@@ -21,6 +21,41 @@ bool Net::connect(const String& ssid, const String& pass, uint32_t timeoutMs) {
 
 bool Net::connected() { return WiFi.status() == WL_CONNECTED; }
 
+int Net::scanWifi(WifiAp* out, int maxAps) {
+  if (!out || maxAps <= 0) return 0;
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();                        // drop any association for a clean scan
+  delay(50);
+  int n = WiFi.scanNetworks();              // blocking, a few seconds
+  if (n < 0) { WiFi.scanDelete(); return -1; }
+  int count = 0;
+  for (int i = 0; i < n; ++i) {
+    String s = WiFi.SSID(i);
+    if (s.length() == 0) continue;          // skip hidden / blank SSIDs
+    int8_t r = (int8_t)WiFi.RSSI(i);
+    bool   e = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    int found = -1;                         // de-dup by SSID, keep the strongest
+    for (int j = 0; j < count; ++j) if (s == out[j].ssid) { found = j; break; }
+    if (found >= 0) {
+      if (r > out[found].rssi) { out[found].rssi = r; out[found].enc = e; }
+      continue;
+    }
+    if (count >= maxAps) continue;
+    strncpy(out[count].ssid, s.c_str(), sizeof(out[count].ssid) - 1);
+    out[count].ssid[sizeof(out[count].ssid) - 1] = 0;
+    out[count].rssi = r;
+    out[count].enc  = e;
+    count++;
+  }
+  WiFi.scanDelete();                        // free the scan result buffer
+  for (int i = 1; i < count; ++i) {         // insertion sort, strongest first
+    WifiAp key = out[i]; int j = i - 1;
+    while (j >= 0 && out[j].rssi < key.rssi) { out[j + 1] = out[j]; --j; }
+    out[j + 1] = key;
+  }
+  return count;
+}
+
 void Net::syncTimeNtp() {
   // UTC (no offset, no DST). Pool servers.
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");

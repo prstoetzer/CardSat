@@ -768,6 +768,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_UPDATE:   keyUpdate(c, enter, back); break;
     case SCR_SETTINGS: keySettings(c, enter, back); break;
     case SCR_EDIT:     keyEdit(c, enter, back); break;
+    case SCR_WIFISCAN: keyWifiScan(c, enter, back); break;
   }
 }
 
@@ -1169,6 +1170,7 @@ void App::keySettings(char c, bool enter, bool back) {
                          screen = SCR_HOME; return; }
   if (isUp(c))   setSel = (setSel + N - 1) % N;
   if (isDown(c)) setSel = (setSel + 1) % N;
+  if (c == 's' && setSel == 4) { startWifiScan(); return; }   // scan from the SSID row
 
   auto adj = [&](int dir){
     switch (setSel) {
@@ -1461,6 +1463,7 @@ void App::draw() {
     case SCR_UPDATE:   drawUpdate(); break;
     case SCR_SETTINGS: drawSettings(); break;
     case SCR_EDIT:     drawEdit(); break;
+    case SCR_WIFISCAN: drawWifiScan(); break;
   }
   // transient status
   if (status.length() && millis() < statusUntil) {
@@ -2003,7 +2006,67 @@ void App::drawSettings() {
     else               canvas.setTextColor(danger ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(rows[i]);
   }
-  footer(",/ change  ENT edit  ` back");
+  if (setSel == 4) footer(",/ change  ENT edit  s scan  ` back");
+  else             footer(",/ change  ENT edit  ` back");
+}
+
+void App::startWifiScan() {
+  setStatus("Scanning WiFi...");
+  draw();                                   // show the notice before the blocking scan
+  wifiApCount = net.scanWifi(wifiAp, MAX_WIFI_AP);
+  wifiSel = 0;
+  screen = SCR_WIFISCAN;
+  if (wifiApCount > 0)       setStatus(String(wifiApCount) + " network(s)");
+  else if (wifiApCount == 0) setStatus("No networks found");
+  else { wifiApCount = 0;    setStatus("Scan failed"); }
+}
+
+void App::keyWifiScan(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_SETTINGS; return; }
+  if (c == 'r') { startWifiScan(); return; }            // rescan
+  if (wifiApCount <= 0) return;
+  if (isUp(c))   wifiSel = (wifiSel + wifiApCount - 1) % wifiApCount;
+  if (isDown(c)) wifiSel = (wifiSel + 1) % wifiApCount;
+  if (enter) {
+    strncpy(cfg.ssid, wifiAp[wifiSel].ssid, sizeof(cfg.ssid) - 1);
+    cfg.ssid[sizeof(cfg.ssid) - 1] = 0;
+    cfg.save();
+    if (wifiAp[wifiSel].enc) {                  // secured -> ask for the password
+      editTarget = 202;
+      editTitle  = String("Password: ") + cfg.ssid;
+      editBuf    = "";
+      screen     = SCR_EDIT;
+    } else {                                    // open network -> no password
+      cfg.pass[0] = 0; cfg.save();
+      setStatus(String("Selected ") + cfg.ssid);
+      screen = SCR_SETTINGS;
+    }
+  }
+}
+
+void App::drawWifiScan() {
+  header("WiFi scan");
+  canvas.setTextSize(1);
+  if (wifiApCount <= 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 40);
+    canvas.print("No networks found.");
+    footer("r rescan  ` back");
+    return;
+  }
+  const int VIS = 9;
+  int scroll = (wifiSel >= VIS) ? (wifiSel - VIS + 1) : 0;
+  for (int v = 0; v < VIS && (scroll + v) < wifiApCount; ++v) {
+    int i = scroll + v;
+    int y = 19 + v * 11;
+    if (i == wifiSel) { canvas.fillRect(0, y - 1, 240, 11, CL_GREEN);
+                        canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    else                canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, y);
+    canvas.printf("%-22.22s %4ddBm%s", wifiAp[i].ssid, (int)wifiAp[i].rssi,
+                  wifiAp[i].enc ? " *" : "");
+  }
+  footer("ENT use  r rescan  ` back  *=secured");
 }
 
 void App::drawEdit() {

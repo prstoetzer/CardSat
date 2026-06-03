@@ -811,9 +811,17 @@ private:
 //  net.h  -  WiFi + HTTPS downloads (AMSAT GP, SatNOGS transponders)
 // ===========================================================================
 
+// One access point returned by a WiFi scan.
+struct WifiAp {
+  char    ssid[33];
+  int8_t  rssi;     // signal strength, dBm
+  bool    enc;      // true = secured (needs a password)
+};
+
 class Net {
 public:
   bool connect(const String& ssid, const String& pass, uint32_t timeoutMs = 15000);
+  int  scanWifi(WifiAp* out, int maxAps);   // scan nearby APs (blocking); count or -1
   bool connected();
   void syncTimeNtp();                       // sets system clock via NTP (UTC)
 
@@ -981,7 +989,7 @@ struct Settings {
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
-  SCR_PASSPOLAR, SCR_MUTUAL
+  SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN
 };
 
 // One upcoming (or in-progress) pass for a favorite, used by the schedule view.
@@ -1063,6 +1071,12 @@ private:
   Transponder activeTx[MAX_TX_PER_SAT];
   int      activeTxCount = 0;     // transponders loaded for the active sat
   int      setSel = 0;            // settings menu cursor
+
+  // WiFi scan (Settings -> WiFi SSID -> 's')
+  static const int MAX_WIFI_AP = 16;
+  WifiAp   wifiAp[MAX_WIFI_AP];
+  int      wifiApCount = 0;
+  int      wifiSel = 0;
 
   // tracking / doppler
   bool     radioOut = false;      // are we sending freqs to the rig?
@@ -1149,6 +1163,7 @@ private:
   void drawLocation();
   void drawUpdate();
   void drawSettings();
+  void drawWifiScan();
   void drawEdit();
 
   // ---- per-screen input ----
@@ -1164,6 +1179,8 @@ private:
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);
+  void startWifiScan();
+  void keyWifiScan(char c, bool enter, bool back);
   void keyEdit(char c, bool enter, bool back);
 
   // ---- small draw utilities ----
@@ -2570,6 +2587,41 @@ bool Net::connect(const String& ssid, const String& pass, uint32_t timeoutMs) {
 
 bool Net::connected() { return WiFi.status() == WL_CONNECTED; }
 
+int Net::scanWifi(WifiAp* out, int maxAps) {
+  if (!out || maxAps <= 0) return 0;
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();                        // drop any association for a clean scan
+  delay(50);
+  int n = WiFi.scanNetworks();              // blocking, a few seconds
+  if (n < 0) { WiFi.scanDelete(); return -1; }
+  int count = 0;
+  for (int i = 0; i < n; ++i) {
+    String s = WiFi.SSID(i);
+    if (s.length() == 0) continue;          // skip hidden / blank SSIDs
+    int8_t r = (int8_t)WiFi.RSSI(i);
+    bool   e = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    int found = -1;                         // de-dup by SSID, keep the strongest
+    for (int j = 0; j < count; ++j) if (s == out[j].ssid) { found = j; break; }
+    if (found >= 0) {
+      if (r > out[found].rssi) { out[found].rssi = r; out[found].enc = e; }
+      continue;
+    }
+    if (count >= maxAps) continue;
+    strncpy(out[count].ssid, s.c_str(), sizeof(out[count].ssid) - 1);
+    out[count].ssid[sizeof(out[count].ssid) - 1] = 0;
+    out[count].rssi = r;
+    out[count].enc  = e;
+    count++;
+  }
+  WiFi.scanDelete();                        // free the scan result buffer
+  for (int i = 1; i < count; ++i) {         // insertion sort, strongest first
+    WifiAp key = out[i]; int j = i - 1;
+    while (j >= 0 && out[j].rssi < key.rssi) { out[j + 1] = out[j]; --j; }
+    out[j + 1] = key;
+  }
+  return count;
+}
+
 void Net::syncTimeNtp() {
   // UTC (no offset, no DST). Pool servers.
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
@@ -3827,6 +3879,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_UPDATE:   keyUpdate(c, enter, back); break;
     case SCR_SETTINGS: keySettings(c, enter, back); break;
     case SCR_EDIT:     keyEdit(c, enter, back); break;
+    case SCR_WIFISCAN: keyWifiScan(c, enter, back); break;
   }
 }
 
@@ -4228,6 +4281,7 @@ void App::keySettings(char c, bool enter, bool back) {
                          screen = SCR_HOME; return; }
   if (isUp(c))   setSel = (setSel + N - 1) % N;
   if (isDown(c)) setSel = (setSel + 1) % N;
+  if (c == 's' && setSel == 4) { startWifiScan(); return; }   // scan from the SSID row
 
   auto adj = [&](int dir){
     switch (setSel) {
@@ -4520,6 +4574,7 @@ void App::draw() {
     case SCR_UPDATE:   drawUpdate(); break;
     case SCR_SETTINGS: drawSettings(); break;
     case SCR_EDIT:     drawEdit(); break;
+    case SCR_WIFISCAN: drawWifiScan(); break;
   }
   // transient status
   if (status.length() && millis() < statusUntil) {
@@ -5062,7 +5117,67 @@ void App::drawSettings() {
     else               canvas.setTextColor(danger ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(rows[i]);
   }
-  footer(",/ change  ENT edit  ` back");
+  if (setSel == 4) footer(",/ change  ENT edit  s scan  ` back");
+  else             footer(",/ change  ENT edit  ` back");
+}
+
+void App::startWifiScan() {
+  setStatus("Scanning WiFi...");
+  draw();                                   // show the notice before the blocking scan
+  wifiApCount = net.scanWifi(wifiAp, MAX_WIFI_AP);
+  wifiSel = 0;
+  screen = SCR_WIFISCAN;
+  if (wifiApCount > 0)       setStatus(String(wifiApCount) + " network(s)");
+  else if (wifiApCount == 0) setStatus("No networks found");
+  else { wifiApCount = 0;    setStatus("Scan failed"); }
+}
+
+void App::keyWifiScan(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_SETTINGS; return; }
+  if (c == 'r') { startWifiScan(); return; }            // rescan
+  if (wifiApCount <= 0) return;
+  if (isUp(c))   wifiSel = (wifiSel + wifiApCount - 1) % wifiApCount;
+  if (isDown(c)) wifiSel = (wifiSel + 1) % wifiApCount;
+  if (enter) {
+    strncpy(cfg.ssid, wifiAp[wifiSel].ssid, sizeof(cfg.ssid) - 1);
+    cfg.ssid[sizeof(cfg.ssid) - 1] = 0;
+    cfg.save();
+    if (wifiAp[wifiSel].enc) {                  // secured -> ask for the password
+      editTarget = 202;
+      editTitle  = String("Password: ") + cfg.ssid;
+      editBuf    = "";
+      screen     = SCR_EDIT;
+    } else {                                    // open network -> no password
+      cfg.pass[0] = 0; cfg.save();
+      setStatus(String("Selected ") + cfg.ssid);
+      screen = SCR_SETTINGS;
+    }
+  }
+}
+
+void App::drawWifiScan() {
+  header("WiFi scan");
+  canvas.setTextSize(1);
+  if (wifiApCount <= 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 40);
+    canvas.print("No networks found.");
+    footer("r rescan  ` back");
+    return;
+  }
+  const int VIS = 9;
+  int scroll = (wifiSel >= VIS) ? (wifiSel - VIS + 1) : 0;
+  for (int v = 0; v < VIS && (scroll + v) < wifiApCount; ++v) {
+    int i = scroll + v;
+    int y = 19 + v * 11;
+    if (i == wifiSel) { canvas.fillRect(0, y - 1, 240, 11, CL_GREEN);
+                        canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    else                canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, y);
+    canvas.printf("%-22.22s %4ddBm%s", wifiAp[i].ssid, (int)wifiAp[i].rssi,
+                  wifiAp[i].enc ? " *" : "");
+  }
+  footer("ENT use  r rescan  ` back  *=secured");
 }
 
 void App::drawEdit() {

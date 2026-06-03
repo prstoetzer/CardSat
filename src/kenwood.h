@@ -36,10 +36,12 @@ public:
   bool setSubMode (RigMode m)   override { return setModeKw(m); }
   bool readSubFreq(uint32_t& hzOut) override;
   bool enableSatMode(bool)      override { return false; } // operator-set on radio
+  bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override {}
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
+  bool hasTone()     const override { return RADIOS[_model].hasTone; }
   bool selVerified() const override { return RADIOS[_model].selVerified; }
   const char* name() const override { return RADIOS[_model].name; }
 

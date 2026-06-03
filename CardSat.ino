@@ -75,10 +75,17 @@
 #include <Sgp4.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <SPI.h>
+#include <SD.h>
 #include <esp_sleep.h>
 #include <time.h>
 #include <sys/time.h>
 #include <math.h>
+
+
+
+
+
 
 
 
@@ -154,6 +161,15 @@ static constexpr int   CIV_UART_NUM   = 1;     // CI-V owns UART1 on G1/G2
 static constexpr int   CIV_RX_PIN     = 1;     // G1
 static constexpr int   CIV_TX_PIN     = 2;     // G2
 
+// microSD (SPI). Used only as a storage fallback when no internal LittleFS/
+// SPIFFS partition is available -- e.g. when CardSat is launched from the
+// bmorcelli Launcher without a SPIFFS region attached (a card is normally
+// present then, since the launcher boots from it). Standard Cardputer pins.
+static constexpr int   SD_SCK_PIN     = 40;
+static constexpr int   SD_MISO_PIN    = 39;
+static constexpr int   SD_MOSI_PIN    = 14;
+static constexpr int   SD_CS_PIN      = 12;
+
 // ---------------------------------------------------------------------------
 //  Antenna rotator: GS-232 over an I2C->UART bridge (SC16IS750/752)
 // ---------------------------------------------------------------------------
@@ -162,11 +178,15 @@ static constexpr int   CIV_TX_PIN     = 2;     // G2
 //  bridge runs on a SECOND I2C controller (Wire1) so it never touches the
 //  keyboard/IMU bus. Chain: Wire1 -> SC16IS750 -> MAX3232 -> DB-9 -> GS-232.
 //
-//  >>> VERIFY THESE PINS against the Cardputer-ADV schematic. <<< They must be
-//  free I2C header pins that do NOT collide with CI-V (G1/G2), the GPS UART
-//  (G15/G13), or the LoRa SPI (G14/G39/G40). The values below are placeholders.
-static constexpr int      ROT_I2C_SDA  = 10;          // <-- set to your I2C SDA pin
-static constexpr int      ROT_I2C_SCL  = 12;          // <-- set to your I2C SCL pin
+//  Pins confirmed from the M5Stack Cap LoRa-1262 pinmap: the Cardputer-ADV
+//  expansion I2C bus is G8 = SDA, G9 = SCL. That is the bus the cap exposes on
+//  its HY2.0-4P Grove Port.A, so a Grove SC16IS750 bridge plugs straight in. It
+//  is shared with the cap's PI4IOE5V6408 IO expander (~0x43/0x44, used only for
+//  the LoRa RF switch, which CardSat doesn't drive), so keep ROT_I2C_ADDR clear
+//  of those. These pins don't collide with CI-V (G1/G2), the GPS UART (G13/G15),
+//  the LoRa SPI (G3/G4/G5/G6/G14/G39/G40), or the SD card (G14/G39/G40 + CS G12).
+static constexpr int      ROT_I2C_SDA  = 8;           // G8  (Cap LoRa Port.A SDA)
+static constexpr int      ROT_I2C_SCL  = 9;           // G9  (Cap LoRa Port.A SCL)
 static constexpr uint8_t  ROT_I2C_ADDR = 0x4D;        // SC16IS750 (A0/A1 strap)
 static constexpr uint32_t ROT_XTAL_HZ  = 14745600UL;  // bridge crystal (breakout)
 static constexpr uint32_t ROT_I2C_HZ   = 400000UL;    // Wire1 clock
@@ -190,9 +210,36 @@ static constexpr int   MUTUAL_PASS_SCAN= 16;   // of my passes scanned for mutua
 #define FILE_CFG     "/config.json"
 #define FILE_TXCACHE "/tx_%lu.json"   // %lu = norad id
 #define FILE_CALIB   "/calib.txt"     // per-sat calibration: "norad dl ul" lines
+#define FILE_TONES   "/tones.txt"     // per-sat CTCSS override: "norad tenths" lines
 #define FILE_FAVS    "/favs.txt"      // favorite NORAD ids, one per line
 #define FILE_MGP     "/mgp.json"     // manually-entered GP sats (one OMM object/line)
 #define FILE_MTX     "/mtx_%lu.json"  // manual transponders per norad (text lines)
+
+
+// =========================================================================
+//  storage.h
+// =========================================================================
+
+// ===========================================================================
+//  storage.h -- filesystem abstraction (internal LittleFS, SD-card fallback)
+// ===========================================================================
+//  CardSat persists everything to flash via LittleFS. When the firmware is run
+//  through a launcher (e.g. bmorcelli's Launcher) the flashed partition table
+//  is the launcher's, and it may not include a SPIFFS/LittleFS data partition
+//  -- so LittleFS.begin() fails and every file open returns an error. In that
+//  situation a microSD card is almost always present (the launcher boots from
+//  it), so we transparently fall back to the SD card.
+//
+//  All persistence goes through Store::fs(), which points at whichever
+//  filesystem mounted. Call Store::begin() once at startup before any file I/O.
+
+namespace Store {
+  bool   begin();            // mount LittleFS (format on fail), else SD card
+  fs::FS& fs();              // the active filesystem (LittleFS or SD)
+  bool   ready();            // true if some filesystem mounted
+  bool   onSD();             // true if we fell back to the SD card
+  bool   formatInternal();   // wipe internal LittleFS (factory reset); never the SD
+}
 
 
 // =========================================================================
@@ -263,23 +310,24 @@ struct RadioProfile {
   bool        selVerified;   // CI-V select sequence documented (Icom only)
   bool        hasSatMode;    // radio has a dedicated full-duplex / sat mode
   bool        canReadFreq;   // frequency read-back implemented for this rig
+  bool        hasTone;       // CAT can set the TX CTCSS (PL) encoder tone
 };
 
 // Order MUST match RadioModel.
 static const RadioProfile RADIOS[RIG_COUNT] = {
-  // name       proto         addr   baud    selMain        selSub         len verf satM read
-  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true  },
-  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true  },
-  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true  },
-  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true  },
-  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, true  },
-  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, true  },
+  // name       proto         addr   baud    selMain        selSub         len verf satM read tone
+  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true, false },
+  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true, false },
+  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true, true  },
+  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true, false },
+  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, true, true  },
+  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, true, true  },
   // Yaesu: 5-byte CAT. baud is the radio's CAT menu setting. No CI-V select.
-  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, true  },
-  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, false },
+  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, true, true  },
+  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, false,false },
   // Kenwood: ASCII CAT over RS-232 (needs a MAX3232-class level interface).
-  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, true  },
-  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, true  },
+  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, true, false },
+  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, true, true  },
 };
 
 
@@ -331,9 +379,16 @@ public:
   // (meaningful for Icom; no-op elsewhere).
   virtual void selectSubBand() = 0;
 
+  // Set the transmit CTCSS (PL) tone encoder. Used for FM satellites whose
+  // uplink requires a subaudible tone (SO-50, AO-91, ISS, PO-101...). The tone
+  // is applied to the uplink (Main/TX). on=false disables it. Backends that
+  // can't drive CTCSS over CAT return false (the default).
+  virtual bool setCtcss(bool on, float toneHz) { (void)on; (void)toneHz; return false; }
+
   // Capabilities / identity (read from the model's RadioProfile).
   virtual bool canReadFreq() const = 0;
   virtual bool hasSatMode()  const = 0;
+  virtual bool hasTone()     const { return false; }   // CAT CTCSS supported
   virtual bool selVerified() const = 0;
   virtual const char* name() const = 0;
 
@@ -344,6 +399,13 @@ public:
   // Map a SatNOGS/AMSAT mode string ("FM","USB","CW","DATA"...) to a RigMode.
   static RigMode modeFromString(const String& s);
 };
+
+// Index (0..38) of the nearest standard CTCSS tone to hz, or -1 if hz<=0 or no
+// tone is within tolerance. The 39-tone EIA list is shared by the Yaesu code
+// table and the Kenwood tone numbers; Icom encodes the frequency directly.
+int  ctcssToneIndex(float hz);
+// The standard tone (in Hz) at a given index, or 0 if out of range.
+float ctcssToneHz(int index);
 
 // Construct the backend for a model. Caller owns the returned pointer.
 Rig* makeRig(RadioModel model);
@@ -376,10 +438,12 @@ public:
   bool setSubMode (RigMode m)   override;
   bool readSubFreq(uint32_t& hzOut) override;
   bool enableSatMode(bool on)   override;
+  bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override { selectSub(); }
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
+  bool hasTone()     const override { return RADIOS[_model].hasTone; }
   bool selVerified() const override { return RADIOS[_model].selVerified; }
   const char* name() const override { return RADIOS[_model].name; }
 
@@ -446,10 +510,12 @@ public:
   bool setSubMode (RigMode m)   override { return setMode(0x17, m); }  // SAT RX
   bool readSubFreq(uint32_t& hzOut) override;          // FT-847 only (0x13)
   bool enableSatMode(bool)      override { return false; }             // operator-set
+  bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override {}                            // n/a
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
+  bool hasTone()     const override { return RADIOS[_model].hasTone; }
   bool selVerified() const override { return RADIOS[_model].selVerified; }
   const char* name() const override { return RADIOS[_model].name; }
 
@@ -507,10 +573,12 @@ public:
   bool setSubMode (RigMode m)   override { return setModeKw(m); }
   bool readSubFreq(uint32_t& hzOut) override;
   bool enableSatMode(bool)      override { return false; } // operator-set on radio
+  bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override {}
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
+  bool hasTone()     const override { return RADIOS[_model].hasTone; }
   bool selVerified() const override { return RADIOS[_model].selVerified; }
   const char* name() const override { return RADIOS[_model].name; }
 
@@ -620,6 +688,7 @@ struct Transponder {
   char     mode[12] = {0};   // e.g. "FM", "USB", "DATA"
   bool     invert   = false; // inverting linear transponder
   bool     isLinear = false; // true => has a tunable passband (do passband tracking)
+  float    toneHz   = 0.0f;  // required FM uplink CTCSS/PL tone (0 = none)
 
   // Downlink passband width in Hz (0 for single-channel / FM).
   uint32_t bandwidth() const {
@@ -680,6 +749,10 @@ public:
   // Per-satellite transponder cache on LittleFS.
   static bool saveTxCache(uint32_t norad, const String& json);
   static int  loadTxCache(uint32_t norad, Transponder* out, int maxN);
+
+  // Required FM uplink CTCSS (PL) tone in Hz for well-known FM satellites
+  // (SatNOGS carries no structured tone field), or 0 if none/unknown.
+  static float knownCtcssHz(uint32_t norad);
 
 private:
   SatEntry _sats[MAX_SATS];
@@ -1002,6 +1075,8 @@ private:
                                   // holds a constant frequency AT THE SATELLITE
   uint32_t lastRxSet = 0;         // last downlink Hz we wrote (detect knob moves)
   uint32_t lastDoppMs = 0;
+  float    toneApplied = -2.0f;   // CTCSS tone currently set on the rig (Hz);
+                                  // 0 = off, -2 = unknown/never (force re-apply)
   bool     rotOut = false;       // are we pointing the rotator?
   float    lastAzCmd = -999.0f;  // last az/el we commanded (deadband)
   float    lastElCmd = -999.0f;
@@ -1024,6 +1099,11 @@ private:
   void applyRadioFromCfg();
   void applyRotatorFromCfg();
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
+  float desiredToneHz() const;                       // PL tone wanted for current TX
+  void  applyCtcssForCurrentTx();                    // push CTCSS to rig if changed
+  float toneOverrideHz(uint32_t norad);              // user CTCSS override, <0 = none
+  void  saveToneOverride(uint32_t norad, float hz);  // hz<0 clears (reverts to auto)
+  void  retagTones(uint32_t norad);                  // re-apply override/table to activeTx
   void startGps();                         // (re)open GPS per cfg.gpsSource
   void factoryReset();                     // wipe LittleFS + reboot to defaults
   void setStatus(const String& s, uint32_t ms = 2500);
@@ -1093,6 +1173,65 @@ private:
 
 
 // =========================================================================
+//  storage.cpp
+// =========================================================================
+
+// ===========================================================================
+//  storage.cpp
+// ===========================================================================
+
+namespace Store {
+
+static fs::FS* g_fs    = &LittleFS;   // default; updated by begin()
+static bool    g_ready = false;
+static bool    g_sd    = false;
+static SPIClass g_spi(HSPI);
+
+bool begin() {
+  g_ready = false; g_sd = false; g_fs = &LittleFS;
+
+  // 1) Prefer internal flash. begin(true) formats the SPIFFS partition if it
+  //    mounts dirty, but it can only succeed if such a partition exists.
+  if (LittleFS.begin(true)) {
+    g_fs = &LittleFS; g_ready = true;
+    Serial.printf("[fs] LittleFS mounted (%u/%u bytes used)\n",
+                  (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
+    return true;
+  }
+
+  // 2) No internal data partition (typical when run from a launcher) -> SD.
+  Serial.println("[fs] LittleFS mount failed (no SPIFFS partition?) - trying SD");
+  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  if (SD.begin(SD_CS_PIN, g_spi)) {
+    g_fs = &SD; g_ready = true; g_sd = true;
+    Serial.println("[fs] using microSD card for storage");
+    return true;
+  }
+
+  Serial.println("[fs] NO filesystem available (LittleFS and SD both failed)");
+  g_fs = &LittleFS;           // leave a valid object; opens will fail gracefully
+  return false;
+}
+
+fs::FS& fs()  { return *g_fs; }
+bool ready()  { return g_ready; }
+bool onSD()   { return g_sd; }
+
+bool formatInternal() {
+  if (g_sd) {
+    // Don't format the user's SD card on a factory reset -- just delete our own
+    // top-level files (per-NORAD transponder caches are harmless and refresh).
+    const char* names[] = { FILE_CFG, FILE_GP, FILE_MGP, FILE_FAVS, FILE_CALIB, FILE_TONES };
+    for (const char* n : names) if (SD.exists(n)) SD.remove(n);
+    return true;
+  }
+  return LittleFS.format();
+}
+
+} // namespace Store
+
+
+// =========================================================================
 //  rig.cpp
 // =========================================================================
 
@@ -1120,6 +1259,34 @@ Rig* makeRig(RadioModel model) {
     case PROTO_CIV:
     default:            return new CivRig(model);
   }
+}
+
+// Standard 39 EIA CTCSS tones in tenths of Hz, ascending. This exact order is
+// shared with Hamlib's ft847_ctcss_list[] and the Kenwood tone list, so the
+// index doubles as the Kenwood tone number (index+1) and the row into the
+// FT-847 CAT code table. Icom encodes the frequency in BCD instead.
+static const uint16_t CTCSS_TENTHS[39] = {
+  670, 693, 719, 744, 770, 797, 825, 854, 885, 915,
+  948, 974, 1000,1035,1072,1109,1148,1188,1230,1273,
+  1318,1365,1413,1462,1514,1567,1622,1679,1738,1799,
+  1862,1928,2035,2107,2181,2257,2336,2418,2503
+};
+
+int ctcssToneIndex(float hz) {
+  if (hz <= 0) return -1;
+  int target = (int)lroundf(hz * 10.0f);   // tenths of Hz
+  int best = -1, bestErr = 9999;
+  for (int i = 0; i < 39; ++i) {
+    int e = abs((int)CTCSS_TENTHS[i] - target);
+    if (e < bestErr) { bestErr = e; best = i; }
+  }
+  // Reject if the nearest standard tone is more than ~1 Hz away (bad input).
+  return (bestErr <= 10) ? best : -1;
+}
+
+float ctcssToneHz(int index) {
+  if (index < 0 || index >= 39) return 0.0f;
+  return CTCSS_TENTHS[index] / 10.0f;
 }
 
 
@@ -1289,6 +1456,27 @@ bool CivRig::enableSatMode(bool on) {
   // IC-9700/9100: command 0x16, sub 0x5A, data 0x01/0x00.
   uint8_t pl[3] = { 0x16, 0x5A, (uint8_t)(on ? 0x01 : 0x00) };
   return sendFrame(pl, 3);
+}
+
+// Transmit CTCSS (PL) tone for an FM uplink. The tone lives on the uplink, so
+// we select MAIN first. Repeater-tone frequency: cmd 0x1B sub 0x00 + 2 BCD
+// bytes of the tone in tenths of Hz (e.g. 67.0 -> 0670 -> 0x06 0x70). Repeater-
+// tone (encoder) on/off: cmd 0x16 sub 0x42 data 0x01/0x00. Verified against the
+// Icom CI-V reference (IC-9700/910H/9100 family).
+bool CivRig::setCtcss(bool on, float toneHz) {
+  if (!RADIOS[_model].hasTone) return false;
+  selectMain();                                   // tone applies to uplink (TX)
+  if (on && toneHz > 0) {
+    int t = (int)lroundf(toneHz * 10.0f);         // tenths of Hz, 4 BCD digits
+    uint8_t b1 = (uint8_t)((((t / 1000) % 10) << 4) | ((t / 100) % 10));
+    uint8_t b2 = (uint8_t)((((t / 10)   % 10) << 4) | (t % 10));
+    uint8_t freq[4] = { 0x1B, 0x00, b1, b2 };
+    sendFrame(freq, 4);
+    uint8_t enc[3]  = { 0x16, 0x42, 0x01 };
+    return sendFrame(enc, 3);
+  }
+  uint8_t off[3] = { 0x16, 0x42, 0x00 };
+  return sendFrame(off, 3);
 }
 
 bool CivRig::readSubFreq(uint32_t& hzOut) {
@@ -1474,6 +1662,31 @@ bool YaesuRig::readSubFreq(uint32_t& hzOut) {
   return true;
 }
 
+// FT-847 CTCSS CAT codes, in the same order as the shared 39-tone list
+// (see ctcssToneIndex). The satellite uplink is the SAT-TX VFO, so the tone
+// frequency uses opcode 0x2B and the encoder is enabled with {0x4A..0x2A}
+// (off = {0x8A..0x2A}). Codes + sequences verified against Hamlib ft847.c.
+static const uint8_t FT847_CTCSS_CODE[39] = {
+  0x3F,0x39,0x1F,0x3E,0x0F,0x3D,0x1E,0x3C,0x0E,0x3B,
+  0x1D,0x3A,0x0D,0x1C,0x0C,0x1B,0x0B,0x1A,0x0A,0x19,
+  0x09,0x18,0x08,0x17,0x07,0x16,0x06,0x15,0x05,0x14,
+  0x04,0x13,0x03,0x12,0x02,0x11,0x01,0x10,0x00
+};
+
+bool YaesuRig::setCtcss(bool on, float toneHz) {
+  if (!RADIOS[_model].hasTone) return false;
+  if (!on || toneHz <= 0) {
+    const uint8_t off[5] = { 0x8A, 0x00, 0x00, 0x00, 0x2A };  // CTCSS/DCS off, sat tx
+    return send(off);
+  }
+  int i = ctcssToneIndex(toneHz);
+  if (i < 0) return false;
+  const uint8_t freq[5] = { FT847_CTCSS_CODE[i], 0x00, 0x00, 0x00, 0x2B }; // freq, sat tx
+  send(freq);
+  const uint8_t enc[5]  = { 0x4A, 0x00, 0x00, 0x00, 0x2A };   // CTCSS enc on, sat tx
+  return send(enc);
+}
+
 
 // =========================================================================
 //  kenwood.cpp
@@ -1570,6 +1783,22 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
   Serial.println("[CAT] VFO-A read: no valid reply");
 #endif
   return false;
+}
+
+// Transmit CTCSS (PL) tone for an FM uplink. TS-2000: TNnn sets the tone
+// (encode) number -- 1-based into the same 39-tone list as ctcssToneIndex --
+// and TO1/TO0 turns the TONE (encode) function on/off. The rig applies it to
+// the current TX (uplink) band. Per Hamlib kenwood TN variant + the TS-2000
+// CAT list; least bench-verified of the three families, so watch the trace.
+bool KenwoodRig::setCtcss(bool on, float toneHz) {
+  if (!RADIOS[_model].hasTone) return false;
+  if (!on || toneHz <= 0) return sendCmd("TO0;");      // TONE function off
+  int i = ctcssToneIndex(toneHz);
+  if (i < 0) return false;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "TN%02d;", i + 1);        // tone number (1-based)
+  sendCmd(buf);
+  return sendCmd("TO1;");                              // TONE (encode) on
 }
 
 
@@ -1729,7 +1958,7 @@ Rotator* makeRotator(uint32_t baud) {
 // ===========================================================================
 
 bool SatDb::begin() {
-  return LittleFS.begin(true);
+  return Store::begin();
 }
 
 int SatDb::indexOfNorad(uint32_t norad) const {
@@ -1940,13 +2169,13 @@ bool SatDb::addGp(const SatEntry& s) {
   d["MEAN_MOTION_DDOT"]  = s.nddot;
   d["REV_AT_EPOCH"]      = s.revAtEpoch;
   d["ELEMENT_SET_NO"]    = s.elsetNum;
-  File f = LittleFS.open(FILE_MGP, "a");
+  File f = Store::fs().open(FILE_MGP, "a");
   if (f) { serializeJson(d, f); f.print("\n"); f.close(); }
   return true;
 }
 
 bool SatDb::loadManualGpFile() {
-  File f = LittleFS.open(FILE_MGP, "r");
+  File f = Store::fs().open(FILE_MGP, "r");
   if (!f) return false;
   bool any = false;
   while (f.available() && _n < MAX_SATS) {
@@ -1966,7 +2195,7 @@ bool SatDb::loadManualGpFile() {
 }
 
 bool SatDb::saveGpJson(const String& json) {
-  File f = LittleFS.open(FILE_GP, "w");
+  File f = Store::fs().open(FILE_GP, "w");
   if (!f) return false;
   f.print(json); f.close();
   return true;
@@ -1982,7 +2211,7 @@ bool SatDb::loadGpFromFs() {
 // String would fail). Object state carries across read-buffer boundaries.
 int SatDb::loadGpFromFile(const char* path) {
   _n = 0;
-  File f = LittleFS.open(path, "r");
+  File f = Store::fs().open(path, "r");
   if (!f) return 0;
 
   static const size_t OBJ_MAX = 1200;     // largest OMM object is ~800 bytes
@@ -2194,17 +2423,32 @@ static String txPath(uint32_t norad) {
 }
 
 bool SatDb::saveTxCache(uint32_t norad, const String& json) {
-  File f = LittleFS.open(txPath(norad), "w");
+  File f = Store::fs().open(txPath(norad), "w");
   if (!f) return false;
   f.print(json); f.close();
   return true;
 }
 
 int SatDb::loadTxCache(uint32_t norad, Transponder* out, int maxN) {
-  File f = LittleFS.open(txPath(norad), "r");
+  File f = Store::fs().open(txPath(norad), "r");
   if (!f) return 0;
   String j = f.readString(); f.close();
   return parseTransmittersJson(j, out, maxN);
+}
+
+// Required FM-uplink CTCSS (PL) tones for the common FM birds. SatNOGS has no
+// structured tone field, so these are built in by NORAD id. Operating tones
+// only (e.g. SO-50's 74.4 Hz arming burst is a separate manual action; its
+// working uplink tone is 67.0 Hz). Extend as new FM satellites appear.
+float SatDb::knownCtcssHz(uint32_t norad) {
+  switch (norad) {
+    case 25544: return 67.0f;   // ISS (FM cross-band repeater)
+    case 27607: return 67.0f;   // SO-50  (SaudiSat-1C)
+    case 43017: return 67.0f;   // AO-91  (RadFxSat / Fox-1B)
+    case 43137: return 67.0f;   // AO-92  (Fox-1D)
+    case 43678: return 141.3f;  // PO-101 (Diwata-2)
+    default:    return 0.0f;
+  }
 }
 
 
@@ -2454,8 +2698,11 @@ bool Net::httpsGetToFile(const String& url, const char* path,
     return false;
   }
 
-  File f = LittleFS.open(path, "w");
-  if (!f) { lastErr = "fs open failed"; http.end(); return false; }
+  File f = Store::fs().open(path, "w");
+  if (!f) {
+    lastErr = Store::ready() ? "fs open failed" : "no filesystem (SPIFFS/SD)";
+    http.end(); return false;
+  }
 
   int len = http.getSize();          // -1 if server didn't send Content-Length
   WiFiClient* stream = http.getStreamPtr();
@@ -2762,7 +3009,7 @@ int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int max
 // ===========================================================================
 
 bool Settings::load() {
-  File f = LittleFS.open(FILE_CFG, "r");
+  File f = Store::fs().open(FILE_CFG, "r");
   if (!f) return false;
   JsonDocument d;
   if (deserializeJson(d, f)) { f.close(); return false; }
@@ -2807,7 +3054,7 @@ bool Settings::save() {
   d["roten"]=rotEnable; d["rotbaud"]=rotBaud; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;
-  File f = LittleFS.open(FILE_CFG, "w");
+  File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
   serializeJson(d, f);
   f.close();
@@ -2896,6 +3143,10 @@ void App::setup() {
   setenv("TZ", "UTC0", 1); tzset();   // work entirely in UTC
 
   db.begin();
+  if (!Store::ready())
+    setStatus("No filesystem! Allocate SPIFFS or insert SD.", 8000);
+  else if (Store::onSD())
+    setStatus("Using SD card for storage", 4000);
   if (!cfg.load()) { cfg.save(); }     // first boot: write defaults
   calDl = cfg.calDlHz; calUl = cfg.calUlHz;
 
@@ -2970,6 +3221,28 @@ void App::applyTransponderModes(const Transponder& t) {
   }
 }
 
+// The PL/CTCSS tone wanted for the current transponder: only FM uplinks carry
+// one (0 = none). Comes from the SatNOGS/manual transponder, tagged in
+// ensureTransponders() from the built-in known-FM-bird table.
+float App::desiredToneHz() const {
+  if (activeTxCount <= 0) return 0.0f;
+  const Transponder& t = activeTx[curTx];
+  if (!t.uplink || Rig::modeFromString(t.mode) != RM_FM) return 0.0f;
+  return t.toneHz;
+}
+
+// Push the CTCSS encoder state to the radio, but only when it actually changes
+// (cheap to call every Doppler tick). Self-corrects across sat/transponder
+// changes and radio on/off (toneApplied is reset to the -2 sentinel on OFF).
+void App::applyCtcssForCurrentTx() {
+  if (!rig || !rig->ready() || !rig->hasTone()) return;
+  float want = desiredToneHz();
+  if (want == toneApplied) return;
+  rig->setCtcss(want > 0, want);
+  toneApplied = want;
+  if (want > 0) setStatus("PL " + String(want, 1) + " Hz on uplink", 2500);
+}
+
 // GPS source profiles: { display name, UART, RX pin, TX pin, baud }. All use
 // UART2 so CI-V keeps UART1. Grove uses G1/G2 (shared with default CI-V pins);
 // both caps put the GNSS UART on G15(RX)/G13(TX), differing only in baud.
@@ -2994,7 +3267,7 @@ void App::startGps() {
 void App::factoryReset() {
   setStatus("Erasing all data...");
   draw();
-  LittleFS.format();
+  Store::formatInternal();
   delay(300);
   ESP.restart();   // reboot -> setup() runs fresh with built-in defaults
 }
@@ -3031,6 +3304,9 @@ bool App::ensureTransponders(SatEntry& s) {
   if (activeTxCount < MAX_TX_PER_SAT)
     activeTxCount += loadManualTx(s.norad, activeTx + activeTxCount,
                                   MAX_TX_PER_SAT - activeTxCount);
+  // 4) tag FM uplinks with the effective PL/CTCSS tone: the user's per-satellite
+  //    override if one is set, otherwise the built-in table (SatNOGS has none).
+  retagTones(s.norad);
   s.txLoaded = (activeTxCount > 0);
   return s.txLoaded;
 }
@@ -3103,7 +3379,7 @@ void App::loadCalForSat(uint32_t norad) {
   // Default to the global calibration from config; override if a per-sat entry
   // exists in the store.
   calDl = cfg.calDlHz; calUl = cfg.calUlHz;
-  File f = LittleFS.open(FILE_CALIB, "r");
+  File f = Store::fs().open(FILE_CALIB, "r");
   if (!f) return;
   while (f.available()) {
     String line = f.readStringUntil('\n');
@@ -3122,7 +3398,7 @@ void App::loadCalForSat(uint32_t norad) {
 void App::saveCalForSat(uint32_t norad) {
   // Read existing entries (excluding this norad), then rewrite with the new one.
   String out;
-  File f = LittleFS.open(FILE_CALIB, "r");
+  File f = Store::fs().open(FILE_CALIB, "r");
   if (f) {
     while (f.available()) {
       String line = f.readStringUntil('\n');
@@ -3138,14 +3414,69 @@ void App::saveCalForSat(uint32_t norad) {
   snprintf(buf, sizeof(buf), "%lu %ld %ld\n",
            (unsigned long)norad, (long)calDl, (long)calUl);
   out += buf;
-  File w = LittleFS.open(FILE_CALIB, "w");
+  File w = Store::fs().open(FILE_CALIB, "w");
   if (w) { w.print(out); w.close(); }
+}
+
+// ---- Per-satellite CTCSS override (text store: "norad tenths" lines) -------
+// tenths >= 0 is a user override (0 = force tone off); a missing line means
+// "use the built-in table". Mirrors the calibration store.
+float App::toneOverrideHz(uint32_t norad) {
+  File f = Store::fs().open(FILE_TONES, "r");
+  if (!f) return -1.0f;
+  float hz = -1.0f;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (line.length() == 0) continue;
+    unsigned long nd; int tenths;
+    if (sscanf(line.c_str(), "%lu %d", &nd, &tenths) == 2 && nd == norad) {
+      hz = tenths / 10.0f; break;
+    }
+  }
+  f.close();
+  return hz;
+}
+
+void App::saveToneOverride(uint32_t norad, float hz) {
+  // Rewrite the file without this norad, then append the new entry (unless
+  // hz < 0, which clears the override so the built-in default applies again).
+  String out;
+  File f = Store::fs().open(FILE_TONES, "r");
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n'); String t = line; t.trim();
+      if (t.length() == 0) continue;
+      unsigned long nd;
+      if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
+      out += t; out += '\n';
+    }
+    f.close();
+  }
+  if (hz >= 0.0f) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lu %d\n",
+             (unsigned long)norad, (int)lroundf(hz * 10.0f));
+    out += buf;
+  }
+  File w = Store::fs().open(FILE_TONES, "w");
+  if (w) { w.print(out); w.close(); }
+}
+
+// Re-stamp the loaded transponders with the effective tone (user override wins
+// over the built-in table) and force the encoder to be re-asserted next tick.
+void App::retagTones(uint32_t norad) {
+  float ov = toneOverrideHz(norad);                       // <0 = no override
+  float pl = (ov >= 0.0f) ? ov : SatDb::knownCtcssHz(norad);
+  for (int i = 0; i < activeTxCount; ++i)
+    if (activeTx[i].uplink && Rig::modeFromString(activeTx[i].mode) == RM_FM)
+      activeTx[i].toneHz = pl;
+  toneApplied = -2.0f;
 }
 
 // ---- Favorites (LittleFS: one NORAD id per line) --------------------------
 void App::loadFavs() {
   favN = 0;
-  File f = LittleFS.open(FILE_FAVS, "r");
+  File f = Store::fs().open(FILE_FAVS, "r");
   if (!f) return;
   while (f.available() && favN < MAX_SATS) {
     String line = f.readStringUntil('\n'); line.trim();
@@ -3157,7 +3488,7 @@ void App::loadFavs() {
 }
 
 void App::saveFavs() {
-  File f = LittleFS.open(FILE_FAVS, "w");
+  File f = Store::fs().open(FILE_FAVS, "w");
   if (!f) return;
   for (int i = 0; i < favN; ++i) f.printf("%lu\n", (unsigned long)favs[i]);
   f.close();
@@ -3328,7 +3659,7 @@ void App::sleepUntilNextPass() {
 // ---- Manual transponders (LittleFS text: "dl ul invert mode" per line) ----
 void App::saveManualTx(uint32_t norad, const Transponder& t) {
   char path[32]; snprintf(path, sizeof(path), FILE_MTX, (unsigned long)norad);
-  File f = LittleFS.open(path, "a");
+  File f = Store::fs().open(path, "a");
   if (!f) return;
   // format: dlLow dlHigh ulLow ulHigh invert mode
   f.printf("%lu %lu %lu %lu %d %s\n",
@@ -3340,7 +3671,7 @@ void App::saveManualTx(uint32_t norad, const Transponder& t) {
 
 int App::loadManualTx(uint32_t norad, Transponder* out, int maxN) {
   char path[32]; snprintf(path, sizeof(path), FILE_MTX, (unsigned long)norad);
-  File f = LittleFS.open(path, "r");
+  File f = Store::fs().open(path, "r");
   if (!f) return 0;
   int n = 0;
   while (f.available() && n < maxN) {
@@ -3436,6 +3767,7 @@ void App::loop() {
           if (t.downlink) rig->setSubFreq(rx);                // downlink (RX) on SUB
           if (t.uplink)   { delay(8); rig->setMainFreq(tx); } // uplink (TX) on MAIN
         }
+        applyCtcssForCurrentTx();   // FM uplink PL tone (only re-sends on change)
       }
     }
     // Rotator pointing (independent of radio output). Rotators are slow, so
@@ -3695,6 +4027,13 @@ void App::keyTrack(char c, bool enter, bool back) {
     onTransponderChanged();
     if (radioOut) applyTransponderModes(activeTx[curTx]);   // refresh rig modes
   }
+  if (c == 'c' && activeTxCount > 0) {               // set/clear CTCSS tone (per sat)
+    float cur = activeTx[curTx].toneHz;
+    editTarget = 340;
+    editTitle  = "CTCSS Hz (0=off, blank=auto)";
+    editBuf    = (cur > 0) ? String(cur, 1) : "";
+    screen = SCR_EDIT; return;
+  }
   if (c == 'r') {                                    // toggle radio output
     radioOut = !radioOut;
     if (radioOut) {
@@ -3703,7 +4042,12 @@ void App::keyTrack(char c, bool enter, bool back) {
       if (activeTxCount > 0) applyTransponderModes(activeTx[curTx]);
       lastDoppMs = 0;
       setStatus("Radio ON");
-    } else setStatus("Radio OFF");
+    } else {
+      if (rig && rig->ready() && rig->hasTone() && toneApplied > 0)
+        rig->setCtcss(false, 0);   // don't leave an encode tone on the operator's rig
+      toneApplied = -2.0f;         // force re-apply next time radio goes ON
+      setStatus("Radio OFF");
+    }
   }
   if (c == 'o') {                                    // toggle rotator pointing
     if (!cfg.rotEnable || !rot) setStatus("Rotator: enable in Settings");
@@ -3936,6 +4280,7 @@ void App::keySettings(char c, bool enter, bool back) {
 }
 
 static Screen editHome(int t) {
+  if (t == 340) return SCR_TRACK;       // CTCSS tone override
   if (t >= 400) return SCR_SETTINGS;    // reset confirmation
   if (t >= 320) return SCR_PASSES;      // manual transponder
   if (t >= 310) return SCR_SATLIST;     // manual GP entry
@@ -3970,6 +4315,32 @@ void App::keyEdit(char c, bool enter, bool back) {
 
       // ---- mutual co-visibility vs a DX grid ----
       case 330: computeMutual(editBuf); return;
+
+      // ---- per-satellite CTCSS tone override ----
+      case 340: {
+        SatEntry* s = activeSat();
+        if (!s) { screen = SCR_TRACK; return; }
+        String b = editBuf; b.trim();
+        if (b.length() == 0) {                        // blank -> revert to auto
+          saveToneOverride(s->norad, -1.0f);
+          setStatus("CTCSS: auto (built-in)");
+        } else {
+          float hz = b.toFloat();
+          if (hz <= 0) {                              // 0 -> force tone off
+            saveToneOverride(s->norad, 0.0f);
+            setStatus("CTCSS off for this sat");
+          } else {
+            int idx = ctcssToneIndex(hz);             // snap to nearest standard
+            if (idx < 0) { setStatus("Not a standard CTCSS tone");
+                           screen = SCR_TRACK; return; }
+            hz = ctcssToneHz(idx);
+            saveToneOverride(s->norad, hz);
+            setStatus("CTCSS " + String(hz, 1) + " Hz set");
+          }
+        }
+        retagTones(s->norad);                         // apply now + re-assert
+        screen = SCR_TRACK; return;
+      }
 
       // ---- manual UTC time entry ----
       case 300: {
@@ -4420,6 +4791,14 @@ void App::drawTrack() {
       canvas.setCursor(4, 79);
       canvas.printf("PB %+.1fk bw%.1fk %s%s", posk, halfk,
                     t.invert ? "INV " : "", tag);
+    }
+
+    // FM uplink PL/CTCSS tone (FM birds aren't linear, so this y row is free).
+    if (!linear && t.uplink && t.toneHz > 0) {
+      bool can = rig && rig->hasTone();
+      canvas.setTextColor((radioOut && can) ? CL_ORANGE : CL_GREY, CL_BLACK);
+      canvas.setCursor(4, 79);
+      canvas.printf("PL %.1f Hz%s", t.toneHz, can ? "" : " (rig n/a)");
     }
 
     // Calibration line (active in CAL mode).

@@ -1,13 +1,11 @@
 // ===========================================================================
-//  civ.cpp
+//  civ.cpp  -  Icom CI-V backend
 // ===========================================================================
 #include "civ.h"
 #include <HardwareSerial.h>
 
 // Set to 0 to silence the CI-V trace on the serial monitor (115200 baud).
 #define CIV_DEBUG 1
-
-static HardwareSerial CivSerial(1);   // default; re-init in begin()
 
 #if CIV_DEBUG
 // Decode the command byte of a single CI-V frame for the human-readable tail.
@@ -58,22 +56,27 @@ static inline void civLog(const char*, const uint8_t*, size_t) {}
 static inline void civLogRaw(const char*, const uint8_t*, size_t) {}
 #endif
 
-void CivRadio::begin(RadioModel model, uint32_t baud,
-                     int uartNum, int rxPin, int txPin) {
-  setModel(model);
+void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   static HardwareSerial* hs = nullptr;   // construct once, reuse on re-begin
   if (!hs) hs = new HardwareSerial(uartNum);
   hs->begin(baud, SERIAL_8N1, rxPin, txPin);
   _stream = hs;
 }
 
-void CivRadio::setModel(RadioModel m) {
-  _model = m;
-  _addr  = RADIOS[m].civAddr;
+CivMode CivRig::toCiv(RigMode m) {
+  switch (m) {
+    case RM_LSB: return CIV_LSB;
+    case RM_USB: return CIV_USB;
+    case RM_CW:  return CIV_CW;
+    case RM_FM:  return CIV_FM;
+    case RM_AM:  return CIV_AM;
+    case RM_DATA:return CIV_RTTY;
+    default:     return CIV_USB;
+  }
 }
 
 // --- BCD: 1 Hz resolution, 5 bytes, least-significant pair first ----------
-void CivRadio::freqToBcd(uint32_t hz, uint8_t out[5]) {
+void CivRig::freqToBcd(uint32_t hz, uint8_t out[5]) {
   for (int i = 0; i < 5; ++i) {
     uint8_t lo = hz % 10; hz /= 10;
     uint8_t hi = hz % 10; hz /= 10;
@@ -81,7 +84,7 @@ void CivRadio::freqToBcd(uint32_t hz, uint8_t out[5]) {
   }
 }
 
-bool CivRadio::sendFrame(const uint8_t* payload, size_t len) {
+bool CivRig::sendFrame(const uint8_t* payload, size_t len) {
   if (!_stream) return false;
   uint8_t buf[20];
   size_t n = 0;
@@ -97,7 +100,7 @@ bool CivRadio::sendFrame(const uint8_t* payload, size_t len) {
   return true;
 }
 
-bool CivRadio::drainEcho(uint32_t timeoutMs) {
+bool CivRig::drainEcho(uint32_t timeoutMs) {
   if (!_stream) return false;
   uint32_t t0 = millis();
   int fd = 0;                          // 1 = our echo seen, 2 = radio reply seen
@@ -129,55 +132,62 @@ bool CivRadio::drainEcho(uint32_t timeoutMs) {
   return fd >= 1;
 }
 
-void CivRadio::selectMain() {
+void CivRig::selectMain() {
   const RadioProfile& p = RADIOS[_model];
   if (p.selLen) sendFrame(p.selMain, p.selLen);
 }
-void CivRadio::selectSub() {
+void CivRig::selectSub() {
   const RadioProfile& p = RADIOS[_model];
   if (p.selLen) sendFrame(p.selSub, p.selLen);
 }
-void CivRadio::selectSubBand() { selectSub(); }
 
-bool CivRadio::setMainFreq(uint32_t hz) {
-  selectMain();
+bool CivRig::setFreqCiv(bool sub, uint32_t hz) {
+  sub ? selectSub() : selectMain();
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
   return sendFrame(pl, 6);
 }
-bool CivRadio::setSubFreq(uint32_t hz) {
-  selectSub();
-  uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
-  return sendFrame(pl, 6);
-}
-bool CivRadio::setMainMode(CivMode m, uint8_t filter) {
-  selectMain();
-  uint8_t pl[3] = { 0x06, (uint8_t)m, filter };
-  return sendFrame(pl, 3);
-}
-bool CivRadio::setSubMode(CivMode m, uint8_t filter) {
-  selectSub();
+bool CivRig::setModeCiv(bool sub, CivMode m, uint8_t filter) {
+  sub ? selectSub() : selectMain();
   uint8_t pl[3] = { 0x06, (uint8_t)m, filter };
   return sendFrame(pl, 3);
 }
 
-bool CivRadio::updateDoppler(uint32_t rxHz, uint32_t txHz) {
-  bool ok = true;
-  ok &= setSubFreq(rxHz);    // downlink (RX) on SUB
-  delay(8);
-  ok &= setMainFreq(txHz);   // uplink (TX) on MAIN
-  return ok;
-}
+bool CivRig::setMainFreq(uint32_t hz) { return setFreqCiv(false, hz); }
+bool CivRig::setSubFreq (uint32_t hz) { return setFreqCiv(true,  hz); }
+bool CivRig::setMainMode(RigMode m)   { return setModeCiv(false, toCiv(m)); }
+bool CivRig::setSubMode (RigMode m)   { return setModeCiv(true,  toCiv(m)); }
 
-bool CivRadio::enableSatMode(bool on) {
+bool CivRig::enableSatMode(bool on) {
   if (!RADIOS[_model].hasSatMode) return false;
   // IC-9700/9100: command 0x16, sub 0x5A, data 0x01/0x00.
   uint8_t pl[3] = { 0x16, 0x5A, (uint8_t)(on ? 0x01 : 0x00) };
   return sendFrame(pl, 3);
 }
 
-bool CivRadio::readSubFreq(uint32_t& hzOut) {
+// Transmit CTCSS (PL) tone for an FM uplink. The tone lives on the uplink, so
+// we select MAIN first. Repeater-tone frequency: cmd 0x1B sub 0x00 + 2 BCD
+// bytes of the tone in tenths of Hz (e.g. 67.0 -> 0670 -> 0x06 0x70). Repeater-
+// tone (encoder) on/off: cmd 0x16 sub 0x42 data 0x01/0x00. Verified against the
+// Icom CI-V reference (IC-9700/910H/9100 family).
+bool CivRig::setCtcss(bool on, float toneHz) {
+  if (!RADIOS[_model].hasTone) return false;
+  selectMain();                                   // tone applies to uplink (TX)
+  if (on && toneHz > 0) {
+    int t = (int)lroundf(toneHz * 10.0f);         // tenths of Hz, 4 BCD digits
+    uint8_t b1 = (uint8_t)((((t / 1000) % 10) << 4) | ((t / 100) % 10));
+    uint8_t b2 = (uint8_t)((((t / 10)   % 10) << 4) | (t % 10));
+    uint8_t freq[4] = { 0x1B, 0x00, b1, b2 };
+    sendFrame(freq, 4);
+    uint8_t enc[3]  = { 0x16, 0x42, 0x01 };
+    return sendFrame(enc, 3);
+  }
+  uint8_t off[3] = { 0x16, 0x42, 0x00 };
+  return sendFrame(off, 3);
+}
+
+bool CivRig::readSubFreq(uint32_t& hzOut) {
   if (!_stream) return false;
-  if (!RADIOS[_model].canReadFreq) return false;   // set-only rig (820/821/970)
+  if (!RADIOS[_model].canReadFreq) return false;   // set-only rig
   selectSub();                                      // 07 D1 (drains its echo)
   while (_stream->available()) _stream->read();     // clear anything stale
   // Send read-operating-frequency request (cmd 0x03) WITHOUT draining: we want
@@ -214,15 +224,4 @@ bool CivRadio::readSubFreq(uint32_t& hzOut) {
   Serial.println("[CI-V] SUB freq read: no valid reply");
 #endif
   return false;
-}
-
-CivMode CivRadio::modeFromString(const String& s) {
-  String u = s; u.toUpperCase();
-  if (u.indexOf("FM")  >= 0) return CIV_FM;
-  if (u.indexOf("USB") >= 0) return CIV_USB;
-  if (u.indexOf("LSB") >= 0) return CIV_LSB;
-  if (u.indexOf("CW")  >= 0) return CIV_CW;
-  if (u.indexOf("AM")  >= 0) return CIV_AM;
-  // Linear transponders are most often operated USB up / USB down.
-  return CIV_USB;
 }

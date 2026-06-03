@@ -3,7 +3,9 @@
 A short, buildable guide to connecting an Icom radio's **CI-V (REMOTE)** jack to
 the **M5Stack Cardputer ADV** Grove port for use with CardSat. It covers the
 level-shifting interface circuit (required — do **not** wire CI-V straight to the
-GPIOs) and the cable.
+GPIOs) and the cable. This is the **Icom** interface specifically; Kenwood and
+Yaesu radios use RS-232 / serial CAT and a different cable (see the README and
+MANUAL §16).
 
 > **Why you can't connect directly.** CI-V is a single-wire, half-duplex bus that
 > idles near **5 V**. The Cardputer's ESP32-S3 GPIOs are **3.3 V and not 5 V
@@ -16,7 +18,7 @@ GPIOs) and the cable.
 
 - **One wire** carries both directions (TX and RX share it); the controller hears
   its own transmissions echoed back. *(CardSat's firmware already swallows that
-  echo, and the new CI-V serial trace shows every frame — see §7.)*
+  echo, and the CI-V serial trace shows every frame — see §6.)*
 - It is **open-collector, idle-high**: the radio holds the line at ~5 V through an
   internal pull-up; any device sends a `0` by **pulling the line low**, and a `1`
   by releasing it.

@@ -92,3 +92,19 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
 #endif
   return false;
 }
+
+// Transmit CTCSS (PL) tone for an FM uplink. TS-2000: TNnn sets the tone
+// (encode) number -- 1-based into the same 39-tone list as ctcssToneIndex --
+// and TO1/TO0 turns the TONE (encode) function on/off. The rig applies it to
+// the current TX (uplink) band. Per Hamlib kenwood TN variant + the TS-2000
+// CAT list; least bench-verified of the three families, so watch the trace.
+bool KenwoodRig::setCtcss(bool on, float toneHz) {
+  if (!RADIOS[_model].hasTone) return false;
+  if (!on || toneHz <= 0) return sendCmd("TO0;");      // TONE function off
+  int i = ctcssToneIndex(toneHz);
+  if (i < 0) return false;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "TN%02d;", i + 1);        // tone number (1-based)
+  sendCmd(buf);
+  return sendCmd("TO1;");                              // TONE (encode) on
+}

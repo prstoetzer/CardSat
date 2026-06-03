@@ -1,6 +1,6 @@
 #pragma once
 // ===========================================================================
-//  net.h  -  WiFi + HTTPS downloads (AMSAT keps, SatNOGS transponders)
+//  net.h  -  WiFi + HTTPS downloads (AMSAT GP, SatNOGS transponders)
 // ===========================================================================
 #include <Arduino.h>
 
@@ -13,8 +13,15 @@ public:
   // GET a URL over HTTPS into `out`. Returns false on HTTP/transport error.
   bool httpsGet(const String& url, String& out, size_t maxBytes = 200000);
 
+  // GET a URL over HTTPS straight into a LittleFS file (no large RAM buffer).
+  // Essential for the GP file: a ~75 KB body can't be held as one contiguous
+  // String on the fragmented no-PSRAM heap (String growth silently truncates).
+  bool httpsGetToFile(const String& url, const char* path,
+                      size_t maxBytes = 400000, size_t* written = nullptr);
+
   // Convenience wrappers.
-  bool fetchAmsatTle(String& out);                  // bare 3-line text
+  bool fetchGp(const String& url, String& out);    // AMSAT GP/OMM JSON array
+  bool fetchGpToFile(const String& url, const char* path);  // GP -> cache file
   bool fetchSatnogsTransmitters(uint32_t norad, String& out);
 
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).

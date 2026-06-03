@@ -46,6 +46,10 @@ bool Location::pollGps() {
       }
     }
   }
+  // Fix is "held" only while the last position is fresh; if the receiver goes
+  // quiet or drops lock, age() climbs past the timeout and we report fix lost.
+  static const uint32_t GPS_FIX_TIMEOUT_MS = 5000;
+  _hasFix = gps.location.isValid() && gps.location.age() < GPS_FIX_TIMEOUT_MS;
   return updated;
 }
 
@@ -55,9 +59,11 @@ void Location::setManual(double lat, double lon, double altM) {
 }
 
 // Maidenhead grid -> lat/lon (centre of the square). Accepts 4 or 6 chars.
-bool Location::setFromGrid(const String& gridIn) {
+bool Location::gridToLatLon(const String& gridIn, double& latOut, double& lonOut) {
   String g = gridIn; g.trim(); g.toUpperCase();
   if (g.length() < 4) return false;
+  if (g[0] < 'A' || g[0] > 'R' || g[1] < 'A' || g[1] > 'R') return false;
+  if (g[2] < '0' || g[2] > '9' || g[3] < '0' || g[3] > '9') return false;
   double lon = (g[0] - 'A') * 20.0 - 180.0;
   double lat = (g[1] - 'A') * 10.0 - 90.0;
   lon += (g[2] - '0') * 2.0;
@@ -68,6 +74,12 @@ bool Location::setFromGrid(const String& gridIn) {
   } else {
     lon += 1.0; lat += 0.5;   // centre of the 2x1 deg square
   }
+  latOut = lat; lonOut = lon;
+  return true;
+}
+bool Location::setFromGrid(const String& gridIn) {
+  double lat, lon;
+  if (!gridToLatLon(gridIn, lat, lon)) return false;
   setManual(lat, lon, 0.0);
   return true;
 }

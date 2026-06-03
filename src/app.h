@@ -8,11 +8,13 @@
 #include "net.h"
 #include "location.h"
 #include "predict.h"
-#include "civ.h"
+#include "rig.h"
+#include "rotator.h"
 
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
-  SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT
+  SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
+  SCR_PASSPOLAR, SCR_MUTUAL
 };
 
 // One upcoming (or in-progress) pass for a favorite, used by the schedule view.
@@ -36,7 +38,8 @@ private:
   Net       net;
   Location  loc;
   Predictor pred;
-  CivRadio  rig;
+  Rig*      rig = nullptr;   // active CAT backend (Icom/Yaesu/Kenwood)
+  Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
 
   // UI state
   Screen   screen = SCR_HOME;
@@ -52,18 +55,32 @@ private:
   int      viewN = 0;
   int      viewSel = 0;           // cursor into view[]
 
-  // manual-entry scratch (TLE name/line1, transponder fields)
-  String   mtName, mtL1;
+  // manual-entry scratch (GP elements + transponder fields)
+  SatEntry mtSat;                 // manual GP-entry accumulator
   uint32_t mtxDl = 0, mtxUl = 0, mtxDlHigh = 0, mtxUlHigh = 0;
   bool     mtxInv = false;
   PassPredict passes[PASS_LIST_LEN];
   int      passSel = 0;          // cursor into the passes list
 
-  // pass-detail plot (Feature 7): cached elevation curve over one pass
+  // pass-detail plot: cached elevation + azimuth curve over one pass
   float    pdEl[PD_SAMPLES];
+  float    pdAz[PD_SAMPLES];
   bool     pdSunlit[PD_SAMPLES];
   PassPredict pdPass;
   bool     pdValid = false;
+
+  // live polar ground-track arc (current pass, or next pass if not up now)
+  PassPredict polarPass;
+  float    polarAz[POLAR_PTS];
+  float    polarEl[POLAR_PTS];
+  bool     polarPathValid = false;
+
+  // mutual-window (co-visibility) results for a remote DX grid
+  MutualWindow mutual[MUTUAL_MAX];
+  int      mutualN = 0;
+  int      mutualSel = 0;
+  char     dxGrid[8] = {0};
+  double   dxLat = 0, dxLon = 0;
 
   // all-favorites schedule + AOS alarm
   SchedEntry sched[SCHED_MAX];
@@ -91,7 +108,16 @@ private:
                                   // holds a constant frequency AT THE SATELLITE
   uint32_t lastRxSet = 0;         // last downlink Hz we wrote (detect knob moves)
   uint32_t lastDoppMs = 0;
+  float    toneApplied = -2.0f;   // CTCSS tone currently set on the rig (Hz);
+                                  // 0 = off, -2 = unknown/never (force re-apply)
+  bool     rotOut = false;       // are we pointing the rotator?
+  float    lastAzCmd = -999.0f;  // last az/el we commanded (deadband)
+  float    lastElCmd = -999.0f;
+  bool     rotParked = false;
+  uint32_t lastRotMs = 0;
   uint32_t lastDrawMs = 0;
+  bool     lastGpsFix  = false;   // for Location-screen auto-refresh
+  int      lastGpsSats = 0;
 
   // text editor
   String   editBuf;
@@ -104,7 +130,13 @@ private:
 
   // ---- helpers ----
   void applyRadioFromCfg();
+  void applyRotatorFromCfg();
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
+  float desiredToneHz() const;                       // PL tone wanted for current TX
+  void  applyCtcssForCurrentTx();                    // push CTCSS to rig if changed
+  float toneOverrideHz(uint32_t norad);              // user CTCSS override, <0 = none
+  void  saveToneOverride(uint32_t norad, float hz);  // hz<0 clears (reverts to auto)
+  void  retagTones(uint32_t norad);                  // re-apply override/table to activeTx
   void startGps();                         // (re)open GPS per cfg.gpsSource
   void factoryReset();                     // wipe LittleFS + reboot to defaults
   void setStatus(const String& s, uint32_t ms = 2500);
@@ -112,7 +144,7 @@ private:
   SatEntry* activeSat();
   bool ensureTransponders(SatEntry& s);   // load (cache or net)
   void onTransponderChanged();             // recenter passband + pick default mode
-  void doUpdateKeps();
+  void doUpdateGp();
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
   void loadCalForSat(uint32_t norad);      // per-satellite calibration -> calDl/calUl
   void saveCalForSat(uint32_t norad);      // persist current calDl/calUl for this sat
@@ -122,7 +154,11 @@ private:
   void toggleFav(uint32_t norad);
   void buildSatView();                     // (re)build the filtered satellite list
   void buildSchedule();                    // next pass for every favorite, sorted
-  void buildPassDetail(const PassPredict& p);  // sample one pass into pdEl/pdSunlit
+  void buildPassDetail(const PassPredict& p);  // sample one pass into pdEl/pdAz/pdSunlit
+  void buildPolarPath();                       // sample current/next pass for the live polar
+  void computeMutual(const String& grid);      // co-visibility windows vs a DX grid
+  void drawPolarGrid(int cx, int cy, int R);   // shared polar rings + cardinal cross
+  void drawPolarArc(int cx, int cy, int R, const float* az, const float* el, int n);
   void refreshScheduleIfNeeded();          // rebuild in the background when due
   void serviceAosAlarm();                  // countdown beeps + flash before AOS
   void sleepUntilNextPass();               // deep-sleep until ~60 s before AOS
@@ -141,6 +177,8 @@ private:
   void drawPassDetail();
   void drawTrack();
   void drawPolar();
+  void drawPassPolar();
+  void drawMutual();
   void drawLocation();
   void drawUpdate();
   void drawSettings();
@@ -154,6 +192,8 @@ private:
   void keyPassDetail(char c, bool enter, bool back);
   void keyTrack(char c, bool enter, bool back);
   void keyPolar(char c, bool enter, bool back);
+  void keyPassPolar(char c, bool enter, bool back);
+  void keyMutual(char c, bool enter, bool back);
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);

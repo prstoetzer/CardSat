@@ -136,3 +136,28 @@ bool YaesuRig::readSubFreq(uint32_t& hzOut) {
 #endif
   return true;
 }
+
+// FT-847 CTCSS CAT codes, in the same order as the shared 39-tone list
+// (see ctcssToneIndex). The satellite uplink is the SAT-TX VFO, so the tone
+// frequency uses opcode 0x2B and the encoder is enabled with {0x4A..0x2A}
+// (off = {0x8A..0x2A}). Codes + sequences verified against Hamlib ft847.c.
+static const uint8_t FT847_CTCSS_CODE[39] = {
+  0x3F,0x39,0x1F,0x3E,0x0F,0x3D,0x1E,0x3C,0x0E,0x3B,
+  0x1D,0x3A,0x0D,0x1C,0x0C,0x1B,0x0B,0x1A,0x0A,0x19,
+  0x09,0x18,0x08,0x17,0x07,0x16,0x06,0x15,0x05,0x14,
+  0x04,0x13,0x03,0x12,0x02,0x11,0x01,0x10,0x00
+};
+
+bool YaesuRig::setCtcss(bool on, float toneHz) {
+  if (!RADIOS[_model].hasTone) return false;
+  if (!on || toneHz <= 0) {
+    const uint8_t off[5] = { 0x8A, 0x00, 0x00, 0x00, 0x2A };  // CTCSS/DCS off, sat tx
+    return send(off);
+  }
+  int i = ctcssToneIndex(toneHz);
+  if (i < 0) return false;
+  const uint8_t freq[5] = { FT847_CTCSS_CODE[i], 0x00, 0x00, 0x00, 0x2B }; // freq, sat tx
+  send(freq);
+  const uint8_t enc[5]  = { 0x4A, 0x00, 0x00, 0x00, 0x2A };   // CTCSS enc on, sat tx
+  return send(enc);
+}

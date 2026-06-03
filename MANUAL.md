@@ -1,7 +1,7 @@
 # CardSat User Manual
 
 A complete guide to operating **CardSat**, the amateur-radio satellite tracker and
-Multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, Kenwood).
+multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, Kenwood).
 
 > **Status.** CardSat runs on the Cardputer ADV, and every feature has been
 > exercised on hardware **except radio (CAT) control and the antenna rotator** —
@@ -89,7 +89,7 @@ All three CAT families share **UART1**, **RX = G1 / TX = G2** by default, but th
 2. Note the radio's CAT settings: **baud** (all families) and, for **Icom**, the
    **CI-V address** (fixed on older rigs).
 3. In CardSat, open **Settings**, choose your **radio model** (this auto-fills the
-   defaults), then adjust **baud** — and, for Icom, the **CI-V address** — to match.
+   defaults), then adjust **CAT baud** — and, for Icom, the **CI-V address** — to match.
 
 CardSat always drives two independent VFOs: **downlink = Sub/RX, uplink = Main/TX.**
 On **Icom** it manages MAIN/SUB and forces the rig's sat mode off. On **Yaesu and
@@ -101,13 +101,13 @@ Doppler-tunes within them. (See [§16](#16-radio-specific-notes).)
 
 ## 4. Connecting a GPS (optional)
 
-GPS runs on **UART2**, independent of CI-V. On the **Location** screen press `s`
+GPS runs on **UART2**, independent of CAT. On the **Location** screen press `s`
 to cycle the source:
 
 | Source | Pins | Baud | Notes |
 |---|---|---|---|
-| **Grove 9600** | G1/G2 | 9600 | ⚠️ same pins as CI-V — don't use both at once |
-| **Grove 115200** | G1/G2 | 115200 | ⚠️ same pins as CI-V — don't use both at once |
+| **Grove 9600** | G1/G2 | 9600 | ⚠️ same pins as CAT — don't use both at once |
+| **Grove 115200** | G1/G2 | 115200 | ⚠️ same pins as CAT — don't use both at once |
 | **Cap LoRa868** | G15/G13 | 115200 | M5Stack Cap LoRa (868) onboard AT6668 GNSS |
 | **Cap LoRa1262** | G15/G13 | 115200 | M5Stack Cap LoRa (1262) onboard AT6668 GNSS |
 
@@ -119,8 +119,8 @@ latitude, longitude, altitude, and grid update automatically, and the clock is
 set from GPS time. The Location screen also refreshes on its own the moment a
 fix is gained or lost or the satellite count changes.
 
-> If you use the **Grove** GPS option you cannot use CI-V on G1/G2 at the same
-> time. The two **Cap LoRa** options use G15/G13 and coexist with CI-V.
+> If you use the **Grove** GPS option you cannot use CAT on G1/G2 at the same
+> time. The two **Cap LoRa** options use G15/G13 and coexist with CAT.
 
 ---
 
@@ -269,13 +269,18 @@ The main operating screen. Top to bottom it shows: **azimuth / elevation** (and
 GP age), **range / range-rate** (and an orange **ECL** flag in eclipse), the
 selected **transponder**, the **downlink (DN) and Doppler-corrected receive (RX)**
 frequencies, the **uplink (UP) and transmit (TX)** frequencies, the **passband**
-position line, the **calibration** line, and the **radio status**.
+position line, the **calibration** line, and the **radio status**. On an FM bird
+that needs a subaudible **PL/CTCSS tone**, a **`PL nn.n Hz`** line appears (orange
+when the radio is on and the rig supports CAT tone, grey otherwise, or
+`PL nn.n Hz (rig n/a)` if the selected rig can't set tone over CAT).
 
 Controls:
 
 - `m` — switch between **TUNE** and **CAL** modes.
 - `d` — toggle **radio-knob tuning** (One True Rule; linear birds only).
 - `t` — cycle to the next transponder.
+- `c` — set the **CTCSS/PL tone** for this satellite (numeric entry: a tone in
+  Hz, `0` to force it off, or blank to revert to the built-in default).
 - `r` — turn radio output **on/off** (sets modes and begins Doppler service).
 - `p` — open the **Polar** plot.
 - **ENTER** — save the current calibration **for this satellite**.
@@ -541,6 +546,41 @@ Protocol command sets follow the Hamlib backends (`icom`, `yaesu/ft847`,
 `yaesu/ft736`, `kenwood/ts2000`, `kenwood/ts790`). Serial framing is set
 automatically: **Icom/Kenwood 8N1, Yaesu 8N2.**
 
+### Automatic PL / CTCSS tone for FM satellites
+
+Several FM birds require a subaudible **PL (CTCSS) tone** on the uplink. CardSat
+applies it automatically: when the active transponder is **FM with an uplink** and
+the satellite is in its built-in tone table, it enables the rig's **TX CTCSS
+encoder** at the right frequency the moment radio output is on, turns it **off**
+again when you switch to a transponder that doesn't need one, and disables it when
+you turn radio output off (so your rig isn't left transmitting a tone). The tone in
+use is shown on the Track screen as a `PL nn.n Hz` line, and a status flash
+confirms it (`PL 67.0 Hz on uplink`).
+
+Built-in tones (operating tone, by NORAD id): **ISS** 67.0, **SO-50** 67.0,
+**AO-91** 67.0, **AO-92** 67.0, **PO-101** 141.3. SatNOGS carries no structured
+tone field, so this list lives in `SatDb::knownCtcssHz()` — extend it there as new
+FM satellites appear. **SO-50 note:** the 67.0 Hz figure is the *operating* tone;
+arming its 10-minute timer with a 74.4 Hz burst is a separate manual step on your
+radio.
+
+**Setting tones yourself.** Press **`c`** on the Track screen to set a tone for the
+current satellite. Enter a frequency in Hz (e.g. `67.0`, `141.3`) and it is snapped
+to the nearest standard CTCSS tone; enter `0` to force the tone **off** for that
+bird; leave it **blank** to clear your override and fall back to the built-in
+default. The override is stored per satellite (by NORAD, in `tones.txt`) and wins
+over the table, so it survives reboots and a GP/transponder refresh, and it's how
+you add a tone for any FM bird not already in the built-in list.
+
+Tone-over-CAT is supported on **IC-910/9100/9700, FT-847, and TS-2000** (the
+`hasTone` flag in `radio_profiles.h`); on other models the `PL` line reads
+`(rig n/a)` and no tone command is sent. Encoders by family: **Icom** CI-V `1B 00`
+(tone freq, BCD) + `16 42` (encoder on/off); **FT-847** sat-TX opcodes `2B`
+(tone, via the CAT code table) + `4A…2A`/`8A…2A` (encoder on/off); **TS-2000**
+`TN` (tone number) + `TO` (encoder on/off). All are taken from the Hamlib
+backends; like the rest of CAT they're host-verified but not yet exercised on a
+real radio — watch the serial trace and confirm the rig shows the tone.
+
 **Icom.** CardSat drives MAIN/SUB directly and forces the rig's built-in satellite
 mode **off** at startup (IC-9100/9700; the others have no such mode). Downlink on
 SUB, uplink on MAIN. MAIN/SUB select uses CI-V `0x07 D0/D1`, verified against the
@@ -623,7 +663,7 @@ watch the **Doppler corrections** stream during a pass. Silence a backend by set
 CardSat can drive an az/el antenna rotator that speaks the **Yaesu GS-232A/B**
 protocol -- a Yaesu G-5500 with a GS-232B, a SPID controller, or any GS-232
 emulator (K3NG / RadioArtisan / ERC). Because all three ESP32-S3 UARTs are
-already in use (USB, CI-V, GPS), the rotator's serial link is created by an
+already in use (USB, CAT, GPS), the rotator's serial link is created by an
 **I2C->UART bridge** (SC16IS750/752) on a second I2C bus, so it coexists with
 the radio and GPS without giving either of them up.
 
@@ -631,17 +671,21 @@ the radio and GPS without giving either of them up.
 
 Chain: **Cardputer I2C (Wire1) -> SC16IS750 -> MAX3232 -> DB-9 -> GS-232 controller.**
 
-- The bridge sits on a free I2C header; set `ROT_I2C_SDA` / `ROT_I2C_SCL` in
-  `config.h`. **Verify those pins against the Cardputer-ADV schematic** -- they
-  must NOT collide with CI-V (G1/G2), the GPS UART (G15/G13), or the LoRa SPI
-  (G14/G39/G40). The defaults are placeholders.
+- The bridge runs on the Cardputer-ADV expansion I2C bus, **G8 = SDA / G9 = SCL**
+  (`ROT_I2C_SDA` / `ROT_I2C_SCL` in `config.h`), on a second I2C controller
+  (Wire1) so it never touches the keyboard/IMU bus. These are confirmed from the
+  M5Stack Cap LoRa-1262 pinmap and don't collide with CAT (G1/G2), the GPS UART
+  (G13/G15), the LoRa SPI (G3/G4/G5/G6/G14/G39/G40), or the SD card (CS G12).
 - GS-232 uses RS-232 voltage levels, so a **MAX3232** sits between the bridge's
   TTL TXD/RXD and the controller's DB-9 (three wires: TXD, RXD, GND).
 - The SC16IS750 needs a 14.7456 MHz crystal (the common breakouts have one); set
   `ROT_XTAL_HZ` if yours differs, and its I2C address (A0/A1 strap) in
   `ROT_I2C_ADDR` (default 0x4D).
-- The bridge shares the I2C bus with the Cap LoRa-1262's own port expander, so
-  pick a non-conflicting address (or add a TCA9548A mux if it clashes).
+- On the Cap LoRa-1262, G8/G9 is exactly the I2C bus broken out to the cap's
+  **HY2.0-4P Grove Port.A**, so a Grove SC16IS750 bridge plugs straight in. That
+  bus also carries the cap's PI4IOE5V6408 IO expander (~0x43/0x44, used only for
+  the LoRa RF switch, which CardSat never drives), so keep `ROT_I2C_ADDR`
+  (default `0x4D`) clear of those — or add a TCA9548A mux if anything clashes.
 
 ### Settings
 
@@ -678,8 +722,11 @@ backend for diagnostics but is not used in the tracking loop.
 
 This backend is bench-reasoned against the GS-232A/B manuals and Hamlib's gs232a/
 gs232b backends, and host-tested for the bridge baud math and command formatting
--- it has not been run against a physical SC16IS750 or a real rotator. Confirm the
-I2C pins/address and the controller's baud before keying real motors.
+-- it has not been run against a physical SC16IS750 or a real rotator. The I2C
+pins (G8/G9) are confirmed from the Cap LoRa-1262 pinmap; still confirm the
+SC16IS750's strapped address and the controller's baud before keying real motors.
+
+---
 
 ## 18. Managing data and factory reset
 
@@ -690,10 +737,20 @@ CardSat stores everything in the device's LittleFS flash:
   erase them),
 - favorites, per-satellite calibration, and all settings.
 
-**Factory reset:** Settings → **Reset all data** → type **ERASE** to confirm. This
-formats the flash, wiping GP data, transponders, favorites, calibration, and
-settings, and reboots to a clean first-run state. Use it to start over or before
-handing the unit to someone else.
+CardSat normally uses the internal **LittleFS** (the SPIFFS partition). If no such
+partition exists — most commonly when CardSat is started from a **firmware
+launcher** (e.g. bmorcelli's Launcher) that didn't attach a SPIFFS region — it
+**automatically falls back to the microSD card** and stores the same files there.
+The serial monitor reports which it mounted (`[fs] LittleFS mounted …` or
+`[fs] using microSD card for storage`), and a brief on-screen note appears at boot
+when the SD fallback is in use. To use internal flash instead, either flash CardSat
+directly with the **Huge APP (3MB No OTA/1MB SPIFFS)** scheme, or have the launcher
+allocate a SPIFFS partition for it (its partition manager / "Ask Spiffs" option).
+
+**Factory reset:** Settings → **Reset all data** → type **ERASE** to confirm. On
+internal flash this formats LittleFS; on the SD fallback it removes CardSat's own
+files (it never formats your card). Either way it reboots to a clean first-run
+state. Use it to start over or before handing the unit to someone else.
 
 ---
 
@@ -706,16 +763,16 @@ GPS, or Location → `c` to enter UTC manually. Also confirm your location is se
 WiFi, open the bird from Satellites (it fetches from SatNOGS), or use Update → `a`
 to cache everything. You can also add one manually (Passes → `n`).
 
-**Radio doesn't respond / wrong VFO moves.** Check the CI-V **address** and
-**baud** in Settings match the radio. Open the serial monitor at 115200 and watch
-the **CI-V trace** ([§16](#16-radio-specific-notes)): each command is shown
+**Radio doesn't respond / wrong VFO moves.** Check the **CAT baud** (and, for
+Icom, the **CI-V address**) in Settings match the radio. Open the serial monitor at
+115200 and watch the **CAT trace** ([§16](#16-radio-specific-notes)): each command is shown
 decoded, and the radio should reply **ACK (FB)** rather than **NAK (FA)**. If the
 wrong VFO tunes, the MAIN/SUB select bytes for that model may need adjusting in
 `radio_profiles.h`.
 
 **Radio-knob tuning feels jumpy or unresponsive.** Read-back happens about twice a
 second, so there's up to ~0.5 s of latency, and a 20 Hz threshold ignores tiny
-readback jitter. On slower CI-V (9600 baud) it's less snappy. If your rig
+readback jitter. On a slower CAT link (9600 baud) it's less snappy. If your rig
 quantizes frequency coarsely, that threshold may need tuning.
 
 **Predictions seem off.** Check the **GP age** indicator — refresh GP data if it's
@@ -733,8 +790,17 @@ and the **clock is set** — the alarm tracks only the soonest upcoming favorite
 so with no favorites or an unset clock there's nothing to count down to.
 
 **GPS not fixing.** Make sure the right **GPS source** is selected (Location → `s`)
-and that GPS is enabled (`p`). The Grove source shares pins with CI-V — don't use
+and that GPS is enabled (`p`). The Grove source shares pins with CAT — don't use
 both at once.
+
+**"fs open" / "No filesystem" when downloading GP (often under a launcher).**
+CardSat needs somewhere to store the GP file. Run directly from flash it uses the
+internal SPIFFS/LittleFS partition; under a launcher that didn't attach a SPIFFS
+region it falls back to the **microSD card**. If you see `fs open` / `no filesystem`,
+either insert a microSD card (the launcher usually boots from one anyway), have the
+launcher allocate a SPIFFS partition for CardSat, or flash CardSat directly with the
+**Huge APP (3MB No OTA/1MB SPIFFS)** partition scheme. The serial monitor's
+`[fs] …` line at boot tells you what mounted.
 
 **Rotator shows "n/c" or won't move.** *n/c* means the I2C->UART bridge didn't
 answer. Check `ROT_I2C_SDA`/`ROT_I2C_SCL` in `config.h` match your wiring and the
@@ -755,7 +821,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Passes** | `;`/`.` select · `d` detail plot · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual window |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` radio-knob tuning · `t` next TX · `r` radio on/off · `o` rotator on/off · `p` polar · ENTER save cal |
+| **Track** | `m` TUNE/CAL · `d` radio-knob tuning · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · ENTER save cal |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
 | **Track · CAL** | `,`/`/` downlink ∓ · `;`/`.` uplink ∓ · `s` step (10/100/1k) · `x` zero |
 | **Polar** | `p`/ENTER/`` ` `` back to track |
@@ -789,7 +855,10 @@ in line and the controller's baud matches **Rot baud** in Settings.
 - **SGP4** — the standard model that turns an element set into position/velocity over time.
 - **Maidenhead grid** — the locator system (e.g. `FM18`) for your station position.
 - **Eclipse / sunlit** — whether the satellite is in Earth's shadow or illuminated.
-- **CI-V** — Icom's Communications Interface-V serial control bus.
+- **CAT** — Computer Aided Transceiver control: the generic term for computer
+  control of a radio. CardSat speaks three CAT dialects — Icom **CI-V**, Yaesu, and
+  Kenwood — behind one abstract rig interface.
+- **CI-V** — Icom's Communications Interface-V serial control bus (Icom's CAT dialect).
 - **MAIN / SUB** — the two VFOs/bands of a satellite-capable radio; CardSat uses
   MAIN for uplink and SUB for downlink.
 - **One True Rule** — KB5MU's principle: tune so the frequency *at the satellite*

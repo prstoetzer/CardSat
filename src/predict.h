@@ -26,14 +26,38 @@ struct LiveLook {
   double sunAz = 0, sunEl = 0;   // Sun position from the observer (degrees)
 };
 
+// One co-visibility (mutual) window: both my station and a remote (DX) station
+// see the satellite above their horizons at the same time.
+struct MutualWindow {
+  time_t start = 0, end = 0; // unix UTC bounds of co-visibility
+  float  myMaxEl = 0;        // peak elevation here during the window
+  float  dxMaxEl = 0;        // peak elevation at the remote site during the window
+};
+
 class Predictor {
 public:
   void setSite(const Observer& o);
-  // Point the propagator at a satellite (copies TLE lines).
+  // Point the propagator at a satellite (renders its GP elements for SGP4).
   bool setSat(SatEntry& s);
 
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
+
+  // Lightweight: just az/el (degrees) for the current site at time t.
+  bool azelAt(time_t t, double& az, double& el);
+
+  // Topocentric elevation (deg) of a satellite at sub-point (satLat/Lon, altKm)
+  // as seen from an arbitrary observer. Used for the remote leg of a mutual
+  // (co-visibility) window without a second propagator.
+  static double elevationFromSubpoint(double obsLatDeg, double obsLonDeg,
+                                      double obsAltM,
+                                      double satLatDeg, double satLonDeg,
+                                      double satAltKm);
+
+  // Find co-visibility windows where this site and `dx` both see the satellite
+  // above `minEl` at once, searching forward from `from`. Returns count (<=maxN).
+  int mutualWindows(time_t from, const Observer& dx, float minEl,
+                    MutualWindow* out, int maxN);
 
   // Doppler-corrected radio frequencies for the current geometry.
   //   rxHz: tune the receiver here to hear a downlink of dlNominal

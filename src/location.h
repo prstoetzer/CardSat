@@ -28,6 +28,8 @@ public:
   int  gpsSats()  const { return _sats; }
 
   static String toGrid(double lat, double lon);  // 6-char Maidenhead
+  // Maidenhead -> lat/lon (square centre) without mutating any Location.
+  static bool gridToLatLon(const String& grid, double& lat, double& lon);
 
 private:
   Observer _obs;

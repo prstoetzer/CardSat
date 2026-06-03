@@ -30,6 +30,11 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   command sets follow the Hamlib backends. Every frame is traced to the serial monitor.
 - **Linear-transponder passband tracking** with correct inversion, and automatic
   sideband selection (USB down / LSB up; USB/USB for HF birds below 30 MHz).
+- **Automatic PL/CTCSS tone** on FM uplinks (SO-50, AO-91, ISS, PO-101…): CardSat
+  enables the rig's TX tone encoder at the right frequency from a built-in table,
+  and clears it when you leave the bird or stop radio output. Tones are also
+  **settable per satellite** (`c` on Track) for any FM bird, and persist. Icom /
+  FT-847 / TS-2000.
 - **Next Passes** — one schedule across *all* your favorites, soonest AOS first.
 - **AOS alarm** — countdown beeps + a screen flash before a favorite rises.
 - **Deep-sleep until the next pass** — park the unit between passes for big
@@ -48,7 +53,9 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Antenna rotator (GS-232)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
   SPID, K3NG/RadioArtisan) through an I²C→UART bridge, so the radio and GPS keep
   their UARTs. Deadband, park-on-LOS, alignment offsets, optional flip mode.
-- **Fully offline** once GP + transponders are cached to flash.
+- **Fully offline** once GP + transponders are cached to flash (internal LittleFS,
+  or the **microSD card** automatically when run from a launcher with no SPIFFS
+  partition).
 - **Favorites**, **manual GP / transponder / time entry**, per-satellite
   **calibration**, and a **factory reset**.
 
@@ -125,13 +132,13 @@ differs by family**, because the electrical layer is different:
   reliably driven through an **FT-847-emulating** CAT interface (KA6BFB / HS-736USB);
   select **FT-847** in Settings in that case.
 
-Set the **model** and **baud** in **Settings** to match the radio's menu (the CI-V
+Set the **model** and **CAT baud** in **Settings** to match the radio's menu (the CI-V
 **address** field applies to Icom only). Yaesu is 8N2; Icom and Kenwood are 8N1 —
 the firmware sets this automatically per backend.
 
 ### GPS (optional)
 
-GPS runs on **UART2**, so it never collides with CI-V on UART1. The source is
+GPS runs on **UART2**, so it never collides with CAT on UART1. The source is
 selectable at runtime on the **Location** screen (press `s`):
 
 | Source | UART | RX | TX | Baud |
@@ -144,25 +151,27 @@ selectable at runtime on the **Location** screen (press `s`):
 Both Cap LoRa modules carry the same AT6668 GNSS at **115200 8N1** on G15/G13;
 the two Grove rows differ only in baud, to match whatever receiver you plug in.
 
-> ⚠️ The **Grove** GPS option uses **G1/G2 — the same pins as the default CI-V
-> port.** Don't run Grove GPS and CI-V at the same time on those pins. The two Cap
-> LoRa sources use G15/G13 and coexist with CI-V fine.
+> ⚠️ The **Grove** GPS option uses **G1/G2 — the same pins as the default CAT
+> port.** Don't run Grove GPS and CAT at the same time on those pins. The two Cap
+> LoRa sources use G15/G13 and coexist with CAT fine.
 
 ---
 
 ### Antenna rotator (GS-232 over I²C)
 
-All three UARTs are spoken for (USB, CI-V, GPS), so the rotator's serial port is
+All three UARTs are spoken for (USB, CAT, GPS), so the rotator's serial port is
 made with an **I²C→UART bridge**. Chain:
 
 **Wire1 → SC16IS750 → MAX3232 → DB-9 → GS-232 controller.**
 
-- Set `ROT_I2C_SDA` / `ROT_I2C_SCL` in `config.h` to a free I²C header (the bridge
-  runs on **Wire1**, separate from the keyboard bus). **Verify the pins** don't
-  collide with CI-V (G1/G2), the GPS UART (G15/G13), or the LoRa SPI (G14/G39/G40)
-  — the defaults are placeholders.
-- The bridge can share the Cap LoRa-1262's I²C bus; give it a non-conflicting
-  address (`ROT_I2C_ADDR`, default `0x4D`) or add a TCA9548A mux.
+- The bridge runs on the Cardputer-ADV expansion I²C bus — **G8 = SDA, G9 = SCL**
+  (`ROT_I2C_SDA`/`ROT_I2C_SCL`), on **Wire1**, separate from the keyboard bus.
+  These are confirmed from the Cap LoRa-1262 pinmap and clear of CAT (G1/G2), the
+  GPS UART (G13/G15), the LoRa SPI (G3/G4/G5/G6/G14/G39/G40), and SD (CS G12).
+- On the Cap LoRa-1262, G8/G9 is the bus broken out to its **HY2.0-4P Grove
+  Port.A**, so a Grove SC16IS750 plugs straight in. It's shared with the cap's
+  PI4IOE5V6408 expander (~0x43/0x44, LoRa RF switch only); keep `ROT_I2C_ADDR`
+  (default `0x4D`) clear of that, or add a TCA9548A mux.
 - GS-232 uses RS-232 levels, so a **MAX3232** sits between the bridge's TTL pins
   and the controller's DB-9 (TXD / RXD / GND).
 - Enable it in **Settings → Rotator**, then press **`o`** on the Track screen.
@@ -212,8 +221,9 @@ Both Yaesu rigs track fully under software control regardless.
 
 ### CAT serial trace
 
-Every CI-V frame the firmware sends is printed to the **serial monitor at 115200
-baud**, decoded, so you can watch exactly what reaches the radio:
+Every frame the firmware sends is printed to the **serial monitor at 115200
+baud**, decoded, so you can watch exactly what reaches the radio. The Icom (CI-V)
+trace looks like:
 
 ```
 [CI-V TX] FE FE A2 E0 07 D1 FD  sel-band SUB
@@ -287,10 +297,15 @@ GP/transponder caches. Still **unverified on real equipment**:
   rather than NAKs (`FA`), that the correct VFO tunes, and that model/baud/address
   match. For radio-knob (One True Rule) tuning, the 20 Hz operator-move threshold
   in the Doppler loop is the knob to adjust if your rig quantizes coarsely.
-- **Antenna rotator.** The SC16IS750 I²C→UART bridge and the GS-232 command path
-  are host-tested for baud math and framing only. Confirm `ROT_I2C_SDA/SCL`, the
-  bridge address (`ROT_I2C_ADDR`), and the controller baud **before keying real
-  motors** — the pins in `config.h` are placeholders.
+- **Antenna rotator.** The I²C pins (G8/G9) are confirmed from the Cap LoRa-1262
+  pinmap, but the SC16IS750 I²C→UART bridge and the GS-232 command path are
+  host-tested for baud math and framing only. Confirm the bridge address
+  (`ROT_I2C_ADDR`) and the controller baud **before keying real motors**.
+- **SD-card storage fallback** — when LittleFS won't mount (e.g. launched from a
+  launcher with no SPIFFS partition) CardSat falls back to microSD on the standard
+  Cardputer SPI pins (SCK 40 / MISO 39 / MOSI 14 / CS 12, in `config.h`). The
+  fallback path hasn't been exercised on hardware yet; verify the pins if your card
+  isn't detected.
 - **TLS** uses `WiFiClientSecure::setInsecure()` (no cert validation) — fine for
   public GP data; pin a CA root if you care.
 
@@ -304,7 +319,8 @@ CardSat.ino             single-file Arduino build (generated from src/)
 src/main.cpp            entry point (instantiates App)
 src/app.{h,cpp}         UI state machine, rendering, Doppler service loop
 src/config.h            URLs, UART/pin assignments, limits, file paths
-src/settings.{h,cpp}    persisted config (WiFi, location, radio, alarm, calibration)
+src/storage.{h,cpp}     filesystem layer: internal LittleFS, microSD fallback
+src/settings.{h,cpp}    persisted config (WiFi, location, radio, rotator, alarm, calibration)
 src/satdb.{h,cpp}       GP/OMM element store + TLE rebuild + streaming parse + transponder cache
 src/net.{h,cpp}         WiFi, NTP, HTTPS GET, GP stream-to-file, SatNOGS fetch
 src/location.{h,cpp}    manual / grid / GPS position, Maidenhead conversion

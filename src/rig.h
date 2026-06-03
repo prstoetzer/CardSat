@@ -45,9 +45,16 @@ public:
   // (meaningful for Icom; no-op elsewhere).
   virtual void selectSubBand() = 0;
 
+  // Set the transmit CTCSS (PL) tone encoder. Used for FM satellites whose
+  // uplink requires a subaudible tone (SO-50, AO-91, ISS, PO-101...). The tone
+  // is applied to the uplink (Main/TX). on=false disables it. Backends that
+  // can't drive CTCSS over CAT return false (the default).
+  virtual bool setCtcss(bool on, float toneHz) { (void)on; (void)toneHz; return false; }
+
   // Capabilities / identity (read from the model's RadioProfile).
   virtual bool canReadFreq() const = 0;
   virtual bool hasSatMode()  const = 0;
+  virtual bool hasTone()     const { return false; }   // CAT CTCSS supported
   virtual bool selVerified() const = 0;
   virtual const char* name() const = 0;
 
@@ -58,6 +65,13 @@ public:
   // Map a SatNOGS/AMSAT mode string ("FM","USB","CW","DATA"...) to a RigMode.
   static RigMode modeFromString(const String& s);
 };
+
+// Index (0..38) of the nearest standard CTCSS tone to hz, or -1 if hz<=0 or no
+// tone is within tolerance. The 39-tone EIA list is shared by the Yaesu code
+// table and the Kenwood tone numbers; Icom encodes the frequency directly.
+int  ctcssToneIndex(float hz);
+// The standard tone (in Hz) at a given index, or 0 if out of range.
+float ctcssToneHz(int index);
 
 // Construct the backend for a model. Caller owns the returned pointer.
 Rig* makeRig(RadioModel model);

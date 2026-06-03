@@ -36,9 +36,10 @@ void Predictor::setSite(const Observer& o) {
 }
 
 bool Predictor::setSat(SatEntry& s) {
-  strncpy(_name, s.name,  sizeof(_name)-1); _name[sizeof(_name)-1]=0;
-  strncpy(_l1,   s.line1, sizeof(_l1)-1);   _l1[sizeof(_l1)-1]=0;
-  strncpy(_l2,   s.line2, sizeof(_l2)-1);   _l2[sizeof(_l2)-1]=0;
+  strncpy(_name, s.name, sizeof(_name)-1); _name[sizeof(_name)-1]=0;
+  // The SGP4 library ingests elements through twoline2rv, so render the stored
+  // GP mean elements into a TLE line-pair (SGP4 is encoding-agnostic).
+  if (!SatDb::gpToTle(s, _l1, _l2)) { _haveSat = false; return false; }
   _sat.init(_name, _l1, _l2);
   _haveSat = (_sat.satrec.error == 0);
   return _haveSat;
@@ -155,6 +156,74 @@ void Predictor::passbandFreqs(const Transponder& t, int32_t pbOffsetHz,
 
 time_t Predictor::jdToUnix(double jd) {
   return (time_t)llround((jd - 2440587.5) * 86400.0);
+}
+
+bool Predictor::azelAt(time_t t, double& az, double& el) {
+  if (!_haveSat) { az = el = 0; return false; }
+  _sat.findsat((unsigned long)t);
+  az = _sat.satAz;
+  el = _sat.satEl;
+  return true;
+}
+
+double Predictor::elevationFromSubpoint(double obsLatDeg, double obsLonDeg,
+                                        double obsAltM,
+                                        double satLatDeg, double satLonDeg,
+                                        double satAltKm) {
+  const double D = M_PI / 180.0, RE = 6378.137, e2 = 6.69437999014e-3;
+  auto ecef = [&](double latD, double lonD, double hKm,
+                  double& x, double& y, double& z) {
+    double phi = latD * D, lam = lonD * D, s = sin(phi), c = cos(phi);
+    double N = RE / sqrt(1.0 - e2 * s * s);
+    x = (N + hKm) * c * cos(lam);
+    y = (N + hKm) * c * sin(lam);
+    z = (N * (1.0 - e2) + hKm) * s;
+  };
+  double ox, oy, oz, sx, sy, sz;
+  ecef(obsLatDeg, obsLonDeg, obsAltM / 1000.0, ox, oy, oz);
+  ecef(satLatDeg, satLonDeg, satAltKm,          sx, sy, sz);
+  double dx = sx - ox, dy = sy - oy, dz = sz - oz;
+  double dn = sqrt(dx * dx + dy * dy + dz * dz);
+  if (dn <= 0) return -90.0;
+  double phi = obsLatDeg * D, lam = obsLonDeg * D;          // ellipsoidal up
+  double ux = cos(phi) * cos(lam), uy = cos(phi) * sin(lam), uz = sin(phi);
+  return asin((dx * ux + dy * uy + dz * uz) / dn) / D;
+}
+
+int Predictor::mutualWindows(time_t from, const Observer& dx, float minEl,
+                             MutualWindow* out, int maxN) {
+  if (!_haveSat) return 0;
+  // My passes down to the horizon mask bound the search (a mutual window can
+  // only occur while I can see the bird), so scan inside each of my passes.
+  PassPredict mine[MUTUAL_PASS_SCAN];
+  int np = predictPasses(from, minEl, mine, MUTUAL_PASS_SCAN);
+
+  const time_t dt = 10;                 // scan step (s)
+  int n = 0;
+  for (int p = 0; p < np && n < maxN; ++p) {
+    bool inWin = false;
+    MutualWindow w;
+    for (time_t t = mine[p].aos; t <= mine[p].los; t += dt) {
+      _sat.findsat((unsigned long)t);
+      double myEl = _sat.satEl;
+      double dxEl = elevationFromSubpoint(dx.lat, dx.lon, dx.altM,
+                                          _sat.satLat, _sat.satLon, _sat.satAlt);
+      bool both = (myEl >= minEl && dxEl >= minEl);
+      if (both) {
+        if (!inWin) { inWin = true; w = MutualWindow();
+                      w.start = t; w.end = t;
+                      w.myMaxEl = (float)myEl; w.dxMaxEl = (float)dxEl; }
+        else { w.end = t;
+               if (myEl > w.myMaxEl) w.myMaxEl = (float)myEl;
+               if (dxEl > w.dxMaxEl) w.dxMaxEl = (float)dxEl; }
+      } else if (inWin) {
+        out[n++] = w; inWin = false;
+        if (n >= maxN) return n;
+      }
+    }
+    if (inWin && n < maxN) out[n++] = w;   // window open at pass end
+  }
+  return n;
 }
 
 int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int maxN) {

@@ -4457,11 +4457,6 @@ void App::keyEdit(char c, bool enter, bool back) {
 // ===========================================================================
 void App::header(const String& t) {
   canvas.fillRect(0, 0, 240, 16, CL_BLUE);
-  canvas.setTextColor(CL_WHITE, CL_BLUE);
-  canvas.setTextSize(2);
-  canvas.setCursor(3, 1);
-  canvas.print(t);
-  canvas.setTextSize(1);
 
   // Battery indicator (top-right). getBatteryLevel() is <0 if unknown.
   int lvl = M5.Power.getBatteryLevel();
@@ -4475,9 +4470,30 @@ void App::header(const String& t) {
     if (fw > 0) canvas.fillRect(bx + 1, by + 1, fw, bh - 2, col);
   }
 
+  // Clock (left of the battery). Build it first so the title can be fit to the
+  // space that's left over.
+  String clk;
+  int rightLimit = bx;                          // title must stop before the battery
   if (timeIsSet()) {
-    String clk = fmtClock(nowUtc()) + "Z";
-    canvas.setCursor(bx - (int)clk.length()*6 - 5, 4);      // left of the battery
+    clk = fmtClock(nowUtc()) + "Z";
+    rightLimit = bx - (int)clk.length() * 6 - 5;  // …and before the clock when it's shown
+  }
+
+  // Title (satellite name) at text size 2 = 12 px/char. Truncate to whatever
+  // fits before the clock/battery so a long name can't overwrite them.
+  const int titleX = 3, charW = 12, gap = 4;
+  int maxChars = (rightLimit - gap - titleX) / charW;
+  if (maxChars < 1) maxChars = 1;
+  String title = ((int)t.length() > maxChars) ? t.substring(0, maxChars) : t;
+  canvas.setTextColor(CL_WHITE, CL_BLUE);
+  canvas.setTextSize(2);
+  canvas.setCursor(titleX, 1);
+  canvas.print(title);
+  canvas.setTextSize(1);
+
+  if (clk.length()) {
+    canvas.setTextColor(CL_WHITE, CL_BLUE);
+    canvas.setCursor(bx - (int)clk.length() * 6 - 5, 4);    // left of the battery
     canvas.print(clk);
   }
 }

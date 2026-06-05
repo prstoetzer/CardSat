@@ -1534,9 +1534,12 @@ void App::drawSchedule() {
     canvas.setCursor(6, 44); canvas.print("No passes >= min elev.");
   }
   time_t now = nowUtc();
-  for (int i = 0; i < schedN && i < 9; ++i) {
+  const int VIS = 9;
+  int scroll = (schedSel >= VIS) ? (schedSel - VIS + 1) : 0;
+  for (int v = 0; v < VIS && (scroll + v) < schedN; ++v) {
+    int i = scroll + v;
     SchedEntry& e = sched[i];
-    int y = 28 + i*10;
+    int y = 28 + v*10;
     if (i == schedSel) { canvas.fillRect(0, y-1, 240, 10, CL_GREEN);
                          canvas.setTextColor(CL_BLACK, CL_GREEN); }
     else canvas.setTextColor(e.inProgress ? CL_GREEN : CL_WHITE, CL_BLACK);

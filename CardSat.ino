@@ -1991,8 +1991,15 @@ static void rstrip(char* s) {
 // ---- EPOCH "YYYY-MM-DD HH:MM:SS.ffffff" -> Unix UTC seconds (fractional) ----
 // Civil-from-days (Howard Hinnant) so it never depends on the process TZ.
 double SatDb::gpEpochToUnix(const char* s) {
+  if (!s) return 0.0;
+  // OMM/GP JSON gives the epoch in ISO 8601 with a 'T' between date and time
+  // (e.g. "2024-01-15T12:34:56.789012"); some sources use a space instead.
+  // Normalize 'T'/'t' to a space so the time-of-day is always parsed -- missing
+  // it silently zeroed HH:MM:SS and shifted pass times by up to ~12 hours.
+  char b[40]; strncpy(b, s, sizeof(b) - 1); b[sizeof(b) - 1] = 0;
+  for (char* p = b; *p; ++p) if (*p == 'T' || *p == 't') *p = ' ';
   int Y = 0, Mo = 1, D = 1, h = 0, mi = 0; double se = 0.0;
-  if (sscanf(s, "%d-%d-%d %d:%d:%lf", &Y, &Mo, &D, &h, &mi, &se) < 3) return 0.0;
+  if (sscanf(b, "%d-%d-%d %d:%d:%lf", &Y, &Mo, &D, &h, &mi, &se) < 3) return 0.0;
   int y = Y - (Mo <= 2);
   long era = (y >= 0 ? y : y - 399) / 400;
   unsigned yoe = (unsigned)(y - era * 400);
@@ -4645,9 +4652,12 @@ void App::drawSchedule() {
     canvas.setCursor(6, 44); canvas.print("No passes >= min elev.");
   }
   time_t now = nowUtc();
-  for (int i = 0; i < schedN && i < 9; ++i) {
+  const int VIS = 9;
+  int scroll = (schedSel >= VIS) ? (schedSel - VIS + 1) : 0;
+  for (int v = 0; v < VIS && (scroll + v) < schedN; ++v) {
+    int i = scroll + v;
     SchedEntry& e = sched[i];
-    int y = 28 + i*10;
+    int y = 28 + v*10;
     if (i == schedSel) { canvas.fillRect(0, y-1, 240, 10, CL_GREEN);
                          canvas.setTextColor(CL_BLACK, CL_GREEN); }
     else canvas.setTextColor(e.inProgress ? CL_GREEN : CL_WHITE, CL_BLACK);

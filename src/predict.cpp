@@ -50,8 +50,9 @@ bool Predictor::setSat(SatEntry& s) {
 // method Gpredict uses (sgp4sdp4 converts ECI position+velocity straight to
 // observer-centred range rate). Far cleaner near TCA than differencing slant
 // range, and evaluated at the exact time rather than the nearest whole second.
-// Relies on the library's standard Vallado propagator: sgp4(satrec, tsince_min,
-// r[3], v[3]) -> TEME position (km) and velocity (km/s).
+// This Hopperpop build uses the older Vallado propagator signature
+// sgp4(whichconst, satrec, tsince_min, r[3], v[3]); pass WGS72 (the constant set
+// the elements are fit to) -> TEME position (km) and velocity (km/s).
 double Predictor::rangeRateAt(double unixSec) {
   if (!_haveSat) return 0.0;
 
@@ -60,7 +61,7 @@ double Predictor::rangeRateAt(double unixSec) {
   // field layout.
   double tsince = (unixSec - _epochUnix) / 60.0;
   double r[3] = {0, 0, 0}, v[3] = {0, 0, 0};
-  sgp4(_sat.satrec, tsince, r, v);              // TEME position/velocity
+  sgp4(wgs72, _sat.satrec, tsince, r, v);       // TEME position/velocity (WGS72)
 
   // Observer in the same TEME frame: geodetic -> ECEF -> rotate by GMST.
   double jd  = unixSec / 86400.0 + 2440587.5;

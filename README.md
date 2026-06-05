@@ -254,7 +254,8 @@ the `FA;` read reply for Kenwood). Silence any of them with `CIV_DEBUG` / `YAESU
 Navigation uses the legends printed on the Cardputer keys:
 `;` up · `.` down · `,` left · `/` right · **ENTER** select · `` ` `` or **DEL** back.
 
-1. **Settings** — WiFi SSID/password, radio model, **CAT baud** (and the CI-V
+1. **Settings** — WiFi SSID/password (or press `s` on the SSID row to **scan**
+   and pick a network), radio model, **CAT baud** (and the CI-V
    address for Icom), minimum pass elevation, AOS alarm on/off.
 2. **Location** — set your grid or lat/lon, or enable GPS; set the UTC clock if
    you have no network/GPS.

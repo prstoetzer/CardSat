@@ -172,6 +172,9 @@ the bottom of each screen. When in doubt, read the footer.
    - **CI-V addr** — set to match the radio; **Icom only**.
    - **Min pass el** — passes below this maximum elevation are hidden (default 5°).
    - **WiFi SSID / WiFi pass** — enter your network, then **Save & test WiFi**.
+     On the **WiFi SSID** row you can instead press **`s`** to **scan** for nearby
+     networks, pick one from the list (strongest first; `*` = secured), and then
+     enter its password (open networks skip the password step).
    - **AOS alarm** — on/off for the pre-pass beeps.
 2. **Location** — set your position one of three ways:
    - `e` latitude, `o` longitude, `a` altitude; or
@@ -330,13 +333,25 @@ actions.
 | CI-V addr | ENTER → edit (hex); Icom only |
 | CAT baud | `,`/`/` cycle 1200…115200 (incl. 57600) — applies to all radio protocols |
 | Min pass el | `,`/`/` 0–30° |
-| WiFi SSID | ENTER → edit |
+| WiFi SSID | ENTER → edit · **`s`** → scan for networks and pick one |
 | WiFi pass | ENTER → edit |
 | Save & test WiFi | ENTER → connect and report OK/FAIL |
 | AOS alarm | `,`/`/` or ENTER toggle on/off |
 | Rotator (+ baud / deadband / park / offsets) | `,`/`/` adjust; see [§17](#17-antenna-rotator-gs-232) |
 | GP source URL | ENTER → edit the GP/OMM download URL |
 | **Reset all data** | ENTER → type **ERASE** to wipe everything (red row) |
+
+### WiFi scan
+
+Reached from **Settings** by pressing **`s`** on the **WiFi SSID** row. CardSat
+scans for nearby networks and lists them strongest-signal first, with each
+network's RSSI (dBm) and a `*` for secured networks.
+
+- `;`/`.` — select a network.
+- **ENTER** — use it: the SSID is saved and you're taken to password entry
+  (open networks skip the password and return to Settings).
+- `r` — rescan.
+- `` ` `` — back to Settings.
 
 ### Edit
 
@@ -828,7 +843,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Mutual** | `;`/`.` scroll · `` ` ``/ENTER back to passes |
 | **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock |
 | **Update** | `k`/ENTER GP · `a` cache all TX · `w` WiFi only |
-| **Settings** | `,`/`/` change · ENTER edit/toggle · (Reset = type ERASE) |
+| **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
 
 ---

@@ -6,7 +6,7 @@
 #include <math.h>
 
 static const double DEG = M_PI / 180.0;
-static const double RE_KM = 6378.137;          // WGS84 equatorial radius
+static const double RE_KM = 6378.135;          // WGS72 equatorial radius (matches the TLE element set)
 
 // Geocentric unit vector to the Sun in equatorial inertial coords (ECI).
 // Low-precision almanac, good to ~0.01 deg -- ample for shadow / az-el.
@@ -42,21 +42,58 @@ bool Predictor::setSat(SatEntry& s) {
   if (!SatDb::gpToTle(s, _l1, _l2)) { _haveSat = false; return false; }
   _sat.init(_name, _l1, _l2);
   _haveSat = (_sat.satrec.error == 0);
+  _epochUnix = s.epochUnix;          // for fractional-time range rate (rangeRateAt)
   return _haveSat;
+}
+
+// Range rate from the SGP4 velocity vector at a fractional instant -- the
+// method Gpredict uses (sgp4sdp4 converts ECI position+velocity straight to
+// observer-centred range rate). Far cleaner near TCA than differencing slant
+// range, and evaluated at the exact time rather than the nearest whole second.
+// Relies on the library's standard Vallado propagator: sgp4(satrec, tsince_min,
+// r[3], v[3]) -> TEME position (km) and velocity (km/s).
+double Predictor::rangeRateAt(double unixSec) {
+  if (!_haveSat) return 0.0;
+
+  // Propagate to the exact instant. tsince is MINUTES since the element epoch;
+  // measure it from the stored Unix epoch so we don't depend on satrec's epoch
+  // field layout.
+  double tsince = (unixSec - _epochUnix) / 60.0;
+  double r[3] = {0, 0, 0}, v[3] = {0, 0, 0};
+  sgp4(_sat.satrec, tsince, r, v);              // TEME position/velocity
+
+  // Observer in the same TEME frame: geodetic -> ECEF -> rotate by GMST.
+  double jd  = unixSec / 86400.0 + 2440587.5;
+  double th  = gmstRad(jd);
+  double ct = cos(th), st = sin(th);
+  double phi = _o.lat * DEG, lam = _o.lon * DEG, hKm = _o.altM / 1000.0;
+  double e2  = 6.694318e-3;                     // WGS72 first eccentricity^2 (f = 1/298.26)
+  double sphi = sin(phi), cphi = cos(phi);
+  double N   = RE_KM / sqrt(1.0 - e2 * sphi * sphi);
+  double xe = (N + hKm) * cphi * cos(lam);      // ECEF
+  double ye = (N + hKm) * cphi * sin(lam);
+  double ze = (N * (1.0 - e2) + hKm) * sphi;
+  double ox = xe * ct - ye * st;                // ECEF -> TEME  (Rz(+theta))
+  double oy = xe * st + ye * ct;
+  double oz = ze;
+
+  // Observer velocity in TEME from Earth rotation: omega_earth x r_obs.
+  const double we = 7.2921150e-5;               // rad/s (sidereal)
+  double ovx = -we * oy, ovy = we * ox, ovz = 0.0;
+
+  // Range rate = (r_rel . v_rel) / |r_rel|, +ve when the range is increasing.
+  double rx = r[0] - ox,  ry = r[1] - oy,  rz = r[2] - oz;
+  double vx = v[0] - ovx, vy = v[1] - ovy, vz = v[2] - ovz;
+  double rmag = sqrt(rx * rx + ry * ry + rz * rz);
+  if (rmag <= 0.0) return 0.0;
+  return (rx * vx + ry * vy + rz * vz) / rmag;
 }
 
 LiveLook Predictor::look(time_t t) {
   LiveLook L;
   if (!_haveSat) return L;
 
-  // Range rate via central finite difference of slant range (2 s baseline).
-  _sat.findsat((unsigned long)(t - 1));
-  double d0 = _sat.satDist;
-  _sat.findsat((unsigned long)(t + 1));
-  double d1 = _sat.satDist;
-  L.rangeRate = (d1 - d0) / 2.0;          // km/s
-
-  // Current sample.
+  // Current sample (az/el/range/sub-point) from the propagator.
   _sat.findsat((unsigned long)t);
   L.az       = _sat.satAz;
   L.el       = _sat.satEl;
@@ -66,6 +103,10 @@ LiveLook Predictor::look(time_t t) {
   L.satAltKm = _sat.satAlt;
   L.visible  = (_sat.satEl > 0.0);
 
+  // Range rate from the SGP4 velocity vector (exact; no finite-difference
+  // truncation), at this same instant -- see rangeRateAt().
+  L.rangeRate = rangeRateAt((double)t);
+
   // ---- Sun geometry: satellite illumination + Sun look-angle --------------
   double jd = (double)t / 86400.0 + 2440587.5;
   double sx, sy, sz; sunEciUnit(jd, sx, sy, sz);    // Sun unit vector (ECI)
@@ -74,7 +115,7 @@ LiveLook Predictor::look(time_t t) {
 
   // Satellite ECEF position from its geodetic sub-point (lat/lon/alt).
   double phi = L.subLat * DEG, lam = L.subLon * DEG, h = L.satAltKm;
-  double e2 = 6.69437999014e-3;                      // WGS84 first ecc^2
+  double e2 = 6.694318e-3;                           // WGS72 first ecc^2 (f = 1/298.26)
   double sphi = sin(phi), cphi = cos(phi);
   double Nlat = RE_KM / sqrt(1.0 - e2 * sphi * sphi);
   double rx = (Nlat + h) * cphi * cos(lam);
@@ -170,7 +211,7 @@ double Predictor::elevationFromSubpoint(double obsLatDeg, double obsLonDeg,
                                         double obsAltM,
                                         double satLatDeg, double satLonDeg,
                                         double satAltKm) {
-  const double D = M_PI / 180.0, RE = 6378.137, e2 = 6.69437999014e-3;
+  const double D = M_PI / 180.0, RE = 6378.135, e2 = 6.694318e-3;
   auto ecef = [&](double latD, double lonD, double hKm,
                   double& x, double& y, double& z) {
     double phi = latD * D, lam = lonD * D, s = sin(phi), c = cos(phi);

@@ -14,7 +14,7 @@
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
-  SCR_PASSPOLAR, SCR_MUTUAL
+  SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN
 };
 
 // One upcoming (or in-progress) pass for a favorite, used by the schedule view.
@@ -96,6 +96,12 @@ private:
   Transponder activeTx[MAX_TX_PER_SAT];
   int      activeTxCount = 0;     // transponders loaded for the active sat
   int      setSel = 0;            // settings menu cursor
+
+  // WiFi scan (Settings -> WiFi SSID -> 's')
+  static const int MAX_WIFI_AP = 16;
+  WifiAp   wifiAp[MAX_WIFI_AP];
+  int      wifiApCount = 0;
+  int      wifiSel = 0;
 
   // tracking / doppler
   bool     radioOut = false;      // are we sending freqs to the rig?
@@ -182,6 +188,7 @@ private:
   void drawLocation();
   void drawUpdate();
   void drawSettings();
+  void drawWifiScan();
   void drawEdit();
 
   // ---- per-screen input ----
@@ -197,6 +204,8 @@ private:
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);
+  void startWifiScan();
+  void keyWifiScan(char c, bool enter, bool back);
   void keyEdit(char c, bool enter, bool back);
 
   // ---- small draw utilities ----

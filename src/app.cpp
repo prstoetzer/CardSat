@@ -673,6 +673,10 @@ void App::loop() {
       SatEntry* s = activeSat();
       if (s && activeTxCount > 0 && timeIsSet()) {
         LiveLook L = pred.look(nowUtc());
+        // Sub-second Doppler: recompute the range rate at the exact instant --
+        // the integer-second look() value lags near TCA. Velocity-based.
+        { struct timeval tv; gettimeofday(&tv, nullptr);
+          L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6); }
         Transponder& t = activeTx[curTx];
         uint32_t dlOp, ulOp, rx, tx;
         if (radioTune && t.isLinear && rig->canReadFreq()) {

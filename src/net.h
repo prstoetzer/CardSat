@@ -4,9 +4,17 @@
 // ===========================================================================
 #include <Arduino.h>
 
+// One access point returned by a WiFi scan.
+struct WifiAp {
+  char    ssid[33];
+  int8_t  rssi;     // signal strength, dBm
+  bool    enc;      // true = secured (needs a password)
+};
+
 class Net {
 public:
   bool connect(const String& ssid, const String& pass, uint32_t timeoutMs = 15000);
+  int  scanWifi(WifiAp* out, int maxAps);   // scan nearby APs (blocking); count or -1
   bool connected();
   void syncTimeNtp();                       // sets system clock via NTP (UTC)
 

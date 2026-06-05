@@ -43,6 +43,11 @@ public:
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
 
+  // Range rate (km/s, +ve receding) at a FRACTIONAL unix time, taken from the
+  // SGP4 velocity vector (the method Gpredict/sgp4sdp4 use) rather than by
+  // differencing slant range. Exact and not quantised to whole seconds.
+  double rangeRateAt(double unixSec);
+
   // Lightweight: just az/el (degrees) for the current site at time t.
   bool azelAt(time_t t, double& az, double& el);
 
@@ -84,5 +89,6 @@ private:
   Sgp4   _sat;
   Observer _o;
   bool   _haveSat = false;
+  double _epochUnix = 0;        // element-set epoch (Unix UTC s), for tsince
   char   _name[26], _l1[72], _l2[72];
 };

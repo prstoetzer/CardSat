@@ -169,6 +169,7 @@ static constexpr int   SD_SCK_PIN     = 40;
 static constexpr int   SD_MISO_PIN    = 39;
 static constexpr int   SD_MOSI_PIN    = 14;
 static constexpr int   SD_CS_PIN      = 12;
+static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 reference init)
 
 // ---------------------------------------------------------------------------
 //  Antenna rotator: GS-232 over an I2C->UART bridge (SC16IS750/752)
@@ -1208,15 +1209,19 @@ namespace Store {
 static fs::FS* g_fs    = &LittleFS;   // default; updated by begin()
 static bool    g_ready = false;
 static bool    g_sd    = false;
-static SPIClass g_spi(HSPI);
 
 bool begin() {
   g_ready = false; g_sd = false; g_fs = &LittleFS;
 
-  // 1) Prefer the microSD card. Everything is kept in a DATA_DIR ("/CardSat")
-  //    folder so the card stays tidy and easy to copy off.
-  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  if (SD.begin(SD_CS_PIN, g_spi)) {
+  // 1) Prefer the microSD card. Use the default SPI bus (FSPI) with the
+  //    Cardputer SD pins and a 25 MHz clock -- matching M5's reference init.
+  //    (An earlier build used a separate HSPI instance, which collides with the
+  //    display's SPI peripheral and makes SD.begin() fail even with a card in.)
+  //    The card must be formatted FAT32 (not exFAT).
+  SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  bool sdMounted = SD.begin(SD_CS_PIN, SPI, SD_FREQ_HZ);
+  if (!sdMounted) sdMounted = SD.begin(SD_CS_PIN, SPI, 1000000);   // retry slower
+  if (sdMounted) {
     g_fs = &SD; g_ready = true; g_sd = true;
     if (!SD.exists(DATA_DIR)) SD.mkdir(DATA_DIR);
     Serial.println("[fs] using microSD card for storage (" DATA_DIR ")");

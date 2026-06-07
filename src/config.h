@@ -65,6 +65,7 @@ static constexpr int   SD_SCK_PIN     = 40;
 static constexpr int   SD_MISO_PIN    = 39;
 static constexpr int   SD_MOSI_PIN    = 14;
 static constexpr int   SD_CS_PIN      = 12;
+static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 reference init)
 
 // ---------------------------------------------------------------------------
 //  Antenna rotator: GS-232 over an I2C->UART bridge (SC16IS750/752)

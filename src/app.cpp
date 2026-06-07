@@ -757,7 +757,64 @@ void App::loop() {
 // ===========================================================================
 //  Input dispatch
 // ===========================================================================
+// Capture the current screen to /CardSat/Screenshots/shot_NNNN.bmp on the SD
+// card (24-bit BMP, no library). Bound to the 'b' key; a short beep confirms.
+// Requires SD-card storage; a low beep means no SD (running on LittleFS).
+void App::takeScreenshot() {
+  if (!Store::onSD()) { beep(300, 120); return; }
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists("/CardSat/Screenshots")) fsx.mkdir("/CardSat/Screenshots");
+
+  static uint32_t seq = 1;
+  char path[48];
+  do { snprintf(path, sizeof(path), "/CardSat/Screenshots/shot_%04lu.bmp",
+                (unsigned long)seq++); }
+  while (fsx.exists(path));
+
+  File fp = fsx.open(path, "w");
+  if (!fp) { beep(300, 120); return; }
+
+  const int W = canvas.width(), H = canvas.height();
+  const uint32_t rowBytes = (uint32_t)W * 3;
+  const uint32_t imgSize  = rowBytes * (uint32_t)H;
+  const uint32_t fileSize = 54 + imgSize;
+  uint8_t hdr[54]; memset(hdr, 0, sizeof(hdr));
+  hdr[0]='B'; hdr[1]='M';
+  hdr[2]=fileSize; hdr[3]=fileSize>>8; hdr[4]=fileSize>>16; hdr[5]=fileSize>>24;
+  hdr[10]=54;                       // pixel-data offset
+  hdr[14]=40;                       // info header size
+  hdr[18]=W & 0xFF; hdr[19]=(W>>8) & 0xFF;
+  hdr[22]=H & 0xFF; hdr[23]=(H>>8) & 0xFF;   // +H => bottom-up rows
+  hdr[26]=1;                        // planes
+  hdr[28]=24;                       // bits per pixel
+  hdr[34]=imgSize; hdr[35]=imgSize>>8; hdr[36]=imgSize>>16; hdr[37]=imgSize>>24;
+  hdr[38]=0x13; hdr[39]=0x0B;       // 2835 ppm (x)
+  hdr[42]=0x13; hdr[43]=0x0B;       // 2835 ppm (y)
+  fp.write(hdr, 54);
+
+  // Read each row as RGB888 with the documented readRectRGB(): M5GFX converts
+  // from the sprite's native format (no RGB565 byte-order ambiguity), and the
+  // public RGBColor type exposes named .r/.g/.b members (layout-independent).
+  // A 24-bit BMP stores pixels as B,G,R, so emit them in that order.
+  static RGBColor line[256];
+  static uint8_t  row[256 * 3];
+  for (int y = H - 1; y >= 0; --y) {            // BMP rows are bottom-up
+    canvas.readRectRGB(0, y, W, 1, line);
+    for (int x = 0; x < W; ++x) {
+      row[x*3 + 0] = line[x].b;                 // BMP stores BGR
+      row[x*3 + 1] = line[x].g;
+      row[x*3 + 2] = line[x].r;
+    }
+    fp.write(row, rowBytes);
+  }
+  fp.close();
+  beep(1800, 40);                   // short confirmation chirp
+}
+
 void App::handleKey(char c, bool enter, bool back) {
+  // Hidden screenshot hotkey: 'b' saves a BMP of the screen to the SD card.
+  // Skipped during text entry (SCR_EDIT) so it can still be typed normally.
+  if (c == 'b' && screen != SCR_EDIT) { takeScreenshot(); return; }
   switch (screen) {
     case SCR_HOME:     keyHome(c, enter, back); break;
     case SCR_SATLIST:  keySatList(c, enter, back); break;

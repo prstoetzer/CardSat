@@ -173,6 +173,7 @@ private:
 
   // ---- input ----
   void handleKey(char c, bool enter, bool back);
+  void takeScreenshot();                   // 'b' key -> BMP to /CardSat/Screenshots/
 
   // ---- per-screen render ----
   void draw();

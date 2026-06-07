@@ -17,25 +17,29 @@ static SPIClass g_spi(HSPI);
 bool begin() {
   g_ready = false; g_sd = false; g_fs = &LittleFS;
 
-  // 1) Prefer internal flash. begin(true) formats the SPIFFS partition if it
-  //    mounts dirty, but it can only succeed if such a partition exists.
+  // 1) Prefer the microSD card. Everything is kept in a DATA_DIR ("/CardSat")
+  //    folder so the card stays tidy and easy to copy off.
+  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  if (SD.begin(SD_CS_PIN, g_spi)) {
+    g_fs = &SD; g_ready = true; g_sd = true;
+    if (!SD.exists(DATA_DIR)) SD.mkdir(DATA_DIR);
+    Serial.println("[fs] using microSD card for storage (" DATA_DIR ")");
+    return true;
+  }
+
+  // 2) No SD card -> fall back to internal LittleFS (same DATA_DIR). begin(true)
+  //    formats the SPIFFS partition if it mounts dirty; only works if such a
+  //    partition exists in the flashed table.
+  Serial.println("[fs] no SD card - falling back to internal LittleFS");
   if (LittleFS.begin(true)) {
     g_fs = &LittleFS; g_ready = true;
+    if (!LittleFS.exists(DATA_DIR)) LittleFS.mkdir(DATA_DIR);
     Serial.printf("[fs] LittleFS mounted (%u/%u bytes used)\n",
                   (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
     return true;
   }
 
-  // 2) No internal data partition (typical when run from a launcher) -> SD.
-  Serial.println("[fs] LittleFS mount failed (no SPIFFS partition?) - trying SD");
-  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  if (SD.begin(SD_CS_PIN, g_spi)) {
-    g_fs = &SD; g_ready = true; g_sd = true;
-    Serial.println("[fs] using microSD card for storage");
-    return true;
-  }
-
-  Serial.println("[fs] NO filesystem available (LittleFS and SD both failed)");
+  Serial.println("[fs] NO filesystem available (SD and LittleFS both failed)");
   g_fs = &LittleFS;           // leave a valid object; opens will fail gracefully
   return false;
 }

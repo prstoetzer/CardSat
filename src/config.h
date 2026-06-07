@@ -102,11 +102,12 @@ static constexpr int   MUTUAL_PASS_SCAN= 16;   // of my passes scanned for mutua
 // ---------------------------------------------------------------------------
 //  Files on LittleFS
 // ---------------------------------------------------------------------------
-#define FILE_GP      "/gp.json"     // cached GP/OMM download (JSON array)
-#define FILE_CFG     "/config.json"
-#define FILE_TXCACHE "/tx_%lu.json"   // %lu = norad id
-#define FILE_CALIB   "/calib.txt"     // per-sat calibration: "norad dl ul" lines
-#define FILE_TONES   "/tones.txt"     // per-sat CTCSS override: "norad tenths" lines
-#define FILE_FAVS    "/favs.txt"      // favorite NORAD ids, one per line
-#define FILE_MGP     "/mgp.json"     // manually-entered GP sats (one OMM object/line)
-#define FILE_MTX     "/mtx_%lu.json"  // manual transponders per norad (text lines)
+#define DATA_DIR     "/CardSat"               // all data/config lives in this folder
+#define FILE_GP      "/CardSat/gp.json"       // cached GP/OMM download (JSON array)
+#define FILE_CFG     "/CardSat/config.json"
+#define FILE_TXCACHE "/CardSat/tx_%lu.json"   // %lu = norad id
+#define FILE_CALIB   "/CardSat/calib.txt"     // per-sat calibration: "norad dl ul" lines
+#define FILE_TONES   "/CardSat/tones.txt"     // per-sat CTCSS override: "norad tenths" lines
+#define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
+#define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
+#define FILE_MTX     "/CardSat/mtx_%lu.json"  // manual transponders per norad (text lines)

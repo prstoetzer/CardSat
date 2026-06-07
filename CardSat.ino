@@ -206,14 +206,15 @@ static constexpr int   MUTUAL_PASS_SCAN= 16;   // of my passes scanned for mutua
 // ---------------------------------------------------------------------------
 //  Files on LittleFS
 // ---------------------------------------------------------------------------
-#define FILE_GP      "/gp.json"     // cached GP/OMM download (JSON array)
-#define FILE_CFG     "/config.json"
-#define FILE_TXCACHE "/tx_%lu.json"   // %lu = norad id
-#define FILE_CALIB   "/calib.txt"     // per-sat calibration: "norad dl ul" lines
-#define FILE_TONES   "/tones.txt"     // per-sat CTCSS override: "norad tenths" lines
-#define FILE_FAVS    "/favs.txt"      // favorite NORAD ids, one per line
-#define FILE_MGP     "/mgp.json"     // manually-entered GP sats (one OMM object/line)
-#define FILE_MTX     "/mtx_%lu.json"  // manual transponders per norad (text lines)
+#define DATA_DIR     "/CardSat"               // all data/config lives in this folder
+#define FILE_GP      "/CardSat/gp.json"       // cached GP/OMM download (JSON array)
+#define FILE_CFG     "/CardSat/config.json"
+#define FILE_TXCACHE "/CardSat/tx_%lu.json"   // %lu = norad id
+#define FILE_CALIB   "/CardSat/calib.txt"     // per-sat calibration: "norad dl ul" lines
+#define FILE_TONES   "/CardSat/tones.txt"     // per-sat CTCSS override: "norad tenths" lines
+#define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
+#define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
+#define FILE_MTX     "/CardSat/mtx_%lu.json"  // manual transponders per norad (text lines)
 
 
 // =========================================================================
@@ -223,12 +224,10 @@ static constexpr int   MUTUAL_PASS_SCAN= 16;   // of my passes scanned for mutua
 // ===========================================================================
 //  storage.h -- filesystem abstraction (internal LittleFS, SD-card fallback)
 // ===========================================================================
-//  CardSat persists everything to flash via LittleFS. When the firmware is run
-//  through a launcher (e.g. bmorcelli's Launcher) the flashed partition table
-//  is the launcher's, and it may not include a SPIFFS/LittleFS data partition
-//  -- so LittleFS.begin() fails and every file open returns an error. In that
-//  situation a microSD card is almost always present (the launcher boots from
-//  it), so we transparently fall back to the SD card.
+//  CardSat keeps everything in a "/CardSat" folder on the microSD card by
+//  default -- config, cached elements, favorites, calibration, transponders.
+//  If no SD card is present it falls back to the internal LittleFS partition
+//  (same "/CardSat" folder) so the firmware still works standalone.
 //
 //  All persistence goes through Store::fs(), which points at whichever
 //  filesystem mounted. Call Store::begin() once at startup before any file I/O.
@@ -1154,6 +1153,7 @@ private:
 
   // ---- input ----
   void handleKey(char c, bool enter, bool back);
+  void takeScreenshot();                   // 'b' key -> BMP to /CardSat/Screenshots/
 
   // ---- per-screen render ----
   void draw();
@@ -1213,25 +1213,29 @@ static SPIClass g_spi(HSPI);
 bool begin() {
   g_ready = false; g_sd = false; g_fs = &LittleFS;
 
-  // 1) Prefer internal flash. begin(true) formats the SPIFFS partition if it
-  //    mounts dirty, but it can only succeed if such a partition exists.
+  // 1) Prefer the microSD card. Everything is kept in a DATA_DIR ("/CardSat")
+  //    folder so the card stays tidy and easy to copy off.
+  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  if (SD.begin(SD_CS_PIN, g_spi)) {
+    g_fs = &SD; g_ready = true; g_sd = true;
+    if (!SD.exists(DATA_DIR)) SD.mkdir(DATA_DIR);
+    Serial.println("[fs] using microSD card for storage (" DATA_DIR ")");
+    return true;
+  }
+
+  // 2) No SD card -> fall back to internal LittleFS (same DATA_DIR). begin(true)
+  //    formats the SPIFFS partition if it mounts dirty; only works if such a
+  //    partition exists in the flashed table.
+  Serial.println("[fs] no SD card - falling back to internal LittleFS");
   if (LittleFS.begin(true)) {
     g_fs = &LittleFS; g_ready = true;
+    if (!LittleFS.exists(DATA_DIR)) LittleFS.mkdir(DATA_DIR);
     Serial.printf("[fs] LittleFS mounted (%u/%u bytes used)\n",
                   (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
     return true;
   }
 
-  // 2) No internal data partition (typical when run from a launcher) -> SD.
-  Serial.println("[fs] LittleFS mount failed (no SPIFFS partition?) - trying SD");
-  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  if (SD.begin(SD_CS_PIN, g_spi)) {
-    g_fs = &SD; g_ready = true; g_sd = true;
-    Serial.println("[fs] using microSD card for storage");
-    return true;
-  }
-
-  Serial.println("[fs] NO filesystem available (LittleFS and SD both failed)");
+  Serial.println("[fs] NO filesystem available (SD and LittleFS both failed)");
   g_fs = &LittleFS;           // leave a valid object; opens will fail gracefully
   return false;
 }
@@ -3923,7 +3927,64 @@ void App::loop() {
 // ===========================================================================
 //  Input dispatch
 // ===========================================================================
+// Capture the current screen to /CardSat/Screenshots/shot_NNNN.bmp on the SD
+// card (24-bit BMP, no library). Bound to the 'b' key; a short beep confirms.
+// Requires SD-card storage; a low beep means no SD (running on LittleFS).
+void App::takeScreenshot() {
+  if (!Store::onSD()) { beep(300, 120); return; }
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists("/CardSat/Screenshots")) fsx.mkdir("/CardSat/Screenshots");
+
+  static uint32_t seq = 1;
+  char path[48];
+  do { snprintf(path, sizeof(path), "/CardSat/Screenshots/shot_%04lu.bmp",
+                (unsigned long)seq++); }
+  while (fsx.exists(path));
+
+  File fp = fsx.open(path, "w");
+  if (!fp) { beep(300, 120); return; }
+
+  const int W = canvas.width(), H = canvas.height();
+  const uint32_t rowBytes = (uint32_t)W * 3;
+  const uint32_t imgSize  = rowBytes * (uint32_t)H;
+  const uint32_t fileSize = 54 + imgSize;
+  uint8_t hdr[54]; memset(hdr, 0, sizeof(hdr));
+  hdr[0]='B'; hdr[1]='M';
+  hdr[2]=fileSize; hdr[3]=fileSize>>8; hdr[4]=fileSize>>16; hdr[5]=fileSize>>24;
+  hdr[10]=54;                       // pixel-data offset
+  hdr[14]=40;                       // info header size
+  hdr[18]=W & 0xFF; hdr[19]=(W>>8) & 0xFF;
+  hdr[22]=H & 0xFF; hdr[23]=(H>>8) & 0xFF;   // +H => bottom-up rows
+  hdr[26]=1;                        // planes
+  hdr[28]=24;                       // bits per pixel
+  hdr[34]=imgSize; hdr[35]=imgSize>>8; hdr[36]=imgSize>>16; hdr[37]=imgSize>>24;
+  hdr[38]=0x13; hdr[39]=0x0B;       // 2835 ppm (x)
+  hdr[42]=0x13; hdr[43]=0x0B;       // 2835 ppm (y)
+  fp.write(hdr, 54);
+
+  // Read each row as RGB888 with the documented readRectRGB(): M5GFX converts
+  // from the sprite's native format (no RGB565 byte-order ambiguity), and the
+  // public RGBColor type exposes named .r/.g/.b members (layout-independent).
+  // A 24-bit BMP stores pixels as B,G,R, so emit them in that order.
+  static RGBColor line[256];
+  static uint8_t  row[256 * 3];
+  for (int y = H - 1; y >= 0; --y) {            // BMP rows are bottom-up
+    canvas.readRectRGB(0, y, W, 1, line);
+    for (int x = 0; x < W; ++x) {
+      row[x*3 + 0] = line[x].b;                 // BMP stores BGR
+      row[x*3 + 1] = line[x].g;
+      row[x*3 + 2] = line[x].r;
+    }
+    fp.write(row, rowBytes);
+  }
+  fp.close();
+  beep(1800, 40);                   // short confirmation chirp
+}
+
 void App::handleKey(char c, bool enter, bool back) {
+  // Hidden screenshot hotkey: 'b' saves a BMP of the screen to the SD card.
+  // Skipped during text entry (SCR_EDIT) so it can still be typed normally.
+  if (c == 'b' && screen != SCR_EDIT) { takeScreenshot(); return; }
   switch (screen) {
     case SCR_HOME:     keyHome(c, enter, back); break;
     case SCR_SATLIST:  keySatList(c, enter, back); break;

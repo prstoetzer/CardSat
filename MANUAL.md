@@ -158,9 +158,12 @@ CardSat uses the arrow legends printed on the Cardputer keys:
 | **ENTER** | select / confirm |
 | `` ` `` or **DEL** | back / cancel |
 | `{` `}` | page up / page down (lists) |
+| `b` | save a screenshot to the SD card (see §18) |
 
 Other letter keys are screen-specific actions and are shown in the **footer** at
-the bottom of each screen. When in doubt, read the footer.
+the bottom of each screen. When in doubt, read the footer. The one global
+exception is **`b`**, which saves a screenshot on any screen and is deliberately
+not shown in any footer.
 
 ---
 
@@ -745,27 +748,37 @@ SC16IS750's strapped address and the controller's baud before keying real motors
 
 ## 18. Managing data and factory reset
 
-CardSat stores everything in the device's LittleFS flash:
+CardSat keeps all of its data in a **`/CardSat`** folder:
 
 - cached GP data and per-satellite transponder caches,
 - your manual GP satellites and manual transponders (kept separate, so a refresh won't
   erase them),
 - favorites, per-satellite calibration, and all settings.
 
-CardSat normally uses the internal **LittleFS** (the SPIFFS partition). If no such
-partition exists — most commonly when CardSat is started from a **firmware
-launcher** (e.g. bmorcelli's Launcher) that didn't attach a SPIFFS region — it
-**automatically falls back to the microSD card** and stores the same files there.
-The serial monitor reports which it mounted (`[fs] LittleFS mounted …` or
-`[fs] using microSD card for storage`), and a brief on-screen note appears at boot
-when the SD fallback is in use. To use internal flash instead, either flash CardSat
-directly with the **Huge APP (3MB No OTA/1MB SPIFFS)** scheme, or have the launcher
-allocate a SPIFFS partition for it (its partition manager / "Ask Spiffs" option).
+CardSat stores this on the **microSD card** by default (in the `/CardSat` folder), so
+your configuration travels with the card and is easy to back up. If no card is present
+at boot it **falls back to the internal LittleFS** flash (same `/CardSat` folder) so
+the unit still works standalone. The serial monitor reports which it mounted
+(`[fs] using microSD card for storage (/CardSat)` or `[fs] no SD card - falling back
+to internal LittleFS`). Insert the card **before powering on** — the filesystem is
+chosen once at startup. For the LittleFS fallback you must flash CardSat with a
+partition scheme that includes a data region, e.g. **Huge APP (3MB No OTA/1MB SPIFFS)**.
 
-**Factory reset:** Settings → **Reset all data** → type **ERASE** to confirm. On
-internal flash this formats LittleFS; on the SD fallback it removes CardSat's own
-files (it never formats your card). Either way it reboots to a clean first-run
-state. Use it to start over or before handing the unit to someone else.
+### Screenshots
+
+Press **`b`** on any screen to save a screenshot of exactly what's displayed. Images
+are written to **`/CardSat/Screenshots/`** on the SD card as 24-bit BMP files named
+`shot_0001.bmp`, `shot_0002.bmp`, … (never overwritten). A short high beep confirms
+each capture; a low beep means there's no SD card to write to — screenshots require
+the card, as the LittleFS fallback is too small for images. The key works on every
+screen **except** the text-entry screen (where `b` types normally), and it is
+intentionally hidden — no footer hint — so it never appears in the captured image.
+BMPs open anywhere and convert easily to PNG for documentation.
+
+**Factory reset:** Settings → **Reset all data** → type **ERASE** to confirm. On the
+SD card this removes CardSat's own files in `/CardSat` (it never formats your card);
+on internal LittleFS it formats the data partition. Either way it reboots to a clean
+first-run state. Use it to start over or before handing the unit to someone else.
 
 ---
 
@@ -827,7 +840,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 
 ## 20. Key reference (cheat sheet)
 
-**Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page.
+**Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot.
 
 | Screen | Keys |
 |---|---|

@@ -53,9 +53,11 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Antenna rotator (GS-232)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
   SPID, K3NG/RadioArtisan) through an I²C→UART bridge, so the radio and GPS keep
   their UARTs. Deadband, park-on-LOS, alignment offsets, optional flip mode.
-- **Fully offline** once GP + transponders are cached to flash (internal LittleFS,
-  or the **microSD card** automatically when run from a launcher with no SPIFFS
-  partition).
+- **Fully offline** once GP + transponders are cached. CardSat stores everything in
+  a **`/CardSat` folder on the microSD card** by default, falling back to internal
+  **LittleFS** if no card is present.
+- **Screenshots** — press **`b`** on any screen to save a 24-bit BMP to
+  `/CardSat/Screenshots/` on the SD card (handy for documentation).
 - **Favorites**, **manual GP / transponder / time entry**, per-satellite
   **calibration**, and a **factory reset**.
 
@@ -302,11 +304,11 @@ GP/transponder caches. Still **unverified on real equipment**:
   pinmap, but the SC16IS750 I²C→UART bridge and the GS-232 command path are
   host-tested for baud math and framing only. Confirm the bridge address
   (`ROT_I2C_ADDR`) and the controller baud **before keying real motors**.
-- **SD-card storage fallback** — when LittleFS won't mount (e.g. launched from a
-  launcher with no SPIFFS partition) CardSat falls back to microSD on the standard
-  Cardputer SPI pins (SCK 40 / MISO 39 / MOSI 14 / CS 12, in `config.h`). The
-  fallback path hasn't been exercised on hardware yet; verify the pins if your card
-  isn't detected.
+- **SD-card storage** — CardSat now stores its data in `/CardSat` on the microSD card
+  by default (SCK 40 / MISO 39 / MOSI 14 / CS 12, in `config.h`), falling back to
+  internal LittleFS only if no card is present. The SD path hasn't been exercised on
+  hardware yet; verify the pins if your card isn't detected, and seat the card before
+  power-up (the filesystem is chosen once at boot).
 - **TLS** uses `WiFiClientSecure::setInsecure()` (no cert validation) — fine for
   public GP data; pin a CA root if you care.
 
@@ -320,7 +322,7 @@ CardSat.ino             single-file Arduino build (generated from src/)
 src/main.cpp            entry point (instantiates App)
 src/app.{h,cpp}         UI state machine, rendering, Doppler service loop
 src/config.h            URLs, UART/pin assignments, limits, file paths
-src/storage.{h,cpp}     filesystem layer: internal LittleFS, microSD fallback
+src/storage.{h,cpp}     filesystem layer: microSD (/CardSat) first, internal LittleFS fallback
 src/settings.{h,cpp}    persisted config (WiFi, location, radio, rotator, alarm, calibration)
 src/satdb.{h,cpp}       GP/OMM element store + TLE rebuild + streaming parse + transponder cache
 src/net.{h,cpp}         WiFi, NTP, HTTPS GET, GP stream-to-file, SatNOGS fetch

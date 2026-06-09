@@ -302,7 +302,7 @@ frequencies come from the **SatNOGS DB** as JSON
 (`https://db.satnogs.org/api/transmitters/`). The GP file (~75 KB) is **streamed
 straight to flash and parsed one element set at a time**, so the full catalog
 loads on the no-PSRAM S3 without ever needing a large contiguous buffer. Up to
-**220 satellites** are held in RAM, and **up to 32 transponders** per active
+**220 satellites** are held in RAM, and **up to 64 transponders** per active
 satellite.
 
 ---

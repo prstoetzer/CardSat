@@ -272,6 +272,25 @@ SatEntry* App::activeSat() {
 // ===========================================================================
 //  Transponders
 // ===========================================================================
+
+// Move two-way transponders (both an uplink and a downlink) to the front of the
+// list, preserving the relative order within each group. SatNOGS lists beacons
+// and telemetry downlinks too (the ISS has ~49 entries), so this puts the
+// workable repeaters/transponders first on the Track screen. Stable, in place.
+static void prioritizeTwoWay(Transponder* tx, int n) {
+  int dst = 0;
+  for (int i = 0; i < n; ++i) {
+    if (tx[i].uplink && tx[i].downlink) {
+      if (i != dst) {                            // rotate tx[dst..i] right by one
+        Transponder t = tx[i];
+        for (int j = i; j > dst; --j) tx[j] = tx[j - 1];
+        tx[dst] = t;
+      }
+      dst++;
+    }
+  }
+}
+
 bool App::ensureTransponders(SatEntry& s) {
   activeTxCount = 0; curTx = 0;
   // 1) try LittleFS cache
@@ -288,6 +307,8 @@ bool App::ensureTransponders(SatEntry& s) {
   if (activeTxCount < MAX_TX_PER_SAT)
     activeTxCount += loadManualTx(s.norad, activeTx + activeTxCount,
                                   MAX_TX_PER_SAT - activeTxCount);
+  // 3b) bring two-way transponders to the front so they're easy to reach
+  prioritizeTwoWay(activeTx, activeTxCount);
   // 4) tag FM uplinks with the effective PL/CTCSS tone: the user's per-satellite
   //    override if one is set, otherwise the built-in table (SatNOGS has none).
   retagTones(s.norad);
@@ -714,10 +735,11 @@ void App::loop() {
     draw();
   }
 
-  // Real-time Doppler service (on the tracking and polar screens)
+  // Real-time Doppler service -- runs whenever the radio is engaged ('r'),
+  // independent of the current screen, so CAT keeps tracking while you make a log
+  // entry, browse passes, etc. The radioOut guard makes it a no-op otherwise.
   uint32_t ms = millis();
-  if (screen == SCR_TRACK || screen == SCR_POLAR) {
-    if (radioOut && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
+  if (radioOut && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
       lastDoppMs = ms;
       SatEntry* s = activeSat();
       if (s && activeTxCount > 0 && timeIsSet()) {
@@ -795,6 +817,9 @@ void App::loop() {
         }
       }
     }
+  // Redraw cadence is still screen-dependent (the radio/rotator service above is
+  // not): refresh the live screens periodically; static ones redraw on keypress.
+  if (screen == SCR_TRACK || screen == SCR_POLAR) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL) {
@@ -1306,7 +1331,7 @@ void App::keyUpdate(char c, bool enter, bool back) {
 }
 
 void App::keySettings(char c, bool enter, bool back) {
-  const int N = 23;
+  const int N = 24;
   if (isBack(c, back)) { applyRadioFromCfg(); applyRotatorFromCfg();
                          screen = SCR_HOME; return; }
   if (isUp(c))   setSel = (setSel + N - 1) % N;
@@ -1369,11 +1394,13 @@ void App::keySettings(char c, bool enter, bool back) {
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 14: editTarget = 203; editTitle = "GP source URL";
                editBuf = cfg.gpUrl; screen = SCR_EDIT; break;
-      case 20: {
+      case 20: editTarget = 204; editTitle = "My callsign";
+               editBuf = cfg.myCall; screen = SCR_EDIT; break;
+      case 21: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
       } break;
-      case 21: {
+      case 22: {
         if (!Store::fs().exists(FILE_CFG_BAK)) { setStatus("No backup found"); break; }
         bool ok = copyFile(FILE_CFG_BAK, FILE_CFG);
         copyFile(FILE_FAVS_BAK, FILE_FAVS);
@@ -1383,7 +1410,7 @@ void App::keySettings(char c, bool enter, bool back) {
                   setStatus("Restored from SD"); }
         else setStatus("Restore failed");
       } break;
-      case 22: editTarget = 400; editTitle = "Type ERASE to wipe all";
+      case 23: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
       default: adj(+1); break;
     }
@@ -1424,6 +1451,8 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.pass[sizeof(cfg.pass)-1] = 0; break;
       case 203: strncpy(cfg.gpUrl, editBuf.c_str(), sizeof(cfg.gpUrl)-1);
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;
+      case 204: strncpy(cfg.myCall, editBuf.c_str(), sizeof(cfg.myCall)-1);
+                cfg.myCall[sizeof(cfg.myCall)-1] = 0; break;
 
       // ---- mutual co-visibility vs a DX grid ----
       case 330: computeMutual(editBuf); return;
@@ -1573,7 +1602,13 @@ void App::keyEdit(char c, bool enter, bool back) {
     setStatus("Saved");
     return;
   }
-  if (c >= 32 && c < 127) editBuf += c;
+  if (c >= 32 && c < 127) {
+    if (editTarget == 204 || editTarget == 500 || editTarget == 503) {
+      if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
+      else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
+    }
+    editBuf += c;
+  }
 }
 
 // ===========================================================================
@@ -1685,16 +1720,16 @@ static void writeQsoCsv(File& f, const PendingQso& q) {
     return o;
   };
   String notes = q.notes; notes.replace("\n", " "); notes.replace("\r", " ");
-  f.printf("%lu,%s,%s,%s,%lu,%lu,%s,%s,%s,%s,%s\n",
+  f.printf("%lu,%s,%s,%s,%lu,%lu,%s,%s,%s,%s,%s,%s\n",
            (unsigned long)q.utc, cl(q.call).c_str(), cl(q.sat).c_str(),
            cl(q.mode).c_str(), (unsigned long)q.dlHz, (unsigned long)q.ulHz,
            cl(q.rstS).c_str(), cl(q.rstR).c_str(), cl(q.myGrid).c_str(),
-           cl(q.grid).c_str(), notes.c_str());
+           cl(q.grid).c_str(), cl(q.myCall).c_str(), notes.c_str());
 }
 
 static bool parseQsoCsv(const String& line, PendingQso& q) {
-  String f[11]; int n = 0, start = 0;
-  for (int i = 0; i < (int)line.length() && n < 10; ++i)
+  String f[12]; int n = 0, start = 0;
+  for (int i = 0; i < (int)line.length() && n < 11; ++i)
     if (line[i] == ',') { f[n++] = line.substring(start, i); start = i + 1; }
   f[n++] = line.substring(start);
   if (n < 11) return false;
@@ -1709,7 +1744,12 @@ static bool parseQsoCsv(const String& line, PendingQso& q) {
   strncpy(q.rstR,   f[7].c_str(),  sizeof(q.rstR)-1);
   strncpy(q.myGrid, f[8].c_str(),  sizeof(q.myGrid)-1);
   strncpy(q.grid,   f[9].c_str(),  sizeof(q.grid)-1);
-  strncpy(q.notes,  f[10].c_str(), sizeof(q.notes)-1);
+  if (n >= 12) {                                   // new schema: mycall before notes
+    strncpy(q.myCall, f[10].c_str(), sizeof(q.myCall)-1);
+    strncpy(q.notes,  f[11].c_str(), sizeof(q.notes)-1);
+  } else {                                         // legacy schema: no mycall column
+    strncpy(q.notes,  f[10].c_str(), sizeof(q.notes)-1);
+  }
   return true;
 }
 
@@ -1723,6 +1763,7 @@ void App::beginQso() {
   qso.utc = timeIsSet() ? (uint32_t)nowUtc() : 0;
   String mg = loc.toGrid(loc.obs().lat, loc.obs().lon);
   strncpy(qso.myGrid, mg.c_str(), sizeof(qso.myGrid) - 1);
+  strncpy(qso.myCall, cfg.myCall, sizeof(qso.myCall) - 1);
   SatEntry* s = activeSat();
   if (s) {
     strncpy(qso.sat, s->name, sizeof(qso.sat) - 1);
@@ -1750,7 +1791,7 @@ bool App::saveQso() {
   bool isNew = !Store::fs().exists(FILE_LOG);
   File f = Store::fs().open(FILE_LOG, "a");
   if (!f) return false;
-  if (isNew) f.print("utc,call,sat,mode,dl,ul,rsts,rstr,mygrid,grid,notes\n");
+  if (isNew) f.print("utc,call,sat,mode,dl,ul,rsts,rstr,mygrid,grid,mycall,notes\n");
   writeQsoCsv(f, qso);
   f.close();
   return true;
@@ -1781,30 +1822,26 @@ bool App::exportAdif() {
                              line[line.length()-1] == '\n'))
       line.remove(line.length() - 1);
     if (!line.length() || line.startsWith("utc,")) continue;
-    String f[11]; int n = 0, start = 0;
-    for (int i = 0; i < (int)line.length() && n < 10; ++i)
-      if (line[i] == ',') { f[n++] = line.substring(start, i); start = i + 1; }
-    f[n++] = line.substring(start);             // remainder = notes
-    if (n < 11) continue;
-    uint32_t utc = strtoul(f[0].c_str(), nullptr, 10);
-    time_t tt = (time_t)utc; struct tm* g = gmtime(&tt);
+    PendingQso q;
+    if (!parseQsoCsv(line, q)) continue;
+    time_t tt = (time_t)q.utc; struct tm* g = gmtime(&tt);
     char d[9] = "", tm6[7] = "";
     if (g) { strftime(d, sizeof(d), "%Y%m%d", g); strftime(tm6, sizeof(tm6), "%H%M%S", g); }
-    double dlM = strtoul(f[4].c_str(), nullptr, 10) / 1e6;
-    double ulM = strtoul(f[5].c_str(), nullptr, 10) / 1e6;
+    double dlM = q.dlHz / 1e6, ulM = q.ulHz / 1e6;
     String rec;
-    adifField(rec, "CALL", f[1]);
-    if (utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
-    adifField(rec, "MODE", f[3]);
-    adifField(rec, "SAT_NAME", f[2]);
+    adifField(rec, "CALL", q.call);
+    if (q.utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
+    adifField(rec, "MODE", q.mode);
+    adifField(rec, "SAT_NAME", q.sat);
     adifField(rec, "PROP_MODE", "SAT");
     if (ulM > 0) { adifField(rec, "FREQ", String(ulM, 4)); adifField(rec, "BAND", bandFor(ulM)); }
     if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
-    adifField(rec, "RST_SENT", f[6]);
-    adifField(rec, "RST_RCVD", f[7]);
-    adifField(rec, "GRIDSQUARE", f[9]);
-    adifField(rec, "MY_GRIDSQUARE", f[8]);
-    adifField(rec, "COMMENT", f[10]);
+    adifField(rec, "RST_SENT", q.rstS);
+    adifField(rec, "RST_RCVD", q.rstR);
+    adifField(rec, "GRIDSQUARE", q.grid);
+    adifField(rec, "MY_GRIDSQUARE", q.myGrid);
+    adifField(rec, "STATION_CALLSIGN", q.myCall);
+    adifField(rec, "COMMENT", q.notes);
     rec += "<EOR>\n";
     out.print(rec);
   }
@@ -1853,13 +1890,13 @@ void App::drawLogEntry() {
                  strftime(tb, sizeof(tb), "%m-%d %H:%M:%SZ", g); }
   else strcpy(tb, "(no clock)");
   canvas.setCursor(4, 20); canvas.printf("%s  %.10s", tb, qso.sat);
-  canvas.setCursor(4, 30); canvas.printf("%s  DL%.3f UL%.3f",
-                                         qso.mode, qso.dlHz/1e6, qso.ulHz/1e6);
-  canvas.setCursor(4, 40); canvas.printf("MyGrid %s", qso.myGrid);
-  const char* labels[] = { "Call", "RST S", "RST R", "Grid", "Notes" };
-  const char* vals[]   = { qso.call, qso.rstS, qso.rstR, qso.grid, qso.notes };
-  for (int i = 0; i < 5; ++i) {
-    int y = 54 + i*12;
+  canvas.setCursor(4, 30); canvas.printf("DL %.3f  UL %.3f", qso.dlHz/1e6, qso.ulHz/1e6);
+  canvas.setCursor(4, 40); canvas.printf("MyGrid %s  MyCall %s",
+                                         qso.myGrid, qso.myCall[0] ? qso.myCall : "-");
+  const char* labels[] = { "Call", "Mode", "RST S", "RST R", "Grid", "Notes" };
+  const char* vals[]   = { qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes };
+  for (int i = 0; i < 6; ++i) {
+    int y = 52 + i*11;
     bool sel = (i == logSel);
     if (sel) { canvas.fillRect(0, y-1, 240, 11, CL_BLUE);
                canvas.setTextColor(CL_WHITE, CL_BLUE); }
@@ -1873,8 +1910,8 @@ void App::drawLogEntry() {
 void App::keyLogEntry(char c, bool enter, bool back) {
   if (c != 'x') logDelArm = false;             // any other key disarms delete
   if (isBack(c, back)) { logEditIdx = -1; screen = logReturn; lastDrawMs = 0; return; }
-  if (isUp(c))   logSel = (logSel + 5 - 1) % 5;
-  if (isDown(c)) logSel = (logSel + 1) % 5;
+  if (isUp(c))   logSel = (logSel + 6 - 1) % 6;
+  if (isDown(c)) logSel = (logSel + 1) % 6;
   if (c == 'x' && logEditIdx >= 0) {           // delete this entry (two-press)
     if (!logDelArm) { logDelArm = true; setStatus("Press x again to delete"); return; }
     bool ok = rewriteLog(logFirstIdx + logEditIdx, nullptr, true);
@@ -1893,12 +1930,20 @@ void App::keyLogEntry(char c, bool enter, bool back) {
     screen = logReturn; lastDrawMs = 0; return;
   }
   if (enter) {
+    if (logSel == 1) {                          // Mode: toggle SSB<->CW on linear
+      if (strcmp(qso.mode, "FM") != 0) {
+        strncpy(qso.mode, strcmp(qso.mode, "CW") == 0 ? "SSB" : "CW",
+                sizeof(qso.mode) - 1);
+        qso.mode[sizeof(qso.mode) - 1] = 0;
+      } else setStatus("FM mode is fixed");
+      return;
+    }
     switch (logSel) {
       case 0: editTarget = 500; editTitle = "Callsign";   editBuf = qso.call; break;
-      case 1: editTarget = 501; editTitle = "RST sent";   editBuf = qso.rstS; break;
-      case 2: editTarget = 502; editTitle = "RST rcvd";   editBuf = qso.rstR; break;
-      case 3: editTarget = 503; editTitle = "Their grid"; editBuf = qso.grid; break;
-      case 4: editTarget = 504; editTitle = "Notes";      editBuf = qso.notes; break;
+      case 2: editTarget = 501; editTitle = "RST sent";   editBuf = qso.rstS; break;
+      case 3: editTarget = 502; editTitle = "RST rcvd";   editBuf = qso.rstR; break;
+      case 4: editTarget = 503; editTitle = "Their grid"; editBuf = qso.grid; break;
+      case 5: editTarget = 504; editTitle = "Notes";      editBuf = qso.notes; break;
     }
     screen = SCR_EDIT;
   }
@@ -2551,7 +2596,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header("Settings");
   canvas.setTextSize(1);
-  const int N = 23;
+  const int N = 24;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -2584,9 +2629,10 @@ void App::drawSettings() {
   rows[19] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
              : (cfg.dimSecs % 60 == 0) ? String(cfg.dimSecs / 60) + " min"
                                        : String(cfg.dimSecs) + " s");
-  rows[20] = String("Backup config+favs -> SD");
-  rows[21] = String("Restore config+favs");
-  rows[22] = String("Reset all data (erase)");
+  rows[20] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
+  rows[21] = String("Backup config+favs -> SD");
+  rows[22] = String("Restore config+favs");
+  rows[23] = String("Reset all data (erase)");
   const int VIS = 9;
   int scroll = (setSel >= VIS) ? (setSel - VIS + 1) : 0;
   for (int v = 0; v < VIS && (scroll + v) < N; ++v) {

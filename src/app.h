@@ -42,6 +42,7 @@ struct PendingQso {
   char     mode[8];
   uint32_t dlHz, ulHz;
   char     myGrid[10];
+  char     myCall[14];
   char     call[14];
   char     rstS[6];
   char     rstR[6];

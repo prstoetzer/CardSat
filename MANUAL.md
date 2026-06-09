@@ -239,12 +239,16 @@ uptime. `` ` `` or ENTER returns home.
 
 Press `l` on the **Track** or **Polar** screen to log the contact you're working —
 radio control keeps running while you type. CardSat snapshots the UTC time,
-satellite, mode, and the current uplink/downlink frequencies plus your Maidenhead
-grid, then lets you fill in:
+satellite, mode, and the current uplink/downlink frequencies plus your own grid
+and callsign (from **My callsign** in Settings), then lets you fill in:
 
-- **Call** — the station worked (required to save).
+- **Call** — the station worked (required to save). Letters default to **uppercase**
+  (hold shift for lowercase).
+- **Mode** — on a **linear** transponder, ENTER toggles **SSB ↔ CW** for this
+  contact; on an FM bird the mode is fixed.
 - **RST S / RST R** — report sent and received (default `59`).
-- **Grid** — the other station's grid (optional; grids are the point of sat ops).
+- **Grid** — the other station's grid, **uppercase** by default (optional, but
+  grids are the point of sat ops).
 - **Notes** — free text.
 
 `;`/`.` move between fields, ENTER edits the selected one, `s` saves, `` ` ``
@@ -252,8 +256,8 @@ cancels. QSOs are appended to **`/CardSat/qso_log.csv`** (one row each; `notes` 
 the last column, so commas there are fine).
 
 The **Log** item on the main menu offers **New QSO entry**, **View / edit log**,
-and **Export to ADIF** (writes `/CardSat/qso_log.adi` for upload to LoTW/eQSL or
-import into your main logger).
+and **Export to ADIF** (writes `/CardSat/qso_log.adi`, including `STATION_CALLSIGN`
+from My callsign, for upload to LoTW/eQSL or import into your main logger).
 
 **View / edit log** is a scrollable list of recent contacts (`;`/`.` to move).
 Open one with ENTER to correct any field and `s` to save, or press `x` twice to
@@ -408,6 +412,7 @@ actions.
 | CAT rate | `,`/`/` adjust the CAT update period in 10 ms steps (default 500 ms; soft-floored to what the CAT baud can service) |
 | CAT delay | `,`/`/` adjust the pause after each command, 0–200 ms in 2 ms steps (default 70 ms; CI-V/Icom only) |
 | Screen sleep | `,`/`/` cycle off / 30 s / 1 min / 2 min / 5 min — blanks the backlight after that idle time |
+| My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
 | Restore config+favs | ENTER → restore them from the backup files |
 | **Reset all data** | ENTER → type **ERASE** to wipe everything (red row) |

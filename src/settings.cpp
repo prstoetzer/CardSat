@@ -17,6 +17,7 @@ bool Settings::load() {
   strncpy(ssid, d["ssid"] | "", sizeof(ssid)-1);
   strncpy(pass, d["pass"] | "", sizeof(pass)-1);
   strncpy(gpUrl, d["gpurl"] | AMSAT_GP_URL, sizeof(gpUrl)-1); gpUrl[sizeof(gpUrl)-1]=0;
+  strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
   lat        = d["lat"] | 0.0;
   lon        = d["lon"] | 0.0;
   altM       = d["alt"] | 0.0;
@@ -53,6 +54,7 @@ bool Settings::save() {
   JsonDocument d;
   d["ssid"] = ssid;  d["pass"] = pass;
   d["gpurl"] = gpUrl;
+  d["mycall"] = myCall;
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;

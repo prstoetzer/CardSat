@@ -75,7 +75,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.6";
+static constexpr const char* FW_VERSION = "0.9.6b";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -108,7 +108,7 @@ static constexpr uint32_t ROT_I2C_HZ   = 400000UL;    // Wire1 clock
 //  Limits (kept modest - no PSRAM on the StampS3A)
 // ---------------------------------------------------------------------------
 static constexpr int   MAX_SATS        = 220;  // sats held in RAM from GP data
-static constexpr int   MAX_TX_PER_SAT  = 32;   // transmitters held for active sat
+static constexpr int   MAX_TX_PER_SAT  = 64;   // transmitters held for active sat (e.g. ISS has ~49 on SatNOGS)
 static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
 static constexpr int   PD_SAMPLES      = 100;  // samples in the pass-detail curve

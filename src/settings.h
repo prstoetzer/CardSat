@@ -18,6 +18,7 @@ struct Settings {
   char     pass[65] = "";
   // Orbital data source (GP/OMM JSON). Editable in Settings.
   char     gpUrl[160] = AMSAT_GP_URL;
+  char     myCall[14] = "";   // operator's own callsign (stored uppercase)
   // Location
   double   lat = 0.0, lon = 0.0, altM = 0.0;
   bool     useGps = false;

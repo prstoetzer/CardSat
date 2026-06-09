@@ -31,6 +31,7 @@ public:
   bool fetchGp(const String& url, String& out);    // AMSAT GP/OMM JSON array
   bool fetchGpToFile(const String& url, const char* path);  // GP -> cache file
   bool fetchSatnogsTransmitters(uint32_t norad, String& out);
+  bool fetchSatnogsTransmittersToFile(uint32_t norad, const char* path);  // tx -> cache file
 
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)

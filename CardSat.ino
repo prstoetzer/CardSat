@@ -782,10 +782,14 @@ public:
   // Returns number of (active) transponders parsed.
   static int parseTransmittersJson(const String& json,
                                    Transponder* out, int maxN);
+  // Streaming variant: parse straight from a File/Stream (e.g. the cache file)
+  // so a large body never has to be held in one contiguous RAM String.
+  static int parseTransmittersStream(Stream& src, Transponder* out, int maxN);
 
   // Per-satellite transponder cache on LittleFS.
   static bool saveTxCache(uint32_t norad, const String& json);
   static int  loadTxCache(uint32_t norad, Transponder* out, int maxN);
+  static String txCachePath(uint32_t norad);   // path of the per-sat tx cache file
 
   // Required FM uplink CTCSS (PL) tone in Hz for well-known FM satellites
   // (SatNOGS carries no structured tone field), or 0 if none/unknown.
@@ -875,6 +879,7 @@ public:
   bool fetchGp(const String& url, String& out);    // AMSAT GP/OMM JSON array
   bool fetchGpToFile(const String& url, const char* path);  // GP -> cache file
   bool fetchSatnogsTransmitters(uint32_t norad, String& out);
+  bool fetchSatnogsTransmittersToFile(uint32_t norad, const char* path);  // tx -> cache file
 
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
@@ -2539,8 +2544,7 @@ bool SatDb::gpToTle(const SatEntry& s, char l1[72], char l2[72]) {
 }
 
 // --- SatNOGS transmitters JSON -------------------------------------------
-int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN) {
-  JsonDocument filter;
+static void txBuildFilter(JsonDocument& filter) {
   JsonObject fe = filter.add<JsonObject>();
   fe["description"]   = true;
   fe["uplink_low"]    = true;
@@ -2552,15 +2556,14 @@ int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN)
   fe["type"]          = true;
   fe["status"]        = true;
   fe["alive"]         = true;
+}
 
-  JsonDocument doc;
-  if (deserializeJson(doc, json, DeserializationOption::Filter(filter))) return 0;
-
+static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
+  // Keep the full SatNOGS list (active and inactive); skip only entries with no
+  // tunable frequency at all (e.g. invalid records with null up/downlinks).
   int n = 0;
   for (JsonObject o : doc.as<JsonArray>()) {
     if (n >= maxN) break;
-    // Keep the full SatNOGS list (active and inactive); skip only entries with no
-    // tunable frequency at all (e.g. invalid records with null up/downlinks).
     Transponder& t = out[n];
     const char* d = o["description"] | "";
     strncpy(t.desc, d, sizeof(t.desc)-1); t.desc[sizeof(t.desc)-1]=0;
@@ -2582,10 +2585,26 @@ int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN)
   return n;
 }
 
+int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN) {
+  JsonDocument filter; txBuildFilter(filter);
+  JsonDocument doc;
+  if (deserializeJson(doc, json, DeserializationOption::Filter(filter))) return 0;
+  return txFillFromDoc(doc, out, maxN);
+}
+
+int SatDb::parseTransmittersStream(Stream& src, Transponder* out, int maxN) {
+  JsonDocument filter; txBuildFilter(filter);
+  JsonDocument doc;
+  if (deserializeJson(doc, src, DeserializationOption::Filter(filter))) return 0;
+  return txFillFromDoc(doc, out, maxN);
+}
+
 static String txPath(uint32_t norad) {
   char buf[32]; snprintf(buf, sizeof(buf), FILE_TXCACHE, (unsigned long)norad);
   return String(buf);
 }
+
+String SatDb::txCachePath(uint32_t norad) { return txPath(norad); }
 
 bool SatDb::saveTxCache(uint32_t norad, const String& json) {
   File f = Store::fs().open(txPath(norad), "w");
@@ -2597,8 +2616,9 @@ bool SatDb::saveTxCache(uint32_t norad, const String& json) {
 int SatDb::loadTxCache(uint32_t norad, Transponder* out, int maxN) {
   File f = Store::fs().open(txPath(norad), "r");
   if (!f) return 0;
-  String j = f.readString(); f.close();
-  return parseTransmittersJson(j, out, maxN);
+  int n = parseTransmittersStream(f, out, maxN);   // stream-parse: never builds a large RAM String
+  f.close();
+  return n;
 }
 
 // Required FM-uplink CTCSS (PL) tones for the common FM birds. SatNOGS has no
@@ -2948,6 +2968,15 @@ bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {
   // so the JSON body isn't truncated mid-object, which would fail the parse and
   // leave the satellite with no transponders.
   return httpsGet(url, out, 200000);
+}
+
+bool Net::fetchSatnogsTransmittersToFile(uint32_t norad, const char* path) {
+  String url = String(SATNOGS_TX_URL) + String((unsigned long)norad);
+  // Stream to flash rather than into a String. The String reader advanced its
+  // byte count even when concat() failed to grow the buffer under TLS heap
+  // pressure, silently dropping chunks and corrupting large lists. 200 KB is
+  // ample for the busiest sat (the ISS, ~54 transmitters).
+  return httpsGetToFile(url, path, 200000, nullptr);
 }
 
 
@@ -3614,11 +3643,11 @@ bool App::ensureTransponders(SatEntry& s) {
   activeTxCount = SatDb::loadTxCache(s.norad, activeTx, MAX_TX_PER_SAT);
   // 2) try network if nothing cached
   if (activeTxCount == 0 && net.connected()) {
-    String j;
-    if (net.fetchSatnogsTransmitters(s.norad, j)) {
-      SatDb::saveTxCache(s.norad, j);
-      activeTxCount = SatDb::parseTransmittersJson(j, activeTx, MAX_TX_PER_SAT);
-    }
+    // Stream the response straight to the cache file, then parse it from there.
+    // The old in-RAM String path silently dropped chunks when the heap couldn't
+    // grow the String under TLS pressure, corrupting large lists (e.g. the ISS).
+    if (net.fetchSatnogsTransmittersToFile(s.norad, SatDb::txCachePath(s.norad).c_str()))
+      activeTxCount = SatDb::loadTxCache(s.norad, activeTx, MAX_TX_PER_SAT);
   }
   // 3) always append any manually-entered transponders for this sat
   if (activeTxCount < MAX_TX_PER_SAT)

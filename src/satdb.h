@@ -82,10 +82,14 @@ public:
   // Returns number of (active) transponders parsed.
   static int parseTransmittersJson(const String& json,
                                    Transponder* out, int maxN);
+  // Streaming variant: parse straight from a File/Stream (e.g. the cache file)
+  // so a large body never has to be held in one contiguous RAM String.
+  static int parseTransmittersStream(Stream& src, Transponder* out, int maxN);
 
   // Per-satellite transponder cache on LittleFS.
   static bool saveTxCache(uint32_t norad, const String& json);
   static int  loadTxCache(uint32_t norad, Transponder* out, int maxN);
+  static String txCachePath(uint32_t norad);   // path of the per-sat tx cache file
 
   // Required FM uplink CTCSS (PL) tone in Hz for well-known FM satellites
   // (SatNOGS carries no structured tone field), or 0 if none/unknown.

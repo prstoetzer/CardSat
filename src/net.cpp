@@ -235,3 +235,12 @@ bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {
   // leave the satellite with no transponders.
   return httpsGet(url, out, 200000);
 }
+
+bool Net::fetchSatnogsTransmittersToFile(uint32_t norad, const char* path) {
+  String url = String(SATNOGS_TX_URL) + String((unsigned long)norad);
+  // Stream to flash rather than into a String. The String reader advanced its
+  // byte count even when concat() failed to grow the buffer under TLS heap
+  // pressure, silently dropping chunks and corrupting large lists. 200 KB is
+  // ample for the busiest sat (the ISS, ~54 transmitters).
+  return httpsGetToFile(url, path, 200000, nullptr);
+}

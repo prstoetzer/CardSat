@@ -297,11 +297,11 @@ bool App::ensureTransponders(SatEntry& s) {
   activeTxCount = SatDb::loadTxCache(s.norad, activeTx, MAX_TX_PER_SAT);
   // 2) try network if nothing cached
   if (activeTxCount == 0 && net.connected()) {
-    String j;
-    if (net.fetchSatnogsTransmitters(s.norad, j)) {
-      SatDb::saveTxCache(s.norad, j);
-      activeTxCount = SatDb::parseTransmittersJson(j, activeTx, MAX_TX_PER_SAT);
-    }
+    // Stream the response straight to the cache file, then parse it from there.
+    // The old in-RAM String path silently dropped chunks when the heap couldn't
+    // grow the String under TLS pressure, corrupting large lists (e.g. the ISS).
+    if (net.fetchSatnogsTransmittersToFile(s.norad, SatDb::txCachePath(s.norad).c_str()))
+      activeTxCount = SatDb::loadTxCache(s.norad, activeTx, MAX_TX_PER_SAT);
   }
   // 3) always append any manually-entered transponders for this sat
   if (activeTxCount < MAX_TX_PER_SAT)

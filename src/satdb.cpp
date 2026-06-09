@@ -431,8 +431,7 @@ bool SatDb::gpToTle(const SatEntry& s, char l1[72], char l2[72]) {
 }
 
 // --- SatNOGS transmitters JSON -------------------------------------------
-int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN) {
-  JsonDocument filter;
+static void txBuildFilter(JsonDocument& filter) {
   JsonObject fe = filter.add<JsonObject>();
   fe["description"]   = true;
   fe["uplink_low"]    = true;
@@ -444,15 +443,14 @@ int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN)
   fe["type"]          = true;
   fe["status"]        = true;
   fe["alive"]         = true;
+}
 
-  JsonDocument doc;
-  if (deserializeJson(doc, json, DeserializationOption::Filter(filter))) return 0;
-
+static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
+  // Keep the full SatNOGS list (active and inactive); skip only entries with no
+  // tunable frequency at all (e.g. invalid records with null up/downlinks).
   int n = 0;
   for (JsonObject o : doc.as<JsonArray>()) {
     if (n >= maxN) break;
-    // Keep the full SatNOGS list (active and inactive); skip only entries with no
-    // tunable frequency at all (e.g. invalid records with null up/downlinks).
     Transponder& t = out[n];
     const char* d = o["description"] | "";
     strncpy(t.desc, d, sizeof(t.desc)-1); t.desc[sizeof(t.desc)-1]=0;
@@ -474,10 +472,26 @@ int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN)
   return n;
 }
 
+int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN) {
+  JsonDocument filter; txBuildFilter(filter);
+  JsonDocument doc;
+  if (deserializeJson(doc, json, DeserializationOption::Filter(filter))) return 0;
+  return txFillFromDoc(doc, out, maxN);
+}
+
+int SatDb::parseTransmittersStream(Stream& src, Transponder* out, int maxN) {
+  JsonDocument filter; txBuildFilter(filter);
+  JsonDocument doc;
+  if (deserializeJson(doc, src, DeserializationOption::Filter(filter))) return 0;
+  return txFillFromDoc(doc, out, maxN);
+}
+
 static String txPath(uint32_t norad) {
   char buf[32]; snprintf(buf, sizeof(buf), FILE_TXCACHE, (unsigned long)norad);
   return String(buf);
 }
+
+String SatDb::txCachePath(uint32_t norad) { return txPath(norad); }
 
 bool SatDb::saveTxCache(uint32_t norad, const String& json) {
   File f = Store::fs().open(txPath(norad), "w");
@@ -489,8 +503,9 @@ bool SatDb::saveTxCache(uint32_t norad, const String& json) {
 int SatDb::loadTxCache(uint32_t norad, Transponder* out, int maxN) {
   File f = Store::fs().open(txPath(norad), "r");
   if (!f) return 0;
-  String j = f.readString(); f.close();
-  return parseTransmittersJson(j, out, maxN);
+  int n = parseTransmittersStream(f, out, maxN);   // stream-parse: never builds a large RAM String
+  f.close();
+  return n;
 }
 
 // Required FM-uplink CTCSS (PL) tones for the common FM birds. SatNOGS has no

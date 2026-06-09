@@ -197,7 +197,8 @@ not shown in any footer.
      present.
 2. **Location** — set your position one of three ways:
    - `e` latitude, `o` longitude, `a` altitude; or
-   - `g` Maidenhead grid; or
+   - `g` Maidenhead grid (uppercased as you type — hold shift for lowercase
+     subsquares — as on the log and mutual-pass grid fields); or
    - `p` enable GPS (and `s` to pick the GPS source).
    - If you have no network or GPS, press `c` to set the **UTC clock** manually
      (`YYYY-MM-DD HH:MM:SS`).
@@ -258,6 +259,13 @@ the last column, so commas there are fine).
 The **Log** item on the main menu offers **New QSO entry**, **View / edit log**,
 and **Export to ADIF** (writes `/CardSat/qso_log.adi`, including `STATION_CALLSIGN`
 from My callsign, for upload to LoTW/eQSL or import into your main logger).
+
+LoTW limits the `SAT_NAME` field to six characters and uses its own names, so on
+export CardSat translates each satellite via **`/CardSat/lotw_sats.csv`** (rows of
+`SAT_NAME,AMSAT_NAME`; a built-in table covers the common cases if the file is
+absent). If a logged satellite has no match, CardSat prompts you for its `SAT_NAME`
+(entry capped at six characters, uppercased) and saves it back to the CSV, so it's
+only asked once. Update that CSV on the card as new satellites appear.
 
 **View / edit log** is a scrollable list of recent contacts (`;`/`.` to move).
 Open one with ENTER to correct any field and `s` to save, or press `x` twice to

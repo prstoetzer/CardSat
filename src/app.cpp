@@ -1418,6 +1418,7 @@ void App::keySettings(char c, bool enter, bool back) {
 }
 
 static Screen editHome(int t) {
+  if (t == 600) return SCR_LOG;         // LoTW SAT_NAME prompt (abort export)
   if (t >= 500) return SCR_LOGENTRY;    // QSO log field edit
   if (t == 340) return SCR_TRACK;       // CTCSS tone override
   if (t >= 400) return SCR_SETTINGS;    // reset confirmation
@@ -1585,6 +1586,24 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 504: strncpy(qso.notes, editBuf.c_str(), sizeof(qso.notes)-1);
                 qso.notes[sizeof(qso.notes)-1]=0; screen=SCR_LOGENTRY; return;
 
+      // ---- LoTW SAT_NAME prompt during ADIF export ----
+      case 600: {
+        String sn = editBuf; sn.trim();
+        if (!sn.length()) { setStatus("Enter a SAT_NAME (max 6)"); return; }
+        bool isNew = !Store::fs().exists(FILE_LOTW);
+        File lf = Store::fs().open(FILE_LOTW, "a");
+        if (lf) {
+          if (isNew) lf.print("SAT_NAME,AMSAT_NAME\n");
+          lf.print(sn); lf.print(","); lf.print(exportSats[exportPendIdx]);
+          lf.print("\n"); lf.close();
+        }
+        exportPendIdx++;
+        if (exportPendIdx < exportPendN) { promptNextLotw(); return; }
+        bool ok = exportAdif();
+        setStatus(ok ? "Exported qso_log.adi" : "Export failed");
+        screen = SCR_LOG; return;
+      }
+
       // ---- factory reset confirmation ----
       case 400: {
         if (editBuf == "ERASE") { factoryReset(); return; }  // formats + reboots
@@ -1603,11 +1622,12 @@ void App::keyEdit(char c, bool enter, bool back) {
     return;
   }
   if (c >= 32 && c < 127) {
-    if (editTarget == 204 || editTarget == 500 || editTarget == 503) {
+    if (editTarget == 103 || editTarget == 204 || editTarget == 330 ||
+        editTarget == 500 || editTarget == 503 || editTarget == 600) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
     }
-    editBuf += c;
+    if (!(editTarget == 600 && editBuf.length() >= 6)) editBuf += c;  // LoTW 6-char cap
   }
 }
 
@@ -1810,6 +1830,88 @@ int App::qsoCount() {
   return n;
 }
 
+// -- LoTW SAT_NAME mapping ---------------------------------------------------
+// LoTW limits SAT_NAME to 6 chars and uses its own names, so CardSat's (AMSAT)
+// satellite name often needs translating. The external /CardSat/lotw_sats.csv
+// ("SAT_NAME,AMSAT_NAME" rows) is consulted first so it can be updated without
+// reflashing; then this built-in table of the non-identity cases.
+static const struct { const char* amsat; const char* lotw; } LOTW_SATS[] = {
+  {"AO-07","AO-7"}, {"ISS","ARISS"}, {"LILACSAT-2","CAS-3H"},
+  {"SONATE-2","SONATE"}, {"Taurus 1","TAURUS"},
+  {"TEVEL2-1","TEV2-1"}, {"TEVEL2-2","TEV2-2"}, {"TEVEL2-3","TEV2-3"},
+  {"TEVEL2-4","TEV2-4"}, {"TEVEL2-5","TEV2-5"}, {"TEVEL2-6","TEV2-6"},
+  {"TEVEL2-7","TEV2-7"}, {"TEVEL2-8","TEV2-8"}, {"TEVEL2-9","TEV2-9"},
+};
+static const int LOTW_SATS_N = sizeof(LOTW_SATS) / sizeof(LOTW_SATS[0]);
+
+// Resolve to a LoTW SAT_NAME. Returns 0 if resolved (a mapping was found, or the
+// name already fits in 6 chars), or 1 if there is no mapping and the name is too
+// long to use as-is (caller should prompt). 'out' always gets a usable value.
+static int lotwSatResolve(const char* amsat, char out[7]) {
+  File f = Store::fs().open(FILE_LOTW, "r");
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n'); line.trim();
+      if (!line.length() || line.startsWith("SAT_NAME")) continue;
+      int comma = line.indexOf(',');
+      if (comma < 0) continue;
+      String sn = line.substring(0, comma);     sn.trim();
+      String an = line.substring(comma + 1);     an.trim();
+      if (an.equalsIgnoreCase(amsat)) {
+        strncpy(out, sn.c_str(), 6); out[6] = 0;
+        f.close(); return 0;
+      }
+    }
+    f.close();
+  }
+  for (int i = 0; i < LOTW_SATS_N; ++i)
+    if (!strcasecmp(LOTW_SATS[i].amsat, amsat)) {
+      strncpy(out, LOTW_SATS[i].lotw, 6); out[6] = 0; return 0;
+    }
+  strncpy(out, amsat, 6); out[6] = 0;
+  return (strlen(amsat) > 6) ? 1 : 0;
+}
+
+void App::promptNextLotw() {
+  editTarget = 600;
+  editTitle  = String("LoTW name: ") + exportSats[exportPendIdx];
+  editBuf    = "";
+  screen     = SCR_EDIT;
+}
+
+// Export entry point from the Log menu: find any logged satellites whose LoTW
+// SAT_NAME can't be resolved automatically and prompt for each (persisting the
+// answer to lotw_sats.csv), then write the ADIF.
+void App::beginAdifExport() {
+  exportPendN = 0; exportPendIdx = 0;
+  String seen[24]; int seenN = 0;
+  File f = Store::fs().open(FILE_LOG, "r");
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      while (line.length() && (line[line.length()-1]=='\r' || line[line.length()-1]=='\n'))
+        line.remove(line.length()-1);
+      if (!line.length() || line.startsWith("utc,")) continue;
+      PendingQso q;
+      if (!parseQsoCsv(line, q) || !q.sat[0]) continue;
+      bool dup = false;
+      for (int i = 0; i < seenN; ++i) if (seen[i].equalsIgnoreCase(q.sat)) { dup = true; break; }
+      if (dup) continue;
+      if (seenN < 24) seen[seenN++] = q.sat;
+      char nm[7];
+      if (lotwSatResolve(q.sat, nm) && exportPendN < 16)   // 1 => needs a prompt
+        exportSats[exportPendN++] = q.sat;
+    }
+    f.close();
+  }
+  if (exportPendN == 0) {
+    bool ok = exportAdif();
+    setStatus(ok ? "Exported qso_log.adi" : "No log to export");
+    return;
+  }
+  promptNextLotw();
+}
+
 bool App::exportAdif() {
   File in = Store::fs().open(FILE_LOG, "r");
   if (!in) return false;
@@ -1832,7 +1934,8 @@ bool App::exportAdif() {
     adifField(rec, "CALL", q.call);
     if (q.utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
     adifField(rec, "MODE", q.mode);
-    adifField(rec, "SAT_NAME", q.sat);
+    char satnm[7]; lotwSatResolve(q.sat, satnm);
+    adifField(rec, "SAT_NAME", satnm);
     adifField(rec, "PROP_MODE", "SAT");
     if (ulM > 0) { adifField(rec, "FREQ", String(ulM, 4)); adifField(rec, "BAND", bandFor(ulM)); }
     if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
@@ -1874,10 +1977,7 @@ void App::keyLog(char c, bool enter, bool back) {
   if (enter) {
     if (logMenuSel == 0) beginQso();
     else if (logMenuSel == 1) { loadLog(); screen = SCR_LOGLIST; }
-    else {
-      bool ok = exportAdif();
-      setStatus(ok ? "Exported qso_log.adi" : "No log to export");
-    }
+    else beginAdifExport();
   }
 }
 

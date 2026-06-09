@@ -164,6 +164,9 @@ private:
   int      logFirstIdx = 0;       // file data-row index of logRecs[0]
   int      logListSel = 0;        // selected row in the log list
   int      logEditIdx = -1;       // editing an existing entry (array idx) or -1=new
+  String   exportSats[16];        // distinct sats needing a LoTW SAT_NAME prompt
+  int      exportPendN = 0;       // number queued
+  int      exportPendIdx = 0;     // current prompt index
   bool     logDelArm = false;     // two-press delete confirmation
 
   // status line
@@ -270,6 +273,8 @@ private:
   bool saveQso();                 // append the pending QSO to the CSV log
   int  qsoCount();                // number of logged QSOs
   bool exportAdif();              // write ADIF from the CSV log
+  void beginAdifExport();         // resolve LoTW names (prompt for misses), then export
+  void promptNextLotw();          // prompt for the next unmapped sat's LoTW SAT_NAME
   void keyLogList(char c, bool enter, bool back);
   void loadLog();                 // load recent entries into logRecs[]
   bool rewriteLog(int fileIdx, const PendingQso* rec, bool del);  // edit/delete a row

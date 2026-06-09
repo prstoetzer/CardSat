@@ -2559,10 +2559,8 @@ int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN)
   int n = 0;
   for (JsonObject o : doc.as<JsonArray>()) {
     if (n >= maxN) break;
-    const char* st = o["status"] | "";
-    bool alive = o["alive"] | true;
-    if (!alive || (st[0] && strcmp(st, "active") != 0)) continue; // active only
-
+    // Keep the full SatNOGS list (active and inactive); skip only entries with no
+    // tunable frequency at all (e.g. invalid records with null up/downlinks).
     Transponder& t = out[n];
     const char* d = o["description"] | "";
     strncpy(t.desc, d, sizeof(t.desc)-1); t.desc[sizeof(t.desc)-1]=0;
@@ -2573,6 +2571,7 @@ int SatDb::parseTransmittersJson(const String& json, Transponder* out, int maxN)
     t.uplink       = o["uplink_low"]      | 0u;
     t.uplinkHigh   = o["uplink_high"]     | 0u;
     t.invert       = o["invert"]          | false;
+    if (t.downlink == 0 && t.uplink == 0) continue;   // nothing to tune -> skip
 
     const char* ty = o["type"] | "";
     bool typeLinear = (strcmp(ty, "Transponder") == 0);

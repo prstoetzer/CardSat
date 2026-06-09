@@ -67,6 +67,20 @@ static constexpr int   SD_MOSI_PIN    = 14;
 static constexpr int   SD_CS_PIN      = 12;
 static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 reference init)
 
+// Soft guard for the CAT update rate: an estimate of the bytes moved per Doppler
+// update (band select + set-freq + set-mode per leg, plus echo/read-back and
+// margin). The effective rate is floored at the time this many bytes take at the
+// configured CAT baud, so a too-low CAT-rate setting can't outrun the link.
+// 8N1 => 10 bits/byte, hence (bytes * 10000) / baud milliseconds.
+static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
+
+// Firmware version (single source of truth; shown on the About screen).
+static constexpr const char* FW_VERSION = "0.9.5";
+// Auto-refresh GP at boot when even the freshest cached element set is older.
+static constexpr double  GP_STALE_DAYS = 7.0;
+// Display backlight level used for normal (awake) operation.
+static constexpr uint8_t SCREEN_BRIGHT = 180;
+
 // ---------------------------------------------------------------------------
 //  Antenna rotator: GS-232 over an I2C->UART bridge (SC16IS750/752)
 // ---------------------------------------------------------------------------
@@ -112,3 +126,5 @@ static constexpr int   MUTUAL_PASS_SCAN= 16;   // of my passes scanned for mutua
 #define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
 #define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
 #define FILE_MTX     "/CardSat/mtx_%lu.json"  // manual transponders per norad (text lines)
+#define FILE_CFG_BAK  "/CardSat/config.bak"    // backup copy of config.json
+#define FILE_FAVS_BAK "/CardSat/favs.bak"      // backup copy of favs.txt

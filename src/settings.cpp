@@ -25,8 +25,14 @@ bool Settings::load() {
   radioModel = d["rig"] | (uint8_t)RIG_IC9700;
   civAddr    = d["addr"]| (uint8_t)0xA2;
   civBaud    = d["baud"]| 19200u;
+  vfoType    = d["vfotype"] | (uint8_t)VFO_MAIN_UP_SUB_DOWN;
+  satMode    = d["satmode"] | false;
+  if (vfoType > VFO_MAIN_DOWN_SUB_UP) vfoType = VFO_MAIN_UP_SUB_DOWN;
+  catRateMs  = d["catms"] | 500u;
+  if (catRateMs < 10) catRateMs = 10;
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
+  dimSecs    = d["dimsecs"] | (uint16_t)120;
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
   rotEnable  = d["roten"]  | false;
@@ -48,8 +54,10 @@ bool Settings::save() {
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
+  d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
+  d["dimsecs"] = dimSecs;
   d["roten"]=rotEnable; d["rotbaud"]=rotBaud; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;

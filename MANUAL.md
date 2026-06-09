@@ -91,8 +91,11 @@ All three CAT families share **UART1**, **RX = G1 / TX = G2** by default, but th
 3. In CardSat, open **Settings**, choose your **radio model** (this auto-fills the
    defaults), then adjust **CAT baud** — and, for Icom, the **CI-V address** — to match.
 
-CardSat always drives two independent VFOs: **downlink = Sub/RX, uplink = Main/TX.**
-On **Icom** it manages MAIN/SUB and forces the rig's sat mode off. On **Yaesu and
+CardSat drives two independent VFOs. By default **downlink = Sub/RX, uplink =
+Main/TX**, but the **VFO Type** setting can swap the roles (*Main Dn/Sub Up*). On
+**Icom** it manages MAIN/SUB and, by default, leaves the rig's satellite mode
+**off**; the **Sat mode** setting commands it on/off when you engage radio control
+(a no-op on rigs without one, such as the IC-820/821/910/970). On **Yaesu and
 Kenwood** the rig's own satellite / full-duplex mode and the band pair are set up
 **by you on the radio** — CAT can't switch bands on those rigs — and CardSat
 Doppler-tunes within them. (See [§16](#16-radio-specific-notes).)
@@ -179,6 +182,14 @@ not shown in any footer.
      networks, pick one from the list (strongest first; `*` = secured), and then
      enter its password (open networks skip the password step).
    - **AOS alarm** — on/off for the pre-pass beeps.
+   - **VFO Type** — which physical VFO carries each leg: *Main Up/Sub Dn* (default)
+     or *Main Dn/Sub Up*.
+   - **Sat mode** — command the rig's own satellite mode on/off when you engage CAT
+     (a no-op on rigs without one).
+   - **CAT rate** — how often Doppler/CAT updates are sent to the radio (default
+     **500 ms**, adjustable in 10 ms steps). A soft floor keeps the *effective*
+     rate no faster than the CAT baud can service one update; the row shows
+     `(min N)` when your setting is being clamped.
 2. **Location** — set your position one of three ways:
    - `e` latitude, `o` longitude, `a` altitude; or
    - `g` Maidenhead grid; or
@@ -190,6 +201,16 @@ not shown in any footer.
    transponders for offline use.
 4. You're ready: **Satellites** to pick birds, **Next Passes** to see what's up.
 
+> **At every power-on**, if a WiFi network is configured CardSat connects
+> automatically and sets the clock over **NTP** before loading data — so a
+> network-connected unit boots with the correct time and no key presses. If WiFi
+> is unavailable it carries on with GPS or the cached/manual clock; the attempt is
+> best-effort and non-fatal (it can add a few seconds to boot while it tries). If
+> the clock is set and even the freshest cached element set is **over a week old**,
+> CardSat also refreshes GP automatically at boot. The display blanks its backlight
+> after the **Screen sleep** idle time (never while tracking or alarming); any key
+> wakes it.
+
 ---
 
 ## 8. Screen reference
@@ -200,8 +221,14 @@ or **DEL** always steps back.
 ### Home
 
 A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
-Location · Update GP/Freq · Settings.** The currently selected satellite is
-shown at the bottom. `;`/`.` move, ENTER selects.
+Location · Update GP/Freq · Settings · About / diagnostics.** The currently
+selected satellite is shown at the bottom. `;`/`.` move, ENTER selects.
+
+### About / diagnostics
+
+Firmware version and build date, storage backend (microSD or internal flash),
+GP catalog size and freshest element age, WiFi/IP, battery level, free heap, and
+uptime. `` ` `` or ENTER returns home.
 
 ### Satellites
 
@@ -283,7 +310,8 @@ when the radio is on and the rig supports CAT tone, grey otherwise, or
 Controls:
 
 - `m` — switch between **TUNE** and **CAL** modes.
-- `d` — toggle **radio-knob tuning** (One True Rule; linear birds only).
+- `d` — cycle the **Doppler tune mode** (linear birds): FULL One True Rule →
+  downlink-only → uplink-only → hold-both. The passband line shows the active mode.
 - `t` — cycle to the next transponder.
 - `c` — set the **CTCSS/PL tone** for this satellite (numeric entry: a tone in
   Hz, `0` to force it off, or blank to revert to the built-in default).
@@ -342,6 +370,12 @@ actions.
 | AOS alarm | `,`/`/` or ENTER toggle on/off |
 | Rotator (+ baud / deadband / park / offsets) | `,`/`/` adjust; see [§17](#17-antenna-rotator-gs-232) |
 | GP source URL | ENTER → edit the GP/OMM download URL |
+| VFO Type | `,`/`/` or ENTER toggle *Main Up/Sub Dn* ↔ *Main Dn/Sub Up* |
+| Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
+| CAT rate | `,`/`/` adjust the CAT update period in 10 ms steps (default 500 ms; soft-floored to what the CAT baud can service) |
+| Screen sleep | `,`/`/` cycle off / 30 s / 1 min / 2 min / 5 min — blanks the backlight after that idle time |
+| Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
+| Restore config+favs | ENTER → restore them from the backup files |
 | **Reset all data** | ENTER → type **ERASE** to wipe everything (red row) |
 
 ### WiFi scan
@@ -413,11 +447,17 @@ On a **linear transponder** you can move through the passband two ways:
   `,`/`/` move your operating point down/up; `s` cycles the step; `x` recenters.
   The `PB` line shows your offset from band center, the half-width, and `INV` for
   inverting birds.
-- **Radio-knob mode** (One True Rule, the natural way): press `d`. The passband
-  line shows `<RADIO>` in orange. Now just **turn the radio's tuning knob** to move
-  around the passband — CardSat reads your downlink, works out where you are, and
-  keeps both legs Doppler-corrected around that fixed satellite frequency. Let go
-  and you stay put. Press `d` again to return control to the device.
+- **Radio-knob mode** (One True Rule, the natural way): press `d` to cycle the
+  tune mode. In **FULL** (passband line shows `<FULL>` in orange) just **turn the
+  radio's tuning knob** to move around the passband — CardSat reads your downlink,
+  works out where you are, and keeps both legs Doppler-corrected around that fixed
+  satellite frequency. Let go and you stay put. Pressing `d` cycles on through
+  **downlink-only** (`<DL>` — One True Rule on the downlink, uplink left alone),
+  **uplink-only** (`<UL>` — only the transmit leg is corrected; handy when an SDR
+  or second receiver handles the downlink, and it needs no frequency read-back so
+  it works even on set-only rigs), and back to **hold-both** (`<TUNE>`, device-key
+  tuning). FULL and downlink-only need a rig that reports frequency; the cycle
+  skips them otherwise.
 
 For an **inverting** transponder the uplink moves opposite to the downlink (tune
 the downlink up, the uplink goes down); for a non-inverting one they track
@@ -463,11 +503,11 @@ The passband position is *not* persisted (it's per-pass); calibration *is*.
 
 **A linear (SSB/CW) bird:**
 
-1–4 as above. On Track you'll start in **TUNE** (or press `d` for radio-knob mode).
+1–4 as above. On Track you'll start in **TUNE** (press `d` to cycle to FULL radio-knob mode).
 5. Press `r` to enable radio output. CardSat sets **USB down / LSB up** (or
    USB/USB on HF) and corrects both legs.
 6. Tune to a clear spot — with the device `,`/`/` keys, or by turning the rig's
-   knob in `<RADIO>` mode. Your downlink stays put; the uplink tracks (inverted if
+   knob in `<FULL>` mode. Your downlink stays put; the uplink tracks (inverted if
    the bird inverts).
 7. If your own signal isn't centered, switch to **CAL** (`m`), trim, and **ENTER**
    to save.
@@ -849,7 +889,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Passes** | `;`/`.` select · `d` detail plot · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual window |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` radio-knob tuning · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · ENTER save cal |
+| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · ENTER save cal |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
 | **Track · CAL** | `,`/`/` downlink ∓ · `;`/`.` uplink ∓ · `s` step (10/100/1k) · `x` zero |
 | **Polar** | `p`/ENTER/`` ` `` back to track |

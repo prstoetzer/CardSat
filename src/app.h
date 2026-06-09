@@ -14,7 +14,15 @@
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
-  SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN
+  SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT
+};
+
+// Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
+enum TuneMode : uint8_t {
+  TM_HOLD = 0,   // hold the passband; Doppler-correct BOTH legs (device-key tuning)
+  TM_FULL,       // One True Rule: rig knob = passband, correct BOTH legs
+  TM_DL,         // One True Rule on the downlink only (uplink left untouched)
+  TM_UL,         // Doppler-correct the uplink only (downlink left untouched)
 };
 
 // One upcoming (or in-progress) pass for a favorite, used by the schedule view.
@@ -110,7 +118,7 @@ private:
   int32_t  pbOffset = 0;          // passband tune offset (Hz up from dl bottom)
   int32_t  tuneStep = 1000;       // Hz per passband-tune nudge
   uint8_t  trackMode = 0;         // 0 = TUNE (passband), 1 = CAL (calibration)
-  bool     radioTune = false;     // One True Rule: tune the rig knob, software
+  TuneMode tuneMode = TM_HOLD;    // Doppler tune mode (cycle with 'd' on Track)
                                   // holds a constant frequency AT THE SATELLITE
   uint32_t lastRxSet = 0;         // last downlink Hz we wrote (detect knob moves)
   uint32_t lastDoppMs = 0;
@@ -122,6 +130,8 @@ private:
   bool     rotParked = false;
   uint32_t lastRotMs = 0;
   uint32_t lastDrawMs = 0;
+  uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
+  bool     screenAsleep = false;  // backlight blanked for power saving
   bool     lastGpsFix  = false;   // for Location-screen auto-refresh
   int      lastGpsSats = 0;
 
@@ -138,6 +148,22 @@ private:
   void applyRadioFromCfg();
   void applyRotatorFromCfg();
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
+  // Route logical downlink/uplink to the physical MAIN/SUB VFOs per cfg.vfoType.
+  bool dlOnSub() const { return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN; }
+  bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }
+  bool rigSetUplinkFreq  (uint32_t hz) { return dlOnSub() ? rig->setMainFreq(hz) : rig->setSubFreq(hz); }
+  void rigSetDownlinkMode(RigMode m)   { if (dlOnSub()) rig->setSubMode(m);  else rig->setMainMode(m); }
+  void rigSetUplinkMode  (RigMode m)   { if (dlOnSub()) rig->setMainMode(m); else rig->setSubMode(m); }
+  bool rigReadDownlinkFreq(uint32_t& h){ return dlOnSub() ? rig->readSubFreq(h) : rig->readMainFreq(h); }
+  void rigSelectDownlink()             { if (dlOnSub()) rig->selectSubBand();  else rig->selectMainBand(); }
+  void rigSelectUplink()               { if (dlOnSub()) rig->selectMainBand(); else rig->selectSubBand(); }
+  // Soft floor: never send CAT faster than the configured baud can comfortably
+  // service one update. Returns max(configured rate, baud-derived minimum), ms.
+  uint32_t effectiveCatRateMs() const {
+    uint32_t baud = cfg.civBaud ? cfg.civBaud : 9600;
+    uint32_t floorMs = (CAT_BYTES_PER_UPDATE * 10000UL) / baud;
+    return cfg.catRateMs > floorMs ? cfg.catRateMs : floorMs;
+  }
   float desiredToneHz() const;                       // PL tone wanted for current TX
   void  applyCtcssForCurrentTx();                    // push CTCSS to rig if changed
   float toneOverrideHz(uint32_t norad);              // user CTCSS override, <0 = none
@@ -190,6 +216,7 @@ private:
   void drawUpdate();
   void drawSettings();
   void drawWifiScan();
+  void drawAbout();
   void drawEdit();
 
   // ---- per-screen input ----
@@ -207,6 +234,7 @@ private:
   void keySettings(char c, bool enter, bool back);
   void startWifiScan();
   void keyWifiScan(char c, bool enter, bool back);
+  void keyAbout(char c, bool enter, bool back);
   void keyEdit(char c, bool enter, bool back);
 
   // ---- small draw utilities ----

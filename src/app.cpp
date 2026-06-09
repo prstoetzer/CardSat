@@ -73,6 +73,18 @@ static void beep(uint16_t freq, uint16_t ms) {
 // ===========================================================================
 //  Setup
 // ===========================================================================
+// Copy a file within the active filesystem (config/favorites backup-restore).
+static bool copyFile(const char* from, const char* to) {
+  File in = Store::fs().open(from, "r");
+  if (!in) return false;
+  File out = Store::fs().open(to, "w");
+  if (!out) { in.close(); return false; }
+  uint8_t buf[256];
+  while (in.available()) { size_t n = in.read(buf, sizeof(buf)); out.write(buf, n); }
+  in.close(); out.close();
+  return true;
+}
+
 void App::setup() {
   auto m5cfg = M5.config();
   M5Cardputer.begin(m5cfg, true);   // true => init keyboard
@@ -80,6 +92,7 @@ void App::setup() {
   M5Cardputer.Display.setRotation(1);
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
   canvas.setTextWrap(false);
+  M5Cardputer.Display.setBrightness(SCREEN_BRIGHT);
 
   setenv("TZ", "UTC0", 1); tzset();   // work entirely in UTC
 
@@ -99,12 +112,41 @@ void App::setup() {
   if (cfg.lat != 0.0 || cfg.lon != 0.0) loc.setManual(cfg.lat, cfg.lon, cfg.altM);
   pred.setSite(loc.obs());
 
+  // If a WiFi network is configured, connect at boot and set the clock over NTP.
+  // Best-effort: a failure is non-fatal (GPS or a cached/manual clock still work).
+  if (cfg.ssid[0]) {
+    setStatus("WiFi..."); draw();
+    if (net.connect(cfg.ssid, cfg.pass)) {
+      Serial.printf("[boot] WiFi OK, IP %s\n", WiFi.localIP().toString().c_str());
+      net.syncTimeNtp();
+      setStatus(timeIsSet() ? "WiFi connected; clock set via NTP"
+                            : "WiFi connected (NTP pending)", 3000);
+    } else {
+      Serial.println("[boot] WiFi connect failed");
+      setStatus("WiFi connect failed at boot", 3000);
+    }
+  }
+
   // Try cached GP data so the unit is useful offline at boot.
   if (db.loadGpFromFs()) setStatus("Loaded cached GP: " + String(db.count()));
   else setStatus("No GP data yet. Use Update.");
   db.loadManualGpFile();    // merge any hand-entered satellites
   loadFavs();
   buildSatView();
+
+  // Auto-refresh: if we're online with a valid clock and even the freshest cached
+  // element set is over a week old, pull fresh GP now so passes/Doppler stay sharp.
+  if (net.connected() && timeIsSet() && db.count() > 0) {
+    double minAge = 1e9;
+    for (int i = 0; i < db.count(); ++i) {
+      double a = gpAgeDays(db.at(i));
+      if (a < minAge) minAge = a;
+    }
+    if (minAge > GP_STALE_DAYS) {
+      setStatus("Elements stale - refreshing GP...", 2500); draw();
+      doUpdateGp();
+    }
+  }
 
   M5Cardputer.Speaker.setVolume(180);   // AOS alarm
   if (timeIsSet() && favN) buildSchedule();
@@ -115,6 +157,7 @@ void App::setup() {
     if (favN && timeIsSet()) { buildSchedule(); schedSel = 0; screen = SCR_SCHEDULE; }
   }
 
+  lastInputMs = millis();
   draw();
 }
 
@@ -127,10 +170,8 @@ void App::applyRadioFromCfg() {
   rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
   if (RADIOS[m].proto == PROTO_CIV)
     rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
-  // Icom: this software drives MAIN/SUB directly, so force the rig's own sat
-  // mode OFF (it would invert the band roles). Yaesu/Kenwood: this is a no-op --
-  // their full-duplex/sat mode is set up by the operator and left untouched.
-  rig->enableSatMode(false);
+  // The rig's satellite mode is no longer forced here -- it is commanded per the
+  // Sat Mode setting when radio control is engaged (see keyTrack, 'r' key).
 }
 
 void App::applyRotatorFromCfg() {
@@ -153,12 +194,12 @@ void App::applyTransponderModes(const Transponder& t) {
   if (t.isLinear) {
     bool hf = (t.uplink   && t.uplink   < 30000000UL) ||
               (t.downlink && t.downlink < 30000000UL);
-    rig->setSubMode(RM_USB);                                  // downlink: USB
-    if (t.uplink) rig->setMainMode(hf ? RM_USB : RM_LSB);     // uplink: LSB (USB if HF)
+    rigSetDownlinkMode(RM_USB);                               // downlink: USB
+    if (t.uplink) rigSetUplinkMode(hf ? RM_USB : RM_LSB);     // uplink: LSB (USB if HF)
   } else {
     RigMode m = Rig::modeFromString(t.mode);
-    rig->setSubMode(m);
-    if (t.uplink) rig->setMainMode(m);
+    rigSetDownlinkMode(m);
+    if (t.uplink) rigSetUplinkMode(m);
   }
 }
 
@@ -179,6 +220,7 @@ void App::applyCtcssForCurrentTx() {
   if (!rig || !rig->ready() || !rig->hasTone()) return;
   float want = desiredToneHz();
   if (want == toneApplied) return;
+  rigSelectUplink();                  // the PL tone lives on the uplink VFO
   rig->setCtcss(want > 0, want);
   toneApplied = want;
   if (want > 0) setStatus("PL " + String(want, 1) + " Hz on uplink", 2500);
@@ -255,7 +297,7 @@ bool App::ensureTransponders(SatEntry& s) {
 // Recenter the passband tuning to mid-band and choose a sensible default
 // track-screen mode for the currently selected transponder.
 void App::onTransponderChanged() {
-  radioTune = false; lastRxSet = 0;           // start each channel in manual tune
+  tuneMode = TM_HOLD; lastRxSet = 0;          // start each channel holding both legs
   if (activeTxCount <= 0) { pbOffset = 0; trackMode = 1; return; }
   Transponder& t = activeTx[curTx];
   if (t.isLinear && t.bandwidth() > 0) {
@@ -661,14 +703,20 @@ void App::loop() {
   if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
     auto ks = M5Cardputer.Keyboard.keysState();
     char c = ks.word.empty() ? 0 : ks.word.front();
-    handleKey(c, ks.enter, ks.del);
+    lastInputMs = millis();
+    if (screenAsleep) {                       // first key just wakes the display
+      M5Cardputer.Display.setBrightness(SCREEN_BRIGHT);
+      screenAsleep = false;
+    } else {
+      handleKey(c, ks.enter, ks.del);
+    }
     draw();
   }
 
   // Real-time Doppler service (on the tracking and polar screens)
   uint32_t ms = millis();
   if (screen == SCR_TRACK || screen == SCR_POLAR) {
-    if (radioOut && rig && rig->ready() && ms - lastDoppMs > 500) {
+    if (radioOut && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
       lastDoppMs = ms;
       SatEntry* s = activeSat();
       if (s && activeTxCount > 0 && timeIsSet()) {
@@ -679,14 +727,18 @@ void App::loop() {
           L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6); }
         Transponder& t = activeTx[curTx];
         uint32_t dlOp, ulOp, rx, tx;
-        if (radioTune && t.isLinear && rig->canReadFreq()) {
+        bool otr   = (tuneMode == TM_FULL || tuneMode == TM_DL) &&
+                     t.isLinear && rig->canReadFreq();
+        bool drvDL = (tuneMode != TM_UL);   // downlink driven in FULL/DL/HOLD
+        bool drvUL = (tuneMode != TM_DL);   // uplink driven in FULL/UL/HOLD
+        if (otr) {
           // ---- One True Rule (KB5MU): hold a constant frequency AT THE
           // SATELLITE while the operator tunes the rig's knob. Read the
           // downlink the operator is on, back out Doppler to find their chosen
           // spot in the passband, then Doppler-correct BOTH legs around that
           // fixed satellite frequency. Let go of the knob and nothing drifts.
           uint32_t rxNow;
-          if (rig->readSubFreq(rxNow)) {
+          if (rigReadDownlinkFreq(rxNow)) {
             double beta = L.rangeRate * 1000.0 / 299792458.0;
             // The rig only moves when the operator turns it (we set it last
             // tick), so any change from lastRxSet is a deliberate knob move.
@@ -702,15 +754,15 @@ void App::loop() {
           }
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
-          if (t.downlink) rig->setSubFreq(rx);                // hold sat downlink
-          if (t.uplink)   { delay(8); rig->setMainFreq(tx);   // hold sat uplink
-                            rig->selectSubBand(); }           // dial back on RX
+          if (drvDL && t.downlink) rigSetDownlinkFreq(rx);    // hold sat downlink
+          if (drvUL && t.uplink) { delay(8); rigSetUplinkFreq(tx);  // hold sat uplink
+                                   rigSelectDownlink(); }     // dial back on RX
           lastRxSet = rx;
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
-          if (t.downlink) rig->setSubFreq(rx);                // downlink (RX) on SUB
-          if (t.uplink)   { delay(8); rig->setMainFreq(tx); } // uplink (TX) on MAIN
+          if (drvDL && t.downlink) rigSetDownlinkFreq(rx);    // downlink (RX)
+          if (drvUL && t.uplink) { delay(8); rigSetUplinkFreq(tx); } // uplink (TX)
         }
         applyCtcssForCurrentTx();   // FM uplink PL tone (only re-sends on change)
       }
@@ -752,6 +804,19 @@ void App::loop() {
   long dt = (nextAos && timeIsSet()) ? (long)(nextAos - nowUtc()) : 999999;
   bool alarmActive = (millis() < aosFlashUntil) || (cfg.aosAlarm && dt <= 60 && dt > -2);
   if (alarmActive && ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
+
+  // Screen power management: blank the backlight after inactivity. Never while
+  // actively tracking (radio/rotator) or alarming; any key wakes it (above).
+  if (!screenAsleep) {
+    if (cfg.dimSecs && !radioOut && !rotOut && !alarmActive &&
+        (millis() - lastInputMs) > (uint32_t)cfg.dimSecs * 1000) {
+      M5Cardputer.Display.setBrightness(0);
+      screenAsleep = true;
+    }
+  } else if (alarmActive) {                    // an AOS alarm wakes the display
+    M5Cardputer.Display.setBrightness(SCREEN_BRIGHT);
+    screenAsleep = false;
+  }
 }
 
 // ===========================================================================
@@ -830,6 +895,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_SETTINGS: keySettings(c, enter, back); break;
     case SCR_EDIT:     keyEdit(c, enter, back); break;
     case SCR_WIFISCAN: keyWifiScan(c, enter, back); break;
+    case SCR_ABOUT:    keyAbout(c, enter, back); break;
   }
 }
 
@@ -842,7 +908,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 7;
+  const int N = 8;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -872,6 +938,7 @@ void App::keyHome(char c, bool enter, bool back) {
       case 4: screen = SCR_LOCATION; break;
       case 5: screen = SCR_UPDATE; break;
       case 6: setSel = 0; screen = SCR_SETTINGS; break;
+      case 7: screen = SCR_ABOUT; break;
     }
   }
 }
@@ -992,19 +1059,21 @@ void App::keyTrack(char c, bool enter, bool back) {
     else { trackMode = 1; setStatus("Not linear: CAL only"); }
   }
 
-  if (c == 'd') {                                    // toggle radio-knob tuning
-    if (!linear) setStatus("Radio tune: linear birds only");
-    else if (!rig->canReadFreq())
-      setStatus(String(rig->name()) + " can't read freq");
+  if (c == 'd') {                                    // cycle the Doppler tune mode
+    if (!linear) setStatus("Tune modes: linear birds only");
     else {
-      radioTune = !radioTune;
+      bool canRead = rig && rig->canReadFreq();
+      do { tuneMode = (TuneMode)((tuneMode + 1) & 3); }   // FULL/DL need knob read
+      while (!canRead && (tuneMode == TM_FULL || tuneMode == TM_DL));
       lastRxSet = 0;                                  // re-sync to the knob
-      setStatus(radioTune ? "Radio tune: knob = passband (OTR)"
-                          : "Radio tune off");
+      setStatus(tuneMode == TM_FULL ? "Tune: FULL knob=passband (OTR)"
+              : tuneMode == TM_DL   ? "Tune: downlink only (OTR)"
+              : tuneMode == TM_UL   ? "Tune: uplink only"
+                                    : "Tune: hold both legs");
     }
   }
 
-  if (trackMode == 0 && linear && !radioTune) {
+  if (trackMode == 0 && linear && tuneMode != TM_FULL && tuneMode != TM_DL) {
     // ---- TUNE mode: move within the transponder passband via device keys ----
     int32_t bw = (int32_t)activeTx[curTx].bandwidth();
     if (isLeft(c))  pbOffset -= tuneStep;            // tune down in passband
@@ -1040,14 +1109,18 @@ void App::keyTrack(char c, bool enter, bool back) {
   if (c == 'r') {                                    // toggle radio output
     radioOut = !radioOut;
     if (radioOut) {
-      // Satellite mode is intentionally never enabled; MAIN/SUB are driven
-      // directly. Downlink rides SUB, uplink rides MAIN.
+      // Command the rig's satellite mode per the Sat Mode setting (a no-op on
+      // rigs without one). Which physical VFO carries up/downlink follows the
+      // VFO Type setting (see the rigSet*/rigSelect* helpers).
+      if (rig) rig->enableSatMode(cfg.satMode);
       if (activeTxCount > 0) applyTransponderModes(activeTx[curTx]);
       lastDoppMs = 0;
       setStatus("Radio ON");
     } else {
-      if (rig && rig->ready() && rig->hasTone() && toneApplied > 0)
+      if (rig && rig->ready() && rig->hasTone() && toneApplied > 0) {
+        rigSelectUplink();         // tone lives on the uplink VFO
         rig->setCtcss(false, 0);   // don't leave an encode tone on the operator's rig
+      }
       toneApplied = -2.0f;         // force re-apply next time radio goes ON
       setStatus("Radio OFF");
     }
@@ -1226,7 +1299,7 @@ void App::keyUpdate(char c, bool enter, bool back) {
 }
 
 void App::keySettings(char c, bool enter, bool back) {
-  const int N = 16;
+  const int N = 22;
   if (isBack(c, back)) { applyRadioFromCfg(); applyRotatorFromCfg();
                          screen = SCR_HOME; return; }
   if (isUp(c))   setSel = (setSel + N - 1) % N;
@@ -1258,6 +1331,16 @@ void App::keySettings(char c, bool enter, bool back) {
                cfg.save(); break;
       case 13: cfg.rotElOff = constrain((int)cfg.rotElOff + dir, -30, 30);
                cfg.save(); break;
+      case 15: cfg.vfoType = (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN)
+                             ? VFO_MAIN_DOWN_SUB_UP : VFO_MAIN_UP_SUB_DOWN;
+               cfg.save(); break;
+      case 16: cfg.satMode = !cfg.satMode; cfg.save(); break;
+      case 17: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
+                 cfg.catRateMs = (uint32_t)v; cfg.save(); } break;
+      case 18: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
+                 for (int i=0;i<5;i++) if (opts[i]==cfg.dimSecs) idx=i;
+                 idx = (idx + dir + 5) % 5; cfg.dimSecs = opts[idx];
+                 cfg.save(); lastInputMs = millis(); } break;
     }
   };
   if (isLeft(c))  adj(-1);
@@ -1276,7 +1359,21 @@ void App::keySettings(char c, bool enter, bool back) {
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 14: editTarget = 203; editTitle = "GP source URL";
                editBuf = cfg.gpUrl; screen = SCR_EDIT; break;
-      case 15: editTarget = 400; editTitle = "Type ERASE to wipe all";
+      case 19: {
+        bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
+        setStatus(ok ? "Backed up to SD" : "Backup failed");
+      } break;
+      case 20: {
+        if (!Store::fs().exists(FILE_CFG_BAK)) { setStatus("No backup found"); break; }
+        bool ok = copyFile(FILE_CFG_BAK, FILE_CFG);
+        copyFile(FILE_FAVS_BAK, FILE_FAVS);
+        if (ok) { cfg.load(); calDl = cfg.calDlHz; calUl = cfg.calUlHz;
+                  loadFavs(); applyRadioFromCfg(); applyRotatorFromCfg();
+                  buildSatView(); if (timeIsSet() && favN) buildSchedule();
+                  setStatus("Restored from SD"); }
+        else setStatus("Restore failed");
+      } break;
+      case 21: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
       default: adj(+1); break;
     }
@@ -1501,6 +1598,49 @@ void App::header(const String& t) {
     canvas.print(clk);
   }
 }
+void App::drawAbout() {
+  header("About");
+  canvas.setTextSize(1);
+  int y = 22; const int dy = 11;
+  auto line = [&](const String& s){
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(s); y += dy;
+  };
+  line(String("CardSat v") + FW_VERSION);
+  line(String("Built ") + __DATE__);
+  line(String("Storage: ") + (Store::onSD() ? "microSD" : "internal flash"));
+  {
+    double minAge = -1.0;
+    for (int i = 0; i < db.count(); ++i) {
+      double a = gpAgeDays(db.at(i));
+      if (minAge < 0 || a < minAge) minAge = a;
+    }
+    String g = String("GP: ") + db.count() + " sats";
+    if (db.count() && timeIsSet() && minAge >= 0) g += ", " + String(minAge, 1) + "d old";
+    line(g);
+  }
+  line(String("WiFi: ") + (net.connected() ? WiFi.localIP().toString() : String("not connected")));
+  {
+    int b = M5.Power.getBatteryLevel();
+    String s = String("Battery: ") + (b < 0 ? String("n/a") : String(b) + "%");
+    if (M5.Power.isCharging()) s += " (charging)";
+    line(s);
+  }
+  line(String("Free heap: ") + String(ESP.getFreeHeap() / 1024) + " KB");
+  {
+    uint32_t up = millis() / 1000;
+    char b[28];
+    snprintf(b, sizeof(b), "Uptime: %luh %lum",
+             (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
+    line(String(b));
+  }
+  footer("` back");
+}
+
+void App::keyAbout(char c, bool enter, bool back) {
+  if (isBack(c, back) || enter) screen = SCR_HOME;
+}
+
 void App::footer(const String& t) {
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setTextSize(1);
@@ -1525,6 +1665,7 @@ void App::draw() {
     case SCR_SETTINGS: drawSettings(); break;
     case SCR_EDIT:     drawEdit(); break;
     case SCR_WIFISCAN: drawWifiScan(); break;
+    case SCR_ABOUT:    drawAbout(); break;
   }
   // transient status
   if (status.length() && millis() < statusUntil) {
@@ -1555,10 +1696,11 @@ void App::draw() {
 void App::drawHome() {
   header("CardSat");
   const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "Location", "Update GP/Freq", "Settings" };
+                          "Track (sel)", "Location", "Update GP/Freq", "Settings",
+                          "About / diagnostics" };
   canvas.setTextSize(1);
-  for (int i = 0; i < 7; ++i) {
-    int y = 20 + i*12;
+  for (int i = 0; i < 8; ++i) {
+    int y = 19 + i*12;
     if (i == homeSel) { canvas.fillRect(0, y-2, 240, 12, CL_GREEN);
                         canvas.setTextColor(CL_BLACK, CL_GREEN); }
     else                canvas.setTextColor(CL_WHITE, CL_BLACK);
@@ -1567,7 +1709,7 @@ void App::drawHome() {
   }
   SatEntry* s = activeSat();
   canvas.setTextColor(CL_CYAN, CL_BLACK);
-  canvas.setCursor(6, 106);
+  canvas.setCursor(6, 116);
   canvas.print(s ? String("Sel: ") + s->name : String("Sel: none"));
   footer("; / . move   ENT select");
 }
@@ -1809,8 +1951,14 @@ void App::drawTrack() {
     if (linear) {
       float halfk = t.bandwidth() / 2000.0f;
       float posk  = (pbOffset - (int32_t)(t.bandwidth()/2)) / 1000.0f;
-      uint16_t col = radioTune ? CL_ORANGE : (trackMode == 0 ? CL_CYAN : CL_GREY);
-      const char* tag = radioTune ? "<RADIO>" : (trackMode == 0 ? "<TUNE>" : "");
+      uint16_t col; const char* tag;
+      switch (tuneMode) {
+        case TM_FULL: col = CL_ORANGE; tag = "<FULL>"; break;
+        case TM_DL:   col = CL_ORANGE; tag = "<DL>";   break;
+        case TM_UL:   col = CL_ORANGE; tag = "<UL>";   break;
+        default:      col = (trackMode == 0 ? CL_CYAN : CL_GREY);
+                      tag = (trackMode == 0 ? "<TUNE>" : ""); break;
+      }
       canvas.setTextColor(col, CL_BLACK);
       canvas.setCursor(4, 79);
       canvas.printf("PB %+.1fk bw%.1fk %s%s", posk, halfk,
@@ -2037,7 +2185,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header("Settings");
   canvas.setTextSize(1);
-  const int N = 16;
+  const int N = 22;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -2058,7 +2206,20 @@ void App::drawSettings() {
     if (u.length() > 28) u = "..." + u.substring(u.length() - 25);
     rows[14] = String("GP URL: ") + u;
   }
-  rows[15] = String("Reset all data (erase)");
+  rows[15] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
+                                ? "Main Up/Sub Dn" : "Main Dn/Sub Up");
+  rows[16] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");
+  {
+    uint32_t eff = effectiveCatRateMs();
+    rows[17] = String("CAT rate: ") + String(cfg.catRateMs) + " ms";
+    if (eff > cfg.catRateMs) rows[17] += " (min " + String(eff) + ")";
+  }
+  rows[18] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
+             : (cfg.dimSecs % 60 == 0) ? String(cfg.dimSecs / 60) + " min"
+                                       : String(cfg.dimSecs) + " s");
+  rows[19] = String("Backup config+favs -> SD");
+  rows[20] = String("Restore config+favs");
+  rows[21] = String("Reset all data (erase)");
   const int VIS = 9;
   int scroll = (setSel >= VIS) ? (setSel - VIS + 1) : 0;
   for (int v = 0; v < VIS && (scroll + v) < N; ++v) {

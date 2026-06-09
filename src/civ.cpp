@@ -171,7 +171,7 @@ bool CivRig::enableSatMode(bool on) {
 // Icom CI-V reference (IC-9700/910H/9100 family).
 bool CivRig::setCtcss(bool on, float toneHz) {
   if (!RADIOS[_model].hasTone) return false;
-  selectMain();                                   // tone applies to uplink (TX)
+  // The caller selects the uplink band first (MAIN or SUB, per VFO Type).
   if (on && toneHz > 0) {
     int t = (int)lroundf(toneHz * 10.0f);         // tenths of Hz, 4 BCD digits
     uint8_t b1 = (uint8_t)((((t / 1000) % 10) << 4) | ((t / 100) % 10));
@@ -185,10 +185,14 @@ bool CivRig::setCtcss(bool on, float toneHz) {
   return sendFrame(off, 3);
 }
 
-bool CivRig::readSubFreq(uint32_t& hzOut) {
+bool CivRig::readSubFreq (uint32_t& hzOut) { return readFreqCiv(true,  hzOut); }
+bool CivRig::readMainFreq(uint32_t& hzOut) { return readFreqCiv(false, hzOut); }
+
+// Read the operating frequency of the SUB (sub=true) or MAIN (sub=false) band.
+bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
   if (!_stream) return false;
   if (!RADIOS[_model].canReadFreq) return false;   // set-only rig
-  selectSub();                                      // 07 D1 (drains its echo)
+  sub ? selectSub() : selectMain();                 // 07 D1/D0 (drains its echo)
   while (_stream->available()) _stream->read();     // clear anything stale
   // Send read-operating-frequency request (cmd 0x03) WITHOUT draining: we want
   // the radio's reply, which on a single-wire CI-V bus arrives after our echo.
@@ -215,13 +219,13 @@ bool CivRig::readSubFreq(uint32_t& hzOut) {
         hz = hz * 100 + (buf[i+k] >> 4) * 10 + (buf[i+k] & 0x0F);
       hzOut = hz;
 #if CIV_DEBUG
-      Serial.printf("[CI-V] SUB freq read: %lu Hz\n", (unsigned long)hz);
+      Serial.printf("[CI-V] %s freq read: %lu Hz\n", sub ? "SUB" : "MAIN", (unsigned long)hz);
 #endif
       return true;
     }
   }
 #if CIV_DEBUG
-  Serial.println("[CI-V] SUB freq read: no valid reply");
+  Serial.printf("[CI-V] %s freq read: no valid reply\n", sub ? "SUB" : "MAIN");
 #endif
   return false;
 }

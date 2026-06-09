@@ -23,9 +23,11 @@ public:
   bool setMainMode(RigMode m)   override;
   bool setSubMode (RigMode m)   override;
   bool readSubFreq(uint32_t& hzOut) override;
+  bool readMainFreq(uint32_t& hzOut) override;
   bool enableSatMode(bool on)   override;
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override { selectSub(); }
+  void selectMainBand()         override { selectMain(); }
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
@@ -46,6 +48,7 @@ private:
   bool   sendFrame(const uint8_t* payload, size_t len);
   bool   setFreqCiv(bool sub, uint32_t hz);
   bool   setModeCiv(bool sub, CivMode m, uint8_t filter = 0x01);
+  bool   readFreqCiv(bool sub, uint32_t& hzOut);
   static CivMode toCiv(RigMode m);
   static void freqToBcd(uint32_t hz, uint8_t out[5]);
   bool   drainEcho(uint32_t timeoutMs = 60);  // CI-V is a shared bus: read back

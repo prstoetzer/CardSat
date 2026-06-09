@@ -6,6 +6,12 @@
 #include "radio_profiles.h"
 #include "config.h"
 
+// Which physical VFO (Main/Sub) carries the uplink vs the downlink.
+enum VfoType : uint8_t {
+  VFO_MAIN_UP_SUB_DOWN = 0,   // uplink on MAIN, downlink on SUB (default)
+  VFO_MAIN_DOWN_SUB_UP = 1,   // uplink on SUB,  downlink on MAIN
+};
+
 struct Settings {
   // WiFi
   char     ssid[33] = "";
@@ -20,10 +26,16 @@ struct Settings {
   uint8_t  radioModel = RIG_IC9700;
   uint8_t  civAddr    = 0xA2;   // 0 => use model default
   uint32_t civBaud    = 19200;
-  // (CI-V is TTL serial only; satellite mode is never used; MAIN/SUB driven directly.)
+  // (CI-V is TTL serial only.) VFO roles + whether to command the rig's own
+  // satellite mode when engaging radio control.
+  uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
+  bool     satMode    = false;
+  uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
   // Tracking
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
+  // Display / power
+  uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)
   int32_t  calDlHz = 0;
   int32_t  calUlHz = 0;

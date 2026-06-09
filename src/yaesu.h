@@ -40,9 +40,11 @@ public:
   bool setMainMode(RigMode m)   override { return setMode(0x27, m); }  // SAT TX
   bool setSubMode (RigMode m)   override { return setMode(0x17, m); }  // SAT RX
   bool readSubFreq(uint32_t& hzOut) override;          // FT-847 only (0x13)
+  bool readMainFreq(uint32_t& hzOut) override { (void)hzOut; return false; }
   bool enableSatMode(bool)      override { return false; }             // operator-set
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override {}                            // n/a
+  void selectMainBand()         override {}                            // n/a
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }

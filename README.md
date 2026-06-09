@@ -23,7 +23,9 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Constant-frequency-at-the-satellite Doppler** (KB5MU's *One True Rule*):
   both the uplink and downlink are continuously corrected so your signal never
   walks through the passband. Tune with the device keys **or with the radio's own
-  knob** — let go and nothing drifts.
+  knob** — let go and nothing drifts. A tune-mode cycle (`d`) covers full One True
+  Rule, **downlink-only**, **uplink-only** (for an SDR / second-receiver setup),
+  and hold-both.
 - **Three CAT families, ten radios**, behind one abstract rig interface so the
   Doppler engine is protocol-agnostic: Icom **CI-V** (IC-820/821/910/970/9100/9700),
   Yaesu (**FT-847**, **FT-736R**), and Kenwood (**TS-790**, **TS-2000**). Wire-level
@@ -53,6 +55,11 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Antenna rotator (GS-232)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
   SPID, K3NG/RadioArtisan) through an I²C→UART bridge, so the radio and GPS keep
   their UARTs. Deadband, park-on-LOS, alignment offsets, optional flip mode.
+- **Auto-refresh, power management, and diagnostics.** If WiFi is configured,
+  CardSat connects and NTP-syncs at boot and **auto-refreshes GP when the cached
+  elements are over a week old**; the backlight blanks after a configurable idle
+  time (any key wakes it); config + favorites **back up / restore to the SD card**;
+  and an **About** screen reports version, storage, GP age, battery, and uptime.
 - **Fully offline** once GP + transponders are cached. CardSat stores everything in
   a **`/CardSat` folder on the microSD card** by default, falling back to internal
   **LittleFS** if no card is present.
@@ -183,13 +190,18 @@ made with an **I²C→UART bridge**. Chain:
 
 ## Radios: bands, satellite mode, and read-back
 
-CardSat always drives **two independent VFOs** — convention **"Sub" = downlink/RX,
-"Main" = uplink/TX** — and Doppler-corrects both. How that maps to each family:
+CardSat drives **two independent VFOs** and Doppler-corrects both. The default
+convention is **"Sub" = downlink/RX, "Main" = uplink/TX**; the **VFO Type** setting
+swaps the roles (*Main Dn/Sub Up*) when your rig's satellite-mode band layout needs
+it. The **CAT rate** setting sets how often updates are sent (default **500 ms**,
+adjustable in 10 ms steps, soft-floored to what the CAT baud can service). How that
+maps to each family:
 
-- **Icom** — CardSat drives MAIN/SUB directly and forces the rig's own satellite
-  mode **off** at startup. MAIN/SUB select uses CI-V `0x07 D0/D1` (verified vs the
-  IC-821H manual). If a radio mistunes the wrong VFO, edit `selMain[]`/`selSub[]` in
-  `radio_profiles.h`.
+- **Icom** — CardSat drives MAIN/SUB directly. By default it leaves the rig's own
+  satellite mode **off**; the **Sat mode** setting commands it on/off when you
+  engage CAT (a no-op on rigs without one). MAIN/SUB select uses CI-V `0x07 D0/D1`
+  (verified vs the IC-821H manual). If a radio mistunes the wrong VFO, edit
+  `selMain[]`/`selSub[]` in `radio_profiles.h`.
 - **Yaesu** — the FT-847 sat opcodes set the SAT-RX (downlink, `0x11`) and SAT-TX
   (uplink, `0x21`) VFOs directly, and read the downlink back with `0x13` (firmware-
   dependent). CAT is enabled at startup (`00 00 00 00 00`).
@@ -258,7 +270,9 @@ Navigation uses the legends printed on the Cardputer keys:
 
 1. **Settings** — WiFi SSID/password (or press `s` on the SSID row to **scan**
    and pick a network), radio model, **CAT baud** (and the CI-V
-   address for Icom), minimum pass elevation, AOS alarm on/off.
+   address for Icom), minimum pass elevation, AOS alarm on/off. Once a network is
+   saved, CardSat **auto-connects and NTP-syncs the clock at every boot**
+   (best-effort; it falls back to GPS or the cached/manual clock).
 2. **Location** — set your grid or lat/lon, or enable GPS; set the UTC clock if
    you have no network/GPS.
 3. **Update** — download GP data (and NTP time-sync); optionally cache *all*

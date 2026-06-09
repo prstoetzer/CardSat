@@ -35,6 +35,7 @@ public:
 
   // Read the downlink (Sub/RX) frequency. Returns false if unsupported.
   virtual bool readSubFreq(uint32_t& hzOut) = 0;
+  virtual bool readMainFreq(uint32_t& hzOut) = 0;
 
   // Toggle the rig's own satellite mode. Icom: actively forced OFF (we drive
   // MAIN/SUB ourselves). Yaesu/Kenwood: no-op -- their full-duplex/sat mode is
@@ -44,6 +45,7 @@ public:
   // Leave band access on the downlink so the operator's dial stays on RX
   // (meaningful for Icom; no-op elsewhere).
   virtual void selectSubBand() = 0;
+  virtual void selectMainBand() = 0;
 
   // Set the transmit CTCSS (PL) tone encoder. Used for FM satellites whose
   // uplink requires a subaudible tone (SO-50, AO-91, ISS, PO-101...). The tone

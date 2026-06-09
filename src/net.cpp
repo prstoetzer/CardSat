@@ -230,5 +230,8 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 
 bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {
   String url = String(SATNOGS_TX_URL) + String((unsigned long)norad);
-  return httpsGet(url, out, 60000);
+  // Busy birds return large transmitter lists (the ISS has ~49); allow ample room
+  // so the JSON body isn't truncated mid-object, which would fail the parse and
+  // leave the satellite with no transponders.
+  return httpsGet(url, out, 200000);
 }

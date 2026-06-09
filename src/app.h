@@ -14,7 +14,8 @@
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
-  SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT
+  SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
+  SCR_LOGLIST
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -32,6 +33,20 @@ struct SchedEntry {
   time_t   aos = 0, los = 0;
   float    maxEl = 0;
   bool     inProgress = false;
+};
+
+// One QSO being entered on the log screen (snapshotted auto fields + typed fields).
+struct PendingQso {
+  uint32_t utc;
+  char     sat[18];
+  char     mode[8];
+  uint32_t dlHz, ulHz;
+  char     myGrid[10];
+  char     call[14];
+  char     rstS[6];
+  char     rstR[6];
+  char     grid[10];
+  char     notes[40];
 };
 
 class App {
@@ -139,6 +154,16 @@ private:
   String   editBuf;
   String   editTitle;
   int      editTarget = 0;        // which field is being edited
+  PendingQso qso;                 // QSO currently being entered
+  int      logSel = 0;            // selected field on the log-entry screen
+  int      logMenuSel = 0;        // selected row on the Log menu
+  Screen   logReturn = SCR_HOME;  // screen to return to after entry
+  PendingQso logRecs[LOG_VIEW_MAX]; // recent log entries loaded for view/edit
+  int      logRecN = 0;           // number loaded
+  int      logFirstIdx = 0;       // file data-row index of logRecs[0]
+  int      logListSel = 0;        // selected row in the log list
+  int      logEditIdx = -1;       // editing an existing entry (array idx) or -1=new
+  bool     logDelArm = false;     // two-press delete confirmation
 
   // status line
   String   status;
@@ -217,6 +242,9 @@ private:
   void drawSettings();
   void drawWifiScan();
   void drawAbout();
+  void drawLog();
+  void drawLogEntry();
+  void drawLogList();
   void drawEdit();
 
   // ---- per-screen input ----
@@ -235,6 +263,15 @@ private:
   void startWifiScan();
   void keyWifiScan(char c, bool enter, bool back);
   void keyAbout(char c, bool enter, bool back);
+  void keyLog(char c, bool enter, bool back);
+  void keyLogEntry(char c, bool enter, bool back);
+  void beginQso();                // snapshot auto fields, open the entry screen
+  bool saveQso();                 // append the pending QSO to the CSV log
+  int  qsoCount();                // number of logged QSOs
+  bool exportAdif();              // write ADIF from the CSV log
+  void keyLogList(char c, bool enter, bool back);
+  void loadLog();                 // load recent entries into logRecs[]
+  bool rewriteLog(int fileIdx, const PendingQso* rec, bool del);  // edit/delete a row
   void keyEdit(char c, bool enter, bool back);
 
   // ---- small draw utilities ----

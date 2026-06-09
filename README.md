@@ -55,6 +55,10 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Antenna rotator (GS-232)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
   SPID, K3NG/RadioArtisan) through an I²C→UART bridge, so the radio and GPS keep
   their UARTs. Deadband, park-on-LOS, alignment offsets, optional flip mode.
+- **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
+  up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without
+  interrupting Doppler control**. Review, edit, or delete past entries on-device,
+  and **export ADIF** on demand for LoTW/eQSL or your main logger.
 - **Auto-refresh, power management, and diagnostics.** If WiFi is configured,
   CardSat connects and NTP-syncs at boot and **auto-refreshes GP when the cached
   elements are over a week old**; the backlight blanks after a configurable idle

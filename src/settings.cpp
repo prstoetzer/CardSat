@@ -30,6 +30,8 @@ bool Settings::load() {
   if (vfoType > VFO_MAIN_DOWN_SUB_UP) vfoType = VFO_MAIN_UP_SUB_DOWN;
   catRateMs  = d["catms"] | 500u;
   if (catRateMs < 10) catRateMs = 10;
+  catDelayMs = d["catdly"] | (uint16_t)70;
+  if (catDelayMs > 200) catDelayMs = 200;
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
@@ -55,6 +57,7 @@ bool Settings::save() {
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
+  d["catdly"] = catDelayMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
   d["dimsecs"] = dimSecs;

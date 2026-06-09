@@ -179,11 +179,13 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.5";
+static constexpr const char* FW_VERSION = "0.9.6";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
 static constexpr uint8_t SCREEN_BRIGHT = 180;
+// Most-recent QSO log entries loaded into RAM for the on-device view/edit list.
+static constexpr int     LOG_VIEW_MAX  = 120;
 
 // ---------------------------------------------------------------------------
 //  Antenna rotator: GS-232 over an I2C->UART bridge (SC16IS750/752)
@@ -232,6 +234,8 @@ static constexpr int   MUTUAL_PASS_SCAN= 16;   // of my passes scanned for mutua
 #define FILE_MTX     "/CardSat/mtx_%lu.json"  // manual transponders per norad (text lines)
 #define FILE_CFG_BAK  "/CardSat/config.bak"    // backup copy of config.json
 #define FILE_FAVS_BAK "/CardSat/favs.bak"      // backup copy of favs.txt
+#define FILE_LOG     "/CardSat/qso_log.csv"     // QSO log (CSV, notes is last field)
+#define FILE_ADIF    "/CardSat/qso_log.adi"     // ADIF export (generated on demand)
 
 
 // =========================================================================
@@ -376,6 +380,13 @@ public:
   // Open the CAT serial port. The backend already knows its own model/params.
   virtual void begin(uint32_t baud, int uartNum, int rxPin, int txPin) = 0;
   virtual bool ready() const = 0;
+
+  // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
+  // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
+  void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
+protected:
+  uint16_t cmdDelayMs = 70;
+public:
 
   // Independent downlink (Sub/RX) and uplink (Main/TX) control.
   virtual bool setMainFreq(uint32_t hz) = 0;   // uplink (TX)
@@ -998,6 +1009,7 @@ struct Settings {
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
   bool     satMode    = false;
   uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
+  uint16_t catDelayMs = 70;    // pause after each CAT command before the next (ms)
   // Tracking
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
@@ -1032,7 +1044,8 @@ struct Settings {
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
-  SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT
+  SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
+  SCR_LOGLIST
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1050,6 +1063,20 @@ struct SchedEntry {
   time_t   aos = 0, los = 0;
   float    maxEl = 0;
   bool     inProgress = false;
+};
+
+// One QSO being entered on the log screen (snapshotted auto fields + typed fields).
+struct PendingQso {
+  uint32_t utc;
+  char     sat[18];
+  char     mode[8];
+  uint32_t dlHz, ulHz;
+  char     myGrid[10];
+  char     call[14];
+  char     rstS[6];
+  char     rstR[6];
+  char     grid[10];
+  char     notes[40];
 };
 
 class App {
@@ -1157,6 +1184,16 @@ private:
   String   editBuf;
   String   editTitle;
   int      editTarget = 0;        // which field is being edited
+  PendingQso qso;                 // QSO currently being entered
+  int      logSel = 0;            // selected field on the log-entry screen
+  int      logMenuSel = 0;        // selected row on the Log menu
+  Screen   logReturn = SCR_HOME;  // screen to return to after entry
+  PendingQso logRecs[LOG_VIEW_MAX]; // recent log entries loaded for view/edit
+  int      logRecN = 0;           // number loaded
+  int      logFirstIdx = 0;       // file data-row index of logRecs[0]
+  int      logListSel = 0;        // selected row in the log list
+  int      logEditIdx = -1;       // editing an existing entry (array idx) or -1=new
+  bool     logDelArm = false;     // two-press delete confirmation
 
   // status line
   String   status;
@@ -1235,6 +1272,9 @@ private:
   void drawSettings();
   void drawWifiScan();
   void drawAbout();
+  void drawLog();
+  void drawLogEntry();
+  void drawLogList();
   void drawEdit();
 
   // ---- per-screen input ----
@@ -1253,6 +1293,15 @@ private:
   void startWifiScan();
   void keyWifiScan(char c, bool enter, bool back);
   void keyAbout(char c, bool enter, bool back);
+  void keyLog(char c, bool enter, bool back);
+  void keyLogEntry(char c, bool enter, bool back);
+  void beginQso();                // snapshot auto fields, open the entry screen
+  bool saveQso();                 // append the pending QSO to the CSV log
+  int  qsoCount();                // number of logged QSOs
+  bool exportAdif();              // write ADIF from the CSV log
+  void keyLogList(char c, bool enter, bool back);
+  void loadLog();                 // load recent entries into logRecs[]
+  bool rewriteLog(int fileIdx, const PendingQso* rec, bool del);  // edit/delete a row
   void keyEdit(char c, bool enter, bool back);
 
   // ---- small draw utilities ----
@@ -1488,6 +1537,7 @@ bool CivRig::sendFrame(const uint8_t* payload, size_t len) {
   _stream->write(buf, n);
   _stream->flush();
   drainEcho();            // swallow our own echo + radio's OK/NG (0xFB/0xFA)
+  if (cmdDelayMs) delay(cmdDelayMs);   // CAT Delay: pause before the next command
   return true;
 }
 
@@ -3216,6 +3266,8 @@ bool Settings::load() {
   if (vfoType > VFO_MAIN_DOWN_SUB_UP) vfoType = VFO_MAIN_UP_SUB_DOWN;
   catRateMs  = d["catms"] | 500u;
   if (catRateMs < 10) catRateMs = 10;
+  catDelayMs = d["catdly"] | (uint16_t)70;
+  if (catDelayMs > 200) catDelayMs = 200;
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
@@ -3241,6 +3293,7 @@ bool Settings::save() {
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
+  d["catdly"] = catDelayMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
   d["dimsecs"] = dimSecs;
@@ -3422,6 +3475,7 @@ void App::applyRadioFromCfg() {
   rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
   if (RADIOS[m].proto == PROTO_CIV)
     rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
+  rig->setCmdDelay(cfg.catDelayMs);                  // CAT Delay: inter-command pause
   // The rig's satellite mode is no longer forced here -- it is commanded per the
   // Sat Mode setting when radio control is engaged (see keyTrack, 'r' key).
 }
@@ -4007,14 +4061,14 @@ void App::loop() {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
           if (drvDL && t.downlink) rigSetDownlinkFreq(rx);    // hold sat downlink
-          if (drvUL && t.uplink) { delay(8); rigSetUplinkFreq(tx);  // hold sat uplink
+          if (drvUL && t.uplink) { rigSetUplinkFreq(tx);            // hold sat uplink
                                    rigSelectDownlink(); }     // dial back on RX
           lastRxSet = rx;
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
           if (drvDL && t.downlink) rigSetDownlinkFreq(rx);    // downlink (RX)
-          if (drvUL && t.uplink) { delay(8); rigSetUplinkFreq(tx); } // uplink (TX)
+          if (drvUL && t.uplink) { rigSetUplinkFreq(tx); }          // uplink (TX)
         }
         applyCtcssForCurrentTx();   // FM uplink PL tone (only re-sends on change)
       }
@@ -4148,6 +4202,9 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_EDIT:     keyEdit(c, enter, back); break;
     case SCR_WIFISCAN: keyWifiScan(c, enter, back); break;
     case SCR_ABOUT:    keyAbout(c, enter, back); break;
+    case SCR_LOG:      keyLog(c, enter, back); break;
+    case SCR_LOGENTRY: keyLogEntry(c, enter, back); break;
+    case SCR_LOGLIST:  keyLogList(c, enter, back); break;
   }
 }
 
@@ -4160,7 +4217,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 8;
+  const int N = 9;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -4191,6 +4248,7 @@ void App::keyHome(char c, bool enter, bool back) {
       case 5: screen = SCR_UPDATE; break;
       case 6: setSel = 0; screen = SCR_SETTINGS; break;
       case 7: screen = SCR_ABOUT; break;
+      case 8: logMenuSel = 0; screen = SCR_LOG; break;
     }
   }
 }
@@ -4391,6 +4449,7 @@ void App::keyTrack(char c, bool enter, bool back) {
       }
     }
   }
+  if (c == 'l') { beginQso(); return; }              // log a QSO (radio keeps tracking)
   if (c == 'p') { polarPathValid = false; screen = SCR_POLAR;
                   lastDrawMs = 0; return; }                   // live polar
   if (enter) {  // persist calibration for THIS satellite (per-sat store)
@@ -4401,6 +4460,7 @@ void App::keyTrack(char c, bool enter, bool back) {
 }
 
 void App::keyPolar(char c, bool enter, bool back) {
+  if (c == 'l') { beginQso(); return; }          // log a QSO (radio keeps tracking)
   // Any of back / ENTER / 'p' returns to the tracking screen.
   if (isBack(c, back) || enter || c == 'p') { screen = SCR_TRACK; lastDrawMs = 0; }
 }
@@ -4551,7 +4611,7 @@ void App::keyUpdate(char c, bool enter, bool back) {
 }
 
 void App::keySettings(char c, bool enter, bool back) {
-  const int N = 22;
+  const int N = 23;
   if (isBack(c, back)) { applyRadioFromCfg(); applyRotatorFromCfg();
                          screen = SCR_HOME; return; }
   if (isUp(c))   setSel = (setSel + N - 1) % N;
@@ -4589,7 +4649,10 @@ void App::keySettings(char c, bool enter, bool back) {
       case 16: cfg.satMode = !cfg.satMode; cfg.save(); break;
       case 17: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
                  cfg.catRateMs = (uint32_t)v; cfg.save(); } break;
-      case 18: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
+      case 18: { long v = (long)cfg.catDelayMs + dir*2; if (v < 0) v = 0;
+                 if (v > 200) v = 200; cfg.catDelayMs = (uint16_t)v; cfg.save();
+                 if (rig) rig->setCmdDelay(cfg.catDelayMs); } break;
+      case 19: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
                  for (int i=0;i<5;i++) if (opts[i]==cfg.dimSecs) idx=i;
                  idx = (idx + dir + 5) % 5; cfg.dimSecs = opts[idx];
                  cfg.save(); lastInputMs = millis(); } break;
@@ -4611,11 +4674,11 @@ void App::keySettings(char c, bool enter, bool back) {
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 14: editTarget = 203; editTitle = "GP source URL";
                editBuf = cfg.gpUrl; screen = SCR_EDIT; break;
-      case 19: {
+      case 20: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
       } break;
-      case 20: {
+      case 21: {
         if (!Store::fs().exists(FILE_CFG_BAK)) { setStatus("No backup found"); break; }
         bool ok = copyFile(FILE_CFG_BAK, FILE_CFG);
         copyFile(FILE_FAVS_BAK, FILE_FAVS);
@@ -4625,7 +4688,7 @@ void App::keySettings(char c, bool enter, bool back) {
                   setStatus("Restored from SD"); }
         else setStatus("Restore failed");
       } break;
-      case 21: editTarget = 400; editTitle = "Type ERASE to wipe all";
+      case 22: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
       default: adj(+1); break;
     }
@@ -4633,6 +4696,7 @@ void App::keySettings(char c, bool enter, bool back) {
 }
 
 static Screen editHome(int t) {
+  if (t >= 500) return SCR_LOGENTRY;    // QSO log field edit
   if (t == 340) return SCR_TRACK;       // CTCSS tone override
   if (t >= 400) return SCR_SETTINGS;    // reset confirmation
   if (t >= 320) return SCR_PASSES;      // manual transponder
@@ -4785,6 +4849,18 @@ void App::keyEdit(char c, bool enter, bool back) {
         }
         screen = SCR_PASSES; return;
       }
+      // ---- QSO log fields ----
+      case 500: strncpy(qso.call, editBuf.c_str(), sizeof(qso.call)-1);
+                qso.call[sizeof(qso.call)-1]=0; screen=SCR_LOGENTRY; return;
+      case 501: strncpy(qso.rstS, editBuf.c_str(), sizeof(qso.rstS)-1);
+                qso.rstS[sizeof(qso.rstS)-1]=0; screen=SCR_LOGENTRY; return;
+      case 502: strncpy(qso.rstR, editBuf.c_str(), sizeof(qso.rstR)-1);
+                qso.rstR[sizeof(qso.rstR)-1]=0; screen=SCR_LOGENTRY; return;
+      case 503: strncpy(qso.grid, editBuf.c_str(), sizeof(qso.grid)-1);
+                qso.grid[sizeof(qso.grid)-1]=0; screen=SCR_LOGENTRY; return;
+      case 504: strncpy(qso.notes, editBuf.c_str(), sizeof(qso.notes)-1);
+                qso.notes[sizeof(qso.notes)-1]=0; screen=SCR_LOGENTRY; return;
+
       // ---- factory reset confirmation ----
       case 400: {
         if (editBuf == "ERASE") { factoryReset(); return; }  // formats + reboots
@@ -4893,6 +4969,342 @@ void App::keyAbout(char c, bool enter, bool back) {
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
 
+// ===================== QSO logging =========================================
+static const char* bandFor(double mhz) {
+  if (mhz >= 144 && mhz < 148)   return "2m";
+  if (mhz >= 430 && mhz < 440)   return "70cm";
+  if (mhz >= 50  && mhz < 54)    return "6m";
+  if (mhz >= 28  && mhz < 29.7)  return "10m";
+  if (mhz >= 1240 && mhz < 1300) return "23cm";
+  return "";
+}
+static void adifField(String& out, const char* name, const String& val) {
+  if (!val.length()) return;
+  out += "<"; out += name; out += ":"; out += String(val.length()); out += ">";
+  out += val; out += " ";
+}
+
+static void writeQsoCsv(File& f, const PendingQso& q) {
+  auto cl = [](const char* s) {
+    String o = s; o.replace(",", " "); o.replace("\n", " "); o.replace("\r", " ");
+    return o;
+  };
+  String notes = q.notes; notes.replace("\n", " "); notes.replace("\r", " ");
+  f.printf("%lu,%s,%s,%s,%lu,%lu,%s,%s,%s,%s,%s\n",
+           (unsigned long)q.utc, cl(q.call).c_str(), cl(q.sat).c_str(),
+           cl(q.mode).c_str(), (unsigned long)q.dlHz, (unsigned long)q.ulHz,
+           cl(q.rstS).c_str(), cl(q.rstR).c_str(), cl(q.myGrid).c_str(),
+           cl(q.grid).c_str(), notes.c_str());
+}
+
+static bool parseQsoCsv(const String& line, PendingQso& q) {
+  String f[11]; int n = 0, start = 0;
+  for (int i = 0; i < (int)line.length() && n < 10; ++i)
+    if (line[i] == ',') { f[n++] = line.substring(start, i); start = i + 1; }
+  f[n++] = line.substring(start);
+  if (n < 11) return false;
+  memset(&q, 0, sizeof(q));
+  q.utc = strtoul(f[0].c_str(), nullptr, 10);
+  strncpy(q.call,   f[1].c_str(),  sizeof(q.call)-1);
+  strncpy(q.sat,    f[2].c_str(),  sizeof(q.sat)-1);
+  strncpy(q.mode,   f[3].c_str(),  sizeof(q.mode)-1);
+  q.dlHz = strtoul(f[4].c_str(), nullptr, 10);
+  q.ulHz = strtoul(f[5].c_str(), nullptr, 10);
+  strncpy(q.rstS,   f[6].c_str(),  sizeof(q.rstS)-1);
+  strncpy(q.rstR,   f[7].c_str(),  sizeof(q.rstR)-1);
+  strncpy(q.myGrid, f[8].c_str(),  sizeof(q.myGrid)-1);
+  strncpy(q.grid,   f[9].c_str(),  sizeof(q.grid)-1);
+  strncpy(q.notes,  f[10].c_str(), sizeof(q.notes)-1);
+  return true;
+}
+
+// Snapshot the auto fields (time, sat, freqs, mode, my grid) at the instant the
+// operator hits 'l', then open the entry screen. Radio control keeps running.
+void App::beginQso() {
+  logReturn = screen;
+  memset(&qso, 0, sizeof(qso));
+  strncpy(qso.rstS, "59", sizeof(qso.rstS) - 1);
+  strncpy(qso.rstR, "59", sizeof(qso.rstR) - 1);
+  qso.utc = timeIsSet() ? (uint32_t)nowUtc() : 0;
+  String mg = loc.toGrid(loc.obs().lat, loc.obs().lon);
+  strncpy(qso.myGrid, mg.c_str(), sizeof(qso.myGrid) - 1);
+  SatEntry* s = activeSat();
+  if (s) {
+    strncpy(qso.sat, s->name, sizeof(qso.sat) - 1);
+    if (activeTxCount > 0) {
+      Transponder& t = activeTx[curTx];
+      strncpy(qso.mode, t.isLinear ? "SSB" : (t.mode[0] ? t.mode : "FM"),
+              sizeof(qso.mode) - 1);
+      if (timeIsSet()) {
+        pred.setSite(loc.obs()); pred.setSat(*s);
+        LiveLook L = pred.look(nowUtc());
+        struct timeval tv; gettimeofday(&tv, nullptr);
+        L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6);
+        uint32_t dlOp, ulOp, rx, tx;
+        Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
+        Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+        qso.dlHz = rx; qso.ulHz = tx;
+      }
+    }
+  }
+  logSel = 0; logEditIdx = -1;
+  screen = SCR_LOGENTRY;
+}
+
+bool App::saveQso() {
+  bool isNew = !Store::fs().exists(FILE_LOG);
+  File f = Store::fs().open(FILE_LOG, "a");
+  if (!f) return false;
+  if (isNew) f.print("utc,call,sat,mode,dl,ul,rsts,rstr,mygrid,grid,notes\n");
+  writeQsoCsv(f, qso);
+  f.close();
+  return true;
+}
+
+int App::qsoCount() {
+  if (!Store::fs().exists(FILE_LOG)) return 0;
+  File f = Store::fs().open(FILE_LOG, "r");
+  if (!f) return 0;
+  int n = 0;
+  while (f.available()) {
+    String l = f.readStringUntil('\n'); l.trim();
+    if (l.length() && !l.startsWith("utc,")) n++;
+  }
+  f.close();
+  return n;
+}
+
+bool App::exportAdif() {
+  File in = Store::fs().open(FILE_LOG, "r");
+  if (!in) return false;
+  File out = Store::fs().open(FILE_ADIF, "w");
+  if (!out) { in.close(); return false; }
+  out.print("CardSat ADIF export\n<ADIF_VER:5>3.1.4 <PROGRAMID:7>CardSat <EOH>\n");
+  while (in.available()) {
+    String line = in.readStringUntil('\n');
+    while (line.length() && (line[line.length()-1] == '\r' ||
+                             line[line.length()-1] == '\n'))
+      line.remove(line.length() - 1);
+    if (!line.length() || line.startsWith("utc,")) continue;
+    String f[11]; int n = 0, start = 0;
+    for (int i = 0; i < (int)line.length() && n < 10; ++i)
+      if (line[i] == ',') { f[n++] = line.substring(start, i); start = i + 1; }
+    f[n++] = line.substring(start);             // remainder = notes
+    if (n < 11) continue;
+    uint32_t utc = strtoul(f[0].c_str(), nullptr, 10);
+    time_t tt = (time_t)utc; struct tm* g = gmtime(&tt);
+    char d[9] = "", tm6[7] = "";
+    if (g) { strftime(d, sizeof(d), "%Y%m%d", g); strftime(tm6, sizeof(tm6), "%H%M%S", g); }
+    double dlM = strtoul(f[4].c_str(), nullptr, 10) / 1e6;
+    double ulM = strtoul(f[5].c_str(), nullptr, 10) / 1e6;
+    String rec;
+    adifField(rec, "CALL", f[1]);
+    if (utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
+    adifField(rec, "MODE", f[3]);
+    adifField(rec, "SAT_NAME", f[2]);
+    adifField(rec, "PROP_MODE", "SAT");
+    if (ulM > 0) { adifField(rec, "FREQ", String(ulM, 4)); adifField(rec, "BAND", bandFor(ulM)); }
+    if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
+    adifField(rec, "RST_SENT", f[6]);
+    adifField(rec, "RST_RCVD", f[7]);
+    adifField(rec, "GRIDSQUARE", f[9]);
+    adifField(rec, "MY_GRIDSQUARE", f[8]);
+    adifField(rec, "COMMENT", f[10]);
+    rec += "<EOR>\n";
+    out.print(rec);
+  }
+  in.close(); out.close();
+  return true;
+}
+
+void App::drawLog() {
+  header("Log");
+  canvas.setTextSize(1);
+  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF" };
+  for (int i = 0; i < 3; ++i) {
+    int y = 26 + i*14;
+    if (i == logMenuSel) { canvas.fillRect(0, y-2, 240, 13, CL_GREEN);
+                           canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    else                   canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(items[i]);
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 26 + 3*14 + 6);
+  canvas.printf("%d logged  (qso_log.csv)", qsoCount());
+  footer("; / . move  ENT  ` back");
+}
+
+void App::keyLog(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_HOME; return; }
+  const int N = 3;
+  if (isUp(c))   logMenuSel = (logMenuSel + N - 1) % N;
+  if (isDown(c)) logMenuSel = (logMenuSel + 1) % N;
+  if (enter) {
+    if (logMenuSel == 0) beginQso();
+    else if (logMenuSel == 1) { loadLog(); screen = SCR_LOGLIST; }
+    else {
+      bool ok = exportAdif();
+      setStatus(ok ? "Exported qso_log.adi" : "No log to export");
+    }
+  }
+}
+
+void App::drawLogEntry() {
+  header(logEditIdx >= 0 ? "Edit QSO" : "Log QSO");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  char tb[24];
+  if (qso.utc) { time_t tt = (time_t)qso.utc; struct tm* g = gmtime(&tt);
+                 strftime(tb, sizeof(tb), "%m-%d %H:%M:%SZ", g); }
+  else strcpy(tb, "(no clock)");
+  canvas.setCursor(4, 20); canvas.printf("%s  %.10s", tb, qso.sat);
+  canvas.setCursor(4, 30); canvas.printf("%s  DL%.3f UL%.3f",
+                                         qso.mode, qso.dlHz/1e6, qso.ulHz/1e6);
+  canvas.setCursor(4, 40); canvas.printf("MyGrid %s", qso.myGrid);
+  const char* labels[] = { "Call", "RST S", "RST R", "Grid", "Notes" };
+  const char* vals[]   = { qso.call, qso.rstS, qso.rstR, qso.grid, qso.notes };
+  for (int i = 0; i < 5; ++i) {
+    int y = 54 + i*12;
+    bool sel = (i == logSel);
+    if (sel) { canvas.fillRect(0, y-1, 240, 11, CL_BLUE);
+               canvas.setTextColor(CL_WHITE, CL_BLUE); }
+    else        canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(4, y); canvas.printf("%-6s %.28s", labels[i], vals[i]);
+  }
+  footer(logEditIdx >= 0 ? "ENT edit  s save  x del  ` back"
+                         : "ENT edit  s save  ` cancel");
+}
+
+void App::keyLogEntry(char c, bool enter, bool back) {
+  if (c != 'x') logDelArm = false;             // any other key disarms delete
+  if (isBack(c, back)) { logEditIdx = -1; screen = logReturn; lastDrawMs = 0; return; }
+  if (isUp(c))   logSel = (logSel + 5 - 1) % 5;
+  if (isDown(c)) logSel = (logSel + 1) % 5;
+  if (c == 'x' && logEditIdx >= 0) {           // delete this entry (two-press)
+    if (!logDelArm) { logDelArm = true; setStatus("Press x again to delete"); return; }
+    bool ok = rewriteLog(logFirstIdx + logEditIdx, nullptr, true);
+    setStatus(ok ? "QSO deleted" : "Delete failed");
+    logDelArm = false; logEditIdx = -1;
+    if (ok) loadLog();
+    screen = logReturn; lastDrawMs = 0; return;
+  }
+  if (c == 's') {
+    if (!qso.call[0]) { setStatus("Call required to log"); return; }
+    bool ok = (logEditIdx >= 0) ? rewriteLog(logFirstIdx + logEditIdx, &qso, false)
+                                : saveQso();
+    setStatus(ok ? (logEditIdx >= 0 ? "QSO updated" : "QSO logged") : "Log write failed");
+    if (ok && logReturn == SCR_LOGLIST) loadLog();
+    logEditIdx = -1;
+    screen = logReturn; lastDrawMs = 0; return;
+  }
+  if (enter) {
+    switch (logSel) {
+      case 0: editTarget = 500; editTitle = "Callsign";   editBuf = qso.call; break;
+      case 1: editTarget = 501; editTitle = "RST sent";   editBuf = qso.rstS; break;
+      case 2: editTarget = 502; editTitle = "RST rcvd";   editBuf = qso.rstR; break;
+      case 3: editTarget = 503; editTitle = "Their grid"; editBuf = qso.grid; break;
+      case 4: editTarget = 504; editTitle = "Notes";      editBuf = qso.notes; break;
+    }
+    screen = SCR_EDIT;
+  }
+}
+
+void App::loadLog() {
+  logRecN = 0;
+  int total = qsoCount();
+  logFirstIdx = (total > LOG_VIEW_MAX) ? total - LOG_VIEW_MAX : 0;
+  logListSel = 0;
+  if (!Store::fs().exists(FILE_LOG)) return;
+  File f = Store::fs().open(FILE_LOG, "r");
+  if (!f) return;
+  int idx = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    while (line.length() && (line[line.length()-1] == '\r' || line[line.length()-1] == '\n'))
+      line.remove(line.length() - 1);
+    if (!line.length() || line.startsWith("utc,")) continue;
+    if (idx >= logFirstIdx && logRecN < LOG_VIEW_MAX)
+      if (parseQsoCsv(line, logRecs[logRecN])) logRecN++;
+    idx++;
+  }
+  f.close();
+  if (logRecN > 0) logListSel = logRecN - 1;       // default to the newest
+}
+
+// Edit (rec, del=false) or delete (del=true) one data row by file index, by
+// streaming the CSV through a temp file -- no full-RAM load, no data loss.
+bool App::rewriteLog(int fileIdx, const PendingQso* rec, bool del) {
+  File in = Store::fs().open(FILE_LOG, "r");
+  if (!in) return false;
+  const char* tmp = "/CardSat/qso_log.tmp";
+  File out = Store::fs().open(tmp, "w");
+  if (!out) { in.close(); return false; }
+  int idx = 0;
+  while (in.available()) {
+    String line = in.readStringUntil('\n');
+    while (line.length() && (line[line.length()-1] == '\r' || line[line.length()-1] == '\n'))
+      line.remove(line.length() - 1);
+    if (line.startsWith("utc,")) { out.print(line); out.print("\n"); continue; }
+    if (!line.length()) continue;
+    if (idx == fileIdx) {
+      if (!del && rec) writeQsoCsv(out, *rec);       // replace; delete = skip
+    } else {
+      out.print(line); out.print("\n");
+    }
+    idx++;
+  }
+  in.close(); out.close();
+  Store::fs().remove(FILE_LOG);
+  Store::fs().rename(tmp, FILE_LOG);
+  return true;
+}
+
+void App::drawLogList() {
+  header("QSO Log");
+  canvas.setTextSize(1);
+  if (logRecN == 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("No QSOs logged yet.");
+    footer("` back");
+    return;
+  }
+  const int VIS = 8;
+  int top = logListSel - VIS/2;
+  if (top > logRecN - VIS) top = logRecN - VIS;
+  if (top < 0) top = 0;
+  for (int r = 0; r < VIS && top + r < logRecN; ++r) {
+    int i = top + r, y = 20 + r*12;
+    PendingQso& q = logRecs[i];
+    bool sel = (i == logListSel);
+    if (sel) { canvas.fillRect(0, y-1, 240, 11, CL_BLUE);
+               canvas.setTextColor(CL_WHITE, CL_BLUE); }
+    else        canvas.setTextColor(CL_CYAN, CL_BLACK);
+    char tb[16];
+    if (q.utc) { time_t tt=(time_t)q.utc; struct tm* g=gmtime(&tt);
+                 strftime(tb, sizeof(tb), "%m-%d %H:%MZ", g); }
+    else strcpy(tb, "--");
+    canvas.setCursor(4, y);
+    canvas.printf("%s %-9.9s %.8s", tb, q.call[0] ? q.call : "(nocall)", q.sat);
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 116); canvas.printf("%d/%d", logListSel + 1, logRecN);
+  footer("; / . move  ENT edit  ` back");
+}
+
+void App::keyLogList(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_LOG; return; }
+  if (logRecN == 0) return;
+  if (isUp(c))   logListSel = (logListSel + logRecN - 1) % logRecN;
+  if (isDown(c)) logListSel = (logListSel + 1) % logRecN;
+  if (enter) {
+    qso = logRecs[logListSel];
+    logEditIdx = logListSel;
+    logReturn = SCR_LOGLIST;
+    logSel = 0; logDelArm = false;
+    screen = SCR_LOGENTRY;
+  }
+}
+
 void App::footer(const String& t) {
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setTextSize(1);
@@ -4918,6 +5330,9 @@ void App::draw() {
     case SCR_EDIT:     drawEdit(); break;
     case SCR_WIFISCAN: drawWifiScan(); break;
     case SCR_ABOUT:    drawAbout(); break;
+    case SCR_LOG:      drawLog(); break;
+    case SCR_LOGENTRY: drawLogEntry(); break;
+    case SCR_LOGLIST:  drawLogList(); break;
   }
   // transient status
   if (status.length() && millis() < statusUntil) {
@@ -4949,11 +5364,11 @@ void App::drawHome() {
   header("CardSat");
   const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
                           "Track (sel)", "Location", "Update GP/Freq", "Settings",
-                          "About / diagnostics" };
+                          "About / diagnostics", "Log" };
   canvas.setTextSize(1);
-  for (int i = 0; i < 8; ++i) {
-    int y = 19 + i*12;
-    if (i == homeSel) { canvas.fillRect(0, y-2, 240, 12, CL_GREEN);
+  for (int i = 0; i < 9; ++i) {
+    int y = 18 + i*11;
+    if (i == homeSel) { canvas.fillRect(0, y-2, 240, 11, CL_GREEN);
                         canvas.setTextColor(CL_BLACK, CL_GREEN); }
     else                canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(6, y);
@@ -5441,7 +5856,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header("Settings");
   canvas.setTextSize(1);
-  const int N = 22;
+  const int N = 23;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -5470,12 +5885,13 @@ void App::drawSettings() {
     rows[17] = String("CAT rate: ") + String(cfg.catRateMs) + " ms";
     if (eff > cfg.catRateMs) rows[17] += " (min " + String(eff) + ")";
   }
-  rows[18] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
+  rows[18] = String("CAT delay: ") + String(cfg.catDelayMs) + " ms";
+  rows[19] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
              : (cfg.dimSecs % 60 == 0) ? String(cfg.dimSecs / 60) + " min"
                                        : String(cfg.dimSecs) + " s");
-  rows[19] = String("Backup config+favs -> SD");
-  rows[20] = String("Restore config+favs");
-  rows[21] = String("Reset all data (erase)");
+  rows[20] = String("Backup config+favs -> SD");
+  rows[21] = String("Restore config+favs");
+  rows[22] = String("Reset all data (erase)");
   const int VIS = 9;
   int scroll = (setSel >= VIS) ? (setSel - VIS + 1) : 0;
   for (int v = 0; v < VIS && (scroll + v) < N; ++v) {

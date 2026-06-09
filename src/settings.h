@@ -31,6 +31,7 @@ struct Settings {
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
   bool     satMode    = false;
   uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
+  uint16_t catDelayMs = 70;    // pause after each CAT command before the next (ms)
   // Tracking
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS

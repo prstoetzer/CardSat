@@ -97,6 +97,7 @@ bool CivRig::sendFrame(const uint8_t* payload, size_t len) {
   _stream->write(buf, n);
   _stream->flush();
   drainEcho();            // swallow our own echo + radio's OK/NG (0xFB/0xFA)
+  if (cmdDelayMs) delay(cmdDelayMs);   // CAT Delay: pause before the next command
   return true;
 }
 

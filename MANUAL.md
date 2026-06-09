@@ -190,6 +190,11 @@ not shown in any footer.
      **500 ms**, adjustable in 10 ms steps). A soft floor keeps the *effective*
      rate no faster than the CAT baud can service one update; the row shows
      `(min N)` when your setting is being clamped.
+   - **CAT delay** — how long to pause *after each CAT command* before sending the
+     next one to the radio (default **70 ms**, 0–200 ms in 2 ms steps). Raise it if
+     an older or slow radio drops or mis-handles back-to-back commands; lower it
+     toward 0 for the fastest tuning on a radio that keeps up. CI-V (Icom) only at
+     present.
 2. **Location** — set your position one of three ways:
    - `e` latitude, `o` longitude, `a` altitude; or
    - `g` Maidenhead grid; or
@@ -221,14 +226,40 @@ or **DEL** always steps back.
 ### Home
 
 A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
-Location · Update GP/Freq · Settings · About / diagnostics.** The currently
-selected satellite is shown at the bottom. `;`/`.` move, ENTER selects.
+Location · Update GP/Freq · Settings · About / diagnostics · Log.** The currently
+selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 
 ### About / diagnostics
 
 Firmware version and build date, storage backend (microSD or internal flash),
 GP catalog size and freshest element age, WiFi/IP, battery level, free heap, and
 uptime. `` ` `` or ENTER returns home.
+
+### Logging QSOs (Log)
+
+Press `l` on the **Track** or **Polar** screen to log the contact you're working —
+radio control keeps running while you type. CardSat snapshots the UTC time,
+satellite, mode, and the current uplink/downlink frequencies plus your Maidenhead
+grid, then lets you fill in:
+
+- **Call** — the station worked (required to save).
+- **RST S / RST R** — report sent and received (default `59`).
+- **Grid** — the other station's grid (optional; grids are the point of sat ops).
+- **Notes** — free text.
+
+`;`/`.` move between fields, ENTER edits the selected one, `s` saves, `` ` ``
+cancels. QSOs are appended to **`/CardSat/qso_log.csv`** (one row each; `notes` is
+the last column, so commas there are fine).
+
+The **Log** item on the main menu offers **New QSO entry**, **View / edit log**,
+and **Export to ADIF** (writes `/CardSat/qso_log.adi` for upload to LoTW/eQSL or
+import into your main logger).
+
+**View / edit log** is a scrollable list of recent contacts (`;`/`.` to move).
+Open one with ENTER to correct any field and `s` to save, or press `x` twice to
+delete it; changes are written straight back to the CSV. The most recent **120**
+QSOs are available on the device — the complete log always lives in
+`/CardSat/qso_log.csv`, which you can also read or edit on a computer.
 
 ### Satellites
 
@@ -312,6 +343,8 @@ Controls:
 - `m` — switch between **TUNE** and **CAL** modes.
 - `d` — cycle the **Doppler tune mode** (linear birds): FULL One True Rule →
   downlink-only → uplink-only → hold-both. The passband line shows the active mode.
+- `l` — **Log QSO** (also on the Polar screen): capture the contact you're working.
+  Radio control keeps running while you fill in the entry.
 - `t` — cycle to the next transponder.
 - `c` — set the **CTCSS/PL tone** for this satellite (numeric entry: a tone in
   Hz, `0` to force it off, or blank to revert to the built-in default).
@@ -373,6 +406,7 @@ actions.
 | VFO Type | `,`/`/` or ENTER toggle *Main Up/Sub Dn* ↔ *Main Dn/Sub Up* |
 | Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
 | CAT rate | `,`/`/` adjust the CAT update period in 10 ms steps (default 500 ms; soft-floored to what the CAT baud can service) |
+| CAT delay | `,`/`/` adjust the pause after each command, 0–200 ms in 2 ms steps (default 70 ms; CI-V/Icom only) |
 | Screen sleep | `,`/`/` cycle off / 30 s / 1 min / 2 min / 5 min — blanks the backlight after that idle time |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
 | Restore config+favs | ENTER → restore them from the backup files |
@@ -889,7 +923,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Passes** | `;`/`.` select · `d` detail plot · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual window |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · ENTER save cal |
+| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `l` log QSO · ENTER save cal |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
 | **Track · CAL** | `,`/`/` downlink ∓ · `;`/`.` uplink ∓ · `s` step (10/100/1k) · `x` zero |
 | **Polar** | `p`/ENTER/`` ` `` back to track |

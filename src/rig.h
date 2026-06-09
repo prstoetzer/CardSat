@@ -27,6 +27,13 @@ public:
   virtual void begin(uint32_t baud, int uartNum, int rxPin, int txPin) = 0;
   virtual bool ready() const = 0;
 
+  // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
+  // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
+  void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
+protected:
+  uint16_t cmdDelayMs = 70;
+public:
+
   // Independent downlink (Sub/RX) and uplink (Main/TX) control.
   virtual bool setMainFreq(uint32_t hz) = 0;   // uplink (TX)
   virtual bool setSubFreq (uint32_t hz) = 0;   // downlink (RX)

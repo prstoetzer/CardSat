@@ -1720,12 +1720,18 @@ void App::keyAbout(char c, bool enter, bool back) {
 }
 
 // ===================== QSO logging =========================================
-static const char* bandFor(double mhz) {
-  if (mhz >= 144 && mhz < 148)   return "2m";
-  if (mhz >= 430 && mhz < 440)   return "70cm";
-  if (mhz >= 50  && mhz < 54)    return "6m";
-  if (mhz >= 28  && mhz < 29.7)  return "10m";
-  if (mhz >= 1240 && mhz < 1300) return "23cm";
+static const char* bandFor(double mhz) {            // ADIF 3.1.7 Band enumeration
+  if (mhz >= 28    && mhz <= 29.7)  return "10m";
+  if (mhz >= 50    && mhz <= 54)    return "6m";
+  if (mhz >= 144   && mhz <= 148)   return "2m";
+  if (mhz >= 222   && mhz <= 225)   return "1.25m";
+  if (mhz >= 420   && mhz <= 450)   return "70cm";
+  if (mhz >= 902   && mhz <= 928)   return "33cm";
+  if (mhz >= 1240  && mhz <= 1300)  return "23cm";
+  if (mhz >= 2300  && mhz <= 2450)  return "13cm";
+  if (mhz >= 3300  && mhz <= 3500)  return "9cm";
+  if (mhz >= 5650  && mhz <= 5925)  return "6cm";
+  if (mhz >= 10000 && mhz <= 10500) return "3cm";
   return "";
 }
 static void adifField(String& out, const char* name, const String& val) {
@@ -1917,7 +1923,17 @@ bool App::exportAdif() {
   if (!in) return false;
   File out = Store::fs().open(FILE_ADIF, "w");
   if (!out) { in.close(); return false; }
-  out.print("CardSat ADIF export\n<ADIF_VER:5>3.1.4 <PROGRAMID:7>CardSat <EOH>\n");
+  out.print("CardSat ADIF export\n");
+  out.print("<ADIF_VER:5>3.1.7 <PROGRAMID:7>CardSat ");
+  { String ver = FW_VERSION;                          // <PROGRAMVERSION:len>value
+    out.print("<PROGRAMVERSION:"); out.print(ver.length()); out.print(">");
+    out.print(ver); out.print(" "); }
+  if (timeIsSet()) {                                  // <CREATED_TIMESTAMP:15>YYYYMMDD HHMMSS
+    time_t now = time(nullptr); struct tm* g = gmtime(&now);
+    char ts[16]; strftime(ts, sizeof(ts), "%Y%m%d %H%M%S", g);
+    out.print("<CREATED_TIMESTAMP:15>"); out.print(ts); out.print(" ");
+  }
+  out.print("<EOH>\n");
   while (in.available()) {
     String line = in.readStringUntil('\n');
     while (line.length() && (line[line.length()-1] == '\r' ||

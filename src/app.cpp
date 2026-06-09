@@ -1623,7 +1623,7 @@ void App::drawAbout() {
   {
     int b = M5.Power.getBatteryLevel();
     String s = String("Battery: ") + (b < 0 ? String("n/a") : String(b) + "%");
-    if (M5.Power.isCharging()) s += " (charging)";
+    if ((int)M5.Power.isCharging() == 1) s += " (charging)";  // 1=charging; ignore "unknown" (2)
     line(s);
   }
   line(String("Free heap: ") + String(ESP.getFreeHeap() / 1024) + " KB");
@@ -1707,11 +1707,15 @@ void App::drawHome() {
     canvas.setCursor(6, y);
     canvas.print(items[i]);
   }
+  footer("; / . move  ENT");
+  // Selected satellite: bottom-right of the footer row, truncated to fit and kept
+  // clear of the key hint on the left.
   SatEntry* s = activeSat();
-  canvas.setTextColor(CL_CYAN, CL_BLACK);
-  canvas.setCursor(6, 116);
-  canvas.print(s ? String("Sel: ") + s->name : String("Sel: none"));
-  footer("; / . move   ENT select");
+  String sel = s ? s->name : String("no sat");
+  if (sel.length() > 18) sel = sel.substring(0, 17) + "~";
+  canvas.setTextColor(s ? CL_CYAN : CL_GREY, CL_BLACK);
+  canvas.setCursor(240 - 2 - (int)sel.length() * 6, 127);
+  canvas.print(sel);
 }
 
 void App::drawSchedule() {

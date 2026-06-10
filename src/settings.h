@@ -12,6 +12,13 @@ enum VfoType : uint8_t {
   VFO_MAIN_DOWN_SUB_UP = 1,   // uplink on SUB,  downlink on MAIN
 };
 
+// Rotator transport: a directly-attached GS-232 controller, or a Hamlib
+// rotctld server reached over TCP (CardSat is the client).
+enum RotType : uint8_t {
+  ROT_GS232 = 0,   // GS-232A/B via the SC16IS750 I2C->UART bridge (default)
+  ROT_NET   = 1,   // rotctld (Hamlib "NET rotctl") over TCP
+};
+
 struct Settings {
   // WiFi
   char     ssid[33] = "";
@@ -41,8 +48,11 @@ struct Settings {
   // Calibration (persisted oscillator offsets, Hz)
   int32_t  calDlHz = 0;
   int32_t  calUlHz = 0;
-  // Rotator (GS-232 az/el over an I2C->UART bridge)
+  // Rotator (GS-232 over an I2C->UART bridge, or rotctld over TCP)
   bool     rotEnable   = false;
+  uint8_t  rotType     = ROT_GS232;  // GS-232 (bridge) or rotctld (network)
+  char     rotHost[40] = "";         // rotctld server host/IP (rotType=ROT_NET)
+  uint16_t rotPort     = 4533;       // rotctld TCP port (Hamlib default 4533)
   uint32_t rotBaud     = 9600;   // GS-232 serial (commonly 9600)
   int16_t  rotAzOff    = 0;      // deg added to commanded azimuth (alignment)
   int16_t  rotElOff    = 0;      // deg added to commanded elevation

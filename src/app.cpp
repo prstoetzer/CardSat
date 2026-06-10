@@ -180,7 +180,7 @@ void App::applyRotatorFromCfg() {
   rotOut = false; rotParked = false;
   lastAzCmd = lastElCmd = -999.0f;
   if (!cfg.rotEnable) return;          // rotator disabled in Settings
-  rot = makeRotator(cfg.rotBaud);      // GS-232 over the I2C->UART bridge
+  rot = makeRotator(cfg.rotType, cfg.rotBaud, cfg.rotHost, cfg.rotPort);
   if (rot) rot->begin();
 }
 
@@ -1157,15 +1157,20 @@ void App::keyTrack(char c, bool enter, bool back) {
   }
   if (c == 'o') {                                    // toggle rotator pointing
     if (!cfg.rotEnable || !rot) setStatus("Rotator: enable in Settings");
-    else if (!rot->ready())     setStatus("Rotator: bridge not found");
     else {
-      rotOut = !rotOut;
-      if (rotOut) {
-        lastRotMs = 0; lastAzCmd = lastElCmd = -999.0f; rotParked = false;
-        setStatus("Rotator ON");
-      } else {
-        rot->point((float)cfg.rotParkAz, (float)cfg.rotParkEl);
-        rotParked = true; setStatus("Rotator OFF (parked)");
+      if (!rot->ready()) rot->begin();   // (re)establish the link/bridge on demand
+      if (!rot->ready())
+        setStatus(cfg.rotType == ROT_NET ? "Rotator: no rotctld link"
+                                         : "Rotator: bridge not found");
+      else {
+        rotOut = !rotOut;
+        if (rotOut) {
+          lastRotMs = 0; lastAzCmd = lastElCmd = -999.0f; rotParked = false;
+          setStatus("Rotator ON");
+        } else {
+          rot->point((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+          rotParked = true; setStatus("Rotator OFF (parked)");
+        }
       }
     }
   }
@@ -1331,7 +1336,7 @@ void App::keyUpdate(char c, bool enter, bool back) {
 }
 
 void App::keySettings(char c, bool enter, bool back) {
-  const int N = 24;
+  const int N = 27;
   if (isBack(c, back)) { applyRadioFromCfg(); applyRotatorFromCfg();
                          screen = SCR_HOME; return; }
   if (isUp(c))   setSel = (setSel + N - 1) % N;
@@ -1351,28 +1356,32 @@ void App::keySettings(char c, bool enter, bool back) {
       case 3: cfg.minPassEl = constrain(cfg.minPassEl + dir, 0, 30); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 9: { uint32_t bs[] = {1200,4800,9600};
+      case 9: cfg.rotType = (cfg.rotType == ROT_NET) ? ROT_GS232 : ROT_NET;
+              cfg.save(); applyRotatorFromCfg(); break;
+      case 11: { long p = (long)cfg.rotPort + dir; if (p < 1) p = 65535;
+                 if (p > 65535) p = 1; cfg.rotPort = (uint16_t)p; cfg.save(); } break;
+      case 12: { uint32_t bs[] = {1200,4800,9600};
                 int idx=2; for (int i=0;i<3;i++) if (bs[i]==cfg.rotBaud) idx=i;
                 idx = (idx + dir + 3) % 3; cfg.rotBaud = bs[idx];
                 cfg.save(); applyRotatorFromCfg(); } break;
-      case 10: cfg.rotDeadband = constrain((int)cfg.rotDeadband + dir, 1, 15);
+      case 13: cfg.rotDeadband = constrain((int)cfg.rotDeadband + dir, 1, 15);
                cfg.save(); break;
-      case 11: { int a = (int)cfg.rotParkAz + dir*5; while (a<0) a+=360; a%=360;
+      case 14: { int a = (int)cfg.rotParkAz + dir*5; while (a<0) a+=360; a%=360;
                  cfg.rotParkAz = (uint16_t)a; cfg.save(); } break;
-      case 12: cfg.rotAzOff = constrain((int)cfg.rotAzOff + dir, -180, 180);
+      case 15: cfg.rotAzOff = constrain((int)cfg.rotAzOff + dir, -180, 180);
                cfg.save(); break;
-      case 13: cfg.rotElOff = constrain((int)cfg.rotElOff + dir, -30, 30);
+      case 16: cfg.rotElOff = constrain((int)cfg.rotElOff + dir, -30, 30);
                cfg.save(); break;
-      case 15: cfg.vfoType = (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN)
+      case 18: cfg.vfoType = (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN)
                              ? VFO_MAIN_DOWN_SUB_UP : VFO_MAIN_UP_SUB_DOWN;
                cfg.save(); break;
-      case 16: cfg.satMode = !cfg.satMode; cfg.save(); break;
-      case 17: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
+      case 19: cfg.satMode = !cfg.satMode; cfg.save(); break;
+      case 20: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
                  cfg.catRateMs = (uint32_t)v; cfg.save(); } break;
-      case 18: { long v = (long)cfg.catDelayMs + dir*2; if (v < 0) v = 0;
+      case 21: { long v = (long)cfg.catDelayMs + dir*2; if (v < 0) v = 0;
                  if (v > 200) v = 200; cfg.catDelayMs = (uint16_t)v; cfg.save();
                  if (rig) rig->setCmdDelay(cfg.catDelayMs); } break;
-      case 19: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
+      case 22: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
                  for (int i=0;i<5;i++) if (opts[i]==cfg.dimSecs) idx=i;
                  idx = (idx + dir + 5) % 5; cfg.dimSecs = opts[idx];
                  cfg.save(); lastInputMs = millis(); } break;
@@ -1392,15 +1401,19 @@ void App::keySettings(char c, bool enter, bool back) {
               break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 14: editTarget = 203; editTitle = "GP source URL";
+      case 10: editTarget = 205; editTitle = "Rotctld host (IP)";
+               editBuf = cfg.rotHost; screen = SCR_EDIT; break;
+      case 11: editTarget = 206; editTitle = "Rotctld port";
+               editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
+      case 17: editTarget = 203; editTitle = "GP source URL";
                editBuf = cfg.gpUrl; screen = SCR_EDIT; break;
-      case 20: editTarget = 204; editTitle = "My callsign";
+      case 23: editTarget = 204; editTitle = "My callsign";
                editBuf = cfg.myCall; screen = SCR_EDIT; break;
-      case 21: {
+      case 24: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
       } break;
-      case 22: {
+      case 25: {
         if (!Store::fs().exists(FILE_CFG_BAK)) { setStatus("No backup found"); break; }
         bool ok = copyFile(FILE_CFG_BAK, FILE_CFG);
         copyFile(FILE_FAVS_BAK, FILE_FAVS);
@@ -1410,7 +1423,7 @@ void App::keySettings(char c, bool enter, bool back) {
                   setStatus("Restored from SD"); }
         else setStatus("Restore failed");
       } break;
-      case 23: editTarget = 400; editTitle = "Type ERASE to wipe all";
+      case 26: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
       default: adj(+1); break;
     }
@@ -1454,6 +1467,15 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;
       case 204: strncpy(cfg.myCall, editBuf.c_str(), sizeof(cfg.myCall)-1);
                 cfg.myCall[sizeof(cfg.myCall)-1] = 0; break;
+
+      // ---- rotctld (network rotator) host / port ----
+      case 205: strncpy(cfg.rotHost, editBuf.c_str(), sizeof(cfg.rotHost)-1);
+                cfg.rotHost[sizeof(cfg.rotHost)-1] = 0;
+                cfg.save(); applyRotatorFromCfg();
+                screen = SCR_SETTINGS; setStatus("Saved"); return;
+      case 206: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
+                  cfg.rotPort = (uint16_t)p; cfg.save(); applyRotatorFromCfg();
+                  screen = SCR_SETTINGS; setStatus("Saved"); return; }
 
       // ---- mutual co-visibility vs a DX grid ----
       case 330: computeMutual(editBuf); return;
@@ -2712,7 +2734,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header("Settings");
   canvas.setTextSize(1);
-  const int N = 24;
+  const int N = 27;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -2723,32 +2745,39 @@ void App::drawSettings() {
   rows[6]  = String("Save & test WiFi");
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
-  rows[9]  = String("Rot baud: ") + String(cfg.rotBaud);
-  rows[10] = String("Rot deadband: ") + String(cfg.rotDeadband) + " deg";
-  rows[11] = String("Rot park az: ") + String(cfg.rotParkAz) + " deg";
-  rows[12] = String("Rot Az offset: ") + String(cfg.rotAzOff) + " deg";
-  rows[13] = String("Rot El offset: ") + String(cfg.rotElOff) + " deg";
+  rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_NET ? "rotctld (net)" : "GS-232");
+  {
+    String h = cfg.rotHost[0] ? String(cfg.rotHost) : String("(not set)");
+    if (h.length() > 18) h = "..." + h.substring(h.length() - 15);
+    rows[10] = String("Rotctld host: ") + h;
+  }
+  rows[11] = String("Rotctld port: ") + String(cfg.rotPort);
+  rows[12] = String("Rot baud: ") + String(cfg.rotBaud);
+  rows[13] = String("Rot deadband: ") + String(cfg.rotDeadband) + " deg";
+  rows[14] = String("Rot park az: ") + String(cfg.rotParkAz) + " deg";
+  rows[15] = String("Rot Az offset: ") + String(cfg.rotAzOff) + " deg";
+  rows[16] = String("Rot El offset: ") + String(cfg.rotElOff) + " deg";
   {
     String u = cfg.gpUrl;                    // show a trimmed tail so it fits
     if (u.length() > 28) u = "..." + u.substring(u.length() - 25);
-    rows[14] = String("GP URL: ") + u;
+    rows[17] = String("GP URL: ") + u;
   }
-  rows[15] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
+  rows[18] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
                                 ? "Main Up/Sub Dn" : "Main Dn/Sub Up");
-  rows[16] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");
+  rows[19] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");
   {
     uint32_t eff = effectiveCatRateMs();
-    rows[17] = String("CAT rate: ") + String(cfg.catRateMs) + " ms";
-    if (eff > cfg.catRateMs) rows[17] += " (min " + String(eff) + ")";
+    rows[20] = String("CAT rate: ") + String(cfg.catRateMs) + " ms";
+    if (eff > cfg.catRateMs) rows[20] += " (min " + String(eff) + ")";
   }
-  rows[18] = String("CAT delay: ") + String(cfg.catDelayMs) + " ms";
-  rows[19] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
+  rows[21] = String("CAT delay: ") + String(cfg.catDelayMs) + " ms";
+  rows[22] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
              : (cfg.dimSecs % 60 == 0) ? String(cfg.dimSecs / 60) + " min"
                                        : String(cfg.dimSecs) + " s");
-  rows[20] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
-  rows[21] = String("Backup config+favs -> SD");
-  rows[22] = String("Restore config+favs");
-  rows[23] = String("Reset all data (erase)");
+  rows[23] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
+  rows[24] = String("Backup config+favs -> SD");
+  rows[25] = String("Restore config+favs");
+  rows[26] = String("Reset all data (erase)");
   const int VIS = 9;
   int scroll = (setSel >= VIS) ? (setSel - VIS + 1) : 0;
   for (int v = 0; v < VIS && (scroll + v) < N; ++v) {

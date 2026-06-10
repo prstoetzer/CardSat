@@ -20,6 +20,7 @@
 //  (0-180 in flip mode). "Sub"/"Main" do not apply here.
 // ===========================================================================
 #include <Arduino.h>
+#include <WiFi.h>          // WiFiClient for the rotctld (network) backend
 #include "config.h"
 
 class Rotator {
@@ -60,5 +61,35 @@ private:
   void    flushIn();
 };
 
-// Build the configured rotator backend (GS-232 at ROT_I2C_ADDR). Caller owns it.
-Rotator* makeRotator(uint32_t baud);
+// rotctld (Hamlib "NET rotctl") TCP client. CardSat is the client; a rotctld
+// server elsewhere on the LAN drives the physical rotator (default port 4533).
+//   "P <az> <el>\n"  set_pos  -> "RPRT 0" on success
+//   "p\n"            get_pos  -> "<az>\n<el>\n" (or "RPRT -n" on error)
+//   "S\n"            stop
+// Position control is fire-and-forget: send P, drain the ack. The socket is
+// opened lazily and reconnected (throttled) so a missing server never hangs the
+// tracking loop.
+class RotctldRotator : public Rotator {
+public:
+  RotctldRotator(const char* host, uint16_t port) : _host(host), _port(port) {}
+  void begin() override;
+  bool ready() const override { return _ok; }
+  bool point(float az, float el) override;
+  bool readPos(float& az, float& el) override;
+  void stop() override;
+  const char* name() const override { return "rotctld"; }
+
+private:
+  String     _host;
+  uint16_t   _port;
+  bool       _ok = false;
+  WiFiClient _client;
+  uint32_t   _lastTry = 0;          // last (re)connect attempt, for throttling
+  bool ensure();                    // (re)connect if needed; updates _ok
+  void drainInput();                // consume pending replies without blocking
+};
+
+// Build the configured rotator backend. Caller owns the returned object.
+//   type 0 = GS-232 (ROT_GS232) on the I2C->UART bridge
+//   type 1 = rotctld (ROT_NET) to host:port over TCP
+Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port);

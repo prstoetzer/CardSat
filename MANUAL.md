@@ -6,7 +6,7 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 > **Status.** CardSat runs on the Cardputer ADV, and every feature has been
 > exercised on hardware **except radio (CAT) control and the antenna rotator** —
 > those two are still unverified on real equipment. Their math (the per-protocol
-> CAT frequency encoders and the GS-232 command formatting) is host-tested, but
+> CAT frequency encoders, and both rotator backends -- GS-232 framing and the rotctld TCP client) is host-tested, but
 > nothing has driven an actual radio or rotator yet. Keep the serial monitor open
 > and verify on the air before trusting it for a contact.
 
@@ -30,7 +30,7 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 14. [GP age and accuracy](#14-gp-age-and-accuracy)
 15. [Working offline](#15-working-offline)
 16. [Radio-specific notes](#16-radio-specific-notes)
-17. [Antenna rotator (GS-232)](#17-antenna-rotator-gs-232)
+17. [Antenna rotator (GS-232 or rotctld)](#17-antenna-rotator-gs-232-or-rotctld)
 18. [Managing data and factory reset](#18-managing-data-and-factory-reset)
 19. [Troubleshooting](#19-troubleshooting)
 20. [Key reference (cheat sheet)](#20-key-reference-cheat-sheet)
@@ -52,7 +52,10 @@ controller. It:
   "One True Rule") so your signal stays put in a linear transponder's passband;
 - lets you tune the passband from the device **or from the radio's own knob**;
 - maintains a **favorites** list, a unified **Next Passes** schedule, an **AOS
-  alarm**, a **deep-sleep-until-next-pass** power saver, and **sun/eclipse** status.
+  alarm**, a **deep-sleep-until-next-pass** power saver, and **sun/eclipse** status;
+- points an **az/el antenna rotator** -- a wired **Yaesu GS-232** controller or a
+  networked **Hamlib `rotctld`** server;
+- **logs QSOs** on the device and **exports ADIF** for LoTW / eQSL or your main logger.
 
 Everything runs on the device. WiFi is needed only to refresh GP/transponders
 and to set the clock.
@@ -413,7 +416,7 @@ actions.
 | WiFi pass | ENTER → edit |
 | Save & test WiFi | ENTER → connect and report OK/FAIL |
 | AOS alarm | `,`/`/` or ENTER toggle on/off |
-| Rotator (+ baud / deadband / park / offsets) | `,`/`/` adjust; see [§17](#17-antenna-rotator-gs-232) |
+| Rotator (+ type / host / port / baud / deadband / park / offsets) | `,`/`/` adjust, ENTER edits host/port; see [§17](#17-antenna-rotator-gs-232-or-rotctld) |
 | GP source URL | ENTER → edit the GP/OMM download URL |
 | VFO Type | `,`/`/` or ENTER toggle *Main Up/Sub Dn* ↔ *Main Dn/Sub Up* |
 | Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
@@ -456,9 +459,9 @@ for **Downlink low (Hz)**, **Uplink low (Hz, 0 = none/beacon)**, **Downlink high
 uplink, it's treated as **linear** and you'll also be asked **Uplink high (Hz,
 0 = same bandwidth)**, **Inverting? (y/n)**, and finally the **Mode**. Single-
 channel entries skip straight to Mode. Manual transponders are stored separately
-from the SatNOGS cache so a GP/transponder refresh won't erase them. Up to **32
+from the SatNOGS cache so a GP/transponder refresh won't erase them. Up to **64
 transponders** are held per satellite (SatNOGS plus your manual ones) — enough
-for even the busiest birds, such as the ISS.
+for even the busiest birds, such as the ISS (~50 transmitters on SatNOGS).
 
 ---
 
@@ -763,14 +766,23 @@ watch the **Doppler corrections** stream during a pass. Silence a backend by set
 
 ---
 
-## 17. Antenna rotator (GS-232)
+## 17. Antenna rotator (GS-232 or rotctld)
 
-CardSat can drive an az/el antenna rotator that speaks the **Yaesu GS-232A/B**
-protocol -- a Yaesu G-5500 with a GS-232B, a SPID controller, or any GS-232
-emulator (K3NG / RadioArtisan / ERC). Because all three ESP32-S3 UARTs are
-already in use (USB, CAT, GPS), the rotator's serial link is created by an
-**I2C->UART bridge** (SC16IS750/752) on a second I2C bus, so it coexists with
-the radio and GPS without giving either of them up.
+CardSat can drive an az/el antenna rotator through either of two interchangeable
+backends, chosen in Settings with **Rot type**:
+
+- **GS-232** -- a directly-attached controller speaking the **Yaesu GS-232A/B**
+  protocol (a Yaesu G-5500 with a GS-232B, a SPID controller, or any GS-232
+  emulator: K3NG / RadioArtisan / ERC). Because all three ESP32-S3 UARTs are
+  already in use (USB, CAT, GPS), this link is created by an **I2C->UART bridge**
+  (SC16IS750/752) on a second I2C bus, so it coexists with the radio and GPS.
+- **rotctld (net)** -- a **Hamlib `rotctld` server** anywhere on the same WiFi
+  network. CardSat is the TCP client (the same role Gpredict plays), so any
+  rotator Hamlib supports can be driven over the LAN with no extra CardSat wiring.
+
+Only one rotator is active at a time. The pointing logic -- alignment offsets,
+deadband, flip mode, park-on-LOS -- is identical for both; **Rot type** only
+changes how the final azimuth/elevation reaches the hardware.
 
 ### Wiring
 
@@ -798,22 +810,30 @@ Enable and tune the rotator in **Settings** (scroll past the radio rows):
 
 | Setting | Meaning |
 |---|---|
-| Rotator | off / on (builds the bridge backend) |
-| Rot baud | GS-232 serial speed (1200 / 4800 / 9600) |
+| Rotator | off / on (builds the selected backend) |
+| Rot type | **GS-232** (I2C bridge) or **rotctld (net)** (TCP client) |
+| Rotctld host | rotctld server IP / hostname (rotctld backend only) |
+| Rotctld port | rotctld TCP port (Hamlib default **4533**) |
+| Rot baud | GS-232 serial speed (1200 / 4800 / 9600); GS-232 backend only |
 | Rot deadband | degrees; suppress moves smaller than this (anti-chatter) |
 | Rot park az | azimuth the rotator parks at on LOS / when disabled |
 | Rot Az offset | added to commanded azimuth (mount alignment) |
 | Rot El offset | added to commanded elevation |
 
+`Rot type` and `Rotctld port` adjust in place with `,`/`/`; `Rotctld host` and
+`Rotctld port` also open a text editor with ENTER.
+
 ### Using it
 
 On the **Track** screen press **`o`** to start/stop pointing. The status line
-shows **Rot ON / off / n/c** (*n/c* = the I2C bridge wasn't found). While on,
-CardSat sends the satellite's azimuth and elevation about once a second with the
-GS-232 `W aaa eee` command, but only when the position has moved past the
-deadband -- rotators are slow and mechanical, so this avoids chattering the
-relays. When the satellite sets, or you press `o` again or leave the screen, the
-rotator **parks** at the configured azimuth/elevation.
+shows **Rot ON / off / n/c** (*n/c* = no link: the I2C bridge wasn't found, or
+the rotctld server isn't reachable). Pressing `o` re-attempts the link on the
+spot, so you can engage as soon as the controller or server comes up. While on,
+CardSat sends the satellite's azimuth and elevation about once a second -- the
+GS-232 `W aaa eee` command, or rotctld `P <az> <el>` -- but only when the
+position has moved past the deadband, since rotators are slow and mechanical.
+When the satellite sets, or you press `o` again or leave the screen, the rotator
+**parks** at the configured azimuth/elevation.
 
 For overhead passes, a persisted **flip mode** (`rotFlip`) commands 0-180 deg
 elevation with a 180 deg azimuth flip, for rotators with 450 deg azimuth / 180 deg
@@ -821,15 +841,41 @@ elevation travel. CardSat points **open-loop** from its own SGP4 prediction (it
 does not poll the controller's heading); the GS-232 `C2` read-back exists in the
 backend for diagnostics but is not used in the tracking loop.
 
+### Network rotator (rotctld)
+
+To use the network backend, run `rotctld` on any machine that can reach your
+rotator (or use a controller that speaks rotctld natively), set **Rot type** to
+**rotctld (net)**, and enter the server's **Rotctld host** (an IP is simplest)
+and **Rotctld port** (Hamlib default **4533**). A dummy server for a bench test:
+
+```
+rotctld -m 1 -T 0.0.0.0 -t 4533
+```
+
+`-m 1` is Hamlib's dummy rotator model, so you can watch CardSat's `P`/`S`
+commands arrive without moving real motors; swap in your rotator's model and
+serial port for the real thing. CardSat opens the socket when you enable the
+rotator and reconnects on its own (throttled to a few seconds) if it drops, so a
+server that is briefly down or rebooted recovers without intervention. Pointing
+is open-loop from CardSat's SGP4 prediction -- it does not read the heading back.
+
+> rotctld has **no authentication** -- keep it on a trusted LAN and never expose
+> the port to the internet. Several clients may connect to one rotctld and can
+> contend for the rotator.
+
 > The rotator only points while you are on the Track or Polar screen. It only
 > moves the antenna -- it does not change the radio's bands, and CAT on the
 > Yaesu/Kenwood sat rigs can't switch the band pair either, so set those by hand.
 
-This backend is bench-reasoned against the GS-232A/B manuals and Hamlib's gs232a/
-gs232b backends, and host-tested for the bridge baud math and command formatting
--- it has not been run against a physical SC16IS750 or a real rotator. The I2C
-pins (G8/G9) are confirmed from the Cap LoRa-1262 pinmap; still confirm the
-SC16IS750's strapped address and the controller's baud before keying real motors.
+The GS-232 backend is bench-reasoned against the GS-232A/B manuals and Hamlib's
+gs232a/gs232b backends, and host-tested for the bridge baud math and command
+formatting -- it has not been run against a physical SC16IS750 or a real rotator.
+The I2C pins (G8/G9) are confirmed from the Cap LoRa-1262 pinmap; still confirm
+the SC16IS750's strapped address and the controller's baud before keying real
+motors. The rotctld backend follows the published Hamlib `rotctld` protocol and
+is the one rotator path you can fully bench-test without trusting hardware
+encoders -- point it at `rotctld -m 1` and watch the commands -- but it has not
+driven a physical rotator either.
 
 ---
 
@@ -939,7 +985,10 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `l` log QSO · ENTER save cal |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
 | **Track · CAL** | `,`/`/` downlink ∓ · `;`/`.` uplink ∓ · `s` step (10/100/1k) · `x` zero |
-| **Polar** | `p`/ENTER/`` ` `` back to track |
+| **Polar** | `l` log QSO · `p`/ENTER/`` ` `` back to track |
+| **Log (menu)** | `;`/`.` select · ENTER → new QSO / browse / export ADIF |
+| **Log · list** | `;`/`.` scroll · ENTER edit entry · `` ` `` back |
+| **Log · entry** | `;`/`.` field · ENTER edit · `s` save · `x`×2 delete · `` ` `` back |
 | **Mutual** | `;`/`.` scroll · `` ` ``/ENTER back to passes |
 | **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock |
 | **Update** | `k`/ENTER GP · `a` cache all TX · `w` WiFi only |

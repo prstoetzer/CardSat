@@ -12,8 +12,8 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > on the device **except CAT radio control and the antenna rotator.** Pass
 > prediction, the polar and pass-detail plots, mutual-window search, GPS, the AOS
 > alarm, deep sleep, and the offline GP/transponder caches are all confirmed
-> working on hardware. The per-protocol CAT frequency encoders and the GS-232
-> rotator command formatting are host-tested but have **not** yet driven a real
+> working on hardware. The per-protocol CAT frequency encoders and both rotator
+> backends (GS-232 framing and the rotctld network client) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
 ---
@@ -52,7 +52,7 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Sun & eclipse** — Sun azimuth/elevation, a Sun glyph on the polar plot, and
   whether the satellite is sunlit or in Earth's shadow.
 - **GP age** — element-set age shown and color-graded so you know when elements are stale.
-- **Antenna rotator (GS-232)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
+- **Antenna rotator (GS-232 or rotctld)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
   SPID, K3NG/RadioArtisan) through an I²C→UART bridge, so the radio and GPS keep
   their UARTs. Deadband, park-on-LOS, alignment offsets, optional flip mode.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
@@ -170,10 +170,17 @@ the two Grove rows differ only in baud, to match whatever receiver you plug in.
 
 ---
 
-### Antenna rotator (GS-232 over I²C)
+### Antenna rotator (GS-232 over I²C, or rotctld over WiFi)
 
-All three UARTs are spoken for (USB, CAT, GPS), so the rotator's serial port is
-made with an **I²C→UART bridge**. Chain:
+CardSat drives an az/el rotator through one of two interchangeable backends,
+chosen in **Settings → Rot type**. Only one is active at a time, and the pointing
+logic — alignment offsets, deadband, flip mode, park-on-LOS — is shared, so
+switching transports doesn't change behaviour. Enable the rotator in Settings and
+press **`o`** on the Track screen to start/stop pointing; it parks at the
+configured azimuth on LOS.
+
+**Wired — GS-232.** All three UARTs are spoken for (USB, CAT, GPS), so the
+rotator's serial port is made with an **I²C→UART bridge**. Chain:
 
 **Wire1 → SC16IS750 → MAX3232 → DB-9 → GS-232 controller.**
 
@@ -186,9 +193,25 @@ made with an **I²C→UART bridge**. Chain:
   PI4IOE5V6408 expander (~0x43/0x44, LoRa RF switch only); keep `ROT_I2C_ADDR`
   (default `0x4D`) clear of that, or add a TCA9548A mux.
 - GS-232 uses RS-232 levels, so a **MAX3232** sits between the bridge's TTL pins
-  and the controller's DB-9 (TXD / RXD / GND).
-- Enable it in **Settings → Rotator**, then press **`o`** on the Track screen.
-  Full details: **[MANUAL.md §17](MANUAL.md)**.
+  and the controller's DB-9 (TXD / RXD / GND). Set **Rot baud** to match the
+  controller (commonly 9600).
+
+**Networked — rotctld.** No extra wiring: set **Rot type → rotctld (net)** and
+point CardSat at a **Hamlib `rotctld`** server on the same WiFi network — enter
+its **Rotctld host** (an IP is simplest) and **Rotctld port** (Hamlib default
+**4533**). CardSat is the TCP client, the same role Gpredict plays: it sends
+`P <az> <el>` about once a second to track and `S`/park on LOS. The socket opens
+when you enable the rotator and reconnects on its own (throttled) if the server
+drops; pressing `o` re-attempts the link on the spot. Because the rotator sits
+behind Hamlib, anything `rotctld` can drive works over the LAN.
+
+- Bench-test it end-to-end before trusting motors: run
+  `rotctld -m 1 -T 0.0.0.0 -t 4533` (Hamlib's dummy rotator) on a PC and watch
+  CardSat's `P`/`S` commands arrive without moving anything.
+- `rotctld` has **no authentication** — keep it on a trusted LAN, never exposed
+  to the internet.
+
+Full details for both backends: **[MANUAL.md §17](MANUAL.md)**.
 
 ---
 
@@ -318,10 +341,13 @@ GP/transponder caches. Still **unverified on real equipment**:
   rather than NAKs (`FA`), that the correct VFO tunes, and that model/baud/address
   match. For radio-knob (One True Rule) tuning, the 20 Hz operator-move threshold
   in the Doppler loop is the knob to adjust if your rig quantizes coarsely.
-- **Antenna rotator.** The I²C pins (G8/G9) are confirmed from the Cap LoRa-1262
-  pinmap, but the SC16IS750 I²C→UART bridge and the GS-232 command path are
-  host-tested for baud math and framing only. Confirm the bridge address
-  (`ROT_I2C_ADDR`) and the controller baud **before keying real motors**.
+- **Antenna rotator.** Two interchangeable backends, both host-tested only. For
+  **GS-232**, the I²C pins (G8/G9) are confirmed from the Cap LoRa-1262 pinmap, but
+  the SC16IS750 I²C→UART bridge and command path are host-tested for baud math and
+  framing only — confirm the bridge address (`ROT_I2C_ADDR`) and the controller
+  baud **before keying real motors**. For **rotctld (net)**, the Hamlib TCP client
+  follows the published protocol and can be exercised end-to-end against
+  `rotctld -m 1`, but it hasn't driven a physical rotator either.
 - **SD-card storage** — CardSat now stores its data in `/CardSat` on the microSD card
   by default (SCK 40 / MISO 39 / MOSI 14 / CS 12, in `config.h`), falling back to
   internal LittleFS only if no card is present. The SD path hasn't been exercised on
@@ -350,7 +376,7 @@ src/rig.{h,cpp}         abstract Rig interface (keeps the Doppler engine protoco
 src/civ.{h,cpp}         Icom CI-V framing, freq/mode set + read, MAIN/SUB select
 src/yaesu.{h,cpp}       Yaesu 5-byte CAT (FT-847 / FT-736R)
 src/kenwood.{h,cpp}     Kenwood ASCII CAT (TS-790 / TS-2000)
-src/rotator.{h,cpp}     GS-232 rotator over an SC16IS750 I²C→UART bridge
+src/rotator.{h,cpp}     rotator backends: GS-232 (SC16IS750 I²C→UART) or rotctld (TCP)
 src/radio_profiles.h    per-model address, baud, band-select, capabilities
 ```
 

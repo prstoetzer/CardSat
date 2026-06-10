@@ -39,6 +39,11 @@ bool Settings::load() {
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
   rotEnable  = d["roten"]  | false;
+  rotType    = d["rottype"]| (uint8_t)ROT_GS232;
+  if (rotType > ROT_NET) rotType = ROT_GS232;
+  strncpy(rotHost, d["rothost"] | "", sizeof(rotHost)-1); rotHost[sizeof(rotHost)-1]=0;
+  rotPort    = d["rotport"]| (uint16_t)4533;
+  if (rotPort == 0) rotPort = 4533;
   rotBaud    = d["rotbaud"]| 9600u;
   rotAzOff   = d["rotaz"]  | (int16_t)0;
   rotElOff   = d["rotel"]  | (int16_t)0;
@@ -63,7 +68,8 @@ bool Settings::save() {
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
   d["dimsecs"] = dimSecs;
-  d["roten"]=rotEnable; d["rotbaud"]=rotBaud; d["rotaz"]=rotAzOff;
+  d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
+  d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;
   File f = Store::fs().open(FILE_CFG, "w");

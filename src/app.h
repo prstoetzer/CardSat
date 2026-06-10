@@ -15,7 +15,7 @@ enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
-  SCR_LOGLIST
+  SCR_LOGLIST, SCR_VIS, SCR_ILLUM
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -103,6 +103,21 @@ private:
   MutualWindow mutual[MUTUAL_MAX];
   int      mutualN = 0;
   int      mutualSel = 0;
+
+  // 10-day pass overview (InstantTrack-style), cached on entry
+  PassPredict visPasses[VIS_PASS_MAX];
+  int      visN = 0;
+
+  // 60-day illumination (DK3WN illum-style). Raster: cols = days, rows = orbit
+  // phase; a set bit means the satellite is in eclipse at that (day, phase).
+  uint8_t  illumBits[ILLUM_DAYS][(ILLUM_ROWS + 7) / 8];
+  bool     illumValid     = false;
+  float    illumPeriodMin = 0;
+  bool     illumSunNow    = true;
+  bool     illumNextEclipse = false;
+  long     illumNextSec   = -1;     // seconds to next sun<->shadow transition
+  float    illumEclMin    = 0;      // eclipse minutes in the current orbit
+  float    illumEclPct    = 0;
   char     dxGrid[8] = {0};
   double   dxLat = 0, dxLon = 0;
 
@@ -143,8 +158,13 @@ private:
   bool     rotOut = false;       // are we pointing the rotator?
   float    lastAzCmd = -999.0f;  // last az/el we commanded (deadband)
   float    lastElCmd = -999.0f;
+  float    lastUnwrappedAz = -999.0f;  // actual az sent (tracks 0..450 overlap)
   bool     rotParked = false;
   uint32_t lastRotMs = 0;
+  PassPredict rotPass;             // cached upcoming pass, for AOS pre-positioning
+  bool     rotPassValid = false;
+  uint32_t rotPassNorad = 0;       // which satellite rotPass belongs to
+  uint32_t lastRotPassMs = 0;      // throttle for rotPass recompute
   uint32_t lastDrawMs = 0;
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     screenAsleep = false;  // backlight blanked for power saving
@@ -168,6 +188,7 @@ private:
   int      exportPendN = 0;       // number queued
   int      exportPendIdx = 0;     // current prompt index
   bool     logDelArm = false;     // two-press delete confirmation
+  bool     logPickSat = false;    // sat list opened to pick a satellite for a log entry
 
   // status line
   String   status;
@@ -176,6 +197,7 @@ private:
   // ---- helpers ----
   void applyRadioFromCfg();
   void applyRotatorFromCfg();
+  void rotPoint(float az, float el);   // send az/el applying the az-range convention
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
   // Route logical downlink/uplink to the physical MAIN/SUB VFOs per cfg.vfoType.
   bool dlOnSub() const { return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN; }
@@ -261,6 +283,8 @@ private:
   void keyPolar(char c, bool enter, bool back);
   void keyPassPolar(char c, bool enter, bool back);
   void keyMutual(char c, bool enter, bool back);
+  void buildVis();   void drawVis();   void keyVis(char c, bool enter, bool back);
+  void buildIllum(); void drawIllum(); void keyIllum(char c, bool enter, bool back);
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);
@@ -270,6 +294,7 @@ private:
   void keyLog(char c, bool enter, bool back);
   void keyLogEntry(char c, bool enter, bool back);
   void beginQso();                // snapshot auto fields, open the entry screen
+  void seedQsoSatDefaults();      // fill qso sat/mode + non-Doppler centre/nominal freqs
   bool saveQso();                 // append the pending QSO to the CSV log
   int  qsoCount();                // number of logged QSOs
   bool exportAdif();              // write ADIF from the CSV log

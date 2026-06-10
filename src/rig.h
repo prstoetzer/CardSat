@@ -27,6 +27,10 @@ public:
   virtual void begin(uint32_t baud, int uartNum, int rxPin, int txPin) = 0;
   virtual bool ready() const = 0;
 
+  // Pumped every loop tick. Network backends (Icom LAN) advance their connection
+  // state machine and answer keepalives here; wired backends need nothing.
+  virtual void service() {}
+
   // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
   // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
   void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
@@ -83,4 +87,7 @@ int  ctcssToneIndex(float hz);
 float ctcssToneHz(int index);
 
 // Construct the backend for a model. Caller owns the returned pointer.
-Rig* makeRig(RadioModel model);
+// catType 0 = wired CI-V/CAT (UART); 1 = Icom LAN (network) for CI-V models, in
+// which case host/port/user/pass configure the RS-BA1 UDP connection.
+Rig* makeRig(RadioModel model, uint8_t catType = 0, const char* host = "",
+             uint16_t port = 50001, const char* user = "", const char* pass = "");

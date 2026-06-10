@@ -3,6 +3,7 @@
 // ===========================================================================
 #include "rig.h"
 #include "civ.h"
+#include "icomnet.h"
 #include "yaesu.h"
 #include "kenwood.h"
 
@@ -19,7 +20,11 @@ RigMode Rig::modeFromString(const String& s) {
   return RM_USB;
 }
 
-Rig* makeRig(RadioModel model) {
+Rig* makeRig(RadioModel model, uint8_t catType, const char* host,
+             uint16_t port, const char* user, const char* pass) {
+  // Icom LAN (RS-BA1 UDP) network CAT: only for CI-V models; catType 1 = CAT_NET.
+  if (catType == 1 && RADIOS[model].proto == PROTO_CIV)
+    return new IcomNetRig(model, host, port, user, pass);
   switch (RADIOS[model].proto) {
     case PROTO_YAESU:   return new YaesuRig(model);
     case PROTO_KENWOOD: return new KenwoodRig(model);

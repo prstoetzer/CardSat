@@ -13,7 +13,7 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > prediction, the polar and pass-detail plots, mutual-window search, GPS, the AOS
 > alarm, deep sleep, and the offline GP/transponder caches are all confirmed
 > working on hardware. The per-protocol CAT frequency encoders and both rotator
-> backends (GS-232 framing and the rotctld network client) are host-tested but have **not** yet driven a real
+> backends (GS-232 framing, the rotctld network client and PstRotator UDP) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
 ---
@@ -47,12 +47,17 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   across the sky for the current pass (or the next one when it's below the horizon),
   with AOS/LOS markers and a travel-direction arrow.
 - **Mutual-window finder** — enter a remote station's grid square and get the
-  **co-visibility windows** for a satellite: when you can both see it at once,
-  with each window's duration and the peak elevation at both ends.
+  **co-visibility windows** for a satellite over the next **10 days**: when you
+  can both see it at once, with each window's duration and the peak elevation at
+  both ends.
+- **10-day pass overview** — InstantTrack-style visibility chart (rows = days,
+  24 h timelines) for the selected satellite, off the Passes screen (`v`).
+- **60-day illumination** — DK3WN *illum*-style Sun/eclipse raster (date x
+  orbit-phase) with a live solar-status readout, off the Passes screen (`i`).
 - **Sun & eclipse** — Sun azimuth/elevation, a Sun glyph on the polar plot, and
   whether the satellite is sunlit or in Earth's shadow.
 - **GP age** — element-set age shown and color-graded so you know when elements are stale.
-- **Antenna rotator (GS-232 or rotctld)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
+- **Antenna rotator (GS-232, rotctld or PstRotator)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
   SPID, K3NG/RadioArtisan) through an I²C→UART bridge, so the radio and GPS keep
   their UARTs. Deadband, park-on-LOS, alignment offsets, optional flip mode.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
@@ -149,6 +154,15 @@ Set the **model** and **CAT baud** in **Settings** to match the radio's menu (th
 **address** field applies to Icom only). Yaesu is 8N2; Icom and Kenwood are 8N1 —
 the firmware sets this automatically per backend.
 
+**Icom over the network (no wiring).** A network-capable Icom (**IC-9700**, IC-705,
+IC-7610, IC-785x) can be driven over **WiFi/Ethernet** with no CI-V interface at all —
+CardSat speaks the radio's RS-BA1 UDP protocol directly. On the radio enable **Network
+Control**, set a **Network User1** id + password, keep the **Control port** at 50001,
+and turn **CI-V Transceive ON**. In **Settings** set **CAT type → Icom LAN** and fill in
+**LAN host / port / user / pass**. Only CAT is carried (the audio stream is not opened);
+everything else — MAIN/SUB, Doppler, sat mode, CTCSS — works exactly as on a wired Icom.
+Protocol details: **[ICOM_LAN_PROTOCOL.md](ICOM_LAN_PROTOCOL.md)**.
+
 ### GPS (optional)
 
 GPS runs on **UART2**, so it never collides with CAT on UART1. The source is
@@ -170,14 +184,20 @@ the two Grove rows differ only in baud, to match whatever receiver you plug in.
 
 ---
 
-### Antenna rotator (GS-232 over I²C, or rotctld over WiFi)
+### Antenna rotator (GS-232 over I²C, or rotctld / PstRotator over WiFi)
 
 CardSat drives an az/el rotator through one of two interchangeable backends,
 chosen in **Settings → Rot type**. Only one is active at a time, and the pointing
 logic — alignment offsets, deadband, flip mode, park-on-LOS — is shared, so
 switching transports doesn't change behaviour. Enable the rotator in Settings and
 press **`o`** on the Track screen to start/stop pointing; it parks at the
-configured azimuth on LOS.
+configured azimuth on LOS. With **Rot pre-point** set (default 2 min), it also
+slews to the next pass's rise bearing that far before AOS, so a slow rotator is
+already aimed when the satellite appears. **Rot az range** matches your rotator's
+azimuth travel — `0..360`, `-180..+180` (centred on North, like Gpredict), or
+`0..450` (90° overlap, so a pass crossing North runs into the overlap instead of
+unwinding a full turn). **Rot el range** picks `90` or `180`°; at 180° a high pass
+**flips over the top** rather than swinging azimuth 180° at culmination.
 
 **Wired — GS-232.** All three UARTs are spoken for (USB, CAT, GPS), so the
 rotator's serial port is made with an **I²C→UART bridge**. Chain:
@@ -198,16 +218,31 @@ rotator's serial port is made with an **I²C→UART bridge**. Chain:
 
 **Networked — rotctld.** No extra wiring: set **Rot type → rotctld (net)** and
 point CardSat at a **Hamlib `rotctld`** server on the same WiFi network — enter
-its **Rotctld host** (an IP is simplest) and **Rotctld port** (Hamlib default
+its **Net host** (an IP is simplest) and **Net port** (Hamlib default
 **4533**). CardSat is the TCP client, the same role Gpredict plays: it sends
 `P <az> <el>` about once a second to track and `S`/park on LOS. The socket opens
 when you enable the rotator and reconnects on its own (throttled) if the server
 drops; pressing `o` re-attempts the link on the spot. Because the rotator sits
-behind Hamlib, anything `rotctld` can drive works over the LAN.
+behind Hamlib, anything `rotctld` can drive works over the LAN. That includes
+rotators with a native rotctld network service, such as the **MuseLab AntRunner**
+(portable, 360°/180°, WiFi) and **AntRunner-Pro** (fixed-install, 360°/90°,
+Ethernet) — point **Net host/port** at the AntRunner, no PC required.
+
+**Networked — PstRotator.** Already running **PstRotator** on a shack PC? Set
+**Rot type → PstRotator (net)**, **Net host** to the PC, and **Net port** to
+PstRotator's UDP Control port (default **12000** — change it from rotctld's 4533).
+CardSat sends `<PST><AZIMUTH>..</AZIMUTH><ELEVATION>..</ELEVATION></PST>` datagrams
+to point and `<PST><STOP>1</STOP></PST>` to stop; PstRotator drives whatever
+controller it is set up for. UDP is connectionless, so enable **UDP Control** in
+PstRotator and confirm the antenna follows on the first pass. This backend also
+drives the **WA4MCM PSR-100** portable satellite rotor directly: it speaks the
+same `<PST>` UDP az/el protocol, so point **Net host/port** at the PSR-100's WiFi
+interface (no PC running PstRotator required).
 
 - Bench-test it end-to-end before trusting motors: run
-  `rotctld -m 1 -T 0.0.0.0 -t 4533` (Hamlib's dummy rotator) on a PC and watch
-  CardSat's `P`/`S` commands arrive without moving anything.
+  `rotctld -m 1 -t 4533 -vvvvv` (Hamlib's dummy rotator) on a PC — the `-vvvvv`
+  makes rotctld print every `P`/`S` command CardSat sends, with no motors moving
+  (without the verbose flag it stays silent, which can look like nothing is sent).
 - `rotctld` has **no authentication** — keep it on a trusted LAN, never exposed
   to the internet.
 
@@ -347,7 +382,9 @@ GP/transponder caches. Still **unverified on real equipment**:
   framing only — confirm the bridge address (`ROT_I2C_ADDR`) and the controller
   baud **before keying real motors**. For **rotctld (net)**, the Hamlib TCP client
   follows the published protocol and can be exercised end-to-end against
-  `rotctld -m 1`, but it hasn't driven a physical rotator either.
+  `rotctld -m 1`, but it hasn't driven a physical rotator either. **PstRotator
+  (net)** is host-verified for UDP message formatting against the PstRotator
+  manual (Rev. 7.5), not yet tested against a live PstRotator.
 - **SD-card storage** — CardSat now stores its data in `/CardSat` on the microSD card
   by default (SCK 40 / MISO 39 / MOSI 14 / CS 12, in `config.h`), falling back to
   internal LittleFS only if no card is present. The SD path hasn't been exercised on
@@ -376,11 +413,19 @@ src/rig.{h,cpp}         abstract Rig interface (keeps the Doppler engine protoco
 src/civ.{h,cpp}         Icom CI-V framing, freq/mode set + read, MAIN/SUB select
 src/yaesu.{h,cpp}       Yaesu 5-byte CAT (FT-847 / FT-736R)
 src/kenwood.{h,cpp}     Kenwood ASCII CAT (TS-790 / TS-2000)
-src/rotator.{h,cpp}     rotator backends: GS-232 (SC16IS750 I²C→UART) or rotctld (TCP)
+src/rotator.{h,cpp}     rotator backends: GS-232 (I²C→UART), rotctld (TCP), PstRotator (UDP)
 src/radio_profiles.h    per-model address, baud, band-select, capabilities
 ```
 
 ---
+
+## Supporting AMSAT
+
+CardSat runs on data and infrastructure that **[AMSAT](https://www.amsat.org/)**
+provides, and on the satellites AMSAT volunteers help keep flying. **If you find
+CardSat useful, please consider joining and/or donating to AMSAT at
+[www.amsat.org](https://www.amsat.org/).** Your support funds the next satellites
+you'll track and work with it.
 
 ## Credits & license
 
@@ -389,5 +434,5 @@ src/radio_profiles.h    per-model address, baud, band-select, capabilities
 - "One True Rule" Doppler tuning: Paul Williamson **KB5MU**,
   [AMSAT](https://www.amsat.org/the-one-true-rule-for-doppler-tuning/).
 
-License: add your preferred license here (e.g. MIT). Built for amateur-radio use;
-respect your local licensing and band plans.
+Released under the **MIT License** (see [MANUAL.md](MANUAL.md) §23 for the full
+text). Built for amateur-radio use; respect your local licensing and band plans.

@@ -75,7 +75,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.7";
+static constexpr const char* FW_VERSION = "0.9.7a";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -113,8 +113,13 @@ static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
 static constexpr int   PD_SAMPLES      = 100;  // samples in the pass-detail curve
 static constexpr int   POLAR_PTS       = 48;   // samples in a polar ground-track arc
-static constexpr int   MUTUAL_MAX      = 12;   // co-visibility windows listed
-static constexpr int   MUTUAL_PASS_SCAN= 16;   // of my passes scanned for mutual windows
+static constexpr int   MUTUAL_MAX      = 24;   // co-visibility windows listed
+static constexpr int   MUTUAL_PASS_SCAN= 64;   // of my passes scanned for mutual windows
+static constexpr int   MUTUAL_HORIZON_DAYS = 10; // search co-visibility this many days out
+static constexpr int   VIS_DAYS        = 10;   // InstantTrack-style overview horizon (days)
+static constexpr int   VIS_PASS_MAX    = 64;   // passes cached for the 10-day overview
+static constexpr int   ILLUM_DAYS      = 60;   // illumination raster columns (days)
+static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbit phase samples)
 
 // ---------------------------------------------------------------------------
 //  Files on LittleFS

@@ -173,8 +173,7 @@ void RotctldRotator::drainInput() {
 
 bool RotctldRotator::point(float az, float el) {
   if (!ensure()) return false;
-  if (az < 0) az += 360.0f;
-  if (el < 0) el = 0;
+  if (el < 0) el = 0;          // az is passed through as-is (caller picks 0-360 vs +/-180)
   drainInput();                          // clear any stale ack from a prior command
   char cmd[24];
   int n = snprintf(cmd, sizeof(cmd), "P %.1f %.1f\n", az, el);
@@ -224,7 +223,72 @@ bool RotctldRotator::readPos(float& az, float& el) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+//  PstRotator UDP control backend
+// ---------------------------------------------------------------------------
+void PstRotator::begin() {
+  _bound = false; _ok = false;
+  ensure();
+}
+
+bool PstRotator::ensure() {
+  if (WiFi.status() != WL_CONNECTED || _host.length() == 0) { _ok = false; return false; }
+  if (!_bound) _bound = _udp.begin(_port + 1);   // RX replies on port+1; opens the socket
+  _ok = _bound;
+  return _ok;
+}
+
+bool PstRotator::send(const char* msg) {
+  if (!ensure()) return false;
+  if (!_udp.beginPacket(_host.c_str(), _port)) { _ok = false; return false; }
+  _udp.write((const uint8_t*)msg, strlen(msg));
+  bool ok = _udp.endPacket();
+#if ROT_DEBUG
+  Serial.printf("[ROT TX] %s -> %s:%u %s\n", msg, _host.c_str(), (unsigned)_port,
+                ok ? "" : "(fail)");
+#endif
+  if (!ok) _ok = false;
+  return ok;
+}
+
+bool PstRotator::point(float az, float el) {
+  if (az < 0) az += 360.0f;          // PstRotator owns its own range; keep az >= 0
+  if (el < 0) el = 0;
+  char msg[80];
+  snprintf(msg, sizeof(msg),
+           "<PST><AZIMUTH>%.1f</AZIMUTH><ELEVATION>%.1f</ELEVATION></PST>", az, el);
+  return send(msg);
+}
+
+void PstRotator::stop() {
+  send("<PST><STOP>1</STOP></PST>");
+}
+
+// PstRotator answers AZ?/EL? on UDP port+1 as "AZ:xxx.x" / "EL:yy.y". Provided
+// for interface completeness; the tracking loop does not call it.
+bool PstRotator::readPos(float& az, float& el) {
+  if (!ensure()) return false;
+  while (_udp.parsePacket() > 0) { uint8_t d[64]; _udp.read(d, sizeof(d)); }  // drain stale
+  send("<PST>AZ?</PST>");
+  send("<PST>EL?</PST>");
+  bool gotAz = false, gotEl = false;
+  char buf[80];
+  uint32_t t0 = millis();
+  while ((!gotAz || !gotEl) && millis() - t0 < 400) {
+    int n = _udp.parsePacket();
+    if (n <= 0) { delay(2); continue; }
+    int r = _udp.read((uint8_t*)buf, sizeof(buf) - 1);
+    if (r < 0) r = 0;
+    buf[r] = 0;
+    char* p;
+    if (!gotAz && (p = strstr(buf, "AZ:"))) { az = atof(p + 3); gotAz = true; }
+    if (!gotEl && (p = strstr(buf, "EL:"))) { el = atof(p + 3); gotEl = true; }
+  }
+  return gotAz && gotEl;
+}
+
 Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port) {
   if (type == 1) return new RotctldRotator(host, port);   // 1 = ROT_NET (settings.h)
+  if (type == 2) return new PstRotator(host, port);        // 2 = ROT_PST (settings.h)
   return new Gs232Rotator(ROT_I2C_ADDR, baud);
 }

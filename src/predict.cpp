@@ -149,6 +149,31 @@ LiveLook Predictor::look(time_t t) {
   return L;
 }
 
+// Eclipse-only test (cylindrical Earth shadow), mirroring look()'s geometry but
+// skipping all observer-relative work. Used by the 60-day illumination screen.
+bool Predictor::sunlitAt(time_t t) {
+  if (!_haveSat) return true;
+  _sat.findsat((unsigned long)t);
+  double jd = (double)t / 86400.0 + 2440587.5;
+  double sx, sy, sz; sunEciUnit(jd, sx, sy, sz);
+  double th = gmstRad(jd);
+  double ct = cos(th), st = sin(th);
+  double phi = _sat.satLat * DEG, lam = _sat.satLon * DEG, h = _sat.satAlt;
+  double e2 = 6.694318e-3;
+  double sphi = sin(phi), cphi = cos(phi);
+  double Nlat = RE_KM / sqrt(1.0 - e2 * sphi * sphi);
+  double rx = (Nlat + h) * cphi * cos(lam);
+  double ry = (Nlat + h) * cphi * sin(lam);
+  double rz = (Nlat * (1.0 - e2) + h) * sphi;
+  double ux =  sx * ct + sy * st;
+  double uy = -sx * st + sy * ct;
+  double uz =  sz;
+  double proj  = rx * ux + ry * uy + rz * uz;
+  double rmag2 = rx * rx + ry * ry + rz * rz;
+  double perp  = sqrt(fmax(0.0, rmag2 - proj * proj));
+  return !(proj < 0.0 && perp < RE_KM);
+}
+
 void Predictor::dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
                              double rangeRateKmS,
                              int32_t calDlHz, int32_t calUlHz,
@@ -235,10 +260,12 @@ double Predictor::elevationFromSubpoint(double obsLatDeg, double obsLonDeg,
 int Predictor::mutualWindows(time_t from, const Observer& dx, float minEl,
                              MutualWindow* out, int maxN) {
   if (!_haveSat) return 0;
-  // My passes down to the horizon mask bound the search (a mutual window can
-  // only occur while I can see the bird), so scan inside each of my passes.
-  PassPredict mine[MUTUAL_PASS_SCAN];
-  int np = predictPasses(from, minEl, mine, MUTUAL_PASS_SCAN);
+  // My passes bound the search (a mutual window can only occur while I can see
+  // the bird), so scan inside each of my passes out to the day horizon. Heap-
+  // allocate the pass buffer: 10 days of a busy LEO is too large for the stack.
+  PassPredict* mine = new PassPredict[MUTUAL_PASS_SCAN];
+  int np = predictPasses(from, minEl, mine, MUTUAL_PASS_SCAN,
+                         from + (time_t)MUTUAL_HORIZON_DAYS * 86400);
 
   const time_t dt = 10;                 // scan step (s)
   int n = 0;
@@ -260,15 +287,17 @@ int Predictor::mutualWindows(time_t from, const Observer& dx, float minEl,
                if (dxEl > w.dxMaxEl) w.dxMaxEl = (float)dxEl; }
       } else if (inWin) {
         out[n++] = w; inWin = false;
-        if (n >= maxN) return n;
+        if (n >= maxN) break;
       }
     }
     if (inWin && n < maxN) out[n++] = w;   // window open at pass end
   }
+  delete[] mine;
   return n;
 }
 
-int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int maxN) {
+int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int maxN,
+                             time_t horizonEnd) {
   if (!_haveSat) return 0;
   passinfo overpass;
   _sat.initpredpoint((unsigned long)from, (double)minEl);
@@ -278,8 +307,10 @@ int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int max
     // search up to ~ a number of iterations for the next pass
     bool ok = _sat.nextpass(&overpass, 200);
     if (!ok) break;
+    time_t aos = jdToUnix(overpass.jdstart);
+    if (horizonEnd && aos > horizonEnd) break;     // stop past the time horizon
     PassPredict& p = out[found];
-    p.aos   = jdToUnix(overpass.jdstart);
+    p.aos   = aos;
     p.los   = jdToUnix(overpass.jdstop);
     p.tca   = jdToUnix(overpass.jdmax);
     p.maxEl = (float)overpass.maxelevation;

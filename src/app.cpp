@@ -165,9 +165,9 @@ void App::applyRadioFromCfg() {
   RadioModel m = (RadioModel)cfg.radioModel;
   uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[m].defaultBaud;
   if (rig) { delete rig; rig = nullptr; }
-  rig = makeRig(m);                                   // Icom / Yaesu / Kenwood
+  rig = makeRig(m, cfg.catType, cfg.catHost, cfg.catPort, cfg.catUser, cfg.catPass);
   if (!rig) return;
-  rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
+  rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);   // net backend ignores UART args
   if (RADIOS[m].proto == PROTO_CIV)
     rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
   rig->setCmdDelay(cfg.catDelayMs);                  // CAT Delay: inter-command pause
@@ -178,10 +178,34 @@ void App::applyRadioFromCfg() {
 void App::applyRotatorFromCfg() {
   if (rot) { delete rot; rot = nullptr; }
   rotOut = false; rotParked = false;
-  lastAzCmd = lastElCmd = -999.0f;
+  lastAzCmd = lastElCmd = lastUnwrappedAz = -999.0f;
+  rotPassValid = false; rotPassNorad = 0;
   if (!cfg.rotEnable) return;          // rotator disabled in Settings
   rot = makeRotator(cfg.rotType, cfg.rotBaud, cfg.rotHost, cfg.rotPort);
   if (rot) rot->begin();
+}
+
+// Send a commanded bearing to the active rotator, applying the configured
+// azimuth-range convention. CardSat computes az as 0-360 (0=North); for a
+// rotator whose azimuth axis is centred on North and runs -180..+180, re-express
+// the bearing in that range (e.g. 270 -> -90). GS-232 controllers are natively
+// 0-360 and re-wrap negatives, so in practice this only changes rotctld output.
+void App::rotPoint(float az, float el) {
+  if (!rot) return;
+  while (az >= 360.0f) az -= 360.0f;     // target bearing in [0,360)
+  while (az < 0.0f)    az += 360.0f;
+  if (cfg.rotAzRange == ROT_AZ_180) {
+    if (az > 180.0f) az -= 360.0f;        // centre on North: [-180,+180]
+  } else if (cfg.rotAzRange == ROT_AZ_450) {
+    // 90 deg overlap: a bearing <=90 is also reachable as +360 (360..450 region).
+    // Pick whichever representation is nearer the last commanded position, so a
+    // pass crossing North continues up into the overlap instead of unwinding 360.
+    if (az <= 90.0f && lastUnwrappedAz > -500.0f &&
+        fabsf((az + 360.0f) - lastUnwrappedAz) < fabsf(az - lastUnwrappedAz))
+      az += 360.0f;
+  }
+  lastUnwrappedAz = az;
+  rot->point(az, el);
 }
 
 // Choose the SSB/FM mode for each leg.
@@ -705,6 +729,7 @@ int App::loadManualTx(uint32_t norad, Transponder* out, int maxN) {
 // ===========================================================================
 void App::loop() {
   M5Cardputer.update();
+  if (rig) rig->service();    // net CAT (Icom LAN): advance connect + keepalives
   if (cfg.useGps) {
     if (loc.pollGps()) { pred.setSite(loc.obs()); }
   }
@@ -808,12 +833,44 @@ void App::loop() {
           if (lastAzCmd < -500.0f ||
               fabsf(az - lastAzCmd) >= (float)cfg.rotDeadband ||
               fabsf(el - lastElCmd) >= (float)cfg.rotDeadband) {
-            rot->point(az, el);
+            rotPoint(az, el);
             lastAzCmd = az; lastElCmd = el; rotParked = false;
           }
-        } else if (!rotParked) {                        // below horizon: park once
-          rot->point((float)cfg.rotParkAz, (float)cfg.rotParkEl);
-          rotParked = true; lastAzCmd = lastElCmd = -999.0f;
+        } else {                                        // below horizon
+          // Pre-position: slew to the next rise bearing shortly before AOS so a
+          // slow rotator is already aimed when the satellite appears.
+          time_t now = nowUtc();
+          bool prePos = false;
+          if (cfg.rotLeadSec > 0) {
+            if (!rotPassValid || now >= rotPass.los || rotPassNorad != s->norad) {
+              if (rotPassNorad != s->norad || ms - lastRotPassMs > 30000) {
+                lastRotPassMs = ms; rotPassNorad = s->norad;
+                PassPredict p;
+                rotPassValid = (pred.predictPasses(now, cfg.minPassEl, &p, 1) >= 1);
+                if (rotPassValid) rotPass = p;
+              }
+            }
+            if (rotPassValid && rotPass.aos > now &&
+                (rotPass.aos - now) <= (time_t)cfg.rotLeadSec) {
+              float az = (float)rotPass.azAos + cfg.rotAzOff;
+              float el = (float)cfg.rotElOff;            // aim at the horizon (el 0)
+              while (az >= 360.0f) az -= 360.0f;
+              while (az < 0.0f)    az += 360.0f;
+              float elMax = cfg.rotFlip ? 180.0f : 90.0f;
+              if (el < 0) el = 0; if (el > elMax) el = elMax;
+              if (lastAzCmd < -500.0f ||
+                  fabsf(az - lastAzCmd) >= (float)cfg.rotDeadband ||
+                  fabsf(el - lastElCmd) >= (float)cfg.rotDeadband) {
+                rotPoint(az, el);
+                lastAzCmd = az; lastElCmd = el; rotParked = false;
+              }
+              prePos = true;
+            }
+          }
+          if (!prePos && !rotParked) {                  // nothing imminent: park once
+            rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+            rotParked = true; lastAzCmd = lastElCmd = -999.0f;
+          }
         }
       }
     }
@@ -916,6 +973,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_POLAR:    keyPolar(c, enter, back); break;
     case SCR_PASSPOLAR: keyPassPolar(c, enter, back); break;
     case SCR_MUTUAL:   keyMutual(c, enter, back); break;
+    case SCR_VIS:      keyVis(c, enter, back); break;
+    case SCR_ILLUM:    keyIllum(c, enter, back); break;
     case SCR_LOCATION: keyLocation(c, enter, back); break;
     case SCR_UPDATE:   keyUpdate(c, enter, back); break;
     case SCR_SETTINGS: keySettings(c, enter, back); break;
@@ -996,7 +1055,10 @@ void App::keySchedule(char c, bool enter, bool back) {
 }
 
 void App::keySatList(char c, bool enter, bool back) {
-  if (isBack(c, back)) { screen = SCR_HOME; return; }
+  if (isBack(c, back)) {
+    if (logPickSat) { logPickSat = false; screen = SCR_LOGENTRY; lastDrawMs = 0; return; }
+    screen = SCR_HOME; return;
+  }
   if (c == 'n') {                              // new manual GP entry
     mtSat = SatEntry();
     editTarget = 310; editTitle = "Sat name"; editBuf = ""; screen = SCR_EDIT;
@@ -1023,6 +1085,11 @@ void App::keySatList(char c, bool enter, bool back) {
     pred.setSat(*s);
     ensureTransponders(*s);
     onTransponderChanged();
+    if (logPickSat) {            // chose a satellite for a log entry
+      logPickSat = false;
+      seedQsoSatDefaults();      // sat + mode + non-Doppler centre/nominal freqs
+      logSel = 0; screen = SCR_LOGENTRY; lastDrawMs = 0; return;
+    }
     passN = timeIsSet()
           ? pred.predictPasses(nowUtc(), cfg.minPassEl, passes, PASS_LIST_LEN)
           : 0;
@@ -1056,6 +1123,8 @@ void App::keyPasses(char c, bool enter, bool back) {
     editTarget = 330; editTitle = "DX grid (4 or 6 char)"; editBuf = "";
     screen = SCR_EDIT; return;
   }
+  if (c == 'v') { buildVis();   screen = SCR_VIS;   lastDrawMs = 0; return; }
+  if (c == 'i') { buildIllum(); screen = SCR_ILLUM; lastDrawMs = 0; return; }
   if (enter || c == 't') {     // enter tracking
     SatEntry* s = activeSat();
     if (s) loadCalForSat(s->norad);
@@ -1074,7 +1143,7 @@ void App::keyTrack(char c, bool enter, bool back) {
   if (isBack(c, back)) {
     if (radioOut) { radioOut = false; }     // stop sending on first back
     else {
-      if (rotOut && rot) { rot->point((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+      if (rotOut && rot) { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
                            rotOut = false; rotParked = true; }
       screen = SCR_PASSES;
     }
@@ -1160,15 +1229,17 @@ void App::keyTrack(char c, bool enter, bool back) {
     else {
       if (!rot->ready()) rot->begin();   // (re)establish the link/bridge on demand
       if (!rot->ready())
-        setStatus(cfg.rotType == ROT_NET ? "Rotator: no rotctld link"
-                                         : "Rotator: bridge not found");
+        setStatus(cfg.rotType == ROT_GS232 ? "Rotator: bridge not found"
+                  : cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
+                                            : "Rotator: no rotctld link");
       else {
         rotOut = !rotOut;
         if (rotOut) {
-          lastRotMs = 0; lastAzCmd = lastElCmd = -999.0f; rotParked = false;
+          lastRotMs = 0; lastAzCmd = lastElCmd = -999.0f;
+          lastUnwrappedAz = -999.0f; rotParked = false;
           setStatus("Rotator ON");
         } else {
-          rot->point((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+          rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
           rotParked = true; setStatus("Rotator OFF (parked)");
         }
       }
@@ -1301,6 +1372,150 @@ void App::keyMutual(char c, bool enter, bool back) {
   }
 }
 
+// ===========================================================================
+//  10-day pass overview (InstantTrack "Multiple Days for Single Satellite")
+// ===========================================================================
+void App::buildVis() {
+  visN = 0;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet()) return;
+  setStatus("Computing 10-day passes..."); draw();
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  time_t now = nowUtc();
+  visN = pred.predictPasses(now, cfg.minPassEl, visPasses, VIS_PASS_MAX,
+                            now + (time_t)VIS_DAYS * 86400);
+  setStatus(visN ? (String(visN) + " pass(es)/10 d") : "No passes in 10 days");
+}
+
+void App::drawVis() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " 10-day") : String("10-day passes"));
+  canvas.setTextSize(1);
+  if (visN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("No passes in the next 10 days.");
+    footer("` back   r recompute"); return;
+  }
+  const int barX0 = 40, barW = 196;          // 196 px = 24 h
+  const int y0 = 19, rowH = 10;
+  time_t now  = nowUtc();
+  time_t mid0 = now - (now % 86400);         // UTC midnight of day 0 (today)
+  for (int h = 6; h <= 18; h += 6)           // 06/12/18 h gridlines behind the bars
+    canvas.drawFastVLine(barX0 + barW * h / 24, y0, rowH * VIS_DAYS, 0x2104);
+  for (int d = 0; d < VIS_DAYS; ++d) {
+    time_t dayStart = mid0 + (time_t)d * 86400;
+    int ry = y0 + d * rowH;
+    struct tm tmv; gmtime_r(&dayStart, &tmv);
+    char lbl[8]; snprintf(lbl, sizeof(lbl), "%02d/%02d", tmv.tm_mon + 1, tmv.tm_mday);
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(2, ry + 1); canvas.print(lbl);
+    canvas.drawFastHLine(barX0, ry + rowH - 1, barW, 0x18E3);
+    for (int i = 0; i < visN; ++i) {
+      time_t a = visPasses[i].aos, b = visPasses[i].los;
+      time_t s0 = (a > dayStart) ? a : dayStart;
+      time_t s1 = (b < dayStart + 86400) ? b : dayStart + 86400;
+      if (s1 <= s0) continue;
+      int x1 = barX0 + (int)(barW * (s0 - dayStart) / 86400);
+      int x2 = barX0 + (int)(barW * (s1 - dayStart) / 86400);
+      int w  = (x2 - x1 < 1) ? 1 : x2 - x1;
+      float me = visPasses[i].maxEl;
+      uint16_t col = (me < 15.0f) ? CL_DGREEN : (me < 40.0f ? CL_GREEN : CL_YELLOW);
+      canvas.fillRect(x1, ry + 1, w, rowH - 3, col);
+    }
+  }
+  canvas.drawFastVLine(barX0 + (int)(barW * (now - mid0) / 86400), y0, rowH, CL_RED);
+  footer("` back  r recompute  0-24h UTC");
+}
+
+void App::keyVis(char c, bool enter, bool back) {
+  if (isBack(c, back) || enter) { screen = SCR_PASSES; lastDrawMs = 0; return; }
+  if (c == 'r') { buildVis(); lastDrawMs = 0; }
+}
+
+// ===========================================================================
+//  60-day illumination (DK3WN "illum"): date x orbit-phase sun/shadow raster
+// ===========================================================================
+void App::buildIllum() {
+  illumValid = false;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet() || s->meanMotion <= 0) return;
+  setStatus("Computing illumination..."); draw();
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  illumPeriodMin = 1440.0f / (float)s->meanMotion;
+  double periodSec = (double)illumPeriodMin * 60.0;
+  time_t now = nowUtc();
+  const int RB = (ILLUM_ROWS + 7) / 8;
+  for (int c = 0; c < ILLUM_DAYS; ++c) {
+    for (int b = 0; b < RB; ++b) illumBits[c][b] = 0;
+    time_t base = now + (time_t)c * 86400;            // one orbit starting this day
+    for (int r = 0; r < ILLUM_ROWS; ++r) {
+      time_t t = base + (time_t)llround(periodSec * r / ILLUM_ROWS);
+      if (!pred.sunlitAt(t)) illumBits[c][r >> 3] |= (1 << (r & 7));  // set = eclipse
+    }
+  }
+  // current-orbit eclipse fraction (column 0) + live status
+  int eclRows = 0;
+  for (int r = 0; r < ILLUM_ROWS; ++r)
+    if (illumBits[0][r >> 3] & (1 << (r & 7))) eclRows++;
+  illumEclMin = illumPeriodMin * eclRows / ILLUM_ROWS;
+  illumEclPct = 100.0f * eclRows / ILLUM_ROWS;
+  illumSunNow = pred.sunlitAt(now);
+  illumNextEclipse = !illumSunNow;
+  illumNextSec = -1;
+  for (long dt = 15; dt <= (long)periodSec + 120; dt += 15)
+    if (pred.sunlitAt(now + dt) != illumSunNow) { illumNextSec = dt; break; }
+  illumValid = true;
+  setStatus("");
+}
+
+void App::drawIllum() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " illum 60d") : String("Illumination"));
+  canvas.setTextSize(1);
+  if (!illumValid) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56);
+    canvas.print((s && s->meanMotion > 0) ? "Press r to compute." : "No orbit data.");
+    footer("` back   r recompute"); return;
+  }
+  const int px0 = 24, py0 = 18, cw = 3, ph = ILLUM_ROWS;   // 60*3 = 180 wide
+  const int pw = ILLUM_DAYS * cw;
+  canvas.fillRect(px0, py0, pw, ph, CL_BLACK);             // eclipse = dark ground
+  canvas.drawRect(px0 - 1, py0 - 1, pw + 2, ph + 2, CL_GREY);
+  for (int c = 0; c < ILLUM_DAYS; ++c) {                   // run-length sunlit spans
+    int x = px0 + c * cw, r = 0;
+    while (r < ILLUM_ROWS) {
+      bool ecl = illumBits[c][r >> 3] & (1 << (r & 7));
+      int r0 = r;
+      while (r < ILLUM_ROWS &&
+             (bool)(illumBits[c][r >> 3] & (1 << (r & 7))) == ecl) r++;
+      if (!ecl) canvas.fillRect(x, py0 + r0, cw, r - r0, CL_YELLOW);   // sunlit
+    }
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(px0 - 4, py0 + ph + 2);       canvas.print("now");
+  canvas.setCursor(px0 + pw - 22, py0 + ph + 2); canvas.print("+60d");
+  canvas.setCursor(px0 + pw + 5, py0);           canvas.print("1 orbit");
+  canvas.setCursor(px0 + pw + 5, py0 + 10);      canvas.printf("%.0fm", illumPeriodMin);
+  canvas.setCursor(4, py0 + ph + 11);
+  canvas.setTextColor(illumSunNow ? CL_YELLOW : CL_CYAN, CL_BLACK);
+  canvas.print(illumSunNow ? "SUN" : "SHADOW");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.printf("  ecl %.0fm/orbit (%.0f%%)", illumEclMin, illumEclPct);
+  if (illumNextSec > 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, py0 + ph + 20);
+    canvas.printf("-> %s in %ldm", illumNextEclipse ? "shadow" : "sun",
+                  illumNextSec / 60);
+  }
+  footer("` back   r recompute");
+}
+
+void App::keyIllum(char c, bool enter, bool back) {
+  if (isBack(c, back) || enter) { screen = SCR_PASSES; lastDrawMs = 0; return; }
+  if (c == 'r') { buildIllum(); lastDrawMs = 0; }
+}
+
 void App::keyLocation(char c, bool enter, bool back) {
   if (isBack(c, back)) { pred.setSite(loc.obs()); screen = SCR_HOME; return; }
   if (c == 'p') {                       // toggle GPS use
@@ -1336,7 +1551,7 @@ void App::keyUpdate(char c, bool enter, bool back) {
 }
 
 void App::keySettings(char c, bool enter, bool back) {
-  const int N = 27;
+  const int N = 35;
   if (isBack(c, back)) { applyRadioFromCfg(); applyRotatorFromCfg();
                          screen = SCR_HOME; return; }
   if (isUp(c))   setSel = (setSel + N - 1) % N;
@@ -1356,7 +1571,7 @@ void App::keySettings(char c, bool enter, bool back) {
       case 3: cfg.minPassEl = constrain(cfg.minPassEl + dir, 0, 30); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 9: cfg.rotType = (cfg.rotType == ROT_NET) ? ROT_GS232 : ROT_NET;
+      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 3) % 3);
               cfg.save(); applyRotatorFromCfg(); break;
       case 11: { long p = (long)cfg.rotPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotPort = (uint16_t)p; cfg.save(); } break;
@@ -1368,23 +1583,36 @@ void App::keySettings(char c, bool enter, bool back) {
                cfg.save(); break;
       case 14: { int a = (int)cfg.rotParkAz + dir*5; while (a<0) a+=360; a%=360;
                  cfg.rotParkAz = (uint16_t)a; cfg.save(); } break;
-      case 15: cfg.rotAzOff = constrain((int)cfg.rotAzOff + dir, -180, 180);
+      case 15: { const uint16_t opts[] = {0,30,60,120,180,300}; int idx=3;
+                 for (int i=0;i<6;i++) if (opts[i]==cfg.rotLeadSec) idx=i;
+                 idx = (idx + dir + 6) % 6; cfg.rotLeadSec = opts[idx];
+                 cfg.save(); rotPassValid = false; } break;
+      case 16: cfg.rotAzOff = constrain((int)cfg.rotAzOff + dir, -180, 180);
                cfg.save(); break;
-      case 16: cfg.rotElOff = constrain((int)cfg.rotElOff + dir, -30, 30);
+      case 17: cfg.rotElOff = constrain((int)cfg.rotElOff + dir, -30, 30);
                cfg.save(); break;
-      case 18: cfg.vfoType = (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN)
+      case 18: cfg.rotAzRange = (uint8_t)((cfg.rotAzRange + dir + 3) % 3);
+               cfg.save(); lastAzCmd = lastUnwrappedAz = -999.0f; break;
+      case 19: cfg.rotFlip = !cfg.rotFlip; cfg.save();
+               lastAzCmd = lastElCmd = -999.0f; break;
+      case 21: cfg.vfoType = (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN)
                              ? VFO_MAIN_DOWN_SUB_UP : VFO_MAIN_UP_SUB_DOWN;
                cfg.save(); break;
-      case 19: cfg.satMode = !cfg.satMode; cfg.save(); break;
-      case 20: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
+      case 22: cfg.satMode = !cfg.satMode; cfg.save(); break;
+      case 23: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
                  cfg.catRateMs = (uint32_t)v; cfg.save(); } break;
-      case 21: { long v = (long)cfg.catDelayMs + dir*2; if (v < 0) v = 0;
+      case 24: { long v = (long)cfg.catDelayMs + dir*2; if (v < 0) v = 0;
                  if (v > 200) v = 200; cfg.catDelayMs = (uint16_t)v; cfg.save();
                  if (rig) rig->setCmdDelay(cfg.catDelayMs); } break;
-      case 22: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
+      case 25: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
                  for (int i=0;i<5;i++) if (opts[i]==cfg.dimSecs) idx=i;
                  idx = (idx + dir + 5) % 5; cfg.dimSecs = opts[idx];
                  cfg.save(); lastInputMs = millis(); } break;
+      case 30: cfg.catType = (uint8_t)((cfg.catType + dir + 2) % 2);
+               cfg.save(); applyRadioFromCfg(); break;
+      case 32: { long p = (long)cfg.catPort + dir; if (p < 1) p = 65535;
+                 if (p > 65535) p = 1; cfg.catPort = (uint16_t)p;
+                 cfg.save(); applyRadioFromCfg(); } break;
     }
   };
   if (isLeft(c))  adj(-1);
@@ -1401,19 +1629,19 @@ void App::keySettings(char c, bool enter, bool back) {
               break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 10: editTarget = 205; editTitle = "Rotctld host (IP)";
+      case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
-      case 11: editTarget = 206; editTitle = "Rotctld port";
+      case 11: editTarget = 206; editTitle = "Net rotator port";
                editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
-      case 17: editTarget = 203; editTitle = "GP source URL";
+      case 20: editTarget = 203; editTitle = "GP source URL";
                editBuf = cfg.gpUrl; screen = SCR_EDIT; break;
-      case 23: editTarget = 204; editTitle = "My callsign";
+      case 26: editTarget = 204; editTitle = "My callsign";
                editBuf = cfg.myCall; screen = SCR_EDIT; break;
-      case 24: {
+      case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
       } break;
-      case 25: {
+      case 28: {
         if (!Store::fs().exists(FILE_CFG_BAK)) { setStatus("No backup found"); break; }
         bool ok = copyFile(FILE_CFG_BAK, FILE_CFG);
         copyFile(FILE_FAVS_BAK, FILE_FAVS);
@@ -1423,8 +1651,18 @@ void App::keySettings(char c, bool enter, bool back) {
                   setStatus("Restored from SD"); }
         else setStatus("Restore failed");
       } break;
-      case 26: editTarget = 400; editTitle = "Type ERASE to wipe all";
+      case 29: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
+      case 30: cfg.catType = (uint8_t)((cfg.catType + 1) % 2);
+               cfg.save(); applyRadioFromCfg(); break;
+      case 31: editTarget = 207; editTitle = "Radio LAN host (IP)";
+               editBuf = cfg.catHost; screen = SCR_EDIT; break;
+      case 32: editTarget = 210; editTitle = "Radio LAN port";
+               editBuf = String(cfg.catPort); screen = SCR_EDIT; break;
+      case 33: editTarget = 208; editTitle = "Radio LAN user";
+               editBuf = cfg.catUser; screen = SCR_EDIT; break;
+      case 34: editTarget = 209; editTitle = "Radio LAN password";
+               editBuf = cfg.catPass; screen = SCR_EDIT; break;
       default: adj(+1); break;
     }
   }
@@ -1475,6 +1713,23 @@ void App::keyEdit(char c, bool enter, bool back) {
                 screen = SCR_SETTINGS; setStatus("Saved"); return;
       case 206: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
                   cfg.rotPort = (uint16_t)p; cfg.save(); applyRotatorFromCfg();
+                  screen = SCR_SETTINGS; setStatus("Saved"); return; }
+
+      // ---- Icom LAN (network CAT) host / user / password / port ----
+      case 207: strncpy(cfg.catHost, editBuf.c_str(), sizeof(cfg.catHost)-1);
+                cfg.catHost[sizeof(cfg.catHost)-1] = 0;
+                cfg.save(); applyRadioFromCfg();
+                screen = SCR_SETTINGS; setStatus("Saved"); return;
+      case 208: strncpy(cfg.catUser, editBuf.c_str(), sizeof(cfg.catUser)-1);
+                cfg.catUser[sizeof(cfg.catUser)-1] = 0;
+                cfg.save(); applyRadioFromCfg();
+                screen = SCR_SETTINGS; setStatus("Saved"); return;
+      case 209: strncpy(cfg.catPass, editBuf.c_str(), sizeof(cfg.catPass)-1);
+                cfg.catPass[sizeof(cfg.catPass)-1] = 0;
+                cfg.save(); applyRadioFromCfg();
+                screen = SCR_SETTINGS; setStatus("Saved"); return;
+      case 210: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
+                  cfg.catPort = (uint16_t)p; cfg.save(); applyRadioFromCfg();
                   screen = SCR_SETTINGS; setStatus("Saved"); return; }
 
       // ---- mutual co-visibility vs a DX grid ----
@@ -1607,6 +1862,32 @@ void App::keyEdit(char c, bool enter, bool back) {
                 qso.grid[sizeof(qso.grid)-1]=0; screen=SCR_LOGENTRY; return;
       case 504: strncpy(qso.notes, editBuf.c_str(), sizeof(qso.notes)-1);
                 qso.notes[sizeof(qso.notes)-1]=0; screen=SCR_LOGENTRY; return;
+      case 505: {   // Date YYYY-MM-DD (UTC); keep the time-of-day
+        int Y, Mo, D;
+        if (sscanf(editBuf.c_str(), "%d-%d-%d", &Y, &Mo, &D) == 3) {
+          time_t base = qso.utc ? (time_t)qso.utc
+                                : (timeIsSet() ? nowUtc() : (time_t)1735689600);
+          struct tm g; gmtime_r(&base, &g);
+          g.tm_year = Y - 1900; g.tm_mon = Mo - 1; g.tm_mday = D;
+          qso.utc = (uint32_t)mktime(&g);            // TZ=UTC0 -> UTC epoch
+        } else setStatus("Use YYYY-MM-DD");
+        screen = SCR_LOGENTRY; return;
+      }
+      case 506: {   // Time HH:MM:SS (UTC); keep the date
+        int H, Mi, S = 0;
+        if (sscanf(editBuf.c_str(), "%d:%d:%d", &H, &Mi, &S) >= 2) {
+          time_t base = qso.utc ? (time_t)qso.utc
+                                : (timeIsSet() ? nowUtc() : (time_t)1735689600);
+          struct tm g; gmtime_r(&base, &g);
+          g.tm_hour = H; g.tm_min = Mi; g.tm_sec = S;
+          qso.utc = (uint32_t)mktime(&g);
+        } else setStatus("Use HH:MM:SS");
+        screen = SCR_LOGENTRY; return;
+      }
+      case 507: { double m = atof(editBuf.c_str());
+                  qso.dlHz = (uint32_t)llround(m * 1e6); screen = SCR_LOGENTRY; return; }
+      case 508: { double m = atof(editBuf.c_str());
+                  qso.ulHz = (uint32_t)llround(m * 1e6); screen = SCR_LOGENTRY; return; }
 
       // ---- LoTW SAT_NAME prompt during ADIF export ----
       case 600: {
@@ -1801,10 +2082,33 @@ static bool parseQsoCsv(const String& line, PendingQso& q) {
   return true;
 }
 
-// Snapshot the auto fields (time, sat, freqs, mode, my grid) at the instant the
-// operator hits 'l', then open the entry screen. Radio control keeps running.
+// Fill qso.sat / qso.mode and the *non-Doppler* default frequencies (the centre
+// of a linear transponder's passband, or the nominal downlink/uplink for an FM /
+// single-channel bird) from the currently active satellite + transponder. Used
+// for manual log entries; leaves dl/ul at 0 if the sat has no transponders.
+void App::seedQsoSatDefaults() {
+  SatEntry* s = activeSat();
+  if (!s) return;
+  strncpy(qso.sat, s->name, sizeof(qso.sat) - 1); qso.sat[sizeof(qso.sat) - 1] = 0;
+  if (activeTxCount > 0) {
+    Transponder& t = activeTx[curTx];
+    strncpy(qso.mode, t.isLinear ? "SSB" : (t.mode[0] ? t.mode : "FM"),
+            sizeof(qso.mode) - 1); qso.mode[sizeof(qso.mode) - 1] = 0;
+    int32_t off = (t.isLinear && t.bandwidth() > 0) ? (int32_t)(t.bandwidth() / 2) : 0;
+    uint32_t dl, ul; Predictor::passbandFreqs(t, off, dl, ul);
+    qso.dlHz = dl; qso.ulHz = ul;
+  }
+}
+
+// Snapshot the auto fields (time, my grid/call) and open the entry screen. When
+// invoked while actively working a pass (from the Track/Polar screen, clock set),
+// the frequencies are the live Doppler-corrected values. Otherwise -- e.g. "New
+// QSO entry" from the Log menu -- the satellite, frequencies, time and date all
+// start as editable defaults (non-Doppler centre/nominal), so a QSO can be logged
+// after the fact. Radio control, if engaged, keeps running.
 void App::beginQso() {
   logReturn = screen;
+  bool live = (screen == SCR_TRACK || screen == SCR_POLAR);
   memset(&qso, 0, sizeof(qso));
   strncpy(qso.rstS, "59", sizeof(qso.rstS) - 1);
   strncpy(qso.rstR, "59", sizeof(qso.rstR) - 1);
@@ -1813,23 +2117,21 @@ void App::beginQso() {
   strncpy(qso.myGrid, mg.c_str(), sizeof(qso.myGrid) - 1);
   strncpy(qso.myCall, cfg.myCall, sizeof(qso.myCall) - 1);
   SatEntry* s = activeSat();
-  if (s) {
+  if (s && live && activeTxCount > 0 && timeIsSet()) {
     strncpy(qso.sat, s->name, sizeof(qso.sat) - 1);
-    if (activeTxCount > 0) {
-      Transponder& t = activeTx[curTx];
-      strncpy(qso.mode, t.isLinear ? "SSB" : (t.mode[0] ? t.mode : "FM"),
-              sizeof(qso.mode) - 1);
-      if (timeIsSet()) {
-        pred.setSite(loc.obs()); pred.setSat(*s);
-        LiveLook L = pred.look(nowUtc());
-        struct timeval tv; gettimeofday(&tv, nullptr);
-        L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6);
-        uint32_t dlOp, ulOp, rx, tx;
-        Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
-        Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
-        qso.dlHz = rx; qso.ulHz = tx;
-      }
-    }
+    Transponder& t = activeTx[curTx];
+    strncpy(qso.mode, t.isLinear ? "SSB" : (t.mode[0] ? t.mode : "FM"),
+            sizeof(qso.mode) - 1);
+    pred.setSite(loc.obs()); pred.setSat(*s);
+    LiveLook L = pred.look(nowUtc());
+    struct timeval tv; gettimeofday(&tv, nullptr);
+    L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6);
+    uint32_t dlOp, ulOp, rx, tx;
+    Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
+    Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+    qso.dlHz = rx; qso.ulHz = tx;
+  } else if (activeTxCount > 0) {
+    seedQsoSatDefaults();          // pre-fill from the selected sat (non-Doppler)
   }
   logSel = 0; logEditIdx = -1;
   screen = SCR_LOGENTRY;
@@ -2023,33 +2325,43 @@ void App::drawLogEntry() {
   header(logEditIdx >= 0 ? "Edit QSO" : "Log QSO");
   canvas.setTextSize(1);
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  char tb[24];
-  if (qso.utc) { time_t tt = (time_t)qso.utc; struct tm* g = gmtime(&tt);
-                 strftime(tb, sizeof(tb), "%m-%d %H:%M:%SZ", g); }
-  else strcpy(tb, "(no clock)");
-  canvas.setCursor(4, 20); canvas.printf("%s  %.10s", tb, qso.sat);
-  canvas.setCursor(4, 30); canvas.printf("DL %.3f  UL %.3f", qso.dlHz/1e6, qso.ulHz/1e6);
-  canvas.setCursor(4, 40); canvas.printf("MyGrid %s  MyCall %s",
-                                         qso.myGrid, qso.myCall[0] ? qso.myCall : "-");
-  const char* labels[] = { "Call", "Mode", "RST S", "RST R", "Grid", "Notes" };
-  const char* vals[]   = { qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes };
-  for (int i = 0; i < 6; ++i) {
-    int y = 52 + i*11;
+  canvas.setCursor(4, 18);
+  canvas.printf("MyGrid %s  MyCall %s", qso.myGrid[0] ? qso.myGrid : "-",
+                qso.myCall[0] ? qso.myCall : "-");
+
+  const int LF = 11;
+  char dbuf[16], tbuf[16], dlb[16], ulb[16];
+  if (qso.utc) { time_t tt = (time_t)qso.utc; struct tm g; gmtime_r(&tt, &g);
+                 strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &g);
+                 strftime(tbuf, sizeof(tbuf), "%H:%M:%SZ", &g); }
+  else { strcpy(dbuf, "(set)"); strcpy(tbuf, "(set)"); }
+  if (qso.dlHz) snprintf(dlb, sizeof(dlb), "%.4f", qso.dlHz / 1e6); else strcpy(dlb, "(set)");
+  if (qso.ulHz) snprintf(ulb, sizeof(ulb), "%.4f", qso.ulHz / 1e6); else strcpy(ulb, "(set)");
+  const char* labels[LF] = { "Date", "Time", "Sat", "DL MHz", "UL MHz",
+                             "Call", "Mode", "RST S", "RST R", "Grid", "Notes" };
+  const char* vals[LF]   = { dbuf, tbuf, qso.sat[0] ? qso.sat : "(pick)", dlb, ulb,
+                             qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes };
+  const int VIS = 8;
+  int scroll = (logSel >= VIS) ? (logSel - VIS + 1) : 0;
+  for (int v = 0; v < VIS && scroll + v < LF; ++v) {
+    int i = scroll + v;
+    int y = 30 + v*11;
     bool sel = (i == logSel);
     if (sel) { canvas.fillRect(0, y-1, 240, 11, CL_BLUE);
                canvas.setTextColor(CL_WHITE, CL_BLUE); }
     else        canvas.setTextColor(CL_CYAN, CL_BLACK);
-    canvas.setCursor(4, y); canvas.printf("%-6s %.28s", labels[i], vals[i]);
+    canvas.setCursor(4, y); canvas.printf("%-6s %.27s", labels[i], vals[i]);
   }
   footer(logEditIdx >= 0 ? "ENT edit  s save  x del  ` back"
                          : "ENT edit  s save  ` cancel");
 }
 
 void App::keyLogEntry(char c, bool enter, bool back) {
+  const int LF = 11;
   if (c != 'x') logDelArm = false;             // any other key disarms delete
   if (isBack(c, back)) { logEditIdx = -1; screen = logReturn; lastDrawMs = 0; return; }
-  if (isUp(c))   logSel = (logSel + 6 - 1) % 6;
-  if (isDown(c)) logSel = (logSel + 1) % 6;
+  if (isUp(c))   logSel = (logSel + LF - 1) % LF;
+  if (isDown(c)) logSel = (logSel + 1) % LF;
   if (c == 'x' && logEditIdx >= 0) {           // delete this entry (two-press)
     if (!logDelArm) { logDelArm = true; setStatus("Press x again to delete"); return; }
     bool ok = rewriteLog(logFirstIdx + logEditIdx, nullptr, true);
@@ -2068,7 +2380,8 @@ void App::keyLogEntry(char c, bool enter, bool back) {
     screen = logReturn; lastDrawMs = 0; return;
   }
   if (enter) {
-    if (logSel == 1) {                          // Mode: toggle SSB<->CW on linear
+    char b[20];
+    if (logSel == 6) {                          // Mode: toggle SSB<->CW on linear
       if (strcmp(qso.mode, "FM") != 0) {
         strncpy(qso.mode, strcmp(qso.mode, "CW") == 0 ? "SSB" : "CW",
                 sizeof(qso.mode) - 1);
@@ -2076,12 +2389,29 @@ void App::keyLogEntry(char c, bool enter, bool back) {
       } else setStatus("FM mode is fixed");
       return;
     }
+    if (logSel == 2) {                          // Sat: pick from the satellite list
+      logPickSat = true; screen = SCR_SATLIST; lastDrawMs = 0; return;
+    }
     switch (logSel) {
-      case 0: editTarget = 500; editTitle = "Callsign";   editBuf = qso.call; break;
-      case 2: editTarget = 501; editTitle = "RST sent";   editBuf = qso.rstS; break;
-      case 3: editTarget = 502; editTitle = "RST rcvd";   editBuf = qso.rstR; break;
-      case 4: editTarget = 503; editTitle = "Their grid"; editBuf = qso.grid; break;
-      case 5: editTarget = 504; editTitle = "Notes";      editBuf = qso.notes; break;
+      case 0: editTarget = 505; editTitle = "Date YYYY-MM-DD (UTC)";
+              if (qso.utc) { time_t tt=(time_t)qso.utc; struct tm g; gmtime_r(&tt,&g);
+                             strftime(b,sizeof(b),"%Y-%m-%d",&g); editBuf=b; }
+              else editBuf = ""; break;
+      case 1: editTarget = 506; editTitle = "Time HH:MM:SS (UTC)";
+              if (qso.utc) { time_t tt=(time_t)qso.utc; struct tm g; gmtime_r(&tt,&g);
+                             strftime(b,sizeof(b),"%H:%M:%S",&g); editBuf=b; }
+              else editBuf = ""; break;
+      case 3: editTarget = 507; editTitle = "Downlink MHz";
+              if (qso.dlHz) { snprintf(b,sizeof(b),"%.4f",qso.dlHz/1e6); editBuf=b; }
+              else editBuf = ""; break;
+      case 4: editTarget = 508; editTitle = "Uplink MHz";
+              if (qso.ulHz) { snprintf(b,sizeof(b),"%.4f",qso.ulHz/1e6); editBuf=b; }
+              else editBuf = ""; break;
+      case 5:  editTarget = 500; editTitle = "Callsign";   editBuf = qso.call; break;
+      case 7:  editTarget = 501; editTitle = "RST sent";   editBuf = qso.rstS; break;
+      case 8:  editTarget = 502; editTitle = "RST rcvd";   editBuf = qso.rstR; break;
+      case 9:  editTarget = 503; editTitle = "Their grid"; editBuf = qso.grid; break;
+      case 10: editTarget = 504; editTitle = "Notes";      editBuf = qso.notes; break;
     }
     screen = SCR_EDIT;
   }
@@ -2202,6 +2532,8 @@ void App::draw() {
     case SCR_POLAR:    drawPolar(); break;
     case SCR_PASSPOLAR: drawPassPolar(); break;
     case SCR_MUTUAL:   drawMutual(); break;
+    case SCR_VIS:      drawVis(); break;
+    case SCR_ILLUM:    drawIllum(); break;
     case SCR_LOCATION: drawLocation(); break;
     case SCR_UPDATE:   drawUpdate(); break;
     case SCR_SETTINGS: drawSettings(); break;
@@ -2734,7 +3066,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header("Settings");
   canvas.setTextSize(1);
-  const int N = 27;
+  const int N = 35;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -2745,39 +3077,57 @@ void App::drawSettings() {
   rows[6]  = String("Save & test WiFi");
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
-  rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_NET ? "rotctld (net)" : "GS-232");
+  rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
+                     : cfg.rotType == ROT_NET ? "rotctld (net)" : "GS-232");
   {
     String h = cfg.rotHost[0] ? String(cfg.rotHost) : String("(not set)");
     if (h.length() > 18) h = "..." + h.substring(h.length() - 15);
-    rows[10] = String("Rotctld host: ") + h;
+    rows[10] = String("Net host: ") + h;
   }
-  rows[11] = String("Rotctld port: ") + String(cfg.rotPort);
+  rows[11] = String("Net port: ") + String(cfg.rotPort);
   rows[12] = String("Rot baud: ") + String(cfg.rotBaud);
   rows[13] = String("Rot deadband: ") + String(cfg.rotDeadband) + " deg";
   rows[14] = String("Rot park az: ") + String(cfg.rotParkAz) + " deg";
-  rows[15] = String("Rot Az offset: ") + String(cfg.rotAzOff) + " deg";
-  rows[16] = String("Rot El offset: ") + String(cfg.rotElOff) + " deg";
+  {
+    uint16_t L = cfg.rotLeadSec;
+    rows[15] = String("Rot pre-point: ") + (L == 0 ? String("off")
+               : (L % 60 == 0) ? String(L / 60) + " min" : String(L) + " s");
+  }
+  rows[16] = String("Rot Az offset: ") + String(cfg.rotAzOff) + " deg";
+  rows[17] = String("Rot El offset: ") + String(cfg.rotElOff) + " deg";
+  rows[18] = String("Rot az range: ") + (cfg.rotAzRange == ROT_AZ_450 ? "0..450"
+                     : cfg.rotAzRange == ROT_AZ_180 ? "-180..+180" : "0..360");
+  rows[19] = String("Rot el range: ") + (cfg.rotFlip ? "180 deg (flip)" : "90 deg");
   {
     String u = cfg.gpUrl;                    // show a trimmed tail so it fits
     if (u.length() > 28) u = "..." + u.substring(u.length() - 25);
-    rows[17] = String("GP URL: ") + u;
+    rows[20] = String("GP URL: ") + u;
   }
-  rows[18] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
+  rows[21] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
                                 ? "Main Up/Sub Dn" : "Main Dn/Sub Up");
-  rows[19] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");
+  rows[22] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");
   {
     uint32_t eff = effectiveCatRateMs();
-    rows[20] = String("CAT rate: ") + String(cfg.catRateMs) + " ms";
-    if (eff > cfg.catRateMs) rows[20] += " (min " + String(eff) + ")";
+    rows[23] = String("CAT rate: ") + String(cfg.catRateMs) + " ms";
+    if (eff > cfg.catRateMs) rows[23] += " (min " + String(eff) + ")";
   }
-  rows[21] = String("CAT delay: ") + String(cfg.catDelayMs) + " ms";
-  rows[22] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
+  rows[24] = String("CAT delay: ") + String(cfg.catDelayMs) + " ms";
+  rows[25] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
              : (cfg.dimSecs % 60 == 0) ? String(cfg.dimSecs / 60) + " min"
                                        : String(cfg.dimSecs) + " s");
-  rows[23] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
-  rows[24] = String("Backup config+favs -> SD");
-  rows[25] = String("Restore config+favs");
-  rows[26] = String("Reset all data (erase)");
+  rows[26] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
+  rows[27] = String("Backup config+favs -> SD");
+  rows[28] = String("Restore config+favs");
+  rows[29] = String("Reset all data (erase)");
+  rows[30] = String("CAT type: ") + (cfg.catType == CAT_NET ? "Icom LAN" : "Wired CI-V");
+  {
+    String h = cfg.catHost[0] ? String(cfg.catHost) : String("(not set)");
+    if (h.length() > 17) h = "..." + h.substring(h.length() - 14);
+    rows[31] = String("LAN host: ") + h;
+  }
+  rows[32] = String("LAN port: ") + String(cfg.catPort);
+  rows[33] = String("LAN user: ") + (cfg.catUser[0] ? cfg.catUser : "(not set)");
+  rows[34] = String("LAN pass: ") + String(strlen(cfg.catPass) ? "******" : "(none)");
   const int VIS = 9;
   int scroll = (setSel >= VIS) ? (setSel - VIS + 1) : 0;
   for (int v = 0; v < VIS && (scroll + v) < N; ++v) {

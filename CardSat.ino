@@ -67,6 +67,7 @@
 #include <Arduino.h>
 #include <M5Cardputer.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <HardwareSerial.h>
@@ -179,7 +180,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.7";
+static constexpr const char* FW_VERSION = "0.9.7a";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -217,8 +218,13 @@ static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
 static constexpr int   PD_SAMPLES      = 100;  // samples in the pass-detail curve
 static constexpr int   POLAR_PTS       = 48;   // samples in a polar ground-track arc
-static constexpr int   MUTUAL_MAX      = 12;   // co-visibility windows listed
-static constexpr int   MUTUAL_PASS_SCAN= 16;   // of my passes scanned for mutual windows
+static constexpr int   MUTUAL_MAX      = 24;   // co-visibility windows listed
+static constexpr int   MUTUAL_PASS_SCAN= 64;   // of my passes scanned for mutual windows
+static constexpr int   MUTUAL_HORIZON_DAYS = 10; // search co-visibility this many days out
+static constexpr int   VIS_DAYS        = 10;   // InstantTrack-style overview horizon (days)
+static constexpr int   VIS_PASS_MAX    = 64;   // passes cached for the 10-day overview
+static constexpr int   ILLUM_DAYS      = 60;   // illumination raster columns (days)
+static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbit phase samples)
 
 // ---------------------------------------------------------------------------
 //  Files on LittleFS
@@ -382,6 +388,10 @@ public:
   virtual void begin(uint32_t baud, int uartNum, int rxPin, int txPin) = 0;
   virtual bool ready() const = 0;
 
+  // Pumped every loop tick. Network backends (Icom LAN) advance their connection
+  // state machine and answer keepalives here; wired backends need nothing.
+  virtual void service() {}
+
   // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
   // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
   void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
@@ -438,7 +448,10 @@ int  ctcssToneIndex(float hz);
 float ctcssToneHz(int index);
 
 // Construct the backend for a model. Caller owns the returned pointer.
-Rig* makeRig(RadioModel model);
+// catType 0 = wired CI-V/CAT (UART); 1 = Icom LAN (network) for CI-V models, in
+// which case host/port/user/pass configure the RS-BA1 UDP connection.
+Rig* makeRig(RadioModel model, uint8_t catType = 0, const char* host = "",
+             uint16_t port = 50001, const char* user = "", const char* pass = "");
 
 
 // =========================================================================
@@ -701,6 +714,137 @@ private:
 // Position control is fire-and-forget: send P, drain the ack. The socket is
 // opened lazily and reconnected (throttled) so a missing server never hangs the
 // tracking loop.
+// ---------------------------------------------------------------------------
+//  IcomNetRig  -  Icom LAN (RS-BA1 UDP) CAT backend (see icomnet.h/.cpp)
+// ---------------------------------------------------------------------------
+class IcomNetRig : public Rig {
+public:
+  IcomNetRig(RadioModel m, const char* host, uint16_t port,
+             const char* user, const char* pass)
+    : _model(m), _addr(RADIOS[m].civAddr), _host(host),
+      _ctlPort(port ? port : 50001), _user(user), _pass(pass) {
+    snprintf(_nameBuf, sizeof(_nameBuf), "%s/LAN", RADIOS[m].name);
+  }
+  ~IcomNetRig() override;
+
+  void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
+  bool ready() const override { return _state == NS_CONNECTED; }
+
+  // Pumped every loop tick: advances the connect/auth state machine, answers and
+  // sends keepalives, drains both sockets, re-auths, and reconnects on loss.
+  void service() override;
+
+  bool setMainFreq(uint32_t hz) override;        // uplink (TX) on MAIN
+  bool setSubFreq (uint32_t hz) override;        // downlink (RX) on SUB
+  bool setMainMode(RigMode m)   override;
+  bool setSubMode (RigMode m)   override;
+  bool readSubFreq(uint32_t& hzOut) override;
+  bool readMainFreq(uint32_t& hzOut) override;
+  bool enableSatMode(bool on)   override;
+  bool setCtcss(bool on, float toneHz) override;
+  void selectSubBand()          override { if (ready()) selBand(true); }
+  void selectMainBand()         override { if (ready()) selBand(false); }
+
+  bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
+  bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
+  bool hasTone()     const override { return RADIOS[_model].hasTone; }
+  bool selVerified() const override { return RADIOS[_model].selVerified; }
+  const char* name() const override { return _nameBuf; }
+
+  void    setAddress(uint8_t a) override { _addr = a; }
+  uint8_t address() const       override { return _addr; }
+
+private:
+  // ---- connection state machine -----------------------------------------
+  enum NetState : uint8_t {
+    NS_IDLE = 0,     // not started / waiting for WiFi or reconnect backoff
+    NS_CTL_OPEN,     // control: sent are-you-there, expecting i-am-here
+    NS_CTL_READY,    // control: sent are-you-ready, expecting ready
+    NS_CTL_LOGIN,    // control: sent login, expecting login reply (token)
+    NS_CTL_AUTH,     // control: sent auth #1/#2, expecting auth ok + capabilities
+    NS_CTL_CONN,     // control: sent conninfo, expecting conninfo success
+    NS_SER_OPEN,     // serial: sent are-you-there, expecting i-am-here
+    NS_SER_READY,    // serial: sent are-you-ready, expecting ready
+    NS_CONNECTED     // serial open + CI-V flowing
+  };
+
+  RadioModel _model;
+  uint8_t    _addr;
+  String     _host;
+  uint16_t   _ctlPort;
+  String     _user, _pass;
+  char       _nameBuf[24];
+
+  WiFiUDP    _ctl, _ser;
+  NetState   _state = NS_IDLE;
+
+  uint32_t _ctlLocalSID = 0, _ctlRemoteSID = 0;
+  uint32_t _serLocalSID = 0, _serRemoteSID = 0;
+  uint8_t  _authID[6];      bool _gotAuthID = false;
+  uint8_t  _a8reply[16];    bool _gotA8 = false;
+  bool     _authOK = false;
+  bool     _serOpened = false;
+
+  // Sequence counters (see ICOM_LAN_PROTOCOL.md): pkt0 "tracked" seq is shared by
+  // idle + every big packet on a stream (starts 1); auth inner seq is embedded in
+  // login/auth/conninfo (starts 0); ping seq + civ seq are independent.
+  uint16_t _ctlTxSeq = 1, _serTxSeq = 1;
+  uint16_t _authInner = 0;
+  uint16_t _civSeq = 0;
+  uint16_t _ctlPingSeq = 0, _serPingSeq = 0;
+  uint32_t _pingPayload = 1;
+
+  // Timers (millis()).
+  uint32_t _tStateMs = 0;     // entered current state
+  uint32_t _tLastRxMs = 0;    // last packet from radio (link-dead detection)
+  uint32_t _tLastTryMs = 0;   // last (re)connect attempt (backoff)
+  uint32_t _tPingCtlMs = 0, _tIdleCtlMs = 0;
+  uint32_t _tPingSerMs = 0, _tIdleSerMs = 0;
+  uint32_t _tReauthMs = 0;
+
+  bool wifiUp() const;
+  void resetSession();
+  void startConnect();
+  void teardown(bool graceful);
+  void failReconnect(const char* why);
+
+  // raw + framed senders
+  static void put32be(uint8_t* b, uint32_t v);
+  void sendRaw(WiFiUDP& u, const uint8_t* d, size_t n);
+  void ctlTracked(uint8_t* d, size_t n);         // stamps [6:8]=_ctlTxSeq++
+  void serTracked(uint8_t* d, size_t n);         // stamps [6:8]=_serTxSeq++
+  void sendAreYouThere(bool ctl);
+  void sendAreYouReady(bool ctl);
+  void sendDisconnect(bool ctl);
+  void sendPing(bool ctl);
+  void replyPing(bool ctl, const uint8_t* r);
+  void sendIdle(bool ctl, uint16_t seq);
+  void sendLogin();
+  void sendAuth(uint8_t magic);
+  void sendConnInfo();
+  void sendSerOpenClose(bool close);
+
+  // receive pumps + dispatch
+  void pumpCtl();
+  void pumpSer();
+  void handleCtl(const uint8_t* r, int n);
+  void handleSer(const uint8_t* r, int n);
+  bool isPing(const uint8_t* r, int n) const;
+  bool isRetransReq(const uint8_t* r, int n) const;
+
+  // CI-V helpers (mirror CivRig, but wrapped in the serial UDP packet)
+  static CivMode toCiv(RigMode m);
+  static void    freqToBcd(uint32_t hz, uint8_t out[5]);
+  void selBand(bool sub);
+  bool sendCivPayload(const uint8_t* pl, size_t pllen);
+  bool setFreqNet(bool sub, uint32_t hz);
+  bool setModeNet(bool sub, CivMode m, uint8_t filter = 0x01);
+  bool readFreqNet(bool sub, uint32_t& hzOut);
+
+  // Obfuscated credential (Icom passcode substitution) -> 16 bytes.
+  static void passcode(const char* s, uint8_t out[16]);
+};
+
 class RotctldRotator : public Rotator {
 public:
   RotctldRotator(const char* host, uint16_t port) : _host(host), _port(port) {}
@@ -721,9 +865,34 @@ private:
   void drainInput();                // consume pending replies without blocking
 };
 
+// PstRotator UDP control. CardSat sends "<PST>...</PST>" datagrams to a
+// PstRotator instance on the LAN (default UDP port 12000): set-position uses
+// <AZIMUTH>/<ELEVATION>, stop uses <STOP>, and AZ?/EL? queries are answered on
+// port+1. Connectionless, so "ready" just means WiFi is up and a host is set.
+class PstRotator : public Rotator {
+public:
+  PstRotator(const char* host, uint16_t port) : _host(host), _port(port) {}
+  void begin() override;
+  bool ready() const override { return _ok; }
+  bool point(float az, float el) override;
+  bool readPos(float& az, float& el) override;
+  void stop() override;
+  const char* name() const override { return "PstRotator"; }
+
+private:
+  String   _host;
+  uint16_t _port;
+  bool     _ok = false;
+  bool     _bound = false;
+  WiFiUDP  _udp;                    // bound to _port+1 to receive AZ?/EL? replies
+  bool ensure();                    // verify WiFi + socket; updates _ok
+  bool send(const char* msg);       // fire-and-forget datagram to host:_port
+};
+
 // Build the configured rotator backend. Caller owns the returned object.
 //   type 0 = GS-232 (ROT_GS232) on the I2C->UART bridge
 //   type 1 = rotctld (ROT_NET) to host:port over TCP
+//   type 2 = PstRotator (ROT_PST) UDP control to host:port
 Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port);
 
 
@@ -961,6 +1130,10 @@ public:
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
 
+  // True if the satellite is in sunlight (not in Earth's cylindrical shadow) at
+  // time t. Lightweight: propagate + shadow test only, no observer geometry.
+  bool sunlitAt(time_t t);
+
   // Range rate (km/s, +ve receding) at a FRACTIONAL unix time, taken from the
   // SGP4 velocity vector (the method Gpredict/sgp4sdp4 use) rather than by
   // differencing slant range. Exact and not quantised to whole seconds.
@@ -999,7 +1172,8 @@ public:
                             uint32_t& dlOp, uint32_t& ulOp);
 
   // Fill up to `maxN` upcoming passes starting from `from` (unix UTC).
-  int  predictPasses(time_t from, float minEl, PassPredict* out, int maxN);
+  int  predictPasses(time_t from, float minEl, PassPredict* out, int maxN,
+                     time_t horizonEnd = 0);
 
   static time_t jdToUnix(double jd);
 
@@ -1026,11 +1200,26 @@ enum VfoType : uint8_t {
   VFO_MAIN_DOWN_SUB_UP = 1,   // uplink on SUB,  downlink on MAIN
 };
 
+// CAT transport for the (Icom) radio: the wired CI-V UART, or the RS-BA1 LAN
+// (UDP) protocol straight to the radio's network port (no PC/rigctld bridge).
+enum CatType : uint8_t {
+  CAT_WIRED = 0,   // CI-V over the TTL UART (default)
+  CAT_NET   = 1,   // Icom LAN (RS-BA1 UDP): control 50001 + serial 50002
+};
+
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
 // rotctld server reached over TCP (CardSat is the client).
 enum RotType : uint8_t {
   ROT_GS232 = 0,   // GS-232A/B via the SC16IS750 I2C->UART bridge (default)
   ROT_NET   = 1,   // rotctld (Hamlib "NET rotctl") over TCP
+  ROT_PST   = 2,   // PstRotator UDP control
+};
+
+// Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
+enum RotAzRange : uint8_t {
+  ROT_AZ_360 = 0,  // 0..360 deg, 0=North, 180=South (default)
+  ROT_AZ_180 = 1,  // -180..+180 deg, centred on 0=North
+  ROT_AZ_450 = 2,  // 0..450 deg, 90 deg overlap to avoid cable-wrap at North
 };
 
 struct Settings {
@@ -1048,6 +1237,13 @@ struct Settings {
   uint8_t  radioModel = RIG_IC9700;
   uint8_t  civAddr    = 0xA2;   // 0 => use model default
   uint32_t civBaud    = 19200;
+  // CAT transport. CAT_NET drives the radio over the RS-BA1 LAN protocol using
+  // the host/port/credentials below instead of the wired CI-V UART.
+  uint8_t  catType    = CAT_WIRED;
+  char     catHost[40] = "";    // radio IP / hostname (catType = CAT_NET)
+  uint16_t catPort     = 50001; // RS-BA1 control port (serial = +1, audio = +2)
+  char     catUser[24] = "";    // radio Network User1 id
+  char     catPass[24] = "";    // radio Network User1 password
   // (CI-V is TTL serial only.) VFO roles + whether to command the rig's own
   // satellite mode when engaging radio control.
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
@@ -1068,6 +1264,8 @@ struct Settings {
   char     rotHost[40] = "";         // rotctld server host/IP (rotType=ROT_NET)
   uint16_t rotPort     = 4533;       // rotctld TCP port (Hamlib default 4533)
   uint32_t rotBaud     = 9600;   // GS-232 serial (commonly 9600)
+  uint16_t rotLeadSec  = 120;    // pre-position lead before AOS (s; 0 = off)
+  uint8_t  rotAzRange  = ROT_AZ_360; // 0..360 or -180..+180 azimuth axis
   int16_t  rotAzOff    = 0;      // deg added to commanded azimuth (alignment)
   int16_t  rotElOff    = 0;      // deg added to commanded elevation
   uint8_t  rotDeadband = 3;      // deg; suppress smaller moves (anti-chatter)
@@ -1092,7 +1290,7 @@ enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
-  SCR_LOGLIST
+  SCR_LOGLIST, SCR_VIS, SCR_ILLUM
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1180,6 +1378,21 @@ private:
   MutualWindow mutual[MUTUAL_MAX];
   int      mutualN = 0;
   int      mutualSel = 0;
+
+  // 10-day pass overview (InstantTrack-style), cached on entry
+  PassPredict visPasses[VIS_PASS_MAX];
+  int      visN = 0;
+
+  // 60-day illumination (DK3WN illum-style). Raster: cols = days, rows = orbit
+  // phase; a set bit means the satellite is in eclipse at that (day, phase).
+  uint8_t  illumBits[ILLUM_DAYS][(ILLUM_ROWS + 7) / 8];
+  bool     illumValid     = false;
+  float    illumPeriodMin = 0;
+  bool     illumSunNow    = true;
+  bool     illumNextEclipse = false;
+  long     illumNextSec   = -1;     // seconds to next sun<->shadow transition
+  float    illumEclMin    = 0;      // eclipse minutes in the current orbit
+  float    illumEclPct    = 0;
   char     dxGrid[8] = {0};
   double   dxLat = 0, dxLon = 0;
 
@@ -1220,8 +1433,13 @@ private:
   bool     rotOut = false;       // are we pointing the rotator?
   float    lastAzCmd = -999.0f;  // last az/el we commanded (deadband)
   float    lastElCmd = -999.0f;
+  float    lastUnwrappedAz = -999.0f;  // actual az sent (tracks 0..450 overlap)
   bool     rotParked = false;
   uint32_t lastRotMs = 0;
+  PassPredict rotPass;             // cached upcoming pass, for AOS pre-positioning
+  bool     rotPassValid = false;
+  uint32_t rotPassNorad = 0;       // which satellite rotPass belongs to
+  uint32_t lastRotPassMs = 0;      // throttle for rotPass recompute
   uint32_t lastDrawMs = 0;
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     screenAsleep = false;  // backlight blanked for power saving
@@ -1245,6 +1463,7 @@ private:
   int      exportPendN = 0;       // number queued
   int      exportPendIdx = 0;     // current prompt index
   bool     logDelArm = false;     // two-press delete confirmation
+  bool     logPickSat = false;    // sat list opened to pick a satellite for a log entry
 
   // status line
   String   status;
@@ -1253,6 +1472,7 @@ private:
   // ---- helpers ----
   void applyRadioFromCfg();
   void applyRotatorFromCfg();
+  void rotPoint(float az, float el);   // send az/el applying the az-range convention
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
   // Route logical downlink/uplink to the physical MAIN/SUB VFOs per cfg.vfoType.
   bool dlOnSub() const { return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN; }
@@ -1338,6 +1558,8 @@ private:
   void keyPolar(char c, bool enter, bool back);
   void keyPassPolar(char c, bool enter, bool back);
   void keyMutual(char c, bool enter, bool back);
+  void buildVis();   void drawVis();   void keyVis(char c, bool enter, bool back);
+  void buildIllum(); void drawIllum(); void keyIllum(char c, bool enter, bool back);
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);
@@ -1347,6 +1569,7 @@ private:
   void keyLog(char c, bool enter, bool back);
   void keyLogEntry(char c, bool enter, bool back);
   void beginQso();                // snapshot auto fields, open the entry screen
+  void seedQsoSatDefaults();      // fill qso sat/mode + non-Doppler centre/nominal freqs
   bool saveQso();                 // append the pending QSO to the CSV log
   int  qsoCount();                // number of logged QSOs
   bool exportAdif();              // write ADIF from the CSV log
@@ -1451,7 +1674,11 @@ RigMode Rig::modeFromString(const String& s) {
   return RM_USB;
 }
 
-Rig* makeRig(RadioModel model) {
+Rig* makeRig(RadioModel model, uint8_t catType, const char* host,
+             uint16_t port, const char* user, const char* pass) {
+  // Icom LAN (RS-BA1 UDP) network CAT: only for CI-V models; catType 1 = CAT_NET.
+  if (catType == 1 && RADIOS[model].proto == PROTO_CIV)
+    return new IcomNetRig(model, host, port, user, pass);
   switch (RADIOS[model].proto) {
     case PROTO_YAESU:   return new YaesuRig(model);
     case PROTO_KENWOOD: return new KenwoodRig(model);
@@ -2183,8 +2410,7 @@ void RotctldRotator::drainInput() {
 
 bool RotctldRotator::point(float az, float el) {
   if (!ensure()) return false;
-  if (az < 0) az += 360.0f;
-  if (el < 0) el = 0;
+  if (el < 0) el = 0;          // az is passed through as-is (caller picks 0-360 vs +/-180)
   drainInput();                          // clear any stale ack from a prior command
   char cmd[24];
   int n = snprintf(cmd, sizeof(cmd), "P %.1f %.1f\n", az, el);
@@ -2234,8 +2460,549 @@ bool RotctldRotator::readPos(float& az, float& el) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+//  PstRotator UDP control backend
+// ---------------------------------------------------------------------------
+void PstRotator::begin() {
+  _bound = false; _ok = false;
+  ensure();
+}
+
+bool PstRotator::ensure() {
+  if (WiFi.status() != WL_CONNECTED || _host.length() == 0) { _ok = false; return false; }
+  if (!_bound) _bound = _udp.begin(_port + 1);   // RX replies on port+1; opens the socket
+  _ok = _bound;
+  return _ok;
+}
+
+bool PstRotator::send(const char* msg) {
+  if (!ensure()) return false;
+  if (!_udp.beginPacket(_host.c_str(), _port)) { _ok = false; return false; }
+  _udp.write((const uint8_t*)msg, strlen(msg));
+  bool ok = _udp.endPacket();
+#if ROT_DEBUG
+  Serial.printf("[ROT TX] %s -> %s:%u %s\n", msg, _host.c_str(), (unsigned)_port,
+                ok ? "" : "(fail)");
+#endif
+  if (!ok) _ok = false;
+  return ok;
+}
+
+bool PstRotator::point(float az, float el) {
+  if (az < 0) az += 360.0f;          // PstRotator owns its own range; keep az >= 0
+  if (el < 0) el = 0;
+  char msg[80];
+  snprintf(msg, sizeof(msg),
+           "<PST><AZIMUTH>%.1f</AZIMUTH><ELEVATION>%.1f</ELEVATION></PST>", az, el);
+  return send(msg);
+}
+
+void PstRotator::stop() {
+  send("<PST><STOP>1</STOP></PST>");
+}
+
+// PstRotator answers AZ?/EL? on UDP port+1 as "AZ:xxx.x" / "EL:yy.y". Provided
+// for interface completeness; the tracking loop does not call it.
+bool PstRotator::readPos(float& az, float& el) {
+  if (!ensure()) return false;
+  while (_udp.parsePacket() > 0) { uint8_t d[64]; _udp.read(d, sizeof(d)); }  // drain stale
+  send("<PST>AZ?</PST>");
+  send("<PST>EL?</PST>");
+  bool gotAz = false, gotEl = false;
+  char buf[80];
+  uint32_t t0 = millis();
+  while ((!gotAz || !gotEl) && millis() - t0 < 400) {
+    int n = _udp.parsePacket();
+    if (n <= 0) { delay(2); continue; }
+    int r = _udp.read((uint8_t*)buf, sizeof(buf) - 1);
+    if (r < 0) r = 0;
+    buf[r] = 0;
+    char* p;
+    if (!gotAz && (p = strstr(buf, "AZ:"))) { az = atof(p + 3); gotAz = true; }
+    if (!gotEl && (p = strstr(buf, "EL:"))) { el = atof(p + 3); gotEl = true; }
+  }
+  return gotAz && gotEl;
+}
+
+// ===========================================================================
+//  icomnet.cpp  -  Icom LAN (RS-BA1 UDP) CAT backend
+// ===========================================================================
+//  Byte layouts and the connect/auth/keepalive sequence follow ICOM_LAN_PROTOCOL.md
+//  (reverse-engineered from nonoo/kappanhang, cross-checked vs wfview and
+//  microenh/NetworkIcom). All multi-byte session IDs are big-endian; the small
+//  header seq at [6:8] is little-endian; the CI-V inner seq at [19:21] is
+//  big-endian. Handshake/control packets are sent twice for loss resilience.
+//
+//  Limitations (first hardware-targeted cut): no transmit retransmit buffer --
+//  a radio retransmit request is answered with an idle carrying that seq (the
+//  kappanhang "not buffered" fallback); a dropped CAT frame is simply re-sent on
+//  the next Doppler cycle. The audio stream is never opened (see ICOM_LAN_PROTOCOL.md
+//  section 7 -- the one item to confirm against real hardware).
+// ===========================================================================
+
+#define ICOMNET_DEBUG 1
+#if ICOMNET_DEBUG
+  #define NLOG(...)  do { Serial.printf(__VA_ARGS__); } while (0)
+#else
+  #define NLOG(...)  do {} while (0)
+#endif
+
+// Big-endian 32-bit read/write.
+void IcomNetRig::put32be(uint8_t* b, uint32_t v) {
+  b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16);
+  b[2] = (uint8_t)(v >> 8);  b[3] = (uint8_t)(v);
+}
+static inline uint32_t rd32be(const uint8_t* b) {
+  return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+         ((uint32_t)b[2] << 8)  |  (uint32_t)b[3];
+}
+
+// Icom passcode substitution (ASCII 32..126 -> byte). See ICOM_LAN_PROTOCOL.md s6.
+void IcomNetRig::passcode(const char* s, uint8_t out[16]) {
+  static const uint8_t seq[95] = {
+    0x47,0x5d,0x4c,0x42,0x66,0x20,0x23,0x46,0x4e,0x57, // 32-41
+    0x45,0x3d,0x67,0x76,0x60,0x41,0x62,0x39,0x59,0x2d, // 42-51
+    0x68,0x7e,0x7c,0x65,0x7d,0x49,0x29,0x72,0x73,0x78, // 52-61
+    0x21,0x6e,0x5a,0x5e,0x4a,0x3e,0x71,0x2c,0x2a,0x54, // 62-71
+    0x3c,0x3a,0x63,0x4f,0x43,0x75,0x27,0x79,0x5b,0x35, // 72-81
+    0x70,0x48,0x6b,0x56,0x6f,0x34,0x32,0x6c,0x30,0x61, // 82-91
+    0x6d,0x7b,0x2f,0x4b,0x64,0x38,0x2b,0x2e,0x50,0x40, // 92-101
+    0x3f,0x55,0x33,0x37,0x25,0x77,0x24,0x26,0x74,0x6a, // 102-111
+    0x28,0x53,0x4d,0x69,0x22,0x5c,0x44,0x31,0x36,0x58, // 112-121
+    0x3b,0x7a,0x51,0x5f,0x52                            // 122-126
+  };
+  for (int i = 0; i < 16; ++i) out[i] = 0;
+  int len = (int)strlen(s);
+  for (int i = 0; i < len && i < 16; ++i) {
+    int p = (int)(uint8_t)s[i] + i;
+    if (p > 126) p = 32 + p % 127;
+    if (p < 32) p = 32;                 // defensive (control chars not expected)
+    out[i] = seq[p - 32];
+  }
+}
+
+CivMode IcomNetRig::toCiv(RigMode m) {
+  switch (m) {
+    case RM_LSB: return CIV_LSB; case RM_USB: return CIV_USB;
+    case RM_CW:  return CIV_CW;  case RM_FM:  return CIV_FM;
+    case RM_AM:  return CIV_AM;  case RM_DATA:return CIV_RTTY;
+    default:     return CIV_USB;
+  }
+}
+void IcomNetRig::freqToBcd(uint32_t hz, uint8_t out[5]) {
+  for (int i = 0; i < 5; ++i) {
+    uint8_t lo = hz % 10; hz /= 10;
+    uint8_t hi = hz % 10; hz /= 10;
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+}
+
+bool IcomNetRig::wifiUp() const { return WiFi.status() == WL_CONNECTED; }
+
+void IcomNetRig::begin(uint32_t, int, int, int) {
+  // No UART. Arm the state machine; service() drives the connection once WiFi is
+  // up. _serPort is _ctlPort+1, audio (never opened) would be _ctlPort+2.
+  resetSession();
+  _tLastTryMs = millis() - 5000;   // allow an immediate first attempt
+}
+
+IcomNetRig::~IcomNetRig() { teardown(true); }
+
+void IcomNetRig::resetSession() {
+  _ctl.stop(); _ser.stop();
+  _state = NS_IDLE;
+  _ctlLocalSID = _ctlRemoteSID = _serLocalSID = _serRemoteSID = 0;
+  _gotAuthID = _gotA8 = _authOK = _serOpened = false;
+  _ctlTxSeq = _serTxSeq = 1;
+  _authInner = 0; _civSeq = 0; _ctlPingSeq = _serPingSeq = 0;
+  memset(_authID, 0, sizeof(_authID));
+  memset(_a8reply, 0, sizeof(_a8reply));
+}
+
+void IcomNetRig::startConnect() {
+  resetSession();
+  _tLastTryMs = millis();
+  if (!wifiUp() || _host.length() == 0) { _state = NS_IDLE; return; }
+  if (!_ctl.begin(_ctlPort)) { _state = NS_IDLE; return; }
+  _ctlLocalSID = (((uint32_t)WiFi.localIP() & 0xFFFF) << 16) | _ctlPort;
+  uint32_t ms = millis();
+  _tStateMs = _tLastRxMs = _tPingCtlMs = _tIdleCtlMs = ms;
+  _state = NS_CTL_OPEN;
+  NLOG("[NET] connecting to %s:%u (CI-V %02X)\n", _host.c_str(), _ctlPort, _addr);
+  sendAreYouThere(true);
+}
+
+void IcomNetRig::failReconnect(const char* why) {
+  NLOG("[NET] reconnect: %s\n", why);
+  teardown(false);
+  _state = NS_IDLE;
+  _tLastTryMs = millis();        // backoff before the next attempt
+}
+
+void IcomNetRig::teardown(bool graceful) {
+  if (graceful && _state == NS_CONNECTED) {
+    if (_serOpened) sendSerOpenClose(true);
+    sendAuth(0x01);              // de-auth on the control stream
+    sendDisconnect(false);
+    sendDisconnect(true);
+    delay(20);
+  }
+  _ctl.stop(); _ser.stop();
+  _serOpened = false;
+}
+
+// --- raw / framed senders --------------------------------------------------
+void IcomNetRig::sendRaw(WiFiUDP& u, const uint8_t* d, size_t n) {
+  // The remote port is encoded by which socket: _ctl -> _ctlPort, _ser -> +1.
+  uint16_t port = (&u == &_ser) ? (uint16_t)(_ctlPort + 1) : _ctlPort;
+  if (!wifiUp()) return;
+  u.beginPacket(_host.c_str(), port);
+  u.write(d, n);
+  u.endPacket();
+}
+void IcomNetRig::ctlTracked(uint8_t* d, size_t n) {
+  d[6] = (uint8_t)_ctlTxSeq; d[7] = (uint8_t)(_ctlTxSeq >> 8); _ctlTxSeq++;
+  sendRaw(_ctl, d, n);
+}
+void IcomNetRig::serTracked(uint8_t* d, size_t n) {
+  d[6] = (uint8_t)_serTxSeq; d[7] = (uint8_t)(_serTxSeq >> 8); _serTxSeq++;
+  sendRaw(_ser, d, n);
+}
+
+void IcomNetRig::sendAreYouThere(bool ctl) {
+  uint8_t p[16]; memset(p, 0, sizeof(p));
+  p[0] = 0x10; p[4] = 0x03;
+  put32be(p + 8, ctl ? _ctlLocalSID : _serLocalSID);   // remoteSID still unknown (0)
+  WiFiUDP& u = ctl ? _ctl : _ser;
+  sendRaw(u, p, 16); sendRaw(u, p, 16);
+}
+void IcomNetRig::sendAreYouReady(bool ctl) {
+  uint8_t p[16]; memset(p, 0, sizeof(p));
+  p[0] = 0x10; p[4] = 0x06; p[6] = 0x01;
+  put32be(p + 8,  ctl ? _ctlLocalSID  : _serLocalSID);
+  put32be(p + 12, ctl ? _ctlRemoteSID : _serRemoteSID);
+  WiFiUDP& u = ctl ? _ctl : _ser;
+  sendRaw(u, p, 16); sendRaw(u, p, 16);
+}
+void IcomNetRig::sendDisconnect(bool ctl) {
+  uint8_t p[16]; memset(p, 0, sizeof(p));
+  p[0] = 0x10; p[4] = 0x05;
+  put32be(p + 8,  ctl ? _ctlLocalSID  : _serLocalSID);
+  put32be(p + 12, ctl ? _ctlRemoteSID : _serRemoteSID);
+  WiFiUDP& u = ctl ? _ctl : _ser;
+  sendRaw(u, p, 16); sendRaw(u, p, 16);
+}
+void IcomNetRig::sendIdle(bool ctl, uint16_t seq) {
+  uint8_t p[16]; memset(p, 0, sizeof(p));
+  p[0] = 0x10; p[6] = (uint8_t)seq; p[7] = (uint8_t)(seq >> 8);
+  put32be(p + 8,  ctl ? _ctlLocalSID  : _serLocalSID);
+  put32be(p + 12, ctl ? _ctlRemoteSID : _serRemoteSID);
+  sendRaw(ctl ? _ctl : _ser, p, 16);
+}
+
+void IcomNetRig::sendPing(bool ctl) {
+  uint8_t p[21]; memset(p, 0, sizeof(p));
+  p[0] = 0x15; p[4] = 0x07;
+  uint16_t seq = ctl ? _ctlPingSeq++ : _serPingSeq++;
+  p[6] = (uint8_t)seq; p[7] = (uint8_t)(seq >> 8);
+  put32be(p + 8,  ctl ? _ctlLocalSID  : _serLocalSID);
+  put32be(p + 12, ctl ? _ctlRemoteSID : _serRemoteSID);
+  p[16] = 0x00;                                  // request
+  uint32_t pc = _pingPayload++;
+  p[17] = (uint8_t)pc; p[18] = (uint8_t)(pc >> 8);
+  p[19] = (uint8_t)(pc >> 16); p[20] = (uint8_t)(pc >> 24);
+  sendRaw(ctl ? _ctl : _ser, p, 21);
+}
+void IcomNetRig::replyPing(bool ctl, const uint8_t* r) {
+  uint8_t p[21]; memset(p, 0, sizeof(p));
+  p[0] = 0x15; p[4] = 0x07;
+  p[6] = r[6]; p[7] = r[7];                      // echo the radio's seq
+  put32be(p + 8,  ctl ? _ctlLocalSID  : _serLocalSID);
+  put32be(p + 12, ctl ? _ctlRemoteSID : _serRemoteSID);
+  p[16] = 0x01;                                  // reply
+  p[17] = r[17]; p[18] = r[18]; p[19] = r[19]; p[20] = r[20];
+  sendRaw(ctl ? _ctl : _ser, p, 21);
+}
+
+void IcomNetRig::sendLogin() {
+  uint8_t p[128]; memset(p, 0, sizeof(p));
+  p[0] = 0x80;
+  put32be(p + 8, _ctlLocalSID); put32be(p + 12, _ctlRemoteSID);
+  p[19] = 0x70; p[20] = 0x01;
+  p[23] = (uint8_t)_authInner; p[24] = (uint8_t)(_authInner >> 8);
+  p[26] = (uint8_t)esp_random(); p[27] = (uint8_t)esp_random();
+  uint8_t u[16], w[16];
+  passcode(_user.c_str(), u); passcode(_pass.c_str(), w);
+  memcpy(p + 64, u, 16); memcpy(p + 80, w, 16);
+  const char* nm = "CardSat";
+  memcpy(p + 96, nm, strlen(nm));                // null-padded by memset
+  ctlTracked(p, 128); _authInner++;
+  NLOG("[NET] login sent\n");
+}
+void IcomNetRig::sendAuth(uint8_t magic) {
+  uint8_t p[64]; memset(p, 0, sizeof(p));
+  p[0] = 0x40;
+  put32be(p + 8, _ctlLocalSID); put32be(p + 12, _ctlRemoteSID);
+  p[19] = 0x30; p[20] = 0x01; p[21] = magic;
+  p[23] = (uint8_t)_authInner; p[24] = (uint8_t)(_authInner >> 8);
+  memcpy(p + 26, _authID, 6);
+  ctlTracked(p, 64); _authInner++;
+}
+void IcomNetRig::sendConnInfo() {
+  uint8_t p[144]; memset(p, 0, sizeof(p));
+  p[0] = 0x90;
+  put32be(p + 8, _ctlLocalSID); put32be(p + 12, _ctlRemoteSID);
+  p[19] = 0x80; p[20] = 0x01; p[21] = 0x03;
+  p[23] = (uint8_t)_authInner; p[24] = (uint8_t)(_authInner >> 8);
+  memcpy(p + 26, _authID, 6);
+  memcpy(p + 32, _a8reply, 16);
+  strncpy((char*)(p + 64), RADIOS[_model].name, 15);   // radio model name, plaintext
+  uint8_t u[16]; passcode(_user.c_str(), u); memcpy(p + 96, u, 16);
+  uint16_t sr = 16000, serP = (uint16_t)(_ctlPort + 1), audP = (uint16_t)(_ctlPort + 2), txb = 100;
+  p[112] = 0x01; p[113] = 0x01; p[114] = 0x04; p[115] = 0x04;
+  p[118] = (uint8_t)(sr >> 8);  p[119] = (uint8_t)sr;
+  p[122] = (uint8_t)(sr >> 8);  p[123] = (uint8_t)sr;
+  p[126] = (uint8_t)(serP >> 8); p[127] = (uint8_t)serP;
+  p[130] = (uint8_t)(audP >> 8); p[131] = (uint8_t)audP;
+  p[134] = (uint8_t)(txb >> 8);  p[135] = (uint8_t)txb;  p[136] = 0x01;
+  ctlTracked(p, 144); _authInner++;
+  NLOG("[NET] conninfo sent\n");
+}
+void IcomNetRig::sendSerOpenClose(bool close) {
+  uint8_t p[22]; memset(p, 0, sizeof(p));
+  p[0] = 0x16;
+  put32be(p + 8, _serLocalSID); put32be(p + 12, _serRemoteSID);
+  p[16] = 0xc0; p[17] = 0x01; p[18] = 0x00;
+  p[19] = (uint8_t)(_civSeq >> 8); p[20] = (uint8_t)_civSeq;   // big-endian
+  p[21] = close ? 0x00 : 0x05;
+  serTracked(p, 22); _civSeq++;
+}
+
+// --- receive ---------------------------------------------------------------
+bool IcomNetRig::isPing(const uint8_t* r, int n) const {
+  return n == 21 && r[1] == 0 && r[2] == 0 && r[3] == 0 && r[4] == 0x07 && r[5] == 0;
+}
+bool IcomNetRig::isRetransReq(const uint8_t* r, int n) const {
+  return n >= 16 && ((r[0] == 0x10 && r[4] == 0x01) || (r[0] == 0x18 && r[4] == 0x01));
+}
+
+void IcomNetRig::pumpCtl() {
+  int n;
+  while ((n = _ctl.parsePacket()) > 0) {
+    uint8_t buf[320]; if (n > (int)sizeof(buf)) n = sizeof(buf);
+    int r = _ctl.read(buf, n); if (r <= 0) break;
+    _tLastRxMs = millis();
+    handleCtl(buf, r);
+  }
+}
+void IcomNetRig::pumpSer() {
+  int n;
+  while ((n = _ser.parsePacket()) > 0) {
+    uint8_t buf[320]; if (n > (int)sizeof(buf)) n = sizeof(buf);
+    int r = _ser.read(buf, n); if (r <= 0) break;
+    _tLastRxMs = millis();
+    handleSer(buf, r);
+  }
+}
+
+void IcomNetRig::handleCtl(const uint8_t* r, int n) {
+  if (isPing(r, n)) { if (r[16] == 0x00) replyPing(true, r); return; }
+  if (isRetransReq(r, n)) { sendIdle(true, (uint16_t)(r[6] | (r[7] << 8))); return; }
+
+  if (n == 16) {
+    if (r[4] == 0x04) {                          // i-am-here
+      _ctlRemoteSID = rd32be(r + 8);
+      if (_state == NS_CTL_OPEN) { sendAreYouReady(true); _state = NS_CTL_READY; _tStateMs = millis(); }
+    } else if (r[4] == 0x06) {                   // ready
+      if (_state == NS_CTL_READY) { sendLogin(); _state = NS_CTL_LOGIN; _tStateMs = millis(); }
+    }
+    return;
+  }
+  if (n == 96 && r[0] == 0x60) {                 // login reply
+    if (_state != NS_CTL_LOGIN) return;
+    if (r[48] == 0xff && r[49] == 0xff && r[50] == 0xff && r[51] == 0xfe) {
+      failReconnect("invalid username/password"); return;
+    }
+    memcpy(_authID, r + 26, 6); _gotAuthID = true;
+    _tPingCtlMs = _tIdleCtlMs = millis();
+    sendAuth(0x02); sendAuth(0x05);
+    _state = NS_CTL_AUTH; _tStateMs = millis();
+    NLOG("[NET] login ok, auth sent\n");
+    return;
+  }
+  if (n == 168 && r[0] == 0xa8) {                // capabilities
+    memcpy(_a8reply, r + 66, 16); _gotA8 = true;
+    if (_state == NS_CTL_AUTH && _authOK && _gotA8) { sendConnInfo(); _state = NS_CTL_CONN; _tStateMs = millis(); }
+    return;
+  }
+  if (n == 64 && r[0] == 0x40) {                 // auth reply
+    if (r[21] == 0x05) _authOK = true;
+    if (_state == NS_CTL_AUTH && _authOK && _gotA8) { sendConnInfo(); _state = NS_CTL_CONN; _tStateMs = millis(); }
+    return;
+  }
+  if (n == 80 && r[0] == 0x50) {                 // status
+    if (r[48] == 0xff && r[49] == 0xff && r[50] == 0xff) { failReconnect("auth rejected"); return; }
+    if (r[48] == 0x00 && r[49] == 0x00 && r[50] == 0x00 && r[64] == 0x01) { failReconnect("radio disconnected"); return; }
+    return;
+  }
+  if (n == 144 && r[0] == 0x90) {                // conninfo success
+    if (_state != NS_CTL_CONN || r[96] != 1) return;
+    _ctlRemoteSID = rd32be(r + 8); _ctlLocalSID = rd32be(r + 12);
+    memcpy(_authID, r + 26, 6);
+    _ser.begin((uint16_t)(_ctlPort + 1));
+    _serLocalSID = (((uint32_t)WiFi.localIP() & 0xFFFF) << 16) | (uint16_t)(_ctlPort + 1);
+    _serTxSeq = 1; _civSeq = 0; _serPingSeq = 0;
+    _tPingSerMs = _tIdleSerMs = millis();
+    sendAreYouThere(false);
+    _state = NS_SER_OPEN; _tStateMs = millis();
+    NLOG("[NET] control up; opening serial stream\n");
+    return;
+  }
+}
+
+void IcomNetRig::handleSer(const uint8_t* r, int n) {
+  if (isPing(r, n)) { if (r[16] == 0x00) replyPing(false, r); return; }
+  if (isRetransReq(r, n)) { sendIdle(false, (uint16_t)(r[6] | (r[7] << 8))); return; }
+  if (n == 16) {
+    if (r[4] == 0x04) {                          // i-am-here
+      _serRemoteSID = rd32be(r + 8);
+      if (_state == NS_SER_OPEN) { sendAreYouReady(false); _state = NS_SER_READY; _tStateMs = millis(); }
+    } else if (r[4] == 0x06) {                   // ready
+      if (_state == NS_SER_READY) {
+        sendSerOpenClose(false); _serOpened = true;
+        _tReauthMs = millis(); _state = NS_CONNECTED; _tStateMs = millis();
+        NLOG("[NET] CONNECTED (serial open)\n");
+      }
+    }
+    return;
+  }
+  // CI-V transceive/echo data (r[16]==0xc1) is consumed by readFreqNet on demand;
+  // unsolicited frequency-change broadcasts are ignored here.
+}
+
+void IcomNetRig::service() {
+  if (!wifiUp()) { if (_state != NS_IDLE) resetSession(); return; }
+  if (_state == NS_IDLE) {
+    if (millis() - _tLastTryMs >= 4000) startConnect();
+    return;
+  }
+  pumpCtl(); pumpSer();
+  uint32_t ms = millis();
+  if (ms - _tLastRxMs > 8000) { failReconnect("link timeout"); return; }
+  if (_state != NS_CONNECTED && ms - _tStateMs > 4000) { failReconnect("handshake stalled"); return; }
+
+  if (_state >= NS_CTL_READY) {
+    if (ms - _tPingCtlMs >= 500) { sendPing(true); _tPingCtlMs = ms; }
+    if (ms - _tIdleCtlMs >= 500) {
+      uint8_t p[16]; memset(p, 0, sizeof(p)); p[0] = 0x10;
+      put32be(p + 8, _ctlLocalSID); put32be(p + 12, _ctlRemoteSID);
+      ctlTracked(p, 16); _tIdleCtlMs = ms;
+    }
+  }
+  if (_state >= NS_SER_READY) {
+    if (ms - _tPingSerMs >= 500) { sendPing(false); _tPingSerMs = ms; }
+    if (ms - _tIdleSerMs >= 500) {
+      uint8_t p[16]; memset(p, 0, sizeof(p)); p[0] = 0x10;
+      put32be(p + 8, _serLocalSID); put32be(p + 12, _serRemoteSID);
+      serTracked(p, 16); _tIdleSerMs = ms;
+    }
+  }
+  if (_state == NS_CONNECTED && ms - _tReauthMs >= 60000) { sendAuth(0x05); _tReauthMs = ms; }
+}
+
+// --- CI-V over the serial stream -------------------------------------------
+bool IcomNetRig::sendCivPayload(const uint8_t* pl, size_t pllen) {
+  if (_state != NS_CONNECTED) return false;
+  uint8_t fr[24]; size_t fn = 0;
+  fr[fn++] = 0xFE; fr[fn++] = 0xFE; fr[fn++] = _addr; fr[fn++] = 0xE0;
+  for (size_t i = 0; i < pllen && fn < sizeof(fr) - 1; ++i) fr[fn++] = pl[i];
+  fr[fn++] = 0xFD;
+  uint8_t N = (uint8_t)fn;
+  uint8_t p[21 + 24]; memset(p, 0, 21 + N);
+  p[0] = (uint8_t)(0x15 + N);
+  put32be(p + 8, _serLocalSID); put32be(p + 12, _serRemoteSID);
+  p[16] = 0xc1; p[17] = N; p[18] = 0x00;
+  p[19] = (uint8_t)(_civSeq >> 8); p[20] = (uint8_t)_civSeq;   // big-endian
+  memcpy(p + 21, fr, N);
+  serTracked(p, 21 + N); _civSeq++;
+  NLOG("[NET CI-V TX] cmd %02X (%u B)\n", pl[0], (unsigned)pllen);
+  pumpCtl(); pumpSer();                          // keep keepalives alive, drain ACK/echo
+  return true;
+}
+void IcomNetRig::selBand(bool sub) {
+  const RadioProfile& p = RADIOS[_model];
+  if (p.selLen) sendCivPayload(sub ? p.selSub : p.selMain, p.selLen);
+}
+bool IcomNetRig::setFreqNet(bool sub, uint32_t hz) {
+  selBand(sub);
+  uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
+  return sendCivPayload(pl, 6);
+}
+bool IcomNetRig::setModeNet(bool sub, CivMode m, uint8_t filter) {
+  selBand(sub);
+  uint8_t pl[3] = { 0x06, (uint8_t)m, filter };
+  return sendCivPayload(pl, 3);
+}
+bool IcomNetRig::readFreqNet(bool sub, uint32_t& hzOut) {
+  if (_state != NS_CONNECTED || !RADIOS[_model].canReadFreq) return false;
+  selBand(sub);
+  while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); }  // drain stale
+  uint8_t pl[1] = { 0x03 };
+  sendCivPayload(pl, 1);
+  uint32_t t0 = millis();
+  while (millis() - t0 < 300) {
+    int n = _ser.parsePacket();
+    if (n <= 0) { pumpCtl(); delay(2); continue; }
+    uint8_t buf[96]; int r = _ser.read(buf, sizeof(buf)); if (r <= 0) continue;
+    _tLastRxMs = millis();
+    if (isPing(buf, r)) { if (buf[16] == 0x00) replyPing(false, buf); continue; }
+    if (r >= 22 && buf[16] == 0xc1) {
+      int N = buf[17];
+      if (21 + N <= r && N >= 11) {
+        const uint8_t* f = buf + 21;
+        if (f[0] == 0xFE && f[1] == 0xFE && f[2] == 0xE0 && f[3] == _addr &&
+            f[4] == 0x03 && f[10] == 0xFD) {
+          uint32_t hz = 0;
+          for (int k = 9; k >= 5; --k) hz = hz * 100 + (f[k] >> 4) * 10 + (f[k] & 0x0F);
+          hzOut = hz;
+          NLOG("[NET CI-V] %s freq %lu Hz\n", sub ? "SUB" : "MAIN", (unsigned long)hz);
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// --- Rig interface ---------------------------------------------------------
+bool IcomNetRig::setMainFreq(uint32_t hz) { return setFreqNet(false, hz); }
+bool IcomNetRig::setSubFreq (uint32_t hz) { return setFreqNet(true,  hz); }
+bool IcomNetRig::setMainMode(RigMode m)   { return setModeNet(false, toCiv(m)); }
+bool IcomNetRig::setSubMode (RigMode m)   { return setModeNet(true,  toCiv(m)); }
+bool IcomNetRig::readSubFreq (uint32_t& hzOut) { return readFreqNet(true,  hzOut); }
+bool IcomNetRig::readMainFreq(uint32_t& hzOut) { return readFreqNet(false, hzOut); }
+
+bool IcomNetRig::enableSatMode(bool on) {
+  if (!RADIOS[_model].hasSatMode) return false;
+  uint8_t pl[3] = { 0x16, 0x5A, (uint8_t)(on ? 0x01 : 0x00) };
+  return sendCivPayload(pl, 3);
+}
+bool IcomNetRig::setCtcss(bool on, float toneHz) {
+  if (!RADIOS[_model].hasTone) return false;
+  if (on && toneHz > 0) {
+    int t = (int)lroundf(toneHz * 10.0f);
+    uint8_t b1 = (uint8_t)((((t / 1000) % 10) << 4) | ((t / 100) % 10));
+    uint8_t b2 = (uint8_t)((((t / 10)   % 10) << 4) | (t % 10));
+    uint8_t freq[4] = { 0x1B, 0x00, b1, b2 }; sendCivPayload(freq, 4);
+    uint8_t enc[3]  = { 0x16, 0x42, 0x01 };     return sendCivPayload(enc, 3);
+  }
+  uint8_t off[3] = { 0x16, 0x42, 0x00 };
+  return sendCivPayload(off, 3);
+}
+
 Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port) {
   if (type == 1) return new RotctldRotator(host, port);   // 1 = ROT_NET (settings.h)
+  if (type == 2) return new PstRotator(host, port);        // 2 = ROT_PST (settings.h)
   return new Gs232Rotator(ROT_I2C_ADDR, baud);
 }
 
@@ -3259,6 +4026,31 @@ LiveLook Predictor::look(time_t t) {
   return L;
 }
 
+// Eclipse-only test (cylindrical Earth shadow), mirroring look()'s geometry but
+// skipping all observer-relative work. Used by the 60-day illumination screen.
+bool Predictor::sunlitAt(time_t t) {
+  if (!_haveSat) return true;
+  _sat.findsat((unsigned long)t);
+  double jd = (double)t / 86400.0 + 2440587.5;
+  double sx, sy, sz; sunEciUnit(jd, sx, sy, sz);
+  double th = gmstRad(jd);
+  double ct = cos(th), st = sin(th);
+  double phi = _sat.satLat * DEG, lam = _sat.satLon * DEG, h = _sat.satAlt;
+  double e2 = 6.694318e-3;
+  double sphi = sin(phi), cphi = cos(phi);
+  double Nlat = RE_KM / sqrt(1.0 - e2 * sphi * sphi);
+  double rx = (Nlat + h) * cphi * cos(lam);
+  double ry = (Nlat + h) * cphi * sin(lam);
+  double rz = (Nlat * (1.0 - e2) + h) * sphi;
+  double ux =  sx * ct + sy * st;
+  double uy = -sx * st + sy * ct;
+  double uz =  sz;
+  double proj  = rx * ux + ry * uy + rz * uz;
+  double rmag2 = rx * rx + ry * ry + rz * rz;
+  double perp  = sqrt(fmax(0.0, rmag2 - proj * proj));
+  return !(proj < 0.0 && perp < RE_KM);
+}
+
 void Predictor::dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
                              double rangeRateKmS,
                              int32_t calDlHz, int32_t calUlHz,
@@ -3345,10 +4137,12 @@ double Predictor::elevationFromSubpoint(double obsLatDeg, double obsLonDeg,
 int Predictor::mutualWindows(time_t from, const Observer& dx, float minEl,
                              MutualWindow* out, int maxN) {
   if (!_haveSat) return 0;
-  // My passes down to the horizon mask bound the search (a mutual window can
-  // only occur while I can see the bird), so scan inside each of my passes.
-  PassPredict mine[MUTUAL_PASS_SCAN];
-  int np = predictPasses(from, minEl, mine, MUTUAL_PASS_SCAN);
+  // My passes bound the search (a mutual window can only occur while I can see
+  // the bird), so scan inside each of my passes out to the day horizon. Heap-
+  // allocate the pass buffer: 10 days of a busy LEO is too large for the stack.
+  PassPredict* mine = new PassPredict[MUTUAL_PASS_SCAN];
+  int np = predictPasses(from, minEl, mine, MUTUAL_PASS_SCAN,
+                         from + (time_t)MUTUAL_HORIZON_DAYS * 86400);
 
   const time_t dt = 10;                 // scan step (s)
   int n = 0;
@@ -3370,15 +4164,17 @@ int Predictor::mutualWindows(time_t from, const Observer& dx, float minEl,
                if (dxEl > w.dxMaxEl) w.dxMaxEl = (float)dxEl; }
       } else if (inWin) {
         out[n++] = w; inWin = false;
-        if (n >= maxN) return n;
+        if (n >= maxN) break;
       }
     }
     if (inWin && n < maxN) out[n++] = w;   // window open at pass end
   }
+  delete[] mine;
   return n;
 }
 
-int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int maxN) {
+int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int maxN,
+                             time_t horizonEnd) {
   if (!_haveSat) return 0;
   passinfo overpass;
   _sat.initpredpoint((unsigned long)from, (double)minEl);
@@ -3388,8 +4184,10 @@ int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int max
     // search up to ~ a number of iterations for the next pass
     bool ok = _sat.nextpass(&overpass, 200);
     if (!ok) break;
+    time_t aos = jdToUnix(overpass.jdstart);
+    if (horizonEnd && aos > horizonEnd) break;     // stop past the time horizon
     PassPredict& p = out[found];
-    p.aos   = jdToUnix(overpass.jdstart);
+    p.aos   = aos;
     p.los   = jdToUnix(overpass.jdstop);
     p.tca   = jdToUnix(overpass.jdmax);
     p.maxEl = (float)overpass.maxelevation;
@@ -3428,6 +4226,13 @@ bool Settings::load() {
   radioModel = d["rig"] | (uint8_t)RIG_IC9700;
   civAddr    = d["addr"]| (uint8_t)0xA2;
   civBaud    = d["baud"]| 19200u;
+  catType    = d["cattype"] | (uint8_t)CAT_WIRED;
+  if (catType > CAT_NET) catType = CAT_WIRED;
+  strncpy(catHost, d["cathost"] | "", sizeof(catHost)-1); catHost[sizeof(catHost)-1]=0;
+  catPort    = d["catport"] | (uint16_t)50001;
+  if (catPort == 0) catPort = 50001;
+  strncpy(catUser, d["catuser"] | "", sizeof(catUser)-1); catUser[sizeof(catUser)-1]=0;
+  strncpy(catPass, d["catpass"] | "", sizeof(catPass)-1); catPass[sizeof(catPass)-1]=0;
   vfoType    = d["vfotype"] | (uint8_t)VFO_MAIN_UP_SUB_DOWN;
   satMode    = d["satmode"] | false;
   if (vfoType > VFO_MAIN_DOWN_SUB_UP) vfoType = VFO_MAIN_UP_SUB_DOWN;
@@ -3442,11 +4247,14 @@ bool Settings::load() {
   calUlHz    = d["calul"] | 0;
   rotEnable  = d["roten"]  | false;
   rotType    = d["rottype"]| (uint8_t)ROT_GS232;
-  if (rotType > ROT_NET) rotType = ROT_GS232;
+  if (rotType > ROT_PST) rotType = ROT_GS232;
   strncpy(rotHost, d["rothost"] | "", sizeof(rotHost)-1); rotHost[sizeof(rotHost)-1]=0;
   rotPort    = d["rotport"]| (uint16_t)4533;
   if (rotPort == 0) rotPort = 4533;
   rotBaud    = d["rotbaud"]| 9600u;
+  rotLeadSec = d["rotlead"]| (uint16_t)120;
+  rotAzRange = d["rotazr"] | (uint8_t)ROT_AZ_360;
+  if (rotAzRange > ROT_AZ_450) rotAzRange = ROT_AZ_360;
   rotAzOff   = d["rotaz"]  | (int16_t)0;
   rotElOff   = d["rotel"]  | (int16_t)0;
   rotDeadband= d["rotdb"]  | (uint8_t)3;
@@ -3465,13 +4273,15 @@ bool Settings::save() {
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
+  d["cattype"] = catType; d["cathost"] = catHost; d["catport"] = catPort;
+  d["catuser"] = catUser; d["catpass"] = catPass;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
   d["catdly"] = catDelayMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
   d["dimsecs"] = dimSecs;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
-  d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotaz"]=rotAzOff;
+  d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;
   File f = Store::fs().open(FILE_CFG, "w");
@@ -3644,9 +4454,9 @@ void App::applyRadioFromCfg() {
   RadioModel m = (RadioModel)cfg.radioModel;
   uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[m].defaultBaud;
   if (rig) { delete rig; rig = nullptr; }
-  rig = makeRig(m);                                   // Icom / Yaesu / Kenwood
+  rig = makeRig(m, cfg.catType, cfg.catHost, cfg.catPort, cfg.catUser, cfg.catPass);
   if (!rig) return;
-  rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
+  rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);   // net backend ignores UART args
   if (RADIOS[m].proto == PROTO_CIV)
     rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
   rig->setCmdDelay(cfg.catDelayMs);                  // CAT Delay: inter-command pause
@@ -3657,10 +4467,34 @@ void App::applyRadioFromCfg() {
 void App::applyRotatorFromCfg() {
   if (rot) { delete rot; rot = nullptr; }
   rotOut = false; rotParked = false;
-  lastAzCmd = lastElCmd = -999.0f;
+  lastAzCmd = lastElCmd = lastUnwrappedAz = -999.0f;
+  rotPassValid = false; rotPassNorad = 0;
   if (!cfg.rotEnable) return;          // rotator disabled in Settings
   rot = makeRotator(cfg.rotType, cfg.rotBaud, cfg.rotHost, cfg.rotPort);
   if (rot) rot->begin();
+}
+
+// Send a commanded bearing to the active rotator, applying the configured
+// azimuth-range convention. CardSat computes az as 0-360 (0=North); for a
+// rotator whose azimuth axis is centred on North and runs -180..+180, re-express
+// the bearing in that range (e.g. 270 -> -90). GS-232 controllers are natively
+// 0-360 and re-wrap negatives, so in practice this only changes rotctld output.
+void App::rotPoint(float az, float el) {
+  if (!rot) return;
+  while (az >= 360.0f) az -= 360.0f;     // target bearing in [0,360)
+  while (az < 0.0f)    az += 360.0f;
+  if (cfg.rotAzRange == ROT_AZ_180) {
+    if (az > 180.0f) az -= 360.0f;        // centre on North: [-180,+180]
+  } else if (cfg.rotAzRange == ROT_AZ_450) {
+    // 90 deg overlap: a bearing <=90 is also reachable as +360 (360..450 region).
+    // Pick whichever representation is nearer the last commanded position, so a
+    // pass crossing North continues up into the overlap instead of unwinding 360.
+    if (az <= 90.0f && lastUnwrappedAz > -500.0f &&
+        fabsf((az + 360.0f) - lastUnwrappedAz) < fabsf(az - lastUnwrappedAz))
+      az += 360.0f;
+  }
+  lastUnwrappedAz = az;
+  rot->point(az, el);
 }
 
 // Choose the SSB/FM mode for each leg.
@@ -4184,6 +5018,7 @@ int App::loadManualTx(uint32_t norad, Transponder* out, int maxN) {
 // ===========================================================================
 void App::loop() {
   M5Cardputer.update();
+  if (rig) rig->service();    // net CAT (Icom LAN): advance connect + keepalives
   if (cfg.useGps) {
     if (loc.pollGps()) { pred.setSite(loc.obs()); }
   }
@@ -4287,12 +5122,44 @@ void App::loop() {
           if (lastAzCmd < -500.0f ||
               fabsf(az - lastAzCmd) >= (float)cfg.rotDeadband ||
               fabsf(el - lastElCmd) >= (float)cfg.rotDeadband) {
-            rot->point(az, el);
+            rotPoint(az, el);
             lastAzCmd = az; lastElCmd = el; rotParked = false;
           }
-        } else if (!rotParked) {                        // below horizon: park once
-          rot->point((float)cfg.rotParkAz, (float)cfg.rotParkEl);
-          rotParked = true; lastAzCmd = lastElCmd = -999.0f;
+        } else {                                        // below horizon
+          // Pre-position: slew to the next rise bearing shortly before AOS so a
+          // slow rotator is already aimed when the satellite appears.
+          time_t now = nowUtc();
+          bool prePos = false;
+          if (cfg.rotLeadSec > 0) {
+            if (!rotPassValid || now >= rotPass.los || rotPassNorad != s->norad) {
+              if (rotPassNorad != s->norad || ms - lastRotPassMs > 30000) {
+                lastRotPassMs = ms; rotPassNorad = s->norad;
+                PassPredict p;
+                rotPassValid = (pred.predictPasses(now, cfg.minPassEl, &p, 1) >= 1);
+                if (rotPassValid) rotPass = p;
+              }
+            }
+            if (rotPassValid && rotPass.aos > now &&
+                (rotPass.aos - now) <= (time_t)cfg.rotLeadSec) {
+              float az = (float)rotPass.azAos + cfg.rotAzOff;
+              float el = (float)cfg.rotElOff;            // aim at the horizon (el 0)
+              while (az >= 360.0f) az -= 360.0f;
+              while (az < 0.0f)    az += 360.0f;
+              float elMax = cfg.rotFlip ? 180.0f : 90.0f;
+              if (el < 0) el = 0; if (el > elMax) el = elMax;
+              if (lastAzCmd < -500.0f ||
+                  fabsf(az - lastAzCmd) >= (float)cfg.rotDeadband ||
+                  fabsf(el - lastElCmd) >= (float)cfg.rotDeadband) {
+                rotPoint(az, el);
+                lastAzCmd = az; lastElCmd = el; rotParked = false;
+              }
+              prePos = true;
+            }
+          }
+          if (!prePos && !rotParked) {                  // nothing imminent: park once
+            rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+            rotParked = true; lastAzCmd = lastElCmd = -999.0f;
+          }
         }
       }
     }
@@ -4395,6 +5262,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_POLAR:    keyPolar(c, enter, back); break;
     case SCR_PASSPOLAR: keyPassPolar(c, enter, back); break;
     case SCR_MUTUAL:   keyMutual(c, enter, back); break;
+    case SCR_VIS:      keyVis(c, enter, back); break;
+    case SCR_ILLUM:    keyIllum(c, enter, back); break;
     case SCR_LOCATION: keyLocation(c, enter, back); break;
     case SCR_UPDATE:   keyUpdate(c, enter, back); break;
     case SCR_SETTINGS: keySettings(c, enter, back); break;
@@ -4475,7 +5344,10 @@ void App::keySchedule(char c, bool enter, bool back) {
 }
 
 void App::keySatList(char c, bool enter, bool back) {
-  if (isBack(c, back)) { screen = SCR_HOME; return; }
+  if (isBack(c, back)) {
+    if (logPickSat) { logPickSat = false; screen = SCR_LOGENTRY; lastDrawMs = 0; return; }
+    screen = SCR_HOME; return;
+  }
   if (c == 'n') {                              // new manual GP entry
     mtSat = SatEntry();
     editTarget = 310; editTitle = "Sat name"; editBuf = ""; screen = SCR_EDIT;
@@ -4502,6 +5374,11 @@ void App::keySatList(char c, bool enter, bool back) {
     pred.setSat(*s);
     ensureTransponders(*s);
     onTransponderChanged();
+    if (logPickSat) {            // chose a satellite for a log entry
+      logPickSat = false;
+      seedQsoSatDefaults();      // sat + mode + non-Doppler centre/nominal freqs
+      logSel = 0; screen = SCR_LOGENTRY; lastDrawMs = 0; return;
+    }
     passN = timeIsSet()
           ? pred.predictPasses(nowUtc(), cfg.minPassEl, passes, PASS_LIST_LEN)
           : 0;
@@ -4535,6 +5412,8 @@ void App::keyPasses(char c, bool enter, bool back) {
     editTarget = 330; editTitle = "DX grid (4 or 6 char)"; editBuf = "";
     screen = SCR_EDIT; return;
   }
+  if (c == 'v') { buildVis();   screen = SCR_VIS;   lastDrawMs = 0; return; }
+  if (c == 'i') { buildIllum(); screen = SCR_ILLUM; lastDrawMs = 0; return; }
   if (enter || c == 't') {     // enter tracking
     SatEntry* s = activeSat();
     if (s) loadCalForSat(s->norad);
@@ -4553,7 +5432,7 @@ void App::keyTrack(char c, bool enter, bool back) {
   if (isBack(c, back)) {
     if (radioOut) { radioOut = false; }     // stop sending on first back
     else {
-      if (rotOut && rot) { rot->point((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+      if (rotOut && rot) { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
                            rotOut = false; rotParked = true; }
       screen = SCR_PASSES;
     }
@@ -4639,15 +5518,17 @@ void App::keyTrack(char c, bool enter, bool back) {
     else {
       if (!rot->ready()) rot->begin();   // (re)establish the link/bridge on demand
       if (!rot->ready())
-        setStatus(cfg.rotType == ROT_NET ? "Rotator: no rotctld link"
-                                         : "Rotator: bridge not found");
+        setStatus(cfg.rotType == ROT_GS232 ? "Rotator: bridge not found"
+                  : cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
+                                            : "Rotator: no rotctld link");
       else {
         rotOut = !rotOut;
         if (rotOut) {
-          lastRotMs = 0; lastAzCmd = lastElCmd = -999.0f; rotParked = false;
+          lastRotMs = 0; lastAzCmd = lastElCmd = -999.0f;
+          lastUnwrappedAz = -999.0f; rotParked = false;
           setStatus("Rotator ON");
         } else {
-          rot->point((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+          rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
           rotParked = true; setStatus("Rotator OFF (parked)");
         }
       }
@@ -4780,6 +5661,150 @@ void App::keyMutual(char c, bool enter, bool back) {
   }
 }
 
+// ===========================================================================
+//  10-day pass overview (InstantTrack "Multiple Days for Single Satellite")
+// ===========================================================================
+void App::buildVis() {
+  visN = 0;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet()) return;
+  setStatus("Computing 10-day passes..."); draw();
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  time_t now = nowUtc();
+  visN = pred.predictPasses(now, cfg.minPassEl, visPasses, VIS_PASS_MAX,
+                            now + (time_t)VIS_DAYS * 86400);
+  setStatus(visN ? (String(visN) + " pass(es)/10 d") : "No passes in 10 days");
+}
+
+void App::drawVis() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " 10-day") : String("10-day passes"));
+  canvas.setTextSize(1);
+  if (visN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("No passes in the next 10 days.");
+    footer("` back   r recompute"); return;
+  }
+  const int barX0 = 40, barW = 196;          // 196 px = 24 h
+  const int y0 = 19, rowH = 10;
+  time_t now  = nowUtc();
+  time_t mid0 = now - (now % 86400);         // UTC midnight of day 0 (today)
+  for (int h = 6; h <= 18; h += 6)           // 06/12/18 h gridlines behind the bars
+    canvas.drawFastVLine(barX0 + barW * h / 24, y0, rowH * VIS_DAYS, 0x2104);
+  for (int d = 0; d < VIS_DAYS; ++d) {
+    time_t dayStart = mid0 + (time_t)d * 86400;
+    int ry = y0 + d * rowH;
+    struct tm tmv; gmtime_r(&dayStart, &tmv);
+    char lbl[8]; snprintf(lbl, sizeof(lbl), "%02d/%02d", tmv.tm_mon + 1, tmv.tm_mday);
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(2, ry + 1); canvas.print(lbl);
+    canvas.drawFastHLine(barX0, ry + rowH - 1, barW, 0x18E3);
+    for (int i = 0; i < visN; ++i) {
+      time_t a = visPasses[i].aos, b = visPasses[i].los;
+      time_t s0 = (a > dayStart) ? a : dayStart;
+      time_t s1 = (b < dayStart + 86400) ? b : dayStart + 86400;
+      if (s1 <= s0) continue;
+      int x1 = barX0 + (int)(barW * (s0 - dayStart) / 86400);
+      int x2 = barX0 + (int)(barW * (s1 - dayStart) / 86400);
+      int w  = (x2 - x1 < 1) ? 1 : x2 - x1;
+      float me = visPasses[i].maxEl;
+      uint16_t col = (me < 15.0f) ? CL_DGREEN : (me < 40.0f ? CL_GREEN : CL_YELLOW);
+      canvas.fillRect(x1, ry + 1, w, rowH - 3, col);
+    }
+  }
+  canvas.drawFastVLine(barX0 + (int)(barW * (now - mid0) / 86400), y0, rowH, CL_RED);
+  footer("` back  r recompute  0-24h UTC");
+}
+
+void App::keyVis(char c, bool enter, bool back) {
+  if (isBack(c, back) || enter) { screen = SCR_PASSES; lastDrawMs = 0; return; }
+  if (c == 'r') { buildVis(); lastDrawMs = 0; }
+}
+
+// ===========================================================================
+//  60-day illumination (DK3WN "illum"): date x orbit-phase sun/shadow raster
+// ===========================================================================
+void App::buildIllum() {
+  illumValid = false;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet() || s->meanMotion <= 0) return;
+  setStatus("Computing illumination..."); draw();
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  illumPeriodMin = 1440.0f / (float)s->meanMotion;
+  double periodSec = (double)illumPeriodMin * 60.0;
+  time_t now = nowUtc();
+  const int RB = (ILLUM_ROWS + 7) / 8;
+  for (int c = 0; c < ILLUM_DAYS; ++c) {
+    for (int b = 0; b < RB; ++b) illumBits[c][b] = 0;
+    time_t base = now + (time_t)c * 86400;            // one orbit starting this day
+    for (int r = 0; r < ILLUM_ROWS; ++r) {
+      time_t t = base + (time_t)llround(periodSec * r / ILLUM_ROWS);
+      if (!pred.sunlitAt(t)) illumBits[c][r >> 3] |= (1 << (r & 7));  // set = eclipse
+    }
+  }
+  // current-orbit eclipse fraction (column 0) + live status
+  int eclRows = 0;
+  for (int r = 0; r < ILLUM_ROWS; ++r)
+    if (illumBits[0][r >> 3] & (1 << (r & 7))) eclRows++;
+  illumEclMin = illumPeriodMin * eclRows / ILLUM_ROWS;
+  illumEclPct = 100.0f * eclRows / ILLUM_ROWS;
+  illumSunNow = pred.sunlitAt(now);
+  illumNextEclipse = !illumSunNow;
+  illumNextSec = -1;
+  for (long dt = 15; dt <= (long)periodSec + 120; dt += 15)
+    if (pred.sunlitAt(now + dt) != illumSunNow) { illumNextSec = dt; break; }
+  illumValid = true;
+  setStatus("");
+}
+
+void App::drawIllum() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " illum 60d") : String("Illumination"));
+  canvas.setTextSize(1);
+  if (!illumValid) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56);
+    canvas.print((s && s->meanMotion > 0) ? "Press r to compute." : "No orbit data.");
+    footer("` back   r recompute"); return;
+  }
+  const int px0 = 24, py0 = 18, cw = 3, ph = ILLUM_ROWS;   // 60*3 = 180 wide
+  const int pw = ILLUM_DAYS * cw;
+  canvas.fillRect(px0, py0, pw, ph, CL_BLACK);             // eclipse = dark ground
+  canvas.drawRect(px0 - 1, py0 - 1, pw + 2, ph + 2, CL_GREY);
+  for (int c = 0; c < ILLUM_DAYS; ++c) {                   // run-length sunlit spans
+    int x = px0 + c * cw, r = 0;
+    while (r < ILLUM_ROWS) {
+      bool ecl = illumBits[c][r >> 3] & (1 << (r & 7));
+      int r0 = r;
+      while (r < ILLUM_ROWS &&
+             (bool)(illumBits[c][r >> 3] & (1 << (r & 7))) == ecl) r++;
+      if (!ecl) canvas.fillRect(x, py0 + r0, cw, r - r0, CL_YELLOW);   // sunlit
+    }
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(px0 - 4, py0 + ph + 2);       canvas.print("now");
+  canvas.setCursor(px0 + pw - 22, py0 + ph + 2); canvas.print("+60d");
+  canvas.setCursor(px0 + pw + 5, py0);           canvas.print("1 orbit");
+  canvas.setCursor(px0 + pw + 5, py0 + 10);      canvas.printf("%.0fm", illumPeriodMin);
+  canvas.setCursor(4, py0 + ph + 11);
+  canvas.setTextColor(illumSunNow ? CL_YELLOW : CL_CYAN, CL_BLACK);
+  canvas.print(illumSunNow ? "SUN" : "SHADOW");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.printf("  ecl %.0fm/orbit (%.0f%%)", illumEclMin, illumEclPct);
+  if (illumNextSec > 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, py0 + ph + 20);
+    canvas.printf("-> %s in %ldm", illumNextEclipse ? "shadow" : "sun",
+                  illumNextSec / 60);
+  }
+  footer("` back   r recompute");
+}
+
+void App::keyIllum(char c, bool enter, bool back) {
+  if (isBack(c, back) || enter) { screen = SCR_PASSES; lastDrawMs = 0; return; }
+  if (c == 'r') { buildIllum(); lastDrawMs = 0; }
+}
+
 void App::keyLocation(char c, bool enter, bool back) {
   if (isBack(c, back)) { pred.setSite(loc.obs()); screen = SCR_HOME; return; }
   if (c == 'p') {                       // toggle GPS use
@@ -4815,7 +5840,7 @@ void App::keyUpdate(char c, bool enter, bool back) {
 }
 
 void App::keySettings(char c, bool enter, bool back) {
-  const int N = 27;
+  const int N = 35;
   if (isBack(c, back)) { applyRadioFromCfg(); applyRotatorFromCfg();
                          screen = SCR_HOME; return; }
   if (isUp(c))   setSel = (setSel + N - 1) % N;
@@ -4835,7 +5860,7 @@ void App::keySettings(char c, bool enter, bool back) {
       case 3: cfg.minPassEl = constrain(cfg.minPassEl + dir, 0, 30); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 9: cfg.rotType = (cfg.rotType == ROT_NET) ? ROT_GS232 : ROT_NET;
+      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 3) % 3);
               cfg.save(); applyRotatorFromCfg(); break;
       case 11: { long p = (long)cfg.rotPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotPort = (uint16_t)p; cfg.save(); } break;
@@ -4847,23 +5872,36 @@ void App::keySettings(char c, bool enter, bool back) {
                cfg.save(); break;
       case 14: { int a = (int)cfg.rotParkAz + dir*5; while (a<0) a+=360; a%=360;
                  cfg.rotParkAz = (uint16_t)a; cfg.save(); } break;
-      case 15: cfg.rotAzOff = constrain((int)cfg.rotAzOff + dir, -180, 180);
+      case 15: { const uint16_t opts[] = {0,30,60,120,180,300}; int idx=3;
+                 for (int i=0;i<6;i++) if (opts[i]==cfg.rotLeadSec) idx=i;
+                 idx = (idx + dir + 6) % 6; cfg.rotLeadSec = opts[idx];
+                 cfg.save(); rotPassValid = false; } break;
+      case 16: cfg.rotAzOff = constrain((int)cfg.rotAzOff + dir, -180, 180);
                cfg.save(); break;
-      case 16: cfg.rotElOff = constrain((int)cfg.rotElOff + dir, -30, 30);
+      case 17: cfg.rotElOff = constrain((int)cfg.rotElOff + dir, -30, 30);
                cfg.save(); break;
-      case 18: cfg.vfoType = (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN)
+      case 18: cfg.rotAzRange = (uint8_t)((cfg.rotAzRange + dir + 3) % 3);
+               cfg.save(); lastAzCmd = lastUnwrappedAz = -999.0f; break;
+      case 19: cfg.rotFlip = !cfg.rotFlip; cfg.save();
+               lastAzCmd = lastElCmd = -999.0f; break;
+      case 21: cfg.vfoType = (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN)
                              ? VFO_MAIN_DOWN_SUB_UP : VFO_MAIN_UP_SUB_DOWN;
                cfg.save(); break;
-      case 19: cfg.satMode = !cfg.satMode; cfg.save(); break;
-      case 20: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
+      case 22: cfg.satMode = !cfg.satMode; cfg.save(); break;
+      case 23: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
                  cfg.catRateMs = (uint32_t)v; cfg.save(); } break;
-      case 21: { long v = (long)cfg.catDelayMs + dir*2; if (v < 0) v = 0;
+      case 24: { long v = (long)cfg.catDelayMs + dir*2; if (v < 0) v = 0;
                  if (v > 200) v = 200; cfg.catDelayMs = (uint16_t)v; cfg.save();
                  if (rig) rig->setCmdDelay(cfg.catDelayMs); } break;
-      case 22: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
+      case 25: { const uint16_t opts[] = {0,30,60,120,300}; int idx=0;
                  for (int i=0;i<5;i++) if (opts[i]==cfg.dimSecs) idx=i;
                  idx = (idx + dir + 5) % 5; cfg.dimSecs = opts[idx];
                  cfg.save(); lastInputMs = millis(); } break;
+      case 30: cfg.catType = (uint8_t)((cfg.catType + dir + 2) % 2);
+               cfg.save(); applyRadioFromCfg(); break;
+      case 32: { long p = (long)cfg.catPort + dir; if (p < 1) p = 65535;
+                 if (p > 65535) p = 1; cfg.catPort = (uint16_t)p;
+                 cfg.save(); applyRadioFromCfg(); } break;
     }
   };
   if (isLeft(c))  adj(-1);
@@ -4880,19 +5918,19 @@ void App::keySettings(char c, bool enter, bool back) {
               break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 10: editTarget = 205; editTitle = "Rotctld host (IP)";
+      case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
-      case 11: editTarget = 206; editTitle = "Rotctld port";
+      case 11: editTarget = 206; editTitle = "Net rotator port";
                editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
-      case 17: editTarget = 203; editTitle = "GP source URL";
+      case 20: editTarget = 203; editTitle = "GP source URL";
                editBuf = cfg.gpUrl; screen = SCR_EDIT; break;
-      case 23: editTarget = 204; editTitle = "My callsign";
+      case 26: editTarget = 204; editTitle = "My callsign";
                editBuf = cfg.myCall; screen = SCR_EDIT; break;
-      case 24: {
+      case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
       } break;
-      case 25: {
+      case 28: {
         if (!Store::fs().exists(FILE_CFG_BAK)) { setStatus("No backup found"); break; }
         bool ok = copyFile(FILE_CFG_BAK, FILE_CFG);
         copyFile(FILE_FAVS_BAK, FILE_FAVS);
@@ -4902,8 +5940,18 @@ void App::keySettings(char c, bool enter, bool back) {
                   setStatus("Restored from SD"); }
         else setStatus("Restore failed");
       } break;
-      case 26: editTarget = 400; editTitle = "Type ERASE to wipe all";
+      case 29: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
+      case 30: cfg.catType = (uint8_t)((cfg.catType + 1) % 2);
+               cfg.save(); applyRadioFromCfg(); break;
+      case 31: editTarget = 207; editTitle = "Radio LAN host (IP)";
+               editBuf = cfg.catHost; screen = SCR_EDIT; break;
+      case 32: editTarget = 210; editTitle = "Radio LAN port";
+               editBuf = String(cfg.catPort); screen = SCR_EDIT; break;
+      case 33: editTarget = 208; editTitle = "Radio LAN user";
+               editBuf = cfg.catUser; screen = SCR_EDIT; break;
+      case 34: editTarget = 209; editTitle = "Radio LAN password";
+               editBuf = cfg.catPass; screen = SCR_EDIT; break;
       default: adj(+1); break;
     }
   }
@@ -4954,6 +6002,23 @@ void App::keyEdit(char c, bool enter, bool back) {
                 screen = SCR_SETTINGS; setStatus("Saved"); return;
       case 206: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
                   cfg.rotPort = (uint16_t)p; cfg.save(); applyRotatorFromCfg();
+                  screen = SCR_SETTINGS; setStatus("Saved"); return; }
+
+      // ---- Icom LAN (network CAT) host / user / password / port ----
+      case 207: strncpy(cfg.catHost, editBuf.c_str(), sizeof(cfg.catHost)-1);
+                cfg.catHost[sizeof(cfg.catHost)-1] = 0;
+                cfg.save(); applyRadioFromCfg();
+                screen = SCR_SETTINGS; setStatus("Saved"); return;
+      case 208: strncpy(cfg.catUser, editBuf.c_str(), sizeof(cfg.catUser)-1);
+                cfg.catUser[sizeof(cfg.catUser)-1] = 0;
+                cfg.save(); applyRadioFromCfg();
+                screen = SCR_SETTINGS; setStatus("Saved"); return;
+      case 209: strncpy(cfg.catPass, editBuf.c_str(), sizeof(cfg.catPass)-1);
+                cfg.catPass[sizeof(cfg.catPass)-1] = 0;
+                cfg.save(); applyRadioFromCfg();
+                screen = SCR_SETTINGS; setStatus("Saved"); return;
+      case 210: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
+                  cfg.catPort = (uint16_t)p; cfg.save(); applyRadioFromCfg();
                   screen = SCR_SETTINGS; setStatus("Saved"); return; }
 
       // ---- mutual co-visibility vs a DX grid ----
@@ -5086,6 +6151,32 @@ void App::keyEdit(char c, bool enter, bool back) {
                 qso.grid[sizeof(qso.grid)-1]=0; screen=SCR_LOGENTRY; return;
       case 504: strncpy(qso.notes, editBuf.c_str(), sizeof(qso.notes)-1);
                 qso.notes[sizeof(qso.notes)-1]=0; screen=SCR_LOGENTRY; return;
+      case 505: {   // Date YYYY-MM-DD (UTC); keep the time-of-day
+        int Y, Mo, D;
+        if (sscanf(editBuf.c_str(), "%d-%d-%d", &Y, &Mo, &D) == 3) {
+          time_t base = qso.utc ? (time_t)qso.utc
+                                : (timeIsSet() ? nowUtc() : (time_t)1735689600);
+          struct tm g; gmtime_r(&base, &g);
+          g.tm_year = Y - 1900; g.tm_mon = Mo - 1; g.tm_mday = D;
+          qso.utc = (uint32_t)mktime(&g);            // TZ=UTC0 -> UTC epoch
+        } else setStatus("Use YYYY-MM-DD");
+        screen = SCR_LOGENTRY; return;
+      }
+      case 506: {   // Time HH:MM:SS (UTC); keep the date
+        int H, Mi, S = 0;
+        if (sscanf(editBuf.c_str(), "%d:%d:%d", &H, &Mi, &S) >= 2) {
+          time_t base = qso.utc ? (time_t)qso.utc
+                                : (timeIsSet() ? nowUtc() : (time_t)1735689600);
+          struct tm g; gmtime_r(&base, &g);
+          g.tm_hour = H; g.tm_min = Mi; g.tm_sec = S;
+          qso.utc = (uint32_t)mktime(&g);
+        } else setStatus("Use HH:MM:SS");
+        screen = SCR_LOGENTRY; return;
+      }
+      case 507: { double m = atof(editBuf.c_str());
+                  qso.dlHz = (uint32_t)llround(m * 1e6); screen = SCR_LOGENTRY; return; }
+      case 508: { double m = atof(editBuf.c_str());
+                  qso.ulHz = (uint32_t)llround(m * 1e6); screen = SCR_LOGENTRY; return; }
 
       // ---- LoTW SAT_NAME prompt during ADIF export ----
       case 600: {
@@ -5280,10 +6371,33 @@ static bool parseQsoCsv(const String& line, PendingQso& q) {
   return true;
 }
 
-// Snapshot the auto fields (time, sat, freqs, mode, my grid) at the instant the
-// operator hits 'l', then open the entry screen. Radio control keeps running.
+// Fill qso.sat / qso.mode and the *non-Doppler* default frequencies (the centre
+// of a linear transponder's passband, or the nominal downlink/uplink for an FM /
+// single-channel bird) from the currently active satellite + transponder. Used
+// for manual log entries; leaves dl/ul at 0 if the sat has no transponders.
+void App::seedQsoSatDefaults() {
+  SatEntry* s = activeSat();
+  if (!s) return;
+  strncpy(qso.sat, s->name, sizeof(qso.sat) - 1); qso.sat[sizeof(qso.sat) - 1] = 0;
+  if (activeTxCount > 0) {
+    Transponder& t = activeTx[curTx];
+    strncpy(qso.mode, t.isLinear ? "SSB" : (t.mode[0] ? t.mode : "FM"),
+            sizeof(qso.mode) - 1); qso.mode[sizeof(qso.mode) - 1] = 0;
+    int32_t off = (t.isLinear && t.bandwidth() > 0) ? (int32_t)(t.bandwidth() / 2) : 0;
+    uint32_t dl, ul; Predictor::passbandFreqs(t, off, dl, ul);
+    qso.dlHz = dl; qso.ulHz = ul;
+  }
+}
+
+// Snapshot the auto fields (time, my grid/call) and open the entry screen. When
+// invoked while actively working a pass (from the Track/Polar screen, clock set),
+// the frequencies are the live Doppler-corrected values. Otherwise -- e.g. "New
+// QSO entry" from the Log menu -- the satellite, frequencies, time and date all
+// start as editable defaults (non-Doppler centre/nominal), so a QSO can be logged
+// after the fact. Radio control, if engaged, keeps running.
 void App::beginQso() {
   logReturn = screen;
+  bool live = (screen == SCR_TRACK || screen == SCR_POLAR);
   memset(&qso, 0, sizeof(qso));
   strncpy(qso.rstS, "59", sizeof(qso.rstS) - 1);
   strncpy(qso.rstR, "59", sizeof(qso.rstR) - 1);
@@ -5292,23 +6406,21 @@ void App::beginQso() {
   strncpy(qso.myGrid, mg.c_str(), sizeof(qso.myGrid) - 1);
   strncpy(qso.myCall, cfg.myCall, sizeof(qso.myCall) - 1);
   SatEntry* s = activeSat();
-  if (s) {
+  if (s && live && activeTxCount > 0 && timeIsSet()) {
     strncpy(qso.sat, s->name, sizeof(qso.sat) - 1);
-    if (activeTxCount > 0) {
-      Transponder& t = activeTx[curTx];
-      strncpy(qso.mode, t.isLinear ? "SSB" : (t.mode[0] ? t.mode : "FM"),
-              sizeof(qso.mode) - 1);
-      if (timeIsSet()) {
-        pred.setSite(loc.obs()); pred.setSat(*s);
-        LiveLook L = pred.look(nowUtc());
-        struct timeval tv; gettimeofday(&tv, nullptr);
-        L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6);
-        uint32_t dlOp, ulOp, rx, tx;
-        Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
-        Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
-        qso.dlHz = rx; qso.ulHz = tx;
-      }
-    }
+    Transponder& t = activeTx[curTx];
+    strncpy(qso.mode, t.isLinear ? "SSB" : (t.mode[0] ? t.mode : "FM"),
+            sizeof(qso.mode) - 1);
+    pred.setSite(loc.obs()); pred.setSat(*s);
+    LiveLook L = pred.look(nowUtc());
+    struct timeval tv; gettimeofday(&tv, nullptr);
+    L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6);
+    uint32_t dlOp, ulOp, rx, tx;
+    Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
+    Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+    qso.dlHz = rx; qso.ulHz = tx;
+  } else if (activeTxCount > 0) {
+    seedQsoSatDefaults();          // pre-fill from the selected sat (non-Doppler)
   }
   logSel = 0; logEditIdx = -1;
   screen = SCR_LOGENTRY;
@@ -5502,33 +6614,43 @@ void App::drawLogEntry() {
   header(logEditIdx >= 0 ? "Edit QSO" : "Log QSO");
   canvas.setTextSize(1);
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  char tb[24];
-  if (qso.utc) { time_t tt = (time_t)qso.utc; struct tm* g = gmtime(&tt);
-                 strftime(tb, sizeof(tb), "%m-%d %H:%M:%SZ", g); }
-  else strcpy(tb, "(no clock)");
-  canvas.setCursor(4, 20); canvas.printf("%s  %.10s", tb, qso.sat);
-  canvas.setCursor(4, 30); canvas.printf("DL %.3f  UL %.3f", qso.dlHz/1e6, qso.ulHz/1e6);
-  canvas.setCursor(4, 40); canvas.printf("MyGrid %s  MyCall %s",
-                                         qso.myGrid, qso.myCall[0] ? qso.myCall : "-");
-  const char* labels[] = { "Call", "Mode", "RST S", "RST R", "Grid", "Notes" };
-  const char* vals[]   = { qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes };
-  for (int i = 0; i < 6; ++i) {
-    int y = 52 + i*11;
+  canvas.setCursor(4, 18);
+  canvas.printf("MyGrid %s  MyCall %s", qso.myGrid[0] ? qso.myGrid : "-",
+                qso.myCall[0] ? qso.myCall : "-");
+
+  const int LF = 11;
+  char dbuf[16], tbuf[16], dlb[16], ulb[16];
+  if (qso.utc) { time_t tt = (time_t)qso.utc; struct tm g; gmtime_r(&tt, &g);
+                 strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &g);
+                 strftime(tbuf, sizeof(tbuf), "%H:%M:%SZ", &g); }
+  else { strcpy(dbuf, "(set)"); strcpy(tbuf, "(set)"); }
+  if (qso.dlHz) snprintf(dlb, sizeof(dlb), "%.4f", qso.dlHz / 1e6); else strcpy(dlb, "(set)");
+  if (qso.ulHz) snprintf(ulb, sizeof(ulb), "%.4f", qso.ulHz / 1e6); else strcpy(ulb, "(set)");
+  const char* labels[LF] = { "Date", "Time", "Sat", "DL MHz", "UL MHz",
+                             "Call", "Mode", "RST S", "RST R", "Grid", "Notes" };
+  const char* vals[LF]   = { dbuf, tbuf, qso.sat[0] ? qso.sat : "(pick)", dlb, ulb,
+                             qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes };
+  const int VIS = 8;
+  int scroll = (logSel >= VIS) ? (logSel - VIS + 1) : 0;
+  for (int v = 0; v < VIS && scroll + v < LF; ++v) {
+    int i = scroll + v;
+    int y = 30 + v*11;
     bool sel = (i == logSel);
     if (sel) { canvas.fillRect(0, y-1, 240, 11, CL_BLUE);
                canvas.setTextColor(CL_WHITE, CL_BLUE); }
     else        canvas.setTextColor(CL_CYAN, CL_BLACK);
-    canvas.setCursor(4, y); canvas.printf("%-6s %.28s", labels[i], vals[i]);
+    canvas.setCursor(4, y); canvas.printf("%-6s %.27s", labels[i], vals[i]);
   }
   footer(logEditIdx >= 0 ? "ENT edit  s save  x del  ` back"
                          : "ENT edit  s save  ` cancel");
 }
 
 void App::keyLogEntry(char c, bool enter, bool back) {
+  const int LF = 11;
   if (c != 'x') logDelArm = false;             // any other key disarms delete
   if (isBack(c, back)) { logEditIdx = -1; screen = logReturn; lastDrawMs = 0; return; }
-  if (isUp(c))   logSel = (logSel + 6 - 1) % 6;
-  if (isDown(c)) logSel = (logSel + 1) % 6;
+  if (isUp(c))   logSel = (logSel + LF - 1) % LF;
+  if (isDown(c)) logSel = (logSel + 1) % LF;
   if (c == 'x' && logEditIdx >= 0) {           // delete this entry (two-press)
     if (!logDelArm) { logDelArm = true; setStatus("Press x again to delete"); return; }
     bool ok = rewriteLog(logFirstIdx + logEditIdx, nullptr, true);
@@ -5547,7 +6669,8 @@ void App::keyLogEntry(char c, bool enter, bool back) {
     screen = logReturn; lastDrawMs = 0; return;
   }
   if (enter) {
-    if (logSel == 1) {                          // Mode: toggle SSB<->CW on linear
+    char b[20];
+    if (logSel == 6) {                          // Mode: toggle SSB<->CW on linear
       if (strcmp(qso.mode, "FM") != 0) {
         strncpy(qso.mode, strcmp(qso.mode, "CW") == 0 ? "SSB" : "CW",
                 sizeof(qso.mode) - 1);
@@ -5555,12 +6678,29 @@ void App::keyLogEntry(char c, bool enter, bool back) {
       } else setStatus("FM mode is fixed");
       return;
     }
+    if (logSel == 2) {                          // Sat: pick from the satellite list
+      logPickSat = true; screen = SCR_SATLIST; lastDrawMs = 0; return;
+    }
     switch (logSel) {
-      case 0: editTarget = 500; editTitle = "Callsign";   editBuf = qso.call; break;
-      case 2: editTarget = 501; editTitle = "RST sent";   editBuf = qso.rstS; break;
-      case 3: editTarget = 502; editTitle = "RST rcvd";   editBuf = qso.rstR; break;
-      case 4: editTarget = 503; editTitle = "Their grid"; editBuf = qso.grid; break;
-      case 5: editTarget = 504; editTitle = "Notes";      editBuf = qso.notes; break;
+      case 0: editTarget = 505; editTitle = "Date YYYY-MM-DD (UTC)";
+              if (qso.utc) { time_t tt=(time_t)qso.utc; struct tm g; gmtime_r(&tt,&g);
+                             strftime(b,sizeof(b),"%Y-%m-%d",&g); editBuf=b; }
+              else editBuf = ""; break;
+      case 1: editTarget = 506; editTitle = "Time HH:MM:SS (UTC)";
+              if (qso.utc) { time_t tt=(time_t)qso.utc; struct tm g; gmtime_r(&tt,&g);
+                             strftime(b,sizeof(b),"%H:%M:%S",&g); editBuf=b; }
+              else editBuf = ""; break;
+      case 3: editTarget = 507; editTitle = "Downlink MHz";
+              if (qso.dlHz) { snprintf(b,sizeof(b),"%.4f",qso.dlHz/1e6); editBuf=b; }
+              else editBuf = ""; break;
+      case 4: editTarget = 508; editTitle = "Uplink MHz";
+              if (qso.ulHz) { snprintf(b,sizeof(b),"%.4f",qso.ulHz/1e6); editBuf=b; }
+              else editBuf = ""; break;
+      case 5:  editTarget = 500; editTitle = "Callsign";   editBuf = qso.call; break;
+      case 7:  editTarget = 501; editTitle = "RST sent";   editBuf = qso.rstS; break;
+      case 8:  editTarget = 502; editTitle = "RST rcvd";   editBuf = qso.rstR; break;
+      case 9:  editTarget = 503; editTitle = "Their grid"; editBuf = qso.grid; break;
+      case 10: editTarget = 504; editTitle = "Notes";      editBuf = qso.notes; break;
     }
     screen = SCR_EDIT;
   }
@@ -5681,6 +6821,8 @@ void App::draw() {
     case SCR_POLAR:    drawPolar(); break;
     case SCR_PASSPOLAR: drawPassPolar(); break;
     case SCR_MUTUAL:   drawMutual(); break;
+    case SCR_VIS:      drawVis(); break;
+    case SCR_ILLUM:    drawIllum(); break;
     case SCR_LOCATION: drawLocation(); break;
     case SCR_UPDATE:   drawUpdate(); break;
     case SCR_SETTINGS: drawSettings(); break;
@@ -6213,7 +7355,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header("Settings");
   canvas.setTextSize(1);
-  const int N = 27;
+  const int N = 35;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -6224,39 +7366,57 @@ void App::drawSettings() {
   rows[6]  = String("Save & test WiFi");
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
-  rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_NET ? "rotctld (net)" : "GS-232");
+  rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
+                     : cfg.rotType == ROT_NET ? "rotctld (net)" : "GS-232");
   {
     String h = cfg.rotHost[0] ? String(cfg.rotHost) : String("(not set)");
     if (h.length() > 18) h = "..." + h.substring(h.length() - 15);
-    rows[10] = String("Rotctld host: ") + h;
+    rows[10] = String("Net host: ") + h;
   }
-  rows[11] = String("Rotctld port: ") + String(cfg.rotPort);
+  rows[11] = String("Net port: ") + String(cfg.rotPort);
   rows[12] = String("Rot baud: ") + String(cfg.rotBaud);
   rows[13] = String("Rot deadband: ") + String(cfg.rotDeadband) + " deg";
   rows[14] = String("Rot park az: ") + String(cfg.rotParkAz) + " deg";
-  rows[15] = String("Rot Az offset: ") + String(cfg.rotAzOff) + " deg";
-  rows[16] = String("Rot El offset: ") + String(cfg.rotElOff) + " deg";
+  {
+    uint16_t L = cfg.rotLeadSec;
+    rows[15] = String("Rot pre-point: ") + (L == 0 ? String("off")
+               : (L % 60 == 0) ? String(L / 60) + " min" : String(L) + " s");
+  }
+  rows[16] = String("Rot Az offset: ") + String(cfg.rotAzOff) + " deg";
+  rows[17] = String("Rot El offset: ") + String(cfg.rotElOff) + " deg";
+  rows[18] = String("Rot az range: ") + (cfg.rotAzRange == ROT_AZ_450 ? "0..450"
+                     : cfg.rotAzRange == ROT_AZ_180 ? "-180..+180" : "0..360");
+  rows[19] = String("Rot el range: ") + (cfg.rotFlip ? "180 deg (flip)" : "90 deg");
   {
     String u = cfg.gpUrl;                    // show a trimmed tail so it fits
     if (u.length() > 28) u = "..." + u.substring(u.length() - 25);
-    rows[17] = String("GP URL: ") + u;
+    rows[20] = String("GP URL: ") + u;
   }
-  rows[18] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
+  rows[21] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
                                 ? "Main Up/Sub Dn" : "Main Dn/Sub Up");
-  rows[19] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");
+  rows[22] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");
   {
     uint32_t eff = effectiveCatRateMs();
-    rows[20] = String("CAT rate: ") + String(cfg.catRateMs) + " ms";
-    if (eff > cfg.catRateMs) rows[20] += " (min " + String(eff) + ")";
+    rows[23] = String("CAT rate: ") + String(cfg.catRateMs) + " ms";
+    if (eff > cfg.catRateMs) rows[23] += " (min " + String(eff) + ")";
   }
-  rows[21] = String("CAT delay: ") + String(cfg.catDelayMs) + " ms";
-  rows[22] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
+  rows[24] = String("CAT delay: ") + String(cfg.catDelayMs) + " ms";
+  rows[25] = String("Screen sleep: ") + (cfg.dimSecs == 0 ? String("off")
              : (cfg.dimSecs % 60 == 0) ? String(cfg.dimSecs / 60) + " min"
                                        : String(cfg.dimSecs) + " s");
-  rows[23] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
-  rows[24] = String("Backup config+favs -> SD");
-  rows[25] = String("Restore config+favs");
-  rows[26] = String("Reset all data (erase)");
+  rows[26] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
+  rows[27] = String("Backup config+favs -> SD");
+  rows[28] = String("Restore config+favs");
+  rows[29] = String("Reset all data (erase)");
+  rows[30] = String("CAT type: ") + (cfg.catType == CAT_NET ? "Icom LAN" : "Wired CI-V");
+  {
+    String h = cfg.catHost[0] ? String(cfg.catHost) : String("(not set)");
+    if (h.length() > 17) h = "..." + h.substring(h.length() - 14);
+    rows[31] = String("LAN host: ") + h;
+  }
+  rows[32] = String("LAN port: ") + String(cfg.catPort);
+  rows[33] = String("LAN user: ") + (cfg.catUser[0] ? cfg.catUser : "(not set)");
+  rows[34] = String("LAN pass: ") + String(strlen(cfg.catPass) ? "******" : "(none)");
   const int VIS = 9;
   int scroll = (setSel >= VIS) ? (setSel - VIS + 1) : 0;
   for (int v = 0; v < VIS && (scroll + v) < N; ++v) {

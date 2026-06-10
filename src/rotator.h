@@ -21,6 +21,7 @@
 // ===========================================================================
 #include <Arduino.h>
 #include <WiFi.h>          // WiFiClient for the rotctld (network) backend
+#include <WiFiUdp.h>        // WiFiUDP for the PstRotator (network) backend
 #include "config.h"
 
 class Rotator {
@@ -89,7 +90,32 @@ private:
   void drainInput();                // consume pending replies without blocking
 };
 
+// PstRotator UDP control. CardSat sends "<PST>...</PST>" datagrams to a
+// PstRotator instance on the LAN (default UDP port 12000): set-position uses
+// <AZIMUTH>/<ELEVATION>, stop uses <STOP>, and AZ?/EL? queries are answered on
+// port+1. Connectionless, so "ready" just means WiFi is up and a host is set.
+class PstRotator : public Rotator {
+public:
+  PstRotator(const char* host, uint16_t port) : _host(host), _port(port) {}
+  void begin() override;
+  bool ready() const override { return _ok; }
+  bool point(float az, float el) override;
+  bool readPos(float& az, float& el) override;
+  void stop() override;
+  const char* name() const override { return "PstRotator"; }
+
+private:
+  String   _host;
+  uint16_t _port;
+  bool     _ok = false;
+  bool     _bound = false;
+  WiFiUDP  _udp;                    // bound to _port+1 to receive AZ?/EL? replies
+  bool ensure();                    // verify WiFi + socket; updates _ok
+  bool send(const char* msg);       // fire-and-forget datagram to host:_port
+};
+
 // Build the configured rotator backend. Caller owns the returned object.
 //   type 0 = GS-232 (ROT_GS232) on the I2C->UART bridge
 //   type 1 = rotctld (ROT_NET) to host:port over TCP
+//   type 2 = PstRotator (ROT_PST) UDP control to host:port
 Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port);

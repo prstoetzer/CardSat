@@ -6,7 +6,7 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 > **Status.** CardSat runs on the Cardputer ADV, and every feature has been
 > exercised on hardware **except radio (CAT) control and the antenna rotator** —
 > those two are still unverified on real equipment. Their math (the per-protocol
-> CAT frequency encoders, and both rotator backends -- GS-232 framing and the rotctld TCP client) is host-tested, but
+> CAT frequency encoders, and all three rotator backends -- GS-232 framing, the rotctld TCP client and PstRotator UDP) is host-tested, but
 > nothing has driven an actual radio or rotator yet. Keep the serial monitor open
 > and verify on the air before trusting it for a contact.
 
@@ -30,7 +30,7 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 14. [GP age and accuracy](#14-gp-age-and-accuracy)
 15. [Working offline](#15-working-offline)
 16. [Radio-specific notes](#16-radio-specific-notes)
-17. [Antenna rotator (GS-232 or rotctld)](#17-antenna-rotator-gs-232-or-rotctld)
+17. [Antenna rotator (GS-232, rotctld or PstRotator)](#17-antenna-rotator-gs-232-rotctld-or-pstrotator)
 18. [Managing data and factory reset](#18-managing-data-and-factory-reset)
 19. [Troubleshooting](#19-troubleshooting)
 20. [Key reference (cheat sheet)](#20-key-reference-cheat-sheet)
@@ -102,6 +102,25 @@ Main/TX**, but the **VFO Type** setting can swap the roles (*Main Dn/Sub Up*). O
 Kenwood** the rig's own satellite / full-duplex mode and the band pair are set up
 **by you on the radio** — CAT can't switch bands on those rigs — and CardSat
 Doppler-tunes within them. (See [§16](#16-radio-specific-notes).)
+
+### Icom over the network (no CI-V wiring)
+
+An Icom with a built-in network port (**IC-9700**, IC-705, IC-7610, IC-785x) can be
+controlled over **WiFi/Ethernet** instead of the wired CI-V bus — CardSat speaks the
+same RS-BA1 UDP protocol as Icom's own remote software. No level shifter, no UART:
+the radio's CI-V/G1/G2 pins stay free.
+
+On the radio (IC-9700: **MENU > SET > Network**): set **Network Control = ON**, set a
+**Network User1** id + password, leave the **Control** port at **50001** (Serial =
+50002, Audio = 50003 follow it), and turn **CI-V Transceive ON** so the radio reports
+changes. Give the radio a stable IP (DHCP reservation or static).
+
+In CardSat **Settings**: set **CAT type → Icom LAN**, **LAN host** to the radio's IP,
+**LAN port** to 50001 (unless you changed it), and **LAN user / LAN pass** to the
+Network User1 credentials. CardSat connects in the background; once the link is up the
+radio behaves exactly like a wired Icom (MAIN/SUB, Doppler, sat mode, CTCSS all work
+the same). Only **CAT** is carried — CardSat does not open the audio stream. Keep the
+credentials on a trusted LAN. (See [§16](#16-radio-specific-notes).)
 
 ---
 
@@ -241,11 +260,26 @@ uptime. `` ` `` or ENTER returns home.
 
 ### Logging QSOs (Log)
 
-Press `l` on the **Track** or **Polar** screen to log the contact you're working —
-radio control keeps running while you type. CardSat snapshots the UTC time,
-satellite, mode, and the current uplink/downlink frequencies plus your own grid
-and callsign (from **My callsign** in Settings), then lets you fill in:
+There are two ways to start an entry:
 
+- **From a pass** — press `l` on the **Track** or **Polar** screen to log the
+  contact you're working; radio control keeps running while you type. CardSat
+  snapshots the UTC time, satellite, mode and the live **Doppler-corrected**
+  uplink/downlink frequencies, plus your grid and callsign (from **My callsign**
+  in Settings).
+- **After the fact** — choose **New QSO entry** from the **Log** menu when you're
+  *not* working a pass. The entry opens with the time set to now and everything
+  ready to edit, so you can log a contact you made earlier or on another rig.
+
+Every field is editable on the entry screen — `;`/`.` move, ENTER edits the
+selected field:
+
+- **Date / Time** — UTC, entered as `YYYY-MM-DD` and `HH:MM:SS`.
+- **Sat** — ENTER opens the satellite list; pick a bird and CardSat fills the
+  **Sat**, **Mode** and frequency fields with its defaults — the **non-Doppler
+  centre** of a linear transponder's passband, or the **nominal** downlink/uplink
+  for an FM or single-channel satellite.
+- **DL MHz / UL MHz** — downlink and uplink in MHz (e.g. `145.960`).
 - **Call** — the station worked (required to save). Letters default to **uppercase**
   (hold shift for lowercase).
 - **Mode** — on a **linear** transponder, ENTER toggles **SSB ↔ CW** for this
@@ -255,9 +289,8 @@ and callsign (from **My callsign** in Settings), then lets you fill in:
   grids are the point of sat ops).
 - **Notes** — free text.
 
-`;`/`.` move between fields, ENTER edits the selected one, `s` saves, `` ` ``
-cancels. QSOs are appended to **`/CardSat/qso_log.csv`** (one row each; `notes` is
-the last column, so commas there are fine).
+`s` saves, `` ` `` cancels. QSOs are appended to **`/CardSat/qso_log.csv`** (one row
+each; `notes` is the last column, so commas there are fine).
 
 The **Log** item on the main menu offers **New QSO entry**, **View / edit log**,
 and **Export to ADIF** (writes `/CardSat/qso_log.adi`, including `STATION_CALLSIGN`
@@ -271,8 +304,9 @@ absent). If a logged satellite has no match, CardSat prompts you for its `SAT_NA
 only asked once. Update that CSV on the card as new satellites appear.
 
 **View / edit log** is a scrollable list of recent contacts (`;`/`.` to move).
-Open one with ENTER to correct any field and `s` to save, or press `x` twice to
-delete it; changes are written straight back to the CSV. The most recent **120**
+Open one with ENTER to correct **any field — including the date, time, satellite
+and frequencies** — then `s` to save, or press `x` twice to delete it; changes are
+written straight back to the CSV. The most recent **120**
 QSOs are available on the device — the complete log always lives in
 `/CardSat/qso_log.csv`, which you can also read or edit on a computer.
 
@@ -312,6 +346,8 @@ elevation, LOS time.** The element-set age is shown top-right, color-graded.
 - `n` — add a **manual transponder** for this satellite (see below).
 - `r` — recompute the pass list.
 - `x` — **mutual window**: enter a remote grid to find co-visibility passes (below).
+- `v` — **10-day pass overview** (InstantTrack-style visibility chart; below).
+- `i` — **illumination** (60-day Sun/eclipse raster; below).
 - `` ` `` — back to Satellites.
 
 ### Pass detail
@@ -329,8 +365,9 @@ and an arrow showing the direction of travel; `p` toggles back to the curve.
 
 From **Passes**, press **`x`** and enter a remote station's **Maidenhead grid**
 (4 or 6 characters, e.g. `IO91` or `JN58td`). CardSat scans the selected
-satellite's upcoming passes and lists every window where **both you and that
-station have the satellite above your horizons at the same time** — the periods
+satellite's upcoming passes **over the next 10 days** and lists every window
+where **both you and that station have the satellite above your horizons at the
+same time** — the periods
 you could actually make a contact through the bird. Each row shows the **start
 time (UTC)**, the **duration** (m:ss), and the **maximum elevation at each end**
 — yours (`me`) and theirs (`dx`) — so you can judge how workable the window is.
@@ -339,6 +376,39 @@ time (UTC)**, the **duration** (m:ss), and the **maximum elevation at each end**
 > Co-visibility is computed to the **0° horizon** for both stations; a window
 > with very low max elevations may be hard to use in practice. The remote grid
 > is assumed at sea level.
+
+---
+
+### 10-day pass overview (`v`)
+
+From **Passes**, press **`v`** for an at-a-glance chart of the selected
+satellite's passes over the **next 10 days**, modelled on InstantTrack's
+"Multiple Days for Single Satellite" visibility screen. Each row is one day
+(today at the top), drawn as a 24-hour timeline (00–24 h UTC, left to right) with
+faint gridlines at 06/12/18 h. Every pass is a coloured bar from AOS to LOS,
+shaded by peak elevation — **dim green** below 15°, **green** to 40°, **yellow**
+above — so high passes stand out. A red tick on the top row marks the current
+time. `r` recomputes; `` ` `` returns to Passes.
+
+---
+
+### Illumination (`i`)
+
+From **Passes**, press **`i`** for a **60-day solar-illumination raster** in the
+style of DK3WN's *illum*. The horizontal axis is date (today at the left edge,
+**+60 d** at the right); the vertical axis is one **orbital period** (its length
+in minutes is printed at the right). Each cell is shaded **yellow when the
+satellite is in sunlight** and left **dark when it is in Earth's shadow
+(eclipse)**, so the eclipse band — and the "sunline" at its edge — stands out,
+widening and narrowing as the orbit plane precesses relative to the Sun and
+vanishing entirely during **full-sun seasons** (handy for judging solar-panel
+charging). Below the raster a live readout shows the **current status**
+(`SUN`/`SHADOW`), the **eclipse minutes per orbit** and percentage for the
+current orbit, and the time to the next Sun↔shadow transition. `r` recomputes;
+`` ` `` returns to Passes.
+
+> Eclipse uses a cylindrical-shadow model (no penumbra) and the raster is
+> sampled, so the band edges and transition times are good to about a minute.
 
 ---
 
@@ -416,7 +486,7 @@ actions.
 | WiFi pass | ENTER → edit |
 | Save & test WiFi | ENTER → connect and report OK/FAIL |
 | AOS alarm | `,`/`/` or ENTER toggle on/off |
-| Rotator (+ type / host / port / baud / deadband / park / offsets) | `,`/`/` adjust, ENTER edits host/port; see [§17](#17-antenna-rotator-gs-232-or-rotctld) |
+| Rotator (+ type / host / port / baud / deadband / park / pre-point / offsets) | `,`/`/` adjust, ENTER edits host/port; see [§17](#17-antenna-rotator-gs-232-rotctld-or-pstrotator) |
 | GP source URL | ENTER → edit the GP/OMM download URL |
 | VFO Type | `,`/`/` or ENTER toggle *Main Up/Sub Dn* ↔ *Main Dn/Sub Up* |
 | Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
@@ -766,9 +836,9 @@ watch the **Doppler corrections** stream during a pass. Silence a backend by set
 
 ---
 
-## 17. Antenna rotator (GS-232 or rotctld)
+## 17. Antenna rotator (GS-232, rotctld or PstRotator)
 
-CardSat can drive an az/el antenna rotator through either of two interchangeable
+CardSat can drive an az/el antenna rotator through one of three interchangeable
 backends, chosen in Settings with **Rot type**:
 
 - **GS-232** -- a directly-attached controller speaking the **Yaesu GS-232A/B**
@@ -779,9 +849,13 @@ backends, chosen in Settings with **Rot type**:
 - **rotctld (net)** -- a **Hamlib `rotctld` server** anywhere on the same WiFi
   network. CardSat is the TCP client (the same role Gpredict plays), so any
   rotator Hamlib supports can be driven over the LAN with no extra CardSat wiring.
+- **PstRotator (net)** -- a **PstRotator** (YO3DMU) instance on the LAN, driven
+  over **UDP** (the same datagrams Gpredict/SatPC32 send it). CardSat sends
+  `<PST>...</PST>` control messages to PstRotator's UDP Control port; PstRotator
+  then drives whatever controller it is configured for.
 
 Only one rotator is active at a time. The pointing logic -- alignment offsets,
-deadband, flip mode, park-on-LOS -- is identical for both; **Rot type** only
+deadband, flip mode, park-on-LOS -- is identical for all of them; **Rot type** only
 changes how the final azimuth/elevation reaches the hardware.
 
 ### Wiring
@@ -811,17 +885,20 @@ Enable and tune the rotator in **Settings** (scroll past the radio rows):
 | Setting | Meaning |
 |---|---|
 | Rotator | off / on (builds the selected backend) |
-| Rot type | **GS-232** (I2C bridge) or **rotctld (net)** (TCP client) |
-| Rotctld host | rotctld server IP / hostname (rotctld backend only) |
-| Rotctld port | rotctld TCP port (Hamlib default **4533**) |
+| Rot type | **GS-232** (I2C bridge), **rotctld (net)** (TCP), or **PstRotator (net)** (UDP) |
+| Net host | server IP / hostname (rotctld or PstRotator backend) |
+| Net port | server port -- rotctld TCP **4533**, PstRotator UDP **12000** |
 | Rot baud | GS-232 serial speed (1200 / 4800 / 9600); GS-232 backend only |
 | Rot deadband | degrees; suppress moves smaller than this (anti-chatter) |
 | Rot park az | azimuth the rotator parks at on LOS / when disabled |
+| Rot pre-point | lead before AOS to pre-aim at the rise bearing (off / 30 s / 1-5 min) |
 | Rot Az offset | added to commanded azimuth (mount alignment) |
 | Rot El offset | added to commanded elevation |
+| Rot az range | azimuth travel: **0..360** (default), **-180..+180** (centred on N), or **0..450** (90 deg overlap) |
+| Rot el range | **90 deg**, or **180 deg** = flip over the top for high passes |
 
-`Rot type` and `Rotctld port` adjust in place with `,`/`/`; `Rotctld host` and
-`Rotctld port` also open a text editor with ENTER.
+`Rot type` and `Net port` adjust in place with `,`/`/`; `Net host` and `Net port`
+also open a text editor with ENTER.
 
 ### Using it
 
@@ -830,38 +907,104 @@ shows **Rot ON / off / n/c** (*n/c* = no link: the I2C bridge wasn't found, or
 the rotctld server isn't reachable). Pressing `o` re-attempts the link on the
 spot, so you can engage as soon as the controller or server comes up. While on,
 CardSat sends the satellite's azimuth and elevation about once a second -- the
-GS-232 `W aaa eee` command, or rotctld `P <az> <el>` -- but only when the
+GS-232 `W aaa eee` command, rotctld's `P <az> <el>`, or PstRotator's `<PST><AZIMUTH>..</AZIMUTH><ELEVATION>..</ELEVATION></PST>` datagram -- but only when the
 position has moved past the deadband, since rotators are slow and mechanical.
 When the satellite sets, or you press `o` again or leave the screen, the rotator
 **parks** at the configured azimuth/elevation.
 
-For overhead passes, a persisted **flip mode** (`rotFlip`) commands 0-180 deg
-elevation with a 180 deg azimuth flip, for rotators with 450 deg azimuth / 180 deg
-elevation travel. CardSat points **open-loop** from its own SGP4 prediction (it
-does not poll the controller's heading); the GS-232 `C2` read-back exists in the
-backend for diagnostics but is not used in the tracking loop.
+**Pre-positioning before AOS.** A slow rotator can take most of a minute to slew
+across the sky, so by the time it reaches the rise bearing the pass has already
+begun. With **Rot pre-point** set to a lead time (default **2 min**; `off`
+disables it), CardSat predicts the next pass for the tracked satellite and, once
+AOS is within that window, aims the rotator at the **rise azimuth on the horizon**
+instead of the idle park position -- so it is already pointed when the satellite
+appears and live tracking takes over smoothly. Set the lead a little longer than
+your rotator's worst-case slew time. Outside the window it still rests at **Rot
+park az**.
 
-### Network rotator (rotctld)
+**Azimuth range (0-360 / +/-180 / 0-450).** By default CardSat assumes the
+azimuth axis runs **0 to 360 deg**, 0 deg = North, 180 deg = South. **Rot az
+range** offers two alternatives for rotators built differently:
+
+- **-180..+180** -- the axis is centred on North and swings +/-180 deg. CardSat
+  re-expresses each bearing into that range (e.g. 270 deg -> -90 deg), the same
+  option Gpredict offers.
+- **0..450** -- the rotator has **90 deg of overlap** past North (a common
+  Yaesu/SatPC32 arrangement). A bearing of 0-90 deg is reachable either directly
+  or as 360-450 deg, so CardSat commands whichever is **nearer its current
+  position**: a pass crossing North continues up into the 360-450 region instead
+  of unwinding a full turn -- no dead-zone spin at culmination.
+
+Both affect what is sent on the **rotctld** path (e.g. `P -90.0 12.0` or
+`P 372.0 8.0`). GS-232 controllers natively accept 0-450 and re-wrap negatives, so
+the GS-232 backend follows the overlap but the +/-180 framing has no visible
+effect there.
+
+For overhead passes, setting **Rot el range** to **180 deg** enables a **flip**:
+near culmination CardSat commands elevation past 90 deg (over the top) together
+with a 180 deg azimuth flip, so an antenna on a 0-180 deg elevation rotator rides
+through zenith without the fast 180 deg azimuth swing a 0-90 deg mount would need.
+Leave it at **90 deg** for a conventional elevation rotator. CardSat points
+**open-loop** from its own SGP4 prediction (it does not poll the controller's
+heading); the GS-232 `C2` read-back exists in the backend for diagnostics but is
+not used in the tracking loop.
+
+### Network rotators (rotctld and PstRotator)
 
 To use the network backend, run `rotctld` on any machine that can reach your
 rotator (or use a controller that speaks rotctld natively), set **Rot type** to
-**rotctld (net)**, and enter the server's **Rotctld host** (an IP is simplest)
-and **Rotctld port** (Hamlib default **4533**). A dummy server for a bench test:
+**rotctld (net)**, and enter the server's address in **Net host** (an IP is
+simplest) and **Net port** (Hamlib default **4533**). A dummy server for a bench test:
 
 ```
-rotctld -m 1 -T 0.0.0.0 -t 4533
+rotctld -m 1 -t 4533 -vvvvv
 ```
 
-`-m 1` is Hamlib's dummy rotator model, so you can watch CardSat's `P`/`S`
-commands arrive without moving real motors; swap in your rotator's model and
+`-m 1` is Hamlib's dummy rotator model and `-vvvvv` makes rotctld log every
+command it receives, so you can watch CardSat's `P`/`S` commands arrive without
+moving real motors (without the verbose flag the server is silent, which can look
+like nothing is being sent); swap in your rotator's model and
 serial port for the real thing. CardSat opens the socket when you enable the
 rotator and reconnects on its own (throttled to a few seconds) if it drops, so a
 server that is briefly down or rebooted recovers without intervention. Pointing
 is open-loop from CardSat's SGP4 prediction -- it does not read the heading back.
 
+Hardware that speaks rotctld natively works the same way, with no PC in between.
+For example, the **MuseLab AntRunner** (BG5DIW) portable az/el rotator (360 deg
+azimuth / 180 deg elevation, controlled over WiFi by its onboard ESP32) and the
+**AntRunner-Pro** (fixed-install, 360 deg / 90 deg, controlled over Ethernet) both
+present a Hamlib `rotctld`-compatible network service. Set **Rot type** to
+**rotctld (net)** and point **Net host** / **Net port** at the AntRunner's rotctld
+service (or at a `rotctld` instance bridging to it over USB).
+
 > rotctld has **no authentication** -- keep it on a trusted LAN and never expose
 > the port to the internet. Several clients may connect to one rotctld and can
 > contend for the rotator.
+
+**PstRotator (UDP).** If you already run **PstRotator** on a shack PC, CardSat can
+drive it directly instead of a rotctld server. In PstRotator, open
+**Communication > UDP Control Port**, set the port (default **12000**), and tick
+**UDP Control** in Setup. On CardSat set **Rot type** to **PstRotator (net)**,
+**Net host** to the PC's IP, and **Net port** to that UDP port -- *remember to
+change it from rotctld's 4533 to 12000*. CardSat then sends
+`<PST><AZIMUTH>az</AZIMUTH><ELEVATION>el</ELEVATION></PST>` to point and
+`<PST><STOP>1</STOP></PST>` to stop. PstRotator does its own azimuth range,
+offsets and flip, so CardSat sends a plain 0-360 bearing here; leave CardSat's
+**Rot az range** / **Rot el range** at default and let PstRotator manage overlap
+and flip (or use CardSat's and keep PstRotator neutral -- just don't double up).
+
+This backend also drives the **WA4MCM PSR-100** (Don Friend, WA4MCM) -- a popular
+portable, lightweight az/el satellite-rotor kit for field/portable work. The
+PSR-100 accepts the same PstRotator-style `<PST>` UDP az/el datagrams over its
+WiFi interface, so CardSat points it directly: set **Rot type** to **PstRotator
+(net)** and aim **Net host** / **Net port** at the PSR-100's UDP interface -- no
+PC running PstRotator in between.
+
+> The PstRotator UDP control is **unauthenticated and connectionless** -- keep it
+> on a trusted LAN. Because UDP has no connection to lose, CardSat reports
+> **Rot ON** whenever WiFi is up and a host is set; it cannot tell whether
+> PstRotator is actually listening, so confirm the antenna follows on the first
+> pass.
 
 > The rotator only points while you are on the Track or Polar screen. It only
 > moves the antenna -- it does not change the radio's bands, and CAT on the
@@ -875,7 +1018,9 @@ the SC16IS750's strapped address and the controller's baud before keying real
 motors. The rotctld backend follows the published Hamlib `rotctld` protocol and
 is the one rotator path you can fully bench-test without trusting hardware
 encoders -- point it at `rotctld -m 1` and watch the commands -- but it has not
-driven a physical rotator either.
+driven a physical rotator either. The **PstRotator** UDP backend is host-verified
+for message formatting against the PstRotator manual (Rev. 7.5); it has not been
+run against a live PstRotator instance.
 
 ---
 
@@ -979,7 +1124,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 |---|---|
 | **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · ENTER passes |
 | **Next Passes** | ENTER track · `r` refresh · `z` deep-sleep until AOS |
-| **Passes** | `;`/`.` select · `d` detail plot · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual window |
+| **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
 | **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `l` log QSO · ENTER save cal |
@@ -990,6 +1135,8 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Log · list** | `;`/`.` scroll · ENTER edit entry · `` ` `` back |
 | **Log · entry** | `;`/`.` field · ENTER edit · `s` save · `x`×2 delete · `` ` `` back |
 | **Mutual** | `;`/`.` scroll · `` ` ``/ENTER back to passes |
+| **10-day** | `r` recompute · `` ` ``/ENTER back to passes |
+| **Illum** | `r` recompute · `` ` ``/ENTER back to passes |
 | **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock |
 | **Update** | `k`/ENTER GP · `a` cache all TX · `w` WiFi only |
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
@@ -1027,6 +1174,46 @@ in line and the controller's baud matches **Rot baud** in Settings.
   MAIN for uplink and SUB for downlink.
 - **One True Rule** — KB5MU's principle: tune so the frequency *at the satellite*
   stays constant; the computer corrects both legs for Doppler.
+
+---
+
+## 22. Supporting AMSAT
+
+CardSat exists because of the work **AMSAT** and its volunteers do — building and
+keeping amateur satellites flying, publishing the orbital data this app depends on,
+and advocating for amateur radio in space. **If you find CardSat useful, please
+consider joining and/or donating to AMSAT at [www.amsat.org](https://www.amsat.org/).**
+Membership and donations directly fund the next generation of satellites you'll
+track and work with this very tool.
+
+---
+
+## 23. License
+
+CardSat is released under the **MIT License**.
+
+> Copyright (c) 2026 Paul Stoetzer (N8HM)
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of
+> this software and associated documentation files (the "Software"), to deal in the
+> Software without restriction, including without limitation the rights to use, copy,
+> modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+> and to permit persons to whom the Software is furnished to do so, subject to the
+> following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+> INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+> PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+> HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+> CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+> OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Third-party components keep their own licenses: SGP4 propagation
+([Hopperpop/Sgp4-Library](https://github.com/Hopperpop/Sgp4-Library)), GP data from
+AMSAT, and transponder data from SatNOGS.
 
 ---
 

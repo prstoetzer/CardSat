@@ -43,6 +43,10 @@ public:
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
 
+  // True if the satellite is in sunlight (not in Earth's cylindrical shadow) at
+  // time t. Lightweight: propagate + shadow test only, no observer geometry.
+  bool sunlitAt(time_t t);
+
   // Range rate (km/s, +ve receding) at a FRACTIONAL unix time, taken from the
   // SGP4 velocity vector (the method Gpredict/sgp4sdp4 use) rather than by
   // differencing slant range. Exact and not quantised to whole seconds.
@@ -81,7 +85,8 @@ public:
                             uint32_t& dlOp, uint32_t& ulOp);
 
   // Fill up to `maxN` upcoming passes starting from `from` (unix UTC).
-  int  predictPasses(time_t from, float minEl, PassPredict* out, int maxN);
+  int  predictPasses(time_t from, float minEl, PassPredict* out, int maxN,
+                     time_t horizonEnd = 0);
 
   static time_t jdToUnix(double jd);
 

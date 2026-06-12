@@ -46,6 +46,13 @@ enum SolarActivity : uint8_t {
   SOLAR_AUTO = 3,  // derive density scale from the live F10.7 flux (fetched with GP)
 };
 
+// Units for the terrestrial Weather screen.
+enum WxUnits {
+  WX_IMPERIAL = 0,   // deg F, mph
+  WX_METRIC   = 1,   // deg C, km/h
+  WX_METRIC_MS = 2,  // deg C, m/s
+};
+
 struct Settings {
   // WiFi
   char     ssid[33] = "";
@@ -82,6 +89,7 @@ struct Settings {
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
+  uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
   // Display / power
   uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)

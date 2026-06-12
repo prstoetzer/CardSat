@@ -162,10 +162,17 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 #define AMSAT_STATUS_URL  "https://www.amsat.org/status/api/v1/summary.php?hours="
 #define AMSAT_STATUS_HOURS 72                    // "recently" window for status reports
 #define FILE_SPACEWX  "/CardSat/spacewx.txt"    // cached space weather: "f107 ap epoch"
+#define FILE_SPACEWX_TMP "/CardSat/spacewx.tmp"  // scratch for streamed NOAA JSON (low heap)
 // NOAA SWPC daily F10.7 cm solar-radio-flux observations (JSON array of records).
 // Best-effort: drives the orbital-decay density scale when "Decay solar = auto".
 #define SPACEWX_F107_URL  "https://services.swpc.noaa.gov/json/f107_cm_flux.json"
 #define SPACEWX_KP_URL    "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+// Open-Meteo terrestrial weather (current + multi-day forecast) for the operating
+// site. Free, no key, non-commercial. https://open-meteo.com  Cached for offline use.
+#define WEATHER_API_BASE  "https://api.open-meteo.com/v1/forecast"
+#define FILE_WEATHER      "/CardSat/weather.txt"   // cached parsed weather
+#define FILE_WEATHER_TMP  "/CardSat/weather.tmp"   // scratch for streamed JSON (low heap)
+#define WX_FORECAST_DAYS  4                          // today + 3 days shown
 #define FILE_LOG     "/CardSat/qso_log.csv"     // QSO log (CSV, notes is last field)
 #define FILE_ADIF    "/CardSat/qso_log.adi"     // ADIF export (generated on demand)
 #define FILE_LOTW    "/CardSat/lotw_sats.csv"   // LoTW SAT_NAME map ("SAT_NAME,AMSAT_NAME")

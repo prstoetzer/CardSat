@@ -15,6 +15,14 @@ format (with a migration for sources saved by older builds).
 
 ## New in this release
 
+- **Weather screen (main menu, below Space Wx).** Current conditions and a short
+  multi-day forecast for the operating site, from the free Open-Meteo service —
+  aimed at portable/field use. Shows current temperature, sky condition, wind and
+  humidity, then per-day high/low and precipitation chance. The location comes from
+  the prediction engine's site coordinates; data is fetched with **Update** and on
+  entry to the screen when WiFi is up (`r` forces a refresh), and is cached to flash
+  for offline viewing. Units (°F·mph / °C·km·h / °C·m·s) are selectable in Settings →
+  Station / display. Weather data by Open-Meteo.com (CC BY 4.0).
 - **QRZ callsign lookup (off the Home menu).** A new "QRZ Lookup" screen looks up a
   callsign in the **QRZ.com** database over its XML data service and shows the
   operator's name, mailing address, country, grid square and licence class. It

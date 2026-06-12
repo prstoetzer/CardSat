@@ -27,7 +27,7 @@ FRONT = [
   "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "Sun/Moon, Space Wx, QRZ Lookup, Location, Update, Settings, Log, About"),
+  "Sun/Moon, Space Wx, Weather, QRZ Lookup, Location, Update, Settings, Log, About"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; "
   "<b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
@@ -68,6 +68,10 @@ BACK = [
  ("SPACE WX (menu)",
   "Solar 10.7cm flux + planetary Kp, labelled &amp; colour-coded, with HF/sat "
   "operating outlook &amp; data age &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
+ ("WEATHER (menu)",
+  "Current conditions + multi-day forecast for your site (Open-Meteo). Temp/sky/wind/"
+  "humidity then daily hi/lo &amp; precip. Refreshes on entry (WiFi) &amp; with Update. "
+  "Units in Settings &middot; <b>r</b> refresh &middot; cached offline &middot; <b>`</b> back"),
  ("QRZ LOOKUP (menu)",
   "Callsign lookup via QRZ.com XML (needs QRZ XML subscription + user/pass in "
   "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
@@ -121,6 +125,9 @@ BACK = [
 ]
 
 
+TOTAL_PAGES = 2  # updated at build time
+
+
 def header(canvas, doc):
     canvas.saveState()
     canvas.setStrokeColor(colors.HexColor('#BBBBBB')); canvas.setLineWidth(0.6)
@@ -133,7 +140,7 @@ def header(canvas, doc):
     canvas.drawString(48, PAGE_H - 10.4, 'v0.9.12  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
-    canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/2' % (side, pg))
+    canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/%d' % (side, pg, TOTAL_PAGES))
     canvas.setStrokeColor(RULE); canvas.setLineWidth(0.4)
     for i in range(1, NCOL):
         rx = XS[i] - GUT / 2.0
@@ -169,7 +176,7 @@ def measure(sections, fs):
     return doc.page
 
 
-def best_fs(sections, hi=9.5, lo=4.5):
+def best_fs(sections, hi=9.5, lo=4.25):
     fs = hi
     while fs >= lo:
         if measure(sections, fs) <= 1:
@@ -195,7 +202,9 @@ def build(front_fs, back_fs):
 
 front_fs = best_fs(FRONT)
 back_fs  = best_fs(BACK)
-print("front_fs=%.2f  back_fs=%.2f" % (front_fs, back_fs))
+# Front is always 1 page; back may span more than one at the legibility floor.
+TOTAL_PAGES = 1 + measure(BACK, back_fs)
+print("front_fs=%.2f  back_fs=%.2f  pages=%d" % (front_fs, back_fs, TOTAL_PAGES))
 build(front_fs, back_fs)
 pages = len(PdfReader(OUT).pages)
 print("final pages:", pages)

@@ -16,7 +16,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -189,6 +189,21 @@ private:
   time_t   spaceWxEpoch   = 0;      // unix time the F10.7 value was observed/fetched
   float    spaceKp        = -1;     // latest planetary Kp index (0-9, -1 = none)
   float    spaceA         = -1;     // latest running A index (a_running, -1 = none)
+
+  // Terrestrial weather (Open-Meteo), cached for offline use. -999 = no data.
+  float    wxTempNow      = -999;   // current temperature (in cfg.wxUnits)
+  float    wxWindNow      = -999;   // current wind speed (in cfg.wxUnits)
+  int      wxWindDirNow   = -1;     // current wind direction (deg, -1 = none)
+  int      wxHumidNow     = -1;     // current relative humidity (%, -1 = none)
+  int      wxCodeNow      = -1;     // current WMO weather code (-1 = none)
+  int      wxDayCount     = 0;      // number of forecast days parsed (0..WX_FORECAST_DAYS)
+  int      wxDayCode[WX_FORECAST_DAYS] = {0};   // per-day WMO weather code
+  float    wxDayHi[WX_FORECAST_DAYS]   = {0};   // per-day high temp
+  float    wxDayLo[WX_FORECAST_DAYS]   = {0};   // per-day low temp
+  int      wxDayPop[WX_FORECAST_DAYS]  = {0};   // per-day precip probability max (%)
+  long     wxDayEpoch[WX_FORECAST_DAYS] = {0};  // per-day date (unix, local midnight)
+  time_t   wxEpoch        = 0;      // when this weather was fetched (0 = none)
+  uint8_t  wxCachedUnits  = 0;      // units the cached values are stored in
   int      spaceScroll    = 0;      // Space Wx screen scroll position
   char     dxGrid[8] = {0};
   double   dxLat = 0, dxLon = 0;
@@ -351,6 +366,12 @@ private:
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
   void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
   void fetchSpaceWeather();                // fetch F10.7 solar flux (best-effort, with GP)
+  void fetchWeather();                     // fetch terrestrial weather (Open-Meteo, best-effort)
+  bool loadWeatherCache();                 // load cached weather from flash on boot
+  static const char* wxCodeText(int code); // WMO weather code -> short label
+  static const char* windDirName(int deg);  // degrees -> 16-point compass ("" if <0)
+  const char* wxTempUnit();                // "F" or "C" per cfg.wxUnits
+  const char* wxWindUnit();                // "mph" / "km/h" / "m/s" per cfg.wxUnits
   void loadSpaceWeather();                 // load cached F10.7 from flash at boot
   double decayDensityScale() const;        // density scale for the decay point estimate
   void loadCalForSat(uint32_t norad);      // per-satellite calibration -> calDl/calUl
@@ -415,6 +436,7 @@ private:
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
+  void drawWeather(); void keyWeather(char c, bool enter, bool back);
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);
   int  txDbScroll = 0;             // transponder-browser scroll position
   void drawQrz();     void keyQrz(char c, bool enter, bool back);

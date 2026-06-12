@@ -641,9 +641,9 @@ whichever screen opened it.
 
 - `k` or **ENTER** — update GP data from your configured source and sync the clock
   (NTP). The same action also refreshes the AMSAT OSCAR **activity marks** shown on
-  the Satellites list **and** the **space-weather** data (solar flux + Kp), so one
-  press brings everything current. The Update screen notes this so it's clear `k`
-  does more than GP.
+  the Satellites list, the **space-weather** data (solar flux + Kp), **and** the
+  terrestrial **weather** for your site, so one press brings everything current. The
+  Update screen notes this so it's clear `k` does more than GP.
 - `a` — fetch and cache **all** transponders for offline use.
 - `w` — connect WiFi only (no download).
 - `` ` `` — back. Diagnostics print to the serial monitor at 115200.
@@ -663,6 +663,7 @@ on-screen key reference. The notable rows:
 | CAT baud | `,`/`/` cycle 1200…115200 (incl. 57600) — applies to all radio protocols |
 | Min pass el | `,`/`/` 0–30° |
 | Decay solar | `,`/`/` cycle assumed solar activity **mean → min → max → auto** for the orbital-analysis decay estimate (changes the headline number and the bracket). **auto** uses the live F10.7 flux fetched with GP data |
+| Weather units | `,`/`/` cycle the units for the **Weather** screen: **°F, mph → °C, km/h → °C, m/s**. Under *Station / display*. |
 | WiFi SSID | ENTER → edit · **`s`** → scan for networks and pick one |
 | WiFi pass | ENTER → edit |
 | Save & test WiFi | ENTER → connect and report OK/FAIL |
@@ -907,6 +908,28 @@ This is a planning cue, not a forecast: the flux and Kp are observed values, and
 the outlook text is a simple heuristic reading of them, not a calibrated
 propagation prediction. A high Kp (storm) is the main thing to watch — it warns of
 auroral flutter on VHF and disturbed high-latitude HF.
+
+### Weather
+
+**Weather** on the main menu (just below Space Wx) shows current conditions and a
+short forecast for your operating site — handy for portable and field operation. It
+displays the current temperature and sky condition, wind speed/direction and
+humidity, then a row for each of the next few days with the day's condition, high/
+low, and chance of precipitation.
+
+The data comes from **Open-Meteo** (open-meteo.com), a free, no-key weather service.
+The location is taken from the same site coordinates the prediction engine uses
+(your GPS fix or manually set lat/lon), so set your location first. Weather is
+fetched when you run **Update**, and also refreshes automatically on entry to the
+screen if WiFi is already connected; **`r`** forces a refresh. Like Space Wx, the
+last result is cached to flash, so it remains viewable offline with a note of its
+age.
+
+Units (°F·mph, °C·km/h, or °C·m/s) are selectable in *Settings → Station / display
+→ Weather units*; changing them re-labels the cached values immediately without
+needing a re-fetch.
+
+*Weather data by Open-Meteo.com, licensed under CC BY 4.0.*
 
 ### Transponder database
 
@@ -1474,6 +1497,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |
 | **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
 | **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labelled & colour-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · `r` refresh over WiFi · `` ` `` back |
+| **Weather** (main menu) | terrestrial current conditions + multi-day forecast for the operating site from Open-Meteo · current temp/sky/wind/humidity then per-day hi/lo & precip chance · refreshes on entry (if on WiFi) and with Update · `r` refresh · cached offline · `` ` `` back |
 | **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
 | **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |

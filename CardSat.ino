@@ -267,10 +267,17 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 #define AMSAT_STATUS_URL  "https://www.amsat.org/status/api/v1/summary.php?hours="
 #define AMSAT_STATUS_HOURS 72                    // "recently" window for status reports
 #define FILE_SPACEWX  "/CardSat/spacewx.txt"    // cached space weather: "f107 ap epoch"
+#define FILE_SPACEWX_TMP "/CardSat/spacewx.tmp"  // scratch for streamed NOAA JSON (low heap)
 // NOAA SWPC daily F10.7 cm solar-radio-flux observations (JSON array of records).
 // Best-effort: drives the orbital-decay density scale when "Decay solar = auto".
 #define SPACEWX_F107_URL  "https://services.swpc.noaa.gov/json/f107_cm_flux.json"
 #define SPACEWX_KP_URL    "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+// Open-Meteo terrestrial weather (current + multi-day forecast) for the operating
+// site. Free, no key, non-commercial. https://open-meteo.com  Cached for offline use.
+#define WEATHER_API_BASE  "https://api.open-meteo.com/v1/forecast"
+#define FILE_WEATHER      "/CardSat/weather.txt"   // cached parsed weather
+#define FILE_WEATHER_TMP  "/CardSat/weather.tmp"   // scratch for streamed JSON (low heap)
+#define WX_FORECAST_DAYS  4                          // today + 3 days shown
 #define FILE_LOG     "/CardSat/qso_log.csv"     // QSO log (CSV, notes is last field)
 #define FILE_ADIF    "/CardSat/qso_log.adi"     // ADIF export (generated on demand)
 #define FILE_LOTW    "/CardSat/lotw_sats.csv"   // LoTW SAT_NAME map ("SAT_NAME,AMSAT_NAME")
@@ -1420,6 +1427,13 @@ enum SolarActivity : uint8_t {
   SOLAR_AUTO = 3,  // derive density scale from the live F10.7 flux (fetched with GP)
 };
 
+// Units for the terrestrial Weather screen.
+enum WxUnits {
+  WX_IMPERIAL = 0,   // deg F, mph
+  WX_METRIC   = 1,   // deg C, km/h
+  WX_METRIC_MS = 2,  // deg C, m/s
+};
+
 struct Settings {
   // WiFi
   char     ssid[33] = "";
@@ -1456,6 +1470,7 @@ struct Settings {
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
+  uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
   // Display / power
   uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)
@@ -1510,7 +1525,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1683,6 +1698,21 @@ private:
   time_t   spaceWxEpoch   = 0;      // unix time the F10.7 value was observed/fetched
   float    spaceKp        = -1;     // latest planetary Kp index (0-9, -1 = none)
   float    spaceA         = -1;     // latest running A index (a_running, -1 = none)
+
+  // Terrestrial weather (Open-Meteo), cached for offline use. -999 = no data.
+  float    wxTempNow      = -999;   // current temperature (in cfg.wxUnits)
+  float    wxWindNow      = -999;   // current wind speed (in cfg.wxUnits)
+  int      wxWindDirNow   = -1;     // current wind direction (deg, -1 = none)
+  int      wxHumidNow     = -1;     // current relative humidity (%, -1 = none)
+  int      wxCodeNow      = -1;     // current WMO weather code (-1 = none)
+  int      wxDayCount     = 0;      // number of forecast days parsed (0..WX_FORECAST_DAYS)
+  int      wxDayCode[WX_FORECAST_DAYS] = {0};   // per-day WMO weather code
+  float    wxDayHi[WX_FORECAST_DAYS]   = {0};   // per-day high temp
+  float    wxDayLo[WX_FORECAST_DAYS]   = {0};   // per-day low temp
+  int      wxDayPop[WX_FORECAST_DAYS]  = {0};   // per-day precip probability max (%)
+  long     wxDayEpoch[WX_FORECAST_DAYS] = {0};  // per-day date (unix, local midnight)
+  time_t   wxEpoch        = 0;      // when this weather was fetched (0 = none)
+  uint8_t  wxCachedUnits  = 0;      // units the cached values are stored in
   int      spaceScroll    = 0;      // Space Wx screen scroll position
   char     dxGrid[8] = {0};
   double   dxLat = 0, dxLon = 0;
@@ -1845,6 +1875,12 @@ private:
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
   void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
   void fetchSpaceWeather();                // fetch F10.7 solar flux (best-effort, with GP)
+  void fetchWeather();                     // fetch terrestrial weather (Open-Meteo, best-effort)
+  bool loadWeatherCache();                 // load cached weather from flash on boot
+  static const char* wxCodeText(int code); // WMO weather code -> short label
+  static const char* windDirName(int deg);  // degrees -> 16-point compass ("" if <0)
+  const char* wxTempUnit();                // "F" or "C" per cfg.wxUnits
+  const char* wxWindUnit();                // "mph" / "km/h" / "m/s" per cfg.wxUnits
   void loadSpaceWeather();                 // load cached F10.7 from flash at boot
   double decayDensityScale() const;        // density scale for the decay point estimate
   void loadCalForSat(uint32_t norad);      // per-satellite calibration -> calDl/calUl
@@ -1909,6 +1945,7 @@ private:
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
+  void drawWeather(); void keyWeather(char c, bool enter, bool back);
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);
   int  txDbScroll = 0;             // transponder-browser scroll position
   void drawQrz();     void keyQrz(char c, bool enter, bool back);
@@ -5046,6 +5083,7 @@ bool Settings::load() {
   aosAlarm   = d["aosalarm"] | true;
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
+  wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
@@ -5096,6 +5134,7 @@ bool Settings::save() {
   d["aosalarm"] = aosAlarm;
   d["beacon"] = beaconMHz;
   d["solar"] = solarAct;
+  d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
@@ -5241,6 +5280,7 @@ void App::setup() {
   else setStatus("No GP data yet. Use Update.");
   db.loadManualGpFile();    // merge any hand-entered satellites
   loadSpaceWeather();       // restore cached F10.7 for the decay estimate
+  loadWeatherCache();       // restore cached terrestrial weather for offline view
   loadFavs();
   buildSatView();
   db.applyAmsatStatusFile(FILE_AMSTAT);   // restore cached AMSAT activity marks
@@ -5558,6 +5598,7 @@ void App::doUpdateGp() {
   buildSatView();
   fetchAmsatStatus();                  // tag active/not-heard from AMSAT status
   fetchSpaceWeather();                 // refresh F10.7 for the decay density scale
+  fetchWeather();                      // refresh terrestrial weather for the site
   nextAos = 0; lastSchedMs = 0;        // force schedule/alarm to recompute
   setStatus("GP OK: " + String(n) + " sats");
 }
@@ -5585,62 +5626,84 @@ void App::fetchAmsatStatus() {
 void App::fetchSpaceWeather() {
   if (!net.connected()) return;
   setStatus("Space weather..."); draw();
-  String body;
-  if (!net.httpsGet(SPACEWX_F107_URL, body, 60000)) return;   // leave cache intact
 
-  auto firstNumAfter = [&](const char* key) -> float {
-    int idx = body.indexOf(String(key));
-    if (idx < 0) return -1;
-    int colon = body.indexOf(':', idx);
-    if (colon < 0) return -1;
-    return (float)atof(body.c_str() + colon + 1);
-  };
+  // --- Solar 10.7 cm flux ---
+  // The f107_cm_flux.json feed is ~22 KB. Building that as a String on the
+  // no-PSRAM heap is unreliable (a large contiguous block can fail when the heap
+  // is fragmented), which previously made the whole screen show no data. Stream
+  // it to flash instead, then read just the head (the newest records lead the
+  // file) into a small buffer to parse. Same low-heap pattern the GP loader uses.
+  if (net.httpsGetToFile(SPACEWX_F107_URL, FILE_SPACEWX_TMP, 40000)) {
+    String head;
+    File f = LittleFS.open(FILE_SPACEWX_TMP, "r");
+    if (f) {
+      size_t cap = 4096;                          // newest entries are near the top
+      head.reserve(cap + 16);
+      while (f.available() && head.length() < cap) head += (char)f.read();
+      f.close();
+    }
+    LittleFS.remove(FILE_SPACEWX_TMP);
 
-  float mean = firstNumAfter("\"ninety_day_mean\"");           // first non-null wins below
-  // ninety_day_mean is null on Morning/Afternoon rows; skip until a real number.
-  if (!(mean > 0)) {
-    int pos = 0, idx;
-    String key("\"ninety_day_mean\"");
-    while ((idx = body.indexOf(key, pos)) >= 0) {
-      int colon = body.indexOf(':', idx);
-      if (colon < 0) break;
-      float v = (float)atof(body.c_str() + colon + 1);         // "null" -> 0.0
-      if (v > 50.0f && v < 400.0f) { mean = v; break; }
-      pos = idx + key.length();
+    auto firstNumAfter = [&](const char* key) -> float {
+      int idx = head.indexOf(String(key));
+      if (idx < 0) return -1;
+      int colon = head.indexOf(':', idx);
+      if (colon < 0) return -1;
+      return (float)atof(head.c_str() + colon + 1);
+    };
+    float mean = -1;
+    { int pos = 0, idx; String key("\"ninety_day_mean\"");
+      while ((idx = head.indexOf(key, pos)) >= 0) {
+        int colon = head.indexOf(':', idx);
+        if (colon < 0) break;
+        float v = (float)atof(head.c_str() + colon + 1);          // "null" -> 0.0
+        if (v > 50.0f && v < 400.0f) { mean = v; break; }
+        pos = idx + key.length();
+      }
+    }
+    float flux = firstNumAfter("\"flux\"");                        // newest record
+    float use = (mean > 50.0f && mean < 400.0f) ? mean
+              : (flux > 50.0f && flux < 400.0f) ? flux : -1.0f;
+    if (use > 0) {
+      spaceF107 = use;
+      spaceWxEpoch = nowUtc();
+      File w = LittleFS.open(FILE_SPACEWX, "w");
+      if (w) { w.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); w.close(); }
     }
   }
-  float flux = firstNumAfter("\"flux\"");                       // newest record (array is desc)
 
-  float use = (mean > 50.0f && mean < 400.0f) ? mean
-            : (flux > 50.0f && flux < 400.0f) ? flux : -1.0f;
-  if (use > 0) {                                                // store F10.7 if we got it
-    spaceF107 = use;
-    spaceWxEpoch = nowUtc();
-    File f = LittleFS.open(FILE_SPACEWX, "w");
-    if (f) { f.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); f.close(); }
-  }
+  // --- Planetary Kp + running A index (geomagnetic activity) ---
+  // Fetched independently of the flux above so a flux hiccup never suppresses it.
+  // The noaa-planetary-k-index feed is ~5 KB with a header row first and the
+  // newest reading LAST, so we read the file's tail. Each row is
+  //   ["time_tag","Kp","a_running","station_count"]  (all quoted strings).
+  if (net.httpsGetToFile(SPACEWX_KP_URL, FILE_SPACEWX_TMP, 16000)) {
+    String tail;
+    File f = LittleFS.open(FILE_SPACEWX_TMP, "r");
+    if (f) {
+      size_t sz = f.size();
+      size_t want = 256;                          // last row is well under this
+      if (sz > want) f.seek(sz - want);
+      tail.reserve(want + 16);
+      while (f.available()) tail += (char)f.read();
+      f.close();
+    }
+    LittleFS.remove(FILE_SPACEWX_TMP);
 
-  // Planetary Kp + running A index (geomagnetic activity), fetched independently
-  // of the flux above so a flux hiccup never suppresses it. NOAA "products"
-  // format is an array of rows with a header row first and the newest last:
-  //   ["time_tag","Kp","a_running","station_count"]
-  // All values are quoted strings; we read the 2nd (Kp) and 3rd (a_running).
-  String kbody;
-  if (net.httpsGet(SPACEWX_KP_URL, kbody, 60000)) {
-    int lastRow = kbody.lastIndexOf('[');
+    int lastRow = tail.lastIndexOf('[');
     if (lastRow >= 0) {
-      int q1 = kbody.indexOf('"', lastRow);                    // time start
-      int q2 = (q1 >= 0) ? kbody.indexOf('"', q1 + 1) : -1;    // time end
-      int q3 = (q2 >= 0) ? kbody.indexOf('"', q2 + 1) : -1;    // kp start
-      int q4 = (q3 >= 0) ? kbody.indexOf('"', q3 + 1) : -1;    // kp end
-      int q5 = (q4 >= 0) ? kbody.indexOf('"', q4 + 1) : -1;    // a_running start
-      int q6 = (q5 >= 0) ? kbody.indexOf('"', q5 + 1) : -1;    // a_running end
+      int q1 = tail.indexOf('"', lastRow);                    // time start
+      int q2 = (q1 >= 0) ? tail.indexOf('"', q1 + 1) : -1;    // time end
+      int q3 = (q2 >= 0) ? tail.indexOf('"', q2 + 1) : -1;    // kp start
+      int q4 = (q3 >= 0) ? tail.indexOf('"', q3 + 1) : -1;    // kp end
+      int q5 = (q4 >= 0) ? tail.indexOf('"', q4 + 1) : -1;    // a_running start
+      int q6 = (q5 >= 0) ? tail.indexOf('"', q5 + 1) : -1;    // a_running end
       if (q3 >= 0 && q4 > q3) {
-        float kp = (float)atof(kbody.substring(q3 + 1, q4).c_str());
+        float kp = (float)atof(tail.substring(q3 + 1, q4).c_str());
         if (kp >= 0.0f && kp <= 9.0f) spaceKp = kp;
       }
       if (q5 >= 0 && q6 > q5) {
-        float a = (float)atof(kbody.substring(q5 + 1, q6).c_str());
+        float a = (float)atof(tail.substring(q5 + 1, q6).c_str());
         if (a >= 0.0f && a <= 400.0f) spaceA = a;
       }
     }
@@ -5660,6 +5723,230 @@ void App::loadSpaceWeather() {
     int sp = line.indexOf(' ');
     if (sp >= 0) spaceWxEpoch = (time_t)atol(line.c_str() + sp + 1);
   }
+}
+
+// ===========================================================================
+//  Terrestrial weather (Open-Meteo) -- current conditions + a short forecast for
+//  the operating site, cached for offline use. Free, no API key, non-commercial
+//  (https://open-meteo.com). Populated from the same site lat/lon the predictor
+//  uses; refreshed with the Update screen and on entry to the Weather screen.
+// ===========================================================================
+
+// Degrees -> 16-point compass abbreviation. Empty string for unknown (<0).
+const char* App::windDirName(int deg) {
+  if (deg < 0) return "";
+  static const char* P[] = { "N","NNE","NE","ENE","E","ESE","SE","SSE",
+                             "S","SSW","SW","WSW","W","WNW","NW","NNW" };
+  int i = (int)((deg % 360) / 22.5f + 0.5f) & 15;
+  return P[i];
+}
+
+// Convert a cached temperature/wind value (stored in wxCachedUnits) into the
+// currently-selected display units, so changing units takes effect immediately
+// without needing a re-fetch.
+static float wxConvTemp(float v, uint8_t from, uint8_t to) {
+  if (v < -900) return v;
+  if (from == to) return v;
+  bool fromF = (from == WX_IMPERIAL), toF = (to == WX_IMPERIAL);
+  if (fromF == toF) return v;                 // both metric variants share deg C
+  return fromF ? (v - 32.0f) * 5.0f / 9.0f    // F -> C
+               : v * 9.0f / 5.0f + 32.0f;     // C -> F
+}
+static float wxConvWind(float v, uint8_t from, uint8_t to) {
+  if (v < -900 || from == to) return v;
+  // normalise to km/h, then to target
+  float kmh = (from == WX_IMPERIAL) ? v * 1.609344f
+            : (from == WX_METRIC_MS) ? v * 3.6f : v;
+  return (to == WX_IMPERIAL) ? kmh / 1.609344f
+       : (to == WX_METRIC_MS) ? kmh / 3.6f : kmh;
+}
+
+// Map a WMO weather-interpretation code to a short label.
+const char* App::wxCodeText(int code) {
+  switch (code) {
+    case 0:  return "Clear";
+    case 1:  return "Mainly clear";
+    case 2:  return "Partly cloudy";
+    case 3:  return "Overcast";
+    case 45: case 48: return "Fog";
+    case 51: case 53: case 55: return "Drizzle";
+    case 56: case 57: return "Frzg drizzle";
+    case 61: return "Light rain";
+    case 63: return "Rain";
+    case 65: return "Heavy rain";
+    case 66: case 67: return "Freezing rain";
+    case 71: return "Light snow";
+    case 73: return "Snow";
+    case 75: return "Heavy snow";
+    case 77: return "Snow grains";
+    case 80: return "Light showers";
+    case 81: return "Showers";
+    case 82: return "Hvy showers";
+    case 85: case 86: return "Snow showers";
+    case 95: return "Thunderstorm";
+    case 96: case 99: return "Thunder+hail";
+    default: return "--";
+  }
+}
+
+// Unit suffix helpers for the configured units.
+const char* App::wxTempUnit() { return cfg.wxUnits == WX_IMPERIAL ? "F" : "C"; }
+const char* App::wxWindUnit() {
+  return cfg.wxUnits == WX_IMPERIAL ? "mph" : (cfg.wxUnits == WX_METRIC_MS ? "m/s" : "km/h");
+}
+
+// Fetch current + WX_FORECAST_DAYS-day forecast for the site. Best-effort: leaves
+// the cache intact on any failure. Streams the (small) JSON to flash, parses it,
+// then rewrites the cache file.
+void App::fetchWeather() {
+  if (!net.connected()) return;
+  const Observer& o = loc.obs();
+  if (!(o.lat != 0.0 || o.lon != 0.0)) return;       // no location set -> nothing to do
+  setStatus("Weather..."); draw();
+
+  const char* tu = (cfg.wxUnits == WX_IMPERIAL) ? "fahrenheit" : "celsius";
+  const char* wu = (cfg.wxUnits == WX_IMPERIAL) ? "mph"
+                 : (cfg.wxUnits == WX_METRIC_MS ? "ms" : "kmh");
+  String url = String(WEATHER_API_BASE)
+             + "?latitude="  + String(o.lat, 4)
+             + "&longitude=" + String(o.lon, 4)
+             + "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m"
+             + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+             + "&timezone=auto&forecast_days=" + String(WX_FORECAST_DAYS)
+             + "&temperature_unit=" + tu + "&wind_speed_unit=" + wu;
+
+  if (!net.httpsGetToFile(url, FILE_WEATHER_TMP, 16000)) return;   // leave cache intact
+
+  String body;
+  { File f = LittleFS.open(FILE_WEATHER_TMP, "r");
+    if (f) { size_t cap = 8192; body.reserve(cap + 16);
+             while (f.available() && body.length() < cap) body += (char)f.read();
+             f.close(); } }
+  LittleFS.remove(FILE_WEATHER_TMP);
+  if (body.length() == 0) return;
+
+  // --- tiny JSON helpers (numbers + first array of a named key) ---
+  auto numAfter = [&](const String& key, int from) -> float {
+    int idx = body.indexOf(key, from);
+    if (idx < 0) return -999;
+    int colon = body.indexOf(':', idx);
+    if (colon < 0) return -999;
+    return (float)atof(body.c_str() + colon + 1);
+  };
+
+  // current object
+  int cur = body.indexOf("\"current\"");
+  if (cur < 0) return;                                // malformed -> keep cache
+  float t  = numAfter("\"temperature_2m\"", cur);
+  float rh = numAfter("\"relative_humidity_2m\"", cur);
+  float wc = numAfter("\"weather_code\"", cur);
+  float ws = numAfter("\"wind_speed_10m\"", cur);
+  float wd = numAfter("\"wind_direction_10m\"", cur);
+
+  // daily arrays: each "key":[v0,v1,...]. Anchor the search to the "daily" object
+  // so we don't latch onto the scalar "weather_code" inside "current".
+  int dailyAt = body.indexOf("\"daily\"");
+  int daySearchFrom = (dailyAt >= 0) ? dailyAt : 0;
+  auto fillIntArray = [&](const char* key, int* out, int maxN) -> int {
+    int idx = body.indexOf(String("\"") + key + "\"", daySearchFrom);
+    if (idx < 0) return 0;
+    int lb = body.indexOf('[', idx); if (lb < 0) return 0;
+    int rb = body.indexOf(']', lb);  if (rb < 0) return 0;
+    String arr = body.substring(lb + 1, rb);
+    int n = 0, pos = 0;
+    while (n < maxN) {
+      int comma = arr.indexOf(',', pos);
+      String tok = (comma < 0) ? arr.substring(pos) : arr.substring(pos, comma);
+      tok.trim();
+      if (tok.length() && tok != "null") out[n++] = (int)lround(atof(tok.c_str()));
+      else if (tok.length()) out[n++] = 0;
+      if (comma < 0) break; pos = comma + 1;
+    }
+    return n;
+  };
+  auto fillFloatArray = [&](const char* key, float* out, int maxN) -> int {
+    int idx = body.indexOf(String("\"") + key + "\"", daySearchFrom);
+    if (idx < 0) return 0;
+    int lb = body.indexOf('[', idx); if (lb < 0) return 0;
+    int rb = body.indexOf(']', lb);  if (rb < 0) return 0;
+    String arr = body.substring(lb + 1, rb);
+    int n = 0, pos = 0;
+    while (n < maxN) {
+      int comma = arr.indexOf(',', pos);
+      String tok = (comma < 0) ? arr.substring(pos) : arr.substring(pos, comma);
+      tok.trim();
+      out[n++] = (tok.length() && tok != "null") ? (float)atof(tok.c_str()) : 0.0f;
+      if (comma < 0) break; pos = comma + 1;
+    }
+    return n;
+  };
+
+  int codes[WX_FORECAST_DAYS], pops[WX_FORECAST_DAYS];
+  float his[WX_FORECAST_DAYS], los[WX_FORECAST_DAYS];
+  int nC = fillIntArray("weather_code", codes, WX_FORECAST_DAYS);
+  int nH = fillFloatArray("temperature_2m_max", his, WX_FORECAST_DAYS);
+  int nL = fillFloatArray("temperature_2m_min", los, WX_FORECAST_DAYS);
+  int nP = fillIntArray("precipitation_probability_max", pops, WX_FORECAST_DAYS);
+  // The first weather_code array we find is the *daily* one only if the current
+  // block doesn't also carry it; guard by requiring temps to have parsed.
+  int nDays = nH; if (nL < nDays) nDays = nL;
+  if (nDays > WX_FORECAST_DAYS) nDays = WX_FORECAST_DAYS;
+
+  // Commit (only if we got a sane current temperature or at least one day).
+  bool ok = (t > -900) || (nDays > 0);
+  if (!ok) return;
+  wxTempNow = t; wxHumidNow = (rh > -900) ? (int)lround(rh) : -1;
+  wxCodeNow = (wc > -900) ? (int)lround(wc) : -1;
+  wxWindNow = ws; wxWindDirNow = (wd > -900) ? (int)lround(wd) : -1;
+  wxDayCount = nDays;
+  for (int i = 0; i < nDays; ++i) {
+    wxDayCode[i] = (i < nC) ? codes[i] : 0;
+    wxDayHi[i]   = his[i];
+    wxDayLo[i]   = los[i];
+    wxDayPop[i]  = (i < nP) ? pops[i] : 0;
+    wxDayEpoch[i] = (long)(nowUtc() + (time_t)i * 86400);   // approximate day labels
+  }
+  wxEpoch = nowUtc();
+  wxCachedUnits = cfg.wxUnits;
+
+  // Persist a compact cache: header line then one line per day.
+  File w = LittleFS.open(FILE_WEATHER, "w");
+  if (w) {
+    w.printf("%d %ld %.1f %d %d %.1f %d %d\n", (int)wxCachedUnits, (long)wxEpoch,
+             wxTempNow, wxHumidNow, wxCodeNow, wxWindNow, wxWindDirNow, wxDayCount);
+    for (int i = 0; i < wxDayCount; ++i)
+      w.printf("%ld %d %.1f %.1f %d\n", wxDayEpoch[i], wxDayCode[i],
+               wxDayHi[i], wxDayLo[i], wxDayPop[i]);
+    w.close();
+  }
+  setStatus("");
+}
+
+// Restore cached weather at boot so the screen has data offline.
+bool App::loadWeatherCache() {
+  File f = LittleFS.open(FILE_WEATHER, "r");
+  if (!f) return false;
+  String hdr = f.readStringUntil('\n');
+  if (hdr.length() == 0) { f.close(); return false; }
+  int u, rh, code, wd, nd; long ep; float t, ws;
+  if (sscanf(hdr.c_str(), "%d %ld %f %d %d %f %d %d",
+             &u, &ep, &t, &rh, &code, &ws, &wd, &nd) != 8) { f.close(); return false; }
+  wxCachedUnits = (uint8_t)u; wxEpoch = (time_t)ep;
+  wxTempNow = t; wxHumidNow = rh; wxCodeNow = code; wxWindNow = ws; wxWindDirNow = wd;
+  if (nd > WX_FORECAST_DAYS) nd = WX_FORECAST_DAYS;
+  wxDayCount = 0;
+  for (int i = 0; i < nd; ++i) {
+    String ln = f.readStringUntil('\n');
+    if (ln.length() == 0) break;
+    long de; int dc, dp; float hi, lo;
+    if (sscanf(ln.c_str(), "%ld %d %f %f %d", &de, &dc, &hi, &lo, &dp) == 5) {
+      wxDayEpoch[wxDayCount] = de; wxDayCode[wxDayCount] = dc;
+      wxDayHi[wxDayCount] = hi; wxDayLo[wxDayCount] = lo; wxDayPop[wxDayCount] = dp;
+      wxDayCount++;
+    }
+  }
+  f.close();
+  return true;
 }
 
 
@@ -6604,6 +6891,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_SPACEWX:  keySpaceWx(c, enter, back); break;
     case SCR_TXDB:     keyTxDb(c, enter, back); break;
     case SCR_QRZ:      keyQrz(c, enter, back); break;
+    case SCR_WEATHER:  keyWeather(c, enter, back); break;
     case SCR_GRID:     keyGrid(c, enter, back); break;
     case SCR_STATES:   keyStates(c, enter, back); break;
     case SCR_DXCC:     keyDxcc(c, enter, back); break;
@@ -6620,7 +6908,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 12;
+  const int N = 13;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -6649,12 +6937,18 @@ void App::keyHome(char c, bool enter, bool back) {
       } break;
       case 4: screen = SCR_SUNMOON; lastDrawMs = 0; break;
       case 5: screen = SCR_SPACEWX; lastDrawMs = 0; break;
-      case 6: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
-      case 7: screen = SCR_LOCATION; break;
-      case 8: screen = SCR_UPDATE; break;
-      case 9: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
-      case 10: logMenuSel = 0; screen = SCR_LOG; break;
-      case 11: screen = SCR_ABOUT; break;
+      case 6: // Weather: refresh on entry if WiFi already up, else show cache
+        if (net.connected()) {
+          const Observer& o = loc.obs();
+          if (o.lat != 0.0 || o.lon != 0.0) fetchWeather();
+        }
+        screen = SCR_WEATHER; lastDrawMs = 0; break;
+      case 7: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+      case 8: screen = SCR_LOCATION; break;
+      case 9: screen = SCR_UPDATE; break;
+      case 10: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
+      case 11: logMenuSel = 0; screen = SCR_LOG; break;
+      case 12: screen = SCR_ABOUT; break;
     }
   }
 }
@@ -7330,7 +7624,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,40,7,25};
+static const int SET_STN[]   = {26,3,40,7,25,43};
 static const int SET_NET[]   = {4,5,6,20,41,42,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -7371,6 +7665,7 @@ void App::keySettings(char c, bool enter, bool back) {
                 cfg.save(); applyRadioFromCfg(); } break;
       case 3: cfg.minPassEl = constrain(cfg.minPassEl + dir, 0, 30); cfg.save(); break;
       case 40: cfg.solarAct = (uint8_t)((cfg.solarAct + dir + 4) % 4); cfg.save(); break;
+      case 43: cfg.wxUnits = (uint8_t)((cfg.wxUnits + dir + 3) % 3); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 4) % 4);
@@ -8405,6 +8700,7 @@ void App::draw() {
     case SCR_SPACEWX:  drawSpaceWx(); break;
     case SCR_TXDB:     drawTxDb(); break;
     case SCR_QRZ:      drawQrz(); break;
+    case SCR_WEATHER:  drawWeather(); break;
     case SCR_GRID:     drawGrid(); break;
     case SCR_STATES:   drawStates(); break;
     case SCR_DXCC:     drawDxcc(); break;
@@ -9790,8 +10086,118 @@ void App::keySpaceWx(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (c == 'r') {
     if (!net.connected()) net.connect(cfg.ssid, cfg.pass);
-    if (net.connected()) { fetchSpaceWeather(); setStatus("Space wx updated"); }
+    if (net.connected()) {
+      float beforeF = spaceF107, beforeK = spaceKp;
+      fetchSpaceWeather();
+      bool got = (spaceF107 > 0 || spaceKp >= 0);
+      bool changed = (spaceF107 != beforeF || spaceKp != beforeK);
+      setStatus(got ? (changed ? "Space wx updated" : "Space wx unchanged")
+                    : "Space wx: fetch failed");
+    }
     else setStatus("No WiFi");
+    lastDrawMs = 0; return;
+  }
+}
+
+// ===========================================================================
+//  Terrestrial weather screen (off Space Wx, key 'w'). Shows current conditions
+//  and a short forecast for the operating site, from Open-Meteo. Refreshes on
+//  entry when WiFi is up; otherwise shows the cached values with their age.
+// ===========================================================================
+void App::drawWeather() {
+  header("Weather");
+  canvas.setTextSize(1);
+
+  if (wxEpoch == 0) {                       // never fetched and nothing cached
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 50);
+    canvas.print("No weather data yet.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 66);
+    canvas.print("Press r on WiFi, or run");
+    canvas.setCursor(6, 76); canvas.print("Update. Needs a location set.");
+    footer("` back  r refresh");
+    return;
+  }
+
+  // --- current conditions (convert cached values to the selected units) ---
+  int y = 20;
+  float tNow = wxConvTemp(wxTempNow, wxCachedUnits, cfg.wxUnits);
+  float windNow = wxConvWind(wxWindNow, wxCachedUnits, cfg.wxUnits);
+  if (tNow > -900) {
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setTextSize(2);
+    canvas.setCursor(6, y);
+    canvas.printf("%d%s", (int)lround(tNow), wxTempUnit());
+    canvas.setTextSize(1);
+    // condition text to the right of the big temperature
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(96, y + 3);
+    canvas.print(wxCodeText(wxCodeNow));
+    y += 20;
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (windNow > -900) {
+    canvas.setCursor(6, y);
+    canvas.printf("Wind %d %s %s", (int)lround(windNow), wxWindUnit(),
+                  windDirName(wxWindDirNow));
+  }
+  if (wxHumidNow >= 0) {
+    canvas.setCursor(150, y);
+    canvas.printf("RH %d%%", wxHumidNow);
+  }
+  y += 14;
+
+  // --- forecast: one row per day ---
+  static const char* DOW[] = { "Sun","Mon","Tue","Wed","Thu","Fri","Sat" };
+  for (int i = 0; i < wxDayCount; ++i) {
+    // day label: "Today" for i==0, else weekday from the per-day epoch
+    String lbl;
+    if (i == 0) lbl = "Today";
+    else {
+      time_t d = (time_t)wxDayEpoch[i];
+      struct tm tmv; gmtime_r(&d, &tmv);
+      lbl = DOW[tmv.tm_wday % 7];
+    }
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(6, y);
+    canvas.print(lbl);
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(46, y);
+    String cond = wxCodeText(wxDayCode[i]);
+    if (cond.length() > 12) cond = cond.substring(0, 12);
+    canvas.print(cond);
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(150, y);
+    canvas.printf("%d/%d", (int)lround(wxConvTemp(wxDayHi[i], wxCachedUnits, cfg.wxUnits)),
+                           (int)lround(wxConvTemp(wxDayLo[i], wxCachedUnits, cfg.wxUnits)));
+    if (wxDayPop[i] > 0) {
+      canvas.setTextColor(wxDayPop[i] >= 50 ? CL_CYAN : CL_GREY, CL_BLACK);
+      canvas.setCursor(200, y); canvas.printf("%d%%", wxDayPop[i]);
+    }
+    y += 11;
+  }
+
+  // --- freshness + unit cache note ---
+  if (wxEpoch) {
+    long ageH = (long)((nowUtc() - wxEpoch) / 3600);
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    String age = (ageH < 1) ? String("<1h old")
+               : (ageH < 48) ? (String(ageH) + "h old")
+               : (String(ageH / 24) + "d old");
+    canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
+  }
+  footer("` back  r refresh");
+}
+
+void App::keyWeather(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (c == 'r') {
+    if (!net.connected()) net.connect(cfg.ssid, cfg.pass);
+    if (net.connected()) {
+      const Observer& o = loc.obs();
+      if (!(o.lat != 0.0 || o.lon != 0.0)) { setStatus("Set a location first"); }
+      else {
+        time_t before = wxEpoch;
+        fetchWeather();
+        setStatus(wxEpoch != before ? "Weather updated" : "Weather: fetch failed");
+      }
+    } else setStatus("No WiFi");
     lastDrawMs = 0; return;
   }
 }
@@ -10890,7 +11296,7 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "Sun / Moon", "Space Wx", "QRZ Lookup", "Location", "Update",
+                          "Track (sel)", "Sun / Moon", "Space Wx", "Weather", "QRZ Lookup", "Location", "Update",
                           "Settings", "Log", "About" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
   const int VIS = 9;
@@ -11511,7 +11917,7 @@ void App::drawUpdate() {
   canvas.setCursor(6, 52); canvas.print("w       : connect WiFi only");
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 68); canvas.print("k also refreshes AMSAT status");
-  canvas.setCursor(6, 78); canvas.print("+ space weather (flux/Kp).");
+  canvas.setCursor(6, 78); canvas.print("+ space wx + weather.");
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(6, 94);
   canvas.printf("Sats in memory: %d", db.count());
@@ -11524,7 +11930,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 43;
+  const int N = 44;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -11597,6 +12003,8 @@ void App::drawSettings() {
                      : String("mean"));
   rows[41] = String("QRZ user: ") + (cfg.qrzUser[0] ? cfg.qrzUser : "(not set)");
   rows[42] = String("QRZ pass: ") + String(strlen(cfg.qrzPass) ? "******" : "(none)");
+  rows[43] = String("Weather units: ") + (cfg.wxUnits == WX_IMPERIAL ? "F, mph"
+                     : cfg.wxUnits == WX_METRIC_MS ? "C, m/s" : "C, km/h");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

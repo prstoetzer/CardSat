@@ -61,6 +61,23 @@ format (with a migration for sources saved by older builds).
 
 ## Fixes
 
+- **Space Wx now returns Kp (and adds the A index).** The Kp fetch was coupled to
+  the solar-flux fetch — if the flux request hiccuped, Kp was silently skipped. The
+  geomagnetic fetch is now independent, and the screen also shows the **running A
+  index** when the NOAA feed provides it. The screen header now reads "Space Wx".
+- **Orbital-analysis page headers corrected.** The page counter showed "/7" and the
+  two newest pages (Pass outlook, Orbit position) read past the end of the page-name
+  list, so they showed a wrong count and a missing/garbled name. The counter now
+  reads "/9" and all nine pages are named (compactly, so the counter survives on
+  long satellite names).
+- **Pass-outlook counts fixed (e.g. AO-7).** The 7-day outlook used a repeated
+  single-pass scan that mis-behaved for high orbits — AO-7 hit the 200-iteration
+  guard with almost no high passes. It now uses one `predictPasses` call over the
+  whole window (the same proven path as the 10-day overview), giving correct pass
+  counts and >30° tallies.
+- **QRZ callsign field defaults to uppercase**, like the other callsign entry
+  fields.
+
 - **Update screen makes clear it refreshes more than GP.** Pressing `k` on the
   Update screen has long fetched the AMSAT activity marks and (more recently) the
   space-weather data alongside the GP elements; the screen now says so, with the

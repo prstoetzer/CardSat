@@ -188,6 +188,7 @@ private:
   float    spaceF107      = -1;     // last-known 10.7 cm solar radio flux (sfu)
   time_t   spaceWxEpoch   = 0;      // unix time the F10.7 value was observed/fetched
   float    spaceKp        = -1;     // latest planetary Kp index (0-9, -1 = none)
+  float    spaceA         = -1;     // latest running A index (a_running, -1 = none)
   int      spaceScroll    = 0;      // Space Wx screen scroll position
   char     dxGrid[8] = {0};
   double   dxLat = 0, dxLon = 0;

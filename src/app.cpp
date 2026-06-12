@@ -504,29 +504,39 @@ void App::fetchSpaceWeather() {
 
   float use = (mean > 50.0f && mean < 400.0f) ? mean
             : (flux > 50.0f && flux < 400.0f) ? flux : -1.0f;
-  if (use <= 0) return;                                         // nothing usable
-  spaceF107 = use;
-  spaceWxEpoch = nowUtc();
-  File f = LittleFS.open(FILE_SPACEWX, "w");
-  if (f) { f.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); f.close(); }
+  if (use > 0) {                                                // store F10.7 if we got it
+    spaceF107 = use;
+    spaceWxEpoch = nowUtc();
+    File f = LittleFS.open(FILE_SPACEWX, "w");
+    if (f) { f.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); f.close(); }
+  }
 
-  // Planetary Kp index (geomagnetic activity). NOAA "products" format is an array
-  // of [time, kp, ...] rows with a header row first and the newest reading last.
+  // Planetary Kp + running A index (geomagnetic activity), fetched independently
+  // of the flux above so a flux hiccup never suppresses it. NOAA "products"
+  // format is an array of rows with a header row first and the newest last:
+  //   ["time_tag","Kp","a_running","station_count"]
+  // All values are quoted strings; we read the 2nd (Kp) and 3rd (a_running).
   String kbody;
   if (net.httpsGet(SPACEWX_KP_URL, kbody, 60000)) {
     int lastRow = kbody.lastIndexOf('[');
     if (lastRow >= 0) {
-      // row looks like ["2026-06-12 18:00:00","3.67","3",null]; 2nd field is Kp.
-      int q1 = kbody.indexOf('"', lastRow);
-      int q2 = (q1 >= 0) ? kbody.indexOf('"', q1 + 1) : -1;     // end of time string
-      int q3 = (q2 >= 0) ? kbody.indexOf('"', q2 + 1) : -1;     // start of kp string
-      int q4 = (q3 >= 0) ? kbody.indexOf('"', q3 + 1) : -1;     // end of kp string
+      int q1 = kbody.indexOf('"', lastRow);                    // time start
+      int q2 = (q1 >= 0) ? kbody.indexOf('"', q1 + 1) : -1;    // time end
+      int q3 = (q2 >= 0) ? kbody.indexOf('"', q2 + 1) : -1;    // kp start
+      int q4 = (q3 >= 0) ? kbody.indexOf('"', q3 + 1) : -1;    // kp end
+      int q5 = (q4 >= 0) ? kbody.indexOf('"', q4 + 1) : -1;    // a_running start
+      int q6 = (q5 >= 0) ? kbody.indexOf('"', q5 + 1) : -1;    // a_running end
       if (q3 >= 0 && q4 > q3) {
         float kp = (float)atof(kbody.substring(q3 + 1, q4).c_str());
         if (kp >= 0.0f && kp <= 9.0f) spaceKp = kp;
       }
+      if (q5 >= 0 && q6 > q5) {
+        float a = (float)atof(kbody.substring(q5 + 1, q6).c_str());
+        if (a >= 0.0f && a <= 400.0f) spaceA = a;
+      }
     }
   }
+  if (spaceWxEpoch == 0 && (spaceKp >= 0 || spaceF107 > 0)) spaceWxEpoch = nowUtc();
 }
 
 // Restore the cached F10.7 at boot so the decay estimate is informed offline.
@@ -2640,7 +2650,8 @@ void App::keyEdit(char c, bool enter, bool back) {
     return;
   }
   if (c >= 32 && c < 127) {
-    if (editTarget == 103 || editTarget == 204 || editTarget == 330 ||
+    if (editTarget == 103 || editTarget == 204 || editTarget == 216 ||
+        editTarget == 330 ||
         editTarget == 500 || editTarget == 503 || editTarget == 600) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
@@ -3944,35 +3955,36 @@ void App::buildOrbit() {
 
   // Pass outlook over the next ORB_OUTLOOK_DAYS days: count passes, find the best
   // (highest) one, the longest, how many clear 30 deg, and the mean spacing.
+  // Use ONE predictPasses call over the whole window (the SGP4 nextpass cursor
+  // advances correctly through consecutive passes) -- the same pattern buildVis
+  // uses. Repeated single-pass re-inits mis-behave for high orbits like AO-7.
   orbOutlookN = 0; orbOutlookHi = 0; orbBestEl = 0; orbBestT = 0; orbBestDur = 0;
   orbLongestMin = 0; orbAvgGapH = 0;
   {
     time_t winEnd = now + (time_t)ORB_OUTLOOK_DAYS * 86400;
-    time_t scan = now; time_t firstAos = 0, lastAos = 0;
-    PassPredict pp1[1];
-    for (int guard = 0; guard < 200 && scan < winEnd; ++guard) {
-      if (pred.predictPasses(scan, cfg.minPassEl, pp1, 1, winEnd) < 1) break;
-      PassPredict& p = pp1[0];
-      orbOutlookN++;
-      if (orbOutlookN == 1) firstAos = p.aos;
-      lastAos = p.aos;
+    // Reuse the 10-day overview buffer (only live while that screen is open; it
+    // is rebuilt on entry there, so borrowing it here is safe).
+    int n = pred.predictPasses(now, cfg.minPassEl, visPasses, VIS_PASS_MAX, winEnd);
+    orbOutlookN = n;
+    for (int i = 0; i < n; ++i) {
+      const PassPredict& p = visPasses[i];
       int dur = (int)(p.los - p.aos);
       if (p.maxEl > orbBestEl) { orbBestEl = p.maxEl; orbBestT = p.aos; orbBestDur = dur; }
       if (dur / 60.0f > orbLongestMin) orbLongestMin = dur / 60.0f;
       if (p.maxEl >= 30.0f) orbOutlookHi++;
-      scan = p.los + 60;          // step past this pass to find the next
     }
-    if (orbOutlookN > 1)
-      orbAvgGapH = (float)(lastAos - firstAos) / (orbOutlookN - 1) / 3600.0f;
+    if (n > 1)
+      orbAvgGapH = (float)(visPasses[n - 1].aos - visPasses[0].aos) / (n - 1) / 3600.0f;
   }
   setStatus("");
 }
 
 void App::drawOrbit() {
   SatEntry* s = activeSat();
-  static const char* PG[] = { "Info", "Live", "Next pass", "Ground trk", "Doppler", "Nodal", "Sun/Beta" };
-  { String h = (s ? String(s->name) : String("Orbit")) + "  " + PG[orbitPage] +
-               " " + String(orbitPage + 1) + "/7";
+  static const char* PG[] = { "Info", "Live", "Pass", "Track", "Doppler", "Nodal",
+                              "Sun/B", "Outlook", "OrbPos" };
+  { String h = (s ? String(s->name) : String("Orbit")) + " " + PG[orbitPage] +
+               " " + String(orbitPage + 1) + "/9";
     header(h); }
   canvas.setTextSize(1);
   if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
@@ -4580,7 +4592,7 @@ void App::keySunMoon(char c, bool enter, bool back) {
 //  reading of what they mean for HF and satellite operation. r = refresh.
 // ===========================================================================
 void App::drawSpaceWx() {
-  header("Space Weather");
+  header("Space Wx");
   canvas.setTextSize(1);
   int y = 20; const int LH = 11;
   auto row = [&](const char* k, const String& v, uint16_t col) {
@@ -4619,6 +4631,15 @@ void App::drawSpaceWx() {
     row("Kp index", String(spaceKp, 1) + "  " + kLbl, kCol);
   } else {
     row("Kp index", "--", CL_GREY);
+  }
+  // --- Running A index (daily-equivalent geomagnetic amplitude), if available ---
+  if (spaceA >= 0) {
+    const char* aLbl; uint16_t aCol;
+    if      (spaceA < 8)  { aLbl = "quiet";     aCol = CL_GREEN; }
+    else if (spaceA < 16) { aLbl = "unsettled"; aCol = CL_WHITE; }
+    else if (spaceA < 30) { aLbl = "active";    aCol = CL_YELLOW; }
+    else                  { aLbl = "storm";     aCol = CL_RED; }
+    row("A index", String(spaceA, 0) + "  " + aLbl, aCol);
   }
   y += 3;
   // --- Plain-language operating note ---
@@ -5757,7 +5778,7 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "Sun / Moon", "Space Wx", "QRZ Lookup", "Location", "Update GP/Freq",
+                          "Track (sel)", "Sun / Moon", "Space Wx", "QRZ Lookup", "Location", "Update",
                           "Settings", "Log", "About" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
   const int VIS = 9;

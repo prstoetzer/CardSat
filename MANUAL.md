@@ -251,7 +251,7 @@ or **DEL** always steps back.
 ### Home
 
 A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
-Location · Update GP/Freq · Settings · About / diagnostics · Log.** The currently
+Location · Update · Settings · About / diagnostics · Log.** The currently
 selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 
 ### About
@@ -891,14 +891,17 @@ Behavior notes:
 
 ### Space weather
 
-**Space Wx** on the main menu summarises the two indices that matter most for
+**Space Wx** on the main menu summarises the indices that matter most for
 propagation: the **solar 10.7 cm radio flux** (F10.7, a proxy for solar activity
-and ionospheric ionisation) and the **planetary Kp index** (geomagnetic
-disturbance, 0–9). Both are fetched from NOAA SWPC together with GP updates, or on
-demand with **`r`** (needs WiFi). Each value is labelled in plain terms — flux
-low/moderate/good/very-high, Kp quiet/unsettled/storm — and colour-coded, with a
-short **operating outlook** line translating the numbers into what to expect on HF
-and satellite paths, plus a note of how old the data is.
+and ionospheric ionisation), the **planetary Kp index** (geomagnetic disturbance,
+0–9), and the **running A index** (the daily-equivalent geomagnetic amplitude,
+shown when the feed provides it). They're fetched from NOAA SWPC together with GP
+updates, or on demand with **`r`** (needs WiFi). The Kp and A fetch is independent
+of the flux fetch, so a hiccup in one never suppresses the other. Each value is
+labelled in plain terms — flux low/moderate/good/very-high, Kp and A
+quiet/unsettled/storm — and colour-coded, with a short **operating outlook** line
+translating the numbers into what to expect on HF and satellite paths, plus a note
+of how old the data is.
 
 This is a planning cue, not a forecast: the flux and Kp are observed values, and
 the outlook text is a simple heuristic reading of them, not a calibrated
@@ -914,7 +917,7 @@ description, the **downlink** (a range for linear transponders) with mode, and t
 **uplink** with any CTCSS tone and inverting/linear flags. `;`/`.` scrolls through
 the list. It's a quick offline reference for a bird's frequencies and modes — handy
 for checking what a satellite carries without a radio connected. If nothing shows,
-the transponders haven't been cached yet; run **Update GP/Freq** with WiFi on.
+the transponders haven't been cached yet; run **Update** with WiFi on.
 
 ### QRZ callsign lookup
 
@@ -1470,7 +1473,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
 | **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |
 | **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
-| **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp index, each labelled & colour-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · `r` refresh over WiFi · `` ` `` back |
+| **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labelled & colour-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · `r` refresh over WiFi · `` ` `` back |
 | **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
 | **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |

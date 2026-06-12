@@ -5632,35 +5632,26 @@ void App::fetchSpaceWeather() {
   setStatus("Space weather..."); draw();
 
   // --- Solar 10.7 cm flux ---
-  // The f107_cm_flux.json feed is ~22 KB, but the newest records lead the file and
-  // we only need the latest values. Cap the read to the first ~6 KB so we reserve a
-  // small RAM buffer (large allocations are unreliable on the fragmented no-PSRAM
-  // heap) -- and use NO filesystem temp file (the LittleFS partition is tiny under
-  // the huge_app scheme and must stay free for the GP cache).
+  // f107_cm_flux.json is an array of objects, newest first, e.g.
+  //   {"time_tag":..,"flux":1.06e+002,"ninety_day_mean":null,"rec_count":null}
+  // We want the *current* flux (the first valid "flux"), NOT the 90-day mean.
+  // Values are in scientific notation (1.06e+002 = 106), which atof handles. Cap the
+  // read to the first ~6 KB (newest records lead the file) for a small RAM buffer.
   { String head;
     if (net.httpsGet(SPACEWX_F107_URL, head, 6000)) {
-      auto firstNumAfter = [&](const char* key) -> float {
-        int idx = head.indexOf(String(key));
-        if (idx < 0) return -1;
-        int colon = head.indexOf(':', idx);
-        if (colon < 0) return -1;
-        return (float)atof(head.c_str() + colon + 1);
-      };
-      float mean = -1;
-      { int pos = 0, idx; String key("\"ninety_day_mean\"");
+      // first valid "flux": (skip any null/garbage, take first sane value)
+      float flux = -1;
+      { int pos = 0, idx; String key("\"flux\"");
         while ((idx = head.indexOf(key, pos)) >= 0) {
           int colon = head.indexOf(':', idx);
           if (colon < 0) break;
-          float v = (float)atof(head.c_str() + colon + 1);          // "null" -> 0.0
-          if (v > 50.0f && v < 400.0f) { mean = v; break; }
+          float v = (float)atof(head.c_str() + colon + 1);
+          if (v > 50.0f && v < 400.0f) { flux = v; break; }
           pos = idx + key.length();
         }
       }
-      float flux = firstNumAfter("\"flux\"");                        // newest record
-      float use = (mean > 50.0f && mean < 400.0f) ? mean
-                : (flux > 50.0f && flux < 400.0f) ? flux : -1.0f;
-      if (use > 0) {
-        spaceF107 = use;
+      if (flux > 0) {
+        spaceF107 = flux;
         spaceWxEpoch = nowUtc();
         File w = LittleFS.open(FILE_SPACEWX, "w");
         if (w) { w.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); w.close(); }
@@ -5669,43 +5660,23 @@ void App::fetchSpaceWeather() {
   }
 
   // --- Planetary Kp + running A index (geomagnetic activity) ---
-  // Fetched independently of the flux above so a flux hiccup never suppresses it.
-  // noaa-planetary-k-index.json is an array of rows, header first, newest LAST:
-  //   ["time_tag","Kp","a_running","station_count"]
-  // Values may be quoted strings or bare numbers depending on the feed, so we take
-  // the last row's contents and split on commas, stripping quotes/space per field.
+  // noaa-planetary-k-index.json is an array of OBJECTS, newest LAST, e.g.
+  //   {"time_tag":..,"Kp":3.67,"a_running":22,"station_count":8}
+  // Values are bare numbers. Read the whole (small ~5 KB) body and take the value
+  // after the LAST "Kp": and the LAST "a_running": (the most recent reading).
   { String kbody;
-    if (net.httpsGet(SPACEWX_KP_URL, kbody, 12000)) {
-      // Find the last row's own [...] span. The very last ']' closes the whole
-      // array, so the row's closing ']' is the one before that; the row's '[' is
-      // the last '[' in the body.
-      int outer = kbody.lastIndexOf(']');
-      int rb = (outer > 0) ? kbody.lastIndexOf(']', outer - 1) : -1;  // row's ]
-      int lb = kbody.lastIndexOf('[');                                 // row's [
-      if (lb >= 0 && rb > lb) {
-        String row = kbody.substring(lb + 1, rb);    // e.g.  "...","3.67","9","8"
-        // split into up to 4 fields on commas
-        String f[4]; int nf = 0, pos = 0;
-        while (nf < 4) {
-          int comma = row.indexOf(',', pos);
-          String tok = (comma < 0) ? row.substring(pos) : row.substring(pos, comma);
-          tok.trim();
-          // strip surrounding quotes
-          if (tok.length() >= 2 && tok[0] == '"' && tok[tok.length() - 1] == '"')
-            tok = tok.substring(1, tok.length() - 1);
-          f[nf++] = tok;
-          if (comma < 0) break; pos = comma + 1;
-        }
-        // field 1 = Kp, field 2 = a_running
-        if (nf >= 2 && f[1].length()) {
-          float kp = (float)atof(f[1].c_str());
-          if (kp >= 0.0f && kp <= 9.0f) spaceKp = kp;
-        }
-        if (nf >= 3 && f[2].length()) {
-          float a = (float)atof(f[2].c_str());
-          if (a >= 0.0f && a <= 400.0f) spaceA = a;
-        }
-      }
+    if (net.httpsGet(SPACEWX_KP_URL, kbody, 16000)) {
+      auto lastNumAfter = [&](const char* key) -> float {
+        int idx = kbody.lastIndexOf(String(key));
+        if (idx < 0) return -1;
+        int colon = kbody.indexOf(':', idx);
+        if (colon < 0) return -1;
+        return (float)atof(kbody.c_str() + colon + 1);
+      };
+      float kp = lastNumAfter("\"Kp\"");
+      float a  = lastNumAfter("\"a_running\"");
+      if (kp >= 0.0f && kp <= 9.0f)   spaceKp = kp;
+      if (a  >= 0.0f && a  <= 400.0f) spaceA  = a;
     }
   }
   if (spaceWxEpoch == 0 && (spaceKp >= 0 || spaceF107 > 0)) spaceWxEpoch = nowUtc();

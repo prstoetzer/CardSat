@@ -7433,9 +7433,9 @@ void App::keySettings(char c, bool enter, bool back) {
       case 20: gpSrcSel = 0; gpSrcScroll = 0; screen = SCR_GPSRC; lastDrawMs = 0; break;
       case 26: editTarget = 204; editTitle = "My callsign";
                editBuf = cfg.myCall; screen = SCR_EDIT; break;
-      case 41: editTarget = 211; editTitle = "QRZ username";
+      case 41: editTarget = 214; editTitle = "QRZ username";
                editBuf = cfg.qrzUser; screen = SCR_EDIT; break;
-      case 42: editTarget = 212; editTitle = "QRZ password";
+      case 42: editTarget = 215; editTitle = "QRZ password";
                editBuf = cfg.qrzPass; screen = SCR_EDIT; break;
       case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
@@ -7485,7 +7485,7 @@ static Screen editHome(int t) {
   if (t >= 320) return SCR_PASSES;      // manual transponder
   if (t >= 310) return SCR_SATLIST;     // manual GP entry
   if (t >= 300) return SCR_LOCATION;    // manual time
-  if (t == 213) return SCR_QRZ;         // QRZ callsign prompt
+  if (t == 216) return SCR_QRZ;         // QRZ callsign prompt
   if (t >= 200) return SCR_SETTINGS;    // radio / WiFi
   if (t >= 100) return SCR_LOCATION;    // location fields
   return SCR_HOME;
@@ -7515,14 +7515,14 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;
       case 204: strncpy(cfg.myCall, editBuf.c_str(), sizeof(cfg.myCall)-1);
                 cfg.myCall[sizeof(cfg.myCall)-1] = 0; break;
-      case 211: strncpy(cfg.qrzUser, editBuf.c_str(), sizeof(cfg.qrzUser)-1);
+      case 214: strncpy(cfg.qrzUser, editBuf.c_str(), sizeof(cfg.qrzUser)-1);
                 cfg.qrzUser[sizeof(cfg.qrzUser)-1] = 0; qrzSessionKey = ""; break;
-      case 212: strncpy(cfg.qrzPass, editBuf.c_str(), sizeof(cfg.qrzPass)-1);
+      case 215: strncpy(cfg.qrzPass, editBuf.c_str(), sizeof(cfg.qrzPass)-1);
                 cfg.qrzPass[sizeof(cfg.qrzPass)-1] = 0; qrzSessionKey = ""; break;
       case 210: { double v = editBuf.toFloat(); if (v >= 0.1 && v <= 50000.0) cfg.beaconMHz = v;
                   cfg.save(); screen = SCR_ORBIT; orbitPage = 4; lastDrawMs = 0;
                   setStatus("Saved"); return; }
-      case 213: {                                   // QRZ callsign lookup
+      case 216: {                                   // QRZ callsign lookup
         String call = editBuf; call.trim(); call.toUpperCase();
         screen = SCR_QRZ; lastDrawMs = 0;
         if (call.length() == 0) { qrzHaveResult = false; return; }
@@ -9767,7 +9767,7 @@ void App::keySpaceWx(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (c == 'r') {
-    if (!net.connected()) net.begin(cfg.ssid, cfg.pass);
+    if (!net.connected()) net.connect(cfg.ssid, cfg.pass);
     if (net.connected()) { fetchSpaceWeather(); setStatus("Space wx updated"); }
     else setStatus("No WiFi");
     lastDrawMs = 0; return;
@@ -9985,7 +9985,7 @@ void App::keyQrz(char c, bool enter, bool back) {
   if (!net.connected()) return;
   if (cfg.qrzUser[0] == 0 || cfg.qrzPass[0] == 0) return;
   if (enter) {                                  // open the text editor for a callsign
-    editTarget = 213; editTitle = "Callsign to look up";
+    editTarget = 216; editTitle = "Callsign to look up";
     editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; return;
   }
 }

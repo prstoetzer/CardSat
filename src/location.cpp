@@ -20,7 +20,9 @@ bool Location::pollGps() {
   if (!_gpsOn || !gpsSerial) return false;
   bool updated = false;
   while (gpsSerial->available()) {
-    if (gps.encode(gpsSerial->read())) {
+    char _gc = gpsSerial->read();
+    feedNmeaChar(_gc);                 // capture per-satellite GSV (az/el/SNR)
+    if (gps.encode(_gc)) {
       if (gps.location.isValid()) {
         _obs.lat = gps.location.lat();
         _obs.lon = gps.location.lng();
@@ -50,7 +52,67 @@ bool Location::pollGps() {
   // quiet or drops lock, age() climbs past the timeout and we report fix lost.
   static const uint32_t GPS_FIX_TIMEOUT_MS = 5000;
   _hasFix = gps.location.isValid() && gps.location.age() < GPS_FIX_TIMEOUT_MS;
+  if (millis() - _lastView > 8000) _viewN = 0;   // drop the sky plot if GSV/RMC stops
   return updated;
+}
+
+// Accumulate raw NMEA characters into a line buffer; parse GSV sentences for
+// per-satellite az/el/SNR, and commit the assembled in-view list on the once-
+// per-cycle RMC sentence (TinyGPS++ does not expose GSV data).
+void Location::feedNmeaChar(char c) {
+  if (c == '\r') return;
+  if (c == '\n') {
+    if (_nmeaLen > 6 && _nmea[0] == '$') {
+      _nmea[_nmeaLen] = 0;
+      if (_nmea[3] == 'G' && _nmea[4] == 'S' && _nmea[5] == 'V') {
+        parseGsv(_nmea);
+      } else if (_nmea[3] == 'R' && _nmea[4] == 'M' && _nmea[5] == 'C') {
+        for (int i = 0; i < _buildN; i++) _view[i] = _build[i];
+        _viewN = _buildN; _buildN = 0; _lastView = millis();
+      }
+    }
+    _nmeaLen = 0;
+    return;
+  }
+  if (_nmeaLen < (int)sizeof(_nmea) - 1) _nmea[_nmeaLen++] = c;
+  else _nmeaLen = 0;                 // overlong line: resynchronise
+}
+
+// Parse one $xxGSV sentence (in place; commas/'*' turned into NUL) and upsert
+// each reported satellite into the assembling list, keyed by (system, prn).
+void Location::parseGsv(char* s) {
+  char t1 = s[1], t2 = s[2], sys = 'N';
+  if      (t1 == 'G' && t2 == 'P') sys = 'P';
+  else if (t1 == 'G' && t2 == 'L') sys = 'L';
+  else if (t1 == 'G' && t2 == 'A') sys = 'A';
+  else if ((t1 == 'G' && t2 == 'B') || (t1 == 'B' && t2 == 'D')) sys = 'B';
+  else if (t1 == 'G' && t2 == 'Q') sys = 'Q';
+
+  char* tok[24]; int nt = 0;
+  for (char* q = s; *q && nt < 24; ) {
+    tok[nt++] = q;
+    while (*q && *q != ',' && *q != '*') q++;
+    if (*q) { *q = 0; q++; }
+  }
+  if (nt < 4) return;                // header: $xxGSV,msgs,msg#,sats,...
+
+  for (int g = 4; g + 3 < nt; g += 4) {       // groups of prn,elev,azim,snr
+    if (!tok[g][0]) continue;
+    int prn = atoi(tok[g]);
+    if (prn <= 0) continue;
+    int el  = tok[g + 1][0] ? atoi(tok[g + 1]) : -1;
+    int az  = tok[g + 2][0] ? atoi(tok[g + 2]) : -1;
+    int snr = tok[g + 3][0] ? atoi(tok[g + 3]) : 0;
+    int idx = -1;
+    for (int i = 0; i < _buildN; i++)
+      if (_build[i].prn == (uint8_t)prn && _build[i].sys == sys) { idx = i; break; }
+    if (idx < 0) { if (_buildN >= MAX_VIEW) continue; idx = _buildN++; }
+    _build[idx].prn = (uint8_t)prn;
+    _build[idx].el  = (int16_t)el;
+    _build[idx].az  = (int16_t)az;
+    _build[idx].snr = (uint8_t)constrain(snr, 0, 99);
+    _build[idx].sys = sys;
+  }
 }
 
 void Location::setManual(double lat, double lon, double altM) {

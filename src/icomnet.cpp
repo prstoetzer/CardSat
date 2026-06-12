@@ -425,7 +425,7 @@ bool IcomNetRig::readFreqNet(bool sub, uint32_t& hzOut) {
   uint8_t pl[1] = { 0x03 };
   sendCivPayload(pl, 1);
   uint32_t t0 = millis();
-  while (millis() - t0 < 300) {
+  while (millis() - t0 < (readBudgetMs ? readBudgetMs : 300)) {
     int n = _ser.parsePacket();
     if (n <= 0) { pumpCtl(); delay(2); continue; }
     uint8_t buf[96]; int r = _ser.read(buf, sizeof(buf)); if (r <= 0) continue;
@@ -456,6 +456,39 @@ bool IcomNetRig::setMainMode(RigMode m)   { return setModeNet(false, toCiv(m)); 
 bool IcomNetRig::setSubMode (RigMode m)   { return setModeNet(true,  toCiv(m)); }
 bool IcomNetRig::readSubFreq (uint32_t& hzOut) { return readFreqNet(true,  hzOut); }
 bool IcomNetRig::readMainFreq(uint32_t& hzOut) { return readFreqNet(false, hzOut); }
+
+// Read PTT/transmit state via CI-V 0x1C 0x00 over the serial stream. Reply CI-V
+// frame: FE FE E0 <addr> 1C 00 <00=RX|01=TX> FD. Rigs that don't answer get
+// marked unsupported after a few misses so the loop stops asking.
+bool IcomNetRig::readPtt(bool& tx) {
+  if (_state != NS_CONNECTED || _pttRead == 0) return false;
+  while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); }  // drain stale
+  uint8_t pl[2] = { 0x1C, 0x00 };
+  sendCivPayload(pl, 2);
+  uint32_t t0 = millis();
+  while (millis() - t0 < (readBudgetMs ? readBudgetMs : 200)) {
+    int n = _ser.parsePacket();
+    if (n <= 0) { pumpCtl(); delay(2); continue; }
+    uint8_t buf[96]; int r = _ser.read(buf, sizeof(buf)); if (r <= 0) continue;
+    _tLastRxMs = millis();
+    if (isPing(buf, r)) { if (buf[16] == 0x00) replyPing(false, buf); continue; }
+    if (r >= 22 && buf[16] == 0xc1) {
+      int N = buf[17];
+      if (21 + N <= r && N >= 8) {
+        const uint8_t* f = buf + 21;
+        if (f[0]==0xFE && f[1]==0xFE && f[2]==0xE0 && f[3]==_addr &&
+            f[4]==0x1C && f[5]==0x00 && f[7]==0xFD) {
+          tx = (f[6] != 0x00);
+          _pttRead = 1; _pttFails = 0;
+          NLOG("[NET CI-V] PTT %s\n", tx ? "TX" : "RX");
+          return true;
+        }
+      }
+    }
+  }
+  if (_pttRead != 1 && ++_pttFails >= 3) _pttRead = 0;
+  return false;
+}
 
 bool IcomNetRig::enableSatMode(bool on) {
   if (!RADIOS[_model].hasSatMode) return false;

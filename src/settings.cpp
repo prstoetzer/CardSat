@@ -27,7 +27,7 @@ bool Settings::load() {
   civAddr    = d["addr"]| (uint8_t)0xA2;
   civBaud    = d["baud"]| 19200u;
   catType    = d["cattype"] | (uint8_t)CAT_WIRED;
-  if (catType > CAT_NET) catType = CAT_WIRED;
+  if (catType > CAT_RIGCTL) catType = CAT_WIRED;
   strncpy(catHost, d["cathost"] | "", sizeof(catHost)-1); catHost[sizeof(catHost)-1]=0;
   catPort    = d["catport"] | (uint16_t)50001;
   if (catPort == 0) catPort = 50001;
@@ -42,6 +42,7 @@ bool Settings::load() {
   if (catDelayMs > 200) catDelayMs = 200;
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
+  beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
@@ -61,6 +62,16 @@ bool Settings::load() {
   rotParkAz  = d["rotpaz"] | (uint16_t)0;
   rotParkEl  = d["rotpel"] | (uint8_t)0;
   rotFlip    = d["rotflip"]| false;
+  rotAzCnt0  = d["rotazc0"]| (int16_t)0;
+  rotAzCntF  = d["rotazcf"]| (int16_t)0;
+  rotElCnt0  = d["rotelc0"]| (int16_t)0;
+  rotElCntF  = d["rotelcf"]| (int16_t)0;
+  rigdEnable = d["rigden"] | false;
+  rigdPort   = d["rigdport"] | (uint16_t)4532;
+  if (rigdPort == 0) rigdPort = 4532;
+  rotdEnable = d["rotden"] | false;
+  rotdPort   = d["rotdport"] | (uint16_t)4533;
+  if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
   return true;
 }
@@ -79,11 +90,15 @@ bool Settings::save() {
   d["catdly"] = catDelayMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
+  d["beacon"] = beaconMHz;
   d["dimsecs"] = dimSecs;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;
+  d["rotazc0"]=rotAzCnt0; d["rotazcf"]=rotAzCntF; d["rotelc0"]=rotElCnt0; d["rotelcf"]=rotElCntF;
+  d["rigden"]=rigdEnable; d["rigdport"]=rigdPort;
+  d["rotden"]=rotdEnable; d["rotdport"]=rotdPort;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
   serializeJson(d, f);

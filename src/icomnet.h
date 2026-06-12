@@ -51,6 +51,7 @@ public:
   bool setSubMode (RigMode m)   override;
   bool readSubFreq(uint32_t& hzOut) override;
   bool readMainFreq(uint32_t& hzOut) override;
+  bool readPtt(bool& tx) override;
   bool enableSatMode(bool on)   override;
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override { if (ready()) selBand(true); }
@@ -95,6 +96,8 @@ private:
   uint8_t  _a8reply[16];    bool _gotA8 = false;
   bool     _authOK = false;
   bool     _serOpened = false;
+  int8_t   _pttRead = -1;    // -1 unknown, 0 unsupported, 1 supported (PTT read 1C 00)
+  uint8_t  _pttFails = 0;    // consecutive read misses before marking unsupported
 
   // Sequence counters (see ICOM_LAN_PROTOCOL.md): pkt0 "tracked" seq is shared by
   // idle + every big packet on a stream (starts 1); auth inner seq is embedded in

@@ -75,7 +75,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.7a";
+static constexpr const char* FW_VERSION = "0.9.8";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -103,6 +103,26 @@ static constexpr int      ROT_I2C_SCL  = 9;           // G9  (Cap LoRa Port.A SC
 static constexpr uint8_t  ROT_I2C_ADDR = 0x4D;        // SC16IS750 (A0/A1 strap)
 static constexpr uint32_t ROT_XTAL_HZ  = 14745600UL;  // bridge crystal (breakout)
 static constexpr uint32_t ROT_I2C_HZ   = 400000UL;    // Wire1 clock
+
+// --- Yaesu direct rotator (ROT_YAESU) -------------------------------------
+// Closed-loop control of a Yaesu az/el controller's external jack via I2C
+// modules on the SAME Wire1 bus as the GS-232 bridge: an ADS1115 reads the two
+// position pots (AIN0=az, AIN1=el, through dividers) and a PCF8574 drives four
+// opto/relay direction lines. See ROTOR_INTERFACE.md.
+// *** UNTESTED hardware. Build and connect at your own risk; the author accepts
+//     no liability for any damage to equipment. ***
+static constexpr uint8_t  YAESU_ADC_ADDR = 0x48;   // ADS1115 (ADDR->GND)
+static constexpr uint8_t  YAESU_OUT_ADDR = 0x20;   // PCF8574 (A2..A0->GND)
+static constexpr uint8_t  YAESU_BIT_CW   = 0;      // PCF8574 bit -> azimuth CW  (Right)
+static constexpr uint8_t  YAESU_BIT_CCW  = 1;      //             -> azimuth CCW (Left)
+static constexpr uint8_t  YAESU_BIT_UP   = 2;      //             -> elevation Up
+static constexpr uint8_t  YAESU_BIT_DOWN = 3;      //             -> elevation Down
+static constexpr bool     YAESU_OUT_ACTIVE_LOW = true; // relay/opto modules: 0 = ON
+static constexpr uint16_t YAESU_SVC_MS    = 100;   // closed-loop update period (~10 Hz)
+static constexpr uint16_t YAESU_STALL_MS  = 4000;  // driving without progress -> all-stop
+static constexpr int32_t  YAESU_STALL_CNT = 25;    // ADC counts counted as "progress"
+static constexpr uint8_t  YAESU_ADC_DR    = 0x5;   // ADS1115 data-rate 101 = 250 SPS
+static constexpr uint16_t YAESU_ADC_MS    = 6;     // single-shot settle for 250 SPS
 
 // ---------------------------------------------------------------------------
 //  Limits (kept modest - no PSRAM on the StampS3A)
@@ -135,6 +155,9 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 #define FILE_MTX     "/CardSat/mtx_%lu.json"  // manual transponders per norad (text lines)
 #define FILE_CFG_BAK  "/CardSat/config.bak"    // backup copy of config.json
 #define FILE_FAVS_BAK "/CardSat/favs.bak"      // backup copy of favs.txt
+#define FILE_AMSTAT   "/CardSat/amstat.json"   // cached AMSAT OSCAR status summary
+#define AMSAT_STATUS_URL  "https://www.amsat.org/status/api/v1/summary.php?hours="
+#define AMSAT_STATUS_HOURS 72                    // "recently" window for status reports
 #define FILE_LOG     "/CardSat/qso_log.csv"     // QSO log (CSV, notes is last field)
 #define FILE_ADIF    "/CardSat/qso_log.adi"     // ADIF export (generated on demand)
 #define FILE_LOTW    "/CardSat/lotw_sats.csv"   // LoTW SAT_NAME map ("SAT_NAME,AMSAT_NAME")

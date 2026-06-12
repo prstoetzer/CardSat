@@ -12,9 +12,17 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > on the device **except CAT radio control and the antenna rotator.** Pass
 > prediction, the polar and pass-detail plots, mutual-window search, GPS, the AOS
 > alarm, deep sleep, and the offline GP/transponder caches are all confirmed
-> working on hardware. The per-protocol CAT frequency encoders and both rotator
-> backends (GS-232 framing, the rotctld network client and PstRotator UDP) are host-tested but have **not** yet driven a real
+> working on hardware. The per-protocol CAT frequency encoders, the **Icom LAN
+> (RS-BA1)** network backend, and the rotator backends (GS-232 framing, the rotctl
+> network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
+
+> **New in v0.9.8:** a realistic coastline world map with all-favourite
+> footprints (`f` highlights one), a GPS sky plot, manual rotator control, a
+> proper per-pass flip, a two-level Settings menu with an on-device Help screen,
+> and four new network control surfaces — a **rigctl** client (drive a remote
+> rigctld-attached radio) plus **rigctld** and **rotctld** *servers* (let a PC
+> drive CardSat's wired radio/rotator). See **[RELEASE_NOTES_0.9.8.md](RELEASE_NOTES_0.9.8.md)**.
 
 ---
 
@@ -30,6 +38,11 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   Doppler engine is protocol-agnostic: Icom **CI-V** (IC-820/821/910/970/9100/9700),
   Yaesu (**FT-847**, **FT-736R**), and Kenwood (**TS-790**, **TS-2000**). Wire-level
   command sets follow the Hamlib backends. Every frame is traced to the serial monitor.
+- **Native Icom LAN control (no CI-V wiring).** Network-capable Icoms (IC-9700,
+  IC-705, IC-7610, IC-785x) can be driven over WiFi/Ethernet using the radio's own
+  **RS-BA1 UDP** protocol — the same one Icom's remote software uses — with no level
+  shifter or UART. Pick **CAT type → Icom LAN** in Settings; MAIN/SUB, Doppler, sat
+  mode and CTCSS all work as on a wired Icom (CAT only — the audio stream is not opened).
 - **Linear-transponder passband tracking** with correct inversion, and automatic
   sideband selection (USB down / LSB up; USB/USB for HF birds below 30 MHz).
 - **Automatic PL/CTCSS tone** on FM uplinks (SO-50, AO-91, ISS, PO-101…): CardSat
@@ -51,19 +64,52 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   can both see it at once, with each window's duration and the peak elevation at
   both ends.
 - **10-day pass overview** — InstantTrack-style visibility chart (rows = days,
-  24 h timelines) for the selected satellite, off the Passes screen (`v`).
+  24 h timelines) for the selected satellite, off the Passes screen (`v`); `;`/`.` page through
+  successive 10-day chunks (forward indefinitely).
 - **60-day illumination** — DK3WN *illum*-style Sun/eclipse raster (date x
-  orbit-phase) with a live solar-status readout, off the Passes screen (`i`).
+  orbit-phase) with a live solar-status readout, off the Passes screen (`i`); `,`/`/`
+  page through successive 60-day chunks (forward indefinitely).
 - **Sun & eclipse** — Sun azimuth/elevation, a Sun glyph on the polar plot, and
   whether the satellite is sunlit or in Earth's shadow.
 - **GP age** — element-set age shown and color-graded so you know when elements are stale.
-- **Antenna rotator (GS-232, rotctld or PstRotator)** — point an az/el rotator (Yaesu G-5500 + GS-232B,
-  SPID, K3NG/RadioArtisan) through an I²C→UART bridge, so the radio and GPS keep
-  their UARTs. Deadband, park-on-LOS, alignment offsets, optional flip mode.
+- **Antenna rotator (GS-232, rotctl, PstRotator, or direct Yaesu)** — point an az/el rotator (Yaesu
+  G-5500 + GS-232B, SPID, K3NG/RadioArtisan) through an I²C→UART bridge so the radio
+  and GPS keep their UARTs, or over WiFi to a **Hamlib rotctld** server or a
+  **PstRotator** instance, or wire a **Yaesu G-5500-class controller directly**
+  (I²C ADC + outputs, no GS-232 box — see **[ROTOR_INTERFACE.md](ROTOR_INTERFACE.md)**,
+  ⚠️ untested). Deadband, park-on-LOS, pre-positioning before AOS,
+  alignment offsets, optional **per-pass flip**, and a **manual control** screen
+  for jogging the antenna by hand with live position read-back.
+- **CardSat as a network server.** Run a **rigctld server** so a PC (Gpredict,
+  WSJT-X, a logger) drives the wired/LAN radio through CardSat, and/or a
+  **rotctld server** so a PC drives the wired GS-232 rotator through CardSat —
+  both over TCP on the LAN.
+- **rigctl network radio.** Drive a radio attached to a remote **Hamlib rigctld**
+  server over WiFi (Settings -> CAT type -> rigctl) — Doppler both legs via split.
+- **World map with coastline** — recognisable continents with **all favourites'**
+  footprints at once; `f` highlights one bird at a time.
+- **GPS sky plot** — fix data plus a polar plot of the GNSS satellites in view
+  (az/el, coloured by signal), off the Location screen.
+- **Workable grid squares** — the 4-char Maidenhead grids under the satellite's
+  footprint, either as the union over a selected pass (off Passes) or live now
+  (off Track, with radio/rotator tracking uninterrupted) - for VUCC/grid chasing.
+- **AMSAT activity marks** — the Satellites list flags whether each bird has been
+  reported heard (filled dot) or only not-heard (ring) recently, from the AMSAT
+  OSCAR Status API, refreshed with each elements update.
+- **Selectable element source** — AMSAT JSON by default, or any CelesTrak JSON-PP
+  category (Amateur Radio first), or a custom URL, chosen from an on-device picker
+  (no URL typing needed); CelesTrak's `OBJECT_NAME` is handled automatically.
+- **Sun & Moon antenna pointing** — a Sun/Moon screen (off the main menu) shows
+  live az/el for both and can drive the rotator to track either, for sun-noise /
+  Moon (EME) aiming and antenna calibration.
+- **On-device Help** — press `h` on (almost) any screen for a scrollable key reference.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without
-  interrupting Doppler control**. Review, edit, or delete past entries on-device,
-  and **export ADIF** on demand for LoTW/eQSL or your main logger.
+  interrupting Doppler control** — or add one **after the fact** from the Log menu,
+  picking the satellite (which defaults the frequencies to the transponder centre /
+  nominal) and editing the **date, time, satellite and frequencies** as needed. The
+  same fields are editable when you review past entries; **export ADIF** on demand for
+  LoTW/eQSL or your main logger.
 - **Auto-refresh, power management, and diagnostics.** If WiFi is configured,
   CardSat connects and NTP-syncs at boot and **auto-refreshes GP when the cached
   elements are over a week old**; the backlight blanks after a configurable idle
@@ -84,7 +130,7 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **M5Stack Cardputer ADV** (StampS3A = ESP32-S3FN8, 8 MB flash, **no PSRAM**,
   240×135 IPS LCD, 56-key keyboard, microSD, speaker, Grove port, 2×7 header).
 - A **CAT interface appropriate to your radio**, between its control jack and the
-  3.3 V header (the ESP32-S3 GPIOs are **not** 5 V tolerant — never wire CAT direct):
+  3.3 V GPIO signals (the Grove **power** pin is 5 V, and the ESP32-S3 GPIOs are **not** 5 V tolerant — never wire CAT direct):
   **Icom** = a 3.3 V-safe single-wire CI-V interface; **Kenwood** = a MAX3232 RS-232
   level shifter (DB-9); **Yaesu** = a serial CAT interface (verify TTL vs RS-232).
 - *(Optional)* a GPS source: the Cardputer **Grove** port, or an **M5Stack Cap
@@ -144,11 +190,13 @@ differs by family**, because the electrical layer is different:
 - **Kenwood (TS-790, TS-2000)** — true **RS-232** on a DB-9 COM port (±12 V). Use a
   **MAX3232-class level shifter** between the DB-9 and G1/G2; do **not** use the CI-V
   circuit. On the TS-2000, a straight 3-wire cable with **CTS/RTS bridged** (or the
-  "RTS +12 V" handshake) is the usual fix for the rig's handshake quirk.
+  "RTS +12 V" handshake) is the usual fix for the rig's handshake quirk. Build
+  guide: **[RS232_INTERFACE.md](RS232_INTERFACE.md)**.
 - **Yaesu (FT-847, FT-736R)** — 5-byte serial CAT. Verify **TTL vs RS-232** for your
   unit from the CAT manual and use the matching level interface. The FT-736R is most
   reliably driven through an **FT-847-emulating** CAT interface (KA6BFB / HS-736USB);
-  select **FT-847** in Settings in that case.
+  select **FT-847** in Settings in that case. Build guide (MAX3232):
+  **[RS232_INTERFACE.md](RS232_INTERFACE.md)**.
 
 Set the **model** and **CAT baud** in **Settings** to match the radio's menu (the CI-V
 **address** field applies to Icom only). Yaesu is 8N2; Icom and Kenwood are 8N1 —
@@ -263,7 +311,9 @@ maps to each family:
   satellite mode **off**; the **Sat mode** setting commands it on/off when you
   engage CAT (a no-op on rigs without one). MAIN/SUB select uses CI-V `0x07 D0/D1`
   (verified vs the IC-821H manual). If a radio mistunes the wrong VFO, edit
-  `selMain[]`/`selSub[]` in `radio_profiles.h`.
+  `selMain[]`/`selSub[]` in `radio_profiles.h`. Network-capable Icoms can run this
+  same control over WiFi/Ethernet — see **Icom over the network** under
+  [CAT (radio)](#cat-radio).
 - **Yaesu** — the FT-847 sat opcodes set the SAT-RX (downlink, `0x11`) and SAT-TX
   (uplink, `0x21`) VFOs directly, and read the downlink back with `0x13` (firmware-
   dependent). CAT is enabled at startup (`00 00 00 00 00`).
@@ -320,8 +370,10 @@ quickest way to confirm wiring, address, and baud. Set `CIV_DEBUG 0` at the top 
 
 The Yaesu and Kenwood backends emit the same kind of trace tagged **`[CAT TX]`**
 (decoded set-freq/mode and CAT-on for Yaesu; the literal `FA…;`/`MD…;` strings and
-the `FA;` read reply for Kenwood). Silence any of them with `CIV_DEBUG` / `YAESU_DEBUG`
-/ `KW_DEBUG 0` at the top of `civ.cpp` / `yaesu.cpp` / `kenwood.cpp`.
+the `FA;` read reply for Kenwood). The **Icom LAN** backend adds **`[NET]`** lines for
+its connect/auth handshake and keepalives, carrying the same CI-V frames. Silence any
+of them with `CIV_DEBUG` / `YAESU_DEBUG` / `KW_DEBUG` / `ICOMNET_DEBUG 0` at the top of
+`civ.cpp` / `yaesu.cpp` / `kenwood.cpp` / `icomnet.cpp`.
 
 ---
 
@@ -374,8 +426,17 @@ GP/transponder caches. Still **unverified on real equipment**:
 
 - **CAT radio control.** Watch the serial monitor to confirm the rig ACKs (`FB`)
   rather than NAKs (`FA`), that the correct VFO tunes, and that model/baud/address
-  match. For radio-knob (One True Rule) tuning, the 20 Hz operator-move threshold
-  in the Doppler loop is the knob to adjust if your rig quantizes coarsely.
+  match. For radio-knob (One True Rule) tuning, each cycle now reads the dial back
+  after a set and only re-sends a leg when it actually moved, so coarse tuning
+  steps no longer masquerade as knob moves; if the rig reports PTT it also skips
+  the knob read while transmitting. The `KNOB_MOVE_HZ` threshold (default 5 Hz) is
+  the knob to adjust if needed.
+- **Icom LAN (RS-BA1).** The network CAT backend is host-tested only: the
+  connect / auth / keepalive handshake and CI-V framing follow the protocol spec but
+  have not been confirmed against a real radio. The open question is whether the radio
+  tolerates the audio stream never being opened (CardSat is CAT-only); there is also no
+  transmit retransmit buffer (a dropped CAT frame re-sends next cycle). Watch the
+  `[NET]` serial trace before relying on it.
 - **Antenna rotator.** Two interchangeable backends, both host-tested only. For
   **GS-232**, the I²C pins (G8/G9) are confirmed from the Cap LoRa-1262 pinmap, but
   the SC16IS750 I²C→UART bridge and command path are host-tested for baud math and
@@ -385,6 +446,10 @@ GP/transponder caches. Still **unverified on real equipment**:
   `rotctld -m 1`, but it hasn't driven a physical rotator either. **PstRotator
   (net)** is host-verified for UDP message formatting against the PstRotator
   manual (Rev. 7.5), not yet tested against a live PstRotator.
+- **Network control surfaces (new in 0.9.8).** The **rigctl** client (CAT type),
+  the **rigctld server**, and the **rotctld server** are all host-tested only.
+  Exercise the client against `rigctld -m 2` and the servers against
+  `rigctl`/`rotctl` or Gpredict; keep both servers on a trusted LAN (no auth).
 - **SD-card storage** — CardSat now stores its data in `/CardSat` on the microSD card
   by default (SCK 40 / MISO 39 / MOSI 14 / CS 12, in `config.h`), falling back to
   internal LittleFS only if no card is present. The SD path hasn't been exercised on
@@ -409,11 +474,12 @@ src/satdb.{h,cpp}       GP/OMM element store + TLE rebuild + streaming parse + t
 src/net.{h,cpp}         WiFi, NTP, HTTPS GET, GP stream-to-file, SatNOGS fetch
 src/location.{h,cpp}    manual / grid / GPS position, Maidenhead conversion
 src/predict.{h,cpp}     SGP4 wrapper: look angles, passes, Doppler, Sun/eclipse, polar path, mutual windows
-src/rig.{h,cpp}         abstract Rig interface (keeps the Doppler engine protocol-agnostic)
+src/rig.{h,cpp}         abstract Rig interface + rigctl (rigctld) network client backend
 src/civ.{h,cpp}         Icom CI-V framing, freq/mode set + read, MAIN/SUB select
+src/icomnet.{h,cpp}     Icom LAN (RS-BA1 UDP) CAT backend — control + serial streams, no wiring
 src/yaesu.{h,cpp}       Yaesu 5-byte CAT (FT-847 / FT-736R)
 src/kenwood.{h,cpp}     Kenwood ASCII CAT (TS-790 / TS-2000)
-src/rotator.{h,cpp}     rotator backends: GS-232 (I²C→UART), rotctld (TCP), PstRotator (UDP)
+src/rotator.{h,cpp}     rotator backends: GS-232 (I²C→UART), rotctl client (TCP), PstRotator (UDP)
 src/radio_profiles.h    per-model address, baud, band-select, capabilities
 ```
 

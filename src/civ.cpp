@@ -189,6 +189,35 @@ bool CivRig::setCtcss(bool on, float toneHz) {
 bool CivRig::readSubFreq (uint32_t& hzOut) { return readFreqCiv(true,  hzOut); }
 bool CivRig::readMainFreq(uint32_t& hzOut) { return readFreqCiv(false, hzOut); }
 
+// Read PTT/transmit state via CI-V "read transceiver status" (0x1C 0x00).
+// Reply: FE FE E0 <addr> 1C 00 <00=RX|01=TX> FD. Rigs that don't support it stay
+// silent; after a few misses we stop polling so we don't load a single-wire bus.
+bool CivRig::readPtt(bool& tx) {
+  if (!_stream || _pttRead == 0) return false;
+  while (_stream->available()) _stream->read();      // clear stale bytes
+  uint8_t f[7] = { 0xFE, 0xFE, _addr, 0xE0, 0x1C, 0x00, 0xFD };
+  civLog("TX", f, 7);
+  _stream->write(f, 7);
+  _stream->flush();
+  uint8_t buf[48]; size_t bn = 0; uint32_t t0 = millis();
+  while (millis() - t0 < 80) {
+    while (_stream->available() && bn < sizeof(buf)) {
+      buf[bn++] = (uint8_t)_stream->read(); t0 = millis();
+    }
+    delay(1);
+  }
+  for (size_t i = 0; i + 7 < bn; ++i) {
+    if (buf[i]==0xFE && buf[i+1]==0xFE && buf[i+2]==0xE0 && buf[i+3]==_addr &&
+        buf[i+4]==0x1C && buf[i+5]==0x00 && buf[i+7]==0xFD) {
+      tx = (buf[i+6] != 0x00);
+      _pttRead = 1; _pttFails = 0;
+      return true;
+    }
+  }
+  if (_pttRead != 1 && ++_pttFails >= 3) _pttRead = 0;   // give up on silent rigs
+  return false;
+}
+
 // Read the operating frequency of the SUB (sub=true) or MAIN (sub=false) band.
 bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
   if (!_stream) return false;
@@ -203,7 +232,7 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
   _stream->flush();
   // Collect the response bytes (echo + reply) for a short window.
   uint8_t buf[48]; size_t bn = 0; uint32_t t0 = millis();
-  while (millis() - t0 < 150) {
+  while (millis() - t0 < (readBudgetMs ? readBudgetMs : 150)) {
     while (_stream->available() && bn < sizeof(buf)) {
       buf[bn++] = (uint8_t)_stream->read(); t0 = millis();
     }

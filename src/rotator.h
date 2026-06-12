@@ -33,6 +33,11 @@ public:
   virtual bool readPos(float& az, float& el) = 0; // false if no/!valid reply
   virtual void stop() = 0;
   virtual const char* name() const = 0;
+  // Optional hooks. service() is a fast closed-loop step for self-driven
+  // backends (default no-op); rawPos() exposes uncalibrated position counts for
+  // calibration (default unsupported).
+  virtual void service() {}
+  virtual bool rawPos(int32_t& azCnt, int32_t& elCnt) { (void)azCnt; (void)elCnt; return false; }
 };
 
 // GS-232A/B rotator via an SC16IS750/752 I2C->UART bridge on Wire1.
@@ -70,15 +75,15 @@ private:
 // Position control is fire-and-forget: send P, drain the ack. The socket is
 // opened lazily and reconnected (throttled) so a missing server never hangs the
 // tracking loop.
-class RotctldRotator : public Rotator {
+class RotctlRotator : public Rotator {
 public:
-  RotctldRotator(const char* host, uint16_t port) : _host(host), _port(port) {}
+  RotctlRotator(const char* host, uint16_t port) : _host(host), _port(port) {}
   void begin() override;
   bool ready() const override { return _ok; }
   bool point(float az, float el) override;
   bool readPos(float& az, float& el) override;
   void stop() override;
-  const char* name() const override { return "rotctld"; }
+  const char* name() const override { return "rotctl"; }
 
 private:
   String     _host;
@@ -114,8 +119,47 @@ private:
   bool send(const char* msg);       // fire-and-forget datagram to host:_port
 };
 
+// Yaesu az/el rotator wired DIRECTLY (no GS-232 box): an ADS1115 reads the
+// controller's two position-feedback voltages (AIN0 az, AIN1 el, via dividers)
+// and a PCF8574 drives four opto-isolated/relay direction lines, both on Wire1
+// (the same bus the GS-232 bridge uses). CardSat runs the closed loop itself:
+// read position, drive toward the target within a deadband, stop; with a stall
+// watchdog and soft limits. Calibration (ADC counts at each axis endpoint) is
+// supplied from settings. *** UNTESTED hardware -- use entirely at your own
+// risk; the author accepts no liability for damage. See ROTOR_INTERFACE.md.
+class YaesuRotator : public Rotator {
+public:
+  YaesuRotator(int azFullDeg, int azCnt0, int azCntF,
+               int elCnt0, int elCntF, int deadbandDeg)
+    : _azFull(azFullDeg), _azC0(azCnt0), _azCF(azCntF),
+      _elC0(elCnt0), _elCF(elCntF), _db(deadbandDeg) {}
+  void begin() override;
+  bool ready() const override { return _ok; }
+  bool point(float az, float el) override;       // set target (clamped); driven in service()
+  bool readPos(float& az, float& el) override;   // mapped degrees
+  void stop() override;
+  void service() override;                        // closed-loop step (call frequently)
+  bool rawPos(int32_t& azCnt, int32_t& elCnt) override;  // raw counts for calibration
+  const char* name() const override { return "Yaesu"; }
+
+private:
+  int      _azFull, _azC0, _azCF, _elC0, _elCF, _db;
+  bool     _ok    = false;
+  bool     _have  = false;        // a target is set (drive until stop())
+  float    _tAz = 0, _tEl = 0;    // target degrees
+  uint8_t  _out   = 0;            // shadow of the active direction bits
+  uint32_t _lastSvc = 0;          // last closed-loop step (rate limit)
+  uint32_t _stallMs = 0;          // last time the position made progress
+  int32_t  _lastAzCnt = 0, _lastElCnt = 0;
+  int32_t  adcRead(uint8_t ch);                  // ADS1115 single-shot; <0 on fail
+  void     outWrite(uint8_t bits);               // PCF8574 (handles active-low)
+  void     allStop() { outWrite(0); }
+  static bool cnt2deg(int32_t c, int c0, int cF, float dmax, float& outDeg);
+};
+
 // Build the configured rotator backend. Caller owns the returned object.
 //   type 0 = GS-232 (ROT_GS232) on the I2C->UART bridge
 //   type 1 = rotctld (ROT_NET) to host:port over TCP
 //   type 2 = PstRotator (ROT_PST) UDP control to host:port
+// (ROT_YAESU is built by the app, which supplies calibration -- not here.)
 Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port);

@@ -15,7 +15,8 @@ enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
-  SCR_LOGLIST, SCR_VIS, SCR_ILLUM
+  SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -75,6 +76,11 @@ private:
   uint32_t favs[MAX_SATS];
   int      favN = 0;
   bool     favOnly = false;
+  int      mapHi = -1;            // world map: highlighted favorite (-1 = none); 'f' cycles
+  float    manAz = 0, manEl = 0;  // manual rotator control target (deg)
+  int      manStep = 5;           // manual rotator jog step (deg)
+  Screen   helpReturn = SCR_HOME; // screen to return to when leaving Help
+  int      helpScroll = 0;        // Help screen scroll offset
   int      view[MAX_SATS];        // db indices currently shown
   int      viewN = 0;
   int      viewSel = 0;           // cursor into view[]
@@ -107,11 +113,40 @@ private:
   // 10-day pass overview (InstantTrack-style), cached on entry
   PassPredict visPasses[VIS_PASS_MAX];
   int      visN = 0;
+  int      visPage = 0;           // 10-day overview window offset (pages of VIS_DAYS)
 
   // 60-day illumination (DK3WN illum-style). Raster: cols = days, rows = orbit
   // phase; a set bit means the satellite is in eclipse at that (day, phase).
   uint8_t  illumBits[ILLUM_DAYS][(ILLUM_ROWS + 7) / 8];
   bool     illumValid     = false;
+  int      illumPage      = 0;      // illumination window offset (pages of ILLUM_DAYS)
+  // Orbital analysis screen (off Satellites), multi-page
+  int      orbitPage = 0;
+  double   orbAscLon = 0;           // sub-longitude of next ascending node (deg)
+  time_t   orbAscT   = 0;           // time of next ascending node (UTC)
+  bool     orbHasPass = false;
+  PassPredict orbPass;
+  bool     orbEcl = false;          // next pass includes eclipse?
+  time_t   orbEclT0 = 0, orbEclT1 = 0;  // first eclipse entry/exit within the pass
+  float    orbSunPct = 0;           // % of next pass in sunlight
+  bool     orbVisible = false;      // next pass optically visible?
+  double   orbDecayDays = -1;       // rough days-to-reentry (-1 n/a, 1e9 stable)
+  // Simulation screen (off Satellites): scrub a frozen UTC time
+  time_t   simTime = 0;
+  int      simStepIdx = 2;          // index into SIM_STEP[] (1m/10m/1h/6h/1d)
+  int      homeScroll = 0;          // scroll offset for the (now scrollable) home menu
+  // Sun / Moon tracking screen (off main menu)
+  bool     smOut = false;           // rotator engaged on the Sun/Moon screen
+  int      smSel = 0;               // 0 = Sun, 1 = Moon
+  // Workable grid squares (4-char Maidenhead) under the footprint
+  uint8_t  gridBits[4050];          // 1 bit per 4-char grid (32400 total, ~4 KB)
+  int      gridN = 0;               // grids in footprint (set bits)
+  int      gridScroll = 0;
+  bool     gridLive = false;        // true = live now (from Track), false = pass union
+  uint32_t gridBuiltMs = 0;         // last live rebuild (millis); 0 = build now
+  // GP / orbital-elements source picker (AMSAT + CelesTrak categories + custom)
+  int      gpSrcSel = 0;
+  int      gpSrcScroll = 0;
   float    illumPeriodMin = 0;
   bool     illumSunNow    = true;
   bool     illumNextEclipse = false;
@@ -135,6 +170,7 @@ private:
   Transponder activeTx[MAX_TX_PER_SAT];
   int      activeTxCount = 0;     // transponders loaded for the active sat
   int      setSel = 0;            // settings menu cursor
+  int      setCat = -1;           // settings category (-1 = top-level list, else 0..3)
 
   // WiFi scan (Settings -> WiFi SSID -> 's')
   static const int MAX_WIFI_AP = 16;
@@ -151,7 +187,10 @@ private:
   uint8_t  trackMode = 0;         // 0 = TUNE (passband), 1 = CAL (calibration)
   TuneMode tuneMode = TM_HOLD;    // Doppler tune mode (cycle with 'd' on Track)
                                   // holds a constant frequency AT THE SATELLITE
-  uint32_t lastRxSet = 0;         // last downlink Hz we wrote (detect knob moves)
+  uint32_t lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
+  uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
+  static constexpr uint32_t FREQ_GUARD_HZ = 2;   // skip a re-send within this many Hz of the last value
+  static constexpr uint32_t KNOB_MOVE_HZ  = 5;   // read-vs-last delta that counts as an operator knob move
   uint32_t lastDoppMs = 0;
   float    toneApplied = -2.0f;   // CTCSS tone currently set on the rig (Hz);
                                   // 0 = off, -2 = unknown/never (force re-apply)
@@ -165,6 +204,19 @@ private:
   bool     rotPassValid = false;
   uint32_t rotPassNorad = 0;       // which satellite rotPass belongs to
   uint32_t lastRotPassMs = 0;      // throttle for rotPass recompute
+  bool     rotFlipPass = false;    // flip decision for the active pass (held to LOS)
+  time_t   rotFlipUntil = 0;       // LOS the current flip decision is valid until
+  // rigctld TCP server (item 2): created when enabled and WiFi is up.
+  WiFiServer* rigd = nullptr;
+  WiFiClient  rigdCli;             // single connected client
+  String      rigdBuf;             // line-assembly buffer
+  uint8_t     rigdVfo = 0;         // 0 = downlink (VFOA/RX), 1 = uplink (VFOB/TX)
+  uint32_t    rigdLastSub = 0, rigdLastMain = 0;  // last freq set (get_freq fallback)
+  RigMode     rigdSubMode = RM_USB, rigdMainMode = RM_LSB;
+  // rotctld TCP server (item 4): a networked PC drives the wired rotator.
+  WiFiServer* rotd = nullptr;
+  WiFiClient  rotdCli;             // single connected client
+  String      rotdBuf;             // line-assembly buffer
   uint32_t lastDrawMs = 0;
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     screenAsleep = false;  // backlight blanked for power saving
@@ -196,7 +248,12 @@ private:
 
   // ---- helpers ----
   void applyRadioFromCfg();
+  void serviceRigctld();                       // pump the rigctld TCP server
+  void rigdHandleLine(const String& line);     // parse + act on one rigctld command
+  void serviceRotctld();                       // pump the rotctld TCP server
+  void rotdHandleLine(const String& line);     // parse + act on one rotctld command
   void applyRotatorFromCfg();
+  bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
   // Route logical downlink/uplink to the physical MAIN/SUB VFOs per cfg.vfoType.
@@ -208,6 +265,26 @@ private:
   bool rigReadDownlinkFreq(uint32_t& h){ return dlOnSub() ? rig->readSubFreq(h) : rig->readMainFreq(h); }
   void rigSelectDownlink()             { if (dlOnSub()) rig->selectSubBand();  else rig->selectMainBand(); }
   void rigSelectUplink()               { if (dlOnSub()) rig->selectMainBand(); else rig->selectSubBand(); }
+  // Drive the downlink dial, but only when it actually moved (don't re-send the
+  // same freq every cycle -- avoids CI-V chatter and receiver-mute clicks). After
+  // a real set, read the accepted freq back and remember THAT, so the rig's
+  // tuning-step rounding can't later masquerade as an operator knob move. Pass
+  // readback=false in modes where we don't follow the knob (saves a round-trip).
+  void driveDownlink(uint32_t rx, bool readback) {
+    uint32_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
+    if (lastRxSet && d < FREQ_GUARD_HZ) return;          // already there
+    if (!rigSetDownlinkFreq(rx)) return;
+    uint32_t back;
+    lastRxSet = (readback && rig->canReadFreq() && rigReadDownlinkFreq(back)) ? back : rx;
+  }
+  // Drive the uplink dial only when it moved; then leave the active band on the
+  // downlink so the operator's knob/read stays on RX. No read-back (the uplink
+  // knob is never followed).
+  void driveUplink(uint32_t tx) {
+    uint32_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
+    if (lastUlHz && d < FREQ_GUARD_HZ) return;
+    if (rigSetUplinkFreq(tx)) { lastUlHz = tx; rigSelectDownlink(); }
+  }
   // Soft floor: never send CAT faster than the configured baud can comfortably
   // service one update. Returns max(configured rate, baud-derived minimum), ms.
   uint32_t effectiveCatRateMs() const {
@@ -229,6 +306,7 @@ private:
   void onTransponderChanged();             // recenter passband + pick default mode
   void doUpdateGp();
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
+  void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
   void loadCalForSat(uint32_t norad);      // per-satellite calibration -> calDl/calUl
   void saveCalForSat(uint32_t norad);      // persist current calDl/calUl for this sat
   void loadFavs();
@@ -285,6 +363,17 @@ private:
   void keyMutual(char c, bool enter, bool back);
   void buildVis();   void drawVis();   void keyVis(char c, bool enter, bool back);
   void buildIllum(); void drawIllum(); void keyIllum(char c, bool enter, bool back);
+  void buildOrbit(); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
+  void drawSim();    void keySim(char c, bool enter, bool back);
+  void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
+  void buildGrids(time_t a, time_t b);
+  void addFootprintGrids(double subLat, double subLon, double altKm);
+  void drawGrid();    void keyGrid(char c, bool enter, bool back);
+  void drawGpSrc();   void keyGpSrc(char c, bool enter, bool back);
+  void drawWorldMap(); void keyWorldMap(char c, bool enter, bool back);
+  void drawRotMan(); void keyRotMan(char c, bool enter, bool back);
+  void drawGps(); void keyGps(char c, bool enter, bool back);
+  void drawHelp(); void keyHelp(char c, bool enter, bool back);
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);

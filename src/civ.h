@@ -24,6 +24,7 @@ public:
   bool setSubMode (RigMode m)   override;
   bool readSubFreq(uint32_t& hzOut) override;
   bool readMainFreq(uint32_t& hzOut) override;
+  bool readPtt(bool& tx) override;
   bool enableSatMode(bool on)   override;
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override { selectSub(); }
@@ -42,6 +43,8 @@ private:
   Stream*    _stream = nullptr;
   RadioModel _model;
   uint8_t    _addr;
+  int8_t     _pttRead = -1;   // -1 unknown, 0 unsupported (stop polling), 1 supported
+  uint8_t    _pttFails = 0;   // consecutive read misses before marking unsupported
 
   void   selectMain();
   void   selectSub();

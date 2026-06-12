@@ -51,6 +51,7 @@ struct SatEntry {
   uint32_t revAtEpoch = 0;    // REV_AT_EPOCH
   uint16_t elsetNum = 0;      // ELEMENT_SET_NO
   bool     txLoaded = false;  // have we fetched transponders this session?
+  uint8_t  amsatStatus = 0;   // AMSAT: 0 none, 1 heard, 2 not heard, 3 telemetry only
 };
 
 class SatDb {
@@ -66,6 +67,7 @@ public:
   bool addGp(const SatEntry& s);               // one manual sat (+persist NDJSON)
   bool loadManualGpFile();                     // merge FILE_MGP into the DB
   bool loadGpFromFs();                         // reload cached GP JSON at boot
+  void applyAmsatStatusFile(const char* path); // set amsatStatus from a cached summary.php
   int  loadGpFromFile(const char* path);       // stream-parse a GP file (low RAM)
   bool saveGpJson(const String& json);         // cache the downloaded blob
 

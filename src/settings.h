@@ -17,6 +17,7 @@ enum VfoType : uint8_t {
 enum CatType : uint8_t {
   CAT_WIRED = 0,   // CI-V over the TTL UART (default)
   CAT_NET   = 1,   // Icom LAN (RS-BA1 UDP): control 50001 + serial 50002
+  CAT_RIGCTL = 2,  // rigctld (Hamlib NET rigctl) client: drive a remote rig over TCP
 };
 
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
@@ -25,6 +26,7 @@ enum RotType : uint8_t {
   ROT_GS232 = 0,   // GS-232A/B via the SC16IS750 I2C->UART bridge (default)
   ROT_NET   = 1,   // rotctld (Hamlib "NET rotctl") over TCP
   ROT_PST   = 2,   // PstRotator UDP control
+  ROT_YAESU = 3,   // Yaesu rotator wired directly via I2C ADC + output expander
 };
 
 // Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
@@ -65,6 +67,7 @@ struct Settings {
   // Tracking
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
+  double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   // Display / power
   uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)
@@ -84,6 +87,22 @@ struct Settings {
   uint16_t rotParkAz   = 0;      // park azimuth on LOS / when disabled
   uint8_t  rotParkEl   = 0;      // park elevation
   bool     rotFlip     = false;  // flip mode (450 az + 0-180 el) for overhead passes
+  // Yaesu direct (ROT_YAESU) calibration: raw ADC counts at each axis endpoint.
+  int16_t  rotAzCnt0   = 0;      // counts at azimuth 0 deg
+  int16_t  rotAzCntF   = 0;      // counts at azimuth full-scale (per rotAzRange)
+  int16_t  rotElCnt0   = 0;      // counts at elevation 0 deg
+  int16_t  rotElCntF   = 0;      // counts at elevation 180 deg
+
+  // rigctld server: CardSat runs a Hamlib NET rigctl (rigctld) TCP server so a
+  // PC (Gpredict, WSJT-X via Hamlib NET rigctl, a logger...) can drive the
+  // wired/LAN rig through CardSat. VFOA = downlink (Sub/RX), VFOB = uplink (Main/TX).
+  bool     rigdEnable  = false;
+  uint16_t rigdPort    = 4532;   // Hamlib rigctld default port
+
+  // rotctld server: CardSat runs a Hamlib NET rotctl (rotctld) TCP server so a
+  // networked PC (Gpredict, ...) can drive the GS-232 rotator wired to CardSat.
+  bool     rotdEnable  = false;
+  uint16_t rotdPort    = 4533;   // Hamlib rotctld default port
 
   bool load();
   bool save();

@@ -14,6 +14,7 @@
 //  labels its VFOs): "Sub" = downlink / RX, "Main" = uplink / TX.
 // ===========================================================================
 #include <Arduino.h>
+#include <WiFi.h>            // WiFiClient for the rigctl (network) backend
 #include "radio_profiles.h"
 
 // Protocol-neutral operating modes; each backend maps these to its own codes.
@@ -34,8 +35,13 @@ public:
   // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
   // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
   void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
+  // Upper bound (ms) on how long a single blocking CAT read may wait, so slow
+  // I/O (especially the LAN backend) can't stall the cooperative main loop.
+  // 0 = use the backend's built-in default. Set from the CAT cycle rate at engage.
+  void setReadBudgetMs(uint16_t ms) { readBudgetMs = ms; }
 protected:
   uint16_t cmdDelayMs = 70;
+  uint16_t readBudgetMs = 0;
 public:
 
   // Independent downlink (Sub/RX) and uplink (Main/TX) control.
@@ -47,6 +53,12 @@ public:
   // Read the downlink (Sub/RX) frequency. Returns false if unsupported.
   virtual bool readSubFreq(uint32_t& hzOut) = 0;
   virtual bool readMainFreq(uint32_t& hzOut) = 0;
+
+  // Read the rig's PTT/transmit state into tx. Returns false if the backend
+  // can't report it (the default), in which case the caller must not assume
+  // anything about transmit state. The Doppler loop uses this to skip the
+  // downlink knob read while transmitting (a rig often reports the TX VFO then).
+  virtual bool readPtt(bool& tx) { (void)tx; return false; }
 
   // Toggle the rig's own satellite mode. Icom: actively forced OFF (we drive
   // MAIN/SUB ourselves). Yaesu/Kenwood: no-op -- their full-duplex/sat mode is
@@ -85,6 +97,44 @@ public:
 int  ctcssToneIndex(float hz);
 // The standard tone (in Hz) at a given index, or 0 if out of range.
 float ctcssToneHz(int index);
+
+// rigctld (Hamlib "NET rigctl") TCP CLIENT. CardSat drives a radio attached to
+// a rigctld server elsewhere on the LAN (default port 4532). To carry both legs
+// of a satellite QSO over one link it uses Hamlib split semantics: the downlink
+// (Sub/RX) is the main VFO (F/f set/get_freq, M set_mode) and the uplink
+// (Main/TX) is the split/TX VFO (I/i set/get_split_freq, X set_split_mode).
+// The socket opens lazily and reconnects (throttled) so a missing server never
+// hangs the Doppler loop. Model-agnostic: the remote rigctld owns the radio.
+class RigctlRig : public Rig {
+public:
+  RigctlRig(const char* host, uint16_t port) : _host(host), _port(port) {}
+  void begin(uint32_t, int, int, int) override { _lastTry = 0; ensure(); }
+  bool ready() const override { return _ok; }
+  void service() override { ensure(); }
+  bool setMainFreq(uint32_t hz) override;   // uplink   -> set_split_freq
+  bool setSubFreq (uint32_t hz) override;   // downlink -> set_freq
+  bool setMainMode(RigMode m)   override;   // uplink   -> set_split_mode
+  bool setSubMode (RigMode m)   override;   // downlink -> set_mode
+  bool readSubFreq (uint32_t& hzOut) override;   // get_freq
+  bool readMainFreq(uint32_t& hzOut) override;   // get_split_freq
+  bool readPtt(bool& tx) override;               // get_ptt
+  bool enableSatMode(bool) override { return false; }  // remote rig is operator-configured
+  void selectSubBand()  override {}
+  void selectMainBand() override {}
+  bool canReadFreq() const override { return true; }
+  bool hasSatMode()  const override { return false; }
+  bool selVerified() const override { return _ok; }
+  const char* name() const override { return "rigctl"; }
+private:
+  String     _host;
+  uint16_t   _port;
+  bool       _ok = false;
+  WiFiClient _c;
+  uint32_t   _lastTry = 0;
+  bool   ensure();                       // (re)connect if needed; updates _ok
+  String xchg(const String& tx);         // send one line, return one reply line ("" on fail)
+  static const char* modeName(RigMode m);
+};
 
 // Construct the backend for a model. Caller owns the returned pointer.
 // catType 0 = wired CI-V/CAT (UART); 1 = Icom LAN (network) for CI-V models, in

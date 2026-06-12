@@ -6,7 +6,7 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 > **Status.** CardSat runs on the Cardputer ADV, and every feature has been
 > exercised on hardware **except radio (CAT) control and the antenna rotator** —
 > those two are still unverified on real equipment. Their math (the per-protocol
-> CAT frequency encoders, and all three rotator backends -- GS-232 framing, the rotctld TCP client and PstRotator UDP) is host-tested, but
+> CAT frequency encoders, and all four rotator backends -- GS-232 framing, the rotctld TCP client, PstRotator UDP and the direct-Yaesu I2C interface) is host-tested, but
 > nothing has driven an actual radio or rotator yet. Keep the serial monitor open
 > and verify on the air before trusting it for a contact.
 
@@ -30,11 +30,13 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 14. [GP age and accuracy](#14-gp-age-and-accuracy)
 15. [Working offline](#15-working-offline)
 16. [Radio-specific notes](#16-radio-specific-notes)
-17. [Antenna rotator (GS-232, rotctld or PstRotator)](#17-antenna-rotator-gs-232-rotctld-or-pstrotator)
+17. [Antenna rotator (GS-232, rotctl, PstRotator, rotctld server)](#17-antenna-rotator-gs-232-rotctl-pstrotator-rotctld-server)
 18. [Managing data and factory reset](#18-managing-data-and-factory-reset)
 19. [Troubleshooting](#19-troubleshooting)
 20. [Key reference (cheat sheet)](#20-key-reference-cheat-sheet)
 21. [Glossary](#21-glossary)
+22. [Supporting AMSAT](#22-supporting-amsat)
+23. [License](#23-license)
 
 ---
 
@@ -252,11 +254,11 @@ A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
 Location · Update GP/Freq · Settings · About / diagnostics · Log.** The currently
 selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 
-### About / diagnostics
+### About
 
-Firmware version and build date, storage backend (microSD or internal flash),
-GP catalog size and freshest element age, WiFi/IP, battery level, free heap, and
-uptime. `` ` `` or ENTER returns home.
+Author credit (**Paul Stoetzer, N8HM**), firmware version and build date, storage
+backend (microSD or internal flash), GP catalog size and freshest element age,
+WiFi/IP, battery level, free heap, and uptime. `` ` `` or ENTER returns home.
 
 ### Logging QSOs (Log)
 
@@ -322,6 +324,53 @@ The catalog (up to 220 sats from the GP data, plus any you add manually).
 - **ENTER** — load the satellite's transponders and open its **Passes**.
 - `` ` `` — back to Home.
 
+At the right edge each row may show an **AMSAT activity mark**: a **filled dot**
+means the satellite has been reported **heard** (active) recently, a **filled
+square** means it has only been reported **telemetry only** (a beacon/telemetry
+is alive but no transponder or voice contact was logged), a **hollow ring** means
+it has only been reported **not heard** recently, and **no mark** means there are
+no recent reports. When a satellite has a mix of reports the strongest wins
+(heard > telemetry > not heard). The marks come from the [AMSAT OSCAR Status
+page](https://www.amsat.org/status/) and are refreshed whenever you run
+**Update** (see [§GP source](#14-gp-age-and-accuracy)). Matching is by base
+designator, so it works for AMSAT-named birds; satellites loaded from CelesTrak
+categories usually won't match and simply show no mark.
+
+### Orbital analysis (`o`)
+
+Opened with `o` from **Satellites**. Six pages, paged with `,`/`/`, `r` to
+recompute, `` ` `` to leave:
+
+- **Info** — NORAD, current altitude, **footprint** diameter, period, apogee/
+  perigee altitudes, the **footprint diameters at apogee and perigee**,
+  inclination/eccentricity, semi-major axis, B\* with a rough drag-decay
+  estimate, element age/revolution, and the next ascending-node longitude/time.
+  The **footprint** is the diameter of the visibility circle on the ground
+  (`2·Re·acos(Re/(Re+h))`) — the widest separation between two stations that can
+  both see the bird at once, i.e. the **longest theoretically possible QSO**
+  through it. It grows with altitude, so for an elliptical orbit the apogee
+  figure is the best case and perigee the worst.
+- **Live** — az/el, range, range-rate, Doppler at 145.8/435 MHz, sub-point,
+  mean anomaly/phase, and sunlit flag.
+- **Next pass** — AOS countdown, duration, max elevation, AOS/LOS azimuths,
+  sunlit fraction, eclipse entry/exit, the optical-visibility flag, the **slant
+  range at AOS/TCA/LOS** and the **one-way path delay** at closest approach
+  (range ÷ c).
+- **Ground track** — the next two orbits projected on an equirectangular map.
+- **Doppler** — the Doppler curve across the next pass, computed at a
+  **user-settable beacon frequency** (press `f` to change it; default 145.8 MHz).
+  Below the plot it shows the peak Doppler shift and the maximum range-rate of
+  the pass.
+- **Nodal** — orbit-plane dynamics from the J2 secular model: revolutions per
+  day; **node drift** (RAAN regression, °/day) and **perigee drift** (apsidal
+  precession, °/day); a **sun-synchronous** flag (node drift ≈ +0.986°/day); the
+  **LTAN** (local solar time of the ascending node); an approximate **repeat
+  ground-track** cycle (revs/days, ≤30 days); and the **longest possible pass**
+  (an overhead pass at apogee). These are first-order estimates — handy for
+  understanding why pass times march earlier each day, whether a bird is
+  sun-synchronous, and how long the very best passes can run — not a precision
+  propagator.
+
 ### Next Passes (schedule)
 
 One merged list of the next pass for **every favorite**, soonest first. Each row
@@ -331,6 +380,7 @@ elements are stale (see [§14](#14-gp-age-and-accuracy)).
 
 - `;`/`.` move.
 - **ENTER** — jump straight to **Track** for that satellite.
+- `m` — open the live **World map** (all footprints; see [World map](#world-map)).
 - `r` — recompute the schedule.
 - `z` — **deep-sleep** until ~60 s before the next AOS (see [§12](#12-aos-alarm-and-deep-sleep)).
 - `` ` `` — back.
@@ -455,6 +505,23 @@ the readout gives that pass's AOS time. The right-hand readout also shows az/el,
 range, range-rate, **Sun az/el**, and whether the satellite is **SUNLIT** or in
 **ECLIPSE**. `p`, ENTER, or `` ` `` return to Track.
 
+### Workable grids (`g`)
+
+The 4-character Maidenhead grid squares currently inside the satellite's
+footprint — every grid from which a station could work the bird at the same
+time you can. Reached two ways:
+
+- `g` from **Passes** — the **union** of grids covered across the selected pass
+  (sampled about once a minute from AOS to LOS), computed once on entry.
+- `g` from **Track** — the grids under the footprint **right now**, refreshed
+  about every 3 s. Radio and rotator tracking keep running while you view it.
+
+Grids are listed six per row in alphabetical order with a live count in the
+header; `;`/`.` scroll a row at a time and `{`/`}` page. Coverage is computed
+with a per-grid bitset, so there is **no cap** on the number of grids — it works
+for any amateur satellite, including high orbits (a ~2500 km bird floods roughly
+4500 grids). `` ` `` returns to whichever screen opened it.
+
 ### Location
 
 - `e` / `o` / `a` — edit latitude / longitude / altitude.
@@ -466,15 +533,19 @@ range, range-rate, **Sun az/el**, and whether the satellite is **SUNLIT** or in
 
 ### Update
 
-- `k` or **ENTER** — download GP data from AMSAT and sync the clock (NTP).
+- `k` or **ENTER** — download GP data from AMSAT and sync the clock (NTP). This
+  also refreshes the AMSAT OSCAR **activity marks** shown on the Satellites list.
 - `a` — fetch and cache **all** transponders for offline use.
 - `w` — connect WiFi only (no download).
 - `` ` `` — back. Diagnostics print to the serial monitor at 115200.
 
 ### Settings
 
-`;`/`.` move; `,`/`/` change adjustable rows; ENTER edits text fields or runs
-actions.
+Settings are grouped into four submenus — **Radio / CAT**, **Rotator**,
+**Station / display**, and **Network / data**. `;`/`.` move; ENTER opens a submenu
+(or, inside one, edits a text field or runs an action); `,`/`/` change an adjustable
+row; `` ` `` backs out to the submenu list, then home. Press `h` anywhere for the
+on-screen key reference. The notable rows:
 
 | Row | Action |
 |---|---|
@@ -486,8 +557,8 @@ actions.
 | WiFi pass | ENTER → edit |
 | Save & test WiFi | ENTER → connect and report OK/FAIL |
 | AOS alarm | `,`/`/` or ENTER toggle on/off |
-| Rotator (+ type / host / port / baud / deadband / park / pre-point / offsets) | `,`/`/` adjust, ENTER edits host/port; see [§17](#17-antenna-rotator-gs-232-rotctld-or-pstrotator) |
-| GP source URL | ENTER → edit the GP/OMM download URL |
+| Rotator (+ type / host / port / baud / ranges / offsets / deadband / park / pre-point) | `,`/`/` adjust, ENTER edits host/port. **Rot type** cycles **GS-232 → rotctl (net) → PstRotator → Yaesu (direct)**; see [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-rotctld-server) |
+| GP source | ENTER → **source picker**: AMSAT (default), any CelesTrak JSON-PP category (Amateur Radio listed first), or **Custom URL…** — see [§14](#14-gp-age-and-accuracy) |
 | VFO Type | `,`/`/` or ENTER toggle *Main Up/Sub Dn* ↔ *Main Dn/Sub Up* |
 | Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
 | CAT rate | `,`/`/` adjust the CAT update period in 10 ms steps (default 500 ms; soft-floored to what the CAT baud can service) |
@@ -497,6 +568,10 @@ actions.
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
 | Restore config+favs | ENTER → restore them from the backup files |
 | **Reset all data** | ENTER → type **ERASE** to wipe everything (red row) |
+| CAT type (+ host / port / user / pass) | `,`/`/` cycle **Wired CI-V** → **Icom LAN** → **rigctl (net)**. Icom LAN drives a network Icom over RS-BA1 (see [§3](#3-connecting-your-radio)); **rigctl** drives a radio attached to a remote Hamlib **rigctld** server over TCP (host/port, default 4532). Under *Radio / CAT*. |
+| Rigctld server (+ port) | `,`/`/` enable a **rigctld server** so a PC (Gpredict, WSJT-X, a logger) drives the radio through CardSat over TCP (default 4532); VFOA=downlink, VFOB=uplink. Under *Radio / CAT*. |
+| Rotctld server (+ port) | `,`/`/` enable a **rotctld server** so a PC drives the **wired GS-232 rotator** through CardSat over TCP (default 4533). Under *Rotator*. |
+| Rotator: manual control | ENTER opens a screen to jog az/el by hand with live read-back. Under *Rotator*. |
 
 ### WiFi scan
 
@@ -670,6 +745,28 @@ This uses a low-precision Sun ephemeris and a cylindrical Earth-shadow model —
 sunlit↔eclipse transition is a hard edge rather than the few-second penumbral
 fade, which is plenty for knowing whether a bird has power or is optically visible.
 
+### Sun / Moon antenna tracking
+
+**Sun / Moon** on the main menu shows live azimuth/elevation for both bodies from
+your location (`;`/`.` selects one). Press **`o`** to drive the rotator at the
+selected body — useful for antenna gain checks against Sun noise, EME pointing,
+or rotator calibration against a visible target. **`x`** stops; **`` ` ``** parks
+and disengages.
+
+Behavior notes:
+
+- The rotator has **one master at a time**: engaging Sun/Moon tracking disengages
+  satellite rotator tracking and vice versa, and opening **Rotator manual**
+  control disengages both.
+- While the selected body is **below the horizon** the rotator parks and waits;
+  tracking resumes automatically when it rises.
+- Tracking keeps running if you navigate to other screens — an orange **SUN** /
+  **MOON** tag in the header shows it's active. Going back from the Sun/Moon
+  screen parks and disengages.
+- The Moon ephemeris is a low-precision series (~arc-minutes after topocentric
+  parallax correction) — far finer than any amateur antenna beamwidth. The Sun
+  is good to ~0.01°.
+
 ---
 
 ## 14. GP age and accuracy
@@ -685,6 +782,23 @@ coded:
 
 Refresh with **Update → k** whenever you have WiFi. For low orbits, weekly (or
 fresher) elements are best.
+
+### Choosing the element source
+
+By default CardSat pulls the **AMSAT** daily GP bulletin (all amateur satellites,
+JSON, including the friendly `AMSAT_NAME`). To change source, open **Settings → GP
+source** and press ENTER for a picker:
+
+- **AMSAT (amateur)** — the default bulletin.
+- **CelesTrak categories** — any CelesTrak GP group in JSON-PP format. Amateur
+  Radio is listed first, followed by SatNOGS and the Special-Interest, Weather &
+  Earth Resources, Communications, Navigation, Scientific and Miscellaneous
+  groups. CelesTrak omits `AMSAT_NAME`, so CardSat falls back to `OBJECT_NAME`
+  and the data parses correctly.
+- **Custom URL…** — type any URL that returns OMM JSON / JSON-PP.
+
+Move with `;`/`.` (or `{`/`}` to page) and press ENTER to select. The choice is
+saved immediately and used by the next **Update → k**.
 
 ---
 
@@ -723,6 +837,11 @@ Defaults are editable; the **CI-V address** field applies to **Icom only**.
 Protocol command sets follow the Hamlib backends (`icom`, `yaesu/ft847`,
 `yaesu/ft736`, `kenwood/ts2000`, `kenwood/ts790`). Serial framing is set
 automatically: **Icom/Kenwood 8N1, Yaesu 8N2.**
+
+The CAT *interface circuit* differs by family. **Icom CI-V** uses a 3.3 V-safe
+single-wire interface (**[CIV_INTERFACE.md](CIV_INTERFACE.md)**); **Yaesu** and
+**Kenwood** use RS-232-level serial — build a **MAX3232** level shifter as in
+**[RS232_INTERFACE.md](RS232_INTERFACE.md)** (⚠️ untested; build at your own risk).
 
 ### Automatic PL / CTCSS tone for FM satellites
 
@@ -764,6 +883,14 @@ mode **off** at startup (IC-9100/9700; the others have no such mode). Downlink o
 SUB, uplink on MAIN. MAIN/SUB select uses CI-V `0x07 D0/D1`, verified against the
 IC-821H manual. Read-back uses `0x03` and works on all six (including the
 IC-820/821/970, per Hamlib). Wrong-VFO fixes live in `radio_profiles.h`.
+
+**Icom over the network.** Any of these Icoms with a LAN port (IC-9700, plus the
+IC-705/7610/785x) can be driven over WiFi/Ethernet instead of the CI-V bus — set
+**CAT type → Icom LAN** in Settings. CardSat carries the *same* CI-V frames shown
+below inside the RS-BA1 UDP protocol, so MAIN/SUB, read-back, sat mode and CTCSS
+behave identically; only the transport changes. Setup is in
+[§3](#3-connecting-your-radio); the wire protocol is documented in
+`ICOM_LAN_PROTOCOL.md`.
 
 **Yaesu (FT-847, FT-736R).** 5-byte CAT (four data bytes + opcode), big-endian BCD
 at 10 Hz. CardSat enables CAT at startup and sets the satellite RX (downlink,
@@ -830,13 +957,25 @@ How to read it:
   One True Rule tuning; `no valid reply` if it failed.
 
 This is the fastest way to confirm your **wiring, model, address, and baud**, and to
-watch the **Doppler corrections** stream during a pass. Silence a backend by setting
-`CIV_DEBUG` / `YAESU_DEBUG` / `KW_DEBUG 0` at the top of
-`civ.cpp` / `yaesu.cpp` / `kenwood.cpp` and rebuild.
+watch the **Doppler corrections** stream during a pass. The **Icom LAN** backend adds
+its own `[NET]` traces for the connect/auth handshake and keepalives (the CI-V frames
+it carries are the same ones shown above). Silence a backend by setting `CIV_DEBUG` /
+`YAESU_DEBUG` / `KW_DEBUG` / `ICOMNET_DEBUG 0` at the top of
+`civ.cpp` / `yaesu.cpp` / `kenwood.cpp` / `icomnet.cpp` and rebuild.
 
 ---
 
-## 17. Antenna rotator (GS-232, rotctld or PstRotator)
+## 17. Antenna rotator (GS-232, rotctl, PstRotator, rotctld server)
+
+> **v0.9.8 note.** The network *client* backend is now labelled **rotctl** in
+> Settings — it connects to a rotctld server, it is not itself the daemon.
+> Separately, CardSat can run its **own rotctld server** (Settings → Rotator →
+> *Rotctld server*, default port **4533**) so a networked PC (Gpredict, …) drives
+> the **GS-232 rotator wired to CardSat**; a `P` from the PC disengages CardSat's
+> own tracking. A **manual control** screen (Settings → Rotator → *Rotator: manual
+> control*) jogs az/el by hand with live read-back. At **el range 180°** the
+> *flip* decision is now made once per pass and held to LOS (it previously never
+> triggered). `rotctld`/`rigctld` servers have no authentication — trusted LAN only.
 
 CardSat can drive an az/el antenna rotator through one of three interchangeable
 backends, chosen in Settings with **Rot type**:
@@ -853,6 +992,14 @@ backends, chosen in Settings with **Rot type**:
   over **UDP** (the same datagrams Gpredict/SatPC32 send it). CardSat sends
   `<PST>...</PST>` control messages to PstRotator's UDP Control port; PstRotator
   then drives whatever controller it is configured for.
+- **Yaesu (direct)** -- a Yaesu **G-5500**-class az/el controller wired **straight to
+  CardSat**, with no GS-232 box: an I2C **ADS1115** reads the position-feedback
+  voltages and an I2C **PCF8574** drives the four direction lines, both on the same
+  I2C bus the GS-232 bridge would use. CardSat closes the pointing loop itself. This
+  is a hardware build with its own calibration step -- see
+  **[ROTOR_INTERFACE.md](ROTOR_INTERFACE.md)** (⚠️ untested; build at your own risk).
+  Calibrate from **Settings → Rotator → Rotator: manual control** (capture keys
+  **1/2/3/4** at the axis endpoints).
 
 Only one rotator is active at a time. The pointing logic -- alignment offsets,
 deadband, flip mode, park-on-LOS -- is identical for all of them; **Rot type** only
@@ -886,7 +1033,7 @@ Enable and tune the rotator in **Settings** (scroll past the radio rows):
 |---|---|
 | Rotator | off / on (builds the selected backend) |
 | Rot type | **GS-232** (I2C bridge), **rotctld (net)** (TCP), or **PstRotator (net)** (UDP) |
-| Net host | server IP / hostname (rotctld or PstRotator backend) |
+| Net host | server IP / hostname (rotctl or PstRotator backend) |
 | Net port | server port -- rotctld TCP **4533**, PstRotator UDP **12000** |
 | Rot baud | GS-232 serial speed (1200 / 4800 / 9600); GS-232 backend only |
 | Rot deadband | degrees; suppress moves smaller than this (anti-chatter) |
@@ -1118,16 +1265,19 @@ in line and the controller's baud matches **Rot baud** in Settings.
 
 ## 20. Key reference (cheat sheet)
 
-**Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot.
+**Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot · `h` help.
 
 | Screen | Keys |
 |---|---|
-| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · ENTER passes |
-| **Next Passes** | ENTER track · `r` refresh · `z` deep-sleep until AOS |
-| **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum |
+| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `o` orbital analysis · `s` simulation · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
+| **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay · Next pass: slant ranges + path delay · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · `r` recompute · `` ` `` back |
+| **Simulation** | `,`/`/` step time · `;`/`.` step size · `x` reset to now · `` ` `` back |
+| **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |
+| **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `l` log QSO · ENTER save cal |
+| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `l` log QSO · `g` workable grids now (radio/rotator keep running) · ENTER save cal |
+| **Workable grids** | 4-char Maidenhead grids under the footprint (per-pass union or live, refreshing ~3 s; uncapped, works to high orbits) · `;`/`.` and `{`/`}` scroll · `` ` `` back |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
 | **Track · CAL** | `,`/`/` downlink ∓ · `;`/`.` uplink ∓ · `s` step (10/100/1k) · `x` zero |
 | **Polar** | `l` log QSO · `p`/ENTER/`` ` `` back to track |
@@ -1135,12 +1285,19 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Log · list** | `;`/`.` scroll · ENTER edit entry · `` ` `` back |
 | **Log · entry** | `;`/`.` field · ENTER edit · `s` save · `x`×2 delete · `` ` `` back |
 | **Mutual** | `;`/`.` scroll · `` ` ``/ENTER back to passes |
-| **10-day** | `r` recompute · `` ` ``/ENTER back to passes |
-| **Illum** | `r` recompute · `` ` ``/ENTER back to passes |
-| **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock |
+| **10-day** | `;`/`.` page ∓10 d (forward indefinitely) · `r` recompute · `` ` ``/ENTER back |
+| **Illum** | `,`/`/` page ∓60 d (forward indefinitely) · `r` recompute · `` ` ``/ENTER back |
+| **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock · ENTER GPS sky plot |
+| **GPS sky plot** | live GNSS az/el coloured by signal · `` ` `` back |
+| **World map** | `f` highlight a favorite · `y` sun · `c` eclipse · `` ` `` back |
+| **Rotator (manual)** | `,`/`/` az · `;`/`.` el · `s` step · `x` stop · `` ` `` back |
+| **Help** | `;`/`.` scroll · `` ` `` back |
 | **Update** | `k`/ENTER GP · `a` cache all TX · `w` WiFi only |
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
+| **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |
+| **Sun / Moon** | `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
+| **About** | build/version, IP, free heap and diagnostics (read-only) |
 
 ---
 
@@ -1168,10 +1325,12 @@ in line and the controller's baud matches **Rot baud** in Settings.
 - **Eclipse / sunlit** — whether the satellite is in Earth's shadow or illuminated.
 - **CAT** — Computer Aided Transceiver control: the generic term for computer
   control of a radio. CardSat speaks three CAT dialects — Icom **CI-V**, Yaesu, and
-  Kenwood — behind one abstract rig interface.
+  Kenwood — behind one abstract rig interface, over a wired serial bus or (for
+  network-capable Icoms) the **Icom LAN** RS-BA1 protocol.
 - **CI-V** — Icom's Communications Interface-V serial control bus (Icom's CAT dialect).
-- **MAIN / SUB** — the two VFOs/bands of a satellite-capable radio; CardSat uses
-  MAIN for uplink and SUB for downlink.
+- **MAIN / SUB** — the two VFOs/bands of a satellite-capable radio; by default
+  CardSat uses MAIN for uplink and SUB for downlink (the **VFO Type** setting swaps
+  them).
 - **One True Rule** — KB5MU's principle: tune so the frequency *at the satellite*
   stays constant; the computer corrects both legs for Doppler.
 

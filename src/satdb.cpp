@@ -263,6 +263,70 @@ bool SatDb::loadGpFromFs() {
   return loadGpFromFile(FILE_GP) > 0;
 }
 
+// ---------------------------------------------------------------------------
+//  AMSAT OSCAR status. Reduce a satellite name to a base designator for
+//  matching: take the part before a mode tag / space / bracket, upper-case it,
+//  and drop a leading zero in the segment after the last hyphen so the bulletin
+//  "AO-07" matches the status page "AO-7_[U/v]".
+// ---------------------------------------------------------------------------
+static void amsatBase(const char* in, char* out, int outsz) {
+  char tmp[28]; int j = 0;
+  for (int i = 0; in[i] && j < (int)sizeof(tmp) - 1; ++i) {
+    char c = in[i];
+    if (c == ' ' || c == '[' || c == '(') break;
+    if (c == '_' && in[i + 1] == '[') break;
+    tmp[j++] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+  }
+  tmp[j] = 0;
+  int h = -1; for (int i = 0; i < j; ++i) if (tmp[i] == '-') h = i;
+  int seg = (h >= 0) ? h + 1 : 0;
+  int sgt = seg; while (tmp[sgt] == '0' && tmp[sgt + 1] >= '0' && tmp[sgt + 1] <= '9') ++sgt;
+  int k = 0;
+  for (int i = 0;   i < seg && k < outsz - 1; ++i) out[k++] = tmp[i];   // prefix + hyphen
+  for (int i = sgt; i < j   && k < outsz - 1; ++i) out[k++] = tmp[i];   // de-zeroed segment
+  out[k] = 0;
+}
+
+// Report precedence for a satellite seen with several report values:
+// heard (1) beats telemetry-only (3) beats not-heard (2) beats nothing (0).
+static inline int amsatPrio(uint8_t s) { return s == 1 ? 3 : s == 3 ? 2 : s == 2 ? 1 : 0; }
+
+// Set each catalog entry's amsatStatus from a cached summary.php response:
+// 1 = Heard / Crew Active, 3 = Telemetry Only, 2 = Not Heard, 0 = no reports.
+// The highest-precedence report value seen for a satellite wins.
+void SatDb::applyAmsatStatusFile(const char* path) {
+  for (int i = 0; i < _n; ++i) _sats[i].amsatStatus = 0;
+  if (_n <= 0) return;
+  File f = Store::fs().open(path, "r");
+  if (!f) return;
+  JsonDocument filter;
+  filter["data"][0]["name"] = true;
+  filter["data"][0]["report"] = true;
+  filter["data"][0]["report_count"] = true;
+  JsonDocument doc;
+  DeserializationError e = deserializeJson(doc, f, DeserializationOption::Filter(filter));
+  f.close();
+  if (e) return;
+  char (*cb)[16] = (char (*)[16])malloc((size_t)_n * 16);
+  if (!cb) return;
+  for (int i = 0; i < _n; ++i) amsatBase(_sats[i].name, cb[i], 16);
+  for (JsonObject r : doc["data"].as<JsonArray>()) {
+    const char* nm  = r["name"]  | "";
+    const char* rep = r["report"] | "";
+    long cnt = r["report_count"] | 0;
+    if (!nm[0] || cnt <= 0) continue;
+    uint8_t st = !strcmp(rep, "Not Heard")      ? 2    // category -> status code
+               : !strcmp(rep, "Telemetry Only") ? 3
+                                                : 1;   // Heard / Crew Active
+    char sb[16]; amsatBase(nm, sb, 16);
+    for (int i = 0; i < _n; ++i) {
+      if (strcmp(sb, cb[i]) != 0) continue;
+      if (amsatPrio(st) > amsatPrio(_sats[i].amsatStatus)) _sats[i].amsatStatus = st;
+    }
+  }
+  free(cb);
+}
+
 // Stream-parse a GP/OMM JSON array from a file, one object at a time, using a
 // small fixed buffer. Never loads the whole file into RAM, so it works for the
 // full ~75 KB amateur list on the no-PSRAM heap (where a single contiguous

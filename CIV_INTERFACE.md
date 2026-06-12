@@ -14,6 +14,30 @@ MANUAL §16).
 
 ---
 
+## Interfacing options
+
+There's more than one way to get an Icom CI-V (REMOTE) jack onto CardSat's Grove
+UART. Pick whichever suits the parts you have — all of them end at the same CardSat
+settings (the model picker fills in the CI-V **address** and **baud**):
+
+1. **Build the discrete level-shifter** in this guide (sections 3–5). Cheapest and
+   self-contained: two transistors and a few resistors, powered from the Grove
+   **5 V** (the Grove port provides **5 V, not 3.3 V**). The rest of this document
+   covers this option.
+2. **Use a ready-made logic-level CI-V interface** (a small board, or an M5/Grove
+   "CI-V" unit). Bring its logic side to **G1/G2 + GND**; make sure it presents
+   **≤ 3.3 V** to the ESP32 — a 5 V-only board still needs the RX divider from
+   section 4. See section 8.
+3. **Use an RS-232 → CI-V cable/adapter** you may already own (an Icom **CT-17**
+   level converter, or a generic RS-232 CI-V cable). CardSat's UART is **3.3 V
+   TTL**, not RS-232, so insert a **MAX3232** between the Grove UART and the cable:
+   `Grove UART → MAX3232 → RS-232 → RS-232/CI-V cable → radio`. Build the MAX3232
+   stage per **[RS232_INTERFACE.md](RS232_INTERFACE.md)** (note its power section —
+   the Grove port is **5 V**, so the MAX3232 is fed from a small 3.3 V LDO). See
+   section 8.
+
+---
+
 ## 1. How CI-V behaves (the 60-second version)
 
 - **One wire** carries both directions (TX and RX share it); the controller hears
@@ -238,6 +262,16 @@ connects to the **CIV** node (not after a series block).
 - **Commercial CI-V interface.** Any 3.3 V-safe CI-V interface works; just bring
   its logic side to G1/G2 and GND with the polarity above. (5 V-only interfaces
   still need the RX divider to protect the ESP32.)
+- **RS-232 → CI-V cable (e.g. Icom CT-17).** If you already have a CI-V interface
+  that presents an **RS-232** port — the classic **CT-17** level converter, or a
+  generic RS-232 CI-V cable — you don't build the discrete circuit at all. Put a
+  **MAX3232** between the Cardputer's 3.3 V Grove UART (G1/G2) and the cable's
+  RS-232 side, then plug the cable's CI-V plug into the radio's REMOTE jack:
+  `Grove UART → MAX3232 → RS-232 → CT-17/CI-V cable → radio`. The MAX3232 stage —
+  including the important detail that the **Grove port supplies 5 V, not 3.3 V**, so
+  the MAX3232 is powered from a small 3.3 V LDO — is documented in
+  **[RS232_INTERFACE.md](RS232_INTERFACE.md)**. This reuses a cable you may already
+  own and keeps the CI-V level conversion inside the proven CT-17.
 
 ---
 

@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+# CardSat 3x5 index-card key-reference generator (landscape, front + back).
+from reportlab.lib.units import inch
+from reportlab.lib import colors
+from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame,
+                                Paragraph, PageBreak)
+from reportlab.lib.styles import ParagraphStyle
+from pypdf import PdfReader
+
+OUT = "/home/claude/CardSat_CheatCard_3x5.pdf"
+PAGE_W, PAGE_H = 5 * inch, 3 * inch            # 360 x 216 pt (landscape 3x5)
+ACCENT    = colors.HexColor('#0B7A3B')
+ACCENT_DK = colors.HexColor('#064F26')
+RULE      = colors.HexColor('#D7D7D7')
+BAND_H, LM, RM, BM, GUT = 15, 9, 9, 7, 7
+TOPGAP    = BAND_H + 3
+frame_top = PAGE_H - TOPGAP
+frame_h   = frame_top - BM
+NCOL      = 2
+col_w     = (PAGE_W - LM - RM - (NCOL - 1) * GUT) / float(NCOL)
+XS        = [LM + i * (col_w + GUT) for i in range(NCOL)]
+
+FRONT = [
+ ("GLOBAL",
+  "<b>;</b> up &middot; <b>.</b> down &middot; <b>,</b> <b>/</b> left/right &middot; "
+  "<b>ENTER</b> select &middot; <b>`</b>/<b>DEL</b> back &middot; "
+  "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help"),
+ ("HOME",
+  "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
+  "Sun/Moon, Location, Update, Settings, Log, About"),
+ ("SATELLITES",
+  "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; "
+  "<b>o</b> orbital analysis &middot; <b>s</b> simulation &middot; <b>ENTER</b> passes &middot; "
+  "right edge: dot = AMSAT heard, square = telemetry, ring = not heard"),
+ ("NEXT PASSES (favs)",
+  "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
+ ("PASSES (sel)",
+  "<b>;</b>/<b>.</b> select &middot; <b>d</b> detail &middot; <b>t</b>/<b>ENTER</b> track &middot; "
+  "<b>n</b> add TX &middot; <b>r</b> recompute &middot; <b>x</b> mutual-DX &middot; "
+  "<b>v</b> 10-day &middot; <b>i</b> illum &middot; <b>g</b> workable grids"),
+ ("TRACK (sel)",
+  "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; "
+  "<b>c</b> CTCSS &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; "
+  "<b>l</b> log QSO &middot; <b>g</b> grids now &middot; <b>ENTER</b> save cal"),
+ ("TRACK &middot; TUNE",
+  "<b>,</b>/<b>/</b> tune -/+ &middot; <b>s</b> step 100/1k/5k &middot; <b>x</b> recenter"),
+ ("TRACK &middot; CAL",
+  "<b>,</b>/<b>/</b> downlink &middot; <b>;</b>/<b>.</b> uplink &middot; "
+  "<b>s</b> step 10/100/1k &middot; <b>x</b> zero"),
+ ("WORKABLE GRIDS",
+  "4-char Maidenhead grids under the footprint (per-pass union or live now). "
+  "<b>;</b>/<b>.</b> &amp; <b>{</b>/<b>}</b> scroll &middot; <b>`</b> back"),
+ ("POLAR / PASS DETAIL",
+  "Pass detail: <b>p</b> polar of this pass. Polar: <b>l</b> log QSO &middot; "
+  "<b>p</b>/<b>ENTER</b>/<b>`</b> back"),
+]
+
+BACK = [
+ ("SUN / MOON",
+  "<b>;</b>/<b>.</b> pick Sun/Moon &middot; <b>o</b> rotor track on/off &middot; "
+  "<b>x</b> stop &middot; <b>`</b> back"),
+ ("ORBITAL ANALYSIS",
+  "<b>,</b>/<b>/</b> pages: Info / Live / Next pass / Ground track / Doppler / Nodal &middot; "
+  "<b>r</b> recompute. Info: footprint dia (= longest QSO). Doppler <b>f</b> sets beacon "
+  "freq. Nodal: J2 drift, sun-sync, LTAN, repeat, longest pass."),
+ ("SIMULATION",
+  "<b>,</b>/<b>/</b> step time &middot; <b>;</b>/<b>.</b> step size &middot; "
+  "<b>x</b> reset to now &middot; <b>`</b> back"),
+ ("LOCATION",
+  "<b>e</b>/<b>o</b>/<b>a</b> lat/lon/alt &middot; <b>g</b> grid &middot; <b>p</b> GPS on/off &middot; "
+  "<b>s</b> GPS source &middot; <b>c</b> set clock &middot; <b>ENTER</b> GPS sky plot"),
+ ("GPS SKY PLOT",
+  "Live GNSS by az/el, coloured by signal (green=strong, grey=weak) &middot; <b>`</b> back"),
+ ("WORLD MAP",
+  "All footprints &middot; <b>f</b> highlight favorite &middot; <b>y</b> sun &middot; "
+  "<b>c</b> eclipse &middot; <b>`</b> back"),
+ ("SCHEDULES",
+  "10-day: <b>;</b>/<b>.</b> page +/-10 d, <b>r</b> recompute &middot; "
+  "Illum: <b>,</b>/<b>/</b> page +/-60 d &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
+ ("LOG",
+  "Menu: <b>ENTER</b> new / browse / export ADIF &middot; List: <b>;</b>/<b>.</b> scroll, "
+  "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
+  "<b>x</b> x2 delete"),
+ ("UPDATE",
+  "<b>k</b>/<b>ENTER</b> GP + clock &middot; <b>a</b> cache all transponders &middot; "
+  "<b>w</b> WiFi connect only"),
+ ("SETTINGS",
+  "<b>,</b>/<b>/</b> change &middot; <b>ENTER</b> edit/toggle &middot; <b>s</b> scan WiFi "
+  "(SSID row) &middot; reset = type ERASE"),
+ ("GP SOURCE",
+  "<b>AMSAT</b> / any <b>CelesTrak</b> JSON-PP category (Amateur first) / <b>Custom URL</b> "
+  "&middot; <b>;</b>/<b>.</b> move &middot; <b>{</b>/<b>}</b> page &middot; <b>ENTER</b> select"),
+ ("ROTATOR (manual)",
+  "<b>,</b>/<b>/</b> az &middot; <b>;</b>/<b>.</b> el &middot; <b>s</b> step &middot; "
+  "<b>x</b> stop &middot; <b>`</b> back"),
+ ("NETWORK SERVERS",
+  "<b>rigctld</b>: PC drives the rig via CardSat over TCP (VFOA=downlink, VFOB=uplink) &middot; "
+  "<b>rotctld</b>: PC drives the wired GS-232 via CardSat &middot; "
+  "<b>rigctl</b>: CAT type drives a remote rig"),
+ ("EDIT",
+  "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
+ ("ABOUT",
+  "Build/version, IP, free heap and diagnostics (read-only)."),
+]
+
+
+def header(canvas, doc):
+    canvas.saveState()
+    canvas.setStrokeColor(colors.HexColor('#BBBBBB')); canvas.setLineWidth(0.6)
+    canvas.rect(2, 2, PAGE_W - 4, PAGE_H - 4)
+    canvas.setFillColor(ACCENT)
+    canvas.rect(0, PAGE_H - BAND_H, PAGE_W, BAND_H, fill=1, stroke=0)
+    canvas.setFillColor(colors.white)
+    canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
+    canvas.setFont('Helvetica', 6.2)
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.8  \u00b7  Key Reference')
+    pg = canvas.getPageNumber()
+    side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
+    canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/2' % (side, pg))
+    canvas.setStrokeColor(RULE); canvas.setLineWidth(0.4)
+    for i in range(1, NCOL):
+        rx = XS[i] - GUT / 2.0
+        canvas.line(rx, BM, rx, frame_top)
+    canvas.restoreState()
+
+
+def _styles(body_fs):
+    tf = body_fs + 0.7
+    t = ParagraphStyle('t', fontName='Helvetica-Bold', fontSize=tf,
+                       leading=tf + 1.0, textColor=ACCENT_DK,
+                       spaceBefore=2.8, spaceAfter=0.8)
+    b = ParagraphStyle('b', fontName='Helvetica', fontSize=body_fs,
+                       leading=body_fs + 1.4, spaceAfter=2.2, textColor=colors.black)
+    return t, b
+
+
+def _frames():
+    return [Frame(XS[i], BM, col_w, frame_h, leftPadding=0, rightPadding=2,
+                  topPadding=0, bottomPadding=0, showBoundary=0) for i in range(NCOL)]
+
+
+def measure(sections, fs):
+    import io
+    t, b = _styles(fs)
+    doc = BaseDocTemplate(io.BytesIO(), pagesize=(PAGE_W, PAGE_H),
+                          leftMargin=LM, rightMargin=RM, topMargin=0, bottomMargin=BM)
+    doc.addPageTemplates(PageTemplate(id='c', frames=_frames()))
+    story = []
+    for title, body in sections:
+        story += [Paragraph(title, t), Paragraph(body, b)]
+    doc.build(story)
+    return doc.page
+
+
+def best_fs(sections, hi=9.5, lo=4.5):
+    fs = hi
+    while fs >= lo:
+        if measure(sections, fs) <= 1:
+            return fs
+        fs -= 0.25
+    return lo
+
+
+def build(front_fs, back_fs):
+    doc = BaseDocTemplate(OUT, pagesize=(PAGE_W, PAGE_H),
+                          leftMargin=LM, rightMargin=RM, topMargin=0, bottomMargin=BM)
+    doc.addPageTemplates(PageTemplate(id='card', frames=_frames(), onPage=header))
+    ft, fb = _styles(front_fs)
+    bt, bb = _styles(back_fs)
+    story = []
+    for title, body in FRONT:
+        story += [Paragraph(title, ft), Paragraph(body, fb)]
+    story.append(PageBreak())
+    for title, body in BACK:
+        story += [Paragraph(title, bt), Paragraph(body, bb)]
+    doc.build(story)
+
+
+front_fs = best_fs(FRONT)
+back_fs  = best_fs(BACK)
+print("front_fs=%.2f  back_fs=%.2f" % (front_fs, back_fs))
+build(front_fs, back_fs)
+pages = len(PdfReader(OUT).pages)
+print("final pages:", pages)

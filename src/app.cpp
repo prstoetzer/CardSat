@@ -509,6 +509,24 @@ void App::fetchSpaceWeather() {
   spaceWxEpoch = nowUtc();
   File f = LittleFS.open(FILE_SPACEWX, "w");
   if (f) { f.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); f.close(); }
+
+  // Planetary Kp index (geomagnetic activity). NOAA "products" format is an array
+  // of [time, kp, ...] rows with a header row first and the newest reading last.
+  String kbody;
+  if (net.httpsGet(SPACEWX_KP_URL, kbody, 60000)) {
+    int lastRow = kbody.lastIndexOf('[');
+    if (lastRow >= 0) {
+      // row looks like ["2026-06-12 18:00:00","3.67","3",null]; 2nd field is Kp.
+      int q1 = kbody.indexOf('"', lastRow);
+      int q2 = (q1 >= 0) ? kbody.indexOf('"', q1 + 1) : -1;     // end of time string
+      int q3 = (q2 >= 0) ? kbody.indexOf('"', q2 + 1) : -1;     // start of kp string
+      int q4 = (q3 >= 0) ? kbody.indexOf('"', q3 + 1) : -1;     // end of kp string
+      if (q3 >= 0 && q4 > q3) {
+        float kp = (float)atof(kbody.substring(q3 + 1, q4).c_str());
+        if (kp >= 0.0f && kp <= 9.0f) spaceKp = kp;
+      }
+    }
+  }
 }
 
 // Restore the cached F10.7 at boot so the decay estimate is informed offline.
@@ -805,9 +823,20 @@ void App::refreshScheduleIfNeeded() {
 
 // ---- Feature 2: AOS alarm (countdown beeps + screen flash) -----------------
 void App::serviceAosAlarm() {
-  if (!cfg.aosAlarm || !timeIsSet() || nextAos == 0) return;
+  if (!cfg.aosAlarm || !timeIsSet()) return;       // all alarm sounds gated off here
+  time_t now = nowUtc();
+  // --- TCA and LOS chirps for a pass already in progress ---
+  if (alarmLos) {
+    if (now >= alarmLos) {                          // pass over: LOS tone, then disarm
+      if (!(alarmPassMarks & 2)) { alarmPassMarks |= 2; beep(1200, 120); delay(90); beep(900, 160); }
+      alarmTca = alarmLos = 0; alarmPassMarks = 0;
+    } else if (alarmTca && now >= alarmTca && !(alarmPassMarks & 1)) {
+      alarmPassMarks |= 1; beep(2200, 110); delay(70); beep(2200, 110);   // TCA (peak elevation)
+    }
+  }
+  if (nextAos == 0) return;
   if (alarmAos != nextAos) { alarmAos = nextAos; alarmMarks = 0; }  // new target
-  long dt = (long)(nextAos - nowUtc());
+  long dt = (long)(nextAos - now);
   if (dt <= 60 && !(alarmMarks & 1)) { alarmMarks |= 1; beep(1500, 80); }
   if (dt <= 30 && !(alarmMarks & 2)) { alarmMarks |= 2; beep(1500, 80); }
   if (dt <= 10 && !(alarmMarks & 4)) { alarmMarks |= 4; beep(1800, 90); }
@@ -817,6 +846,15 @@ void App::serviceAosAlarm() {
     aosFlashUntil = millis() + 8000;
     strncpy(aosFlashName, nextAosName, sizeof(aosFlashName) - 1);
     aosFlashName[sizeof(aosFlashName) - 1] = 0;
+    // Arm TCA/LOS chirps from the schedule entry whose AOS just fired.
+    alarmTca = alarmLos = 0; alarmPassMarks = 0;
+    for (int i = 0; i < schedN; ++i) {
+      if (sched[i].aos == nextAos && sched[i].los > now) {
+        alarmLos = sched[i].los;
+        alarmTca = sched[i].aos + (sched[i].los - sched[i].aos) / 2;  // mid-pass ~= peak el
+        break;
+      }
+    }
     nextAos = 0;            // force refreshScheduleIfNeeded() to find the next
   }
 }
@@ -1441,6 +1479,9 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_ORBIT:    keyOrbit(c, enter, back); break;
     case SCR_SIM:      keySim(c, enter, back); break;
     case SCR_SUNMOON:  keySunMoon(c, enter, back); break;
+    case SCR_SPACEWX:  keySpaceWx(c, enter, back); break;
+    case SCR_TXDB:     keyTxDb(c, enter, back); break;
+    case SCR_QRZ:      keyQrz(c, enter, back); break;
     case SCR_GRID:     keyGrid(c, enter, back); break;
     case SCR_STATES:   keyStates(c, enter, back); break;
     case SCR_DXCC:     keyDxcc(c, enter, back); break;
@@ -1457,7 +1498,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 10;
+  const int N = 12;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -1485,11 +1526,13 @@ void App::keyHome(char c, bool enter, bool back) {
         }
       } break;
       case 4: screen = SCR_SUNMOON; lastDrawMs = 0; break;
-      case 5: screen = SCR_LOCATION; break;
-      case 6: screen = SCR_UPDATE; break;
-      case 7: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
-      case 8: logMenuSel = 0; screen = SCR_LOG; break;
-      case 9: screen = SCR_ABOUT; break;
+      case 5: screen = SCR_SPACEWX; lastDrawMs = 0; break;
+      case 6: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+      case 7: screen = SCR_LOCATION; break;
+      case 8: screen = SCR_UPDATE; break;
+      case 9: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
+      case 10: logMenuSel = 0; screen = SCR_LOG; break;
+      case 11: screen = SCR_ABOUT; break;
     }
   }
 }
@@ -1547,6 +1590,11 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   if (c == 's' && viewN > 0) {                     // open the simulation screen
     simTime = timeIsSet() ? nowUtc() : 0; screen = SCR_SIM; lastDrawMs = 0; return;
+  }
+  if (c == 't' && viewN > 0) {                      // browse the transponder database
+    SatEntry* s = activeSat();
+    if (s) { ensureTransponders(*s); txDbScroll = 0; screen = SCR_TXDB; lastDrawMs = 0; }
+    return;
   }
   if (c == 'd' && viewN > 0) {                      // 10-day pass overview
     visReturn = SCR_SATLIST; visDayOff = 0; buildVis();
@@ -2161,7 +2209,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,25};
-static const int SET_NET[]   = {4,5,6,20,27,28,29};
+static const int SET_NET[]   = {4,5,6,20,41,42,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
   (int)(sizeof(SET_RADIO)/sizeof(int)), (int)(sizeof(SET_ROTOR)/sizeof(int)),
@@ -2274,6 +2322,10 @@ void App::keySettings(char c, bool enter, bool back) {
       case 20: gpSrcSel = 0; gpSrcScroll = 0; screen = SCR_GPSRC; lastDrawMs = 0; break;
       case 26: editTarget = 204; editTitle = "My callsign";
                editBuf = cfg.myCall; screen = SCR_EDIT; break;
+      case 41: editTarget = 211; editTitle = "QRZ username";
+               editBuf = cfg.qrzUser; screen = SCR_EDIT; break;
+      case 42: editTarget = 212; editTitle = "QRZ password";
+               editBuf = cfg.qrzPass; screen = SCR_EDIT; break;
       case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
@@ -2322,6 +2374,7 @@ static Screen editHome(int t) {
   if (t >= 320) return SCR_PASSES;      // manual transponder
   if (t >= 310) return SCR_SATLIST;     // manual GP entry
   if (t >= 300) return SCR_LOCATION;    // manual time
+  if (t == 213) return SCR_QRZ;         // QRZ callsign prompt
   if (t >= 200) return SCR_SETTINGS;    // radio / WiFi
   if (t >= 100) return SCR_LOCATION;    // location fields
   return SCR_HOME;
@@ -2351,9 +2404,22 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;
       case 204: strncpy(cfg.myCall, editBuf.c_str(), sizeof(cfg.myCall)-1);
                 cfg.myCall[sizeof(cfg.myCall)-1] = 0; break;
+      case 211: strncpy(cfg.qrzUser, editBuf.c_str(), sizeof(cfg.qrzUser)-1);
+                cfg.qrzUser[sizeof(cfg.qrzUser)-1] = 0; qrzSessionKey = ""; break;
+      case 212: strncpy(cfg.qrzPass, editBuf.c_str(), sizeof(cfg.qrzPass)-1);
+                cfg.qrzPass[sizeof(cfg.qrzPass)-1] = 0; qrzSessionKey = ""; break;
       case 210: { double v = editBuf.toFloat(); if (v >= 0.1 && v <= 50000.0) cfg.beaconMHz = v;
                   cfg.save(); screen = SCR_ORBIT; orbitPage = 4; lastDrawMs = 0;
                   setStatus("Saved"); return; }
+      case 213: {                                   // QRZ callsign lookup
+        String call = editBuf; call.trim(); call.toUpperCase();
+        screen = SCR_QRZ; lastDrawMs = 0;
+        if (call.length() == 0) { qrzHaveResult = false; return; }
+        setStatus("QRZ: looking up " + call + "..."); draw();
+        String err;
+        if (qrzLookup(call, err)) { qrzHaveResult = true; setStatus(""); }
+        else { qrzHaveResult = false; setStatus("QRZ: " + err); }
+        return; }
 
       // ---- rotctld (network rotator) host / port ----
       case 205: strncpy(cfg.rotHost, editBuf.c_str(), sizeof(cfg.rotHost)-1);
@@ -3212,6 +3278,9 @@ void App::draw() {
     case SCR_HELP:     drawHelp(); break;
     case SCR_ORBIT:    drawOrbit(); break;
     case SCR_SIM:      drawSim(); break;
+    case SCR_SPACEWX:  drawSpaceWx(); break;
+    case SCR_TXDB:     drawTxDb(); break;
+    case SCR_QRZ:      drawQrz(); break;
     case SCR_SUNMOON:  drawSunMoon(); break;
     case SCR_GRID:     drawGrid(); break;
     case SCR_STATES:   drawStates(); break;
@@ -3872,6 +3941,30 @@ void App::buildOrbit() {
   orbDecayDays = estimateDecayDays(*s, decayDensityScale());
   orbDecayLo   = estimateDecayDays(*s, solarDensityScale(SOLAR_LOW));   // longest life
   orbDecayHi   = estimateDecayDays(*s, solarDensityScale(SOLAR_HIGH));  // shortest life
+
+  // Pass outlook over the next ORB_OUTLOOK_DAYS days: count passes, find the best
+  // (highest) one, the longest, how many clear 30 deg, and the mean spacing.
+  orbOutlookN = 0; orbOutlookHi = 0; orbBestEl = 0; orbBestT = 0; orbBestDur = 0;
+  orbLongestMin = 0; orbAvgGapH = 0;
+  {
+    time_t winEnd = now + (time_t)ORB_OUTLOOK_DAYS * 86400;
+    time_t scan = now; time_t firstAos = 0, lastAos = 0;
+    PassPredict pp1[1];
+    for (int guard = 0; guard < 200 && scan < winEnd; ++guard) {
+      if (pred.predictPasses(scan, cfg.minPassEl, pp1, 1, winEnd) < 1) break;
+      PassPredict& p = pp1[0];
+      orbOutlookN++;
+      if (orbOutlookN == 1) firstAos = p.aos;
+      lastAos = p.aos;
+      int dur = (int)(p.los - p.aos);
+      if (p.maxEl > orbBestEl) { orbBestEl = p.maxEl; orbBestT = p.aos; orbBestDur = dur; }
+      if (dur / 60.0f > orbLongestMin) orbLongestMin = dur / 60.0f;
+      if (p.maxEl >= 30.0f) orbOutlookHi++;
+      scan = p.los + 60;          // step past this pass to find the next
+    }
+    if (orbOutlookN > 1)
+      orbAvgGapH = (float)(lastAos - firstAos) / (orbOutlookN - 1) / 3600.0f;
+  }
   setStatus("");
 }
 
@@ -3951,7 +4044,8 @@ void App::drawOrbit() {
     row("MA / phase", String(maNow, 0) + " / " + String(phase));
     canvas.setTextColor(L.sunlit ? CL_YELLOW : CL_CYAN, CL_BLACK);
     canvas.setCursor(2, y); canvas.print(L.sunlit ? "SUNLIT" : "ECLIPSE");
-    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.printf("  sun el %.0f", L.sunEl);
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.printf("  sun el %.0f  ecl dep %+.1f", L.sunEl, pred.eclipseDepthDeg(now));
     footer("` bk  ,// page");
     return;
   }
@@ -3970,8 +4064,14 @@ void App::drawOrbit() {
     if (orbEcl && orbEclT0) {
       String e = "+" + hms((long)(orbEclT0 - orbPass.aos));
       if (orbEclT1) e += " to +" + hms((long)(orbEclT1 - orbPass.aos));
-      row("Eclipse", e);
-    } else row("Eclipse", orbEcl ? "yes" : "none");
+      row("Ecl (pass)", e);
+      // deepest point in Earth's shadow during the pass (PREDICT-style depth)
+      double dMax = -90.0;
+      for (time_t t = orbPass.aos; t <= orbPass.los; t += 15) {
+        double d = pred.eclipseDepthDeg(t); if (d > dMax) dMax = d;
+      }
+      if (dMax > 0) row("Ecl depth", String(dMax, 1) + " deg peak");
+    } else row("Ecl (pass)", orbEcl ? "yes" : "none");
     if (now) {                                       // slant range + 1-way path delay
       pred.setSite(loc.obs()); pred.setSat(*s);
       double rA = pred.look(orbPass.aos).rangeKm, rT = pred.look(orbPass.tca).rangeKm,
@@ -4024,23 +4124,24 @@ void App::drawOrbit() {
   if (orbitPage == 6) {                              // ---------- Sun / beta angle ----------
     const double D2R = 0.017453292519943295;
     double beta = now ? pred.betaAngleDeg(now, s->incl, s->raan) : 0.0;
-    // Beta at which the orbit just grazes Earth's shadow (no eclipse above it):
-    // beta* = acos(Re / (Re + h)) at mean altitude. Above |beta*| -> full sun.
+    // beta* (analytic full-sun threshold) is shown as context, but the actual
+    // full-sun/eclipse verdict and fraction come from sampling one full orbit
+    // with the SAME geometric shadow test the illumination screen uses -- so the
+    // two screens never disagree near the threshold.
     double hMean = a - RE;                                  // km (a, RE in km here)
     double betaStar = (hMean > 0) ? acos(RE / (RE + hMean)) / D2R : 0.0;
-    bool fullSun = fabs(beta) >= betaStar;
-    // Approximate fraction of each orbit spent in eclipse from beta (circular
-    // shadow-cylinder geometry): f_ecl = (1/pi)*acos( sqrt(h^2+2*Re*h) /
-    // ((Re+h)*cos(beta)) ), zero when |beta| >= beta*.
-    double fEcl = 0.0;
-    if (!fullSun) {
-      double num = sqrt(hMean * hMean + 2.0 * RE * hMean);
-      double den = (RE + hMean) * cos(beta * D2R);
-      double q = (den > 0) ? num / den : 1.0;
-      if (q > 1.0) q = 1.0; if (q < -1.0) q = -1.0;
-      fEcl = acos(q) / M_PI;
-    }
     double periodMin2 = (mm > 0) ? 1440.0 / mm : 0.0;
+    double fEcl = 0.0; bool fullSun = true;
+    if (now && periodMin2 > 0) {
+      time_t period = (time_t)(periodMin2 * 60.0 + 0.5);
+      int N = 180, ecl = 0;                                 // sample the orbit at ~N points
+      for (int k = 0; k < N; ++k) {
+        time_t t = now + (time_t)((double)period * k / N);
+        if (!pred.sunlitAt(t)) ecl++;
+      }
+      fEcl = (double)ecl / N;
+      fullSun = (ecl == 0);
+    }
     row("Beta now",   String(beta, 1) + " deg");
     row("Sunlight",   fullSun ? "full-sun orbit" : "eclipsed each rev");
     row("Beta*",      "+/-" + String(betaStar, 1) + " deg (full-sun)");
@@ -4068,6 +4169,70 @@ void App::drawOrbit() {
       }
     }
     footer("` bk  ,// page  r refresh");
+    return;
+  }
+
+  if (orbitPage == 7) {                              // ---------- Pass outlook ----------
+    if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+                canvas.print("Clock not set."); footer("` bk  ,// page  r refresh"); return; }
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(2, y);
+    canvas.printf("Next %d days", ORB_OUTLOOK_DAYS); y += LH;
+    if (orbOutlookN == 0) {
+      canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, y);
+      canvas.print("No passes above mask.");
+      footer("` bk  ,// page  r refresh"); return;
+    }
+    auto hms = [](long sec) -> String { if (sec < 0) sec = 0; char b[12];
+      snprintf(b, sizeof(b), "%ld:%02ld", sec / 60, sec % 60); return String(b); };
+    row("Passes",   String(orbOutlookN) + " (" + String(orbOutlookHi) + " >30 deg)");
+    row("Longest",  String(orbLongestMin, 1) + " min");
+    row("Avg gap",  String(orbAvgGapH, 1) + " h");
+    // Best pass: when, how high, how long, and its sunlit state.
+    if (orbBestT) {
+      struct tm tmv; gmtime_r(&orbBestT, &tmv);
+      char d[16]; snprintf(d, sizeof(d), "%02d/%02d %02d:%02dZ",
+                           tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+      row("Best el",  String(orbBestEl, 0) + " deg");
+      row("Best at",  String(d));
+      row("Best in",  hms((long)(orbBestT - now)));
+      row("Best dur", hms((long)orbBestDur));
+    }
+    footer("` bk  ,// page  r refresh");
+    return;
+  }
+
+  if (orbitPage == 8) {                              // ---------- Orbit position ----------
+    if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+                canvas.print("Clock not set."); footer("` bk  ,// page"); return; }
+    const double D2R = 0.017453292519943295, TWO_PI2 = 6.283185307179586;
+    double periodS = (mm > 0) ? 86400.0 / mm : 0.0;
+    // Mean anomaly now (deg) advanced from epoch.
+    double maNow = fmod(s->ma + 360.0 * mm * (now - s->epochUnix) / 86400.0, 360.0);
+    if (maNow < 0) maNow += 360.0;
+    // Time to perigee (MA = 0/360) and apogee (MA = 180), via mean motion.
+    double toPeri = (360.0 - maNow) / 360.0 * periodS;     // s until next MA=0
+    double toApo  = fmod((180.0 - maNow + 360.0), 360.0) / 360.0 * periodS;
+    // Argument of latitude u = argp + true anomaly (approx with MA for small e is
+    // poor; use a 3-term equation-of-centre expansion for the true anomaly).
+    double M = maNow * D2R, e = s->ecc;
+    double nu = M + (2*e - 0.25*e*e*e) * sin(M)
+                  + 1.25*e*e * sin(2*M)
+                  + (13.0/12.0)*e*e*e * sin(3*M);           // true anomaly (rad)
+    double u = fmod(s->argp + nu / D2R, 360.0); if (u < 0) u += 360.0;
+    long revNow = (long)s->revAtEpoch +
+                  (long)floor((now - s->epochUnix) / periodS);
+    auto hms = [](long sec) -> String { if (sec < 0) sec = 0; char b[12];
+      snprintf(b, sizeof(b), "%ld:%02ld", sec / 60, sec % 60); return String(b); };
+    row("Mean anom", String(maNow, 1) + " deg");
+    row("True anom", String(nu / D2R, 1) + " deg");
+    row("Arg lat",   String(u, 1) + " deg");
+    row("To perigee",hms((long)toPeri));
+    row("To apogee", hms((long)toApo));
+    row("Arg peri",  String(s->argp, 1) + " deg");
+    row("RAAN",      String(s->raan, 1) + " deg");
+    row("Rev now",   String(revNow));
+    row("Epoch age", String((now - s->epochUnix) / 86400.0, 2) + " d");
+    footer("` bk  ,// page");
     return;
   }
 
@@ -4153,8 +4318,8 @@ void App::drawOrbit() {
 void App::keyOrbit(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
-  if (isRight(c)) { if (++orbitPage > 6) orbitPage = 0; lastDrawMs = 0; return; }
-  if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 6; lastDrawMs = 0; return; }
+  if (isRight(c)) { if (++orbitPage > 8) orbitPage = 0; lastDrawMs = 0; return; }
+  if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 8; lastDrawMs = 0; return; }
   if (c == 'r')   { buildOrbit(); lastDrawMs = 0; return; }
   if (c == 'f' && orbitPage == 4) {                   // edit Doppler-page beacon freq
     editTarget = 210; editTitle = "Beacon freq (MHz)";
@@ -4407,6 +4572,311 @@ void App::keySunMoon(char c, bool enter, bool back) {
     lastDrawMs = 0; return;
   }
   if (c == 'x') { if (rot) rot->stop(); smOut = false; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Space weather summary (off Home). Shows the solar 10.7 cm flux and the
+//  planetary Kp index fetched from NOAA SWPC (with GP updates), plus a plain
+//  reading of what they mean for HF and satellite operation. r = refresh.
+// ===========================================================================
+void App::drawSpaceWx() {
+  header("Space Weather");
+  canvas.setTextSize(1);
+  int y = 20; const int LH = 11;
+  auto row = [&](const char* k, const String& v, uint16_t col) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(6, y);  canvas.print(k);
+    canvas.setTextColor(col, CL_BLACK);      canvas.setCursor(104, y); canvas.print(v);
+    y += LH;
+  };
+  if (spaceF107 <= 0 && spaceKp < 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+    canvas.print("No data yet.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 70);
+    canvas.print("Update GP or press r (WiFi).");
+    footer("` back   r refresh");
+    return;
+  }
+  // --- Solar 10.7 cm flux ---
+  if (spaceF107 > 0) {
+    const char* sLbl; uint16_t sCol;
+    if      (spaceF107 < 90)  { sLbl = "low";       sCol = CL_GREY; }
+    else if (spaceF107 < 120) { sLbl = "moderate";  sCol = CL_WHITE; }
+    else if (spaceF107 < 160) { sLbl = "good";      sCol = CL_GREEN; }
+    else                      { sLbl = "very high"; sCol = CL_YELLOW; }
+    row("Solar flux", String(spaceF107, 0) + " sfu", sCol);
+    row("  (F10.7)", String(sLbl), sCol);
+  } else {
+    row("Solar flux", "--", CL_GREY);
+  }
+  // --- Planetary Kp (geomagnetic) ---
+  if (spaceKp >= 0) {
+    const char* kLbl; uint16_t kCol;
+    if      (spaceKp < 4) { kLbl = "quiet";        kCol = CL_GREEN; }
+    else if (spaceKp < 5) { kLbl = "unsettled";    kCol = CL_WHITE; }
+    else if (spaceKp < 6) { kLbl = "minor storm";  kCol = CL_YELLOW; }
+    else if (spaceKp < 7) { kLbl = "mod. storm";   kCol = CL_YELLOW; }
+    else                  { kLbl = "major storm";  kCol = CL_RED; }
+    row("Kp index", String(spaceKp, 1) + "  " + kLbl, kCol);
+  } else {
+    row("Kp index", "--", CL_GREY);
+  }
+  y += 3;
+  // --- Plain-language operating note ---
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(6, y); y += LH;
+  canvas.print("Operating outlook:");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  const char* note;
+  if (spaceKp >= 5)
+    note = "Geomag storm: aurora & VHF\nflutter likely; HF paths\ndisturbed at high lat.";
+  else if (spaceF107 >= 120 && spaceKp >= 0 && spaceKp < 4)
+    note = "Strong sun, quiet field:\ngood HF & stable sat passes.";
+  else if (spaceF107 > 0 && spaceF107 < 90)
+    note = "Weak sun: lower HF MUF;\nsat passes unaffected.";
+  else
+    note = "Settled conditions; normal\nHF and satellite operation.";
+  { int ly = y; const char* p = note;
+    while (*p) { const char* nl = strchr(p, '\n'); int len = nl ? (int)(nl - p) : (int)strlen(p);
+      String line(""); for (int i = 0; i < len; ++i) line += p[i];
+      canvas.setCursor(6, ly); canvas.print(line); ly += 10;
+      if (!nl) break; p = nl + 1; }
+  }
+  // freshness
+  if (spaceWxEpoch) {
+    long ageH = (long)((nowUtc() - spaceWxEpoch) / 3600);
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    String age = (ageH < 1) ? String("<1h old")
+               : (ageH < 48) ? (String(ageH) + "h old")
+               : (String(ageH / 24) + "d old");
+    canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
+  }
+  footer("` back   r refresh");
+}
+
+void App::keySpaceWx(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (c == 'r') {
+    if (!net.connected()) net.begin(cfg.ssid, cfg.pass);
+    if (net.connected()) { fetchSpaceWeather(); setStatus("Space wx updated"); }
+    else setStatus("No WiFi");
+    lastDrawMs = 0; return;
+  }
+}
+
+// ===========================================================================
+//  Transponder database browser (off Satellites, key 't'). Lists every
+//  transponder/beacon entry for the selected satellite from the on-device
+//  catalog (SatNOGS-sourced) in an easy-to-scan up/down/mode/tone layout.
+// ===========================================================================
+static String txMHz(uint32_t hz) {
+  if (hz == 0) return String("-");
+  char b[16]; snprintf(b, sizeof(b), "%.4f", hz / 1.0e6); return String(b);
+}
+
+void App::drawTxDb() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " TX") : String("Transponders"));
+  canvas.setTextSize(1);
+  if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+            canvas.print("No satellite."); footer("` back"); return; }
+  if (activeTxCount == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 52);
+    canvas.print("No transponders cached.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 66);
+    canvas.print("Update GP/Freq with WiFi on.");
+    footer("` back"); return;
+  }
+  // Each entry is a 3-line block: name; DOWN + mode; UP + tone/flags.
+  const int BLOCK = 3, LH = 10, ROWS = 10;          // 10 text rows in the safe band
+  const int perPage = ROWS / BLOCK;                 // 3 entries per page
+  if (txDbScroll >= activeTxCount) txDbScroll = 0;
+  int y = 19;
+  for (int e = txDbScroll; e < activeTxCount && e < txDbScroll + perPage; ++e) {
+    const Transponder& t = activeTx[e];
+    // line 1: index + description, in cyan
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(4, y);
+    { String d = String(e + 1) + ". " + String(t.desc);
+      if (d.length() > 38) d = d.substring(0, 37) + "~";
+      canvas.print(d); }
+    y += LH;
+    // line 2: downlink (range if linear) + mode
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(10, y);
+    { String dn = "D " + txMHz(t.downlink);
+      if (t.downlinkHigh > t.downlink) dn += "-" + txMHz(t.downlinkHigh);
+      dn += " " + String(t.mode);
+      canvas.print(dn); }
+    y += LH;
+    // line 3: uplink (range if linear) + tone / invert flag
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(10, y);
+    { String up = "U " + txMHz(t.uplink);
+      if (t.uplinkHigh > t.uplink) up += "-" + txMHz(t.uplinkHigh);
+      if (t.isLinear) up += t.invert ? " inv" : " lin";
+      if (t.toneHz > 0) up += " " + String(t.toneHz, 1) + "Hz";
+      canvas.print(up); }
+    y += LH + 2;                                     // small gap between entries
+  }
+  // scrollbar hints + count
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (txDbScroll > 0)                       { canvas.setCursor(232, 19);  canvas.print("^"); }
+  if (txDbScroll + perPage < activeTxCount) { canvas.setCursor(232, 112); canvas.print("v"); }
+  int last = txDbScroll + perPage; if (last > activeTxCount) last = activeTxCount;
+  { char c[24]; snprintf(c, sizeof(c), "%d-%d/%d", txDbScroll + 1, last, activeTxCount);
+    footer(String("`bk  ;/. scroll   ") + c); }
+}
+
+void App::keyTxDb(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  const int perPage = 3;
+  if (isDown(c)) { if (txDbScroll + perPage < activeTxCount) txDbScroll += perPage; lastDrawMs = 0; return; }
+  if (isUp(c))   { txDbScroll -= perPage; if (txDbScroll < 0) txDbScroll = 0; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  QRZ.com callsign lookup (off Home). Uses the QRZ XML subscription service:
+//  log in with the user's QRZ credentials to get a session key, then query a
+//  callsign. Requires WiFi and a QRZ XML-data subscription. API spec:
+//  https://www.qrz.com/page/current_spec.html
+// ===========================================================================
+static String qrzTag(const String& xml, const char* tag) {
+  String open = String("<") + tag + ">";
+  String close = String("</") + tag + ">";
+  int a = xml.indexOf(open); if (a < 0) return String("");
+  a += open.length();
+  int b = xml.indexOf(close, a); if (b < 0) return String("");
+  return xml.substring(a, b);
+}
+
+static String qrzUrlEnc(const String& s) {
+  String o; const char* hex = "0123456789ABCDEF";
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') o += c;
+    else { o += '%'; o += hex[(c >> 4) & 0xF]; o += hex[c & 0xF]; }
+  }
+  return o;
+}
+
+// Perform a lookup. On success fills the qrz* result fields and returns true.
+// On failure returns false and sets err to a user-facing message.
+bool App::qrzLookup(const String& call, String& err) {
+  const char* base = "https://xmldata.qrz.com/xml/current/";
+  // 1. Ensure we have a session key (log in if needed).
+  if (qrzSessionKey.length() == 0) {
+    String url = String(base) + "?username=" + qrzUrlEnc(cfg.qrzUser) +
+                 ";password=" + qrzUrlEnc(cfg.qrzPass) + ";agent=CardSat";
+    String body;
+    if (!net.httpsGet(url, body, 8000)) { err = "QRZ login: no response"; return false; }
+    qrzSessionKey = qrzTag(body, "Key");
+    if (qrzSessionKey.length() == 0) {
+      String e = qrzTag(body, "Error");
+      err = e.length() ? e : "QRZ login failed";
+      return false;
+    }
+  }
+  // 2. Query the callsign with the session key.
+  String url = String(base) + "?s=" + qrzSessionKey + ";callsign=" + qrzUrlEnc(call);
+  String body;
+  if (!net.httpsGet(url, body, 16000)) { err = "QRZ query: no response"; return false; }
+  // If the key expired, the response carries an Error and no Callsign node; retry once.
+  if (body.indexOf("<Callsign>") < 0) {
+    String e = qrzTag(body, "Error");
+    if (e.indexOf("Session") >= 0 || e.indexOf("Timeout") >= 0 || e.indexOf("invalid") >= 0) {
+      qrzSessionKey = "";                       // force re-login and retry
+      String url2 = String(base) + "?username=" + qrzUrlEnc(cfg.qrzUser) +
+                    ";password=" + qrzUrlEnc(cfg.qrzPass) + ";agent=CardSat";
+      String lb;
+      if (net.httpsGet(url2, lb, 8000)) qrzSessionKey = qrzTag(lb, "Key");
+      if (qrzSessionKey.length()) {
+        String q2 = String(base) + "?s=" + qrzSessionKey + ";callsign=" + qrzUrlEnc(call);
+        net.httpsGet(q2, body, 16000);
+      }
+    }
+    if (body.indexOf("<Callsign>") < 0) {
+      err = e.length() ? e : "Not found";
+      return false;
+    }
+  }
+  // 3. Parse the fields we display.
+  String fn = qrzTag(body, "fname"), ln = qrzTag(body, "name");
+  qrzName = (fn + " " + ln); qrzName.trim();
+  if (qrzName.length() == 0) qrzName = qrzTag(body, "name_fmt");
+  String a1 = qrzTag(body, "addr1"), a2 = qrzTag(body, "addr2"),
+         st = qrzTag(body, "state"), zip = qrzTag(body, "zip");
+  qrzAddr = a1;
+  { String l2 = a2; if (st.length()) l2 += (l2.length() ? ", " : "") + st;
+    if (zip.length()) l2 += " " + zip;
+    if (l2.length()) qrzAddr += (qrzAddr.length() ? "\n" : "") + l2; }
+  qrzCountry = qrzTag(body, "country");
+  qrzGrid    = qrzTag(body, "grid");
+  qrzClass   = qrzTag(body, "class");
+  qrzCall    = qrzTag(body, "call"); if (qrzCall.length() == 0) qrzCall = call;
+  qrzCall.toUpperCase();
+  return true;
+}
+
+void App::drawQrz() {
+  header("QRZ Lookup");
+  canvas.setTextSize(1);
+  // No WiFi: just say so.
+  if (!net.connected()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 50);
+    canvas.print("WiFi not connected.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 66);
+    canvas.print("Connect WiFi (Update or");
+    canvas.setCursor(6, 76); canvas.print("Settings) and try again.");
+    footer("` back");
+    return;
+  }
+  // No credentials: explain the subscription requirement.
+  if (cfg.qrzUser[0] == 0 || cfg.qrzPass[0] == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 40);
+    canvas.print("QRZ credentials needed.");
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(6, 58);
+    canvas.print("Requires a QRZ XML-data");
+    canvas.setCursor(6, 68); canvas.print("subscription. Enter your QRZ");
+    canvas.setCursor(6, 78); canvas.print("username & password in");
+    canvas.setCursor(6, 88); canvas.print("Settings > Network / data.");
+    footer("` back");
+    return;
+  }
+  // Result, or a prompt to enter a callsign.
+  if (!qrzHaveResult) {
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(6, 50);
+    canvas.print("Press ENTER to enter a");
+    canvas.setCursor(6, 60); canvas.print("callsign to look up.");
+    footer("ENTER callsign   ` back");
+    return;
+  }
+  int y = 20;
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(6, y);
+  canvas.print(qrzCall); y += 12;
+  auto line = [&](const String& s, uint16_t col) {
+    if (s.length() == 0) return;
+    canvas.setTextColor(col, CL_BLACK); canvas.setCursor(6, y);
+    String t = s; if (t.length() > 38) t = t.substring(0, 37) + "~";
+    canvas.print(t); y += 10;
+  };
+  line(qrzName, CL_WHITE);
+  // address may contain a newline (two lines)
+  { String a = qrzAddr; int nl = a.indexOf('\n');
+    if (nl >= 0) { line(a.substring(0, nl), CL_WHITE); line(a.substring(nl + 1), CL_WHITE); }
+    else line(a, CL_WHITE); }
+  line(qrzCountry, CL_GREY);
+  { String extra; if (qrzGrid.length()) extra = "Grid " + qrzGrid;
+    if (qrzClass.length()) extra += (extra.length() ? "   " : "") + String("Class ") + qrzClass;
+    line(extra, CL_GREEN); }
+  footer("ENTER new   ` back");
+}
+
+void App::keyQrz(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (!net.connected()) return;
+  if (cfg.qrzUser[0] == 0 || cfg.qrzPass[0] == 0) return;
+  if (enter) {                                  // open the text editor for a callsign
+    editTarget = 213; editTitle = "Callsign to look up";
+    editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
 }
 
 // ===========================================================================
@@ -5287,7 +5757,7 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "Sun / Moon", "Location", "Update GP/Freq",
+                          "Track (sel)", "Sun / Moon", "Space Wx", "QRZ Lookup", "Location", "Update GP/Freq",
                           "Settings", "Log", "About" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
   const int VIS = 9;
@@ -5401,7 +5871,7 @@ void App::drawSatList() {
       else                         canvas.drawCircle(cx, cy, 3, col);          // not heard = ring
     }
   }
-  footer("ENT pass o orb s sim d 10d i illum f fav v favs ` bk");
+  footer("ENT pass o orb s sim t tx d 10d i illum f fav `bk");
 }
 
 void App::drawPasses() {
@@ -5903,21 +6373,25 @@ void App::drawUpdate() {
   canvas.setTextSize(1);
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(6, 24);
-  canvas.print(String("k / ENT : download GP (") + gpSourceLabel() + ")");
+  canvas.print(String("k / ENT : update GP (") + gpSourceLabel() + ")");
   canvas.setCursor(6, 38); canvas.print("a       : cache ALL transponders");
   canvas.setCursor(6, 52); canvas.print("w       : connect WiFi only");
-  canvas.setCursor(6, 70);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, 68); canvas.print("k also refreshes AMSAT status");
+  canvas.setCursor(6, 78); canvas.print("+ space weather (flux/Kp).");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(6, 94);
   canvas.printf("Sats in memory: %d", db.count());
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 84); canvas.print("'a' downloads every sat's TX so");
-  canvas.setCursor(6, 94); canvas.print("the unit works fully offline.");
+  canvas.setCursor(6, 108); canvas.print("'a' caches every sat's TX for");
+  canvas.setCursor(6, 118); canvas.print("full offline use.");
   footer("` back");
 }
 
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 41;
+  const int N = 43;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -5988,6 +6462,8 @@ void App::drawSettings() {
                          ? String("auto (F10.7 ") + String((int)lround(spaceF107)) + ")"
                          : String("auto (no data)"))
                      : String("mean"));
+  rows[41] = String("QRZ user: ") + (cfg.qrzUser[0] ? cfg.qrzUser : "(not set)");
+  rows[42] = String("QRZ pass: ") + String(strlen(cfg.qrzPass) ? "******" : "(none)");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

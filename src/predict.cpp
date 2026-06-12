@@ -174,6 +174,41 @@ bool Predictor::sunlitAt(time_t t) {
   return !(proj < 0.0 && perp < RE_KM);
 }
 
+// Eclipse depth in degrees (PREDICT/Clarke convention). Reuses the same Sun and
+// satellite geometry as sunlitAt: with r the geocentric satellite distance, the
+// Earth subtends a half-angle sd_earth = asin(Re/r) at the satellite. The angle
+// of the satellite off the anti-solar axis is delta = asin(perp / r). The depth
+// is sd_earth - delta on the anti-sun side: positive when the satellite is
+// inside the umbral cone (eclipsed), negative (a clearance margin) in sunlight.
+double Predictor::eclipseDepthDeg(time_t t) {
+  if (!_haveSat) return -90.0;
+  _sat.findsat((unsigned long)t);
+  double jd = (double)t / 86400.0 + 2440587.5;
+  double sx, sy, sz; sunEciUnit(jd, sx, sy, sz);
+  double th = gmstRad(jd);
+  double ct = cos(th), st = sin(th);
+  double phi = _sat.satLat * DEG, lam = _sat.satLon * DEG, h = _sat.satAlt;
+  double e2 = 6.694318e-3;
+  double sphi = sin(phi), cphi = cos(phi);
+  double Nlat = RE_KM / sqrt(1.0 - e2 * sphi * sphi);
+  double rx = (Nlat + h) * cphi * cos(lam);
+  double ry = (Nlat + h) * cphi * sin(lam);
+  double rz = (Nlat * (1.0 - e2) + h) * sphi;
+  double ux =  sx * ct + sy * st;
+  double uy = -sx * st + sy * ct;
+  double uz =  sz;
+  double proj  = rx * ux + ry * uy + rz * uz;          // along Sun axis (+ = sunward)
+  double rmag2 = rx * rx + ry * ry + rz * rz;
+  double r     = sqrt(rmag2);
+  double perp  = sqrt(fmax(0.0, rmag2 - proj * proj));  // distance from Sun axis
+  double sdEarth = asin(fmin(1.0, RE_KM / r)) / DEG;     // Earth angular radius (deg)
+  double delta   = asin(fmin(1.0, perp / r)) / DEG;      // off anti-sun axis (deg)
+  // On the sunward side (proj >= 0) the satellite cannot be eclipsed; report the
+  // depth as negative (well outside the shadow) using the supplement of delta.
+  double depth = (proj < 0.0) ? (sdEarth - delta) : (sdEarth - (180.0 - delta));
+  return depth;
+}
+
 double Predictor::betaAngleDeg(time_t t, double inclDeg, double raanDeg) {
   double jd = (double)t / 86400.0 + 2440587.5;
   double sx, sy, sz; sunEciUnit(jd, sx, sy, sz);          // Sun unit vector (ECI)

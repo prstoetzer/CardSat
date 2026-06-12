@@ -137,7 +137,10 @@ static constexpr int   MUTUAL_MAX      = 24;   // co-visibility windows listed
 static constexpr int   MUTUAL_PASS_SCAN= 64;   // of my passes scanned for mutual windows
 static constexpr int   MUTUAL_HORIZON_DAYS = 10; // search co-visibility this many days out
 static constexpr int   VIS_DAYS        = 10;   // InstantTrack-style overview horizon (days)
-static constexpr int   VIS_PASS_MAX    = 64;   // passes cached for the 10-day overview
+static constexpr int   ORB_OUTLOOK_DAYS = 7;   // orbital-analysis pass-outlook window (days)
+static constexpr int   VIS_PASS_MAX    = 128;  // passes cached for the 10-day overview
+                                               // (busy LEO ~10-12/day x 10 d; was 64,
+                                               // which truncated the last day-rows)
 static constexpr int   ILLUM_DAYS      = 60;   // illumination raster columns (days)
 static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbit phase samples)
 
@@ -162,6 +165,7 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 // NOAA SWPC daily F10.7 cm solar-radio-flux observations (JSON array of records).
 // Best-effort: drives the orbital-decay density scale when "Decay solar = auto".
 #define SPACEWX_F107_URL  "https://services.swpc.noaa.gov/json/f107_cm_flux.json"
+#define SPACEWX_KP_URL    "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 #define FILE_LOG     "/CardSat/qso_log.csv"     // QSO log (CSV, notes is last field)
 #define FILE_ADIF    "/CardSat/qso_log.adi"     // ADIF export (generated on demand)
 #define FILE_LOTW    "/CardSat/lotw_sats.csv"   // LoTW SAT_NAME map ("SAT_NAME,AMSAT_NAME")

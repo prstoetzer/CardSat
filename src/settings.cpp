@@ -18,6 +18,8 @@ bool Settings::load() {
   strncpy(pass, d["pass"] | "", sizeof(pass)-1);
   strncpy(gpUrl, d["gpurl"] | AMSAT_GP_URL, sizeof(gpUrl)-1); gpUrl[sizeof(gpUrl)-1]=0;
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
+  strncpy(qrzUser, d["qrzuser"] | "", sizeof(qrzUser)-1); qrzUser[sizeof(qrzUser)-1]=0;
+  strncpy(qrzPass, d["qrzpass"] | "", sizeof(qrzPass)-1); qrzPass[sizeof(qrzPass)-1]=0;
   lat        = d["lat"] | 0.0;
   lon        = d["lon"] | 0.0;
   altM       = d["alt"] | 0.0;
@@ -82,6 +84,7 @@ bool Settings::save() {
   d["ssid"] = ssid;  d["pass"] = pass;
   d["gpurl"] = gpUrl;
   d["mycall"] = myCall;
+  d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;

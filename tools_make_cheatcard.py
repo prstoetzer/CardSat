@@ -27,10 +27,10 @@ FRONT = [
   "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "Sun/Moon, Location, Update, Settings, Log, About"),
+  "Sun/Moon, Space Wx, QRZ Lookup, Location, Update, Settings, Log, About"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; "
-  "<b>o</b> orbital &middot; <b>s</b> sim &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
+  "<b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
   "right edge: dot = AMSAT heard, square = telemetry, ring = not heard"),
  ("NEXT PASSES (favs)",
   "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
@@ -65,10 +65,20 @@ BACK = [
   "Graphic sky-dome (Sun/Moon glyphs by az/el) &middot; <b>g</b> graphic/list &middot; "
   "<b>;</b>/<b>.</b> pick Sun/Moon &middot; <b>o</b> rotor track on/off &middot; "
   "<b>x</b> stop &middot; <b>`</b> back"),
+ ("SPACE WX (menu)",
+  "Solar 10.7cm flux + planetary Kp, labelled &amp; colour-coded, with HF/sat "
+  "operating outlook &amp; data age &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
+ ("QRZ LOOKUP (menu)",
+  "Callsign lookup via QRZ.com XML (needs QRZ XML subscription + user/pass in "
+  "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
+ ("TRANSPONDER DB (Sats &rarr; t)",
+  "Scroll the selected sat's transponder/beacon entries: desc, <b>D</b> downlink+mode, "
+  "<b>U</b> uplink+tone/inv &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
-  "<b>,</b>/<b>/</b> pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta &middot; "
-  "<b>r</b> recompute. Info: footprint dia (= longest QSO) + decay range. Doppler <b>f</b> sets beacon "
-  "freq. Nodal: J2 drift, sun-sync, LTAN. Sun/Beta: beta angle, eclipse %/orbit."),
+  "<b>,</b>/<b>/</b> 9 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
+  "Pass outlook / Orbit position &middot; <b>r</b> recompute. Info: footprint dia (= longest QSO) + decay. "
+  "Live/Next: eclipse depth. Nodal: J2 drift, sun-sync, LTAN. Sun/Beta: beta, eclipse %/orbit. "
+  "Outlook: 7-day best pass. Position: anomaly, to perigee/apogee. Doppler <b>f</b> sets beacon freq."),
  ("SIMULATION",
   "<b>,</b>/<b>/</b> step time &middot; <b>;</b>/<b>.</b> step size &middot; "
   "<b>m</b> world-map view (sub-point + footprint) &middot; "
@@ -120,7 +130,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.11  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.12  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/2' % (side, pg))

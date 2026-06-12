@@ -2,9 +2,10 @@
 
 A performance and fixes release. Computing **workable DXCC** and **workable US
 states** for a *future pass* is now roughly **12–15× faster** with identical
-results; the **Update screen** names the GP source that will actually be
-downloaded; and **CelesTrak** GP queries use the correct request format (with a
-migration for sources saved by older builds).
+results; the **illumination and orbital-analysis screens now agree** on whether an
+orbit is full-sun or eclipsed; the **Update screen** names the GP source that will
+actually be downloaded; and **CelesTrak** GP queries use the correct request
+format (with a migration for sources saved by older builds).
 
 > **Hardware status — unchanged.** Pass prediction, plots, GPS, the AOS alarm,
 > deep sleep, and the offline caches are confirmed on hardware. Radio, rotator,
@@ -12,8 +13,77 @@ migration for sources saved by older builds).
 
 ---
 
+## New in this release
+
+- **QRZ callsign lookup (off the Home menu).** A new "QRZ Lookup" screen looks up a
+  callsign in the **QRZ.com** database over its XML data service and shows the
+  operator's name, mailing address, country, grid square and licence class. It
+  needs a **QRZ XML-data subscription**: enter your QRZ username and password in
+  *Settings → Network / data* (password stored masked, like the other
+  credentials). The screen handles the edge cases plainly — no WiFi says so, no
+  credentials explains the subscription requirement, and QRZ errors (not found /
+  bad password) are shown in the status line. The session key is cached and reused,
+  with automatic re-login on expiry.
+- **TCA and LOS pass sounds.** In addition to the AOS countdown beeps, the alarm
+  now chirps at **TCA** (closest approach / peak elevation, a double mid-tone) and
+  at **LOS** (a descending two-tone) so you can work a pass by ear. All three
+  (AOS, TCA, LOS) are gated by the single AOS-alarm setting — turning alerts off
+  silences every pass sound.
+- **Space Weather screen (off the Home menu).** A new "Space Wx" entry shows the
+  solar **10.7 cm flux** and the planetary **Kp index** (fetched from NOAA SWPC
+  with GP updates, or on demand with `r`), each labelled (quiet/storm, low/high)
+  and colour-coded, with a plain-language operating outlook for HF and satellite
+  conditions and a data-freshness note.
+- **Transponder browser (off Satellites, key `t`).** A new screen lists every
+  transponder/beacon entry the on-device catalog holds for the selected satellite
+  in a scrollable up/down/mode/tone layout — handy for checking a bird's
+  frequencies without a radio connected.
+- **Two new orbital-analysis pages.** The analysis screen gains a **Pass outlook**
+  page — a 7-day planning summary (total passes, how many clear 30°, the longest
+  pass, the mean gap between passes, and the single best upcoming pass with its
+  elevation, date/time, countdown and duration) — and an **Orbit position** page
+  (mean and true anomaly, argument of latitude, time to the next perigee and
+  apogee, argument of perigee, RAAN, current revolution number, and element age).
+  The outlook is computed once per recompute; the position page is live. Page
+  order is now Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta
+  / Pass outlook / Orbit position.
+- **Eclipse depth (orbital analysis).** Bringing CardSat in line with PREDICT,
+  the orbital-analysis screen now reports **eclipse depth** — the angle (degrees)
+  by which the satellite sits inside Earth's umbral shadow cone, computed as
+  Earth's angular radius seen from the satellite minus the satellite's angular
+  distance from the anti-solar axis. Positive means eclipsed (deeper = more
+  positive, peaking at Earth's angular radius when dead-centre in shadow);
+  negative is a sunlight clearance margin. It appears live on the **Live** page
+  beside the sunlit/eclipse flag, and as a **peak eclipse depth** on the **Next
+  pass** page when the bird transits shadow during the pass. The value reuses the
+  same Sun/shadow geometry as the existing sunlit test, so it stays consistent
+  with the illumination and Sun/Beta screens.
+
 ## Fixes
 
+- **Update screen makes clear it refreshes more than GP.** Pressing `k` on the
+  Update screen has long fetched the AMSAT activity marks and (more recently) the
+  space-weather data alongside the GP elements; the screen now says so, with the
+  GP line reading "update GP (source)" and a note that the same action also
+  refreshes AMSAT status and space weather. No behaviour change — just an honest
+  label.
+
+- **10-day overview now fills every day.** The chart cached at most 64 passes,
+  but a busy LEO can have 70–100+ passes over ten days, so the buffer filled
+  before the last day-rows and they appeared empty. The cache is raised to 128
+  passes (~3 KB), enough for ~12 passes/day across the full window. *(The fetch is
+  still bounded by the 10-day time horizon, so it stops as soon as the window is
+  covered.)*
+- **Illumination and orbital-analysis agree on full-sun vs eclipse.** The
+  Sun/Beta page decided "full-sun orbit" vs "eclipsed each rev" from an analytic
+  beta-vs-beta* threshold using mean altitude, while the illumination screen used
+  a direct geometric shadow test sampled over the orbit. Near the threshold the
+  two could disagree. The Sun/Beta page now derives its verdict and eclipse
+  percentage from the **same per-orbit geometric sampling** the illumination
+  screen uses, so they're consistent; beta and beta* are still shown as context.
+  The orbital-analysis Info page's pass-scoped eclipse row is relabelled
+  "Ecl (pass)" to make clear it refers to shadow transit during the current pass,
+  not the per-orbit eclipse state.
 - **Update screen now names the actual GP source.** The Update screen always read
   "download GP (AMSAT)" even when a CelesTrak category or a custom URL was
   selected. It now shows the configured source — e.g. "download GP (CT:amateur)"

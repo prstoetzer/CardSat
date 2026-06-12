@@ -365,9 +365,13 @@ recompute, `` ` `` to leave:
   through it. It grows with altitude, so for an elliptical orbit the apogee
   figure is the best case and perigee the worst.
 - **Live** — az/el, range, range-rate, Doppler at 145.8/435 MHz, sub-point,
-  mean anomaly/phase, and sunlit flag.
+  mean anomaly/phase, the sunlit/eclipse flag, and the **eclipse depth** — the
+  PREDICT-style angle (degrees) by which the satellite is inside Earth's umbral
+  shadow (positive when eclipsed, negative as a sunlight margin), so you can see
+  not just *whether* it's in shadow but *how deeply*.
 - **Next pass** — AOS countdown, duration, max elevation, AOS/LOS azimuths,
-  sunlit fraction, eclipse entry/exit, the optical-visibility flag, the **slant
+  sunlit fraction, eclipse entry/exit, the **peak eclipse depth** if the bird
+  transits shadow during the pass, the optical-visibility flag, the **slant
   range at AOS/TCA/LOS** and the **one-way path delay** at closest approach
   (range ÷ c).
 - **Ground track** — the next two orbits projected on an equirectangular map.
@@ -384,6 +388,17 @@ recompute, `` ` `` to leave:
   understanding why pass times march earlier each day, whether a bird is
   sun-synchronous, and how long the very best passes can run — not a precision
   propagator.
+- **Pass outlook** — a planning summary over the next 7 days: the total number of
+  passes above your mask, how many clear 30°, the longest pass, and the mean gap
+  between passes — plus the **best upcoming pass** (its peak elevation, the
+  date/time it occurs, the countdown to it, and its duration). This answers "when
+  this week is worth operating this bird" at a glance.
+- **Orbit position** — where the satellite is in its orbit right now: mean
+  anomaly, true anomaly, and **argument of latitude**, the **time to the next
+  perigee and apogee**, plus argument of perigee, RAAN, the current revolution
+  number, and the element-set age. For eccentric orbits the perigee/apogee timing
+  shows when the bird is moving slowest and sitting highest — i.e. when the
+  longest-dwell passes occur.
 
 ### Next Passes (schedule)
 
@@ -624,8 +639,11 @@ whichever screen opened it.
 
 ### Update
 
-- `k` or **ENTER** — download GP data from AMSAT and sync the clock (NTP). This
-  also refreshes the AMSAT OSCAR **activity marks** shown on the Satellites list.
+- `k` or **ENTER** — update GP data from your configured source and sync the clock
+  (NTP). The same action also refreshes the AMSAT OSCAR **activity marks** shown on
+  the Satellites list **and** the **space-weather** data (solar flux + Kp), so one
+  press brings everything current. The Update screen notes this so it's clear `k`
+  does more than GP.
 - `a` — fetch and cache **all** transponders for offline use.
 - `w` — connect WiFi only (no download).
 - `` ` `` — back. Diagnostics print to the serial monitor at 115200.
@@ -657,6 +675,7 @@ on-screen key reference. The notable rows:
 | CAT delay | `,`/`/` adjust the pause after each command, 0–200 ms in 2 ms steps (default 70 ms; CI-V/Icom only) |
 | Screen sleep | `,`/`/` cycle off / 30 s / 1 min / 2 min / 5 min — blanks the backlight after that idle time |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
+| QRZ user / QRZ pass | ENTER → enter your QRZ.com username / password for the **QRZ Lookup** screen (requires a QRZ XML-data subscription). Password shown masked. Under *Network / data*. |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
 | Restore config+favs | ENTER → restore them from the backup files |
 | **Reset all data** | ENTER → type **ERASE** to wipe everything (red row) |
@@ -809,8 +828,12 @@ eclipse.
 **AOS alarm** (toggle in Settings → *AOS alarm*): when enabled and you have
 favorites and a set clock, CardSat tracks the soonest upcoming favorite AOS in the
 background. It **beeps** at T-60 s, T-30 s, and T-10 s, then sounds a longer
-double-beep and shows a blinking **"AOS!"** banner at acquisition. A small orange
-countdown banner appears on any screen within the last minute.
+double-beep and shows a blinking **"AOS!"** banner at acquisition. Once a pass is
+underway it also chirps at **TCA** (closest approach / peak elevation — a double
+mid-tone) and at **LOS** (a descending two-tone), so you can follow a pass by ear
+without watching the screen. All of these sounds are governed by this one setting:
+turning the AOS alarm off silences the AOS, TCA and LOS cues together. A small
+orange countdown banner appears on any screen within the last minute.
 
 **Deep sleep** (Next Passes → `z`): CardSat computes the next favorite AOS and
 puts the ESP32 into deep sleep until **~60 s before** it, dramatically extending
@@ -865,6 +888,57 @@ Behavior notes:
 - The Moon ephemeris is a low-precision series (~arc-minutes after topocentric
   parallax correction) — far finer than any amateur antenna beamwidth. The Sun
   is good to ~0.01°.
+
+### Space weather
+
+**Space Wx** on the main menu summarises the two indices that matter most for
+propagation: the **solar 10.7 cm radio flux** (F10.7, a proxy for solar activity
+and ionospheric ionisation) and the **planetary Kp index** (geomagnetic
+disturbance, 0–9). Both are fetched from NOAA SWPC together with GP updates, or on
+demand with **`r`** (needs WiFi). Each value is labelled in plain terms — flux
+low/moderate/good/very-high, Kp quiet/unsettled/storm — and colour-coded, with a
+short **operating outlook** line translating the numbers into what to expect on HF
+and satellite paths, plus a note of how old the data is.
+
+This is a planning cue, not a forecast: the flux and Kp are observed values, and
+the outlook text is a simple heuristic reading of them, not a calibrated
+propagation prediction. A high Kp (storm) is the main thing to watch — it warns of
+auroral flutter on VHF and disturbed high-latitude HF.
+
+### Transponder database
+
+From the **Satellites** list, press **`t`** to browse every transponder and
+beacon entry the on-device catalog holds for the selected satellite (sourced from
+SatNOGS with the transponder cache). Each entry is shown as a short block: its
+description, the **downlink** (a range for linear transponders) with mode, and the
+**uplink** with any CTCSS tone and inverting/linear flags. `;`/`.` scrolls through
+the list. It's a quick offline reference for a bird's frequencies and modes — handy
+for checking what a satellite carries without a radio connected. If nothing shows,
+the transponders haven't been cached yet; run **Update GP/Freq** with WiFi on.
+
+### QRZ callsign lookup
+
+**QRZ Lookup** on the main menu looks up a callsign in the **QRZ.com** database and
+shows the operator's name, mailing address, country, grid square and licence class.
+It uses QRZ's XML data service, which **requires a QRZ XML-data subscription**.
+
+To use it, enter your QRZ **username** and **password** in *Settings → Network /
+data* (rows **QRZ user** / **QRZ pass**). Then open **QRZ Lookup**, press **ENTER**,
+type a callsign, and press ENTER again. CardSat logs in to QRZ, caches the session
+key, and displays the result; the key is reused for subsequent lookups until it
+expires (then it re-logs in automatically).
+
+The screen handles the obvious cases plainly:
+
+- **No WiFi** — it simply says WiFi isn't connected; connect via Update or Settings
+  and try again.
+- **No credentials** — it explains that a QRZ XML subscription is required and that
+  you need to enter your username and password in Settings.
+- **Not found / login error** — the QRZ error message (e.g. "Not found", "password
+  incorrect") is shown in the status line.
+
+Your QRZ password is stored on the device the same way the WiFi and radio-LAN
+passwords are; it is shown masked in Settings. CardSat talks to QRZ over HTTPS.
 
 ---
 
@@ -1368,8 +1442,8 @@ in line and the controller's baud matches **Rot baud** in Settings.
 
 | Screen | Keys |
 |---|---|
-| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `o` orbital analysis · `s` simulation · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
-| **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Next pass: slant ranges + path delay · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · `r` recompute · `` ` `` back |
+| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `o` orbital analysis · `s` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
+| **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / Pass outlook / Orbit position) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Live: az/el/range/Doppler, mean anomaly/phase, sunlit/eclipse + **eclipse depth** (deg; >0 = in shadow) · Next pass: slant ranges + path delay + peak eclipse depth · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · Pass outlook: 7-day pass count/>30° count/longest/avg gap + the best upcoming pass (elevation, when, duration) · Orbit position: mean/true anomaly, argument of latitude, time to perigee/apogee, RAAN, rev number · `r` recompute · `` ` `` back |
 | **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |
 | **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
@@ -1396,6 +1470,9 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
 | **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |
 | **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
+| **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp index, each labelled & colour-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · `r` refresh over WiFi · `` ` `` back |
+| **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
+| **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
 | **About** | build/version, IP, free heap and diagnostics (read-only) |
 

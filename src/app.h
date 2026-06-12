@@ -16,7 +16,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -135,6 +135,16 @@ private:
   double   orbDecayDays = -1;       // rough days-to-reentry (-1 n/a, 1e9 stable)
   double   orbDecayLo = -1;         // low-density (solar-min) bound: longer life
   double   orbDecayHi = -1;         // high-density (solar-max) bound: shorter life
+
+  // Pass outlook (page 7): aggregate stats over the next ORB_OUTLOOK_DAYS days,
+  // computed once in buildOrbit().
+  int      orbOutlookN = 0;         // passes in the window
+  int      orbOutlookHi = 0;        // of those, count above 30 deg
+  float    orbBestEl = 0;           // best (max) elevation in the window
+  time_t   orbBestT = 0;            // AOS time of that best pass
+  int      orbBestDur = 0;          // duration (s) of that best pass
+  float    orbLongestMin = 0;       // longest pass duration in the window (min)
+  float    orbAvgGapH = 0;          // mean spacing between passes (hours)
   // Simulation screen (off Satellites): scrub a frozen UTC time
   time_t   simTime = 0;
   bool     simMap = false;          // Sim screen: world-map view vs data list
@@ -177,6 +187,8 @@ private:
   // Live space weather (fetched with GP). f107 <= 0 means "none cached yet".
   float    spaceF107      = -1;     // last-known 10.7 cm solar radio flux (sfu)
   time_t   spaceWxEpoch   = 0;      // unix time the F10.7 value was observed/fetched
+  float    spaceKp        = -1;     // latest planetary Kp index (0-9, -1 = none)
+  int      spaceScroll    = 0;      // Space Wx screen scroll position
   char     dxGrid[8] = {0};
   double   dxLat = 0, dxLon = 0;
 
@@ -188,6 +200,9 @@ private:
   char       nextAosName[26] = {0};
   time_t     alarmAos = 0;             // AOS we're currently counting down to
   uint8_t    alarmMarks = 0;           // bitmask of countdown beeps already fired
+  time_t     alarmTca = 0;             // TCA of the pass in progress (0 = none)
+  time_t     alarmLos = 0;             // LOS of the pass in progress (0 = none)
+  uint8_t    alarmPassMarks = 0;       // TCA/LOS beeps already fired this pass
   uint32_t   aosFlashUntil = 0;        // screen-flash overlay end (millis)
   char       aosFlashName[26] = {0};
   int      curTx = 0;             // selected transponder index for active sat
@@ -398,6 +413,16 @@ private:
   void buildOrbit(); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
+  void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
+  void drawTxDb();    void keyTxDb(char c, bool enter, bool back);
+  int  txDbScroll = 0;             // transponder-browser scroll position
+  void drawQrz();     void keyQrz(char c, bool enter, bool back);
+  bool qrzLookup(const String& call, String& err);  // returns true on success
+  String qrzSessionKey;            // cached QRZ XML session key (empty = need login)
+  String qrzCall;                  // last looked-up callsign
+  String qrzName, qrzAddr, qrzGrid, qrzCountry, qrzClass;  // parsed result fields
+  bool   qrzHaveResult = false;    // a result is on screen
+  int    qrzScroll = 0;            // result scroll (for long bios/addresses)
   void buildGrids(time_t a, time_t b);
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);

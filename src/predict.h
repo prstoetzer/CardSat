@@ -47,6 +47,12 @@ public:
   // time t. Lightweight: propagate + shadow test only, no observer geometry.
   bool sunlitAt(time_t t);
 
+  // Eclipse depth (deg), PREDICT/Clarke convention: how far the satellite is
+  // inside (positive) or outside (negative) Earth's umbral shadow cone, as the
+  // difference between Earth's angular radius seen from the satellite and the
+  // satellite's angular distance from the anti-solar axis. >0 = eclipsed.
+  double eclipseDepthDeg(time_t t);
+
   // Solar beta angle (deg) for an orbit of the given inclination and RAAN at
   // time t: the angle between the orbit plane and the Sun direction. Near 0 the
   // orbit plane contains the Sun (long eclipses each rev); near +/-90 the plane

@@ -43,6 +43,7 @@ bool Settings::load() {
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
+  solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
@@ -91,6 +92,7 @@ bool Settings::save() {
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
   d["beacon"] = beaconMHz;
+  d["solar"] = solarAct;
   d["dimsecs"] = dimSecs;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;

@@ -345,6 +345,20 @@ recompute, `` ` `` to leave:
   perigee altitudes, the **footprint diameters at apogee and perigee**,
   inclination/eccentricity, semi-major axis, B\* with a rough drag-decay
   estimate, element age/revolution, and the next ascending-node longitude/time.
+  The decay estimate integrates B\* through an exponential-atmosphere model with
+  a **King-Hele** treatment that lets an eccentric orbit circularize (drag at
+  perigee lowers apogee fastest), down to a ~120 km reentry. Because
+  thermospheric density swings about a factor of ten over the solar cycle - the
+  single biggest driver of lifetime - a second **"Decay rng"** line shows the
+  bracket from **solar maximum (shortest)** to **solar minimum (longest)**, with
+  the assumed level (`mean`/`min`/`max`/`auto`, set in *Settings -> Station /
+  display -> Decay solar*) in parentheses. In **`auto`** the density scale is
+  derived from the live **F10.7 solar flux**, downloaded with the GP elements and
+  cached (the setting row shows the current value); without a cached flux it
+  falls back to mean. Treat all of this as **order-of-magnitude**: it
+  ignores attitude, lift, and short-term space weather, and B\* itself is often
+  a fitted fudge term, so the chart is a "should I worry about this object" cue,
+  not a reentry prediction.
   The **footprint** is the diameter of the visibility circle on the ground
   (`2·Re·acos(Re/(Re+h))`) — the widest separation between two stations that can
   both see the bird at once, i.e. the **longest theoretically possible QSO**
@@ -435,10 +449,14 @@ From **Passes**, press **`v`** for an at-a-glance chart of the selected
 satellite's passes over the **next 10 days**, modelled on InstantTrack's
 "Multiple Days for Single Satellite" visibility screen. Each row is one day
 (today at the top), drawn as a 24-hour timeline (00–24 h UTC, left to right) with
-faint gridlines at 06/12/18 h. Every pass is a coloured bar from AOS to LOS,
-shaded by peak elevation — **dim green** below 15°, **green** to 40°, **yellow**
-above — so high passes stand out. A red tick on the top row marks the current
-time. `r` recomputes; `` ` `` returns to Passes.
+faint gridlines at 06/12/18 h. The window is aligned to UTC midnight and spans
+ten **full** days, so every row is filled edge to edge — the chart is not cut off
+partway through the last day at the time you opened it. Every pass is a coloured
+bar from AOS to LOS, shaded by peak elevation — **dim green** below 15°,
+**green** to 40°, **yellow** above — so high passes stand out. A red tick on the
+top row marks the current time. **`;`/`.` scroll one day at a time** — the oldest
+day falls off the top and a new day appears at the bottom (you can scroll forward
+indefinitely, but not before today). `r` recomputes; `` ` `` returns to Passes.
 
 ---
 
@@ -454,8 +472,9 @@ widening and narrowing as the orbit plane precesses relative to the Sun and
 vanishing entirely during **full-sun seasons** (handy for judging solar-panel
 charging). Below the raster a live readout shows the **current status**
 (`SUN`/`SHADOW`), the **eclipse minutes per orbit** and percentage for the
-current orbit, and the time to the next Sun↔shadow transition. `r` recomputes;
-`` ` `` returns to Passes.
+current orbit, and the time to the next Sun↔shadow transition. **`,`/`/` scroll
+one day at a time** through the 60-day window (forward indefinitely, not before
+today). `r` recomputes; `` ` `` returns to Passes.
 
 > Eclipse uses a cylindrical-shadow model (no penumbra) and the raster is
 > sampled, so the band edges and transition times are good to about a minute.
@@ -485,6 +504,8 @@ Controls:
   Hz, `0` to force it off, or blank to revert to the built-in default).
 - `r` — turn radio output **on/off** (sets modes and begins Doppler service).
 - `p` — open the **Polar** plot.
+- `f` — open **Manual mode** (frequency calculator; see below). Useful when you
+  have no CAT-controlled radio and are tuning by hand.
 - **ENTER** — save the current calibration **for this satellite**.
 - `` ` `` — first press stops the radio output; second press goes back.
 
@@ -492,6 +513,34 @@ TUNE-mode keys: `,`/`/` tune down/up the passband, `s` cycle step
 (100/1000/5000 Hz), `x` recenter. CAL-mode keys: `,`/`/` trim downlink, `;`/`.`
 trim uplink, `s` cycle step (10/100/1000 Hz), `x` zero. See
 [§9](#9-doppler-tuning-and-the-one-true-rule) and [§10](#10-calibration).
+
+### Manual mode (`f` from Track)
+
+**Manual mode** is for operating without a CAT-controlled radio: it shows the
+same live data as Track but **never commands a radio or rotator**. Instead, you
+fix one leg — the frequency you'll hold on your own rig — and it shows the
+**Doppler-corrected frequency to tune the other leg to**, updated live, with your
+saved calibration applied.
+
+The two frequency rows are marked **HOLD** (the leg you park on your radio, shown
+at its nominal value without Doppler) and **TUNE>** (the leg you must follow,
+shown Doppler-corrected). Press **`u`** to toggle which leg is fixed:
+
+- **Linear birds** — fixing the downlink shows the uplink to transmit (and vice
+  versa). `,`/`/` move the fixed frequency through the passband, `s` cycles the
+  step, `x` recenters. The HOLD leg's parked value moves with the passband; the
+  TUNE> leg follows with Doppler.
+- **FM birds** — pick which leg is fixed with `u` (typically the **VHF** leg,
+  which has little Doppler and is the one you park). The other (UHF) leg shows
+  the Doppler-corrected frequency to chase. A hint line notes which leg is fixed
+  and whether it's VHF.
+- **Downlink-only birds** — just the computed downlink to tune your receiver to.
+
+`m` toggles **CAL** (trim the same per-satellite calibration as Track), `t`
+cycles transponder, `l` logs a QSO, `p` opens the polar plot, `g` opens live
+workable grids — and **the log, polar, and grid screens all return here** rather
+than to Track. **ENTER** saves calibration for this satellite. `` ` `` or `f`
+returns to Track.
 
 ### Polar
 
@@ -516,11 +565,14 @@ time you can. Reached two ways:
 - `g` from **Track** — the grids under the footprint **right now**, refreshed
   about every 3 s. Radio and rotator tracking keep running while you view it.
 
-Grids are listed six per row in alphabetical order with a live count in the
-header; `;`/`.` scroll a row at a time and `{`/`}` page. Coverage is computed
-with a per-grid bitset, so there is **no cap** on the number of grids — it works
-for any amateur satellite, including high orbits (a ~2500 km bird floods roughly
-4500 grids). `` ` `` returns to whichever screen opened it.
+Grids are listed six per row in alphabetical order. The **workable count** is
+shown on its own cyan line at the top of the list (the header had no room for
+it), and when the list spills past one page that line also shows the visible
+window, e.g. `1370 workable  (1-48)`. `;`/`.` scroll a row at a time and `{`/`}`
+page. Coverage is computed with a per-grid bitset, so there is **no cap** on the
+number of grids — it works for any amateur satellite, including high orbits (a
+~2500 km bird floods roughly 4500 grids). `` ` `` returns to whichever screen
+opened it.
 
 ### Location
 
@@ -553,6 +605,7 @@ on-screen key reference. The notable rows:
 | CI-V addr | ENTER → edit (hex); Icom only |
 | CAT baud | `,`/`/` cycle 1200…115200 (incl. 57600) — applies to all radio protocols |
 | Min pass el | `,`/`/` 0–30° |
+| Decay solar | `,`/`/` cycle assumed solar activity **mean → min → max → auto** for the orbital-analysis decay estimate (changes the headline number and the bracket). **auto** uses the live F10.7 flux fetched with GP data |
 | WiFi SSID | ENTER → edit · **`s`** → scan for networks and pick one |
 | WiFi pass | ENTER → edit |
 | Save & test WiFi | ENTER → connect and report OK/FAIL |
@@ -747,11 +800,18 @@ fade, which is plenty for knowing whether a bird has power or is optically visib
 
 ### Sun / Moon antenna tracking
 
-**Sun / Moon** on the main menu shows live azimuth/elevation for both bodies from
-your location (`;`/`.` selects one). Press **`o`** to drive the rotator at the
-selected body — useful for antenna gain checks against Sun noise, EME pointing,
-or rotator calibration against a visible target. **`x`** stops; **`` ` ``** parks
-and disengages.
+**Sun / Moon** on the main menu shows the live position of both bodies from your
+location. It opens in a **graphical sky view**: a polar dome (zenith at centre,
+North up, horizon at the rim) with the Sun drawn as a rayed yellow disc and the
+Moon as a cyan crescent, so you can see at a glance where each one is. A compact
+panel on the right lists azimuth, elevation and above/below-horizon for both. A
+body below the horizon is shown faintly just outside the rim so its bearing is
+still readable. Press **`g`** to toggle between the graphic and a plain
+azimuth/elevation data list. `;`/`.` selects which body the rotator follows
+(marked with a green ring, not a highlight bar). Press **`o`** to drive the
+rotator at the selected body — useful for antenna gain checks against Sun noise,
+EME pointing, or rotator calibration against a visible target. **`x`** stops;
+**`` ` ``** parks and disengages.
 
 Behavior notes:
 
@@ -1269,15 +1329,16 @@ in line and the controller's baud matches **Rot baud** in Settings.
 
 | Screen | Keys |
 |---|---|
-| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `o` orbital analysis · `s` simulation · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
-| **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay · Next pass: slant ranges + path delay · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · `r` recompute · `` ` `` back |
-| **Simulation** | `,`/`/` step time · `;`/`.` step size · `x` reset to now · `` ` `` back |
+| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `o` orbital analysis · `s` simulation · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
+| **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Next pass: slant ranges + path delay · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · `r` recompute · `` ` `` back |
+| **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |
 | **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `l` log QSO · `g` workable grids now (radio/rotator keep running) · ENTER save cal |
-| **Workable grids** | 4-char Maidenhead grids under the footprint (per-pass union or live, refreshing ~3 s; uncapped, works to high orbits) · `;`/`.` and `{`/`}` scroll · `` ` `` back |
+| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `f` Manual mode · `l` log QSO · `g` workable grids now (radio/rotator keep running) · ENTER save cal |
+| **Manual mode** | no-radio frequency calculator · `u` toggle which leg is fixed (HOLD vs TUNE>) · `,`/`/` move fixed freq in passband (linear) · `s` step · `x` center · `m` CAL · `t` next TX · `l` log · `p` polar · `g` grids (all return here) · ENTER save cal · `` ` ``/`f` back to Track |
+| **Workable grids** | 4-char Maidenhead grids under the footprint (per-pass union or live, refreshing ~3 s; uncapped, works to high orbits) · count shown on a cyan line above the list · `;`/`.` and `{`/`}` scroll · `` ` `` back |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
 | **Track · CAL** | `,`/`/` downlink ∓ · `;`/`.` uplink ∓ · `s` step (10/100/1k) · `x` zero |
 | **Polar** | `l` log QSO · `p`/ENTER/`` ` `` back to track |
@@ -1285,8 +1346,8 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Log · list** | `;`/`.` scroll · ENTER edit entry · `` ` `` back |
 | **Log · entry** | `;`/`.` field · ENTER edit · `s` save · `x`×2 delete · `` ` `` back |
 | **Mutual** | `;`/`.` scroll · `` ` ``/ENTER back to passes |
-| **10-day** | `;`/`.` page ∓10 d (forward indefinitely) · `r` recompute · `` ` ``/ENTER back |
-| **Illum** | `,`/`/` page ∓60 d (forward indefinitely) · `r` recompute · `` ` ``/ENTER back |
+| **10-day** | `;`/`.` scroll ∓1 day (forward indefinitely, oldest day off the top; not before today) · `r` recompute · `` ` ``/ENTER back |
+| **Illum** | `,`/`/` scroll ∓1 day (forward indefinitely; not before today) · `r` recompute · `` ` ``/ENTER back |
 | **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock · ENTER GPS sky plot |
 | **GPS sky plot** | live GNSS az/el coloured by signal · `` ` `` back |
 | **World map** | `f` highlight a favorite · `y` sun · `c` eclipse · `` ` `` back |
@@ -1295,7 +1356,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Update** | `k`/ENTER GP · `a` cache all TX · `w` WiFi only |
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
 | **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |
-| **Sun / Moon** | `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
+| **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
 | **About** | build/version, IP, free heap and diagnostics (read-only) |
 

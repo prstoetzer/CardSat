@@ -17,12 +17,14 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
-> **New in v0.9.8:** a realistic coastline world map with all-favourite
-> footprints (`f` highlights one), a GPS sky plot, manual rotator control, a
-> proper per-pass flip, a two-level Settings menu with an on-device Help screen,
-> and four new network control surfaces — a **rigctl** client (drive a remote
-> rigctld-attached radio) plus **rigctld** and **rotctld** *servers* (let a PC
-> drive CardSat's wired radio/rotator). See **[RELEASE_NOTES_0.9.8.md](RELEASE_NOTES_0.9.8.md)**.
+> **New in v0.9.10:** a no-radio **Manual mode** (off Track) that computes the
+> Doppler-corrected frequency to tune by hand when you fix one leg; a **Sun/Beta
+> angle** page in orbital analysis; **live F10.7 space weather** fetched with GP
+> data to drive an **auto** decay estimate; a **retuned decay model** (King-Hele
+> eccentricity decay, realistic lifetimes, solar-activity range); **10-day /
+> illumination** charts now also reachable straight from the Satellites list; and
+> smoother one-day-at-a-time scrolling on both schedule charts. See
+> **[RELEASE_NOTES_0.9.10.md](RELEASE_NOTES_0.9.10.md)**.
 
 ---
 
@@ -88,6 +90,10 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   server over WiFi (Settings -> CAT type -> rigctl) — Doppler both legs via split.
 - **World map with coastline** — recognisable continents with **all favourites'**
   footprints at once; `f` highlights one bird at a time.
+- **Time-step simulation** — off the Satellites list (`s`), step a satellite
+  forward/back in time (`,`/`/`) at selectable steps to preview az/el, range and
+  lighting; `m` switches to a world-map view that walks the sub-point and
+  footprint across the map as you step.
 - **GPS sky plot** — fix data plus a polar plot of the GNSS satellites in view
   (az/el, coloured by signal), off the Location screen.
 - **Workable grid squares** — the 4-char Maidenhead grids under the satellite's
@@ -99,9 +105,10 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Selectable element source** — AMSAT JSON by default, or any CelesTrak JSON-PP
   category (Amateur Radio first), or a custom URL, chosen from an on-device picker
   (no URL typing needed); CelesTrak's `OBJECT_NAME` is handled automatically.
-- **Sun & Moon antenna pointing** — a Sun/Moon screen (off the main menu) shows
-  live az/el for both and can drive the rotator to track either, for sun-noise /
-  Moon (EME) aiming and antenna calibration.
+- **Sun & Moon antenna pointing** — a Sun/Moon screen (off the main menu) with a
+  graphical sky-dome view (Sun and Moon glyphs plotted by az/el; `g` toggles a
+  data list) that can drive the rotator to track either, for sun-noise / Moon
+  (EME) aiming and antenna calibration.
 - **On-device Help** — press `h` on (almost) any screen for a scrollable key reference.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without

@@ -75,7 +75,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.8";
+static constexpr const char* FW_VERSION = "0.9.10";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -158,6 +158,10 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 #define FILE_AMSTAT   "/CardSat/amstat.json"   // cached AMSAT OSCAR status summary
 #define AMSAT_STATUS_URL  "https://www.amsat.org/status/api/v1/summary.php?hours="
 #define AMSAT_STATUS_HOURS 72                    // "recently" window for status reports
+#define FILE_SPACEWX  "/CardSat/spacewx.txt"    // cached space weather: "f107 ap epoch"
+// NOAA SWPC daily F10.7 cm solar-radio-flux observations (JSON array of records).
+// Best-effort: drives the orbital-decay density scale when "Decay solar = auto".
+#define SPACEWX_F107_URL  "https://services.swpc.noaa.gov/json/f107_cm_flux.json"
 #define FILE_LOG     "/CardSat/qso_log.csv"     // QSO log (CSV, notes is last field)
 #define FILE_ADIF    "/CardSat/qso_log.adi"     // ADIF export (generated on demand)
 #define FILE_LOTW    "/CardSat/lotw_sats.csv"   // LoTW SAT_NAME map ("SAT_NAME,AMSAT_NAME")

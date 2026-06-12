@@ -131,6 +131,7 @@ void App::setup() {
   if (db.loadGpFromFs()) setStatus("Loaded cached GP: " + String(db.count()));
   else setStatus("No GP data yet. Use Update.");
   db.loadManualGpFile();    // merge any hand-entered satellites
+  loadSpaceWeather();       // restore cached F10.7 for the decay estimate
   loadFavs();
   buildSatView();
   db.applyAmsatStatusFile(FILE_AMSTAT);   // restore cached AMSAT activity marks
@@ -412,6 +413,7 @@ void App::doUpdateGp() {
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
   buildSatView();
   fetchAmsatStatus();                  // tag active/not-heard from AMSAT status
+  fetchSpaceWeather();                 // refresh F10.7 for the decay density scale
   nextAos = 0; lastSchedMs = 0;        // force schedule/alarm to recompute
   setStatus("GP OK: " + String(n) + " sats");
 }
@@ -426,6 +428,84 @@ void App::fetchAmsatStatus() {
   setStatus("AMSAT status..."); draw();
   if (net.httpsGetToFile(url, FILE_AMSTAT, 200000, nullptr))
     db.applyAmsatStatusFile(FILE_AMSTAT);
+}
+
+// Fetch the latest NOAA SWPC 10.7 cm solar radio flux and cache it. Best-effort
+// and non-fatal: a failure leaves the previous value (and the manual Decay-solar
+// setting) untouched. The feed is a JSON array of records ordered NEWEST FIRST,
+// each with a "flux" field (e.g. 1.06e+002 = 106 sfu) and, on the daily Noon
+// record, a "ninety_day_mean". The 81-day-ish average tracks thermospheric
+// density better than a single day's flux, so we prefer the first ninety_day_mean
+// and fall back to the first (newest) flux. Values are validated to a plausible
+// range; we scan a bounded slice rather than fully parsing the array.
+void App::fetchSpaceWeather() {
+  if (!net.connected()) return;
+  setStatus("Space weather..."); draw();
+  String body;
+  if (!net.httpsGet(SPACEWX_F107_URL, body, 60000)) return;   // leave cache intact
+
+  auto firstNumAfter = [&](const char* key) -> float {
+    int idx = body.indexOf(String(key));
+    if (idx < 0) return -1;
+    int colon = body.indexOf(':', idx);
+    if (colon < 0) return -1;
+    return (float)atof(body.c_str() + colon + 1);
+  };
+
+  float mean = firstNumAfter("\"ninety_day_mean\"");           // first non-null wins below
+  // ninety_day_mean is null on Morning/Afternoon rows; skip until a real number.
+  if (!(mean > 0)) {
+    int pos = 0, idx;
+    String key("\"ninety_day_mean\"");
+    while ((idx = body.indexOf(key, pos)) >= 0) {
+      int colon = body.indexOf(':', idx);
+      if (colon < 0) break;
+      float v = (float)atof(body.c_str() + colon + 1);         // "null" -> 0.0
+      if (v > 50.0f && v < 400.0f) { mean = v; break; }
+      pos = idx + key.length();
+    }
+  }
+  float flux = firstNumAfter("\"flux\"");                       // newest record (array is desc)
+
+  float use = (mean > 50.0f && mean < 400.0f) ? mean
+            : (flux > 50.0f && flux < 400.0f) ? flux : -1.0f;
+  if (use <= 0) return;                                         // nothing usable
+  spaceF107 = use;
+  spaceWxEpoch = nowUtc();
+  File f = LittleFS.open(FILE_SPACEWX, "w");
+  if (f) { f.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); f.close(); }
+}
+
+// Restore the cached F10.7 at boot so the decay estimate is informed offline.
+void App::loadSpaceWeather() {
+  File f = LittleFS.open(FILE_SPACEWX, "r");
+  if (!f) return;
+  String line = f.readStringUntil('\n'); f.close();
+  float v = (float)atof(line.c_str());
+  if (v > 50.0f && v < 400.0f) {
+    spaceF107 = v;
+    int sp = line.indexOf(' ');
+    if (sp >= 0) spaceWxEpoch = (time_t)atol(line.c_str() + sp + 1);
+  }
+}
+
+// Atmospheric-density scale for the decay point estimate. In AUTO mode, derive a
+// continuous scale from the live F10.7 flux (piecewise-linear: ~70 sfu solar-min
+// -> 0.35x, ~150 mean -> 1.0x, ~250 solar-max -> 3.0x), clamped to the bracket.
+// Without a cached flux, AUTO falls back to mean. Otherwise use the fixed level.
+static double solarDensityScale(uint8_t act);   // defined with the decay model below
+double App::decayDensityScale() const {
+  if (cfg.solarAct == SOLAR_AUTO) {
+    if (spaceF107 <= 0) return 1.0;                 // no data yet -> mean
+    double f = spaceF107;
+    double s;
+    if (f <= 70)       s = 0.35;
+    else if (f <= 150) s = 0.35 + (f - 70) * (1.0 - 0.35) / 80.0;
+    else if (f <= 250) s = 1.0  + (f - 150) * (3.0 - 1.0) / 100.0;
+    else               s = 3.0;
+    return s;
+  }
+  return solarDensityScale(cfg.solarAct);
 }
 
 // Fetch and cache every satellite's transponders to flash, so the unit works
@@ -678,7 +758,7 @@ void App::buildPassDetail(const PassPredict& p) {
 
 void App::refreshScheduleIfNeeded() {
   if (favN == 0 || !timeIsSet()) return;
-  if (screen == SCR_TRACK || screen == SCR_POLAR) return;  // don't disturb Doppler
+  if (screen == SCR_TRACK || screen == SCR_POLAR || screen == SCR_MANUAL) return;  // don't disturb Doppler
   if (screen == SCR_PASSES) return;                        // owns the propagator
   uint32_t ms = millis();
   bool due = (nextAos == 0) || (nowUtc() >= nextAos) ||
@@ -1204,7 +1284,7 @@ void App::loop() {
   // Redraw cadence is still screen-dependent (the radio/rotator service above is
   // not): refresh the live screens periodically; static ones redraw on keypress.
   if (screen == SCR_TRACK || screen == SCR_POLAR || screen == SCR_WORLDMAP ||
-      screen == SCR_ROTMAN || screen == SCR_GPS ||
+      screen == SCR_ROTMAN || screen == SCR_GPS || screen == SCR_MANUAL ||
       (screen == SCR_ORBIT && orbitPage <= 2) || screen == SCR_SUNMOON ||
       screen == SCR_GRID) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
@@ -1304,6 +1384,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_PASSES:   keyPasses(c, enter, back); break;
     case SCR_PASSDETAIL: keyPassDetail(c, enter, back); break;
     case SCR_TRACK:    keyTrack(c, enter, back); break;
+    case SCR_MANUAL:   keyManual(c, enter, back); break;
     case SCR_POLAR:    keyPolar(c, enter, back); break;
     case SCR_PASSPOLAR: keyPassPolar(c, enter, back); break;
     case SCR_MUTUAL:   keyMutual(c, enter, back); break;
@@ -1430,6 +1511,14 @@ void App::keySatList(char c, bool enter, bool back) {
   if (c == 's' && viewN > 0) {                     // open the simulation screen
     simTime = timeIsSet() ? nowUtc() : 0; screen = SCR_SIM; lastDrawMs = 0; return;
   }
+  if (c == 'd' && viewN > 0) {                      // 10-day pass overview
+    visReturn = SCR_SATLIST; visDayOff = 0; buildVis();
+    screen = SCR_VIS; lastDrawMs = 0; return;
+  }
+  if (c == 'i' && viewN > 0) {                      // 60-day illumination raster
+    visReturn = SCR_SATLIST; illumDayOff = 0; buildIllum();
+    screen = SCR_ILLUM; lastDrawMs = 0; return;
+  }
   if (enter && viewN > 0) {
     SatEntry* s = activeSat();
     pred.setSite(loc.obs());
@@ -1479,8 +1568,8 @@ void App::keyPasses(char c, bool enter, bool back) {
     gridLive = false; gridScroll = 0; buildGrids(passes[passSel].aos, passes[passSel].los);
     setStatus(""); screen = SCR_GRID; lastDrawMs = 0; return;
   }
-  if (c == 'v') { visPage = 0; buildVis();   screen = SCR_VIS;   lastDrawMs = 0; return; }
-  if (c == 'i') { illumPage = 0; buildIllum(); screen = SCR_ILLUM; lastDrawMs = 0; return; }
+  if (c == 'v') { visReturn = SCR_PASSES; visDayOff = 0; buildVis();   screen = SCR_VIS;   lastDrawMs = 0; return; }
+  if (c == 'i') { visReturn = SCR_PASSES; illumDayOff = 0; buildIllum(); screen = SCR_ILLUM; lastDrawMs = 0; return; }
   if (enter || c == 't') {     // enter tracking
     SatEntry* s = activeSat();
     if (s) loadCalForSat(s->norad);
@@ -1607,11 +1696,68 @@ void App::keyTrack(char c, bool enter, bool back) {
     }
   }
   if (c == 'l') { beginQso(); return; }              // log a QSO (radio keeps tracking)
+  if (c == 'f') {                                    // open Manual (no-radio) freq calc
+    liveReturn = SCR_MANUAL; screen = SCR_MANUAL; lastDrawMs = 0; return;
+  }
   if (c == 'g') { gridLive = true; gridScroll = 0; gridBuiltMs = 0;   // workable grids now (radio/rotor keep running)
-                  screen = SCR_GRID; lastDrawMs = 0; return; }
-  if (c == 'p') { polarPathValid = false; screen = SCR_POLAR;
+                  liveReturn = SCR_TRACK; screen = SCR_GRID; lastDrawMs = 0; return; }
+  if (c == 'p') { polarPathValid = false; liveReturn = SCR_TRACK; screen = SCR_POLAR;
                   lastDrawMs = 0; return; }                   // live polar
   if (enter) {  // persist calibration for THIS satellite (per-sat store)
+    SatEntry* s = activeSat();
+    if (s) { saveCalForSat(s->norad);
+             setStatus("Cal saved: " + String(s->name)); }
+  }
+}
+
+// Manual (no-radio) mode keys: passband/cal tuning like Track, leg toggle, and
+// access to log/polar/grids (which return here), but NO radio or rotator keys.
+void App::keyManual(char c, bool enter, bool back) {
+  if (isBack(c, back) || c == 'f') { screen = SCR_TRACK; lastDrawMs = 0; return; }
+
+  bool linear = (activeTxCount > 0) && activeTx[curTx].isLinear &&
+                activeTx[curTx].bandwidth() > 0;
+  bool haveUp = (activeTxCount > 0) && activeTx[curTx].uplink != 0;
+
+  if (c == 'u' && haveUp) {                          // toggle which leg is fixed
+    manFixUp = !manFixUp;
+    setStatus(manFixUp ? "Fix uplink (hold TX)" : "Fix downlink (hold RX)");
+  }
+
+  if (c == 'm') {                                    // toggle TUNE / CAL
+    if (linear) trackMode ^= 1;
+    else { trackMode = 1; setStatus("Not linear: CAL only"); }
+  }
+
+  if (trackMode == 0 && linear) {
+    // ---- TUNE: move within the passband (fixed leg the operator dials) ----
+    int32_t bw = (int32_t)activeTx[curTx].bandwidth();
+    if (isLeft(c))  pbOffset -= tuneStep;
+    if (isRight(c)) pbOffset += tuneStep;
+    if (pbOffset < 0)  pbOffset = 0;
+    if (pbOffset > bw) pbOffset = bw;
+    if (c == 's') tuneStep = (tuneStep == 100) ? 1000 : (tuneStep == 1000 ? 5000 : 100);
+    if (c == 'x') pbOffset = bw / 2;                 // recenter passband
+  } else {
+    // ---- CAL: trim oscillator offsets (shared with Track, same store) ----
+    if (isLeft(c))  calDl -= calStep;
+    if (isRight(c)) calDl += calStep;
+    if (isUp(c))    calUl += calStep;
+    if (isDown(c))  calUl -= calStep;
+    if (c == 's') calStep = (calStep == 10) ? 100 : (calStep == 100 ? 1000 : 10);
+    if (c == 'x') { calDl = 0; calUl = 0; }
+  }
+
+  if (c == 't' && activeTxCount > 0) {               // cycle transponder
+    curTx = (curTx + 1) % activeTxCount;
+    onTransponderChanged();
+  }
+  if (c == 'l') { beginQso(); return; }              // log a QSO (returns here)
+  if (c == 'g') { gridLive = true; gridScroll = 0; gridBuiltMs = 0;
+                  liveReturn = SCR_MANUAL; screen = SCR_GRID; lastDrawMs = 0; return; }
+  if (c == 'p') { polarPathValid = false; liveReturn = SCR_MANUAL; screen = SCR_POLAR;
+                  lastDrawMs = 0; return; }
+  if (enter) {                                       // persist calibration for THIS sat
     SatEntry* s = activeSat();
     if (s) { saveCalForSat(s->norad);
              setStatus("Cal saved: " + String(s->name)); }
@@ -1621,7 +1767,7 @@ void App::keyTrack(char c, bool enter, bool back) {
 void App::keyPolar(char c, bool enter, bool back) {
   if (c == 'l') { beginQso(); return; }          // log a QSO (radio keeps tracking)
   // Any of back / ENTER / 'p' returns to the tracking screen.
-  if (isBack(c, back) || enter || c == 'p') { screen = SCR_TRACK; lastDrawMs = 0; }
+  if (isBack(c, back) || enter || c == 'p') { screen = liveReturn; lastDrawMs = 0; }
 }
 
 // ---- Polar view of one selected pass (from the pass-detail screen) ---------
@@ -1742,29 +1888,40 @@ void App::buildVis() {
   visN = 0;
   SatEntry* s = activeSat();
   if (!s || !timeIsSet()) return;
+  building = true;
   setStatus("Computing 10-day passes..."); draw();
   pred.setSite(loc.obs()); pred.setSat(*s);
-  time_t now = nowUtc() + (time_t)visPage * (time_t)VIS_DAYS * 86400;
-  visN = pred.predictPasses(now, cfg.minPassEl, visPasses, VIS_PASS_MAX,
-                            now + (time_t)VIS_DAYS * 86400);
+  // Window starts at UTC midnight of (today + visDayOff) and spans VIS_DAYS *full*
+  // days, so every day-row of the chart is completely filled (the horizon is not
+  // cut off partway through the last day at the request time).
+  time_t today0 = nowUtc() - (nowUtc() % 86400);
+  time_t winStart = today0 + (time_t)visDayOff * 86400;
+  time_t winEnd   = winStart + (time_t)VIS_DAYS * 86400;
+  visN = pred.predictPasses(winStart, cfg.minPassEl, visPasses, VIS_PASS_MAX, winEnd);
+  building = false;
   setStatus(visN ? (String(visN) + " pass(es)/10 d") : "No passes in 10 days");
 }
 
 void App::drawVis() {
   SatEntry* s = activeSat();
   { String hd = s ? (String(s->name) + " 10-day") : String("10-day passes");
-    if (visPage) hd += " +" + String(visPage * VIS_DAYS) + "d";
+    if (visDayOff) hd += " +" + String(visDayOff) + "d";
     header(hd); }
   canvas.setTextSize(1);
+  if (building) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("Computing passes...");
+    footer("` back"); return;
+  }
   if (visN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 56); canvas.print("No passes in this 10-day window.");
-    footer("` bk  ;/. +/-10d  r recomp"); return;
+    footer("` bk  ;/. +/-1d  r recomp"); return;
   }
   const int barX0 = 40, barW = 196;          // 196 px = 24 h
   const int y0 = 19, rowH = 10;
-  time_t now  = nowUtc() + (time_t)visPage * (time_t)VIS_DAYS * 86400;
-  time_t mid0 = now - (now % 86400);         // UTC midnight of day 0 (today)
+  time_t today0 = nowUtc() - (nowUtc() % 86400);
+  time_t mid0   = today0 + (time_t)visDayOff * 86400;   // UTC midnight of the first row
   for (int h = 6; h <= 18; h += 6)           // 06/12/18 h gridlines behind the bars
     canvas.drawFastVLine(barX0 + barW * h / 24, y0, rowH * VIS_DAYS, 0x2104);
   for (int d = 0; d < VIS_DAYS; ++d) {
@@ -1788,16 +1945,17 @@ void App::drawVis() {
       canvas.fillRect(x1, ry + 1, w, rowH - 3, col);
     }
   }
-  if (visPage == 0)
-    canvas.drawFastVLine(barX0 + (int)(barW * (now - mid0) / 86400), y0, rowH, CL_RED);
-  footer("` bk  ;/. +/-10d  r recomp");
+  // "Now" marker only on today's row (first row when not scrolled into the future).
+  if (visDayOff == 0)
+    canvas.drawFastVLine(barX0 + (int)(barW * (nowUtc() - mid0) / 86400), y0, rowH, CL_RED);
+  footer("` bk  ;/. +/-1d  r recomp");
 }
 
 void App::keyVis(char c, bool enter, bool back) {
-  if (isBack(c, back) || enter) { screen = SCR_PASSES; lastDrawMs = 0; return; }
+  if (isBack(c, back) || enter) { screen = visReturn; lastDrawMs = 0; return; }
   if (c == 'r') { buildVis(); lastDrawMs = 0; return; }
-  if (isDown(c)) { visPage++; buildVis(); lastDrawMs = 0; return; }              // . next 10 d
-  if (isUp(c) && visPage > 0) { visPage--; buildVis(); lastDrawMs = 0; return; } // ; prev 10 d
+  if (isDown(c)) { visDayOff++; buildVis(); lastDrawMs = 0; return; }              // . scroll 1 day forward
+  if (isUp(c) && visDayOff > 0) { visDayOff--; buildVis(); lastDrawMs = 0; return; } // ; scroll 1 day back (>= today)
 }
 
 // ===========================================================================
@@ -1807,11 +1965,14 @@ void App::buildIllum() {
   illumValid = false;
   SatEntry* s = activeSat();
   if (!s || !timeIsSet() || s->meanMotion <= 0) return;
+  building = true;
   setStatus("Computing illumination..."); draw();
   pred.setSite(loc.obs()); pred.setSat(*s);
   illumPeriodMin = 1440.0f / (float)s->meanMotion;
   double periodSec = (double)illumPeriodMin * 60.0;
-  time_t now = nowUtc() + (time_t)illumPage * (time_t)ILLUM_DAYS * 86400;
+  // Raster starts at UTC midnight of (today + illumDayOff); each column is one day.
+  time_t today0 = nowUtc() - (nowUtc() % 86400);
+  time_t now = today0 + (time_t)illumDayOff * 86400;
   const int RB = (ILLUM_ROWS + 7) / 8;
   for (int c = 0; c < ILLUM_DAYS; ++c) {
     for (int b = 0; b < RB; ++b) illumBits[c][b] = 0;
@@ -1832,6 +1993,7 @@ void App::buildIllum() {
   illumNextSec = -1;
   for (long dt = 15; dt <= (long)periodSec + 120; dt += 15)
     if (pred.sunlitAt(now + dt) != illumSunNow) { illumNextSec = dt; break; }
+  building = false;
   illumValid = true;
   setStatus("");
 }
@@ -1839,13 +2001,18 @@ void App::buildIllum() {
 void App::drawIllum() {
   SatEntry* s = activeSat();
   { String hd = s ? (String(s->name) + " illum 60d") : String("Illumination");
-    if (illumPage) hd += " +" + String(illumPage * ILLUM_DAYS) + "d";
+    if (illumDayOff) hd += " +" + String(illumDayOff) + "d";
     header(hd); }
   canvas.setTextSize(1);
+  if (building) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("Computing illumination...");
+    footer("` back"); return;
+  }
   if (!illumValid) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 56);
-    canvas.print((s && s->meanMotion > 0) ? "Press r to compute." : "No orbit data.");
+    canvas.print((s && s->meanMotion > 0) ? "No passes / orbit data." : "No orbit data.");
     footer("` back   r recompute"); return;
   }
   const int px0 = 24, py0 = 18, cw = 3, ph = ILLUM_ROWS;   // 60*3 = 180 wide
@@ -1864,10 +2031,10 @@ void App::drawIllum() {
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(px0 - 4, py0 + ph + 2);
-  if (illumPage == 0) canvas.print("now");
-  else                canvas.printf("+%dd", illumPage * ILLUM_DAYS);
+  if (illumDayOff == 0) canvas.print("now");
+  else                  canvas.printf("+%dd", illumDayOff);
   canvas.setCursor(px0 + pw - 22, py0 + ph + 2);
-  canvas.printf("+%dd", (illumPage + 1) * ILLUM_DAYS);
+  canvas.printf("+%dd", illumDayOff + ILLUM_DAYS);
   canvas.setCursor(px0 + pw + 5, py0);           canvas.print("1 orbit");
   canvas.setCursor(px0 + pw + 5, py0 + 10);      canvas.printf("%.0fm", illumPeriodMin);
   canvas.setCursor(4, py0 + ph + 11);
@@ -1881,14 +2048,14 @@ void App::drawIllum() {
     canvas.printf("-> %s in %ldm", illumNextEclipse ? "shadow" : "sun",
                   illumNextSec / 60);
   }
-  footer("` bk  ,// +/-60d  r recomp");
+  footer("` bk  ,// +/-1d  r recomp");
 }
 
 void App::keyIllum(char c, bool enter, bool back) {
-  if (isBack(c, back) || enter) { screen = SCR_PASSES; lastDrawMs = 0; return; }
+  if (isBack(c, back) || enter) { screen = visReturn; lastDrawMs = 0; return; }
   if (c == 'r') { buildIllum(); lastDrawMs = 0; return; }
-  if (isRight(c)) { illumPage++; buildIllum(); lastDrawMs = 0; return; }                // / next 60 d
-  if (isLeft(c) && illumPage > 0) { illumPage--; buildIllum(); lastDrawMs = 0; return; } // , prev 60 d
+  if (isRight(c)) { illumDayOff++; buildIllum(); lastDrawMs = 0; return; }                 // / scroll 1 day forward
+  if (isLeft(c) && illumDayOff > 0) { illumDayOff--; buildIllum(); lastDrawMs = 0; return; } // , scroll 1 day back (>= today)
 }
 
 void App::keyLocation(char c, bool enter, bool back) {
@@ -1928,7 +2095,7 @@ void App::keyUpdate(char c, bool enter, bool back) {
 
 // Settings are grouped into categories for a two-level menu. The per-row value
 // logic in adj()/ENTER stays keyed by absolute row index; these tables only map
-// a category + cursor position to that absolute index. Every row 0..37 appears
+// a category + cursor position to that absolute index. Every row 0..40 appears
 // in exactly one category.
 static const int SET_CAT_N = 4;
 static const char* const SET_CAT_NAME[SET_CAT_N] = {
@@ -1936,7 +2103,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,7,25};
+static const int SET_STN[]   = {26,3,40,7,25};
 static const int SET_NET[]   = {4,5,6,20,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -1976,6 +2143,7 @@ void App::keySettings(char c, bool enter, bool back) {
                 idx = (idx + dir + 7) % 7; cfg.civBaud = bs[idx];
                 cfg.save(); applyRadioFromCfg(); } break;
       case 3: cfg.minPassEl = constrain(cfg.minPassEl + dir, 0, 30); cfg.save(); break;
+      case 40: cfg.solarAct = (uint8_t)((cfg.solarAct + dir + 4) % 4); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 4) % 4);
@@ -2545,7 +2713,7 @@ void App::seedQsoSatDefaults() {
 // after the fact. Radio control, if engaged, keeps running.
 void App::beginQso() {
   logReturn = screen;
-  bool live = (screen == SCR_TRACK || screen == SCR_POLAR);
+  bool live = (screen == SCR_TRACK || screen == SCR_POLAR || screen == SCR_MANUAL);
   memset(&qso, 0, sizeof(qso));
   strncpy(qso.rstS, "59", sizeof(qso.rstS) - 1);
   strncpy(qso.rstR, "59", sizeof(qso.rstR) - 1);
@@ -2966,6 +3134,7 @@ void App::draw() {
     case SCR_PASSES:   drawPasses(); break;
     case SCR_PASSDETAIL: drawPassDetail(); break;
     case SCR_TRACK:    drawTrack(); break;
+    case SCR_MANUAL:   drawManual(); break;
     case SCR_POLAR:    drawPolar(); break;
     case SCR_PASSPOLAR: drawPassPolar(); break;
     case SCR_MUTUAL:   drawMutual(); break;
@@ -3494,30 +3663,75 @@ static double expAtmosphere(double hkm) {
   return B[i][1] * exp(-(hkm - B[i][0]) / B[i][2]);
 }
 
-// Days to reentry from B* + exponential atmosphere, integrating the near-circular
-// per-rev decay dA = -2*pi*(Cd*A/m)*rho*a^2 with perigee dropping to ~120 km.
-// Cd*A/m = 12.741621 * B* (m^2/kg). Order-of-magnitude only: no solar activity,
-// attitude, or lift, and B* itself can be a fudge term. -1 = rising/no data,
-// 1e9 = effectively stable.
-static double estimateDecayDays(const SatEntry& s) {
-  if (s.bstar <= 0 || s.meanMotion <= 0) return -1;
-  const double MU = 3.986004418e14, RE = 6.378137e6, TP = 6.283185307179586;
-  double CdAm = 12.741621 * s.bstar;                       // m^2/kg
+// Density scale factors for the assumed solar-activity level. Thermospheric
+// density at LEO altitudes varies ~an order of magnitude over the solar cycle;
+// these bracket the static table (tuned to roughly cycle-mean conditions).
+static double solarDensityScale(uint8_t act) {
+  switch (act) {
+    case SOLAR_LOW:  return 0.35;   // solar minimum
+    case SOLAR_HIGH: return 3.0;    // solar maximum
+    default:         return 1.0;    // cycle mean
+  }
+}
+
+// Days to reentry from B* + exponential atmosphere, using a King-Hele style
+// decay that lets the orbit circularize: drag is strongest at perigee, so the
+// apogee comes down faster than the perigee while the perigee altitude is what
+// governs the drag. We track perigee/apogee radii (rp, ra) separately and apply
+// the per-orbit energy loss preferentially to apogee until the orbit is nearly
+// circular, then bring both down together. Cd*A/m = 12.741621 * B* (m^2/kg).
+// densScale brackets solar activity. Order-of-magnitude only: no attitude, lift,
+// or short-term space weather. Returns -1 = rising/no data, 1e9 = effectively
+// stable, otherwise estimated days to a ~120 km perigee.
+static double estimateDecayDays(const SatEntry& s, double densScale) {
+  if (s.bstar <= 0 || s.meanMotion <= 0 || densScale <= 0) return -1;
+  const double MU = 3.986004418e14, RE = 6.378137e6, TP = 6.283185307179686;
+  // Cd*A/m from B*: the textbook SGP4 conversion (12.741621*B*) leaves LEO
+  // lifetimes ~3x too long against observed reentries (an un-reboosted ISS at
+  // ~420 km comes down in ~1-2 yr, not ~10). Calibrating the per-rev decay
+  // against ISS-class, ~400 km and ~550 km objects at mean solar activity puts
+  // the multiplier near 38 (about 3x the textbook value -- consistent with a
+  // reference-density normalization slip). Still order-of-magnitude: B* itself
+  // is frequently a fitted fudge term, so treat the result as a coarse cue.
+  double CdAm = 38.0 * s.bstar;                            // m^2/kg (calibrated)
   double nn = s.meanMotion * TP / 86400.0;                 // rad/s
-  double a = pow(MU / (nn * nn), 1.0 / 3.0);               // m
-  double e = s.ecc, tDays = 0;
-  for (int it = 0; it < 100000; ++it) {
-    double hp = a * (1 - e) - RE;                           // perigee altitude (m)
+  double a  = pow(MU / (nn * nn), 1.0 / 3.0);              // m
+  double e  = s.ecc; if (e < 0) e = 0; if (e > 0.95) e = 0.95;
+  double rp = a * (1.0 - e);                               // perigee radius (m)
+  double ra = a * (1.0 + e);                               // apogee radius (m)
+  double tDays = 0;
+  for (int it = 0; it < 200000; ++it) {
+    double hp = rp - RE;                                    // perigee altitude (m)
     if (hp < 120e3) return tDays;                           // reentry
-    double rho = expAtmosphere(hp / 1000.0);
+    double rho = expAtmosphere(hp / 1000.0) * densScale;    // density at perigee
     if (rho <= 0) return 1e9;                               // above atmosphere table
-    double T = TP * sqrt(a * a * a / MU);                   // s
+    a = 0.5 * (rp + ra);
+    double T = TP * sqrt(a * a * a / MU);                   // orbital period (s)
+    // Energy-equivalent SMA decay rate, evaluated with perigee density (drag
+    // acts mainly near perigee). dadt < 0.
     double dadt = -2.0 * TP * CdAm * rho * a * a / T;       // m/s
     if (dadt >= 0) return 1e9;
-    double dt = -2000.0 / dadt;                             // step ~2 km of perigee
-    if (dt > 30.0 * 86400.0) dt = 30.0 * 86400.0;
+    // Adaptive step: shrink near the end so the fast final plunge isn't overshot.
+    double margin = hp - 120e3;
+    double dt = -(margin * 0.25 + 1000.0) / dadt;           // ~quarter of remaining drop
+    double capDays = (hp < 200e3) ? 0.25 : (hp < 350e3 ? 5.0 : 30.0);
+    if (dt > capDays * 86400.0) dt = capDays * 86400.0;
     if (dt < 1.0) dt = 1.0;
-    a += dadt * dt; tDays += dt / 86400.0;
+    double da = dadt * dt;                                  // total SMA decrement (<0)
+    // King-Hele: while eccentric, drag at perigee removes energy mainly from
+    // apogee. Pull apogee down at ~ (ra/rp) the rate of perigee so the orbit
+    // circularizes; once nearly circular, both fall together.
+    double ecur = (ra - rp) / (ra + rp);
+    if (ecur > 1e-3) {
+      double ratio = ra / rp;                               // > 1
+      double dra = 2.0 * da * ratio / (1.0 + ratio);        // apogee share
+      double drp = 2.0 * da / (1.0 + ratio);                // perigee share (smaller)
+      ra += dra; rp += drp;
+      if (ra < rp) ra = rp;                                 // clamp at circular
+    } else {
+      ra += da; rp += da;                                   // circular: uniform
+    }
+    tDays += dt / 86400.0;
     if (tDays > 36500.0) return 1e9;                        // > 100 yr
   }
   return tDays;
@@ -3532,9 +3746,25 @@ static String fmtDecay(double days) {
   return "~" + String(days / 365.0, 1) + "yr";
 }
 
+// Terse form (no "~") for the range bracket display.
+static String fmtDecayShort(double days) {
+  if (days < 0)       return "n/a";
+  if (days >= 36500)  return "stable";
+  if (days < 1)       return "<1d";
+  if (days < 100)     return String((long)lround(days)) + "d";
+  if (days < 730)     return String((long)lround(days / 30.0)) + "mo";
+  return String(days / 365.0, 1) + "yr";
+}
+
+static const char* solarActLabel(uint8_t a) {
+  return a == SOLAR_LOW ? "min" : (a == SOLAR_HIGH ? "max"
+       : a == SOLAR_AUTO ? "auto" : "mean");
+}
+
 void App::buildOrbit() {
   orbHasPass = false; orbEcl = false; orbVisible = false; orbSunPct = 0;
-  orbAscT = 0; orbAscLon = 0; orbEclT0 = 0; orbEclT1 = 0; orbDecayDays = -1;
+  orbAscT = 0; orbAscLon = 0; orbEclT0 = 0; orbEclT1 = 0;
+  orbDecayDays = -1; orbDecayLo = -1; orbDecayHi = -1;
   SatEntry* s = activeSat();
   if (!s || !timeIsSet() || s->meanMotion <= 0) return;
   setStatus("Analyzing orbit..."); draw();
@@ -3576,15 +3806,17 @@ void App::buildOrbit() {
     }
     orbSunPct = total ? (100.0f * sun / total) : 0;
   }
-  orbDecayDays = estimateDecayDays(*s);
+  orbDecayDays = estimateDecayDays(*s, decayDensityScale());
+  orbDecayLo   = estimateDecayDays(*s, solarDensityScale(SOLAR_LOW));   // longest life
+  orbDecayHi   = estimateDecayDays(*s, solarDensityScale(SOLAR_HIGH));  // shortest life
   setStatus("");
 }
 
 void App::drawOrbit() {
   SatEntry* s = activeSat();
-  static const char* PG[] = { "Info", "Live", "Next pass", "Ground trk", "Doppler", "Nodal" };
+  static const char* PG[] = { "Info", "Live", "Next pass", "Ground trk", "Doppler", "Nodal", "Sun/Beta" };
   { String h = (s ? String(s->name) : String("Orbit")) + "  " + PG[orbitPage] +
-               " " + String(orbitPage + 1) + "/6";
+               " " + String(orbitPage + 1) + "/7";
     header(h); }
   canvas.setTextSize(1);
   if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
@@ -3626,6 +3858,9 @@ void App::drawOrbit() {
     row("Incl/Ecc",     String(s->incl, 2) + " / " + String(s->ecc, 5));
     row("SMA (a)",      String(a, 0) + " km");
     row("B* / decay",   String(s->bstar, 6) + " " + fmtDecay(orbDecayDays));
+    if (orbDecayDays >= 0 && orbDecayDays < 36500)        // show the solar bracket
+      row("Decay rng",  fmtDecayShort(orbDecayHi) + "-" + fmtDecayShort(orbDecayLo) +
+                        " (" + solarActLabel(cfg.solarAct) + ")");
     row("Age/Rev",      String(ageD, 2) + "d / " + String(revNow));
     if (orbAscT) {
       struct tm tmv; gmtime_r(&orbAscT, &tmv);
@@ -3723,6 +3958,56 @@ void App::drawOrbit() {
     return;
   }
 
+  if (orbitPage == 6) {                              // ---------- Sun / beta angle ----------
+    const double D2R = 0.017453292519943295;
+    double beta = now ? pred.betaAngleDeg(now, s->incl, s->raan) : 0.0;
+    // Beta at which the orbit just grazes Earth's shadow (no eclipse above it):
+    // beta* = acos(Re / (Re + h)) at mean altitude. Above |beta*| -> full sun.
+    double hMean = a - RE;                                  // km (a, RE in km here)
+    double betaStar = (hMean > 0) ? acos(RE / (RE + hMean)) / D2R : 0.0;
+    bool fullSun = fabs(beta) >= betaStar;
+    // Approximate fraction of each orbit spent in eclipse from beta (circular
+    // shadow-cylinder geometry): f_ecl = (1/pi)*acos( sqrt(h^2+2*Re*h) /
+    // ((Re+h)*cos(beta)) ), zero when |beta| >= beta*.
+    double fEcl = 0.0;
+    if (!fullSun) {
+      double num = sqrt(hMean * hMean + 2.0 * RE * hMean);
+      double den = (RE + hMean) * cos(beta * D2R);
+      double q = (den > 0) ? num / den : 1.0;
+      if (q > 1.0) q = 1.0; if (q < -1.0) q = -1.0;
+      fEcl = acos(q) / M_PI;
+    }
+    double periodMin2 = (mm > 0) ? 1440.0 / mm : 0.0;
+    row("Beta now",   String(beta, 1) + " deg");
+    row("Sunlight",   fullSun ? "full-sun orbit" : "eclipsed each rev");
+    row("Beta*",      "+/-" + String(betaStar, 1) + " deg (full-sun)");
+    if (!fullSun) {
+      row("Eclipse",  String(fEcl * 100.0, 0) + "% /orbit");
+      row("Ecl time", String(fEcl * periodMin2, 1) + " min/orbit");
+    } else {
+      row("Eclipse",  "none (continuous sun)");
+    }
+    // Scan ahead to the next full-sun window edge (beta crossing +/-beta*).
+    if (now) {
+      time_t found = 0; bool wantFull = !fullSun;
+      for (long d = 1; d <= 180; ++d) {
+        double b = pred.betaAngleDeg(now + (time_t)d * 86400, s->incl, s->raan);
+        if ((fabs(b) >= betaStar) == wantFull) { found = now + (time_t)d * 86400; break; }
+      }
+      if (found) {
+        struct tm tmv; gmtime_r(&found, &tmv);
+        char b[20]; snprintf(b, sizeof(b), "%02d/%02d", tmv.tm_mon + 1, tmv.tm_mday);
+        long dd = (long)((found - now) / 86400);
+        row(wantFull ? "-> full sun" : "-> eclipses",
+            String(b) + " (" + String(dd) + "d)");
+      } else {
+        row(wantFull ? "-> full sun" : "-> eclipses", ">180d");
+      }
+    }
+    footer("` bk  ,// page  r refresh");
+    return;
+  }
+
   if (orbitPage == 5) {                              // ---------- Orbit dynamics (J2) ----------
     const double D2R = 0.017453292519943295;
     const double J2 = 0.00108262998905, DPD = 57.29577951308232 * 86400.0;  // rad/s -> deg/day
@@ -3805,8 +4090,8 @@ void App::drawOrbit() {
 void App::keyOrbit(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
-  if (isRight(c)) { if (++orbitPage > 5) orbitPage = 0; lastDrawMs = 0; return; }
-  if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 5; lastDrawMs = 0; return; }
+  if (isRight(c)) { if (++orbitPage > 6) orbitPage = 0; lastDrawMs = 0; return; }
+  if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 6; lastDrawMs = 0; return; }
   if (c == 'r')   { buildOrbit(); lastDrawMs = 0; return; }
   if (c == 'f' && orbitPage == 4) {                   // edit Doppler-page beacon freq
     editTarget = 210; editTitle = "Beacon freq (MHz)";
@@ -3823,7 +4108,7 @@ static const char* SIM_STEPL[] = { "1 min", "10 min", "1 hr", "6 hr", "1 day" };
 
 void App::drawSim() {
   SatEntry* s = activeSat();
-  header(s ? (String(s->name) + " sim") : String("Simulation"));
+  header(s ? (String(s->name) + (simMap ? " sim map" : " sim")) : String("Simulation"));
   canvas.setTextSize(1);
   if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
             canvas.print("No satellite."); footer("` back"); return; }
@@ -3831,16 +4116,88 @@ void App::drawSim() {
             canvas.print("Clock not set (NTP/GPS)."); footer("` back"); return; }
   if (simTime == 0) simTime = nowUtc();
 
+  struct tm tmv; gmtime_r(&simTime, &tmv);
+  char ts[28]; snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02dZ",
+                        tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                        tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  LiveLook L = pred.look(simTime);
+
+  if (simMap) {
+    // ---- World-map view: sub-point + footprint at the simulated instant. ----
+    const int MX = 0, MY = 16, MW = 240, MH = 96;      // map rect (y 16..112)
+    const uint16_t GRID = 0x4208;
+    canvas.fillRect(MX, MY, MW, MH, CL_BLACK);
+    { int px = 0, py = 0, plo = 0; bool pen = false;
+      for (int i = 0; i + 1 < COAST_N; i += 2) {
+        int lo = COAST[i], la = COAST[i + 1];
+        if (lo == 999) { pen = false; continue; }
+        int x = MX + (int)lround((lo + 180.0) / 360.0 * MW);
+        int y = MY + (int)lround((90.0 - la) / 180.0 * MH);
+        if (pen && abs(lo - plo) < 180) canvas.drawLine(px, py, x, y, CL_DGREEN);
+        px = x; py = y; plo = lo; pen = true;
+      }
+    }
+    for (int lon = -180; lon <= 180; lon += 30) {
+      int x = MX + (lon + 180) * MW / 360; if (x > MX + MW - 1) x = MX + MW - 1;
+      canvas.drawLine(x, MY, x, MY + MH - 1, lon == 0 ? CL_DGREEN : GRID);
+    }
+    for (int lat = -60; lat <= 60; lat += 30) {
+      int y = MY + (90 - lat) * MH / 180;
+      canvas.drawLine(MX, y, MX + MW - 1, y, lat == 0 ? CL_DGREEN : GRID);
+    }
+    canvas.drawRect(MX, MY, MW, MH, GRID);
+
+    Observer o = loc.obs();
+    if (o.valid) {
+      int qx = MX + (int)lround((o.lon + 180.0) / 360.0 * MW);
+      int qy = MY + (int)lround((90.0  - o.lat) / 180.0 * MH);
+      canvas.drawLine(qx - 3, qy, qx + 3, qy, CL_WHITE);
+      canvas.drawLine(qx, qy - 3, qx, qy + 3, CL_WHITE);
+    }
+
+    double lon = L.subLon; while (lon < -180) lon += 360; while (lon > 180) lon -= 360;
+    double lat = L.subLat; if (lat > 90) lat = 90; if (lat < -90) lat = -90;
+    int x = MX + (int)lround((lon + 180.0) / 360.0 * MW);
+    int y = MY + (int)lround((90.0 - lat) / 180.0 * MH);
+    uint16_t col = L.sunlit ? CL_YELLOW : CL_CYAN;
+    if (L.satAltKm > 1.0) {                            // ground footprint outline
+      const double D2R = 0.0174532925199433, R2D = 57.2957795130823, RE = 6371.0;
+      double beta = acos(RE / (RE + L.satAltKm));
+      double la1 = lat * D2R, lo1 = lon * D2R, sb = sin(beta), cb = cos(beta);
+      double s1 = sin(la1), c1 = cos(la1);
+      int pfx = 0, pfy = 0; double pflon = 0; bool have = false;
+      for (int a = 0; a <= 360; a += 15) {
+        double az = a * D2R;
+        double la2 = asin(s1 * cb + c1 * sb * cos(az));
+        double lo2 = lo1 + atan2(sin(az) * sb * c1, cb - s1 * sin(la2));
+        double lo2d = lo2 * R2D; while (lo2d < -180) lo2d += 360; while (lo2d > 180) lo2d -= 360;
+        int fx = MX + (int)lround((lo2d + 180.0) / 360.0 * MW);
+        int fy = MY + (int)lround((90.0 - la2 * R2D) / 180.0 * MH);
+        if (have && fabs(lo2d - pflon) < 180.0) canvas.drawLine(pfx, pfy, fx, fy, col);
+        pfx = fx; pfy = fy; pflon = lo2d; have = true;
+      }
+    }
+    canvas.fillCircle(x, y, 2, col);
+    canvas.drawCircle(x, y, 3, CL_BLACK);
+    SatEntry* a = activeSat(); if (a) pred.setSat(*a);  // restore propagator
+
+    // Time + step strip below the map.
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(2, MY + MH + 1); canvas.print(ts);
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(2, MY + MH + 11);
+    canvas.printf("El %.0f  step %s  %s", L.el, SIM_STEPL[simStepIdx],
+                  L.el > 0 ? "VIS" : "---");
+    footer("` bk  m data  ,// time  ;/. step");
+    return;
+  }
+
   int y = 18; const int LH = 11;
   auto row = [&](const char* k, const String& v) {
     canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, y);  canvas.print(k);
     canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(86, y); canvas.print(v);
     y += LH;
   };
-  struct tm tmv; gmtime_r(&simTime, &tmv);
-  char ts[28]; snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02dZ",
-                        tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-                        tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
   canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(2, y); canvas.print(ts); y += LH;
 
   long d = (long)(simTime - nowUtc()); long ad = d < 0 ? -d : d;
@@ -3849,8 +4206,6 @@ void App::drawSim() {
   row("Offset", ds);
   row("Step",   SIM_STEPL[simStepIdx]);
 
-  pred.setSite(loc.obs()); pred.setSat(*s);
-  LiveLook L = pred.look(simTime);
   row("Az / El",  String(L.az, 1) + " / " + String(L.el, 1));
   row("Range",    String(L.rangeKm, 0) + " km");
   row("Sub pt",   String(L.subLat, 2) + "," + String(L.subLon, 2));
@@ -3859,12 +4214,13 @@ void App::drawSim() {
   canvas.setCursor(2, y); canvas.print(L.el > 0 ? "ABOVE horizon" : "below horizon");
   canvas.setTextColor(L.sunlit ? CL_YELLOW : CL_CYAN, CL_BLACK);
   canvas.printf("  %s", L.sunlit ? "sunlit" : "eclipse");
-  footer("` bk  ,// time  ;/. step  x now");
+  footer("` bk  m map  ,// time  ;/. step  x now");
 }
 
 void App::keySim(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (c == 'm')   { simMap = !simMap; lastDrawMs = 0; return; }
   if (simTime == 0 && timeIsSet()) simTime = nowUtc();
   if (isRight(c)) { simTime += SIM_STEP[simStepIdx]; lastDrawMs = 0; return; }
   if (isLeft(c))  { simTime -= SIM_STEP[simStepIdx]; lastDrawMs = 0; return; }
@@ -3892,28 +4248,83 @@ void App::drawSunMoon() {
   skyObjAzEl(now, o.lat, o.lon, false, azv[0], elv[0]);   // Sun
   skyObjAzEl(now, o.lat, o.lon, true,  azv[1], elv[1]);   // Moon
   static const char* nm[2] = { "SUN", "MOON" };
-  for (int i = 0; i < 2; ++i) {
-    int y = 24 + i * 36;
-    bool sel = (smSel == i);
-    if (sel) canvas.fillRect(2, y - 4, 236, 32, CL_DGREEN);
-    canvas.setTextColor(sel ? CL_GREEN : CL_WHITE, CL_BLACK);
-    canvas.setTextSize(2); canvas.setCursor(8, y); canvas.print(nm[i]); canvas.setTextSize(1);
-    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(96, y);      canvas.print("Az");
-    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(114, y);     canvas.printf("%.1f", azv[i]);
-    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(96, y + 13); canvas.print("El");
-    canvas.setTextColor(elv[i] > 0 ? CL_WHITE : CL_GREY, CL_BLACK);
-    canvas.setCursor(114, y + 13); canvas.printf("%.1f", elv[i]);
-    canvas.setTextColor(elv[i] > 0 ? CL_GREEN : CL_GREY, CL_BLACK);
-    canvas.setCursor(186, y + 6); canvas.print(elv[i] > 0 ? "up" : "down");
+  const uint16_t SUNCOL = CL_YELLOW, MOONCOL = CL_CYAN;
+  const uint16_t bodyCol[2] = { SUNCOL, MOONCOL };
+
+  if (smGraphic) {
+    // ---- Graphical sky dome: zenith at centre, N up, elevation = radius. ----
+    // Bodies below the horizon are shown faintly just outside the rim so their
+    // azimuth is still readable. The selected body gets a ring, not a fill bar.
+    const int cx = 62, cy = 70, R = 50;
+    drawPolarGrid(cx, cy, R);
+    auto domeXY = [&](double az, double el, int& x, int& y) {
+      double e = el; if (e > 90) e = 90; if (e < -6) e = -6;
+      double rr = (e >= 0) ? R * (90.0 - e) / 90.0 : R + 4;   // below: just outside rim
+      double a  = az * (M_PI / 180.0);
+      x = cx + (int)lround(rr * sin(a));
+      y = cy - (int)lround(rr * cos(a));
+    };
+    for (int i = 0; i < 2; ++i) {
+      int x, y; domeXY(azv[i], elv[i], x, y);
+      bool up = elv[i] > 0;
+      uint16_t col = up ? bodyCol[i] : CL_GREY;
+      if (i == 0) {                                  // Sun: filled disc + rays
+        canvas.fillCircle(x, y, 5, col);
+        if (up) for (int a = 0; a < 360; a += 45) {
+          double ar = a * (M_PI / 180.0);
+          canvas.drawLine(x + (int)lround(7*sin(ar)), y - (int)lround(7*cos(ar)),
+                          x + (int)lround(9*sin(ar)), y - (int)lround(9*cos(ar)), col);
+        }
+      } else {                                       // Moon: disc with a bite (crescent)
+        canvas.fillCircle(x, y, 5, col);
+        canvas.fillCircle(x + 2, y - 1, 4, CL_BLACK);
+      }
+      if (smSel == i) canvas.drawCircle(x, y, 9, CL_GREEN);   // selection ring
+    }
+
+    // ---- Compact data panel on the right. ----
+    int px = 124;
+    for (int i = 0; i < 2; ++i) {
+      int y = 22 + i * 40;
+      bool sel = (smSel == i);
+      canvas.setTextSize(2);
+      canvas.setTextColor(sel ? CL_GREEN : bodyCol[i], CL_BLACK);
+      canvas.setCursor(px, y); canvas.print(nm[i]);
+      canvas.setTextSize(1);
+      canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(px, y + 18);  canvas.print("Az");
+      canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(px + 18, y + 18); canvas.printf("%.1f", azv[i]);
+      canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(px + 64, y + 18); canvas.print("El");
+      canvas.setTextColor(elv[i] > 0 ? CL_WHITE : CL_GREY, CL_BLACK);
+      canvas.setCursor(px + 82, y + 18); canvas.printf("%.1f", elv[i]);
+      canvas.setTextColor(elv[i] > 0 ? CL_GREEN : CL_GREY, CL_BLACK);
+      canvas.setCursor(px, y + 28); canvas.print(elv[i] > 0 ? "above horizon" : "below horizon");
+    }
+  } else {
+    // ---- Data-list view (compact, no full-width highlight bar). ----
+    for (int i = 0; i < 2; ++i) {
+      int y = 24 + i * 36;
+      bool sel = (smSel == i);
+      if (sel) { canvas.drawRect(2, y - 4, 236, 32, CL_GREEN); }   // outline, not fill
+      canvas.setTextColor(sel ? CL_GREEN : bodyCol[i], CL_BLACK);
+      canvas.setTextSize(2); canvas.setCursor(8, y); canvas.print(nm[i]); canvas.setTextSize(1);
+      canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(96, y);      canvas.print("Az");
+      canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(114, y);     canvas.printf("%.1f", azv[i]);
+      canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(96, y + 13); canvas.print("El");
+      canvas.setTextColor(elv[i] > 0 ? CL_WHITE : CL_GREY, CL_BLACK);
+      canvas.setCursor(114, y + 13); canvas.printf("%.1f", elv[i]);
+      canvas.setTextColor(elv[i] > 0 ? CL_GREEN : CL_GREY, CL_BLACK);
+      canvas.setCursor(186, y + 6); canvas.print(elv[i] > 0 ? "up" : "down");
+    }
   }
+
   bool rok = rot && rot->ready();
   canvas.setTextColor(smOut ? CL_GREEN : (rok ? CL_GREY : CL_ORANGE), CL_BLACK);
-  canvas.setCursor(8, 104);
+  canvas.setCursor(8, 116);
   const char* rs = !smOut ? (rok ? "off" : "n/c")
                   : (elv[smSel] <= 0 ? (smSel ? "MOON set (parked)" : "SUN set (parked)")
                                      : (smSel ? "tracking MOON" : "tracking SUN"));
   canvas.printf("Rotator: %s", rs);
-  footer("` bk  ;/. pick  o rotor  x stop");
+  footer("` bk  ;/. pick  g view  o rotor  x stop");
 }
 
 void App::keySunMoon(char c, bool enter, bool back) {
@@ -3923,6 +4334,7 @@ void App::keySunMoon(char c, bool enter, bool back) {
     smOut = false; screen = SCR_HOME; lastDrawMs = 0; return;
   }
   if (isUp(c) || isDown(c)) { smSel ^= 1; lastAzCmd = lastElCmd = -999.0f; lastDrawMs = 0; return; }
+  if (c == 'g') { smGraphic = !smGraphic; lastDrawMs = 0; return; }
   if (c == 'o') {
     if (!rot || !rot->ready()) { setStatus("Rotator not ready"); return; }
     smOut = !smOut; lastAzCmd = lastElCmd = -999.0f;
@@ -4009,7 +4421,7 @@ void App::drawGrid() {
   }
   SatEntry* s = activeSat();
   { String h = (s ? String(s->name) : String("Grids")) +
-               (gridLive ? " now " : " pass ") + String(gridN);
+               (gridLive ? " now" : " pass");
     header(h); }
   canvas.setTextSize(1);
   if (gridN == 0) {
@@ -4017,15 +4429,28 @@ void App::drawGrid() {
     canvas.print(timeIsSet() ? "No grids in footprint." : "Clock not set.");
     footer("` back"); return;
   }
-  const int COLS = 6, ROWS = 9, PER = COLS * ROWS;
+  // Workable-grid count on its own line (no room in the header). Right-aligned,
+  // and shows the scroll window position when the list spills past one page.
+  const int COLS = 6, ROWS = 8, PER = COLS * ROWS;
   if (gridScroll >= gridN) gridScroll = 0;
+  { char cnt[40];
+    if (gridN > PER) {
+      int from = gridScroll + 1, to = gridScroll + PER; if (to > gridN) to = gridN;
+      snprintf(cnt, sizeof(cnt), "%d workable  (%d-%d)", gridN, from, to);
+    } else {
+      snprintf(cnt, sizeof(cnt), "%d workable", gridN);
+    }
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    int w = (int)strlen(cnt) * 6; int x = 238 - w; if (x < 4) x = 4;
+    canvas.setCursor(x, 19); canvas.print(cnt);
+  }
   int seen = 0, drawn = 0;                          // walk set bits in sorted order
   for (int idx = 0; idx < 32400 && drawn < PER; ++idx) {
     if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
     if (seen++ < gridScroll) continue;
     char g[5]; gridStr(idx, g);
     canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(4 + (drawn % COLS) * 40, 20 + (drawn / COLS) * 11);
+    canvas.setCursor(4 + (drawn % COLS) * 40, 31 + (drawn / COLS) * 11);
     canvas.print(g); ++drawn;
   }
   footer(gridN > PER ? "` bk  ;/. scroll  {} page" : "` back");
@@ -4033,8 +4458,8 @@ void App::drawGrid() {
 
 void App::keyGrid(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { screen = gridLive ? SCR_TRACK : SCR_PASSES; lastDrawMs = 0; return; }
-  const int PER = 6 * 9;
+  if (isBack(c, back)) { screen = gridLive ? liveReturn : SCR_PASSES; lastDrawMs = 0; return; }
+  const int PER = 6 * 8;
   if (isDown(c)) { if (gridScroll + PER < gridN) gridScroll += 6; lastDrawMs = 0; return; }
   if (isUp(c))   { if (gridScroll >= 6) gridScroll -= 6; lastDrawMs = 0; return; }
   if (c == '}')  { if (gridScroll + PER < gridN) gridScroll += PER; lastDrawMs = 0; return; }
@@ -4240,7 +4665,7 @@ void App::drawSatList() {
       else                         canvas.drawCircle(cx, cy, 3, col);          // not heard = ring
     }
   }
-  footer("ENT pass f fav v favs o orb s sim ` bk");
+  footer("ENT pass o orb s sim d 10d i illum f fav v favs ` bk");
 }
 
 void App::drawPasses() {
@@ -4453,9 +4878,128 @@ void App::drawTrack() {
     canvas.print("! verify MAIN/SUB for this rig");
   }
   if (trackMode == 0)
-    footer(",/tune s=stp x=ctr m=cal t r o p=plr");
+    footer(",/tune s=stp x=ctr m=cal t r o p f=man");
   else
-    footer(",/DN ;.UP s=stp x=0 m=tn t=tp r o p=plr");
+    footer(",/DN ;.UP s=stp x=0 m=tn t r o p f=man");
+}
+
+// ---------------------------------------------------------------------------
+//  Manual (no-radio) frequency-calculator mode. Same data and most options as
+//  Track, but it never commands a radio or rotator. The operator fixes one leg
+//  (the frequency they will hold on their own radio) and reads the Doppler-
+//  corrected frequency they should tune the OTHER leg to. Saved calibration is
+//  applied. For linear birds the fixed leg is tunable within the passband; for
+//  FM the user picks which leg is fixed (typically the VHF one); downlink-only
+//  sats just show the computed downlink.
+// ---------------------------------------------------------------------------
+void App::drawManual() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " [MAN]") : String("Manual"));
+  canvas.setTextSize(1);
+  if (!s) { footer("` back"); return; }
+
+  LiveLook L = timeIsSet() ? pred.look(nowUtc()) : LiveLook();
+
+  // Az / El / range / range-rate (same as Track).
+  canvas.setTextColor(L.visible ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 20);
+  canvas.printf("Az %5.1f  El %5.1f%s", L.az, L.el, L.visible ? " *" : "");
+  { double age = gpAgeDays(*s);
+    if (age >= 0) { canvas.setTextColor(ageColor(age), CL_BLACK);
+                    canvas.setCursor(186, 20); canvas.printf("GP%4.1fd", age); } }
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(4, 31);
+  canvas.printf("Rng %5.0fkm  Rate %+5.2f km/s", L.rangeKm, L.rangeRate);
+  if (timeIsSet() && !L.sunlit) {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(214, 31); canvas.print("ECL");
+  }
+
+  if (activeTxCount == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(4, 50); canvas.print("No transponder data.");
+    footer("` back  t=tp  l p"); return;
+  }
+
+  Transponder& t = activeTx[curTx];
+  bool linear = t.isLinear && t.bandwidth() > 0;
+  uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+  Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
+  Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(4, 44);
+  canvas.printf("TX%d/%d %s%-.15s", curTx+1, activeTxCount,
+                linear ? "[LIN] " : "", t.desc);
+
+  bool haveUp = (ulOp != 0);
+  // Which leg is fixed? User picks via 'u'. Downlink-only -> always downlink.
+  bool fixUp = haveUp && manFixUp;
+
+  // The FIXED leg is the frequency the operator parks on their own radio: show
+  // its nominal value (operating freq + calibration, NO Doppler). The DERIVED
+  // leg is what they must tune the other VFO to right now: operating freq +
+  // Doppler + calibration (the rx/tx the propagator already computed).
+  int64_t dnPark = (int64_t)dlOp + calDl;
+  int64_t upPark = (int64_t)ulOp + calUl;
+
+  // Row helper: label, value, and whether this is the fixed (HOLD) leg or the
+  // derived (TUNE->) leg. Fixed = white/HOLD, derived = green/TUNE>.
+  auto legRow = [&](int y, const char* leg, uint32_t hz, bool fixed) {
+    canvas.setTextColor(fixed ? CL_WHITE : CL_GREEN, CL_BLACK);
+    canvas.setCursor(4, y);
+    canvas.printf("%s %s", leg, fmtMHz(hz).c_str());
+    canvas.setTextColor(fixed ? CL_GREY : CL_GREEN, CL_BLACK);
+    canvas.setCursor(150, y);
+    canvas.print(fixed ? "HOLD" : "TUNE>");
+  };
+
+  // Downlink row: parked nominal if fixing downlink, else the Doppler-tuned rx.
+  legRow(56, "DN", (!fixUp) ? (uint32_t)(dnPark > 0 ? dnPark : 0) : rx, !fixUp);
+  // Uplink row (if any): parked nominal if fixing uplink, else the Doppler tx.
+  if (haveUp) legRow(67, "UP", fixUp ? (uint32_t)(upPark > 0 ? upPark : 0) : tx, fixUp);
+  else { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 67);
+         canvas.print("UP  (receive only)"); }
+
+  // Passband position (linear only) — the fixed leg is what the operator tunes
+  // within the passband; the derived leg follows.
+  if (linear) {
+    float halfk = t.bandwidth() / 2000.0f;
+    float posk  = (pbOffset - (int32_t)(t.bandwidth()/2)) / 1000.0f;
+    canvas.setTextColor(trackMode == 0 ? CL_CYAN : CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 79);
+    canvas.printf("PB %+.1fk bw%.1fk %s%s", posk, halfk,
+                  t.invert ? "INV " : "", trackMode == 0 ? "<TUNE>" : "");
+  } else if (haveUp) {
+    // FM: indicate the fixed leg and its band.
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 79);
+    bool dnVhf = (dlOp >= 144000000UL && dlOp <= 148000000UL);
+    bool upVhf = (ulOp >= 144000000UL && ulOp <= 148000000UL);
+    const char* hint = fixUp ? (upVhf ? "uplink fixed (VHF)" : "uplink fixed")
+                             : (dnVhf ? "downlink fixed (VHF)" : "downlink fixed");
+    canvas.print(hint);
+  }
+
+  // Calibration line (active in CAL mode), same semantics as Track.
+  canvas.setTextColor(trackMode == 1 ? CL_YELLOW : CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 90);
+  canvas.printf("cal DN%+ld UP%+ld st%ld%s",
+                (long)calDl, (long)calUl,
+                (long)(trackMode == 0 ? tuneStep : calStep),
+                trackMode == 1 ? " <CAL>" : "");
+
+  // Mode reminder line: no radio is being driven here.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 102);
+  if (haveUp) canvas.printf("Manual: hold %s, tune the other", fixUp ? "UP" : "DN");
+  else        canvas.print("Manual: tune RX to DN above");
+
+  if (linear)
+    footer(trackMode == 0 ? ",/tune u=leg s=stp x=ctr m=cal t l p `bk"
+                          : ",/DN ;.UP u=leg s=stp x=0 m=tn t l p `bk");
+  else
+    footer(haveUp ? "u=leg m=cal t=tp l p ` back" : "m=cal t=tp l p ` back");
 }
 
 // Shared polar grid: elevation rings (0/30/60/90) + cardinal cross + labels.
@@ -4636,7 +5180,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 40;
+  const int N = 41;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -4711,6 +5255,12 @@ void App::drawSettings() {
   rows[37] = String("Rigctld port: ") + String(cfg.rigdPort);
   rows[38] = String("Rotctld server: ") + (cfg.rotdEnable ? "on" : "off");
   rows[39] = String("Rotctld port: ") + String(cfg.rotdPort);
+  rows[40] = String("Decay solar: ") + (cfg.solarAct == SOLAR_LOW ? String("min (long life)")
+                     : cfg.solarAct == SOLAR_HIGH ? String("max (short life)")
+                     : cfg.solarAct == SOLAR_AUTO ? (spaceF107 > 0
+                         ? String("auto (F10.7 ") + String((int)lround(spaceF107)) + ")"
+                         : String("auto (no data)"))
+                     : String("mean"));
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

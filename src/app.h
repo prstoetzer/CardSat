@@ -16,7 +16,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -113,13 +113,15 @@ private:
   // 10-day pass overview (InstantTrack-style), cached on entry
   PassPredict visPasses[VIS_PASS_MAX];
   int      visN = 0;
-  int      visPage = 0;           // 10-day overview window offset (pages of VIS_DAYS)
+  int      visDayOff = 0;         // 10-day overview start offset from today, in DAYS (>=0)
+  Screen   visReturn = SCR_PASSES; // screen to return to from vis/illum (Satellites or Passes)
+  bool     building = false;      // a build is in progress (suppress empty-state placeholders)
 
   // 60-day illumination (DK3WN illum-style). Raster: cols = days, rows = orbit
   // phase; a set bit means the satellite is in eclipse at that (day, phase).
   uint8_t  illumBits[ILLUM_DAYS][(ILLUM_ROWS + 7) / 8];
   bool     illumValid     = false;
-  int      illumPage      = 0;      // illumination window offset (pages of ILLUM_DAYS)
+  int      illumDayOff    = 0;      // illumination raster start offset from today, in DAYS (>=0)
   // Orbital analysis screen (off Satellites), multi-page
   int      orbitPage = 0;
   double   orbAscLon = 0;           // sub-longitude of next ascending node (deg)
@@ -131,13 +133,17 @@ private:
   float    orbSunPct = 0;           // % of next pass in sunlight
   bool     orbVisible = false;      // next pass optically visible?
   double   orbDecayDays = -1;       // rough days-to-reentry (-1 n/a, 1e9 stable)
+  double   orbDecayLo = -1;         // low-density (solar-min) bound: longer life
+  double   orbDecayHi = -1;         // high-density (solar-max) bound: shorter life
   // Simulation screen (off Satellites): scrub a frozen UTC time
   time_t   simTime = 0;
+  bool     simMap = false;          // Sim screen: world-map view vs data list
   int      simStepIdx = 2;          // index into SIM_STEP[] (1m/10m/1h/6h/1d)
   int      homeScroll = 0;          // scroll offset for the (now scrollable) home menu
   // Sun / Moon tracking screen (off main menu)
   bool     smOut = false;           // rotator engaged on the Sun/Moon screen
   int      smSel = 0;               // 0 = Sun, 1 = Moon
+  bool     smGraphic = true;        // Sun/Moon screen: graphic sky-dome vs data list
   // Workable grid squares (4-char Maidenhead) under the footprint
   uint8_t  gridBits[4050];          // 1 bit per 4-char grid (32400 total, ~4 KB)
   int      gridN = 0;               // grids in footprint (set bits)
@@ -153,6 +159,9 @@ private:
   long     illumNextSec   = -1;     // seconds to next sun<->shadow transition
   float    illumEclMin    = 0;      // eclipse minutes in the current orbit
   float    illumEclPct    = 0;
+  // Live space weather (fetched with GP). f107 <= 0 means "none cached yet".
+  float    spaceF107      = -1;     // last-known 10.7 cm solar radio flux (sfu)
+  time_t   spaceWxEpoch   = 0;      // unix time the F10.7 value was observed/fetched
   char     dxGrid[8] = {0};
   double   dxLat = 0, dxLon = 0;
 
@@ -185,6 +194,8 @@ private:
   int32_t  pbOffset = 0;          // passband tune offset (Hz up from dl bottom)
   int32_t  tuneStep = 1000;       // Hz per passband-tune nudge
   uint8_t  trackMode = 0;         // 0 = TUNE (passband), 1 = CAL (calibration)
+  bool     manFixUp = false;      // Manual mode: false = fix downlink, true = fix uplink
+  Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
   TuneMode tuneMode = TM_HOLD;    // Doppler tune mode (cycle with 'd' on Track)
                                   // holds a constant frequency AT THE SATELLITE
   uint32_t lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
@@ -307,6 +318,9 @@ private:
   void doUpdateGp();
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
   void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
+  void fetchSpaceWeather();                // fetch F10.7 solar flux (best-effort, with GP)
+  void loadSpaceWeather();                 // load cached F10.7 from flash at boot
+  double decayDensityScale() const;        // density scale for the decay point estimate
   void loadCalForSat(uint32_t norad);      // per-satellite calibration -> calDl/calUl
   void saveCalForSat(uint32_t norad);      // persist current calDl/calUl for this sat
   void loadFavs();
@@ -338,6 +352,7 @@ private:
   void drawPasses();
   void drawPassDetail();
   void drawTrack();
+  void drawManual();
   void drawPolar();
   void drawPassPolar();
   void drawMutual();
@@ -358,6 +373,7 @@ private:
   void keyPasses(char c, bool enter, bool back);
   void keyPassDetail(char c, bool enter, bool back);
   void keyTrack(char c, bool enter, bool back);
+  void keyManual(char c, bool enter, bool back);
   void keyPolar(char c, bool enter, bool back);
   void keyPassPolar(char c, bool enter, bool back);
   void keyMutual(char c, bool enter, bool back);

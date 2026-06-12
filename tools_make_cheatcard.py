@@ -30,7 +30,7 @@ FRONT = [
   "Sun/Moon, Location, Update, Settings, Log, About"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; "
-  "<b>o</b> orbital analysis &middot; <b>s</b> simulation &middot; <b>ENTER</b> passes &middot; "
+  "<b>o</b> orbital &middot; <b>s</b> sim &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
   "right edge: dot = AMSAT heard, square = telemetry, ring = not heard"),
  ("NEXT PASSES (favs)",
   "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
@@ -41,14 +41,19 @@ FRONT = [
  ("TRACK (sel)",
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; "
   "<b>c</b> CTCSS &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; "
-  "<b>l</b> log QSO &middot; <b>g</b> grids now &middot; <b>ENTER</b> save cal"),
+  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>g</b> grids now &middot; <b>ENTER</b> save cal"),
+ ("MANUAL (no radio)",
+  "Fix one leg, read Doppler freq to tune the other by hand. <b>u</b> toggle "
+  "HOLD/TUNE leg &middot; <b>,</b>/<b>/</b> passband (linear) &middot; <b>m</b> CAL &middot; "
+  "<b>t</b> next TX &middot; <b>l</b> log &middot; <b>p</b> polar &middot; <b>g</b> grids &middot; <b>`</b>/<b>f</b> Track"),
  ("TRACK &middot; TUNE",
   "<b>,</b>/<b>/</b> tune -/+ &middot; <b>s</b> step 100/1k/5k &middot; <b>x</b> recenter"),
  ("TRACK &middot; CAL",
   "<b>,</b>/<b>/</b> downlink &middot; <b>;</b>/<b>.</b> uplink &middot; "
   "<b>s</b> step 10/100/1k &middot; <b>x</b> zero"),
  ("WORKABLE GRIDS",
-  "4-char Maidenhead grids under the footprint (per-pass union or live now). "
+  "4-char Maidenhead grids under the footprint (per-pass union or live now); "
+  "count on a cyan line above the list. "
   "<b>;</b>/<b>.</b> &amp; <b>{</b>/<b>}</b> scroll &middot; <b>`</b> back"),
  ("POLAR / PASS DETAIL",
   "Pass detail: <b>p</b> polar of this pass. Polar: <b>l</b> log QSO &middot; "
@@ -57,14 +62,16 @@ FRONT = [
 
 BACK = [
  ("SUN / MOON",
+  "Graphic sky-dome (Sun/Moon glyphs by az/el) &middot; <b>g</b> graphic/list &middot; "
   "<b>;</b>/<b>.</b> pick Sun/Moon &middot; <b>o</b> rotor track on/off &middot; "
   "<b>x</b> stop &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
-  "<b>,</b>/<b>/</b> pages: Info / Live / Next pass / Ground track / Doppler / Nodal &middot; "
-  "<b>r</b> recompute. Info: footprint dia (= longest QSO). Doppler <b>f</b> sets beacon "
-  "freq. Nodal: J2 drift, sun-sync, LTAN, repeat, longest pass."),
+  "<b>,</b>/<b>/</b> pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta &middot; "
+  "<b>r</b> recompute. Info: footprint dia (= longest QSO) + decay range. Doppler <b>f</b> sets beacon "
+  "freq. Nodal: J2 drift, sun-sync, LTAN. Sun/Beta: beta angle, eclipse %/orbit."),
  ("SIMULATION",
   "<b>,</b>/<b>/</b> step time &middot; <b>;</b>/<b>.</b> step size &middot; "
+  "<b>m</b> world-map view (sub-point + footprint) &middot; "
   "<b>x</b> reset to now &middot; <b>`</b> back"),
  ("LOCATION",
   "<b>e</b>/<b>o</b>/<b>a</b> lat/lon/alt &middot; <b>g</b> grid &middot; <b>p</b> GPS on/off &middot; "
@@ -75,8 +82,8 @@ BACK = [
   "All footprints &middot; <b>f</b> highlight favorite &middot; <b>y</b> sun &middot; "
   "<b>c</b> eclipse &middot; <b>`</b> back"),
  ("SCHEDULES",
-  "10-day: <b>;</b>/<b>.</b> page +/-10 d, <b>r</b> recompute &middot; "
-  "Illum: <b>,</b>/<b>/</b> page +/-60 d &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
+  "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
+  "Illum: <b>,</b>/<b>/</b> scroll +/-1 day &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
  ("LOG",
   "Menu: <b>ENTER</b> new / browse / export ADIF &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
@@ -113,7 +120,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.8  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.10  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/2' % (side, pg))

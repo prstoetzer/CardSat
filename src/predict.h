@@ -47,6 +47,13 @@ public:
   // time t. Lightweight: propagate + shadow test only, no observer geometry.
   bool sunlitAt(time_t t);
 
+  // Solar beta angle (deg) for an orbit of the given inclination and RAAN at
+  // time t: the angle between the orbit plane and the Sun direction. Near 0 the
+  // orbit plane contains the Sun (long eclipses each rev); near +/-90 the plane
+  // faces the Sun (often continuous sunlight). Independent of the satellite's
+  // position in the orbit, so it needs no propagation.
+  double betaAngleDeg(time_t t, double inclDeg, double raanDeg);
+
   // Range rate (km/s, +ve receding) at a FRACTIONAL unix time, taken from the
   // SGP4 velocity vector (the method Gpredict/sgp4sdp4 use) rather than by
   // differencing slant range. Exact and not quantised to whole seconds.

@@ -36,6 +36,16 @@ enum RotAzRange : uint8_t {
   ROT_AZ_450 = 2,  // 0..450 deg, 90 deg overlap to avoid cable-wrap at North
 };
 
+// Assumed thermospheric activity level for the orbital-decay estimate. Density
+// at 300-500 km swings ~an order of magnitude over the solar cycle, which is the
+// single biggest driver of lifetime uncertainty; this lets the user bracket it.
+enum SolarActivity : uint8_t {
+  SOLAR_LOW  = 0,  // solar minimum (thin atmosphere -> longer life)
+  SOLAR_MEAN = 1,  // cycle average (default)
+  SOLAR_HIGH = 2,  // solar maximum (puffed-up atmosphere -> shorter life)
+  SOLAR_AUTO = 3,  // derive density scale from the live F10.7 flux (fetched with GP)
+};
+
 struct Settings {
   // WiFi
   char     ssid[33] = "";
@@ -68,6 +78,7 @@ struct Settings {
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
+  uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
   // Display / power
   uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)

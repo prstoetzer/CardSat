@@ -174,6 +174,20 @@ bool Predictor::sunlitAt(time_t t) {
   return !(proj < 0.0 && perp < RE_KM);
 }
 
+double Predictor::betaAngleDeg(time_t t, double inclDeg, double raanDeg) {
+  double jd = (double)t / 86400.0 + 2440587.5;
+  double sx, sy, sz; sunEciUnit(jd, sx, sy, sz);          // Sun unit vector (ECI)
+  double i = inclDeg * DEG, O = raanDeg * DEG;
+  // Orbit-normal unit vector in ECI from inclination + RAAN.
+  double nx =  sin(i) * sin(O);
+  double ny = -sin(i) * cos(O);
+  double nz =  cos(i);
+  double d = nx * sx + ny * sy + nz * sz;                 // = cos(angle to Sun)
+  if (d >  1.0) d =  1.0;
+  if (d < -1.0) d = -1.0;
+  return asin(d) / DEG;                                   // beta = 90 - angle(n,Sun)
+}
+
 void Predictor::dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
                              double rangeRateKmS,
                              int32_t calDlHz, int32_t calUlHz,

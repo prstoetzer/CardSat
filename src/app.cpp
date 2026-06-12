@@ -487,10 +487,13 @@ void App::fetchSpaceWeather() {
   // f107_cm_flux.json is an array of objects, newest first, e.g.
   //   {"time_tag":..,"flux":1.06e+002,"ninety_day_mean":null,"rec_count":null}
   // We want the *current* flux (the first valid "flux"), NOT the 90-day mean.
-  // Values are in scientific notation (1.06e+002 = 106), which atof handles. Cap the
-  // read to the first ~6 KB (newest records lead the file) for a small RAM buffer.
+  // Values are in scientific notation (1.06e+002 = 106), which atof handles.
+  // Read the whole (~22 KB) body so the HTTPS transfer completes naturally -- a
+  // mid-stream byte cap left the connection half-read and the fetch unreliable.
   { String head;
-    if (net.httpsGet(SPACEWX_F107_URL, head, 6000)) {
+    bool ok = net.httpsGet(SPACEWX_F107_URL, head, 40000);
+    if (!ok) { delay(300); ok = net.httpsGet(SPACEWX_F107_URL, head, 40000); }  // retry once
+    if (ok) {
       // first valid "flux": (skip any null/garbage, take first sane value)
       float flux = -1;
       { int pos = 0, idx; String key("\"flux\"");
@@ -507,17 +510,25 @@ void App::fetchSpaceWeather() {
         spaceWxEpoch = nowUtc();
         File w = LittleFS.open(FILE_SPACEWX, "w");
         if (w) { w.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); w.close(); }
+      } else {
+        Serial.printf("[wx] flux fetch ok but no value parsed; head[0..80]=%s\n",
+                      head.substring(0, 80).c_str());
       }
+    } else {
+      Serial.printf("[wx] flux fetch failed: code=%d %s\n", net.lastCode, net.lastErr.c_str());
     }
   }
 
   // --- Planetary Kp + running A index (geomagnetic activity) ---
   // noaa-planetary-k-index.json is an array of OBJECTS, newest LAST, e.g.
   //   {"time_tag":..,"Kp":3.67,"a_running":22,"station_count":8}
-  // Values are bare numbers. Read the whole (small ~5 KB) body and take the value
-  // after the LAST "Kp": and the LAST "a_running": (the most recent reading).
+  // Values are bare numbers. The newest reading is the LAST object, so we must read
+  // the WHOLE file (~30 KB) -- a byte cap would truncate the end and miss current
+  // data -- then take the value after the LAST "Kp": and LAST "a_running":.
   { String kbody;
-    if (net.httpsGet(SPACEWX_KP_URL, kbody, 16000)) {
+    bool ok = net.httpsGet(SPACEWX_KP_URL, kbody, 60000);
+    if (!ok) { delay(300); ok = net.httpsGet(SPACEWX_KP_URL, kbody, 60000); }  // retry once
+    if (ok) {
       auto lastNumAfter = [&](const char* key) -> float {
         int idx = kbody.lastIndexOf(String(key));
         if (idx < 0) return -1;
@@ -529,6 +540,11 @@ void App::fetchSpaceWeather() {
       float a  = lastNumAfter("\"a_running\"");
       if (kp >= 0.0f && kp <= 9.0f)   spaceKp = kp;
       if (a  >= 0.0f && a  <= 400.0f) spaceA  = a;
+      if (kp < 0 || a < 0)
+        Serial.printf("[wx] Kp parse: kp=%.2f a=%.0f (body %u bytes)\n",
+                      kp, a, (unsigned)kbody.length());
+    } else {
+      Serial.printf("[wx] Kp fetch failed: code=%d %s\n", net.lastCode, net.lastErr.c_str());
     }
   }
   if (spaceWxEpoch == 0 && (spaceKp >= 0 || spaceF107 > 0)) spaceWxEpoch = nowUtc();

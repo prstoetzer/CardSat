@@ -944,7 +944,7 @@ void App::rotdHandleLine(const String& lineIn) {
 static void skyObjAzEl(time_t t, double obsLatDeg, double obsLonDeg, bool moon,
                        double& azOut, double& elOut) {
   const double D2R = 0.017453292519943295, R2D = 57.29577951308232,
-               TWO_PI = 6.283185307179586;
+               TWO_PI_ = 6.283185307179586;
   double d  = ((double)t - 946728000.0) / 86400.0;          // days since J2000.0
   double ecl = (23.4393 - 3.563e-7 * d) * D2R;              // mean obliquity
   double gmst = fmod(280.46061837 + 360.98564736629 * d, 360.0);
@@ -1004,7 +1004,7 @@ static void skyObjAzEl(time_t t, double obsLatDeg, double obsLonDeg, bool moon,
   double cosA = (sin(dec) - sin(latR) * sinAlt) / (cos(latR) * cos(alt));
   if (cosA > 1) cosA = 1; if (cosA < -1) cosA = -1;
   double A = acos(cosA);
-  if (sin(ha) > 0) A = TWO_PI - A;
+  if (sin(ha) > 0) A = TWO_PI_ - A;
   azOut = A * R2D; elOut = alt * R2D;
 }
 
@@ -2070,7 +2070,7 @@ void App::keySettings(char c, bool enter, bool back) {
       case 31: editTarget = 207;
                editTitle = (cfg.catType == CAT_RIGCTL) ? "rigctld host (IP)" : "Radio LAN host (IP)";
                editBuf = cfg.catHost; screen = SCR_EDIT; break;
-      case 32: editTarget = 210;
+      case 32: editTarget = 211;
                editTitle = (cfg.catType == CAT_RIGCTL) ? "rigctld port" : "Radio LAN port";
                editBuf = String(cfg.catPort); screen = SCR_EDIT; break;
       case 33: editTarget = 208; editTitle = "Radio LAN user";
@@ -2152,7 +2152,7 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.catPass[sizeof(cfg.catPass)-1] = 0;
                 cfg.save(); applyRadioFromCfg();
                 screen = SCR_SETTINGS; setStatus("Saved"); return;
-      case 210: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
+      case 211: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
                   cfg.catPort = (uint16_t)p; cfg.save(); applyRadioFromCfg();
                   screen = SCR_SETTINGS; setStatus("Saved"); return; }
 

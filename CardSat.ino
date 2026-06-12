@@ -794,9 +794,29 @@ private:
 // Position control is fire-and-forget: send P, drain the ack. The socket is
 // opened lazily and reconnected (throttled) so a missing server never hangs the
 // tracking loop.
-// ---------------------------------------------------------------------------
-//  IcomNetRig  -  Icom LAN (RS-BA1 UDP) CAT backend (see icomnet.h/.cpp)
-// ---------------------------------------------------------------------------
+// ===========================================================================
+//  icomnet.h  -  Icom LAN (RS-BA1 UDP) CAT backend  (IcomNetRig : Rig)
+// ===========================================================================
+//
+//  Native network control of an IC-9700 (and the wider IC-705/7610/785x family)
+//  over the radio's built-in Ethernet/Wi-Fi port -- no PC or rigctld bridge.
+//  CardSat speaks the same undocumented UDP protocol as Icom's RS-BA1, wfview
+//  and kappanhang. Only the transport differs from the wired CivRig: the CI-V
+//  frames carried are identical (FE FE <radio> E0 <payload> FD), so the One True
+//  Rule Doppler loop, MAIN/SUB selection and calibration are unchanged.
+//
+//  CAT-only: we open the CONTROL stream (UDP 50001) and the SERIAL/CI-V stream
+//  (UDP 50002). The AUDIO stream (50003) is never opened.
+//
+//  The connection runs as a non-blocking state machine pumped from service()
+//  every loop tick (keepalives are timing-sensitive). The Rig CI-V methods send
+//  fire-and-forget once CONNECTED; readback methods pump the serial socket
+//  briefly for the reply. Protocol details and byte layouts: ICOM_LAN_PROTOCOL.md
+//
+//  Radio setup (IC-9700 MENU > SET > Network): Network Control = ON, a User1 id
+//  + password, Control port 50001, and CI-V Transceive ON (so the radio pushes
+//  changes). Username/password are entered in Settings (CAT type = Icom LAN).
+// ===========================================================================
 class IcomNetRig : public Rig {
 public:
   IcomNetRig(RadioModel m, const char* host, uint16_t port,

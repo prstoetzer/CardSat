@@ -133,6 +133,10 @@ void App::setup() {
   db.loadManualGpFile();    // merge any hand-entered satellites
   loadSpaceWeather();       // restore cached F10.7 for the decay estimate
   loadWeatherCache();       // restore cached terrestrial weather for offline view
+  // Remove any leftover streaming scratch files from older builds so they don't
+  // waste space on the small LittleFS partition (the GP cache needs all of it).
+  if (LittleFS.exists(FILE_SPACEWX_TMP)) LittleFS.remove(FILE_SPACEWX_TMP);
+  if (LittleFS.exists(FILE_WEATHER_TMP)) LittleFS.remove(FILE_WEATHER_TMP);
   loadFavs();
   buildSatView();
   db.applyAmsatStatusFile(FILE_AMSTAT);   // restore cached AMSAT activity marks
@@ -480,83 +484,65 @@ void App::fetchSpaceWeather() {
   setStatus("Space weather..."); draw();
 
   // --- Solar 10.7 cm flux ---
-  // The f107_cm_flux.json feed is ~22 KB. Building that as a String on the
-  // no-PSRAM heap is unreliable (a large contiguous block can fail when the heap
-  // is fragmented), which previously made the whole screen show no data. Stream
-  // it to flash instead, then read just the head (the newest records lead the
-  // file) into a small buffer to parse. Same low-heap pattern the GP loader uses.
-  if (net.httpsGetToFile(SPACEWX_F107_URL, FILE_SPACEWX_TMP, 40000)) {
-    String head;
-    File f = LittleFS.open(FILE_SPACEWX_TMP, "r");
-    if (f) {
-      size_t cap = 4096;                          // newest entries are near the top
-      head.reserve(cap + 16);
-      while (f.available() && head.length() < cap) head += (char)f.read();
-      f.close();
-    }
-    LittleFS.remove(FILE_SPACEWX_TMP);
-
-    auto firstNumAfter = [&](const char* key) -> float {
-      int idx = head.indexOf(String(key));
-      if (idx < 0) return -1;
-      int colon = head.indexOf(':', idx);
-      if (colon < 0) return -1;
-      return (float)atof(head.c_str() + colon + 1);
-    };
-    float mean = -1;
-    { int pos = 0, idx; String key("\"ninety_day_mean\"");
-      while ((idx = head.indexOf(key, pos)) >= 0) {
+  // The f107_cm_flux.json feed is ~22 KB, but the newest records lead the file and
+  // we only need the latest values. Cap the read to the first ~6 KB so we reserve a
+  // small RAM buffer (large allocations are unreliable on the fragmented no-PSRAM
+  // heap) -- and use NO filesystem temp file (the LittleFS partition is tiny under
+  // the huge_app scheme and must stay free for the GP cache).
+  { String head;
+    if (net.httpsGet(SPACEWX_F107_URL, head, 6000)) {
+      auto firstNumAfter = [&](const char* key) -> float {
+        int idx = head.indexOf(String(key));
+        if (idx < 0) return -1;
         int colon = head.indexOf(':', idx);
-        if (colon < 0) break;
-        float v = (float)atof(head.c_str() + colon + 1);          // "null" -> 0.0
-        if (v > 50.0f && v < 400.0f) { mean = v; break; }
-        pos = idx + key.length();
+        if (colon < 0) return -1;
+        return (float)atof(head.c_str() + colon + 1);
+      };
+      float mean = -1;
+      { int pos = 0, idx; String key("\"ninety_day_mean\"");
+        while ((idx = head.indexOf(key, pos)) >= 0) {
+          int colon = head.indexOf(':', idx);
+          if (colon < 0) break;
+          float v = (float)atof(head.c_str() + colon + 1);          // "null" -> 0.0
+          if (v > 50.0f && v < 400.0f) { mean = v; break; }
+          pos = idx + key.length();
+        }
       }
-    }
-    float flux = firstNumAfter("\"flux\"");                        // newest record
-    float use = (mean > 50.0f && mean < 400.0f) ? mean
-              : (flux > 50.0f && flux < 400.0f) ? flux : -1.0f;
-    if (use > 0) {
-      spaceF107 = use;
-      spaceWxEpoch = nowUtc();
-      File w = LittleFS.open(FILE_SPACEWX, "w");
-      if (w) { w.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); w.close(); }
+      float flux = firstNumAfter("\"flux\"");                        // newest record
+      float use = (mean > 50.0f && mean < 400.0f) ? mean
+                : (flux > 50.0f && flux < 400.0f) ? flux : -1.0f;
+      if (use > 0) {
+        spaceF107 = use;
+        spaceWxEpoch = nowUtc();
+        File w = LittleFS.open(FILE_SPACEWX, "w");
+        if (w) { w.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); w.close(); }
+      }
     }
   }
 
   // --- Planetary Kp + running A index (geomagnetic activity) ---
   // Fetched independently of the flux above so a flux hiccup never suppresses it.
-  // The noaa-planetary-k-index feed is ~5 KB with a header row first and the
-  // newest reading LAST, so we read the file's tail. Each row is
+  // The noaa-planetary-k-index feed is small (~5 KB) with a header row first and the
+  // newest reading LAST, so we read the whole body into RAM and parse the last row.
   //   ["time_tag","Kp","a_running","station_count"]  (all quoted strings).
-  if (net.httpsGetToFile(SPACEWX_KP_URL, FILE_SPACEWX_TMP, 16000)) {
-    String tail;
-    File f = LittleFS.open(FILE_SPACEWX_TMP, "r");
-    if (f) {
-      size_t sz = f.size();
-      size_t want = 256;                          // last row is well under this
-      if (sz > want) f.seek(sz - want);
-      tail.reserve(want + 16);
-      while (f.available()) tail += (char)f.read();
-      f.close();
-    }
-    LittleFS.remove(FILE_SPACEWX_TMP);
-
-    int lastRow = tail.lastIndexOf('[');
-    if (lastRow >= 0) {
-      int q1 = tail.indexOf('"', lastRow);                    // time start
-      int q2 = (q1 >= 0) ? tail.indexOf('"', q1 + 1) : -1;    // time end
-      int q3 = (q2 >= 0) ? tail.indexOf('"', q2 + 1) : -1;    // kp start
-      int q4 = (q3 >= 0) ? tail.indexOf('"', q3 + 1) : -1;    // kp end
-      int q5 = (q4 >= 0) ? tail.indexOf('"', q4 + 1) : -1;    // a_running start
-      int q6 = (q5 >= 0) ? tail.indexOf('"', q5 + 1) : -1;    // a_running end
-      if (q3 >= 0 && q4 > q3) {
-        float kp = (float)atof(tail.substring(q3 + 1, q4).c_str());
-        if (kp >= 0.0f && kp <= 9.0f) spaceKp = kp;
-      }
-      if (q5 >= 0 && q6 > q5) {
-        float a = (float)atof(tail.substring(q5 + 1, q6).c_str());
-        if (a >= 0.0f && a <= 400.0f) spaceA = a;
+  { String kbody;
+    if (net.httpsGet(SPACEWX_KP_URL, kbody, 12000)) {
+      int lastRow = kbody.lastIndexOf('[');
+      if (lastRow >= 0) {
+        int q1 = kbody.indexOf('"', lastRow);                    // time start
+        int q2 = (q1 >= 0) ? kbody.indexOf('"', q1 + 1) : -1;    // time end
+        int q3 = (q2 >= 0) ? kbody.indexOf('"', q2 + 1) : -1;    // kp start
+        int q4 = (q3 >= 0) ? kbody.indexOf('"', q3 + 1) : -1;    // kp end
+        int q5 = (q4 >= 0) ? kbody.indexOf('"', q4 + 1) : -1;    // a_running start
+        int q6 = (q5 >= 0) ? kbody.indexOf('"', q5 + 1) : -1;    // a_running end
+        if (q3 >= 0 && q4 > q3) {
+          float kp = (float)atof(kbody.substring(q3 + 1, q4).c_str());
+          if (kp >= 0.0f && kp <= 9.0f) spaceKp = kp;
+        }
+        if (q5 >= 0 && q6 > q5) {
+          float a = (float)atof(kbody.substring(q5 + 1, q6).c_str());
+          if (a >= 0.0f && a <= 400.0f) spaceA = a;
+        }
       }
     }
   }
@@ -666,14 +652,11 @@ void App::fetchWeather() {
              + "&timezone=auto&forecast_days=" + String(WX_FORECAST_DAYS)
              + "&temperature_unit=" + tu + "&wind_speed_unit=" + wu;
 
-  if (!net.httpsGetToFile(url, FILE_WEATHER_TMP, 16000)) return;   // leave cache intact
-
+  // Open-Meteo's response for this query is small (~2-3 KB), so read it straight
+  // into RAM -- no filesystem temp file (the LittleFS partition is tiny under the
+  // huge_app scheme and must stay free for the GP cache).
   String body;
-  { File f = LittleFS.open(FILE_WEATHER_TMP, "r");
-    if (f) { size_t cap = 8192; body.reserve(cap + 16);
-             while (f.available() && body.length() < cap) body += (char)f.read();
-             f.close(); } }
-  LittleFS.remove(FILE_WEATHER_TMP);
+  if (!net.httpsGet(url, body, 12000)) return;        // leave cache intact
   if (body.length() == 0) return;
 
   // --- tiny JSON helpers (numbers + first array of a named key) ---

@@ -392,6 +392,21 @@ void App::onTransponderChanged() {
 // ===========================================================================
 //  GP element update (download AMSAT GP/OMM JSON)
 // ===========================================================================
+
+// Human-readable label for whatever GP source is currently configured in
+// cfg.gpUrl: "AMSAT", a CelesTrak category ("CT:amateur"), or "Custom".
+String App::gpSourceLabel() {
+  String u = cfg.gpUrl;
+  if (u == AMSAT_GP_URL) return "AMSAT";
+  if (u.indexOf("celestrak") >= 0) {
+    int g = u.indexOf("GROUP="), sp = u.indexOf("SPECIAL=");
+    if (g >= 0)       { int e = u.indexOf('&', g);  return "CT:" + u.substring(g + 6, e < 0 ? u.length() : e); }
+    if (sp >= 0)      { int e = u.indexOf('&', sp); return "CT:" + u.substring(sp + 8, e < 0 ? u.length() : e); }
+    return "CelesTrak";
+  }
+  return "Custom";
+}
+
 void App::doUpdateGp() {
   setStatus("WiFi..."); draw();
   if (!net.connected() && !net.connect(cfg.ssid, cfg.pass)) {
@@ -400,12 +415,32 @@ void App::doUpdateGp() {
   }
   Serial.printf("[gp] WiFi OK, IP %s\n", WiFi.localIP().toString().c_str());
   net.syncTimeNtp();
+  // Repair any CelesTrak URL saved by an older build with the lowercase
+  // FORMAT=json-pretty token, which some CelesTrak edges reject; the documented
+  // token is uppercase. (Compact JSON is valid and smaller than pretty-print.)
+  { String u = cfg.gpUrl;
+    if (u.indexOf("celestrak") >= 0) {
+      int f = u.indexOf("FORMAT=");
+      if (f >= 0) {
+        int e = u.indexOf('&', f); if (e < 0) e = u.length();
+        u = u.substring(0, f) + "FORMAT=JSON" + u.substring(e);
+        strncpy(cfg.gpUrl, u.c_str(), sizeof(cfg.gpUrl) - 1);
+        cfg.gpUrl[sizeof(cfg.gpUrl) - 1] = 0; cfg.save();
+      }
+    }
+  }
   setStatus("Downloading GP..."); draw();
   // Stream straight to the cache file (the download IS the offline cache) and
   // parse from flash -- avoids holding the whole ~75 KB body in RAM.
   if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
     Serial.printf("[gp] download failed: %s\n", net.lastErr.c_str());
-    setStatus("GP DL failed: " + net.lastErr); return;
+    // A refused/timed-out connection to CelesTrak often means the IP was
+    // temporarily firewalled after earlier bad requests; AMSAT is a good fallback.
+    String e = net.lastErr;
+    if (gpSourceLabel().startsWith("CT") &&
+        (net.lastCode < 0 || net.lastCode == 403 || net.lastCode == 301))
+      e += " (CelesTrak may be blocking; try AMSAT or wait)";
+    setStatus("GP DL failed: " + e); return;
   }
   int n = db.loadGpFromFile(FILE_GP);
   db.loadManualGpFile();               // re-merge hand-entered sats after replace
@@ -4561,17 +4596,49 @@ static const int16_t STATEPOLY[] = {
 static const char STATE_CODE[] = "AKALARAZCACOCTDCDEFLGAHIIAIDILINKSKYLAMAMDMEMIMNMOMSMTNCNDNENHNJNMNVNYOHOKORPARISCSDTNTXUTVAVTWAWIWVWY";   // 51 entities x 2 chars
 static const int STATE_N = (int)(sizeof(STATE_CODE) - 1) / 2;   // 51
 
-// Ray-cast point-in-polygon over one entity's vertex run starting at i0.
-// Returns the index just past this entity's separator (next entity start).
-static int statePolyTest(double lon, double lat, int i0, bool& inside) {
-  inside = false;
-  int i = i0; double px = 0, py = 0; bool have = false;
+// --- fast-path index tables (start offset + bbox per state polygon) ---
+// Precomputed per-entity start offset (int16 index) + lon/lat bbox (lon*10,
+// lat*10) for fast footprint rejection. Matches STATEPOLY/STATEPOLY_CODE order.
+static const uint16_t STATEPOLY_START[] = {
+  0, 26, 46, 60, 76, 100, 112, 126, 138, 150, 172, 188, 208, 224, 248, 270,
+  284, 296, 310, 326, 342, 360, 380, 404, 422, 440, 456, 476, 492, 504, 520, 534,
+  552, 568, 588, 616, 630, 648, 664, 682, 696, 712, 726, 740, 772, 788, 802, 814,
+  834, 854, 870,
+};
+static const int16_t STATEPOLY_LOMIN[] = {
+  -1680, -884, -946, -1148, -1244, -1090, -737, -771, -758, -876, -856, -1603, -966, -1172, -915, -875,
+  -1020, -895, -940, -735, -795, -711, -904, -972, -958, -916, -1160, -843, -1040, -1040, -726, -756,
+  -1090, -1200, -798, -848, -1030, -1246, -805, -719, -834, -1040, -903, -1066, -1140, -837, -734, -1247,
+  -929, -826, -1110,
+};
+static const int16_t STATEPOLY_LOMAX[] = {
+  -1300, -850, -901, -1090, -1146, -1020, -718, -769, -750, -800, -808, -1548, -901, -1110, -870, -848,
+  -946, -820, -890, -700, -750, -670, -824, -900, -895, -881, -1040, -755, -965, -953, -707, -739,
+  -1030, -1140, -720, -805, -944, -1170, -747, -711, -785, -964, -817, -935, -1090, -752, -715, -1170,
+  -870, -777, -1040,
+};
+static const int16_t STATEPOLY_LAMIN[] = {
+  540, 302, 330, 313, 325, 370, 410, 388, 384, 251, 306, 189, 406, 420, 370, 380,
+  370, 365, 290, 413, 379, 431, 417, 435, 360, 302, 445, 339, 460, 400, 427, 389,
+  313, 350, 405, 384, 336, 420, 397, 413, 320, 425, 350, 260, 370, 366, 427, 460,
+  425, 372, 410,
+};
+static const int16_t STATEPOLY_LAMAX[] = {
+  700, 350, 365, 370, 420, 410, 420, 390, 398, 307, 350, 222, 435, 490, 425, 418,
+  400, 386, 330, 429, 397, 475, 466, 494, 406, 350, 490, 366, 490, 430, 453, 414,
+  370, 420, 450, 419, 370, 462, 420, 420, 352, 460, 366, 365, 420, 380, 450, 490,
+  466, 406, 450,
+};
+
+// Point-in-polygon for a single state polygon starting at int16 offset s0.
+static bool statePipAt(double lon, double lat, int s0) {
+  bool inside = false;
+  int i = s0; double px = 0, py = 0; bool have = false;
   double x0 = 0, y0 = 0; bool first = true;
-  // first vertex (for closing the ring)
   int n = (int)(sizeof(STATEPOLY)/sizeof(STATEPOLY[0]));
   while (i + 1 < n) {
     int a = STATEPOLY[i], b = STATEPOLY[i + 1];
-    if (a == 32767 && b == 32767) { i += 2; break; }
+    if (a == 32767 && b == 32767) break;
     double cx = a / 10.0, cy = b / 10.0;
     if (first) { x0 = cx; y0 = cy; first = false; }
     if (have) {
@@ -4580,12 +4647,11 @@ static int statePolyTest(double lon, double lat, int i0, bool& inside) {
     }
     px = cx; py = cy; have = true; i += 2;
   }
-  // close the ring (last vertex -> first)
   if (have) {
     if (((py > lat) != (y0 > lat)) &&
         (lon < (px - x0) * (lat - y0) / (py - y0) + x0)) inside = !inside;
   }
-  return i;
+  return inside;
 }
 
 void App::addFootprintStates(double subLat, double subLon, double altKm) {
@@ -4594,10 +4660,9 @@ void App::addFootprintStates(double subLat, double subLon, double altKm) {
   double coslam = Re / (Re + altKm);                     // cos(footprint half-angle)
   double lamDeg = acos(coslam) * R2D;
   double sinSub = sin(subLat * D2R), cosSub = cos(subLat * D2R);
-  // Test each entity once: a state is workable if ANY probe point of its
-  // outline-ish interior is inside the footprint. We sample the footprint by
-  // walking a coarse lat/lon mesh (like grids) and tagging the containing
-  // state. The mesh step (1 deg) is fine vs the ~0.1 deg boundaries.
+  // Walk a coarse lat/lon mesh over the footprint; each mesh point is rejected
+  // against every state's bounding box before any ray-cast, and states already
+  // found are skipped. The mesh step (1 deg) is fine vs the ~0.1 deg boundaries.
   int latLo = (int)floor(subLat - lamDeg), latHi = (int)ceil(subLat + lamDeg);
   for (int la = latLo; la <= latHi; ++la) {
     if (la < -90 || la >= 90) continue;
@@ -4609,16 +4674,13 @@ void App::addFootprintStates(double subLat, double subLon, double altKm) {
     for (int lo = lonLo; lo <= lonHi; ++lo) {
       double clon = lo + 0.5;
       if (A + B * cos((clon - subLon) * D2R) < coslam) continue;  // outside footprint
-      // Which entity contains this mesh point? (skip ones already set.)
-      int idx = 0, i = 0;
-      while (idx < STATE_N) {
-        if (!(stateBits[idx >> 3] & (1 << (idx & 7)))) {
-          bool inside; i = statePolyTest(clon, la + 0.5, i, inside);
-          if (inside) stateBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
-        } else {
-          bool inside; i = statePolyTest(0, 0, i, inside);  // advance past entity
-        }
-        ++idx;
+      int16_t qlo = (int16_t)lround(clon * 10.0), qla = (int16_t)lround((la + 0.5) * 10.0);
+      for (int idx = 0; idx < STATE_N; ++idx) {
+        if (stateBits[idx >> 3] & (1 << (idx & 7))) continue;        // already found
+        if (qlo < STATEPOLY_LOMIN[idx] || qlo > STATEPOLY_LOMAX[idx] ||
+            qla < STATEPOLY_LAMIN[idx] || qla > STATEPOLY_LAMAX[idx]) continue;  // bbox reject
+        if (statePipAt(clon, la + 0.5, STATEPOLY_START[idx]))
+          stateBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
       }
     }
   }
@@ -4913,16 +4975,94 @@ static void dxccCode(int idx, char* out) {
   out[k] = 0;
 }
 
-// Ray-cast point-in-polygon over one polygon entity starting at i0; returns
-// the index just past this entity's separator.
-static int dxccPolyTest(double lon, double lat, int i0, bool& inside) {
-  inside = false;
-  int i = i0; double px = 0, py = 0; bool have = false;
+// Great-circle distance (km) between two lat/lon points.
+static double dxccGcKm(double la1, double lo1, double la2, double lo2) {
+  const double d2r = 0.017453292519943295, R = 6371.0;
+  double dphi = (la2 - la1) * d2r, dl = (lo2 - lo1) * d2r;
+  double a = sin(dphi/2)*sin(dphi/2) +
+             cos(la1*d2r)*cos(la2*d2r)*sin(dl/2)*sin(dl/2);
+  if (a < 0) a = 0; if (a > 1) a = 1;
+  return 2.0 * R * asin(sqrt(a));
+}
+
+// --- fast-path index tables (start offset + bbox per polygon) ---
+// Precomputed per-entity start offset (int16 index) + lon/lat bbox (lon*10,
+// lat*10) for fast footprint rejection. Matches DXCCPOLY/DXCCPOLY_CODE order.
+static const uint16_t DXCCPOLY_START[] = {
+  0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 120, 142, 154, 166, 178, 190,
+  202, 214, 228, 240, 252, 264, 276, 288, 300, 312, 324, 336, 348, 360, 372, 384,
+  396, 408, 420, 432, 444, 456, 470, 482, 516, 528, 548, 562, 574, 586, 598, 610,
+  622, 634, 646, 664, 678, 690, 706, 718, 730, 742, 754, 766, 778, 790, 802, 814,
+  826, 838, 850, 868, 880, 892, 904, 916, 934, 946, 958, 970, 982, 994, 1010, 1022,
+  1034, 1046, 1062, 1074, 1092, 1104, 1118, 1132, 1144, 1184, 1196, 1210, 1222, 1242, 1254, 1272,
+  1298, 1310, 1322, 1334, 1348, 1360, 1372, 1396, 1408, 1420, 1432, 1446, 1458, 1470, 1484, 1496,
+  1508, 1520, 1554, 1566, 1578, 1590, 1616, 1630, 1642, 1654, 1668, 1680, 1696, 1708, 1720, 1732,
+  1744, 1756, 1768, 1780, 1820, 1832, 1848, 1880, 1892, 1922, 1952, 1970, 2006, 2018, 2030, 2044,
+  2056, 2088, 2100, 2112, 2124, 2136, 2148, 2162, 2174, 2186, 2208, 2220, 2232, 2244, 2256, 2276,
+  2288,
+};
+static const int16_t DXCCPOLY_LOMIN[] = {
+  1765, 77, 1040, 465, 415, 187, 794, 343, 100, 310, 27, 435, -1726, 345, -162, 430,
+  328, -50, -599, -604, 139, -30, 468, -128, 985, 1110, 805, 140, 1036, -620, 200, -1757,
+  535, 885, 525, 508, 502, 610, 1202, 750, 320, -757, -849, -110, -690, -93, -174, -310,
+  -578, -255, 60, 1200, 163, -95, -170, -105, 440, -109, 450, 270, 230, 345, 234, 705,
+  685, 530, -48, 1640, -615, -1505, -540, -55, 165, 65, -805, -737, -725, -790, 1261, -818,
+  -883, 980, 370, 70, -621, 1295, 880, 350, -1247, 1445, -1603, -1711, -1680, -680, 50, -720,
+  57, 214, 217, -813, 353, 100, 210, 125, 170, 30, -730, -76, 70, 1410, 1255, 43,
+  -695, -730, -574, 880, 136, 110, 141, 240, 250, 200, 1340, 260, -230, -918, -853, 100,
+  90, -85, -90, 280, 565, 470, 221, 125, -1410, 1130, 682, -1171, 1030, 1005, 920, 610,
+  950, 400, 1665, 360, 223, -870, 203, -900, 183, -734, 263, 205, 193, 192, 1665, -610,
+  164,
+};
+static const int16_t DXCCPOLY_LOMAX[] = {
+  1795, 113, 1090, 495, 455, 199, 820, 357, 250, 390, 145, 505, -1714, 415, -128, 510,
+  358, 90, -591, -574, 189, 6, 488, -108, 1045, 1190, 875, 320, 1040, -604, 290, -1747,
+  595, 925, 565, 516, 508, 770, 1218, 1320, 390, -670, -741, -30, -600, -67, -164, -250,
+  -542, -225, 140, 1265, 193, 33, -140, -55, 460, -79, 610, 300, 280, 445, 324, 785,
+  745, 630, 82, 1670, -605, -1485, -520, 17, 225, 99, -765, -713, -689, -670, 1295, -782,
+  -847, 1055, 530, 185, -613, 1458, 1180, 380, -670, 1451, -1548, -1703, -1300, -650, 290, -530,
+  65, 264, 287, -690, 363, 180, 315, 185, 220, 60, -200, -64, 120, 1550, 1285, 69,
+  -685, -346, -544, 920, 160, 242, 239, 360, 360, 265, 1350, 440, -150, -888, -827, 150,
+  140, -25, 30, 1800, 705, 870, 402, 225, -560, 1530, 898, -867, 1070, 1055, 1010, 710,
+  1410, 470, 1685, 410, 273, -834, 297, -880, 233, -600, 333, 229, 207, 208, 1780, -550,
+  329,
+};
+static const int16_t DXCCPOLY_LAMIN[] = {
+  -193, 320, 95, 391, 410, 423, 61, 300, 220, -110, 43, -260, -143, -30, 130, 130,
+  -175, 240, 128, 35, 437, 43, 285, 73, 10, 20, 267, -90, 12, 97, -260, -220,
+  185, 265, 227, 247, 258, 240, 224, 185, -240, -530, 199, 285, -210, 372, 323, 375,
+  -343, 143, 476, 60, 430, 360, 275, 516, 392, 49, 265, 460, 579, 40, 517, 400,
+  370, 360, 430, -230, 141, -186, 28, 500, 460, 461, -40, 183, 179, -40, 345, 75,
+  138, 70, 170, 380, 117, 310, 420, 295, 250, 131, 189, -146, 540, 177, 580, -520,
+  494, 545, 413, -184, 333, 466, 600, 485, 480, 499, 600, 615, 545, -100, 380, 512,
+  119, -337, 29, 215, 455, 553, 490, 90, 220, 350, 70, 360, 636, 140, 86, 10,
+  -43, 45, 100, 500, 380, 420, 453, -275, 420, -385, 81, 150, 105, 155, 110, 310,
+  -95, 295, -180, 330, 561, 111, 437, 132, 420, 10, -215, 409, 419, 397, -460, -265,
+  -349,
+};
+static const int16_t DXCCPOLY_LAMAX[] = {
+  -163, 370, 235, 415, 430, 433, 95, 330, 330, -10, 135, -120, -133, 40, 160, 180,
+  -95, 370, 136, 65, 471, 113, 301, 97, 60, 70, 297, 50, 16, 113, -180, -204,
+  245, 285, 253, 259, 264, 370, 250, 500, -120, -184, 232, 355, -130, 422, 331, 395,
+  -313, 167, 545, 185, 454, 430, 291, 550, 412, 79, 385, 484, 595, 140, 553, 430,
+  404, 420, 511, -200, 151, -166, 52, 586, 484, 475, 10, 197, 195, 110, 385, 95,
+  158, 200, 310, 465, 125, 455, 500, 325, 490, 137, 219, -140, 700, 187, 700, -200,
+  502, 561, 441, -5, 345, 486, 700, 511, 494, 513, 830, 625, 575, -30, 420, 532,
+  125, 52, 53, 265, 467, 685, 544, 210, 320, 415, 80, 410, 662, 170, 112, 100,
+  27, 105, 240, 730, 450, 550, 523, -165, 730, -110, 345, 325, 145, 215, 280, 370,
+  60, 365, -140, 370, 577, 147, 480, 144, 460, 120, -165, 423, 433, 423, -350, -205,
+  -224,
+};
+
+// Point-in-polygon for a single polygon starting at int16 offset s0 (no advance).
+static bool dxccPipAt(double lon, double lat, int s0) {
+  bool inside = false;
+  int i = s0; double px = 0, py = 0; bool have = false;
   double x0 = 0, y0 = 0; bool first = true;
   int n = (int)(sizeof(DXCCPOLY)/sizeof(DXCCPOLY[0]));
   while (i + 1 < n) {
     int a = DXCCPOLY[i], b = DXCCPOLY[i + 1];
-    if (a == 32767 && b == 32767) { i += 2; break; }
+    if (a == 32767 && b == 32767) break;
     double cx = a / 10.0, cy = b / 10.0;
     if (first) { x0 = cx; y0 = cy; first = false; }
     if (have) {
@@ -4935,17 +5075,7 @@ static int dxccPolyTest(double lon, double lat, int i0, bool& inside) {
     if (((py > lat) != (y0 > lat)) &&
         (lon < (px - x0) * (lat - y0) / (py - y0) + x0)) inside = !inside;
   }
-  return i;
-}
-
-// Great-circle distance (km) between two lat/lon points.
-static double dxccGcKm(double la1, double lo1, double la2, double lo2) {
-  const double d2r = 0.017453292519943295, R = 6371.0;
-  double dphi = (la2 - la1) * d2r, dl = (lo2 - lo1) * d2r;
-  double a = sin(dphi/2)*sin(dphi/2) +
-             cos(la1*d2r)*cos(la2*d2r)*sin(dl/2)*sin(dl/2);
-  if (a < 0) a = 0; if (a > 1) a = 1;
-  return 2.0 * R * asin(sqrt(a));
+  return inside;
 }
 
 void App::addFootprintDxcc(double subLat, double subLon, double altKm) {
@@ -4956,7 +5086,9 @@ void App::addFootprintDxcc(double subLat, double subLon, double altKm) {
   double fpKm   = Re * acos(coslam);          // surface footprint radius (km)
   const double CLAIM_KM = 80.0;               // entity's own extent allowance
   double sinSub = sin(subLat * D2R), cosSub = cos(subLat * D2R);
-  // --- polygon entities: walk a coarse footprint mesh, tag the container ---
+  // --- polygon entities: walk a coarse footprint mesh, tag the container.
+  // Each mesh point is rejected against every entity's bounding box (cheap)
+  // before any ray-cast, and entities already found are skipped outright. ---
   int latLo = (int)floor(subLat - lamDeg), latHi = (int)ceil(subLat + lamDeg);
   for (int la = latLo; la <= latHi; ++la) {
     if (la < -90 || la >= 90) continue;
@@ -4969,24 +5101,25 @@ void App::addFootprintDxcc(double subLat, double subLon, double altKm) {
       double clon = lo + 0.5;
       while (clon < -180) clon += 360; while (clon >= 180) clon -= 360;
       if (A + B * cos((clon - subLon) * D2R) < coslam) continue;
-      int idx = 0, i = 0;
-      while (idx < DXCCPOLY_N) {
-        if (!(dxccBits[idx >> 3] & (1 << (idx & 7)))) {
-          bool inside; i = dxccPolyTest(clon, la + 0.5, i, inside);
-          if (inside) dxccBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
-        } else {
-          bool inside; i = dxccPolyTest(0, 0, i, inside);
-        }
-        ++idx;
+      int16_t qlo = (int16_t)lround(clon * 10.0), qla = (int16_t)lround((la + 0.5) * 10.0);
+      for (int idx = 0; idx < DXCCPOLY_N; ++idx) {
+        if (dxccBits[idx >> 3] & (1 << (idx & 7))) continue;          // already found
+        if (qlo < DXCCPOLY_LOMIN[idx] || qlo > DXCCPOLY_LOMAX[idx] ||
+            qla < DXCCPOLY_LAMIN[idx] || qla > DXCCPOLY_LAMAX[idx]) continue;  // bbox reject
+        if (dxccPipAt(clon, la + 0.5, DXCCPOLY_START[idx]))
+          dxccBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
       }
     }
   }
   // --- point entities: within footprint radius + claim radius of sub-point ---
   double limit = fpKm + CLAIM_KM;
+  double limDeg = limit / 100.0 + 2.0;        // conservative latitude pre-reject band
   for (int k = 0; k < DXCCPT_N; ++k) {
     int gi = DXCCPOLY_N + k;
     if (dxccBits[gi >> 3] & (1 << (gi & 7))) continue;
-    double elo = DXCCPT[k*2] / 10.0, ela = DXCCPT[k*2 + 1] / 10.0;
+    double ela = DXCCPT[k*2 + 1] / 10.0;
+    if (fabs(ela - subLat) > limDeg) continue;
+    double elo = DXCCPT[k*2] / 10.0;
     if (dxccGcKm(subLat, subLon, ela, elo) <= limit)
       dxccBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
   }
@@ -5137,7 +5270,11 @@ void App::keyGpSrc(char c, bool enter, bool back) {
     if (!strcmp(q, "@AMSAT")) {
       strncpy(cfg.gpUrl, AMSAT_GP_URL, sizeof(cfg.gpUrl) - 1);
     } else {
-      String url = String("https://celestrak.org/NORAD/elements/gp.php?") + q + "&FORMAT=json-pretty";
+      // CelesTrak's GP query. Use the documented host (celestrak.org -- the .com
+      // host 301-redirects and can get the IP firewalled) and the exact uppercase
+      // FORMAT token from their spec. JSON (compact) is valid and smaller than
+      // JSON-PRETTY; the streaming parser doesn't need pretty-printing.
+      String url = String("https://celestrak.org/NORAD/elements/gp.php?") + q + "&FORMAT=JSON";
       strncpy(cfg.gpUrl, url.c_str(), sizeof(cfg.gpUrl) - 1);
     }
     cfg.gpUrl[sizeof(cfg.gpUrl) - 1] = 0;
@@ -5765,7 +5902,8 @@ void App::drawUpdate() {
   header("Update");
   canvas.setTextSize(1);
   canvas.setTextColor(CL_WHITE, CL_BLACK);
-  canvas.setCursor(6, 24); canvas.print("k / ENT : download GP (AMSAT)");
+  canvas.setCursor(6, 24);
+  canvas.print(String("k / ENT : download GP (") + gpSourceLabel() + ")");
   canvas.setCursor(6, 38); canvas.print("a       : cache ALL transponders");
   canvas.setCursor(6, 52); canvas.print("w       : connect WiFi only");
   canvas.setCursor(6, 70);
@@ -5812,17 +5950,7 @@ void App::drawSettings() {
   rows[18] = String("Rot az range: ") + (cfg.rotAzRange == ROT_AZ_450 ? "0..450"
                      : cfg.rotAzRange == ROT_AZ_180 ? "-180..+180" : "0..360");
   rows[19] = String("Rot el range: ") + (cfg.rotFlip ? "180 deg (flip)" : "90 deg");
-  {
-    String u = cfg.gpUrl, lbl;
-    if (u == AMSAT_GP_URL) lbl = "AMSAT";
-    else if (u.indexOf("celestrak") >= 0) {
-      int g = u.indexOf("GROUP="), sp = u.indexOf("SPECIAL=");
-      if (g >= 0)       { int e = u.indexOf('&', g);  lbl = "CT:" + u.substring(g + 6, e < 0 ? u.length() : e); }
-      else if (sp >= 0) { int e = u.indexOf('&', sp); lbl = "CT:" + u.substring(sp + 8, e < 0 ? u.length() : e); }
-      else lbl = "CelesTrak";
-    } else lbl = "Custom";
-    rows[20] = String("GP source: ") + lbl;
-  }
+  rows[20] = String("GP source: ") + gpSourceLabel();
   rows[21] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
                                 ? "Main Up/Sub Dn" : "Main Dn/Sub Up");
   rows[22] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");

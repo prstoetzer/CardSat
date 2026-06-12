@@ -331,6 +331,7 @@ private:
   bool ensureTransponders(SatEntry& s);   // load (cache or net)
   void onTransponderChanged();             // recenter passband + pick default mode
   void doUpdateGp();
+  String gpSourceLabel();                  // human label for the configured GP source
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
   void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
   void fetchSpaceWeather();                // fetch F10.7 solar flux (best-effort, with GP)

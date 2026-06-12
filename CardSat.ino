@@ -5670,25 +5670,39 @@ void App::fetchSpaceWeather() {
 
   // --- Planetary Kp + running A index (geomagnetic activity) ---
   // Fetched independently of the flux above so a flux hiccup never suppresses it.
-  // The noaa-planetary-k-index feed is small (~5 KB) with a header row first and the
-  // newest reading LAST, so we read the whole body into RAM and parse the last row.
-  //   ["time_tag","Kp","a_running","station_count"]  (all quoted strings).
+  // noaa-planetary-k-index.json is an array of rows, header first, newest LAST:
+  //   ["time_tag","Kp","a_running","station_count"]
+  // Values may be quoted strings or bare numbers depending on the feed, so we take
+  // the last row's contents and split on commas, stripping quotes/space per field.
   { String kbody;
     if (net.httpsGet(SPACEWX_KP_URL, kbody, 12000)) {
-      int lastRow = kbody.lastIndexOf('[');
-      if (lastRow >= 0) {
-        int q1 = kbody.indexOf('"', lastRow);                    // time start
-        int q2 = (q1 >= 0) ? kbody.indexOf('"', q1 + 1) : -1;    // time end
-        int q3 = (q2 >= 0) ? kbody.indexOf('"', q2 + 1) : -1;    // kp start
-        int q4 = (q3 >= 0) ? kbody.indexOf('"', q3 + 1) : -1;    // kp end
-        int q5 = (q4 >= 0) ? kbody.indexOf('"', q4 + 1) : -1;    // a_running start
-        int q6 = (q5 >= 0) ? kbody.indexOf('"', q5 + 1) : -1;    // a_running end
-        if (q3 >= 0 && q4 > q3) {
-          float kp = (float)atof(kbody.substring(q3 + 1, q4).c_str());
+      // Find the last row's own [...] span. The very last ']' closes the whole
+      // array, so the row's closing ']' is the one before that; the row's '[' is
+      // the last '[' in the body.
+      int outer = kbody.lastIndexOf(']');
+      int rb = (outer > 0) ? kbody.lastIndexOf(']', outer - 1) : -1;  // row's ]
+      int lb = kbody.lastIndexOf('[');                                 // row's [
+      if (lb >= 0 && rb > lb) {
+        String row = kbody.substring(lb + 1, rb);    // e.g.  "...","3.67","9","8"
+        // split into up to 4 fields on commas
+        String f[4]; int nf = 0, pos = 0;
+        while (nf < 4) {
+          int comma = row.indexOf(',', pos);
+          String tok = (comma < 0) ? row.substring(pos) : row.substring(pos, comma);
+          tok.trim();
+          // strip surrounding quotes
+          if (tok.length() >= 2 && tok[0] == '"' && tok[tok.length() - 1] == '"')
+            tok = tok.substring(1, tok.length() - 1);
+          f[nf++] = tok;
+          if (comma < 0) break; pos = comma + 1;
+        }
+        // field 1 = Kp, field 2 = a_running
+        if (nf >= 2 && f[1].length()) {
+          float kp = (float)atof(f[1].c_str());
           if (kp >= 0.0f && kp <= 9.0f) spaceKp = kp;
         }
-        if (q5 >= 0 && q6 > q5) {
-          float a = (float)atof(kbody.substring(q5 + 1, q6).c_str());
+        if (nf >= 3 && f[2].length()) {
+          float a = (float)atof(f[2].c_str());
           if (a >= 0.0f && a <= 400.0f) spaceA = a;
         }
       }

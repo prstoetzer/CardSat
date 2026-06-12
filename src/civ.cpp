@@ -160,8 +160,8 @@ bool CivRig::setSubMode (RigMode m)   { return setModeCiv(true,  toCiv(m)); }
 
 bool CivRig::enableSatMode(bool on) {
   if (!RADIOS[_model].hasSatMode) return false;
-  // IC-9700/9100: command 0x16, sub 0x5A, data 0x01/0x00.
-  uint8_t pl[3] = { 0x16, 0x5A, (uint8_t)(on ? 0x01 : 0x00) };
+  // CI-V cmd 0x16; sub-cmd is per-rig: IC-910 = 0x07, IC-9100/9700 = 0x5A.
+  uint8_t pl[3] = { 0x16, RADIOS[_model].satModeSub, (uint8_t)(on ? 0x01 : 0x00) };
   return sendFrame(pl, 3);
 }
 

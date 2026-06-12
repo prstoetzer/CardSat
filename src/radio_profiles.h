@@ -63,23 +63,25 @@ struct RadioProfile {
   uint8_t     selLen;        // valid bytes in selMain/selSub (0 = n/a)
   bool        selVerified;   // CI-V select sequence documented (Icom only)
   bool        hasSatMode;    // radio has a dedicated full-duplex / sat mode
+  uint8_t     satModeSub;    // CI-V satmode sub-cmd under 0x16 (Icom): IC-910 = 0x07,
+                             // IC-9100/9700 = 0x5A. 0 = n/a (non-CI-V).
   bool        canReadFreq;   // frequency read-back implemented for this rig
   bool        hasTone;       // CAT can set the TX CTCSS (PL) encoder tone
 };
 
 // Order MUST match RadioModel.
 static const RadioProfile RADIOS[RIG_COUNT] = {
-  // name       proto         addr   baud    selMain        selSub         len verf satM read tone
-  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true, false },
-  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true, false },
-  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true, true  },
-  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,true, false },
-  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, true, true  },
-  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, true, true  },
+  // name       proto         addr   baud    selMain        selSub         len verf satM satSub read tone
+  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, false },
+  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, false },
+  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x07, true, true  },
+  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x5A, true, false },
+  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, true  },
+  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, true  },
   // Yaesu: 5-byte CAT. baud is the radio's CAT menu setting. No CI-V select.
-  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, true, true  },
-  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, false,false },
+  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, true  },
+  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, false,false },
   // Kenwood: ASCII CAT over RS-232 (needs a MAX3232-class level interface).
-  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, true, false },
-  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, true, true  },
+  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, false },
+  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, true  },
 };

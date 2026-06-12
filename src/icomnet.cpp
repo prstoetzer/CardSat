@@ -492,7 +492,8 @@ bool IcomNetRig::readPtt(bool& tx) {
 
 bool IcomNetRig::enableSatMode(bool on) {
   if (!RADIOS[_model].hasSatMode) return false;
-  uint8_t pl[3] = { 0x16, 0x5A, (uint8_t)(on ? 0x01 : 0x00) };
+  // CI-V cmd 0x16; sub-cmd is per-rig: IC-910 = 0x07, IC-9100/9700 = 0x5A.
+  uint8_t pl[3] = { 0x16, RADIOS[_model].satModeSub, (uint8_t)(on ? 0x01 : 0x00) };
   return sendCivPayload(pl, 3);
 }
 bool IcomNetRig::setCtcss(bool on, float toneHz) {

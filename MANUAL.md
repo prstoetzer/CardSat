@@ -574,6 +574,45 @@ number of grids — it works for any amateur satellite, including high orbits (a
 ~2500 km bird floods roughly 4500 grids). `` ` `` returns to whichever screen
 opened it.
 
+### Workable US states (`w`)
+
+The US states (and DC) currently inside the satellite's footprint — the state
+equivalent of the workable-grids screen, reached the same ways and in the same
+modes:
+
+- `w` from **Passes** — the **union** of states covered across the selected
+  pass, computed once on entry.
+- `w` from **Track** (or **Manual**) — the states under the footprint **right
+  now**, refreshed about every 3 s, with radio and rotator tracking still
+  running.
+
+States are listed by their two-letter USPS code, six per row, alphabetically,
+with the same cyan workable-count line and `;`/`.` · `{`/`}` scrolling as the
+grids screen. Membership is decided by a point-in-polygon test against bundled
+**simplified** state boundaries (about 0.1°/11 km resolution), so a footprint
+grazing a state line may briefly claim both neighbours — fine at footprint
+scale, where both are in fact workable. AK, HI and DC are included. `` ` ``
+returns to whichever screen opened it.
+
+### Workable DXCC (`e`)
+
+The DXCC entities currently inside the footprint — the same idea again, for
+**DXCC chasing**, reached the same ways (`e` from Passes for the per-pass union,
+or from Track / Manual for live now). Entities are listed by common prefix
+(e.g. `DL`, `JA`, `VK`, `9V`), five per row, with the same workable-count line
+and scrolling.
+
+**Coverage and accuracy.** All **340 current DXCC entities** are included, via a
+hybrid model: the major countries use simplified boundary polygons (so the right
+country is picked from the footprint geometry), while the long tail of islands and
+micro-entities is represented by each entity's reference coordinate from `cty.dat`
+and counted as workable when that point falls within the footprint (plus a small
+claim radius). Country borders are coarse, so a footprint near a border may list a
+neighbour too, and a single-point entity is claimed as a unit rather than by exact
+shape. Treat this as **chasing guidance** — which entities are reachable on the
+pass — and confirm the actual entity worked from your own log. `` ` `` returns to
+whichever screen opened it.
+
 ### Location
 
 - `e` / `o` / `a` — edit latitude / longitude / altitude.
@@ -1333,7 +1372,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 | **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Next pass: slant ranges + path delay · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · `r` recompute · `` ` `` back |
 | **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |
-| **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) |
+| **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
 | **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `f` Manual mode · `l` log QSO · `g` workable grids now (radio/rotator keep running) · ENTER save cal |

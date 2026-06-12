@@ -37,24 +37,24 @@ FRONT = [
  ("PASSES (sel)",
   "<b>;</b>/<b>.</b> select &middot; <b>d</b> detail &middot; <b>t</b>/<b>ENTER</b> track &middot; "
   "<b>n</b> add TX &middot; <b>r</b> recompute &middot; <b>x</b> mutual-DX &middot; "
-  "<b>v</b> 10-day &middot; <b>i</b> illum &middot; <b>g</b> workable grids"),
+  "<b>v</b> 10-day &middot; <b>i</b> illum &middot; <b>g</b> grids &middot; <b>w</b> US states &middot; <b>e</b> DXCC"),
  ("TRACK (sel)",
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; "
   "<b>c</b> CTCSS &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; "
-  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>g</b> grids now &middot; <b>ENTER</b> save cal"),
+  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
  ("MANUAL (no radio)",
   "Fix one leg, read Doppler freq to tune the other by hand. <b>u</b> toggle "
   "HOLD/TUNE leg &middot; <b>,</b>/<b>/</b> passband (linear) &middot; <b>m</b> CAL &middot; "
-  "<b>t</b> next TX &middot; <b>l</b> log &middot; <b>p</b> polar &middot; <b>g</b> grids &middot; <b>`</b>/<b>f</b> Track"),
+  "<b>t</b> next TX &middot; <b>l</b> log &middot; <b>p</b> polar &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC &middot; <b>`</b>/<b>f</b> Track"),
  ("TRACK &middot; TUNE",
   "<b>,</b>/<b>/</b> tune -/+ &middot; <b>s</b> step 100/1k/5k &middot; <b>x</b> recenter"),
  ("TRACK &middot; CAL",
   "<b>,</b>/<b>/</b> downlink &middot; <b>;</b>/<b>.</b> uplink &middot; "
   "<b>s</b> step 10/100/1k &middot; <b>x</b> zero"),
- ("WORKABLE GRIDS",
-  "4-char Maidenhead grids under the footprint (per-pass union or live now); "
-  "count on a cyan line above the list. "
-  "<b>;</b>/<b>.</b> &amp; <b>{</b>/<b>}</b> scroll &middot; <b>`</b> back"),
+ ("WORKABLE GRIDS / STATES / DXCC",
+  "Footprint coverage (per-pass union or live now), count on a cyan line: "
+  "<b>g</b> 4-char grids &middot; <b>w</b> US states+DC &middot; <b>e</b> DXCC (all 340, "
+  "hybrid polygons+points). <b>;</b>/<b>.</b> &amp; <b>{</b>/<b>}</b> scroll &middot; <b>`</b> back"),
  ("POLAR / PASS DETAIL",
   "Pass detail: <b>p</b> polar of this pass. Polar: <b>l</b> log QSO &middot; "
   "<b>p</b>/<b>ENTER</b>/<b>`</b> back"),
@@ -83,7 +83,7 @@ BACK = [
   "<b>c</b> eclipse &middot; <b>`</b> back"),
  ("SCHEDULES",
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
-  "Illum: <b>,</b>/<b>/</b> scroll +/-1 day &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
+  "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
  ("LOG",
   "Menu: <b>ENTER</b> new / browse / export ADIF &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
@@ -120,7 +120,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.10  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.11  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/2' % (side, pg))

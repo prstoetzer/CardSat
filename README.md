@@ -17,6 +17,13 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
+> **New in v0.9.11:** **Workable US states** (WAS) and **Workable DXCC** (the full
+> 340-entity list, via a hybrid of country polygons and island/micro-entity points
+> from cty.dat), joining Workable grids — reachable the same ways (live off Track /
+> Manual, or as a per-pass union off Passes). Plus a display-overlap cleanup across
+> the Sun/Moon, polar, GPS-sky, simulation-map, and orbital-analysis screens. See
+> **[RELEASE_NOTES_0.9.11.md](RELEASE_NOTES_0.9.11.md)**.
+
 > **New in v0.9.10:** a no-radio **Manual mode** (off Track) that computes the
 > Doppler-corrected frequency to tune by hand when you fix one leg; a **Sun/Beta
 > angle** page in orbital analysis; **live F10.7 space weather** fetched with GP
@@ -99,6 +106,10 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Workable grid squares** — the 4-char Maidenhead grids under the satellite's
   footprint, either as the union over a selected pass (off Passes) or live now
   (off Track, with radio/rotator tracking uninterrupted) - for VUCC/grid chasing.
+- **Workable US states** — the same idea for US states + DC (the `w` key), found
+  by point-in-polygon against bundled simplified boundaries - for WAS chasing.
+- **Workable DXCC** — and again for all **340 DXCC entities** (the `e` key): a
+  hybrid of country polygons + island/micro-entity reference points from cty.dat.
 - **AMSAT activity marks** — the Satellites list flags whether each bird has been
   reported heard (filled dot) or only not-heard (ring) recently, from the AMSAT
   OSCAR Status API, refreshed with each elements update.
@@ -421,6 +432,12 @@ straight to flash and parsed one element set at a time**, so the full catalog
 loads on the no-PSRAM S3 without ever needing a large contiguous buffer. Up to
 **220 satellites** are held in RAM, and **up to 64 transponders** per active
 satellite.
+
+The **Workable DXCC** screen's entity list is derived from **cty.dat** (the DXCC
+country file maintained by Jim Reisert, AD1C, at <https://www.country-files.com/>):
+major countries are converted to simplified boundary polygons, and the remaining
+island/micro-entities use each entity's reference coordinate from the file. The
+data is bundled in flash; the device does not download it.
 
 ---
 

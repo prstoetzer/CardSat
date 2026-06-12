@@ -16,7 +16,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -150,6 +150,21 @@ private:
   int      gridScroll = 0;
   bool     gridLive = false;        // true = live now (from Track), false = pass union
   uint32_t gridBuiltMs = 0;         // last live rebuild (millis); 0 = build now
+
+  // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
+  // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
+  uint8_t  stateBits[7];            // 1 bit per entity (STATE_N <= 56)
+  int      stateN = 0;             // entities in footprint (set bits)
+  int      stateScroll = 0;
+  bool     stateLive = false;      // true = live now (Track/Manual), false = pass union
+  uint32_t stateBuiltMs = 0;       // last live rebuild (millis); 0 = build now
+
+  // Workable DXCC (hybrid: country polygons + island/micro-entity points = 340).
+  uint8_t  dxccBits[43];           // 1 bit per entity (DXCC_N = 340, hybrid)
+  int      dxccN = 0;
+  int      dxccScroll = 0;
+  bool     dxccLive = false;
+  uint32_t dxccBuiltMs = 0;
   // GP / orbital-elements source picker (AMSAT + CelesTrak categories + custom)
   int      gpSrcSel = 0;
   int      gpSrcScroll = 0;
@@ -385,6 +400,12 @@ private:
   void buildGrids(time_t a, time_t b);
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);
+  void buildStates(time_t a, time_t b);
+  void addFootprintStates(double subLat, double subLon, double altKm);
+  void drawStates();  void keyStates(char c, bool enter, bool back);
+  void buildDxcc(time_t a, time_t b);
+  void addFootprintDxcc(double subLat, double subLon, double altKm);
+  void drawDxcc();    void keyDxcc(char c, bool enter, bool back);
   void drawGpSrc();   void keyGpSrc(char c, bool enter, bool back);
   void drawWorldMap(); void keyWorldMap(char c, bool enter, bool back);
   void drawRotMan(); void keyRotMan(char c, bool enter, bool back);

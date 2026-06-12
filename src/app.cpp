@@ -1286,7 +1286,7 @@ void App::loop() {
   if (screen == SCR_TRACK || screen == SCR_POLAR || screen == SCR_WORLDMAP ||
       screen == SCR_ROTMAN || screen == SCR_GPS || screen == SCR_MANUAL ||
       (screen == SCR_ORBIT && orbitPage <= 2) || screen == SCR_SUNMOON ||
-      screen == SCR_GRID) {
+      screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL) {
@@ -1407,6 +1407,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_SIM:      keySim(c, enter, back); break;
     case SCR_SUNMOON:  keySunMoon(c, enter, back); break;
     case SCR_GRID:     keyGrid(c, enter, back); break;
+    case SCR_STATES:   keyStates(c, enter, back); break;
+    case SCR_DXCC:     keyDxcc(c, enter, back); break;
     case SCR_GPSRC:    keyGpSrc(c, enter, back); break;
   }
 }
@@ -1568,6 +1570,16 @@ void App::keyPasses(char c, bool enter, bool back) {
     gridLive = false; gridScroll = 0; buildGrids(passes[passSel].aos, passes[passSel].los);
     setStatus(""); screen = SCR_GRID; lastDrawMs = 0; return;
   }
+  if (c == 'w' && passN > 0 && passSel < passN) {     // workable US states on this pass
+    setStatus("Computing pass states..."); draw();
+    stateLive = false; stateScroll = 0; buildStates(passes[passSel].aos, passes[passSel].los);
+    setStatus(""); screen = SCR_STATES; lastDrawMs = 0; return;
+  }
+  if (c == 'e' && passN > 0 && passSel < passN) {     // workable DXCC entities on this pass
+    setStatus("Computing pass DXCC..."); draw();
+    dxccLive = false; dxccScroll = 0; buildDxcc(passes[passSel].aos, passes[passSel].los);
+    setStatus(""); screen = SCR_DXCC; lastDrawMs = 0; return;
+  }
   if (c == 'v') { visReturn = SCR_PASSES; visDayOff = 0; buildVis();   screen = SCR_VIS;   lastDrawMs = 0; return; }
   if (c == 'i') { visReturn = SCR_PASSES; illumDayOff = 0; buildIllum(); screen = SCR_ILLUM; lastDrawMs = 0; return; }
   if (enter || c == 't') {     // enter tracking
@@ -1701,6 +1713,10 @@ void App::keyTrack(char c, bool enter, bool back) {
   }
   if (c == 'g') { gridLive = true; gridScroll = 0; gridBuiltMs = 0;   // workable grids now (radio/rotor keep running)
                   liveReturn = SCR_TRACK; screen = SCR_GRID; lastDrawMs = 0; return; }
+  if (c == 'w') { stateLive = true; stateScroll = 0; stateBuiltMs = 0;  // workable US states now
+                  liveReturn = SCR_TRACK; screen = SCR_STATES; lastDrawMs = 0; return; }
+  if (c == 'e') { dxccLive = true; dxccScroll = 0; dxccBuiltMs = 0;     // workable DXCC entities now
+                  liveReturn = SCR_TRACK; screen = SCR_DXCC; lastDrawMs = 0; return; }
   if (c == 'p') { polarPathValid = false; liveReturn = SCR_TRACK; screen = SCR_POLAR;
                   lastDrawMs = 0; return; }                   // live polar
   if (enter) {  // persist calibration for THIS satellite (per-sat store)
@@ -1755,6 +1771,10 @@ void App::keyManual(char c, bool enter, bool back) {
   if (c == 'l') { beginQso(); return; }              // log a QSO (returns here)
   if (c == 'g') { gridLive = true; gridScroll = 0; gridBuiltMs = 0;
                   liveReturn = SCR_MANUAL; screen = SCR_GRID; lastDrawMs = 0; return; }
+  if (c == 'w') { stateLive = true; stateScroll = 0; stateBuiltMs = 0;
+                  liveReturn = SCR_MANUAL; screen = SCR_STATES; lastDrawMs = 0; return; }
+  if (c == 'e') { dxccLive = true; dxccScroll = 0; dxccBuiltMs = 0;
+                  liveReturn = SCR_MANUAL; screen = SCR_DXCC; lastDrawMs = 0; return; }
   if (c == 'p') { polarPathValid = false; liveReturn = SCR_MANUAL; screen = SCR_POLAR;
                   lastDrawMs = 0; return; }
   if (enter) {                                       // persist calibration for THIS sat
@@ -1779,7 +1799,7 @@ void App::drawPassPolar() {
                   canvas.setCursor(6, 50); canvas.print("No pass data.");
                   footer("` back"); return; }
 
-  const int cx = 66, cy = 78, R = 50;
+  const int cx = 66, cy = 70, R = 44;
   drawPolarGrid(cx, cy, R);
   drawPolarArc(cx, cy, R, pdAz, pdEl, PD_SAMPLES);
 
@@ -1889,7 +1909,6 @@ void App::buildVis() {
   SatEntry* s = activeSat();
   if (!s || !timeIsSet()) return;
   building = true;
-  setStatus("Computing 10-day passes..."); draw();
   pred.setSite(loc.obs()); pred.setSat(*s);
   // Window starts at UTC midnight of (today + visDayOff) and spans VIS_DAYS *full*
   // days, so every day-row of the chart is completely filled (the horizon is not
@@ -1899,7 +1918,7 @@ void App::buildVis() {
   time_t winEnd   = winStart + (time_t)VIS_DAYS * 86400;
   visN = pred.predictPasses(winStart, cfg.minPassEl, visPasses, VIS_PASS_MAX, winEnd);
   building = false;
-  setStatus(visN ? (String(visN) + " pass(es)/10 d") : "No passes in 10 days");
+  setStatus("");
 }
 
 void App::drawVis() {
@@ -2048,14 +2067,17 @@ void App::drawIllum() {
     canvas.printf("-> %s in %ldm", illumNextEclipse ? "shadow" : "sun",
                   illumNextSec / 60);
   }
-  footer("` bk  ,// +/-1d  r recomp");
+  footer("` bk  ,// +/-60d  r recomp");
 }
 
 void App::keyIllum(char c, bool enter, bool back) {
   if (isBack(c, back) || enter) { screen = visReturn; lastDrawMs = 0; return; }
   if (c == 'r') { buildIllum(); lastDrawMs = 0; return; }
-  if (isRight(c)) { illumDayOff++; buildIllum(); lastDrawMs = 0; return; }                 // / scroll 1 day forward
-  if (isLeft(c) && illumDayOff > 0) { illumDayOff--; buildIllum(); lastDrawMs = 0; return; } // , scroll 1 day back (>= today)
+  if (isRight(c)) { illumDayOff += ILLUM_DAYS; buildIllum(); lastDrawMs = 0; return; }   // / next 60-day window
+  if (isLeft(c)) {                                                                       // , previous 60-day window (>= today)
+    illumDayOff = (illumDayOff >= ILLUM_DAYS) ? illumDayOff - ILLUM_DAYS : 0;
+    buildIllum(); lastDrawMs = 0; return;
+  }
 }
 
 void App::keyLocation(char c, bool enter, bool back) {
@@ -3157,6 +3179,8 @@ void App::draw() {
     case SCR_SIM:      drawSim(); break;
     case SCR_SUNMOON:  drawSunMoon(); break;
     case SCR_GRID:     drawGrid(); break;
+    case SCR_STATES:   drawStates(); break;
+    case SCR_DXCC:     drawDxcc(); break;
     case SCR_GPSRC:    drawGpSrc(); break;
   }
   // transient status
@@ -3489,7 +3513,7 @@ void App::drawGps() {
   }
 
   // Sky plot.
-  const int cx = 174, cy = 74, R = 50;
+  const int cx = 174, cy = 75, R = 50;
   canvas.drawCircle(cx, cy, R, CL_GREY);          // horizon (el 0)
   canvas.drawCircle(cx, cy, R * 2 / 3, 0x4208);   // el 30
   canvas.drawCircle(cx, cy, R / 3, 0x4208);       // el 60
@@ -3564,11 +3588,15 @@ void App::drawHelp() {
     "PASSES",
     " ENT/t track  d detail",
     " g workable grids",
+    " w workable US states",
+    " e workable DXCC",
     " v 10-day  i illum  x DX",
     "TRACK (selected sat)",
     " r  engage radio (Doppler)",
     " arrows tune / adjust",
     " g grids now  p polar",
+    " w US states now",
+    " e DXCC now",
     "WORKABLE GRIDS",
     " grids under footprint",
     " ;/. {} scroll",
@@ -3831,7 +3859,7 @@ void App::drawOrbit() {
   double apo = a * (1 + s->ecc) - RE, peri = a * (1 - s->ecc) - RE;
   time_t now = timeIsSet() ? nowUtc() : 0;
 
-  int y = 18; const int LH = 10;
+  int y = 18; const int LH = 9;
   auto row = [&](const char* k, const String& v) {
     canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, y);  canvas.print(k);
     canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(98, y); canvas.print(v);
@@ -4126,7 +4154,7 @@ void App::drawSim() {
 
   if (simMap) {
     // ---- World-map view: sub-point + footprint at the simulated instant. ----
-    const int MX = 0, MY = 16, MW = 240, MH = 96;      // map rect (y 16..112)
+    const int MX = 0, MY = 16, MW = 240, MH = 92;      // map rect (y 16..108)
     const uint16_t GRID = 0x4208;
     canvas.fillRect(MX, MY, MW, MH, CL_BLACK);
     { int px = 0, py = 0, plo = 0; bool pen = false;
@@ -4255,7 +4283,7 @@ void App::drawSunMoon() {
     // ---- Graphical sky dome: zenith at centre, N up, elevation = radius. ----
     // Bodies below the horizon are shown faintly just outside the rim so their
     // azimuth is still readable. The selected body gets a ring, not a fill bar.
-    const int cx = 62, cy = 70, R = 50;
+    const int cx = 62, cy = 68, R = 42;
     drawPolarGrid(cx, cy, R);
     auto domeXY = [&](double az, double el, int& x, int& y) {
       double e = el; if (e > 90) e = 90; if (e < -6) e = -6;
@@ -4465,6 +4493,577 @@ void App::keyGrid(char c, bool enter, bool back) {
   if (c == '}')  { if (gridScroll + PER < gridN) gridScroll += PER; lastDrawMs = 0; return; }
   if (c == '{')  { gridScroll -= PER; if (gridScroll < 0) gridScroll = 0; lastDrawMs = 0; return; }
 }
+
+// ===========================================================================
+//  Workable US states/DC: which states fall under the satellite footprint.
+//  Mirrors the workable-grids feature exactly (same footprint walk and UI);
+//  the only difference is the per-point lookup -- a point-in-polygon test
+//  against bundled simplified state boundaries instead of Maidenhead math.
+//  Boundaries are coarse (~0.1 deg); a footprint grazing a border may claim
+//  both neighbours, which is acceptable at footprint scale.
+// ===========================================================================
+// Simplified boundary polygons. Encoding: int16_t (lon*10, lat*10) pairs;
+// 32767,32767 separates entities. Order matches STATE_CODE (alphabetical),
+// so iterating set bits yields sorted output.
+static const int16_t STATEPOLY[] = {
+  /*AK*/ -1680,650, -1600,700, -1450,700, -1410,690, -1410,600, -1300,560, -1350,580, -1500,590, -1580,560, -1650,540, -1680,600, -1680,650, 32767,32767,
+  /*AL*/ -882,350, -856,350, -852,329, -850,320, -851,310, -876,302, -884,302, -881,319, -882,350, 32767,32767,
+  /*AR*/ -946,365, -902,365, -901,350, -912,330, -945,330, -946,365, 32767,32767,
+  /*AZ*/ -1148,370, -1090,370, -1090,313, -1111,313, -1148,325, -1146,330, -1148,370, 32767,32767,
+  /*CA*/ -1244,420, -1200,420, -1200,390, -1146,350, -1146,325, -1171,325, -1185,340, -1205,345, -1224,372, -1244,400, -1244,420, 32767,32767,
+  /*CO*/ -1090,410, -1020,410, -1020,370, -1090,370, -1090,410, 32767,32767,
+  /*CT*/ -737,420, -718,420, -718,413, -729,410, -737,410, -737,420, 32767,32767,
+  /*DC*/ -771,389, -769,390, -769,388, -770,388, -771,389, 32767,32767,
+  /*DE*/ -758,398, -750,398, -750,384, -756,384, -758,398, 32767,32767,
+  /*FL*/ -876,304, -850,307, -820,307, -814,307, -800,268, -801,252, -811,251, -828,278, -840,301, -876,304, 32767,32767,
+  /*GA*/ -856,350, -831,350, -810,321, -808,307, -830,306, -851,310, -856,350, 32767,32767,
+  /*HI*/ -1603,219, -1593,222, -1578,213, -1560,208, -1548,195, -1557,189, -1567,205, -1583,213, -1603,219, 32767,32767,
+  /*IA*/ -966,435, -912,435, -901,425, -911,406, -958,406, -966,427, -966,435, 32767,32767,
+  /*ID*/ -1172,490, -1160,490, -1160,470, -1140,466, -1130,456, -1110,445, -1110,420, -1170,420, -1172,443, -1169,456, -1172,490, 32767,32767,
+  /*IL*/ -915,425, -875,425, -875,410, -870,380, -880,370, -895,370, -906,389, -915,402, -906,425, -915,425, 32767,32767,
+  /*IN*/ -875,418, -848,417, -848,391, -860,380, -875,383, -875,418, 32767,32767,
+  /*KS*/ -1020,400, -946,400, -946,370, -1020,370, -1020,400, 32767,32767,
+  /*KY*/ -895,365, -820,386, -826,372, -840,366, -880,365, -895,365, 32767,32767,
+  /*LA*/ -940,330, -910,330, -892,302, -890,290, -913,293, -938,297, -940,330, 32767,32767,
+  /*MA*/ -735,428, -709,429, -700,418, -710,415, -718,413, -735,420, -735,428, 32767,32767,
+  /*MD*/ -795,397, -758,397, -750,380, -760,379, -770,384, -775,393, -795,393, -795,397, 32767,32767,
+  /*ME*/ -711,453, -707,460, -692,475, -680,473, -670,457, -672,445, -700,431, -708,433, -711,453, 32767,32767,
+  /*MI*/ -904,466, -870,458, -840,465, -834,450, -824,430, -832,417, -868,417, -865,440, -850,458, -880,460, -904,466, 32767,32767,
+  /*MN*/ -972,490, -952,494, -900,481, -920,467, -912,435, -965,435, -966,453, -972,490, 32767,32767,
+  /*MO*/ -958,406, -912,406, -901,380, -895,370, -895,360, -946,365, -946,400, -958,406, 32767,32767,
+  /*MS*/ -916,350, -881,350, -884,302, -896,302, -916,310, -903,330, -916,350, 32767,32767,
+  /*MT*/ -1160,490, -1040,490, -1040,450, -1110,450, -1110,445, -1130,456, -1140,466, -1160,470, -1160,490, 32767,32767,
+  /*NC*/ -843,366, -755,366, -758,352, -780,339, -797,348, -843,350, -843,366, 32767,32767,
+  /*ND*/ -1040,490, -972,490, -965,460, -1040,460, -1040,490, 32767,32767,
+  /*NE*/ -1040,430, -985,430, -964,425, -953,400, -1020,400, -1040,410, -1040,430, 32767,32767,
+  /*NH*/ -726,453, -715,453, -707,436, -708,431, -725,427, -726,453, 32767,32767,
+  /*NJ*/ -756,414, -739,410, -740,404, -744,394, -749,389, -756,396, -751,406, -756,414, 32767,32767,
+  /*NM*/ -1090,370, -1030,370, -1030,320, -1066,320, -1082,318, -1090,313, -1090,370, 32767,32767,
+  /*NV*/ -1200,420, -1140,420, -1140,362, -1147,360, -1146,350, -1156,358, -1170,387, -1200,390, -1200,420, 32767,32767,
+  /*NY*/ -798,423, -790,433, -765,440, -733,450, -733,436, -735,420, -747,410, -740,405, -720,410, -739,410, -754,420, -798,420, -798,423, 32767,32767,
+  /*OH*/ -848,417, -805,419, -805,406, -820,384, -848,391, -848,417, 32767,32767,
+  /*OK*/ -1030,370, -944,370, -944,336, -960,337, -990,340, -1000,346, -1030,365, -1030,370, 32767,32767,
+  /*OR*/ -1246,462, -1232,460, -1190,460, -1170,460, -1170,420, -1244,420, -1246,462, 32767,32767,
+  /*PA*/ -805,420, -798,420, -754,420, -747,414, -750,400, -760,397, -805,397, -805,420, 32767,32767,
+  /*RI*/ -719,420, -711,420, -711,414, -715,413, -719,416, -719,420, 32767,32767,
+  /*SC*/ -834,352, -800,348, -785,339, -792,330, -815,320, -833,345, -834,352, 32767,32767,
+  /*SD*/ -1040,460, -965,460, -964,425, -985,430, -1040,430, -1040,460, 32767,32767,
+  /*TN*/ -903,365, -817,366, -837,353, -882,350, -903,350, -903,365, 32767,32767,
+  /*TX*/ -1066,320, -1030,320, -1030,365, -1000,365, -1000,346, -960,337, -940,336, -935,300, -970,260, -992,264, -1014,298, -1030,290, -1049,306, -1065,318, -1066,320, 32767,32767,
+  /*UT*/ -1140,420, -1110,420, -1110,410, -1090,410, -1090,370, -1140,370, -1140,420, 32767,32767,
+  /*VA*/ -837,366, -752,380, -760,370, -770,366, -800,366, -837,366, 32767,32767,
+  /*VT*/ -734,450, -715,450, -720,427, -733,428, -734,450, 32767,32767,
+  /*WA*/ -1247,484, -1230,482, -1220,490, -1170,490, -1170,460, -1190,460, -1232,460, -1246,463, -1247,484, 32767,32767,
+  /*WI*/ -929,454, -904,466, -880,460, -870,454, -878,440, -870,425, -906,425, -929,435, -929,454, 32767,32767,
+  /*WV*/ -826,382, -805,406, -795,397, -777,393, -790,385, -817,372, -826,382, 32767,32767,
+  /*WY*/ -1110,450, -1040,450, -1040,410, -1110,410, -1110,450, 32767,32767,
+};
+static const char STATE_CODE[] = "AKALARAZCACOCTDCDEFLGAHIIAIDILINKSKYLAMAMDMEMIMNMOMSMTNCNDNENHNJNMNVNYOHOKORPARISCSDTNTXUTVAVTWAWIWVWY";   // 51 entities x 2 chars
+static const int STATE_N = (int)(sizeof(STATE_CODE) - 1) / 2;   // 51
+
+// Ray-cast point-in-polygon over one entity's vertex run starting at i0.
+// Returns the index just past this entity's separator (next entity start).
+static int statePolyTest(double lon, double lat, int i0, bool& inside) {
+  inside = false;
+  int i = i0; double px = 0, py = 0; bool have = false;
+  double x0 = 0, y0 = 0; bool first = true;
+  // first vertex (for closing the ring)
+  int n = (int)(sizeof(STATEPOLY)/sizeof(STATEPOLY[0]));
+  while (i + 1 < n) {
+    int a = STATEPOLY[i], b = STATEPOLY[i + 1];
+    if (a == 32767 && b == 32767) { i += 2; break; }
+    double cx = a / 10.0, cy = b / 10.0;
+    if (first) { x0 = cx; y0 = cy; first = false; }
+    if (have) {
+      if (((py > lat) != (cy > lat)) &&
+          (lon < (px - cx) * (lat - cy) / (py - cy) + cx)) inside = !inside;
+    }
+    px = cx; py = cy; have = true; i += 2;
+  }
+  // close the ring (last vertex -> first)
+  if (have) {
+    if (((py > lat) != (y0 > lat)) &&
+        (lon < (px - x0) * (lat - y0) / (py - y0) + x0)) inside = !inside;
+  }
+  return i;
+}
+
+void App::addFootprintStates(double subLat, double subLon, double altKm) {
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232, Re = 6371.0;
+  if (altKm < 1) return;
+  double coslam = Re / (Re + altKm);                     // cos(footprint half-angle)
+  double lamDeg = acos(coslam) * R2D;
+  double sinSub = sin(subLat * D2R), cosSub = cos(subLat * D2R);
+  // Test each entity once: a state is workable if ANY probe point of its
+  // outline-ish interior is inside the footprint. We sample the footprint by
+  // walking a coarse lat/lon mesh (like grids) and tagging the containing
+  // state. The mesh step (1 deg) is fine vs the ~0.1 deg boundaries.
+  int latLo = (int)floor(subLat - lamDeg), latHi = (int)ceil(subLat + lamDeg);
+  for (int la = latLo; la <= latHi; ++la) {
+    if (la < -90 || la >= 90) continue;
+    double clatR = (la + 0.5) * D2R;
+    double cl = cos(clatR); if (cl < 0.15) cl = 0.15;
+    double lonHalf = lamDeg / cl + 2.0;
+    int lonLo = (int)floor(subLon - lonHalf), lonHi = (int)ceil(subLon + lonHalf);
+    double A = sin(clatR) * sinSub, B = cos(clatR) * cosSub;
+    for (int lo = lonLo; lo <= lonHi; ++lo) {
+      double clon = lo + 0.5;
+      if (A + B * cos((clon - subLon) * D2R) < coslam) continue;  // outside footprint
+      // Which entity contains this mesh point? (skip ones already set.)
+      int idx = 0, i = 0;
+      while (idx < STATE_N) {
+        if (!(stateBits[idx >> 3] & (1 << (idx & 7)))) {
+          bool inside; i = statePolyTest(clon, la + 0.5, i, inside);
+          if (inside) stateBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+        } else {
+          bool inside; i = statePolyTest(0, 0, i, inside);  // advance past entity
+        }
+        ++idx;
+      }
+    }
+  }
+}
+
+void App::buildStates(time_t a, time_t b) {
+  memset(stateBits, 0, sizeof(stateBits));
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet()) { stateN = 0; return; }
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  int samples = (b > a) ? 1 + (int)((b - a) / 60) : 1;
+  if (samples > 90) samples = 90; if (samples < 1) samples = 1;
+  for (int k = 0; k < samples; ++k) {
+    time_t t = (samples > 1) ? a + (time_t)((double)(b - a) * k / (samples - 1)) : a;
+    LiveLook L = pred.look(t);
+    addFootprintStates(L.subLat, L.subLon, L.satAltKm);
+  }
+  int cnt = 0;
+  for (size_t i = 0; i < sizeof(stateBits); ++i)
+    for (uint8_t v = stateBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
+  stateN = cnt;
+}
+
+void App::drawStates() {
+  if (stateLive) {
+    uint32_t ms = millis();
+    if (!stateBuiltMs || ms - stateBuiltMs > 3000) {
+      stateBuiltMs = ms; buildStates(nowUtc(), nowUtc());
+    }
+  }
+  SatEntry* s = activeSat();
+  { String h = (s ? String(s->name) : String("States")) +
+               (stateLive ? " now" : " pass");
+    header(h); }
+  canvas.setTextSize(1);
+  if (stateN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+    canvas.print(timeIsSet() ? "No US states in footprint." : "Clock not set.");
+    footer("` back"); return;
+  }
+  const int COLS = 6, ROWS = 8, PER = COLS * ROWS;
+  if (stateScroll >= stateN) stateScroll = 0;
+  { char cnt[40];
+    if (stateN > PER) {
+      int from = stateScroll + 1, to = stateScroll + PER; if (to > stateN) to = stateN;
+      snprintf(cnt, sizeof(cnt), "%d workable  (%d-%d)", stateN, from, to);
+    } else {
+      snprintf(cnt, sizeof(cnt), "%d workable", stateN);
+    }
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    int w = (int)strlen(cnt) * 6; int x = 238 - w; if (x < 4) x = 4;
+    canvas.setCursor(x, 19); canvas.print(cnt);
+  }
+  int seen = 0, drawn = 0;
+  for (int idx = 0; idx < STATE_N && drawn < PER; ++idx) {
+    if (!(stateBits[idx >> 3] & (1 << (idx & 7)))) continue;
+    if (seen++ < stateScroll) continue;
+    char g[3]; g[0] = STATE_CODE[idx * 2]; g[1] = STATE_CODE[idx * 2 + 1]; g[2] = 0;
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4 + (drawn % COLS) * 40, 31 + (drawn / COLS) * 11);
+    canvas.print(g); ++drawn;
+  }
+  footer(stateN > PER ? "` bk  ;/. scroll  {} page" : "` back");
+}
+
+void App::keyStates(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = stateLive ? liveReturn : SCR_PASSES; lastDrawMs = 0; return; }
+  const int PER = 6 * 8;
+  if (isDown(c)) { if (stateScroll + PER < stateN) stateScroll += 6; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (stateScroll >= 6) stateScroll -= 6; lastDrawMs = 0; return; }
+  if (c == '}')  { if (stateScroll + PER < stateN) stateScroll += PER; lastDrawMs = 0; return; }
+  if (c == '{')  { stateScroll -= PER; if (stateScroll < 0) stateScroll = 0; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Workable DXCC entities (full ~340-entity list, hybrid model):
+//   - Major countries as simplified polygons (DXCCPOLY) - precise borders.
+//   - The long tail of islands/micro-entities as points (DXCCPT) from cty.dat
+//     - workable when the representative point is within the footprint plus a
+//     small claim radius. Indices 0..DXCCPOLY_N-1 are polygons; the next
+//     DXCCPT_N indices are points. Combined into one 43-byte bitset.
+// ===========================================================================
+// Simplified boundary polygons for the major DXCC country entities.
+// int16_t (lon*10, lat*10) pairs; 32767,32767 separates entities; order
+// matches DXCCPOLY_CODE. These are the large landmasses; smaller entities
+// are handled as points (see DXCCPT). Coarse borders: a footprint near a
+// border may also list the neighbour.
+static const int16_t DXCCPOLY[] = {
+  /*3D2*/ 1765,-193, 1795,-193, 1795,-163, 1765,-163, 1765,-193, 32767,32767,
+  /*3V*/ 77,320, 113,320, 113,370, 77,370, 77,320, 32767,32767,
+  /*3W*/ 1040,95, 1090,95, 1090,235, 1040,235, 1040,95, 32767,32767,
+  /*4J*/ 465,391, 495,391, 495,415, 465,415, 465,391, 32767,32767,
+  /*4L*/ 415,410, 455,410, 455,430, 415,430, 415,410, 32767,32767,
+  /*4O*/ 187,423, 199,423, 199,433, 187,433, 187,423, 32767,32767,
+  /*4S*/ 794,61, 820,61, 820,95, 794,95, 794,61, 32767,32767,
+  /*4X*/ 343,300, 357,300, 357,330, 343,330, 343,300, 32767,32767,
+  /*5A*/ 100,330, 250,320, 250,220, 100,240, 100,330, 32767,32767,
+  /*5H*/ 310,-110, 390,-110, 390,-10, 310,-10, 310,-110, 32767,32767,
+  /*5N*/ 27,64, 70,43, 85,45, 95,65, 140,115, 145,130, 130,135, 35,135, 27,110, 27,64, 32767,32767,
+  /*5R*/ 435,-260, 505,-260, 505,-120, 435,-120, 435,-260, 32767,32767,
+  /*5W*/ -1726,-143, -1714,-143, -1714,-133, -1726,-133, -1726,-143, 32767,32767,
+  /*5Z*/ 345,-30, 415,-30, 415,40, 345,40, 345,-30, 32767,32767,
+  /*6W*/ -162,130, -128,130, -128,160, -162,160, -162,130, 32767,32767,
+  /*7O*/ 430,130, 510,130, 510,180, 430,180, 430,130, 32767,32767,
+  /*7Q*/ 328,-175, 358,-175, 358,-95, 328,-95, 328,-175, 32767,32767,
+  /*7X*/ -20,350, 80,370, 90,320, 30,240, -50,280, -20,350, 32767,32767,
+  /*8P*/ -599,128, -591,128, -591,136, -599,136, -599,128, 32767,32767,
+  /*8R*/ -604,35, -574,35, -574,65, -604,65, -604,35, 32767,32767,
+  /*9A*/ 139,437, 189,437, 189,471, 139,471, 139,437, 32767,32767,
+  /*9G*/ -30,43, 6,43, 6,113, -30,113, -30,43, 32767,32767,
+  /*9K*/ 468,285, 488,285, 488,301, 468,301, 468,285, 32767,32767,
+  /*9L*/ -128,73, -108,73, -108,97, -128,97, -128,73, 32767,32767,
+  /*9M2*/ 985,10, 1045,10, 1045,60, 985,60, 985,10, 32767,32767,
+  /*9M6*/ 1110,20, 1190,20, 1190,70, 1110,70, 1110,20, 32767,32767,
+  /*9N*/ 805,267, 875,267, 875,297, 805,297, 805,267, 32767,32767,
+  /*9Q*/ 140,-90, 320,-90, 320,50, 140,50, 140,-90, 32767,32767,
+  /*9V*/ 1036,12, 1040,12, 1040,16, 1036,16, 1036,12, 32767,32767,
+  /*9Y*/ -620,97, -604,97, -604,113, -620,113, -620,97, 32767,32767,
+  /*A2*/ 200,-260, 290,-260, 290,-180, 200,-180, 200,-260, 32767,32767,
+  /*A3*/ -1757,-220, -1747,-220, -1747,-204, -1757,-204, -1757,-220, 32767,32767,
+  /*A4*/ 535,185, 595,185, 595,245, 535,245, 535,185, 32767,32767,
+  /*A5*/ 885,265, 925,265, 925,285, 885,285, 885,265, 32767,32767,
+  /*A6*/ 525,227, 565,227, 565,253, 525,253, 525,227, 32767,32767,
+  /*A7*/ 508,247, 516,247, 516,259, 508,259, 508,247, 32767,32767,
+  /*A9*/ 502,258, 508,258, 508,264, 502,264, 502,258, 32767,32767,
+  /*AP*/ 610,250, 750,370, 770,350, 710,280, 670,240, 610,250, 32767,32767,
+  /*BV*/ 1202,224, 1218,224, 1218,250, 1202,250, 1202,224, 32767,32767,
+  /*BY*/ 750,400, 900,470, 1200,500, 1320,470, 1250,420, 1225,405, 1220,370, 1210,320, 1220,305, 1170,240, 1100,210, 1080,185, 980,220, 850,280, 790,320, 750,400, 32767,32767,
+  /*C9*/ 320,-240, 390,-240, 390,-120, 320,-120, 320,-240, 32767,32767,
+  /*CE*/ -700,-184, -670,-220, -680,-370, -735,-450, -757,-500, -710,-530, -720,-400, -715,-300, -700,-184, 32767,32767,
+  /*CM*/ -849,219, -800,232, -741,201, -777,199, -820,215, -849,219, 32767,32767,
+  /*CN*/ -110,285, -30,285, -30,355, -110,355, -110,285, 32767,32767,
+  /*CP*/ -690,-210, -600,-210, -600,-130, -690,-130, -690,-210, 32767,32767,
+  /*CT*/ -93,372, -67,372, -67,422, -93,422, -93,372, 32767,32767,
+  /*CT3*/ -174,323, -164,323, -164,331, -174,331, -174,323, 32767,32767,
+  /*CU*/ -310,375, -250,375, -250,395, -310,395, -310,375, 32767,32767,
+  /*CX*/ -578,-343, -542,-343, -542,-313, -578,-313, -578,-343, 32767,32767,
+  /*D4*/ -255,143, -225,143, -225,167, -255,167, -255,143, 32767,32767,
+  /*DL*/ 60,510, 90,545, 140,539, 130,505, 125,480, 76,476, 61,490, 60,510, 32767,32767,
+  /*DU*/ 1200,185, 1240,180, 1265,80, 1220,60, 1200,120, 1200,185, 32767,32767,
+  /*E7*/ 163,430, 193,430, 193,454, 163,454, 163,430, 32767,32767,
+  /*EA*/ -93,430, 33,424, 7,388, -20,367, -60,360, -95,387, -93,430, 32767,32767,
+  /*EA8*/ -170,275, -140,275, -140,291, -170,291, -170,275, 32767,32767,
+  /*EI*/ -105,516, -55,516, -55,550, -105,550, -105,516, 32767,32767,
+  /*EK*/ 440,392, 460,392, 460,412, 440,412, 440,392, 32767,32767,
+  /*EL*/ -109,49, -79,49, -79,79, -109,79, -109,49, 32767,32767,
+  /*EP*/ 450,265, 610,265, 610,385, 450,385, 450,265, 32767,32767,
+  /*ER*/ 270,460, 300,460, 300,484, 270,484, 270,460, 32767,32767,
+  /*ES*/ 230,579, 280,579, 280,595, 230,595, 230,579, 32767,32767,
+  /*ET*/ 345,40, 445,40, 445,140, 345,140, 345,40, 32767,32767,
+  /*EU*/ 234,517, 324,517, 324,553, 234,553, 234,517, 32767,32767,
+  /*EX*/ 705,400, 785,400, 785,430, 705,430, 705,400, 32767,32767,
+  /*EY*/ 685,370, 745,370, 745,404, 685,404, 685,370, 32767,32767,
+  /*EZ*/ 530,360, 630,360, 630,420, 530,420, 530,360, 32767,32767,
+  /*F*/ -48,484, 25,511, 82,489, 75,438, 30,430, -15,433, -18,463, -48,484, 32767,32767,
+  /*FK*/ 1640,-230, 1670,-230, 1670,-200, 1640,-200, 1640,-230, 32767,32767,
+  /*FM*/ -615,141, -605,141, -605,151, -615,151, -615,141, 32767,32767,
+  /*FO*/ -1505,-186, -1485,-186, -1485,-166, -1505,-166, -1505,-186, 32767,32767,
+  /*FY*/ -540,28, -520,28, -520,52, -540,52, -540,28, 32767,32767,
+  /*G*/ -55,500, -30,535, -30,550, -20,575, -40,586, 17,525, 15,510, -55,500, 32767,32767,
+  /*HA*/ 165,460, 225,460, 225,484, 165,484, 165,460, 32767,32767,
+  /*HB*/ 65,461, 99,461, 99,475, 65,475, 65,461, 32767,32767,
+  /*HC*/ -805,-40, -765,-40, -765,10, -805,10, -805,-40, 32767,32767,
+  /*HH*/ -737,183, -713,183, -713,197, -737,197, -737,183, 32767,32767,
+  /*HI*/ -725,179, -689,179, -689,195, -725,195, -725,179, 32767,32767,
+  /*HK*/ -790,90, -710,110, -670,60, -670,-40, -700,-40, -790,20, -790,90, 32767,32767,
+  /*HL*/ 1261,345, 1295,345, 1295,385, 1261,385, 1261,345, 32767,32767,
+  /*HP*/ -818,75, -782,75, -782,95, -818,95, -818,75, 32767,32767,
+  /*HR*/ -883,138, -847,138, -847,158, -883,158, -883,138, 32767,32767,
+  /*HS*/ 980,80, 1055,140, 1050,180, 1000,200, 990,140, 1000,70, 980,80, 32767,32767,
+  /*HZ*/ 370,170, 530,170, 530,310, 370,310, 370,170, 32767,32767,
+  /*I*/ 70,459, 136,465, 130,420, 185,401, 156,380, 124,380, 80,440, 70,459, 32767,32767,
+  /*J3*/ -621,117, -613,117, -613,125, -621,125, -621,117, 32767,32767,
+  /*JA*/ 1295,335, 1302,310, 1409,355, 1458,434, 1416,455, 1295,335, 32767,32767,
+  /*JT*/ 880,490, 1160,500, 1180,460, 1000,420, 900,450, 880,490, 32767,32767,
+  /*JY*/ 350,295, 380,295, 380,325, 350,325, 350,295, 32767,32767,
+  /*K*/ -1247,484, -950,490, -830,420, -825,450, -770,440, -670,450, -700,410, -755,350, -810,250, -840,300, -900,290, -970,260, -990,265, -1030,290, -1065,318, -1147,325, -1171,325, -1244,400, -1247,484, 32767,32767,
+  /*KH2*/ 1445,131, 1451,131, 1451,137, 1445,137, 1445,131, 32767,32767,
+  /*KH6*/ -1603,219, -1548,195, -1557,189, -1567,205, -1583,213, -1603,219, 32767,32767,
+  /*KH8*/ -1711,-146, -1703,-146, -1703,-140, -1711,-140, -1711,-146, 32767,32767,
+  /*KL*/ -1680,650, -1600,700, -1410,700, -1410,600, -1300,560, -1500,590, -1650,540, -1680,600, -1680,650, 32767,32767,
+  /*KP4*/ -680,177, -650,177, -650,187, -680,187, -680,177, 32767,32767,
+  /*LA*/ 50,580, 110,590, 150,680, 290,700, 200,695, 120,650, 50,620, 50,580, 32767,32767,
+  /*LU*/ -660,-220, -580,-200, -540,-260, -530,-340, -570,-380, -620,-400, -650,-450, -680,-520, -720,-500, -695,-400, -690,-300, -660,-220, 32767,32767,
+  /*LX*/ 57,494, 65,494, 65,502, 57,502, 57,494, 32767,32767,
+  /*LY*/ 214,545, 264,545, 264,561, 214,561, 214,545, 32767,32767,
+  /*LZ*/ 217,413, 287,413, 287,441, 217,441, 217,413, 32767,32767,
+  /*OA*/ -813,-40, -750,-5, -690,-110, -700,-184, -760,-140, -813,-40, 32767,32767,
+  /*OD*/ 353,333, 363,333, 363,345, 353,345, 353,333, 32767,32767,
+  /*OE*/ 100,466, 180,466, 180,486, 100,486, 100,466, 32767,32767,
+  /*OH*/ 210,603, 250,600, 275,602, 305,615, 315,625, 300,685, 270,700, 230,685, 210,650, 210,630, 210,603, 32767,32767,
+  /*OK*/ 125,485, 185,485, 185,511, 125,511, 125,485, 32767,32767,
+  /*OM*/ 170,480, 220,480, 220,494, 170,494, 170,480, 32767,32767,
+  /*ON*/ 30,499, 60,499, 60,513, 30,513, 30,499, 32767,32767,
+  /*OX*/ -550,600, -200,700, -200,830, -600,800, -730,780, -550,600, 32767,32767,
+  /*OY*/ -76,615, -64,615, -64,625, -76,625, -76,615, 32767,32767,
+  /*OZ*/ 70,545, 120,545, 120,575, 70,575, 70,545, 32767,32767,
+  /*P2*/ 1410,-30, 1500,-60, 1550,-70, 1470,-100, 1410,-90, 1410,-30, 32767,32767,
+  /*P5*/ 1255,380, 1285,380, 1285,420, 1255,420, 1255,380, 32767,32767,
+  /*PA*/ 43,512, 69,512, 69,532, 43,532, 43,512, 32767,32767,
+  /*PJ2*/ -695,119, -685,119, -685,125, -695,125, -695,119, 32767,32767,
+  /*PY*/ -730,-73, -729,-98, -644,-229, -576,-302, -535,-337, -420,-230, -407,-208, -390,-179, -350,-95, -346,-75, -350,-52, -510,42, -600,52, -640,42, -698,18, -730,-73, 32767,32767,
+  /*PZ*/ -574,29, -544,29, -544,53, -574,53, -574,29, 32767,32767,
+  /*S2*/ 880,215, 920,215, 920,265, 880,265, 880,215, 32767,32767,
+  /*S5*/ 136,455, 160,455, 160,467, 136,467, 136,455, 32767,32767,
+  /*SM*/ 110,585, 128,553, 145,553, 165,562, 190,580, 195,630, 242,658, 235,685, 190,685, 150,660, 125,610, 110,585, 32767,32767,
+  /*SP*/ 141,539, 239,544, 235,503, 190,490, 147,508, 141,539, 32767,32767,
+  /*ST*/ 240,90, 360,90, 360,210, 240,210, 240,90, 32767,32767,
+  /*SU*/ 250,320, 340,315, 360,220, 250,220, 250,320, 32767,32767,
+  /*SV*/ 200,400, 260,415, 265,385, 230,350, 215,375, 200,400, 32767,32767,
+  /*T8*/ 1340,70, 1350,70, 1350,80, 1340,80, 1340,70, 32767,32767,
+  /*TA*/ 260,400, 440,410, 440,375, 360,360, 280,365, 260,390, 260,400, 32767,32767,
+  /*TF*/ -230,636, -150,636, -150,662, -230,662, -230,636, 32767,32767,
+  /*TG*/ -918,140, -888,140, -888,170, -918,170, -918,140, 32767,32767,
+  /*TI*/ -853,86, -827,86, -827,112, -853,112, -853,86, 32767,32767,
+  /*TJ*/ 100,10, 150,10, 150,100, 100,100, 100,10, 32767,32767,
+  /*TR*/ 90,-43, 140,-43, 140,27, 90,27, 90,-43, 32767,32767,
+  /*TU*/ -85,45, -25,45, -25,105, -85,105, -85,45, 32767,32767,
+  /*TZ*/ -90,100, 30,100, 30,240, -90,240, -90,100, 32767,32767,
+  /*UA*/ 280,600, 300,680, 600,690, 1000,730, 1400,720, 1600,690, 1800,660, 1600,600, 1350,550, 1300,500, 1200,500, 900,500, 600,520, 480,520, 400,500, 400,550, 300,550, 280,560, 280,600, 32767,32767,
+  /*UK*/ 565,380, 705,380, 705,450, 565,450, 565,380, 32767,32767,
+  /*UN*/ 500,550, 800,540, 870,490, 800,425, 520,420, 470,500, 500,550, 32767,32767,
+  /*UR*/ 221,484, 240,505, 270,516, 310,523, 355,510, 402,495, 400,470, 380,475, 365,453, 335,460, 315,466, 296,454, 282,454, 227,479, 221,484, 32767,32767,
+  /*V5*/ 125,-275, 225,-275, 225,-165, 125,-165, 125,-275, 32767,32767,
+  /*VE*/ -1410,690, -950,690, -800,730, -640,600, -560,510, -660,450, -790,430, -825,420, -890,480, -950,490, -1230,490, -1300,540, -1410,600, -1410,690, 32767,32767,
+  /*VK*/ 1130,-220, 1220,-180, 1300,-120, 1370,-120, 1420,-110, 1460,-190, 1530,-250, 1530,-320, 1500,-375, 1410,-385, 1290,-320, 1150,-340, 1140,-260, 1130,-220, 32767,32767,
+  /*VU*/ 682,237, 775,81, 799,95, 898,220, 880,264, 745,345, 710,320, 682,237, 32767,32767,
+  /*XE*/ -1171,325, -1065,318, -1030,290, -970,260, -975,210, -905,215, -867,215, -875,185, -900,178, -920,150, -965,160, -995,165, -1050,200, -1100,240, -1140,280, -1120,300, -1171,325, 32767,32767,
+  /*XU*/ 1030,105, 1070,105, 1070,145, 1030,145, 1030,105, 32767,32767,
+  /*XW*/ 1005,155, 1055,155, 1055,215, 1005,215, 1005,155, 32767,32767,
+  /*XZ*/ 920,210, 980,280, 1010,210, 990,110, 940,160, 920,210, 32767,32767,
+  /*YA*/ 610,310, 710,310, 710,370, 610,370, 610,310, 32767,32767,
+  /*YB*/ 950,60, 980,20, 1040,15, 1060,-20, 1060,-70, 1140,-85, 1200,-95, 1310,-80, 1410,-90, 1410,-20, 1320,10, 1200,30, 1080,20, 1000,55, 950,60, 32767,32767,
+  /*YI*/ 400,295, 470,295, 470,365, 400,365, 400,295, 32767,32767,
+  /*YJ*/ 1665,-180, 1685,-180, 1685,-140, 1665,-140, 1665,-180, 32767,32767,
+  /*YK*/ 360,330, 410,330, 410,370, 360,370, 360,330, 32767,32767,
+  /*YL*/ 223,561, 273,561, 273,577, 223,577, 223,561, 32767,32767,
+  /*YN*/ -870,111, -834,111, -834,147, -870,147, -870,111, 32767,32767,
+  /*YO*/ 203,480, 287,480, 297,452, 227,437, 203,460, 203,480, 32767,32767,
+  /*YS*/ -900,132, -880,132, -880,144, -900,144, -900,132, 32767,32767,
+  /*YU*/ 183,420, 233,420, 233,460, 183,460, 183,420, 32767,32767,
+  /*YV*/ -734,110, -710,120, -640,107, -600,95, -600,10, -660,10, -675,60, -720,70, -734,90, -734,110, 32767,32767,
+  /*Z2*/ 263,-215, 333,-215, 333,-165, 263,-165, 263,-215, 32767,32767,
+  /*Z3*/ 205,409, 229,409, 229,423, 205,423, 205,409, 32767,32767,
+  /*Z6*/ 193,419, 207,419, 207,433, 193,433, 193,419, 32767,32767,
+  /*ZA*/ 192,397, 208,397, 208,423, 192,423, 192,397, 32767,32767,
+  /*ZL*/ 1730,-350, 1780,-375, 1780,-410, 1745,-415, 1700,-460, 1665,-460, 1700,-430, 1720,-400, 1730,-350, 32767,32767,
+  /*ZP*/ -610,-265, -550,-265, -550,-205, -610,-205, -610,-265, 32767,32767,
+  /*ZS*/ 169,-287, 200,-284, 250,-260, 294,-224, 313,-224, 329,-260, 310,-299, 280,-327, 256,-340, 220,-349, 184,-344, 170,-315, 164,-287, 169,-287, 32767,32767,
+};
+static const char DXCCPOLY_CODE[] = "3D2 3V 3W 4J 4L 4O 4S 4X 5A 5H 5N 5R 5W 5Z 6W 7O 7Q 7X 8P 8R 9A 9G 9K 9L 9M2 9M6 9N 9Q 9V 9Y A2 A3 A4 A5 A6 A7 A9 AP BV BY C9 CE CM CN CP CT CT3 CU CX D4 DL DU E7 EA EA8 EI EK EL EP ER ES ET EU EX EY EZ F FK FM FO FY G HA HB HC HH HI HK HL HP HR HS HZ I J3 JA JT JY K KH2 KH6 KH8 KL KP4 LA LU LX LY LZ OA OD OE OH OK OM ON OX OY OZ P2 P5 PA PJ2 PY PZ S2 S5 SM SP ST SU SV T8 TA TF TG TI TJ TR TU TZ UA UK UN UR V5 VE VK VU XE XU XW XZ YA YB YI YJ YK YL YN YO YS YU YV Z2 Z3 Z6 ZA ZL ZP ZS";
+static const int DXCCPOLY_N = 161;
+
+// Point entities (the DXCC "long tail": islands and micro-entities) from
+// cty.dat. int16_t (lon*10, lat*10) per entity; order matches DXCCPT_CODE.
+// An entity is workable if its representative point is within the satellite
+// footprint plus a small claim radius. Together with the DXCCPOLY country
+// polygons this yields the full ~340-entity DXCC list.
+static const int16_t DXCCPT[] = {
+  124, 419, 1142, 99, 74, 437, 567, -104, 575, -204, 634, -197, 103, 17, 56, -14, 1750, -220, 1771, -125, 315, -266, -107, 110,
+  34, -544, -906, -688, 60, 462, -740, 408, 1260, -88, 330, 350, -105, 206, 94, 176, 13, 84, 326, 19, -775, 182, 279, -292,
+  734, 42, 144, 359, 267, -142, 298, -32, 298, -18, 1177, 151, 1167, 207, 1669, -5, 16, 426, -164, 134, -760, 242, -801, -263,
+  -1094, -271, -788, -336, 0, -900, -599, 439, -600, 470, 185, -125, 433, -116, 390, 150, 343, 313, -1611, -100, -1579, -219, -1698, -190,
+  30, 396, -53, 359, -617, 161, 452, -129, -628, 179, 1583, -199, -1495, -234, -1092, 103, -1401, -89, -562, 468, 555, -211, -630, 181,
+  473, -116, 427, -170, 545, -159, 518, -464, 693, -490, 775, -378, -1762, -133, -45, 542, -67, 547, -22, 492, -42, 568, -26, 494,
+  -37, 523, 1600, -90, 1658, -107, 96, 471, -910, -8, -817, 126, -816, 40, 125, 419, 93, 402, 424, 118, -148, 120, -610, 139,
+  -614, 154, -612, 132, 1540, 243, 1422, 270, 160, 780, -83, 710, -750, 200, 1457, 152, -1760, 0, -1695, 167, -1774, 282, -1621, 59,
+  -1780, 290, -1712, -110, 1666, 193, -750, 184, -648, 177, -679, 181, 204, 601, 190, 600, -700, 125, -682, 122, -631, 176, -631, 181,
+  -324, -38, -290, 0, -293, -205, 499, 807, -138, 248, 555, -47, 66, 2, 240, 400, 279, 362, 248, 352, 1792, -85, 1730, 14,
+  -1717, -28, -1574, 18, 1695, -9, 454, 20, 124, 440, -870, 55, 90, 420, 203, 68, 154, -10, 182, 158, 22, 99, 205, 547,
+  841, 559, -618, 171, -887, 170, -628, 174, 1582, 69, 1673, 91, 1146, 45, 735, -531, 1589, -546, 968, -122, 1591, -316, 1558, -174,
+  1679, -290, 1500, -162, 1056, -105, -630, 182, -622, 168, -648, 183, -718, 218, -1301, -251, -1248, -247, -587, -516, -371, -545, -587, -621,
+  -456, -606, -263, -584, -647, 323, 724, -73, 1142, 223, 928, 124, 728, 112, -1110, 188, -20, 120, 1135, 221, -636, 157, 316, 48,
+  -54, 362, 336, 353, -57, -160, -144, -79, -123, -371, -812, 193, -1712, -94, -1765, -438, -1779, -292, 1676, -516, 377, -469,
+};
+static const char DXCCPT_CODE[] = "1A 1S 3A 3B6 3B8 3B9 3C 3C0 3D2/c 3D2/r 3DA 3X 3Y/b 3Y/p 4U1I 4U1U 4W 5B 5T 5U 5V 5X 6Y 7P 8Q 9H 9J 9U 9X BS7 BV9P C2 C3 C5 C6 CE0X CE0Y CE0Z CE9 CY0 CY9 D2 D6 E3 E4 E5/n E5/s E6 EA6 EA9 FG FH FJ FK/c FO/a FO/c FO/m FP FR FS FT/g FT/j FT/t FT/w FT/x FT/z FW GD GI GJ GM GU GW H4 H40 HB0 HC8 HK0/a HK0/m HV IS J2 J5 J6 J7 J8 JD/m JD/o JW JX KG4 KH0 KH1 KH3 KH4 KH5 KH7K KH8/s KH9 KP1 KP2 KP5 OH0 OJ0 P4 PJ4 PJ5 PJ7 PY0F PY0S PY0T R1FJ S0 S7 S9 SV/a SV5 SV9 T2 T30 T31 T32 T33 T5 T7 TI9 TK TL TN TT TY UA2 UA9 V2 V3 V4 V6 V7 V8 VK0H VK0M VK9C VK9L VK9M VK9N VK9W VK9X VP2E VP2M VP2V VP5 VP6 VP6/d VP8 VP8/g VP8/h VP8/o VP8/s VP9 VQ9 VR VU4 VU7 XF4 XT XX9 YV0 Z8 ZB ZC4 ZD7 ZD8 ZD9 ZF ZK3 ZL7 ZL8 ZL9 ZS8";
+static const int DXCCPT_N = 179;
+
+static const int DXCC_N = DXCCPOLY_N + DXCCPT_N;   // 340
+
+// Copy the idx-th DXCC prefix into out (<=7 chars). idx < DXCCPOLY_N indexes
+// the polygon code list; otherwise the point code list.
+static void dxccCode(int idx, char* out) {
+  const char* s; int e;
+  if (idx < DXCCPOLY_N) { s = DXCCPOLY_CODE; e = idx; }
+  else                  { s = DXCCPT_CODE;   e = idx - DXCCPOLY_N; }
+  const char* p = s;
+  while (*p && e > 0) { if (*p == ' ') --e; ++p; }
+  int k = 0;
+  while (*p && *p != ' ' && k < 7) out[k++] = *p++;
+  out[k] = 0;
+}
+
+// Ray-cast point-in-polygon over one polygon entity starting at i0; returns
+// the index just past this entity's separator.
+static int dxccPolyTest(double lon, double lat, int i0, bool& inside) {
+  inside = false;
+  int i = i0; double px = 0, py = 0; bool have = false;
+  double x0 = 0, y0 = 0; bool first = true;
+  int n = (int)(sizeof(DXCCPOLY)/sizeof(DXCCPOLY[0]));
+  while (i + 1 < n) {
+    int a = DXCCPOLY[i], b = DXCCPOLY[i + 1];
+    if (a == 32767 && b == 32767) { i += 2; break; }
+    double cx = a / 10.0, cy = b / 10.0;
+    if (first) { x0 = cx; y0 = cy; first = false; }
+    if (have) {
+      if (((py > lat) != (cy > lat)) &&
+          (lon < (px - cx) * (lat - cy) / (py - cy) + cx)) inside = !inside;
+    }
+    px = cx; py = cy; have = true; i += 2;
+  }
+  if (have) {
+    if (((py > lat) != (y0 > lat)) &&
+        (lon < (px - x0) * (lat - y0) / (py - y0) + x0)) inside = !inside;
+  }
+  return i;
+}
+
+// Great-circle distance (km) between two lat/lon points.
+static double dxccGcKm(double la1, double lo1, double la2, double lo2) {
+  const double d2r = 0.017453292519943295, R = 6371.0;
+  double dphi = (la2 - la1) * d2r, dl = (lo2 - lo1) * d2r;
+  double a = sin(dphi/2)*sin(dphi/2) +
+             cos(la1*d2r)*cos(la2*d2r)*sin(dl/2)*sin(dl/2);
+  if (a < 0) a = 0; if (a > 1) a = 1;
+  return 2.0 * R * asin(sqrt(a));
+}
+
+void App::addFootprintDxcc(double subLat, double subLon, double altKm) {
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232, Re = 6371.0;
+  if (altKm < 1) return;
+  double coslam = Re / (Re + altKm);
+  double lamDeg = acos(coslam) * R2D;
+  double fpKm   = Re * acos(coslam);          // surface footprint radius (km)
+  const double CLAIM_KM = 80.0;               // entity's own extent allowance
+  double sinSub = sin(subLat * D2R), cosSub = cos(subLat * D2R);
+  // --- polygon entities: walk a coarse footprint mesh, tag the container ---
+  int latLo = (int)floor(subLat - lamDeg), latHi = (int)ceil(subLat + lamDeg);
+  for (int la = latLo; la <= latHi; ++la) {
+    if (la < -90 || la >= 90) continue;
+    double clatR = (la + 0.5) * D2R;
+    double cl = cos(clatR); if (cl < 0.15) cl = 0.15;
+    double lonHalf = lamDeg / cl + 2.0;
+    int lonLo = (int)floor(subLon - lonHalf), lonHi = (int)ceil(subLon + lonHalf);
+    double A = sin(clatR) * sinSub, B = cos(clatR) * cosSub;
+    for (int lo = lonLo; lo <= lonHi; ++lo) {
+      double clon = lo + 0.5;
+      while (clon < -180) clon += 360; while (clon >= 180) clon -= 360;
+      if (A + B * cos((clon - subLon) * D2R) < coslam) continue;
+      int idx = 0, i = 0;
+      while (idx < DXCCPOLY_N) {
+        if (!(dxccBits[idx >> 3] & (1 << (idx & 7)))) {
+          bool inside; i = dxccPolyTest(clon, la + 0.5, i, inside);
+          if (inside) dxccBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+        } else {
+          bool inside; i = dxccPolyTest(0, 0, i, inside);
+        }
+        ++idx;
+      }
+    }
+  }
+  // --- point entities: within footprint radius + claim radius of sub-point ---
+  double limit = fpKm + CLAIM_KM;
+  for (int k = 0; k < DXCCPT_N; ++k) {
+    int gi = DXCCPOLY_N + k;
+    if (dxccBits[gi >> 3] & (1 << (gi & 7))) continue;
+    double elo = DXCCPT[k*2] / 10.0, ela = DXCCPT[k*2 + 1] / 10.0;
+    if (dxccGcKm(subLat, subLon, ela, elo) <= limit)
+      dxccBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+  }
+}
+
+void App::buildDxcc(time_t a, time_t b) {
+  memset(dxccBits, 0, sizeof(dxccBits));
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet()) { dxccN = 0; return; }
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  int samples = (b > a) ? 1 + (int)((b - a) / 60) : 1;
+  if (samples > 90) samples = 90; if (samples < 1) samples = 1;
+  for (int k = 0; k < samples; ++k) {
+    time_t t = (samples > 1) ? a + (time_t)((double)(b - a) * k / (samples - 1)) : a;
+    LiveLook L = pred.look(t);
+    addFootprintDxcc(L.subLat, L.subLon, L.satAltKm);
+  }
+  int cnt = 0;
+  for (size_t i = 0; i < sizeof(dxccBits); ++i)
+    for (uint8_t v = dxccBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
+  dxccN = cnt;
+}
+
+void App::drawDxcc() {
+  if (dxccLive) {
+    uint32_t ms = millis();
+    if (!dxccBuiltMs || ms - dxccBuiltMs > 3000) {
+      dxccBuiltMs = ms; buildDxcc(nowUtc(), nowUtc());
+    }
+  }
+  SatEntry* s = activeSat();
+  { String h = (s ? String(s->name) : String("DXCC")) +
+               (dxccLive ? " now" : " pass");
+    header(h); }
+  canvas.setTextSize(1);
+  if (dxccN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+    canvas.print(timeIsSet() ? "No DXCC in footprint." : "Clock not set.");
+    footer("` back"); return;
+  }
+  const int COLS = 5, ROWS = 8, PER = COLS * ROWS;
+  if (dxccScroll >= dxccN) dxccScroll = 0;
+  { char cnt[44];
+    if (dxccN > PER) {
+      int from = dxccScroll + 1, to = dxccScroll + PER; if (to > dxccN) to = dxccN;
+      snprintf(cnt, sizeof(cnt), "%d workable  (%d-%d)", dxccN, from, to);
+    } else {
+      snprintf(cnt, sizeof(cnt), "%d workable", dxccN);
+    }
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    int w = (int)strlen(cnt) * 6; int x = 238 - w; if (x < 4) x = 4;
+    canvas.setCursor(x, 19); canvas.print(cnt);
+  }
+  int seen = 0, drawn = 0;
+  for (int idx = 0; idx < DXCC_N && drawn < PER; ++idx) {
+    if (!(dxccBits[idx >> 3] & (1 << (idx & 7)))) continue;
+    if (seen++ < dxccScroll) continue;
+    char g[8]; dxccCode(idx, g);
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4 + (drawn % COLS) * 48, 31 + (drawn / COLS) * 11);
+    canvas.print(g); ++drawn;
+  }
+  footer(dxccN > PER ? "` bk  ;/. scroll  {} page" : "` back");
+}
+
+void App::keyDxcc(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = dxccLive ? liveReturn : SCR_PASSES; lastDrawMs = 0; return; }
+  const int PER = 5 * 8;
+  if (isDown(c)) { if (dxccScroll + PER < dxccN) dxccScroll += 5; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (dxccScroll >= 5) dxccScroll -= 5; lastDrawMs = 0; return; }
+  if (c == '}')  { if (dxccScroll + PER < dxccN) dxccScroll += PER; lastDrawMs = 0; return; }
+  if (c == '{')  { dxccScroll -= PER; if (dxccScroll < 0) dxccScroll = 0; lastDrawMs = 0; return; }
+}
+
+
+
 
 // ===========================================================================
 //  GP / orbital-elements source picker. Default AMSAT JSON; any CelesTrak
@@ -4709,7 +5308,7 @@ void App::drawPasses() {
     canvas.printf("%s  %2ldm %3.0f %s",
                   fmtMDHM(p.aos).c_str(), mins, p.maxEl, fmtHM(p.los).c_str());
   }
-  footer("ENT trk r rcmp d dtl n+TX x mut `bk");
+  footer("ENT trk d dtl n+TX g grd w st e dx x mut `bk");
 }
 
 void App::drawPassDetail() {
@@ -5088,7 +5687,7 @@ void App::drawPolar() {
   canvas.setTextSize(1);
   if (!s) { footer("` back"); return; }
 
-  const int cx = 66, cy = 78, R = 50;   // plot centre + outer (horizon) radius
+  const int cx = 66, cy = 70, R = 44;   // plot centre + outer (horizon) radius
 
   // (Re)build the ground-track arc on entry or when the cached pass has ended.
   if (timeIsSet() && (!polarPathValid || nowUtc() > polarPass.los)) buildPolarPath();

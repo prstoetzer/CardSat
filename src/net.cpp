@@ -146,7 +146,7 @@ bool Net::fetchGp(const String& url, String& out) {
 }
 
 bool Net::fetchGpToFile(const String& url, const char* path) {
-  return httpsGetToFile(url, path, 400000, nullptr);
+  return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
 }
 
 bool Net::httpsGetToFile(const String& url, const char* path,
@@ -155,7 +155,25 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
 
-  Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
+  // Guard against starting a TLS session when the heap is too low to complete the
+  // handshake -- failing here with a clear reason beats a truncated/garbled body.
+  if (ESP.getFreeHeap() < 45000) {
+    lastErr = "low heap"; 
+    Serial.printf("[net] abort GET: heap only %u\n", (unsigned)ESP.getFreeHeap());
+    return false;
+  }
+  // Guard against a full filesystem (the internal LittleFS partition is small).
+  // Need room for the body plus slack; if we can't be sure, don't write a file
+  // that would truncate and then fail to parse.
+  {
+    size_t freeb = Store::freeBytes();
+    if (freeb && freeb < maxBytes + 4096) {
+      lastErr = "low flash";
+      Serial.printf("[net] abort GET: free flash %u < need %u\n",
+                    (unsigned)freeb, (unsigned)(maxBytes + 4096));
+      return false;
+    }
+  }
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
                 (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
                 (int)WiFi.RSSI());
@@ -226,6 +244,20 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   if (writeErr)    { lastErr = "fs write failed"; return false; }
   if (total == 0)  { lastErr = "empty body"; return false; }
   return true;
+}
+
+bool Net::httpsGetToFileRetry(const String& url, const char* path,
+                              size_t maxBytes, size_t* written, int attempts) {
+  if (attempts < 1) attempts = 1;
+  for (int i = 0; i < attempts; i++) {
+    if (httpsGetToFile(url, path, maxBytes, written)) return true;
+    // A "low flash" failure won't fix itself on retry -- bail immediately.
+    if (lastErr == "low flash") return false;
+    Serial.printf("[net] attempt %d/%d failed (%s); retrying\n",
+                  i + 1, attempts, lastErr.c_str());
+    delay(400 * (i + 1));   // simple linear backoff
+  }
+  return false;
 }
 
 bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {

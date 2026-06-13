@@ -17,4 +17,5 @@ namespace Store {
   bool   ready();            // true if some filesystem mounted
   bool   onSD();             // true if we fell back to the SD card
   bool   formatInternal();   // wipe internal LittleFS (factory reset); never the SD
+  size_t freeBytes();        // approx free space on the active FS (large if on SD)
 }

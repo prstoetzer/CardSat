@@ -268,6 +268,7 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 #define AMSAT_STATUS_HOURS 72                    // "recently" window for status reports
 #define FILE_SPACEWX  "/CardSat/spacewx.txt"    // cached space weather: "f107 ap epoch"
 #define FILE_SPACEWX_TMP "/CardSat/spacewx.tmp"  // scratch for streamed NOAA JSON (low heap)
+#define FILE_DL_TMP      "/CardSat/dl.tmp"        // shared scratch for streamed downloads (one at a time)
 // NOAA SWPC daily F10.7 cm solar-radio-flux observations (JSON array of records).
 // Best-effort: drives the orbital-decay density scale when "Decay solar = auto".
 #define SPACEWX_F107_URL  "https://services.swpc.noaa.gov/json/f107_cm_flux.json"
@@ -304,6 +305,7 @@ namespace Store {
   bool   ready();            // true if some filesystem mounted
   bool   onSD();             // true if we fell back to the SD card
   bool   formatInternal();   // wipe internal LittleFS (factory reset); never the SD
+  size_t freeBytes();        // approx free space on the active FS (large if on SD)
 }
 
 
@@ -1254,6 +1256,13 @@ public:
   bool httpsGetToFile(const String& url, const char* path,
                       size_t maxBytes = 400000, size_t* written = nullptr);
 
+  // Same, but retries a few times with backoff. Transient TLS/Wi-Fi hiccups are
+  // the common cause of a failed or short download on this hardware; a couple of
+  // retries turns most of those into successes. `attempts` total tries.
+  bool httpsGetToFileRetry(const String& url, const char* path,
+                           size_t maxBytes = 400000, size_t* written = nullptr,
+                           int attempts = 3);
+
   // Convenience wrappers.
   bool fetchGp(const String& url, String& out);    // AMSAT GP/OMM JSON array
   bool fetchGpToFile(const String& url, const char* path);  // GP -> cache file
@@ -2047,6 +2056,16 @@ bool begin() {
 fs::FS& fs()  { return *g_fs; }
 bool ready()  { return g_ready; }
 bool onSD()   { return g_sd; }
+
+size_t freeBytes() {
+  // On the internal LittleFS partition free space is tight and worth checking
+  // before a streamed download; on an SD card it's effectively unlimited for
+  // our purposes, so report a large value without probing the card.
+  if (g_sd) return (size_t)8 * 1024 * 1024;
+  if (!g_ready) return 0;
+  uint32_t total = LittleFS.totalBytes(), used = LittleFS.usedBytes();
+  return (used < total) ? (size_t)(total - used) : 0;
+}
 
 bool formatInternal() {
   if (g_sd) {
@@ -4562,7 +4581,7 @@ bool Net::fetchGp(const String& url, String& out) {
 }
 
 bool Net::fetchGpToFile(const String& url, const char* path) {
-  return httpsGetToFile(url, path, 400000, nullptr);
+  return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
 }
 
 bool Net::httpsGetToFile(const String& url, const char* path,
@@ -4570,6 +4589,26 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   lastCode = 0; lastErr = "";
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
+
+  // Guard against starting a TLS session when the heap is too low to complete the
+  // handshake -- failing here with a clear reason beats a truncated/garbled body.
+  if (ESP.getFreeHeap() < 45000) {
+    lastErr = "low heap"; 
+    Serial.printf("[net] abort GET: heap only %u\n", (unsigned)ESP.getFreeHeap());
+    return false;
+  }
+  // Guard against a full filesystem (the internal LittleFS partition is small).
+  // Need room for the body plus slack; if we can't be sure, don't write a file
+  // that would truncate and then fail to parse.
+  {
+    size_t freeb = Store::freeBytes();
+    if (freeb && freeb < maxBytes + 4096) {
+      lastErr = "low flash";
+      Serial.printf("[net] abort GET: free flash %u < need %u\n",
+                    (unsigned)freeb, (unsigned)(maxBytes + 4096));
+      return false;
+    }
+  }
 
   Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -4642,6 +4681,20 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   if (writeErr)    { lastErr = "fs write failed"; return false; }
   if (total == 0)  { lastErr = "empty body"; return false; }
   return true;
+}
+
+bool Net::httpsGetToFileRetry(const String& url, const char* path,
+                              size_t maxBytes, size_t* written, int attempts) {
+  if (attempts < 1) attempts = 1;
+  for (int i = 0; i < attempts; i++) {
+    if (httpsGetToFile(url, path, maxBytes, written)) return true;
+    // A "low flash" failure won't fix itself on retry -- bail immediately.
+    if (lastErr == "low flash") return false;
+    Serial.printf("[net] attempt %d/%d failed (%s); retrying\n",
+                  i + 1, attempts, lastErr.c_str());
+    delay(400 * (i + 1));   // simple linear backoff
+  }
+  return false;
 }
 
 bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {
@@ -5281,10 +5334,11 @@ void App::setup() {
   db.loadManualGpFile();    // merge any hand-entered satellites
   loadSpaceWeather();       // restore cached F10.7 for the decay estimate
   loadWeatherCache();       // restore cached terrestrial weather for offline view
-  // Remove any leftover streaming scratch files from older builds so they don't
-  // waste space on the small LittleFS partition (the GP cache needs all of it).
-  if (LittleFS.exists(FILE_SPACEWX_TMP)) LittleFS.remove(FILE_SPACEWX_TMP);
-  if (LittleFS.exists(FILE_WEATHER_TMP)) LittleFS.remove(FILE_WEATHER_TMP);
+  // Remove any leftover streaming scratch files (from older builds, or a fetch
+  // interrupted by reset) so they don't waste space on the small filesystem.
+  if (Store::fs().exists(FILE_SPACEWX_TMP)) Store::fs().remove(FILE_SPACEWX_TMP);
+  if (Store::fs().exists(FILE_WEATHER_TMP)) Store::fs().remove(FILE_WEATHER_TMP);
+  if (Store::fs().exists(FILE_DL_TMP))      Store::fs().remove(FILE_DL_TMP);
   loadFavs();
   buildSatView();
   db.applyAmsatStatusFile(FILE_AMSTAT);   // restore cached AMSAT activity marks
@@ -5611,12 +5665,88 @@ void App::doUpdateGp() {
 // (active) or not-heard recently. Cached to flash so the marks survive a
 // reboot, and refreshed whenever elements are updated. Best-effort: a failure
 // leaves the previous marks intact.
+// ---------------------------------------------------------------------------
+//  Streamed-download value scanners. The space-weather and weather feeds are
+//  parsed by finding a few "key":value pairs, so we never need the whole body
+//  in RAM (a large contiguous String is exactly what fails on the fragmented
+//  no-PSRAM heap). These read the cached file in a small rolling buffer and
+//  pull the value(s) out -- the same stream-and-discard discipline GP uses.
+// ---------------------------------------------------------------------------
+
+// Read an entire small cache file into a String sized exactly to the file (one
+// allocation, no concat-doubling). Returns "" on failure. Use only for bodies
+// known to be modest (< ~12 KB) such as the weather forecast; larger feeds use
+// scanFileNum() instead so nothing big is ever held at once.
+static String readSmallFile(const char* path, size_t cap) {
+  String s;
+  File f = Store::fs().open(path, "r");
+  if (!f) return s;
+  size_t n = f.size();
+  if (n == 0 || n > cap) { f.close(); return s; }
+  s.reserve(n + 1);
+  uint8_t buf[256];
+  while (f.available()) {
+    int r = f.read(buf, sizeof(buf));
+    if (r <= 0) break;
+    s.concat((const char*)buf, r);
+  }
+  f.close();
+  return s;
+}
+
+// Scan a (possibly large) cached file for the numeric value following a key,
+// e.g. key="\"flux\":" -> the number after it. `wantLast` returns the value
+// after the LAST occurrence (newest record in NOAA feeds that append); else the
+// first in-range value. Range [lo,hi] rejects garbage. Returns NAN if none.
+// Reads in a small sliding window so the file is never held whole in RAM.
+static float scanFileNum(const char* path, const char* key,
+                         bool wantLast, float lo, float hi) {
+  File f = Store::fs().open(path, "r");
+  if (!f) return NAN;
+  const size_t KL = strlen(key);
+  // Sliding window: keep the last (KL + 32) bytes so a key split across reads
+  // is still found, plus room for the number that follows.
+  const size_t TAIL = KL + 40;
+  String win;                 // small, bounded: <= CHUNK + TAIL
+  const size_t CHUNK = 512;
+  uint8_t buf[CHUNK];
+  float found = NAN;
+  while (f.available()) {
+    int r = f.read(buf, CHUNK);
+    if (r <= 0) break;
+    win.concat((const char*)buf, r);
+    // scan all key occurrences currently in the window
+    int from = 0, idx;
+    while ((idx = win.indexOf(key, from)) >= 0) {
+      // need some digits after the key+colon to parse safely; if the match is
+      // too close to the end, defer it to the next chunk.
+      int after = idx + (int)KL;
+      if (after + 24 > (int)win.length() && f.available()) break;
+      // skip the ":", optional quotes and whitespace between key and number
+      const char* p = win.c_str() + after;
+      while (*p==':' || *p=='"' || *p==' ' || *p=='\t') p++;
+      float v = (float)atof(p);
+      if (v >= lo && v <= hi) {
+        found = v;
+        if (!wantLast) { f.close(); return found; }   // first hit is enough
+      }
+      from = idx + (int)KL;
+    }
+    // retain only the tail (so a key spanning the chunk boundary still matches)
+    if (win.length() > TAIL) win.remove(0, win.length() - TAIL);
+  }
+  f.close();
+  return found;
+}
+
 void App::fetchAmsatStatus() {
   if (!net.connected()) return;
   String url = String(AMSAT_STATUS_URL) + AMSAT_STATUS_HOURS;
   setStatus("AMSAT status..."); draw();
-  if (net.httpsGetToFile(url, FILE_AMSTAT, 200000, nullptr))
+  if (net.httpsGetToFileRetry(url, FILE_AMSTAT, 200000, nullptr, 3))
     db.applyAmsatStatusFile(FILE_AMSTAT);
+  else
+    Serial.printf("[amsat] status fetch failed: %s\n", net.lastErr.c_str());
 }
 
 // Fetch the latest NOAA SWPC 10.7 cm solar radio flux and cache it. Best-effort
@@ -5634,66 +5764,43 @@ void App::fetchSpaceWeather() {
   // --- Solar 10.7 cm flux ---
   // f107_cm_flux.json is an array of objects, newest first, e.g.
   //   {"time_tag":..,"flux":1.06e+002,"ninety_day_mean":null,"rec_count":null}
-  // We want the *current* flux (the first valid "flux"), NOT the 90-day mean.
-  // Values are in scientific notation (1.06e+002 = 106), which atof handles.
-  // Read the whole (~22 KB) body so the HTTPS transfer completes naturally -- a
-  // mid-stream byte cap left the connection half-read and the fetch unreliable.
-  { String head;
-    bool ok = net.httpsGet(SPACEWX_F107_URL, head, 40000);
-    if (!ok) { delay(300); ok = net.httpsGet(SPACEWX_F107_URL, head, 40000); }  // retry once
-    if (ok) {
-      // first valid "flux": (skip any null/garbage, take first sane value)
-      float flux = -1;
-      { int pos = 0, idx; String key("\"flux\"");
-        while ((idx = head.indexOf(key, pos)) >= 0) {
-          int colon = head.indexOf(':', idx);
-          if (colon < 0) break;
-          float v = (float)atof(head.c_str() + colon + 1);
-          if (v > 50.0f && v < 400.0f) { flux = v; break; }
-          pos = idx + key.length();
-        }
-      }
-      if (flux > 0) {
-        spaceF107 = flux;
-        spaceWxEpoch = nowUtc();
-        File w = LittleFS.open(FILE_SPACEWX, "w");
-        if (w) { w.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); w.close(); }
-      } else {
-        Serial.printf("[wx] flux fetch ok but no value parsed; head[0..80]=%s\n",
-                      head.substring(0, 80).c_str());
-      }
+  // We want the *current* flux (the FIRST valid "flux"), NOT the 90-day mean.
+  // Stream to a shared temp file and scan it from disk: nothing big is ever held
+  // as one contiguous String (the cause of the intermittent parse failures on
+  // the fragmented no-PSRAM heap). The temp file is deleted right after parsing
+  // so it never competes with the GP cache for the small LittleFS partition.
+  if (net.httpsGetToFileRetry(SPACEWX_F107_URL, FILE_DL_TMP, 40000, nullptr, 3)) {
+    float flux = scanFileNum(FILE_DL_TMP, "\"flux\"", /*wantLast=*/false, 50.0f, 400.0f);
+    Store::fs().remove(FILE_DL_TMP);
+    if (!isnan(flux) && flux > 0) {
+      spaceF107 = flux;
+      spaceWxEpoch = nowUtc();
+      File w = Store::fs().open(FILE_SPACEWX, "w");
+      if (w) { w.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); w.close(); }
     } else {
-      Serial.printf("[wx] flux fetch failed: code=%d %s\n", net.lastCode, net.lastErr.c_str());
+      Serial.println("[wx] flux fetched but no in-range value parsed");
     }
+  } else {
+    Store::fs().remove(FILE_DL_TMP);
+    Serial.printf("[wx] flux fetch failed: code=%d %s\n", net.lastCode, net.lastErr.c_str());
   }
 
   // --- Planetary Kp + running A index (geomagnetic activity) ---
   // noaa-planetary-k-index.json is an array of OBJECTS, newest LAST, e.g.
   //   {"time_tag":..,"Kp":3.67,"a_running":22,"station_count":8}
-  // Values are bare numbers. The newest reading is the LAST object, so we must read
-  // the WHOLE file (~30 KB) -- a byte cap would truncate the end and miss current
-  // data -- then take the value after the LAST "Kp": and LAST "a_running":.
-  { String kbody;
-    bool ok = net.httpsGet(SPACEWX_KP_URL, kbody, 60000);
-    if (!ok) { delay(300); ok = net.httpsGet(SPACEWX_KP_URL, kbody, 60000); }  // retry once
-    if (ok) {
-      auto lastNumAfter = [&](const char* key) -> float {
-        int idx = kbody.lastIndexOf(String(key));
-        if (idx < 0) return -1;
-        int colon = kbody.indexOf(':', idx);
-        if (colon < 0) return -1;
-        return (float)atof(kbody.c_str() + colon + 1);
-      };
-      float kp = lastNumAfter("\"Kp\"");
-      float a  = lastNumAfter("\"a_running\"");
-      if (kp >= 0.0f && kp <= 9.0f)   spaceKp = kp;
-      if (a  >= 0.0f && a  <= 400.0f) spaceA  = a;
-      if (kp < 0 || a < 0)
-        Serial.printf("[wx] Kp parse: kp=%.2f a=%.0f (body %u bytes)\n",
-                      kp, a, (unsigned)kbody.length());
-    } else {
-      Serial.printf("[wx] Kp fetch failed: code=%d %s\n", net.lastCode, net.lastErr.c_str());
-    }
+  // Bare numbers; newest reading is the LAST object, so take the value after the
+  // LAST "Kp" and LAST "a_running". Streamed + scanned from disk like the flux.
+  if (net.httpsGetToFileRetry(SPACEWX_KP_URL, FILE_DL_TMP, 80000, nullptr, 3)) {
+    float kp = scanFileNum(FILE_DL_TMP, "\"Kp\"",        /*wantLast=*/true, 0.0f, 9.0f);
+    float a  = scanFileNum(FILE_DL_TMP, "\"a_running\"", /*wantLast=*/true, 0.0f, 400.0f);
+    Store::fs().remove(FILE_DL_TMP);
+    if (!isnan(kp)) spaceKp = kp;
+    if (!isnan(a))  spaceA  = a;
+    if (isnan(kp) || isnan(a))
+      Serial.printf("[wx] Kp parse incomplete: kp=%.2f a=%.0f\n", kp, a);
+  } else {
+    Store::fs().remove(FILE_DL_TMP);
+    Serial.printf("[wx] Kp fetch failed: code=%d %s\n", net.lastCode, net.lastErr.c_str());
   }
   if (spaceWxEpoch == 0 && (spaceKp >= 0 || spaceF107 > 0)) spaceWxEpoch = nowUtc();
 }
@@ -5802,11 +5909,17 @@ void App::fetchWeather() {
              + "&timezone=auto&forecast_days=" + String(WX_FORECAST_DAYS)
              + "&temperature_unit=" + tu + "&wind_speed_unit=" + wu;
 
-  // Open-Meteo's response for this query is small (~2-3 KB), so read it straight
-  // into RAM -- no filesystem temp file (the LittleFS partition is tiny under the
-  // huge_app scheme and must stay free for the GP cache).
-  String body;
-  if (!net.httpsGet(url, body, 12000)) return;        // leave cache intact
+  // Open-Meteo's response for this query is small (~2-3 KB). Stream it to the
+  // shared temp file (robust, with retry), then read it back in one exact-size
+  // allocation -- avoiding the concat-doubling String growth that intermittently
+  // truncated on the fragmented heap. Delete the temp right after.
+  if (!net.httpsGetToFileRetry(url, FILE_DL_TMP, 16000, nullptr, 3)) {
+    Store::fs().remove(FILE_DL_TMP);
+    Serial.printf("[wx] weather fetch failed: code=%d %s\n", net.lastCode, net.lastErr.c_str());
+    return;                                            // leave cache intact
+  }
+  String body = readSmallFile(FILE_DL_TMP, 16000);
+  Store::fs().remove(FILE_DL_TMP);
   if (body.length() == 0) return;
 
   // --- tiny JSON helpers (numbers + first array of a named key) ---
@@ -9078,9 +9191,10 @@ void App::drawHelp() {
     " AMSAT: dot=heard",
     "  sq=telemetry  ring=no",
     "ORBIT ANALYSIS",
-    " ,// flip pages (6)",
-    " info/live/pass/trk/",
-    "  dop/nodal",
+    " ,// flip pages (9)",
+    " info/live/pass/trk/dop/",
+    "  nodal/sun-beta/outlook/",
+    "  orbit-pos",
     " info: footprint=max QSO",
     " dop: f beacon freq",
     " nodal: J2 drift, LTAN,",
@@ -9116,9 +9230,17 @@ void App::drawHelp() {
     " GNSS sats by az/el",
     " green=strong  grey=weak",
     "WORLD MAP",
-    " all footprints shown",
-    " f highlight a sat",
-    " y sun  c eclipse",
+    " all footprints + sun",
+    " f cycle highlighted fav",
+    "SPACE WX (menu)",
+    " solar flux + Kp + A idx",
+    " HF/sat outlook  r refresh",
+    "WEATHER (menu)",
+    " current + forecast (site)",
+    " r refresh  cached offline",
+    "QRZ LOOKUP (menu)",
+    " callsign -> name/grid/QTH",
+    " needs QRZ XML sub + WiFi",
     "SETTINGS",
     " ;/. move  ,// change",
     " ENT select / edit field",

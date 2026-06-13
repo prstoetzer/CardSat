@@ -17,6 +17,15 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
+> **New in v0.9.12:** a **QRZ.com callsign lookup** screen and a terrestrial
+> **Weather** screen (current conditions + multi-day forecast for your operating
+> site, from Open-Meteo), both on the main menu; a **Yaesu (direct)** rotator
+> backend that wires a G-5500-class controller straight to CardSat over I²C (ADS1115
+> position feedback + PCF8574 direction lines), with on-screen **ADC calibration**;
+> a **Space Wx** screen (solar flux + Kp + A index with an operating outlook); and
+> fixes to the NOAA space-weather fetch/parse. See
+> **[RELEASE_NOTES_0.9.12.md](RELEASE_NOTES_0.9.12.md)**.
+
 > **New in v0.9.11:** **Workable US states** (WAS) and **Workable DXCC** (the full
 > 340-entity list, via a hybrid of country polygons and island/micro-entity points
 > from cty.dat), joining Workable grids — reachable the same ways (live off Track /
@@ -120,6 +129,18 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   graphical sky-dome view (Sun and Moon glyphs plotted by az/el; `g` toggles a
   data list) that can drive the rotator to track either, for sun-noise / Moon
   (EME) aiming and antenna calibration.
+- **Space weather** — a **Space Wx** screen (main menu) shows the solar **10.7 cm
+  flux**, planetary **Kp**, and running **A index** from NOAA SWPC, each colour-coded
+  with a plain-language HF/satellite operating outlook; cached for offline viewing
+  and refreshed with each elements update.
+- **Terrestrial weather** — a **Weather** screen (main menu) shows current
+  conditions and a multi-day forecast for your operating site from **Open-Meteo**
+  (free, no key): temperature, sky, wind and humidity now, then per-day high/low and
+  precipitation chance. Units selectable (°F·mph / °C·km·h / °C·m·s); cached offline.
+- **QRZ.com callsign lookup** — a **QRZ Lookup** screen (main menu) resolves a
+  callsign to name, location, grid and licence class over the QRZ XML API (needs a
+  QRZ XML-data subscription and WiFi) — handy for working a station you've just
+  contacted.
 - **On-device Help** — press `h` on (almost) any screen for a scrollable key reference.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without
@@ -161,7 +182,33 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 
 ## Build & flash
 
-### Arduino IDE (single-file `CardSat.ino`)
+### Prebuilt binaries (no toolchain)
+
+Two binaries ship with each release:
+
+| File | Use it with | Notes |
+|---|---|---|
+| `CardSat.bin` | **[Launcher](https://github.com/bmorcelli/Launcher)** (bmorcelli) | App-only image; **only** works through Launcher, which writes the bootloader/partition table itself. Cannot be flashed standalone. |
+| `CardSat_Merged.bin` | **M5Burner**, or **direct flash** (esptool / web flasher) | Complete standalone image (bootloader + partition table + app + empty LittleFS) at `0x0`. |
+
+**Launcher:** copy `CardSat.bin` to Launcher's bin folder on the microSD (or use
+its WebUI/OTA), then start Launcher and pick **CardSat** — it builds the right
+partition layout and installs the app. The file has no standalone bootloader, so it
+runs only through Launcher.
+
+**M5Burner / direct flash:** use `CardSat_Merged.bin`. In M5Burner, add it as a
+custom firmware and burn. To flash directly:
+
+```
+esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
+  write_flash 0x0 CardSat_Merged.bin
+```
+
+or the web flasher at <https://espressif.github.io/esptool-js/> (chip **ESP32-S3**,
+file at **`0x0`**). The filesystem starts empty — run **Update** once on first boot
+to fetch GP elements.
+
+### Build from source — Arduino IDE (single-file `CardSat.ino`)
 
 Install **M5Cardputer**, **ArduinoJson** (v7), **TinyGPSPlus** from Library
 Manager, and the Hopperpop **Sgp4** library via *Add .ZIP Library*
@@ -179,7 +226,7 @@ The default ~1.25 MB app partition is too small and the build fails with *"Sketc
 too big"*; the 3 MB "Huge APP" layout fits with room to spare and provides the
 1 MB SPIFFS region that LittleFS uses for cached data.
 
-### PlatformIO
+### Build from source — PlatformIO
 
 ```
 pio run                 # build
@@ -439,6 +486,13 @@ major countries are converted to simplified boundary polygons, and the remaining
 island/micro-entities use each entity's reference coordinate from the file. The
 data is bundled in flash; the device does not download it.
 
+Three optional screens pull live data from public services, each cached for
+offline use: **space weather** (solar flux + planetary Kp/A) from **NOAA SWPC**
+(`services.swpc.noaa.gov`); **terrestrial weather** for the operating site from
+**Open-Meteo** (`api.open-meteo.com`, free and key-less, used under CC BY 4.0); and
+**callsign lookup** from **QRZ.com**'s XML API (`xmldata.qrz.com`, which requires
+your own QRZ XML-data subscription credentials, entered in Settings).
+
 ---
 
 ## Things to verify
@@ -503,7 +557,7 @@ src/civ.{h,cpp}         Icom CI-V framing, freq/mode set + read, MAIN/SUB select
 src/icomnet.{h,cpp}     Icom LAN (RS-BA1 UDP) CAT backend — control + serial streams, no wiring
 src/yaesu.{h,cpp}       Yaesu 5-byte CAT (FT-847 / FT-736R)
 src/kenwood.{h,cpp}     Kenwood ASCII CAT (TS-790 / TS-2000)
-src/rotator.{h,cpp}     rotator backends: GS-232 (I²C→UART), rotctl client (TCP), PstRotator (UDP)
+src/rotator.{h,cpp}     rotator backends: GS-232 (I²C→UART), rotctl client (TCP), PstRotator (UDP), Yaesu direct (I²C ADC + outputs)
 src/radio_profiles.h    per-model address, baud, band-select, capabilities
 ```
 

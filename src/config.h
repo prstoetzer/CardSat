@@ -163,6 +163,7 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 #define AMSAT_STATUS_HOURS 72                    // "recently" window for status reports
 #define FILE_SPACEWX  "/CardSat/spacewx.txt"    // cached space weather: "f107 ap epoch"
 #define FILE_SPACEWX_TMP "/CardSat/spacewx.tmp"  // scratch for streamed NOAA JSON (low heap)
+#define FILE_DL_TMP      "/CardSat/dl.tmp"        // shared scratch for streamed downloads (one at a time)
 // NOAA SWPC daily F10.7 cm solar-radio-flux observations (JSON array of records).
 // Best-effort: drives the orbital-decay density scale when "Decay solar = auto".
 #define SPACEWX_F107_URL  "https://services.swpc.noaa.gov/json/f107_cm_flux.json"

@@ -160,3 +160,32 @@ format (with a migration for sources saved by older builds).
 - `FW_VERSION` → **0.9.12**.
 
 ---
+
+## Installing
+
+Two binaries are attached to this release:
+
+- **`CardSat.bin`** — for **[Launcher](https://github.com/bmorcelli/Launcher)**
+  (bmorcelli). Copy it to Launcher's bin folder on the microSD (or use Launcher's
+  WebUI/OTA), then start Launcher and select **CardSat**; Launcher writes the
+  partition table and app for you. This is an **app-only** image with no standalone
+  bootloader or partition table, so it works **only** through Launcher — it cannot
+  be flashed on its own.
+- **`CardSat_Merged.bin`** — a **complete standalone image** (bootloader +
+  partition table + app + empty LittleFS) for **M5Burner** or a **direct flash** at
+  offset `0x0`. In M5Burner, add it as a custom firmware and burn. To flash
+  directly:
+
+  ```
+  esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
+    write_flash 0x0 CardSat_Merged.bin
+  ```
+
+  or the web flasher at <https://espressif.github.io/esptool-js/> (chip
+  **ESP32-S3**, file at **`0x0`**).
+
+The merged image ships with an **empty** filesystem — run **Update** once on first
+boot to download GP elements. Building from source (Arduino IDE or PlatformIO) is
+unchanged; see the manual (§5) or README.
+
+---

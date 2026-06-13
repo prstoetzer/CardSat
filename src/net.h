@@ -27,6 +27,13 @@ public:
   bool httpsGetToFile(const String& url, const char* path,
                       size_t maxBytes = 400000, size_t* written = nullptr);
 
+  // Same, but retries a few times with backoff. Transient TLS/Wi-Fi hiccups are
+  // the common cause of a failed or short download on this hardware; a couple of
+  // retries turns most of those into successes. `attempts` total tries.
+  bool httpsGetToFileRetry(const String& url, const char* path,
+                           size_t maxBytes = 400000, size_t* written = nullptr,
+                           int attempts = 3);
+
   // Convenience wrappers.
   bool fetchGp(const String& url, String& out);    // AMSAT GP/OMM JSON array
   bool fetchGpToFile(const String& url, const char* path);  // GP -> cache file

@@ -52,6 +52,16 @@ fs::FS& fs()  { return *g_fs; }
 bool ready()  { return g_ready; }
 bool onSD()   { return g_sd; }
 
+size_t freeBytes() {
+  // On the internal LittleFS partition free space is tight and worth checking
+  // before a streamed download; on an SD card it's effectively unlimited for
+  // our purposes, so report a large value without probing the card.
+  if (g_sd) return (size_t)8 * 1024 * 1024;
+  if (!g_ready) return 0;
+  uint32_t total = LittleFS.totalBytes(), used = LittleFS.usedBytes();
+  return (used < total) ? (size_t)(total - used) : 0;
+}
+
 bool formatInternal() {
   if (g_sd) {
     // Don't format the user's SD card on a factory reset -- just delete our own

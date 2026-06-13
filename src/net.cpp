@@ -9,6 +9,8 @@
 #include <LittleFS.h>
 #include "storage.h"
 #include <time.h>
+#include <esp_heap_caps.h>   // heap_caps_get_largest_free_block(): contiguous block,
+                             // which is what the TLS handshake actually needs
 
 bool Net::connect(const String& ssid, const String& pass, uint32_t timeoutMs) {
   if (ssid.length() == 0) return false;
@@ -67,34 +69,49 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = "";
   if (!connected()) { lastErr = "no WiFi"; return false; }
 
-  Serial.printf("[net] GET %s\n", url.c_str());
-  Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
-                (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
-                (int)WiFi.RSSI());
+  Serial.printf(
+    "[net] GET %s\n", url.c_str());
+  {
+    size_t freeHeap = ESP.getFreeHeap();
+    size_t largest  = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    Serial.printf("[net] heap before TLS: free %u, largest block %u, IP %s, RSSI %d\n",
+                  (unsigned)freeHeap, (unsigned)largest,
+                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
-  // The TLS handshake needs a sizeable contiguous allocation; if the heap is too
-  // low or fragmented it fails as a "connection refused" (-1). Bail early with a
-  // clear reason rather than after a confusing transport error.
-  if (ESP.getFreeHeap() < 40000) {
-    lastErr = "low heap";
-    Serial.printf("[net] abort GET: heap only %u (need ~40k for TLS)\n",
-                  (unsigned)ESP.getFreeHeap());
-    return false;
+    // The TLS handshake needs a sizeable *contiguous* allocation; total free can
+    // look fine while the largest block is too small (fragmentation). Gate on the
+    // largest block, not total free, so we bail with a clear reason instead of
+    // failing later as a confusing "connection refused" (-1).
+    if (largest < 42000) {
+      lastErr = "low heap (fragmented)";
+      Serial.printf("[net] abort GET: largest block only %u (need ~42k contiguous for TLS)\n",
+                    (unsigned)largest);
+      return false;
+    }
   }
 
   WiFiClientSecure client;
+  // Core 3.x NetworkClientSecure can leave a TLS/socket resource half-released on
+  // teardown, so the *next* HTTPS connect() in the session fails instantly with
+  // start_ssl_client:-1 ("connection refused") -- not a heap issue (it fails even
+  // with 250k+ free; see arduino-esp32 #6165/#4992). Force an explicit stop() on
+  // every exit path via this RAII guard, and disable keep-alive reuse below, so
+  // each call starts from a clean socket.
+  struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
   // Certificate validation disabled for simplicity (public data). For a
   // security-sensitive deployment, pin the CA root instead of setInsecure().
   client.setInsecure();
-  // Shrink the TLS record buffers from the 16 KB default. Every endpoint CardSat
-  // talks to serves small responses, so an 8 KB RX / 2 KB TX buffer is ample and
-  // cuts the per-connection RAM by ~8 KB -- which can be the difference between
-  // the handshake fitting or failing on the fragmented no-PSRAM heap. (8 KB RX,
-  // not 4 KB, so servers that send large TLS records still work.)
-  client.setBufferSizes(8192, 2048);
+  // NOTE: earlier builds called client.setBufferSizes(8192, 2048) here to shrink
+  // the TLS record buffers from the 16 KB default and save ~8 KB of heap on the
+  // no-PSRAM ESP32-S3. ESP32 core 3.x replaced WiFiClientSecure with
+  // NetworkClientSecure, which no longer exposes that method -- the mbedTLS
+  // record buffer sizes are fixed at core-build time via MBEDTLS_SSL_IN/OUT_
+  // CONTENT_LEN in sdkconfig and can't be set from the sketch. Do NOT re-add the
+  // call; it will not compile against core 3.x.
   client.setTimeout(15000);
 
   HTTPClient http;
+  http.setReuse(false);   // no keep-alive: avoid carrying half-open state between calls
   http.setUserAgent("CardSat-Cardputer/1.0");
   http.setConnectTimeout(15000);
   http.setTimeout(15000);
@@ -173,9 +190,12 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 
   // Guard against starting a TLS session when the heap is too low to complete the
   // handshake -- failing here with a clear reason beats a truncated/garbled body.
-  if (ESP.getFreeHeap() < 40000) {
-    lastErr = "low heap"; 
-    Serial.printf("[net] abort GET: heap only %u\n", (unsigned)ESP.getFreeHeap());
+  // Gate on the largest *contiguous* block (what the handshake allocates), not
+  // total free, since fragmentation can fail the handshake at healthy-looking free.
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 42000) {
+    lastErr = "low heap (fragmented)";
+    Serial.printf("[net] abort GET: largest block only %u\n",
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     return false;
   }
   // Guard against a full filesystem (the internal LittleFS partition is small).
@@ -190,16 +210,20 @@ bool Net::httpsGetToFile(const String& url, const char* path,
       return false;
     }
   }
-  Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
-                (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
-                (int)WiFi.RSSI());
+  Serial.printf("[net] heap before TLS: free %u, largest block %u, IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   WiFiClientSecure client;
+  // See httpsGet: force explicit stop() on every exit (core 3.x second-connect bug).
+  struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
   client.setInsecure();
-  client.setBufferSizes(8192, 2048);   // small TLS records: less heap (see httpsGet)
+  // setBufferSizes() removed: not available on core 3.x NetworkClientSecure (see httpsGet)
   client.setTimeout(15000);
 
   HTTPClient http;
+  http.setReuse(false);   // no keep-alive (see httpsGet)
   http.setUserAgent("CardSat-Cardputer/1.0");
   http.setConnectTimeout(15000);
   http.setTimeout(15000);

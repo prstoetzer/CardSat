@@ -77,17 +77,11 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
     Serial.printf("[net] heap before TLS: free %u, largest block %u, IP %s, RSSI %d\n",
                   (unsigned)freeHeap, (unsigned)largest,
                   WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
-
-    // The TLS handshake needs a sizeable *contiguous* allocation; total free can
-    // look fine while the largest block is too small (fragmentation). Gate on the
-    // largest block, not total free, so we bail with a clear reason instead of
-    // failing later as a confusing "connection refused" (-1).
-    if (largest < 42000) {
-      lastErr = "low heap (fragmented)";
-      Serial.printf("[net] abort GET: largest block only %u (need ~42k contiguous for TLS)\n",
-                    (unsigned)largest);
-      return false;
-    }
+    // NOTE: we log the largest contiguous block (what the TLS handshake allocates)
+    // but do NOT pre-emptively abort on it. An earlier guard at 42k turned out to
+    // block connections that can actually complete in ~30k, so we let the handshake
+    // be the judge -- a real failure surfaces a real transport error below, rather
+    // than a manufactured "low heap" abort. The number stays here as a diagnostic.
   }
 
   WiFiClientSecure client;
@@ -188,16 +182,11 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
 
-  // Guard against starting a TLS session when the heap is too low to complete the
-  // handshake -- failing here with a clear reason beats a truncated/garbled body.
-  // Gate on the largest *contiguous* block (what the handshake allocates), not
-  // total free, since fragmentation can fail the handshake at healthy-looking free.
-  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 42000) {
-    lastErr = "low heap (fragmented)";
-    Serial.printf("[net] abort GET: largest block only %u\n",
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    return false;
-  }
+  // Log the largest contiguous block (what the TLS handshake allocates) as a
+  // diagnostic, but do NOT pre-emptively abort on it -- an earlier 42k guard
+  // blocked downloads that can complete in ~30k. Let the handshake be the judge.
+  Serial.printf("[net] largest free block before TLS: %u\n",
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   // Guard against a full filesystem (the internal LittleFS partition is small).
   // Need room for the body plus slack; if we can't be sure, don't write a file
   // that would truncate and then fail to parse.

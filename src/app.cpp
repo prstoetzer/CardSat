@@ -421,6 +421,16 @@ void App::doUpdateGp() {
   }
   Serial.printf("[gp] WiFi OK, IP %s\n", WiFi.localIP().toString().c_str());
   net.syncTimeNtp();
+  // Fetch the small, handshake-sensitive feeds (space weather, terrestrial
+  // weather) BEFORE the big GP download. loadGpFromFile() populates the
+  // persistent ~220-satellite RAM structure, which legitimately fills and
+  // fragments the heap; afterward a fresh TLS handshake for these small JSON
+  // feeds can fail to find a contiguous block on the no-PSRAM S3 (the flux
+  // fetch failing only from the Update screen, never from Space Wx, was this).
+  // Neither fetch depends on GP data, so running them first is purely better:
+  // they get a clean heap, and they still happen even if the GP download fails.
+  fetchSpaceWeather();                 // F10.7 for the decay density scale
+  fetchWeather();                      // terrestrial weather for the site
   // Repair any CelesTrak URL saved by an older build with the lowercase
   // FORMAT=json-pretty token, which some CelesTrak edges reject; the documented
   // token is uppercase. (Compact JSON is valid and smaller than pretty-print.)
@@ -454,8 +464,7 @@ void App::doUpdateGp() {
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
   buildSatView();
   fetchAmsatStatus();                  // tag active/not-heard from AMSAT status
-  fetchSpaceWeather();                 // refresh F10.7 for the decay density scale
-  fetchWeather();                      // refresh terrestrial weather for the site
+                                       // (kept here: it needs the loaded catalog)
   nextAos = 0; lastSchedMs = 0;        // force schedule/alarm to recompute
   setStatus("GP OK: " + String(n) + " sats");
 }

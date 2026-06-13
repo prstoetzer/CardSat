@@ -1706,6 +1706,8 @@ listed below.
 
 ### Home menu
 
+![Home menu](docs/img/home.jpg)
+
 - **Purpose** — the top-level launcher.
 - **Reached from** — power-on lands here; `` ` `` from most top-level screens returns here.
 - **Shows** — a scrolling list of the thirteen destinations: Satellites, Next
@@ -1715,6 +1717,10 @@ listed below.
 - **Keys** — `;`/`.` move the highlight; **ENTER** opens the selected item.
 
 ### Satellites
+
+![Satellites list](docs/img/satellites.jpg)
+
+![Satellites — favorites filter](docs/img/satellites-favorites.jpg)
 
 - **Purpose** — browse the catalog, choose favorites, and reach the per-satellite
   analysis tools.
@@ -1730,6 +1736,22 @@ listed below.
 
 ### Orbital analysis
 
+![Orbital analysis — Info](docs/img/analysis-info.jpg)
+
+![Orbital analysis — Live](docs/img/analysis-live.jpg)
+
+![Orbital analysis — Next pass](docs/img/analysis-pass.jpg)
+
+![Orbital analysis — Doppler](docs/img/analysis-doppler.jpg)
+
+![Orbital analysis — Nodal](docs/img/analysis-nodal.jpg)
+
+![Orbital analysis — Sun/Beta](docs/img/analysis-sunbeta.jpg)
+
+![Orbital analysis — Pass outlook](docs/img/analysis-pass-outlook.jpg)
+
+![Orbital analysis — Orbit position](docs/img/analysis-orbit-position.jpg)
+
 - **Purpose** — a nine-page deep dive into one satellite's orbit: geometry,
   dynamics, lighting, and pass planning. Full theory and per-page detail are in
   [§8 → Orbital analysis](#orbital-analysis-o).
@@ -1740,6 +1762,10 @@ listed below.
   the beacon frequency; `` ` `` leaves.
 
 ### Simulation
+
+![Simulation](docs/img/simulation.jpg)
+
+![Simulation — map view](docs/img/simulation-map.jpg)
 
 - **Purpose** — a "time machine" that propagates the selected satellite to an
   arbitrary time so you can preview geometry past or future.
@@ -1761,6 +1787,8 @@ listed below.
 
 ### Next Passes (schedule)
 
+![Next Passes schedule](docs/img/next-passes.jpg)
+
 - **Purpose** — the unified upcoming-pass schedule across **all** your favorites,
   so you see what is next regardless of which bird it is.
 - **Reached from** — Home → Next Passes (all favs).
@@ -1771,6 +1799,8 @@ listed below.
   **World map**; `z` arms **deep sleep** until the next AOS; `` ` `` back.
 
 ### Passes
+
+![Passes (per-satellite)](docs/img/passes.jpg)
 
 - **Purpose** — the pass list for one selected satellite, and the jumping-off
   point to tracking, the visualizers, and the workable lists.
@@ -1784,6 +1814,8 @@ listed below.
 
 ### Pass detail
 
+![Pass detail (elevation)](docs/img/pass-detail.jpg)
+
 - **Purpose** — the full numeric breakdown of one pass plus its polar plot.
 - **Reached from** — Passes → `d`, or Next Passes → ENTER.
 - **Shows** — AOS/TCA/LOS times and azimuths, max elevation, duration, and a polar
@@ -1791,6 +1823,8 @@ listed below.
 - **Keys** — `p` toggle to the dedicated **Pass polar** view; `` ` `` back.
 
 ### Pass polar
+
+![Pass polar plot](docs/img/pass-polar.jpg)
 
 - **Purpose** — a full-screen polar (azimuth/elevation sky) plot of a single
   pass's arc.
@@ -1801,6 +1835,8 @@ listed below.
 
 ### Mutual windows (co-visibility)
 
+![Mutual windows](docs/img/mutual-windows.jpg)
+
 - **Purpose** — find the times a satellite is simultaneously visible to you **and**
   to a second station — the windows in which a contact is geometrically possible.
 - **Reached from** — Passes → `x`.
@@ -1809,6 +1845,8 @@ listed below.
 - **Keys** — `;`/`.` scroll the windows; **ENTER** edit the remote grid; `` ` `` back.
 
 ### 10-day pass overview
+
+![10-day pass overview](docs/img/ten-day-overview.jpg)
 
 - **Purpose** — an at-a-glance visibility chart of one satellite's passes over ten
   days, modelled on InstantTrack's multi-day view.
@@ -1821,6 +1859,8 @@ listed below.
 
 ### Illumination
 
+![Illumination](docs/img/illumination.jpg)
+
 - **Purpose** — a 60-day solar-illumination raster (DK3WN *illum* style) showing
   when the satellite is sunlit vs. eclipsed across its orbit.
 - **Reached from** — Passes → `i` (or Satellites → `i`).
@@ -1832,6 +1872,10 @@ listed below.
   before today); `r` recompute; `` ` `` back to Passes.
 
 ### Track
+
+![Track — live Doppler & CAT](docs/img/track.jpg)
+
+![Track — ground track](docs/img/track-groundtrack.jpg)
 
 - **Purpose** — the main operating screen: live pointing, Doppler-corrected
   frequencies, transponder selection, calibration, and radio/rotator control. Full
@@ -1870,6 +1914,8 @@ listed below.
 
 ### Workable grids
 
+![Workable grids](docs/img/workable-grids.jpg)
+
 - **Purpose** — the Maidenhead grid squares currently (or, from Passes, during the
   pass) reachable through the satellite's footprint.
 - **Reached from** — Track → `g` (live) or Passes → `g` (for the pass).
@@ -1879,6 +1925,8 @@ listed below.
 
 ### Workable US states
 
+![Workable US states](docs/img/workable-states.jpg)
+
 - **Purpose** — the US states (for WAS chasing) under the footprint now or during
   the pass.
 - **Reached from** — Track → `w` (live) or Passes → `w` (for the pass).
@@ -1887,12 +1935,16 @@ listed below.
 
 ### Workable DXCC
 
+![Workable DXCC](docs/img/workable-dxcc.jpg)
+
 - **Purpose** — the DXCC entities under the footprint now or during the pass.
 - **Reached from** — Track → `e` (live) or Passes → `e` (for the pass).
 - **Shows** — the workable DXCC list (derived from bundled cty.dat geometry).
 - **Keys** — `;`/`.` scroll; `` ` `` back.
 
 ### Sun / Moon
+
+![Sun / Moon](docs/img/sun-moon.jpg)
 
 - **Purpose** — point the rotator at the Sun or Moon for sun-noise/EME work and
   antenna calibration; full detail in [§13 → Sun / Moon](#sun--moon-antenna-tracking).
@@ -1904,6 +1956,8 @@ listed below.
 
 ### Space weather
 
+![Space weather](docs/img/space-wx.jpg)
+
 - **Purpose** — solar flux and geomagnetic indices with a plain-language operating
   outlook; detail in [§13 → Space weather](#space-weather).
 - **Reached from** — Home → Space Wx.
@@ -1913,6 +1967,8 @@ listed below.
 
 ### Weather
 
+![Weather](docs/img/weather.jpg)
+
 - **Purpose** — terrestrial current conditions and a multi-day forecast for the
   operating site; detail in [§13 → Weather](#weather).
 - **Reached from** — Home → Weather.
@@ -1921,6 +1977,8 @@ listed below.
 - **Keys** — `r` refresh over WiFi; `` ` `` back.
 
 ### QRZ callsign lookup
+
+![QRZ callsign lookup](docs/img/qrz-lookup.jpg)
 
 - **Purpose** — resolve a callsign to name, location, grid and licence class via
   the QRZ.com XML API; detail in [§13 → QRZ callsign lookup](#qrz-callsign-lookup).
@@ -1932,6 +1990,8 @@ listed below.
 
 ### Location
 
+![Location](docs/img/location.jpg)
+
 - **Purpose** — set your station position and clock, and view the GPS sky plot.
 - **Reached from** — Home → Location.
 - **Shows** — current lat/lon/altitude, grid, time source and clock, and GPS
@@ -1942,6 +2002,8 @@ listed below.
 
 ### GPS sky plot
 
+![GPS sky plot](docs/img/gps-sky.jpg)
+
 - **Purpose** — a polar plot of the GNSS satellites currently in view, by signal
   strength — useful for checking antenna/fix quality.
 - **Reached from** — Location → ENTER.
@@ -1950,6 +2012,8 @@ listed below.
 - **Keys** — `` ` `` back. (The plot updates live; no other keys.)
 
 ### Update
+
+![Update](docs/img/update.jpg)
 
 - **Purpose** — refresh everything that comes from the network in one place.
 - **Reached from** — Home → Update.
@@ -1968,6 +2032,16 @@ listed below.
   choice is saved immediately and used by the next Update.
 
 ### Settings
+
+![Settings menu](docs/img/settings.jpg)
+
+![Settings — Radio / CAT](docs/img/settings-radio-cat.jpg)
+
+![Settings — Rotator](docs/img/settings-rotator.jpg)
+
+![Settings — Station / display](docs/img/settings-station-display.jpg)
+
+![Settings — Network / data](docs/img/settings-network-data.jpg)
 
 - **Purpose** — all configuration, grouped into four submenus (Radio / CAT,
   Rotator, Station / display, Network). Each row and its adjust keys are tabulated
@@ -2001,12 +2075,16 @@ listed below.
 
 ### Log menu
 
+![Log menu](docs/img/log-menu.jpg)
+
 - **Purpose** — the QSO logging hub.
 - **Reached from** — Home → Log.
 - **Shows** — New QSO entry, View / edit log, Export to ADIF.
 - **Keys** — `;`/`.` move; **ENTER** open the selected item; `` ` `` back.
 
 ### Log entry
+
+![Log entry](docs/img/log-entry.jpg)
 
 - **Purpose** — create or edit one QSO record. Full field list in
   [§8 → Logging QSOs](#logging-qsos-log).
@@ -2020,6 +2098,8 @@ listed below.
 
 ### Log list (view / edit)
 
+![Log list](docs/img/log-list.jpg)
+
 - **Purpose** — review and correct stored contacts.
 - **Reached from** — Log menu → View / edit log.
 - **Shows** — a scrollable list of the most recent 120 QSOs.
@@ -2027,6 +2107,8 @@ listed below.
   `x` twice to delete; `` ` `` back.
 
 ### World map
+
+![world-map](docs/img/world-map.jpg)
 
 - **Purpose** — a live equirectangular map of all favorites' footprints with the
   day/night terminator.
@@ -2043,6 +2125,8 @@ listed below.
 - **Keys** — `;`/`.` scroll; `` ` `` back.
 
 ### About
+
+![About](docs/img/about.jpg)
 
 - **Purpose** — build and diagnostic information.
 - **Reached from** — Home → About.

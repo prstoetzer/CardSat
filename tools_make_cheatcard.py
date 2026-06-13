@@ -137,7 +137,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.12  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.13  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/%d' % (side, pg, TOTAL_PAGES))

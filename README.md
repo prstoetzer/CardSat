@@ -17,6 +17,15 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
+> **New in v0.9.13:** networking compatibility and reliability. CardSat now
+> **builds against ESP32 Arduino core 3.3.x** (which renamed `WiFiClientSecure`
+> to `NetworkClientSecure`), the HTTPS fetch path is **hardened** against a known
+> core-3.x second-connection failure, and the **Update sequence is reordered** so
+> the small space-weather and weather feeds are fetched before the GP catalog
+> loads — fixing a solar-flux fetch that could fail only when run from the Update
+> screen (now they also refresh even if the GP download fails). See
+> **[RELEASE_NOTES_0.9.13.md](RELEASE_NOTES_0.9.13.md)**.
+
 > **New in v0.9.12:** a **QRZ.com callsign lookup** screen and a terrestrial
 > **Weather** screen (current conditions + multi-day forecast for your operating
 > site, from Open-Meteo), both on the main menu; a **Yaesu (direct)** rotator
@@ -161,6 +170,31 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   `/CardSat/Screenshots/` on the SD card (handy for documentation).
 - **Favorites**, **manual GP / transponder / time entry**, per-satellite
   **calibration**, and a **factory reset**.
+
+---
+
+## Screenshots
+
+A few of CardSat's screens (240×135 native captures from the device). The full
+set is in the [manual](MANUAL.md#20-screen-by-screen-reference).
+
+<table>
+<tr>
+<td align="center"><img src="docs/img/track.jpg" width="240"><br><b>Track</b> — live Doppler &amp; CAT read-back</td>
+<td align="center"><img src="docs/img/satellites.jpg" width="240"><br><b>Satellites</b> — the catalog with activity marks</td>
+<td align="center"><img src="docs/img/next-passes.jpg" width="240"><br><b>Next Passes</b> — unified favorites schedule</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/img/pass-polar.jpg" width="240"><br><b>Pass polar</b> — sky track for the next pass</td>
+<td align="center"><img src="docs/img/world-map.jpg" width="240"><br><b>World map</b> — footprints, sun terminator</td>
+<td align="center"><img src="docs/img/analysis-info.jpg" width="240"><br><b>Orbital analysis</b> — nine pages of detail</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/img/space-wx.jpg" width="240"><br><b>Space Wx</b> — solar flux, Kp, operating outlook</td>
+<td align="center"><img src="docs/img/illumination.jpg" width="240"><br><b>Illumination</b> — sunlit/eclipse over the orbit</td>
+<td align="center"><img src="docs/img/home.jpg" width="240"><br><b>Home</b> — every screen is one hop away</td>
+</tr>
+</table>
 
 ---
 

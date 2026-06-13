@@ -1,0 +1,116 @@
+% ===========================================================================
+%  CardSat manual — custom book theme (pandoc + xelatex)
+%  Reconstructs the green/ghost-numeral design.
+% ===========================================================================
+\usepackage{fontspec}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{titling}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{ragged2e}
+\usepackage{needspace}
+
+% --- Theme colors (sampled from the original) -----------------------------
+\definecolor{csgreen}{RGB}{31,92,61}      % #1F5C3D signature green
+\definecolor{csgreendk}{RGB}{20,63,42}    % darker shade (cover dot)
+\definecolor{csghost}{RGB}{207,224,214}   % faded green ghost-numeral tint
+\definecolor{cstablehdr}{RGB}{243,245,244}% #F3F5F4 table header band
+\definecolor{csrule}{RGB}{215,215,215}    % light grey rules
+\definecolor{cscode}{RGB}{31,92,61}       % inline code in green
+
+% --- Fonts: TeX Gyre family (matches the original) ------------------------
+\setmainfont{TeX Gyre Pagella}
+\setsansfont{TeX Gyre Heros}
+\setmonofont{DejaVu Sans Mono}[Scale=0.85]
+
+% --- Link / code coloring --------------------------------------------------
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=csgreen, urlcolor=csgreen,
+            citecolor=csgreen}
+
+% inline code (\texttt) in green, like the original
+\let\oldtexttt\texttt
+\renewcommand{\texttt}[1]{{\color{cscode}\oldtexttt{#1}}}
+
+% --- Chapter (H1 = \section in pandoc default) styling --------------------
+% Ghost numeral above the title, green title, accent rule beneath.
+% Numbered sections get the ghost numeral; starred sections (TOC "Contents",
+% License front-matter, etc.) get a plain green title with the rule, no numeral.
+\titleformat{\section}
+  {\normalfont\sffamily\bfseries}
+  {}                                  % no inline number; we draw a ghost one
+  {0pt}
+  {\thesectionghost\color{csgreen}\Huge}   % title in green
+  [\vspace{2pt}{\color{csgreen}\titlerule[2pt]}]
+\titleformat{name=\section,numberless}
+  {\normalfont\sffamily\bfseries}
+  {}
+  {0pt}
+  {\color{csgreen}\Huge}             % no ghost numeral for starred sections
+  [\vspace{2pt}{\color{csgreen}\titlerule[2pt]}]
+
+% counter-driven two-digit ghost numeral
+\newcommand{\thesectionghost}{%
+  \nobreak
+  {\color{csghost}\sffamily\bfseries\fontsize{54}{54}\selectfont
+   \makebox[0pt][l]{\hspace*{-2pt}\twodigitnum{\value{section}}}}%
+  \par\vspace{6pt}%
+}
+\newcommand{\twodigitnum}[1]{\ifnum#1<10 0\fi\number#1}
+
+\titlespacing*{\section}{0pt}{2.2\baselineskip}{0.6\baselineskip}
+
+% Each numbered chapter opens on a fresh page (matches the book design and
+% prevents the ghost numeral from being orphaned at a page bottom).
+\newcommand{\sectionbreak}{\clearpage}
+
+% Subsections (H2) — green, sans, no ghost numeral
+\titleformat{\subsection}
+  {\normalfont\sffamily\bfseries\large\color{csgreen}}{}{0pt}{}
+\titlespacing*{\subsection}{0pt}{1.4\baselineskip}{0.3\baselineskip}
+
+\titleformat{\subsubsection}
+  {\normalfont\sffamily\bfseries\color{csgreendk}}{}{0pt}{}
+
+% --- Running headers / footers --------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{csrule}\leaders\hrule height \headrulewidth\hfill}}
+\renewcommand{\footrule}{\hbox to\headwidth{\color{csrule}\leaders\hrule height \footrulewidth\hfill}}
+\fancyhead[L]{\footnotesize\itshape\color{gray}CardSat — The Complete Operating Manual}
+\fancyhead[R]{\footnotesize\itshape\color{gray}\nouppercase{\rightmark}}
+\fancyfoot[C]{\footnotesize\color{gray}\thepage}
+\setlength{\headheight}{14pt}
+
+% section title into the right header mark
+\renewcommand{\sectionmark}[1]{\markright{#1}}
+
+% --- Table styling: green-tinted header rows via booktabs/longtable -------
+% pandoc uses longtable; tint the header row.
+\usepackage{colortbl}
+\usepackage{array}
+\arrayrulecolor{csrule}
+
+% --- Code block frame ------------------------------------------------------
+\usepackage{fvextra}
+\usepackage{etoolbox}
+\usepackage[breakable,skins]{tcolorbox}
+% pandoc emits plain {verbatim} for code blocks (no language => no highlighting).
+% Wrap every verbatim in a light-grey boxed panel to match the book design.
+\newtcolorbox{codepanel}{breakable,colback=cstablehdr,colframe=csrule,
+  boxrule=0.4pt,arc=1pt,left=6pt,right=6pt,top=4pt,bottom=4pt}
+\BeforeBeginEnvironment{verbatim}{\begin{codepanel}\small}
+\AfterEndEnvironment{verbatim}{\end{codepanel}}
+% Also box the Shaded env if highlighting is ever enabled.
+\makeatletter
+\AtBeginDocument{%
+  \@ifundefined{Shaded}{}{%
+    \renewenvironment{Shaded}
+      {\begin{codepanel}}{\end{codepanel}}%
+  }%
+}
+\makeatother

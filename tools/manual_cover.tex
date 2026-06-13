@@ -1,0 +1,42 @@
+\begin{titlepage}
+\newgeometry{margin=0pt}
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture,overlay]
+  % full-bleed dark green background
+  \fill[csgreen] (current page.south west) rectangle (current page.north east);
+
+  % top header rule + labels
+  \coordinate (TL) at ([xshift=2.2cm,yshift=-2.2cm]current page.north west);
+  \coordinate (TR) at ([xshift=-2.2cm,yshift=-2.2cm]current page.north east);
+  \draw[white!85,line width=0.4pt] ([yshift=-10pt]TL) -- ([yshift=-10pt]TR);
+  \node[anchor=north west,white!90,font=\sffamily\footnotesize\bfseries]
+    at ([yshift=2pt]TL) {AMATEUR\ \ RADIO\ \ SATELLITE\ \ TRACKER};
+  \node[anchor=north east,white!90,font=\sffamily\footnotesize\bfseries]
+    at ([yshift=2pt]TR) {M5STACK\ \ CARDPUTER};
+
+  % --- orbital graphic: three tilted ellipses + satellite dot ---
+  \begin{scope}[shift={([yshift=-2.5cm]current page.center)}]
+    \foreach \ang in {18,-22,62}{
+      \draw[csghost!55,line width=0.6pt,rotate=\ang]
+        (0,0) ellipse (3.4cm and 1.4cm);
+    }
+    % central body (earth)
+    \fill[csgreendk] (0,0) circle (0.32cm);
+    % satellite dot on an orbit
+    \fill[white!92] (2.4,0.9) circle (0.07cm);
+  \end{scope}
+
+  % --- title block (raised, above the orbit) ---
+  \node[anchor=center,white,font=\sffamily\bfseries\fontsize{52}{52}\selectfont]
+    at ([yshift=3.0cm]current page.center) {CardSat};
+  \node[anchor=center,white!92,font=\sffamily\fontsize{17}{17}\selectfont]
+    at ([yshift=2.0cm]current page.center) {The Complete Operating Manual};
+
+  % --- firmware + author block (well below the orbit) ---
+  \node[anchor=center,white!80,font=\sffamily\small]
+    at ([yshift=-5.7cm]current page.center) {Firmware v0.9.13};
+  \node[anchor=center,white!80,font=\sffamily\small]
+    at ([yshift=-6.13cm]current page.center) {Paul Stoetzer\ \ \textperiodcentered\ \ N8HM};
+\end{tikzpicture}
+\restoregeometry
+\end{titlepage}

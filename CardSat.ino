@@ -4507,10 +4507,26 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
                 (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
                 (int)WiFi.RSSI());
 
+  // The TLS handshake needs a sizeable contiguous allocation; if the heap is too
+  // low or fragmented it fails as a "connection refused" (-1). Bail early with a
+  // clear reason rather than after a confusing transport error.
+  if (ESP.getFreeHeap() < 40000) {
+    lastErr = "low heap";
+    Serial.printf("[net] abort GET: heap only %u (need ~40k for TLS)\n",
+                  (unsigned)ESP.getFreeHeap());
+    return false;
+  }
+
   WiFiClientSecure client;
-  // Certificate validation disabled for simplicity (public GP data). For a
+  // Certificate validation disabled for simplicity (public data). For a
   // security-sensitive deployment, pin the CA root instead of setInsecure().
   client.setInsecure();
+  // Shrink the TLS record buffers from the 16 KB default. Every endpoint CardSat
+  // talks to serves small responses, so an 8 KB RX / 2 KB TX buffer is ample and
+  // cuts the per-connection RAM by ~8 KB -- which can be the difference between
+  // the handshake fitting or failing on the fragmented no-PSRAM heap. (8 KB RX,
+  // not 4 KB, so servers that send large TLS records still work.)
+  client.setBufferSizes(8192, 2048);
   client.setTimeout(15000);
 
   HTTPClient http;
@@ -4592,7 +4608,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 
   // Guard against starting a TLS session when the heap is too low to complete the
   // handshake -- failing here with a clear reason beats a truncated/garbled body.
-  if (ESP.getFreeHeap() < 45000) {
+  if (ESP.getFreeHeap() < 40000) {
     lastErr = "low heap"; 
     Serial.printf("[net] abort GET: heap only %u\n", (unsigned)ESP.getFreeHeap());
     return false;
@@ -4617,6 +4633,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 
   WiFiClientSecure client;
   client.setInsecure();
+  client.setBufferSizes(8192, 2048);   // small TLS records: less heap (see httpsGet)
   client.setTimeout(15000);
 
   HTTPClient http;

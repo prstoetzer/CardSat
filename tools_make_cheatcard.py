@@ -103,9 +103,9 @@ BACK = [
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete"),
  ("UPDATE",
-  "<b>k</b>/<b>ENTER</b> GP + clock + AMSAT/space-wx/weather &middot; "
-  "<b>a</b> cache all transponders (batches w/ auto-reboots; ends \u201cCached all N\u201d) &middot; "
-  "<b>w</b> WiFi connect only"),
+  "<b>k</b>/<b>ENTER</b> GP+clock+AMSAT+space-wx+weather &middot; "
+  "<b>a</b> cache all transponders (auto-reboots until done) &middot; "
+  "<b>w</b> WiFi only"),
  ("SETTINGS",
   "<b>,</b>/<b>/</b> change &middot; <b>ENTER</b> edit/toggle &middot; <b>s</b> scan WiFi "
   "(SSID row) &middot; reset = type ERASE"),
@@ -177,7 +177,7 @@ def measure(sections, fs):
     return doc.page
 
 
-def best_fs(sections, hi=9.5, lo=4.25):
+def best_fs(sections, hi=9.5, lo=4.0):
     fs = hi
     while fs >= lo:
         if measure(sections, fs) <= 1:

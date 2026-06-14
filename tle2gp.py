@@ -45,8 +45,10 @@ def _tle_epoch_to_iso(epoch_field: str) -> str:
     day_of_year = float(epoch_field[2:])
     base = datetime(year, 1, 1, tzinfo=timezone.utc)
     dt = base + timedelta(days=day_of_year - 1.0)
-    # microsecond precision is plenty for SGP4 epochs
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
+    # round to whole seconds for CardSat's manual-entry format
+    if dt.microsecond >= 500000:
+        dt += timedelta(seconds=1)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _decode_exp_field(field: str) -> float:
@@ -144,6 +146,31 @@ def iter_tles(lines):
             buf = []
 
 
+def _fixed(value, places):
+    """Format a float as a plain decimal string (no scientific notation)."""
+    return f"{value:.{places}f}"
+
+
+def to_json(records):
+    """Serialize GP records with fixed-point notation for the small fields."""
+    formatted = []
+    for gp in records:
+        g = dict(gp)
+        g["MEAN_MOTION"] = _fixed(g["MEAN_MOTION"], 8)
+        g["ECCENTRICITY"] = _fixed(g["ECCENTRICITY"], 7)
+        g["MEAN_MOTION_DOT"] = _fixed(g["MEAN_MOTION_DOT"], 12)
+        g["MEAN_MOTION_DDOT"] = _fixed(g["MEAN_MOTION_DDOT"], 12)
+        g["BSTAR"] = _fixed(g["BSTAR"], 10)
+        formatted.append(g)
+    payload = formatted if len(formatted) > 1 else formatted[0]
+    # dump, then strip the quotes we added around the numeric strings so the
+    # JSON stays numeric but never switches to scientific notation
+    text = json.dumps(payload, indent=2)
+    import re
+    text = re.sub(r'"(-?\d+\.\d+)"', r'\1', text)
+    return text
+
+
 def print_human(gp: dict):
     name = gp["OBJECT_NAME"] or f"NORAD {gp['NORAD_CAT_ID']}"
     print(f"=== {name} ===")
@@ -155,9 +182,9 @@ def print_human(gp: dict):
         ("ARG_OF_PERICENTER (deg)", f"{gp['ARG_OF_PERICENTER']:.4f}"),
         ("MEAN_ANOMALY (deg)", f"{gp['MEAN_ANOMALY']:.4f}"),
         ("MEAN_MOTION (rev/day)", f"{gp['MEAN_MOTION']:.8f}"),
-        ("MEAN_MOTION_DOT (rev/day^2)",  f"{gp['MEAN_MOTION_DOT']:.4e}"),
-        ("MEAN_MOTION_DDOT (rev/day^3)", f"{gp['MEAN_MOTION_DDOT']:.4e}"),
-        ("BSTAR (1/ER)",       f"{gp['BSTAR']:.6e}"),
+        ("MEAN_MOTION_DOT (rev/day^2)",  f"{gp['MEAN_MOTION_DOT']:.12f}"),
+        ("MEAN_MOTION_DDOT (rev/day^3)", f"{gp['MEAN_MOTION_DDOT']:.12f}"),
+        ("BSTAR (1/ER)",       f"{gp['BSTAR']:.10f}"),
         ("NORAD_CAT_ID",       gp["NORAD_CAT_ID"]),
         ("CLASSIFICATION",     gp["CLASSIFICATION_TYPE"]),
         ("ELEMENT_SET_NO",     gp["ELEMENT_SET_NO"]),
@@ -189,7 +216,7 @@ def main():
         sys.exit(1)
 
     if args.json:
-        print(json.dumps(records if len(records) > 1 else records[0], indent=2))
+        print(to_json(records))
     else:
         for gp in records:
             print_human(gp)

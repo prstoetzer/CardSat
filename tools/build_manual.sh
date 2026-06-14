@@ -43,7 +43,7 @@ pandoc "$TMP/body.md" -o "$ROOT/CardSat_Manual.pdf" \
   --pdf-engine=xelatex --template="$TMP/tpl.latex" \
   --resource-path="$ROOT" \
   --toc --toc-depth=1 --number-sections \
-  -V geometry:"a4paper,margin=2.2cm,top=2.4cm,bottom=2.2cm" -V fontsize=10pt \
+  -V geometry:"a4paper,margin=2.0cm,top=2.2cm,bottom=2.0cm" -V fontsize=12pt \
   -V mainfont="TeX Gyre Pagella" -V sansfont="TeX Gyre Heros" -V monofont="DejaVu Sans Mono" \
   -V colorlinks=true -H "$HERE/manual_header.tex" --include-before-body="$TMP/frontmatter.tex"
 

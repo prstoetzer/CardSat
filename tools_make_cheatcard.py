@@ -103,7 +103,8 @@ BACK = [
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete"),
  ("UPDATE",
-  "<b>k</b>/<b>ENTER</b> GP + clock &middot; <b>a</b> cache all transponders &middot; "
+  "<b>k</b>/<b>ENTER</b> GP + clock + AMSAT/space-wx/weather &middot; "
+  "<b>a</b> cache all transponders (batches w/ auto-reboots; ends \u201cCached all N\u201d) &middot; "
   "<b>w</b> WiFi connect only"),
  ("SETTINGS",
   "<b>,</b>/<b>/</b> change &middot; <b>ENTER</b> edit/toggle &middot; <b>s</b> scan WiFi "
@@ -137,7 +138,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.13  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.14  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/%d' % (side, pg, TOTAL_PAGES))

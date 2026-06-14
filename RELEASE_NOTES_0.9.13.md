@@ -1,11 +1,9 @@
 # CardSat v0.9.13 — Release Notes
 
-A networking compatibility and reliability release. CardSat now **builds against
-ESP32 Arduino core 3.3.x** (which replaced `WiFiClientSecure` with
-`NetworkClientSecure`), the **HTTPS fetch path is hardened** against a known
-core-3.x second-connection failure, and the **Update sequence is reordered** so
-the small space-weather and weather feeds are fetched on a clean heap — fixing the
-solar-flux fetch that failed only when run after a GP download.
+A networking reliability release. The **Update sequence is reordered** so the
+small space-weather and weather feeds are fetched on a clean heap, slow feeds get
+a **longer read timeout**, and **truncated downloads are detected and retried**
+instead of being silently accepted.
 
 > **Hardware status.** Pass prediction, plots, GPS, the AOS alarm, deep sleep, and
 > the offline caches are confirmed on hardware. The networking changes in this
@@ -13,16 +11,18 @@ solar-flux fetch that failed only when run after a GP download.
 > Space Wx flows (see Fixes), but the radio and rotator paths remain host-tested
 > only.
 
+> **ESP32 core requirement.** CardSat shrinks the per-connection TLS record
+> buffers via `WiFiClientSecure::setBufferSizes(8192, 2048)` — without it, the
+> full 16 KB buffers fragment the no-PSRAM ESP32-S3 heap and repeated HTTPS
+> connects fail with `start_ssl_client: -1` (e.g. caching all transponders dies
+> partway, and the failure poisons the whole WiFi stack until reboot). Build with
+> an esp32 core that still exposes `setBufferSizes()` — the **M5Stack board
+> package 3.2.6** (or upstream esp32 **2.0.x**). Upstream core **3.3.x removed the
+> method**; do not build against it.
+
 ---
 
 ## Fixes
-
-- **Builds on ESP32 core 3.3.x.** The newer core aliases `WiFiClientSecure` to
-  `NetworkClientSecure`, which no longer exposes `setBufferSizes()`. Earlier builds
-  called it to shrink the TLS record buffers and save heap on the no-PSRAM
-  ESP32-S3; that call no longer compiles. It has been removed from the HTTPS paths.
-  The mbedTLS record buffer sizes are now fixed at core-build time
-  (`MBEDTLS_SSL_IN/OUT_CONTENT_LEN`) and are not settable from the sketch.
 
 - **Solar-flux fetch from the Update screen.** Running an Update first loaded the
   ~220-satellite GP catalog into RAM and *then* fetched the NOAA space-weather
@@ -37,21 +37,34 @@ solar-flux fetch that failed only when run after a GP download.
   AMSAT status is still fetched after the catalog loads, since it tags the loaded
   satellites.
 
-- **HTTPS second-connection hardening.** Under core 3.x, `NetworkClientSecure` can
-  leave a TLS/socket resource half-released on teardown, so a following HTTPS
-  request in the same session could fail instantly with a `start_ssl_client: -1`
-  ("connection refused") that is *not* a heap problem. Both HTTPS paths now force an
-  explicit client `stop()` on every exit (via a small RAII guard) and disable
-  HTTP keep-alive reuse (`setReuse(false)`), so each request starts from a clean
-  socket.
+- **Per-call TLS client.** Each HTTPS request uses a fresh `WiFiClientSecure` with
+  an explicit `stop()` on every exit path (via a small RAII guard) and HTTP
+  keep-alive disabled (`setReuse(false)`), so a failed or timed-out connection is
+  discarded rather than reused — one failure never poisons the next request.
+
+- **Longer read timeout for slow feeds.** The NOAA solar-flux feed
+  (`f107_cm_flux.json`, ~22 KB) is sometimes slow to begin responding and a 15 s
+  read window timed out (`-11`) even on a healthy link. The file-download path now
+  uses a 30 s read timeout (connect timeout stays 15 s, since connecting is fast),
+  so the slow feed completes instead of failing all three retries.
+
+- **Truncated-download detection.** On a weak link the HTTPS read loop could exit
+  early on a transient mid-stream lull and silently accept a partial body — a
+  declared-70 KB GP file arriving as 23 KB, parsing to 31 satellites instead of 90,
+  with no error. The loop no longer terminates on a transient disconnect while a
+  declared Content-Length is still unmet (it waits, bounded by a 20 s hard stall
+  timeout), and a body shorter than its declared length is now reported as a
+  failure so the retry logic runs instead of accepting the truncated file. Applies
+  to both the in-RAM and stream-to-file download paths.
 
 ---
 
 ## Internals
 
-- `net.cpp` / `CardSat.ino`: removed the `client.setBufferSizes(8192, 2048)` calls
-  in `httpsGet` and `httpsGetToFile` (four call sites across both representations),
-  with an explanatory note so they are not re-added against core 3.x.
+- `net.cpp` / `CardSat.ino`: `httpsGet` and `httpsGetToFile` set
+  `client.setBufferSizes(8192, 2048)` to shrink the TLS record buffers (~14 KB
+  heap saved per connection on the no-PSRAM S3). This requires an esp32 core that
+  still exposes the method — see the core requirement note above.
 - Added an RAII `ClientStop` guard and `http.setReuse(false)` to both HTTPS
   functions; added `#include <esp_heap_caps.h>` and a pre-TLS log of the largest
   contiguous free block (`heap_caps_get_largest_free_block`) alongside total free,

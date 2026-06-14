@@ -364,6 +364,8 @@ private:
   void doUpdateGp();
   String gpSourceLabel();                  // human label for the configured GP source
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
+  int  cacheTxBatch(int start);            // cache one TX_CACHE_BATCH-sized batch
+  void resumeCacheIfPending();             // continue a batched cache run after reboot
   void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
   void fetchSpaceWeather();                // fetch F10.7 solar flux (best-effort, with GP)
   void fetchWeather();                     // fetch terrestrial weather (Open-Meteo, best-effort)

@@ -167,6 +167,10 @@ void App::setup() {
 
   lastInputMs = millis();
   draw();
+
+  // If a batched "cache all transponders" run is in progress, continue it now
+  // (caches the next batch and reboots, until every sat is done).
+  resumeCacheIfPending();
 }
 
 void App::applyRadioFromCfg() {
@@ -421,42 +425,12 @@ void App::doUpdateGp() {
   }
   Serial.printf("[gp] WiFi OK, IP %s\n", WiFi.localIP().toString().c_str());
   net.syncTimeNtp();
-  // Fetch the small, handshake-sensitive feeds (space weather, terrestrial
-  // weather) BEFORE the big GP download. loadGpFromFile() populates the
-  // persistent ~220-satellite RAM structure, which legitimately fills and
-  // fragments the heap; afterward a fresh TLS handshake for these small JSON
-  // feeds can fail to find a contiguous block on the no-PSRAM S3 (the flux
-  // fetch failing only from the Update screen, never from Space Wx, was this).
-  // Neither fetch depends on GP data, so running them first is purely better:
-  // they get a clean heap, and they still happen even if the GP download fails.
-  fetchSpaceWeather();                 // F10.7 for the decay density scale
-  fetchWeather();                      // terrestrial weather for the site
-  // Repair any CelesTrak URL saved by an older build with the lowercase
-  // FORMAT=json-pretty token, which some CelesTrak edges reject; the documented
-  // token is uppercase. (Compact JSON is valid and smaller than pretty-print.)
-  { String u = cfg.gpUrl;
-    if (u.indexOf("celestrak") >= 0) {
-      int f = u.indexOf("FORMAT=");
-      if (f >= 0) {
-        int e = u.indexOf('&', f); if (e < 0) e = u.length();
-        u = u.substring(0, f) + "FORMAT=JSON" + u.substring(e);
-        strncpy(cfg.gpUrl, u.c_str(), sizeof(cfg.gpUrl) - 1);
-        cfg.gpUrl[sizeof(cfg.gpUrl) - 1] = 0; cfg.save();
-      }
-    }
-  }
   setStatus("Downloading GP..."); draw();
   // Stream straight to the cache file (the download IS the offline cache) and
   // parse from flash -- avoids holding the whole ~75 KB body in RAM.
   if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
     Serial.printf("[gp] download failed: %s\n", net.lastErr.c_str());
-    // A refused/timed-out connection to CelesTrak often means the IP was
-    // temporarily firewalled after earlier bad requests; AMSAT is a good fallback.
-    String e = net.lastErr;
-    if (gpSourceLabel().startsWith("CT") &&
-        (net.lastCode < 0 || net.lastCode == 403 || net.lastCode == 301))
-      e += " (CelesTrak may be blocking; try AMSAT or wait)";
-    setStatus("GP DL failed: " + e); return;
+    setStatus("GP DL failed: " + net.lastErr); return;
   }
   int n = db.loadGpFromFile(FILE_GP);
   db.loadManualGpFile();               // re-merge hand-entered sats after replace
@@ -464,7 +438,9 @@ void App::doUpdateGp() {
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
   buildSatView();
   fetchAmsatStatus();                  // tag active/not-heard from AMSAT status
-                                       // (kept here: it needs the loaded catalog)
+                                       // (needs the loaded catalog)
+  fetchSpaceWeather();                 // F10.7 flux + Kp/A from NOAA SWPC
+  fetchWeather();                      // local surface weather (open-meteo)
   nextAos = 0; lastSchedMs = 0;        // force schedule/alarm to recompute
   setStatus("GP OK: " + String(n) + " sats");
 }
@@ -577,7 +553,7 @@ void App::fetchSpaceWeather() {
   // as one contiguous String (the cause of the intermittent parse failures on
   // the fragmented no-PSRAM heap). The temp file is deleted right after parsing
   // so it never competes with the GP cache for the small LittleFS partition.
-  if (net.httpsGetToFileRetry(SPACEWX_F107_URL, FILE_DL_TMP, 40000, nullptr, 3)) {
+  if (net.httpsGetToFileRetry(SPACEWX_F107_URL, FILE_DL_TMP, 40000, nullptr, 3, 25000)) {
     float flux = scanFileNum(FILE_DL_TMP, "\"flux\"", /*wantLast=*/false, 50.0f, 400.0f);
     Store::fs().remove(FILE_DL_TMP);
     if (!isnan(flux) && flux > 0) {
@@ -598,7 +574,7 @@ void App::fetchSpaceWeather() {
   //   {"time_tag":..,"Kp":3.67,"a_running":22,"station_count":8}
   // Bare numbers; newest reading is the LAST object, so take the value after the
   // LAST "Kp" and LAST "a_running". Streamed + scanned from disk like the flux.
-  if (net.httpsGetToFileRetry(SPACEWX_KP_URL, FILE_DL_TMP, 80000, nullptr, 3)) {
+  if (net.httpsGetToFileRetry(SPACEWX_KP_URL, FILE_DL_TMP, 80000, nullptr, 3, 25000)) {
     float kp = scanFileNum(FILE_DL_TMP, "\"Kp\"",        /*wantLast=*/true, 0.0f, 9.0f);
     float a  = scanFileNum(FILE_DL_TMP, "\"a_running\"", /*wantLast=*/true, 0.0f, 400.0f);
     Store::fs().remove(FILE_DL_TMP);
@@ -872,25 +848,137 @@ double App::decayDensityScale() const {
   return solarDensityScale(cfg.solarAct);
 }
 
-// Fetch and cache every satellite's transponders to flash, so the unit works
-// fully offline afterwards. One HTTPS GET per satellite (slow but one-time).
-void App::doCacheAllTransponders() {
-  if (!net.connected() && !net.connect(cfg.ssid, cfg.pass)) {
-    setStatus("WiFi failed (check SSID/pass)"); return;
+// ---- "Cache all transponders" via small per-sat batches across reboots ------
+// The SatNOGS per-sat request is small and reliable, but ~90 of them in one boot
+// exhausts the tiny LWIP socket pool (connection-refused wall) and the link's
+// RSSI drifts over a long run. So we cache TX_CACHE_BATCH sats per boot, persist
+// the next index to a marker file, and reboot: each boot starts with a pristine
+// socket pool and a fresh WiFi association. setup() calls resumeCacheIfPending()
+// to continue automatically until all sats are done.
+
+// Read the saved next-index from the marker (returns -1 if no resume pending).
+// The marker holds "index stallCount" on one line; stallCount (optional, default
+// 0) counts consecutive boots that failed to advance past `index`.
+static int txResumeRead(int* stall = nullptr) {
+  if (stall) *stall = 0;
+  File f = Store::fs().open(FILE_TX_RESUME, "r");
+  if (!f) return -1;
+  String s = f.readStringUntil('\n');
+  f.close();
+  s.trim();
+  if (s.length() == 0) return -1;
+  int sp = s.indexOf(' ');
+  if (sp >= 0) {
+    if (stall) *stall = s.substring(sp + 1).toInt();
+    return s.substring(0, sp).toInt();
   }
+  return s.toInt();
+}
+
+// Persist the next-index (and stall count) to cache. idx >= count means
+// "done" -> remove marker.
+static void txResumeWrite(int idx, int count, int stall = 0) {
+  if (idx >= count) { if (Store::fs().exists(FILE_TX_RESUME)) Store::fs().remove(FILE_TX_RESUME); return; }
+  File f = Store::fs().open(FILE_TX_RESUME, "w");
+  if (!f) return;
+  f.print(idx); f.print(' '); f.println(stall);
+  f.close();
+}
+
+// Cache one batch of sats starting at `start`. Returns the index of the next sat
+// still needing caching. Normally that's start+TX_CACHE_BATCH (clamped), but if a
+// sat fails all its retries (the socket pool is exhausted for this boot), we stop
+// and return THAT sat's index -- so the next boot re-attempts it in a fresh pool
+// instead of skipping it. This guarantees every sat is eventually cached.
+int App::cacheTxBatch(int start) {
   int n = db.count();
-  if (n == 0) { setStatus("No sats. Update GP first."); return; }
-  int ok = 0;
-  for (int i = 0; i < n; ++i) {
+  // Free the two rigctld/rotctld listener sockets for the batch (the pool is
+  // tiny). serviceRigctld()/serviceRotctld() rebuild them next loop tick.
+  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
+  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
+
+  int end = start + TX_CACHE_BATCH; if (end > n) end = n;
+  for (int i = start; i < end; ++i) {
     SatEntry& s = db.at(i);
     setStatus("TX " + String(i+1) + "/" + String(n) + ": " + s.name); draw();
-    String j;
-    if (net.fetchSatnogsTransmitters(s.norad, j) && SatDb::saveTxCache(s.norad, j))
-      ok++;
+    String url = String(SATNOGS_TX_URL) + String((unsigned long)s.norad);
+    // Per-sat retry (3 attempts) so a single transient -1/-11 doesn't lose a sat.
+    bool ok = net.httpsGetToFileRetry(url, SatDb::txCachePath(s.norad).c_str(),
+                                      200000, nullptr, 3);
+    if (!ok) {
+      // All retries failed: the pool is wedged for this boot. Stop here and let
+      // the next boot resume from THIS sat with a clean pool, rather than losing it.
+      Serial.printf("[tx] sat %lu failed all retries; deferring to next boot\n",
+                    (unsigned long)s.norad);
+      return i;
+    }
     delay(40);   // be gentle on the API
   }
-  Serial.printf("[tx] cached %d/%d satellites\n", ok, n);
-  setStatus("Cached TX: " + String(ok) + "/" + String(n));
+  return end;
+}
+
+// User-triggered "cache all": don't cache inline here -- this boot has already
+// spent socket-pool slots on the GP download + AMSAT fetch, which is exactly why
+// the first batch used to hit the -1 wall a few sats in. Instead, set the resume
+// marker to 0 and reboot, so EVERY batch (including the first) runs in a pristine
+// boot. resumeCacheIfPending() in setup() then does the actual work, batch by
+// batch, rebooting between each until all sats are cached.
+void App::doCacheAllTransponders() {
+  int n = db.count();
+  if (n == 0) { setStatus("No sats. Update GP first."); return; }
+  txResumeWrite(0, n);                  // mark a fresh run pending from index 0
+  Serial.printf("[tx] starting batched cache of %d sats, rebooting\n", n);
+  setStatus("Caching transponders - rebooting...", 2000);
+  draw(); delay(1500);
+  ESP.restart();
+}
+
+// Called at the end of setup(): if a cache run is pending (marker present),
+// continue the next batch and reboot, until every sat is cached.
+void App::resumeCacheIfPending() {
+  int stall = 0;
+  int start = txResumeRead(&stall);
+  if (start < 0) return;                 // nothing pending
+  int n = db.count();
+  if (n == 0) { txResumeWrite(n, n); return; }   // no sats -> clear stale marker
+  if (start >= n) { txResumeWrite(n, n); return; }
+
+  // A run is in progress: show the Update menu (not Home) on every resume boot
+  // so the user sees where the caching lives and the progress status sits there.
+  screen = SCR_UPDATE; lastDrawMs = 0; draw();
+
+  if (!net.connected() && !net.connect(cfg.ssid, cfg.pass)) {
+    // Can't make progress without WiFi; leave the marker so a later boot retries.
+    setStatus("Cache paused: no WiFi", 2500);
+    return;
+  }
+  int next = cacheTxBatch(start);
+
+  // Guard against an infinite reboot loop: if a batch makes zero progress (the
+  // very first sat failed all retries even in this fresh boot), count the stall.
+  // After 2 such boots, skip that one stubborn sat so the run can continue.
+  if (next == start) {
+    if (stall + 1 >= 2) {
+      Serial.printf("[tx] sat index %d stuck after retries; skipping it\n", start);
+      next = start + 1;
+      stall = 0;
+    } else {
+      stall++;
+    }
+  } else {
+    stall = 0;
+  }
+
+  txResumeWrite(next, n, stall);
+  if (next >= n) {
+    Serial.printf("[tx] cache complete: %d satellites\n", n);
+    setStatus("Cached all " + String(n) + " transponders", 3000);
+    return;
+  }
+  Serial.printf("[tx] batch done to %d/%d, rebooting to continue\n", next, n);
+  setStatus("Caching " + String(next) + "/" + String(n) + " - rebooting...", 2000);
+  draw(); delay(1500);
+  ESP.restart();
 }
 
 // ---- Per-satellite calibration (LittleFS text store: "norad dl ul" lines) ---

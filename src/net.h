@@ -24,15 +24,19 @@ public:
   // GET a URL over HTTPS straight into a LittleFS file (no large RAM buffer).
   // Essential for the GP file: a ~75 KB body can't be held as one contiguous
   // String on the fragmented no-PSRAM heap (String growth silently truncates).
+  // `firstByteMs` (optional): for slow-first-response hosts (e.g. NOAA SWPC),
+  // extends the connect/handshake/first-byte allowance so a slow-but-healthy
+  // negotiation isn't aborted. 0 (default) keeps the standard 10-15s timeouts.
   bool httpsGetToFile(const String& url, const char* path,
-                      size_t maxBytes = 400000, size_t* written = nullptr);
+                      size_t maxBytes = 400000, size_t* written = nullptr,
+                      uint32_t firstByteMs = 0);
 
   // Same, but retries a few times with backoff. Transient TLS/Wi-Fi hiccups are
   // the common cause of a failed or short download on this hardware; a couple of
   // retries turns most of those into successes. `attempts` total tries.
   bool httpsGetToFileRetry(const String& url, const char* path,
                            size_t maxBytes = 400000, size_t* written = nullptr,
-                           int attempts = 3);
+                           int attempts = 3, uint32_t firstByteMs = 0);
 
   // Convenience wrappers.
   bool fetchGp(const String& url, String& out);    // AMSAT GP/OMM JSON array

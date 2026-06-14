@@ -69,43 +69,23 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = "";
   if (!connected()) { lastErr = "no WiFi"; return false; }
 
-  Serial.printf(
-    "[net] GET %s\n", url.c_str());
-  {
-    size_t freeHeap = ESP.getFreeHeap();
-    size_t largest  = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    Serial.printf("[net] heap before TLS: free %u, largest block %u, IP %s, RSSI %d\n",
-                  (unsigned)freeHeap, (unsigned)largest,
-                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
-    // NOTE: we log the largest contiguous block (what the TLS handshake allocates)
-    // but do NOT pre-emptively abort on it. An earlier guard at 42k turned out to
-    // block connections that can actually complete in ~30k, so we let the handshake
-    // be the judge -- a real failure surfaces a real transport error below, rather
-    // than a manufactured "low heap" abort. The number stays here as a diagnostic.
-  }
+  Serial.printf("[net] GET %s\n", url.c_str());
+  Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
+                (int)WiFi.RSSI());
 
   WiFiClientSecure client;
-  // Core 3.x NetworkClientSecure can leave a TLS/socket resource half-released on
-  // teardown, so the *next* HTTPS connect() in the session fails instantly with
-  // start_ssl_client:-1 ("connection refused") -- not a heap issue (it fails even
-  // with 250k+ free; see arduino-esp32 #6165/#4992). Force an explicit stop() on
-  // every exit path via this RAII guard, and disable keep-alive reuse below, so
-  // each call starts from a clean socket.
+  // Force an explicit client.stop() on EVERY exit path (including early returns
+  // and mid-read timeouts). Relying on the destructor alone leaves a socket that
+  // stalled mid-stream lingering in the LWIP pool on this core; after enough such
+  // leaks every subsequent connect() returns -1. stop() closes the fd at once.
   struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
-  // Certificate validation disabled for simplicity (public data). For a
+  // Certificate validation disabled for simplicity (public GP data). For a
   // security-sensitive deployment, pin the CA root instead of setInsecure().
   client.setInsecure();
-  // NOTE: earlier builds called client.setBufferSizes(8192, 2048) here to shrink
-  // the TLS record buffers from the 16 KB default and save ~8 KB of heap on the
-  // no-PSRAM ESP32-S3. ESP32 core 3.x replaced WiFiClientSecure with
-  // NetworkClientSecure, which no longer exposes that method -- the mbedTLS
-  // record buffer sizes are fixed at core-build time via MBEDTLS_SSL_IN/OUT_
-  // CONTENT_LEN in sdkconfig and can't be set from the sketch. Do NOT re-add the
-  // call; it will not compile against core 3.x.
   client.setTimeout(15000);
 
   HTTPClient http;
-  http.setReuse(false);   // no keep-alive: avoid carrying half-open state between calls
   http.setUserAgent("CardSat-Cardputer/1.0");
   http.setConnectTimeout(15000);
   http.setTimeout(15000);
@@ -166,56 +146,34 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   return true;
 }
 
-bool Net::fetchGp(const String& url, String& out) {
-  // GP/OMM JSON can be a few hundred KB for the full amateur list; cap higher
-  // than the old TLE text. MAX_SATS still bounds what we actually store.
-  return httpsGet(url, out, 400000);
-}
-
-bool Net::fetchGpToFile(const String& url, const char* path) {
-  return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
-}
-
 bool Net::httpsGetToFile(const String& url, const char* path,
-                         size_t maxBytes, size_t* written) {
+                         size_t maxBytes, size_t* written, uint32_t firstByteMs) {
   lastCode = 0; lastErr = "";
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
 
-  // Log the largest contiguous block (what the TLS handshake allocates) as a
-  // diagnostic, but do NOT pre-emptively abort on it -- an earlier 42k guard
-  // blocked downloads that can complete in ~30k. Let the handshake be the judge.
-  Serial.printf("[net] largest free block before TLS: %u\n",
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-  // Guard against a full filesystem (the internal LittleFS partition is small).
-  // Need room for the body plus slack; if we can't be sure, don't write a file
-  // that would truncate and then fail to parse.
-  {
-    size_t freeb = Store::freeBytes();
-    if (freeb && freeb < maxBytes + 4096) {
-      lastErr = "low flash";
-      Serial.printf("[net] abort GET: free flash %u < need %u\n",
-                    (unsigned)freeb, (unsigned)(maxBytes + 4096));
-      return false;
-    }
-  }
-  Serial.printf("[net] heap before TLS: free %u, largest block %u, IP %s, RSSI %d\n",
-                (unsigned)ESP.getFreeHeap(),
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+  Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
+  Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
+                (int)WiFi.RSSI());
+
+  // Some hosts (notably NOAA SWPC -- government-hosted, load-balanced, strict TLS)
+  // are slow on the FIRST response/handshake from a fresh client/IP. When the
+  // caller passes a firstByteMs, give the connect + first-byte phase a longer
+  // allowance so that slow-but-healthy negotiation isn't aborted as a timeout.
+  uint32_t connectMs = (firstByteMs > 15000) ? firstByteMs : 15000;
 
   WiFiClientSecure client;
-  // See httpsGet: force explicit stop() on every exit (core 3.x second-connect bug).
+  // Force client.stop() on every exit (see httpsGet) -- closes the socket fd
+  // immediately so a stalled/timed-out transfer doesn't leak it from the pool.
   struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
   client.setInsecure();
-  // setBufferSizes() removed: not available on core 3.x NetworkClientSecure (see httpsGet)
-  client.setTimeout(15000);
+  client.setTimeout(connectMs);
 
   HTTPClient http;
-  http.setReuse(false);   // no keep-alive (see httpsGet)
   http.setUserAgent("CardSat-Cardputer/1.0");
-  http.setConnectTimeout(15000);
-  http.setTimeout(15000);
+  http.setConnectTimeout(connectMs);
+  http.setTimeout(connectMs);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.useHTTP10(true);
 
@@ -244,6 +202,11 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   size_t total = 0;
   uint32_t lastRx = millis();
   bool writeErr = false;
+  // The grace window before the FIRST byte can be longer than the mid-stream
+  // stall window (for slow-first-response hosts); once any byte arrives we use
+  // the normal 10s stall timeout for the rest of the body.
+  const uint32_t STALL_MS = 10000;
+  uint32_t firstWindow = (firstByteMs > STALL_MS) ? firstByteMs : STALL_MS;
   // Stream straight to flash: each chunk is written and freed, so no large
   // contiguous RAM buffer is ever needed (which is what truncated the String
   // version). Terminate on declared length / idle timeout, not on a transient
@@ -261,7 +224,10 @@ bool Net::httpsGetToFile(const String& url, const char* path,
       if (len > 0 && total >= (size_t)len) break;
       if (!http.connected() && !stream->available() && millis() - lastRx > 500)
         break;
-      if (millis() - lastRx > 10000) break;
+      // Use the longer first-byte window until the first byte lands, then the
+      // normal mid-stream stall timeout.
+      uint32_t window = (total == 0) ? firstWindow : STALL_MS;
+      if (millis() - lastRx > window) break;
       delay(5);
     }
   }
@@ -277,10 +243,11 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 }
 
 bool Net::httpsGetToFileRetry(const String& url, const char* path,
-                              size_t maxBytes, size_t* written, int attempts) {
+                              size_t maxBytes, size_t* written, int attempts,
+                              uint32_t firstByteMs) {
   if (attempts < 1) attempts = 1;
   for (int i = 0; i < attempts; i++) {
-    if (httpsGetToFile(url, path, maxBytes, written)) return true;
+    if (httpsGetToFile(url, path, maxBytes, written, firstByteMs)) return true;
     // A "low flash" failure won't fix itself on retry -- bail immediately.
     if (lastErr == "low flash") return false;
     Serial.printf("[net] attempt %d/%d failed (%s); retrying\n",
@@ -288,6 +255,16 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
     delay(400 * (i + 1));   // simple linear backoff
   }
   return false;
+}
+
+bool Net::fetchGpToFile(const String& url, const char* path) {
+  return httpsGetToFile(url, path, 400000, nullptr);
+}
+
+bool Net::fetchGp(const String& url, String& out) {
+  // GP/OMM JSON can be a few hundred KB for the full amateur list; cap higher
+  // than the old TLE text. MAX_SATS still bounds what we actually store.
+  return httpsGet(url, out, 400000);
 }
 
 bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {

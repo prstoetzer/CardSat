@@ -572,6 +572,7 @@ int SatDb::loadTxCache(uint32_t norad, Transponder* out, int maxN) {
   return n;
 }
 
+
 // Required FM-uplink CTCSS (PL) tones for the common FM birds. SatNOGS has no
 // structured tone field, so these are built in by NORAD id. Operating tones
 // only (e.g. SO-50's 74.4 Hz arming burst is a separate manual action; its

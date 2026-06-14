@@ -23,6 +23,12 @@ static constexpr double C_LIGHT = 299792458.0;
 
 // SatNOGS DB REST API (transponder frequencies)
 #define SATNOGS_TX_URL     "https://db.satnogs.org/api/transmitters/?format=json&satellite__norad_cat_id="
+// "Cache all" runs in small per-sat batches across reboots: a fresh socket pool
+// and WiFi association each boot keeps the LWIP pool from exhausting on this
+// link. This marker file holds the next satellite index to cache; its presence
+// means a resume is pending and setup() auto-continues. Deleted when done.
+#define FILE_TX_RESUME     "/CardSat/tx_resume.txt"
+#define TX_CACHE_BATCH     12                       // sats cached per boot
 
 // ---------------------------------------------------------------------------
 //  Serial / UART wiring
@@ -75,7 +81,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.13";
+static constexpr const char* FW_VERSION = "0.9.14";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.

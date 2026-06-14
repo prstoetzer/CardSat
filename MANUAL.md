@@ -801,7 +801,17 @@ whichever screen opened it.
   the Satellites list, the **space-weather** data (solar flux + Kp), **and** the
   terrestrial **weather** for your site, so one press brings everything current. The
   Update screen notes this so it's clear `k` does more than GP.
-- `a` — fetch and cache **all** transponders for offline use.
+- `a` — fetch and cache **all** transponders for offline use. This runs in small
+  batches across **automatic reboots**: CardSat caches a handful of satellites,
+  reboots to get a fresh network connection, and continues where it left off,
+  repeating until every satellite is done. Each reboot returns to the **Update**
+  screen showing the running count (e.g. "Caching 24/90"), and the run finishes
+  on "Cached all 90 transponders". The whole pass takes a few minutes and several
+  reboots — this is normal and lets the unit cache the full catalog reliably even
+  on a weak Wi-Fi link. A run resumes automatically if interrupted (e.g. by a
+  power cycle); to cancel a pending run, delete `/CardSat/tx_resume.txt` from the
+  card. Satellites with no transmitters in the SatNOGS database are cached as an
+  empty list, which is expected.
 - `w` — connect WiFi only (no download).
 - `` ` `` — back. Diagnostics print to the serial monitor at 115200.
 
@@ -1233,7 +1243,9 @@ saved immediately and used by the next **Update → k**.
 CardSat is designed to operate with no network in the field:
 
 1. With WiFi, go to **Update** and press `k` (GP + clock) and then `a` (cache
-   **all** transponders). Both are written to flash.
+   **all** transponders). Both are written to flash. The transponder cache runs
+   in batches across several automatic reboots and finishes on "Cached all N
+   transponders" — let it run to completion before going offline.
 2. After that, everything — pass prediction, transponders, Doppler, the schedule —
    works with WiFi off. The clock keeps running (and survives deep sleep); use GPS
    or manual `c` entry to set it where there's no NTP.

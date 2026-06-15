@@ -89,6 +89,28 @@ public:
                            int32_t calDlHz, int32_t calUlHz,
                            uint32_t& rxHz, uint32_t& txHz);
 
+  // Full-duplex uplink when the operator HOLDS THE DOWNLINK on a fixed receive
+  // frequency (so they keep hearing their own signal at the same spot) instead of
+  // holding a fixed point in the satellite passband. This compensates the *round
+  // trip*: the uplink must counter both the uplink Doppler and the downlink
+  // Doppler, because where your downlink lands depends on where the bird heard
+  // your uplink. dlOp/ulOp are the satellite-frame operating pair from
+  // passbandFreqs (so `invert` matches the transponder). Returns the transmit
+  // frequency (incl. calUl) that parks the ground downlink at dlOp+calDl.
+  static uint32_t uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
+                                         bool invert, double rangeRateKmS,
+                                         int32_t calDlHz, int32_t calUlHz);
+
+  // Symmetric case: the operator HOLDS THE UPLINK on a fixed transmit frequency
+  // and tunes only the downlink to follow. Returns the receive frequency (incl.
+  // calDl) to hear their own signal, compensating the round trip (the bird hears
+  // the fixed uplink Doppler-shifted, then its emitted downlink is Doppler-shifted
+  // again on the way down). dlOp/ulOp are the satellite-frame pair from
+  // passbandFreqs so `invert` matches the transponder.
+  static uint32_t downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
+                                         bool invert, double rangeRateKmS,
+                                         int32_t calDlHz, int32_t calUlHz);
+
   // Linear-transponder passband tracking. Given a tuning offset measured in Hz
   // up from the downlink passband bottom, return the *operating* downlink and
   // uplink centre frequencies (before Doppler). For an inverting transponder

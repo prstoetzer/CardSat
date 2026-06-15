@@ -188,7 +188,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.15";
+static constexpr const char* FW_VERSION = "0.9.16";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1412,6 +1412,28 @@ public:
                            double rangeRateKmS,
                            int32_t calDlHz, int32_t calUlHz,
                            uint32_t& rxHz, uint32_t& txHz);
+
+  // Full-duplex uplink when the operator HOLDS THE DOWNLINK on a fixed receive
+  // frequency (so they keep hearing their own signal at the same spot) instead of
+  // holding a fixed point in the satellite passband. This compensates the *round
+  // trip*: the uplink must counter both the uplink Doppler and the downlink
+  // Doppler, because where your downlink lands depends on where the bird heard
+  // your uplink. dlOp/ulOp are the satellite-frame operating pair from
+  // passbandFreqs (so `invert` matches the transponder). Returns the transmit
+  // frequency (incl. calUl) that parks the ground downlink at dlOp+calDl.
+  static uint32_t uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
+                                         bool invert, double rangeRateKmS,
+                                         int32_t calDlHz, int32_t calUlHz);
+
+  // Symmetric case: the operator HOLDS THE UPLINK on a fixed transmit frequency
+  // and tunes only the downlink to follow. Returns the receive frequency (incl.
+  // calDl) to hear their own signal, compensating the round trip (the bird hears
+  // the fixed uplink Doppler-shifted, then its emitted downlink is Doppler-shifted
+  // again on the way down). dlOp/ulOp are the satellite-frame pair from
+  // passbandFreqs so `invert` matches the transponder.
+  static uint32_t downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
+                                         bool invert, double rangeRateKmS,
+                                         int32_t calDlHz, int32_t calUlHz);
 
   // Linear-transponder passband tracking. Given a tuning offset measured in Hz
   // up from the downlink passband bottom, return the *operating* downlink and
@@ -5145,6 +5167,55 @@ void Predictor::dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
 
   rxHz = (uint32_t)llround(rx);
   txHz = (uint32_t)llround(tx);
+}
+
+uint32_t Predictor::uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
+                                           bool invert, double rangeRateKmS,
+                                           int32_t calDlHz, int32_t calUlHz) {
+  if (ulOp == 0) return 0;
+  double beta = rangeRateKmS * 1000.0 / C_LIGHT;   // +ve receding
+  double oneMinusBeta = 1.0 - beta;
+  if (oneMinusBeta == 0.0) oneMinusBeta = 1e-12;    // guard (never physical)
+
+  // The operator parks RX at the ground frequency dlOp+calDl. For the ground to
+  // hear that, the bird must EMIT a downlink of Fdl_sat = (dlOp+calDl)/(1-beta).
+  // delta is how far that emit sits above the nominal operating downlink.
+  double parkedGround = (double)dlOp + (double)calDlHz;
+  double fdlSat = parkedGround / oneMinusBeta;
+  double delta  = fdlSat - (double)dlOp;
+
+  // Map the shifted emit back to the uplink the bird must HEAR, using the same
+  // inversion sense as passbandFreqs: inverting -> uplink moves opposite the
+  // downlink; non-inverting -> it tracks. Then Doppler-compensate that uplink so
+  // the bird actually hears it, and add the uplink calibration.
+  double fulSat = invert ? ((double)ulOp - delta) : ((double)ulOp + delta);
+  double tx = fulSat / oneMinusBeta + (double)calUlHz;
+  if (tx < 0) tx = 0;
+  return (uint32_t)llround(tx);
+}
+
+uint32_t Predictor::downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
+                                           bool invert, double rangeRateKmS,
+                                           int32_t calDlHz, int32_t calUlHz) {
+  double beta = rangeRateKmS * 1000.0 / C_LIGHT;   // +ve receding
+  double oneMinusBeta = 1.0 - beta;
+  if (oneMinusBeta == 0.0) oneMinusBeta = 1e-12;    // guard (never physical)
+  // No uplink (downlink-only bird): just the plain Doppler-shifted downlink.
+  if (ulOp == 0)
+    return (uint32_t)llround((double)dlOp * oneMinusBeta + (double)calDlHz);
+
+  // The operator parks TX at the ground frequency ulOp+calUl; the bird hears that
+  // Doppler-shifted to Ful_sat.
+  double parkedTxGround = (double)ulOp + (double)calUlHz;
+  double fulSat = parkedTxGround * oneMinusBeta;
+  // Translate the heard uplink to the emitted downlink with the same inversion
+  // sense as passbandFreqs (inverting -> downlink moves opposite the uplink).
+  double fdlSat = invert ? ((double)dlOp - (fulSat - (double)ulOp))
+                         : ((double)dlOp + (fulSat - (double)ulOp));
+  // That emit is Doppler-shifted again on the way down; add downlink calibration.
+  double rx = fdlSat * oneMinusBeta + (double)calDlHz;
+  if (rx < 0) rx = 0;
+  return (uint32_t)llround(rx);
 }
 
 void Predictor::passbandFreqs(const Transponder& t, int32_t pbOffsetHz,
@@ -12383,10 +12454,28 @@ void App::drawManual() {
     canvas.print(fixed ? "HOLD" : "TUNE>");
   };
 
-  // Downlink row: parked nominal if fixing downlink, else the Doppler-tuned rx.
-  legRow(56, "DN", (!fixUp) ? (uint32_t)(dnPark > 0 ? dnPark : 0) : rx, !fixUp);
-  // Uplink row (if any): parked nominal if fixing uplink, else the Doppler tx.
-  if (haveUp) legRow(67, "UP", fixUp ? (uint32_t)(upPark > 0 ? upPark : 0) : tx, fixUp);
+  // Downlink row: parked nominal if fixing downlink, else the derived TUNE value.
+  // When the UPLINK is the fixed leg on a LINEAR bird, the operator parks TX and
+  // tunes RX to hear themselves, so the downlink must cancel the *round-trip*
+  // Doppler (the bird hears the fixed uplink Doppler-shifted, then re-emits a
+  // downlink that shifts again on the way down). For FM the legs are independent
+  // channels, so the plain per-leg rx is correct.
+  uint32_t dnTune = rx;
+  if (haveUp && fixUp && linear)
+    dnTune = Predictor::downlinkForFixedUplink(dlOp, ulOp, t.invert,
+                                               L.rangeRate, calDl, calUl);
+  legRow(56, "DN", (!fixUp) ? (uint32_t)(dnPark > 0 ? dnPark : 0) : dnTune, !fixUp);
+  // Uplink row (if any): parked nominal if fixing uplink, else the derived TUNE
+  // value. When the DOWNLINK is the fixed leg on a LINEAR bird, the operator is
+  // parking RX to hear themselves, so the uplink must cancel the *round-trip*
+  // Doppler (not just its own leg) -- otherwise their signal drifts off the
+  // parked downlink. For FM (non-linear) the legs are independent channels, so
+  // the plain per-leg tx is correct there.
+  uint32_t upTune = tx;
+  if (haveUp && !fixUp && linear)
+    upTune = Predictor::uplinkForFixedDownlink(dlOp, ulOp, t.invert,
+                                               L.rangeRate, calDl, calUl);
+  if (haveUp) legRow(67, "UP", fixUp ? (uint32_t)(upPark > 0 ? upPark : 0) : upTune, fixUp);
   else { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 67);
          canvas.print("UP  (receive only)"); }
 

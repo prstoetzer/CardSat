@@ -17,6 +17,14 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
+> **New in v0.9.16:** a **Manual-mode** bug fix — when working a linear
+> transponder full duplex and holding one leg fixed (to keep hearing yourself on a
+> stationary frequency), the **other leg is now corrected for round-trip Doppler**
+> in both directions (hold-downlink and hold-uplink). Previously each leg was
+> Doppler-corrected independently, so your own signal could drift several kHz off
+> the fixed leg during a pass. FM birds and the radio-driving Track screen are
+> unchanged. See **[RELEASE_NOTES_0.9.16.md](RELEASE_NOTES_0.9.16.md)**.
+
 > **New in v0.9.15:** radio- and rotator-control refinements (several adapted from
 > the open-source **OscarWatch** tracker). Doppler CAT writes now use a
 > **mode-aware deadband** (loose for FM, tight for linear SSB/CW) that **tightens

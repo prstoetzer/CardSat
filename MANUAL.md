@@ -377,7 +377,9 @@ The catalog (up to 220 sats from the GP data, plus any you add manually).
 - `f` — toggle **favorite** (favorites are marked with `*`).
 - `v` — toggle **favorites-only** filter.
 - `n` — add a **manual GP satellite**: enter the name, NORAD ID, epoch, then each
-  orbital element in turn (see **Edit** under [§8](#8-screen-reference)).
+  orbital element in turn (see **Edit** under [§8](#8-screen-reference)). If your
+  elements are only in TLE form, convert them first with `tools/tle2gp.py` (see
+  [§8](#8-screen-reference)).
 - `x` — **delete** the selected satellite, but *only if it was added manually*
   (one you entered with `n`). Press `x` once to arm, `x` again to confirm. This
   removes it from `/CardSat/mgp.json` and from your favorites; cached GP
@@ -707,12 +709,20 @@ shown Doppler-corrected). Press **`u`** to toggle which leg is fixed:
 
 - **Linear birds** — fixing the downlink shows the uplink to transmit (and vice
   versa). `,`/`/` move the fixed frequency through the passband, `s` cycles the
-  step, `x` recenters. The HOLD leg's parked value moves with the passband; the
-  TUNE> leg follows with Doppler.
+  step, `x` recenters. The HOLD leg's parked value stays put; the TUNE> leg
+  follows with Doppler. Because the goal is to keep hearing *yourself* on the
+  fixed leg, the TUNE> leg is corrected for the **round-trip** Doppler — it
+  cancels both the uplink and downlink shift, in **either** direction (hold the
+  downlink and tune the uplink, or hold the uplink and tune the downlink), since
+  where your own signal lands depends on where the bird heard your transmission.
+  (Fixing a single satellite-passband point instead — the convention used when
+  CardSat drives a real radio on the Track screen — lets the downlink drift on the
+  ground; here the goal is the opposite, a stationary fixed leg you can park on.)
 - **FM birds** — pick which leg is fixed with `u` (typically the **VHF** leg,
   which has little Doppler and is the one you park). The other (UHF) leg shows
-  the Doppler-corrected frequency to chase. A hint line notes which leg is fixed
-  and whether it's VHF.
+  the Doppler-corrected frequency to chase. FM legs are independent channels, so
+  no round-trip correction applies. A hint line notes which leg is fixed and
+  whether it's VHF.
 - **Downlink-only birds** — just the computed downlink to tune your receiver to.
 
 `m` toggles **CAL** (trim the same per-satellite calibration as Track), `t`
@@ -886,6 +896,31 @@ the GP mean elements — **inclination**, **RAAN**, **eccentricity** (e.g.
 `0.0006190`), **argument of perigee**, **mean anomaly**, **mean motion**
 (rev/day), and **BSTAR** (drag; `0` is fine if unknown). The satellite is stored
 with the downloaded ones and persists across GP refreshes.
+
+> **Only have a TLE? Convert it with `tools/tle2gp.py`.** Manual entry asks for GP
+> (OMM) mean elements, but some objects are still published only as a classic
+> **two-line element set (TLE)**. The repo includes a small, dependency-free
+> Python helper that decodes a TLE into exactly the fields above — handling the
+> conversions that are easy to get wrong by hand: the TLE epoch (`YYDDD.dddddddd`
+> → ISO date/time), the implied-decimal eccentricity, BSTAR's exponent notation,
+> and the derivative scaling (TLE stores *n*-dot/2 and *n*-ddot/6; GP reports the
+> full values). Run it on a file of one or more TLEs, or paste a 2–3 line set on
+> standard input:
+>
+> ```
+> python3 tools/tle2gp.py mysat.txt        # file with one or more TLEs
+> python3 tools/tle2gp.py                   # then paste 2–3 lines, Ctrl-D
+> python3 tools/tle2gp.py --json mysat.txt  # AMSAT-style GP/OMM JSON instead
+> ```
+>
+> The default output lists each element with its label and units, ready to type
+> straight into the `n` prompts in order (epoch, inclination, RAAN, eccentricity,
+> argument of perigee, mean anomaly, mean motion, BSTAR). The `--json` form emits
+> an AMSAT-style GP/OMM record, handy if you'd rather host the set at a **Custom
+> URL** GP source (see [§7](#7-first-time-setup)) than type it in. Either way the
+> numbers are identical to what CardSat would have downloaded — the script only
+> *re-packages* the same SGP4 mean elements a TLE already contains, so accuracy
+> still decays with the element set's age and you'll want a fresh TLE periodically.
 
 **Adding a manual transponder** (from Passes → `n`): you'll be asked, in order,
 for **Downlink low (Hz)**, **Uplink low (Hz, 0 = none/beacon)**, **Downlink high
@@ -1204,7 +1239,9 @@ mean elements in whatever format" is **GP** (General Perturbations). CardSat dow
 but internally it renders each set back into a TLE line-pair — epoch encoded as
 `YYDDD.dddddddd`, B\* in TLE exponent notation, with the line checksums — and hands
 that to the SGP4 library, which still ingests elements the classic way. The element
-values are identical; only the wrapper changes.
+values are identical; only the wrapper changes. (Because they're the same numbers,
+a TLE can be mechanically decoded into the GP fields CardSat's manual entry asks
+for — that's what the bundled **`tools/tle2gp.py`** helper does; see [§8](#8-screen-reference).)
 
 **What SGP4 is.** SGP4 (Simplified General Perturbations 4) is the analytic propagator
 that NORAD/USSPACECOM elements are *fit to*. "Analytic" means it isn't numerically

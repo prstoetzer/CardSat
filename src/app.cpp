@@ -6982,10 +6982,28 @@ void App::drawManual() {
     canvas.print(fixed ? "HOLD" : "TUNE>");
   };
 
-  // Downlink row: parked nominal if fixing downlink, else the Doppler-tuned rx.
-  legRow(56, "DN", (!fixUp) ? (uint32_t)(dnPark > 0 ? dnPark : 0) : rx, !fixUp);
-  // Uplink row (if any): parked nominal if fixing uplink, else the Doppler tx.
-  if (haveUp) legRow(67, "UP", fixUp ? (uint32_t)(upPark > 0 ? upPark : 0) : tx, fixUp);
+  // Downlink row: parked nominal if fixing downlink, else the derived TUNE value.
+  // When the UPLINK is the fixed leg on a LINEAR bird, the operator parks TX and
+  // tunes RX to hear themselves, so the downlink must cancel the *round-trip*
+  // Doppler (the bird hears the fixed uplink Doppler-shifted, then re-emits a
+  // downlink that shifts again on the way down). For FM the legs are independent
+  // channels, so the plain per-leg rx is correct.
+  uint32_t dnTune = rx;
+  if (haveUp && fixUp && linear)
+    dnTune = Predictor::downlinkForFixedUplink(dlOp, ulOp, t.invert,
+                                               L.rangeRate, calDl, calUl);
+  legRow(56, "DN", (!fixUp) ? (uint32_t)(dnPark > 0 ? dnPark : 0) : dnTune, !fixUp);
+  // Uplink row (if any): parked nominal if fixing uplink, else the derived TUNE
+  // value. When the DOWNLINK is the fixed leg on a LINEAR bird, the operator is
+  // parking RX to hear themselves, so the uplink must cancel the *round-trip*
+  // Doppler (not just its own leg) -- otherwise their signal drifts off the
+  // parked downlink. For FM (non-linear) the legs are independent channels, so
+  // the plain per-leg tx is correct there.
+  uint32_t upTune = tx;
+  if (haveUp && !fixUp && linear)
+    upTune = Predictor::uplinkForFixedDownlink(dlOp, ulOp, t.invert,
+                                               L.rangeRate, calDl, calUl);
+  if (haveUp) legRow(67, "UP", fixUp ? (uint32_t)(upPark > 0 ? upPark : 0) : upTune, fixUp);
   else { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 67);
          canvas.print("UP  (receive only)"); }
 

@@ -252,6 +252,48 @@ bool SatDb::loadManualGpFile() {
   return any;
 }
 
+// True if this norad has a hand-entered line in FILE_MGP (i.e. it's a manual sat
+// the user can delete), regardless of whether a cached GP entry also exists.
+bool SatDb::isManualGp(uint32_t norad) {
+  File f = Store::fs().open(FILE_MGP, "r");
+  if (!f) return false;
+  bool found = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (line.length() == 0) continue;
+    JsonDocument d;
+    if (deserializeJson(d, line)) continue;
+    if ((uint32_t)(d["NORAD_CAT_ID"] | 0) == norad) { found = true; break; }
+  }
+  f.close();
+  return found;
+}
+
+// Delete a hand-entered sat from FILE_MGP: rewrite the file without its line.
+// Lines that aren't this norad (including any the user annotated) are preserved.
+bool SatDb::removeManualGp(uint32_t norad) {
+  File f = Store::fs().open(FILE_MGP, "r");
+  if (!f) return false;
+  String out; bool removed = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    String t = line; t.trim();
+    if (t.length() == 0) continue;
+    JsonDocument d;
+    if (!deserializeJson(d, t) && (uint32_t)(d["NORAD_CAT_ID"] | 0) == norad) {
+      removed = true; continue;                 // drop this line
+    }
+    out += t; out += '\n';
+  }
+  f.close();
+  if (!removed) return false;
+  if (out.length() == 0) { Store::fs().remove(FILE_MGP); return true; }
+  File w = Store::fs().open(FILE_MGP, "w");
+  if (!w) return false;
+  w.print(out); w.close();
+  return true;
+}
+
 bool SatDb::saveGpJson(const String& json) {
   File f = Store::fs().open(FILE_GP, "w");
   if (!f) return false;
@@ -413,13 +455,21 @@ static void encNdot(double v, char out[12]) {
   snprintf(out, 12, "%c.%08ld", s, m);
 }
 
-// Catalog number: 5 digits, or Alpha-5 for 100000-339999 (TLE's stopgap).
+// Catalog number for the *synthesized TLE line* only. The TLE format's field is
+// 5 columns, so it physically cannot hold a >5-digit catalog number. We use
+// Alpha-5 (CelesTrak's documented stopgap) for 100000-339999, and for anything
+// larger (6-9 digit Space-Fence / analyst IDs, e.g. 799xxxxxx) we emit the low 5
+// digits purely so the TLE stays well-formed for twoline2rv. This is SAFE because
+// the satrec's catalog number is never read back as identity: CardSat keeps the
+// full NORAD id in SatEntry.norad (uint32_t, good to 4.29e9) for all identity,
+// storage, dedup, file paths, and display. SGP4 propagation depends only on the
+// orbital elements, not this field, so 9-digit objects still propagate correctly.
 static void encCatalog(uint32_t n, char out[6]) {
   if (n <= 99999u) { snprintf(out, 6, "%05lu", (unsigned long)n); return; }
   static const char* A = "ABCDEFGHJKLMNPQRSTUVWXYZ";   // skips I and O
   int hi = (int)(n / 10000), lo = (int)(n % 10000);
   if (hi >= 10 && hi <= 33) snprintf(out, 6, "%c%04d", A[hi - 10], lo);
-  else snprintf(out, 6, "%05lu", (unsigned long)(n % 100000u));
+  else snprintf(out, 6, "%05lu", (unsigned long)(n % 100000u));  // >339999: low 5 (TLE cosmetic only)
 }
 
 static int tleChecksum(const char* line) {

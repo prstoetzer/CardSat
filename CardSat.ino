@@ -188,7 +188,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.14";
+static constexpr const char* FW_VERSION = "0.9.15";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -334,12 +334,30 @@ namespace Store {
 //  yaesu/ft736.c, kenwood/ts2000.c, kenwood/ts790.c) and the radios' CAT
 //  manuals. See civ.cpp / yaesu.cpp / kenwood.cpp for the wire-level encoders.
 //
-//  Icom CI-V addresses (verified against the standard Icom address table):
+//  Icom CI-V addresses (verified against the standard Icom address table and
+//  Hamlib backends / live CI-V traces):
 //      IC-820 = 0x42   IC-910 = 0x60   IC-9100 = 0x7C
 //      IC-821 = 0x4C   IC-970 = 0x2E   IC-9700 = 0xA2
 //
-//  MAIN/SUB band select (Icom only): CI-V cmd 0x07, D0 = MAIN, D1 = SUB,
-//  verified from the IC-821H manual command table and shared across the family.
+//  MAIN/SUB band select (Icom only): CI-V cmd 0x07, sub D0/D1. The IC-821H (D0=MAIN,
+//  D1=SUB) and IC-820H (REVERSED: D1=MAIN, D0=SUB) are each confirmed from their own
+//  manuals; the IC-9100/9700 D0/D1 mapping is confirmed against Hamlib (PR #97 main/
+//  sub 0x07 0xD0/0xD1). The IC-910/IC-970 use the same 0x07 D0/D1 family convention.
+//
+//  Satellite-mode toggle (CI-V, per-rig command + sub-command):
+//    * IC-9100 / IC-9700 : cmd 0x16 sub 0x5A. CONFIRMED from the IC-9700 CI-V
+//                          Reference Guide ("5A ... Send/read the satellite mode")
+//                          and a live IC-9100 trace "fe fe 7c e0 16 5a fd" (#1656).
+//    * IC-910            : cmd 0x1A sub 0x07 -- DIFFERENT command group. CONFIRMED
+//                          from the IC-910 manual CONTROL COMMAND table (cmd 1A,
+//                          sub 07 = "Set satellite mode"). Hamlib also carries this
+//                          as a separate S_MEM_SATMODE910 constant (PR #143).
+//    * IC-820/821/970    : no CAT satellite-mode command (hardware switch); hasSatMode
+//                          reflects this.
+//
+//  Tone encoder on/off (CI-V cmd 0x16, per-rig sub toneEncSub): IC-9100/9700 = 0x42
+//  (Repeater tone); IC-910 = 0x43 (Subaudible tone -- its 0x42 is the auto-notch
+//  filter). Confirmed from the IC-9700 CI-V guide and IC-910 manual command tables.
 //
 //  Frequency read-back (canReadFreq) enables the "radio knob" One True Rule
 //  tuning mode:
@@ -384,27 +402,43 @@ struct RadioProfile {
   uint8_t     selLen;        // valid bytes in selMain/selSub (0 = n/a)
   bool        selVerified;   // CI-V select sequence documented (Icom only)
   bool        hasSatMode;    // radio has a dedicated full-duplex / sat mode
-  uint8_t     satModeSub;    // CI-V satmode sub-cmd under 0x16 (Icom): IC-910 = 0x07,
-                             // IC-9100/9700 = 0x5A. 0 = n/a (non-CI-V).
+  uint8_t     satModeCmd;    // CI-V satmode command byte (Icom): IC-910 = 0x1A,
+                             // IC-9100/9700 = 0x16. 0 = n/a (non-CI-V).
+  uint8_t     satModeSub;    // CI-V satmode sub-cmd: IC-910 = 0x07 (under 0x1A),
+                             // IC-9100/9700 = 0x5A (under 0x16). 0 = n/a.
   bool        canReadFreq;   // frequency read-back implemented for this rig
   bool        hasTone;       // CAT can set the TX CTCSS (PL) encoder tone
+  uint8_t     toneEncSub;    // CI-V tone-encoder on/off sub-cmd under 0x16:
+                             // IC-9100/9700 = 0x42 (Repeater tone), IC-910 = 0x43
+                             // (Subaudible tone; on the 910, 0x42 is auto-notch). 0 = n/a.
 };
 
 // Order MUST match RadioModel.
 static const RadioProfile RADIOS[RIG_COUNT] = {
-  // name       proto         addr   baud    selMain        selSub         len verf satM satSub read tone
-  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, false },
-  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, false },
-  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x07, true, true  },
-  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x5A, true, false },
-  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, true  },
-  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, true  },
+  // name       proto         addr   baud    selMain        selSub         len verf satM satCmd satSub read tone tnEnc
+  // NOTE: MAIN/SUB band-select differs between these two otherwise-similar rigs,
+  // each confirmed from its own manual's CI-V command table (cmd 07):
+  //   IC-821H: Main band access = D0, Sub band access = D1  (addr 4C)
+  //   IC-820H: Main band access = D1, Sub band access = D0  (addr 42)  <- REVERSED
+  // So selMain/selSub are intentionally swapped between the two rows below.
+  // satCmd/satSub: satellite-mode toggle. IC-9100/9700 = 0x16/0x5A (confirmed: 9700
+  // CI-V Reference Guide & live 9100 trace fe fe 7c e0 16 5a fd). IC-910 is DIFFERENT:
+  // 0x1A/0x07 (verified from the IC-910 CONTROL COMMAND table, cmd 1A sub 07
+  // "Set satellite mode"). 0/0 where there's no CAT satmode.
+  // tnEnc: tone-encoder on/off sub under 0x16. IC-9100/9700 = 0x42 (Repeater tone);
+  // IC-910 = 0x43 (Subaudible tone; its 0x42 is auto-notch). 0 where no CAT tone.
+  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, true, 0x16, 0x5A, true, false, 0x00 },
+  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, false, 0x00 },
+  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x1A, 0x07, true, true,  0x43 },
+  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x16, 0x5A, true, false, 0x00 },
+  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42 },
+  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42 },
   // Yaesu: 5-byte CAT. baud is the radio's CAT menu setting. No CI-V select.
-  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, true  },
-  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, false,false },
+  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00 },
+  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, false,false, 0x00 },
   // Kenwood: ASCII CAT over RS-232 (needs a MAX3232-class level interface).
-  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, false },
-  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, true  },
+  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, false, 0x00 },
+  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00 },
 };
 
 
@@ -1134,6 +1168,8 @@ public:
   int  appendGpFromJson(const String& json);  // append (dedup/replace by norad)
   bool addGp(const SatEntry& s);               // one manual sat (+persist NDJSON)
   bool loadManualGpFile();                     // merge FILE_MGP into the DB
+  bool isManualGp(uint32_t norad);             // true if norad has a line in FILE_MGP
+  bool removeManualGp(uint32_t norad);         // delete a hand-entered sat from FILE_MGP
   bool loadGpFromFs();                         // reload cached GP JSON at boot
   void applyAmsatStatusFile(const char* path); // set amsatStatus from a cached summary.php
   int  loadGpFromFile(const char* path);       // stream-parse a GP file (low RAM)
@@ -1486,6 +1522,10 @@ struct Settings {
   bool     satMode    = false;
   uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
   uint16_t catDelayMs = 70;    // pause after each CAT command before the next (ms)
+  // Doppler CAT write deadband + predictive lead (tunable; see app.h DOPP_* defaults)
+  uint16_t doppThreshFmHz  = 300; // FM leg write deadband (Hz)
+  uint16_t doppThreshLinHz = 50;  // linear SSB/CW leg write deadband (Hz)
+  uint16_t doppLeadMs      = 50;  // predictive-lead cap (ms); 0 = lead off
   // Tracking
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
@@ -1504,6 +1544,7 @@ struct Settings {
   uint16_t rotPort     = 4533;       // rotctld TCP port (Hamlib default 4533)
   uint32_t rotBaud     = 9600;   // GS-232 serial (commonly 9600)
   uint16_t rotLeadSec  = 120;    // pre-position lead before AOS (s; 0 = off)
+  uint8_t  rotAzLookSec = 3;     // 450-overlap az lookahead horizon (s; 0 = off)
   uint8_t  rotAzRange  = ROT_AZ_360; // 0..360 or -180..+180 azimuth axis
   int16_t  rotAzOff    = 0;      // deg added to commanded azimuth (alignment)
   int16_t  rotElOff    = 0;      // deg added to commanded elevation
@@ -1546,7 +1587,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1646,6 +1687,15 @@ private:
   int      visDayOff = 0;         // 10-day overview start offset from today, in DAYS (>=0)
   Screen   visReturn = SCR_PASSES; // screen to return to from vis/illum (Satellites or Passes)
   bool     building = false;      // a build is in progress (suppress empty-state placeholders)
+
+  // EQX table (equatorial crossings, ascending node) for OSCARLOCATOR use.
+  // 3-day window; an AO-7-class orbit gives ~37 crossings, higher orbits fewer.
+  static const int EQX_MAX = 64;
+  time_t   eqxT[EQX_MAX];         // unix UTC of each ascending-node crossing
+  float    eqxLonW[EQX_MAX];      // sub-longitude in West-positive degrees (0..360)
+  int      eqxN = 0;
+  int      eqxScroll = 0;
+  bool     eqxDescending = false;  // false = ascending node (EQX), true = descending node
 
   // 60-day illumination (DK3WN illum-style). Raster: cols = days, rows = orbit
   // phase; a set bit means the satellite is in eclipse at that (day, phase).
@@ -1778,6 +1828,26 @@ private:
   uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
   static constexpr uint32_t FREQ_GUARD_HZ = 2;   // skip a re-send within this many Hz of the last value
   static constexpr uint32_t KNOB_MOVE_HZ  = 5;   // read-vs-last delta that counts as an operator knob move
+  // ---- CAT write deadband + adaptive threshold + predictive lead (OscarWatch-
+  // inspired) -------------------------------------------------------------------
+  // (1) Mode-aware write deadband: only push a leg when it moved more than the
+  // threshold for its mode. FM tolerates kHz of Doppler in its passband, so a
+  // loose value avoids needless CI-V chatter; linear SSB/CW needs tight tracking.
+  static constexpr uint32_t DOPP_THRESH_FM_HZ     = 300;  // FM downlink/uplink write deadband
+  static constexpr uint32_t DOPP_THRESH_LINEAR_HZ = 50;   // linear SSB/CW write deadband
+  // (2) Adaptive threshold near TCA: when the Doppler slew (Hz/s) is high (fast
+  // geometry around closest approach), tighten the threshold so the rig keeps up;
+  // when slew is low, keep it loose. Linear interpolate between the breakpoints.
+  static constexpr float    DOPP_SLEW_START_HZS = 15.0f;  // below this slew: base threshold
+  static constexpr float    DOPP_SLEW_FULL_HZS  = 35.0f;  // at/above this: threshold halved
+  static constexpr uint32_t DOPP_THRESH_MIN_HZ  = 25;     // floor when slew is high
+  // (3) Predictive CAT lead: compute Doppler for now+lead to mask CAT latency,
+  // but taper the lead to zero near TCA (where range rate is small and a forward
+  // lead overshoots). Capped small; only meaningful on fast overhead passes.
+  static constexpr float    DOPP_LEAD_MAX_MS        = 50.0f;  // hard cap on lead
+  static constexpr float    DOPP_LEAD_TAPER_KMS     = 0.35f;  // |range rate| (km/s) for full lead
+  static constexpr float    DOPP_LEAD_SLOPE_START   = 0.010f; // km/s^2: lead blend begins
+  static constexpr float    DOPP_LEAD_SLOPE_FULL    = 0.016f; // km/s^2: lead blend full
   uint32_t lastDoppMs = 0;
   float    toneApplied = -2.0f;   // CTCSS tone currently set on the rig (Hz);
                                   // 0 = off, -2 = unknown/never (force re-apply)
@@ -1785,6 +1855,13 @@ private:
   float    lastAzCmd = -999.0f;  // last az/el we commanded (deadband)
   float    lastElCmd = -999.0f;
   float    lastUnwrappedAz = -999.0f;  // actual az sent (tracks 0..450 overlap)
+  // 450-deg overlap lookahead (OscarWatch-inspired): when an upcoming north wrap
+  // is predicted, pre-commit to the 361-450 band BEFORE the bearing crosses, so
+  // the rotator climbs into the overlap instead of unwinding ~360 the long way.
+  // Computed in the live-track tick (only when NOT flipped); consumed by rotPoint
+  // (only in ROT_AZ_450). These two guards keep it off the 180-flip and 360 paths.
+  bool     rotAz450PreCommit = false;  // force +360 representation this command
+  static constexpr float ROT_AZ_LOOKAHEAD_SEC = 3.0f;  // predict az this far ahead
   bool     rotParked = false;
   uint32_t lastRotMs = 0;
   PassPredict rotPass;             // cached upcoming pass, for AOS pre-positioning
@@ -1827,6 +1904,7 @@ private:
   int      exportPendN = 0;       // number queued
   int      exportPendIdx = 0;     // current prompt index
   bool     logDelArm = false;     // two-press delete confirmation
+  bool     satDelArm = false;     // two-press delete confirmation (manual GP sat)
   bool     logPickSat = false;    // sat list opened to pick a satellite for a log entry
 
   // status line
@@ -1843,6 +1921,14 @@ private:
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
+  // Compute the per-tick CAT write deadband (mode-aware, adaptively tightened
+  // near TCA) and the TCA-tapered predictive lead range rate. `rrNow` is the
+  // instantaneous range rate (km/s); `centerHz` the higher of the two leg freqs
+  // (for slew estimation); `linear` selects the linear vs FM base threshold.
+  // Returns the effective threshold (Hz); writes the lead-adjusted range rate
+  // (km/s) to *leadRrOut.
+  uint32_t dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
+                                double nowSec, double* leadRrOut);
   // Route logical downlink/uplink to the physical MAIN/SUB VFOs per cfg.vfoType.
   bool dlOnSub() const { return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN; }
   bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }
@@ -1857,9 +1943,9 @@ private:
   // a real set, read the accepted freq back and remember THAT, so the rig's
   // tuning-step rounding can't later masquerade as an operator knob move. Pass
   // readback=false in modes where we don't follow the knob (saves a round-trip).
-  void driveDownlink(uint32_t rx, bool readback) {
+  void driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
     uint32_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
-    if (lastRxSet && d < FREQ_GUARD_HZ) return;          // already there
+    if (lastRxSet && d < threshHz) return;               // within deadband: already there
     if (!rigSetDownlinkFreq(rx)) return;
     uint32_t back;
     lastRxSet = (readback && rig->canReadFreq() && rigReadDownlinkFreq(back)) ? back : rx;
@@ -1867,9 +1953,9 @@ private:
   // Drive the uplink dial only when it moved; then leave the active band on the
   // downlink so the operator's knob/read stays on RX. No read-back (the uplink
   // knob is never followed).
-  void driveUplink(uint32_t tx) {
+  void driveUplink(uint32_t tx, uint32_t threshHz = FREQ_GUARD_HZ) {
     uint32_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
-    if (lastUlHz && d < FREQ_GUARD_HZ) return;
+    if (lastUlHz && d < threshHz) return;
     if (rigSetUplinkFreq(tx)) { lastUlHz = tx; rigSelectDownlink(); }
   }
   // Soft floor: never send CAT faster than the configured baud can comfortably
@@ -1924,6 +2010,7 @@ private:
   void sleepUntilNextPass();               // deep-sleep until ~60 s before AOS
   void saveManualTx(uint32_t norad, const Transponder& t);
   int  loadManualTx(uint32_t norad, Transponder* out, int maxN);
+  bool deleteManualTx(uint32_t norad, int manualIdx);  // remove the Nth manual TX
 
   // ---- input ----
   void handleKey(char c, bool enter, bool back);
@@ -1965,12 +2052,15 @@ private:
   void buildVis();   void drawVis();   void keyVis(char c, bool enter, bool back);
   void buildIllum(); void drawIllum(); void keyIllum(char c, bool enter, bool back);
   void buildOrbit(); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
+  void buildEqx();   void drawEqx();   void keyEqx(char c, bool enter, bool back);
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
   void drawWeather(); void keyWeather(char c, bool enter, bool back);
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);
   int  txDbScroll = 0;             // transponder-browser scroll position
+  int  txDbSel = 0;               // selected transponder entry (for delete)
+  bool txDbDelArm = false;        // two-press delete confirmation (manual TX)
   void drawQrz();     void keyQrz(char c, bool enter, bool back);
   bool qrzLookup(const String& call, String& err);  // returns true on success
   String qrzSessionKey;            // cached QRZ XML session key (empty = need login)
@@ -2269,7 +2359,18 @@ static void civDecode(const uint8_t* b, size_t n) {
                    else if (b[5]==0xD1) Serial.print("SUB");
                    else if (b[5]==0xB0) Serial.print("swap");
                    else Serial.printf("%02X", b[5]); } break;
-    case 0x16: Serial.printf("  sat-mode %s", (n > 6 && b[6]) ? "ON" : "OFF"); break;
+    case 0x16:                                  // 0x16 group: sub-cmd selects function
+      if (n > 5 && b[5] == 0x5A)
+        Serial.printf("  sat-mode %s", (n > 6 && b[6]) ? "ON" : "OFF");   // 9100/9700
+      else if (n > 5 && b[5] == 0x42)
+        Serial.printf("  tone-enc %s", (n > 6 && b[6]) ? "ON" : "OFF");
+      else if (n > 5) Serial.printf("  ctl-16 sub %02X", b[5]);
+      break;
+    case 0x1A:                                  // IC-910 sat-mode lives here (sub 0x07)
+      if (n > 5 && b[5] == 0x07)
+        Serial.printf("  sat-mode %s", (n > 6 && b[6]) ? "ON" : "OFF");
+      else if (n > 5) Serial.printf("  ctl-1A sub %02X", b[5]);
+      break;
     case 0xFB: Serial.print("  ACK"); break;
     case 0xFA: Serial.print("  NAK"); break;
   }
@@ -2395,16 +2496,23 @@ bool CivRig::setSubMode (RigMode m)   { return setModeCiv(true,  toCiv(m)); }
 
 bool CivRig::enableSatMode(bool on) {
   if (!RADIOS[_model].hasSatMode) return false;
-  // CI-V cmd 0x16; sub-cmd is per-rig: IC-910 = 0x07, IC-9100/9700 = 0x5A.
-  uint8_t pl[3] = { 0x16, RADIOS[_model].satModeSub, (uint8_t)(on ? 0x01 : 0x00) };
+  // Satmode command differs by rig: IC-9100/9700 use 0x16/0x5A, but the IC-910
+  // uses 0x1A/0x07 (per its CONTROL COMMAND table). Both the command and the
+  // sub-command come from the profile.
+  uint8_t pl[3] = { RADIOS[_model].satModeCmd,
+                    RADIOS[_model].satModeSub,
+                    (uint8_t)(on ? 0x01 : 0x00) };
   return sendFrame(pl, 3);
 }
 
 // Transmit CTCSS (PL) tone for an FM uplink. The tone lives on the uplink, so
 // we select MAIN first. Repeater-tone frequency: cmd 0x1B sub 0x00 + 2 BCD
-// bytes of the tone in tenths of Hz (e.g. 67.0 -> 0670 -> 0x06 0x70). Repeater-
-// tone (encoder) on/off: cmd 0x16 sub 0x42 data 0x01/0x00. Verified against the
-// Icom CI-V reference (IC-9700/910H/9100 family).
+// bytes of the tone in tenths of Hz (e.g. 67.0 -> 0670 -> 0x06 0x70), confirmed
+// from the IC-9700 CI-V Reference Guide. Encoder on/off: cmd 0x16, sub is per-rig
+// (profile toneEncSub): IC-9100/9700 = 0x42 (Repeater tone), IC-910 = 0x43
+// (Subaudible tone -- on the 910, 0x42 is the auto-notch filter). The IC-910's
+// 0x1B tone-frequency command is unconfirmed; if the rig NAKs it, the encoder
+// on/off still applies whatever tone is set on the radio.
 bool CivRig::setCtcss(bool on, float toneHz) {
   if (!RADIOS[_model].hasTone) return false;
   // The caller selects the uplink band first (MAIN or SUB, per VFO Type).
@@ -2414,10 +2522,10 @@ bool CivRig::setCtcss(bool on, float toneHz) {
     uint8_t b2 = (uint8_t)((((t / 10)   % 10) << 4) | (t % 10));
     uint8_t freq[4] = { 0x1B, 0x00, b1, b2 };
     sendFrame(freq, 4);
-    uint8_t enc[3]  = { 0x16, 0x42, 0x01 };
+    uint8_t enc[3]  = { 0x16, RADIOS[_model].toneEncSub, 0x01 };
     return sendFrame(enc, 3);
   }
-  uint8_t off[3] = { 0x16, 0x42, 0x00 };
+  uint8_t off[3] = { 0x16, RADIOS[_model].toneEncSub, 0x00 };
   return sendFrame(off, 3);
 }
 
@@ -2686,7 +2794,13 @@ static inline void kwLog(const char*, const String&) {}
 void KenwoodRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   static HardwareSerial* hs = nullptr;
   if (!hs) hs = new HardwareSerial(uartNum);
-  hs->begin(baud, SERIAL_8N1, rxPin, txPin);   // Kenwood CAT = 8N1
+  // Kenwood CAT framing is 8 data bits, no parity. Stop bits are baud-dependent:
+  // the IF-232C generation (TS-450/690/790/850/950) requires TWO stop bits at
+  // 4800 baud, and one stop bit at every higher rate (e.g. TS-2000 @ 57600).
+  // Confirmed from the TS-850 External Control manual (4800 bps, 1 start / 8 data
+  // / 2 stop / no parity) and corroborated for the TS-790 family.
+  uint32_t cfg = (baud <= 4800) ? SERIAL_8N2 : SERIAL_8N1;
+  hs->begin(baud, cfg, rxPin, txPin);
   _stream = hs;
 }
 
@@ -2764,7 +2878,12 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
 // (encode) number -- 1-based into the same 39-tone list as ctcssToneIndex --
 // and TO1/TO0 turns the TONE (encode) function on/off. The rig applies it to
 // the current TX (uplink) band. Per Hamlib kenwood TN variant + the TS-2000
-// CAT list; least bench-verified of the three families, so watch the trace.
+// CAT list. The TS-790 uses the same FA/FB/MD ASCII protocol (FA; read-back
+// confirmed from a live Hamlib TS-790 trace), at 4800 baud 8N2; its CTCSS needs
+// the optional TSU-5 decoder unit and is decode-only over the panel, so the
+// profile sets hasTone=false. CAT on the TS-790 is via the optional IF-232C
+// interface (the operating manual documents the interface but not the command
+// set). Still the least bench-verified of the three families -- watch the trace.
 bool KenwoodRig::setCtcss(bool on, float toneHz) {
   if (!RADIOS[_model].hasTone) return false;
   if (!on || toneHz <= 0) return sendCmd("TO0;");      // TONE function off
@@ -3561,8 +3680,11 @@ bool IcomNetRig::readPtt(bool& tx) {
 
 bool IcomNetRig::enableSatMode(bool on) {
   if (!RADIOS[_model].hasSatMode) return false;
-  // CI-V cmd 0x16; sub-cmd is per-rig: IC-910 = 0x07, IC-9100/9700 = 0x5A.
-  uint8_t pl[3] = { 0x16, RADIOS[_model].satModeSub, (uint8_t)(on ? 0x01 : 0x00) };
+  // Satmode command differs by rig: IC-9100/9700 use 0x16/0x5A, but the IC-910
+  // uses 0x1A/0x07 (per its CONTROL COMMAND table). Both bytes come from the profile.
+  uint8_t pl[3] = { RADIOS[_model].satModeCmd,
+                    RADIOS[_model].satModeSub,
+                    (uint8_t)(on ? 0x01 : 0x00) };
   return sendCivPayload(pl, 3);
 }
 bool IcomNetRig::setCtcss(bool on, float toneHz) {
@@ -3572,9 +3694,9 @@ bool IcomNetRig::setCtcss(bool on, float toneHz) {
     uint8_t b1 = (uint8_t)((((t / 1000) % 10) << 4) | ((t / 100) % 10));
     uint8_t b2 = (uint8_t)((((t / 10)   % 10) << 4) | (t % 10));
     uint8_t freq[4] = { 0x1B, 0x00, b1, b2 }; sendCivPayload(freq, 4);
-    uint8_t enc[3]  = { 0x16, 0x42, 0x01 };     return sendCivPayload(enc, 3);
+    uint8_t enc[3]  = { 0x16, RADIOS[_model].toneEncSub, 0x01 }; return sendCivPayload(enc, 3);
   }
-  uint8_t off[3] = { 0x16, 0x42, 0x00 };
+  uint8_t off[3] = { 0x16, RADIOS[_model].toneEncSub, 0x00 };
   return sendCivPayload(off, 3);
 }
 
@@ -3954,6 +4076,48 @@ bool SatDb::loadManualGpFile() {
   return any;
 }
 
+// True if this norad has a hand-entered line in FILE_MGP (i.e. it's a manual sat
+// the user can delete), regardless of whether a cached GP entry also exists.
+bool SatDb::isManualGp(uint32_t norad) {
+  File f = Store::fs().open(FILE_MGP, "r");
+  if (!f) return false;
+  bool found = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (line.length() == 0) continue;
+    JsonDocument d;
+    if (deserializeJson(d, line)) continue;
+    if ((uint32_t)(d["NORAD_CAT_ID"] | 0) == norad) { found = true; break; }
+  }
+  f.close();
+  return found;
+}
+
+// Delete a hand-entered sat from FILE_MGP: rewrite the file without its line.
+// Lines that aren't this norad (including any the user annotated) are preserved.
+bool SatDb::removeManualGp(uint32_t norad) {
+  File f = Store::fs().open(FILE_MGP, "r");
+  if (!f) return false;
+  String out; bool removed = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    String t = line; t.trim();
+    if (t.length() == 0) continue;
+    JsonDocument d;
+    if (!deserializeJson(d, t) && (uint32_t)(d["NORAD_CAT_ID"] | 0) == norad) {
+      removed = true; continue;                 // drop this line
+    }
+    out += t; out += '\n';
+  }
+  f.close();
+  if (!removed) return false;
+  if (out.length() == 0) { Store::fs().remove(FILE_MGP); return true; }
+  File w = Store::fs().open(FILE_MGP, "w");
+  if (!w) return false;
+  w.print(out); w.close();
+  return true;
+}
+
 bool SatDb::saveGpJson(const String& json) {
   File f = Store::fs().open(FILE_GP, "w");
   if (!f) return false;
@@ -4115,13 +4279,21 @@ static void encNdot(double v, char out[12]) {
   snprintf(out, 12, "%c.%08ld", s, m);
 }
 
-// Catalog number: 5 digits, or Alpha-5 for 100000-339999 (TLE's stopgap).
+// Catalog number for the *synthesized TLE line* only. The TLE format's field is
+// 5 columns, so it physically cannot hold a >5-digit catalog number. We use
+// Alpha-5 (CelesTrak's documented stopgap) for 100000-339999, and for anything
+// larger (6-9 digit Space-Fence / analyst IDs, e.g. 799xxxxxx) we emit the low 5
+// digits purely so the TLE stays well-formed for twoline2rv. This is SAFE because
+// the satrec's catalog number is never read back as identity: CardSat keeps the
+// full NORAD id in SatEntry.norad (uint32_t, good to 4.29e9) for all identity,
+// storage, dedup, file paths, and display. SGP4 propagation depends only on the
+// orbital elements, not this field, so 9-digit objects still propagate correctly.
 static void encCatalog(uint32_t n, char out[6]) {
   if (n <= 99999u) { snprintf(out, 6, "%05lu", (unsigned long)n); return; }
   static const char* A = "ABCDEFGHJKLMNPQRSTUVWXYZ";   // skips I and O
   int hi = (int)(n / 10000), lo = (int)(n % 10000);
   if (hi >= 10 && hi <= 33) snprintf(out, 6, "%c%04d", A[hi - 10], lo);
-  else snprintf(out, 6, "%05lu", (unsigned long)(n % 100000u));
+  else snprintf(out, 6, "%05lu", (unsigned long)(n % 100000u));  // >339999: low 5 (TLE cosmetic only)
 }
 
 static int tleChecksum(const char* line) {
@@ -5149,6 +5321,10 @@ bool Settings::load() {
   if (catRateMs < 10) catRateMs = 10;
   catDelayMs = d["catdly"] | (uint16_t)70;
   if (catDelayMs > 200) catDelayMs = 200;
+  doppThreshFmHz  = d["dpfm"]  | (uint16_t)300;
+  doppThreshLinHz = d["dplin"] | (uint16_t)50;
+  doppLeadMs      = d["dplead"]| (uint16_t)50;
+  if (doppLeadMs > 100) doppLeadMs = 100;
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
@@ -5165,6 +5341,7 @@ bool Settings::load() {
   if (rotPort == 0) rotPort = 4533;
   rotBaud    = d["rotbaud"]| 9600u;
   rotLeadSec = d["rotlead"]| (uint16_t)120;
+  rotAzLookSec = d["rotazlk"] | (uint8_t)3;
   rotAzRange = d["rotazr"] | (uint8_t)ROT_AZ_360;
   if (rotAzRange > ROT_AZ_450) rotAzRange = ROT_AZ_360;
   rotAzOff   = d["rotaz"]  | (int16_t)0;
@@ -5200,6 +5377,7 @@ bool Settings::save() {
   d["catuser"] = catUser; d["catpass"] = catPass;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
   d["catdly"] = catDelayMs;
+  d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
   d["beacon"] = beaconMHz;
@@ -5207,7 +5385,7 @@ bool Settings::save() {
   d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
-  d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
+  d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;
   d["rotazc0"]=rotAzCnt0; d["rotazcf"]=rotAzCntF; d["rotelc0"]=rotElCnt0; d["rotelcf"]=rotElCntF;
@@ -5462,11 +5640,16 @@ void App::rotPoint(float az, float el) {
     // 90 deg overlap: a bearing <=90 is also reachable as +360 (360..450 region).
     // Pick whichever representation is nearer the last commanded position, so a
     // pass crossing North continues up into the overlap instead of unwinding 360.
-    if (az <= 90.0f && lastUnwrappedAz > -500.0f &&
-        fabsf((az + 360.0f) - lastUnwrappedAz) < fabsf(az - lastUnwrappedAz))
+    // The lookahead (rotAz450PreCommit, set in the track tick when a north wrap is
+    // imminent) forces the +360 branch early, before the reactive test would.
+    if (az + 360.0f <= 450.0f &&
+        (rotAz450PreCommit ||
+         (az <= 90.0f && lastUnwrappedAz > -500.0f &&
+          fabsf((az + 360.0f) - lastUnwrappedAz) < fabsf(az - lastUnwrappedAz))))
       az += 360.0f;
   }
   lastUnwrappedAz = az;
+  rotAz450PreCommit = false;   // single-shot: never carries to a later call (park, pre-pos, Sun/Moon, manual)
   rot->point(az, el);
 }
 
@@ -6212,7 +6395,7 @@ void App::loadCalForSat(uint32_t norad) {
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
-    if (line.length() == 0) continue;
+    if (line.length() == 0 || line[0] == '#' || line[0] == ';') continue;  // blank/comment
     unsigned long nd; long dl, ul;
     if (sscanf(line.c_str(), "%lu %ld %ld", &nd, &dl, &ul) == 3
         && nd == norad) {
@@ -6232,6 +6415,7 @@ void App::saveCalForSat(uint32_t norad) {
       String line = f.readStringUntil('\n');
       String t = line; t.trim();
       if (t.length() == 0) continue;
+      if (t[0] == '#' || t[0] == ';') { out += t; out += '\n'; continue; }  // keep comments
       unsigned long nd;
       if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
       out += t; out += '\n';
@@ -6255,7 +6439,7 @@ float App::toneOverrideHz(uint32_t norad) {
   float hz = -1.0f;
   while (f.available()) {
     String line = f.readStringUntil('\n'); line.trim();
-    if (line.length() == 0) continue;
+    if (line.length() == 0 || line[0] == '#' || line[0] == ';') continue;  // blank/comment
     unsigned long nd; int tenths;
     if (sscanf(line.c_str(), "%lu %d", &nd, &tenths) == 2 && nd == norad) {
       hz = tenths / 10.0f; break;
@@ -6274,6 +6458,7 @@ void App::saveToneOverride(uint32_t norad, float hz) {
     while (f.available()) {
       String line = f.readStringUntil('\n'); String t = line; t.trim();
       if (t.length() == 0) continue;
+      if (t[0] == '#' || t[0] == ';') { out += t; out += '\n'; continue; }  // keep comments
       unsigned long nd;
       if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
       out += t; out += '\n';
@@ -6543,6 +6728,29 @@ int App::loadManualTx(uint32_t norad, Transponder* out, int maxN) {
   return n;
 }
 
+// Delete the manualIdx-th manual transponder (0-based, in file order) for this
+// sat by rewriting FILE_MTX without that line. Returns true if a line was removed.
+bool App::deleteManualTx(uint32_t norad, int manualIdx) {
+  char path[32]; snprintf(path, sizeof(path), FILE_MTX, (unsigned long)norad);
+  File f = Store::fs().open(path, "r");
+  if (!f) return false;
+  String out; int seen = 0; bool removed = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    String t = line; t.trim();
+    if (t.length() == 0) continue;
+    if (seen == manualIdx) { seen++; removed = true; continue; }  // drop this one
+    seen++; out += t; out += '\n';
+  }
+  f.close();
+  if (!removed) return false;
+  if (out.length() == 0) { Store::fs().remove(path); return true; }
+  File w = Store::fs().open(path, "w");
+  if (!w) return false;
+  w.print(out); w.close();
+  return true;
+}
+
 // ===========================================================================
 //  Main loop
 // ===========================================================================
@@ -6781,6 +6989,58 @@ static void skyObjAzEl(time_t t, double obsLatDeg, double obsLonDeg, bool moon,
   azOut = A * R2D; elOut = alt * R2D;
 }
 
+// Compute the mode-aware, TCA-adaptive CAT write deadband and the TCA-tapered
+// predictive lead range rate. See the constants in app.h for the breakpoints.
+// All three ideas are gated to do nothing harmful at low slew / low range rate,
+// so on slow passes this reduces to "base threshold, no lead".
+uint32_t App::dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
+                                   double nowSec, double* leadRrOut) {
+  // Sample the range rate ~1 s ahead once; used for both slew (item 2) and the
+  // lead-blend slope (item 3). One extra propagation per service tick.
+  double rrAhead = pred.rangeRateAt(nowSec + 1.0);
+  double slopeKmS2 = fabs(rrAhead - rrNow) / 1.0;        // km/s^2
+
+  // (2) Doppler slew at the higher leg frequency: |f * d(rr)/dt / c|, Hz/s.
+  double slewHzS = fabs((double)centerHz * slopeKmS2 / 299792458.0);
+
+  // Base deadband by mode (user-tunable in Settings), then adaptively tighten
+  // when slew is high.
+  uint32_t base = linear ? cfg.doppThreshLinHz : cfg.doppThreshFmHz;
+  uint32_t thresh = base;
+  if (slewHzS > DOPP_SLEW_START_HZS) {
+    uint32_t reduced = base / 2; if (reduced < DOPP_THRESH_MIN_HZ) reduced = DOPP_THRESH_MIN_HZ;
+    if (reduced > base) reduced = base;                  // never raise above base
+    if (slewHzS >= DOPP_SLEW_FULL_HZS) {
+      thresh = reduced;
+    } else {
+      float f = (float)((slewHzS - DOPP_SLEW_START_HZS) /
+                        (DOPP_SLEW_FULL_HZS - DOPP_SLEW_START_HZS));
+      thresh = (uint32_t)lround(base - f * (double)(base - reduced));
+    }
+  }
+
+  // (3) TCA-tapered predictive lead. Blend toward the look-ahead range rate in
+  // proportion to the slope (how fast Doppler is changing), then taper that
+  // blend to zero as |range rate| -> 0 (near TCA a forward lead overshoots).
+  double leadRr = rrNow;
+  if (leadRrOut && cfg.doppLeadMs > 0) {
+    float slopeBlend;
+    if (slopeKmS2 <= DOPP_LEAD_SLOPE_START)      slopeBlend = 0.0f;
+    else if (slopeKmS2 >= DOPP_LEAD_SLOPE_FULL)  slopeBlend = 1.0f;
+    else slopeBlend = (float)((slopeKmS2 - DOPP_LEAD_SLOPE_START) /
+                              (DOPP_LEAD_SLOPE_FULL - DOPP_LEAD_SLOPE_START));
+    float taper = (float)fmin(fabs(rrNow) / DOPP_LEAD_TAPER_KMS, 1.0);
+    float blend = slopeBlend * taper;
+    if (blend > 0.0f) {
+      // Range rate at now + lead, then blend in by `blend`. Lead capped small.
+      double rrLead = pred.rangeRateAt(nowSec + (double)cfg.doppLeadMs / 1000.0);
+      leadRr = rrNow + (rrLead - rrNow) * blend;
+    }
+  }
+  if (leadRrOut) *leadRrOut = leadRr;
+  return thresh;
+}
+
 void App::loop() {
   M5Cardputer.update();
   if (rig) rig->service();    // net CAT (Icom LAN): advance connect + keepalives
@@ -6832,6 +7092,15 @@ void App::loop() {
           L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6); }
         Transponder& t = activeTx[curTx];
         uint32_t dlOp, ulOp, rx, tx;
+        // Mode-aware, TCA-adaptive write deadband (1,2) + TCA-tapered lead (3).
+        // centerHz = higher leg, used for the slew estimate. Lead-adjust the
+        // range rate that feeds the Doppler correction.
+        double nowSec; { struct timeval tv2; gettimeofday(&tv2, nullptr);
+                         nowSec = (double)tv2.tv_sec + tv2.tv_usec * 1e-6; }
+        uint32_t centerHz = (t.uplink > t.downlink) ? t.uplink : t.downlink;
+        double leadRr = L.rangeRate;
+        uint32_t threshHz = dopplerThreshAndLead(L.rangeRate, centerHz, t.isLinear,
+                                                 nowSec, &leadRr);
         bool otr   = (tuneMode == TM_FULL || tuneMode == TM_DL) &&
                      t.isLinear && rig->canReadFreq();
         bool drvDL = (tuneMode != TM_UL);   // downlink driven in FULL/DL/HOLD
@@ -6862,16 +7131,16 @@ void App::loop() {
             }
           }
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
-          Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+          Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
           // Send a leg only when it actually moved; read the downlink back (unless
           // transmitting) so the rig's rounding can't later look like a knob move.
-          if (drvDL && t.downlink) driveDownlink(rx, !transmitting);
-          if (drvUL && t.uplink)   driveUplink(tx);
+          if (drvDL && t.downlink) driveDownlink(rx, !transmitting, threshHz);
+          if (drvUL && t.uplink)   driveUplink(tx, threshHz);
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
-          Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
-          if (drvDL && t.downlink) driveDownlink(rx, false);  // HOLD/UL: no knob follow
-          if (drvUL && t.uplink)   driveUplink(tx);
+          Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
+          if (drvDL && t.downlink) driveDownlink(rx, false, threshHz);  // HOLD/UL: no knob follow
+          if (drvUL && t.uplink)   driveUplink(tx, threshHz);
         }
         applyCtcssForCurrentTx();   // FM uplink PL tone (only re-sends on change)
       }
@@ -6903,6 +7172,24 @@ void App::loop() {
           if (cfg.rotFlip && rotFlipPass) { az += 180.0f; el = 180.0f - el; }
           while (az >= 360.0f) az -= 360.0f;
           while (az < 0.0f)    az += 360.0f;
+          // 450-overlap lookahead: predict the bearing cfg.rotAzLookSec ahead
+          // and pre-commit to the 361-450 band if a north wrap is imminent. GUARDS:
+          // (1) only on a 450 rotator, (2) never when flipped (az+180 makes the
+          // overlap reasoning meaningless -- OscarWatch nulls the ahead-az here).
+          // cfg.rotAzLookSec == 0 disables the lookahead (reactive overlap only).
+          rotAz450PreCommit = false;
+          if (cfg.rotAzRange == ROT_AZ_450 && cfg.rotAzLookSec > 0 &&
+              !(cfg.rotFlip && rotFlipPass)) {
+            double aAz, aEl;
+            if (pred.azelAt(nowT + (time_t)cfg.rotAzLookSec, aAz, aEl)) {
+              float ahead = (float)aAz + cfg.rotAzOff;
+              while (ahead >= 360.0f) ahead -= 360.0f;
+              while (ahead < 0.0f)    ahead += 360.0f;
+              // Currently low/east of north and about to wrap west across north:
+              // commit to the overlap now so the post-north move is short.
+              if (az <= 90.0f && ahead > 270.0f) rotAz450PreCommit = true;
+            }
+          }
           float elMax = cfg.rotFlip ? 180.0f : 90.0f;
           if (el < 0) el = 0; if (el > elMax) el = elMax;
           if (lastAzCmd < -500.0f ||
@@ -6912,6 +7199,7 @@ void App::loop() {
             lastAzCmd = az; lastElCmd = el; rotParked = false;
           }
         } else {                                        // below horizon
+          rotAz450PreCommit = false;   // clear any hint set but not consumed above
           // Pre-position: slew to the next rise bearing shortly before AOS so a
           // slow rotator is already aimed when the satellite appears.
           time_t now = nowUtc();
@@ -7101,6 +7389,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_SUNMOON:  keySunMoon(c, enter, back); break;
     case SCR_SPACEWX:  keySpaceWx(c, enter, back); break;
     case SCR_TXDB:     keyTxDb(c, enter, back); break;
+    case SCR_EQX:      keyEqx(c, enter, back); break;
     case SCR_QRZ:      keyQrz(c, enter, back); break;
     case SCR_WEATHER:  keyWeather(c, enter, back); break;
     case SCR_GRID:     keyGrid(c, enter, back); break;
@@ -7189,6 +7478,7 @@ void App::keySchedule(char c, bool enter, bool back) {
 
 void App::keySatList(char c, bool enter, bool back) {
   if (isBack(c, back)) {
+    satDelArm = false;
     if (logPickSat) { logPickSat = false; screen = SCR_LOGENTRY; lastDrawMs = 0; return; }
     screen = SCR_HOME; return;
   }
@@ -7201,13 +7491,32 @@ void App::keySatList(char c, bool enter, bool back) {
                   setStatus(favOnly ? "Favorites only" : "All satellites"); return; }
   int n = viewN;
   if (n == 0) return;
-  if (isUp(c)   && viewSel > 0)     viewSel--;
-  if (isDown(c) && viewSel < n - 1) viewSel++;
+  if (isUp(c)   && viewSel > 0)     { viewSel--; satDelArm = false; }
+  if (isDown(c) && viewSel < n - 1) { viewSel++; satDelArm = false; }
   if (c == '{') viewSel = max(0, viewSel - 10);
   if (c == '}') viewSel = min(n - 1, viewSel + 10);
   if (c == 'f') {                              // toggle favorite for selected
     toggleFav(db.at(view[viewSel]).norad);
     if (favOnly) buildSatView();               // may shrink the list
+  }
+  if (c == 'x' && viewN > 0) {                  // delete a hand-entered (manual) sat
+    uint32_t nd = db.at(view[viewSel]).norad;
+    if (!db.isManualGp(nd)) { setStatus("Only manually-added sats can be deleted");
+                              satDelArm = false; return; }
+    if (!satDelArm) { satDelArm = true; setStatus("Press x again to delete this sat");
+                      return; }
+    satDelArm = false;
+    if (db.removeManualGp(nd)) {
+      // Rebuild the in-memory catalog from the cached GP file + remaining manual
+      // sats so the deleted entry is gone without a fragile in-place array removal.
+      db.loadGpFromFile(FILE_GP);
+      db.loadManualGpFile();
+      if (isFav(nd)) toggleFav(nd);             // drop it from favorites too
+      buildSatView();
+      if (viewSel >= viewN) viewSel = viewN > 0 ? viewN - 1 : 0;
+      setStatus("Satellite deleted");
+    } else setStatus("Delete failed");
+    return;
   }
   if (viewSel < satScroll)      satScroll = viewSel;
   if (viewSel > satScroll + 9)  satScroll = viewSel - 9;
@@ -7220,7 +7529,12 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   if (c == 't' && viewN > 0) {                      // browse the transponder database
     SatEntry* s = activeSat();
-    if (s) { ensureTransponders(*s); txDbScroll = 0; screen = SCR_TXDB; lastDrawMs = 0; }
+    if (s) { ensureTransponders(*s); txDbScroll = 0; txDbSel = 0; txDbDelArm = false;
+             screen = SCR_TXDB; lastDrawMs = 0; }
+    return;
+  }
+  if (c == 'e' && viewN > 0) {                      // EQX table (OSCARLOCATOR)
+    eqxDescending = false; buildEqx(); screen = SCR_EQX; lastDrawMs = 0;
     return;
   }
   if (c == 'd' && viewN > 0) {                      // 10-day pass overview
@@ -7827,14 +8141,14 @@ void App::keyUpdate(char c, bool enter, bool back) {
 
 // Settings are grouped into categories for a two-level menu. The per-row value
 // logic in adj()/ENTER stays keyed by absolute row index; these tables only map
-// a category + cursor position to that absolute index. Every row 0..40 appears
+// a category + cursor position to that absolute index. Every row 0..47 appears
 // in exactly one category.
 static const int SET_CAT_N = 4;
 static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Station / display", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,36,37};
-static const int SET_ROTOR[] = {8,9,10,11,12,18,19,16,17,13,14,15,35,38,39};
+static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
+static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,25,43};
 static const int SET_NET[]   = {4,5,6,20,41,42,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
@@ -7927,6 +8241,14 @@ void App::keySettings(char c, bool enter, bool back) {
       case 38: cfg.rotdEnable = !cfg.rotdEnable; cfg.save(); break;
       case 39: { long p = (long)cfg.rotdPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotdPort = (uint16_t)p; cfg.save(); } break;
+      case 44: { long v = (long)cfg.doppThreshFmHz + dir*25; if (v < 0) v = 0;
+                 if (v > 2000) v = 2000; cfg.doppThreshFmHz = (uint16_t)v; cfg.save(); } break;
+      case 45: { long v = (long)cfg.doppThreshLinHz + dir*10; if (v < 0) v = 0;
+                 if (v > 1000) v = 1000; cfg.doppThreshLinHz = (uint16_t)v; cfg.save(); } break;
+      case 46: { long v = (long)cfg.doppLeadMs + dir*5; if (v < 0) v = 0;
+                 if (v > 100) v = 100; cfg.doppLeadMs = (uint16_t)v; cfg.save(); } break;
+      case 47: { long v = (long)cfg.rotAzLookSec + dir; if (v < 0) v = 0;
+                 if (v > 10) v = 10; cfg.rotAzLookSec = (uint8_t)v; cfg.save(); } break;
     }
   };
   if (isLeft(c))  adj(-1);
@@ -8910,6 +9232,7 @@ void App::draw() {
     case SCR_SUNMOON:  drawSunMoon(); break;
     case SCR_SPACEWX:  drawSpaceWx(); break;
     case SCR_TXDB:     drawTxDb(); break;
+    case SCR_EQX:      drawEqx(); break;
     case SCR_QRZ:      drawQrz(); break;
     case SCR_WEATHER:  drawWeather(); break;
     case SCR_GRID:     drawGrid(); break;
@@ -9968,6 +10291,118 @@ void App::keyOrbit(char c, bool enter, bool back) {
 }
 
 // ===========================================================================
+//  EQX table (off Satellites): equatorial crossing times + longitudes for use
+//  with an OSCARLOCATOR plotting board. Each EQX is an ascending-node crossing
+//  (sub-satellite latitude going south -> north). Times are UTC; longitudes are
+//  printed West-positive (W = +), the convention printed on Oscarlocator dials.
+//  Covers a rolling 3-day window from now, computed on-device from the selected
+//  sat's GP elements (no network needed). Modeled on AO-7_OSCARLOCATOR (N8HM).
+// ===========================================================================
+void App::buildEqx() {
+  eqxN = 0; eqxScroll = 0;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet() || s->meanMotion <= 0) return;
+  setStatus(eqxDescending ? "Computing crossings (desc)..." : "Computing EQX table...");
+  draw();
+  pred.setSite(loc.obs()); pred.setSat(*s);
+
+  const time_t now    = nowUtc();
+  const time_t window = (time_t)(3 * 86400);         // 3 days
+  const time_t end    = now + window;
+  // Coarse step a fraction of the period so we never skip a node; each node type
+  // recurs once per orbit. 30 s is plenty for LEO/HEO amateur sats.
+  const long   step   = 30;
+
+  double prevLat = pred.look(now).subLat;
+  time_t prevT   = now;
+  for (time_t t = now + step; t <= end && eqxN < EQX_MAX; t += step) {
+    LiveLook L = pred.look(t);
+    // Ascending node: lat crosses 0 going - -> + (northbound).
+    // Descending node: lat crosses 0 going + -> - (southbound).
+    bool cross = eqxDescending ? (prevLat >= 0 && L.subLat < 0)
+                               : (prevLat < 0 && L.subLat >= 0);
+    if (cross) {
+      time_t a = prevT, b = t;                       // bracket, then bisect
+      for (int k = 0; k < 18; ++k) {
+        time_t m = a + (b - a) / 2;
+        double lm = pred.look(m).subLat;
+        // keep [a,b] straddling the crossing for whichever direction we want
+        bool firstHalf = eqxDescending ? (lm >= 0) : (lm < 0);
+        if (firstHalf) a = m; else b = m;
+      }
+      double lonE = pred.look(b).subLon;             // East-positive, -180..180
+      double lonW = -lonE; while (lonW < 0) lonW += 360.0; while (lonW >= 360.0) lonW -= 360.0;
+      if (lonW < 0.05 || lonW > 359.95) lonW = 0.0;  // avoid "-0.0 W" at the meridian
+      eqxT[eqxN]    = b;
+      eqxLonW[eqxN] = (float)lonW;
+      eqxN++;
+    }
+    prevLat = L.subLat; prevT = t;
+  }
+  setStatus(eqxN ? "" : "No crossings found");
+}
+
+void App::drawEqx() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + (eqxDescending ? " DEQX" : " EQX"))
+           : String("EQX table"));
+  canvas.setTextSize(1);
+  if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+            canvas.print("No satellite."); footer("` back"); return; }
+  if (!timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 52);
+    canvas.print("Clock not set.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 66);
+    canvas.print("Set UTC (GPS or Location).");
+    footer("` back"); return;
+  }
+  if (eqxN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 52);
+    canvas.print(eqxDescending ? "No descending crossings." : "No ascending crossings.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 66);
+    canvas.print("r recompute   ` back");
+    footer("` back"); return;
+  }
+  // Column header
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 17);
+  canvas.print(eqxDescending ? "Date  Desc UTC    Long (W+)"
+                             : "Date    EQX UTC    Long (W+)");
+  const int LH = 9, ROWS = 10;                       // 10 data rows under the head
+  if (eqxScroll > eqxN - 1) eqxScroll = 0;
+  int y = 28;
+  int lastMday = -1;
+  for (int e = eqxScroll; e < eqxN && e < eqxScroll + ROWS; ++e) {
+    struct tm g; gmtime_r(&eqxT[e], &g);
+    char date[8] = "      ";
+    if (g.tm_mday != lastMday) { snprintf(date, sizeof(date), "%02d/%02d", g.tm_mon + 1, g.tm_mday);
+                                 lastMday = g.tm_mday; }
+    char line[40];
+    snprintf(line, sizeof(line), "%-6s %02d:%02d:%02d   %5.1f W",
+             date, g.tm_hour, g.tm_min, g.tm_sec, eqxLonW[e]);
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y);
+    canvas.print(line);
+    y += LH;
+  }
+  // scrollbar hints + position
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (eqxScroll > 0)              { canvas.setCursor(232, 28);  canvas.print("^"); }
+  if (eqxScroll + ROWS < eqxN)    { canvas.setCursor(232, 112); canvas.print("v"); }
+  int last = eqxScroll + ROWS; if (last > eqxN) last = eqxN;
+  { char c[28]; snprintf(c, sizeof(c), "%d-%d/%d", eqxScroll + 1, last, eqxN);
+    footer(String("`bk ;/. scr d ") + (eqxDescending ? "asc" : "desc") + " r recalc " + c); }
+}
+
+void App::keyEqx(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  const int ROWS = 10;
+  if (isDown(c)) { if (eqxScroll + ROWS < eqxN) eqxScroll += ROWS; lastDrawMs = 0; return; }
+  if (isUp(c))   { eqxScroll -= ROWS; if (eqxScroll < 0) eqxScroll = 0; lastDrawMs = 0; return; }
+  if (c == 'd')  { eqxDescending = !eqxDescending; buildEqx(); lastDrawMs = 0; return; }
+  if (c == 'r')  { buildEqx(); lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
 //  Simulation screen (off Satellites): freeze a UTC time and scrub it to see
 //  where the selected satellite will be. A frozen snapshot (not live).
 // ===========================================================================
@@ -10452,9 +10887,12 @@ void App::drawTxDb() {
   int y = 19;
   for (int e = txDbScroll; e < activeTxCount && e < txDbScroll + perPage; ++e) {
     const Transponder& t = activeTx[e];
-    // line 1: index + description, in cyan
-    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(4, y);
-    { String d = String(e + 1) + ". " + String(t.desc);
+    bool manual = (strncmp(t.desc, "manual", 6) == 0);
+    bool sel = (e == txDbSel);
+    // line 1: index + description, in cyan (selected entry marked with '>')
+    canvas.setTextColor(sel ? CL_GREEN : CL_CYAN, CL_BLACK); canvas.setCursor(4, y);
+    { String d = (sel ? ">" : " ") + String(e + 1) + ". " + String(t.desc);
+      if (manual) d += " *";
       if (d.length() > 38) d = d.substring(0, 37) + "~";
       canvas.print(d); }
     y += LH;
@@ -10478,17 +10916,41 @@ void App::drawTxDb() {
   canvas.setTextColor(CL_GREY, CL_BLACK);
   if (txDbScroll > 0)                       { canvas.setCursor(232, 19);  canvas.print("^"); }
   if (txDbScroll + perPage < activeTxCount) { canvas.setCursor(232, 112); canvas.print("v"); }
-  int last = txDbScroll + perPage; if (last > activeTxCount) last = activeTxCount;
-  { char c[24]; snprintf(c, sizeof(c), "%d-%d/%d", txDbScroll + 1, last, activeTxCount);
-    footer(String("`bk  ;/. scroll   ") + c); }
+  { bool selManual = (txDbSel < activeTxCount &&
+                      strncmp(activeTx[txDbSel].desc, "manual", 6) == 0);
+    char cnt[24]; snprintf(cnt, sizeof(cnt), "%d/%d", txDbSel + 1, activeTxCount);
+    footer(String("`bk ;/. sel ") + (selManual ? "x del " : "") + cnt + " (* manual)"); }
 }
 
 void App::keyTxDb(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { txDbDelArm = false; screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (activeTxCount == 0) return;
   const int perPage = 3;
-  if (isDown(c)) { if (txDbScroll + perPage < activeTxCount) txDbScroll += perPage; lastDrawMs = 0; return; }
-  if (isUp(c))   { txDbScroll -= perPage; if (txDbScroll < 0) txDbScroll = 0; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (txDbSel > 0) txDbSel--; txDbDelArm = false; }
+  if (isDown(c)) { if (txDbSel < activeTxCount - 1) txDbSel++; txDbDelArm = false; }
+  // keep the selected entry on-screen (page of `perPage` blocks)
+  if (txDbSel < txDbScroll)            txDbScroll = (txDbSel / perPage) * perPage;
+  if (txDbSel >= txDbScroll + perPage) txDbScroll = (txDbSel / perPage) * perPage;
+  if (c == 'x') {                                  // delete (manual entries only)
+    SatEntry* s = activeSat();
+    bool isManual = (strncmp(activeTx[txDbSel].desc, "manual", 6) == 0);
+    if (!s || !isManual) { setStatus("Only manual entries can be deleted"); return; }
+    if (!txDbDelArm) { txDbDelArm = true; setStatus("Press x again to delete"); return; }
+    // manual index = count of manual entries before this one
+    int mIdx = 0;
+    for (int e = 0; e < txDbSel; ++e)
+      if (strncmp(activeTx[e].desc, "manual", 6) == 0) mIdx++;
+    txDbDelArm = false;
+    if (deleteManualTx(s->norad, mIdx)) {
+      ensureTransponders(*s);                      // reload the list
+      if (txDbSel >= activeTxCount) txDbSel = activeTxCount > 0 ? activeTxCount - 1 : 0;
+      onTransponderChanged();
+      setStatus("Transponder deleted");
+    } else setStatus("Delete failed");
+    lastDrawMs = 0; return;
+  }
+  lastDrawMs = 0;
 }
 
 // ===========================================================================
@@ -11630,7 +12092,9 @@ void App::drawSatList() {
       else                         canvas.drawCircle(cx, cy, 3, col);          // not heard = ring
     }
   }
-  footer("ENT pass o orb s sim t tx d 10d i illum f fav `bk");
+  bool selManual = (viewN > 0 && viewSel < viewN && db.isManualGp(db.at(view[viewSel]).norad));
+  if (selManual) footer("ENT pass o orb t tx e eqx f fav x del `bk");
+  else           footer("ENT pass o orb s sim t tx e eqx d 10d i illum f fav `bk");
 }
 
 void App::drawPasses() {
@@ -12150,7 +12614,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 44;
+  const int N = 48;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -12225,6 +12689,12 @@ void App::drawSettings() {
   rows[42] = String("QRZ pass: ") + String(strlen(cfg.qrzPass) ? "******" : "(none)");
   rows[43] = String("Weather units: ") + (cfg.wxUnits == WX_IMPERIAL ? "F, mph"
                      : cfg.wxUnits == WX_METRIC_MS ? "C, m/s" : "C, km/h");
+  rows[44] = String("Dopp FM band: ") + String(cfg.doppThreshFmHz) + " Hz";
+  rows[45] = String("Dopp linear band: ") + String(cfg.doppThreshLinHz) + " Hz";
+  rows[46] = String("Dopp lead: ") + (cfg.doppLeadMs == 0 ? String("off")
+                     : String(cfg.doppLeadMs) + " ms");
+  rows[47] = String("Rot az lookahead: ") + (cfg.rotAzLookSec == 0 ? String("off")
+                     : String(cfg.rotAzLookSec) + " s");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

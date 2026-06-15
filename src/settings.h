@@ -84,6 +84,10 @@ struct Settings {
   bool     satMode    = false;
   uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
   uint16_t catDelayMs = 70;    // pause after each CAT command before the next (ms)
+  // Doppler CAT write deadband + predictive lead (tunable; see app.h DOPP_* defaults)
+  uint16_t doppThreshFmHz  = 300; // FM leg write deadband (Hz)
+  uint16_t doppThreshLinHz = 50;  // linear SSB/CW leg write deadband (Hz)
+  uint16_t doppLeadMs      = 50;  // predictive-lead cap (ms); 0 = lead off
   // Tracking
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
@@ -102,6 +106,7 @@ struct Settings {
   uint16_t rotPort     = 4533;       // rotctld TCP port (Hamlib default 4533)
   uint32_t rotBaud     = 9600;   // GS-232 serial (commonly 9600)
   uint16_t rotLeadSec  = 120;    // pre-position lead before AOS (s; 0 = off)
+  uint8_t  rotAzLookSec = 3;     // 450-overlap az lookahead horizon (s; 0 = off)
   uint8_t  rotAzRange  = ROT_AZ_360; // 0..360 or -180..+180 azimuth axis
   int16_t  rotAzOff    = 0;      // deg added to commanded azimuth (alignment)
   int16_t  rotElOff    = 0;      // deg added to commanded elevation

@@ -12,12 +12,30 @@
 //  yaesu/ft736.c, kenwood/ts2000.c, kenwood/ts790.c) and the radios' CAT
 //  manuals. See civ.cpp / yaesu.cpp / kenwood.cpp for the wire-level encoders.
 //
-//  Icom CI-V addresses (verified against the standard Icom address table):
+//  Icom CI-V addresses (verified against the standard Icom address table and
+//  Hamlib backends / live CI-V traces):
 //      IC-820 = 0x42   IC-910 = 0x60   IC-9100 = 0x7C
 //      IC-821 = 0x4C   IC-970 = 0x2E   IC-9700 = 0xA2
 //
-//  MAIN/SUB band select (Icom only): CI-V cmd 0x07, D0 = MAIN, D1 = SUB,
-//  verified from the IC-821H manual command table and shared across the family.
+//  MAIN/SUB band select (Icom only): CI-V cmd 0x07, sub D0/D1. The IC-821H (D0=MAIN,
+//  D1=SUB) and IC-820H (REVERSED: D1=MAIN, D0=SUB) are each confirmed from their own
+//  manuals; the IC-9100/9700 D0/D1 mapping is confirmed against Hamlib (PR #97 main/
+//  sub 0x07 0xD0/0xD1). The IC-910/IC-970 use the same 0x07 D0/D1 family convention.
+//
+//  Satellite-mode toggle (CI-V, per-rig command + sub-command):
+//    * IC-9100 / IC-9700 : cmd 0x16 sub 0x5A. CONFIRMED from the IC-9700 CI-V
+//                          Reference Guide ("5A ... Send/read the satellite mode")
+//                          and a live IC-9100 trace "fe fe 7c e0 16 5a fd" (#1656).
+//    * IC-910            : cmd 0x1A sub 0x07 -- DIFFERENT command group. CONFIRMED
+//                          from the IC-910 manual CONTROL COMMAND table (cmd 1A,
+//                          sub 07 = "Set satellite mode"). Hamlib also carries this
+//                          as a separate S_MEM_SATMODE910 constant (PR #143).
+//    * IC-820/821/970    : no CAT satellite-mode command (hardware switch); hasSatMode
+//                          reflects this.
+//
+//  Tone encoder on/off (CI-V cmd 0x16, per-rig sub toneEncSub): IC-9100/9700 = 0x42
+//  (Repeater tone); IC-910 = 0x43 (Subaudible tone -- its 0x42 is the auto-notch
+//  filter). Confirmed from the IC-9700 CI-V guide and IC-910 manual command tables.
 //
 //  Frequency read-back (canReadFreq) enables the "radio knob" One True Rule
 //  tuning mode:
@@ -63,25 +81,41 @@ struct RadioProfile {
   uint8_t     selLen;        // valid bytes in selMain/selSub (0 = n/a)
   bool        selVerified;   // CI-V select sequence documented (Icom only)
   bool        hasSatMode;    // radio has a dedicated full-duplex / sat mode
-  uint8_t     satModeSub;    // CI-V satmode sub-cmd under 0x16 (Icom): IC-910 = 0x07,
-                             // IC-9100/9700 = 0x5A. 0 = n/a (non-CI-V).
+  uint8_t     satModeCmd;    // CI-V satmode command byte (Icom): IC-910 = 0x1A,
+                             // IC-9100/9700 = 0x16. 0 = n/a (non-CI-V).
+  uint8_t     satModeSub;    // CI-V satmode sub-cmd: IC-910 = 0x07 (under 0x1A),
+                             // IC-9100/9700 = 0x5A (under 0x16). 0 = n/a.
   bool        canReadFreq;   // frequency read-back implemented for this rig
   bool        hasTone;       // CAT can set the TX CTCSS (PL) encoder tone
+  uint8_t     toneEncSub;    // CI-V tone-encoder on/off sub-cmd under 0x16:
+                             // IC-9100/9700 = 0x42 (Repeater tone), IC-910 = 0x43
+                             // (Subaudible tone; on the 910, 0x42 is auto-notch). 0 = n/a.
 };
 
 // Order MUST match RadioModel.
 static const RadioProfile RADIOS[RIG_COUNT] = {
-  // name       proto         addr   baud    selMain        selSub         len verf satM satSub read tone
-  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, false },
-  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, false },
-  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x07, true, true  },
-  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x5A, true, false },
-  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, true  },
-  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x5A, true, true  },
+  // name       proto         addr   baud    selMain        selSub         len verf satM satCmd satSub read tone tnEnc
+  // NOTE: MAIN/SUB band-select differs between these two otherwise-similar rigs,
+  // each confirmed from its own manual's CI-V command table (cmd 07):
+  //   IC-821H: Main band access = D0, Sub band access = D1  (addr 4C)
+  //   IC-820H: Main band access = D1, Sub band access = D0  (addr 42)  <- REVERSED
+  // So selMain/selSub are intentionally swapped between the two rows below.
+  // satCmd/satSub: satellite-mode toggle. IC-9100/9700 = 0x16/0x5A (confirmed: 9700
+  // CI-V Reference Guide & live 9100 trace fe fe 7c e0 16 5a fd). IC-910 is DIFFERENT:
+  // 0x1A/0x07 (verified from the IC-910 CONTROL COMMAND table, cmd 1A sub 07
+  // "Set satellite mode"). 0/0 where there's no CAT satmode.
+  // tnEnc: tone-encoder on/off sub under 0x16. IC-9100/9700 = 0x42 (Repeater tone);
+  // IC-910 = 0x43 (Subaudible tone; its 0x42 is auto-notch). 0 where no CAT tone.
+  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, true, 0x16, 0x5A, true, false, 0x00 },
+  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, false, 0x00 },
+  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x1A, 0x07, true, true,  0x43 },
+  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x16, 0x5A, true, false, 0x00 },
+  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42 },
+  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42 },
   // Yaesu: 5-byte CAT. baud is the radio's CAT menu setting. No CI-V select.
-  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, true  },
-  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, false,false },
+  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00 },
+  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, false,false, 0x00 },
   // Kenwood: ASCII CAT over RS-232 (needs a MAX3232-class level interface).
-  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, false },
-  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, true, true  },
+  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, false, 0x00 },
+  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00 },
 };

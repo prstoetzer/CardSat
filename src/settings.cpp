@@ -42,6 +42,10 @@ bool Settings::load() {
   if (catRateMs < 10) catRateMs = 10;
   catDelayMs = d["catdly"] | (uint16_t)70;
   if (catDelayMs > 200) catDelayMs = 200;
+  doppThreshFmHz  = d["dpfm"]  | (uint16_t)300;
+  doppThreshLinHz = d["dplin"] | (uint16_t)50;
+  doppLeadMs      = d["dplead"]| (uint16_t)50;
+  if (doppLeadMs > 100) doppLeadMs = 100;
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
@@ -58,6 +62,7 @@ bool Settings::load() {
   if (rotPort == 0) rotPort = 4533;
   rotBaud    = d["rotbaud"]| 9600u;
   rotLeadSec = d["rotlead"]| (uint16_t)120;
+  rotAzLookSec = d["rotazlk"] | (uint8_t)3;
   rotAzRange = d["rotazr"] | (uint8_t)ROT_AZ_360;
   if (rotAzRange > ROT_AZ_450) rotAzRange = ROT_AZ_360;
   rotAzOff   = d["rotaz"]  | (int16_t)0;
@@ -93,6 +98,7 @@ bool Settings::save() {
   d["catuser"] = catUser; d["catpass"] = catPass;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
   d["catdly"] = catDelayMs;
+  d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
   d["beacon"] = beaconMHz;
@@ -100,7 +106,7 @@ bool Settings::save() {
   d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
-  d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
+  d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;
   d["rotazc0"]=rotAzCnt0; d["rotazcf"]=rotAzCntF; d["rotelc0"]=rotElCnt0; d["rotelcf"]=rotElCntF;

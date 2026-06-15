@@ -19,7 +19,13 @@ static inline void kwLog(const char*, const String&) {}
 void KenwoodRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   static HardwareSerial* hs = nullptr;
   if (!hs) hs = new HardwareSerial(uartNum);
-  hs->begin(baud, SERIAL_8N1, rxPin, txPin);   // Kenwood CAT = 8N1
+  // Kenwood CAT framing is 8 data bits, no parity. Stop bits are baud-dependent:
+  // the IF-232C generation (TS-450/690/790/850/950) requires TWO stop bits at
+  // 4800 baud, and one stop bit at every higher rate (e.g. TS-2000 @ 57600).
+  // Confirmed from the TS-850 External Control manual (4800 bps, 1 start / 8 data
+  // / 2 stop / no parity) and corroborated for the TS-790 family.
+  uint32_t cfg = (baud <= 4800) ? SERIAL_8N2 : SERIAL_8N1;
+  hs->begin(baud, cfg, rxPin, txPin);
   _stream = hs;
 }
 
@@ -97,7 +103,12 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
 // (encode) number -- 1-based into the same 39-tone list as ctcssToneIndex --
 // and TO1/TO0 turns the TONE (encode) function on/off. The rig applies it to
 // the current TX (uplink) band. Per Hamlib kenwood TN variant + the TS-2000
-// CAT list; least bench-verified of the three families, so watch the trace.
+// CAT list. The TS-790 uses the same FA/FB/MD ASCII protocol (FA; read-back
+// confirmed from a live Hamlib TS-790 trace), at 4800 baud 8N2; its CTCSS needs
+// the optional TSU-5 decoder unit and is decode-only over the panel, so the
+// profile sets hasTone=false. CAT on the TS-790 is via the optional IF-232C
+// interface (the operating manual documents the interface but not the command
+// set). Still the least bench-verified of the three families -- watch the trace.
 bool KenwoodRig::setCtcss(bool on, float toneHz) {
   if (!RADIOS[_model].hasTone) return false;
   if (!on || toneHz <= 0) return sendCmd("TO0;");      // TONE function off

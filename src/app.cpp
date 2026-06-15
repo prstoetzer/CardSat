@@ -244,11 +244,16 @@ void App::rotPoint(float az, float el) {
     // 90 deg overlap: a bearing <=90 is also reachable as +360 (360..450 region).
     // Pick whichever representation is nearer the last commanded position, so a
     // pass crossing North continues up into the overlap instead of unwinding 360.
-    if (az <= 90.0f && lastUnwrappedAz > -500.0f &&
-        fabsf((az + 360.0f) - lastUnwrappedAz) < fabsf(az - lastUnwrappedAz))
+    // The lookahead (rotAz450PreCommit, set in the track tick when a north wrap is
+    // imminent) forces the +360 branch early, before the reactive test would.
+    if (az + 360.0f <= 450.0f &&
+        (rotAz450PreCommit ||
+         (az <= 90.0f && lastUnwrappedAz > -500.0f &&
+          fabsf((az + 360.0f) - lastUnwrappedAz) < fabsf(az - lastUnwrappedAz))))
       az += 360.0f;
   }
   lastUnwrappedAz = az;
+  rotAz450PreCommit = false;   // single-shot: never carries to a later call (park, pre-pos, Sun/Moon, manual)
   rot->point(az, el);
 }
 
@@ -991,7 +996,7 @@ void App::loadCalForSat(uint32_t norad) {
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
-    if (line.length() == 0) continue;
+    if (line.length() == 0 || line[0] == '#' || line[0] == ';') continue;  // blank/comment
     unsigned long nd; long dl, ul;
     if (sscanf(line.c_str(), "%lu %ld %ld", &nd, &dl, &ul) == 3
         && nd == norad) {
@@ -1011,6 +1016,7 @@ void App::saveCalForSat(uint32_t norad) {
       String line = f.readStringUntil('\n');
       String t = line; t.trim();
       if (t.length() == 0) continue;
+      if (t[0] == '#' || t[0] == ';') { out += t; out += '\n'; continue; }  // keep comments
       unsigned long nd;
       if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
       out += t; out += '\n';
@@ -1034,7 +1040,7 @@ float App::toneOverrideHz(uint32_t norad) {
   float hz = -1.0f;
   while (f.available()) {
     String line = f.readStringUntil('\n'); line.trim();
-    if (line.length() == 0) continue;
+    if (line.length() == 0 || line[0] == '#' || line[0] == ';') continue;  // blank/comment
     unsigned long nd; int tenths;
     if (sscanf(line.c_str(), "%lu %d", &nd, &tenths) == 2 && nd == norad) {
       hz = tenths / 10.0f; break;
@@ -1053,6 +1059,7 @@ void App::saveToneOverride(uint32_t norad, float hz) {
     while (f.available()) {
       String line = f.readStringUntil('\n'); String t = line; t.trim();
       if (t.length() == 0) continue;
+      if (t[0] == '#' || t[0] == ';') { out += t; out += '\n'; continue; }  // keep comments
       unsigned long nd;
       if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
       out += t; out += '\n';
@@ -1322,8 +1329,29 @@ int App::loadManualTx(uint32_t norad, Transponder* out, int maxN) {
   return n;
 }
 
-// ===========================================================================
-//  Main loop
+// Delete the manualIdx-th manual transponder (0-based, in file order) for this
+// sat by rewriting FILE_MTX without that line. Returns true if a line was removed.
+bool App::deleteManualTx(uint32_t norad, int manualIdx) {
+  char path[32]; snprintf(path, sizeof(path), FILE_MTX, (unsigned long)norad);
+  File f = Store::fs().open(path, "r");
+  if (!f) return false;
+  String out; int seen = 0; bool removed = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    String t = line; t.trim();
+    if (t.length() == 0) continue;
+    if (seen == manualIdx) { seen++; removed = true; continue; }  // drop this one
+    seen++; out += t; out += '\n';
+  }
+  f.close();
+  if (!removed) return false;
+  if (out.length() == 0) { Store::fs().remove(path); return true; }
+  File w = Store::fs().open(path, "w");
+  if (!w) return false;
+  w.print(out); w.close();
+  return true;
+}
+
 // ===========================================================================
 // ===========================================================================
 //  rigctld server (item 2): a minimal Hamlib NET rigctl TCP server so a PC can
@@ -1560,6 +1588,58 @@ static void skyObjAzEl(time_t t, double obsLatDeg, double obsLonDeg, bool moon,
   azOut = A * R2D; elOut = alt * R2D;
 }
 
+// Compute the mode-aware, TCA-adaptive CAT write deadband and the TCA-tapered
+// predictive lead range rate. See the constants in app.h for the breakpoints.
+// All three ideas are gated to do nothing harmful at low slew / low range rate,
+// so on slow passes this reduces to "base threshold, no lead".
+uint32_t App::dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
+                                   double nowSec, double* leadRrOut) {
+  // Sample the range rate ~1 s ahead once; used for both slew (item 2) and the
+  // lead-blend slope (item 3). One extra propagation per service tick.
+  double rrAhead = pred.rangeRateAt(nowSec + 1.0);
+  double slopeKmS2 = fabs(rrAhead - rrNow) / 1.0;        // km/s^2
+
+  // (2) Doppler slew at the higher leg frequency: |f * d(rr)/dt / c|, Hz/s.
+  double slewHzS = fabs((double)centerHz * slopeKmS2 / 299792458.0);
+
+  // Base deadband by mode (user-tunable in Settings), then adaptively tighten
+  // when slew is high.
+  uint32_t base = linear ? cfg.doppThreshLinHz : cfg.doppThreshFmHz;
+  uint32_t thresh = base;
+  if (slewHzS > DOPP_SLEW_START_HZS) {
+    uint32_t reduced = base / 2; if (reduced < DOPP_THRESH_MIN_HZ) reduced = DOPP_THRESH_MIN_HZ;
+    if (reduced > base) reduced = base;                  // never raise above base
+    if (slewHzS >= DOPP_SLEW_FULL_HZS) {
+      thresh = reduced;
+    } else {
+      float f = (float)((slewHzS - DOPP_SLEW_START_HZS) /
+                        (DOPP_SLEW_FULL_HZS - DOPP_SLEW_START_HZS));
+      thresh = (uint32_t)lround(base - f * (double)(base - reduced));
+    }
+  }
+
+  // (3) TCA-tapered predictive lead. Blend toward the look-ahead range rate in
+  // proportion to the slope (how fast Doppler is changing), then taper that
+  // blend to zero as |range rate| -> 0 (near TCA a forward lead overshoots).
+  double leadRr = rrNow;
+  if (leadRrOut && cfg.doppLeadMs > 0) {
+    float slopeBlend;
+    if (slopeKmS2 <= DOPP_LEAD_SLOPE_START)      slopeBlend = 0.0f;
+    else if (slopeKmS2 >= DOPP_LEAD_SLOPE_FULL)  slopeBlend = 1.0f;
+    else slopeBlend = (float)((slopeKmS2 - DOPP_LEAD_SLOPE_START) /
+                              (DOPP_LEAD_SLOPE_FULL - DOPP_LEAD_SLOPE_START));
+    float taper = (float)fmin(fabs(rrNow) / DOPP_LEAD_TAPER_KMS, 1.0);
+    float blend = slopeBlend * taper;
+    if (blend > 0.0f) {
+      // Range rate at now + lead, then blend in by `blend`. Lead capped small.
+      double rrLead = pred.rangeRateAt(nowSec + (double)cfg.doppLeadMs / 1000.0);
+      leadRr = rrNow + (rrLead - rrNow) * blend;
+    }
+  }
+  if (leadRrOut) *leadRrOut = leadRr;
+  return thresh;
+}
+
 void App::loop() {
   M5Cardputer.update();
   if (rig) rig->service();    // net CAT (Icom LAN): advance connect + keepalives
@@ -1611,6 +1691,15 @@ void App::loop() {
           L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6); }
         Transponder& t = activeTx[curTx];
         uint32_t dlOp, ulOp, rx, tx;
+        // Mode-aware, TCA-adaptive write deadband (1,2) + TCA-tapered lead (3).
+        // centerHz = higher leg, used for the slew estimate. Lead-adjust the
+        // range rate that feeds the Doppler correction.
+        double nowSec; { struct timeval tv2; gettimeofday(&tv2, nullptr);
+                         nowSec = (double)tv2.tv_sec + tv2.tv_usec * 1e-6; }
+        uint32_t centerHz = (t.uplink > t.downlink) ? t.uplink : t.downlink;
+        double leadRr = L.rangeRate;
+        uint32_t threshHz = dopplerThreshAndLead(L.rangeRate, centerHz, t.isLinear,
+                                                 nowSec, &leadRr);
         bool otr   = (tuneMode == TM_FULL || tuneMode == TM_DL) &&
                      t.isLinear && rig->canReadFreq();
         bool drvDL = (tuneMode != TM_UL);   // downlink driven in FULL/DL/HOLD
@@ -1641,16 +1730,16 @@ void App::loop() {
             }
           }
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
-          Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+          Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
           // Send a leg only when it actually moved; read the downlink back (unless
           // transmitting) so the rig's rounding can't later look like a knob move.
-          if (drvDL && t.downlink) driveDownlink(rx, !transmitting);
-          if (drvUL && t.uplink)   driveUplink(tx);
+          if (drvDL && t.downlink) driveDownlink(rx, !transmitting, threshHz);
+          if (drvUL && t.uplink)   driveUplink(tx, threshHz);
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
-          Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
-          if (drvDL && t.downlink) driveDownlink(rx, false);  // HOLD/UL: no knob follow
-          if (drvUL && t.uplink)   driveUplink(tx);
+          Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
+          if (drvDL && t.downlink) driveDownlink(rx, false, threshHz);  // HOLD/UL: no knob follow
+          if (drvUL && t.uplink)   driveUplink(tx, threshHz);
         }
         applyCtcssForCurrentTx();   // FM uplink PL tone (only re-sends on change)
       }
@@ -1682,6 +1771,24 @@ void App::loop() {
           if (cfg.rotFlip && rotFlipPass) { az += 180.0f; el = 180.0f - el; }
           while (az >= 360.0f) az -= 360.0f;
           while (az < 0.0f)    az += 360.0f;
+          // 450-overlap lookahead: predict the bearing cfg.rotAzLookSec ahead
+          // and pre-commit to the 361-450 band if a north wrap is imminent. GUARDS:
+          // (1) only on a 450 rotator, (2) never when flipped (az+180 makes the
+          // overlap reasoning meaningless -- OscarWatch nulls the ahead-az here).
+          // cfg.rotAzLookSec == 0 disables the lookahead (reactive overlap only).
+          rotAz450PreCommit = false;
+          if (cfg.rotAzRange == ROT_AZ_450 && cfg.rotAzLookSec > 0 &&
+              !(cfg.rotFlip && rotFlipPass)) {
+            double aAz, aEl;
+            if (pred.azelAt(nowT + (time_t)cfg.rotAzLookSec, aAz, aEl)) {
+              float ahead = (float)aAz + cfg.rotAzOff;
+              while (ahead >= 360.0f) ahead -= 360.0f;
+              while (ahead < 0.0f)    ahead += 360.0f;
+              // Currently low/east of north and about to wrap west across north:
+              // commit to the overlap now so the post-north move is short.
+              if (az <= 90.0f && ahead > 270.0f) rotAz450PreCommit = true;
+            }
+          }
           float elMax = cfg.rotFlip ? 180.0f : 90.0f;
           if (el < 0) el = 0; if (el > elMax) el = elMax;
           if (lastAzCmd < -500.0f ||
@@ -1691,6 +1798,7 @@ void App::loop() {
             lastAzCmd = az; lastElCmd = el; rotParked = false;
           }
         } else {                                        // below horizon
+          rotAz450PreCommit = false;   // clear any hint set but not consumed above
           // Pre-position: slew to the next rise bearing shortly before AOS so a
           // slow rotator is already aimed when the satellite appears.
           time_t now = nowUtc();
@@ -1880,6 +1988,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_SUNMOON:  keySunMoon(c, enter, back); break;
     case SCR_SPACEWX:  keySpaceWx(c, enter, back); break;
     case SCR_TXDB:     keyTxDb(c, enter, back); break;
+    case SCR_EQX:      keyEqx(c, enter, back); break;
     case SCR_QRZ:      keyQrz(c, enter, back); break;
     case SCR_WEATHER:  keyWeather(c, enter, back); break;
     case SCR_GRID:     keyGrid(c, enter, back); break;
@@ -1968,6 +2077,7 @@ void App::keySchedule(char c, bool enter, bool back) {
 
 void App::keySatList(char c, bool enter, bool back) {
   if (isBack(c, back)) {
+    satDelArm = false;
     if (logPickSat) { logPickSat = false; screen = SCR_LOGENTRY; lastDrawMs = 0; return; }
     screen = SCR_HOME; return;
   }
@@ -1980,13 +2090,32 @@ void App::keySatList(char c, bool enter, bool back) {
                   setStatus(favOnly ? "Favorites only" : "All satellites"); return; }
   int n = viewN;
   if (n == 0) return;
-  if (isUp(c)   && viewSel > 0)     viewSel--;
-  if (isDown(c) && viewSel < n - 1) viewSel++;
+  if (isUp(c)   && viewSel > 0)     { viewSel--; satDelArm = false; }
+  if (isDown(c) && viewSel < n - 1) { viewSel++; satDelArm = false; }
   if (c == '{') viewSel = max(0, viewSel - 10);
   if (c == '}') viewSel = min(n - 1, viewSel + 10);
   if (c == 'f') {                              // toggle favorite for selected
     toggleFav(db.at(view[viewSel]).norad);
     if (favOnly) buildSatView();               // may shrink the list
+  }
+  if (c == 'x' && viewN > 0) {                  // delete a hand-entered (manual) sat
+    uint32_t nd = db.at(view[viewSel]).norad;
+    if (!db.isManualGp(nd)) { setStatus("Only manually-added sats can be deleted");
+                              satDelArm = false; return; }
+    if (!satDelArm) { satDelArm = true; setStatus("Press x again to delete this sat");
+                      return; }
+    satDelArm = false;
+    if (db.removeManualGp(nd)) {
+      // Rebuild the in-memory catalog from the cached GP file + remaining manual
+      // sats so the deleted entry is gone without a fragile in-place array removal.
+      db.loadGpFromFile(FILE_GP);
+      db.loadManualGpFile();
+      if (isFav(nd)) toggleFav(nd);             // drop it from favorites too
+      buildSatView();
+      if (viewSel >= viewN) viewSel = viewN > 0 ? viewN - 1 : 0;
+      setStatus("Satellite deleted");
+    } else setStatus("Delete failed");
+    return;
   }
   if (viewSel < satScroll)      satScroll = viewSel;
   if (viewSel > satScroll + 9)  satScroll = viewSel - 9;
@@ -1999,7 +2128,12 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   if (c == 't' && viewN > 0) {                      // browse the transponder database
     SatEntry* s = activeSat();
-    if (s) { ensureTransponders(*s); txDbScroll = 0; screen = SCR_TXDB; lastDrawMs = 0; }
+    if (s) { ensureTransponders(*s); txDbScroll = 0; txDbSel = 0; txDbDelArm = false;
+             screen = SCR_TXDB; lastDrawMs = 0; }
+    return;
+  }
+  if (c == 'e' && viewN > 0) {                      // EQX table (OSCARLOCATOR)
+    eqxDescending = false; buildEqx(); screen = SCR_EQX; lastDrawMs = 0;
     return;
   }
   if (c == 'd' && viewN > 0) {                      // 10-day pass overview
@@ -2606,14 +2740,14 @@ void App::keyUpdate(char c, bool enter, bool back) {
 
 // Settings are grouped into categories for a two-level menu. The per-row value
 // logic in adj()/ENTER stays keyed by absolute row index; these tables only map
-// a category + cursor position to that absolute index. Every row 0..40 appears
+// a category + cursor position to that absolute index. Every row 0..47 appears
 // in exactly one category.
 static const int SET_CAT_N = 4;
 static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Station / display", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,36,37};
-static const int SET_ROTOR[] = {8,9,10,11,12,18,19,16,17,13,14,15,35,38,39};
+static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
+static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,25,43};
 static const int SET_NET[]   = {4,5,6,20,41,42,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
@@ -2706,6 +2840,14 @@ void App::keySettings(char c, bool enter, bool back) {
       case 38: cfg.rotdEnable = !cfg.rotdEnable; cfg.save(); break;
       case 39: { long p = (long)cfg.rotdPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotdPort = (uint16_t)p; cfg.save(); } break;
+      case 44: { long v = (long)cfg.doppThreshFmHz + dir*25; if (v < 0) v = 0;
+                 if (v > 2000) v = 2000; cfg.doppThreshFmHz = (uint16_t)v; cfg.save(); } break;
+      case 45: { long v = (long)cfg.doppThreshLinHz + dir*10; if (v < 0) v = 0;
+                 if (v > 1000) v = 1000; cfg.doppThreshLinHz = (uint16_t)v; cfg.save(); } break;
+      case 46: { long v = (long)cfg.doppLeadMs + dir*5; if (v < 0) v = 0;
+                 if (v > 100) v = 100; cfg.doppLeadMs = (uint16_t)v; cfg.save(); } break;
+      case 47: { long v = (long)cfg.rotAzLookSec + dir; if (v < 0) v = 0;
+                 if (v > 10) v = 10; cfg.rotAzLookSec = (uint8_t)v; cfg.save(); } break;
     }
   };
   if (isLeft(c))  adj(-1);
@@ -3688,6 +3830,7 @@ void App::draw() {
     case SCR_SIM:      drawSim(); break;
     case SCR_SPACEWX:  drawSpaceWx(); break;
     case SCR_TXDB:     drawTxDb(); break;
+    case SCR_EQX:      drawEqx(); break;
     case SCR_QRZ:      drawQrz(); break;
     case SCR_WEATHER:  drawWeather(); break;
     case SCR_SUNMOON:  drawSunMoon(); break;
@@ -4747,6 +4890,118 @@ void App::keyOrbit(char c, bool enter, bool back) {
 }
 
 // ===========================================================================
+//  EQX table (off Satellites): equatorial crossing times + longitudes for use
+//  with an OSCARLOCATOR plotting board. Each EQX is an ascending-node crossing
+//  (sub-satellite latitude going south -> north). Times are UTC; longitudes are
+//  printed West-positive (W = +), the convention printed on Oscarlocator dials.
+//  Covers a rolling 3-day window from now, computed on-device from the selected
+//  sat's GP elements (no network needed). Modeled on AO-7_OSCARLOCATOR (N8HM).
+// ===========================================================================
+void App::buildEqx() {
+  eqxN = 0; eqxScroll = 0;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet() || s->meanMotion <= 0) return;
+  setStatus(eqxDescending ? "Computing crossings (desc)..." : "Computing EQX table...");
+  draw();
+  pred.setSite(loc.obs()); pred.setSat(*s);
+
+  const time_t now    = nowUtc();
+  const time_t window = (time_t)(3 * 86400);         // 3 days
+  const time_t end    = now + window;
+  // Coarse step a fraction of the period so we never skip a node; each node type
+  // recurs once per orbit. 30 s is plenty for LEO/HEO amateur sats.
+  const long   step   = 30;
+
+  double prevLat = pred.look(now).subLat;
+  time_t prevT   = now;
+  for (time_t t = now + step; t <= end && eqxN < EQX_MAX; t += step) {
+    LiveLook L = pred.look(t);
+    // Ascending node: lat crosses 0 going - -> + (northbound).
+    // Descending node: lat crosses 0 going + -> - (southbound).
+    bool cross = eqxDescending ? (prevLat >= 0 && L.subLat < 0)
+                               : (prevLat < 0 && L.subLat >= 0);
+    if (cross) {
+      time_t a = prevT, b = t;                       // bracket, then bisect
+      for (int k = 0; k < 18; ++k) {
+        time_t m = a + (b - a) / 2;
+        double lm = pred.look(m).subLat;
+        // keep [a,b] straddling the crossing for whichever direction we want
+        bool firstHalf = eqxDescending ? (lm >= 0) : (lm < 0);
+        if (firstHalf) a = m; else b = m;
+      }
+      double lonE = pred.look(b).subLon;             // East-positive, -180..180
+      double lonW = -lonE; while (lonW < 0) lonW += 360.0; while (lonW >= 360.0) lonW -= 360.0;
+      if (lonW < 0.05 || lonW > 359.95) lonW = 0.0;  // avoid "-0.0 W" at the meridian
+      eqxT[eqxN]    = b;
+      eqxLonW[eqxN] = (float)lonW;
+      eqxN++;
+    }
+    prevLat = L.subLat; prevT = t;
+  }
+  setStatus(eqxN ? "" : "No crossings found");
+}
+
+void App::drawEqx() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + (eqxDescending ? " DEQX" : " EQX"))
+           : String("EQX table"));
+  canvas.setTextSize(1);
+  if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+            canvas.print("No satellite."); footer("` back"); return; }
+  if (!timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 52);
+    canvas.print("Clock not set.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 66);
+    canvas.print("Set UTC (GPS or Location).");
+    footer("` back"); return;
+  }
+  if (eqxN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 52);
+    canvas.print(eqxDescending ? "No descending crossings." : "No ascending crossings.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 66);
+    canvas.print("r recompute   ` back");
+    footer("` back"); return;
+  }
+  // Column header
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 17);
+  canvas.print(eqxDescending ? "Date  Desc UTC    Long (W+)"
+                             : "Date    EQX UTC    Long (W+)");
+  const int LH = 9, ROWS = 10;                       // 10 data rows under the head
+  if (eqxScroll > eqxN - 1) eqxScroll = 0;
+  int y = 28;
+  int lastMday = -1;
+  for (int e = eqxScroll; e < eqxN && e < eqxScroll + ROWS; ++e) {
+    struct tm g; gmtime_r(&eqxT[e], &g);
+    char date[8] = "      ";
+    if (g.tm_mday != lastMday) { snprintf(date, sizeof(date), "%02d/%02d", g.tm_mon + 1, g.tm_mday);
+                                 lastMday = g.tm_mday; }
+    char line[40];
+    snprintf(line, sizeof(line), "%-6s %02d:%02d:%02d   %5.1f W",
+             date, g.tm_hour, g.tm_min, g.tm_sec, eqxLonW[e]);
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y);
+    canvas.print(line);
+    y += LH;
+  }
+  // scrollbar hints + position
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (eqxScroll > 0)              { canvas.setCursor(232, 28);  canvas.print("^"); }
+  if (eqxScroll + ROWS < eqxN)    { canvas.setCursor(232, 112); canvas.print("v"); }
+  int last = eqxScroll + ROWS; if (last > eqxN) last = eqxN;
+  { char c[28]; snprintf(c, sizeof(c), "%d-%d/%d", eqxScroll + 1, last, eqxN);
+    footer(String("`bk ;/. scr d ") + (eqxDescending ? "asc" : "desc") + " r recalc " + c); }
+}
+
+void App::keyEqx(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  const int ROWS = 10;
+  if (isDown(c)) { if (eqxScroll + ROWS < eqxN) eqxScroll += ROWS; lastDrawMs = 0; return; }
+  if (isUp(c))   { eqxScroll -= ROWS; if (eqxScroll < 0) eqxScroll = 0; lastDrawMs = 0; return; }
+  if (c == 'd')  { eqxDescending = !eqxDescending; buildEqx(); lastDrawMs = 0; return; }
+  if (c == 'r')  { buildEqx(); lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
 //  Simulation screen (off Satellites): freeze a UTC time and scrub it to see
 //  where the selected satellite will be. A frozen snapshot (not live).
 // ===========================================================================
@@ -5231,9 +5486,12 @@ void App::drawTxDb() {
   int y = 19;
   for (int e = txDbScroll; e < activeTxCount && e < txDbScroll + perPage; ++e) {
     const Transponder& t = activeTx[e];
-    // line 1: index + description, in cyan
-    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(4, y);
-    { String d = String(e + 1) + ". " + String(t.desc);
+    bool manual = (strncmp(t.desc, "manual", 6) == 0);
+    bool sel = (e == txDbSel);
+    // line 1: index + description, in cyan (selected entry marked with '>')
+    canvas.setTextColor(sel ? CL_GREEN : CL_CYAN, CL_BLACK); canvas.setCursor(4, y);
+    { String d = (sel ? ">" : " ") + String(e + 1) + ". " + String(t.desc);
+      if (manual) d += " *";
       if (d.length() > 38) d = d.substring(0, 37) + "~";
       canvas.print(d); }
     y += LH;
@@ -5257,17 +5515,41 @@ void App::drawTxDb() {
   canvas.setTextColor(CL_GREY, CL_BLACK);
   if (txDbScroll > 0)                       { canvas.setCursor(232, 19);  canvas.print("^"); }
   if (txDbScroll + perPage < activeTxCount) { canvas.setCursor(232, 112); canvas.print("v"); }
-  int last = txDbScroll + perPage; if (last > activeTxCount) last = activeTxCount;
-  { char c[24]; snprintf(c, sizeof(c), "%d-%d/%d", txDbScroll + 1, last, activeTxCount);
-    footer(String("`bk  ;/. scroll   ") + c); }
+  { bool selManual = (txDbSel < activeTxCount &&
+                      strncmp(activeTx[txDbSel].desc, "manual", 6) == 0);
+    char cnt[24]; snprintf(cnt, sizeof(cnt), "%d/%d", txDbSel + 1, activeTxCount);
+    footer(String("`bk ;/. sel ") + (selManual ? "x del " : "") + cnt + " (* manual)"); }
 }
 
 void App::keyTxDb(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { txDbDelArm = false; screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (activeTxCount == 0) return;
   const int perPage = 3;
-  if (isDown(c)) { if (txDbScroll + perPage < activeTxCount) txDbScroll += perPage; lastDrawMs = 0; return; }
-  if (isUp(c))   { txDbScroll -= perPage; if (txDbScroll < 0) txDbScroll = 0; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (txDbSel > 0) txDbSel--; txDbDelArm = false; }
+  if (isDown(c)) { if (txDbSel < activeTxCount - 1) txDbSel++; txDbDelArm = false; }
+  // keep the selected entry on-screen (page of `perPage` blocks)
+  if (txDbSel < txDbScroll)            txDbScroll = (txDbSel / perPage) * perPage;
+  if (txDbSel >= txDbScroll + perPage) txDbScroll = (txDbSel / perPage) * perPage;
+  if (c == 'x') {                                  // delete (manual entries only)
+    SatEntry* s = activeSat();
+    bool isManual = (strncmp(activeTx[txDbSel].desc, "manual", 6) == 0);
+    if (!s || !isManual) { setStatus("Only manual entries can be deleted"); return; }
+    if (!txDbDelArm) { txDbDelArm = true; setStatus("Press x again to delete"); return; }
+    // manual index = count of manual entries before this one
+    int mIdx = 0;
+    for (int e = 0; e < txDbSel; ++e)
+      if (strncmp(activeTx[e].desc, "manual", 6) == 0) mIdx++;
+    txDbDelArm = false;
+    if (deleteManualTx(s->norad, mIdx)) {
+      ensureTransponders(*s);                      // reload the list
+      if (txDbSel >= activeTxCount) txDbSel = activeTxCount > 0 ? activeTxCount - 1 : 0;
+      onTransponderChanged();
+      setStatus("Transponder deleted");
+    } else setStatus("Delete failed");
+    lastDrawMs = 0; return;
+  }
+  lastDrawMs = 0;
 }
 
 // ===========================================================================
@@ -6409,7 +6691,9 @@ void App::drawSatList() {
       else                         canvas.drawCircle(cx, cy, 3, col);          // not heard = ring
     }
   }
-  footer("ENT pass o orb s sim t tx d 10d i illum f fav `bk");
+  bool selManual = (viewN > 0 && viewSel < viewN && db.isManualGp(db.at(view[viewSel]).norad));
+  if (selManual) footer("ENT pass o orb t tx e eqx f fav x del `bk");
+  else           footer("ENT pass o orb s sim t tx e eqx d 10d i illum f fav `bk");
 }
 
 void App::drawPasses() {
@@ -6929,7 +7213,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 44;
+  const int N = 48;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -7004,6 +7288,12 @@ void App::drawSettings() {
   rows[42] = String("QRZ pass: ") + String(strlen(cfg.qrzPass) ? "******" : "(none)");
   rows[43] = String("Weather units: ") + (cfg.wxUnits == WX_IMPERIAL ? "F, mph"
                      : cfg.wxUnits == WX_METRIC_MS ? "C, m/s" : "C, km/h");
+  rows[44] = String("Dopp FM band: ") + String(cfg.doppThreshFmHz) + " Hz";
+  rows[45] = String("Dopp linear band: ") + String(cfg.doppThreshLinHz) + " Hz";
+  rows[46] = String("Dopp lead: ") + (cfg.doppLeadMs == 0 ? String("off")
+                     : String(cfg.doppLeadMs) + " ms");
+  rows[47] = String("Rot az lookahead: ") + (cfg.rotAzLookSec == 0 ? String("off")
+                     : String(cfg.rotAzLookSec) + " s");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

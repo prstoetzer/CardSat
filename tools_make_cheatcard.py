@@ -29,8 +29,8 @@ FRONT = [
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
   "Sun/Moon, Space Wx, Weather, QRZ Lookup, Location, Update, Settings, Log, About"),
  ("SATELLITES",
-  "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; "
-  "<b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
+  "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; <b>x</b> del manual sat &middot; "
+  "<b>e</b> EQX table &middot; <b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
   "right edge: dot = AMSAT heard, square = telemetry, ring = not heard"),
  ("NEXT PASSES (favs)",
   "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
@@ -77,7 +77,10 @@ BACK = [
   "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
  ("TRANSPONDER DB (Sats &rarr; t)",
   "Scroll the selected sat's transponder/beacon entries: desc, <b>D</b> downlink+mode, "
-  "<b>U</b> uplink+tone/inv &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
+  "<b>U</b> uplink+tone/inv &middot; <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2-press) &middot; <b>`</b> back"),
+ ("EQX TABLE (Sats &rarr; e)",
+  "Equatorial crossing times (UTC) + longitude West-positive for OSCARLOCATOR, next 3 days. "
+  "<b>;</b>/<b>.</b> scroll &middot; <b>d</b> toggle ascending/descending node (EQX/DEQX) &middot; <b>r</b> recompute &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
   "<b>,</b>/<b>/</b> 9 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
   "Pass outlook / Orbit position &middot; <b>r</b> recompute. Info: footprint dia (= longest QSO) + decay. "
@@ -103,9 +106,9 @@ BACK = [
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete"),
  ("UPDATE",
-  "<b>k</b>/<b>ENTER</b> GP + clock + AMSAT/space-wx/weather &middot; "
-  "<b>a</b> cache all transponders (batches w/ auto-reboots; ends \u201cCached all N\u201d) &middot; "
-  "<b>w</b> WiFi connect only"),
+  "<b>k</b>/<b>ENTER</b> GP+clock+AMSAT+space-wx+weather &middot; "
+  "<b>a</b> cache all transponders (auto-reboots until done) &middot; "
+  "<b>w</b> WiFi only"),
  ("SETTINGS",
   "<b>,</b>/<b>/</b> change &middot; <b>ENTER</b> edit/toggle &middot; <b>s</b> scan WiFi "
   "(SSID row) &middot; reset = type ERASE"),
@@ -138,7 +141,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.14  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.15  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/%d' % (side, pg, TOTAL_PAGES))
@@ -177,7 +180,7 @@ def measure(sections, fs):
     return doc.page
 
 
-def best_fs(sections, hi=9.5, lo=4.25):
+def best_fs(sections, hi=9.5, lo=4.0):
     fs = hi
     while fs >= lo:
         if measure(sections, fs) <= 1:

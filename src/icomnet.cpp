@@ -492,8 +492,11 @@ bool IcomNetRig::readPtt(bool& tx) {
 
 bool IcomNetRig::enableSatMode(bool on) {
   if (!RADIOS[_model].hasSatMode) return false;
-  // CI-V cmd 0x16; sub-cmd is per-rig: IC-910 = 0x07, IC-9100/9700 = 0x5A.
-  uint8_t pl[3] = { 0x16, RADIOS[_model].satModeSub, (uint8_t)(on ? 0x01 : 0x00) };
+  // Satmode command differs by rig: IC-9100/9700 use 0x16/0x5A, but the IC-910
+  // uses 0x1A/0x07 (per its CONTROL COMMAND table). Both bytes come from the profile.
+  uint8_t pl[3] = { RADIOS[_model].satModeCmd,
+                    RADIOS[_model].satModeSub,
+                    (uint8_t)(on ? 0x01 : 0x00) };
   return sendCivPayload(pl, 3);
 }
 bool IcomNetRig::setCtcss(bool on, float toneHz) {
@@ -503,8 +506,8 @@ bool IcomNetRig::setCtcss(bool on, float toneHz) {
     uint8_t b1 = (uint8_t)((((t / 1000) % 10) << 4) | ((t / 100) % 10));
     uint8_t b2 = (uint8_t)((((t / 10)   % 10) << 4) | (t % 10));
     uint8_t freq[4] = { 0x1B, 0x00, b1, b2 }; sendCivPayload(freq, 4);
-    uint8_t enc[3]  = { 0x16, 0x42, 0x01 };     return sendCivPayload(enc, 3);
+    uint8_t enc[3]  = { 0x16, RADIOS[_model].toneEncSub, 0x01 }; return sendCivPayload(enc, 3);
   }
-  uint8_t off[3] = { 0x16, 0x42, 0x00 };
+  uint8_t off[3] = { 0x16, RADIOS[_model].toneEncSub, 0x00 };
   return sendCivPayload(off, 3);
 }

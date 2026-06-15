@@ -16,7 +16,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -116,6 +116,15 @@ private:
   int      visDayOff = 0;         // 10-day overview start offset from today, in DAYS (>=0)
   Screen   visReturn = SCR_PASSES; // screen to return to from vis/illum (Satellites or Passes)
   bool     building = false;      // a build is in progress (suppress empty-state placeholders)
+
+  // EQX table (equatorial crossings, ascending node) for OSCARLOCATOR use.
+  // 3-day window; an AO-7-class orbit gives ~37 crossings, higher orbits fewer.
+  static const int EQX_MAX = 64;
+  time_t   eqxT[EQX_MAX];         // unix UTC of each ascending-node crossing
+  float    eqxLonW[EQX_MAX];      // sub-longitude in West-positive degrees (0..360)
+  int      eqxN = 0;
+  int      eqxScroll = 0;
+  bool     eqxDescending = false;  // false = ascending node (EQX), true = descending node
 
   // 60-day illumination (DK3WN illum-style). Raster: cols = days, rows = orbit
   // phase; a set bit means the satellite is in eclipse at that (day, phase).
@@ -248,6 +257,26 @@ private:
   uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
   static constexpr uint32_t FREQ_GUARD_HZ = 2;   // skip a re-send within this many Hz of the last value
   static constexpr uint32_t KNOB_MOVE_HZ  = 5;   // read-vs-last delta that counts as an operator knob move
+  // ---- CAT write deadband + adaptive threshold + predictive lead (OscarWatch-
+  // inspired) -------------------------------------------------------------------
+  // (1) Mode-aware write deadband: only push a leg when it moved more than the
+  // threshold for its mode. FM tolerates kHz of Doppler in its passband, so a
+  // loose value avoids needless CI-V chatter; linear SSB/CW needs tight tracking.
+  static constexpr uint32_t DOPP_THRESH_FM_HZ     = 300;  // FM downlink/uplink write deadband
+  static constexpr uint32_t DOPP_THRESH_LINEAR_HZ = 50;   // linear SSB/CW write deadband
+  // (2) Adaptive threshold near TCA: when the Doppler slew (Hz/s) is high (fast
+  // geometry around closest approach), tighten the threshold so the rig keeps up;
+  // when slew is low, keep it loose. Linear interpolate between the breakpoints.
+  static constexpr float    DOPP_SLEW_START_HZS = 15.0f;  // below this slew: base threshold
+  static constexpr float    DOPP_SLEW_FULL_HZS  = 35.0f;  // at/above this: threshold halved
+  static constexpr uint32_t DOPP_THRESH_MIN_HZ  = 25;     // floor when slew is high
+  // (3) Predictive CAT lead: compute Doppler for now+lead to mask CAT latency,
+  // but taper the lead to zero near TCA (where range rate is small and a forward
+  // lead overshoots). Capped small; only meaningful on fast overhead passes.
+  static constexpr float    DOPP_LEAD_MAX_MS        = 50.0f;  // hard cap on lead
+  static constexpr float    DOPP_LEAD_TAPER_KMS     = 0.35f;  // |range rate| (km/s) for full lead
+  static constexpr float    DOPP_LEAD_SLOPE_START   = 0.010f; // km/s^2: lead blend begins
+  static constexpr float    DOPP_LEAD_SLOPE_FULL    = 0.016f; // km/s^2: lead blend full
   uint32_t lastDoppMs = 0;
   float    toneApplied = -2.0f;   // CTCSS tone currently set on the rig (Hz);
                                   // 0 = off, -2 = unknown/never (force re-apply)
@@ -255,6 +284,13 @@ private:
   float    lastAzCmd = -999.0f;  // last az/el we commanded (deadband)
   float    lastElCmd = -999.0f;
   float    lastUnwrappedAz = -999.0f;  // actual az sent (tracks 0..450 overlap)
+  // 450-deg overlap lookahead (OscarWatch-inspired): when an upcoming north wrap
+  // is predicted, pre-commit to the 361-450 band BEFORE the bearing crosses, so
+  // the rotator climbs into the overlap instead of unwinding ~360 the long way.
+  // Computed in the live-track tick (only when NOT flipped); consumed by rotPoint
+  // (only in ROT_AZ_450). These two guards keep it off the 180-flip and 360 paths.
+  bool     rotAz450PreCommit = false;  // force +360 representation this command
+  static constexpr float ROT_AZ_LOOKAHEAD_SEC = 3.0f;  // predict az this far ahead
   bool     rotParked = false;
   uint32_t lastRotMs = 0;
   PassPredict rotPass;             // cached upcoming pass, for AOS pre-positioning
@@ -297,6 +333,7 @@ private:
   int      exportPendN = 0;       // number queued
   int      exportPendIdx = 0;     // current prompt index
   bool     logDelArm = false;     // two-press delete confirmation
+  bool     satDelArm = false;     // two-press delete confirmation (manual GP sat)
   bool     logPickSat = false;    // sat list opened to pick a satellite for a log entry
 
   // status line
@@ -313,6 +350,14 @@ private:
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
+  // Compute the per-tick CAT write deadband (mode-aware, adaptively tightened
+  // near TCA) and the TCA-tapered predictive lead range rate. `rrNow` is the
+  // instantaneous range rate (km/s); `centerHz` the higher of the two leg freqs
+  // (for slew estimation); `linear` selects the linear vs FM base threshold.
+  // Returns the effective threshold (Hz); writes the lead-adjusted range rate
+  // (km/s) to *leadRrOut.
+  uint32_t dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
+                                double nowSec, double* leadRrOut);
   // Route logical downlink/uplink to the physical MAIN/SUB VFOs per cfg.vfoType.
   bool dlOnSub() const { return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN; }
   bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }
@@ -327,9 +372,9 @@ private:
   // a real set, read the accepted freq back and remember THAT, so the rig's
   // tuning-step rounding can't later masquerade as an operator knob move. Pass
   // readback=false in modes where we don't follow the knob (saves a round-trip).
-  void driveDownlink(uint32_t rx, bool readback) {
+  void driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
     uint32_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
-    if (lastRxSet && d < FREQ_GUARD_HZ) return;          // already there
+    if (lastRxSet && d < threshHz) return;               // within deadband: already there
     if (!rigSetDownlinkFreq(rx)) return;
     uint32_t back;
     lastRxSet = (readback && rig->canReadFreq() && rigReadDownlinkFreq(back)) ? back : rx;
@@ -337,9 +382,9 @@ private:
   // Drive the uplink dial only when it moved; then leave the active band on the
   // downlink so the operator's knob/read stays on RX. No read-back (the uplink
   // knob is never followed).
-  void driveUplink(uint32_t tx) {
+  void driveUplink(uint32_t tx, uint32_t threshHz = FREQ_GUARD_HZ) {
     uint32_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
-    if (lastUlHz && d < FREQ_GUARD_HZ) return;
+    if (lastUlHz && d < threshHz) return;
     if (rigSetUplinkFreq(tx)) { lastUlHz = tx; rigSelectDownlink(); }
   }
   // Soft floor: never send CAT faster than the configured baud can comfortably
@@ -394,6 +439,7 @@ private:
   void sleepUntilNextPass();               // deep-sleep until ~60 s before AOS
   void saveManualTx(uint32_t norad, const Transponder& t);
   int  loadManualTx(uint32_t norad, Transponder* out, int maxN);
+  bool deleteManualTx(uint32_t norad, int manualIdx);  // remove the Nth manual TX
 
   // ---- input ----
   void handleKey(char c, bool enter, bool back);
@@ -435,12 +481,15 @@ private:
   void buildVis();   void drawVis();   void keyVis(char c, bool enter, bool back);
   void buildIllum(); void drawIllum(); void keyIllum(char c, bool enter, bool back);
   void buildOrbit(); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
+  void buildEqx();   void drawEqx();   void keyEqx(char c, bool enter, bool back);
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
   void drawWeather(); void keyWeather(char c, bool enter, bool back);
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);
   int  txDbScroll = 0;             // transponder-browser scroll position
+  int  txDbSel = 0;               // selected transponder entry (for delete)
+  bool txDbDelArm = false;        // two-press delete confirmation (manual TX)
   void drawQrz();     void keyQrz(char c, bool enter, bool back);
   bool qrzLookup(const String& call, String& err);  // returns true on success
   String qrzSessionKey;            // cached QRZ XML session key (empty = need login)

@@ -66,6 +66,8 @@ public:
   int  appendGpFromJson(const String& json);  // append (dedup/replace by norad)
   bool addGp(const SatEntry& s);               // one manual sat (+persist NDJSON)
   bool loadManualGpFile();                     // merge FILE_MGP into the DB
+  bool isManualGp(uint32_t norad);             // true if norad has a line in FILE_MGP
+  bool removeManualGp(uint32_t norad);         // delete a hand-entered sat from FILE_MGP
   bool loadGpFromFs();                         // reload cached GP JSON at boot
   void applyAmsatStatusFile(const char* path); // set amsatStatus from a cached summary.php
   int  loadGpFromFile(const char* path);       // stream-parse a GP file (low RAM)

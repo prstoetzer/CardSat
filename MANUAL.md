@@ -378,6 +378,13 @@ The catalog (up to 220 sats from the GP data, plus any you add manually).
 - `v` — toggle **favorites-only** filter.
 - `n` — add a **manual GP satellite**: enter the name, NORAD ID, epoch, then each
   orbital element in turn (see **Edit** under [§8](#8-screen-reference)).
+- `x` — **delete** the selected satellite, but *only if it was added manually*
+  (one you entered with `n`). Press `x` once to arm, `x` again to confirm. This
+  removes it from `/CardSat/mgp.json` and from your favorites; cached GP
+  satellites from the network can't be deleted this way (they'd just return on the
+  next Update). To **edit** a manual satellite, delete it and re-add it with `n`.
+- `e` — open the **EQX table** (equatorial crossings) for the selected satellite,
+  for use with an OSCARLOCATOR (see [Transponder/EQX screens in §8](#8-screen-reference)).
 - **ENTER** — load the satellite's transponders and open its **Passes**.
 - `` ` `` — back to Home.
 
@@ -841,6 +848,9 @@ on-screen key reference. The notable rows:
 | Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
 | CAT rate | `,`/`/` adjust the CAT update period in 10 ms steps (default 500 ms; soft-floored to what the CAT baud can service) |
 | CAT delay | `,`/`/` adjust the pause after each command, 0–200 ms in 2 ms steps (default 70 ms; CI-V/Icom only) |
+| Dopp FM band | `,`/`/` the FM-leg write deadband, 0–2000 Hz in 25 Hz steps (default 300 Hz). CardSat only re-sends an FM frequency once Doppler has moved it more than this — FM's wide passband absorbs the rest, so a loose value avoids needless CI-V chatter |
+| Dopp linear band | `,`/`/` the SSB/CW-leg write deadband, 0–1000 Hz in 10 Hz steps (default 50 Hz). Tighter than FM because linear modes need close tracking; near closest approach CardSat tightens this automatically |
+| Dopp lead | `,`/`/` the predictive-lead cap, 0–100 ms in 5 ms steps (default 50 ms; `0` = off). On fast overhead passes CardSat can compute Doppler slightly ahead to mask CAT latency, tapering the lead to zero near closest approach. Raise it if your rig's CI-V is slow; set `0` to disable |
 | Screen sleep | `,`/`/` cycle off / 30 s / 1 min / 2 min / 5 min — blanks the backlight after that idle time |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
 | QRZ user / QRZ pass | ENTER → enter your QRZ.com username / password for the **QRZ Lookup** screen (requires a QRZ XML-data subscription). Password shown masked. Under *Network / data*. |
@@ -961,6 +971,42 @@ null them out per satellite.
    and reloaded automatically next time you track that bird.
 
 The passband position is *not* persisted (it's per-pass); calibration *is*.
+
+### Editing calibrations on the SD card
+
+Per-satellite calibrations are stored as a plain-text file, so you can author or
+bulk-edit them on a computer instead of nudging each bird by hand. With the
+microSD removed (or over USB mass storage), open **`/CardSat/calib.txt`**. Each
+line is one satellite:
+
+```
+# norad  downlink_Hz  uplink_Hz      (lines starting with # or ; are comments)
+43017   -250   300
+25544    120     0
+```
+
+- The first field is the **NORAD catalog number**; the next two are the
+  **downlink** and **uplink** offsets in **Hz** (signed — negative lowers the
+  frequency). These are the same `calDl`/`calUl` values you trim in **CAL** mode.
+- Whitespace-separated, one satellite per line. Blank lines and lines beginning
+  with `#` or `;` are ignored, so you can annotate the file freely.
+- The file is read each time you select or track a satellite, so edits take
+  effect the next time you open that bird — **no reflash needed**. Saving a
+  calibration on the device (CAL → **ENTER**) rewrites this file but preserves
+  your comment lines.
+
+CTCSS tone overrides work the same way in **`/CardSat/tones.txt`**, one line per
+satellite as `norad tone_tenths` (tenths of a Hz, so `670` = 67.0 Hz; `0` forces
+the tone off):
+
+```
+# norad  tone_tenths
+25544   670
+```
+
+Both files live on the microSD card if one is present, otherwise in the device's
+internal flash. If a satellite has no line in `calib.txt`, the global calibration
+from **Settings** is used.
 
 ---
 
@@ -1274,7 +1320,13 @@ Defaults are editable; the **CI-V address** field applies to **Icom only**.
 
 Protocol command sets follow the Hamlib backends (`icom`, `yaesu/ft847`,
 `yaesu/ft736`, `kenwood/ts2000`, `kenwood/ts790`). Serial framing is set
-automatically: **Icom/Kenwood 8N1, Yaesu 8N2.**
+automatically: **Icom 8N1, Yaesu 8N2, Kenwood 8N1 — except 8N2 at 4800 baud.**
+The TS-790 generation (IF-232C interface: TS-450/690/790/850/950) requires **two
+stop bits at 4800 baud** (one stop bit at higher rates such as the TS-2000's
+57600); CardSat selects this by baud automatically. Note the TS-790's CAT is via
+the **optional IF-232C** adapter — its operating manual documents the interface
+but not the command set, so the TS-790 mapping leans on the shared Kenwood
+protocol and is the least bench-verified of the rigs here.
 
 The CAT *interface circuit* differs by family. **Icom CI-V** uses a 3.3 V-safe
 single-wire interface (**[CIV_INTERFACE.md](CIV_INTERFACE.md)**); **Yaesu** and
@@ -1317,10 +1369,34 @@ backends; like the rest of CAT they're host-verified but not yet exercised on a
 real radio — watch the serial trace and confirm the rig shows the tone.
 
 **Icom.** CardSat drives MAIN/SUB directly and forces the rig's built-in satellite
-mode **off** at startup (IC-9100/9700; the others have no such mode). Downlink on
-SUB, uplink on MAIN. MAIN/SUB select uses CI-V `0x07 D0/D1`, verified against the
-IC-821H manual. Read-back uses `0x03` and works on all six (including the
-IC-820/821/970, per Hamlib). Wrong-VFO fixes live in `radio_profiles.h`.
+mode **off** at startup on the rigs that expose it over CAT (IC-910, IC-9100,
+IC-9700). Downlink on SUB, uplink on MAIN. Read-back uses `0x03` and works on all
+six (including the IC-820/821/970, per Hamlib). Wrong-VFO fixes live in
+`radio_profiles.h`.
+
+> **IC-910 satellite-mode & tone commands differ from the IC-9100/9700.** The
+> IC-9100/9700 toggle satellite mode with CI-V `0x16 0x5A`, but the **IC-910 uses a
+> different command group entirely: `0x1A 0x07`** (verified from the IC-910 CONTROL
+> COMMAND table — on the IC-910, command `0x16` has no satellite-mode sub-command).
+> Likewise the CTCSS tone encoder is `0x16 0x42` (Repeater tone) on the
+> IC-9100/9700 but **`0x16 0x43` (Subaudible tone) on the IC-910** — its `0x42` is
+> the auto-notch filter. CardSat sends the right command for each rig. (Earlier
+> firmware sent `0x16 0x07`/`0x16 0x42` to the IC-910, so sat mode never engaged
+> and the tone key toggled the notch; both are fixed.)
+
+> **IC-820H vs IC-821H MAIN/SUB select.** These two rigs use the *same* CI-V
+> command (`07`) for band select but with the **two sub-commands swapped** — a
+> quirk confirmed from each radio's own manual (CI-V command table):
+>
+> | Radio | Address | Main band access | Sub band access |
+> |-------|---------|------------------|-----------------|
+> | IC-821H | `4C` | `0x07 D0` | `0x07 D1` |
+> | IC-820H | `42` | `0x07 D1` | `0x07 D0` |
+>
+> CardSat ships the correct (reversed) mapping for each, so both tune the right VFO
+> out of the box. If you ever swap one rig's CI-V address onto the other's profile,
+> remember the band-select bytes differ too. The frame is otherwise identical:
+> preamble `FE FE`, controller `E0`, command `07`, end `FD`.
 
 **Icom over the network.** The **IC-9700** can be driven over WiFi/Ethernet instead
 of the CI-V bus — set **CAT type → Icom LAN** in Settings (with the IC-9700 selected
@@ -1482,6 +1558,7 @@ Enable and tune the rotator in **Settings** (scroll past the radio rows):
 | Rot Az offset | added to commanded azimuth (mount alignment) |
 | Rot El offset | added to commanded elevation |
 | Rot az range | azimuth travel: **0..360** (default), **-180..+180** (centred on N), or **0..450** (90 deg overlap) |
+| Rot az lookahead | `,`/`/` 0–10 s (default 3 s; `0` = off). On a **0..450** rotator only: CardSat predicts the bearing this many seconds ahead and, when a pass is about to cross north, commits early to the 361–450° overlap band so it makes a short move instead of unwinding ~360°. Has no effect on 0..360 or flipped passes. Tune to your rotator's slew speed |
 | Rot el range | **90 deg**, or **180 deg** = flip over the top for high passes |
 
 `Rot type` and `Net port` adjust in place with `,`/`/`; `Net host` and `Net port`
@@ -1794,8 +1871,44 @@ listed below.
   satellite (from SatNOGS plus any you added).
 - **Reached from** — Satellites → `t`.
 - **Shows** — a scrollable list of entries with description, downlink (and mode),
-  uplink, and tone/inverting flags.
-- **Keys** — `;`/`.` scroll; `` ` `` back.
+  uplink, and tone/inverting flags. The currently selected entry is highlighted
+  with a `>`; entries you added by hand are tagged with a `*`.
+- **Keys** — `;`/`.` select an entry; `x` **delete** the selected entry, *only if
+  it's a manual one* (`*`-tagged) — press `x` once to arm, `x` again to confirm.
+  `` ` `` back. Deleting rewrites that satellite's `/CardSat/mtx_<norad>.json`
+  file; SatNOGS-cached entries can't be deleted here (they'd return on the next
+  Freq update). To **edit** a manual transponder, delete it and re-add it with `n`
+  on the **Passes** screen.
+
+### EQX table (OSCARLOCATOR)
+
+- **Purpose** — a table of **equatorial crossing (EQX)** times and longitudes for
+  the selected satellite, for use with a classic **OSCARLOCATOR** plotting board.
+  Each EQX is an **ascending-node** crossing — the moment the satellite's
+  ground track crosses the equator heading **north**. With the EQX time and
+  longitude you rotate the Oscarlocator's track overlay to that longitude and read
+  AOS/LOS and mutual visibility directly off the board, with no live computer at
+  the operating position. A `d` keypress switches the table to the **descending
+  node** (southbound equator crossing) if you'd rather reference that.
+- **Reached from** — Satellites → `e`.
+- **Shows** — a scrollable, day-grouped table covering the next **3 days**, each
+  row an EQX **date**, **time in UTC**, and **sub-satellite longitude in
+  West-positive** notation (`123.4 W`), matching the convention printed on
+  Oscarlocator dials. Successive crossings step westward by roughly
+  360°×(period/sidereal-day) per orbit (~28.7° for an AO-7-class orbit).
+- **Computed on-device** from the satellite's current GP elements (SGP4) — no
+  network needed — so the longitudes drift as the elements age; run **Update**
+  every week or two to keep them fresh, the same as for tracking.
+- **Keys** — `;`/`.` scroll a page at a time; `d` **toggle ascending ↔
+  descending** node (recomputes the table — ascending/EQX is the default and the
+  usual OSCARLOCATOR reference, descending gives the southbound equator crossing);
+  `r` recompute (e.g. after the clock is set or new elements are loaded); `` ` ``
+  back. Requires the **UTC clock** to be set (GPS or Location → `c`). The header
+  shows **EQX** for ascending or **DEQX** for descending.
+
+> The table mirrors the output of the **AO-7_OSCARLOCATOR** generator
+> (github.com/prstoetzer/AO-7_OSCARLOCATOR), but works for any satellite in the
+> catalog and runs entirely on the Cardputer.
 
 ### Next Passes (schedule)
 
@@ -2164,7 +2277,7 @@ listed below.
 
 | Screen | Keys |
 |---|---|
-| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `o` orbital analysis · `s` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
+| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `o` orbital analysis · `s` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
 | **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / Pass outlook / Orbit position) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Live: az/el/range/Doppler, mean anomaly/phase, sunlit/eclipse + **eclipse depth** (deg; >0 = in shadow) · Next pass: slant ranges + path delay + peak eclipse depth · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · Pass outlook: 7-day pass count/>30° count/longest/avg gap + the best upcoming pass (elevation, when, duration) · Orbit position: mean/true anomaly, argument of latitude, time to perigee/apogee, RAAN, rev number · `r` recompute · `` ` `` back |
 | **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |

@@ -34,7 +34,18 @@ static void civDecode(const uint8_t* b, size_t n) {
                    else if (b[5]==0xD1) Serial.print("SUB");
                    else if (b[5]==0xB0) Serial.print("swap");
                    else Serial.printf("%02X", b[5]); } break;
-    case 0x16: Serial.printf("  sat-mode %s", (n > 6 && b[6]) ? "ON" : "OFF"); break;
+    case 0x16:                                  // 0x16 group: sub-cmd selects function
+      if (n > 5 && b[5] == 0x5A)
+        Serial.printf("  sat-mode %s", (n > 6 && b[6]) ? "ON" : "OFF");   // 9100/9700
+      else if (n > 5 && b[5] == 0x42)
+        Serial.printf("  tone-enc %s", (n > 6 && b[6]) ? "ON" : "OFF");
+      else if (n > 5) Serial.printf("  ctl-16 sub %02X", b[5]);
+      break;
+    case 0x1A:                                  // IC-910 sat-mode lives here (sub 0x07)
+      if (n > 5 && b[5] == 0x07)
+        Serial.printf("  sat-mode %s", (n > 6 && b[6]) ? "ON" : "OFF");
+      else if (n > 5) Serial.printf("  ctl-1A sub %02X", b[5]);
+      break;
     case 0xFB: Serial.print("  ACK"); break;
     case 0xFA: Serial.print("  NAK"); break;
   }
@@ -160,16 +171,23 @@ bool CivRig::setSubMode (RigMode m)   { return setModeCiv(true,  toCiv(m)); }
 
 bool CivRig::enableSatMode(bool on) {
   if (!RADIOS[_model].hasSatMode) return false;
-  // CI-V cmd 0x16; sub-cmd is per-rig: IC-910 = 0x07, IC-9100/9700 = 0x5A.
-  uint8_t pl[3] = { 0x16, RADIOS[_model].satModeSub, (uint8_t)(on ? 0x01 : 0x00) };
+  // Satmode command differs by rig: IC-9100/9700 use 0x16/0x5A, but the IC-910
+  // uses 0x1A/0x07 (per its CONTROL COMMAND table). Both the command and the
+  // sub-command come from the profile.
+  uint8_t pl[3] = { RADIOS[_model].satModeCmd,
+                    RADIOS[_model].satModeSub,
+                    (uint8_t)(on ? 0x01 : 0x00) };
   return sendFrame(pl, 3);
 }
 
 // Transmit CTCSS (PL) tone for an FM uplink. The tone lives on the uplink, so
 // we select MAIN first. Repeater-tone frequency: cmd 0x1B sub 0x00 + 2 BCD
-// bytes of the tone in tenths of Hz (e.g. 67.0 -> 0670 -> 0x06 0x70). Repeater-
-// tone (encoder) on/off: cmd 0x16 sub 0x42 data 0x01/0x00. Verified against the
-// Icom CI-V reference (IC-9700/910H/9100 family).
+// bytes of the tone in tenths of Hz (e.g. 67.0 -> 0670 -> 0x06 0x70), confirmed
+// from the IC-9700 CI-V Reference Guide. Encoder on/off: cmd 0x16, sub is per-rig
+// (profile toneEncSub): IC-9100/9700 = 0x42 (Repeater tone), IC-910 = 0x43
+// (Subaudible tone -- on the 910, 0x42 is the auto-notch filter). The IC-910's
+// 0x1B tone-frequency command is unconfirmed; if the rig NAKs it, the encoder
+// on/off still applies whatever tone is set on the radio.
 bool CivRig::setCtcss(bool on, float toneHz) {
   if (!RADIOS[_model].hasTone) return false;
   // The caller selects the uplink band first (MAIN or SUB, per VFO Type).
@@ -179,10 +197,10 @@ bool CivRig::setCtcss(bool on, float toneHz) {
     uint8_t b2 = (uint8_t)((((t / 10)   % 10) << 4) | (t % 10));
     uint8_t freq[4] = { 0x1B, 0x00, b1, b2 };
     sendFrame(freq, 4);
-    uint8_t enc[3]  = { 0x16, 0x42, 0x01 };
+    uint8_t enc[3]  = { 0x16, RADIOS[_model].toneEncSub, 0x01 };
     return sendFrame(enc, 3);
   }
-  uint8_t off[3] = { 0x16, 0x42, 0x00 };
+  uint8_t off[3] = { 0x16, RADIOS[_model].toneEncSub, 0x00 };
   return sendFrame(off, 3);
 }
 

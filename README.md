@@ -17,6 +17,16 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
+> **New in v0.9.15:** radio- and rotator-control refinements (several adapted from
+> the open-source **OscarWatch** tracker). Doppler CAT writes now use a
+> **mode-aware deadband** (loose for FM, tight for linear SSB/CW) that **tightens
+> automatically near closest approach**, plus an optional **TCA-tapered predictive
+> lead** to mask CAT latency. On 450° rotators, azimuth tracking now **looks ahead
+> and pre-commits to the overlap band before a north crossing** for shortest-path
+> slewing. Also: **per-satellite calibrations can be hand-authored** on the SD card
+> (`/CardSat/calib.txt`), and those files are now comment-friendly.
+> See **[RELEASE_NOTES_0.9.15.md](RELEASE_NOTES_0.9.15.md)**.
+
 > **New in v0.9.14:** reliable **offline transponder caching**. "Cache all
 > transponders" (`a` on the Update screen) now caches the full catalog in small
 > batches across **automatic reboots** — each reboot gives a fresh network

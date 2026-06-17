@@ -17,6 +17,17 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
+> **New in v0.9.18:** an opt-in **mobile web control page** served over WiFi — pick
+> a satellite, view pass times, and drive the radio/rotator from your phone; the
+> **large-font readout** now shows the frequencies even
+> larger (the AOS line was dropped to make room) and **follows the Doppler tune
+> mode** you pick on Track, with full passband tuning from the big view; a matching
+> **large-font Manual calculator** (`z` from Manual); **tilt tuning extended to
+> Manual mode**; an **optional second WiFi network** that's tried automatically if
+> the first fails (handy for a field router or phone hotspot); and frequency
+> readouts that **stay tidy on any band** by shedding decimals as needed.
+> See **[RELEASE_NOTES_0.9.18.md](RELEASE_NOTES_0.9.18.md)**.
+
 > **New in v0.9.17:** a **large-font operating readout** (press `z` on Track) that
 > shows RX/TX, az/el and an AOS/LOS countdown in big digits for at-a-glance
 > operating, with the radio/rotator still tracking; an adjustable **screen

@@ -44,12 +44,16 @@ FRONT = [
   "<b>y</b> tilt on/off (ADV) &middot; "
   "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
  ("BIG READOUT (z from Track)",
-  "Large RX/TX, az/el, AOS/LOS countdown. Radio+rotator keep tracking &middot; "
-  "<b>t</b> next TX &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>y</b> tilt &middot; <b>l</b> log &middot; <b>z</b>/<b>`</b> back"),
+  "Big RX/TX + az/el + tune mode (follows Track). Radio+rotator keep tracking &middot; "
+  "<b>,</b>/<b>/</b> tune &middot; <b>s</b>/<b>x</b> step/ctr &middot; <b>m</b>/<b>d</b> mode &middot; "
+  "<b>t</b> TX &middot; <b>r</b> radio &middot; <b>o</b> rot &middot; <b>y</b> tilt &middot; <b>l</b> log &middot; <b>z</b>/<b>`</b> back"),
  ("MANUAL (no radio)",
   "Fix one leg, read Doppler freq to tune the other by hand. <b>u</b> toggle "
   "HOLD/TUNE leg &middot; <b>,</b>/<b>/</b> passband (linear) &middot; <b>m</b> CAL &middot; "
-  "<b>t</b> next TX &middot; <b>l</b> log &middot; <b>p</b> polar &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC &middot; <b>`</b>/<b>f</b> Track"),
+  "<b>t</b> next TX &middot; <b>z</b> big view &middot; <b>l</b> log &middot; <b>p</b> polar &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC &middot; <b>`</b>/<b>f</b> Track"),
+ ("MANUAL BIG (z from Manual)",
+  "HOLD/TUNE legs in big digits &middot; <b>u</b> swap leg &middot; <b>,</b>/<b>/</b> tune &middot; "
+  "<b>s</b>/<b>x</b> &middot; <b>m</b> CAL &middot; <b>t</b> TX &middot; <b>z</b>/<b>`</b> back"),
  ("TRACK &middot; TUNE",
   "<b>,</b>/<b>/</b> tune -/+ &middot; <b>s</b> step 100/1k/5k &middot; <b>x</b> recenter &middot; tilt to tune if enabled (ADV)"),
  ("TRACK &middot; CAL",
@@ -87,9 +91,8 @@ BACK = [
   "<b>;</b>/<b>.</b> scroll &middot; <b>d</b> toggle ascending/descending node (EQX/DEQX) &middot; <b>r</b> recompute &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
   "<b>,</b>/<b>/</b> 9 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
-  "Pass outlook / Orbit position &middot; <b>r</b> recompute. Info: footprint dia (= longest QSO) + decay. "
-  "Live/Next: eclipse depth. Nodal: J2 drift, sun-sync, LTAN. Sun/Beta: beta, eclipse %/orbit. "
-  "Outlook: 7-day best pass. Position: anomaly, to perigee/apogee. Doppler <b>f</b> sets beacon freq."),
+  "Pass outlook / Orbit position &middot; <b>r</b> recompute. Info: footprint dia + decay. "
+  "Nodal: J2 drift, sun-sync, LTAN. Sun/Beta: beta, eclipse %/orbit. Doppler <b>f</b> sets beacon freq."),
  ("SIMULATION",
   "<b>,</b>/<b>/</b> step time &middot; <b>;</b>/<b>.</b> step size &middot; "
   "<b>m</b> world-map view (sub-point + footprint) &middot; "
@@ -115,7 +118,7 @@ BACK = [
   "<b>w</b> WiFi only"),
  ("SETTINGS",
   "<b>,</b>/<b>/</b> change &middot; <b>ENTER</b> edit/toggle &middot; <b>s</b> scan WiFi "
-  "(SSID row) &middot; reset = type ERASE"),
+  "&middot; opt. 2nd WiFi (field fallback) &middot; reset = ERASE"),
  ("GP SOURCE",
   "<b>AMSAT</b> / any <b>CelesTrak</b> JSON-PP category (Amateur first) / <b>Custom URL</b> "
   "&middot; <b>;</b>/<b>.</b> move &middot; <b>{</b>/<b>}</b> page &middot; <b>ENTER</b> select"),
@@ -125,7 +128,8 @@ BACK = [
  ("NETWORK SERVERS",
   "<b>rigctld</b>: PC drives the rig via CardSat over TCP (VFOA=downlink, VFOB=uplink) &middot; "
   "<b>rotctld</b>: PC drives the wired GS-232 via CardSat &middot; "
-  "<b>rigctl</b>: CAT type drives a remote rig"),
+  "<b>rigctl</b>: CAT type drives a remote rig &middot; "
+  "<b>Web control</b>: opt-in mobile page (shows URL); pick/fav sat, passes (w/ peak), tune+radio/rotator, Manual + Orbit views. No auth, trusted LAN only"),
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
@@ -145,7 +149,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.17  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.18  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/%d' % (side, pg, TOTAL_PAGES))

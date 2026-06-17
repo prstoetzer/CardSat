@@ -16,6 +16,8 @@ bool Settings::load() {
 
   strncpy(ssid, d["ssid"] | "", sizeof(ssid)-1);
   strncpy(pass, d["pass"] | "", sizeof(pass)-1);
+  strncpy(ssid2, d["ssid2"] | "", sizeof(ssid2)-1); ssid2[sizeof(ssid2)-1]=0;
+  strncpy(pass2, d["pass2"] | "", sizeof(pass2)-1); pass2[sizeof(pass2)-1]=0;
   strncpy(gpUrl, d["gpurl"] | AMSAT_GP_URL, sizeof(gpUrl)-1); gpUrl[sizeof(gpUrl)-1]=0;
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
   strncpy(qrzUser, d["qrzuser"] | "", sizeof(qrzUser)-1); qrzUser[sizeof(qrzUser)-1]=0;
@@ -82,6 +84,8 @@ bool Settings::load() {
   if (rigdPort == 0) rigdPort = 4532;
   rotdEnable = d["rotden"] | false;
   rotdPort   = d["rotdport"] | (uint16_t)4533;
+  webEnable  = d["weben"] | false;
+  webPort    = d["webport"] | (uint16_t)80;
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
   return true;
@@ -90,6 +94,7 @@ bool Settings::load() {
 bool Settings::save() {
   JsonDocument d;
   d["ssid"] = ssid;  d["pass"] = pass;
+  d["ssid2"] = ssid2; d["pass2"] = pass2;
   d["gpurl"] = gpUrl;
   d["mycall"] = myCall;
   d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
@@ -116,6 +121,7 @@ bool Settings::save() {
   d["rotazc0"]=rotAzCnt0; d["rotazcf"]=rotAzCntF; d["rotelc0"]=rotElCnt0; d["rotelcf"]=rotElCntF;
   d["rigden"]=rigdEnable; d["rigdport"]=rigdPort;
   d["rotden"]=rotdEnable; d["rotdport"]=rotdPort;
+  d["weben"]=webEnable; d["webport"]=webPort;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
   serializeJson(d, f);

@@ -188,7 +188,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.17";
+static constexpr const char* FW_VERSION = "0.9.18";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1517,6 +1517,8 @@ struct Settings {
   // WiFi
   char     ssid[33] = "";
   char     pass[65] = "";
+  char     ssid2[33] = "";    // optional 2nd network (field use: phone hotspot, etc.)
+  char     pass2[65] = "";
   // Orbital data source (GP/OMM JSON). Editable in Settings.
   char     gpUrl[160] = AMSAT_GP_URL;
   char     myCall[14] = "";   // operator's own callsign (stored uppercase)
@@ -1593,6 +1595,13 @@ struct Settings {
   bool     rotdEnable  = false;
   uint16_t rotdPort    = 4533;   // Hamlib rotctld default port
 
+  // Built-in mobile web control page, served over the WiFi LAN. Opt-in: when on,
+  // a phone on the same network can select a satellite, see pass times, and drive
+  // the radio/rotator. Plain HTTP on the LAN only (no auth); leave off if you
+  // don't want it exposed.
+  bool     webEnable   = false;
+  uint16_t webPort     = 80;
+
   bool load();
   bool save();
 };
@@ -1611,7 +1620,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1908,6 +1917,12 @@ private:
   WiFiServer* rotd = nullptr;
   WiFiClient  rotdCli;             // single connected client
   String      rotdBuf;             // line-assembly buffer
+  // Mobile web control page: a phone on the LAN selects sats, sees passes, and
+  // drives the radio/rotator. One client at a time, serviced cooperatively.
+  WiFiServer* webd = nullptr;
+  WiFiClient  webdCli;            // single connected client
+  String      webdBuf;           // request-assembly buffer (request line + headers)
+  String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     screenAsleep = false;  // backlight blanked for power saving
@@ -1944,6 +1959,14 @@ private:
   void rigdHandleLine(const String& line);     // parse + act on one rigctld command
   void serviceRotctld();                       // pump the rotctld TCP server
   void rotdHandleLine(const String& line);     // parse + act on one rotctld command
+  void serviceWebd();                          // pump the mobile web-control server
+  void webdHandleRequest(const String& reqLine);  // route one HTTP request
+  void webdSendStatusJson();                   // GET /api/status
+  void webdSendSatsJson();                     // GET /api/sats
+  void webdSendPassesJson();                   // GET /api/passes
+  void webdSendOrbitJson();                     // GET /api/orbit (orbital analysis)
+  bool webdSelectSat(uint32_t norad);          // POST /api/select
+  void webdSendPage();                         // GET / (the mobile HTML page)
   void applyRotatorFromCfg();
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
@@ -2004,6 +2027,7 @@ private:
   SatEntry* activeSat();
   bool ensureTransponders(SatEntry& s);   // load (cache or net)
   void onTransponderChanged();             // recenter passband + pick default mode
+  bool connectWifiCfg(uint32_t timeoutMs = 12000);  // try primary then 2nd WiFi
   void serviceTiltTune();                  // accelerometer (tilt) passband tuning (ADV)
   void doUpdateGp();
   String gpSourceLabel();                  // human label for the configured GP source
@@ -2054,6 +2078,7 @@ private:
   void drawTrack();
   void drawBig();    // large-font operating readout (toggled from Track with 'z')
   void drawManual();
+  void drawManualBig();   // large-font version of the Manual calculator ('z')
   void drawPolar();
   void drawPassPolar();
   void drawMutual();
@@ -2076,12 +2101,13 @@ private:
   void keyTrack(char c, bool enter, bool back);
   void keyBig(char c, bool enter, bool back);
   void keyManual(char c, bool enter, bool back);
+  void keyManualBig(char c, bool enter, bool back);
   void keyPolar(char c, bool enter, bool back);
   void keyPassPolar(char c, bool enter, bool back);
   void keyMutual(char c, bool enter, bool back);
   void buildVis();   void drawVis();   void keyVis(char c, bool enter, bool back);
   void buildIllum(); void drawIllum(); void keyIllum(char c, bool enter, bool back);
-  void buildOrbit(); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
+  void buildOrbit(bool quiet = false); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
   void buildEqx();   void drawEqx();   void keyEqx(char c, bool enter, bool back);
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
@@ -4779,9 +4805,11 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
       if (len > 0 && total >= (size_t)len) break;     // whole body received
     } else {
       if (len > 0 && total >= (size_t)len) break;
-      // Peer closed with nothing buffered: allow a short grace for any final
-      // TLS-buffered bytes, then finish. Otherwise wait, up to a hard timeout.
-      if (!http.connected() && !stream->available() && millis() - lastRx > 500)
+      // Only treat a closed connection as end-of-body when the length is UNKNOWN.
+      // With a declared Content-Length we keep waiting (up to the stall timeout)
+      // so a momentary TLS burst gap on a weak link can't truncate the body.
+      if (len <= 0 && !http.connected() && !stream->available() &&
+          millis() - lastRx > 500)
         break;
       if (millis() - lastRx > 10000) break;           // idle/stall timeout
       delay(5);
@@ -4792,6 +4820,12 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   Serial.printf("[net] received %u bytes (declared %d), heap now %u\n",
                 (unsigned)total, len, (unsigned)ESP.getFreeHeap());
   if (out.length() == 0) { lastErr = "empty body"; return false; }
+  // Declared length but got less -> truncated; report failure so callers/retries
+  // don't parse a partial body.
+  if (len > 0 && total < (size_t)len) {
+    lastErr = "short read " + String((unsigned)total) + "/" + String(len);
+    return false;
+  }
   return true;
 }
 
@@ -4871,7 +4905,13 @@ bool Net::httpsGetToFile(const String& url, const char* path,
       if (len > 0 && total >= (size_t)len) break;
     } else {
       if (len > 0 && total >= (size_t)len) break;
-      if (!http.connected() && !stream->available() && millis() - lastRx > 500)
+      // Only treat a closed connection as end-of-body when the length is UNKNOWN
+      // (chunked / no Content-Length). When the server declared a length and we
+      // haven't reached it, a momentary connected()==false with no available
+      // bytes is just a TLS burst gap on a weak link -- keep waiting up to the
+      // stall window instead of declaring a truncated download complete.
+      if (len <= 0 && !http.connected() && !stream->available() &&
+          millis() - lastRx > 500)
         break;
       // Use the longer first-byte window until the first byte lands, then the
       // normal mid-stream stall timeout.
@@ -4888,6 +4928,13 @@ bool Net::httpsGetToFile(const String& url, const char* path,
                 (unsigned)total, path, len, (unsigned)ESP.getFreeHeap());
   if (writeErr)    { lastErr = "fs write failed"; return false; }
   if (total == 0)  { lastErr = "empty body"; return false; }
+  // If the server told us how big the body is and we got less, the transfer was
+  // cut short (a stall timeout or a dropped TLS burst). Report failure so the
+  // retry wrapper re-attempts rather than parsing a truncated file.
+  if (len > 0 && total < (size_t)len) {
+    lastErr = "short read " + String((unsigned)total) + "/" + String(len);
+    return false;
+  }
   return true;
 }
 
@@ -4907,7 +4954,11 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
 }
 
 bool Net::fetchGpToFile(const String& url, const char* path) {
-  return httpsGetToFile(url, path, 400000, nullptr);
+  // GP is the largest and most important download; on a weak link it can be cut
+  // short mid-body, so allow a few attempts. httpsGetToFile now reports a short
+  // read (got fewer bytes than the declared Content-Length) as a failure, so the
+  // retry wrapper re-attempts instead of caching a truncated catalog.
+  return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
 }
 
 bool Net::fetchGp(const String& url, String& out) {
@@ -5374,6 +5425,8 @@ bool Settings::load() {
 
   strncpy(ssid, d["ssid"] | "", sizeof(ssid)-1);
   strncpy(pass, d["pass"] | "", sizeof(pass)-1);
+  strncpy(ssid2, d["ssid2"] | "", sizeof(ssid2)-1); ssid2[sizeof(ssid2)-1]=0;
+  strncpy(pass2, d["pass2"] | "", sizeof(pass2)-1); pass2[sizeof(pass2)-1]=0;
   strncpy(gpUrl, d["gpurl"] | AMSAT_GP_URL, sizeof(gpUrl)-1); gpUrl[sizeof(gpUrl)-1]=0;
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
   strncpy(qrzUser, d["qrzuser"] | "", sizeof(qrzUser)-1); qrzUser[sizeof(qrzUser)-1]=0;
@@ -5440,6 +5493,8 @@ bool Settings::load() {
   if (rigdPort == 0) rigdPort = 4532;
   rotdEnable = d["rotden"] | false;
   rotdPort   = d["rotdport"] | (uint16_t)4533;
+  webEnable  = d["weben"] | false;
+  webPort    = d["webport"] | (uint16_t)80;
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
   return true;
@@ -5448,6 +5503,7 @@ bool Settings::load() {
 bool Settings::save() {
   JsonDocument d;
   d["ssid"] = ssid;  d["pass"] = pass;
+  d["ssid2"] = ssid2; d["pass2"] = pass2;
   d["gpurl"] = gpUrl;
   d["mycall"] = myCall;
   d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
@@ -5474,6 +5530,7 @@ bool Settings::save() {
   d["rotazc0"]=rotAzCnt0; d["rotazcf"]=rotAzCntF; d["rotelc0"]=rotElCnt0; d["rotelcf"]=rotElCntF;
   d["rigden"]=rigdEnable; d["rigdport"]=rigdPort;
   d["rotden"]=rotdEnable; d["rotdport"]=rotdPort;
+  d["weben"]=webEnable; d["webport"]=webPort;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
   serializeJson(d, f);
@@ -5494,6 +5551,12 @@ bool Settings::save() {
 static const uint16_t CL_BLACK=0x0000, CL_WHITE=0xFFFF, CL_GREEN=0x07E0, CL_RED=0xF800,
                       CL_YELLOW=0xFFE0, CL_CYAN=0x07FF, CL_ORANGE=0xFD20, CL_GREY=0x7BEF,
                       CL_BLUE=0x041F, CL_DGREEN=0x0320;
+// Menu/list selection-bar background. Pure CL_GREEN (0x07E0) is the most luminant
+// primary the panel makes, so black text on it glares and the green blooms into
+// thin glyphs -- reported as hard to read. CL_SELBG is a calmer medium forest
+// green: same "green = selected" language across the UI, far less glare with
+// black text. Tune the exact shade on hardware if desired (0x0540 is dimmer).
+static const uint16_t CL_SELBG=0x05C0;
 
 static M5Canvas canvas(&M5Cardputer.Display);
 
@@ -5517,9 +5580,18 @@ static String fmtClock(time_t t) {
                        tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
   return String(b);
 }
-static String fmtMHz(uint32_t hz) {
-  char b[20]; snprintf(b, sizeof(b), "%.5f", hz / 1e6); return String(b);
+// Format a frequency in MHz, dropping decimal places as the integer part grows
+// so the string stays bounded for any band up to 99999 MHz. maxDigits caps the
+// fractional places for low bands; higher bands shed decimals to keep width sane:
+//   < 1000 MHz : maxDigits decimals (e.g. 145.99700)
+//   < 10000    : 3 decimals        (e.g. 1296.500)
+//   < 100000   : 1 decimal         (e.g. 10489.5 ... 99999.5)
+static String fmtMHzN(uint32_t hz, int maxDigits) {
+  double m = hz / 1e6;
+  int dp = (m < 1000.0) ? maxDigits : (m < 10000.0) ? 3 : 1;
+  char b[20]; snprintf(b, sizeof(b), "%.*f", dp, m); return String(b);
 }
+static String fmtMHz(uint32_t hz) { return fmtMHzN(hz, 5); }
 
 // Compact countdown: "45s", "12m", "1h05".
 static String fmtCountdown(long s) {
@@ -5601,7 +5673,7 @@ void App::setup() {
   // Best-effort: a failure is non-fatal (GPS or a cached/manual clock still work).
   if (cfg.ssid[0]) {
     setStatus("WiFi..."); draw();
-    if (net.connect(cfg.ssid, cfg.pass)) {
+    if (connectWifiCfg()) {
       Serial.printf("[boot] WiFi OK, IP %s\n", WiFi.localIP().toString().c_str());
       net.syncTimeNtp();
       setStatus(timeIsSet() ? "WiFi connected; clock set via NTP"
@@ -5896,11 +5968,26 @@ void App::onTransponderChanged() {
 // active on Track/Big in TUNE mode on a linear bird; everything else no-ops.
 // Called once per UI cycle (~tens of ms); it integrates a Hz/s rate so the step
 // is independent of the exact call cadence.
+
+
+// Connect to WiFi, trying the primary network first and then the optional
+// secondary one (for field use on a second router or a phone hotspot). Returns
+// true on the first network that associates. A blank SSID is skipped.
+bool App::connectWifiCfg(uint32_t timeoutMs) {
+  if (cfg.ssid[0] && net.connect(cfg.ssid, cfg.pass, timeoutMs)) return true;
+  if (cfg.ssid2[0] && net.connect(cfg.ssid2, cfg.pass2, timeoutMs)) return true;
+  return false;
+}
+
 void App::serviceTiltTune() {
   if (!cfg.tiltTune || !imuReady) return;
-  if (screen != SCR_TRACK && screen != SCR_BIG) return;
+  bool onTrack  = (screen == SCR_TRACK || screen == SCR_BIG);
+  bool onManual = (screen == SCR_MANUAL || screen == SCR_MANUALBIG);
+  if (!onTrack && !onManual) return;
   if (trackMode != 0) return;                            // TUNE mode only
-  if (tuneMode == TM_FULL || tuneMode == TM_DL) return;  // these track the knob
+  // On Track/Big the FULL/DL modes are driven by the rig knob, so tilt must not
+  // fight them. The Manual screen has no radio, so this guard doesn't apply there.
+  if (onTrack && (tuneMode == TM_FULL || tuneMode == TM_DL)) return;
   if (activeTxCount <= 0) return;
   Transponder& t = activeTx[curTx];
   if (!t.isLinear || t.bandwidth() == 0) return;
@@ -5958,7 +6045,7 @@ String App::gpSourceLabel() {
 
 void App::doUpdateGp() {
   setStatus("WiFi..."); draw();
-  if (!net.connected() && !net.connect(cfg.ssid, cfg.pass)) {
+  if (!net.connected() && !connectWifiCfg()) {
     Serial.println("[gp] WiFi connect failed");
     setStatus("WiFi failed (check SSID/pass)"); return;
   }
@@ -6489,7 +6576,7 @@ void App::resumeCacheIfPending() {
   // so the user sees where the caching lives and the progress status sits there.
   screen = SCR_UPDATE; lastDrawMs = 0; draw();
 
-  if (!net.connected() && !net.connect(cfg.ssid, cfg.pass)) {
+  if (!net.connected() && !connectWifiCfg()) {
     // Can't make progress without WiFi; leave the marker so a later boot retries.
     setStatus("Cache paused: no WiFi", 2500);
     return;
@@ -6754,7 +6841,7 @@ void App::buildPassDetail(const PassPredict& p) {
 
 void App::refreshScheduleIfNeeded() {
   if (favN == 0 || !timeIsSet()) return;
-  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_MANUAL) return;  // don't disturb Doppler
+  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_MANUAL || screen == SCR_MANUALBIG) return;  // don't disturb Doppler
   if (screen == SCR_PASSES) return;                        // owns the propagator
   uint32_t ms = millis();
   bool due = (nextAos == 0) || (nowUtc() >= nextAos) ||
@@ -7054,6 +7141,533 @@ void App::rotdHandleLine(const String& lineIn) {
   }
 }
 
+// ===========================================================================
+//  Mobile web control page (opt-in, served over the WiFi LAN)
+//
+//  A deliberately tiny HTTP server in the same cooperative style as the rigctld
+//  and rotctld servers above: accept one client, read the request without
+//  blocking, answer, move on. The served page is a single self-contained file
+//  (kept in PROGMEM so it never lands on the fragmented no-PSRAM heap) that polls
+//  /api/status and posts to /api/select and /api/cmd. Commands reuse the exact
+//  keypad handlers, so the web UI drives the same, already-correct code paths as
+//  the physical keys -- it never re-implements radio/rotator logic.
+// ===========================================================================
+
+static const char WEB_PAGE[] PROGMEM = R"HTMLPAGE(<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>CardSat</title>
+<style>
+:root{--bg:#0b0e13;--fg:#e6edf3;--mut:#8b96a5;--grn:#39d353;--org:#f0883e;--cy:#4ad;--pan:#161b22;--bd:#2a313c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:10px 14px;background:var(--pan);border-bottom:1px solid var(--bd);
+position:sticky;top:0;display:flex;align-items:center;gap:8px}
+header b{font-size:18px}.tag{margin-left:auto;font-size:12px;color:var(--mut)}
+main{padding:12px;max-width:560px;margin:0 auto}
+.card{background:var(--pan);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:12px}
+.freq{font-variant-numeric:tabular-nums;font-size:30px;font-weight:700;letter-spacing:.5px}
+.rx{color:var(--grn)}.tx{color:var(--org)}.lab{color:var(--mut);font-size:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>*{flex:1}select,button{font:inherit;color:var(--fg);background:#1d242e;
+border:1px solid var(--bd);border-radius:10px;padding:12px;min-height:48px}
+button:active{background:#283040}.on{outline:2px solid var(--grn)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.az{font-size:22px;font-variant-numeric:tabular-nums}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{padding:6px 4px;border-bottom:1px solid var(--bd);text-align:left}
+th{color:var(--mut);font-weight:600}.mut{color:var(--mut)}
+.pill{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--bd)}
+</style></head><body>
+<header><b>CardSat</b><span class="tag" id="tag">connecting...</span></header>
+<main>
+<div class="card"><div class="row"><div>
+<select id="sat"></select></div>
+<button id="fav" style="flex:0 0 auto" title="favourite">&#9734;</button>
+<button id="go" style="flex:0 0 auto">Track</button></div></div>
+<div class="card">
+<div class="lab">DOWNLINK (RX)</div><div class="freq rx" id="rx">--.-----</div>
+<div class="lab" style="margin-top:8px">UPLINK (TX)</div><div class="freq tx" id="tx">--.-----</div>
+<div class="row" style="margin-top:10px">
+<div class="az lab">Az <span id="az" class="fg">--</span>&deg;</div>
+<div class="az lab">El <span id="el" class="fg">--</span>&deg;</div>
+<div class="lab">Mode <span id="mode" class="fg">--</span></div></div></div>
+<div class="card"><div class="row" style="margin-bottom:8px">
+<button id="mRadio" class="on" style="flex:1">Radio</button>
+<button id="mMan" style="flex:1">Manual</button>
+<button id="mOrb" style="flex:1">Orbit</button></div>
+<div id="radCtl" class="grid">
+<button data-k=",">Tune -</button><button data-k="/">Tune +</button>
+<button data-k="t">TX&#x2192;</button><button data-k="d">Mode</button>
+<button id="brad" data-k="r">Radio</button><button id="brot" data-k="o">Rotator</button>
+<button data-k="m">CAL</button><button data-k="x">Center</button>
+</div>
+<div id="manCtl" style="display:none">
+<div class="lab" id="mhl">HOLD</div>
+<div class="freq" id="hold" style="color:#fff">--.-----</div>
+<div class="lab" id="mtl" style="margin-top:8px">TUNE &#x2192;</div>
+<div class="freq" id="mtune" style="color:var(--cy)">--.-----</div>
+<div class="grid" style="margin-top:10px">
+<button data-m=",">Tune -</button><button data-m="/">Tune +</button>
+<button data-m="u">Swap leg</button><button data-m="t">TX&#x2192;</button>
+<button data-m="m">CAL</button><button data-m="x">Center</button></div>
+</div>
+<div id="orbCtl" style="display:none">
+<div class="lab">ORBITAL ANALYSIS</div>
+<table id="orbTbl"><tr><td class="mut">&mdash;</td></tr></table>
+</div></div>
+<div class="card"><div class="lab" style="margin-bottom:6px">UPCOMING PASSES</div>
+<table id="passes"><tr><td class="mut">&mdash;</td></tr></table></div>
+</main>
+<script>
+var lastSat=0,man=false,mode='rad';
+function j(u,o){return fetch(u,o).then(r=>r.json())}
+function pad(n){return(n<10?'0':'')+n}
+function hhmm(t){var d=new Date(t*1000);return pad(d.getHours())+':'+pad(d.getMinutes())}
+function dur(s){var m=Math.round(s/60);return m+'m'}
+function setMode(m){mode=m;man=(m=='man');
+document.getElementById('mRadio').classList.toggle('on',m=='rad');
+document.getElementById('mMan').classList.toggle('on',m=='man');
+document.getElementById('mOrb').classList.toggle('on',m=='orb');
+document.getElementById('radCtl').style.display=(m=='rad')?'':'none';
+document.getElementById('manCtl').style.display=(m=='man')?'':'none';
+document.getElementById('orbCtl').style.display=(m=='orb')?'':'none';
+if(m=='orb')orbit()}
+function orow(k,v){return '<tr><td class="mut">'+k+'</td><td>'+v+'</td></tr>'}
+function orbit(){j('/api/orbit').then(o=>{var t=document.getElementById('orbTbl');
+if(!o.ok){t.innerHTML='<tr><td class="mut">need clock + elements</td></tr>';return}
+var h='';
+h+=orow('Altitude',Math.round(o.alt)+' km');
+h+=orow('Footprint',Math.round(o.footprint)+' km');
+h+=orow('Period',o.period+' min');
+h+=orow('Apo/Peri',Math.round(o.apo)+'/'+Math.round(o.peri)+' km');
+h+=orow('Incl/Ecc',o.incl+' / '+o.ecc);
+h+=orow('Decay',o.decayDays<0?'n/a':(o.decayDays>36500?'stable':o.decayDays+' d'));
+h+=orow('Range rate',o.rangeRate+' km/s');
+h+=orow('Sublat/lon',o.subLat+', '+o.subLon);
+h+=orow('Sunlit',o.sunlit?'yes':'eclipse');
+h+=orow('Beta',o.beta+'\u00b0 (\u00b1'+o.betaStar+' full-sun)');
+h+=orow('Eclipse',o.eclFrac>0?o.eclFrac+'%/orbit':'none');
+h+=orow('Node drift',o.nodeDrift+'\u00b0/day'+(o.sunSync?' (sun-sync)':''));
+h+=orow('Perig drift',o.perigDrift+'\u00b0/day');
+h+=orow('Mean anom',o.meanAnom+'\u00b0');
+h+=orow('True anom',o.trueAnom+'\u00b0');
+h+=orow('To peri/apo',Math.round(o.toPeri/60)+'/'+Math.round(o.toApo/60)+' min');
+if(o.outlookN)h+=orow('Outlook',o.outlookN+' passes, '+o.outlookHi+' >30\u00b0');
+if(o.bestEl)h+=orow('Best pass',Math.round(o.bestEl)+'\u00b0, '+o.longestMin+' min max');
+t.innerHTML=h})}
+function loadSats(){j('/api/sats').then(a=>{var s=document.getElementById('sat');
+s.innerHTML='';a.forEach(x=>{var o=document.createElement('option');o.value=x.n;
+o.dataset.fav=x.fav?1:0;
+o.textContent=x.name+(x.fav?' \u2605':'');s.appendChild(o)});reflectFav()})}
+function reflectFav(){var s=document.getElementById('sat');var o=s.options[s.selectedIndex];
+document.getElementById('fav').innerHTML=(o&&o.dataset.fav=='1')?'\\u2605':'\\u2606'}
+function passes(){j('/api/passes').then(a=>{var t=document.getElementById('passes');
+if(!a.length){t.innerHTML='<tr><td class="mut">no passes</td></tr>';return}
+var h='<tr><th>AOS</th><th>Peak</th><th>El</th><th>Dur</th><th>Az</th></tr>';
+a.forEach(p=>{h+='<tr><td>'+hhmm(p.aos)+'</td><td>'+hhmm(p.tca)+'</td><td>'+p.el+'&deg;</td><td>'+dur(p.los-p.aos)
++'</td><td>'+p.azaos+'&rarr;'+p.azlos+'</td></tr>'});t.innerHTML=h})}
+function tick(){j('/api/status').then(s=>{
+document.getElementById('tag').textContent=s.name||'no sat';
+document.getElementById('rx').textContent=s.rx;document.getElementById('tx').textContent=s.tx;
+document.getElementById('az').textContent=Math.round(s.az);
+document.getElementById('el').textContent=Math.round(s.el);
+document.getElementById('mode').textContent=s.mode;
+document.getElementById('brad').classList.toggle('on',s.radio);
+document.getElementById('brot').classList.toggle('on',s.rot);
+document.getElementById('hold').textContent=s.hold;
+document.getElementById('mtune').textContent=s.tune;
+document.getElementById('mhl').textContent=s.fixup?'HOLD uplink (park TX here)':'HOLD downlink (park RX here)';
+document.getElementById('mtl').textContent=s.fixup?'TUNE \\u2192 downlink (follow)':'TUNE \\u2192 uplink (follow)';
+if(s.norad&&s.norad!=lastSat){lastSat=s.norad;passes()}
+}).catch(e=>{document.getElementById('tag').textContent='offline'})}
+document.getElementById('go').onclick=function(){
+var n=document.getElementById('sat').value;
+j('/api/select?norad='+n,{method:'POST'}).then(()=>{lastSat=0;tick()})}
+document.getElementById('sat').onchange=reflectFav;
+document.getElementById('fav').onclick=function(){
+var s=document.getElementById('sat');var o=s.options[s.selectedIndex];if(!o)return;
+j('/api/fav?norad='+o.value,{method:'POST'}).then(r=>{o.dataset.fav=r.fav?1:0;
+o.textContent=o.textContent.replace(/ \u2605$/,'')+(r.fav?' \u2605':'');reflectFav()})}
+document.getElementById('mRadio').onclick=function(){setMode('rad')}
+document.getElementById('mMan').onclick=function(){setMode('man')}
+document.getElementById('mOrb').onclick=function(){setMode('orb')}
+document.querySelectorAll('button[data-k]').forEach(b=>{b.onclick=function(){
+j('/api/cmd?k='+encodeURIComponent(b.dataset.k),{method:'POST'}).then(tick)}})
+document.querySelectorAll('button[data-m]').forEach(b=>{b.onclick=function(){
+j('/api/cmd?man=1&k='+encodeURIComponent(b.dataset.m),{method:'POST'}).then(tick)}})
+loadSats();tick();setInterval(tick,1500);
+</script></body></html>)HTMLPAGE";
+
+void App::serviceWebd() {
+  // Start/stop the listener with the enable flag and WiFi state.
+  if (cfg.webEnable && net.connected()) {
+    if (!webd) { webd = new WiFiServer(cfg.webPort); webd->begin(); webd->setNoDelay(true); }
+  } else {
+    if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf = ""; }
+    return;
+  }
+  // Accept one client at a time.
+  if (!webdCli || !webdCli.connected()) {
+    WiFiClient nc = webd->available();
+    if (nc) { webdCli = nc; webdBuf = ""; }
+  }
+  if (!webdCli || !webdCli.connected()) return;
+  // Read the request line + headers without blocking. We only need the request
+  // line (method + path); we drain the rest until a blank line, then respond.
+  int guard = 0;
+  while (webdCli.available() && guard++ < 1024) {
+    char ch = (char)webdCli.read();
+    if (ch == '\r') continue;
+    if (ch == '\n') {
+      if (webdBuf.length() == 0) {          // blank line: end of headers
+        webdHandleRequest(webdReqLine);
+        webdCli.stop();
+        webdReqLine = "";
+        return;
+      }
+      if (webdReqLine.length() == 0) webdReqLine = webdBuf;  // first line = request line
+      webdBuf = "";
+    } else if (webdBuf.length() < 200) {
+      webdBuf += ch;
+    }
+  }
+}
+
+// Route one HTTP request by method + path (only the verbs/paths we serve).
+void App::webdHandleRequest(const String& reqLine) {
+  // reqLine looks like "GET /api/status?x=1 HTTP/1.1"
+  int sp1 = reqLine.indexOf(' ');
+  int sp2 = reqLine.indexOf(' ', sp1 + 1);
+  if (sp1 < 0 || sp2 < 0) { webdCli.print(F("HTTP/1.1 400 Bad Request\r\n\r\n")); return; }
+  String method = reqLine.substring(0, sp1);
+  String path   = reqLine.substring(sp1 + 1, sp2);
+
+  if (path == "/" || path.startsWith("/index")) { webdSendPage(); return; }
+  if (path.startsWith("/api/status")) { webdSendStatusJson(); return; }
+  if (path.startsWith("/api/sats"))   { webdSendSatsJson();   return; }
+  if (path.startsWith("/api/passes")) { webdSendPassesJson(); return; }
+  if (path.startsWith("/api/orbit"))  { webdSendOrbitJson();  return; }
+
+  if (method == "POST" && path.startsWith("/api/select")) {
+    int q = path.indexOf("norad=");
+    uint32_t n = (q >= 0) ? (uint32_t)strtoul(path.c_str() + q + 6, nullptr, 10) : 0;
+    bool ok = (n != 0) && webdSelectSat(n);
+    webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                    "Connection:close\r\n\r\n"));
+    webdCli.print(ok ? F("{\"ok\":true}") : F("{\"ok\":false}"));
+    return;
+  }
+  if (method == "POST" && path.startsWith("/api/fav")) {
+    int q = path.indexOf("norad=");
+    uint32_t n = (q >= 0) ? (uint32_t)strtoul(path.c_str() + q + 6, nullptr, 10) : 0;
+    bool nowFav = false;
+    if (n != 0) { toggleFav(n); nowFav = isFav(n); }
+    webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                    "Connection:close\r\n\r\n"));
+    String o = "{\"ok\":"; o += (n ? "true" : "false");
+    o += ",\"fav\":"; o += (nowFav ? "true" : "false"); o += "}";
+    webdCli.print(o);
+    return;
+  }
+  if (method == "POST" && path.startsWith("/api/cmd")) {
+    int q = path.indexOf("k=");
+    char k = 0;
+    if (q >= 0) {
+      String kv = path.substring(q + 2);
+      int amp = kv.indexOf('&'); if (amp >= 0) kv = kv.substring(0, amp);
+      // single char, URL-decoded for the few we use (',' '/' letters arrive raw;
+      // '%2C'/'%2F' handled for safety).
+      if (kv.startsWith("%2C") || kv.startsWith("%2c")) k = ',';
+      else if (kv.startsWith("%2F") || kv.startsWith("%2f")) k = '/';
+      else if (kv.length() > 0) k = kv[0];
+    }
+    // Only accept the in-place Track controls the page exposes; ignore anything
+    // that would navigate or that isn't a safe live control. With man=1 the key
+    // is run in Manual-calculator context instead (adds 'u' to swap the held leg).
+    bool manual = (path.indexOf("man=1") >= 0);
+    bool allowed = (k==','||k=='/'||k=='t'||k=='d'||k=='r'||k=='o'||k=='m'||k=='x'||k=='s'||k=='y'
+                    || (manual && (k=='u'||k=='m'||k==','||k=='/'||k=='t'||k=='x'||k=='s')));
+    if (allowed) {
+      Screen save = screen;
+      if (manual) {
+        screen = SCR_MANUAL;          // run the control in the Manual calculator
+        keyManual(k, false, false);
+        if (screen == SCR_MANUAL) screen = save;
+      } else {
+        screen = SCR_TRACK;           // run the control in its native context
+        keyTrack(k, false, false);
+        if (screen == SCR_TRACK) screen = save;   // don't yank the device's own view
+      }
+      lastDrawMs = 0;
+    }
+    webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                    "Connection:close\r\n\r\n{\"ok\":true}"));
+    return;
+  }
+  webdCli.print(F("HTTP/1.1 404 Not Found\r\nConnection:close\r\n\r\n"));
+}
+
+void App::webdSendPage() {
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:text/html; charset=utf-8\r\n"
+                  "Cache-Control:no-store\r\nConnection:close\r\n\r\n"));
+  // Stream the PROGMEM page in chunks so we never copy it whole into RAM.
+  const char* p = WEB_PAGE;
+  char buf[128]; size_t i = 0;
+  char c;
+  while ((c = pgm_read_byte(p++)) != 0) {
+    buf[i++] = c;
+    if (i == sizeof(buf)) { webdCli.write((const uint8_t*)buf, i); i = 0; }
+  }
+  if (i) webdCli.write((const uint8_t*)buf, i);
+}
+
+void App::webdSendStatusJson() {
+  SatEntry* s = activeSat();
+  LiveLook L = (s && timeIsSet()) ? pred.look(nowUtc()) : LiveLook();
+  uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+  if (s && activeTxCount > 0) {
+    Transponder& t = activeTx[curTx];
+    Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
+    Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+  }
+  const char* mtag = (tuneMode == TM_FULL) ? "FULL" : (tuneMode == TM_DL) ? "DL"
+                   : (tuneMode == TM_UL) ? "UL" : (trackMode == 0 ? "TUNE" : "CAL");
+
+  // Manual-mode legs: the HOLD leg (parked nominal, no Doppler) and the TUNE leg
+  // (Doppler-corrected, round-trip on a linear bird) -- the same numbers the
+  // on-device Manual calculator shows, so the web page can offer manual tuning.
+  bool haveUp = (ulOp != 0);
+  bool fixUp  = haveUp && manFixUp;
+  uint32_t holdHz = 0, tuneHz = 0;
+  if (s && activeTxCount > 0) {
+    Transponder& t = activeTx[curTx];
+    bool linear = t.isLinear && t.bandwidth() > 0;
+    int64_t dnPark = (int64_t)dlOp + calDl;
+    int64_t upPark = (int64_t)ulOp + calUl;
+    if (!fixUp) {
+      holdHz = (uint32_t)(dnPark > 0 ? dnPark : 0);          // hold downlink
+      tuneHz = (haveUp && linear)
+             ? Predictor::uplinkForFixedDownlink(dlOp, ulOp, t.invert, L.rangeRate, calDl, calUl)
+             : tx;
+    } else {
+      holdHz = (uint32_t)(upPark > 0 ? upPark : 0);          // hold uplink
+      tuneHz = linear
+             ? Predictor::downlinkForFixedUplink(dlOp, ulOp, t.invert, L.rangeRate, calDl, calUl)
+             : rx;
+    }
+  }
+
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                  "Connection:close\r\n\r\n"));
+  String j = "{";
+  j += "\"name\":\""; j += (s ? s->name : ""); j += "\",";
+  j += "\"norad\":"; j += (s ? s->norad : 0); j += ",";
+  j += "\"rx\":\""; j += (activeTxCount > 0 ? fmtMHz(rx) : String("--.-----")); j += "\",";
+  j += "\"tx\":\""; j += ((activeTxCount > 0 && ulOp) ? fmtMHz(tx) : String("--.-----")); j += "\",";
+  j += "\"az\":"; j += String(L.az, 1); j += ",";
+  j += "\"el\":"; j += String(L.el, 1); j += ",";
+  j += "\"mode\":\""; j += mtag; j += "\",";
+  j += "\"radio\":"; j += (radioOut ? "true" : "false"); j += ",";
+  j += "\"rot\":"; j += (rotOut ? "true" : "false"); j += ",";
+  j += "\"fixup\":"; j += (fixUp ? "true" : "false"); j += ",";
+  j += "\"haveup\":"; j += (haveUp ? "true" : "false"); j += ",";
+  j += "\"hold\":\""; j += (holdHz ? fmtMHz(holdHz) : String("--.-----")); j += "\",";
+  j += "\"tune\":\""; j += (tuneHz ? fmtMHz(tuneHz) : String("--.-----")); j += "\"";
+  j += "}";
+  webdCli.print(j);
+}
+
+void App::webdSendSatsJson() {
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                  "Connection:close\r\n\r\n["));
+  // Favorites first; if none are marked, fall back to the whole catalog (capped).
+  bool any = false; int emitted = 0;
+  for (int i = 0; i < favN && emitted < 60; ++i) {
+    int idx = db.indexOfNorad(favs[i]);
+    if (idx < 0) continue;
+    SatEntry& s = db.at(idx);
+    if (any) webdCli.print(',');
+    String o = "{\"n\":"; o += s.norad; o += ",\"name\":\""; o += s.name; o += "\",\"fav\":true}";
+    webdCli.print(o); any = true; emitted++;
+  }
+  if (!any) {
+    int n = db.count();
+    for (int i = 0; i < n && emitted < 60; ++i) {
+      SatEntry& s = db.at(i);
+      if (any) webdCli.print(',');
+      String o = "{\"n\":"; o += s.norad; o += ",\"name\":\""; o += s.name;
+      o += "\",\"fav\":"; o += (isFav(s.norad) ? "true" : "false"); o += "}";
+      webdCli.print(o); any = true; emitted++;
+    }
+  }
+  webdCli.print(']');
+}
+
+void App::webdSendPassesJson() {
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                  "Connection:close\r\n\r\n["));
+  SatEntry* s = activeSat();
+  if (s && timeIsSet()) {
+    PassPredict pp[8];
+    int n = pred.predictPasses(nowUtc(), cfg.minPassEl, pp, 8);
+    for (int i = 0; i < n; ++i) {
+      if (i) webdCli.print(',');
+      String o = "{\"aos\":"; o += (uint32_t)pp[i].aos;
+      o += ",\"los\":"; o += (uint32_t)pp[i].los;
+      o += ",\"tca\":"; o += (uint32_t)pp[i].tca;
+      o += ",\"el\":"; o += (int)(pp[i].maxEl + 0.5f);
+      o += ",\"azaos\":"; o += (int)(pp[i].azAos + 0.5f);
+      o += ",\"azlos\":"; o += (int)(pp[i].azLos + 0.5f);
+      o += "}";
+      webdCli.print(o);
+    }
+  }
+  webdCli.print(']');
+}
+
+// GET /api/orbit -- the orbital-analysis numbers, the same values the nine
+// on-device Orbit pages show, as one JSON object. buildOrbit() populates the
+// member fields (decay, ascending node, pass-window stats, next-pass sunlit
+// fraction); the per-page scalars below re-derive from the elements with the
+// identical formulas drawOrbit() uses, so the web view never disagrees with the
+// device. Two pages are curves: "track" (sub-points over the next ~2 orbits) and
+// "doppler" (Hz across the next pass) are emitted as short arrays.
+void App::webdSendOrbitJson() {
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                  "Connection:close\r\n\r\n"));
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet() || s->meanMotion <= 0) { webdCli.print(F("{\"ok\":false}")); return; }
+
+  buildOrbit(true);                              // populate the member fields (headless)
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  time_t now = nowUtc();
+
+  const double MU = 398600.4418, RE = 6378.137, D2R = 0.017453292519943295;
+  const double C_KM = 299792.458, J2 = 0.00108262998905, DPD = 57.29577951308232 * 86400.0;
+  double mm = s->meanMotion;
+  double periodMin = (mm > 0) ? 1440.0 / mm : 0;
+  double nrad = mm * 6.283185307179586 / 86400.0;
+  double a = (nrad > 0) ? pow(MU / (nrad * nrad), 1.0 / 3.0) : 0;
+  double apo = a * (1 + s->ecc) - RE, peri = a * (1 - s->ecc) - RE;
+  auto fpDia = [&](double h){ return (h > 0) ? 2.0 * RE * acos(RE / (RE + h)) : 0.0; };
+
+  LiveLook L = pred.look(now);
+  double altNow = L.satAltKm;
+  double maNow = fmod(s->ma + 360.0 * mm * (now - s->epochUnix) / 86400.0, 360.0);
+  if (maNow < 0) maNow += 360.0;
+
+  // J2 secular drifts.
+  double ci = cos(s->incl * D2R), pp2 = a * (1.0 - s->ecc * s->ecc);
+  double ReP2 = (pp2 > 0) ? (RE / pp2) * (RE / pp2) : 0.0;
+  double Odot = -1.5 * nrad * J2 * ReP2 * ci * DPD;
+  double Wdot = 0.75 * nrad * J2 * ReP2 * (5 * ci * ci - 1) * DPD;
+
+  // Beta angle + eclipse fraction over one orbit.
+  double beta = pred.betaAngleDeg(now, s->incl, s->raan);
+  double hMean = a - RE;
+  double betaStar = (hMean > 0) ? acos(RE / (RE + hMean)) / D2R : 0.0;
+  int Necl = 120, ecl = 0;
+  time_t period = (time_t)(periodMin * 60.0 + 0.5);
+  for (int k = 0; period > 0 && k < Necl; ++k)
+    if (!pred.sunlitAt(now + (time_t)((double)period * k / Necl))) ecl++;
+  double fEcl = Necl ? (double)ecl / Necl : 0.0;
+
+  // Orbit position: true anomaly via equation of centre, time to peri/apo.
+  double periodS = (mm > 0) ? 86400.0 / mm : 0.0, e = s->ecc, M = maNow * D2R;
+  double nu = M + (2*e - 0.25*e*e*e) * sin(M) + 1.25*e*e * sin(2*M)
+            + (13.0/12.0)*e*e*e * sin(3*M);
+  double u = fmod(s->argp + nu / D2R, 360.0); if (u < 0) u += 360.0;
+  double toPeri = (360.0 - maNow) / 360.0 * periodS;
+  double toApo  = fmod((180.0 - maNow + 360.0), 360.0) / 360.0 * periodS;
+
+  auto num = [](double v, int dp){ char b[24]; snprintf(b, sizeof(b), "%.*f", dp, v); return String(b); };
+
+  String j = "{\"ok\":true,";
+  j += "\"name\":\""; j += s->name; j += "\",\"norad\":"; j += s->norad; j += ",";
+  // page 0: info
+  j += "\"alt\":"; j += num(altNow,0); j += ",\"footprint\":"; j += num(fpDia(altNow),0); j += ",";
+  j += "\"period\":"; j += num(periodMin,1); j += ",\"apo\":"; j += num(apo,0);
+  j += ",\"peri\":"; j += num(peri,0); j += ",\"sma\":"; j += num(a,0); j += ",";
+  j += "\"incl\":"; j += num(s->incl,2); j += ",\"ecc\":"; j += num(s->ecc,5);
+  j += ",\"bstar\":"; j += num(s->bstar,6); j += ",";
+  j += "\"decayDays\":"; j += num(orbDecayDays,1);
+  j += ",\"decayLo\":"; j += num(orbDecayLo,1); j += ",\"decayHi\":"; j += num(orbDecayHi,1); j += ",";
+  j += "\"ascLon\":"; j += num(orbAscLon,1); j += ",\"ascT\":"; j += (uint32_t)orbAscT; j += ",";
+  // page 1: live
+  j += "\"az\":"; j += num(L.az,1); j += ",\"el\":"; j += num(L.el,1);
+  j += ",\"range\":"; j += num(L.rangeKm,0); j += ",\"rangeRate\":"; j += num(L.rangeRate,3); j += ",";
+  j += "\"subLat\":"; j += num(L.subLat,2); j += ",\"subLon\":"; j += num(L.subLon,2);
+  j += ",\"sunlit\":"; j += (L.sunlit ? "true" : "false");
+  j += ",\"eclDepth\":"; j += num(pred.eclipseDepthDeg(now),1); j += ",";
+  // page 2: next pass
+  j += "\"hasPass\":"; j += (orbHasPass ? "true" : "false");
+  if (orbHasPass) {
+    j += ",\"pAos\":"; j += (uint32_t)orbPass.aos; j += ",\"pLos\":"; j += (uint32_t)orbPass.los;
+    j += ",\"pMaxEl\":"; j += num(orbPass.maxEl,1); j += ",\"pAzAos\":"; j += num(orbPass.azAos,0);
+    j += ",\"pAzLos\":"; j += num(orbPass.azLos,0); j += ",\"pSunPct\":"; j += num(orbSunPct,0);
+  }
+  j += ",";
+  // page 5: nodal / J2
+  j += "\"nodeDrift\":"; j += num(Odot,3); j += ",\"perigDrift\":"; j += num(Wdot,3);
+  j += ",\"sunSync\":"; j += ((fabs(Odot - 0.98565) < 0.05) ? "true" : "false"); j += ",";
+  // page 6: sun / beta
+  j += "\"beta\":"; j += num(beta,1); j += ",\"betaStar\":"; j += num(betaStar,1);
+  j += ",\"eclFrac\":"; j += num(fEcl*100.0,0); j += ",";
+  // page 7: outlook
+  j += "\"outlookN\":"; j += orbOutlookN; j += ",\"outlookHi\":"; j += orbOutlookHi;
+  j += ",\"bestEl\":"; j += num(orbBestEl,0); j += ",\"bestT\":"; j += (uint32_t)orbBestT;
+  j += ",\"longestMin\":"; j += num(orbLongestMin,1); j += ",\"avgGapH\":"; j += num(orbAvgGapH,1); j += ",";
+  // page 8: orbit position
+  j += "\"meanAnom\":"; j += num(maNow,1); j += ",\"trueAnom\":"; j += num(nu/D2R,1);
+  j += ",\"argLat\":"; j += num(u,1); j += ",\"toPeri\":"; j += (long)toPeri;
+  j += ",\"toApo\":"; j += (long)toApo; j += ",\"argp\":"; j += num(s->argp,1);
+  j += ",\"raan\":"; j += num(s->raan,1);
+  webdCli.print(j);
+
+  // page 3: ground track -- sub-points over the next ~2 orbits (downsampled).
+  webdCli.print(F(",\"track\":["));
+  { int N = 36; double pS = (mm > 0) ? 86400.0 / mm : 0;
+    for (int i = 0; i <= N; ++i) {
+      LiveLook P = pred.look(now + (time_t)(pS * 2 * i / N));
+      if (i) webdCli.print(',');
+      String o = "["; o += num(P.subLat,1); o += ","; o += num(P.subLon,1); o += "]";
+      webdCli.print(o);
+    }
+  }
+  webdCli.print(']');
+
+  // page 4: doppler curve across the next pass (Hz at the beacon ref freq).
+  webdCli.print(F(",\"doppler\":["));
+  if (orbHasPass) {
+    int N = 40; double dur = (double)(orbPass.los - orbPass.aos), fbHz = cfg.beaconMHz * 1e6;
+    for (int i = 0; i < N; ++i) {
+      double t = (double)orbPass.aos + dur * i / (N - 1);
+      long dop = lround(-pred.rangeRateAt(t) / C_KM * fbHz);
+      if (i) webdCli.print(',');
+      webdCli.print(dop);
+    }
+  }
+  webdCli.print(F("],\"beaconMHz\":"));
+  webdCli.print(num(cfg.beaconMHz, 3));
+  webdCli.print('}');
+}
+
+// Make the given NORAD the active satellite, mirroring the keySatList ENTER path
+// (set the predictor, load transponders, recenter the passband). Returns false
+// if the NORAD isn't in the catalog.
+bool App::webdSelectSat(uint32_t norad) {
+  int idx = db.indexOfNorad(norad);
+  if (idx < 0) return false;
+  SatEntry& s = db.at(idx);
+  satSel = idx;
+  pred.setSite(loc.obs());
+  pred.setSat(s);
+  ensureTransponders(s);
+  onTransponderChanged();
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 //  Low-precision Sun & Moon topocentric az/el (degrees) for an observer.
 //  Sun ~0.01 deg; Moon ~a few arc-min after the listed perturbations and a
@@ -7185,6 +7799,7 @@ void App::loop() {
   if (rot) rot->service();    // self-driven rotators (Yaesu direct) run their loop here
   serviceRigctld();           // rigctld TCP server: let a PC drive the rig via CardSat
   serviceRotctld();           // rotctld TCP server: let a PC drive the wired rotator
+  serviceWebd();              // mobile web control page (opt-in, over the WiFi LAN)
   if (cfg.useGps) {
     if (loc.pollGps()) { pred.setSite(loc.obs()); }
   }
@@ -7201,9 +7816,9 @@ void App::loop() {
   refreshScheduleIfNeeded();   // keep the all-favorites schedule fresh
   serviceAosAlarm();           // countdown beeps + flash before AOS
 
-  // Accelerometer (tilt) passband tuning -- opt-in, ADV-only, self-gated to
-  // Track/Big in TUNE mode. Keep the backlight awake while it's actively moving
-  // the passband so the operator can see the readout change.
+  // Accelerometer (tilt) passband tuning -- opt-in, ADV-only, self-gated to the
+  // Track/Big/Manual screens in TUNE mode. Keep the backlight awake while it's
+  // actively moving the passband so the operator can see the readout change.
   if (cfg.tiltTune && imuReady) {
     int32_t before = pbOffset;
     serviceTiltTune();
@@ -7411,7 +8026,7 @@ void App::loop() {
     }
   // Redraw cadence is still screen-dependent (the radio/rotator service above is
   // not): refresh the live screens periodically; static ones redraw on keypress.
-  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_WORLDMAP ||
+  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUALBIG || screen == SCR_POLAR || screen == SCR_WORLDMAP ||
       screen == SCR_ROTMAN || screen == SCR_GPS || screen == SCR_MANUAL ||
       (screen == SCR_ORBIT && orbitPage <= 2) || screen == SCR_SUNMOON ||
       screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC) {
@@ -7513,6 +8128,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_PASSDETAIL: keyPassDetail(c, enter, back); break;
     case SCR_TRACK:    keyTrack(c, enter, back); break;
     case SCR_BIG:      keyBig(c, enter, back); break;
+    case SCR_MANUALBIG: keyManualBig(c, enter, back); break;
     case SCR_MANUAL:   keyManual(c, enter, back); break;
     case SCR_POLAR:    keyPolar(c, enter, back); break;
     case SCR_PASSPOLAR: keyPassPolar(c, enter, back); break;
@@ -7958,6 +8574,7 @@ void App::keyManual(char c, bool enter, bool back) {
                   liveReturn = SCR_MANUAL; screen = SCR_DXCC; lastDrawMs = 0; return; }
   if (c == 'p') { polarPathValid = false; liveReturn = SCR_MANUAL; screen = SCR_POLAR;
                   lastDrawMs = 0; return; }
+  if (c == 'z') { screen = SCR_MANUALBIG; lastDrawMs = 0; return; }  // large-font Manual
   if (enter) {                                       // persist calibration for THIS sat
     SatEntry* s = activeSat();
     if (s) { saveCalForSat(s->norad);
@@ -8064,8 +8681,8 @@ void App::drawMutual() {
     MutualWindow& m = mutual[i];
     long secs = (long)(m.end - m.start);
     int y = 38 + v*10;
-    if (i == mutualSel) { canvas.fillRect(0, y-1, 240, 10, CL_GREEN);
-                          canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    if (i == mutualSel) { canvas.fillRect(0, y-1, 240, 10, CL_SELBG);
+                          canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                  canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y);
     canvas.printf("%s %ld:%02ld %3.0f %3.0f", fmtMDHM(m.start).c_str(),
@@ -8292,7 +8909,7 @@ void App::keyUpdate(char c, bool enter, bool back) {
   if (c == 'k' || enter) { doUpdateGp(); }
   if (c == 'a') { doCacheAllTransponders(); }   // cache all TX for offline use
   if (c == 'w') {
-    setStatus(net.connect(cfg.ssid, cfg.pass) ? "WiFi connected" : "WiFi failed");
+    setStatus(connectWifiCfg() ? "WiFi connected" : "WiFi failed");
   }
 }
 
@@ -8307,7 +8924,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,48,49,25,43};
-static const int SET_NET[]   = {4,5,6,20,41,42,27,28,29};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
   (int)(sizeof(SET_RADIO)/sizeof(int)), (int)(sizeof(SET_ROTOR)/sizeof(int)),
@@ -8425,7 +9042,15 @@ void App::keySettings(char c, bool enter, bool back) {
               editBuf = cfg.ssid; screen = SCR_EDIT; break;
       case 5: editTarget = 202; editTitle = "WiFi password";
               editBuf = cfg.pass; screen = SCR_EDIT; break;
-      case 6: setStatus(net.connect(cfg.ssid, cfg.pass) ? "WiFi OK" : "WiFi FAIL");
+      case 50: editTarget = 205; editTitle = "WiFi 2 SSID";
+               editBuf = cfg.ssid2; screen = SCR_EDIT; break;
+      case 51: editTarget = 206; editTitle = "WiFi 2 password";
+               editBuf = cfg.pass2; screen = SCR_EDIT; break;
+      case 52: cfg.webEnable = !cfg.webEnable; cfg.save();
+               setStatus(cfg.webEnable ? "Web control ON" : "Web control OFF"); break;
+      case 53: { long p = (long)cfg.webPort + dir; if (p < 1) p = 65535;
+                 if (p > 65535) p = 1; cfg.webPort = (uint16_t)p; cfg.save(); } break;
+      case 6: setStatus(connectWifiCfg() ? "WiFi OK" : "WiFi FAIL");
               break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
@@ -8514,6 +9139,10 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.ssid[sizeof(cfg.ssid)-1] = 0; break;
       case 202: strncpy(cfg.pass, editBuf.c_str(), sizeof(cfg.pass)-1);
                 cfg.pass[sizeof(cfg.pass)-1] = 0; break;
+      case 205: strncpy(cfg.ssid2, editBuf.c_str(), sizeof(cfg.ssid2)-1);
+                cfg.ssid2[sizeof(cfg.ssid2)-1] = 0; break;
+      case 206: strncpy(cfg.pass2, editBuf.c_str(), sizeof(cfg.pass2)-1);
+                cfg.pass2[sizeof(cfg.pass2)-1] = 0; break;
       case 203: strncpy(cfg.gpUrl, editBuf.c_str(), sizeof(cfg.gpUrl)-1);
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;
       case 204: strncpy(cfg.myCall, editBuf.c_str(), sizeof(cfg.myCall)-1);
@@ -8951,7 +9580,7 @@ void App::seedQsoSatDefaults() {
 // after the fact. Radio control, if engaged, keeps running.
 void App::beginQso() {
   logReturn = screen;
-  bool live = (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_MANUAL);
+  bool live = (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_MANUAL || screen == SCR_MANUALBIG);
   memset(&qso, 0, sizeof(qso));
   strncpy(qso.rstS, "59", sizeof(qso.rstS) - 1);
   strncpy(qso.rstR, "59", sizeof(qso.rstR) - 1);
@@ -9141,8 +9770,8 @@ void App::drawLog() {
   const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF" };
   for (int i = 0; i < 3; ++i) {
     int y = 26 + i*14;
-    if (i == logMenuSel) { canvas.fillRect(0, y-2, 240, 13, CL_GREEN);
-                           canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    if (i == logMenuSel) { canvas.fillRect(0, y-2, 240, 13, CL_SELBG);
+                           canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                   canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(6, y); canvas.print(items[i]);
   }
@@ -9373,6 +10002,7 @@ void App::draw() {
     case SCR_PASSDETAIL: drawPassDetail(); break;
     case SCR_TRACK:    drawTrack(); break;
     case SCR_BIG:      drawBig(); break;
+    case SCR_MANUALBIG: drawManualBig(); break;
     case SCR_MANUAL:   drawManual(); break;
     case SCR_POLAR:    drawPolar(); break;
     case SCR_PASSPOLAR: drawPassPolar(); break;
@@ -10020,13 +10650,13 @@ static const char* solarActLabel(uint8_t a) {
        : a == SOLAR_AUTO ? "auto" : "mean");
 }
 
-void App::buildOrbit() {
+void App::buildOrbit(bool quiet) {
   orbHasPass = false; orbEcl = false; orbVisible = false; orbSunPct = 0;
   orbAscT = 0; orbAscLon = 0; orbEclT0 = 0; orbEclT1 = 0;
   orbDecayDays = -1; orbDecayLo = -1; orbDecayHi = -1;
   SatEntry* s = activeSat();
   if (!s || !timeIsSet() || s->meanMotion <= 0) return;
-  setStatus("Analyzing orbit..."); draw();
+  if (!quiet) { setStatus("Analyzing orbit..."); draw(); }
   pred.setSite(loc.obs()); pred.setSat(*s);
   time_t now = nowUtc();
   double periodSec = 86400.0 / s->meanMotion;
@@ -10092,7 +10722,7 @@ void App::buildOrbit() {
     if (n > 1)
       orbAvgGapH = (float)(visPasses[n - 1].aos - visPasses[0].aos) / (n - 1) / 3600.0f;
   }
-  setStatus("");
+  if (!quiet) setStatus("");
 }
 
 void App::drawOrbit() {
@@ -10905,7 +11535,7 @@ void App::keySpaceWx(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (c == 'r') {
-    if (!net.connected()) net.connect(cfg.ssid, cfg.pass);
+    if (!net.connected()) connectWifiCfg();
     if (net.connected()) {
       float beforeF = spaceF107, beforeK = spaceKp;
       fetchSpaceWeather();
@@ -11008,7 +11638,7 @@ void App::keyWeather(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (c == 'r') {
-    if (!net.connected()) net.connect(cfg.ssid, cfg.pass);
+    if (!net.connected()) connectWifiCfg();
     if (net.connected()) {
       const Observer& o = loc.obs();
       if (!(o.lat != 0.0 || o.lon != 0.0)) { setStatus("Set a location first"); }
@@ -12100,8 +12730,8 @@ void App::drawGpSrc() {
   if (gpSrcScroll < 0) gpSrcScroll = 0;
   for (int r = 0; r < VIS && gpSrcScroll + r < GP_SRC_N; ++r) {
     int i = gpSrcScroll + r, y = 18 + r * 11;
-    if (i == gpSrcSel) { canvas.fillRect(0, y - 2, 240, 11, CL_GREEN);
-                         canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    if (i == gpSrcSel) { canvas.fillRect(0, y - 2, 240, 11, CL_SELBG);
+                         canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                 canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(6, y); canvas.print(GP_SRC[i].label);
   }
@@ -12154,8 +12784,8 @@ void App::drawHome() {
   canvas.setTextSize(1);
   for (int r = 0; r < VIS && (homeScroll + r) < N; ++r) {
     int i = homeScroll + r, y = 18 + r * 11;
-    if (i == homeSel) { canvas.fillRect(0, y - 2, 240, 11, CL_GREEN);
-                        canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    if (i == homeSel) { canvas.fillRect(0, y - 2, 240, 11, CL_SELBG);
+                        canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(6, y); canvas.print(items[i]);
   }
@@ -12202,8 +12832,8 @@ void App::drawSchedule() {
     int i = scroll + v;
     SchedEntry& e = sched[i];
     int y = 28 + v*10;
-    if (i == schedSel) { canvas.fillRect(0, y-1, 240, 10, CL_GREEN);
-                         canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    if (i == schedSel) { canvas.fillRect(0, y-1, 240, 10, CL_SELBG);
+                         canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else canvas.setTextColor(e.inProgress ? CL_GREEN : CL_WHITE, CL_BLACK);
     String when = e.inProgress ? String("NOW") : fmtCountdown((long)(e.aos - now));
     long lenMin = (e.los - e.aos) / 60;
@@ -12241,8 +12871,8 @@ void App::drawSatList() {
     int vi = satScroll + row;
     SatEntry& s = db.at(view[vi]);
     int y = 20 + row*10;
-    if (vi == viewSel) { canvas.fillRect(0, y-1, 240, 10, CL_GREEN);
-                         canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    if (vi == viewSel) { canvas.fillRect(0, y-1, 240, 10, CL_SELBG);
+                         canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                 canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y);
     canvas.printf("%c%-21s%5lu", isFav(s.norad) ? '*' : ' ',
@@ -12296,8 +12926,8 @@ void App::drawPasses() {
     int y = 30 + i*10;
     PassPredict& p = passes[i];
     long mins = (p.los - p.aos) / 60;
-    if (i == passSel) { canvas.fillRect(0, y-1, 240, 10, CL_GREEN);
-                        canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    if (i == passSel) { canvas.fillRect(0, y-1, 240, 10, CL_SELBG);
+                        canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y);
     canvas.printf("%s  %2ldm %3.0f %s",
@@ -12495,10 +13125,14 @@ void App::drawBig() {
 
   LiveLook L = timeIsSet() ? pred.look(nowUtc()) : LiveLook();
 
-  // --- name + radio/rotator state badges (small) ---
+  // Big-screen frequency string: 4 decimals (10 Hz) keeps even L-band birds inside
+  // the panel at the large font, e.g. "145.9970" / "1296.5000".
+  auto fmtBig = [](uint32_t hz) { return fmtMHzN(hz, 4); };
+
+  // --- name + radio/rotator/tilt state badges (small) ---
   canvas.setTextSize(1);
   canvas.setTextColor(CL_CYAN, CL_BLACK);
-  canvas.setCursor(4, 3); canvas.printf("%-.20s", s->name);
+  canvas.setCursor(4, 3); canvas.printf("%-.18s", s->name);
   canvas.setCursor(168, 3);
   canvas.setTextColor(radioOut ? CL_GREEN : CL_GREY, CL_BLACK); canvas.print("RAD");
   canvas.setCursor(198, 3);
@@ -12508,7 +13142,7 @@ void App::drawBig() {
     canvas.setTextColor(trackMode == 0 ? CL_CYAN : CL_GREY, CL_BLACK); canvas.print("TILT");
   }
 
-  // --- RX / TX, the two numbers that matter, in size 3 ---
+  // --- RX / TX in the largest font that fits (size 4) ---
   uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
   if (activeTxCount > 0) {
     Transponder& t = activeTx[curTx];
@@ -12516,72 +13150,70 @@ void App::drawBig() {
     Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
   }
   canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(4, 20); canvas.print("RX");
-  canvas.setTextSize(3); canvas.setTextColor(CL_GREEN, CL_BLACK);
-  canvas.setCursor(28, 16);
-  canvas.print(activeTxCount > 0 ? fmtMHz(rx).c_str() : "--.----");
+  canvas.setCursor(2, 22); canvas.print("RX");
+  canvas.setTextSize(4); canvas.setTextColor(CL_GREEN, CL_BLACK);
+  canvas.setCursor(22, 18);
+  canvas.print(activeTxCount > 0 ? fmtBig(rx).c_str() : "--.----");
 
   canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(4, 47); canvas.print("TX");
-  canvas.setTextSize(3); canvas.setTextColor(CL_ORANGE, CL_BLACK);
-  canvas.setCursor(28, 43);
-  if (activeTxCount > 0 && ulOp) canvas.print(fmtMHz(tx).c_str());
+  canvas.setCursor(2, 58); canvas.print("TX");
+  canvas.setTextSize(4); canvas.setTextColor(CL_ORANGE, CL_BLACK);
+  canvas.setCursor(22, 54);
+  if (activeTxCount > 0 && ulOp) canvas.print(fmtBig(tx).c_str());
   else { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.print("rx only"); }
 
-  // --- Az / El in size 2 ---
+  // --- Az / El + active Doppler tune mode (size 2) ---
   canvas.setTextSize(2);
   canvas.setTextColor(L.visible ? CL_GREEN : CL_GREY, CL_BLACK);
-  canvas.setCursor(4, 78);
+  canvas.setCursor(4, 96);
   canvas.printf("Az%3.0f El%3.0f", L.az, L.el);
   if (timeIsSet() && L.visible && !L.sunlit) {        // in eclipse but workable
     canvas.setTextSize(1); canvas.setTextColor(CL_ORANGE, CL_BLACK);
-    canvas.setCursor(206, 84); canvas.print("ECL");
+    canvas.setCursor(206, 90); canvas.print("ECL");
   }
 
-  // --- big status line: countdown to LOS (if up) or AOS (if waiting) ---
-  canvas.setTextSize(2);
-  if (L.visible) {
-    canvas.setTextColor(CL_GREEN, CL_BLACK);
-    canvas.setCursor(4, 104);
-    long los = (alarmLos && (time_t)alarmLos > nowUtc())
-                 ? (long)((time_t)alarmLos - nowUtc()) : -1;
-    if (los >= 0) canvas.printf("LOS %s", fmtCountdown(los).c_str());
-    else          canvas.print("** WORKABLE **");
-  } else if (nextAos && (time_t)nextAos > nowUtc()) {
-    canvas.setTextColor(CL_YELLOW, CL_BLACK);
-    canvas.setCursor(4, 104);
-    canvas.printf("AOS %s", fmtCountdown((long)((time_t)nextAos - nowUtc())).c_str());
-  } else {
-    canvas.setTextColor(CL_GREY, CL_BLACK);
-    canvas.setCursor(4, 104); canvas.print("--");
-  }
-
-  // --- transponder index hint (small, bottom) ---
+  // --- bottom line: tune mode + passband position, mirroring Track ---
+  canvas.setTextSize(1);
   if (activeTxCount > 0) {
-    canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
-    canvas.setCursor(150, 110);
+    Transponder& t = activeTx[curTx];
+    bool linear = t.isLinear && t.bandwidth() > 0;
+    const char* mtag = (tuneMode == TM_FULL) ? "FULL"
+                     : (tuneMode == TM_DL)   ? "DL"
+                     : (tuneMode == TM_UL)   ? "UL"
+                     : (trackMode == 0 ? "TUNE" : "CAL");
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(4, 118);
+    if (linear && trackMode == 0) {
+      float posk = (pbOffset - (int32_t)(t.bandwidth()/2)) / 1000.0f;
+      canvas.printf("%s  PB %+.1fk%s", mtag, posk, t.invert ? " INV" : "");
+    } else {
+      canvas.printf("%s", mtag);
+    }
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(176, 118);
     canvas.printf("TX%d/%d", curTx + 1, activeTxCount);
   }
 
   canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(4, 126);
-  canvas.print(imuReady ? "z back  t r o l y=tilt" : "z back  t r o l");
+  canvas.setCursor(4, 128);
+  canvas.print(imuReady ? ",/tune d=mode t r o l z=back y=tilt"
+                        : ",/tune d=mode t r o l z=back");
 }
 
 void App::keyBig(char c, bool enter, bool back) {
   if (isBack(c, back) || c == 'z') { screen = SCR_TRACK; lastDrawMs = 0; return; }
-  // Keep the session controllable without leaving the big view.
-  if (c == 't' && activeTxCount > 0) {
-    curTx = (curTx + 1) % activeTxCount;
-    onTransponderChanged();
-    if (radioOut) applyTransponderModes(activeTx[curTx]);
-    lastDrawMs = 0; return;
-  }
+  // Everything else that's valid on Track stays valid here: passband tuning
+  // (,/; . and s/x), CAL trims, tune-mode cycling (m/d), transponder (t), radio
+  // (r), rotator (o), tilt (y), and logging (l). Delegate to keyTrack so the
+  // behaviour -- including the FULL/DL knob-driven guard -- is identical and lives
+  // in one place. keyTrack won't navigate away for any of these, so we just keep
+  // showing the big view.
   if (c == 'l') { beginQso(); return; }            // log keeps tracking
-  if (c == 'r' || c == 'o' || c == 'y') {           // radio/rotator/tilt toggles
+  bool nav = (c == 'f' || c == 'p' || c == 'g' || c == 'w' || c == 'e' ||
+              c == 'c');                            // keys that leave Track
+  if (!nav) {
     keyTrack(c, enter, back);
-    if (screen == SCR_BIG) lastDrawMs = 0;          // stay on Big
-    return;
+    if (screen == SCR_BIG) lastDrawMs = 0;          // stay on Big, force redraw
   }
 }
 
@@ -12691,6 +13323,10 @@ void App::drawManual() {
     canvas.setCursor(4, 79);
     canvas.printf("PB %+.1fk bw%.1fk %s%s", posk, halfk,
                   t.invert ? "INV " : "", trackMode == 0 ? "<TUNE>" : "");
+    if (cfg.tiltTune && imuReady && trackMode == 0) {
+      canvas.setTextColor(CL_CYAN, CL_BLACK);
+      canvas.setCursor(210, 79); canvas.print("TLT");
+    }
   } else if (haveUp) {
     // FM: indicate the fixed leg and its band.
     canvas.setTextColor(CL_GREY, CL_BLACK);
@@ -12721,6 +13357,106 @@ void App::drawManual() {
                           : ",/DN ;.UP u=leg s=stp x=0 m=tn t l p `bk");
   else
     footer(haveUp ? "u=leg m=cal t=tp l p ` back" : "m=cal t=tp l p ` back");
+}
+
+// Large-font version of the Manual calculator: the DN and UP frequencies a hand
+// operator parks/tunes, in big digits, with the same round-trip Doppler maths as
+// drawManual. Toggled from Manual with 'z'. No radio is driven here -- it's the
+// no-CAT frequency aid -- but tilt/Doppler-mode plumbing is irrelevant since the
+// Manual screen has no tuneMode knob-follow; the operator simply reads the two
+// numbers and tunes by hand.
+void App::drawManualBig() {
+  SatEntry* s = activeSat();
+  if (!s) { canvas.setTextSize(2); canvas.setTextColor(CL_GREY, CL_BLACK);
+            canvas.setCursor(6, 56); canvas.print("No satellite"); return; }
+
+  auto fmtBig = [](uint32_t hz) { return fmtMHzN(hz, 4); };
+
+  LiveLook L = timeIsSet() ? pred.look(nowUtc()) : LiveLook();
+
+  // --- name + range-rate badge (small) ---
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(4, 3); canvas.printf("%-.16s", s->name);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(150, 3); canvas.printf("%+5.2f km/s", L.rangeRate);
+  if (cfg.tiltTune && imuReady) {
+    canvas.setCursor(122, 3);
+    canvas.setTextColor(trackMode == 0 ? CL_CYAN : CL_GREY, CL_BLACK); canvas.print("TILT");
+  }
+
+  if (activeTxCount == 0) {
+    canvas.setTextSize(2); canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("No transponder");
+    return;
+  }
+
+  Transponder& t = activeTx[curTx];
+  bool linear = t.isLinear && t.bandwidth() > 0;
+  uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+  Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
+  Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+  bool haveUp = (ulOp != 0);
+  bool fixUp  = haveUp && manFixUp;
+
+  int64_t dnPark = (int64_t)dlOp + calDl;
+  int64_t upPark = (int64_t)ulOp + calUl;
+  uint32_t dnTune = rx;
+  if (haveUp && fixUp && linear)
+    dnTune = Predictor::downlinkForFixedUplink(dlOp, ulOp, t.invert, L.rangeRate, calDl, calUl);
+  uint32_t upTune = tx;
+  if (haveUp && !fixUp && linear)
+    upTune = Predictor::uplinkForFixedDownlink(dlOp, ulOp, t.invert, L.rangeRate, calDl, calUl);
+
+  uint32_t dnShow = (!fixUp) ? (uint32_t)(dnPark > 0 ? dnPark : 0) : dnTune;
+  uint32_t upShow = fixUp    ? (uint32_t)(upPark > 0 ? upPark : 0) : upTune;
+
+  // Big leg rows: HOLD leg in white, TUNE> leg in green, with a small tag.
+  auto bigRow = [&](int yLab, int yVal, const char* leg, uint32_t hz, bool fixed, bool show) {
+    canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(2, yLab); canvas.print(leg);
+    canvas.setCursor(2, yLab + 10);
+    canvas.setTextColor(fixed ? CL_WHITE : CL_GREEN, CL_BLACK);
+    canvas.print(fixed ? "HOLD" : "TUNE");
+    canvas.setTextSize(4);
+    canvas.setTextColor(fixed ? CL_WHITE : (leg[0] == 'D' ? CL_GREEN : CL_ORANGE), CL_BLACK);
+    canvas.setCursor(40, yVal);
+    if (show) canvas.print(fmtBig(hz).c_str());
+    else { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.print("rx only"); }
+  };
+
+  bigRow(20, 18, "DN", dnShow, !fixUp, true);
+  bigRow(60, 58, "UP", upShow, fixUp, haveUp);
+
+  // --- bottom line: which leg is fixed + passband + footer ---
+  canvas.setTextSize(2);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(4, 98);
+  if (haveUp) canvas.print(fixUp ? "Hold UP, tune DN" : "Hold DN, tune UP");
+  else        canvas.print("Receive only");
+
+  if (linear) {
+    canvas.setTextSize(1); canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    float posk = (pbOffset - (int32_t)(t.bandwidth()/2)) / 1000.0f;
+    canvas.setCursor(4, 118);
+    canvas.printf("PB %+.1fk%s", posk, t.invert ? " INV" : "");
+  }
+
+  canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 128);
+  canvas.print(haveUp ? ",/tune u=leg s x t z=back" : ",/tune s x t z=back");
+}
+
+void App::keyManualBig(char c, bool enter, bool back) {
+  if (isBack(c, back) || c == 'z') { screen = SCR_MANUAL; lastDrawMs = 0; return; }
+  // Delegate the in-place controls (u leg, m TUNE/CAL, ,/; . tune, s/x, t) to
+  // keyManual; suppress the keys that would navigate to another screen.
+  if (c == 'l') { beginQso(); return; }
+  bool nav = (c == 'f' || c == 'p' || c == 'g' || c == 'w' || c == 'e');
+  if (!nav) {
+    keyManual(c, enter, back);
+    if (screen == SCR_MANUALBIG) lastDrawMs = 0;
+  }
 }
 
 // Shared polar grid: elevation rings (0/30/60/90) + cardinal cross + labels.
@@ -12906,7 +13642,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 50;
+  const int N = 54;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -12915,6 +13651,12 @@ void App::drawSettings() {
   rows[4]  = String("WiFi SSID: ") + cfg.ssid;
   rows[5]  = String("WiFi pass: ") + String(strlen(cfg.pass) ? "******" : "(none)");
   rows[6]  = String("Save & test WiFi");
+  rows[50] = String("WiFi 2 SSID: ") + String(strlen(cfg.ssid2) ? cfg.ssid2 : "(none)");
+  rows[51] = String("WiFi 2 pass: ") + String(strlen(cfg.pass2) ? "******" : "(none)");
+  rows[52] = String("Web control: ") + (cfg.webEnable ? "on" : "off")
+             + (cfg.webEnable && net.connected()
+                ? String(" (http://") + WiFi.localIP().toString() + ")" : String(""));
+  rows[53] = String("Web port: ") + String(cfg.webPort);
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
   rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
@@ -12994,8 +13736,8 @@ void App::drawSettings() {
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {
       int y = 19 + v*11;
-      if (v == setSel) { canvas.fillRect(0, y-1, 240, 11, CL_GREEN);
-                         canvas.setTextColor(CL_BLACK, CL_GREEN); }
+      if (v == setSel) { canvas.fillRect(0, y-1, 240, 11, CL_SELBG);
+                         canvas.setTextColor(CL_BLACK, CL_SELBG); }
       else               canvas.setTextColor(CL_WHITE, CL_BLACK);
       canvas.setCursor(4, y); canvas.print(String(SET_CAT_NAME[v]) + "  >");
     }
@@ -13010,8 +13752,8 @@ void App::drawSettings() {
     int ai  = SET_CAT_ROWS[setCat][idx];
     int y = 19 + v*11;
     bool danger = (ai == 29);                     // "Reset all data (erase)"
-    if (idx == setSel) { canvas.fillRect(0, y-1, 240, 11, danger ? CL_RED : CL_GREEN);
-                         canvas.setTextColor(CL_BLACK, danger ? CL_RED : CL_GREEN); }
+    if (idx == setSel) { canvas.fillRect(0, y-1, 240, 11, danger ? CL_RED : CL_SELBG);
+                         canvas.setTextColor(CL_BLACK, danger ? CL_RED : CL_SELBG); }
     else                 canvas.setTextColor(danger ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(rows[ai]);
   }
@@ -13068,8 +13810,8 @@ void App::drawWifiScan() {
   for (int v = 0; v < VIS && (scroll + v) < wifiApCount; ++v) {
     int i = scroll + v;
     int y = 19 + v * 11;
-    if (i == wifiSel) { canvas.fillRect(0, y - 1, 240, 11, CL_GREEN);
-                        canvas.setTextColor(CL_BLACK, CL_GREEN); }
+    if (i == wifiSel) { canvas.fillRect(0, y - 1, 240, 11, CL_SELBG);
+                        canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y);
     canvas.printf("%-22.22s %4ddBm%s", wifiAp[i].ssid, (int)wifiAp[i].rssi,

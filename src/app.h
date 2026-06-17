@@ -16,7 +16,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -313,6 +313,12 @@ private:
   WiFiServer* rotd = nullptr;
   WiFiClient  rotdCli;             // single connected client
   String      rotdBuf;             // line-assembly buffer
+  // Mobile web control page: a phone on the LAN selects sats, sees passes, and
+  // drives the radio/rotator. One client at a time, serviced cooperatively.
+  WiFiServer* webd = nullptr;
+  WiFiClient  webdCli;            // single connected client
+  String      webdBuf;            // request-assembly buffer (request line + headers)
+  String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     screenAsleep = false;  // backlight blanked for power saving
@@ -349,6 +355,14 @@ private:
   void rigdHandleLine(const String& line);     // parse + act on one rigctld command
   void serviceRotctld();                       // pump the rotctld TCP server
   void rotdHandleLine(const String& line);     // parse + act on one rotctld command
+  void serviceWebd();                          // pump the mobile web-control server
+  void webdHandleRequest(const String& reqLine);  // route one HTTP request
+  void webdSendStatusJson();                   // GET /api/status
+  void webdSendSatsJson();                     // GET /api/sats
+  void webdSendPassesJson();                   // GET /api/passes
+  void webdSendOrbitJson();                     // GET /api/orbit (orbital analysis)
+  bool webdSelectSat(uint32_t norad);          // POST /api/select
+  void webdSendPage();                         // GET / (the mobile HTML page)
   void applyRotatorFromCfg();
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
@@ -409,6 +423,7 @@ private:
   SatEntry* activeSat();
   bool ensureTransponders(SatEntry& s);   // load (cache or net)
   void onTransponderChanged();             // recenter passband + pick default mode
+  bool connectWifiCfg(uint32_t timeoutMs = 12000);  // try primary then 2nd WiFi
   void serviceTiltTune();                  // accelerometer (tilt) passband tuning (ADV)
   void doUpdateGp();
   String gpSourceLabel();                  // human label for the configured GP source
@@ -459,6 +474,7 @@ private:
   void drawTrack();
   void drawBig();    // large-font operating readout (toggled from Track with 'z')
   void drawManual();
+  void drawManualBig();   // large-font version of the Manual calculator ('z')
   void drawPolar();
   void drawPassPolar();
   void drawMutual();
@@ -481,12 +497,13 @@ private:
   void keyTrack(char c, bool enter, bool back);
   void keyBig(char c, bool enter, bool back);
   void keyManual(char c, bool enter, bool back);
+  void keyManualBig(char c, bool enter, bool back);
   void keyPolar(char c, bool enter, bool back);
   void keyPassPolar(char c, bool enter, bool back);
   void keyMutual(char c, bool enter, bool back);
   void buildVis();   void drawVis();   void keyVis(char c, bool enter, bool back);
   void buildIllum(); void drawIllum(); void keyIllum(char c, bool enter, bool back);
-  void buildOrbit(); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
+  void buildOrbit(bool quiet = false); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
   void buildEqx();   void drawEqx();   void keyEqx(char c, bool enter, bool back);
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);

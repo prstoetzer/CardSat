@@ -31,13 +31,14 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 15. [Working offline](#15-working-offline)
 16. [Radio-specific notes](#16-radio-specific-notes)
 17. [Antenna rotator (GS-232, rotctl, PstRotator, rotctld server)](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server)
-18. [Managing data and factory reset](#18-managing-data-and-factory-reset)
-19. [Troubleshooting](#19-troubleshooting)
-20. [Screen-by-screen reference](#20-screen-by-screen-reference)
-21. [Key reference (cheat sheet)](#21-key-reference-cheat-sheet)
-22. [Glossary](#22-glossary)
-23. [Supporting AMSAT](#23-supporting-amsat)
-24. [License](#24-license)
+18. [Mobile web control](#18-mobile-web-control)
+19. [Managing data and factory reset](#19-managing-data-and-factory-reset)
+20. [Troubleshooting](#20-troubleshooting)
+21. [Screen-by-screen reference](#21-screen-by-screen-reference)
+22. [Key reference (cheat sheet)](#22-key-reference-cheat-sheet)
+23. [Glossary](#23-glossary)
+24. [Supporting AMSAT](#24-supporting-amsat)
+25. [License](#25-license)
 
 ---
 
@@ -262,6 +263,11 @@ not shown in any footer.
      On the **WiFi SSID** row you can instead press **`s`** to **scan** for nearby
      networks, pick one from the list (strongest first; `*` = secured), and then
      enter its password (open networks skip the password step).
+   - **WiFi 2 SSID / WiFi 2 pass** — an **optional second network**. If the primary
+     network can't be joined, CardSat automatically falls back to this one. Handy
+     in the field: keep your home router as the primary and a **phone hotspot** (or
+     a portable travel router) as the second, and the device connects to whichever
+     is present. Leave it blank to disable.
    - **AOS alarm** — on/off for the pre-pass beeps.
    - **VFO Type** — which physical VFO carries each leg: *Main Up/Sub Dn* (default)
      or *Main Dn/Sub Up*.
@@ -706,14 +712,21 @@ marker on the passband line shows it's armed.
 ### Large-font readout (`z` from Track)
 
 A stripped-down, glanceable view for operating a pass without squinting: the
-**RX** and **TX** frequencies in large digits, **Az/El** below them, and a big
-**LOS** countdown (or **AOS** countdown when the bird is below the horizon, or
-**\*\* WORKABLE \*\***  when it's up). Small badges show **RAD**/**ROT** (radio and
-rotator on/off), **TILT** if tilt tuning is armed, and the transponder index.
-The radio, rotator and Doppler tracking keep running exactly as on Track — this
-is just an alternate view of the same live session — and `t` (next transponder),
-`r` (radio), `o` (rotator) and `l` (log a QSO) still work without leaving it.
-Press `z` or `` ` `` to return to Track.
+**RX** and **TX** frequencies in the largest digits that fit, with **Az/El** and
+the active **Doppler tune mode** below them. Small badges show **RAD**/**ROT**
+(radio and rotator on/off), **TILT** if tilt tuning is armed, and the transponder
+index. The bottom line echoes the tune mode (**FULL / DL / UL / TUNE / CAL**) and,
+on a linear bird, the passband position — so the big view follows whatever Doppler
+tuning option you selected on the Track screen.
+
+The radio, rotator and Doppler tracking keep running exactly as on Track — this is
+just an alternate view of the same live session. All the in-place Track controls
+work here too: `,`/`/` tune through the passband, `s`/`x` step/recenter, `m`
+TUNE/CAL, `d` cycle tune mode, `t` next transponder, `r` radio, `o` rotator, `y`
+tilt, and `l` to log a QSO. Press `z` or `` ` `` to return to Track.
+
+(The earlier AOS/LOS countdown was removed from this view to give the frequencies
+more room; the countdowns remain on the regular Track and Passes screens.)
 
 ### Manual mode (`f` from Track)
 
@@ -750,6 +763,13 @@ cycles transponder, `l` logs a QSO, `p` opens the polar plot, `g` opens live
 workable grids — and **the log, polar, and grid screens all return here** rather
 than to Track. **ENTER** saves calibration for this satellite. `` ` `` or `f`
 returns to Track.
+
+Press **`z`** for a **large-font version of the Manual calculator** — the HOLD and
+TUNE legs in big digits, with the fixed/derived leg labelled, for reading at arm's
+length in the field. The in-place keys (`u` swap leg, `m` CAL, `,`/`/` tune, `s`/`x`,
+`t`) work the same there; `z` or `` ` `` returns to the normal Manual view. If the
+board has the motion sensor and **Tilt tuning** is on, you can roll the device to
+move through the passband in Manual mode too, exactly as on Track.
 
 ### Polar
 
@@ -870,7 +890,9 @@ on-screen key reference. The notable rows:
 | Weather units | `,`/`/` cycle the units for the **Weather** screen: **°F, mph → °C, km/h → °C, m/s**. Under *Station / display*. |
 | WiFi SSID | ENTER → edit · **`s`** → scan for networks and pick one |
 | WiFi pass | ENTER → edit |
-| Save & test WiFi | ENTER → connect and report OK/FAIL |
+| WiFi 2 SSID | ENTER → edit an **optional second network** tried if the first fails (field use: a second router, or a phone hotspot). Leave blank to disable |
+| WiFi 2 pass | ENTER → edit |
+| Save & test WiFi | ENTER → connect and report OK/FAIL (tries the primary network, then the second if set) |
 | AOS alarm | `,`/`/` or ENTER toggle on/off |
 | Rotator (+ type / host / port / baud / ranges / offsets / deadband / park / pre-point) | `,`/`/` adjust, ENTER edits host/port. **Rot type** cycles **GS-232 → rotctl (net) → PstRotator → Yaesu (direct)**; see [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server) |
 | GP source | ENTER → **source picker**: AMSAT (default), any CelesTrak JSON-PP category (Amateur Radio listed first), or **Custom URL…** — see [§14](#14-gp-age-and-accuracy) |
@@ -892,6 +914,7 @@ on-screen key reference. The notable rows:
 | CAT type (+ host / port / user / pass) | `,`/`/` cycle **Wired CI-V** → **Icom LAN** → **rigctl (net)**. Icom LAN drives the **IC-9700** over RS-BA1 (see [§3](#3-connecting-your-radio)); **rigctl** drives a radio attached to a remote Hamlib **rigctld** server over TCP (host/port, default 4532). Under *Radio / CAT*. |
 | Rigctld server (+ port) | `,`/`/` enable a **rigctld server** so a PC (Gpredict, WSJT-X, a logger) drives the radio through CardSat over TCP (default 4532); VFOA=downlink, VFOB=uplink. Under *Radio / CAT*. |
 | Rotctld server (+ port) | `,`/`/` enable a **rotctld server** so a PC drives the **wired GS-232 rotator** through CardSat over TCP (default 4533). Under *Rotator*. |
+| Web control (+ port) | `,`/`/` or ENTER enable the **mobile web control page** served over WiFi (default port 80). When on and connected, the row shows the URL to open (e.g. `http://192.168.1.42`). Under *Network / data*. Plain HTTP on the LAN, **no authentication** — see [§18](#18-mobile-web-control). |
 | Rotator: manual control | ENTER opens a screen to jog az/el by hand with live read-back. For a **Yaesu (direct)** rotator this is also where you **calibrate the ADC**: it shows live ADC counts and you capture the axis endpoints with `1`/`2`/`3`/`4` (az 0 / az full / el 0 / el full) — see [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server) and [ROTOR_INTERFACE.md](ROTOR_INTERFACE.md). Under *Rotator*. |
 
 ### WiFi scan
@@ -1013,6 +1036,16 @@ any bird with an uplink or downlink **below 30 MHz (HF)**, which uses **USB up a
 USB down**. FM and single-channel birds use the transponder's own mode on both
 legs.
 
+> **Frequency representation and display.** CardSat stores every frequency as a
+> 32-bit count of hertz, so the highest frequency it can represent is about
+> **4294 MHz** — comfortably above the amateur-satellite bands in use (2 m, 70 cm,
+> 23 cm, 13 cm). Frequencies above that can't be entered or tracked. On screen,
+> readouts **shed decimal places as the integer part grows** so they always fit the
+> panel: sub-GHz birds keep five decimals (e.g. `145.99000`), while higher bands
+> show fewer (`1296.500`, and so on). The large-font views trim one more decimal
+> than the normal views to keep the big digits inside the screen. This only affects
+> the *displayed* precision — the underlying tuning is always full-resolution.
+
 ---
 
 ## 10. Calibration
@@ -1076,14 +1109,15 @@ faster, and holding the device level holds the frequency. There's a dead-zone of
 a few degrees around level so a hand-held device doesn't drift, and the rate
 saturates past roughly 35°.
 
-It only acts on the **Track** and **large-font** screens, in **TUNE** mode, on a
-**linear** bird — everywhere else it does nothing. A **TLT** (Track) or **TILT**
-(large-font) marker shows when it's armed. On a board without the sensor the
-setting reads **n/a (no IMU)** and can't be turned on. Tilt tuning is off by
-default; many operators will prefer the keys, since tilting the device also moves
-your antenna and your eyes — it's offered as an option, not the default. Once the
-board has the sensor you can flip it on and off mid-pass with **`y`** on the Track
-or large-font screen, without opening Settings; the change is saved either way.
+It only acts on the **Track**, **large-font**, and **Manual** screens, in **TUNE**
+mode, on a **linear** bird — everywhere else it does nothing. A **TLT** (Track /
+Manual) or **TILT** (large-font) marker shows when it's armed. On a board without
+the sensor the setting reads **n/a (no IMU)** and can't be turned on. Tilt tuning
+is off by default; many operators will prefer the keys, since tilting the device
+also moves your antenna and your eyes — it's offered as an option, not the default.
+Once the board has the sensor you can flip it on and off mid-pass with **`y`** on
+the Track or large-font screen, without opening Settings; the change is saved
+either way.
 
 ---
 
@@ -1767,7 +1801,61 @@ run against a live PstRotator instance.
 
 ---
 
-## 18. Managing data and factory reset
+## 18. Mobile web control
+
+CardSat can serve a small **mobile-friendly web page over your WiFi network**, so a
+phone, tablet, or laptop on the same network can drive it without touching the
+keypad. It's **off by default**.
+
+**Enable it:** *Settings → Network / data → Web control* (`,`/`/` or ENTER to turn
+on; **Web port** sets the port, default 80). Once it's on and CardSat is connected
+to WiFi, the **Web control** row shows the address to open — for example
+`http://192.168.1.42`. Type that into any browser on the same network.
+
+**What the page does:**
+
+- **Satellite selection** — pick one of your favourites from the drop-down and tap
+  **Track** to make it active. (If you haven't marked any favourites, the list
+  falls back to the catalog.) The **★** button beside the selector adds or removes
+  the chosen satellite from your favourites, just like marking one on the device.
+- **Pass times** — the upcoming passes for the active satellite are listed with
+  AOS time, **peak** (time of closest approach), maximum elevation, duration, and
+  AOS→LOS azimuth, refreshed when you switch satellites.
+- **Live readout** — downlink (RX) and uplink (TX) frequencies, azimuth/elevation,
+  and the current tune mode, refreshed about once a second.
+- **Radio & rotator control** — buttons tune the passband down/up, step to the next
+  transponder, cycle the Doppler tune mode, recenter the passband, toggle CAL, and
+  switch **radio** and **rotator** output on/off. These do exactly what the
+  corresponding keys do on the Track screen — the web page drives the same
+  controls, it doesn't second-guess them.
+- **Manual (no-radio) tuning** — tap **Manual** to switch the control card to the
+  hand-tuning calculator. It shows the **HOLD** leg (the frequency to park your own
+  radio on) and the **TUNE** leg (the Doppler-corrected frequency to follow),
+  exactly as the on-device Manual screen does, with the same round-trip Doppler
+  correction on linear birds. **Swap leg** chooses whether you hold the downlink or
+  the uplink; Tune ±, next transponder, CAL, and recenter work as on the device.
+- **Orbital analysis** — tap **Orbit** for a read-only summary of the same numbers
+  the on-device orbital-analysis pages compute: altitude and footprint, period,
+  apogee/perigee, inclination/eccentricity, decay estimate, live range-rate and
+  sub-point, sunlit/eclipse state, beta angle and eclipse fraction, J2 node and
+  perigee drift (with a sun-synchronous flag), mean/true anomaly, time to
+  perigee/apogee, and the multi-day pass outlook with the best upcoming pass. It's
+  view-only — nothing on the device changes.
+
+The web page coexists with the rigctld/rotctld servers and the normal on-device UI;
+the device keeps tracking and you can use its keypad at the same time.
+
+> **Security.** This is plain **HTTP on the local network with no password** —
+> anyone who can reach your WiFi can open the page and operate the radio and
+> rotator. Use it only on networks you trust, and don't forward the port to the
+> internet. Turning **Web control** off stops the server immediately. In the field,
+> pairing this with a **phone hotspot** (see the second-WiFi network in
+> [§7](#7-first-time-setup)) gives you a private network for phone-to-CardSat
+> control with no other infrastructure.
+
+---
+
+## 19. Managing data and factory reset
 
 CardSat keeps all of its data in a **`/CardSat`** folder:
 
@@ -1803,7 +1891,7 @@ first-run state. Use it to start over or before handing the unit to someone else
 
 ---
 
-## 19. Troubleshooting
+## 20. Troubleshooting
 
 **No passes / "Clock not set."** Set the clock first: Update → `k` (NTP), enable
 GPS, or Location → `c` to enter UTC manually. Also confirm your location is set.
@@ -1859,7 +1947,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 
 ---
 
-## 20. Screen-by-screen reference
+## 21. Screen-by-screen reference
 
 This section catalogs **every screen** in the firmware in a uniform format —
 what it is for, how you get to it, what it shows, and what each key does. It
@@ -2350,7 +2438,7 @@ listed below.
 
 ---
 
-## 21. Key reference (cheat sheet)
+## 22. Key reference (cheat sheet)
 
 **Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot · `h` help.
 
@@ -2364,7 +2452,9 @@ listed below.
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
 | **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
-| **Large-font readout** (`z` from Track) | glanceable RX/TX, az/el, AOS/LOS countdown · `t` next TX · `r` radio · `o` rotator · `y` tilt on/off · `l` log · `z`/`` ` `` back to Track |
+| **Large-font readout** (`z` from Track) | big RX/TX + az/el + tune mode · `,`/`/` tune · `s`/`x` step/center · `m` TUNE/CAL · `d` mode · `t` next TX · `r` radio · `o` rotator · `y` tilt · `l` log · `z`/`` ` `` back to Track |
+| **Manual mode** (`f` from Track) | no-radio calculator; `u` swap fixed leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z` large-font · `l`/`p`/`g` (return here) · `` ` ``/`f` back |
+| **Manual large-font** (`z` from Manual) | HOLD/TUNE legs in big digits · `u` swap leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z`/`` ` `` back to Manual |
 | **Manual mode** | no-radio frequency calculator · `u` toggle which leg is fixed (HOLD vs TUNE>) · `,`/`/` move fixed freq in passband (linear) · `s` step · `x` center · `m` CAL · `t` next TX · `l` log · `p` polar · `g` grids (all return here) · ENTER save cal · `` ` ``/`f` back to Track |
 | **Workable grids** | 4-char Maidenhead grids under the footprint (per-pass union or live, refreshing ~3 s; uncapped, works to high orbits) · count shown on a cyan line above the list · `;`/`.` and `{`/`}` scroll · `` ` `` back |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
@@ -2394,7 +2484,7 @@ listed below.
 
 ---
 
-## 22. Glossary
+## 23. Glossary
 
 - **AOS / LOS** — Acquisition / Loss of Signal: when the satellite rises above and
   sets below your horizon.
@@ -2429,7 +2519,7 @@ listed below.
 
 ---
 
-## 23. Supporting AMSAT
+## 24. Supporting AMSAT
 
 CardSat exists because of the work **AMSAT** and its volunteers do — building and
 keeping amateur satellites flying, publishing the orbital data this app depends on,
@@ -2440,7 +2530,7 @@ track and work with this very tool.
 
 ---
 
-## 24. License
+## 25. License
 
 CardSat is released under the **MIT License**.
 

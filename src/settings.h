@@ -57,6 +57,8 @@ struct Settings {
   // WiFi
   char     ssid[33] = "";
   char     pass[65] = "";
+  char     ssid2[33] = "";    // optional 2nd network (field use: phone hotspot, etc.)
+  char     pass2[65] = "";
   // Orbital data source (GP/OMM JSON). Editable in Settings.
   char     gpUrl[160] = AMSAT_GP_URL;
   char     myCall[14] = "";   // operator's own callsign (stored uppercase)
@@ -132,6 +134,13 @@ struct Settings {
   // networked PC (Gpredict, ...) can drive the GS-232 rotator wired to CardSat.
   bool     rotdEnable  = false;
   uint16_t rotdPort    = 4533;   // Hamlib rotctld default port
+
+  // Built-in mobile web control page, served over the WiFi LAN. Opt-in: when on,
+  // a phone on the same network can select a satellite, see pass times, and drive
+  // the radio/rotator. Plain HTTP on the LAN only (no auth); leave off if you
+  // don't want it exposed.
+  bool     webEnable   = false;
+  uint16_t webPort     = 80;
 
   bool load();
   bool save();

@@ -130,9 +130,11 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
       if (len > 0 && total >= (size_t)len) break;     // whole body received
     } else {
       if (len > 0 && total >= (size_t)len) break;
-      // Peer closed with nothing buffered: allow a short grace for any final
-      // TLS-buffered bytes, then finish. Otherwise wait, up to a hard timeout.
-      if (!http.connected() && !stream->available() && millis() - lastRx > 500)
+      // Only treat a closed connection as end-of-body when the length is UNKNOWN.
+      // With a declared Content-Length we keep waiting (up to the stall timeout)
+      // so a momentary TLS burst gap on a weak link can't truncate the body.
+      if (len <= 0 && !http.connected() && !stream->available() &&
+          millis() - lastRx > 500)
         break;
       if (millis() - lastRx > 10000) break;           // idle/stall timeout
       delay(5);
@@ -143,6 +145,12 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   Serial.printf("[net] received %u bytes (declared %d), heap now %u\n",
                 (unsigned)total, len, (unsigned)ESP.getFreeHeap());
   if (out.length() == 0) { lastErr = "empty body"; return false; }
+  // Declared length but got less -> truncated; report failure so callers/retries
+  // don't parse a partial body.
+  if (len > 0 && total < (size_t)len) {
+    lastErr = "short read " + String((unsigned)total) + "/" + String(len);
+    return false;
+  }
   return true;
 }
 
@@ -222,7 +230,13 @@ bool Net::httpsGetToFile(const String& url, const char* path,
       if (len > 0 && total >= (size_t)len) break;
     } else {
       if (len > 0 && total >= (size_t)len) break;
-      if (!http.connected() && !stream->available() && millis() - lastRx > 500)
+      // Only treat a closed connection as end-of-body when the length is UNKNOWN
+      // (chunked / no Content-Length). When the server declared a length and we
+      // haven't reached it, a momentary connected()==false with no available
+      // bytes is just a TLS burst gap on a weak link -- keep waiting up to the
+      // stall window instead of declaring a truncated download complete.
+      if (len <= 0 && !http.connected() && !stream->available() &&
+          millis() - lastRx > 500)
         break;
       // Use the longer first-byte window until the first byte lands, then the
       // normal mid-stream stall timeout.
@@ -239,6 +253,13 @@ bool Net::httpsGetToFile(const String& url, const char* path,
                 (unsigned)total, path, len, (unsigned)ESP.getFreeHeap());
   if (writeErr)    { lastErr = "fs write failed"; return false; }
   if (total == 0)  { lastErr = "empty body"; return false; }
+  // If the server told us how big the body is and we got less, the transfer was
+  // cut short (a stall timeout or a dropped TLS burst). Report failure so the
+  // retry wrapper re-attempts rather than parsing a truncated file.
+  if (len > 0 && total < (size_t)len) {
+    lastErr = "short read " + String((unsigned)total) + "/" + String(len);
+    return false;
+  }
   return true;
 }
 
@@ -258,7 +279,11 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
 }
 
 bool Net::fetchGpToFile(const String& url, const char* path) {
-  return httpsGetToFile(url, path, 400000, nullptr);
+  // GP is the largest and most important download; on a weak link it can be cut
+  // short mid-body, so allow a few attempts. httpsGetToFile now reports a short
+  // read (got fewer bytes than the declared Content-Length) as a failure, so the
+  // retry wrapper re-attempts instead of caching a truncated catalog.
+  return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
 }
 
 bool Net::fetchGp(const String& url, String& out) {

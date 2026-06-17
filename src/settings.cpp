@@ -52,6 +52,8 @@ bool Settings::load() {
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
+  bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
+  tiltTune   = d["tilttune"] | false;
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
   rotEnable  = d["roten"]  | false;
@@ -105,6 +107,8 @@ bool Settings::save() {
   d["solar"] = solarAct;
   d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
+  d["bright"]  = bright;
+  d["tilttune"] = tiltTune;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;

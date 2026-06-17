@@ -95,6 +95,8 @@ struct Settings {
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
   uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
   // Display / power
+  uint8_t  bright     = 180;    // active screen brightness (10..255)
+  bool     tiltTune   = false;  // accelerometer (tilt) passband tuning, ADV-only
   uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)
   int32_t  calDlHz = 0;

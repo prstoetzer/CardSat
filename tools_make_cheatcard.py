@@ -40,14 +40,18 @@ FRONT = [
   "<b>v</b> 10-day &middot; <b>i</b> illum &middot; <b>g</b> grids &middot; <b>w</b> US states &middot; <b>e</b> DXCC"),
  ("TRACK (sel)",
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; "
-  "<b>c</b> CTCSS &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; "
+  "<b>c</b> CTCSS &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>z</b> big readout &middot; "
+  "<b>y</b> tilt on/off (ADV) &middot; "
   "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
+ ("BIG READOUT (z from Track)",
+  "Large RX/TX, az/el, AOS/LOS countdown. Radio+rotator keep tracking &middot; "
+  "<b>t</b> next TX &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>y</b> tilt &middot; <b>l</b> log &middot; <b>z</b>/<b>`</b> back"),
  ("MANUAL (no radio)",
   "Fix one leg, read Doppler freq to tune the other by hand. <b>u</b> toggle "
   "HOLD/TUNE leg &middot; <b>,</b>/<b>/</b> passband (linear) &middot; <b>m</b> CAL &middot; "
   "<b>t</b> next TX &middot; <b>l</b> log &middot; <b>p</b> polar &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC &middot; <b>`</b>/<b>f</b> Track"),
  ("TRACK &middot; TUNE",
-  "<b>,</b>/<b>/</b> tune -/+ &middot; <b>s</b> step 100/1k/5k &middot; <b>x</b> recenter"),
+  "<b>,</b>/<b>/</b> tune -/+ &middot; <b>s</b> step 100/1k/5k &middot; <b>x</b> recenter &middot; tilt to tune if enabled (ADV)"),
  ("TRACK &middot; CAL",
   "<b>,</b>/<b>/</b> downlink &middot; <b>;</b>/<b>.</b> uplink &middot; "
   "<b>s</b> step 10/100/1k &middot; <b>x</b> zero"),
@@ -141,7 +145,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.15  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.17  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/%d' % (side, pg, TOTAL_PAGES))

@@ -16,7 +16,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -249,6 +249,9 @@ private:
   int32_t  pbOffset = 0;          // passband tune offset (Hz up from dl bottom)
   int32_t  tuneStep = 1000;       // Hz per passband-tune nudge
   uint8_t  trackMode = 0;         // 0 = TUNE (passband), 1 = CAL (calibration)
+  bool     imuReady = false;      // BMI270 present (Cardputer ADV) for tilt tuning
+  float    tiltAccum = 0;         // sub-Hz tilt-rate integrator (carries fractional Hz)
+  uint32_t lastTiltMs = 0;        // last tilt-tune service time (rate integration)
   bool     manFixUp = false;      // Manual mode: false = fix downlink, true = fix uplink
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
   TuneMode tuneMode = TM_HOLD;    // Doppler tune mode (cycle with 'd' on Track)
@@ -406,6 +409,7 @@ private:
   SatEntry* activeSat();
   bool ensureTransponders(SatEntry& s);   // load (cache or net)
   void onTransponderChanged();             // recenter passband + pick default mode
+  void serviceTiltTune();                  // accelerometer (tilt) passband tuning (ADV)
   void doUpdateGp();
   String gpSourceLabel();                  // human label for the configured GP source
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
@@ -453,6 +457,7 @@ private:
   void drawPasses();
   void drawPassDetail();
   void drawTrack();
+  void drawBig();    // large-font operating readout (toggled from Track with 'z')
   void drawManual();
   void drawPolar();
   void drawPassPolar();
@@ -474,6 +479,7 @@ private:
   void keyPasses(char c, bool enter, bool back);
   void keyPassDetail(char c, bool enter, bool back);
   void keyTrack(char c, bool enter, bool back);
+  void keyBig(char c, bool enter, bool back);
   void keyManual(char c, bool enter, bool back);
   void keyPolar(char c, bool enter, bool back);
   void keyPassPolar(char c, bool enter, bool back);

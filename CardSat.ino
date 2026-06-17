@@ -188,7 +188,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.16";
+static constexpr const char* FW_VERSION = "0.9.17";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1555,6 +1555,8 @@ struct Settings {
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
   uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
   // Display / power
+  uint8_t  bright     = 180;    // active screen brightness (10..255)
+  bool     tiltTune   = false;  // accelerometer (tilt) passband tuning, ADV-only
   uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)
   int32_t  calDlHz = 0;
@@ -1609,7 +1611,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1842,6 +1844,9 @@ private:
   int32_t  pbOffset = 0;          // passband tune offset (Hz up from dl bottom)
   int32_t  tuneStep = 1000;       // Hz per passband-tune nudge
   uint8_t  trackMode = 0;         // 0 = TUNE (passband), 1 = CAL (calibration)
+  bool     imuReady = false;      // BMI270 present (Cardputer ADV) for tilt tuning
+  float    tiltAccum = 0;         // sub-Hz tilt-rate integrator (carries fractional Hz)
+  uint32_t lastTiltMs = 0;        // last tilt-tune service time (rate integration)
   bool     manFixUp = false;      // Manual mode: false = fix downlink, true = fix uplink
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
   TuneMode tuneMode = TM_HOLD;    // Doppler tune mode (cycle with 'd' on Track)
@@ -1999,6 +2004,7 @@ private:
   SatEntry* activeSat();
   bool ensureTransponders(SatEntry& s);   // load (cache or net)
   void onTransponderChanged();             // recenter passband + pick default mode
+  void serviceTiltTune();                  // accelerometer (tilt) passband tuning (ADV)
   void doUpdateGp();
   String gpSourceLabel();                  // human label for the configured GP source
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
@@ -2046,6 +2052,7 @@ private:
   void drawPasses();
   void drawPassDetail();
   void drawTrack();
+  void drawBig();    // large-font operating readout (toggled from Track with 'z')
   void drawManual();
   void drawPolar();
   void drawPassPolar();
@@ -2067,6 +2074,7 @@ private:
   void keyPasses(char c, bool enter, bool back);
   void keyPassDetail(char c, bool enter, bool back);
   void keyTrack(char c, bool enter, bool back);
+  void keyBig(char c, bool enter, bool back);
   void keyManual(char c, bool enter, bool back);
   void keyPolar(char c, bool enter, bool back);
   void keyPassPolar(char c, bool enter, bool back);
@@ -5402,6 +5410,8 @@ bool Settings::load() {
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
+  bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
+  tiltTune   = d["tilttune"] | false;
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
   rotEnable  = d["roten"]  | false;
@@ -5455,6 +5465,8 @@ bool Settings::save() {
   d["solar"] = solarAct;
   d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
+  d["bright"]  = bright;
+  d["tilttune"] = tiltTune;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
@@ -5555,6 +5567,11 @@ static bool copyFile(const char* from, const char* to) {
 void App::setup() {
   auto m5cfg = M5.config();
   M5Cardputer.begin(m5cfg, true);   // true => init keyboard
+  // Cardputer ADV has a BMI270 IMU; the original Cardputer has none. begin()
+  // is a no-op when absent, and isEnabled() then reports false, so tilt tuning
+  // silently does nothing on a non-ADV board.
+  M5.Imu.begin();
+  imuReady = M5.Imu.isEnabled();
   Serial.begin(115200);             // diagnostics on the USB serial monitor
   M5Cardputer.Display.setRotation(1);
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
@@ -5569,6 +5586,7 @@ void App::setup() {
   else if (Store::onSD())
     setStatus("Using SD card for storage", 4000);
   if (!cfg.load()) { cfg.save(); }     // first boot: write defaults
+  M5Cardputer.Display.setBrightness(cfg.bright);   // apply the saved brightness
   calDl = cfg.calDlHz; calUl = cfg.calUlHz;
 
   applyRadioFromCfg();
@@ -5869,6 +5887,55 @@ void App::onTransponderChanged() {
     pbOffset = 0;
     trackMode = 1;                            // CAL mode for FM / single-channel
   }
+}
+
+// Accelerometer (tilt) passband tuning -- opt-in (cfg.tiltTune), ADV-only.
+// Concept: roll the Cardputer left/right to nudge the transponder passband
+// position, with tilt *angle* setting the tune RATE (gentle = fine, more = fast)
+// rather than an absolute mapping, which is far steadier to hold by hand. Only
+// active on Track/Big in TUNE mode on a linear bird; everything else no-ops.
+// Called once per UI cycle (~tens of ms); it integrates a Hz/s rate so the step
+// is independent of the exact call cadence.
+void App::serviceTiltTune() {
+  if (!cfg.tiltTune || !imuReady) return;
+  if (screen != SCR_TRACK && screen != SCR_BIG) return;
+  if (trackMode != 0) return;                            // TUNE mode only
+  if (tuneMode == TM_FULL || tuneMode == TM_DL) return;  // these track the knob
+  if (activeTxCount <= 0) return;
+  Transponder& t = activeTx[curTx];
+  if (!t.isLinear || t.bandwidth() == 0) return;
+
+  float ax = 0, ay = 0, az = 0;
+  if (!M5.Imu.getAccel(&ax, &ay, &az)) return;           // g units
+
+  // The Cardputer is used in landscape; roll about its long axis moves one
+  // horizontal accel component through ~±1 g. Use that as the tilt signal, with
+  // a dead-zone around level so a hand-held device doesn't creep, and a cap so
+  // past ~35 deg the rate saturates. A light low-pass tames sensor noise.
+  static float filt = 0;
+  filt += 0.30f * (ax - filt);                           // 1-pole LPF
+  float mag = fabsf(filt);
+  const float DEAD = 0.12f;                               // ~7 deg dead-zone
+  const float FULL = 0.58f;                               // ~35 deg -> max rate
+  if (mag <= DEAD) { tiltAccum = 0; return; }
+  float norm = (mag - DEAD) / (FULL - DEAD);
+  if (norm > 1.0f) norm = 1.0f;
+
+  // Rate curve: square the normalized tilt for fine control near level, scaled to
+  // a sensible max slew. 8 kHz/s at full tilt crosses a 50 kHz passband in ~6 s.
+  uint32_t dtMs = millis() - lastTiltMs; lastTiltMs = millis();
+  if (dtMs > 250) dtMs = 250;                             // ignore long gaps (just switched in)
+  float rateHz = 8000.0f * norm * norm;                  // Hz per second
+  float deltaF = rateHz * (dtMs / 1000.0f);
+  tiltAccum += (filt < 0 ? -deltaF : deltaF);            // sign = tilt direction
+
+  int32_t whole = (int32_t)tiltAccum;
+  if (whole == 0) return;
+  tiltAccum -= whole;
+  int32_t bw = (int32_t)t.bandwidth();
+  pbOffset += whole;
+  if (pbOffset < 0)  pbOffset = 0;
+  if (pbOffset > bw) pbOffset = bw;
 }
 
 // ===========================================================================
@@ -6687,7 +6754,7 @@ void App::buildPassDetail(const PassPredict& p) {
 
 void App::refreshScheduleIfNeeded() {
   if (favN == 0 || !timeIsSet()) return;
-  if (screen == SCR_TRACK || screen == SCR_POLAR || screen == SCR_MANUAL) return;  // don't disturb Doppler
+  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_MANUAL) return;  // don't disturb Doppler
   if (screen == SCR_PASSES) return;                        // owns the propagator
   uint32_t ms = millis();
   bool due = (nextAos == 0) || (nowUtc() >= nextAos) ||
@@ -7134,13 +7201,22 @@ void App::loop() {
   refreshScheduleIfNeeded();   // keep the all-favorites schedule fresh
   serviceAosAlarm();           // countdown beeps + flash before AOS
 
+  // Accelerometer (tilt) passband tuning -- opt-in, ADV-only, self-gated to
+  // Track/Big in TUNE mode. Keep the backlight awake while it's actively moving
+  // the passband so the operator can see the readout change.
+  if (cfg.tiltTune && imuReady) {
+    int32_t before = pbOffset;
+    serviceTiltTune();
+    if (pbOffset != before) lastInputMs = millis();   // count tilt as activity
+  }
+
   // Keyboard
   if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
     auto ks = M5Cardputer.Keyboard.keysState();
     char c = ks.word.empty() ? 0 : ks.word.front();
     lastInputMs = millis();
     if (screenAsleep) {                       // first key just wakes the display
-      M5Cardputer.Display.setBrightness(SCREEN_BRIGHT);
+      M5Cardputer.Display.setBrightness(cfg.bright);
       screenAsleep = false;
     } else {
       handleKey(c, ks.enter, ks.del);
@@ -7335,7 +7411,7 @@ void App::loop() {
     }
   // Redraw cadence is still screen-dependent (the radio/rotator service above is
   // not): refresh the live screens periodically; static ones redraw on keypress.
-  if (screen == SCR_TRACK || screen == SCR_POLAR || screen == SCR_WORLDMAP ||
+  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_WORLDMAP ||
       screen == SCR_ROTMAN || screen == SCR_GPS || screen == SCR_MANUAL ||
       (screen == SCR_ORBIT && orbitPage <= 2) || screen == SCR_SUNMOON ||
       screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC) {
@@ -7359,7 +7435,7 @@ void App::loop() {
       screenAsleep = true;
     }
   } else if (alarmActive) {                    // an AOS alarm wakes the display
-    M5Cardputer.Display.setBrightness(SCREEN_BRIGHT);
+    M5Cardputer.Display.setBrightness(cfg.bright);
     screenAsleep = false;
   }
 }
@@ -7436,6 +7512,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_PASSES:   keyPasses(c, enter, back); break;
     case SCR_PASSDETAIL: keyPassDetail(c, enter, back); break;
     case SCR_TRACK:    keyTrack(c, enter, back); break;
+    case SCR_BIG:      keyBig(c, enter, back); break;
     case SCR_MANUAL:   keyManual(c, enter, back); break;
     case SCR_POLAR:    keyPolar(c, enter, back); break;
     case SCR_PASSPOLAR: keyPassPolar(c, enter, back); break;
@@ -7814,6 +7891,15 @@ void App::keyTrack(char c, bool enter, bool back) {
                   liveReturn = SCR_TRACK; screen = SCR_DXCC; lastDrawMs = 0; return; }
   if (c == 'p') { polarPathValid = false; liveReturn = SCR_TRACK; screen = SCR_POLAR;
                   lastDrawMs = 0; return; }                   // live polar
+  if (c == 'z') { screen = SCR_BIG; lastDrawMs = 0; return; }  // large-font readout
+  if (c == 'y') {                                    // toggle tilt tuning on the fly
+    if (!imuReady) setStatus("Tilt: no IMU on this board");
+    else {
+      cfg.tiltTune = !cfg.tiltTune; cfg.save();
+      tiltAccum = 0; lastTiltMs = millis();
+      setStatus(cfg.tiltTune ? "Tilt tuning ON" : "Tilt tuning OFF");
+    }
+  }
   if (enter) {  // persist calibration for THIS satellite (per-sat store)
     SatEntry* s = activeSat();
     if (s) { saveCalForSat(s->norad);
@@ -8220,7 +8306,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,40,7,25,43};
+static const int SET_STN[]   = {26,3,40,7,48,49,25,43};
 static const int SET_NET[]   = {4,5,6,20,41,42,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -8320,6 +8406,13 @@ void App::keySettings(char c, bool enter, bool back) {
                  if (v > 100) v = 100; cfg.doppLeadMs = (uint16_t)v; cfg.save(); } break;
       case 47: { long v = (long)cfg.rotAzLookSec + dir; if (v < 0) v = 0;
                  if (v > 10) v = 10; cfg.rotAzLookSec = (uint8_t)v; cfg.save(); } break;
+      case 48: { long v = (long)cfg.bright + dir*16; if (v < 10) v = 10;
+                 if (v > 255) v = 255; cfg.bright = (uint8_t)v;
+                 M5Cardputer.Display.setBrightness(cfg.bright);   // live preview
+                 cfg.save(); } break;
+      case 49: if (!imuReady) setStatus("No IMU on this board");
+               else { cfg.tiltTune = !cfg.tiltTune; cfg.save();
+                      tiltAccum = 0; lastTiltMs = millis(); } break;
     }
   };
   if (isLeft(c))  adj(-1);
@@ -8858,7 +8951,7 @@ void App::seedQsoSatDefaults() {
 // after the fact. Radio control, if engaged, keeps running.
 void App::beginQso() {
   logReturn = screen;
-  bool live = (screen == SCR_TRACK || screen == SCR_POLAR || screen == SCR_MANUAL);
+  bool live = (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_MANUAL);
   memset(&qso, 0, sizeof(qso));
   strncpy(qso.rstS, "59", sizeof(qso.rstS) - 1);
   strncpy(qso.rstR, "59", sizeof(qso.rstR) - 1);
@@ -9279,6 +9372,7 @@ void App::draw() {
     case SCR_PASSES:   drawPasses(); break;
     case SCR_PASSDETAIL: drawPassDetail(); break;
     case SCR_TRACK:    drawTrack(); break;
+    case SCR_BIG:      drawBig(); break;
     case SCR_MANUAL:   drawManual(); break;
     case SCR_POLAR:    drawPolar(); break;
     case SCR_PASSPOLAR: drawPassPolar(); break;
@@ -12339,6 +12433,10 @@ void App::drawTrack() {
       canvas.setCursor(4, 79);
       canvas.printf("PB %+.1fk bw%.1fk %s%s", posk, halfk,
                     t.invert ? "INV " : "", tag);
+      if (cfg.tiltTune && imuReady && trackMode == 0) {
+        canvas.setTextColor(CL_CYAN, CL_BLACK);
+        canvas.setCursor(210, 79); canvas.print("TLT");
+      }
     }
 
     // FM uplink PL/CTCSS tone (FM birds aren't linear, so this y row is free).
@@ -12378,10 +12476,115 @@ void App::drawTrack() {
     canvas.print("! verify MAIN/SUB for this rig");
   }
   if (trackMode == 0)
-    footer(",/tune s=stp x=ctr m=cal t r o p f=man");
+    footer(imuReady ? ",/tune s x=ctr m=cal t r o p f y=tilt"
+                    : ",/tune s=stp x=ctr m=cal t r o p f=man");
   else
     footer(",/DN ;.UP s=stp x=0 m=tn t r o p f=man");
 }
+
+// Large-font "operating" readout: only the values you need at arm's length during
+// a pass -- RX, TX, az/el, and an AOS/LOS countdown. Toggled from Track with 'z';
+// the radio/rotator/Doppler service keeps running (it's gated on radioOut/rotOut,
+// not on which screen is showing), so this is purely an alternate view of the
+// same live session. 't' (next transponder), 'r' (radio), 'o' (rotator) and 'l'
+// (log) still work without leaving the big view.
+void App::drawBig() {
+  SatEntry* s = activeSat();
+  if (!s) { canvas.setTextSize(2); canvas.setTextColor(CL_GREY, CL_BLACK);
+            canvas.setCursor(6, 56); canvas.print("No satellite"); return; }
+
+  LiveLook L = timeIsSet() ? pred.look(nowUtc()) : LiveLook();
+
+  // --- name + radio/rotator state badges (small) ---
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(4, 3); canvas.printf("%-.20s", s->name);
+  canvas.setCursor(168, 3);
+  canvas.setTextColor(radioOut ? CL_GREEN : CL_GREY, CL_BLACK); canvas.print("RAD");
+  canvas.setCursor(198, 3);
+  canvas.setTextColor(rotOut ? CL_GREEN : CL_GREY, CL_BLACK);   canvas.print("ROT");
+  if (cfg.tiltTune && imuReady) {
+    canvas.setCursor(138, 3);
+    canvas.setTextColor(trackMode == 0 ? CL_CYAN : CL_GREY, CL_BLACK); canvas.print("TILT");
+  }
+
+  // --- RX / TX, the two numbers that matter, in size 3 ---
+  uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+  if (activeTxCount > 0) {
+    Transponder& t = activeTx[curTx];
+    Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
+    Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
+  }
+  canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 20); canvas.print("RX");
+  canvas.setTextSize(3); canvas.setTextColor(CL_GREEN, CL_BLACK);
+  canvas.setCursor(28, 16);
+  canvas.print(activeTxCount > 0 ? fmtMHz(rx).c_str() : "--.----");
+
+  canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 47); canvas.print("TX");
+  canvas.setTextSize(3); canvas.setTextColor(CL_ORANGE, CL_BLACK);
+  canvas.setCursor(28, 43);
+  if (activeTxCount > 0 && ulOp) canvas.print(fmtMHz(tx).c_str());
+  else { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.print("rx only"); }
+
+  // --- Az / El in size 2 ---
+  canvas.setTextSize(2);
+  canvas.setTextColor(L.visible ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 78);
+  canvas.printf("Az%3.0f El%3.0f", L.az, L.el);
+  if (timeIsSet() && L.visible && !L.sunlit) {        // in eclipse but workable
+    canvas.setTextSize(1); canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(206, 84); canvas.print("ECL");
+  }
+
+  // --- big status line: countdown to LOS (if up) or AOS (if waiting) ---
+  canvas.setTextSize(2);
+  if (L.visible) {
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.setCursor(4, 104);
+    long los = (alarmLos && (time_t)alarmLos > nowUtc())
+                 ? (long)((time_t)alarmLos - nowUtc()) : -1;
+    if (los >= 0) canvas.printf("LOS %s", fmtCountdown(los).c_str());
+    else          canvas.print("** WORKABLE **");
+  } else if (nextAos && (time_t)nextAos > nowUtc()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(4, 104);
+    canvas.printf("AOS %s", fmtCountdown((long)((time_t)nextAos - nowUtc())).c_str());
+  } else {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 104); canvas.print("--");
+  }
+
+  // --- transponder index hint (small, bottom) ---
+  if (activeTxCount > 0) {
+    canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(150, 110);
+    canvas.printf("TX%d/%d", curTx + 1, activeTxCount);
+  }
+
+  canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 126);
+  canvas.print(imuReady ? "z back  t r o l y=tilt" : "z back  t r o l");
+}
+
+void App::keyBig(char c, bool enter, bool back) {
+  if (isBack(c, back) || c == 'z') { screen = SCR_TRACK; lastDrawMs = 0; return; }
+  // Keep the session controllable without leaving the big view.
+  if (c == 't' && activeTxCount > 0) {
+    curTx = (curTx + 1) % activeTxCount;
+    onTransponderChanged();
+    if (radioOut) applyTransponderModes(activeTx[curTx]);
+    lastDrawMs = 0; return;
+  }
+  if (c == 'l') { beginQso(); return; }            // log keeps tracking
+  if (c == 'r' || c == 'o' || c == 'y') {           // radio/rotator/tilt toggles
+    keyTrack(c, enter, back);
+    if (screen == SCR_BIG) lastDrawMs = 0;          // stay on Big
+    return;
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 //  Manual (no-radio) frequency-calculator mode. Same data and most options as
@@ -12703,7 +12906,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 48;
+  const int N = 50;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -12784,6 +12987,9 @@ void App::drawSettings() {
                      : String(cfg.doppLeadMs) + " ms");
   rows[47] = String("Rot az lookahead: ") + (cfg.rotAzLookSec == 0 ? String("off")
                      : String(cfg.rotAzLookSec) + " s");
+  rows[48] = String("Brightness: ") + String((int)((cfg.bright * 100 + 127) / 255)) + "%";
+  rows[49] = String("Tilt tuning: ") + (!imuReady ? String("n/a (no IMU)")
+                                                   : (cfg.tiltTune ? String("on") : String("off")));
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

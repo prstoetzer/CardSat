@@ -681,6 +681,11 @@ Controls:
 - `o` — turn **rotator** pointing **on/off** (if a rotator is configured; sends
   live az/el to the selected backend, parks on stop). See [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server).
 - `p` — open the **Polar** plot.
+- `z` — open the **large-font readout** (see below). A quick way to read RX/TX,
+  az/el and the AOS/LOS countdown at arm's length; radio and rotator keep running.
+- `y` — toggle **tilt tuning** on/off on the fly (only if the board has the sensor
+  and the feature is otherwise available; see Settings). Lets you flip accelerometer
+  tuning on for a tricky stretch and back off without opening Settings.
 - `g` / `w` / `e` — show the **workable grids / US states / DXCC** reachable under
   the footprint **right now**, refreshing live; radio and rotator control keep
   running while you look. (The same three lists are also available per-pass from
@@ -693,7 +698,22 @@ Controls:
 TUNE-mode keys: `,`/`/` tune down/up the passband, `s` cycle step
 (100/1000/5000 Hz), `x` recenter. CAL-mode keys: `,`/`/` trim downlink, `;`/`.`
 trim uplink, `s` cycle step (10/100/1000 Hz), `x` zero. See
-[§9](#9-doppler-tuning-and-the-one-true-rule) and [§10](#10-calibration).
+[§9](#9-doppler-tuning-and-the-one-true-rule) and [§10](#10-calibration). When
+**Tilt tuning** is enabled (see Settings), in TUNE mode on a linear bird you can
+also roll the Cardputer left/right to move through the passband — a small **TLT**
+marker on the passband line shows it's armed.
+
+### Large-font readout (`z` from Track)
+
+A stripped-down, glanceable view for operating a pass without squinting: the
+**RX** and **TX** frequencies in large digits, **Az/El** below them, and a big
+**LOS** countdown (or **AOS** countdown when the bird is below the horizon, or
+**\*\* WORKABLE \*\***  when it's up). Small badges show **RAD**/**ROT** (radio and
+rotator on/off), **TILT** if tilt tuning is armed, and the transponder index.
+The radio, rotator and Doppler tracking keep running exactly as on Track — this
+is just an alternate view of the same live session — and `t` (next transponder),
+`r` (radio), `o` (rotator) and `l` (log a QSO) still work without leaving it.
+Press `z` or `` ` `` to return to Track.
 
 ### Manual mode (`f` from Track)
 
@@ -862,6 +882,8 @@ on-screen key reference. The notable rows:
 | Dopp linear band | `,`/`/` the SSB/CW-leg write deadband, 0–1000 Hz in 10 Hz steps (default 50 Hz). Tighter than FM because linear modes need close tracking; near closest approach CardSat tightens this automatically |
 | Dopp lead | `,`/`/` the predictive-lead cap, 0–100 ms in 5 ms steps (default 50 ms; `0` = off). On fast overhead passes CardSat can compute Doppler slightly ahead to mask CAT latency, tapering the lead to zero near closest approach. Raise it if your rig's CI-V is slow; set `0` to disable |
 | Screen sleep | `,`/`/` cycle off / 30 s / 1 min / 2 min / 5 min — blanks the backlight after that idle time |
+| Brightness | `,`/`/` adjust the active screen brightness in ~6% steps; previews live. Under *Station / display* |
+| Tilt tuning | `,`/`/` or ENTER toggle **accelerometer passband tuning** on/off. Shown as **n/a (no IMU)** on boards without one (only the Cardputer **ADV** has the sensor). When on, roll the device left/right in TUNE mode on a linear bird to move through the passband. Under *Station / display* |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
 | QRZ user / QRZ pass | ENTER → enter your QRZ.com username / password for the **QRZ Lookup** screen (requires a QRZ XML-data subscription). Password shown masked. Under *Network / data*. |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
@@ -1042,6 +1064,26 @@ the tone off):
 Both files live on the microSD card if one is present, otherwise in the device's
 internal flash. If a satellite has no line in `calib.txt`, the global calibration
 from **Settings** is used.
+
+### Tilt tuning (accelerometer, opt-in, ADV only)
+
+The Cardputer **ADV** has a motion sensor (the original Cardputer does not). When
+**Tilt tuning** is switched on under *Settings → Station / display*, you can roll
+the device left and right to move through a linear transponder's passband instead
+of (or alongside) the `,`/`/` keys. It's deliberately a **rate** control, not an
+absolute one: a gentle tilt nudges slowly for fine work, a firmer tilt slews
+faster, and holding the device level holds the frequency. There's a dead-zone of
+a few degrees around level so a hand-held device doesn't drift, and the rate
+saturates past roughly 35°.
+
+It only acts on the **Track** and **large-font** screens, in **TUNE** mode, on a
+**linear** bird — everywhere else it does nothing. A **TLT** (Track) or **TILT**
+(large-font) marker shows when it's armed. On a board without the sensor the
+setting reads **n/a (no IMU)** and can't be turned on. Tilt tuning is off by
+default; many operators will prefer the keys, since tilting the device also moves
+your antenna and your eyes — it's offered as an option, not the default. Once the
+board has the sensor you can flip it on and off mid-pass with **`y`** on the Track
+or large-font screen, without opening Settings; the change is saved either way.
 
 ---
 
@@ -2321,7 +2363,8 @@ listed below.
 | **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `f` Manual mode · `l` log QSO · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
+| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
+| **Large-font readout** (`z` from Track) | glanceable RX/TX, az/el, AOS/LOS countdown · `t` next TX · `r` radio · `o` rotator · `y` tilt on/off · `l` log · `z`/`` ` `` back to Track |
 | **Manual mode** | no-radio frequency calculator · `u` toggle which leg is fixed (HOLD vs TUNE>) · `,`/`/` move fixed freq in passband (linear) · `s` step · `x` center · `m` CAL · `t` next TX · `l` log · `p` polar · `g` grids (all return here) · ENTER save cal · `` ` ``/`f` back to Track |
 | **Workable grids** | 4-char Maidenhead grids under the footprint (per-pass union or live, refreshing ~3 s; uncapped, works to high orbits) · count shown on a cyan line above the list · `;`/`.` and `{`/`}` scroll · `` ` `` back |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |

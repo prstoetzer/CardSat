@@ -3470,6 +3470,8 @@ void App::keySettings(char c, bool enter, bool back) {
       case 38: cfg.rotdEnable = !cfg.rotdEnable; cfg.save(); break;
       case 39: { long p = (long)cfg.rotdPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotdPort = (uint16_t)p; cfg.save(); } break;
+      case 53: { long p = (long)cfg.webPort + dir; if (p < 1) p = 65535;
+                 if (p > 65535) p = 1; cfg.webPort = (uint16_t)p; cfg.save(); } break;
       case 44: { long v = (long)cfg.doppThreshFmHz + dir*25; if (v < 0) v = 0;
                  if (v > 2000) v = 2000; cfg.doppThreshFmHz = (uint16_t)v; cfg.save(); } break;
       case 45: { long v = (long)cfg.doppThreshLinHz + dir*10; if (v < 0) v = 0;
@@ -3497,14 +3499,12 @@ void App::keySettings(char c, bool enter, bool back) {
               editBuf = cfg.ssid; screen = SCR_EDIT; break;
       case 5: editTarget = 202; editTitle = "WiFi password";
               editBuf = cfg.pass; screen = SCR_EDIT; break;
-      case 50: editTarget = 205; editTitle = "WiFi 2 SSID";
+      case 50: editTarget = 217; editTitle = "WiFi 2 SSID";
                editBuf = cfg.ssid2; screen = SCR_EDIT; break;
-      case 51: editTarget = 206; editTitle = "WiFi 2 password";
+      case 51: editTarget = 218; editTitle = "WiFi 2 password";
                editBuf = cfg.pass2; screen = SCR_EDIT; break;
       case 52: cfg.webEnable = !cfg.webEnable; cfg.save();
                setStatus(cfg.webEnable ? "Web control ON" : "Web control OFF"); break;
-      case 53: { long p = (long)cfg.webPort + dir; if (p < 1) p = 65535;
-                 if (p > 65535) p = 1; cfg.webPort = (uint16_t)p; cfg.save(); } break;
       case 6: setStatus(connectWifiCfg() ? "WiFi OK" : "WiFi FAIL");
               break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
@@ -3594,9 +3594,9 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.ssid[sizeof(cfg.ssid)-1] = 0; break;
       case 202: strncpy(cfg.pass, editBuf.c_str(), sizeof(cfg.pass)-1);
                 cfg.pass[sizeof(cfg.pass)-1] = 0; break;
-      case 205: strncpy(cfg.ssid2, editBuf.c_str(), sizeof(cfg.ssid2)-1);
+      case 217: strncpy(cfg.ssid2, editBuf.c_str(), sizeof(cfg.ssid2)-1);
                 cfg.ssid2[sizeof(cfg.ssid2)-1] = 0; break;
-      case 206: strncpy(cfg.pass2, editBuf.c_str(), sizeof(cfg.pass2)-1);
+      case 218: strncpy(cfg.pass2, editBuf.c_str(), sizeof(cfg.pass2)-1);
                 cfg.pass2[sizeof(cfg.pass2)-1] = 0; break;
       case 203: strncpy(cfg.gpUrl, editBuf.c_str(), sizeof(cfg.gpUrl)-1);
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;

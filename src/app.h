@@ -356,6 +356,11 @@ private:
   void serviceRotctld();                       // pump the rotctld TCP server
   void rotdHandleLine(const String& line);     // parse + act on one rotctld command
   void serviceWebd();                          // pump the mobile web-control server
+  void suspendNetServers();                    // tear down rigd/rotd/webd listeners
+                                               // (free their sockets) before a
+                                               // blocking download; they auto-rebuild
+  static App* s_self;                          // for the static Net TLS hook to reach us
+  static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
   void webdSendStatusJson();                   // GET /api/status
   void webdSendSatsJson();                     // GET /api/sats

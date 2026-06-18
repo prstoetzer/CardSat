@@ -47,4 +47,14 @@ public:
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
   String lastErr  = "";    // short human-readable reason
+
+  // Optional hook invoked around EVERY outbound TLS session: busy(true) just
+  // before a connection is opened, busy(false) after it closes. The app uses it
+  // to release its LAN listener sockets (rigctld/rotctld/web) for the duration of
+  // the fetch -- on the socket-limited, no-PSRAM ESP32-S3 those listeners (plus a
+  // kept-alive browser tab) can otherwise starve the outbound HTTPS connect and
+  // it gets refused. Set once at startup; leaving it null disables the behaviour.
+  // Guarding here (the single choke point) covers every fetch -- GP, weather,
+  // space weather, AMSAT, transponders, QRZ -- without per-call-site discipline.
+  static void (*onTlsBusy)(bool busy);
 };

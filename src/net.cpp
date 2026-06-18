@@ -12,6 +12,22 @@
 #include <esp_heap_caps.h>   // heap_caps_get_largest_free_block(): contiguous block,
                              // which is what the TLS handshake actually needs
 
+// TLS-session hook (see net.h). Null by default; the app installs it at startup.
+void (*Net::onTlsBusy)(bool) = nullptr;
+
+// RAII guard: fires onTlsBusy(true) when the FIRST guard on the stack is entered
+// and onTlsBusy(false) when the LAST one leaves, on every exit path. The depth
+// count makes it reentrant: httpsGetToFileRetry can hold a guard across its whole
+// retry loop while each inner httpsGetToFile also guards, without the inner scope
+// resuming (rebuilding the listeners) between attempts.
+namespace {
+int g_tlsDepth = 0;
+struct TlsBusyGuard {
+  TlsBusyGuard()  { if (g_tlsDepth++ == 0 && Net::onTlsBusy) Net::onTlsBusy(true);  }
+  ~TlsBusyGuard() { if (--g_tlsDepth == 0 && Net::onTlsBusy) Net::onTlsBusy(false); }
+};
+}
+
 bool Net::connect(const String& ssid, const String& pass, uint32_t timeoutMs) {
   if (ssid.length() == 0) return false;
   WiFi.mode(WIFI_STA);
@@ -68,6 +84,7 @@ void Net::syncTimeNtp() {
 bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = "";
   if (!connected()) { lastErr = "no WiFi"; return false; }
+  TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
 
   Serial.printf("[net] GET %s\n", url.c_str());
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -159,6 +176,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   lastCode = 0; lastErr = "";
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
+  TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
 
   Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -267,6 +285,7 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
                               size_t maxBytes, size_t* written, int attempts,
                               uint32_t firstByteMs) {
   if (attempts < 1) attempts = 1;
+  TlsBusyGuard _tls;   // hold listeners down across the whole retry sequence
   for (int i = 0; i < attempts; i++) {
     if (httpsGetToFile(url, path, maxBytes, written, firstByteMs)) return true;
     // A "low flash" failure won't fix itself on retry -- bail immediately.

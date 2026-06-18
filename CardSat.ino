@@ -1320,6 +1320,16 @@ public:
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
   String lastErr  = "";    // short human-readable reason
+
+  // Optional hook invoked around EVERY outbound TLS session: busy(true) just
+  // before a connection is opened, busy(false) after it closes. The app uses it
+  // to release its LAN listener sockets (rigctld/rotctld/web) for the duration of
+  // the fetch -- on the socket-limited, no-PSRAM ESP32-S3 those listeners (plus a
+  // kept-alive browser tab) can otherwise starve the outbound HTTPS connect and
+  // it gets refused. Set once at startup; leaving it null disables the behaviour.
+  // Guarding here (the single choke point) covers every fetch -- GP, weather,
+  // space weather, AMSAT, transponders, QRZ -- without per-call-site discipline.
+  static void (*onTlsBusy)(bool busy);
 };
 
 
@@ -1960,6 +1970,11 @@ private:
   void serviceRotctld();                       // pump the rotctld TCP server
   void rotdHandleLine(const String& line);     // parse + act on one rotctld command
   void serviceWebd();                          // pump the mobile web-control server
+  void suspendNetServers();                    // tear down rigd/rotd/webd listeners
+                                               // (free their sockets) before a
+                                               // blocking download; they auto-rebuild
+  static App* s_self;                          // for the static Net TLS hook to reach us
+  static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
   void webdSendStatusJson();                   // GET /api/status
   void webdSendSatsJson();                     // GET /api/sats
@@ -4687,6 +4702,22 @@ String Location::toGrid(double lat, double lon) {
 //  net.cpp
 // ===========================================================================
 
+// TLS-session hook (see class Net). Null by default; app installs it at startup.
+void (*Net::onTlsBusy)(bool) = nullptr;
+
+// RAII guard: fires onTlsBusy(true) when the FIRST guard on the stack is entered
+// and onTlsBusy(false) when the LAST one leaves, on every exit path. The depth
+// count makes it reentrant: httpsGetToFileRetry can hold a guard across its whole
+// retry loop while each inner httpsGetToFile also guards, without the inner scope
+// resuming (rebuilding the listeners) between attempts.
+namespace {
+int g_tlsDepth = 0;
+struct TlsBusyGuard {
+  TlsBusyGuard()  { if (g_tlsDepth++ == 0 && Net::onTlsBusy) Net::onTlsBusy(true);  }
+  ~TlsBusyGuard() { if (--g_tlsDepth == 0 && Net::onTlsBusy) Net::onTlsBusy(false); }
+};
+}
+
 bool Net::connect(const String& ssid, const String& pass, uint32_t timeoutMs) {
   if (ssid.length() == 0) return false;
   WiFi.mode(WIFI_STA);
@@ -4743,6 +4774,7 @@ void Net::syncTimeNtp() {
 bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = "";
   if (!connected()) { lastErr = "no WiFi"; return false; }
+  TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
 
   Serial.printf("[net] GET %s\n", url.c_str());
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -4834,6 +4866,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   lastCode = 0; lastErr = "";
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
+  TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
 
   Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -4942,6 +4975,7 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
                               size_t maxBytes, size_t* written, int attempts,
                               uint32_t firstByteMs) {
   if (attempts < 1) attempts = 1;
+  TlsBusyGuard _tls;   // hold listeners down across the whole retry sequence
   for (int i = 0; i < attempts; i++) {
     if (httpsGetToFile(url, path, maxBytes, written, firstByteMs)) return true;
     // A "low flash" failure won't fix itself on retry -- bail immediately.
@@ -5637,6 +5671,8 @@ static bool copyFile(const char* from, const char* to) {
 }
 
 void App::setup() {
+  s_self = this;
+  Net::onTlsBusy = &App::tlsBusyTrampoline;   // free LAN sockets around every fetch
   auto m5cfg = M5.config();
   M5Cardputer.begin(m5cfg, true);   // true => init keyboard
   // Cardputer ADV has a BMI270 IMU; the original Cardputer has none. begin()
@@ -7223,7 +7259,7 @@ th{color:var(--mut);font-weight:600}.mut{color:var(--mut)}
 var lastSat=0,man=false,mode='rad';
 function j(u,o){return fetch(u,o).then(r=>r.json())}
 function pad(n){return(n<10?'0':'')+n}
-function hhmm(t){var d=new Date(t*1000);return pad(d.getHours())+':'+pad(d.getMinutes())}
+function hhmm(t){var d=new Date(t*1000);return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+'Z'}
 function dur(s){var m=Math.round(s/60);return m+'m'}
 function setMode(m){mode=m;man=(m=='man');
 document.getElementById('mRadio').classList.toggle('on',m=='rad');
@@ -7261,7 +7297,7 @@ s.innerHTML='';a.forEach(x=>{var o=document.createElement('option');o.value=x.n;
 o.dataset.fav=x.fav?1:0;
 o.textContent=x.name+(x.fav?' \u2605':'');s.appendChild(o)});reflectFav()})}
 function reflectFav(){var s=document.getElementById('sat');var o=s.options[s.selectedIndex];
-document.getElementById('fav').innerHTML=(o&&o.dataset.fav=='1')?'\\u2605':'\\u2606'}
+document.getElementById('fav').innerHTML=(o&&o.dataset.fav=='1')?'\u2605':'\u2606'}
 function passes(){j('/api/passes').then(a=>{var t=document.getElementById('passes');
 if(!a.length){t.innerHTML='<tr><td class="mut">no passes</td></tr>';return}
 var h='<tr><th>AOS</th><th>Peak</th><th>El</th><th>Dur</th><th>Az</th></tr>';
@@ -7278,7 +7314,7 @@ document.getElementById('brot').classList.toggle('on',s.rot);
 document.getElementById('hold').textContent=s.hold;
 document.getElementById('mtune').textContent=s.tune;
 document.getElementById('mhl').textContent=s.fixup?'HOLD uplink (park TX here)':'HOLD downlink (park RX here)';
-document.getElementById('mtl').textContent=s.fixup?'TUNE \\u2192 downlink (follow)':'TUNE \\u2192 uplink (follow)';
+document.getElementById('mtl').textContent=s.fixup?'TUNE \u2192 downlink (follow)':'TUNE \u2192 uplink (follow)';
 if(s.norad&&s.norad!=lastSat){lastSat=s.norad;passes()}
 }).catch(e=>{document.getElementById('tag').textContent='offline'})}
 document.getElementById('go').onclick=function(){
@@ -7298,6 +7334,28 @@ document.querySelectorAll('button[data-m]').forEach(b=>{b.onclick=function(){
 j('/api/cmd?man=1&k='+encodeURIComponent(b.dataset.m),{method:'POST'}).then(tick)}})
 loadSats();tick();setInterval(tick,1500);
 </script></body></html>)HTMLPAGE";
+
+// Tear down the three LAN listeners (rigctld, rotctld, web) and their connected
+// clients, freeing their sockets. The ESP32 has a small LWIP socket pool and TLS
+// needs a free socket plus a large contiguous buffer; with the listeners (and a
+// kept-alive browser connection) holding sockets, an outbound HTTPS connect for a
+// GP/data download can be refused ("connection refused") or starved of heap. The
+// service functions rebuild each listener on the next loop tick once the download
+// sequence is done, so this is a transient suspend, not a disable.
+void App::suspendNetServers() {
+  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
+  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
+  if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf = ""; }
+}
+
+// Static glue so the UI-agnostic Net layer can free our listener sockets around
+// every outbound TLS session (see Net::onTlsBusy). On busy=true we drop the
+// listeners; on busy=false we do nothing -- serviceRigctld/rotctld/Webd rebuild
+// them on the next loop tick once control returns from the (blocking) fetch.
+App* App::s_self = nullptr;
+void App::tlsBusyTrampoline(bool busy) {
+  if (busy && s_self) s_self->suspendNetServers();
+}
 
 void App::serviceWebd() {
   // Start/stop the listener with the enable flag and WiFi state.

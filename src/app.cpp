@@ -101,6 +101,8 @@ static bool copyFile(const char* from, const char* to) {
 }
 
 void App::setup() {
+  s_self = this;
+  Net::onTlsBusy = &App::tlsBusyTrampoline;   // free LAN sockets around every fetch
   auto m5cfg = M5.config();
   M5Cardputer.begin(m5cfg, true);   // true => init keyboard
   // Cardputer ADV has a BMI270 IMU; the original Cardputer has none. begin()
@@ -1680,7 +1682,7 @@ th{color:var(--mut);font-weight:600}.mut{color:var(--mut)}
 var lastSat=0,man=false,mode='rad';
 function j(u,o){return fetch(u,o).then(r=>r.json())}
 function pad(n){return(n<10?'0':'')+n}
-function hhmm(t){var d=new Date(t*1000);return pad(d.getHours())+':'+pad(d.getMinutes())}
+function hhmm(t){var d=new Date(t*1000);return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+'Z'}
 function dur(s){var m=Math.round(s/60);return m+'m'}
 function setMode(m){mode=m;man=(m=='man');
 document.getElementById('mRadio').classList.toggle('on',m=='rad');
@@ -1718,7 +1720,7 @@ s.innerHTML='';a.forEach(x=>{var o=document.createElement('option');o.value=x.n;
 o.dataset.fav=x.fav?1:0;
 o.textContent=x.name+(x.fav?' \u2605':'');s.appendChild(o)});reflectFav()})}
 function reflectFav(){var s=document.getElementById('sat');var o=s.options[s.selectedIndex];
-document.getElementById('fav').innerHTML=(o&&o.dataset.fav=='1')?'\\u2605':'\\u2606'}
+document.getElementById('fav').innerHTML=(o&&o.dataset.fav=='1')?'\u2605':'\u2606'}
 function passes(){j('/api/passes').then(a=>{var t=document.getElementById('passes');
 if(!a.length){t.innerHTML='<tr><td class="mut">no passes</td></tr>';return}
 var h='<tr><th>AOS</th><th>Peak</th><th>El</th><th>Dur</th><th>Az</th></tr>';
@@ -1735,7 +1737,7 @@ document.getElementById('brot').classList.toggle('on',s.rot);
 document.getElementById('hold').textContent=s.hold;
 document.getElementById('mtune').textContent=s.tune;
 document.getElementById('mhl').textContent=s.fixup?'HOLD uplink (park TX here)':'HOLD downlink (park RX here)';
-document.getElementById('mtl').textContent=s.fixup?'TUNE \\u2192 downlink (follow)':'TUNE \\u2192 uplink (follow)';
+document.getElementById('mtl').textContent=s.fixup?'TUNE \u2192 downlink (follow)':'TUNE \u2192 uplink (follow)';
 if(s.norad&&s.norad!=lastSat){lastSat=s.norad;passes()}
 }).catch(e=>{document.getElementById('tag').textContent='offline'})}
 document.getElementById('go').onclick=function(){
@@ -1755,6 +1757,28 @@ document.querySelectorAll('button[data-m]').forEach(b=>{b.onclick=function(){
 j('/api/cmd?man=1&k='+encodeURIComponent(b.dataset.m),{method:'POST'}).then(tick)}})
 loadSats();tick();setInterval(tick,1500);
 </script></body></html>)HTMLPAGE";
+
+// Tear down the three LAN listeners (rigctld, rotctld, web) and their connected
+// clients, freeing their sockets. The ESP32 has a small LWIP socket pool and TLS
+// needs a free socket plus a large contiguous buffer; with the listeners (and a
+// kept-alive browser connection) holding sockets, an outbound HTTPS connect for a
+// GP/data download can be refused ("connection refused") or starved of heap. The
+// service functions rebuild each listener on the next loop tick once the download
+// sequence is done, so this is a transient suspend, not a disable.
+void App::suspendNetServers() {
+  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
+  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
+  if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf = ""; }
+}
+
+// Static glue so the UI-agnostic Net layer can free our listener sockets around
+// every outbound TLS session (see Net::onTlsBusy). On busy=true we drop the
+// listeners; on busy=false we do nothing -- serviceRigctld/rotctld/Webd rebuild
+// them on the next loop tick once control returns from the (blocking) fetch.
+App* App::s_self = nullptr;
+void App::tlsBusyTrampoline(bool busy) {
+  if (busy && s_self) s_self->suspendNetServers();
+}
 
 void App::serviceWebd() {
   // Start/stop the listener with the enable flag and WiFi state.

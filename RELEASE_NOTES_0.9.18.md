@@ -124,6 +124,22 @@ failure, and the GP fetch now **retries** (up to three attempts) instead of cach
 a partial catalog. Small downloads were unaffected; this specifically rescues the
 big ones on marginal links.
 
+## Web control: UTC times and downloads while connected
+
+Two fixes for the mobile web page:
+
+- **Pass times now show in UTC** (with a `Z` suffix) instead of being converted to
+  the phone or laptop's local timezone — matching how CardSat shows time everywhere
+  else, which is what satellite operators expect.
+- **Downloads no longer fail while web control is on.** Any internet fetch — keps
+  (GP), weather, space weather, AMSAT status, transponders, or a QRZ lookup — while
+  the web server was running could be refused ("connection refused"): the LAN
+  listeners were holding sockets that the outbound HTTPS connection needed on the
+  socket-limited, no-PSRAM ESP32-S3. The listeners are now briefly released for the
+  duration of *any* download and rebuilt automatically afterward, so the browser
+  simply reconnects on its next refresh. This is handled in one place (around every
+  TLS session), so it covers all current and future fetches uniformly.
+
 ## Notes
 
 - Host-verified only; confirm on hardware before relying on the new views during a

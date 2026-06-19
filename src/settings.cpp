@@ -55,6 +55,8 @@ bool Settings::load() {
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
+  mapCenterLon = d["mapclon"] | (int16_t)0;
+  if (mapCenterLon < -180) mapCenterLon = -180; if (mapCenterLon > 180) mapCenterLon = 180;
   tiltTune   = d["tilttune"] | false;
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
@@ -113,6 +115,7 @@ bool Settings::save() {
   d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
   d["bright"]  = bright;
+  d["mapclon"] = mapCenterLon;
   d["tilttune"] = tiltTune;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;

@@ -77,6 +77,8 @@ private:
   int      favN = 0;
   bool     favOnly = false;
   int      mapHi = -1;            // world map: highlighted favorite (-1 = none); 'f' cycles
+  Screen   mapReturn = SCR_SCHEDULE; // where the World Map's back key returns to
+                                  // (set on entry: Home vs the 'm' shortcut)
   float    manAz = 0, manEl = 0;  // manual rotator control target (deg)
   int      manStep = 5;           // manual rotator jog step (deg)
   Screen   helpReturn = SCR_HOME; // screen to return to when leaving Help
@@ -431,6 +433,7 @@ private:
   bool connectWifiCfg(uint32_t timeoutMs = 12000);  // try primary then 2nd WiFi
   void serviceTiltTune();                  // accelerometer (tilt) passband tuning (ADV)
   void doUpdateGp();
+  void doFastUpdate();                      // GP + transponders for favorites only
   String gpSourceLabel();                  // human label for the configured GP source
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
   int  cacheTxBatch(int start);            // cache one TX_CACHE_BATCH-sized batch

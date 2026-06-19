@@ -188,7 +188,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.18";
+static constexpr const char* FW_VERSION = "0.9.19";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1566,6 +1566,8 @@ struct Settings {
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
   uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
+  int16_t  mapCenterLon = 0;     // world-map center longitude (deg); 0 = classic
+                                 // 0-degree-centered view, else recenter on QTH
   // Display / power
   uint8_t  bright     = 180;    // active screen brightness (10..255)
   bool     tiltTune   = false;  // accelerometer (tilt) passband tuning, ADV-only
@@ -1691,6 +1693,8 @@ private:
   int      favN = 0;
   bool     favOnly = false;
   int      mapHi = -1;            // world map: highlighted favorite (-1 = none); 'f' cycles
+  Screen   mapReturn = SCR_SCHEDULE; // where the World Map's back key returns to
+                                  // (set on entry: Home vs the 'm' shortcut)
   float    manAz = 0, manEl = 0;  // manual rotator control target (deg)
   int      manStep = 5;           // manual rotator jog step (deg)
   Screen   helpReturn = SCR_HOME; // screen to return to when leaving Help
@@ -2045,6 +2049,7 @@ private:
   bool connectWifiCfg(uint32_t timeoutMs = 12000);  // try primary then 2nd WiFi
   void serviceTiltTune();                  // accelerometer (tilt) passband tuning (ADV)
   void doUpdateGp();
+  void doFastUpdate();                      // GP + transponders for favorites only
   String gpSourceLabel();                  // human label for the configured GP source
   void doCacheAllTransponders();           // fetch+cache every sat's TX (offline prep)
   int  cacheTxBatch(int start);            // cache one TX_CACHE_BATCH-sized batch
@@ -5498,6 +5503,8 @@ bool Settings::load() {
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
+  mapCenterLon = d["mapclon"] | (int16_t)0;
+  if (mapCenterLon < -180) mapCenterLon = -180; if (mapCenterLon > 180) mapCenterLon = 180;
   tiltTune   = d["tilttune"] | false;
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
@@ -5556,6 +5563,7 @@ bool Settings::save() {
   d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
   d["bright"]  = bright;
+  d["mapclon"] = mapCenterLon;
   d["tilttune"] = tiltTune;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
@@ -6105,6 +6113,67 @@ void App::doUpdateGp() {
   fetchWeather();                      // local surface weather (open-meteo)
   nextAos = 0; lastSchedMs = 0;        // force schedule/alarm to recompute
   setStatus("GP OK: " + String(n) + " sats");
+}
+
+// Fast update: refresh orbital elements (GP), the AMSAT activity marks (a single
+// bulk summary fetch, so it's cheap to include), and then transponder data for the
+// FAVORITES only -- skipping the space-weather and local-weather fetches a full
+// update does. The GP source is a bulk file, so the elements download is the same;
+// the speed win is fetching transponders for just the handful of favorites
+// (proactively, here) instead of every sat on demand, and skipping the two slower
+// extra fetches. With no favorites it falls back to refreshing the active sat.
+void App::doFastUpdate() {
+  setStatus("WiFi..."); draw();
+  if (!net.connected() && !connectWifiCfg()) {
+    Serial.println("[fast] WiFi connect failed");
+    setStatus("WiFi failed (check SSID/pass)"); return;
+  }
+  net.syncTimeNtp();
+  setStatus("Fast: GP..."); draw();
+  if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
+    Serial.printf("[fast] GP download failed: %s\n", net.lastErr.c_str());
+    setStatus("GP DL failed: " + net.lastErr); return;
+  }
+  int n = db.loadGpFromFile(FILE_GP);
+  db.loadManualGpFile();
+  Serial.printf("[fast] parsed %d satellites\n", n);
+  if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
+  buildSatView();
+  fetchAmsatStatus();                  // AMSAT activity marks are a single bulk
+                                       // summary fetch, so refresh them too (tags
+                                       // the whole catalog in one call); space
+                                       // weather + local weather are still skipped.
+
+  // Refresh transponders for the favorites (fetch overwrites the per-sat cache).
+  // If there are none, refresh the currently active sat so the action still does
+  // something useful.
+  int done = 0, fail = 0, total = favN;
+  if (total > 0) {
+    for (int i = 0; i < favN; ++i) {
+      int idx = db.indexOfNorad(favs[i]);
+      if (idx < 0) continue;                       // favorite not in this catalog
+      SatEntry& s = db.at(idx);
+      setStatus("Fast TX " + String(i+1) + "/" + String(total) + ": " + s.name); draw();
+      if (net.fetchSatnogsTransmittersToFile(s.norad, SatDb::txCachePath(s.norad).c_str()))
+        done++;
+      else fail++;
+      delay(40);                                   // be gentle on the API
+    }
+  } else if (activeSat()) {
+    SatEntry* s = activeSat();
+    setStatus("Fast TX: " + String(s->name)); draw();
+    if (net.fetchSatnogsTransmittersToFile(s->norad, SatDb::txCachePath(s->norad).c_str()))
+      done++; else fail++;
+  }
+
+  // Reload the active sat's transponders from the refreshed cache so the change
+  // is visible immediately.
+  if (activeSat()) { activeTxCount = 0; ensureTransponders(*activeSat()); }
+
+  nextAos = 0; lastSchedMs = 0;        // force schedule/alarm to recompute
+  String msg = "Fast OK: " + String(n) + " sats, " + String(done) + " fav TX";
+  if (fail) msg += " (" + String(fail) + " failed)";
+  setStatus(msg);
 }
 
 // Pull the AMSAT OSCAR status summary and tag each catalog entry as heard
@@ -8230,7 +8299,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 13;
+  const int N = 14;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -8257,20 +8326,21 @@ void App::keyHome(char c, bool enter, bool back) {
           screen = SCR_TRACK;
         }
       } break;
-      case 4: screen = SCR_SUNMOON; lastDrawMs = 0; break;
-      case 5: screen = SCR_SPACEWX; lastDrawMs = 0; break;
-      case 6: // Weather: refresh on entry if WiFi already up, else show cache
+      case 4: mapHi = -1; mapReturn = SCR_HOME; screen = SCR_WORLDMAP; lastDrawMs = 0; break;  // all footprints
+      case 5: screen = SCR_SUNMOON; lastDrawMs = 0; break;
+      case 6: screen = SCR_SPACEWX; lastDrawMs = 0; break;
+      case 7: // Weather: refresh on entry if WiFi already up, else show cache
         if (net.connected()) {
           const Observer& o = loc.obs();
           if (o.lat != 0.0 || o.lon != 0.0) fetchWeather();
         }
         screen = SCR_WEATHER; lastDrawMs = 0; break;
-      case 7: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
-      case 8: screen = SCR_LOCATION; break;
-      case 9: screen = SCR_UPDATE; break;
-      case 10: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
-      case 11: logMenuSel = 0; screen = SCR_LOG; break;
-      case 12: screen = SCR_ABOUT; break;
+      case 8: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+      case 9: screen = SCR_LOCATION; break;
+      case 10: screen = SCR_UPDATE; break;
+      case 11: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
+      case 12: logMenuSel = 0; screen = SCR_LOG; break;
+      case 13: screen = SCR_ABOUT; break;
     }
   }
 }
@@ -8965,6 +9035,7 @@ void App::keyLocation(char c, bool enter, bool back) {
 void App::keyUpdate(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
   if (c == 'k' || enter) { doUpdateGp(); }
+  if (c == 'f') { doFastUpdate(); }             // GP + favorites' transponders only
   if (c == 'a') { doCacheAllTransponders(); }   // cache all TX for offline use
   if (c == 'w') {
     setStatus(connectWifiCfg() ? "WiFi connected" : "WiFi failed");
@@ -10199,27 +10270,49 @@ static const int16_t COAST[] = {
 };
 static const int COAST_N = sizeof(COAST)/sizeof(COAST[0]);
 
+// World-map longitude projection with recenter support. The map is equirectangular;
+// shifting the center longitude is just a horizontal wrap. mapShiftLon() returns
+// the longitude relative to the current map center, wrapped into (-180, 180], so
+// both the x-pixel mapping and the date-line seam test work in the same shifted
+// space. With cfg.mapCenterLon == 0 these reduce to the original behavior.
+static inline double mapShiftLon(double lon, double centerLon) {
+  double d = lon - centerLon;
+  while (d < -180.0) d += 360.0;
+  while (d >  180.0) d -= 360.0;
+  return d;                                  // (-180, 180], 0 == map center
+}
+// Map a longitude to an x pixel within [MX, MX+MW), given the map center.
+static inline int mapLonToX(double lon, double centerLon, int MX, int MW) {
+  double d = mapShiftLon(lon, centerLon);    // -180..180 across the map width
+  return MX + (int)lround((d + 180.0) / 360.0 * MW);
+}
+
 void App::drawWorldMap() {
   header("World Map");
   const int MX = 0, MY = 16, MW = 240, MH = 108;     // map rect (y 16..124)
   const uint16_t GRID = 0x4208;                      // dim grey graticule
+  const double centerLon = (double)cfg.mapCenterLon; // 0 = classic 0-centered view
   canvas.fillRect(MX, MY, MW, MH, CL_BLACK);
 
   // Coarse public-domain coastline outline (land), drawn under the graticule.
-  { int px = 0, py = 0, plo = 0; bool pen = false;
+  // The seam test is done in shifted space: skip a segment whose two endpoints
+  // land on opposite halves of the (recentered) map, i.e. it crosses the seam.
+  { int px = 0, py = 0; double pds = 0; bool pen = false;
     for (int i = 0; i + 1 < COAST_N; i += 2) {
       int lo = COAST[i], la = COAST[i + 1];
       if (lo == 999) { pen = false; continue; }
-      int x = MX + (int)lround((lo + 180.0) / 360.0 * MW);
+      double ds = mapShiftLon(lo, centerLon);
+      int x = mapLonToX(lo, centerLon, MX, MW);
       int y = MY + (int)lround((90.0 - la) / 180.0 * MH);
-      if (pen && abs(lo - plo) < 180) canvas.drawLine(px, py, x, y, CL_DGREEN);
-      px = x; py = y; plo = lo; pen = true;
+      if (pen && fabs(ds - pds) < 180.0) canvas.drawLine(px, py, x, y, CL_DGREEN);
+      px = x; py = y; pds = ds; pen = true;
     }
   }
 
   // Graticule every 30 deg; emphasise the equator and the prime meridian.
-  for (int lon = -180; lon <= 180; lon += 30) {
-    int x = MX + (lon + 180) * MW / 360; if (x > MX + MW - 1) x = MX + MW - 1;
+  for (int lon = -180; lon < 180; lon += 30) {
+    int x = mapLonToX(lon, centerLon, MX, MW);
+    if (x > MX + MW - 1) x = MX + MW - 1; if (x < MX) x = MX;
     canvas.drawLine(x, MY, x, MY + MH - 1, lon == 0 ? CL_DGREEN : GRID);
   }
   for (int lat = -60; lat <= 60; lat += 30) {
@@ -10231,7 +10324,7 @@ void App::drawWorldMap() {
   // Home QTH: white cross + label.
   Observer o = loc.obs();
   if (o.valid) {
-    int qx = MX + (int)lround((o.lon + 180.0) / 360.0 * MW);
+    int qx = mapLonToX(o.lon, centerLon, MX, MW);
     int qy = MY + (int)lround((90.0  - o.lat) / 180.0 * MH);
     canvas.drawLine(qx - 3, qy, qx + 3, qy, CL_WHITE);
     canvas.drawLine(qx, qy - 3, qx, qy + 3, CL_WHITE);
@@ -10265,29 +10358,31 @@ void App::drawWorldMap() {
     LiveLook L = pred.look(now);
     double lon = L.subLon; while (lon < -180) lon += 360; while (lon > 180) lon -= 360;
     double lat = L.subLat; if (lat > 90) lat = 90; if (lat < -90) lat = -90;
-    int x = MX + (int)lround((lon + 180.0) / 360.0 * MW);
+    int x = mapLonToX(lon, centerLon, MX, MW);
     int y = MY + (int)lround((90.0 - lat) / 180.0 * MH);
     bool hi = (mapHi == i);
     uint16_t col = (mapHi >= 0 && !hi) ? 0x4208            // dim others when one is highlighted
                  : (L.sunlit ? CL_YELLOW : CL_CYAN);       // sunlit vs eclipse
     // Ground footprint: the small circle on the sphere at central angle beta
     // where the satellite sits on the horizon, cos(beta) = Re/(Re+h). Sampled in
-    // azimuth and drawn as an outline; segments crossing the date line are skipped.
+    // azimuth and drawn as an outline; segments crossing the seam are skipped
+    // (tested in recentered space so the skip tracks the moved date line).
     if (L.satAltKm > 1.0) {
       const double D2R = 0.0174532925199433, R2D = 57.2957795130823, RE = 6371.0;
       double beta = acos(RE / (RE + L.satAltKm));
       double la1 = lat * D2R, lo1 = lon * D2R, sb = sin(beta), cb = cos(beta);
       double s1 = sin(la1), c1 = cos(la1);
-      int pfx = 0, pfy = 0; double pflon = 0; bool have = false;
+      int pfx = 0, pfy = 0; double pfds = 0; bool have = false;
       for (int a = 0; a <= 360; a += 15) {
         double az = a * D2R;
         double la2 = asin(s1 * cb + c1 * sb * cos(az));
         double lo2 = lo1 + atan2(sin(az) * sb * c1, cb - s1 * sin(la2));
         double lo2d = lo2 * R2D; while (lo2d < -180) lo2d += 360; while (lo2d > 180) lo2d -= 360;
-        int fx = MX + (int)lround((lo2d + 180.0) / 360.0 * MW);
+        double ds = mapShiftLon(lo2d, centerLon);
+        int fx = mapLonToX(lo2d, centerLon, MX, MW);
         int fy = MY + (int)lround((90.0 - la2 * R2D) / 180.0 * MH);
-        if (have && fabs(lo2d - pflon) < 180.0) canvas.drawLine(pfx, pfy, fx, fy, col);
-        pfx = fx; pfy = fy; pflon = lo2d; have = true;
+        if (have && fabs(ds - pfds) < 180.0) canvas.drawLine(pfx, pfy, fx, fy, col);
+        pfx = fx; pfy = fy; pfds = ds; have = true;
       }
     }
     canvas.fillCircle(x, y, hi ? 3 : 2, col);
@@ -10306,14 +10401,22 @@ void App::drawWorldMap() {
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(2, MY + 1); canvas.printf("%d favs", shown);
-  footer("` bk  f hilite  y=sun c=ecl");
+  footer(cfg.mapCenterLon != 0 ? "` bk  f hi  c=ctr 0   yel/cyn sun/ecl"
+                               : "` bk  f hi  c=ctr QTH yel/cyn sun/ecl");
 }
 
 void App::keyWorldMap(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { screen = SCR_SCHEDULE; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { screen = mapReturn; lastDrawMs = 0; return; }
   if (c == 'f' && favN > 0) {                 // cycle highlighted favorite (-1 = none)
     if (++mapHi >= favN) mapHi = -1;
+    lastDrawMs = 0;
+  }
+  if (c == 'c') {                             // toggle: center on QTH <-> classic 0-deg
+    Observer o = loc.obs();
+    if (cfg.mapCenterLon != 0) cfg.mapCenterLon = 0;        // back to 0-centered
+    else if (o.valid)          cfg.mapCenterLon = (int16_t)lround(o.lon);  // center on QTH
+    cfg.save();
     lastDrawMs = 0;
   }
 }
@@ -12831,9 +12934,11 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "Sun / Moon", "Space Wx", "Weather", "QRZ Lookup", "Location", "Update",
+                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "QRZ Lookup", "Location", "Update",
                           "Settings", "Log", "About" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
+  static_assert(sizeof(items) / sizeof(items[0]) == 14,
+                "Home menu item count must match keyHome's N");
   const int VIS = 9;
   if (homeSel < homeScroll)           homeScroll = homeSel;
   if (homeSel > homeScroll + VIS - 1) homeScroll = homeSel - VIS + 1;
@@ -13683,17 +13788,15 @@ void App::drawUpdate() {
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(6, 24);
   canvas.print(String("k / ENT : update GP (") + gpSourceLabel() + ")");
-  canvas.setCursor(6, 38); canvas.print("a       : cache ALL transponders");
-  canvas.setCursor(6, 52); canvas.print("w       : connect WiFi only");
+  canvas.setCursor(6, 38); canvas.print("f       : fast (GP + fav TX)");
+  canvas.setCursor(6, 52); canvas.print("a       : cache ALL transponders");
+  canvas.setCursor(6, 66); canvas.print("w       : connect WiFi only");
   canvas.setTextColor(CL_CYAN, CL_BLACK);
-  canvas.setCursor(6, 68); canvas.print("k also refreshes AMSAT status");
-  canvas.setCursor(6, 78); canvas.print("+ space wx + weather.");
+  canvas.setCursor(6, 82); canvas.print("k adds space wx + weather;");
+  canvas.setCursor(6, 92); canvas.print("f does GP+AMSAT+fav TX.");
   canvas.setTextColor(CL_WHITE, CL_BLACK);
-  canvas.setCursor(6, 94);
-  canvas.printf("Sats in memory: %d", db.count());
-  canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 108); canvas.print("'a' caches every sat's TX for");
-  canvas.setCursor(6, 118); canvas.print("full offline use.");
+  canvas.setCursor(6, 106);
+  canvas.printf("Sats: %d   Favs: %d", db.count(), favN);
   footer("` back");
 }
 

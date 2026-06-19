@@ -314,7 +314,8 @@ or **DEL** always steps back.
 ### Home
 
 A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
-Location · Update · Settings · About / diagnostics · Log.** The currently
+World Map · Sun / Moon · Space Wx · Weather · QRZ Lookup · Location · Update ·
+Settings · About / diagnostics · Log.** The currently
 selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 
 ### About
@@ -858,6 +859,12 @@ whichever screen opened it.
   the Satellites list, the **space-weather** data (solar flux + Kp), **and** the
   terrestrial **weather** for your site, so one press brings everything current. The
   Update screen notes this so it's clear `k` does more than GP.
+- `f` — **fast update**: refresh the orbital elements (GP), the AMSAT activity
+  marks (a single bulk fetch, so it's included), and the transponder data for your
+  **favorites only** — skipping the space-weather and terrestrial-weather fetches
+  that `k` also pulls. This is the quick way to bring your regularly-worked birds
+  current without the longer full refresh — handy in the field. (If you haven't
+  marked any favorites, it refreshes the currently active satellite instead.)
 - `a` — fetch and cache **all** transponders for offline use. This runs in small
   batches across **automatic reboots**: CardSat caches a handful of satellites,
   reboots to get a fresh network connection, and continues where it left off,
@@ -1966,10 +1973,10 @@ listed below.
 
 - **Purpose** — the top-level launcher.
 - **Reached from** — power-on lands here; `` ` `` from most top-level screens returns here.
-- **Shows** — a scrolling list of the thirteen destinations: Satellites, Next
-  Passes (all favs), Passes (sel), Track (sel), Sun / Moon, Space Wx, Weather, QRZ
-  Lookup, Location, Update, Settings, Log, About. The header carries the clock and
-  battery gauge.
+- **Shows** — a scrolling list of the fourteen destinations: Satellites, Next
+  Passes (all favs), Passes (sel), Track (sel), World Map, Sun / Moon, Space Wx,
+  Weather, QRZ Lookup, Location, Update, Settings, Log, About. The header carries
+  the clock and battery gauge.
 - **Keys** — `;`/`.` move the highlight; **ENTER** opens the selected item.
 
 ### Satellites
@@ -2312,7 +2319,8 @@ listed below.
 - **Shows** — the last GP age and a note that `k` also refreshes the clock, AMSAT
   status, space weather and terrestrial weather.
 - **Keys** — `k` (or ENTER) download GP + sync clock (NTP) + AMSAT + space wx +
-  weather; `a` fetch and cache **all** transponders for offline use; `` ` `` back.
+  weather; `f` fast update (GP + AMSAT + favorites' transponders, skips space wx/weather);
+  `a` fetch and cache **all** transponders for offline use; `` ` `` back.
 
 ### GP source
 
@@ -2404,10 +2412,17 @@ listed below.
 
 - **Purpose** — a live equirectangular map of all favorites' footprints with the
   day/night terminator.
-- **Reached from** — Next Passes → `m`.
+- **Reached from** — Home → World Map, or Next Passes → `m`. Back returns to
+  wherever you entered from.
 - **Shows** — every favorite's sub-point and footprint, your station marker, the
   graticule, and the sun terminator (drawn automatically).
-- **Keys** — `f` cycle which favorite is highlighted; `` ` `` back.
+- **Keys** — `f` cycle which favorite is highlighted; **`c` recenter the map on
+  your QTH** (press again to return to the classic 0°-centered view); `` ` `` back.
+- **Recentering** — by default the map is centered on 0° longitude. Press `c` to
+  center it on your station's longitude instead, so your QTH sits in the middle and
+  the world wraps around it; this is remembered across reboots. Only the longitude
+  is shifted — north stays up and the equator stays centered. The orbital-analysis
+  ground-track map and the simulation map keep the standard 0°-centered view.
 
 ### Help
 
@@ -2468,10 +2483,10 @@ listed below.
 | **Illum** | `,`/`/` scroll ∓1 day (forward indefinitely; not before today) · `r` recompute · `` ` ``/ENTER back |
 | **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock · ENTER GPS sky plot |
 | **GPS sky plot** | live GNSS az/el coloured by signal · `` ` `` back |
-| **World map** | `f` cycle highlighted favorite (sun terminator drawn automatically) · `` ` `` back |
+| **World map** | `f` cycle highlighted favorite · `c` recenter on QTH / 0° (sun terminator drawn automatically) · `` ` `` back |
 | **Rotator (manual)** | `,`/`/` az · `;`/`.` el · `s` step · `x` stop · *(Yaesu direct only)* `1`/`2`/`3`/`4` capture ADC at az 0 / az full / el 0 / el full · `` ` `` back |
 | **Help** | `;`/`.` scroll · `` ` `` back |
-| **Update** | `k`/ENTER GP · `a` cache all TX · `w` WiFi only |
+| **Update** | `k`/ENTER GP (+clock/AMSAT/space-wx/weather) · `f` fast (GP + AMSAT + fav TX) · `a` cache all TX · `w` WiFi only |
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
 | **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |
 | **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |

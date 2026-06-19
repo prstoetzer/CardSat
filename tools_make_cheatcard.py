@@ -27,7 +27,7 @@ FRONT = [
   "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "Sun/Moon, Space Wx, Weather, QRZ Lookup, Location, Update, Settings, Log, About"),
+  "World Map, Sun/Moon, Space Wx, Weather, QRZ Lookup, Location, Update, Settings, Log, About"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; <b>x</b> del manual sat &middot; "
   "<b>e</b> EQX table &middot; <b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
@@ -103,8 +103,8 @@ BACK = [
  ("GPS SKY PLOT",
   "Live GNSS by az/el, coloured by signal (green=strong, grey=weak) &middot; <b>`</b> back"),
  ("WORLD MAP",
-  "All footprints &middot; <b>f</b> highlight favorite &middot; <b>y</b> sun &middot; "
-  "<b>c</b> eclipse &middot; <b>`</b> back"),
+  "All footprints &middot; <b>f</b> highlight favorite &middot; <b>c</b> recenter on QTH/0&deg; &middot; "
+  "yellow=sunlit cyan=eclipse &middot; <b>`</b> back"),
  ("SCHEDULES",
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
   "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
@@ -114,6 +114,7 @@ BACK = [
   "<b>x</b> x2 delete"),
  ("UPDATE",
   "<b>k</b>/<b>ENTER</b> GP+clock+AMSAT+space-wx+weather &middot; "
+  "<b>f</b> fast (GP + AMSAT + favorites' transponders) &middot; "
   "<b>a</b> cache all transponders (auto-reboots until done) &middot; "
   "<b>w</b> WiFi only"),
  ("SETTINGS",
@@ -149,7 +150,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.18  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.19  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/%d' % (side, pg, TOTAL_PAGES))

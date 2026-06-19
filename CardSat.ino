@@ -4435,11 +4435,17 @@ static constexpr uint8_t  IR_DUTY_ON   = 96;      // ~38% duty -- typical IR dri
 
 void IrBeacon::begin() {
 #if defined(ARDUINO_ARCH_ESP32)
-  // Configure the LEDC timer/channel for the carrier and park it off.
-  ledcSetup(IR_LEDC_CH, IR_CARRIER_HZ, IR_LEDC_BITS);
-  ledcAttachPin(IR_LED_PIN, IR_LEDC_CH);
-  ledcWrite(IR_LEDC_CH, 0);                        // carrier off (LED dark)
-  _ok = true;
+  // Configure LEDC for the carrier and park it off. The LEDC API changed in
+  // ESP32 Arduino core 3.0: ledcSetup()+ledcAttachPin() were merged into
+  // ledcAttach(pin, freq, bits) and ledcWrite() now takes the PIN, not a channel.
+  #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+    _ok = ledcAttach(IR_LED_PIN, IR_CARRIER_HZ, IR_LEDC_BITS);
+  #else
+    ledcSetup(IR_LEDC_CH, IR_CARRIER_HZ, IR_LEDC_BITS);
+    ledcAttachPin(IR_LED_PIN, IR_LEDC_CH);
+    _ok = true;
+  #endif
+  carrier(false);                                 // carrier off (LED dark)
 #else
   _ok = false;
 #endif
@@ -4448,7 +4454,11 @@ void IrBeacon::begin() {
 
 void IrBeacon::carrier(bool on) {
 #if defined(ARDUINO_ARCH_ESP32)
-  ledcWrite(IR_LEDC_CH, on ? IR_DUTY_ON : 0);
+  #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+    ledcWrite(IR_LED_PIN, on ? IR_DUTY_ON : 0);   // core 3.x: address by pin
+  #else
+    ledcWrite(IR_LEDC_CH, on ? IR_DUTY_ON : 0);   // core 2.x: address by channel
+  #endif
 #else
   (void)on;
 #endif

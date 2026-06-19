@@ -65,6 +65,7 @@ public:
   static int  RECOVER_AFTER;                    // failures before a hard reset (default 3)
   static int  REBOOT_AFTER;                     // failed hard resets before prompting reboot
   static uint32_t INTER_FETCH_MS;               // settle delay before each TLS session
+  static uint32_t TLS_MIN_BLOCK;                // min contiguous heap for an mbedTLS handshake
 
   // Optional hook invoked around EVERY outbound TLS session: busy(true) just
   // before a connection is opened, busy(false) after it closes. The app uses it

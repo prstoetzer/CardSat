@@ -20,6 +20,8 @@ int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before r
 int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
 uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
                                         // just-closed socket leaves the LWIP pool
+uint32_t Net::TLS_MIN_BLOCK  = 42000;   // mbedTLS handshake needs a contiguous block this
+                                        // big; below it we defragment before connecting
 
 // Flush the LWIP socket pool by tearing the STA association down hard, then
 // reconnect with the credentials WiFi already holds. This is the reliable cure
@@ -129,9 +131,10 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
   Serial.printf("[net] GET %s\n", url.c_str());
-  Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
-                (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
-                (int)WiFi.RSSI());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   WiFiClientSecure client;
   // Force an explicit client.stop() on EVERY exit path (including early returns
@@ -223,9 +226,10 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
   Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
-  Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
-                (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
-                (int)WiFi.RSSI());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   // Some hosts (notably NOAA SWPC -- government-hosted, load-balanced, strict TLS)
   // are slow on the FIRST response/handshake from a fresh client/IP. When the

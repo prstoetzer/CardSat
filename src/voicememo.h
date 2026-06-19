@@ -49,6 +49,8 @@ private:
   uint32_t _startMs = 0;
   uint32_t _dataBytes = 0;                     // PCM payload written so far
   char     _path[64] = {0};
+  bool     _primed = false;                    // a record buffer is in flight
+  uint8_t  _bufIdx = 0;                         // which buffer is being filled
   const char* _err = "";
   bool     _spkWasOn = false;
 

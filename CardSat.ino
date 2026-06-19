@@ -1415,6 +1415,7 @@ public:
   static int  RECOVER_AFTER;                    // failures before a hard reset (default 3)
   static int  REBOOT_AFTER;                     // failed hard resets before prompting reboot
   static uint32_t INTER_FETCH_MS;               // settle delay before each TLS session
+  static uint32_t TLS_MIN_BLOCK;                // min contiguous heap for an mbedTLS handshake
 
   // Optional hook invoked around EVERY outbound TLS session: busy(true) just
   // before a connection is opened, busy(false) after it closes. The app uses it
@@ -1811,6 +1812,8 @@ private:
   uint32_t _startMs = 0;
   uint32_t _dataBytes = 0;                     // PCM payload written so far
   char     _path[64] = {0};
+  bool     _primed = false;                    // a record buffer is in flight
+  uint8_t  _bufIdx = 0;                         // which buffer is being filled
   const char* _err = "";
   bool     _spkWasOn = false;
 
@@ -2131,6 +2134,9 @@ private:
   void rotdHandleLine(const String& line);     // parse + act on one rotctld command
   void serviceWebd();                          // pump the mobile web-control server
   void suspendNetServers();                    // tear down rigd/rotd/webd listeners
+  void freeCanvasForTls();                     // free ~64 KB sprite for mbedTLS handshake
+  void restoreCanvasAfterTls();
+  bool canvasFreed = false;                    // true while the sprite is freed for a fetch
                                                // (free their sockets) before a
                                                // blocking download; they auto-rebuild
   static App* s_self;                          // for the static Net TLS hook to reach us
@@ -4372,6 +4378,8 @@ bool VoiceMemo::start() {
 
   writeWavHeader(0);                 // placeholder sizes; patched on finalize
   _dataBytes = 0;
+  _primed    = false;
+  _bufIdx    = 0;
   _startMs   = millis();
   _state     = RECORDING;
   Serial.printf("[memo] recording -> %s\n", _path);
@@ -4384,15 +4392,34 @@ void VoiceMemo::poll() {
   // Hard time cap.
   if (millis() - _startMs >= MEMO_MAX_SECS * 1000UL) { finalize(true); return; }
 
-  // Pull one block from the mic and append it. record() blocks only for this
-  // small block (~64 ms of audio), so the loop stays responsive.
-  static int16_t blk[MEMO_BLOCK_SAMPLES];
-  if (M5.Mic.record(blk, MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ)) {
-    size_t bytes = MEMO_BLOCK_SAMPLES * sizeof(int16_t);
-    size_t w = _file.write((uint8_t*)blk, bytes);
-    _dataBytes += w;
-    if (w < bytes) { _err = "SD write short"; finalize(false); }   // card full/err
+  if (!M5.Mic.isEnabled()) return;
+
+  // M5.Mic.record() is asynchronous: it queues a buffer to be filled by I2S DMA
+  // and returns true once accepted -- the data is NOT ready when it returns. We
+  // double-buffer: kick a record into buffer A, and once the mic finishes filling
+  // it (isRecording() goes false), write A to SD and kick buffer B, ping-ponging.
+  // Writing the buffer immediately after record() returns (the old bug) captured
+  // empty/garbage data, so no audio was saved.
+  static int16_t buf[2][MEMO_BLOCK_SAMPLES];
+
+  if (!_primed) {
+    // Start the first capture.
+    if (M5.Mic.record(buf[_bufIdx], MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ)) _primed = true;
+    return;
   }
+
+  // Wait (cooperatively) until the in-flight buffer is filled.
+  if (M5.Mic.isRecording()) return;
+
+  // The buffer just finished: write it, then immediately kick the other buffer.
+  int16_t* done = buf[_bufIdx];
+  _bufIdx ^= 1;
+  M5.Mic.record(buf[_bufIdx], MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ);   // next capture
+
+  size_t bytes = MEMO_BLOCK_SAMPLES * sizeof(int16_t);
+  size_t w = _file.write((uint8_t*)done, bytes);
+  _dataBytes += w;
+  if (w < bytes) { _err = "SD write short"; finalize(false); }       // card full/err
 }
 
 void VoiceMemo::stop() {
@@ -4400,6 +4427,13 @@ void VoiceMemo::stop() {
 }
 
 void VoiceMemo::finalize(bool ok) {
+  // Let any in-flight capture settle before tearing down the mic (avoids cutting
+  // a DMA transfer mid-buffer). The final partial block isn't written -- a <=64 ms
+  // tail loss is fine.
+  if (_primed && M5.Mic.isEnabled()) {
+    uint32_t t0 = millis();
+    while (M5.Mic.isRecording() && millis() - t0 < 200) { M5.delay(1); }
+  }
   // Stop the mic, restore the speaker.
   M5.Mic.end();
   if (_spkWasOn) M5.Speaker.begin();
@@ -4412,7 +4446,7 @@ void VoiceMemo::finalize(bool ok) {
                 ok ? "saved" : "aborted", (unsigned long)_dataBytes,
                 (unsigned long)(millis() - _startMs));
   if (!ok && _path[0]) Store::fs().remove(_path);   // discard a broken file
-  _state = IDLE;
+  _state = IDLE; _primed = false;
 }
 
 uint32_t VoiceMemo::elapsedMs() const {
@@ -5312,6 +5346,8 @@ int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before r
 int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
 uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
                                         // just-closed socket leaves the LWIP pool
+uint32_t Net::TLS_MIN_BLOCK  = 42000;   // mbedTLS handshake needs a contiguous block this
+                                        // big; below it we defragment before connecting
 
 // Flush the LWIP socket pool by tearing the STA association down hard, then
 // reconnect with the credentials WiFi already holds. This is the reliable cure
@@ -5423,9 +5459,10 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
   Serial.printf("[net] GET %s\n", url.c_str());
-  Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
-                (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
-                (int)WiFi.RSSI());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   WiFiClientSecure client;
   // Force an explicit client.stop() on EVERY exit path (including early returns
@@ -5517,9 +5554,10 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
   Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
-  Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
-                (unsigned)ESP.getFreeHeap(), WiFi.localIP().toString().c_str(),
-                (int)WiFi.RSSI());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   // Some hosts (notably NOAA SWPC -- government-hosted, load-balanced, strict TLS)
   // are slow on the FIRST response/handshake from a fresh client/IP. When the
@@ -8102,6 +8140,27 @@ void App::suspendNetServers() {
   if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf = ""; }
 }
 
+// The full-screen 240x135x16bpp sprite is a single ~64 KB contiguous allocation
+// that otherwise caps the largest free heap block around 31 KB -- too small for
+// mbedTLS to allocate its handshake buffers, so every TLS connect returns -1. We
+// free the sprite for the duration of an outbound fetch (the loop isn't drawing
+// during a blocking download) and recreate it afterwards. drawMemoIndicator and
+// the per-screen draws are skipped while it's gone via canvasFreed.
+void App::freeCanvasForTls() {
+  if (canvasFreed) return;
+  canvas.deleteSprite();
+  canvasFreed = true;
+  Serial.printf("[net] freed display sprite for TLS (largest block now %u)\n",
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+void App::restoreCanvasAfterTls() {
+  if (!canvasFreed) return;
+  canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
+  canvas.setTextWrap(false);
+  canvasFreed = false;
+  lastDrawMs = 0;   // force a full redraw on the next loop tick
+}
+
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
 // every outbound TLS session (see Net::onTlsBusy). On busy=true we drop the
 // listeners and mark a fetch in progress; on busy=false we clear that mark once
@@ -8113,8 +8172,15 @@ App* App::s_self = nullptr;
 int  App::s_fetchDepth = 0;
 void App::tlsBusyTrampoline(bool busy) {
   if (!s_self) return;
-  if (busy) { s_fetchDepth++; s_self->suspendNetServers(); }
-  else if (s_fetchDepth > 0) { s_fetchDepth--; }
+  if (busy) {
+    if (s_fetchDepth++ == 0) {
+      s_self->suspendNetServers();
+      s_self->freeCanvasForTls();   // free the ~64 KB sprite so mbedTLS can get a
+                                    // large contiguous block for its handshake
+    }
+  } else if (s_fetchDepth > 0) {
+    if (--s_fetchDepth == 0) s_self->restoreCanvasAfterTls();
+  }
 }
 bool App::netFetchActive() { return s_fetchDepth > 0; }
 
@@ -10863,6 +10929,7 @@ void App::footer(const String& t) {
 }
 
 void App::draw() {
+  if (canvasFreed) return;   // sprite freed for a TLS fetch; nothing to draw to
   canvas.fillScreen(CL_BLACK);
   switch (screen) {
     case SCR_HOME:     drawHome(); break;

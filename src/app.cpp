@@ -10,6 +10,7 @@
 #include <sys/time.h>
 #include <math.h>
 #include <esp_sleep.h>   // deep-sleep-until-next-pass
+#include <esp_heap_caps.h>   // heap_caps_get_largest_free_block() for the TLS sprite-free
 
 // 16-bit 565 colours
 static const uint16_t CL_BLACK=0x0000, CL_WHITE=0xFFFF, CL_GREEN=0x07E0, CL_RED=0xF800,
@@ -1871,6 +1872,27 @@ void App::suspendNetServers() {
   if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf = ""; }
 }
 
+// The full-screen 240x135x16bpp sprite is a single ~64 KB contiguous allocation
+// that otherwise caps the largest free heap block around 31 KB -- too small for
+// mbedTLS to allocate its handshake buffers, so every TLS connect returns -1. We
+// free the sprite for the duration of an outbound fetch (the loop isn't drawing
+// during a blocking download) and recreate it afterwards. drawMemoIndicator and
+// the per-screen draws are skipped while it's gone via canvasFreed.
+void App::freeCanvasForTls() {
+  if (canvasFreed) return;
+  canvas.deleteSprite();
+  canvasFreed = true;
+  Serial.printf("[net] freed display sprite for TLS (largest block now %u)\n",
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+void App::restoreCanvasAfterTls() {
+  if (!canvasFreed) return;
+  canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
+  canvas.setTextWrap(false);
+  canvasFreed = false;
+  lastDrawMs = 0;   // force a full redraw on the next loop tick
+}
+
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
 // every outbound TLS session (see Net::onTlsBusy). On busy=true we drop the
 // listeners and mark a fetch in progress; on busy=false we clear that mark once
@@ -1882,8 +1904,15 @@ App* App::s_self = nullptr;
 int  App::s_fetchDepth = 0;
 void App::tlsBusyTrampoline(bool busy) {
   if (!s_self) return;
-  if (busy) { s_fetchDepth++; s_self->suspendNetServers(); }
-  else if (s_fetchDepth > 0) { s_fetchDepth--; }
+  if (busy) {
+    if (s_fetchDepth++ == 0) {
+      s_self->suspendNetServers();
+      s_self->freeCanvasForTls();   // free the ~64 KB sprite so mbedTLS can get a
+                                    // large contiguous block for its handshake
+    }
+  } else if (s_fetchDepth > 0) {
+    if (--s_fetchDepth == 0) s_self->restoreCanvasAfterTls();
+  }
 }
 bool App::netFetchActive() { return s_fetchDepth > 0; }
 
@@ -4629,6 +4658,7 @@ void App::footer(const String& t) {
 }
 
 void App::draw() {
+  if (canvasFreed) return;   // sprite freed for a TLS fetch; nothing to draw to
   canvas.fillScreen(CL_BLACK);
   switch (screen) {
     case SCR_HOME:     drawHome(); break;

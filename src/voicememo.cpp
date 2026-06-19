@@ -90,6 +90,8 @@ bool VoiceMemo::start() {
 
   writeWavHeader(0);                 // placeholder sizes; patched on finalize
   _dataBytes = 0;
+  _primed    = false;
+  _bufIdx    = 0;
   _startMs   = millis();
   _state     = RECORDING;
   Serial.printf("[memo] recording -> %s\n", _path);
@@ -102,15 +104,34 @@ void VoiceMemo::poll() {
   // Hard time cap.
   if (millis() - _startMs >= MEMO_MAX_SECS * 1000UL) { finalize(true); return; }
 
-  // Pull one block from the mic and append it. record() blocks only for this
-  // small block (~64 ms of audio), so the loop stays responsive.
-  static int16_t blk[MEMO_BLOCK_SAMPLES];
-  if (M5.Mic.record(blk, MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ)) {
-    size_t bytes = MEMO_BLOCK_SAMPLES * sizeof(int16_t);
-    size_t w = _file.write((uint8_t*)blk, bytes);
-    _dataBytes += w;
-    if (w < bytes) { _err = "SD write short"; finalize(false); }   // card full/err
+  if (!M5.Mic.isEnabled()) return;
+
+  // M5.Mic.record() is asynchronous: it queues a buffer to be filled by I2S DMA
+  // and returns true once accepted -- the data is NOT ready when it returns. We
+  // double-buffer: kick a record into buffer A, and once the mic finishes filling
+  // it (isRecording() goes false), write A to SD and kick buffer B, ping-ponging.
+  // Writing the buffer immediately after record() returns (the old bug) captured
+  // empty/garbage data, so no audio was saved.
+  static int16_t buf[2][MEMO_BLOCK_SAMPLES];
+
+  if (!_primed) {
+    // Start the first capture.
+    if (M5.Mic.record(buf[_bufIdx], MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ)) _primed = true;
+    return;
   }
+
+  // Wait (cooperatively) until the in-flight buffer is filled.
+  if (M5.Mic.isRecording()) return;
+
+  // The buffer just finished: write it, then immediately kick the other buffer.
+  int16_t* done = buf[_bufIdx];
+  _bufIdx ^= 1;
+  M5.Mic.record(buf[_bufIdx], MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ);   // next capture
+
+  size_t bytes = MEMO_BLOCK_SAMPLES * sizeof(int16_t);
+  size_t w = _file.write((uint8_t*)done, bytes);
+  _dataBytes += w;
+  if (w < bytes) { _err = "SD write short"; finalize(false); }       // card full/err
 }
 
 void VoiceMemo::stop() {
@@ -118,6 +139,13 @@ void VoiceMemo::stop() {
 }
 
 void VoiceMemo::finalize(bool ok) {
+  // Let any in-flight capture settle before tearing down the mic (avoids cutting
+  // a DMA transfer mid-buffer). The final partial block isn't written -- a <=64 ms
+  // tail loss is fine.
+  if (_primed && M5.Mic.isEnabled()) {
+    uint32_t t0 = millis();
+    while (M5.Mic.isRecording() && millis() - t0 < 200) { M5.delay(1); }
+  }
   // Stop the mic, restore the speaker.
   M5.Mic.end();
   if (_spkWasOn) M5.Speaker.begin();
@@ -130,7 +158,7 @@ void VoiceMemo::finalize(bool ok) {
                 ok ? "saved" : "aborted", (unsigned long)_dataBytes,
                 (unsigned long)(millis() - _startMs));
   if (!ok && _path[0]) Store::fs().remove(_path);   // discard a broken file
-  _state = IDLE;
+  _state = IDLE; _primed = false;
 }
 
 uint32_t VoiceMemo::elapsedMs() const {

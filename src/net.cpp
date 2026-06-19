@@ -15,6 +15,47 @@
 // TLS-session hook (see net.h). Null by default; the app installs it at startup.
 void (*Net::onTlsBusy)(bool) = nullptr;
 
+// Socket-failure recovery tunables (see net.h).
+int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before reset
+int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
+uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
+                                        // just-closed socket leaves the LWIP pool
+
+// Flush the LWIP socket pool by tearing the STA association down hard, then
+// reconnect with the credentials WiFi already holds. This is the reliable cure
+// once fds wedge and connect() starts returning -1.
+bool Net::hardResetWifi() {
+  Serial.println("[net] hard WiFi reset (flushing socket pool)");
+  WiFi.disconnect(true);                 // true => also turn the radio off briefly
+  delay(200);
+  WiFi.mode(WIFI_STA);
+  WiFi.reconnect();                      // reuse the last good credentials
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(150);
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  Serial.printf("[net] hard reset %s\n", ok ? "recovered" : "still down");
+  if (ok) connFails = 0;
+  return ok;
+}
+
+// Update the consecutive-failure counter from a fetch result. A success (any
+// HTTP code > 0, i.e. we actually reached the server) clears it; a connect-level
+// failure (code <= 0) increments it, and once we cross the threshold we hard-reset
+// the WiFi stack to clear a wedged socket pool before the next attempt.
+void Net::noteConnResult(int code) {
+  if (code > 0) { connFails = 0; recoverExhausted = false; failedResets = 0; return; }
+  if (++connFails >= RECOVER_AFTER) {
+    Serial.printf("[net] %d consecutive connect failures -> recovering\n", connFails);
+    if (hardResetWifi()) {
+      failedResets = 0;                         // recovered: clear the reboot counter
+    } else if (++failedResets >= REBOOT_AFTER) {
+      Serial.println("[net] hard resets exhausted -> requesting reboot prompt");
+      recoverExhausted = true;                  // app surfaces a reboot prompt
+    }
+    connFails = 0;                              // give the next attempt a clean count
+  }
+}
+
 // RAII guard: fires onTlsBusy(true) when the FIRST guard on the stack is entered
 // and onTlsBusy(false) when the LAST one leaves, on every exit path. The depth
 // count makes it reentrant: httpsGetToFileRetry can hold a guard across its whole
@@ -85,6 +126,7 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = "";
   if (!connected()) { lastErr = "no WiFi"; return false; }
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
   Serial.printf("[net] GET %s\n", url.c_str());
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -114,6 +156,7 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
 
   int code = http.GET();
   lastCode = code;
+  noteConnResult(code);   // track consecutive connect failures; auto-recover the pool
   if (code != HTTP_CODE_OK) {
     lastErr = (code > 0) ? ("HTTP " + String(code))
                          : HTTPClient::errorToString(code);
@@ -177,6 +220,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
   Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -208,6 +252,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 
   int code = http.GET();
   lastCode = code;
+  noteConnResult(code);   // track consecutive connect failures; auto-recover the pool
   if (code != HTTP_CODE_OK) {
     lastErr = (code > 0) ? ("HTTP " + String(code))
                          : HTTPClient::errorToString(code);

@@ -67,6 +67,61 @@ private:
   void    flushIn();
 };
 
+// Easycomm I/II/III rotator over the same SC16IS750/752 I2C->UART bridge.
+// Easycomm is the open, plain-ASCII tracking protocol used by SatNOGS, K3NG,
+// ERC and most homebrew controllers (Hamlib rotators/easycomm):
+//   II/III set:   "AZ<az.a> EL<el.a>\r"  (decimal degrees, 0.1 resolution)
+//   II/III query: "AZ EL\r"  ->  "AZ<az.a> EL<el.a>" (some controllers append VE...)
+//   stop:         "SA SE\r"  (stop azimuth + stop elevation)
+//   I set:        "AZ<az> EL<el>"        (integer; the older variant)
+// A single backend covers all three for tracking: II and III share the same
+// positioning grammar (III only adds velocity/config commands we don't need),
+// and I is the integer-format variant selected by `ver`.
+class EasycommRotator : public Rotator {
+public:
+  // ver: 1 = Easycomm I (integer AZ/EL), 2 = II, 3 = III (II/III identical here).
+  EasycommRotator(uint8_t i2cAddr, uint32_t baud, uint8_t ver)
+    : _addr(i2cAddr), _baud(baud), _ver(ver ? ver : 2) {}
+  void begin() override;
+  bool ready() const override { return _ok; }
+  bool point(float az, float el) override;
+  bool readPos(float& az, float& el) override;
+  void stop() override;
+  const char* name() const override {
+    return _ver == 1 ? "Easycomm I" : _ver == 3 ? "Easycomm III" : "Easycomm II";
+  }
+private:
+  uint8_t _addr; uint32_t _baud; uint8_t _ver; bool _ok = false;
+  void wreg(uint8_t reg, uint8_t val); uint8_t rreg(uint8_t reg);
+  bool bridgeInit();
+  void putc_(char c); void puts_(const char* s); int getc_(); void flushIn();
+};
+
+// SPID Rot2Prog (MD-01/02, ROT2PROG) rotator over the same I2C->UART bridge.
+// Binary protocol (per the Alfa/RFHamDesign spec and Hamlib rotators/spid
+// "rot2prog"): fixed 13-byte command frames, 12-byte status replies.
+//   START 0x57 | H1 H2 H3 H4 PH | V1 V2 V3 V4 PV | CMD | END 0x20
+//   az/el are sent as (deg + 360) * resolution, each digit one ASCII byte;
+//   CMD 0x2F = set, 0x1F = status/query, 0x0F = stop.
+// Status reply decodes az/el back from the same digit encoding. Resolution is
+// the controller's pulses-per-degree (commonly 1 or 2); we use 1 (whole-degree).
+class SpidRotator : public Rotator {
+public:
+  SpidRotator(uint8_t i2cAddr, uint32_t baud) : _addr(i2cAddr), _baud(baud) {}
+  void begin() override;
+  bool ready() const override { return _ok; }
+  bool point(float az, float el) override;
+  bool readPos(float& az, float& el) override;
+  void stop() override;
+  const char* name() const override { return "SPID Rot2Prog"; }
+private:
+  uint8_t _addr; uint32_t _baud; bool _ok = false;
+  static constexpr int RES = 1;            // pulses/degree (whole-degree control)
+  void wreg(uint8_t reg, uint8_t val); uint8_t rreg(uint8_t reg);
+  bool bridgeInit();
+  void putb_(uint8_t b); int getb_(uint32_t toMs); void flushIn();
+};
+
 // rotctld (Hamlib "NET rotctl") TCP client. CardSat is the client; a rotctld
 // server elsewhere on the LAN drives the physical rotator (default port 4533).
 //   "P <az> <el>\n"  set_pos  -> "RPRT 0" on success

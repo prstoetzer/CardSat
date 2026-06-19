@@ -49,6 +49,37 @@ unchanged.
 
 ---
 
+## More robust downloads (socket-failure recovery)
+
+The networking layer now actively recovers from the connect-level failures that
+could previously cascade. When a TLS connection is refused with a `-1`-class error
+(the symptom of a wedged LWIP socket pool), CardSat counts consecutive failures and,
+after a few in a row, hard-resets the WiFi stack to flush the pool before the next
+attempt — the reliable cure once sockets wedge. A short settle delay before each
+fetch also gives a just-closed socket time to leave the pool, reducing the chance of
+exhaustion during the back-to-back downloads of a full update. A successful transfer
+clears the failure counter.
+
+---
+
+## New rotator protocols: Easycomm (I/II/III) and SPID Rot2Prog
+
+CardSat's antenna-rotator support gains four new **Rot type** choices, all over the
+same I2C->UART bridge the GS-232 backend uses:
+
+- **Easycomm I, II, and III** — the open, plain-ASCII tracking protocol used by
+  SatNOGS, K3NG, ERC, and most homebrew rotator controllers. II is the common
+  decimal-degree form; I is the older integer form; III shares II's positioning.
+- **SPID Rot2Prog** — the binary protocol of SPID MD-01/MD-02 (Alfa/RFHamDesign)
+  controllers.
+
+Select them under Settings → Rotator → **Rot type**, which now cycles through all
+eight backends. **Both are host-verified only** — the ASCII formatting/parsing and
+the SPID binary frame encode/decode were checked off-device, but neither has been
+run against a physical controller. Treat as untested until confirmed on hardware.
+
+---
+
 ## Notes
 
 - Host-verified only: the recenter and seam logic were checked off-device and the

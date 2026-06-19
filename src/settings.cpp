@@ -50,6 +50,7 @@ bool Settings::load() {
   if (doppLeadMs > 100) doppLeadMs = 100;
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
+  irBeacon   = d["irbeacon"] | false;
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
@@ -110,6 +111,7 @@ bool Settings::save() {
   d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
+  d["irbeacon"] = irBeacon;
   d["beacon"] = beaconMHz;
   d["solar"] = solarAct;
   d["wxunits"] = wxUnits;

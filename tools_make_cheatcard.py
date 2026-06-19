@@ -42,7 +42,7 @@ FRONT = [
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; "
   "<b>c</b> CTCSS &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>z</b> big readout &middot; "
   "<b>y</b> tilt on/off (ADV) &middot; "
-  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
+  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
  ("BIG READOUT (z from Track)",
   "Big RX/TX + az/el + tune mode (follows Track). Radio+rotator keep tracking &middot; "
   "<b>,</b>/<b>/</b> tune &middot; <b>s</b>/<b>x</b> step/ctr &middot; <b>m</b>/<b>d</b> mode &middot; "
@@ -150,7 +150,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 8.5); canvas.drawString(7, PAGE_H - 10.6, 'CardSat')
     canvas.setFont('Helvetica', 6.2)
-    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.19  \u00b7  Key Reference')
+    canvas.drawString(48, PAGE_H - 10.4, 'v0.9.21  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 7, PAGE_H - 10.4, '%s   %d/%d' % (side, pg, TOTAL_PAGES))

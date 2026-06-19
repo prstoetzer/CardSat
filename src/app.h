@@ -10,13 +10,15 @@
 #include "predict.h"
 #include "rig.h"
 #include "rotator.h"
+#include "voicememo.h"
+#include "irbeacon.h"
 
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -65,6 +67,10 @@ private:
   Predictor pred;
   Rig*      rig = nullptr;   // active CAT backend (Icom/Yaesu/Kenwood)
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
+  VoiceMemo memo;            // SD-card voice memo recorder ('v' on Track family)
+  IrBeacon  irBeacon;        // IR pass-alert beacon (distinct flash count per event)
+  void toggleMemo();         // start/stop a memo; shared by the Track-family keys
+  void drawMemoIndicator();  // red REC badge overlay while a memo is recording
 
   // UI state
   Screen   screen = SCR_HOME;
@@ -79,6 +85,7 @@ private:
   int      mapHi = -1;            // world map: highlighted favorite (-1 = none); 'f' cycles
   Screen   mapReturn = SCR_SCHEDULE; // where the World Map's back key returns to
                                   // (set on entry: Home vs the 'm' shortcut)
+  Screen   netRebootReturn = SCR_HOME; // screen to restore if the user declines reboot
   float    manAz = 0, manEl = 0;  // manual rotator control target (deg)
   int      manStep = 5;           // manual rotator jog step (deg)
   Screen   helpReturn = SCR_HOME; // screen to return to when leaving Help
@@ -363,6 +370,8 @@ private:
                                                // blocking download; they auto-rebuild
   static App* s_self;                          // for the static Net TLS hook to reach us
   static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
+  static int  s_fetchDepth;                    // >0 while any outbound fetch is active
+  static bool netFetchActive();                // service*() skip rebuild while true
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
   void webdSendStatusJson();                   // GET /api/status
   void webdSendSatsJson();                     // GET /api/sats
@@ -548,6 +557,7 @@ private:
   void startWifiScan();
   void keyWifiScan(char c, bool enter, bool back);
   void keyAbout(char c, bool enter, bool back);
+  void drawNetReboot(); void keyNetReboot(char c, bool enter, bool back);
   void keyLog(char c, bool enter, bool back);
   void keyLogEntry(char c, bool enter, bool back);
   void beginQso();                // snapshot auto fields, open the entry screen

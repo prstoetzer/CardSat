@@ -27,6 +27,10 @@ enum RotType : uint8_t {
   ROT_NET   = 1,   // rotctld (Hamlib "NET rotctl") over TCP
   ROT_PST   = 2,   // PstRotator UDP control
   ROT_YAESU = 3,   // Yaesu rotator wired directly via I2C ADC + output expander
+  ROT_EASYCOMM1 = 4,  // Easycomm I (integer ASCII) via the I2C->UART bridge
+  ROT_EASYCOMM2 = 5,  // Easycomm II (decimal ASCII) via the bridge
+  ROT_EASYCOMM3 = 6,  // Easycomm III (II grammar + velocity) via the bridge
+  ROT_SPID      = 7,  // SPID Rot2Prog (MD-01/02) binary via the bridge
 };
 
 // Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
@@ -93,6 +97,8 @@ struct Settings {
   // Tracking
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
+  bool     irBeacon   = false;  // also flash the IR LED on each pass alert
+                                // (distinct flash count per event; user-built RX)
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
   uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen

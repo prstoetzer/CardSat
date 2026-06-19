@@ -784,6 +784,26 @@ the readout gives that pass's AOS time. The right-hand readout also shows az/el,
 range, range-rate, **Sun az/el**, and whether the satellite is **SUNLIT** or in
 **ECLIPSE**. `p`, ENTER, or `` ` `` return to Track.
 
+### Voice memo (`v`, SD card required)
+
+Press `v` on the **Track**, **Manual**, **large-font readout** (Track or Manual),
+or **Polar** screen to record a short spoken note — for example "worked W1ABC, good
+signal" during a pass — without leaving the screen. A red **REC** badge with a
+countdown appears top-right while recording, and **radio, rotator, and web control
+keep running** throughout (the memo is captured one small block at a time between
+the normal tracking updates). Press `v` again to stop, or it stops automatically at
+the 30-second cap.
+
+Memos are saved as 16 kHz mono WAV files under **`/CardSat/audio/`** on the SD card,
+named by UTC timestamp (e.g. `memo_20260617_203145.wav`). **An SD card is required** —
+with no card, `v` reports "Memo: SD card required" and does nothing. Retrieve memos
+by reading the SD card on a computer; CardSat does not play them back on-device.
+
+> Voice memo is **new in v0.9.20 and host-verified only** — the WAV writing and the
+> cooperative capture were checked off-device, but the microphone/SD interaction has
+> not yet been confirmed on hardware. Treat it as untested until you've verified a
+> recording on a real Cardputer ADV.
+
 ### Workable grids (`g`)
 
 The 4-character Maidenhead grid squares currently inside the satellite's
@@ -901,7 +921,8 @@ on-screen key reference. The notable rows:
 | WiFi 2 pass | ENTER → edit |
 | Save & test WiFi | ENTER → connect and report OK/FAIL (tries the primary network, then the second if set) |
 | AOS alarm | `,`/`/` or ENTER toggle on/off |
-| Rotator (+ type / host / port / baud / ranges / offsets / deadband / park / pre-point) | `,`/`/` adjust, ENTER edits host/port. **Rot type** cycles **GS-232 → rotctl (net) → PstRotator → Yaesu (direct)**; see [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server) |
+| IR pass beacon | `,`/`/` or ENTER toggle on/off — also flash the built-in IR LED on each pass alert, with a distinct flash count per event (see [§12](#12-aos-alarm-and-deep-sleep)). SD not required; off by default |
+| Rotator (+ type / host / port / baud / ranges / offsets / deadband / park / pre-point) | `,`/`/` adjust, ENTER edits host/port. **Rot type** cycles **GS-232 → rotctl (net) → PstRotator → Yaesu (direct) → Easycomm I → Easycomm II → Easycomm III → SPID Rot2Prog**; see [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server) |
 | GP source | ENTER → **source picker**: AMSAT (default), any CelesTrak JSON-PP category (Amateur Radio listed first), or **Custom URL…** — see [§14](#14-gp-age-and-accuracy) |
 | VFO Type | `,`/`/` or ENTER toggle *Main Up/Sub Dn* ↔ *Main Dn/Sub Up* |
 | Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
@@ -1166,6 +1187,39 @@ mid-tone) and at **LOS** (a descending two-tone), so you can follow a pass by ea
 without watching the screen. All of these sounds are governed by this one setting:
 turning the AOS alarm off silences the AOS, TCA and LOS cues together. A small
 orange countdown banner appears on any screen within the last minute.
+
+**IR pass beacon** (toggle in Settings → Station → *IR pass beacon*, off by
+default): when enabled, every pass-alert event *also* emits a burst of flashes from
+the Cardputer's **built-in IR LED** (GPIO 44), with a **distinct flash count per
+event** so external hardware can tell them apart. The flashes accompany the existing
+beeps — they don't replace them — and are gated by the same AOS-alarm machinery, so
+they only fire when the AOS alarm is on. Each flash is a ~60 ms burst of standard
+**38 kHz IR carrier** (with ~140 ms gaps), the kind any common IR receiver/
+demodulator detects:
+
+| Event | Flashes |
+|---|---|
+| T-60 s to AOS | 1 |
+| T-30 s to AOS | 2 |
+| T-10 s to AOS | 3 |
+| AOS (pass start) | 4 |
+| TCA (peak elevation) | 5 |
+| LOS (pass end) | 6 |
+
+CardSat only **transmits** these counts — what you do with them is up to you. Point
+a 38 kHz IR receiver module (e.g. a TSOP38238 or a Vishay TSOP4838) at the
+Cardputer, count the pulses in each burst, and trigger whatever you like: key a
+relay to power up a rotator or preamp at T-10, flash a shack light at AOS, start an
+SDR recording, drive a bigger external alert, or log events on a second
+microcontroller. The flashing is fully non-blocking — it runs one burst at a time
+between the normal tracking updates, so radio, rotator, and web control keep running
+throughout. Build whatever receiver and logic you want around the counts above.
+
+> The IR pass beacon is **new in v0.9.21 and host-verified only** — the carrier
+> timing and flash-count logic were checked off-device, but the actual IR output and
+> a receiver decoding it have not been confirmed on hardware. The 38 kHz carrier,
+> duty cycle, and burst/gap timing may need tuning for your particular receiver;
+> treat the counts as the stable contract and the exact waveform as adjustable.
 
 **Deep sleep** (Next Passes → `z`): CardSat computes the next favorite AOS and
 puts the ESP32 into deep sleep until **~60 s before** it, dramatically extending
@@ -1613,14 +1667,24 @@ it carries are the same ones shown above). Silence a backend by setting `CIV_DEB
 > *flip* decision is now made once per pass and held to LOS (it previously never
 > triggered). `rotctld`/`rigctld` servers have no authentication — trusted LAN only.
 
-CardSat can drive an az/el antenna rotator through one of three interchangeable
+CardSat can drive an az/el antenna rotator through one of several interchangeable
 backends, chosen in Settings with **Rot type**:
 
 - **GS-232** -- a directly-attached controller speaking the **Yaesu GS-232A/B**
-  protocol (a Yaesu G-5500 with a GS-232B, a SPID controller, or any GS-232
-  emulator: K3NG / RadioArtisan / ERC). Because all three ESP32-S3 UARTs are
+  protocol (a Yaesu G-5500 with a GS-232B, a SPID controller in GS-232 mode, or any
+  GS-232 emulator: K3NG / RadioArtisan / ERC). Because all three ESP32-S3 UARTs are
   already in use (USB, CAT, GPS), this link is created by an **I2C->UART bridge**
   (SC16IS750/752) on a second I2C bus, so it coexists with the radio and GPS.
+- **Easycomm I / II / III** -- the open, plain-ASCII tracking protocol used by
+  **SatNOGS, K3NG, ERC** and most homebrew rotator controllers (the same protocol
+  Hamlib's `easycomm` backends speak). Choose the version your controller expects:
+  **II** is the common decimal-degree form (`AZ123.4 EL045.0`), **I** is the older
+  integer form, and **III** shares II's positioning grammar. Uses the same
+  **I2C->UART bridge** as GS-232.
+- **SPID Rot2Prog** -- the binary protocol of **SPID MD-01 / MD-02** (Alfa/
+  RFHamDesign) controllers, as documented in Hamlib's `spid` (`rot2prog`) backend.
+  Whole-degree positioning over the same **I2C->UART bridge**. (If your SPID box is
+  set to GS-232 emulation, you can use **GS-232** instead.)
 - **rotctld (net)** -- a **Hamlib `rotctld` server** anywhere on the same WiFi
   network. CardSat is the TCP client (the same role Gpredict plays), so any
   rotator Hamlib supports can be driven over the LAN with no extra CardSat wiring.
@@ -1636,6 +1700,11 @@ backends, chosen in Settings with **Rot type**:
   **[ROTOR_INTERFACE.md](ROTOR_INTERFACE.md)** (⚠️ untested; build at your own risk).
   Calibrate from **Settings → Rotator → Rotator: manual control** (capture keys
   **1/2/3/4** at the axis endpoints).
+
+> **Easycomm & SPID are new in v0.9.19 and host-verified only** -- the ASCII
+> formatting/parsing and the SPID binary frame encode/decode were checked
+> off-device, but neither has been exercised against a physical controller yet.
+> Treat them as untested; verify carefully before trusting them with real hardware.
 
 Only one rotator is active at a time. The pointing logic -- alignment offsets,
 deadband, flip mode, park-on-LOS -- is identical for all of them; **Rot type** only
@@ -1921,6 +1990,13 @@ quantizes frequency coarsely, that threshold may need tuning.
 
 **Predictions seem off.** Check the **GP age** indicator — refresh GP data if it's
 yellow/red. Confirm your location and that the clock is correct (UTC).
+
+**"Network problem" reboot prompt.** If downloads keep failing with refused
+connections, CardSat first retries and hard-resets WiFi automatically (this clears a
+wedged socket pool). If that still doesn't recover, it shows a **Network problem**
+screen offering a reboot — press **ENTER**/`y` to reboot (the reliable cure once the
+socket stack is stuck) or `` ` ``/`n` to keep running and try again later. CardSat
+never reboots on its own; the choice is always yours.
 
 **Fewer satellites than expected after Update.** The GP file streams straight to
 flash and is parsed incrementally, so it isn't limited by RAM; the catalog holds
@@ -2466,7 +2542,7 @@ listed below.
 | **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
+| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `v` voice memo (SD card) · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
 | **Large-font readout** (`z` from Track) | big RX/TX + az/el + tune mode · `,`/`/` tune · `s`/`x` step/center · `m` TUNE/CAL · `d` mode · `t` next TX · `r` radio · `o` rotator · `y` tilt · `l` log · `z`/`` ` `` back to Track |
 | **Manual mode** (`f` from Track) | no-radio calculator; `u` swap fixed leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z` large-font · `l`/`p`/`g` (return here) · `` ` ``/`f` back |
 | **Manual large-font** (`z` from Manual) | HOLD/TUNE legs in big digits · `u` swap leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z`/`` ` `` back to Manual |

@@ -48,6 +48,24 @@ public:
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
   String lastErr  = "";    // short human-readable reason
 
+  // --- Socket-failure recovery -------------------------------------------
+  // Connect-level failures (code <= 0, e.g. the -1 returned once the LWIP socket
+  // pool is wedged) tend to cascade: once a few fds leak, every subsequent
+  // connect() also returns -1. We count consecutive connect-level failures and,
+  // after a threshold, hard-reset the WiFi stack (disconnect(true) flushes the
+  // whole socket pool) -- the only reliable way out. A successful transfer clears
+  // the counter. noteConnResult() is called by the fetch paths; hardResetWifi()
+  // is also callable directly.
+  int  connFails = 0;                          // consecutive connect-level failures
+  int  failedResets = 0;                        // consecutive hard resets that didn't recover
+  void noteConnResult(int code);               // update counter; auto-reset at threshold
+  bool hardResetWifi();                         // disconnect(true) + reconnect; flush pool
+  bool recoverExhausted = false;                // set when hard resets keep failing; the
+                                                // app prompts the user for a reboot
+  static int  RECOVER_AFTER;                    // failures before a hard reset (default 3)
+  static int  REBOOT_AFTER;                     // failed hard resets before prompting reboot
+  static uint32_t INTER_FETCH_MS;               // settle delay before each TLS session
+
   // Optional hook invoked around EVERY outbound TLS session: busy(true) just
   // before a connection is opened, busy(false) after it closes. The app uses it
   // to release its LAN listener sockets (rigctld/rotctld/web) for the duration of

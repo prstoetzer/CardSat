@@ -170,6 +170,23 @@ static constexpr int   CIV_UART_NUM   = 1;     // CI-V owns UART1 on G1/G2
 static constexpr int   CIV_RX_PIN     = 1;     // G1
 static constexpr int   CIV_TX_PIN     = 2;     // G2
 
+// Built-in IR LED (Cardputer & Cardputer-Adv): GPIO 44, the same pin M5's IR
+// examples use. CardSat uses it as a silent pass-alert *beacon*: each pass-alert
+// event emits a distinct number of 38 kHz IR bursts so external user-built
+// hardware (an IR receiver/demodulator like a TSOP38238 feeding a microcontroller)
+// can tell the events apart and trigger whatever the user designs. Off by default.
+static constexpr int      IR_LED_PIN     = 44;
+static constexpr uint32_t IR_CARRIER_HZ  = 38000;   // standard IR receiver carrier
+static constexpr uint16_t IR_BURST_MS    = 60;      // each flash: carrier-on duration
+static constexpr uint16_t IR_GAP_MS      = 140;     // off-time between flashes in a group
+// Distinct flash counts per pass-alert event (so a receiver can disambiguate):
+static constexpr uint8_t  IR_N_T60       = 1;       // 60 s to AOS
+static constexpr uint8_t  IR_N_T30       = 2;       // 30 s to AOS
+static constexpr uint8_t  IR_N_T10       = 3;       // 10 s to AOS
+static constexpr uint8_t  IR_N_AOS       = 4;       // AOS (pass start)
+static constexpr uint8_t  IR_N_TCA       = 5;       // TCA (peak elevation)
+static constexpr uint8_t  IR_N_LOS       = 6;       // LOS (pass end)
+
 // microSD (SPI). Used only as a storage fallback when no internal LittleFS/
 // SPIFFS partition is available -- e.g. when CardSat is launched from the
 // bmorcelli Launcher without a SPIFFS region attached (a card is normally
@@ -188,7 +205,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.19";
+static constexpr const char* FW_VERSION = "0.9.21";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -261,6 +278,11 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 //  Files on LittleFS
 // ---------------------------------------------------------------------------
 #define DATA_DIR     "/CardSat"               // all data/config lives in this folder
+#define AUDIO_DIR    "/CardSat/audio"         // voice memos (SD card only)
+// Voice-memo capture (SD-card-only feature; PDM mic via M5Unified into a WAV).
+static constexpr uint32_t MEMO_SAMPLE_HZ  = 16000;  // 16 kHz mono
+static constexpr uint32_t MEMO_MAX_SECS   = 30;     // hard cap per memo
+static constexpr uint32_t MEMO_MIN_FREE_KB = 512;   // refuse if SD has less free
 #define FILE_GP      "/CardSat/gp.json"       // cached GP/OMM download (JSON array)
 #define FILE_CFG     "/CardSat/config.json"
 #define FILE_TXCACHE "/CardSat/tx_%lu.json"   // %lu = norad id
@@ -847,6 +869,61 @@ private:
   void    flushIn();
 };
 
+// Easycomm I/II/III rotator over the same SC16IS750/752 I2C->UART bridge.
+// Easycomm is the open, plain-ASCII tracking protocol used by SatNOGS, K3NG,
+// ERC and most homebrew controllers (Hamlib rotators/easycomm):
+//   II/III set:   "AZ<az.a> EL<el.a>\r"  (decimal degrees, 0.1 resolution)
+//   II/III query: "AZ EL\r"  ->  "AZ<az.a> EL<el.a>" (some controllers append VE...)
+//   stop:         "SA SE\r"  (stop azimuth + stop elevation)
+//   I set:        "AZ<az> EL<el>"        (integer; the older variant)
+// A single backend covers all three for tracking: II and III share the same
+// positioning grammar (III only adds velocity/config commands we don't need),
+// and I is the integer-format variant selected by `ver`.
+class EasycommRotator : public Rotator {
+public:
+  // ver: 1 = Easycomm I (integer AZ/EL), 2 = II, 3 = III (II/III identical here).
+  EasycommRotator(uint8_t i2cAddr, uint32_t baud, uint8_t ver)
+    : _addr(i2cAddr), _baud(baud), _ver(ver ? ver : 2) {}
+  void begin() override;
+  bool ready() const override { return _ok; }
+  bool point(float az, float el) override;
+  bool readPos(float& az, float& el) override;
+  void stop() override;
+  const char* name() const override {
+    return _ver == 1 ? "Easycomm I" : _ver == 3 ? "Easycomm III" : "Easycomm II";
+  }
+private:
+  uint8_t _addr; uint32_t _baud; uint8_t _ver; bool _ok = false;
+  void wreg(uint8_t reg, uint8_t val); uint8_t rreg(uint8_t reg);
+  bool bridgeInit();
+  void putc_(char c); void puts_(const char* s); int getc_(); void flushIn();
+};
+
+// SPID Rot2Prog (MD-01/02, ROT2PROG) rotator over the same I2C->UART bridge.
+// Binary protocol (per the Alfa/RFHamDesign spec and Hamlib rotators/spid
+// "rot2prog"): fixed 13-byte command frames, 12-byte status replies.
+//   START 0x57 | H1 H2 H3 H4 PH | V1 V2 V3 V4 PV | CMD | END 0x20
+//   az/el are sent as (deg + 360) * resolution, each digit one ASCII byte;
+//   CMD 0x2F = set, 0x1F = status/query, 0x0F = stop.
+// Status reply decodes az/el back from the same digit encoding. Resolution is
+// the controller's pulses-per-degree (commonly 1 or 2); we use 1 (whole-degree).
+class SpidRotator : public Rotator {
+public:
+  SpidRotator(uint8_t i2cAddr, uint32_t baud) : _addr(i2cAddr), _baud(baud) {}
+  void begin() override;
+  bool ready() const override { return _ok; }
+  bool point(float az, float el) override;
+  bool readPos(float& az, float& el) override;
+  void stop() override;
+  const char* name() const override { return "SPID Rot2Prog"; }
+private:
+  uint8_t _addr; uint32_t _baud; bool _ok = false;
+  static constexpr int RES = 1;            // pulses/degree (whole-degree control)
+  void wreg(uint8_t reg, uint8_t val); uint8_t rreg(uint8_t reg);
+  bool bridgeInit();
+  void putb_(uint8_t b); int getb_(uint32_t toMs); void flushIn();
+};
+
 // rotctld (Hamlib "NET rotctl") TCP client. CardSat is the client; a rotctld
 // server elsewhere on the LAN drives the physical rotator (default port 4533).
 //   "P <az> <el>\n"  set_pos  -> "RPRT 0" on success
@@ -1321,6 +1398,24 @@ public:
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
   String lastErr  = "";    // short human-readable reason
 
+  // --- Socket-failure recovery -------------------------------------------
+  // Connect-level failures (code <= 0, e.g. the -1 returned once the LWIP socket
+  // pool is wedged) tend to cascade: once a few fds leak, every subsequent
+  // connect() also returns -1. We count consecutive connect-level failures and,
+  // after a threshold, hard-reset the WiFi stack (disconnect(true) flushes the
+  // whole socket pool) -- the only reliable way out. A successful transfer clears
+  // the counter. noteConnResult() is called by the fetch paths; hardResetWifi()
+  // is also callable directly.
+  int  connFails = 0;                          // consecutive connect-level failures
+  int  failedResets = 0;                        // consecutive hard resets that didn't recover
+  void noteConnResult(int code);               // update counter; auto-reset at threshold
+  bool hardResetWifi();                         // disconnect(true) + reconnect; flush pool
+  bool recoverExhausted = false;                // set when hard resets keep failing; the
+                                                // app prompts the user for a reboot
+  static int  RECOVER_AFTER;                    // failures before a hard reset (default 3)
+  static int  REBOOT_AFTER;                     // failed hard resets before prompting reboot
+  static uint32_t INTER_FETCH_MS;               // settle delay before each TLS session
+
   // Optional hook invoked around EVERY outbound TLS session: busy(true) just
   // before a connection is opened, busy(false) after it closes. The app uses it
   // to release its LAN listener sockets (rigctld/rotctld/web) for the duration of
@@ -1497,6 +1592,10 @@ enum RotType : uint8_t {
   ROT_NET   = 1,   // rotctld (Hamlib "NET rotctl") over TCP
   ROT_PST   = 2,   // PstRotator UDP control
   ROT_YAESU = 3,   // Yaesu rotator wired directly via I2C ADC + output expander
+  ROT_EASYCOMM1 = 4,  // Easycomm I (integer ASCII) via the I2C->UART bridge
+  ROT_EASYCOMM2 = 5,  // Easycomm II (decimal ASCII) via the bridge
+  ROT_EASYCOMM3 = 6,  // Easycomm III (II grammar + velocity) via the bridge
+  ROT_SPID      = 7,  // SPID Rot2Prog (MD-01/02) binary via the bridge
 };
 
 // Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
@@ -1563,6 +1662,8 @@ struct Settings {
   // Tracking
   float    minPassEl  = 5.0f;
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
+  bool     irBeacon   = false;  // also flash the IR LED on each pass alert
+                                // (distinct flash count per event; user-built RX)
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
   uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
@@ -1632,7 +1733,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1667,6 +1768,56 @@ struct PendingQso {
   char     notes[40];
 };
 
+class IrBeacon {
+public:
+  void begin();                  // configure LEDC on the IR pin (carrier idle off)
+  bool ready() const { return _ok; }
+  void flash(uint8_t count);     // queue a group of `count` 38 kHz bursts
+  void service();                // advance the flasher one step; call every loop
+  bool busy() const { return _state != IDLE; }
+
+private:
+  enum State { IDLE, ON, GAP };
+  bool     _ok      = false;
+  State    _state   = IDLE;
+  uint8_t  _left    = 0;         // bursts remaining in the current group
+  uint32_t _stepMs  = 0;         // when the current ON/GAP step ends
+  void carrier(bool on);         // gate the 38 kHz carrier
+};
+
+class VoiceMemo {
+public:
+  enum State { IDLE, RECORDING, ERROR };
+
+  // Begin a memo. Returns false (and sets lastError) if SD isn't present, the
+  // audio folder can't be made, the card is too full, or the mic won't start.
+  bool start();
+  // Pull one block from the mic into the file; call every loop tick while
+  // recording. Auto-finalizes at the time cap. No-op when idle.
+  void poll();
+  // Finalize the current memo (patch the WAV header, close, restore speaker).
+  void stop();
+
+  bool   isRecording() const { return _state == RECORDING; }
+  State  state()       const { return _state; }
+  uint32_t elapsedMs() const;                 // since start (0 if idle)
+  uint32_t secondsLeft() const;               // until the cap
+  const char* lastError() const { return _err; }
+  const char* path()      const { return _path; }
+
+private:
+  State    _state   = IDLE;
+  File     _file;
+  uint32_t _startMs = 0;
+  uint32_t _dataBytes = 0;                     // PCM payload written so far
+  char     _path[64] = {0};
+  const char* _err = "";
+  bool     _spkWasOn = false;
+
+  void writeWavHeader(uint32_t dataBytes);     // (re)write the 44-byte RIFF header
+  void finalize(bool ok);
+};
+
 class App {
 public:
   void setup();
@@ -1681,6 +1832,10 @@ private:
   Predictor pred;
   Rig*      rig = nullptr;   // active CAT backend (Icom/Yaesu/Kenwood)
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
+  VoiceMemo memo;            // SD-card voice memo recorder ('v' on Track family)
+  IrBeacon  irBeacon;        // IR pass-alert beacon (distinct flash count per event)
+  void toggleMemo();         // start/stop a memo; shared by the Track-family keys
+  void drawMemoIndicator();  // red REC badge overlay while a memo is recording
 
   // UI state
   Screen   screen = SCR_HOME;
@@ -1695,6 +1850,7 @@ private:
   int      mapHi = -1;            // world map: highlighted favorite (-1 = none); 'f' cycles
   Screen   mapReturn = SCR_SCHEDULE; // where the World Map's back key returns to
                                   // (set on entry: Home vs the 'm' shortcut)
+  Screen   netRebootReturn = SCR_HOME; // screen to restore if the user declines reboot
   float    manAz = 0, manEl = 0;  // manual rotator control target (deg)
   int      manStep = 5;           // manual rotator jog step (deg)
   Screen   helpReturn = SCR_HOME; // screen to return to when leaving Help
@@ -1979,6 +2135,8 @@ private:
                                                // blocking download; they auto-rebuild
   static App* s_self;                          // for the static Net TLS hook to reach us
   static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
+  static int  s_fetchDepth;                    // >0 while any outbound fetch is active
+  static bool netFetchActive();                // service*() skip rebuild while true
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
   void webdSendStatusJson();                   // GET /api/status
   void webdSendSatsJson();                     // GET /api/sats
@@ -2164,6 +2322,7 @@ private:
   void startWifiScan();
   void keyWifiScan(char c, bool enter, bool back);
   void keyAbout(char c, bool enter, bool back);
+  void drawNetReboot(); void keyNetReboot(char c, bool enter, bool back);
   void keyLog(char c, bool enter, bool back);
   void keyLogEntry(char c, bool enter, bool back);
   void beginQso();                // snapshot auto fields, open the entry screen
@@ -3115,6 +3274,233 @@ bool Gs232Rotator::readPos(float& az, float& el) {
 }
 
 // ---------------------------------------------------------------------------
+//  Easycomm I/II/III backend (ASCII) over the SC16IS750/752 I2C->UART bridge
+// ---------------------------------------------------------------------------
+// Bridge plumbing mirrors Gs232Rotator (same register map / sequence); kept as
+// its own copy rather than refactored into a shared base so the working GS-232
+// path is untouched.
+void EasycommRotator::wreg(uint8_t reg, uint8_t val) {
+  Wire1.beginTransmission(_addr);
+  Wire1.write((uint8_t)(reg << 3));
+  Wire1.write(val);
+  Wire1.endTransmission();
+}
+uint8_t EasycommRotator::rreg(uint8_t reg) {
+  Wire1.beginTransmission(_addr);
+  Wire1.write((uint8_t)(reg << 3));
+  Wire1.endTransmission();
+  Wire1.requestFrom((int)_addr, 1);
+  return Wire1.available() ? (uint8_t)Wire1.read() : 0x00;
+}
+bool EasycommRotator::bridgeInit() {
+  wreg(SC_IOCTL, 0x08); delay(5);
+  uint32_t div = ROT_XTAL_HZ / (16UL * _baud);
+  wreg(SC_LCR, 0x80);
+  wreg(SC_DLL, (uint8_t)(div & 0xFF));
+  wreg(SC_DLH, (uint8_t)((div >> 8) & 0xFF));
+  wreg(SC_LCR, 0x03);
+  wreg(SC_FCR, 0x07);
+  wreg(SC_SPR, 0x5A);
+  bool ok = (rreg(SC_SPR) == 0x5A);
+#if ROT_DEBUG
+  Serial.printf("[ROT] Easycomm SC16IS750 @0x%02X %s (baud %lu)\n",
+                _addr, ok ? "ready" : "NOT FOUND", (unsigned long)_baud);
+#endif
+  return ok;
+}
+void EasycommRotator::putc_(char c) {
+  uint32_t t0 = millis();
+  while (!(rreg(SC_LSR) & 0x20)) { if (millis() - t0 > 50) break; }
+  wreg(SC_THR, (uint8_t)c);
+}
+void EasycommRotator::puts_(const char* s) { while (*s) putc_(*s++); }
+int EasycommRotator::getc_() {
+  if (rreg(SC_RXLVL) == 0) return -1;
+  return (int)rreg(SC_RHR);
+}
+void EasycommRotator::flushIn() { while (rreg(SC_RXLVL)) rreg(SC_RHR); }
+
+void EasycommRotator::begin() {
+  Wire1.begin(ROT_I2C_SDA, ROT_I2C_SCL, ROT_I2C_HZ);
+  _ok = bridgeInit();
+}
+
+bool EasycommRotator::point(float az, float el) {
+  if (!_ok) return false;
+  if (az < 0)   az += 360.0f;
+  if (az > 360) az -= 360.0f;
+  if (el < 0)   el = 0;
+  if (el > 180) el = 180;
+  char cmd[32];
+  if (_ver == 1)   // Easycomm I: integer degrees
+    snprintf(cmd, sizeof(cmd), "AZ%d EL%d\r", (int)lroundf(az), (int)lroundf(el));
+  else             // Easycomm II/III: one-decimal degrees
+    snprintf(cmd, sizeof(cmd), "AZ%.1f EL%.1f\r", az, el);
+#if ROT_DEBUG
+  Serial.printf("[ROT TX] %s", cmd);
+#endif
+  puts_(cmd);
+  return true;
+}
+
+void EasycommRotator::stop() {
+  if (!_ok) return;
+#if ROT_DEBUG
+  Serial.println("[ROT TX] SA SE (stop)");
+#endif
+  puts_("SA SE\r");
+}
+
+// Query "AZ EL\r" -> reply contains "AZ<val>" and "EL<val>" tokens (decimal for
+// II/III, integer for I; atof handles both). Some III controllers append more
+// fields (VE.., etc.) which we ignore.
+bool EasycommRotator::readPos(float& az, float& el) {
+  if (!_ok) return false;
+  flushIn();
+  puts_("AZ EL\r");
+  String r;
+  uint32_t t0 = millis();
+  while (millis() - t0 < 500) {
+    int c = getc_();
+    if (c < 0) { delay(2); continue; }
+    if (c == '\r' || c == '\n') { if (r.length()) break; else continue; }
+    r += (char)c; t0 = millis();
+    if (r.length() > 48) break;
+  }
+#if ROT_DEBUG
+  Serial.printf("[ROT RX] %s\n", r.length() ? r.c_str() : "(no reply)");
+#endif
+  int ia = r.indexOf("AZ");
+  int ie = r.indexOf("EL");
+  if (ia < 0 || ie < 0) return false;
+  az = (float)atof(r.c_str() + ia + 2);
+  el = (float)atof(r.c_str() + ie + 2);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  SPID Rot2Prog (MD-01/02) backend (binary) over the I2C->UART bridge
+// ---------------------------------------------------------------------------
+void SpidRotator::wreg(uint8_t reg, uint8_t val) {
+  Wire1.beginTransmission(_addr);
+  Wire1.write((uint8_t)(reg << 3));
+  Wire1.write(val);
+  Wire1.endTransmission();
+}
+uint8_t SpidRotator::rreg(uint8_t reg) {
+  Wire1.beginTransmission(_addr);
+  Wire1.write((uint8_t)(reg << 3));
+  Wire1.endTransmission();
+  Wire1.requestFrom((int)_addr, 1);
+  return Wire1.available() ? (uint8_t)Wire1.read() : 0x00;
+}
+bool SpidRotator::bridgeInit() {
+  wreg(SC_IOCTL, 0x08); delay(5);
+  uint32_t div = ROT_XTAL_HZ / (16UL * _baud);
+  wreg(SC_LCR, 0x80);
+  wreg(SC_DLL, (uint8_t)(div & 0xFF));
+  wreg(SC_DLH, (uint8_t)((div >> 8) & 0xFF));
+  wreg(SC_LCR, 0x03);
+  wreg(SC_FCR, 0x07);
+  wreg(SC_SPR, 0x5A);
+  bool ok = (rreg(SC_SPR) == 0x5A);
+#if ROT_DEBUG
+  Serial.printf("[ROT] SPID SC16IS750 @0x%02X %s (baud %lu)\n",
+                _addr, ok ? "ready" : "NOT FOUND", (unsigned long)_baud);
+#endif
+  return ok;
+}
+void SpidRotator::putb_(uint8_t b) {
+  uint32_t t0 = millis();
+  while (!(rreg(SC_LSR) & 0x20)) { if (millis() - t0 > 50) break; }
+  wreg(SC_THR, b);
+}
+int SpidRotator::getb_(uint32_t toMs) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < toMs) {
+    if (rreg(SC_RXLVL)) return (int)rreg(SC_RHR);
+    delay(1);
+  }
+  return -1;
+}
+void SpidRotator::flushIn() { while (rreg(SC_RXLVL)) rreg(SC_RHR); }
+
+void SpidRotator::begin() {
+  Wire1.begin(ROT_I2C_SDA, ROT_I2C_SCL, ROT_I2C_HZ);
+  _ok = bridgeInit();
+}
+
+// Rot2Prog SET frame (13 bytes): 0x57 H1 H2 H3 H4 PH V1 V2 V3 V4 PV CMD 0x20.
+// Each angle is encoded as (deg + 360) * RES, then the 4 most-significant decimal
+// digits are sent one-per-byte as raw values (0..9); PH/PV carry the resolution.
+bool SpidRotator::point(float az, float el) {
+  if (!_ok) return false;
+  if (az < 0)   az += 360.0f;
+  if (az > 360) az -= 360.0f;
+  if (el < 0)   el = 0;
+  if (el > 180) el = 180;
+  int ha = (int)lroundf((az + 360.0f) * RES);   // azimuth encoded value
+  int ve = (int)lroundf((el + 360.0f) * RES);   // elevation encoded value
+  uint8_t f[13];
+  f[0] = 0x57;
+  f[1] = (ha / 1000) % 10; f[2] = (ha / 100) % 10; f[3] = (ha / 10) % 10; f[4] = ha % 10;
+  f[5] = (uint8_t)RES;
+  f[6] = (ve / 1000) % 10; f[7] = (ve / 100) % 10; f[8] = (ve / 10) % 10; f[9] = ve % 10;
+  f[10] = (uint8_t)RES;
+  f[11] = 0x2F;            // SET
+  f[12] = 0x20;
+#if ROT_DEBUG
+  Serial.printf("[ROT TX] SPID set az=%d el=%d (ha=%d ve=%d)\n",
+                (int)lroundf(az), (int)lroundf(el), ha, ve);
+#endif
+  flushIn();
+  for (int i = 0; i < 13; i++) putb_(f[i]);
+  return true;
+}
+
+void SpidRotator::stop() {
+  if (!_ok) return;
+  uint8_t f[13] = {0x57,0,0,0,0,0,0,0,0,0,0,0x0F,0x20};   // CMD 0x0F = stop
+#if ROT_DEBUG
+  Serial.println("[ROT TX] SPID stop");
+#endif
+  flushIn();
+  for (int i = 0; i < 13; i++) putb_(f[i]);
+}
+
+// STATUS query: send a status frame (CMD 0x1F) and read the 12-byte reply
+//   0x57 H1 H2 H3 H4 PH V1 V2 V3 V4 PV 0x20
+// az = (H1*1000 + H2*100 + H3*10 + H4)/RES - 360 ; el decoded the same way.
+bool SpidRotator::readPos(float& az, float& el) {
+  if (!_ok) return false;
+  flushIn();
+  uint8_t q[13] = {0x57,0,0,0,0,0,0,0,0,0,0,0x1F,0x20};   // CMD 0x1F = status
+  for (int i = 0; i < 13; i++) putb_(q[i]);
+  uint8_t r[12];
+  int got = 0;
+  while (got < 12) {
+    int b = getb_(500);
+    if (b < 0) break;
+    if (got == 0 && b != 0x57) continue;   // resync to frame start
+    r[got++] = (uint8_t)b;
+  }
+  if (got < 12 || r[0] != 0x57 || r[11] != 0x20) {
+#if ROT_DEBUG
+    Serial.printf("[ROT RX] SPID status incomplete (%d bytes)\n", got);
+#endif
+    return false;
+  }
+  // Decode: the four digits form (deg + 360) * RES, MSD first.
+  float a = (r[1]*1000 + r[2]*100 + r[3]*10 + r[4]) / (float)RES - 360.0f;
+  float e = (r[6]*1000 + r[7]*100 + r[8]*10 + r[9]) / (float)RES - 360.0f;
+  az = a; el = e;
+#if ROT_DEBUG
+  Serial.printf("[ROT RX] SPID az=%.1f el=%.1f\n", az, el);
+#endif
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 //  rotctld (Hamlib NET rotctl) TCP client backend
 // ---------------------------------------------------------------------------
 static constexpr uint32_t ROTCTLD_RETRY_MS = 5000;   // don't hammer a down server
@@ -3896,8 +4282,209 @@ void YaesuRotator::service() {
 Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port) {
   if (type == 1) return new RotctlRotator(host, port);   // 1 = ROT_NET (settings.h)
   if (type == 2) return new PstRotator(host, port);        // 2 = ROT_PST (settings.h)
+  if (type == 4) return new EasycommRotator(ROT_I2C_ADDR, baud, 1);  // Easycomm I
+  if (type == 5) return new EasycommRotator(ROT_I2C_ADDR, baud, 2);  // Easycomm II
+  if (type == 6) return new EasycommRotator(ROT_I2C_ADDR, baud, 3);  // Easycomm III
+  if (type == 7) return new SpidRotator(ROT_I2C_ADDR, baud);          // SPID Rot2Prog
   return new Gs232Rotator(ROT_I2C_ADDR, baud);
 }
+
+// One capture block. At 16 kHz mono 16-bit, 1024 samples = 64 ms = 2048 bytes.
+// Small enough that pulling one per loop tick leaves the radio/rotator/web
+// services responsive, large enough to keep the per-block overhead modest.
+static constexpr size_t MEMO_BLOCK_SAMPLES = 1024;
+
+// Little-endian helpers for the WAV header fields.
+static void put32(uint8_t* p, uint32_t v) { p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24; }
+static void put16(uint8_t* p, uint16_t v) { p[0]=v; p[1]=v>>8; }
+
+void VoiceMemo::writeWavHeader(uint32_t dataBytes) {
+  // Canonical 44-byte PCM WAV header (RIFF / fmt / data).
+  uint8_t h[44];
+  const uint32_t sr   = MEMO_SAMPLE_HZ;
+  const uint16_t ch   = 1, bits = 16;
+  const uint32_t br   = sr * ch * bits / 8;        // byte rate
+  const uint16_t ba   = ch * bits / 8;             // block align
+  memcpy(h + 0,  "RIFF", 4);
+  put32(h + 4,  36 + dataBytes);                   // chunk size
+  memcpy(h + 8,  "WAVE", 4);
+  memcpy(h + 12, "fmt ", 4);
+  put32(h + 16, 16);                               // fmt chunk size
+  put16(h + 20, 1);                                // PCM
+  put16(h + 22, ch);
+  put32(h + 24, sr);
+  put32(h + 28, br);
+  put16(h + 32, ba);
+  put16(h + 34, bits);
+  memcpy(h + 36, "data", 4);
+  put32(h + 40, dataBytes);
+  _file.seek(0);
+  _file.write(h, sizeof(h));
+}
+
+bool VoiceMemo::start() {
+  _err = "";
+  if (_state == RECORDING) return true;
+
+  // SD-card REQUIRED: this feature only writes to a physical card.
+  if (!Store::onSD()) { _err = "SD card required"; _state = ERROR; return false; }
+
+  // Ensure the audio folder exists.
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists(AUDIO_DIR) && !fsx.mkdir(AUDIO_DIR)) {
+    _err = "mkdir failed"; _state = ERROR; return false;
+  }
+
+  // Refuse if the card is implausibly full (best-effort; SD free is large).
+  if (Store::freeBytes() < (size_t)MEMO_MIN_FREE_KB * 1024) {
+    _err = "SD nearly full"; _state = ERROR; return false;
+  }
+
+  // Build a timestamped filename: /CardSat/audio/memo_YYYYMMDD_HHMMSS.wav, or a
+  // millis()-based name if the clock isn't set.
+  time_t now = time(nullptr);
+  if (now > 1700000000) {
+    struct tm tmv; gmtime_r(&now, &tmv);
+    snprintf(_path, sizeof(_path), "%s/memo_%04d%02d%02d_%02d%02d%02d.wav",
+             AUDIO_DIR, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+  } else {
+    snprintf(_path, sizeof(_path), "%s/memo_%lu.wav", AUDIO_DIR,
+             (unsigned long)millis());
+  }
+
+  _file = fsx.open(_path, "w");
+  if (!_file) { _err = "open failed"; _state = ERROR; return false; }
+
+  // The mic and speaker share I2S: stop the speaker, start the mic.
+  _spkWasOn = M5.Speaker.isEnabled();
+  if (_spkWasOn) M5.Speaker.end();
+  {
+    auto mc = M5.Mic.config();
+    mc.sample_rate = MEMO_SAMPLE_HZ;
+    M5.Mic.config(mc);
+  }
+  if (!M5.Mic.begin()) {
+    _file.close(); fsx.remove(_path);
+    if (_spkWasOn) M5.Speaker.begin();
+    _err = "mic start failed"; _state = ERROR; return false;
+  }
+
+  writeWavHeader(0);                 // placeholder sizes; patched on finalize
+  _dataBytes = 0;
+  _startMs   = millis();
+  _state     = RECORDING;
+  Serial.printf("[memo] recording -> %s\n", _path);
+  return true;
+}
+
+void VoiceMemo::poll() {
+  if (_state != RECORDING) return;
+
+  // Hard time cap.
+  if (millis() - _startMs >= MEMO_MAX_SECS * 1000UL) { finalize(true); return; }
+
+  // Pull one block from the mic and append it. record() blocks only for this
+  // small block (~64 ms of audio), so the loop stays responsive.
+  static int16_t blk[MEMO_BLOCK_SAMPLES];
+  if (M5.Mic.record(blk, MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ)) {
+    size_t bytes = MEMO_BLOCK_SAMPLES * sizeof(int16_t);
+    size_t w = _file.write((uint8_t*)blk, bytes);
+    _dataBytes += w;
+    if (w < bytes) { _err = "SD write short"; finalize(false); }   // card full/err
+  }
+}
+
+void VoiceMemo::stop() {
+  if (_state == RECORDING) finalize(true);
+}
+
+void VoiceMemo::finalize(bool ok) {
+  // Stop the mic, restore the speaker.
+  M5.Mic.end();
+  if (_spkWasOn) M5.Speaker.begin();
+
+  if (_file) {
+    writeWavHeader(_dataBytes);      // patch RIFF/data sizes with the real length
+    _file.close();
+  }
+  Serial.printf("[memo] %s (%lu bytes, %lu ms)\n",
+                ok ? "saved" : "aborted", (unsigned long)_dataBytes,
+                (unsigned long)(millis() - _startMs));
+  if (!ok && _path[0]) Store::fs().remove(_path);   // discard a broken file
+  _state = IDLE;
+}
+
+uint32_t VoiceMemo::elapsedMs() const {
+  return _state == RECORDING ? (millis() - _startMs) : 0;
+}
+uint32_t VoiceMemo::secondsLeft() const {
+  if (_state != RECORDING) return 0;
+  uint32_t el = (millis() - _startMs) / 1000;
+  return el >= MEMO_MAX_SECS ? 0 : (MEMO_MAX_SECS - el);
+}
+
+// LEDC (ESP32 hardware PWM) generates the 38 kHz carrier on the IR LED pin. We
+// gate it on for IR_BURST_MS, off for IR_GAP_MS, `count` times -- a burst group.
+// A standard IR receiver/demodulator (38 kHz, e.g. TSOP38238) sees each carrier-on
+// window as one detected pulse, so the receiver can count the pulses per group and
+// map the count back to the alert event.
+static constexpr int      IR_LEDC_CH   = 7;       // a high LEDC channel, unlikely to clash
+static constexpr uint8_t  IR_LEDC_BITS = 8;       // 8-bit duty (0..255)
+static constexpr uint8_t  IR_DUTY_ON   = 96;      // ~38% duty -- typical IR drive
+
+void IrBeacon::begin() {
+#if defined(ARDUINO_ARCH_ESP32)
+  // Configure the LEDC timer/channel for the carrier and park it off.
+  ledcSetup(IR_LEDC_CH, IR_CARRIER_HZ, IR_LEDC_BITS);
+  ledcAttachPin(IR_LED_PIN, IR_LEDC_CH);
+  ledcWrite(IR_LEDC_CH, 0);                        // carrier off (LED dark)
+  _ok = true;
+#else
+  _ok = false;
+#endif
+  _state = IDLE; _left = 0; _stepMs = 0;
+}
+
+void IrBeacon::carrier(bool on) {
+#if defined(ARDUINO_ARCH_ESP32)
+  ledcWrite(IR_LEDC_CH, on ? IR_DUTY_ON : 0);
+#else
+  (void)on;
+#endif
+}
+
+// Queue a group of `count` bursts. If a group is already playing we just replace
+// the remaining count -- alerts are spaced seconds apart, so groups never overlap
+// in practice, but this keeps a late call from stacking oddly.
+void IrBeacon::flash(uint8_t count) {
+  if (!_ok || count == 0) return;
+  _left   = count;
+  _state  = ON;
+  carrier(true);
+  _stepMs = millis() + IR_BURST_MS;
+}
+
+// One cooperative step. Called every loop tick; never blocks. Advances the ON ->
+// GAP -> (next burst) sequence by time, decrementing the remaining count, and
+// returns to IDLE when the group is done.
+void IrBeacon::service() {
+  if (_state == IDLE) return;
+  if ((int32_t)(millis() - _stepMs) < 0) return;   // current step still running
+
+  if (_state == ON) {
+    carrier(false);                                // end this burst
+    if (--_left == 0) { _state = IDLE; return; }   // group complete
+    _state  = GAP;                                 // inter-burst gap
+    _stepMs = millis() + IR_GAP_MS;
+  } else { // GAP
+    carrier(true);                                 // start the next burst
+    _state  = ON;
+    _stepMs = millis() + IR_BURST_MS;
+  }
+}
+
+
 
 
 // =========================================================================
@@ -4710,6 +5297,49 @@ String Location::toGrid(double lat, double lon) {
 // TLS-session hook (see class Net). Null by default; app installs it at startup.
 void (*Net::onTlsBusy)(bool) = nullptr;
 
+// Socket-failure recovery tunables (see net.h).
+int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before reset
+int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
+uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
+                                        // just-closed socket leaves the LWIP pool
+
+// Flush the LWIP socket pool by tearing the STA association down hard, then
+// reconnect with the credentials WiFi already holds. This is the reliable cure
+// once fds wedge and connect() starts returning -1.
+bool Net::hardResetWifi() {
+  Serial.println("[net] hard WiFi reset (flushing socket pool)");
+  WiFi.disconnect(true);                 // true => also turn the radio off briefly
+  delay(200);
+  WiFi.mode(WIFI_STA);
+  WiFi.reconnect();                      // reuse the last good credentials
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(150);
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  Serial.printf("[net] hard reset %s\n", ok ? "recovered" : "still down");
+  if (ok) connFails = 0;
+  return ok;
+}
+
+// Update the consecutive-failure counter from a fetch result. A success (any
+// HTTP code > 0, i.e. we actually reached the server) clears it; a connect-level
+// failure (code <= 0) increments it, and once we cross the threshold we hard-reset
+// the WiFi stack to clear a wedged socket pool before the next attempt.
+void Net::noteConnResult(int code) {
+  if (code > 0) { connFails = 0; recoverExhausted = false; failedResets = 0; return; }
+  if (++connFails >= RECOVER_AFTER) {
+    Serial.printf("[net] %d consecutive connect failures -> recovering\n", connFails);
+    if (hardResetWifi()) {
+      failedResets = 0;                         // recovered: clear the reboot counter
+    } else if (++failedResets >= REBOOT_AFTER) {
+      Serial.println("[net] hard resets exhausted -> requesting reboot prompt");
+      recoverExhausted = true;                  // app surfaces a reboot prompt
+    }
+    connFails = 0;                              // give the next attempt a clean count
+  }
+}
+
+
+
 // RAII guard: fires onTlsBusy(true) when the FIRST guard on the stack is entered
 // and onTlsBusy(false) when the LAST one leaves, on every exit path. The depth
 // count makes it reentrant: httpsGetToFileRetry can hold a guard across its whole
@@ -4780,6 +5410,7 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = "";
   if (!connected()) { lastErr = "no WiFi"; return false; }
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
   Serial.printf("[net] GET %s\n", url.c_str());
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -4809,6 +5440,7 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
 
   int code = http.GET();
   lastCode = code;
+  noteConnResult(code);   // track consecutive connect failures; auto-recover the pool
   if (code != HTTP_CODE_OK) {
     lastErr = (code > 0) ? ("HTTP " + String(code))
                          : HTTPClient::errorToString(code);
@@ -4872,6 +5504,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
   Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
   Serial.printf("[net] heap before TLS: %u, IP %s, RSSI %d\n",
@@ -4903,6 +5536,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 
   int code = http.GET();
   lastCode = code;
+  noteConnResult(code);   // track consecutive connect failures; auto-recover the pool
   if (code != HTTP_CODE_OK) {
     lastErr = (code > 0) ? ("HTTP " + String(code))
                          : HTTPClient::errorToString(code);
@@ -5498,6 +6132,7 @@ bool Settings::load() {
   if (doppLeadMs > 100) doppLeadMs = 100;
   minPassEl  = d["minel"] | 5.0f;
   aosAlarm   = d["aosalarm"] | true;
+  irBeacon   = d["irbeacon"] | false;
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
@@ -5558,6 +6193,7 @@ bool Settings::save() {
   d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
   d["aosalarm"] = aosAlarm;
+  d["irbeacon"] = irBeacon;
   d["beacon"] = beaconMHz;
   d["solar"] = solarAct;
   d["wxunits"] = wxUnits;
@@ -5758,6 +6394,7 @@ void App::setup() {
   }
 
   M5Cardputer.Speaker.setVolume(180);   // AOS alarm
+  irBeacon.begin();                     // IR pass-alert beacon (idle until an alert)
   if (timeIsSet() && favN) buildSchedule();
 
   // If we woke from the deep-sleep-until-pass timer, jump to the schedule so
@@ -5928,6 +6565,36 @@ void App::factoryReset() {
   Store::formatInternal();
   delay(300);
   ESP.restart();   // reboot -> setup() runs fresh with built-in defaults
+}
+
+// Toggle a voice memo on/off (shared by the Track-family screens' 'v' key).
+// SD-card required; the recorder streams a WAV to /CardSat/audio and keeps the
+// radio/rotator/web services running by recording one small block per loop tick.
+void App::toggleMemo() {
+  if (memo.isRecording()) {
+    memo.stop();
+    setStatus("Memo saved");
+  } else if (memo.start()) {
+    setStatus("Recording memo...");
+  } else {
+    setStatus(String("Memo: ") + memo.lastError());   // e.g. "SD card required"
+  }
+  lastDrawMs = 0;
+}
+
+// Small red "REC ●" badge with the remaining seconds, drawn top-right while a memo
+// records. Called at the end of each Track-family draw so it overlays the content.
+void App::drawMemoIndicator() {
+  if (!memo.isRecording()) return;
+  canvas.setTextSize(1);
+  // Blink the dot ~1 Hz so it reads as live.
+  bool on = ((millis() / 500) & 1);
+  int x = 188, y = 2;
+  canvas.fillRect(x - 2, y - 1, 52, 11, CL_BLACK);
+  if (on) canvas.fillCircle(x + 3, y + 4, 3, CL_RED);
+  canvas.setTextColor(CL_RED, CL_BLACK);
+  canvas.setCursor(x + 10, y + 1);
+  canvas.printf("REC%lus", (unsigned long)memo.secondsLeft());
 }
 
 void App::setStatus(const String& s, uint32_t ms) {
@@ -6963,21 +7630,27 @@ void App::serviceAosAlarm() {
   // --- TCA and LOS chirps for a pass already in progress ---
   if (alarmLos) {
     if (now >= alarmLos) {                          // pass over: LOS tone, then disarm
-      if (!(alarmPassMarks & 2)) { alarmPassMarks |= 2; beep(1200, 120); delay(90); beep(900, 160); }
+      if (!(alarmPassMarks & 2)) { alarmPassMarks |= 2; beep(1200, 120); delay(90); beep(900, 160);
+        if (cfg.irBeacon) irBeacon.flash(IR_N_LOS); }
       alarmTca = alarmLos = 0; alarmPassMarks = 0;
     } else if (alarmTca && now >= alarmTca && !(alarmPassMarks & 1)) {
       alarmPassMarks |= 1; beep(2200, 110); delay(70); beep(2200, 110);   // TCA (peak elevation)
+      if (cfg.irBeacon) irBeacon.flash(IR_N_TCA);
     }
   }
   if (nextAos == 0) return;
   if (alarmAos != nextAos) { alarmAos = nextAos; alarmMarks = 0; }  // new target
   long dt = (long)(nextAos - now);
-  if (dt <= 60 && !(alarmMarks & 1)) { alarmMarks |= 1; beep(1500, 80); }
-  if (dt <= 30 && !(alarmMarks & 2)) { alarmMarks |= 2; beep(1500, 80); }
-  if (dt <= 10 && !(alarmMarks & 4)) { alarmMarks |= 4; beep(1800, 90); }
+  if (dt <= 60 && !(alarmMarks & 1)) { alarmMarks |= 1; beep(1500, 80);
+    if (cfg.irBeacon) irBeacon.flash(IR_N_T60); }
+  if (dt <= 30 && !(alarmMarks & 2)) { alarmMarks |= 2; beep(1500, 80);
+    if (cfg.irBeacon) irBeacon.flash(IR_N_T30); }
+  if (dt <= 10 && !(alarmMarks & 4)) { alarmMarks |= 4; beep(1800, 90);
+    if (cfg.irBeacon) irBeacon.flash(IR_N_T10); }
   if (dt <= 0  && !(alarmMarks & 8)) {
     alarmMarks |= 8;
     beep(2600, 250); delay(120); beep(2600, 250);          // AOS!
+    if (cfg.irBeacon) irBeacon.flash(IR_N_AOS);
     aosFlashUntil = millis() + 8000;
     strncpy(aosFlashName, nextAosName, sizeof(aosFlashName) - 1);
     aosFlashName[sizeof(aosFlashName) - 1] = 0;
@@ -7108,6 +7781,7 @@ static long rigdPassband(RigMode m) {
 }
 
 void App::serviceRigctld() {
+  if (netFetchActive()) return;   // listeners stay freed during an outbound fetch
   // Start/stop the listener with the enable flag and WiFi state.
   if (cfg.rigdEnable && net.connected()) {
     if (!rigd) { rigd = new WiFiServer(cfg.rigdPort); rigd->begin(); rigd->setNoDelay(true); }
@@ -7194,6 +7868,7 @@ void App::rigdHandleLine(const String& lineIn) {
 //  tracking so the two don't fight. One client at a time; pumped each loop.
 // ===========================================================================
 void App::serviceRotctld() {
+  if (netFetchActive()) return;   // listeners stay freed during an outbound fetch
   if (cfg.rotdEnable && net.connected()) {
     if (!rotd) { rotd = new WiFiServer(cfg.rotdPort); rotd->begin(); rotd->setNoDelay(true); }
   } else {
@@ -7419,14 +8094,22 @@ void App::suspendNetServers() {
 
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
 // every outbound TLS session (see Net::onTlsBusy). On busy=true we drop the
-// listeners; on busy=false we do nothing -- serviceRigctld/rotctld/Webd rebuild
-// them on the next loop tick once control returns from the (blocking) fetch.
+// listeners and mark a fetch in progress; on busy=false we clear that mark once
+// the outermost fetch unwinds. While the mark is set, the service*() functions
+// refuse to rebuild the listeners -- so across a multi-fetch update (GP, AMSAT,
+// space wx, weather) the sockets stay freed for the whole burst even if the main
+// loop runs between fetches, giving the outbound TLS connects maximum headroom.
 App* App::s_self = nullptr;
+int  App::s_fetchDepth = 0;
 void App::tlsBusyTrampoline(bool busy) {
-  if (busy && s_self) s_self->suspendNetServers();
+  if (!s_self) return;
+  if (busy) { s_fetchDepth++; s_self->suspendNetServers(); }
+  else if (s_fetchDepth > 0) { s_fetchDepth--; }
 }
+bool App::netFetchActive() { return s_fetchDepth > 0; }
 
 void App::serviceWebd() {
+  if (netFetchActive()) return;   // listeners stay freed during an outbound fetch
   // Start/stop the listener with the enable flag and WiFi state.
   if (cfg.webEnable && net.connected()) {
     if (!webd) { webd = new WiFiServer(cfg.webPort); webd->begin(); webd->setNoDelay(true); }
@@ -7927,6 +8610,16 @@ void App::loop() {
   serviceRigctld();           // rigctld TCP server: let a PC drive the rig via CardSat
   serviceRotctld();           // rotctld TCP server: let a PC drive the wired rotator
   serviceWebd();              // mobile web control page (opt-in, over the WiFi LAN)
+  memo.poll();                // voice memo: append one block if recording (SD only)
+  irBeacon.service();         // IR pass-alert beacon: advance any queued flashes
+  // If the socket-recovery path exhausted its hard resets, surface a reboot
+  // prompt once (don't reboot silently). The user decides; the flag is cleared
+  // so we don't re-enter while they're on the prompt.
+  if (net.recoverExhausted && screen != SCR_NETREBOOT) {
+    net.recoverExhausted = false;
+    netRebootReturn = screen;
+    screen = SCR_NETREBOOT; lastDrawMs = 0;
+  }
   if (cfg.useGps) {
     if (loc.pollGps()) { pred.setSite(loc.obs()); }
   }
@@ -8268,6 +8961,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_EDIT:     keyEdit(c, enter, back); break;
     case SCR_WIFISCAN: keyWifiScan(c, enter, back); break;
     case SCR_ABOUT:    keyAbout(c, enter, back); break;
+    case SCR_NETREBOOT: keyNetReboot(c, enter, back); break;
     case SCR_LOG:      keyLog(c, enter, back); break;
     case SCR_LOGENTRY: keyLogEntry(c, enter, back); break;
     case SCR_LOGLIST:  keyLogList(c, enter, back); break;
@@ -8513,6 +9207,7 @@ void App::keyPassDetail(char c, bool enter, bool back) {
 }
 
 void App::keyTrack(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back)) {
     if (radioOut) { radioOut = false; }     // stop sending on first back
     else {
@@ -8606,9 +9301,9 @@ void App::keyTrack(char c, bool enter, bool back) {
     else {
       if (!rot->ready()) rot->begin();   // (re)establish the link/bridge on demand
       if (!rot->ready())
-        setStatus(cfg.rotType == ROT_GS232 ? "Rotator: bridge not found"
-                  : cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
-                                            : "Rotator: no rotctl link");
+        setStatus(cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
+                  : cfg.rotType == ROT_NET ? "Rotator: no rotctl link"
+                                           : "Rotator: bridge not found");
       else {
         rotOut = !rotOut;
         if (rotOut) {
@@ -8654,6 +9349,7 @@ void App::keyTrack(char c, bool enter, bool back) {
 // Manual (no-radio) mode keys: passband/cal tuning like Track, leg toggle, and
 // access to log/polar/grids (which return here), but NO radio or rotator keys.
 void App::keyManual(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back) || c == 'f') { screen = SCR_TRACK; lastDrawMs = 0; return; }
 
   bool linear = (activeTxCount > 0) && activeTx[curTx].isLinear &&
@@ -8711,6 +9407,7 @@ void App::keyManual(char c, bool enter, bool back) {
 }
 
 void App::keyPolar(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (c == 'l') { beginQso(); return; }          // log a QSO (radio keeps tracking)
   // Any of back / ENTER / 'p' returns to the tracking screen.
   if (isBack(c, back) || enter || c == 'p') { screen = liveReturn; lastDrawMs = 0; }
@@ -9052,7 +9749,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,40,7,48,49,25,43};
+static const int SET_STN[]   = {26,3,40,7,54,48,49,25,43};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -9095,8 +9792,9 @@ void App::keySettings(char c, bool enter, bool back) {
       case 40: cfg.solarAct = (uint8_t)((cfg.solarAct + dir + 4) % 4); cfg.save(); break;
       case 43: cfg.wxUnits = (uint8_t)((cfg.wxUnits + dir + 3) % 3); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
+      case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 4) % 4);
+      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 8) % 8);
               cfg.save(); applyRotatorFromCfg(); break;
       case 11: { long p = (long)cfg.rotPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotPort = (uint16_t)p; cfg.save(); } break;
@@ -9182,6 +9880,7 @@ void App::keySettings(char c, bool enter, bool back) {
       case 6: setStatus(connectWifiCfg() ? "WiFi OK" : "WiFi FAIL");
               break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
+      case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
@@ -9622,6 +10321,38 @@ void App::drawAbout() {
 void App::keyAbout(char c, bool enter, bool back) {
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
+
+// Network-recovery reboot prompt. Shown when the socket-failure recovery path has
+// exhausted its hard WiFi resets and the connection still won't come back -- a
+// reboot is the last-resort cure, but we ask rather than reboot under the user.
+void App::drawNetReboot() {
+  header("Network problem");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_RED, CL_BLACK);
+  canvas.setCursor(6, 26); canvas.print("WiFi/socket recovery failed.");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(6, 44); canvas.print("Repeated connections were");
+  canvas.setCursor(6, 54); canvas.print("refused and resetting WiFi");
+  canvas.setCursor(6, 64); canvas.print("did not recover it.");
+  canvas.setCursor(6, 82); canvas.print("A reboot usually clears this.");
+  canvas.setTextColor(CL_YELLOW, CL_BLACK);
+  canvas.setCursor(6, 102); canvas.print("ENTER / y = reboot now");
+  canvas.setCursor(6, 112); canvas.print("`  /  n = keep running");
+  footer("ENTER reboot   ` cancel");
+}
+
+void App::keyNetReboot(char c, bool enter, bool back) {
+  if (enter || c == 'y') {
+    setStatus("Rebooting..."); draw(); delay(300);
+    ESP.restart();
+    return;
+  }
+  if (isBack(c, back) || c == 'n') {
+    net.failedResets = 0;                    // user declined; reset the reboot counter
+    screen = netRebootReturn; lastDrawMs = 0;
+  }
+}
+
 
 // ===================== QSO logging =========================================
 static const char* bandFor(double mhz) {            // ADIF 3.1.7 Band enumeration
@@ -10144,6 +10875,7 @@ void App::draw() {
     case SCR_EDIT:     drawEdit(); break;
     case SCR_WIFISCAN: drawWifiScan(); break;
     case SCR_ABOUT:    drawAbout(); break;
+    case SCR_NETREBOOT: drawNetReboot(); break;
     case SCR_LOG:      drawLog(); break;
     case SCR_LOGENTRY: drawLogEntry(); break;
     case SCR_LOGLIST:  drawLogList(); break;
@@ -10187,6 +10919,10 @@ void App::draw() {
     canvas.setTextSize(1); canvas.setCursor(2, 17);
     canvas.printf("AOS %.14s  T-%s", nextAosName, fmtCountdown(dt).c_str());
   }
+  // Voice-memo REC badge: overlay on the Track-family screens while recording.
+  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUAL ||
+      screen == SCR_MANUALBIG || screen == SCR_POLAR)
+    drawMemoIndicator();
   canvas.pushSprite(0, 0);
 }
 
@@ -13364,6 +14100,7 @@ void App::drawBig() {
 }
 
 void App::keyBig(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back) || c == 'z') { screen = SCR_TRACK; lastDrawMs = 0; return; }
   // Everything else that's valid on Track stays valid here: passband tuning
   // (,/; . and s/x), CAL trims, tune-mode cycling (m/d), transponder (t), radio
@@ -13611,6 +14348,7 @@ void App::drawManualBig() {
 }
 
 void App::keyManualBig(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back) || c == 'z') { screen = SCR_MANUAL; lastDrawMs = 0; return; }
   // Delegate the in-place controls (u leg, m TUNE/CAL, ,/; . tune, s/x, t) to
   // keyManual; suppress the keys that would navigate to another screen.
@@ -13803,7 +14541,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 54;
+  const int N = 55;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -13819,10 +14557,15 @@ void App::drawSettings() {
                 ? String(" (http://") + WiFi.localIP().toString() + ")" : String(""));
   rows[53] = String("Web port: ") + String(cfg.webPort);
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
+  rows[54] = String("IR pass beacon: ") + (cfg.irBeacon ? "on" : "off");
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
   rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
                      : cfg.rotType == ROT_NET ? "rotctl (net)"
-                     : cfg.rotType == ROT_YAESU ? "Yaesu (direct)" : "GS-232");
+                     : cfg.rotType == ROT_YAESU ? "Yaesu (direct)"
+                     : cfg.rotType == ROT_EASYCOMM1 ? "Easycomm I"
+                     : cfg.rotType == ROT_EASYCOMM2 ? "Easycomm II"
+                     : cfg.rotType == ROT_EASYCOMM3 ? "Easycomm III"
+                     : cfg.rotType == ROT_SPID ? "SPID Rot2Prog" : "GS-232");
   {
     String h = cfg.rotHost[0] ? String(cfg.rotHost) : String("(not set)");
     if (h.length() > 18) h = "..." + h.substring(h.length() - 15);

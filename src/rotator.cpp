@@ -139,6 +139,233 @@ bool Gs232Rotator::readPos(float& az, float& el) {
 }
 
 // ---------------------------------------------------------------------------
+//  Easycomm I/II/III backend (ASCII) over the SC16IS750/752 I2C->UART bridge
+// ---------------------------------------------------------------------------
+// Bridge plumbing mirrors Gs232Rotator (same register map / sequence); kept as
+// its own copy rather than refactored into a shared base so the working GS-232
+// path is untouched.
+void EasycommRotator::wreg(uint8_t reg, uint8_t val) {
+  Wire1.beginTransmission(_addr);
+  Wire1.write((uint8_t)(reg << 3));
+  Wire1.write(val);
+  Wire1.endTransmission();
+}
+uint8_t EasycommRotator::rreg(uint8_t reg) {
+  Wire1.beginTransmission(_addr);
+  Wire1.write((uint8_t)(reg << 3));
+  Wire1.endTransmission();
+  Wire1.requestFrom((int)_addr, 1);
+  return Wire1.available() ? (uint8_t)Wire1.read() : 0x00;
+}
+bool EasycommRotator::bridgeInit() {
+  wreg(SC_IOCTL, 0x08); delay(5);
+  uint32_t div = ROT_XTAL_HZ / (16UL * _baud);
+  wreg(SC_LCR, 0x80);
+  wreg(SC_DLL, (uint8_t)(div & 0xFF));
+  wreg(SC_DLH, (uint8_t)((div >> 8) & 0xFF));
+  wreg(SC_LCR, 0x03);
+  wreg(SC_FCR, 0x07);
+  wreg(SC_SPR, 0x5A);
+  bool ok = (rreg(SC_SPR) == 0x5A);
+#if ROT_DEBUG
+  Serial.printf("[ROT] Easycomm SC16IS750 @0x%02X %s (baud %lu)\n",
+                _addr, ok ? "ready" : "NOT FOUND", (unsigned long)_baud);
+#endif
+  return ok;
+}
+void EasycommRotator::putc_(char c) {
+  uint32_t t0 = millis();
+  while (!(rreg(SC_LSR) & 0x20)) { if (millis() - t0 > 50) break; }
+  wreg(SC_THR, (uint8_t)c);
+}
+void EasycommRotator::puts_(const char* s) { while (*s) putc_(*s++); }
+int EasycommRotator::getc_() {
+  if (rreg(SC_RXLVL) == 0) return -1;
+  return (int)rreg(SC_RHR);
+}
+void EasycommRotator::flushIn() { while (rreg(SC_RXLVL)) rreg(SC_RHR); }
+
+void EasycommRotator::begin() {
+  Wire1.begin(ROT_I2C_SDA, ROT_I2C_SCL, ROT_I2C_HZ);
+  _ok = bridgeInit();
+}
+
+bool EasycommRotator::point(float az, float el) {
+  if (!_ok) return false;
+  if (az < 0)   az += 360.0f;
+  if (az > 360) az -= 360.0f;
+  if (el < 0)   el = 0;
+  if (el > 180) el = 180;
+  char cmd[32];
+  if (_ver == 1)   // Easycomm I: integer degrees
+    snprintf(cmd, sizeof(cmd), "AZ%d EL%d\r", (int)lroundf(az), (int)lroundf(el));
+  else             // Easycomm II/III: one-decimal degrees
+    snprintf(cmd, sizeof(cmd), "AZ%.1f EL%.1f\r", az, el);
+#if ROT_DEBUG
+  Serial.printf("[ROT TX] %s", cmd);
+#endif
+  puts_(cmd);
+  return true;
+}
+
+void EasycommRotator::stop() {
+  if (!_ok) return;
+#if ROT_DEBUG
+  Serial.println("[ROT TX] SA SE (stop)");
+#endif
+  puts_("SA SE\r");
+}
+
+// Query "AZ EL\r" -> reply contains "AZ<val>" and "EL<val>" tokens (decimal for
+// II/III, integer for I; atof handles both). Some III controllers append more
+// fields (VE.., etc.) which we ignore.
+bool EasycommRotator::readPos(float& az, float& el) {
+  if (!_ok) return false;
+  flushIn();
+  puts_("AZ EL\r");
+  String r;
+  uint32_t t0 = millis();
+  while (millis() - t0 < 500) {
+    int c = getc_();
+    if (c < 0) { delay(2); continue; }
+    if (c == '\r' || c == '\n') { if (r.length()) break; else continue; }
+    r += (char)c; t0 = millis();
+    if (r.length() > 48) break;
+  }
+#if ROT_DEBUG
+  Serial.printf("[ROT RX] %s\n", r.length() ? r.c_str() : "(no reply)");
+#endif
+  int ia = r.indexOf("AZ");
+  int ie = r.indexOf("EL");
+  if (ia < 0 || ie < 0) return false;
+  az = (float)atof(r.c_str() + ia + 2);
+  el = (float)atof(r.c_str() + ie + 2);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  SPID Rot2Prog (MD-01/02) backend (binary) over the I2C->UART bridge
+// ---------------------------------------------------------------------------
+void SpidRotator::wreg(uint8_t reg, uint8_t val) {
+  Wire1.beginTransmission(_addr);
+  Wire1.write((uint8_t)(reg << 3));
+  Wire1.write(val);
+  Wire1.endTransmission();
+}
+uint8_t SpidRotator::rreg(uint8_t reg) {
+  Wire1.beginTransmission(_addr);
+  Wire1.write((uint8_t)(reg << 3));
+  Wire1.endTransmission();
+  Wire1.requestFrom((int)_addr, 1);
+  return Wire1.available() ? (uint8_t)Wire1.read() : 0x00;
+}
+bool SpidRotator::bridgeInit() {
+  wreg(SC_IOCTL, 0x08); delay(5);
+  uint32_t div = ROT_XTAL_HZ / (16UL * _baud);
+  wreg(SC_LCR, 0x80);
+  wreg(SC_DLL, (uint8_t)(div & 0xFF));
+  wreg(SC_DLH, (uint8_t)((div >> 8) & 0xFF));
+  wreg(SC_LCR, 0x03);
+  wreg(SC_FCR, 0x07);
+  wreg(SC_SPR, 0x5A);
+  bool ok = (rreg(SC_SPR) == 0x5A);
+#if ROT_DEBUG
+  Serial.printf("[ROT] SPID SC16IS750 @0x%02X %s (baud %lu)\n",
+                _addr, ok ? "ready" : "NOT FOUND", (unsigned long)_baud);
+#endif
+  return ok;
+}
+void SpidRotator::putb_(uint8_t b) {
+  uint32_t t0 = millis();
+  while (!(rreg(SC_LSR) & 0x20)) { if (millis() - t0 > 50) break; }
+  wreg(SC_THR, b);
+}
+int SpidRotator::getb_(uint32_t toMs) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < toMs) {
+    if (rreg(SC_RXLVL)) return (int)rreg(SC_RHR);
+    delay(1);
+  }
+  return -1;
+}
+void SpidRotator::flushIn() { while (rreg(SC_RXLVL)) rreg(SC_RHR); }
+
+void SpidRotator::begin() {
+  Wire1.begin(ROT_I2C_SDA, ROT_I2C_SCL, ROT_I2C_HZ);
+  _ok = bridgeInit();
+}
+
+// Rot2Prog SET frame (13 bytes): 0x57 H1 H2 H3 H4 PH V1 V2 V3 V4 PV CMD 0x20.
+// Each angle is encoded as (deg + 360) * RES, then the 4 most-significant decimal
+// digits are sent one-per-byte as raw values (0..9); PH/PV carry the resolution.
+bool SpidRotator::point(float az, float el) {
+  if (!_ok) return false;
+  if (az < 0)   az += 360.0f;
+  if (az > 360) az -= 360.0f;
+  if (el < 0)   el = 0;
+  if (el > 180) el = 180;
+  int ha = (int)lroundf((az + 360.0f) * RES);   // azimuth encoded value
+  int ve = (int)lroundf((el + 360.0f) * RES);   // elevation encoded value
+  uint8_t f[13];
+  f[0] = 0x57;
+  f[1] = (ha / 1000) % 10; f[2] = (ha / 100) % 10; f[3] = (ha / 10) % 10; f[4] = ha % 10;
+  f[5] = (uint8_t)RES;
+  f[6] = (ve / 1000) % 10; f[7] = (ve / 100) % 10; f[8] = (ve / 10) % 10; f[9] = ve % 10;
+  f[10] = (uint8_t)RES;
+  f[11] = 0x2F;            // SET
+  f[12] = 0x20;
+#if ROT_DEBUG
+  Serial.printf("[ROT TX] SPID set az=%d el=%d (ha=%d ve=%d)\n",
+                (int)lroundf(az), (int)lroundf(el), ha, ve);
+#endif
+  flushIn();
+  for (int i = 0; i < 13; i++) putb_(f[i]);
+  return true;
+}
+
+void SpidRotator::stop() {
+  if (!_ok) return;
+  uint8_t f[13] = {0x57,0,0,0,0,0,0,0,0,0,0,0x0F,0x20};   // CMD 0x0F = stop
+#if ROT_DEBUG
+  Serial.println("[ROT TX] SPID stop");
+#endif
+  flushIn();
+  for (int i = 0; i < 13; i++) putb_(f[i]);
+}
+
+// STATUS query: send a status frame (CMD 0x1F) and read the 12-byte reply
+//   0x57 H1 H2 H3 H4 PH V1 V2 V3 V4 PV 0x20
+// az = (H1*1000 + H2*100 + H3*10 + H4)/RES - 360 ; el decoded the same way.
+bool SpidRotator::readPos(float& az, float& el) {
+  if (!_ok) return false;
+  flushIn();
+  uint8_t q[13] = {0x57,0,0,0,0,0,0,0,0,0,0,0x1F,0x20};   // CMD 0x1F = status
+  for (int i = 0; i < 13; i++) putb_(q[i]);
+  uint8_t r[12];
+  int got = 0;
+  while (got < 12) {
+    int b = getb_(500);
+    if (b < 0) break;
+    if (got == 0 && b != 0x57) continue;   // resync to frame start
+    r[got++] = (uint8_t)b;
+  }
+  if (got < 12 || r[0] != 0x57 || r[11] != 0x20) {
+#if ROT_DEBUG
+    Serial.printf("[ROT RX] SPID status incomplete (%d bytes)\n", got);
+#endif
+    return false;
+  }
+  // Decode: the four digits form (deg + 360) * RES, MSD first.
+  float a = (r[1]*1000 + r[2]*100 + r[3]*10 + r[4]) / (float)RES - 360.0f;
+  float e = (r[6]*1000 + r[7]*100 + r[8]*10 + r[9]) / (float)RES - 360.0f;
+  az = a; el = e;
+#if ROT_DEBUG
+  Serial.printf("[ROT RX] SPID az=%.1f el=%.1f\n", az, el);
+#endif
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 //  rotctld (Hamlib NET rotctl) TCP client backend
 // ---------------------------------------------------------------------------
 static constexpr uint32_t ROTCTLD_RETRY_MS = 5000;   // don't hammer a down server
@@ -407,5 +634,9 @@ void YaesuRotator::service() {
 Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port) {
   if (type == 1) return new RotctlRotator(host, port);   // 1 = ROT_NET (settings.h)
   if (type == 2) return new PstRotator(host, port);        // 2 = ROT_PST (settings.h)
+  if (type == 4) return new EasycommRotator(ROT_I2C_ADDR, baud, 1);  // Easycomm I
+  if (type == 5) return new EasycommRotator(ROT_I2C_ADDR, baud, 2);  // Easycomm II
+  if (type == 6) return new EasycommRotator(ROT_I2C_ADDR, baud, 3);  // Easycomm III
+  if (type == 7) return new SpidRotator(ROT_I2C_ADDR, baud);          // SPID Rot2Prog
   return new Gs232Rotator(ROT_I2C_ADDR, baud);
 }

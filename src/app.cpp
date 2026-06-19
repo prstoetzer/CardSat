@@ -180,6 +180,7 @@ void App::setup() {
   }
 
   M5Cardputer.Speaker.setVolume(180);   // AOS alarm
+  irBeacon.begin();                     // IR pass-alert beacon (idle until an alert)
   if (timeIsSet() && favN) buildSchedule();
 
   // If we woke from the deep-sleep-until-pass timer, jump to the schedule so
@@ -350,6 +351,36 @@ void App::factoryReset() {
   Store::formatInternal();
   delay(300);
   ESP.restart();   // reboot -> setup() runs fresh with built-in defaults
+}
+
+// Toggle a voice memo on/off (shared by the Track-family screens' 'v' key).
+// SD-card required; the recorder streams a WAV to /CardSat/audio and keeps the
+// radio/rotator/web services running by recording one small block per loop tick.
+void App::toggleMemo() {
+  if (memo.isRecording()) {
+    memo.stop();
+    setStatus("Memo saved");
+  } else if (memo.start()) {
+    setStatus("Recording memo...");
+  } else {
+    setStatus(String("Memo: ") + memo.lastError());   // e.g. "SD card required"
+  }
+  lastDrawMs = 0;
+}
+
+// Small red "REC ●" badge with the remaining seconds, drawn top-right while a memo
+// records. Called at the end of each Track-family draw so it overlays the content.
+void App::drawMemoIndicator() {
+  if (!memo.isRecording()) return;
+  canvas.setTextSize(1);
+  // Blink the dot ~1 Hz so it reads as live.
+  bool on = ((millis() / 500) & 1);
+  int x = 188, y = 2;
+  canvas.fillRect(x - 2, y - 1, 52, 11, CL_BLACK);
+  if (on) canvas.fillCircle(x + 3, y + 4, 3, CL_RED);
+  canvas.setTextColor(CL_RED, CL_BLACK);
+  canvas.setCursor(x + 10, y + 1);
+  canvas.printf("REC%lus", (unsigned long)memo.secondsLeft());
 }
 
 void App::setStatus(const String& s, uint32_t ms) {
@@ -1380,21 +1411,27 @@ void App::serviceAosAlarm() {
   // --- TCA and LOS chirps for a pass already in progress ---
   if (alarmLos) {
     if (now >= alarmLos) {                          // pass over: LOS tone, then disarm
-      if (!(alarmPassMarks & 2)) { alarmPassMarks |= 2; beep(1200, 120); delay(90); beep(900, 160); }
+      if (!(alarmPassMarks & 2)) { alarmPassMarks |= 2; beep(1200, 120); delay(90); beep(900, 160);
+        if (cfg.irBeacon) irBeacon.flash(IR_N_LOS); }
       alarmTca = alarmLos = 0; alarmPassMarks = 0;
     } else if (alarmTca && now >= alarmTca && !(alarmPassMarks & 1)) {
       alarmPassMarks |= 1; beep(2200, 110); delay(70); beep(2200, 110);   // TCA (peak elevation)
+      if (cfg.irBeacon) irBeacon.flash(IR_N_TCA);
     }
   }
   if (nextAos == 0) return;
   if (alarmAos != nextAos) { alarmAos = nextAos; alarmMarks = 0; }  // new target
   long dt = (long)(nextAos - now);
-  if (dt <= 60 && !(alarmMarks & 1)) { alarmMarks |= 1; beep(1500, 80); }
-  if (dt <= 30 && !(alarmMarks & 2)) { alarmMarks |= 2; beep(1500, 80); }
-  if (dt <= 10 && !(alarmMarks & 4)) { alarmMarks |= 4; beep(1800, 90); }
+  if (dt <= 60 && !(alarmMarks & 1)) { alarmMarks |= 1; beep(1500, 80);
+    if (cfg.irBeacon) irBeacon.flash(IR_N_T60); }
+  if (dt <= 30 && !(alarmMarks & 2)) { alarmMarks |= 2; beep(1500, 80);
+    if (cfg.irBeacon) irBeacon.flash(IR_N_T30); }
+  if (dt <= 10 && !(alarmMarks & 4)) { alarmMarks |= 4; beep(1800, 90);
+    if (cfg.irBeacon) irBeacon.flash(IR_N_T10); }
   if (dt <= 0  && !(alarmMarks & 8)) {
     alarmMarks |= 8;
     beep(2600, 250); delay(120); beep(2600, 250);          // AOS!
+    if (cfg.irBeacon) irBeacon.flash(IR_N_AOS);
     aosFlashUntil = millis() + 8000;
     strncpy(aosFlashName, nextAosName, sizeof(aosFlashName) - 1);
     aosFlashName[sizeof(aosFlashName) - 1] = 0;
@@ -1523,6 +1560,7 @@ static long rigdPassband(RigMode m) {
 }
 
 void App::serviceRigctld() {
+  if (netFetchActive()) return;   // listeners stay freed during an outbound fetch
   // Start/stop the listener with the enable flag and WiFi state.
   if (cfg.rigdEnable && net.connected()) {
     if (!rigd) { rigd = new WiFiServer(cfg.rigdPort); rigd->begin(); rigd->setNoDelay(true); }
@@ -1609,6 +1647,7 @@ void App::rigdHandleLine(const String& lineIn) {
 //  tracking so the two don't fight. One client at a time; pumped each loop.
 // ===========================================================================
 void App::serviceRotctld() {
+  if (netFetchActive()) return;   // listeners stay freed during an outbound fetch
   if (cfg.rotdEnable && net.connected()) {
     if (!rotd) { rotd = new WiFiServer(cfg.rotdPort); rotd->begin(); rotd->setNoDelay(true); }
   } else {
@@ -1834,14 +1873,22 @@ void App::suspendNetServers() {
 
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
 // every outbound TLS session (see Net::onTlsBusy). On busy=true we drop the
-// listeners; on busy=false we do nothing -- serviceRigctld/rotctld/Webd rebuild
-// them on the next loop tick once control returns from the (blocking) fetch.
+// listeners and mark a fetch in progress; on busy=false we clear that mark once
+// the outermost fetch unwinds. While the mark is set, the service*() functions
+// refuse to rebuild the listeners -- so across a multi-fetch update (GP, AMSAT,
+// space wx, weather) the sockets stay freed for the whole burst even if the main
+// loop runs between fetches, giving the outbound TLS connects maximum headroom.
 App* App::s_self = nullptr;
+int  App::s_fetchDepth = 0;
 void App::tlsBusyTrampoline(bool busy) {
-  if (busy && s_self) s_self->suspendNetServers();
+  if (!s_self) return;
+  if (busy) { s_fetchDepth++; s_self->suspendNetServers(); }
+  else if (s_fetchDepth > 0) { s_fetchDepth--; }
 }
+bool App::netFetchActive() { return s_fetchDepth > 0; }
 
 void App::serviceWebd() {
+  if (netFetchActive()) return;   // listeners stay freed during an outbound fetch
   // Start/stop the listener with the enable flag and WiFi state.
   if (cfg.webEnable && net.connected()) {
     if (!webd) { webd = new WiFiServer(cfg.webPort); webd->begin(); webd->setNoDelay(true); }
@@ -2340,6 +2387,16 @@ void App::loop() {
   serviceRigctld();           // rigctld TCP server: let a PC drive the rig via CardSat
   serviceRotctld();           // rotctld TCP server: let a PC drive the wired rotator
   serviceWebd();              // mobile web control page (opt-in, over the WiFi LAN)
+  memo.poll();                // voice memo: append one block if recording (SD only)
+  irBeacon.service();         // IR pass-alert beacon: advance any queued flashes
+  // If the socket-recovery path exhausted its hard resets, surface a reboot
+  // prompt once (don't reboot silently). The user decides; the flag is cleared
+  // so we don't re-enter while they're on the prompt.
+  if (net.recoverExhausted && screen != SCR_NETREBOOT) {
+    net.recoverExhausted = false;
+    netRebootReturn = screen;
+    screen = SCR_NETREBOOT; lastDrawMs = 0;
+  }
   if (cfg.useGps) {
     if (loc.pollGps()) { pred.setSite(loc.obs()); }
   }
@@ -2681,6 +2738,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_EDIT:     keyEdit(c, enter, back); break;
     case SCR_WIFISCAN: keyWifiScan(c, enter, back); break;
     case SCR_ABOUT:    keyAbout(c, enter, back); break;
+    case SCR_NETREBOOT: keyNetReboot(c, enter, back); break;
     case SCR_LOG:      keyLog(c, enter, back); break;
     case SCR_LOGENTRY: keyLogEntry(c, enter, back); break;
     case SCR_LOGLIST:  keyLogList(c, enter, back); break;
@@ -2926,6 +2984,7 @@ void App::keyPassDetail(char c, bool enter, bool back) {
 }
 
 void App::keyTrack(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back)) {
     if (radioOut) { radioOut = false; }     // stop sending on first back
     else {
@@ -3019,9 +3078,9 @@ void App::keyTrack(char c, bool enter, bool back) {
     else {
       if (!rot->ready()) rot->begin();   // (re)establish the link/bridge on demand
       if (!rot->ready())
-        setStatus(cfg.rotType == ROT_GS232 ? "Rotator: bridge not found"
-                  : cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
-                                            : "Rotator: no rotctl link");
+        setStatus(cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
+                  : cfg.rotType == ROT_NET ? "Rotator: no rotctl link"
+                                           : "Rotator: bridge not found");
       else {
         rotOut = !rotOut;
         if (rotOut) {
@@ -3067,6 +3126,7 @@ void App::keyTrack(char c, bool enter, bool back) {
 // Manual (no-radio) mode keys: passband/cal tuning like Track, leg toggle, and
 // access to log/polar/grids (which return here), but NO radio or rotator keys.
 void App::keyManual(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back) || c == 'f') { screen = SCR_TRACK; lastDrawMs = 0; return; }
 
   bool linear = (activeTxCount > 0) && activeTx[curTx].isLinear &&
@@ -3124,6 +3184,7 @@ void App::keyManual(char c, bool enter, bool back) {
 }
 
 void App::keyPolar(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (c == 'l') { beginQso(); return; }          // log a QSO (radio keeps tracking)
   // Any of back / ENTER / 'p' returns to the tracking screen.
   if (isBack(c, back) || enter || c == 'p') { screen = liveReturn; lastDrawMs = 0; }
@@ -3465,7 +3526,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,40,7,48,49,25,43};
+static const int SET_STN[]   = {26,3,40,7,54,48,49,25,43};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -3508,8 +3569,9 @@ void App::keySettings(char c, bool enter, bool back) {
       case 40: cfg.solarAct = (uint8_t)((cfg.solarAct + dir + 4) % 4); cfg.save(); break;
       case 43: cfg.wxUnits = (uint8_t)((cfg.wxUnits + dir + 3) % 3); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
+      case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 4) % 4);
+      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 8) % 8);
               cfg.save(); applyRotatorFromCfg(); break;
       case 11: { long p = (long)cfg.rotPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotPort = (uint16_t)p; cfg.save(); } break;
@@ -3595,6 +3657,7 @@ void App::keySettings(char c, bool enter, bool back) {
       case 6: setStatus(connectWifiCfg() ? "WiFi OK" : "WiFi FAIL");
               break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
+      case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
@@ -4034,6 +4097,37 @@ void App::drawAbout() {
 
 void App::keyAbout(char c, bool enter, bool back) {
   if (isBack(c, back) || enter) screen = SCR_HOME;
+}
+
+// Network-recovery reboot prompt. Shown when the socket-failure recovery path has
+// exhausted its hard WiFi resets and the connection still won't come back -- a
+// reboot is the last-resort cure, but we ask rather than reboot under the user.
+void App::drawNetReboot() {
+  header("Network problem");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_RED, CL_BLACK);
+  canvas.setCursor(6, 26); canvas.print("WiFi/socket recovery failed.");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(6, 44); canvas.print("Repeated connections were");
+  canvas.setCursor(6, 54); canvas.print("refused and resetting WiFi");
+  canvas.setCursor(6, 64); canvas.print("did not recover it.");
+  canvas.setCursor(6, 82); canvas.print("A reboot usually clears this.");
+  canvas.setTextColor(CL_YELLOW, CL_BLACK);
+  canvas.setCursor(6, 102); canvas.print("ENTER / y = reboot now");
+  canvas.setCursor(6, 112); canvas.print("`  /  n = keep running");
+  footer("ENTER reboot   ` cancel");
+}
+
+void App::keyNetReboot(char c, bool enter, bool back) {
+  if (enter || c == 'y') {
+    setStatus("Rebooting..."); draw(); delay(300);
+    ESP.restart();
+    return;
+  }
+  if (isBack(c, back) || c == 'n') {
+    net.failedResets = 0;                    // user declined; reset the reboot counter
+    screen = netRebootReturn; lastDrawMs = 0;
+  }
 }
 
 // ===================== QSO logging =========================================
@@ -4557,6 +4651,7 @@ void App::draw() {
     case SCR_EDIT:     drawEdit(); break;
     case SCR_WIFISCAN: drawWifiScan(); break;
     case SCR_ABOUT:    drawAbout(); break;
+    case SCR_NETREBOOT: drawNetReboot(); break;
     case SCR_LOG:      drawLog(); break;
     case SCR_LOGENTRY: drawLogEntry(); break;
     case SCR_LOGLIST:  drawLogList(); break;
@@ -4600,6 +4695,10 @@ void App::draw() {
     canvas.setTextSize(1); canvas.setCursor(2, 17);
     canvas.printf("AOS %.14s  T-%s", nextAosName, fmtCountdown(dt).c_str());
   }
+  // Voice-memo REC badge: overlay on the Track-family screens while recording.
+  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUAL ||
+      screen == SCR_MANUALBIG || screen == SCR_POLAR)
+    drawMemoIndicator();
   canvas.pushSprite(0, 0);
 }
 
@@ -7777,6 +7876,7 @@ void App::drawBig() {
 }
 
 void App::keyBig(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back) || c == 'z') { screen = SCR_TRACK; lastDrawMs = 0; return; }
   // Everything else that's valid on Track stays valid here: passband tuning
   // (,/; . and s/x), CAL trims, tune-mode cycling (m/d), transponder (t), radio
@@ -8023,6 +8123,7 @@ void App::drawManualBig() {
 }
 
 void App::keyManualBig(char c, bool enter, bool back) {
+  if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back) || c == 'z') { screen = SCR_MANUAL; lastDrawMs = 0; return; }
   // Delegate the in-place controls (u leg, m TUNE/CAL, ,/; . tune, s/x, t) to
   // keyManual; suppress the keys that would navigate to another screen.
@@ -8215,7 +8316,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 54;
+  const int N = 55;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -8231,10 +8332,15 @@ void App::drawSettings() {
                 ? String(" (http://") + WiFi.localIP().toString() + ")" : String(""));
   rows[53] = String("Web port: ") + String(cfg.webPort);
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
+  rows[54] = String("IR pass beacon: ") + (cfg.irBeacon ? "on" : "off");
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
   rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
                      : cfg.rotType == ROT_NET ? "rotctl (net)"
-                     : cfg.rotType == ROT_YAESU ? "Yaesu (direct)" : "GS-232");
+                     : cfg.rotType == ROT_YAESU ? "Yaesu (direct)"
+                     : cfg.rotType == ROT_EASYCOMM1 ? "Easycomm I"
+                     : cfg.rotType == ROT_EASYCOMM2 ? "Easycomm II"
+                     : cfg.rotType == ROT_EASYCOMM3 ? "Easycomm III"
+                     : cfg.rotType == ROT_SPID ? "SPID Rot2Prog" : "GS-232");
   {
     String h = cfg.rotHost[0] ? String(cfg.rotHost) : String("(not set)");
     if (h.length() > 18) h = "..." + h.substring(h.length() - 15);

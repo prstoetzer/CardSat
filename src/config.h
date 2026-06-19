@@ -63,6 +63,23 @@ static constexpr int   CIV_UART_NUM   = 1;     // CI-V owns UART1 on G1/G2
 static constexpr int   CIV_RX_PIN     = 1;     // G1
 static constexpr int   CIV_TX_PIN     = 2;     // G2
 
+// Built-in IR LED (Cardputer & Cardputer-Adv): GPIO 44, the same pin M5's IR
+// examples use. CardSat uses it as a silent pass-alert *beacon*: each pass-alert
+// event emits a distinct number of 38 kHz IR bursts so external user-built
+// hardware (an IR receiver/demodulator like a TSOP38238 feeding a microcontroller)
+// can tell the events apart and trigger whatever the user designs. Off by default.
+static constexpr int      IR_LED_PIN     = 44;
+static constexpr uint32_t IR_CARRIER_HZ  = 38000;   // standard IR receiver carrier
+static constexpr uint16_t IR_BURST_MS    = 60;      // each flash: carrier-on duration
+static constexpr uint16_t IR_GAP_MS      = 140;     // off-time between flashes in a group
+// Distinct flash counts per pass-alert event (so a receiver can disambiguate):
+static constexpr uint8_t  IR_N_T60       = 1;       // 60 s to AOS
+static constexpr uint8_t  IR_N_T30       = 2;       // 30 s to AOS
+static constexpr uint8_t  IR_N_T10       = 3;       // 10 s to AOS
+static constexpr uint8_t  IR_N_AOS       = 4;       // AOS (pass start)
+static constexpr uint8_t  IR_N_TCA       = 5;       // TCA (peak elevation)
+static constexpr uint8_t  IR_N_LOS       = 6;       // LOS (pass end)
+
 // microSD (SPI). Used only as a storage fallback when no internal LittleFS/
 // SPIFFS partition is available -- e.g. when CardSat is launched from the
 // bmorcelli Launcher without a SPIFFS region attached (a card is normally
@@ -81,7 +98,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.19";
+static constexpr const char* FW_VERSION = "0.9.21";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -154,6 +171,11 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 //  Files on LittleFS
 // ---------------------------------------------------------------------------
 #define DATA_DIR     "/CardSat"               // all data/config lives in this folder
+#define AUDIO_DIR    "/CardSat/audio"         // voice memos (SD card only)
+// Voice-memo capture (SD-card-only feature; PDM mic via M5Unified into a WAV).
+static constexpr uint32_t MEMO_SAMPLE_HZ  = 16000;  // 16 kHz mono
+static constexpr uint32_t MEMO_MAX_SECS   = 30;     // hard cap per memo
+static constexpr uint32_t MEMO_MIN_FREE_KB = 512;   // refuse if SD has less free
 #define FILE_GP      "/CardSat/gp.json"       // cached GP/OMM download (JSON array)
 #define FILE_CFG     "/CardSat/config.json"
 #define FILE_TXCACHE "/CardSat/tx_%lu.json"   // %lu = norad id

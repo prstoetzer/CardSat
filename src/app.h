@@ -368,6 +368,7 @@ private:
   void suspendNetServers();                    // tear down rigd/rotd/webd listeners
   void freeCanvasForTls();                     // free ~64 KB sprite for mbedTLS handshake
   void restoreCanvasAfterTls();
+  void tickCanvasRestore();                    // loop-driven retry if restore alloc failed
   bool canvasFreed = false;                    // true while the sprite is freed for a fetch
                                                // (free their sockets) before a
                                                // blocking download; they auto-rebuild

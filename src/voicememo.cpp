@@ -4,6 +4,7 @@
 #include "voicememo.h"
 #include "config.h"
 #include "storage.h"
+#include <M5Cardputer.h>   // M5.Mic / .Speaker (ADV: needs IDF 5.4.x, see MANUAL.md)
 #include <M5Unified.h>
 #include <time.h>
 
@@ -16,9 +17,8 @@ static constexpr size_t MEMO_BLOCK_SAMPLES = 1024;
 static void put32(uint8_t* p, uint32_t v) { p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24; }
 static void put16(uint8_t* p, uint16_t v) { p[0]=v; p[1]=v>>8; }
 
-void VoiceMemo::writeWavHeader(uint32_t dataBytes) {
+void VoiceMemo::buildWavHeader(uint8_t h[44], uint32_t dataBytes) {
   // Canonical 44-byte PCM WAV header (RIFF / fmt / data).
-  uint8_t h[44];
   const uint32_t sr   = MEMO_SAMPLE_HZ;
   const uint16_t ch   = 1, bits = 16;
   const uint32_t br   = sr * ch * bits / 8;        // byte rate
@@ -36,6 +36,15 @@ void VoiceMemo::writeWavHeader(uint32_t dataBytes) {
   put16(h + 34, bits);
   memcpy(h + 36, "data", 4);
   put32(h + 40, dataBytes);
+}
+
+void VoiceMemo::writeWavHeader(uint32_t dataBytes) {
+  // Write the header at the front of the currently-open _file. Used only for the
+  // initial placeholder in start(); the final size is patched in finalize() by
+  // reopening the file (a backward seek-then-write on an open "w" handle does not
+  // reliably commit on the SD/FS driver, which left the data size at 0 -> silent).
+  uint8_t h[44];
+  buildWavHeader(h, dataBytes);
   _file.seek(0);
   _file.write(h, sizeof(h));
 }
@@ -74,9 +83,12 @@ bool VoiceMemo::start() {
   _file = fsx.open(_path, "w");
   if (!_file) { _err = "open failed"; _state = ERROR; return false; }
 
-  // The mic and speaker share I2S: stop the speaker, start the mic.
-  _spkWasOn = M5.Speaker.isEnabled();
-  if (_spkWasOn) M5.Speaker.end();
+  // The mic and speaker share I2S: stop the speaker, then start the mic.
+  // NOTE: on the Cardputer ADV the ES8311 mic only works when CardSat is built
+  // against ESP-IDF 5.4.x; on 5.5.x M5Unified's mic path can't clock the codec
+  // (upstream regression, espressif/esp-idf#18621). See MANUAL.md.
+  _spkWasOn = M5Cardputer.Speaker.isEnabled();
+  if (_spkWasOn) M5Cardputer.Speaker.end();
   {
     auto mc = M5.Mic.config();
     mc.sample_rate = MEMO_SAMPLE_HZ;
@@ -84,7 +96,7 @@ bool VoiceMemo::start() {
   }
   if (!M5.Mic.begin()) {
     _file.close(); fsx.remove(_path);
-    if (_spkWasOn) M5.Speaker.begin();
+    if (_spkWasOn) M5Cardputer.Speaker.begin();
     _err = "mic start failed"; _state = ERROR; return false;
   }
 
@@ -92,6 +104,11 @@ bool VoiceMemo::start() {
   _dataBytes = 0;
   _primed    = false;
   _bufIdx    = 0;
+  _peak      = 0;
+  _rawPeak   = 0;
+  _hpPrevX   = 0;
+  _hpPrevY   = 0;
+  _hpPrimed  = false;
   _startMs   = millis();
   _state     = RECORDING;
   Serial.printf("[memo] recording -> %s\n", _path);
@@ -106,27 +123,40 @@ void VoiceMemo::poll() {
 
   if (!M5.Mic.isEnabled()) return;
 
-  // M5.Mic.record() is asynchronous: it queues a buffer to be filled by I2S DMA
-  // and returns true once accepted -- the data is NOT ready when it returns. We
-  // double-buffer: kick a record into buffer A, and once the mic finishes filling
-  // it (isRecording() goes false), write A to SD and kick buffer B, ping-ponging.
-  // Writing the buffer immediately after record() returns (the old bug) captured
-  // empty/garbage data, so no audio was saved.
+  // M5.Mic.record() is asynchronous: it queues a buffer to be filled by
+  // I2S DMA and returns once accepted -- the data is NOT ready on return. We
+  // double-buffer: kick a record into buffer A, and once the mic finishes
+  // filling it (isRecording() goes false), write A to SD and kick buffer B,
+  // ping-ponging. (Writing immediately after record() returns would capture
+  // empty/garbage data.)
   static int16_t buf[2][MEMO_BLOCK_SAMPLES];
 
   if (!_primed) {
-    // Start the first capture.
     if (M5.Mic.record(buf[_bufIdx], MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ)) _primed = true;
     return;
   }
+  if (M5.Mic.isRecording()) return;          // wait for the in-flight buffer
 
-  // Wait (cooperatively) until the in-flight buffer is filled.
-  if (M5.Mic.isRecording()) return;
-
-  // The buffer just finished: write it, then immediately kick the other buffer.
   int16_t* done = buf[_bufIdx];
   _bufIdx ^= 1;
   M5.Mic.record(buf[_bufIdx], MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ);   // next capture
+
+  // Remove DC bias with a one-pole high-pass (primed from the first sample to
+  // avoid a startup transient), then apply modest gain with clipping.
+  if (!_hpPrimed) { _hpPrevX = done[0]; _hpPrevY = 0; _hpPrimed = true; }
+  for (size_t i = 0; i < MEMO_BLOCK_SAMPLES; i++) {
+    int32_t x = done[i];
+    int32_t y = x - _hpPrevX + ((_hpPrevY * 4075) / 4096);
+    _hpPrevX = x;
+    _hpPrevY = y;
+    { int32_t ry = y < 0 ? -y : y; if (ry > _rawPeak) _rawPeak = (uint16_t)(ry > 65535 ? 65535 : ry); }
+    int32_t s = y * MEMO_AC_GAIN;
+    if (s >  32767) s =  32767;
+    if (s < -32768) s = -32768;
+    done[i] = (int16_t)s;
+    int16_t v = done[i]; if (v < 0) v = -v;
+    if ((uint16_t)v > _peak) _peak = (uint16_t)v;
+  }
 
   size_t bytes = MEMO_BLOCK_SAMPLES * sizeof(int16_t);
   size_t w = _file.write((uint8_t*)done, bytes);
@@ -139,24 +169,39 @@ void VoiceMemo::stop() {
 }
 
 void VoiceMemo::finalize(bool ok) {
-  // Let any in-flight capture settle before tearing down the mic (avoids cutting
-  // a DMA transfer mid-buffer). The final partial block isn't written -- a <=64 ms
-  // tail loss is fine.
+  // Let any in-flight capture settle, then stop the mic and restore the speaker.
   if (_primed && M5.Mic.isEnabled()) {
     uint32_t t0 = millis();
     while (M5.Mic.isRecording() && millis() - t0 < 200) { M5.delay(1); }
   }
-  // Stop the mic, restore the speaker.
   M5.Mic.end();
-  if (_spkWasOn) M5.Speaker.begin();
+  if (_spkWasOn) M5Cardputer.Speaker.begin();
 
   if (_file) {
-    writeWavHeader(_dataBytes);      // patch RIFF/data sizes with the real length
     _file.close();
+    // Patch the real RIFF/data sizes by reopening for random-access update. A
+    // seek(0)+write on the original "w" handle did not commit on this SD driver,
+    // leaving the data chunk size at 0 so players treated the file as empty
+    // (audible samples present on disk, but silent playback). Reopen "r+",
+    // overwrite the 44-byte header, done.
+    if (ok && _path[0]) {
+      uint8_t h[44];
+      buildWavHeader(h, _dataBytes);
+      File pf = Store::fs().open(_path, "r+");
+      if (pf) {
+        pf.seek(0);
+        pf.write(h, sizeof(h));
+        pf.close();
+      } else {
+        Serial.println("[memo] WARN: could not reopen to patch WAV header");
+      }
+    }
   }
-  Serial.printf("[memo] %s (%lu bytes, %lu ms)\n",
+  Serial.printf("[memo] %s (%lu bytes, %lu ms, peak %u, rawAC %u%s)\n",
                 ok ? "saved" : "aborted", (unsigned long)_dataBytes,
-                (unsigned long)(millis() - _startMs));
+                (unsigned long)(millis() - _startMs), (unsigned)_peak,
+                (unsigned)_rawPeak,
+                _rawPeak == 0 ? " -- SILENT, mic captured no signal" : "");
   if (!ok && _path[0]) Store::fs().remove(_path);   // discard a broken file
   _state = IDLE; _primed = false;
 }

@@ -799,10 +799,18 @@ named by UTC timestamp (e.g. `memo_20260617_203145.wav`). **An SD card is requir
 with no card, `v` reports "Memo: SD card required" and does nothing. Retrieve memos
 by reading the SD card on a computer; CardSat does not play them back on-device.
 
-> Voice memo is **new in v0.9.20 and host-verified only** — the WAV writing and the
-> cooperative capture were checked off-device, but the microphone/SD interaction has
-> not yet been confirmed on hardware. Treat it as untested until you've verified a
-> recording on a real Cardputer ADV.
+> **Cardputer ADV — voice memo requires building against ESP-IDF 5.4.x.** The ADV
+> captures through an ES8311 codec (the original Cardputer used a PDM mic), and the
+> codec's record clock is only driven correctly when CardSat is built against the
+> **ESP-IDF 5.4.x** toolchain. In practice that means the **Espressif "esp32" Arduino
+> core 3.2.x** (which bundles IDF 5.4.2). On the newer 3.3.x core / IDF 5.5.x the
+> mic path produces a constant (silent) signal — an upstream regression, not a
+> CardSat bug (see
+> [espressif/esp-idf#18621](https://github.com/espressif/esp-idf/issues/18621)).
+> Everything else in CardSat builds and runs on either toolchain; only voice memo is
+> affected. To confirm your build is correct, the boot log should report an IDF
+> 5.4.x SDK version. Recording uses M5Unified's `M5.Mic`, so an up-to-date M5Unified
+> is recommended.
 
 ### Workable grids (`g`)
 
@@ -1215,7 +1223,7 @@ microcontroller. The flashing is fully non-blocking — it runs one burst at a t
 between the normal tracking updates, so radio, rotator, and web control keep running
 throughout. Build whatever receiver and logic you want around the counts above.
 
-> The IR pass beacon is **new in v0.9.21 and host-verified only** — the carrier
+> The IR pass beacon is **new in v0.9.22 and host-verified only** — the carrier
 > timing and flash-count logic were checked off-device, but the actual IR output and
 > a receiver decoding it have not been confirmed on hardware. The 38 kHz carrier,
 > duty cycle, and burst/gap timing may need tuning for your particular receiver;

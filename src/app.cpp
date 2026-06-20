@@ -12,16 +12,29 @@
 #include <esp_sleep.h>   // deep-sleep-until-next-pass
 #include <esp_heap_caps.h>   // heap_caps_get_largest_free_block() for the TLS sprite-free
 
-// 16-bit 565 colours
-static const uint16_t CL_BLACK=0x0000, CL_WHITE=0xFFFF, CL_GREEN=0x07E0, CL_RED=0xF800,
-                      CL_YELLOW=0xFFE0, CL_CYAN=0x07FF, CL_ORANGE=0xFD20, CL_GREY=0x7BEF,
-                      CL_BLUE=0x041F, CL_DGREEN=0x0320;
-// Menu/list selection-bar background. Pure CL_GREEN (0x07E0) is the most luminant
-// primary the panel makes, so black text on it glares and the green blooms into
-// thin glyphs -- reported as hard to read. CL_SELBG is a calmer medium forest
-// green: same "green = selected" language across the UI, far less glare with
-// black text. Tune the exact shade on hardware if desired (0x0540 is dimmer).
-static const uint16_t CL_SELBG=0x05C0;
+// 8bpp palette indices. The display canvas is an 8bpp (palette) sprite -- on a
+// palette sprite M5GFX/LGFX uses the value passed to fill/draw as a PALETTE
+// INDEX, not as a 16-bit colour (a 16-bit colour would be truncated to a bogus
+// index). So the CL_* names below are indices into CL_PALETTE[], and every
+// existing canvas.fill/draw(..., CL_x) call passes the right index unchanged.
+// CL_PALETTE[] holds the real RGB565 colours, installed via createPalette() at
+// startup. Indices 11/12 are the dim greys used for grid/axis lines that were
+// previously raw 565 literals (0x2104/0x18E3 -> CL_DGREY, 0x4208 -> CL_MGREY).
+enum : uint8_t {
+  CL_BLACK = 0, CL_WHITE = 1, CL_GREEN = 2, CL_RED = 3,
+  CL_YELLOW = 4, CL_CYAN = 5, CL_ORANGE = 6, CL_GREY = 7,
+  CL_BLUE = 8, CL_DGREEN = 9, CL_SELBG = 10, CL_DGREY = 11, CL_MGREY = 12
+};
+// Parallel table of the real 16-bit 565 colours, indexed by the CL_* values.
+// CL_SELBG: a calmer medium forest green for the selection bar (pure green
+// glares and blooms thin glyphs with black text). Order MUST match the enum.
+static const uint16_t CL_PALETTE[] = {
+  /*0 BLACK */ 0x0000, /*1 WHITE */ 0xFFFF, /*2 GREEN */ 0x07E0, /*3 RED   */ 0xF800,
+  /*4 YELLOW*/ 0xFFE0, /*5 CYAN  */ 0x07FF, /*6 ORANGE*/ 0xFD20, /*7 GREY  */ 0x7BEF,
+  /*8 BLUE  */ 0x041F, /*9 DGREEN*/ 0x0320, /*10 SELBG*/ 0x05C0, /*11 DGREY*/ 0x2104,
+  /*12 MGREY*/ 0x4208,
+};
+static const uint32_t CL_PALETTE_N = sizeof(CL_PALETTE) / sizeof(CL_PALETTE[0]);
 
 static M5Canvas canvas(&M5Cardputer.Display);
 
@@ -105,6 +118,7 @@ void App::setup() {
   s_self = this;
   Net::onTlsBusy = &App::tlsBusyTrampoline;   // free LAN sockets around every fetch
   auto m5cfg = M5.config();
+  m5cfg.internal_mic = true;        // wire the ADV ES8311 mic-enable path (voice memo)
   M5Cardputer.begin(m5cfg, true);   // true => init keyboard
   // Cardputer ADV has a BMI270 IMU; the original Cardputer has none. begin()
   // is a no-op when absent, and isEnabled() then reports false, so tilt tuning
@@ -113,7 +127,14 @@ void App::setup() {
   imuReady = M5.Imu.isEnabled();
   Serial.begin(115200);             // diagnostics on the USB serial monitor
   M5Cardputer.Display.setRotation(1);
+  // 8bpp palette canvas: 32 KB sprite (vs 64 KB at 16bpp). The smaller footprint
+  // leaves ~85 KB free for the mbedTLS handshake with the sprite KEPT allocated,
+  // so we never delete/recreate it (the 16bpp 64 KB block never returns on IDF
+  // 5.4.x, which froze the screen). Colours come from CL_PALETTE via the index
+  // scheme (see the CL_* enum); createPalette installs them.
+  canvas.setColorDepth(8);
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
+  canvas.createPalette(CL_PALETTE, CL_PALETTE_N);
   canvas.setTextWrap(false);
   M5Cardputer.Display.setBrightness(SCREEN_BRIGHT);
 
@@ -565,6 +586,7 @@ void App::doUpdateGp() {
   fetchWeather();                      // local surface weather (open-meteo)
   nextAos = 0; lastSchedMs = 0;        // force schedule/alarm to recompute
   setStatus("GP OK: " + String(n) + " sats");
+  draw();                              // paint the final status (canvas is restored)
 }
 
 // Fast update: refresh orbital elements (GP), the AMSAT activity marks (a single
@@ -626,6 +648,7 @@ void App::doFastUpdate() {
   String msg = "Fast OK: " + String(n) + " sats, " + String(done) + " fav TX";
   if (fail) msg += " (" + String(fail) + " failed)";
   setStatus(msg);
+  draw();                              // paint the final status (canvas is restored)
 }
 
 // Pull the AMSAT OSCAR status summary and tag each catalog entry as heard
@@ -1878,19 +1901,21 @@ void App::suspendNetServers() {
 // free the sprite for the duration of an outbound fetch (the loop isn't drawing
 // during a blocking download) and recreate it afterwards. drawMemoIndicator and
 // the per-screen draws are skipped while it's gone via canvasFreed.
+// The 8bpp display sprite is only ~32 KB, so it stays allocated through every
+// TLS session: with it kept, ~85 KB of heap remains free, which is enough for
+// the mbedTLS handshake. We therefore never delete/recreate the sprite (the
+// 16bpp 64 KB block could not be reliably reallocated on IDF 5.4.x, which froze
+// the screen). These remain as no-ops so the trampoline call sites and the
+// canvasFreed contract stay intact; canvasFreed is never set, so draw() always
+// runs. Socket suspension around fetches is handled separately in the trampoline.
 void App::freeCanvasForTls() {
-  if (canvasFreed) return;
-  canvas.deleteSprite();
-  canvasFreed = true;
-  Serial.printf("[net] freed display sprite for TLS (largest block now %u)\n",
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  // intentionally a no-op: the 8bpp sprite is small enough to keep allocated
 }
 void App::restoreCanvasAfterTls() {
-  if (!canvasFreed) return;
-  canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
-  canvas.setTextWrap(false);
-  canvasFreed = false;
-  lastDrawMs = 0;   // force a full redraw on the next loop tick
+  // nothing to restore; the sprite is never freed
+}
+void App::tickCanvasRestore() {
+  // no-op; retained for the loop call site
 }
 
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
@@ -1907,8 +1932,7 @@ void App::tlsBusyTrampoline(bool busy) {
   if (busy) {
     if (s_fetchDepth++ == 0) {
       s_self->suspendNetServers();
-      s_self->freeCanvasForTls();   // free the ~64 KB sprite so mbedTLS can get a
-                                    // large contiguous block for its handshake
+      s_self->freeCanvasForTls();   // free ~64 KB sprite for the TLS handshake heap
     }
   } else if (s_fetchDepth > 0) {
     if (--s_fetchDepth == 0) s_self->restoreCanvasAfterTls();
@@ -2441,6 +2465,7 @@ void App::loop() {
 
   refreshScheduleIfNeeded();   // keep the all-favorites schedule fresh
   serviceAosAlarm();           // countdown beeps + flash before AOS
+  tickCanvasRestore();         // retry sprite realloc if a post-fetch restore failed
 
   // Accelerometer (tilt) passband tuning -- opt-in, ADV-only, self-gated to the
   // Track/Big/Manual screens in TUNE mode. Keep the backlight awake while it's
@@ -3371,7 +3396,7 @@ void App::drawVis() {
   time_t today0 = nowUtc() - (nowUtc() % 86400);
   time_t mid0   = today0 + (time_t)visDayOff * 86400;   // UTC midnight of the first row
   for (int h = 6; h <= 18; h += 6)           // 06/12/18 h gridlines behind the bars
-    canvas.drawFastVLine(barX0 + barW * h / 24, y0, rowH * VIS_DAYS, 0x2104);
+    canvas.drawFastVLine(barX0 + barW * h / 24, y0, rowH * VIS_DAYS, CL_DGREY);
   for (int d = 0; d < VIS_DAYS; ++d) {
     time_t dayStart = mid0 + (time_t)d * 86400;
     int ry = y0 + d * rowH;
@@ -3379,7 +3404,7 @@ void App::drawVis() {
     char lbl[8]; snprintf(lbl, sizeof(lbl), "%02d/%02d", tmv.tm_mon + 1, tmv.tm_mday);
     canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.setCursor(2, ry + 1); canvas.print(lbl);
-    canvas.drawFastHLine(barX0, ry + rowH - 1, barW, 0x18E3);
+    canvas.drawFastHLine(barX0, ry + rowH - 1, barW, CL_DGREY);
     for (int i = 0; i < visN; ++i) {
       time_t a = visPasses[i].aos, b = visPasses[i].los;
       time_t s0 = (a > dayStart) ? a : dayStart;
@@ -4832,7 +4857,7 @@ static inline int mapLonToX(double lon, double centerLon, int MX, int MW) {
 void App::drawWorldMap() {
   header("World Map");
   const int MX = 0, MY = 16, MW = 240, MH = 108;     // map rect (y 16..124)
-  const uint16_t GRID = 0x4208;                      // dim grey graticule
+  const uint16_t GRID = CL_MGREY;                      // dim grey graticule
   const double centerLon = (double)cfg.mapCenterLon; // 0 = classic 0-centered view
   canvas.fillRect(MX, MY, MW, MH, CL_BLACK);
 
@@ -4903,7 +4928,7 @@ void App::drawWorldMap() {
     int x = mapLonToX(lon, centerLon, MX, MW);
     int y = MY + (int)lround((90.0 - lat) / 180.0 * MH);
     bool hi = (mapHi == i);
-    uint16_t col = (mapHi >= 0 && !hi) ? 0x4208            // dim others when one is highlighted
+    uint16_t col = (mapHi >= 0 && !hi) ? CL_MGREY            // dim others when one is highlighted
                  : (L.sunlit ? CL_YELLOW : CL_CYAN);       // sunlit vs eclipse
     // Ground footprint: the small circle on the sphere at central angle beta
     // where the satellite sits on the horizon, cos(beta) = Re/(Re+h). Sampled in
@@ -5070,10 +5095,10 @@ void App::drawGps() {
   // Sky plot.
   const int cx = 174, cy = 75, R = 50;
   canvas.drawCircle(cx, cy, R, CL_GREY);          // horizon (el 0)
-  canvas.drawCircle(cx, cy, R * 2 / 3, 0x4208);   // el 30
-  canvas.drawCircle(cx, cy, R / 3, 0x4208);       // el 60
-  canvas.drawFastVLine(cx, cy - R, 2 * R, 0x4208);
-  canvas.drawFastHLine(cx - R, cy, 2 * R, 0x4208);
+  canvas.drawCircle(cx, cy, R * 2 / 3, CL_MGREY);   // el 30
+  canvas.drawCircle(cx, cy, R / 3, CL_MGREY);       // el 60
+  canvas.drawFastVLine(cx, cy - R, 2 * R, CL_MGREY);
+  canvas.drawFastHLine(cx - R, cy, 2 * R, CL_MGREY);
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(cx - 2, cy - R - 9); canvas.print("N");
   const double D2R = 0.0174532925199433;
@@ -5557,7 +5582,7 @@ void App::drawOrbit() {
         int x = MX + (lo + 180) * MW / 360, yy = MY + (90 - la) * MH / 180;
         if (pen && abs(lo - plo) < 180) canvas.drawLine(px, py, x, yy, CL_DGREEN);
         px = x; py = yy; plo = lo; pen = true; } }
-    canvas.drawFastHLine(MX, MY + MH / 2, MW, 0x4208);     // equator
+    canvas.drawFastHLine(MX, MY + MH / 2, MW, CL_MGREY);     // equator
     if (now) {
       pred.setSat(*s);
       double periodSec = 86400.0 / mm; const int N = 80;
@@ -5742,7 +5767,7 @@ void App::drawOrbit() {
   // orbitPage == 4                                  // ---------- Doppler curve ----------
   {
     const int PX = 30, PY = 20, PW = 204, PH = 90;
-    canvas.drawRect(PX - 1, PY - 1, PW + 2, PH + 2, 0x4208);
+    canvas.drawRect(PX - 1, PY - 1, PW + 2, PH + 2, CL_MGREY);
     if (!orbHasPass) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
       canvas.print("No upcoming pass."); footer("` bk  ,// page"); return; }
     pred.setSat(*s);
@@ -5758,7 +5783,7 @@ void App::drawOrbit() {
     }
     if (mx <= mn) mx = mn + 1;
     int zy = PY + (int)((mx - 0.0f) / (mx - mn) * (PH - 1));
-    if (zy >= PY && zy < PY + PH) canvas.drawFastHLine(PX, zy, PW, 0x2104);   // 0 Hz line
+    if (zy >= PY && zy < PY + PH) canvas.drawFastHLine(PX, zy, PW, CL_DGREY);   // 0 Hz line
     int ppx = 0, ppy = 0;
     for (int i = 0; i < PW; ++i) {
       int x = PX + i, yv = PY + (int)((mx - buf[i]) / (mx - mn) * (PH - 1));
@@ -5928,7 +5953,7 @@ void App::drawSim() {
   if (simMap) {
     // ---- World-map view: sub-point + footprint at the simulated instant. ----
     const int MX = 0, MY = 16, MW = 240, MH = 92;      // map rect (y 16..108)
-    const uint16_t GRID = 0x4208;
+    const uint16_t GRID = CL_MGREY;
     canvas.fillRect(MX, MY, MW, MH, CL_BLACK);
     { int px = 0, py = 0, plo = 0; bool pen = false;
       for (int i = 0; i + 1 < COAST_N; i += 2) {

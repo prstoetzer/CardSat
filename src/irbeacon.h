@@ -18,7 +18,7 @@
 //
 //  Disabled by default (cfg.irBeacon); enable in Settings. Uses GPIO 44 only.
 //
-//  *** Host-verified only as of v0.9.21: the carrier timing and state machine are
+//  *** Host-verified only as of v0.9.22: the carrier timing and state machine are
 //  checked off-device; the actual IR output and a receiver decoding it want
 //  confirmation on hardware. ***
 // ===========================================================================

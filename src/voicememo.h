@@ -51,9 +51,15 @@ private:
   char     _path[64] = {0};
   bool     _primed = false;                    // a record buffer is in flight
   uint8_t  _bufIdx = 0;                         // which buffer is being filled
+  uint16_t _peak   = 0;                         // peak |sample| seen (silence detect)
+  uint16_t _rawPeak = 0;                        // peak |raw AC| before gain (calibration)
+  int32_t  _hpPrevX = 0;                        // high-pass filter: previous input
+  int32_t  _hpPrevY = 0;                        // high-pass filter: previous output
+  bool     _hpPrimed = false;                   // filter seeded from first sample
   const char* _err = "";
   bool     _spkWasOn = false;
 
+  void buildWavHeader(uint8_t h[44], uint32_t dataBytes);  // fill a 44-byte RIFF header
   void writeWavHeader(uint32_t dataBytes);     // (re)write the 44-byte RIFF header
   void finalize(bool ok);
 };

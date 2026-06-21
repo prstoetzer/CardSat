@@ -1,4 +1,20 @@
-# CardSat v0.9.24 — Release Notes
+# CardSat v0.9.25 — Release Notes
+
+## CAT self-test (Settings → Radio / CAT)
+
+A new **Run CAT self-test** action exercises every CAT function the active backend
+supports and reports a PASS/FAIL/INFO line for each — both on a scrollable results
+screen and echoed to the serial monitor (115200, `[CAT-TEST]` prefix) alongside the
+existing `[CI-V TX]`/`[CI-V RX]` frames, so a failure sits right next to the NAK or
+no-reply that caused it. It checks downlink/uplink frequency set (with read-back
+verify where supported), mode set on both legs, MAIN/SUB band select, satellite mode
+toggle, PTT/transmit-state read, and the CTCSS encoder.
+
+It is deliberately **non-destructive**: it never keys the transmitter (PTT is only
+*read*), it saves the dial up front and restores both legs when done, leaves
+satellite mode and the CTCSS encoder **off**, leaves band access on the downlink, and
+re-syncs the Doppler send-guards so normal tracking resumes cleanly. If CAT isn't
+engaged it shows a short "Radio not ready" message instead.
 
 ## Icom CI-V tracking, audited against OscarWatch
 

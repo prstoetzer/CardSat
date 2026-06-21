@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -92,6 +92,16 @@ private:
   int      manStep = 5;           // manual rotator jog step (deg)
   Screen   helpReturn = SCR_HOME; // screen to return to when leaving Help
   int      helpScroll = 0;        // Help screen scroll offset
+
+  // CAT self-test (SCR_CATTEST): results of exercising every CAT function, shown
+  // on the device and echoed to the serial monitor. Fixed buffer (no heap churn
+  // on the no-PSRAM ESP32); lines past the cap are dropped.
+  static const int CATTEST_MAX = 48;
+  String   catLines[CATTEST_MAX];
+  int      catCount  = 0;        // number of result lines filled
+  int      catScroll = 0;        // scroll offset on the results screen
+  int      catPass   = 0;        // tally for the summary line
+  int      catFail   = 0;
   int      view[MAX_SATS];        // db indices currently shown
   int      viewN = 0;
   int      viewSel = 0;           // cursor into view[]
@@ -700,6 +710,14 @@ private:
   void drawRotMan(); void keyRotMan(char c, bool enter, bool back);
   void drawGps(); void keyGps(char c, bool enter, bool back);
   void drawHelp(); void keyHelp(char c, bool enter, bool back);
+
+  // CAT self-test: run the full sequence, render results, handle scrolling.
+  void runCatTest();
+  void drawCatTest();
+  void keyCatTest(char c, bool enter, bool back);
+  // Append one result line: echo to Serial and store for the on-screen list.
+  void catLog(const String& line);
+  void catStep(const String& name, bool ok, const String& detail = String());
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);

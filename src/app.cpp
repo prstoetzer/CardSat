@@ -2964,6 +2964,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_ROTMAN:   keyRotMan(c, enter, back); break;
     case SCR_GPS:      keyGps(c, enter, back); break;
     case SCR_HELP:     keyHelp(c, enter, back); break;
+    case SCR_CATTEST:  keyCatTest(c, enter, back); break;
     case SCR_ORBIT:    keyOrbit(c, enter, back); break;
     case SCR_SIM:      keySim(c, enter, back); break;
     case SCR_SUNMOON:  keySunMoon(c, enter, back); break;
@@ -4164,7 +4165,7 @@ static const int SET_CAT_N = 4;
 static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Station / display", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
+static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37,62};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,54,48,49,25,43};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,27,28,29};
@@ -4317,6 +4318,7 @@ void App::keySettings(char c, bool enter, bool back) {
                setStatus(cfg.webEnable ? "Web control ON" : "Web control OFF"); break;
       case 6: setStatus(connectWifiCfg() ? "WiFi OK" : "WiFi FAIL");
               break;
+      case 62: runCatTest(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
       case 55: cfg.loraEnable = !cfg.loraEnable; cfg.save();
@@ -5386,6 +5388,7 @@ void App::draw() {
     case SCR_ROTMAN:   drawRotMan(); break;
     case SCR_GPS:      drawGps(); break;
     case SCR_HELP:     drawHelp(); break;
+    case SCR_CATTEST:  drawCatTest(); break;
     case SCR_ORBIT:    drawOrbit(); break;
     case SCR_SIM:      drawSim(); break;
     case SCR_SPACEWX:  drawSpaceWx(); break;
@@ -5932,6 +5935,7 @@ void App::drawHelp() {
     "SETTINGS",
     " ;/. move  ,// change",
     " ENT select / edit field",
+    " row: Run CAT self-test",
     " row: Rotator manual ctrl",
     " row: Rigctld server +port",
     " row: GP source picker",
@@ -5939,6 +5943,16 @@ void App::drawHelp() {
     " ;/. pick  {} page",
     " AMSAT / CelesTrak / URL",
     " ENT select",
+    "CAT SELF-TEST (Settings)",
+    " Radio/CAT > Run CAT self-",
+    "  test: checks freq set+",
+    "  read, mode, MAIN/SUB,",
+    "  sat mode, PTT, CTCSS",
+    " PASS/FAIL on screen +",
+    "  serial (115200)",
+    " safe: never keys TX,",
+    "  restores the dial",
+    " ;/. scroll  ` back",
     "ROTATOR MANUAL",
     " ,// az   ;/. el",
     " s step   x stop",
@@ -5987,6 +6001,165 @@ void App::keyHelp(char c, bool enter, bool back) {
   if (isUp(c))   { helpScroll--; lastDrawMs = 0; }
   if (isDown(c)) { helpScroll++; lastDrawMs = 0; }
   if (isBack(c, back)) { screen = helpReturn; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  CAT self-test (Settings -> Radio / CAT -> "Run CAT self-test")
+//
+//  Exercises every CAT function the active backend exposes and reports a
+//  PASS/FAIL/INFO line for each, both on the device screen (SCR_CATTEST) and on
+//  the serial monitor at 115200. It is deliberately NON-DESTRUCTIVE:
+//    * It never keys the transmitter (PTT is only READ, never set).
+//    * It saves the dial state, drives test values, then restores the dial and
+//      re-syncs the Doppler send-guards so normal tracking resumes cleanly.
+//  Frequency-set "PASS" means the rig accepted the command; where read-back is
+//  supported it additionally confirms the value came back within tolerance.
+// ===========================================================================
+
+void App::catLog(const String& line) {
+  Serial.print("[CAT-TEST] "); Serial.println(line);     // echo to serial monitor
+  if (catCount < CATTEST_MAX) catLines[catCount++] = line;
+}
+
+void App::catStep(const String& name, bool ok, const String& detail) {
+  if (ok) catPass++; else catFail++;
+  String l = (ok ? "[PASS] " : "[FAIL] ") + name;
+  if (detail.length()) l += ": " + detail;
+  catLog(l);
+}
+
+void App::runCatTest() {
+  catCount = 0; catScroll = 0; catPass = 0; catFail = 0;
+
+  if (!rig || !rig->ready()) {
+    catLog("Radio not ready.");
+    catLog("Turn CAT on (Track 'r')");
+    catLog("or check CAT type/wiring.");
+    screen = SCR_CATTEST; lastDrawMs = 0;
+    return;
+  }
+
+  catLog(String("Rig: ") + rig->name());
+  catLog(String("Addr 0x") + String(rig->address(), HEX) +
+         "  read=" + (rig->canReadFreq() ? "Y" : "N") +
+         " sat=" + (rig->hasSatMode() ? "Y" : "N") +
+         " tone=" + (rig->hasTone() ? "Y" : "N"));
+
+  // Save current dial so we can restore it afterwards.
+  uint32_t savedRx = lastRxSet, savedUl = lastUlHz;
+
+  // Pick safe in-band test frequencies (2 m downlink, 70 cm uplink). These are
+  // RX/standby tunes; we never transmit.
+  const uint32_t TEST_DL = 145900000UL;   // 145.900 MHz
+  const uint32_t TEST_UL = 435100000UL;   // 435.100 MHz
+  const uint32_t TOL     = 50;            // Hz tolerance for read-back compare
+
+  // --- Downlink frequency set (+ read-back verify if supported) ----------
+  {
+    bool ok = rig->setSubFreq(TEST_DL);
+    if (ok && rig->canReadFreq()) {
+      uint32_t back = 0;
+      if (rig->readSubFreq(back)) {
+        uint32_t d = back > TEST_DL ? back - TEST_DL : TEST_DL - back;
+        catStep("Downlink set+read", d <= TOL,
+                String(back) + " Hz (set " + String(TEST_DL) + ")");
+      } else {
+        catStep("Downlink set", ok, "set OK, read no-reply");
+      }
+    } else {
+      catStep("Downlink set", ok);
+    }
+  }
+
+  // --- Uplink frequency set (+ read-back verify if supported) ------------
+  {
+    bool ok = rig->setMainFreq(TEST_UL);
+    if (ok && rig->canReadFreq()) {
+      uint32_t back = 0;
+      if (rig->readMainFreq(back)) {
+        uint32_t d = back > TEST_UL ? back - TEST_UL : TEST_UL - back;
+        catStep("Uplink set+read", d <= TOL,
+                String(back) + " Hz (set " + String(TEST_UL) + ")");
+      } else {
+        catStep("Uplink set", ok, "set OK, read no-reply");
+      }
+    } else {
+      catStep("Uplink set", ok);
+    }
+  }
+
+  // --- Mode set on both legs --------------------------------------------
+  catStep("Downlink mode USB", rig->setSubMode(RM_USB));
+  catStep("Uplink mode FM",    rig->setMainMode(RM_FM));
+
+  // --- MAIN/SUB band select (Icom: real frames; others: no-op -> INFO) ---
+  if (rig->canReadFreq()) {
+    rig->selectMainBand();
+    rig->selectSubBand();
+    catLog("[INFO] Band select sent (MAIN+SUB)");
+  }
+
+  // --- Satellite mode toggle (only if the rig has a CAT command) ---------
+  if (rig->hasSatMode()) {
+    bool on  = rig->enableSatMode(true);
+    bool off = rig->enableSatMode(false);   // leave it OFF (CardSat drives bands)
+    catStep("Sat mode on/off", on && off);
+  } else {
+    catLog("[INFO] Sat mode: no CAT cmd");
+  }
+
+  // --- PTT / transmit-state read (READ ONLY -- never keys TX) ------------
+  {
+    bool tx = false;
+    if (rig->readPtt(tx)) catStep("PTT read", true, tx ? "TX" : "RX");
+    else                  catLog("[INFO] PTT read: not supported");
+  }
+
+  // --- CTCSS encoder (only if supported; set a tone then turn it off) -----
+  if (rig->hasTone()) {
+    bool on  = rig->setCtcss(true, 67.0f);
+    bool off = rig->setCtcss(false, 0);     // leave the encoder OFF
+    catStep("CTCSS 67.0 on/off", on && off);
+  } else {
+    catLog("[INFO] CTCSS: not supported");
+  }
+
+  // --- Restore the dial and re-sync the Doppler send-guards --------------
+  if (savedRx) rig->setSubFreq(savedRx);
+  if (savedUl) rig->setMainFreq(savedUl);
+  rig->selectSubBand();          // leave access on the downlink for the operator
+  lastRxSet = savedRx; lastUlHz = savedUl; uplinkDeferTicks = 0;
+
+  catLog(String("Done: ") + String(catPass) + " pass, " +
+         String(catFail) + " fail");
+
+  screen = SCR_CATTEST; lastDrawMs = 0;
+}
+
+void App::drawCatTest() {
+  header("CAT self-test");
+  canvas.setTextSize(1);
+  const int rows = 9;
+  if (catScroll > catCount - rows) catScroll = catCount - rows;
+  if (catScroll < 0) catScroll = 0;
+  for (int i = 0; i < rows && (catScroll + i) < catCount; i++) {
+    const String& s = catLines[catScroll + i];
+    uint16_t col = CL_WHITE;
+    if      (s.startsWith("[PASS]")) col = CL_GREEN;
+    else if (s.startsWith("[FAIL]")) col = CL_RED;
+    else if (s.startsWith("[INFO]")) col = CL_CYAN;
+    canvas.setTextColor(col, CL_BLACK);
+    canvas.setCursor(4, 20 + i * 12);
+    canvas.print(s.substring(0, 38));
+  }
+  footer("; / . scroll   ` back");
+}
+
+void App::keyCatTest(char c, bool enter, bool back) {
+  (void)enter;
+  if (isUp(c))   { catScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { catScroll++; lastDrawMs = 0; }
+  if (isBack(c, back)) { setSel = 0; setCat = -1; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
 }
 
 // ===========================================================================
@@ -10259,7 +10432,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 61;
+  const int N = 63;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -10360,6 +10533,7 @@ void App::drawSettings() {
   rows[48] = String("Brightness: ") + String((int)((cfg.bright * 100 + 127) / 255)) + "%";
   rows[49] = String("Tilt tuning: ") + (!imuReady ? String("n/a (no IMU)")
                                                    : (cfg.tiltTune ? String("on") : String("off")));
+  rows[62] = String("Run CAT self-test");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

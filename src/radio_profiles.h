@@ -39,7 +39,15 @@
 //
 //  Frequency read-back (canReadFreq) enables the "radio knob" One True Rule
 //  tuning mode:
-//    * Icom (all six)     : CI-V 0x03 reads the operating frequency.
+//    * Icom (all six)     : CI-V 0x03 reads the operating frequency. The SUB band
+//                           is re-selected immediately before each read; if the
+//                           radio doesn't reply (common on the IC-821's SUB band),
+//                           the read falls back to the last value we commanded so
+//                           Doppler tracking continues (knob-follow is skipped that
+//                           cycle rather than acting on a bad read). PTT state for
+//                           the knob-follow is polled with 0x1C 0x00 (read
+//                           transceiver status); rigs that don't answer it are
+//                           detected and the poll is dropped after a few misses.
 //    * Yaesu FT-847       : "read freq & mode" (opcode 0x03, patched to 0x13 for
 //                           SAT-RX) returns 4 BCD bytes + mode. Works only on
 //                           firmware-updated units (early ones can't read). true.

@@ -1,6 +1,52 @@
-# CardSat v0.9.23 — Release Notes
+# CardSat v0.9.24 — Release Notes
+
+## Icom CI-V tracking, audited against OscarWatch
+
+Two changes to bring the Icom MAIN/SUB control in line with how the known-good
+OscarWatch tracker drives these rigs (especially helpful on slow single-wire rigs
+like the IC-821):
+
+- **Uplink write is deferred one tick after a downlink write or knob move.** After
+  CardSat writes the downlink (or the operator moves the receive dial), the uplink
+  write now waits one Doppler tick so the SUB read and the receive dial settle
+  before the bus is used for the MAIN uplink. During a fast Doppler slew the uplink
+  still services every other tick, so it never starves.
+
+- **Receive-only birds turn satellite mode off and tune the downlink on MAIN.** A
+  transponder with no uplink (beacon, telemetry, SSTV, CW) now commands the rig's
+  satellite mode **off** and routes the downlink to the **MAIN** band regardless of
+  the VFO Type setting. This matches OscarWatch and the SDR-Control apps, and on the
+  IC-821 the MAIN band reads back far more reliably than SUB.
+
+## Sat-to-sat window search no longer stalls
+
+The "both satellites visible" finder used to compute its multi-day search in one
+long blocking pass, which could starve the system and appear to hang (or never
+finish) on hardware. It now runs as an **incremental background job**: it samples
+a few hundred points per loop tick, shows a **live progress bar (0→100 %)**, keeps
+the back key responsive throughout, and always completes. The results are
+identical to the old one-shot search.
+
+## Web sky plot shows the next pass when the satellite is below the horizon
+
+When the active satellite is below your horizon, the web control page's polar plot
+now draws the **next pass as an arc** (azimuth/elevation across the upcoming pass)
+instead of an empty plot, so you can see where the satellite will rise and set. The
+moment it comes above the horizon the live position dot takes over and the arc
+clears. The `/api/passes` response now also includes an `arc` array for this.
 
 ## Fix
+
+- **IC-821 CI-V read reliability.** Reworked the Icom CI-V frequency-read flow for
+  the IC-821, whose SUB band (the satellite downlink) often won't answer the read
+  command. CardSat now re-selects the band immediately before each read and, when
+  no valid reply arrives, falls back to the last frequency it commanded instead of
+  failing — so the downlink keeps Doppler-tracking and a bad read is never mistaken
+  for an operator knob move. Transponder mode-setting was reordered to set the
+  uplink (MAIN) leg first and leave the radio on the downlink (SUB) band, which is
+  where the read happens. The `0x1C 0x00` poll (read transmit/PTT status, used to
+  pause knob-follow while transmitting) and the band-select model are documented;
+  rigs that don't support the status poll are detected and it is dropped.
 
 - **DX Doppler starts at the centre of the linear passband.** The Doppler table
   now opens with the operating point in the middle of the selected linear

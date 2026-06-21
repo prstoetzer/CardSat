@@ -156,7 +156,12 @@ void CivRig::selectSub() {
 bool CivRig::setFreqCiv(bool sub, uint32_t hz) {
   sub ? selectSub() : selectMain();
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
-  return sendFrame(pl, 6);
+  bool ok = sendFrame(pl, 6);
+  // Remember what we last commanded on each band, so a flaky SUB read (the
+  // IC-821 in particular often won't answer 0x03 for the SUB band) can fall back
+  // to this value instead of returning nothing.
+  if (ok) { if (sub) _lastSubHz = hz; else _lastMainHz = hz; }
+  return ok;
 }
 bool CivRig::setModeCiv(bool sub, CivMode m, uint8_t filter) {
   sub ? selectSub() : selectMain();
@@ -237,11 +242,28 @@ bool CivRig::readPtt(bool& tx) {
 }
 
 // Read the operating frequency of the SUB (sub=true) or MAIN (sub=false) band.
+//
+// The SUB-band read is the unreliable one, especially on the IC-821: the radio
+// frequently won't answer cmd 0x03 for the SUB band, or answers with the MAIN
+// frequency, unless the SUB band is explicitly re-selected immediately before the
+// read and given a moment to settle. We therefore (1) re-select the band, (2)
+// wait the inter-command settle, (3) flush stale bytes, (4) send 0x03, and (5) if
+// no valid reply arrives within the budget, fall back to the last value we
+// COMMANDED on that band rather than failing outright. The boolean return tells
+// the caller whether the value is fresh (true) or a fallback/none (false); hzOut
+// is always left at the best estimate we have.
 bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
+  uint32_t lastSet = sub ? _lastSubHz : _lastMainHz;
+  if (lastSet) hzOut = lastSet;                     // default to last-commanded
   if (!_stream) return false;
-  if (!RADIOS[_model].canReadFreq) return false;   // set-only rig
-  sub ? selectSub() : selectMain();                 // 07 D1/D0 (drains its echo)
-  while (_stream->available()) _stream->read();     // clear anything stale
+  if (!RADIOS[_model].canReadFreq) return false;    // set-only rig
+
+  // Re-select the target band immediately before the read. sendFrame() applies
+  // the configured CAT inter-command delay after the select, which doubles as the
+  // settle time the IC-821's SUB band needs before it will report correctly.
+  sub ? selectSub() : selectMain();
+  while (_stream->available()) _stream->read();      // clear stale/echo bytes
+
   // Send read-operating-frequency request (cmd 0x03) WITHOUT draining: we want
   // the radio's reply, which on a single-wire CI-V bus arrives after our echo.
   uint8_t f[6] = { 0xFE, 0xFE, _addr, 0xE0, 0x03, 0xFD };
@@ -266,6 +288,7 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
       for (int k = 9; k >= 5; --k)
         hz = hz * 100 + (buf[i+k] >> 4) * 10 + (buf[i+k] & 0x0F);
       hzOut = hz;
+      if (sub) _lastSubHz = hz; else _lastMainHz = hz;   // keep the cache current
 #if CIV_DEBUG
       Serial.printf("[CI-V] %s freq read: %lu Hz\n", sub ? "SUB" : "MAIN", (unsigned long)hz);
 #endif
@@ -273,7 +296,8 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
     }
   }
 #if CIV_DEBUG
-  Serial.printf("[CI-V] %s freq read: no valid reply\n", sub ? "SUB" : "MAIN");
+  Serial.printf("[CI-V] %s freq read: no valid reply%s\n", sub ? "SUB" : "MAIN",
+                lastSet ? " (using last-set)" : "");
 #endif
-  return false;
+  return false;   // hzOut already holds the last-set fallback (or 0 if none yet)
 }

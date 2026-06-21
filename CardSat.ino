@@ -206,7 +206,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.23";
+static constexpr const char* FW_VERSION = "0.9.24";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -387,7 +387,15 @@ namespace Store {
 //
 //  Frequency read-back (canReadFreq) enables the "radio knob" One True Rule
 //  tuning mode:
-//    * Icom (all six)     : CI-V 0x03 reads the operating frequency.
+//    * Icom (all six)     : CI-V 0x03 reads the operating frequency. The SUB band
+//                           is re-selected immediately before each read; if the
+//                           radio doesn't reply (common on the IC-821's SUB band),
+//                           the read falls back to the last value we commanded so
+//                           Doppler tracking continues (knob-follow is skipped that
+//                           cycle rather than acting on a bad read). PTT state for
+//                           the knob-follow is polled with 0x1C 0x00 (read
+//                           transceiver status); rigs that don't answer it are
+//                           detected and the poll is dropped after a few misses.
 //    * Yaesu FT-847       : "read freq & mode" (opcode 0x03, patched to 0x13 for
 //                           SAT-RX) returns 4 BCD bytes + mode. Works only on
 //                           firmware-updated units (early ones can't read). true.
@@ -661,6 +669,8 @@ private:
   uint8_t    _addr;
   int8_t     _pttRead = -1;   // -1 unknown, 0 unsupported (stop polling), 1 supported
   uint8_t    _pttFails = 0;   // consecutive read misses before marking unsupported
+  uint32_t   _lastMainHz = 0; // last frequency we COMMANDED on MAIN (uplink)
+  uint32_t   _lastSubHz  = 0; // last frequency we COMMANDED on SUB  (downlink)
 
   void   selectMain();
   void   selectSub();
@@ -2116,8 +2126,21 @@ private:
   SatSatWin satsatWin[SATSAT_MAX];
   int       satsatN = 0;
   bool      satsatComputed = false;
-  bool      satsatPending = false;    // draw a "calculating" frame before the blocking compute
-  void computeSatSat();
+  // Incremental sat-to-sat job. The full search (sampling both satellites'
+  // elevation across a multi-day window) is too long to run in one blocking call
+  // without starving the idle task / tripping the watchdog, so it runs a few
+  // hundred samples per loop() tick and shows live progress. Phases:
+  //   0 = idle, 1 = sampling sat A, 2 = sampling sat B, 3 = scanning for overlaps.
+  static const int SATSAT_NS = 3 * 24 * 60;   // 4320 samples (3 days @ 60 s)
+  int8_t*   satsatElA = nullptr;     // heap elevation tracks (allocated while running)
+  int8_t*   satsatElB = nullptr;
+  int       satsatJobPhase = 0;      // 0 idle / 1 sampling A / 2 sampling B / 3 scan
+  int       satsatJobI = 0;          // progress index within the current phase
+  time_t    satsatT0 = 0;            // job window start
+  int       satsatJobPct = 0;        // 0..100 for the progress display
+  void      satsatStartJob();        // begin/refresh the incremental search
+  void      satsatJobTick();         // advance the job a little; called from loop()
+  void      satsatAbortJob();        // free buffers + stop (on leaving the screen)
   void drawSatSat();
   void keySatSat(char c, bool enter, bool back);
   // LoRa text messaging (SCR_MESSAGES): broadcast group chat between CardSats on
@@ -2242,8 +2265,13 @@ private:
                                   // holds a constant frequency AT THE SATELLITE
   uint32_t lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
   uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
+  uint8_t  uplinkDeferTicks = 0;  // suppress the uplink write for N ticks after a downlink write/knob
+                                  // move (OscarWatch "defer uplink after dial move"); lets the SUB
+                                  // read + downlink settle before the bus is used for the MAIN uplink
   static constexpr uint32_t FREQ_GUARD_HZ = 2;   // skip a re-send within this many Hz of the last value
   static constexpr uint32_t KNOB_MOVE_HZ  = 5;   // read-vs-last delta that counts as an operator knob move
+  static constexpr uint8_t  UPLINK_DEFER_TICKS = 1; // ticks to hold off the uplink write after a downlink
+                                                    // write/knob move, so the SUB read + RX settle first
   // ---- CAT write deadband + adaptive threshold + predictive lead (OscarWatch-
   // inspired) -------------------------------------------------------------------
   // (1) Mode-aware write deadband: only push a leg when it moved more than the
@@ -2372,7 +2400,18 @@ private:
   uint32_t dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
                                 double nowSec, double* leadRrOut);
   // Route logical downlink/uplink to the physical MAIN/SUB VFOs per cfg.vfoType.
-  bool dlOnSub() const { return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN; }
+  // Receive-only transponders (no uplink: beacons, telemetry, SSTV, CW) are tuned
+  // on the MAIN band with satellite mode OFF -- this matches how OscarWatch and the
+  // SDR-Control apps drive Icom rigs for receive-only, and on the IC-821 the MAIN
+  // band also reads far more reliably than SUB. txReceiveOnly() reflects the active
+  // transponder; when true, the downlink ignores the VFO-type swap and uses MAIN.
+  bool txReceiveOnly() const {
+    return activeTxCount > 0 && activeTx[curTx].uplink == 0 && activeTx[curTx].downlink != 0;
+  }
+  bool dlOnSub() const {
+    if (txReceiveOnly()) return false;               // receive-only: downlink on MAIN
+    return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN;
+  }
   bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }
   bool rigSetUplinkFreq  (uint32_t hz) { return dlOnSub() ? rig->setMainFreq(hz) : rig->setSubFreq(hz); }
   void rigSetDownlinkMode(RigMode m)   { if (dlOnSub()) rig->setSubMode(m);  else rig->setMainMode(m); }
@@ -2385,12 +2424,13 @@ private:
   // a real set, read the accepted freq back and remember THAT, so the rig's
   // tuning-step rounding can't later masquerade as an operator knob move. Pass
   // readback=false in modes where we don't follow the knob (saves a round-trip).
-  void driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
+  bool driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
     uint32_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
-    if (lastRxSet && d < threshHz) return;               // within deadband: already there
-    if (!rigSetDownlinkFreq(rx)) return;
+    if (lastRxSet && d < threshHz) return false;         // within deadband: already there
+    if (!rigSetDownlinkFreq(rx)) return false;
     uint32_t back;
     lastRxSet = (readback && rig->canReadFreq() && rigReadDownlinkFreq(back)) ? back : rx;
+    return true;
   }
   // Drive the uplink dial only when it moved; then leave the active band on the
   // downlink so the operator's knob/read stays on RX. No read-back (the uplink
@@ -2399,6 +2439,20 @@ private:
     uint32_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
     if (lastUlHz && d < threshHz) return;
     if (rigSetUplinkFreq(tx)) { lastUlHz = tx; rigSelectDownlink(); }
+  }
+  // Uplink write with a one-tick defer after a downlink write or operator knob
+  // move (OscarWatch "defer uplink after a dial move"). Sequence: consume any
+  // pending defer, drive the uplink only if not currently deferred, then re-arm
+  // the defer if the downlink moved this tick AND we just drove. The re-arm guard
+  // guarantees that during a fast Doppler slew (downlink writing every tick) the
+  // uplink still services every other tick instead of starving. `ulEnabled` is
+  // the caller's drvUL && t.uplink condition.
+  void driveUplinkDeferred(uint32_t tx, uint32_t threshHz, bool dlMoved, bool ulEnabled) {
+    bool deferred = (uplinkDeferTicks > 0);
+    if (uplinkDeferTicks > 0) uplinkDeferTicks--;
+    bool drove = false;
+    if (!deferred && ulEnabled) { driveUplink(tx, threshHz); drove = true; }
+    if (dlMoved && drove) uplinkDeferTicks = UPLINK_DEFER_TICKS;   // defer the NEXT uplink
   }
   // Soft floor: never send CAT faster than the configured baud can comfortably
   // service one update. Returns max(configured rate, baud-derived minimum), ms.
@@ -2936,7 +2990,12 @@ void CivRig::selectSub() {
 bool CivRig::setFreqCiv(bool sub, uint32_t hz) {
   sub ? selectSub() : selectMain();
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
-  return sendFrame(pl, 6);
+  bool ok = sendFrame(pl, 6);
+  // Remember what we last commanded on each band, so a flaky SUB read (the
+  // IC-821 in particular often won't answer 0x03 for the SUB band) can fall back
+  // to this value instead of returning nothing.
+  if (ok) { if (sub) _lastSubHz = hz; else _lastMainHz = hz; }
+  return ok;
 }
 bool CivRig::setModeCiv(bool sub, CivMode m, uint8_t filter) {
   sub ? selectSub() : selectMain();
@@ -3017,11 +3076,28 @@ bool CivRig::readPtt(bool& tx) {
 }
 
 // Read the operating frequency of the SUB (sub=true) or MAIN (sub=false) band.
+//
+// The SUB-band read is the unreliable one, especially on the IC-821: the radio
+// frequently won't answer cmd 0x03 for the SUB band, or answers with the MAIN
+// frequency, unless the SUB band is explicitly re-selected immediately before the
+// read and given a moment to settle. We therefore (1) re-select the band, (2)
+// wait the inter-command settle, (3) flush stale bytes, (4) send 0x03, and (5) if
+// no valid reply arrives within the budget, fall back to the last value we
+// COMMANDED on that band rather than failing outright. The boolean return tells
+// the caller whether the value is fresh (true) or a fallback/none (false); hzOut
+// is always left at the best estimate we have.
 bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
+  uint32_t lastSet = sub ? _lastSubHz : _lastMainHz;
+  if (lastSet) hzOut = lastSet;                     // default to last-commanded
   if (!_stream) return false;
-  if (!RADIOS[_model].canReadFreq) return false;   // set-only rig
-  sub ? selectSub() : selectMain();                 // 07 D1/D0 (drains its echo)
-  while (_stream->available()) _stream->read();     // clear anything stale
+  if (!RADIOS[_model].canReadFreq) return false;    // set-only rig
+
+  // Re-select the target band immediately before the read. sendFrame() applies
+  // the configured CAT inter-command delay after the select, which doubles as the
+  // settle time the IC-821's SUB band needs before it will report correctly.
+  sub ? selectSub() : selectMain();
+  while (_stream->available()) _stream->read();      // clear stale/echo bytes
+
   // Send read-operating-frequency request (cmd 0x03) WITHOUT draining: we want
   // the radio's reply, which on a single-wire CI-V bus arrives after our echo.
   uint8_t f[6] = { 0xFE, 0xFE, _addr, 0xE0, 0x03, 0xFD };
@@ -3046,6 +3122,7 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
       for (int k = 9; k >= 5; --k)
         hz = hz * 100 + (buf[i+k] >> 4) * 10 + (buf[i+k] & 0x0F);
       hzOut = hz;
+      if (sub) _lastSubHz = hz; else _lastMainHz = hz;   // keep the cache current
 #if CIV_DEBUG
       Serial.printf("[CI-V] %s freq read: %lu Hz\n", sub ? "SUB" : "MAIN", (unsigned long)hz);
 #endif
@@ -3053,9 +3130,10 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
     }
   }
 #if CIV_DEBUG
-  Serial.printf("[CI-V] %s freq read: no valid reply\n", sub ? "SUB" : "MAIN");
+  Serial.printf("[CI-V] %s freq read: no valid reply%s\n", sub ? "SUB" : "MAIN",
+                lastSet ? " (using last-set)" : "");
 #endif
-  return false;
+  return false;   // hzOut already holds the last-set fallback (or 0 if none yet)
 }
 
 
@@ -7210,15 +7288,19 @@ void App::rotPoint(float az, float el) {
 //   transponder's own mode on both legs.
 void App::applyTransponderModes(const Transponder& t) {
   if (!rig || !rig->ready()) return;
+  // Set the UPLINK (MAIN) leg first, then the DOWNLINK (SUB) leg, so the radio is
+  // left selected on the downlink band -- that is where the operator's RX knob
+  // sits and where the One-True-Rule read-back happens. (On the IC-821 the SUB
+  // band must be the last one selected before a read, so ending here helps.)
   if (t.isLinear) {
     bool hf = (t.uplink   && t.uplink   < 30000000UL) ||
               (t.downlink && t.downlink < 30000000UL);
-    rigSetDownlinkMode(RM_USB);                               // downlink: USB
     if (t.uplink) rigSetUplinkMode(hf ? RM_USB : RM_LSB);     // uplink: LSB (USB if HF)
+    rigSetDownlinkMode(RM_USB);                               // downlink: USB (selected last)
   } else {
     RigMode m = Rig::modeFromString(t.mode);
-    rigSetDownlinkMode(m);
     if (t.uplink) rigSetUplinkMode(m);
+    rigSetDownlinkMode(m);
   }
 }
 
@@ -8754,9 +8836,9 @@ h+=orow('Mean/True anom',o.meanAnom+'\u00b0 / '+o.trueAnom+'\u00b0');
 h+=orow('To peri/apo',Math.round(o.toPeri/60)+'/'+Math.round(o.toApo/60)+' min');
 if(o.outlookN)h+=orow('Outlook',o.outlookN+' passes, '+o.outlookHi+' >30\u00b0');
 t.innerHTML=h;
-if(o.track&&o.track.length){drawArc(o.track)}})}
+})}
 function aedom(az,el){var r=100*(90-Math.max(0,el))/90,a=az*Math.PI/180;return[110+r*Math.sin(a),110-r*Math.cos(a)]}
-function drawArc(track){/*track are sublat/lon, not az/el; skip arc unless az/el avail*/}
+function drawArc(arc){var el=gid('arc');if(!arc||!arc.length){el.setAttribute('points','');return;}var pts=arc.filter(p=>p[1]>=0).map(p=>{var c=aedom(p[0],p[1]);return c[0].toFixed(1)+','+c[1].toFixed(1)}).join(' ');el.setAttribute('points',pts);}
 function loadSats(){j('/api/sats').then(a=>{window._sats=a;renderSats('')})}
 function renderSats(q){var s=gid('sat');var cur=s.value;s.innerHTML='';
 (window._sats||[]).filter(x=>!q||x.name.toLowerCase().indexOf(q)>=0).forEach(x=>{
@@ -8767,8 +8849,8 @@ function loadTx(){j('/api/tx').then(o=>{var s=gid('tpsel');s.innerHTML='';
 o.list.forEach(x=>{var op=document.createElement('option');op.value=x.i;
 op.textContent=x.d+(x.m?(' ('+x.m+')'):'');if(x.i==o.cur)op.selected=true;s.appendChild(op)});
 if(!o.list.length){var op=document.createElement('option');op.textContent='(none)';s.appendChild(op)}})}
-function passes(){j('/api/passes').then(a=>{passList=a;var t=gid('passes');
-if(!a.length){t.innerHTML='<tr><td class="mut">no passes</td></tr>';return}
+function passes(){j('/api/passes').then(d=>{var a=(d&&d.passes)?d.passes:[];passList=a;window._arc=(d&&d.arc)?d.arc:[];var t=gid('passes');
+if(!a.length){t.innerHTML='<tr><td class="mut">no passes</td></tr>';drawArc([]);return}
 var h='<tr><th>AOS</th><th>Peak</th><th>El</th><th>Dur</th><th>Az</th></tr>';
 a.forEach(p=>{h+='<tr><td>'+hhmm(p.aos)+'</td><td>'+hhmm(p.tca)+'</td><td>'+p.el+'&deg;</td><td>'+dur(p.los-p.aos)+'</td><td>'+p.azaos+'&rarr;'+p.azlos+'</td></tr>'});
 t.innerHTML=h})}
@@ -8787,8 +8869,8 @@ gid('brad').classList.toggle('on',s.radio);gid('brot').classList.toggle('on',s.r
 gid('hold').textContent=s.hold;gid('mtune').textContent=s.tune;
 gid('mhl').textContent=s.fixup?'HOLD uplink (park TX here)':'HOLD downlink (park RX here)';
 gid('mtl').textContent=s.fixup?'TUNE \u2192 downlink (follow)':'TUNE \u2192 uplink (follow)';
-/* sky dot */
-var dot=gid('dot');if(s.el>=0&&(s.az||s.el)){var p=aedom(s.az,s.el);dot.setAttribute('cx',p[0].toFixed(1));dot.setAttribute('cy',p[1].toFixed(1));dot.style.display=''}else{dot.style.display='none'}
+/* sky dot + next-pass arc */
+var dot=gid('dot');if(s.el>=0){var p=aedom(s.az,s.el);dot.setAttribute('cx',p[0].toFixed(1));dot.setAttribute('cy',p[1].toFixed(1));dot.style.display='';gid('arc').setAttribute('points','')}else{dot.style.display='none';drawArc(window._arc||[])}
 /* cal placeholders */
 if(document.activeElement!=gid('caldl'))gid('caldl').placeholder=s.caldl;
 if(document.activeElement!=gid('calul'))gid('calul').placeholder=s.calul;
@@ -8931,7 +9013,15 @@ void App::webdHandleRequest(const String& reqLine) {
     int q = path.indexOf("i=");
     int i = (q >= 0) ? (int)strtol(path.c_str() + q + 2, nullptr, 10) : -1;
     bool ok = false;
-    if (i >= 0 && i < activeTxCount) { curTx = i; onTransponderChanged(); lastDrawMs = 0; ok = true; }
+    if (i >= 0 && i < activeTxCount) {
+      curTx = i; onTransponderChanged();
+      if (radioOut && rig) {                          // mirror the on-device 't' cycle
+        rig->enableSatMode(cfg.satMode && !txReceiveOnly());   // off for receive-only birds
+        applyTransponderModes(activeTx[curTx]);
+        lastRxSet = 0; lastUlHz = 0; uplinkDeferTicks = 0;
+      }
+      lastDrawMs = 0; ok = true;
+    }
     webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
                     "Connection:close\r\n\r\n"));
     webdCli.print(ok ? F("{\"ok\":true}") : F("{\"ok\":false}"));
@@ -9128,11 +9218,12 @@ void App::webdSendSatsJson() {
 
 void App::webdSendPassesJson() {
   webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
-                  "Connection:close\r\n\r\n["));
+                  "Connection:close\r\n\r\n{\"passes\":["));
   SatEntry* s = activeSat();
+  PassPredict pp[8];
+  int n = 0;
   if (s && timeIsSet()) {
-    PassPredict pp[8];
-    int n = pred.predictPasses(nowUtc(), cfg.minPassEl, pp, 8);
+    n = pred.predictPasses(nowUtc(), cfg.minPassEl, pp, 8);
     for (int i = 0; i < n; ++i) {
       if (i) webdCli.print(',');
       String o = "{\"aos\":"; o += (uint32_t)pp[i].aos;
@@ -9145,7 +9236,22 @@ void App::webdSendPassesJson() {
       webdCli.print(o);
     }
   }
-  webdCli.print(']');
+  // Next-pass arc: az/el samples across the first upcoming pass, so the web sky
+  // plot can draw the approaching pass while the satellite is below the horizon.
+  webdCli.print(F("],\"arc\":["));
+  if (s && timeIsSet() && n > 0) {
+    pred.setSite(loc.obs()); pred.setSat(*s);
+    const int NA = 24;
+    double span = (double)(pp[0].los - pp[0].aos); if (span < 1) span = 1;
+    for (int i = 0; i < NA; ++i) {
+      time_t t = pp[0].aos + (time_t)llround(span * i / (double)(NA - 1));
+      LiveLook L = pred.look(t);
+      if (i) webdCli.print(',');
+      String o = "["; o += String(L.az, 0); o += ","; o += String(L.el, 0); o += "]";
+      webdCli.print(o);
+    }
+  }
+  webdCli.print(F("]}"));
 }
 
 // GET /api/orbit -- the orbital-analysis numbers, the same values the nine
@@ -9468,6 +9574,8 @@ void App::loop() {
   serviceAosAlarm();           // countdown beeps + flash before AOS
   tickCanvasRestore();         // retry sprite realloc if a post-fetch restore failed
 
+  if (satsatJobPhase != 0) satsatJobTick();   // advance the incremental sat-to-sat search
+
   // Accelerometer (tilt) passband tuning -- opt-in, ADV-only, self-gated to the
   // Track/Big/Manual screens in TUNE mode. Keep the backlight awake while it's
   // actively moving the passband so the operator can see the readout change.
@@ -9527,6 +9635,7 @@ void App::loop() {
           // satellite frequency. Let go of the knob and nothing drifts.
           uint32_t rxNow; bool txNow = false;
           bool transmitting = rig->readPtt(txNow) && txNow;
+          bool knobMoved = false;
           // Skip the knob read on (re)sync (lastRxSet==0): PUSH our current
           // passband point to the rig instead of adopting whatever freq it is
           // parked on (push-then-track). Also skip while transmitting -- the rig
@@ -9542,19 +9651,26 @@ void App::loop() {
               int32_t bw  = (int32_t)t.bandwidth();
               if (off < 0) off = 0; if (off > bw) off = bw;
               pbOffset = off;                       // new fixed satellite point
+              knobMoved = true;
             }
           }
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
-          // Send a leg only when it actually moved; read the downlink back (unless
-          // transmitting) so the rig's rounding can't later look like a knob move.
-          if (drvDL && t.downlink) driveDownlink(rx, !transmitting, threshHz);
-          if (drvUL && t.uplink)   driveUplink(tx, threshHz);
+          // Downlink first; read it back (unless transmitting) so the rig's
+          // rounding can't later look like a knob move.
+          bool dlWrote = (drvDL && t.downlink && driveDownlink(rx, !transmitting, threshHz));
+          // Uplink with a one-tick defer after a downlink write or operator knob
+          // move (OscarWatch "defer uplink after a dial move"): consume any pending
+          // defer, drive the uplink only if not currently deferred, then re-arm if
+          // this tick wrote/moved the downlink. The "&& ulOk" guard means that
+          // during a fast Doppler slew (downlink writing every tick) the uplink
+          // still services every other tick instead of starving.
+          driveUplinkDeferred(tx, threshHz, (dlWrote || knobMoved), drvUL && t.uplink);
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
-          if (drvDL && t.downlink) driveDownlink(rx, false, threshHz);  // HOLD/UL: no knob follow
-          if (drvUL && t.uplink)   driveUplink(tx, threshHz);
+          bool dlWrote = (drvDL && t.downlink && driveDownlink(rx, false, threshHz));  // HOLD/UL: no knob follow
+          driveUplinkDeferred(tx, threshHz, dlWrote, drvUL && t.uplink);
         }
         applyCtcssForCurrentTx();   // FM uplink PL tone (only re-sends on change)
       }
@@ -10142,7 +10258,8 @@ void App::keySatList(char c, bool enter, bool back) {
     return;
   }
   if (c == '2' && viewN > 0) {                      // sat-to-sat visibility finder
-    satsatOther = 0; satsatSel = 0; satsatComputed = false; satsatPending = true; screen = SCR_SATSAT; lastDrawMs = 0;
+    satsatOther = 0; satsatSel = 0; screen = SCR_SATSAT; lastDrawMs = 0;
+    satsatStartJob();
     return;
   }
   if (c == 'd' && viewN > 0) {                      // 10-day pass overview
@@ -10286,7 +10403,11 @@ void App::keyTrack(char c, bool enter, bool back) {
   if (c == 't' && activeTxCount > 0) {               // cycle transponder
     curTx = (curTx + 1) % activeTxCount;
     onTransponderChanged();
-    if (radioOut) applyTransponderModes(activeTx[curTx]);   // refresh rig modes
+    if (radioOut && rig) {                           // refresh rig sat-mode + modes
+      rig->enableSatMode(cfg.satMode && !txReceiveOnly());   // off for receive-only birds
+      applyTransponderModes(activeTx[curTx]);
+      lastRxSet = 0; lastUlHz = 0; uplinkDeferTicks = 0;     // re-sync after the routing change
+    }
   }
   if (c == 'n' && activeTxCount > 0) {               // jump to the beacon
     int found = -1, firstDlOnly = -1;
@@ -10300,7 +10421,11 @@ void App::keyTrack(char c, bool enter, bool back) {
     if (found < 0) found = firstDlOnly;
     if (found >= 0) {
       curTx = found; onTransponderChanged();
-      if (radioOut) applyTransponderModes(activeTx[curTx]);
+      if (radioOut && rig) {                          // beacon is receive-only: sat mode off, RX on MAIN
+        rig->enableSatMode(cfg.satMode && !txReceiveOnly());
+        applyTransponderModes(activeTx[curTx]);
+        lastRxSet = 0; lastUlHz = 0; uplinkDeferTicks = 0;
+      }
       setStatus(String("Beacon: ") + activeTx[curTx].desc);
     } else setStatus("No beacon listed for this sat");
   }
@@ -10314,12 +10439,14 @@ void App::keyTrack(char c, bool enter, bool back) {
   if (c == 'r') {                                    // toggle radio output
     radioOut = !radioOut;
     if (radioOut) {
-      // Command the rig's satellite mode per the Sat Mode setting (a no-op on
-      // rigs without one). Which physical VFO carries up/downlink follows the
-      // VFO Type setting (see the rigSet*/rigSelect* helpers).
-      if (rig) rig->enableSatMode(cfg.satMode);
+      // Command the rig's satellite mode (a no-op on rigs without one). A
+      // receive-only transponder (beacon/telemetry, no uplink) turns satellite
+      // mode OFF and tunes the downlink on MAIN; a two-way transponder turns it on
+      // per the Sat Mode setting. Which physical VFO carries up/downlink otherwise
+      // follows the VFO Type setting (see the rigSet*/rigSelect* helpers).
+      if (rig) rig->enableSatMode(cfg.satMode && !txReceiveOnly());
       if (activeTxCount > 0) applyTransponderModes(activeTx[curTx]);
-      lastDoppMs = 0; lastRxSet = 0; lastUlHz = 0;   // re-sync tracking cleanly
+      lastDoppMs = 0; lastRxSet = 0; lastUlHz = 0; uplinkDeferTicks = 0;   // re-sync tracking cleanly
       // Bound how long any single CAT read may block the cooperative loop, so a
       // laggy rig (especially the LAN backend) degrades to "no knob update this
       // cycle" instead of stalling the UI/rotator. ~3 reads fit in one cycle.
@@ -14000,80 +14127,107 @@ void App::keyGpsPos(char c, bool enter, bool back) {
 //  from the Satellites screen.
 // ===========================================================================
 
-void App::computeSatSat() {
-  satsatN = 0; satsatComputed = true;
+// Begin (or restart) the incremental sat-to-sat search. Allocates the elevation
+// tracks and sets phase 1; the actual sampling/scan runs a chunk per loop() tick
+// in satsatJobTick(), so the device never blocks long enough to stall.
+void App::satsatStartJob() {
+  satsatAbortJob();                  // free any previous run first
+  satsatN = 0; satsatComputed = false;
   SatEntry* a = activeSat();
-  if (!a || !timeIsSet() || favN == 0) return;
-  // Resolve the "other" satellite from the favourites list.
+  if (!a || !timeIsSet() || favN == 0) { satsatComputed = true; return; }
   if (satsatOther < 0) satsatOther = 0;
   if (satsatOther >= favN) satsatOther = favN - 1;
   int bIdx = db.indexOfNorad(favs[satsatOther]);
-  if (bIdx < 0) return;
-  SatEntry b = db.at(bIdx);                  // copy: setSat takes a reference
-  if (b.norad == a->norad) return;           // same bird; nothing to compute
+  if (bIdx < 0) { satsatComputed = true; return; }
+  if (db.at(bIdx).norad == a->norad) { satsatComputed = true; return; }  // same bird
 
-  Observer me = loc.obs();
-  time_t now = nowUtc();
-  // Search window/step. IMPORTANT: setSat() rebuilds the SGP4 element set (a TLE
-  // render + twoline2rv init) and is far too costly to call inside the time loop.
-  // Calling it per 30 s step over 5 days = ~29k inits blocks for many seconds and
-  // trips the task watchdog (device freeze). Instead we sample each satellite ONCE
-  // across the window into a compact elevation array (two setSat calls total),
-  // then scan the arrays for overlap. 3 days at 60 s = 4320 samples.
-  const int      STEP   = 60;                          // seconds
-  const int      NS     = 3 * 24 * 60;                 // 4320 samples (3 days)
-  const time_t   T0     = now;
-  const double   MINEL  = 0.0;
+  satsatElA = (int8_t*)malloc(SATSAT_NS);
+  satsatElB = (int8_t*)malloc(SATSAT_NS);
+  if (!satsatElA || !satsatElB) { satsatAbortJob(); satsatComputed = true; return; }
 
-  // One byte per sample is plenty for an above-horizon elevation (0..90).
-  // Allocated on the heap so it isn't a large stack frame; freed before return.
-  static const int SS_NS = 3 * 24 * 60;
-  int8_t* elA = (int8_t*)malloc(SS_NS);
-  int8_t* elB = (int8_t*)malloc(SS_NS);
-  if (!elA || !elB) { if (elA) free(elA); if (elB) free(elB); return; }
+  satsatT0 = nowUtc();
+  satsatJobPhase = 1; satsatJobI = 0; satsatJobPct = 0;
+  // Prime the predictor for sat A; the tick samples from here.
+  pred.setSite(loc.obs()); pred.setSat(*a);
+}
 
-  // Sample satellite A across the whole window (single setSat).
-  pred.setSite(me); pred.setSat(*a);
-  for (int i = 0; i < NS; ++i) {
-    double az, el;
-    pred.azelAt(T0 + (time_t)i * STEP, az, el);
-    elA[i] = (int8_t)constrain((int)lround(el), -90, 90);
-    if ((i & 255) == 0) yield();             // keep the watchdog fed
-  }
-  // Sample satellite B across the same window (single setSat).
-  pred.setSat(b);
-  for (int i = 0; i < NS; ++i) {
-    double az, el;
-    pred.azelAt(T0 + (time_t)i * STEP, az, el);
-    elB[i] = (int8_t)constrain((int)lround(el), -90, 90);
-    if ((i & 255) == 0) yield();
-  }
+// Free the job buffers and return to idle. Safe to call anytime.
+void App::satsatAbortJob() {
+  if (satsatElA) { free(satsatElA); satsatElA = nullptr; }
+  if (satsatElB) { free(satsatElB); satsatElB = nullptr; }
+  satsatJobPhase = 0; satsatJobI = 0;
+}
 
-  // Scan the two elevation tracks for overlapping above-horizon windows.
-  bool inWin = false; time_t wStart = 0; float maxA = 0, maxB = 0;
-  for (int i = 0; i < NS; ++i) {
-    bool both = (elA[i] > MINEL && elB[i] > MINEL);
-    time_t t = T0 + (time_t)i * STEP;
-    if (both && !inWin) { inWin = true; wStart = t; maxA = elA[i]; maxB = elB[i]; }
-    else if (both) { if (elA[i] > maxA) maxA = elA[i]; if (elB[i] > maxB) maxB = elB[i]; }
-    else if (!both && inWin) {
-      inWin = false;
-      if (satsatN < SATSAT_MAX) {
-        satsatWin[satsatN].start = wStart; satsatWin[satsatN].end = t;
-        satsatWin[satsatN].maxElA = maxA;  satsatWin[satsatN].maxElB = maxB;
-        satsatN++;
-      } else break;
+// Advance the incremental search by one chunk. Called every loop() tick while a
+// job is active. Sampling is split into bounded chunks so a single tick stays
+// well under the watchdog window; the scan phase is cheap and finishes in one go.
+void App::satsatJobTick() {
+  if (satsatJobPhase == 0) return;
+  if (!satsatElA || !satsatElB) { satsatAbortJob(); satsatComputed = true; return; }
+
+  const int STEP  = 60;                         // seconds between samples
+  const int CHUNK = 240;                        // samples processed per tick
+
+  if (satsatJobPhase == 1) {                    // sampling satellite A
+    int end = satsatJobI + CHUNK; if (end > SATSAT_NS) end = SATSAT_NS;
+    for (int i = satsatJobI; i < end; ++i) {
+      double az, el; pred.azelAt(satsatT0 + (time_t)i * STEP, az, el);
+      satsatElA[i] = (int8_t)constrain((int)lround(el), -90, 90);
     }
-  }
-  if (inWin && satsatN < SATSAT_MAX) {       // window still open at search end
-    satsatWin[satsatN].start = wStart; satsatWin[satsatN].end = T0 + (time_t)(NS - 1) * STEP;
-    satsatWin[satsatN].maxElA = maxA; satsatWin[satsatN].maxElB = maxB; satsatN++;
+    satsatJobI = end;
+    satsatJobPct = (satsatJobI * 50) / SATSAT_NS;        // 0..50%
+    if (satsatJobI >= SATSAT_NS) {
+      // Switch to sat B: re-point the predictor, restart the index.
+      int bIdx = db.indexOfNorad(favs[satsatOther]);
+      if (bIdx < 0) { satsatAbortJob(); satsatComputed = true; satsatN = 0; return; }
+      SatEntry b = db.at(bIdx);
+      pred.setSat(b);
+      satsatJobPhase = 2; satsatJobI = 0;
+    }
+    return;
   }
 
-  free(elA); free(elB);
-  // restore predictor to the primary sat for the rest of the UI
-  pred.setSite(me); pred.setSat(*a);
-  satsatSel = 0;
+  if (satsatJobPhase == 2) {                    // sampling satellite B
+    int end = satsatJobI + CHUNK; if (end > SATSAT_NS) end = SATSAT_NS;
+    for (int i = satsatJobI; i < end; ++i) {
+      double az, el; pred.azelAt(satsatT0 + (time_t)i * STEP, az, el);
+      satsatElB[i] = (int8_t)constrain((int)lround(el), -90, 90);
+    }
+    satsatJobI = end;
+    satsatJobPct = 50 + (satsatJobI * 50) / SATSAT_NS;   // 50..100%
+    if (satsatJobI >= SATSAT_NS) { satsatJobPhase = 3; satsatJobI = 0; }
+    return;
+  }
+
+  if (satsatJobPhase == 3) {                    // scan the two tracks for overlaps
+    satsatN = 0;
+    bool inWin = false; time_t wStart = 0; float maxA = 0, maxB = 0;
+    for (int i = 0; i < SATSAT_NS; ++i) {
+      bool both = (satsatElA[i] > 0 && satsatElB[i] > 0);
+      time_t t = satsatT0 + (time_t)i * STEP;
+      if (both && !inWin) { inWin = true; wStart = t; maxA = satsatElA[i]; maxB = satsatElB[i]; }
+      else if (both) { if (satsatElA[i] > maxA) maxA = satsatElA[i]; if (satsatElB[i] > maxB) maxB = satsatElB[i]; }
+      else if (!both && inWin) {
+        inWin = false;
+        if (satsatN < SATSAT_MAX) {
+          satsatWin[satsatN].start = wStart; satsatWin[satsatN].end = t;
+          satsatWin[satsatN].maxElA = maxA;  satsatWin[satsatN].maxElB = maxB; satsatN++;
+        } else break;
+      }
+    }
+    if (inWin && satsatN < SATSAT_MAX) {
+      satsatWin[satsatN].start = wStart;
+      satsatWin[satsatN].end = satsatT0 + (time_t)(SATSAT_NS - 1) * STEP;
+      satsatWin[satsatN].maxElA = maxA; satsatWin[satsatN].maxElB = maxB; satsatN++;
+    }
+    // Done: free buffers, restore the predictor to the primary sat for the UI.
+    satsatAbortJob();
+    satsatComputed = true; satsatJobPct = 100; satsatSel = 0;
+    SatEntry* a = activeSat();
+    if (a) { pred.setSite(loc.obs()); pred.setSat(*a); }
+    lastDrawMs = 0;
+    return;
+  }
 }
 
 void App::drawSatSat() {
@@ -14087,23 +14241,27 @@ void App::drawSatSat() {
     canvas.setCursor(6, 62); canvas.print("with 'f' to pick a 2nd.");
     footer("` back"); return;
   }
-  // Show a status frame first, THEN compute on the following frame, so the
-  // "Calculating" message is actually painted before the (multi-second) blocking
-  // search runs instead of the screen appearing frozen during it.
-  if (satsatPending) {
+  // While the incremental search runs, show a live progress bar. The actual
+  // sampling happens a chunk per loop() tick in satsatJobTick(), so this screen
+  // stays responsive (the back key still works) and always finishes.
+  if (satsatJobPhase != 0 || !satsatComputed) {
     int bIdx = db.indexOfNorad(favs[satsatOther]);
     const char* bName = (bIdx >= 0) ? db.at(bIdx).name : "?";
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
-    canvas.setCursor(6, 50); canvas.print("Calculating windows...");
+    canvas.setCursor(6, 46); canvas.print("Calculating windows...");
     canvas.setTextColor(CL_GREY, CL_BLACK);
-    canvas.setCursor(6, 64); canvas.printf("vs %.20s", bName);
-    canvas.setCursor(6, 78); canvas.print("(searching 3 days)");
+    canvas.setCursor(6, 58); canvas.printf("vs %.20s", bName);
+    // progress bar
+    int pct = satsatJobPct; if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+    const int bx = 6, by = 74, bw = 228, bh = 10;
+    canvas.drawRect(bx, by, bw, bh, CL_GREY);
+    canvas.fillRect(bx + 1, by + 1, (bw - 2) * pct / 100, bh - 2, CL_GREEN);
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(bx, by + 14); canvas.printf("%d%%  (searching 3 days)", pct);
     footer("` back");
-    satsatPending = false;       // compute on the next frame
-    lastDrawMs = 0;              // force an immediate redraw to run the compute
+    lastDrawMs = 0;              // keep redrawing so the bar advances
     return;
   }
-  if (!satsatComputed) computeSatSat();
 
   // Which 2nd sat.
   int bIdx = db.indexOfNorad(favs[satsatOther]);
@@ -14147,13 +14305,13 @@ void App::drawSatSat() {
 
 void App::keySatSat(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { buildSatView(); screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { satsatAbortJob(); buildSatView(); screen = SCR_SATLIST; lastDrawMs = 0; return; }
   if (favN == 0) return;
   if (c == 'n') {                             // cycle the 2nd satellite
     satsatOther = (satsatOther + 1) % favN;
-    satsatComputed = false; satsatPending = true; lastDrawMs = 0; return;
+    satsatStartJob(); lastDrawMs = 0; return;
   }
-  if (c == 'r') { satsatComputed = false; satsatPending = true; lastDrawMs = 0; return; }   // recompute
+  if (c == 'r') { satsatStartJob(); lastDrawMs = 0; return; }   // recompute
   if (isUp(c))   { if (satsatSel > 0) satsatSel--; lastDrawMs = 0; }
   if (isDown(c)) { if (satsatSel < satsatN - 1) satsatSel++; lastDrawMs = 0; }
 }

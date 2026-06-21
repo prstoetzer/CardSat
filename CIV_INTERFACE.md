@@ -239,6 +239,17 @@ powers the radio-knob (One True Rule) tuning.
 the interface — adjust `selMain[]`/`selSub[]` for your model in
 `radio_profiles.h`.
 
+**IC-821: frequency reads are unreliable (knob-follow jumps or no read).** This is a
+known quirk of the IC-821, not a wiring fault. On this radio the **SUB** band (the
+downlink/RX in satellite mode) frequently won't answer the read command unless the
+SUB band has just been selected. CardSat already re-selects the band immediately
+before every read and, when no valid reply comes back within the budget, **falls
+back to the last frequency it commanded** rather than acting on a bad read — so the
+downlink keeps Doppler-tracking even when reads fail; you just lose live knob-follow
+for that cycle. If knob-follow is consistently unavailable on your IC-821, that is
+expected; the device **TUNE** keys move the passband instead. Increasing **CAT
+Delay** in Settings (giving the SUB band longer to settle) can improve read success.
+
 **Garbled/intermittent frames.** Check the idle voltages (§6a), shorten the cable,
 and confirm the baud. The 22k/33k divider and the transistors are good well past
 19200 baud, so persistent garbling usually means a wiring/ground issue.

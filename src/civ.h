@@ -45,6 +45,8 @@ private:
   uint8_t    _addr;
   int8_t     _pttRead = -1;   // -1 unknown, 0 unsupported (stop polling), 1 supported
   uint8_t    _pttFails = 0;   // consecutive read misses before marking unsupported
+  uint32_t   _lastMainHz = 0; // last frequency we COMMANDED on MAIN (uplink)
+  uint32_t   _lastSubHz  = 0; // last frequency we COMMANDED on SUB  (downlink)
 
   void   selectMain();
   void   selectSub();

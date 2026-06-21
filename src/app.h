@@ -232,8 +232,21 @@ private:
   SatSatWin satsatWin[SATSAT_MAX];
   int       satsatN = 0;
   bool      satsatComputed = false;
-  bool      satsatPending = false;    // draw a "calculating" frame before the blocking compute
-  void computeSatSat();
+  // Incremental sat-to-sat job. The full search (sampling both satellites'
+  // elevation across a multi-day window) is too long to run in one blocking call
+  // without starving the idle task / tripping the watchdog, so it runs a few
+  // hundred samples per loop() tick and shows live progress. Phases:
+  //   0 = idle, 1 = sampling sat A, 2 = sampling sat B, 3 = scanning for overlaps.
+  static const int SATSAT_NS = 3 * 24 * 60;   // 4320 samples (3 days @ 60 s)
+  int8_t*   satsatElA = nullptr;     // heap elevation tracks (allocated while running)
+  int8_t*   satsatElB = nullptr;
+  int       satsatJobPhase = 0;      // 0 idle / 1 sampling A / 2 sampling B / 3 scan
+  int       satsatJobI = 0;          // progress index within the current phase
+  time_t    satsatT0 = 0;            // job window start
+  int       satsatJobPct = 0;        // 0..100 for the progress display
+  void      satsatStartJob();        // begin/refresh the incremental search
+  void      satsatJobTick();         // advance the job a little; called from loop()
+  void      satsatAbortJob();        // free buffers + stop (on leaving the screen)
   void drawSatSat();
   void keySatSat(char c, bool enter, bool back);
   // LoRa text messaging (SCR_MESSAGES): broadcast group chat between CardSats on
@@ -358,8 +371,13 @@ private:
                                   // holds a constant frequency AT THE SATELLITE
   uint32_t lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
   uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
+  uint8_t  uplinkDeferTicks = 0;  // suppress the uplink write for N ticks after a downlink write/knob
+                                  // move (OscarWatch "defer uplink after dial move"); lets the SUB
+                                  // read + downlink settle before the bus is used for the MAIN uplink
   static constexpr uint32_t FREQ_GUARD_HZ = 2;   // skip a re-send within this many Hz of the last value
   static constexpr uint32_t KNOB_MOVE_HZ  = 5;   // read-vs-last delta that counts as an operator knob move
+  static constexpr uint8_t  UPLINK_DEFER_TICKS = 1; // ticks to hold off the uplink write after a downlink
+                                                    // write/knob move, so the SUB read + RX settle first
   // ---- CAT write deadband + adaptive threshold + predictive lead (OscarWatch-
   // inspired) -------------------------------------------------------------------
   // (1) Mode-aware write deadband: only push a leg when it moved more than the
@@ -488,7 +506,18 @@ private:
   uint32_t dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
                                 double nowSec, double* leadRrOut);
   // Route logical downlink/uplink to the physical MAIN/SUB VFOs per cfg.vfoType.
-  bool dlOnSub() const { return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN; }
+  // Receive-only transponders (no uplink: beacons, telemetry, SSTV, CW) are tuned
+  // on the MAIN band with satellite mode OFF -- this matches how OscarWatch and the
+  // SDR-Control apps drive Icom rigs for receive-only, and on the IC-821 the MAIN
+  // band also reads far more reliably than SUB. txReceiveOnly() reflects the active
+  // transponder; when true, the downlink ignores the VFO-type swap and uses MAIN.
+  bool txReceiveOnly() const {
+    return activeTxCount > 0 && activeTx[curTx].uplink == 0 && activeTx[curTx].downlink != 0;
+  }
+  bool dlOnSub() const {
+    if (txReceiveOnly()) return false;               // receive-only: downlink on MAIN
+    return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN;
+  }
   bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }
   bool rigSetUplinkFreq  (uint32_t hz) { return dlOnSub() ? rig->setMainFreq(hz) : rig->setSubFreq(hz); }
   void rigSetDownlinkMode(RigMode m)   { if (dlOnSub()) rig->setSubMode(m);  else rig->setMainMode(m); }
@@ -501,12 +530,17 @@ private:
   // a real set, read the accepted freq back and remember THAT, so the rig's
   // tuning-step rounding can't later masquerade as an operator knob move. Pass
   // readback=false in modes where we don't follow the knob (saves a round-trip).
-  void driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
+  // Returns true if it actually wrote the dial (the caller uses this to briefly
+  // defer the uplink write so the SUB read + downlink settle first -- the
+  // OscarWatch "defer uplink after a dial move" rule, important on slow single-
+  // wire Main/Sub rigs like the IC-821).
+  bool driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
     uint32_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
-    if (lastRxSet && d < threshHz) return;               // within deadband: already there
-    if (!rigSetDownlinkFreq(rx)) return;
+    if (lastRxSet && d < threshHz) return false;         // within deadband: already there
+    if (!rigSetDownlinkFreq(rx)) return false;
     uint32_t back;
     lastRxSet = (readback && rig->canReadFreq() && rigReadDownlinkFreq(back)) ? back : rx;
+    return true;
   }
   // Drive the uplink dial only when it moved; then leave the active band on the
   // downlink so the operator's knob/read stays on RX. No read-back (the uplink
@@ -515,6 +549,20 @@ private:
     uint32_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
     if (lastUlHz && d < threshHz) return;
     if (rigSetUplinkFreq(tx)) { lastUlHz = tx; rigSelectDownlink(); }
+  }
+  // Uplink write with a one-tick defer after a downlink write or operator knob
+  // move (OscarWatch "defer uplink after a dial move"). Sequence: consume any
+  // pending defer, drive the uplink only if not currently deferred, then re-arm
+  // the defer if the downlink moved this tick AND we just drove. The re-arm guard
+  // guarantees that during a fast Doppler slew (downlink writing every tick) the
+  // uplink still services every other tick instead of starving. `ulEnabled` is
+  // the caller's drvUL && t.uplink condition.
+  void driveUplinkDeferred(uint32_t tx, uint32_t threshHz, bool dlMoved, bool ulEnabled) {
+    bool deferred = (uplinkDeferTicks > 0);
+    if (uplinkDeferTicks > 0) uplinkDeferTicks--;
+    bool drove = false;
+    if (!deferred && ulEnabled) { driveUplink(tx, threshHz); drove = true; }
+    if (dlMoved && drove) uplinkDeferTicks = UPLINK_DEFER_TICKS;   // defer the NEXT uplink
   }
   // Soft floor: never send CAT faster than the configured baud can comfortably
   // service one update. Returns max(configured rate, baud-derived minimum), ms.

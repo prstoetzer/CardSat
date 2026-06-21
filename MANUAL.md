@@ -728,7 +728,10 @@ Controls:
   entry, or one whose description names a beacon) so the radio tunes straight to
   it with Doppler correction. Useful for finding a bird by its telemetry/CW beacon
   before working it. Also available on the **Big readout** screen. If the satellite
-  has no beacon listed, a status note says so.
+  has no beacon listed, a status note says so. On an Icom rig a receive-only
+  transponder like this turns the rig's **satellite mode off** and tunes the
+  downlink on the **MAIN** band (which also reads back more reliably), matching how
+  OscarWatch and the SDR-Control apps handle receive-only birds.
 - `c` — set the **CTCSS/PL tone** for this satellite (numeric entry: a tone in
   Hz, `0` to force it off, or blank to revert to the built-in default).
 - `r` — turn radio output **on/off** (sets modes and begins Doppler service).
@@ -920,8 +923,11 @@ and the **peak elevation of each satellite** during the window (the first in
 green, the second in cyan) so you can judge how usable it is. `;`/`.` scroll;
 `` ` `` returns to Satellites.
 
+The search runs in the background with a **progress bar** while it scans, so the
+screen stays responsive (the back key works throughout) and always finishes.
+
 > Both satellites are evaluated to your **0° horizon**. A window with very low
-> peak elevations on either bird may be hard to use. The search looks five days
+> peak elevations on either bird may be hard to use. The search looks three days
 > ahead and lists up to sixteen windows.
 
 ### Voice memo (`v`, SD card required)
@@ -2161,7 +2167,9 @@ to WiFi, the **Web control** row shows the address to open — for example
   know at a glance when to be ready.
 - **Live sky plot** — a polar plot (N up, elevation as distance from the rim) with
   a moving dot showing the satellite's current azimuth/elevation, updated about
-  once a second. The dot hides while the satellite is below the horizon.
+  once a second. While the satellite is **below the horizon**, the plot instead
+  draws the **next pass as an arc** (its azimuth/elevation track), so you can see
+  where it will rise and set; the live dot takes over the moment it comes up.
 - **Live readout** — downlink (RX) and uplink (TX) frequencies, azimuth/elevation,
   and the current tune mode, refreshed about once a second.
 - **Transponder selection** — a drop-down lists the active satellite's

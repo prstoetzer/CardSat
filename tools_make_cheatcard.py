@@ -44,7 +44,7 @@ FRONT = [
   "<b>;</b>/<b>.</b> scroll &middot; <b>d</b> asc/desc node &middot; <b>r</b> recompute &middot; <b>`</b> back"),
  ("OSCARLOCATOR (Sats &rarr; k)",
   "Live azimuthal-equidistant plot: sub-point, footprint, QTH range ring + full ground track (AOS/LOS). "
-  "<b>m</b> toggle QTH-centred / polar (auto N/S, flips at equator) &middot; <b>`</b> back"),
+  "<b>m</b> toggle polar (default, auto N/S, flips at equator) / QTH-centred &middot; <b>`</b> back"),
  ("DX DOPPLER TABLE (Mutual &rarr; d)",
   "RX/TX dial freqs for BOTH stations every 30s across a mutual window. Two lines/step: me (green) + DX (cyan). "
   "<b>t</b> cycle transponder &middot; <b>m</b> mode: true rule / fixed DL / fixed UL &middot; <b>a</b> anchor dial (me/DX RX/TX) &middot; <b>,</b>/<b>/</b> linear passband point &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
@@ -131,7 +131,7 @@ BACK = [
  ("VOICE MEMOS (Log &rarr; Voice Memos)",
   "Browse newest-first (date/time/sat/len). <b>ENTER</b> play &middot; <b>n</b> new &middot; <b>d</b> del &middot; <b>r</b> refresh &middot; record via <b>v</b> on Track. SD req'd"),
  ("LORA MESSAGES (Home &rarr; Messages)",
-  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll &middot; <b>r</b> retry &middot; <b>`</b> back. Needs RadioLib build. Untested HW"),
+  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll &middot; <b>r</b> retry &middot; <b>`</b> back. Needs RadioLib build. Untested HW"),
  ("UPDATE",
   "<b>k</b>/<b>ENTER</b> GP+clock+AMSAT+space-wx+weather &middot; <b>f</b> fast (GP+AMSAT+favs' TX) &middot; "
   "<b>a</b> cache all TX (auto-reboots) &middot; <b>w</b> WiFi only"),

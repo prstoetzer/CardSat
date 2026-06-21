@@ -1,5 +1,48 @@
 # CardSat v0.9.23 — Release Notes
 
+## Fix
+
+- **DX Doppler starts at the centre of the linear passband.** The Doppler table
+  now opens with the operating point in the middle of the selected linear
+  transponder's passband (and re-centres when you switch transponders with `t`),
+  matching how the on-device tracker centres a linear bird, instead of starting at
+  the low edge. FM and single-channel transponders are unaffected.
+
+## Mobile web control improvements
+
+The web control page (Settings → Network/data → Web control) gained:
+
+- a **live sky plot** — a polar plot with a moving dot at the satellite's current
+  azimuth/elevation;
+- an **in-pass indicator and AOS countdown** in the header ("IN PASS — LOS in
+  m:ss" / "Next AOS in m:ss");
+- **transponder selection** from a labelled drop-down (mirrors the `t` key);
+- **direct calibration entry** — type exact RX/TX offsets in Hz and Set/Zero them
+  (saved per-satellite);
+- a **filter box** to narrow a long satellite list;
+- a **responsive layout** that uses one column on phones and two columns on
+  tablets/computers.
+
+Internally, all satellite and transponder names served as JSON are now escaped, so
+a name containing a quote or backslash can no longer break the page. Two small
+endpoints were added (`/api/tx` for the transponder list/select, `/api/cal` for
+calibration). As with the rest of the LAN servers, the web page is HTTP on the
+local network with no authentication — use it only on trusted networks.
+
+## Changes
+
+- **OSCARLOCATOR opens in polar view** by default (press `m` for the QTH-centred
+  view); the polar sheet auto-selects N/S and flips at the equator.
+- **Sat-to-sat finder shows a "Calculating windows…" status** while it searches,
+  instead of appearing to pause during the computation.
+- **LoRa region presets.** A new **LoRa region** setting (Settings → Network/data)
+  seeds a legal amateur frequency for your area: **US** → 33 cm band, 906.875 MHz
+  (default); **EU** → 70 cm band, 433.775 MHz; **Japan** → 430 MHz band,
+  431.000 MHz — all at 125 kHz. The default region is now **US (906.875 MHz)**
+  instead of 433.775 MHz. You can still set any carrier 150–960 MHz by hand; the
+  region just provides a sensible, in-band starting point. You remain responsible
+  for operating within your licence and local rules.
+
 ## Fixes from device testing
 
 - **Sat-to-sat finder no longer freezes.** The visibility search was calling the

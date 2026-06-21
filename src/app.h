@@ -210,6 +210,7 @@ private:
   int       dxdWin    = 0;            // which mutual window index this table is for
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
+  void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
   void dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
                    uint32_t& dxRx, uint32_t& dxTx);  // core per-step calculator
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
@@ -231,6 +232,7 @@ private:
   SatSatWin satsatWin[SATSAT_MAX];
   int       satsatN = 0;
   bool      satsatComputed = false;
+  bool      satsatPending = false;    // draw a "calculating" frame before the blocking compute
   void computeSatSat();
   void drawSatSat();
   void keySatSat(char c, bool enter, bool back);
@@ -470,6 +472,7 @@ private:
   void webdSendSatsJson();                     // GET /api/sats
   void webdSendPassesJson();                   // GET /api/passes
   void webdSendOrbitJson();                     // GET /api/orbit (orbital analysis)
+  void webdSendTxJson();                        // GET /api/tx (transponder list + current)
   bool webdSelectSat(uint32_t norad);          // POST /api/select
   void webdSendPage();                         // GET / (the mobile HTML page)
   void applyRotatorFromCfg();

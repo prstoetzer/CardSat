@@ -152,10 +152,21 @@ struct Settings {
 
   // LoRa text messaging (CardSat-to-CardSat broadcast). Uses the Cap LoRa SX1262.
   bool     loraEnable  = false;     // bring the radio up at boot
-  uint32_t loraFreqKHz = 433775;    // carrier in kHz (433.775 MHz default)
+  // Region presets pick a legal amateur LoRa frequency/bandwidth for the operator:
+  //   0 = US  : 33cm amateur band (902-928 MHz). 70cm in the US is held to 100 kHz
+  //             occupied bandwidth, so 33cm is the home for 125 kHz LoRa. Default
+  //             906.875 MHz, clear of the busy 915 MHz ISM centre.
+  //   1 = EU  : 70cm amateur band (430-440 MHz). LoRa-APRS standard 433.775 MHz.
+  //   2 = JP  : 430 MHz amateur band (430-440 MHz). Japan's 920 MHz band is ISM,
+  //             not amateur, so amateur LoRa belongs on 430 MHz. Default 431.000.
+  // The operator can still set any frequency 150-960 MHz by hand after choosing a
+  // region; the region just seeds sensible, legal defaults.
+  uint8_t  loraRegion  = 0;         // 0 = US (default), 1 = EU, 2 = JP
+  uint32_t loraFreqKHz = 906875;    // carrier in kHz (US 33cm default, 906.875 MHz)
   uint8_t  loraSf      = 12;        // spreading factor 7..12 (12 = max range)
   uint32_t loraBwHz    = 125000;    // bandwidth in Hz (125 kHz standard)
   int8_t   loraTxDbm   = 20;        // TX power dBm (<=22 on SX1262)
+  void loraApplyRegion(uint8_t region);   // seed freq/BW from a region preset
 
   bool load();
   bool save();

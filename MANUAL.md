@@ -655,10 +655,11 @@ Three tracking modes, cycled with **`m`**:
 
 Press **`a`** to cycle which dial is the **anchor** (my RX, my TX, DX RX, or DX
 TX). For a **linear** transponder you also choose **where in the passband** to
-operate: **`,`/`/`** move the operating point in 1 kHz steps (`<`/`>` in 5 kHz),
-and the offset is shown as `+NNk`. RX values are shown in green, TX in yellow.
-**`;`/`.`** scroll through the 30-second steps; `` ` `` returns to the mutual
-window list.
+operate: the table **opens at the centre of the passband** (and re-centres when you
+switch transponders with **`t`**), and **`,`/`/`** move the operating point in
+1 kHz steps (`<`/`>` in 5 kHz), shown as `+NNk`. RX values are shown in green, TX
+in yellow. **`;`/`.`** scroll through the 30-second steps; `` ` `` returns to the
+mutual window list.
 
 > Frequencies include your station calibration offsets. The DX station is assumed
 > at sea level with no local calibration. For an SSB contact, treat the numbers as
@@ -839,17 +840,17 @@ plots a single pass in az/el over your sky), this plots the satellite's
 It complements the tabular **EQX table** (`e`): the EQX table lists the
 equator-crossing times and longitudes, and this view shows the resulting geometry.
 
-Two modes, toggled with **`m`**:
+Two modes, toggled with **`m`** (the view **opens in polar mode** by default):
 
+- **Polar** (default) — a pole sits at the centre and the satellite is plotted by
+  latitude (distance from the pole) and longitude (angle). CardSat **automatically
+  chooses the North or South polar sheet** from the satellite's current hemisphere
+  and **flips between them live** as the bird crosses the equator, so the satellite
+  always stays on the visible chart.
 - **QTH-centred** — your station sits at the centre, with range/elevation rings
   around it. The satellite is drawn at its true bearing and great-circle distance
   from you, so you can see at a glance where it is relative to your horizon and
   how far away it is.
-- **Polar** — a pole sits at the centre and the satellite is plotted by latitude
-  (distance from the pole) and longitude (angle). CardSat **automatically chooses
-  the North or South polar sheet** from the satellite's current hemisphere and
-  **flips between them live** as the bird crosses the equator, so the satellite
-  always stays on the visible chart.
 
 Both modes draw a coarse coastline, a lat/lon graticule, the satellite marker
 (yellow when sunlit, cyan in eclipse) and its **ground footprint** circle. They
@@ -1058,26 +1059,39 @@ outing, a club net, or a SOTA/portable activation.
 > M5Stack Cap LoRa reference and the SX1262 datasheet but has **not** been
 > confirmed on a device, and it needs the **RadioLib** library plus a build with
 > `CARDSAT_HAS_LORA` enabled (see below). Until you've verified two units talk to
-> each other, treat it as experimental. Know your band's rules: 433.775 MHz at
-> 125 kHz is the global LoRa-APRS-style default and is fine for amateur use in
-> much of the world, but in the US the 70 cm band is limited to 100 kHz occupied
-> bandwidth, so 915 MHz ISM is the cleaner US path. You pick the frequency.
+> each other, treat it as experimental. **Know your band's rules** — pick the
+> **LoRa region** preset that matches where you operate (see Settings below):
+>
+> - **US (default)** — the **33 cm amateur band (902–928 MHz)**. The US 70 cm band
+>   is held to ~100 kHz occupied bandwidth, which is tight for 125 kHz LoRa, so
+>   33 cm is the home for amateur LoRa here. Default **906.875 MHz**, clear of the
+>   busy 915 MHz ISM centre.
+> - **EU** — the **70 cm amateur band (430–440 MHz)**. Default **433.775 MHz**, the
+>   LoRa-APRS standard, at 125 kHz.
+> - **Japan** — the **430 MHz amateur band (430–440 MHz)**. Default **431.000 MHz**.
+>   (Japan's 920 MHz band is ISM, with certification rules — not amateur — so
+>   amateur LoRa belongs on 430 MHz.)
+>
+> These are starting points within each band, not the only legal frequencies; you
+> can still set any carrier 150–960 MHz by hand, and you remain responsible for
+> operating within your licence and local regulations.
 
 **Using it.** Set your callsign (Settings → Station, or the QRZ screen), enable
-**LoRa msg** in Settings → Network/data, and set the frequency/SF/bandwidth to
-match the other stations. Open **Messages** from the Home menu. Press `n` to write
-a message on the full keyboard and **ENTER** to send; `;`/`.` scroll back through
-history. Your own messages show in cyan as `>me`; received messages show in green
-by the sender's callsign. The top line shows the current frequency, SF, bandwidth
-and your callsign. History holds the most recent 24 messages (a fixed ring — no
-SD card needed, lost on reboot).
+**LoRa msg** in Settings → Network/data, pick your **LoRa region**, then fine-tune
+the frequency/SF/bandwidth to match the other stations. Open **Messages** from the
+Home menu. Press `n` to write a message on the full keyboard and **ENTER** to send;
+`;`/`.` scroll back through history. Your own messages show in cyan as `>me`;
+received messages show in green by the sender's callsign. The top line shows the
+current frequency, SF, bandwidth and your callsign. History holds the most recent
+24 messages (a fixed ring — no SD card needed, lost on reboot).
 
 **Settings.** In Settings → Network/data: **LoRa msg** on/off (turning it on
-brings the radio up); **LoRa freq** (arrow-adjust in 100 kHz steps, or ENTER to
-type an exact MHz value, 150–960 MHz); **LoRa SF** (7–12; 12 = maximum range and
-sensitivity, the default; lower = faster but shorter range); **LoRa BW** (62.5 /
-125 / 250 kHz); **LoRa TX pwr** (0–22 dBm). Both ends must use the same frequency,
-SF and BW to hear each other.
+brings the radio up); **LoRa region** (US 33cm / EU 70cm / JP 430 — selecting one
+seeds a legal default frequency + 125 kHz bandwidth for that band); **LoRa freq**
+(arrow-adjust in 100 kHz steps, or ENTER to type an exact MHz value, 150–960 MHz);
+**LoRa SF** (7–12; 12 = maximum range and sensitivity, the default; lower = faster
+but shorter range); **LoRa BW** (62.5 / 125 / 250 kHz); **LoRa TX pwr** (0–22 dBm).
+Both ends must use the same frequency, SF and BW to hear each other.
 
 **Enabling the build.** The LoRa code is wrapped so the firmware compiles without
 the radio. To actually use it: install **RadioLib** (Arduino Library Manager →
@@ -2138,18 +2152,34 @@ to WiFi, the **Web control** row shows the address to open — for example
 
 - **Satellite selection** — pick one of your favourites from the drop-down and tap
   **Track** to make it active. (If you haven't marked any favourites, the list
-  falls back to the catalog.) The **★** button beside the selector adds or removes
-  the chosen satellite from your favourites, just like marking one on the device.
-- **Pass times** — the upcoming passes for the active satellite are listed with
-  AOS time, **peak** (time of closest approach), maximum elevation, duration, and
-  AOS→LOS azimuth, refreshed when you switch satellites.
+  falls back to the catalog.) A **filter box** narrows a long list as you type, and
+  the **★** button beside the selector adds or removes the chosen satellite from
+  your favourites, just like marking one on the device.
+- **In-pass indicator & AOS countdown** — the header shows a live **"IN PASS — LOS
+  in m:ss"** while the active satellite is up (with the peak elevation and time
+  under the sky plot), and a **"Next AOS in m:ss"** countdown otherwise, so you
+  know at a glance when to be ready.
+- **Live sky plot** — a polar plot (N up, elevation as distance from the rim) with
+  a moving dot showing the satellite's current azimuth/elevation, updated about
+  once a second. The dot hides while the satellite is below the horizon.
 - **Live readout** — downlink (RX) and uplink (TX) frequencies, azimuth/elevation,
   and the current tune mode, refreshed about once a second.
+- **Transponder selection** — a drop-down lists the active satellite's
+  transponders by name and mode; choosing one selects it on the device (the same
+  selection the `t` key cycles), so you can pick the FM channel or the linear
+  passband from your phone.
 - **Radio & rotator control** — buttons tune the passband down/up, step to the next
   transponder, cycle the Doppler tune mode, recenter the passband, toggle CAL, and
   switch **radio** and **rotator** output on/off. These do exactly what the
   corresponding keys do on the Track screen — the web page drives the same
   controls, it doesn't second-guess them.
+- **Direct calibration entry** — type an exact **RX cal** or **TX cal** offset in
+  Hz and tap **Set** to apply it (the value is saved per-satellite, the same as the
+  on-device calibration); **Zero cal** clears both. For a linear bird the current
+  passband position and bandwidth are shown. The displayed RX/TX dials are always
+  computed live from the transponder plus Doppler plus this calibration, so the
+  calibration is the operator-settable correction rather than a free-typed absolute
+  frequency.
 - **Manual (no-radio) tuning** — tap **Manual** to switch the control card to the
   hand-tuning calculator. It shows the **HOLD** leg (the frequency to park your own
   radio on) and the **TUNE** leg (the Doppler-corrected frequency to follow),
@@ -2159,13 +2189,13 @@ to WiFi, the **Web control** row shows the address to open — for example
 - **Orbital analysis** — tap **Orbit** for a read-only summary of the same numbers
   the on-device orbital-analysis pages compute: altitude and footprint, period,
   apogee/perigee, inclination/eccentricity, decay estimate, live range-rate and
-  sub-point, sunlit/eclipse state, beta angle and eclipse fraction, J2 node and
-  perigee drift (with a sun-synchronous flag), mean/true anomaly, time to
-  perigee/apogee, and the multi-day pass outlook with the best upcoming pass. It's
-  view-only — nothing on the device changes.
+  sub-point, sunlit/eclipse state, beta angle, J2 node and perigee drift (with a
+  sun-synchronous flag), mean/true anomaly, time to perigee/apogee, and the
+  multi-day pass outlook. It's view-only — nothing on the device changes.
 
-The web page coexists with the rigctld/rotctld servers and the normal on-device UI;
-the device keeps tracking and you can use its keypad at the same time.
+The page is **responsive** — a single column on a phone, and a two-column layout on
+a tablet or computer. It coexists with the rigctld/rotctld servers and the normal
+on-device UI; the device keeps tracking and you can use its keypad at the same time.
 
 > **Security.** This is plain **HTTP on the local network with no password** —
 > anyone who can reach your WiFi can open the page and operate the radio and

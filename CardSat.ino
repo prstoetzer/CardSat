@@ -1728,10 +1728,21 @@ struct Settings {
 
   // LoRa text messaging (CardSat-to-CardSat broadcast). Uses the Cap LoRa SX1262.
   bool     loraEnable  = false;     // bring the radio up at boot
-  uint32_t loraFreqKHz = 433775;    // carrier in kHz (433.775 MHz default)
+  // Region presets pick a legal amateur LoRa frequency/bandwidth for the operator:
+  //   0 = US  : 33cm amateur band (902-928 MHz). 70cm in the US is held to 100 kHz
+  //             occupied bandwidth, so 33cm is the home for 125 kHz LoRa. Default
+  //             906.875 MHz, clear of the busy 915 MHz ISM centre.
+  //   1 = EU  : 70cm amateur band (430-440 MHz). LoRa-APRS standard 433.775 MHz.
+  //   2 = JP  : 430 MHz amateur band (430-440 MHz). Japan's 920 MHz band is ISM,
+  //             not amateur, so amateur LoRa belongs on 430 MHz. Default 431.000.
+  // The operator can still set any frequency 150-960 MHz by hand after choosing a
+  // region; the region just seeds sensible, legal defaults.
+  uint8_t  loraRegion  = 0;         // 0 = US (default), 1 = EU, 2 = JP
+  uint32_t loraFreqKHz = 906875;    // carrier in kHz (US 33cm default, 906.875 MHz)
   uint8_t  loraSf      = 12;        // spreading factor 7..12 (12 = max range)
   uint32_t loraBwHz    = 125000;    // bandwidth in Hz (125 kHz standard)
   int8_t   loraTxDbm   = 20;        // TX power dBm (<=22 on SX1262)
+  void loraApplyRegion(uint8_t region);   // seed freq/BW from a region preset
 
   bool load();
   bool save();
@@ -2083,6 +2094,7 @@ private:
   int       dxdWin    = 0;            // which mutual window index this table is for
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
+  void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
   void dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
                    uint32_t& dxRx, uint32_t& dxTx);  // core per-step calculator
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
@@ -2104,6 +2116,7 @@ private:
   SatSatWin satsatWin[SATSAT_MAX];
   int       satsatN = 0;
   bool      satsatComputed = false;
+  bool      satsatPending = false;    // draw a "calculating" frame before the blocking compute
   void computeSatSat();
   void drawSatSat();
   void keySatSat(char c, bool enter, bool back);
@@ -2343,6 +2356,7 @@ private:
   void webdSendSatsJson();                     // GET /api/sats
   void webdSendPassesJson();                   // GET /api/passes
   void webdSendOrbitJson();                     // GET /api/orbit (orbital analysis)
+  void webdSendTxJson();                        // GET /api/tx (transponder list + current)
   bool webdSelectSat(uint32_t norad);          // POST /api/select
   void webdSendPage();                         // GET / (the mobile HTML page)
   void applyRotatorFromCfg();
@@ -6797,13 +6811,29 @@ bool Settings::load() {
   webEnable  = d["weben"] | false;
   webPort    = d["webport"] | (uint16_t)80;
   loraEnable = d["loraen"] | false;
-  loraFreqKHz= d["lorafk"] | (uint32_t)433775;
+  loraRegion = d["lorargn"] | (uint8_t)0;
+  loraFreqKHz= d["lorafk"] | (uint32_t)906875;
   loraSf     = d["lorasf"] | (uint8_t)12;
   loraBwHz   = d["lorabw"] | (uint32_t)125000;
   loraTxDbm  = d["loratx"] | (int8_t)20;
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
   return true;
+}
+
+// Seed a legal amateur LoRa frequency + bandwidth for a region preset. SF and TX
+// power are left as the operator set them; only the carrier and bandwidth move.
+//   US (0): 33cm band 902-928 MHz, 906.875 MHz @ 125 kHz.
+//   EU (1): 70cm band 430-440 MHz, 433.775 MHz @ 125 kHz (LoRa-APRS standard).
+//   JP (2): 430 MHz band 430-440 MHz, 431.000 MHz @ 125 kHz.
+void Settings::loraApplyRegion(uint8_t region) {
+  loraRegion = region;
+  switch (region) {
+    case 1: loraFreqKHz = 433775; loraBwHz = 125000; break;   // EU
+    case 2: loraFreqKHz = 431000; loraBwHz = 125000; break;   // JP
+    case 0:
+    default: loraRegion = 0; loraFreqKHz = 906875; loraBwHz = 125000; break; // US
+  }
 }
 
 bool Settings::save() {
@@ -6839,7 +6869,7 @@ bool Settings::save() {
   d["rigden"]=rigdEnable; d["rigdport"]=rigdPort;
   d["rotden"]=rotdEnable; d["rotdport"]=rotdPort;
   d["weben"]=webEnable; d["webport"]=webPort;
-  d["loraen"]=loraEnable; d["lorafk"]=loraFreqKHz; d["lorasf"]=loraSf;
+  d["loraen"]=loraEnable; d["lorargn"]=loraRegion; d["lorafk"]=loraFreqKHz; d["lorasf"]=loraSf;
   d["lorabw"]=loraBwHz; d["loratx"]=loraTxDbm;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
@@ -6915,6 +6945,29 @@ static String fmtMHzN(uint32_t hz, int maxDigits) {
   char b[20]; snprintf(b, sizeof(b), "%.*f", dp, m); return String(b);
 }
 static String fmtMHz(uint32_t hz) { return fmtMHzN(hz, 5); }
+
+// Escape a string for safe inclusion inside a JSON double-quoted value. Sat and
+// transponder names come straight from catalog/SatNOGS data and can contain
+// quotes, backslashes or stray control bytes; without escaping, one bad name
+// produces malformed JSON and breaks the whole web page.
+static String jsonEsc(const char* s) {
+  String o;
+  if (!s) return o;
+  for (const char* p = s; *p; ++p) {
+    unsigned char c = (unsigned char)*p;
+    switch (c) {
+      case '"':  o += "\\\""; break;
+      case '\\': o += "\\\\"; break;
+      case '\n': o += "\\n";  break;
+      case '\r': o += "\\r";  break;
+      case '\t': o += "\\t";  break;
+      default:
+        if (c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); o += b; }
+        else o += (char)c;
+    }
+  }
+  return o;
+}
 
 // Compact countdown: "45s", "12m", "1h05".
 static String fmtCountdown(long s) {
@@ -8593,149 +8646,176 @@ void App::rotdHandleLine(const String& lineIn) {
 
 static const char WEB_PAGE[] PROGMEM = R"HTMLPAGE(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CardSat</title>
 <style>
-:root{--bg:#0b0e13;--fg:#e6edf3;--mut:#8b96a5;--grn:#39d353;--org:#f0883e;--cy:#4ad;--pan:#161b22;--bd:#2a313c}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
-font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-header{padding:10px 14px;background:var(--pan);border-bottom:1px solid var(--bd);
-position:sticky;top:0;display:flex;align-items:center;gap:8px}
-header b{font-size:18px}.tag{margin-left:auto;font-size:12px;color:var(--mut)}
-main{padding:12px;max-width:560px;margin:0 auto}
-.card{background:var(--pan);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:12px}
-.freq{font-variant-numeric:tabular-nums;font-size:30px;font-weight:700;letter-spacing:.5px}
-.rx{color:var(--grn)}.tx{color:var(--org)}.lab{color:var(--mut);font-size:12px}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.row>*{flex:1}select,button{font:inherit;color:var(--fg);background:#1d242e;
-border:1px solid var(--bd);border-radius:10px;padding:12px;min-height:48px}
-button:active{background:#283040}.on{outline:2px solid var(--grn)}
-.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+:root{--bg:#0b0e13;--fg:#e6edf3;--mut:#8b96a5;--grn:#39d353;--org:#f0883e;--cy:#4ad;--pan:#161b22;--bd:#2a313c;--acc:#316dca}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:10px 14px;background:var(--pan);border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px}
+header b{font-size:18px}.tag{margin-left:auto;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums}.tag.pass{color:var(--grn);font-weight:600}
+main{padding:12px;max-width:980px;margin:0 auto}
+.cols{display:grid;grid-template-columns:1fr;gap:12px}
+@media(min-width:760px){.cols{grid-template-columns:1fr 1fr;align-items:start}.span2{grid-column:1/-1}}
+.card{background:var(--pan);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:0}
+.freq{font-variant-numeric:tabular-nums;font-size:clamp(26px,7vw,34px);font-weight:700;letter-spacing:.5px}
+.rx{color:var(--grn)}.tx{color:var(--org)}.lab{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row>*{flex:1}
+select,button,input{font:inherit;color:var(--fg);background:#1d242e;border:1px solid var(--bd);border-radius:10px;padding:12px;min-height:48px}
+input{width:100%}input:focus,select:focus{outline:2px solid var(--acc);border-color:var(--acc)}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}button:active{background:#283040}.on{outline:2px solid var(--grn)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}@media(max-width:420px){.grid{grid-template-columns:repeat(2,1fr)}}
 .az{font-size:22px;font-variant-numeric:tabular-nums}
-table{width:100%;border-collapse:collapse;font-size:14px}
-td,th{padding:6px 4px;border-bottom:1px solid var(--bd);text-align:left}
-th{color:var(--mut);font-weight:600}.mut{color:var(--mut)}
-.pill{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--bd)}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;border-bottom:1px solid var(--bd);text-align:left}th{color:var(--mut);font-weight:600}.mut{color:var(--mut)}
+.tools{display:flex;gap:8px;flex-wrap:wrap}.flt{flex:0 0 auto;width:auto;min-width:120px}
+.skywrap{display:flex;justify-content:center;padding:4px 0}svg{max-width:100%;height:auto}
+.hint{font-size:12px;color:var(--mut);margin-top:6px}
+.fld{display:flex;gap:8px;align-items:center;margin-top:8px}.fld label{flex:0 0 auto;width:84px;color:var(--mut);font-size:13px}.fld input{flex:1}.fld button{flex:0 0 auto;min-width:64px}
+.pillrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.sm{min-width:auto;min-height:auto;padding:8px 12px}
 </style></head><body>
 <header><b>CardSat</b><span class="tag" id="tag">connecting...</span></header>
 <main>
-<div class="card"><div class="row"><div>
-<select id="sat"></select></div>
-<button id="fav" style="flex:0 0 auto" title="favourite">&#9734;</button>
-<button id="go" style="flex:0 0 auto">Track</button></div></div>
+<div class="card span2"><div class="tools">
+<input id="search" placeholder="filter..." style="flex:1;min-width:120px">
+<select id="sat" style="flex:2;min-width:150px"></select>
+<button id="fav" class="flt" title="favourite">&#9734;</button>
+<button id="go" class="flt">Track</button></div></div>
+<div class="cols">
 <div class="card">
-<div class="lab">DOWNLINK (RX)</div><div class="freq rx" id="rx">--.-----</div>
-<div class="lab" style="margin-top:8px">UPLINK (TX)</div><div class="freq tx" id="tx">--.-----</div>
+<div class="lab">Downlink (RX)</div><div class="freq rx" id="rx">--.-----</div>
+<div class="lab" style="margin-top:8px">Uplink (TX)</div><div class="freq tx" id="tx">--.-----</div>
 <div class="row" style="margin-top:10px">
-<div class="az lab">Az <span id="az" class="fg">--</span>&deg;</div>
-<div class="az lab">El <span id="el" class="fg">--</span>&deg;</div>
-<div class="lab">Mode <span id="mode" class="fg">--</span></div></div></div>
-<div class="card"><div class="row" style="margin-bottom:8px">
-<button id="mRadio" class="on" style="flex:1">Radio</button>
-<button id="mMan" style="flex:1">Manual</button>
-<button id="mOrb" style="flex:1">Orbit</button></div>
-<div id="radCtl" class="grid">
+<div class="az lab">Az <span id="az" style="color:var(--fg)">--</span>&deg;</div>
+<div class="az lab">El <span id="el" style="color:var(--fg)">--</span>&deg;</div>
+<div class="lab">Mode <span id="mode" style="color:var(--fg)">--</span></div></div>
+<div class="skywrap"><svg id="sky" viewBox="0 0 220 220" width="220" height="220" role="img" aria-label="sky plot">
+<circle cx="110" cy="110" r="100" fill="#0d1117" stroke="#2a313c"/>
+<circle cx="110" cy="110" r="66" fill="none" stroke="#222a35"/>
+<circle cx="110" cy="110" r="33" fill="none" stroke="#222a35"/>
+<line x1="110" y1="10" x2="110" y2="210" stroke="#222a35"/><line x1="10" y1="110" x2="210" y2="110" stroke="#222a35"/>
+<text x="110" y="22" fill="#8b96a5" font-size="11" text-anchor="middle">N</text>
+<text x="110" y="206" fill="#8b96a5" font-size="11" text-anchor="middle">S</text>
+<text x="200" y="114" fill="#8b96a5" font-size="11" text-anchor="middle">E</text>
+<text x="20" y="114" fill="#8b96a5" font-size="11" text-anchor="middle">W</text>
+<polyline id="arc" fill="none" stroke="#316dca" stroke-width="2" opacity=".7" points=""/>
+<circle id="dot" cx="110" cy="110" r="6" fill="#39d353" stroke="#0b0e13" stroke-width="2" style="display:none"/>
+</svg></div>
+<div class="hint" id="aos">&mdash;</div></div>
+<div class="card">
+<div class="row" style="margin-bottom:8px">
+<button id="mRadio" class="on">Radio</button><button id="mMan">Manual</button><button id="mOrb">Orbit</button></div>
+<div id="radCtl">
+<div class="lab">Transponder</div>
+<select id="tpsel" style="width:100%;margin-top:4px"></select>
+<div class="grid" style="margin-top:10px">
 <button data-k=",">Tune -</button><button data-k="/">Tune +</button>
 <button data-k="t">TX&#x2192;</button><button data-k="d">Mode</button>
 <button id="brad" data-k="r">Radio</button><button id="brot" data-k="o">Rotator</button>
-<button data-k="m">CAL</button><button data-k="x">Center</button>
-</div>
+<button data-k="m">CAL</button><button data-k="x">Center</button></div>
+<div class="lab" style="margin-top:12px">Direct calibration (Hz)</div>
+<div class="fld"><label for="caldl">RX cal</label><input id="caldl" type="number" inputmode="numeric" step="100" placeholder="0"><button id="setdl">Set</button></div>
+<div class="fld"><label for="calul">TX cal</label><input id="calul" type="number" inputmode="numeric" step="100" placeholder="0"><button id="setul">Set</button></div>
+<div class="hint" id="pbline"></div>
+<div class="pillrow"><button id="calzero" class="flt sm">Zero cal</button></div></div>
 <div id="manCtl" style="display:none">
-<div class="lab" id="mhl">HOLD</div>
-<div class="freq" id="hold" style="color:#fff">--.-----</div>
-<div class="lab" id="mtl" style="margin-top:8px">TUNE &#x2192;</div>
-<div class="freq" id="mtune" style="color:var(--cy)">--.-----</div>
+<div class="lab" id="mhl">HOLD</div><div class="freq" id="hold" style="color:#fff">--.-----</div>
+<div class="lab" id="mtl" style="margin-top:8px">TUNE &#x2192;</div><div class="freq" id="mtune" style="color:var(--cy)">--.-----</div>
 <div class="grid" style="margin-top:10px">
 <button data-m=",">Tune -</button><button data-m="/">Tune +</button>
 <button data-m="u">Swap leg</button><button data-m="t">TX&#x2192;</button>
-<button data-m="m">CAL</button><button data-m="x">Center</button></div>
-</div>
+<button data-m="m">CAL</button><button data-m="x">Center</button></div></div>
 <div id="orbCtl" style="display:none">
-<div class="lab">ORBITAL ANALYSIS</div>
-<table id="orbTbl"><tr><td class="mut">&mdash;</td></tr></table>
-</div></div>
-<div class="card"><div class="lab" style="margin-bottom:6px">UPCOMING PASSES</div>
+<div class="lab">Orbital analysis</div>
+<table id="orbTbl"><tr><td class="mut">&mdash;</td></tr></table></div></div>
+<div class="card span2"><div class="lab" style="margin-bottom:6px">Upcoming passes</div>
 <table id="passes"><tr><td class="mut">&mdash;</td></tr></table></div>
-</main>
+</div></main>
 <script>
-var lastSat=0,man=false,mode='rad';
+var lastSat=0,mode='rad',passList=[],lastTxKey='';
 function j(u,o){return fetch(u,o).then(r=>r.json())}
 function pad(n){return(n<10?'0':'')+n}
 function hhmm(t){var d=new Date(t*1000);return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+'Z'}
-function dur(s){var m=Math.round(s/60);return m+'m'}
-function setMode(m){mode=m;man=(m=='man');
-document.getElementById('mRadio').classList.toggle('on',m=='rad');
-document.getElementById('mMan').classList.toggle('on',m=='man');
-document.getElementById('mOrb').classList.toggle('on',m=='orb');
-document.getElementById('radCtl').style.display=(m=='rad')?'':'none';
-document.getElementById('manCtl').style.display=(m=='man')?'':'none';
-document.getElementById('orbCtl').style.display=(m=='orb')?'':'none';
+function dur(s){return Math.round(s/60)+'m'}
+function ms(s){s=Math.max(0,Math.round(s));return Math.floor(s/60)+':'+pad(s%60)}
+function gid(i){return document.getElementById(i)}
+function setMode(m){mode=m;
+gid('mRadio').classList.toggle('on',m=='rad');gid('mMan').classList.toggle('on',m=='man');gid('mOrb').classList.toggle('on',m=='orb');
+gid('radCtl').style.display=(m=='rad')?'':'none';gid('manCtl').style.display=(m=='man')?'':'none';gid('orbCtl').style.display=(m=='orb')?'':'none';
 if(m=='orb')orbit()}
 function orow(k,v){return '<tr><td class="mut">'+k+'</td><td>'+v+'</td></tr>'}
-function orbit(){j('/api/orbit').then(o=>{var t=document.getElementById('orbTbl');
+function orbit(){j('/api/orbit').then(o=>{var t=gid('orbTbl');
 if(!o.ok){t.innerHTML='<tr><td class="mut">need clock + elements</td></tr>';return}
-var h='';
-h+=orow('Altitude',Math.round(o.alt)+' km');
-h+=orow('Footprint',Math.round(o.footprint)+' km');
-h+=orow('Period',o.period+' min');
-h+=orow('Apo/Peri',Math.round(o.apo)+'/'+Math.round(o.peri)+' km');
-h+=orow('Incl/Ecc',o.incl+' / '+o.ecc);
-h+=orow('Decay',o.decayDays<0?'n/a':(o.decayDays>36500?'stable':o.decayDays+' d'));
-h+=orow('Range rate',o.rangeRate+' km/s');
-h+=orow('Sublat/lon',o.subLat+', '+o.subLon);
-h+=orow('Sunlit',o.sunlit?'yes':'eclipse');
-h+=orow('Beta',o.beta+'\u00b0 (\u00b1'+o.betaStar+' full-sun)');
-h+=orow('Eclipse',o.eclFrac>0?o.eclFrac+'%/orbit':'none');
+var h='';h+=orow('Altitude',Math.round(o.alt)+' km');h+=orow('Footprint',Math.round(o.footprint)+' km');
+h+=orow('Period',o.period+' min');h+=orow('Apo/Peri',Math.round(o.apo)+'/'+Math.round(o.peri)+' km');
+h+=orow('Incl/Ecc',o.incl+' / '+o.ecc);h+=orow('Decay',o.decayDays<0?'n/a':(o.decayDays>36500?'stable':o.decayDays+' d'));
+h+=orow('Range rate',o.rangeRate+' km/s');h+=orow('Sublat/lon',o.subLat+', '+o.subLon);
+h+=orow('Sunlit',o.sunlit?'yes':'eclipse');h+=orow('Beta',o.beta+'\u00b0');
 h+=orow('Node drift',o.nodeDrift+'\u00b0/day'+(o.sunSync?' (sun-sync)':''));
-h+=orow('Perig drift',o.perigDrift+'\u00b0/day');
-h+=orow('Mean anom',o.meanAnom+'\u00b0');
-h+=orow('True anom',o.trueAnom+'\u00b0');
+h+=orow('Mean/True anom',o.meanAnom+'\u00b0 / '+o.trueAnom+'\u00b0');
 h+=orow('To peri/apo',Math.round(o.toPeri/60)+'/'+Math.round(o.toApo/60)+' min');
 if(o.outlookN)h+=orow('Outlook',o.outlookN+' passes, '+o.outlookHi+' >30\u00b0');
-if(o.bestEl)h+=orow('Best pass',Math.round(o.bestEl)+'\u00b0, '+o.longestMin+' min max');
-t.innerHTML=h})}
-function loadSats(){j('/api/sats').then(a=>{var s=document.getElementById('sat');
-s.innerHTML='';a.forEach(x=>{var o=document.createElement('option');o.value=x.n;
-o.dataset.fav=x.fav?1:0;
-o.textContent=x.name+(x.fav?' \u2605':'');s.appendChild(o)});reflectFav()})}
-function reflectFav(){var s=document.getElementById('sat');var o=s.options[s.selectedIndex];
-document.getElementById('fav').innerHTML=(o&&o.dataset.fav=='1')?'\u2605':'\u2606'}
-function passes(){j('/api/passes').then(a=>{var t=document.getElementById('passes');
+t.innerHTML=h;
+if(o.track&&o.track.length){drawArc(o.track)}})}
+function aedom(az,el){var r=100*(90-Math.max(0,el))/90,a=az*Math.PI/180;return[110+r*Math.sin(a),110-r*Math.cos(a)]}
+function drawArc(track){/*track are sublat/lon, not az/el; skip arc unless az/el avail*/}
+function loadSats(){j('/api/sats').then(a=>{window._sats=a;renderSats('')})}
+function renderSats(q){var s=gid('sat');var cur=s.value;s.innerHTML='';
+(window._sats||[]).filter(x=>!q||x.name.toLowerCase().indexOf(q)>=0).forEach(x=>{
+var o=document.createElement('option');o.value=x.n;o.dataset.fav=x.fav?1:0;
+o.textContent=x.name+(x.fav?' \u2605':'');if(x.n==cur)o.selected=true;s.appendChild(o)});reflectFav()}
+function reflectFav(){var s=gid('sat');var o=s.options[s.selectedIndex];gid('fav').innerHTML=(o&&o.dataset.fav=='1')?'\u2605':'\u2606'}
+function loadTx(){j('/api/tx').then(o=>{var s=gid('tpsel');s.innerHTML='';
+o.list.forEach(x=>{var op=document.createElement('option');op.value=x.i;
+op.textContent=x.d+(x.m?(' ('+x.m+')'):'');if(x.i==o.cur)op.selected=true;s.appendChild(op)});
+if(!o.list.length){var op=document.createElement('option');op.textContent='(none)';s.appendChild(op)}})}
+function passes(){j('/api/passes').then(a=>{passList=a;var t=gid('passes');
 if(!a.length){t.innerHTML='<tr><td class="mut">no passes</td></tr>';return}
 var h='<tr><th>AOS</th><th>Peak</th><th>El</th><th>Dur</th><th>Az</th></tr>';
-a.forEach(p=>{h+='<tr><td>'+hhmm(p.aos)+'</td><td>'+hhmm(p.tca)+'</td><td>'+p.el+'&deg;</td><td>'+dur(p.los-p.aos)
-+'</td><td>'+p.azaos+'&rarr;'+p.azlos+'</td></tr>'});t.innerHTML=h})}
-function tick(){j('/api/status').then(s=>{
-document.getElementById('tag').textContent=s.name||'no sat';
-document.getElementById('rx').textContent=s.rx;document.getElementById('tx').textContent=s.tx;
-document.getElementById('az').textContent=Math.round(s.az);
-document.getElementById('el').textContent=Math.round(s.el);
-document.getElementById('mode').textContent=s.mode;
-document.getElementById('brad').classList.toggle('on',s.radio);
-document.getElementById('brot').classList.toggle('on',s.rot);
-document.getElementById('hold').textContent=s.hold;
-document.getElementById('mtune').textContent=s.tune;
-document.getElementById('mhl').textContent=s.fixup?'HOLD uplink (park TX here)':'HOLD downlink (park RX here)';
-document.getElementById('mtl').textContent=s.fixup?'TUNE \u2192 downlink (follow)':'TUNE \u2192 uplink (follow)';
+a.forEach(p=>{h+='<tr><td>'+hhmm(p.aos)+'</td><td>'+hhmm(p.tca)+'</td><td>'+p.el+'&deg;</td><td>'+dur(p.los-p.aos)+'</td><td>'+p.azaos+'&rarr;'+p.azlos+'</td></tr>'});
+t.innerHTML=h})}
+function updCountdown(){var tag=gid('tag'),aos=gid('aos'),now=Date.now()/1000;
+if(!passList.length){return}
+var p=passList[0];
+if(now>=p.aos&&now<=p.los){tag.textContent='IN PASS \u2014 LOS in '+ms(p.los-now);tag.classList.add('pass');aos.textContent='Max el '+p.el+'\u00b0 at '+hhmm(p.tca)}
+else if(now<p.aos){tag.classList.remove('pass');var nm=document.title;tag.textContent=(window._satname||'')||'idle';aos.textContent='Next AOS in '+ms(p.aos-now)+' ('+hhmm(p.aos)+', max '+p.el+'\u00b0)'}
+else{aos.textContent='\u2014'}}
+function tick(){j('/api/status').then(s=>{window._satname=s.name;
+gid('tag').classList.contains('pass')||(gid('tag').textContent=s.name||'no sat');
+gid('rx').textContent=s.rx;gid('tx').textContent=s.tx;
+gid('az').textContent=Math.round(s.az);gid('el').textContent=Math.round(s.el);
+gid('mode').textContent=s.mode;
+gid('brad').classList.toggle('on',s.radio);gid('brot').classList.toggle('on',s.rot);
+gid('hold').textContent=s.hold;gid('mtune').textContent=s.tune;
+gid('mhl').textContent=s.fixup?'HOLD uplink (park TX here)':'HOLD downlink (park RX here)';
+gid('mtl').textContent=s.fixup?'TUNE \u2192 downlink (follow)':'TUNE \u2192 uplink (follow)';
+/* sky dot */
+var dot=gid('dot');if(s.el>=0&&(s.az||s.el)){var p=aedom(s.az,s.el);dot.setAttribute('cx',p[0].toFixed(1));dot.setAttribute('cy',p[1].toFixed(1));dot.style.display=''}else{dot.style.display='none'}
+/* cal placeholders */
+if(document.activeElement!=gid('caldl'))gid('caldl').placeholder=s.caldl;
+if(document.activeElement!=gid('calul'))gid('calul').placeholder=s.calul;
+gid('pbline').textContent=s.lin?('Linear passband: '+Math.round(s.pbOff/1000)+' / '+Math.round(s.pbBw/1000)+' kHz'):'';
+/* transponder dropdown sync */
+var key=s.norad+':'+s.txn;if(key!=lastTxKey){lastTxKey=key;loadTx()}else{var ts=gid('tpsel');if(ts.value!=s.txi&&s.txi>=0)ts.value=s.txi}
 if(s.norad&&s.norad!=lastSat){lastSat=s.norad;passes()}
-}).catch(e=>{document.getElementById('tag').textContent='offline'})}
-document.getElementById('go').onclick=function(){
-var n=document.getElementById('sat').value;
-j('/api/select?norad='+n,{method:'POST'}).then(()=>{lastSat=0;tick()})}
-document.getElementById('sat').onchange=reflectFav;
-document.getElementById('fav').onclick=function(){
-var s=document.getElementById('sat');var o=s.options[s.selectedIndex];if(!o)return;
+updCountdown();
+}).catch(e=>{gid('tag').textContent='offline';gid('tag').classList.remove('pass')})}
+gid('go').onclick=function(){var n=gid('sat').value;j('/api/select?norad='+n,{method:'POST'}).then(()=>{lastSat=0;lastTxKey='';tick()})}
+gid('search').oninput=function(){renderSats(this.value.toLowerCase())}
+gid('sat').onchange=reflectFav;
+gid('fav').onclick=function(){var s=gid('sat'),o=s.options[s.selectedIndex];if(!o)return;
 j('/api/fav?norad='+o.value,{method:'POST'}).then(r=>{o.dataset.fav=r.fav?1:0;
 o.textContent=o.textContent.replace(/ \u2605$/,'')+(r.fav?' \u2605':'');reflectFav()})}
-document.getElementById('mRadio').onclick=function(){setMode('rad')}
-document.getElementById('mMan').onclick=function(){setMode('man')}
-document.getElementById('mOrb').onclick=function(){setMode('orb')}
-document.querySelectorAll('button[data-k]').forEach(b=>{b.onclick=function(){
-j('/api/cmd?k='+encodeURIComponent(b.dataset.k),{method:'POST'}).then(tick)}})
-document.querySelectorAll('button[data-m]').forEach(b=>{b.onclick=function(){
-j('/api/cmd?man=1&k='+encodeURIComponent(b.dataset.m),{method:'POST'}).then(tick)}})
-loadSats();tick();setInterval(tick,1500);
-</script></body></html>)HTMLPAGE";
+gid('tpsel').onchange=function(){j('/api/tx?i='+this.value,{method:'POST'}).then(tick)}
+gid('setdl').onclick=function(){var v=gid('caldl').value;if(v==='')return;j('/api/cal?dl='+parseInt(v,10),{method:'POST'}).then(()=>{gid('caldl').value='';tick()})}
+gid('setul').onclick=function(){var v=gid('calul').value;if(v==='')return;j('/api/cal?ul='+parseInt(v,10),{method:'POST'}).then(()=>{gid('calul').value='';tick()})}
+gid('calzero').onclick=function(){j('/api/cal?dl=0&ul=0',{method:'POST'}).then(tick)}
+gid('mRadio').onclick=function(){setMode('rad')}
+gid('mMan').onclick=function(){setMode('man')}
+gid('mOrb').onclick=function(){setMode('orb')}
+document.querySelectorAll('button[data-k]').forEach(b=>{b.onclick=function(){j('/api/cmd?k='+encodeURIComponent(b.dataset.k),{method:'POST'}).then(tick)}})
+document.querySelectorAll('button[data-m]').forEach(b=>{b.onclick=function(){j('/api/cmd?man=1&k='+encodeURIComponent(b.dataset.m),{method:'POST'}).then(tick)}})
+loadSats();tick();setInterval(tick,1500);setInterval(updCountdown,1000);
+</script></body></html>
+)HTMLPAGE";
 
 // Tear down the three LAN listeners (rigctld, rotctld, web) and their connected
 // clients, freeing their sockets. The ESP32 has a small LWIP socket pool and TLS
@@ -8845,6 +8925,38 @@ void App::webdHandleRequest(const String& reqLine) {
   if (path.startsWith("/api/sats"))   { webdSendSatsJson();   return; }
   if (path.startsWith("/api/passes")) { webdSendPassesJson(); return; }
   if (path.startsWith("/api/orbit"))  { webdSendOrbitJson();  return; }
+  if (path == "/api/tx" || path.startsWith("/api/tx?")) {
+    if (method != "POST") { webdSendTxJson(); return; }
+    // POST /api/tx?i=N -- select transponder by index
+    int q = path.indexOf("i=");
+    int i = (q >= 0) ? (int)strtol(path.c_str() + q + 2, nullptr, 10) : -1;
+    bool ok = false;
+    if (i >= 0 && i < activeTxCount) { curTx = i; onTransponderChanged(); lastDrawMs = 0; ok = true; }
+    webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                    "Connection:close\r\n\r\n"));
+    webdCli.print(ok ? F("{\"ok\":true}") : F("{\"ok\":false}"));
+    return;
+  }
+  if (method == "POST" && path.startsWith("/api/cal")) {
+    // POST /api/cal?dl=N&ul=N -- set RX/TX calibration directly (Hz). Either may
+    // be omitted; values clamp to a sane +/-100 kHz to avoid fat-finger errors.
+    auto getHz = [&](const char* key, int32_t cur)->int32_t {
+      String k = String(key) + "=";
+      int q = path.indexOf(k);
+      if (q < 0) return cur;
+      long v = strtol(path.c_str() + q + k.length(), nullptr, 10);
+      if (v < -100000) v = -100000; if (v > 100000) v = 100000;
+      return (int32_t)v;
+    };
+    calDl = getHz("dl", calDl);
+    calUl = getHz("ul", calUl);
+    cfg.calDlHz = calDl; cfg.calUlHz = calUl; cfg.save();
+    { SatEntry* cs = activeSat(); if (cs) saveCalForSat(cs->norad); }
+    lastDrawMs = 0;
+    webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                    "Connection:close\r\n\r\n{\"ok\":true}"));
+    return;
+  }
 
   if (method == "POST" && path.startsWith("/api/select")) {
     int q = path.indexOf("norad=");
@@ -8958,7 +9070,7 @@ void App::webdSendStatusJson() {
   webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
                   "Connection:close\r\n\r\n"));
   String j = "{";
-  j += "\"name\":\""; j += (s ? s->name : ""); j += "\",";
+  j += "\"name\":\""; j += jsonEsc(s ? s->name : ""); j += "\",";
   j += "\"norad\":"; j += (s ? s->norad : 0); j += ",";
   j += "\"rx\":\""; j += (activeTxCount > 0 ? fmtMHz(rx) : String("--.-----")); j += "\",";
   j += "\"tx\":\""; j += ((activeTxCount > 0 && ulOp) ? fmtMHz(tx) : String("--.-----")); j += "\",";
@@ -8969,6 +9081,19 @@ void App::webdSendStatusJson() {
   j += "\"rot\":"; j += (rotOut ? "true" : "false"); j += ",";
   j += "\"fixup\":"; j += (fixUp ? "true" : "false"); j += ",";
   j += "\"haveup\":"; j += (haveUp ? "true" : "false"); j += ",";
+  // Transponder context for the web radio panel: current index, count, the
+  // current transponder's label, and the linear passband position (Hz from the
+  // low edge) + total bandwidth so the page can show/set the operating point.
+  j += "\"txi\":"; j += (activeTxCount > 0 ? curTx : -1); j += ",";
+  j += "\"txn\":"; j += activeTxCount; j += ",";
+  j += "\"txd\":\""; j += (activeTxCount > 0 ? jsonEsc(activeTx[curTx].desc) : String("")); j += "\",";
+  { uint32_t bw = (activeTxCount > 0) ? activeTx[curTx].bandwidth() : 0;
+    bool lin = (activeTxCount > 0) && activeTx[curTx].isLinear && bw > 0;
+    j += "\"lin\":"; j += (lin ? "true" : "false"); j += ",";
+    j += "\"pbOff\":"; j += (long)pbOffset; j += ",";
+    j += "\"pbBw\":"; j += (long)bw; j += ","; }
+  j += "\"caldl\":"; j += (long)calDl; j += ",";
+  j += "\"calul\":"; j += (long)calUl; j += ",";
   j += "\"hold\":\""; j += (holdHz ? fmtMHz(holdHz) : String("--.-----")); j += "\",";
   j += "\"tune\":\""; j += (tuneHz ? fmtMHz(tuneHz) : String("--.-----")); j += "\"";
   j += "}";
@@ -8985,7 +9110,7 @@ void App::webdSendSatsJson() {
     if (idx < 0) continue;
     SatEntry& s = db.at(idx);
     if (any) webdCli.print(',');
-    String o = "{\"n\":"; o += s.norad; o += ",\"name\":\""; o += s.name; o += "\",\"fav\":true}";
+    String o = "{\"n\":"; o += s.norad; o += ",\"name\":\""; o += jsonEsc(s.name); o += "\",\"fav\":true}";
     webdCli.print(o); any = true; emitted++;
   }
   if (!any) {
@@ -8993,7 +9118,7 @@ void App::webdSendSatsJson() {
     for (int i = 0; i < n && emitted < 60; ++i) {
       SatEntry& s = db.at(i);
       if (any) webdCli.print(',');
-      String o = "{\"n\":"; o += s.norad; o += ",\"name\":\""; o += s.name;
+      String o = "{\"n\":"; o += s.norad; o += ",\"name\":\""; o += jsonEsc(s.name);
       o += "\",\"fav\":"; o += (isFav(s.norad) ? "true" : "false"); o += "}";
       webdCli.print(o); any = true; emitted++;
     }
@@ -9163,6 +9288,24 @@ bool App::webdSelectSat(uint32_t norad) {
   ensureTransponders(s);
   onTransponderChanged();
   return true;
+}
+
+// GET /api/tx -- the transponder list for the active satellite, plus the current
+// index, so the web radio panel can show a labelled dropdown and select by index.
+void App::webdSendTxJson() {
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                  "Connection:close\r\n\r\n"));
+  String j = "{\"cur\":"; j += (activeTxCount > 0 ? curTx : -1);
+  j += ",\"list\":[";
+  for (int i = 0; i < activeTxCount; ++i) {
+    if (i) j += ',';
+    j += "{\"i\":"; j += i;
+    j += ",\"d\":\""; j += jsonEsc(activeTx[i].desc); j += "\"";
+    j += ",\"m\":\""; j += jsonEsc(activeTx[i].mode); j += "\"";
+    j += ",\"lin\":"; j += (activeTx[i].isLinear ? "true" : "false"); j += "}";
+  }
+  j += "]}";
+  webdCli.print(j);
 }
 
 // ---------------------------------------------------------------------------
@@ -9991,7 +10134,7 @@ void App::keySatList(char c, bool enter, bool back) {
     return;
   }
   if (c == 'k' && viewN > 0) {                      // OSCARLOCATOR live polar view
-    oscarMode = 0; oscarArcN = 0; oscarArcTriedMs = 0; screen = SCR_OSCAR; lastDrawMs = 0;
+    oscarMode = 1; oscarArcN = 0; oscarArcTriedMs = 0; screen = SCR_OSCAR; lastDrawMs = 0;
     return;
   }
   if (c == '3' && viewN > 0) {                      // 3D globe view (auto-follow)
@@ -9999,7 +10142,7 @@ void App::keySatList(char c, bool enter, bool back) {
     return;
   }
   if (c == '2' && viewN > 0) {                      // sat-to-sat visibility finder
-    satsatOther = 0; satsatSel = 0; satsatComputed = false; screen = SCR_SATSAT; lastDrawMs = 0;
+    satsatOther = 0; satsatSel = 0; satsatComputed = false; satsatPending = true; screen = SCR_SATSAT; lastDrawMs = 0;
     return;
   }
   if (c == 'd' && viewN > 0) {                      // 10-day pass overview
@@ -10419,6 +10562,7 @@ void App::keyMutual(char c, bool enter, bool back) {
     if (c == 'd' || enter) {                 // Doppler table for this window
       if (!activeSat()) { setStatus("No satellite"); return; }
       dxdWin = mutualSel; dxdRow = 0;
+      dxdCenterPassband();                   // start at the centre of a linear passband
       screen = SCR_DXDOPP; lastDrawMs = 0;
       return;
     }
@@ -10442,6 +10586,20 @@ void App::keyMutual(char c, bool enter, bool back) {
 //  The anchor (whose dial is fixed, or whose passband point you set in true rule)
 //  is one of: my RX, my TX, DX RX, DX TX.
 // ===========================================================================
+
+// Set the DX Doppler passband operating point to the centre of the currently
+// selected transponder. For a linear (tunable-passband) transponder that is the
+// middle of the downlink passband (bandwidth/2 from the low edge); for an FM or
+// single-channel transponder there is no passband to offset, so it is 0. This
+// mirrors onTransponderChanged() so the DX Doppler table opens on the same
+// nominal channel the on-device tracker would centre on.
+void App::dxdCenterPassband() {
+  if (activeTxCount > 0) {
+    Transponder& t = activeTx[curTx];
+    if (t.isLinear && t.bandwidth() > 0) { dxdPbOff = (int32_t)(t.bandwidth() / 2); return; }
+  }
+  dxdPbOff = 0;
+}
 
 // Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
 void App::dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
@@ -10599,7 +10757,7 @@ void App::keyDxDopp(char c, bool enter, bool back) {
 
   if (c == 'm') { dxdMode = (dxdMode + 1) % 3; lastDrawMs = 0; return; }
   if (c == 't') {                                  // cycle the selected transponder
-    if (activeTxCount > 0) { curTx = (curTx + 1) % activeTxCount; dxdPbOff = 0; }
+    if (activeTxCount > 0) { curTx = (curTx + 1) % activeTxCount; dxdCenterPassband(); }
     lastDrawMs = 0; return;
   }
   if (c == 'a') { dxdAnchor = (dxdAnchor + 1) % 4; lastDrawMs = 0; return; }
@@ -10842,7 +11000,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,54,48,49,25,43};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,55,56,57,58,59,27,28,29};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
   (int)(sizeof(SET_RADIO)/sizeof(int)), (int)(sizeof(SET_ROTOR)/sizeof(int)),
@@ -10903,6 +11061,10 @@ void App::keySettings(char c, bool enter, bool back) {
                                                  cfg.loraBwHz, cfg.loraTxDbm); } break;
       case 59: { int p = (int)cfg.loraTxDbm + dir; if (p < 0) p = 0; if (p > 22) p = 22;
                  cfg.loraTxDbm = (int8_t)p; cfg.save();
+                 if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                                 cfg.loraBwHz, cfg.loraTxDbm); } break;
+      case 60: { int r = ((int)cfg.loraRegion + dir + 3) % 3;
+                 cfg.loraApplyRegion((uint8_t)r); cfg.save();
                  if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
                                                  cfg.loraBwHz, cfg.loraTxDbm); } break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
@@ -11008,6 +11170,12 @@ void App::keySettings(char c, bool enter, bool back) {
                                                  cfg.loraBwHz, cfg.loraTxDbm); } break;
       case 59: editTarget = 702; editTitle = "LoRa TX power (dBm 0-22)";
                editBuf = String(cfg.loraTxDbm); screen = SCR_EDIT; break;
+      case 60: { int r = ((int)cfg.loraRegion + 1) % 3;
+                 cfg.loraApplyRegion((uint8_t)r); cfg.save();
+                 if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                                 cfg.loraBwHz, cfg.loraTxDbm);
+                 setStatus(r == 0 ? "US 33cm 906.875" : r == 1 ? "EU 70cm 433.775"
+                                                               : "JP 430 431.000"); } break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
@@ -13919,6 +14087,22 @@ void App::drawSatSat() {
     canvas.setCursor(6, 62); canvas.print("with 'f' to pick a 2nd.");
     footer("` back"); return;
   }
+  // Show a status frame first, THEN compute on the following frame, so the
+  // "Calculating" message is actually painted before the (multi-second) blocking
+  // search runs instead of the screen appearing frozen during it.
+  if (satsatPending) {
+    int bIdx = db.indexOfNorad(favs[satsatOther]);
+    const char* bName = (bIdx >= 0) ? db.at(bIdx).name : "?";
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("Calculating windows...");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 64); canvas.printf("vs %.20s", bName);
+    canvas.setCursor(6, 78); canvas.print("(searching 3 days)");
+    footer("` back");
+    satsatPending = false;       // compute on the next frame
+    lastDrawMs = 0;              // force an immediate redraw to run the compute
+    return;
+  }
   if (!satsatComputed) computeSatSat();
 
   // Which 2nd sat.
@@ -13967,9 +14151,9 @@ void App::keySatSat(char c, bool enter, bool back) {
   if (favN == 0) return;
   if (c == 'n') {                             // cycle the 2nd satellite
     satsatOther = (satsatOther + 1) % favN;
-    satsatComputed = false; lastDrawMs = 0; return;
+    satsatComputed = false; satsatPending = true; lastDrawMs = 0; return;
   }
-  if (c == 'r') { satsatComputed = false; lastDrawMs = 0; return; }   // recompute
+  if (c == 'r') { satsatComputed = false; satsatPending = true; lastDrawMs = 0; return; }   // recompute
   if (isUp(c))   { if (satsatSel > 0) satsatSel--; lastDrawMs = 0; }
   if (isDown(c)) { if (satsatSel < satsatN - 1) satsatSel++; lastDrawMs = 0; }
 }
@@ -16883,7 +17067,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 60;
+  const int N = 61;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -16905,6 +17089,8 @@ void App::drawSettings() {
   rows[57] = String("LoRa SF: ") + String(cfg.loraSf);
   rows[58] = String("LoRa BW: ") + String(cfg.loraBwHz / 1000) + " kHz";
   rows[59] = String("LoRa TX pwr: ") + String(cfg.loraTxDbm) + " dBm";
+  { const char* rg = (cfg.loraRegion == 1) ? "EU 70cm" : (cfg.loraRegion == 2) ? "JP 430" : "US 33cm";
+    rows[60] = String("LoRa region: ") + rg; }
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
   rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
                      : cfg.rotType == ROT_NET ? "rotctl (net)"

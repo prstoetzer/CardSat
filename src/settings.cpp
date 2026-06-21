@@ -90,13 +90,29 @@ bool Settings::load() {
   webEnable  = d["weben"] | false;
   webPort    = d["webport"] | (uint16_t)80;
   loraEnable = d["loraen"] | false;
-  loraFreqKHz= d["lorafk"] | (uint32_t)433775;
+  loraRegion = d["lorargn"] | (uint8_t)0;
+  loraFreqKHz= d["lorafk"] | (uint32_t)906875;
   loraSf     = d["lorasf"] | (uint8_t)12;
   loraBwHz   = d["lorabw"] | (uint32_t)125000;
   loraTxDbm  = d["loratx"] | (int8_t)20;
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
   return true;
+}
+
+// Seed a legal amateur LoRa frequency + bandwidth for a region preset. SF and TX
+// power are left as the operator set them; only the carrier and bandwidth move.
+//   US (0): 33cm band 902-928 MHz, 906.875 MHz @ 125 kHz.
+//   EU (1): 70cm band 430-440 MHz, 433.775 MHz @ 125 kHz (LoRa-APRS standard).
+//   JP (2): 430 MHz band 430-440 MHz, 431.000 MHz @ 125 kHz.
+void Settings::loraApplyRegion(uint8_t region) {
+  loraRegion = region;
+  switch (region) {
+    case 1: loraFreqKHz = 433775; loraBwHz = 125000; break;   // EU
+    case 2: loraFreqKHz = 431000; loraBwHz = 125000; break;   // JP
+    case 0:
+    default: loraRegion = 0; loraFreqKHz = 906875; loraBwHz = 125000; break; // US
+  }
 }
 
 bool Settings::save() {
@@ -132,7 +148,7 @@ bool Settings::save() {
   d["rigden"]=rigdEnable; d["rigdport"]=rigdPort;
   d["rotden"]=rotdEnable; d["rotdport"]=rotdPort;
   d["weben"]=webEnable; d["webport"]=webPort;
-  d["loraen"]=loraEnable; d["lorafk"]=loraFreqKHz; d["lorasf"]=loraSf;
+  d["loraen"]=loraEnable; d["lorargn"]=loraRegion; d["lorafk"]=loraFreqKHz; d["lorasf"]=loraSf;
   d["lorabw"]=loraBwHz; d["loratx"]=loraTxDbm;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;

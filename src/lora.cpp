@@ -13,7 +13,14 @@
 #include <Wire.h>
 
 // RadioLib module instance for the SX1262 at the Cap LoRa pinmap.
-static SX1262 g_radio = new Module(LORA_PIN_NSS, LORA_PIN_DIO1, LORA_PIN_RST, LORA_PIN_BUSY);
+// NOTE: allocated on the heap via a pointer (constructed in begin()) rather than
+// a by-value global. A by-value global forces the SX1262 destructor/vtable into
+// this translation unit's static init/exit machinery; when this code is inlined
+// into the large single-file CardSat.ino, that pushes a literal pool out of L32R
+// range and the Xtensa linker fails with "dangerous relocation: l32r ... out of
+// range". A pointer keeps the heavy object construction inside begin() instead.
+static Module* g_mod = nullptr;
+static SX1262* g_radio = nullptr;
 
 // DIO1 fires on RX-done / TX-done; the ISR just sets a flag (must live in IRAM
 // on ESP32, or the wake-from-flash race drops the interrupt).
@@ -40,7 +47,12 @@ void LoraRadio::rfSwitchRx() {
 
 bool LoraRadio::begin(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm) {
   _ready = false;
-  int st = g_radio.begin();                 // default SPI; uses the pins above
+  if (!g_radio) {                            // construct once (heap, not static)
+    g_mod   = new Module(LORA_PIN_NSS, LORA_PIN_DIO1, LORA_PIN_RST, LORA_PIN_BUSY);
+    g_radio = new SX1262(g_mod);
+  }
+  if (!g_radio) return false;
+  int st = g_radio->begin();                // default SPI; uses the pins above
   if (st != RADIOLIB_ERR_NONE) return false;
 
   // Configure the RF antenna switch direction via the expander on first use.
@@ -48,52 +60,53 @@ bool LoraRadio::begin(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm)
 
   if (!setRadio(freqKHz, sf, bwHz, txDbm)) return false;
 
-  g_radio.setDio1Action(loraIsr);
+  g_radio->setDio1Action(loraIsr);
   _ready = true;
   listen();
   return true;
 }
 
 bool LoraRadio::setRadio(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm) {
+  if (!g_radio) return false;
   float freqMHz = (float)freqKHz / 1000.0f;
   float bwKHz   = (float)bwHz / 1000.0f;
-  if (g_radio.setFrequency(freqMHz)      != RADIOLIB_ERR_NONE) return false;
-  if (g_radio.setSpreadingFactor(sf)     != RADIOLIB_ERR_NONE) return false;
-  if (g_radio.setBandwidth(bwKHz)        != RADIOLIB_ERR_NONE) return false;
-  if (g_radio.setCodingRate(5)           != RADIOLIB_ERR_NONE) return false; // 4/5
-  g_radio.setOutputPower(txDbm);
+  if (g_radio->setFrequency(freqMHz)      != RADIOLIB_ERR_NONE) return false;
+  if (g_radio->setSpreadingFactor(sf)     != RADIOLIB_ERR_NONE) return false;
+  if (g_radio->setBandwidth(bwKHz)        != RADIOLIB_ERR_NONE) return false;
+  if (g_radio->setCodingRate(5)           != RADIOLIB_ERR_NONE) return false; // 4/5
+  g_radio->setOutputPower(txDbm);
   // A private sync word so CardSat traffic won't trigger on LoRaWAN gateways.
-  g_radio.setSyncWord(0x12);
+  g_radio->setSyncWord(0x12);
   return true;
 }
 
 bool LoraRadio::sendRaw(const uint8_t* data, size_t len) {
-  if (!_ready) return false;
+  if (!_ready || !g_radio) return false;
   rfSwitchTx();
-  int st = g_radio.transmit((uint8_t*)data, len);  // blocking
+  int st = g_radio->transmit((uint8_t*)data, len);  // blocking
   rfSwitchRx();
   listen();
   return (st == RADIOLIB_ERR_NONE);
 }
 
 void LoraRadio::listen() {
-  if (!_ready) return;
+  if (!_ready || !g_radio) return;
   rfSwitchRx();
-  g_radio.startReceive();
+  g_radio->startReceive();
 }
 
 bool LoraRadio::poll(uint8_t* buf, size_t bufLen, size_t& outLen,
                      float& rssi, float& snr) {
-  if (!_ready) return false;
+  if (!_ready || !g_radio) return false;
   if (!g_irqFired) return false;
   g_irqFired = false;
 
-  size_t n = g_radio.getPacketLength();
-  if (n == 0 || n > bufLen) { g_radio.startReceive(); return false; }
-  int st = g_radio.readData(buf, n);
-  rssi = g_radio.getRSSI();
-  snr  = g_radio.getSNR();
-  g_radio.startReceive();                 // back to listening
+  size_t n = g_radio->getPacketLength();
+  if (n == 0 || n > bufLen) { g_radio->startReceive(); return false; }
+  int st = g_radio->readData(buf, n);
+  rssi = g_radio->getRSSI();
+  snr  = g_radio->getSNR();
+  g_radio->startReceive();                 // back to listening
   if (st != RADIOLIB_ERR_NONE) return false;
   outLen = n;
   return true;

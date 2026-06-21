@@ -1082,6 +1082,18 @@ search "RadioLib" by Jan Gromes), and define `CARDSAT_HAS_LORA=1` for the build
 (e.g. edit the define at the top of `src/lora.h` / the inlined block in
 `CardSat.ino`). Without that, the Messages screen reports the radio is off.
 
+> **If the single-file `CardSat.ino` fails to link with `CARDSAT_HAS_LORA=1`**
+> showing `dangerous relocation: l32r: literal target out of range`, that is an
+> Xtensa toolchain limit: the very large single translation unit pushes RadioLib's
+> code out of the reach of the `l32r` instruction's literal pool. CardSat
+> mitigates this by constructing the SX1262 on the heap (a pointer, not a static
+> global) so its destructor/vtable stay out of the sketch's static-init code. If
+> the single-file build still fails to link with LoRa enabled, **build from the
+> modular `src/` folder instead** (open `src/main.cpp` / use the PlatformIO build):
+> there `lora.cpp` is its own small translation unit and the literal-range problem
+> does not arise. The non-LoRa build (`CARDSAT_HAS_LORA=0`, the default) links
+> fine either way.
+
 ### Update
 
 - `k` or **ENTER** — update GP data from your configured source and sync the clock

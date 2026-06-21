@@ -1801,7 +1801,7 @@ private:
   uint8_t  _left    = 0;         // bursts remaining in the current group
   uint32_t _stepMs  = 0;         // when the current ON/GAP step ends
   void carrier(bool on);         // gate the 38 kHz carrier
-}
+};
 
 // ===========================================================================
 //  LoRa SX1262 radio wrapper (inlined from src/lora.h) for CardSat messaging
@@ -16123,133 +16123,6 @@ void App::drawPolarArc(int cx, int cy, int R, const float* az, const float* el, 
       canvas.fillTriangle(tx, ty, b1x, b1y, b2x, b2y, CL_WHITE);
     }
   }
-}
-
-// Sample the current pass (or the next one, if not currently up) for the live
-// polar arc. Rebuilt on entry and whenever the cached pass has ended.
-void App::buildPolarPath() {
-  polarPathValid = false;
-  SatEntry* s = activeSat();
-  if (!s || !timeIsSet()) return;
-  pred.setSite(loc.obs());
-  if (!pred.setSat(*s)) return;
-  time_t now = nowUtc();
-  PassPredict pp[3];
-  int np = pred.predictPasses(now - 1800, 0.5f, pp, 3);   // include an in-progress pass
-  PassPredict* use = nullptr;
-  for (int i = 0; i < np; ++i) if (pp[i].los > now) { use = &pp[i]; break; }
-  if (!use) return;
-  polarPass = *use;
-  double span = (double)(use->los - use->aos); if (span < 1) span = 1;
-  for (int i = 0; i < POLAR_PTS; ++i) {
-    time_t t = use->aos + (time_t)llround(span * i / (double)(POLAR_PTS - 1));
-    double az, el; pred.azelAt(t, az, el);
-    polarAz[i] = (float)az; polarEl[i] = (float)el;
-  }
-  polarPathValid = true;
-}
-
-void App::drawPolar() {
-  SatEntry* s = activeSat();
-  header(s ? String(s->name) : String("Polar"));
-  canvas.setTextSize(1);
-  if (!s) { footer("` back"); return; }
-
-  const int cx = 66, cy = 70, R = 44;   // plot centre + outer (horizon) radius
-
-  // (Re)build the ground-track arc on entry or when the cached pass has ended.
-  if (timeIsSet() && (!polarPathValid || nowUtc() > polarPass.los)) buildPolarPath();
-
-  drawPolarGrid(cx, cy, R);
-  if (polarPathValid) drawPolarArc(cx, cy, R, polarAz, polarEl, POLAR_PTS);
-
-  LiveLook L = timeIsSet() ? pred.look(nowUtc()) : LiveLook();
-
-  if (timeIsSet() && L.el > 0) {
-    double rr = R * (90.0 - L.el) / 90.0;       // radius shrinks toward zenith
-    double a  = L.az * (M_PI / 180.0);
-    int px = cx + (int)lround(rr * sin(a));
-    int py = cy - (int)lround(rr * cos(a));
-    canvas.drawLine(cx, cy, px, py, CL_DGREEN);
-    canvas.fillCircle(px, py, 3, CL_GREEN);
-  }
-
-  // Sun glyph (only when the Sun is above the horizon).
-  if (timeIsSet() && L.sunEl > 0) {
-    double rr = R * (90.0 - L.sunEl) / 90.0;
-    double a  = L.sunAz * (M_PI / 180.0);
-    int px = cx + (int)lround(rr * sin(a));
-    int py = cy - (int)lround(rr * cos(a));
-    canvas.fillCircle(px, py, 2, CL_YELLOW);
-    canvas.drawCircle(px, py, 4, CL_YELLOW);
-  }
-
-  // Right-hand readout.
-  int rx = 128;
-  canvas.setTextColor(L.visible ? CL_GREEN : CL_GREY, CL_BLACK);
-  canvas.setCursor(rx, 22);
-  if (L.visible)             canvas.print("VISIBLE");
-  else if (polarPathValid)   canvas.printf("AOS %s", fmtHM(polarPass.aos).c_str());
-  else                       canvas.print("below horizon");
-  canvas.setTextColor(CL_WHITE, CL_BLACK);
-  canvas.setCursor(rx, 40); canvas.printf("Az  %5.1f", L.az);
-  canvas.setCursor(rx, 52); canvas.printf("El  %5.1f", L.el);
-  canvas.setCursor(rx, 64); canvas.printf("Rng %.0f km", L.rangeKm);
-  canvas.setCursor(rx, 76); canvas.printf("%s %.3f km/s",
-                  L.rangeRate >= 0 ? "away" : "appr", fabs(L.rangeRate));
-  if (timeIsSet()) {
-    canvas.setTextColor(CL_YELLOW, CL_BLACK);
-    canvas.setCursor(rx, 88); canvas.printf("Sun %03.0f/%+.0f", L.sunAz, L.sunEl);
-    canvas.setTextColor(L.sunlit ? CL_GREEN : CL_ORANGE, CL_BLACK);
-    canvas.setCursor(rx, 100); canvas.print(L.sunlit ? "sat SUNLIT" : "sat ECLIPSE");
-  } else {
-    canvas.setTextColor(CL_YELLOW, CL_BLACK);
-    canvas.setCursor(rx, 96); canvas.print("clock not set");
-  }
-  footer("p / ENT / ` back to track");
-}
-
-// ===========================================================================
-//  OSCARLOCATOR live view (SCR_OSCAR): an azimuthal-equidistant "plotting
-//  board" centred either on your station (QTH mode) or on a pole (polar mode).
-//  Live: it follows the satellite's sub-point in real time, drawing the
-//  graticule, a coarse coastline, the satellite marker + ground footprint, and
-//  (QTH mode) range rings. Modelled on the OSCARLOCATOR simulator; the same
-//  footprint/great-circle math used by the world map is reused here.
-// ===========================================================================
-
-// Azimuthal-equidistant projection onto the disc. Returns false if the point
-// falls outside the plotted radius (rmaxDeg). mode 0 = QTH-centred (great-circle
-// bearing/range from the observer), mode 1/2 = North/South polar.
-//   qth   : t = azimuth, 0=N at top, clockwise
-//   polarN: t = longitude, rho = 90-lat   (north pole at centre)
-//   polarS: t = longitude, rho = 90+lat   (south pole at centre)
-static bool oscarProject(int mode, double qlat, double qlon,
-                         double lat, double lon, double rmaxDeg,
-                         int cx, int cy, int R, int& sx, int& sy) {
-  const double D2R = 0.0174532925199433, R2D = 57.2957795130823;
-  double rhoDeg, tdeg;
-  if (mode == 0) {
-    // central angle + initial bearing from (qlat,qlon) to (lat,lon)
-    double p1 = qlat * D2R, p2 = lat * D2R, dl = (lon - qlon) * D2R;
-    double ca = sin(p1) * sin(p2) + cos(p1) * cos(p2) * cos(dl);
-    if (ca > 1) ca = 1; if (ca < -1) ca = -1;
-    rhoDeg = acos(ca) * R2D;
-    double y = sin(dl) * cos(p2);
-    double x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl);
-    tdeg = atan2(y, x) * R2D; if (tdeg < 0) tdeg += 360.0;
-  } else if (mode == 1) {                 // north polar
-    rhoDeg = 90.0 - lat; tdeg = lon;
-  } else {                                // south polar
-    rhoDeg = 90.0 + lat; tdeg = lon;
-  }
-  if (rhoDeg > rmaxDeg) return false;
-  double r = rhoDeg / rmaxDeg * R;
-  double a = tdeg * D2R;
-  if (mode == 0)      { sx = cx + (int)lround(r * sin(a)); sy = cy - (int)lround(r * cos(a)); }
-  else if (mode == 1) { sx = cx + (int)lround(r * sin(a)); sy = cy + (int)lround(r * cos(a)); }
-  else                { sx = cx - (int)lround(r * sin(a)); sy = cy + (int)lround(r * cos(a)); }
-  return true;
 }
 
 // Sample the current pass (or the next one, if not currently up) for the live

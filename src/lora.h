@@ -28,10 +28,21 @@
 // Cap LoRa (SX1262) SPI pinmap, confirmed from the M5Stack Cap LoRa pinmap /
 // Arduino tutorial: NSS=G5, DIO1(IRQ)=G4, RST=G3, BUSY=G6. The PI4IOE5V6408 IO
 // expander on the cap's I2C bus drives the RF antenna switch.
+//
+// IMPORTANT: the LoRa SX1262 and the microSD card share ONE SPI bus on the
+// Cardputer ADV: SCK=G40, MISO=G39, MOSI=G14 (the SD pins in config.h). They
+// differ only in chip-select (SD CS=G12, LoRa NSS=G5). RadioLib must therefore
+// be given this exact bus and must not re-`SPI.begin()` it with other pins, or
+// the shared bus is reconfigured out from under the SD driver and the card
+// becomes inaccessible. begin() below shares the bus and restores SD's CS line.
 static constexpr int  LORA_PIN_NSS  = 5;
 static constexpr int  LORA_PIN_DIO1 = 4;
 static constexpr int  LORA_PIN_RST  = 3;
 static constexpr int  LORA_PIN_BUSY = 6;
+static constexpr int  LORA_PIN_SCK  = 40;   // shared with SD (SD_SCK_PIN)
+static constexpr int  LORA_PIN_MISO = 39;   // shared with SD (SD_MISO_PIN)
+static constexpr int  LORA_PIN_MOSI = 14;   // shared with SD (SD_MOSI_PIN)
+static constexpr int  SD_CS_PIN_SHARED = 12; // SD chip-select (must stay HIGH/idle)
 static constexpr uint8_t LORA_RFSW_I2C_ADDR = 0x43;   // PI4IOE5V6408 (cap default)
 
 // One received frame, handed up to the app layer.

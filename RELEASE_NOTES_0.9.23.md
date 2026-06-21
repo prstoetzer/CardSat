@@ -1,5 +1,32 @@
 # CardSat v0.9.23 — Release Notes
 
+## Fixes from device testing
+
+- **Sat-to-sat finder no longer freezes.** The visibility search was calling the
+  SGP4 element re-initialiser twice per 30-second step over a 5-day window
+  (~29,000 full re-inits), which blocked long enough to trip the task watchdog and
+  freeze the unit. It now samples each satellite once across the window into a
+  compact in-RAM track (two re-inits total), yields periodically, and scans those
+  tracks for overlaps — fast and watchdog-safe.
+- **DX Doppler transponder selection works, and the table is readable.** The DX
+  Doppler screen now has a **`t`** key to cycle the transponder directly, and each
+  30-second step is shown on two lines — your dials ("me", green) and the DX
+  station's ("DX", cyan), each with RX and TX — so the four frequencies no longer
+  run into each other. Mode changes (true rule / fixed DL / fixed UL) are easier to
+  read against the clearer layout.
+- **OSCARLOCATOR and Sky-sources plots clear the header.** The polar/azimuthal
+  discs and their compass labels were drawn far enough up that the disc top and the
+  "N" label overlapped the title bar. The OSCARLOCATOR disc is now centred lower,
+  and the shared polar-grid compass labels sit just inside the disc edge.
+- **LoRa Messages status bar clears the header.** The frequency / SF / bandwidth
+  line was flush against the title bar; it (and the divider and message list) now
+  start below it.
+- **SD card stays accessible after using LoRa.** The Cap LoRa SX1262 and the
+  microSD card share one SPI bus (SCK 40 / MISO 39 / MOSI 14, different chip
+  selects). LoRa bring-up was reconfiguring the bus in a way that left the SD
+  driver unable to use it. LoRa now shares the existing bus on the SD pins and
+  keeps the SD chip-select idle, so the card remains reachable.
+
 This release adds three significant new satellite views — an **OSCARLOCATOR**
 azimuthal plot, a **3D globe**, and an on-device **voice-memo browser** — plus a
 round of documentation accuracy work across the README and Manual.

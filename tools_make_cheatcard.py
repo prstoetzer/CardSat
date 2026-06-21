@@ -46,8 +46,8 @@ FRONT = [
   "Live azimuthal-equidistant plot: sub-point, footprint, QTH range ring + full ground track (AOS/LOS). "
   "<b>m</b> toggle QTH-centred / polar (auto N/S, flips at equator) &middot; <b>`</b> back"),
  ("DX DOPPLER TABLE (Mutual &rarr; d)",
-  "RX/TX dial freqs for BOTH stations every 30s across a mutual window, for the selected transponder (pick with <b>t</b>). "
-  "<b>m</b> mode: true rule / fixed DL / fixed UL &middot; <b>a</b> anchor dial (me/DX RX/TX) &middot; <b>,</b>/<b>/</b> linear passband point &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
+  "RX/TX dial freqs for BOTH stations every 30s across a mutual window. Two lines/step: me (green) + DX (cyan). "
+  "<b>t</b> cycle transponder &middot; <b>m</b> mode: true rule / fixed DL / fixed UL &middot; <b>a</b> anchor dial (me/DX RX/TX) &middot; <b>,</b>/<b>/</b> linear passband point &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("NEXT PASSES (favs)",
   "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
  ("PASSES (sel)",

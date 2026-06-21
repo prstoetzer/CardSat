@@ -635,8 +635,11 @@ frequencies are different at each end** — your Doppler and the DX station's
 Doppler aren't the same, because you're moving relative to the satellite by
 different amounts. This table solves that. It lists, **every 30 seconds across the
 window**, the predicted **RX (downlink)** and **TX (uplink)** dial frequencies for
-**both your station and the DX station**, for the transponder you've selected
-(pick it first with **`t`** on the Satellites screen).
+**both your station and the DX station**, for the selected transponder. Each
+30-second step shows two lines — your dials (green, "me") and the DX station's
+(cyan, "DX") — so the four frequencies never run together. Press **`t`** to cycle
+which transponder is used (the same selection you can also make with `t` on the
+Satellites screen).
 
 Three tracking modes, cycled with **`m`**:
 
@@ -2471,13 +2474,14 @@ listed below.
   frequencies for **both stations** through the pass, for manual tuning of a
   coordinated contact.
 - **Reached from** — Mutual windows → `d`.
-- **Shows** — a scrolling table (UTC, my RX/TX, DX RX/TX) for the selected
-  transponder, in one of three modes — **true rule**, **fixed downlink**, or
+- **Shows** — a scrolling table for the selected transponder, two lines per
+  30-second step: your dials (green, "me") and the DX station's (cyan, "DX"), each
+  with RX and TX — in one of three modes — **true rule**, **fixed downlink**, or
   **fixed uplink** — with an anchor dial and (for a linear transponder) a passband
   operating point.
-- **Keys** — `m` cycle mode; `a` cycle anchor (my RX/TX, DX RX/TX); `,`/`/` move
-  the linear passband point (1 kHz; `<`/`>` 5 kHz); `;`/`.` scroll the time steps;
-  `` ` `` back to the mutual list.
+- **Keys** — `t` cycle transponder; `m` cycle mode; `a` cycle anchor (my RX/TX, DX
+  RX/TX); `,`/`/` move the linear passband point (1 kHz; `<`/`>` 5 kHz); `;`/`.`
+  scroll the time steps; `` ` `` back to the mutual list.
 
 ### Sat-to-sat visibility
 

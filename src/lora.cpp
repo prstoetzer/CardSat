@@ -47,22 +47,36 @@ void LoraRadio::rfSwitchRx() {
 
 bool LoraRadio::begin(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm) {
   _ready = false;
+  // The SD card and LoRa share one SPI bus (SCK40/MISO39/MOSI14). Make sure the
+  // SD chip-select is idle-HIGH (deselected) before we touch the bus, and keep
+  // the LoRa NSS HIGH until RadioLib drives it, so neither device sees stray
+  // clocks meant for the other.
+  pinMode(SD_CS_PIN_SHARED, OUTPUT);  digitalWrite(SD_CS_PIN_SHARED, HIGH);
+  pinMode(LORA_PIN_NSS, OUTPUT);      digitalWrite(LORA_PIN_NSS, HIGH);
+
   if (!g_radio) {                            // construct once (heap, not static)
     g_mod   = new Module(LORA_PIN_NSS, LORA_PIN_DIO1, LORA_PIN_RST, LORA_PIN_BUSY);
     g_radio = new SX1262(g_mod);
   }
   if (!g_radio) return false;
-  int st = g_radio->begin();                // default SPI; uses the pins above
-  if (st != RADIOLIB_ERR_NONE) return false;
+
+  // Share the already-running SPI bus on the SD pins rather than letting RadioLib
+  // re-init SPI with its own defaults (which would reconfigure the bus the SD
+  // driver relies on). SPI.begin() with the same pins is idempotent/safe here.
+  SPI.begin(LORA_PIN_SCK, LORA_PIN_MISO, LORA_PIN_MOSI, LORA_PIN_NSS);
+
+  int st = g_radio->begin();                // uses the shared SPI bus
+  if (st != RADIOLIB_ERR_NONE) { digitalWrite(SD_CS_PIN_SHARED, HIGH); return false; }
 
   // Configure the RF antenna switch direction via the expander on first use.
   rfSwitchRx();
 
-  if (!setRadio(freqKHz, sf, bwHz, txDbm)) return false;
+  if (!setRadio(freqKHz, sf, bwHz, txDbm)) { digitalWrite(SD_CS_PIN_SHARED, HIGH); return false; }
 
   g_radio->setDio1Action(loraIsr);
   _ready = true;
   listen();
+  digitalWrite(SD_CS_PIN_SHARED, HIGH);     // leave SD deselected & reachable
   return true;
 }
 

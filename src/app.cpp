@@ -3699,38 +3699,41 @@ void App::drawDxDopp() {
 
   // Column headers.
   canvas.setTextColor(CL_WHITE, CL_BLACK);
-  canvas.setCursor(2, 40);  canvas.print("UTC");
-  canvas.setCursor(40, 40); canvas.print("me RX/TX");
-  canvas.setCursor(138,40); canvas.print("DX RX/TX");
+  canvas.setCursor(2, 40);   canvas.print("UTC");
+  canvas.setCursor(56, 40);  canvas.print("RX (MHz)");
+  canvas.setCursor(150, 40); canvas.print("TX (MHz)");
   canvas.drawLine(0, 49, 240, 49, CL_DGREY);
 
-  // Rows: 30 s steps across the window, starting at dxdRow.
+  // Rows: each 30 s step takes TWO lines (me, then DX) so the four frequencies
+  // never run together on the 240 px display. me = green, DX = cyan; the time is
+  // printed once per step on the "me" line.
   time_t span = w.end - w.start; if (span < 0) span = 0;
   int nSteps = (int)(span / 30) + 1;
-  const int rowH = 9, firstY = 51, maxRows = 8;
-  for (int r = 0; r < maxRows; ++r) {
+  const int rowH = 9, firstY = 51, maxSteps = 4;   // 4 steps * 2 lines = 8 lines
+  for (int r = 0; r < maxSteps; ++r) {
     int step = dxdRow + r;
     if (step >= nSteps) break;
     time_t t = w.start + (time_t)step * 30;
     if (t > w.end) t = w.end;
     uint32_t mRx, mTx, dRx, dTx;
     dxDoppFreqs(t, mRx, mTx, dRx, dTx);
-    int y = firstY + r * rowH;
+    int yMe = firstY + (r * 2)     * rowH;
+    int yDx = firstY + (r * 2 + 1) * rowH;
+    // me line: time + RX + TX
     canvas.setTextColor(CL_GREY, CL_BLACK);
-    canvas.setCursor(2, y); canvas.print(fmtHM(t).c_str());
-    // me
+    canvas.setCursor(2, yMe);  canvas.print(fmtHM(t).c_str());
     canvas.setTextColor(CL_GREEN, CL_BLACK);
-    canvas.setCursor(40, y); canvas.printf("%.4f", mRx / 1e6);
-    if (mTx) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
-               canvas.setCursor(92, y); canvas.printf("%.4f", mTx / 1e6); }
-    // dx
-    canvas.setTextColor(CL_GREEN, CL_BLACK);
-    canvas.setCursor(138, y); canvas.printf("%.4f", dRx / 1e6);
-    if (dTx) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
-               canvas.setCursor(190, y); canvas.printf("%.4f", dTx / 1e6); }
+    canvas.setCursor(40, yMe); canvas.print("me");
+    canvas.setCursor(56, yMe); canvas.printf("%.4f", mRx / 1e6);
+    if (mTx) { canvas.setCursor(150, yMe); canvas.printf("%.4f", mTx / 1e6); }
+    // DX line: RX + TX (no time; aligned under me)
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(40, yDx); canvas.print("DX");
+    canvas.setCursor(56, yDx); canvas.printf("%.4f", dRx / 1e6);
+    if (dTx) { canvas.setCursor(150, yDx); canvas.printf("%.4f", dTx / 1e6); }
   }
 
-  footer("m mode  a anc  ,/ pb  ;/. scroll  `bk");
+  footer("t tx  m mode  a anc  ,/ pb  ;/. `bk");
 }
 
 void App::keyDxDopp(char c, bool enter, bool back) {
@@ -3742,6 +3745,10 @@ void App::keyDxDopp(char c, bool enter, bool back) {
   Transponder& tp = activeTx[curTx];
 
   if (c == 'm') { dxdMode = (dxdMode + 1) % 3; lastDrawMs = 0; return; }
+  if (c == 't') {                                  // cycle the selected transponder
+    if (activeTxCount > 0) { curTx = (curTx + 1) % activeTxCount; dxdPbOff = 0; }
+    lastDrawMs = 0; return;
+  }
   if (c == 'a') { dxdAnchor = (dxdAnchor + 1) % 4; lastDrawMs = 0; return; }
   if (isUp(c))   { if (dxdRow > 0) dxdRow--; lastDrawMs = 0; return; }
   if (isDown(c)) { if (dxdRow < nSteps - 1) dxdRow++; lastDrawMs = 0; return; }
@@ -6975,24 +6982,53 @@ void App::computeSatSat() {
   if (satsatOther >= favN) satsatOther = favN - 1;
   int bIdx = db.indexOfNorad(favs[satsatOther]);
   if (bIdx < 0) return;
-  SatEntry& b = db.at(bIdx);
-  if (b.norad == a->norad) return;          // same bird; nothing to compute
+  SatEntry b = db.at(bIdx);                  // copy: setSat takes a reference
+  if (b.norad == a->norad) return;           // same bird; nothing to compute
 
   Observer me = loc.obs();
   time_t now = nowUtc();
-  const time_t HORIZON = (time_t)5 * 24 * 3600;   // search 5 days out
-  const time_t STEP = 30;                          // 30 s sampling
-  const double MINEL = 0.0;
+  // Search window/step. IMPORTANT: setSat() rebuilds the SGP4 element set (a TLE
+  // render + twoline2rv init) and is far too costly to call inside the time loop.
+  // Calling it per 30 s step over 5 days = ~29k inits blocks for many seconds and
+  // trips the task watchdog (device freeze). Instead we sample each satellite ONCE
+  // across the window into a compact elevation array (two setSat calls total),
+  // then scan the arrays for overlap. 3 days at 60 s = 4320 samples.
+  const int      STEP   = 60;                          // seconds
+  const int      NS     = 3 * 24 * 60;                 // 4320 samples (3 days)
+  const time_t   T0     = now;
+  const double   MINEL  = 0.0;
 
+  // One byte per sample is plenty for an above-horizon elevation (0..90).
+  // Allocated on the heap so it isn't a large stack frame; freed before return.
+  static const int SS_NS = 3 * 24 * 60;
+  int8_t* elA = (int8_t*)malloc(SS_NS);
+  int8_t* elB = (int8_t*)malloc(SS_NS);
+  if (!elA || !elB) { if (elA) free(elA); if (elB) free(elB); return; }
+
+  // Sample satellite A across the whole window (single setSat).
+  pred.setSite(me); pred.setSat(*a);
+  for (int i = 0; i < NS; ++i) {
+    double az, el;
+    pred.azelAt(T0 + (time_t)i * STEP, az, el);
+    elA[i] = (int8_t)constrain((int)lround(el), -90, 90);
+    if ((i & 255) == 0) yield();             // keep the watchdog fed
+  }
+  // Sample satellite B across the same window (single setSat).
+  pred.setSat(b);
+  for (int i = 0; i < NS; ++i) {
+    double az, el;
+    pred.azelAt(T0 + (time_t)i * STEP, az, el);
+    elB[i] = (int8_t)constrain((int)lround(el), -90, 90);
+    if ((i & 255) == 0) yield();
+  }
+
+  // Scan the two elevation tracks for overlapping above-horizon windows.
   bool inWin = false; time_t wStart = 0; float maxA = 0, maxB = 0;
-  for (time_t t = now; t < now + HORIZON; t += STEP) {
-    double az, elA, elB;
-    pred.setSite(me);
-    pred.setSat(*a); pred.azelAt(t, az, elA);
-    pred.setSat(b);  pred.azelAt(t, az, elB);
-    bool both = (elA > MINEL && elB > MINEL);
-    if (both && !inWin) { inWin = true; wStart = t; maxA = (float)elA; maxB = (float)elB; }
-    else if (both) { if (elA > maxA) maxA = (float)elA; if (elB > maxB) maxB = (float)elB; }
+  for (int i = 0; i < NS; ++i) {
+    bool both = (elA[i] > MINEL && elB[i] > MINEL);
+    time_t t = T0 + (time_t)i * STEP;
+    if (both && !inWin) { inWin = true; wStart = t; maxA = elA[i]; maxB = elB[i]; }
+    else if (both) { if (elA[i] > maxA) maxA = elA[i]; if (elB[i] > maxB) maxB = elB[i]; }
     else if (!both && inWin) {
       inWin = false;
       if (satsatN < SATSAT_MAX) {
@@ -7003,9 +7039,11 @@ void App::computeSatSat() {
     }
   }
   if (inWin && satsatN < SATSAT_MAX) {       // window still open at search end
-    satsatWin[satsatN].start = wStart; satsatWin[satsatN].end = now + HORIZON;
+    satsatWin[satsatN].start = wStart; satsatWin[satsatN].end = T0 + (time_t)(NS - 1) * STEP;
     satsatWin[satsatN].maxElA = maxA; satsatWin[satsatN].maxElB = maxB; satsatN++;
   }
+
+  free(elA); free(elB);
   // restore predictor to the primary sat for the rest of the UI
   pred.setSite(me); pred.setSat(*a);
   satsatSel = 0;
@@ -7178,15 +7216,15 @@ void App::drawMessages() {
 
   // Status line: freq / SF / BW + my call.
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(2, 16);
+  canvas.setCursor(2, 19);
   canvas.printf("%.3fMHz SF%d %ldk  %s",
                 cfg.loraFreqKHz / 1000.0, cfg.loraSf, (long)(cfg.loraBwHz / 1000),
                 cfg.myCall[0] ? cfg.myCall : "NOCALL");
-  canvas.drawLine(0, 25, 240, 25, CL_DGREY);
+  canvas.drawLine(0, 28, 240, 28, CL_DGREY);
 
   // Message list: newest at the bottom, scrollable with ;/. (msgScroll counts
   // back from newest). Each message is one or two lines.
-  const int VIS = 9, rowY0 = 28, rowH = 10;
+  const int VIS = 9, rowY0 = 31, rowH = 10;
   // Build a display order: oldest..newest indices.
   int order[MSG_MAX]; int on = 0;
   for (int i = 0; i < msgCount; ++i) {
@@ -9256,10 +9294,12 @@ void App::drawPolarGrid(int cx, int cy, int R) {
   canvas.drawLine(cx, cy - R, cx, cy + R, CL_GREY);
   canvas.drawLine(cx - R, cy, cx + R, cy, CL_GREY);
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(cx - 2,     cy - R - 9); canvas.print("N");
-  canvas.setCursor(cx - 2,     cy + R + 2); canvas.print("S");
-  canvas.setCursor(cx + R + 2, cy - 3);     canvas.print("E");
-  canvas.setCursor(cx - R - 8, cy - 3);     canvas.print("W");
+  // Labels sit just INSIDE the disc edge so the top "N" never overlaps the
+  // header bar (several callers place the disc with its top near y=20).
+  canvas.setCursor(cx - 2,     cy - R + 2); canvas.print("N");
+  canvas.setCursor(cx - 2,     cy + R - 8); canvas.print("S");
+  canvas.setCursor(cx + R - 6, cy - 3);     canvas.print("E");
+  canvas.setCursor(cx - R + 2, cy - 3);     canvas.print("W");
 }
 
 // Draw a satellite ground-track arc (az/el samples) on the polar plot, with AOS
@@ -9476,7 +9516,9 @@ void App::drawOscar() {
     return;
   }
 
-  const int cx = 70, cy = 70, R = 56;
+  // Centre low enough that the disc (and its N/S edge labels) clear the 16 px
+  // header bar: top of the disc is cy-R = 24, and the labels sit just inside it.
+  const int cx = 70, cy = 76, R = 52;
   const Observer& o = loc.obs();
   const double qlat = o.lat, qlon = o.lon;
 
@@ -9520,15 +9562,16 @@ void App::drawOscar() {
     }
   }
 
-  // Compass / pole labels.
+  // Compass / pole labels. The top label sits just INSIDE the disc top edge
+  // (cy-R+2) rather than above it, so it never overlaps the header bar.
   canvas.setTextColor(CL_GREY, CL_BLACK);
   if (pm == 0) {
-    canvas.setCursor(cx - 2, cy - R - 9); canvas.print("N");
-    canvas.setCursor(cx - 2, cy + R + 2); canvas.print("S");
-    canvas.setCursor(cx + R + 2, cy - 3); canvas.print("E");
-    canvas.setCursor(cx - R - 8, cy - 3); canvas.print("W");
+    canvas.setCursor(cx - 2, cy - R + 2); canvas.print("N");
+    canvas.setCursor(cx - 2, cy + R - 8); canvas.print("S");
+    canvas.setCursor(cx + R - 6, cy - 3); canvas.print("E");
+    canvas.setCursor(cx - R + 2, cy - 3); canvas.print("W");
   } else {
-    canvas.setCursor(cx - 8, cy - R - 9);
+    canvas.setCursor(cx - 8, cy - R + 2);
     canvas.print(pm == 1 ? "N pole" : "S pole");
   }
 

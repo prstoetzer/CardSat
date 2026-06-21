@@ -35,6 +35,9 @@ public:
   const Observer& obs() const { return _obs; }
   bool gpsHasFix() const { return _hasFix; }
   int  gpsSats()  const { return _sats; }
+  double gpsSpeedKmh() const { return _speedKmh; }   // ground speed (km/h)
+  double gpsCourseDeg() const { return _courseDeg; } // course over ground (deg true)
+  double gpsHdop() const { return _hdop; }           // horizontal dilution of precision
 
   static const int MAX_VIEW = 32;
   int  gpsViewCount() const { return _viewN; }
@@ -48,6 +51,9 @@ private:
   Observer _obs;
   bool     _hasFix = false;
   int      _sats   = 0;
+  double   _speedKmh = 0.0;
+  double   _courseDeg = 0.0;
+  double   _hdop = 0.0;
   bool     _gpsOn  = false;
   GpsSat   _view[MAX_VIEW];  int _viewN  = 0;   // committed in-view list
   GpsSat   _build[MAX_VIEW]; int _buildN = 0;   // assembling current NMEA cycle

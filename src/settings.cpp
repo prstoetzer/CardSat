@@ -89,6 +89,11 @@ bool Settings::load() {
   rotdPort   = d["rotdport"] | (uint16_t)4533;
   webEnable  = d["weben"] | false;
   webPort    = d["webport"] | (uint16_t)80;
+  loraEnable = d["loraen"] | false;
+  loraFreqKHz= d["lorafk"] | (uint32_t)433775;
+  loraSf     = d["lorasf"] | (uint8_t)12;
+  loraBwHz   = d["lorabw"] | (uint32_t)125000;
+  loraTxDbm  = d["loratx"] | (int8_t)20;
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
   return true;
@@ -127,6 +132,8 @@ bool Settings::save() {
   d["rigden"]=rigdEnable; d["rigdport"]=rigdPort;
   d["rotden"]=rotdEnable; d["rotdport"]=rotdPort;
   d["weben"]=webEnable; d["webport"]=webPort;
+  d["loraen"]=loraEnable; d["lorafk"]=loraFreqKHz; d["lorasf"]=loraSf;
+  d["lorabw"]=loraBwHz; d["loratx"]=loraTxDbm;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
   serializeJson(d, f);

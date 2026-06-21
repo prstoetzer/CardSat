@@ -127,26 +127,55 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **AOS alarm** — countdown beeps + a screen flash before a favorite rises.
 - **Deep-sleep until the next pass** — park the unit between passes for big
   battery savings; it wakes ~60 s before AOS.
+- **Jump to beacon** — one key (`n`) on the Track and large-font readout screens
+  tunes straight to the satellite's beacon (its downlink-only/telemetry entry) with
+  Doppler correction, for finding a bird by its beacon before working it.
 - **Pass-detail plot** — elevation curve for a pass, colored by sunlit/eclipse,
   plus a **polar view** of that pass (ground track + direction of travel).
 - **Polar sky plot with ground track** — the live polar shows the satellite's arc
   across the sky for the current pass (or the next one when it's below the horizon),
   with AOS/LOS markers and a travel-direction arrow.
+- **OSCARLOCATOR live view** — a live azimuthal-equidistant plotting board (`k` on
+  the Satellites screen) showing the satellite's **sub-point and footprint on the
+  Earth** in real time, the graphical companion to the EQX table. It also plots a
+  **QTH range ring** (footprint radius at mean altitude, centred on you) and the
+  **full ground-track arc** (a whole orbit across the disc) with AOS/LOS markers. Toggle (`m`) between a
+  **QTH-centred** view (your station at centre, true bearing/distance) and a
+  **polar** view that auto-selects the North or South sheet and **flips live as the
+  bird crosses the equator**.
+- **3D globe** — an orthographic wireframe Earth (`3` on the Satellites screen) that
+  **auto-follows the selected satellite**, rotating to keep its sub-point centred.
+  Shows a graticule, coastline, a **day/night terminator**, your QTH, **all
+  favourites** as dots, the selected bird's **ground footprint** and a blue
+  **ground-track trail** (a full orbit) — all on the near hemisphere, with the far
+  side hidden behind the curve. Enter a **second (DX) location** by Maidenhead grid
+  (`g`) to overlay its footprint; where it meets the satellite footprint is the
+  mutual-visibility region. Arrow keys turn the globe for free-look; ENTER re-snaps
+  to follow.
 - **Mutual-window finder** — enter a remote station's grid square and get the
   **co-visibility windows** for a satellite over the next **10 days**: when you
   can both see it at once, with each window's duration and the peak elevation at
-  both ends.
+  both ends. From a window, open a **DX Doppler table** (`d`) that lists the
+  **RX/TX dial frequencies for both stations every 30 s** through the pass — in
+  true-rule, fixed-downlink, or fixed-uplink mode, with a selectable passband
+  operating point — for manually tuning a coordinated contact through a short
+  window.
 - **10-day pass overview** — InstantTrack-style visibility chart (rows = days,
   24 h timelines) for the selected satellite, off the Passes screen (`v`); `;`/`.` page through
   successive 10-day chunks (forward indefinitely).
+- **Sat-to-sat visibility finder** — off the Satellites screen (`2`), the windows
+  when the selected satellite and a second one (from your favorites) are **both
+  above your horizon at once** over the next five days, with each window's duration
+  and the peak elevation of both birds — for cross-satellite relay or back-to-back
+  working.
 - **60-day illumination** — DK3WN *illum*-style Sun/eclipse raster (date x
   orbit-phase) with a live solar-status readout, off the Passes screen (`i`); `,`/`/`
   page through successive 60-day chunks (forward indefinitely).
 - **Sun & eclipse** — Sun azimuth/elevation, a Sun glyph on the polar plot, and
   whether the satellite is sunlit or in Earth's shadow.
 - **GP age** — element-set age shown and color-graded so you know when elements are stale.
-- **Antenna rotator (GS-232, rotctl, PstRotator, or direct Yaesu)** — point an az/el rotator (Yaesu
-  G-5500 + GS-232B, SPID, K3NG/RadioArtisan) through an I²C→UART bridge so the radio
+- **Antenna rotator (GS-232, Easycomm, SPID, rotctl, PstRotator, or direct Yaesu)** — point an az/el rotator (Yaesu
+  G-5500 + GS-232B, SPID MD-01/02, K3NG/RadioArtisan, SatNOGS/ERC via **Easycomm I/II/III**) through an I²C→UART bridge so the radio
   and GPS keep their UARTs, or over WiFi to a **Hamlib rotctld** server or a
   **PstRotator** instance, or wire a **Yaesu G-5500-class controller directly**
   (I²C ADC + outputs, no GS-232 box — see **[ROTOR_INTERFACE.md](ROTOR_INTERFACE.md)**,
@@ -160,13 +189,18 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **rigctl network radio.** Drive a radio attached to a remote **Hamlib rigctld**
   server over WiFi (Settings -> CAT type -> rigctl) — Doppler both legs via split.
 - **World map with coastline** — recognisable continents with **all favourites'**
-  footprints at once; `f` highlights one bird at a time.
+  footprints at once; `f` highlights one bird at a time, and **`c` recenters the map
+  on your own location** so your QTH sits in the middle.
 - **Time-step simulation** — off the Satellites list (`s`), step a satellite
   forward/back in time (`,`/`/`) at selectable steps to preview az/el, range and
   lighting; `m` switches to a world-map view that walks the sub-point and
   footprint across the map as you step.
 - **GPS sky plot** — fix data plus a polar plot of the GNSS satellites in view
   (az/el, coloured by signal), off the Location screen.
+- **Live GPS position** — off the Location screen (`v`), a full-precision readout
+  for rovers and portable ops: latitude/longitude in **degrees-minutes-seconds**
+  (to 0.001″) and decimal, altitude, **Maidenhead grid** (updates live as you
+  move), plus **ground speed** (km/h and knots) and **course**.
 - **Workable grid squares** — the 4-char Maidenhead grids under the satellite's
   footprint, either as the union over a selected pass (off Passes) or live now
   (off Track, with radio/rotator tracking uninterrupted) - for VUCC/grid chasing.
@@ -183,7 +217,10 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 - **Sun & Moon antenna pointing** — a Sun/Moon screen (off the main menu) with a
   graphical sky-dome view (Sun and Moon glyphs plotted by az/el; `g` toggles a
   data list) that can drive the rotator to track either, for sun-noise / Moon
-  (EME) aiming and antenna calibration.
+  (EME) aiming and antenna calibration. A secondary **Sky sources** plot (`s`) adds
+  the planets and the strongest cosmic radio sources (Cas A, Cyg A, the galactic
+  centre, the Crab, Virgo A) on the same dome — for antenna pointing and as an
+  RF-source reference.
 - **Space weather** — a **Space Wx** screen (main menu) shows the solar **10.7 cm
   flux**, planetary **Kp**, and running **A index** from NOAA SWPC, each colour-coded
   with a plain-language HF/satellite operating outlook; cached for offline viewing
@@ -204,9 +241,32 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   nominal) and editing the **date, time, satellite and frequencies** as needed. The
   same fields are editable when you review past entries; **export ADIF** on demand for
   LoTW/eQSL or your main logger.
+- **Voice memos.** Press **`v`** while tracking to record a quick voice note to the
+  SD card **without interrupting Doppler control** — the filename is stamped with the
+  UTC time and the **satellite** you're on (e.g. `memo_20260617_203145_AO-91.wav`). A
+  **Voice Memos** browser (in the **Log** menu) lists them newest-first by date, time,
+  satellite and length, and lets you **play** a memo back through the speaker, **delete**
+  one, or record a **new standalone memo** (`n`, not tied to a satellite) on the spot.
+  SD-card only; recording needs an **ESP-IDF 5.4.x** build on the ADV (see
+  [MANUAL.md](MANUAL.md)).
+- **IR pass beacon** (optional, off by default) — on each AOS-alarm event CardSat can
+  also blink the Cardputer's **built-in IR LED** with a distinct flash count per event
+  (T-60/T-30/T-10/AOS/TCA/LOS), a 38 kHz carrier any common IR receiver decodes, so you
+  can trigger external hardware (relays, preamps, recorders, shack lights) off a pass.
+  Non-blocking; ⚠️ host-verified only, see [MANUAL.md](MANUAL.md).
+- **LoRa text messaging** (optional, off by default) — CardSat-to-CardSat **broadcast
+  group chat** over the M5Stack **Cap LoRa (SX1262)**: every unit on the same
+  frequency/SF/bandwidth sees every message, for a club net or SOTA/portable group.
+  Selectable frequency (150–960 MHz; the SX1262 is unfiltered), spreading factor
+  (7–12, default 12) and bandwidth; fixed-size message ring (no SD, no heap growth).
+  Needs the **RadioLib** library and a `CARDSAT_HAS_LORA` build. ⚠️ Untested
+  hardware path — verify two units talk before relying on it; mind your band's
+  bandwidth rules. See [MANUAL.md](MANUAL.md).
 - **Auto-refresh, power management, and diagnostics.** If WiFi is configured,
   CardSat connects and NTP-syncs at boot and **auto-refreshes GP when the cached
-  elements are over a week old**; the backlight blanks after a configurable idle
+  elements are over a week old**; a **fast update** (`f` on the Update screen) refreshes
+  just the elements, AMSAT activity and favorites' transponders, skipping space/terrestrial
+  weather; the backlight blanks after a configurable idle
   time (any key wakes it); config + favorites **back up / restore to the SD card**;
   and an **About** screen reports version, storage, GP age, battery, and uptime.
 - **Fully offline** once GP + transponders are cached. CardSat stores everything in
@@ -637,9 +697,18 @@ src/civ.{h,cpp}         Icom CI-V framing, freq/mode set + read, MAIN/SUB select
 src/icomnet.{h,cpp}     Icom LAN (RS-BA1 UDP) CAT backend — control + serial streams, no wiring
 src/yaesu.{h,cpp}       Yaesu 5-byte CAT (FT-847 / FT-736R)
 src/kenwood.{h,cpp}     Kenwood ASCII CAT (TS-790 / TS-2000)
-src/rotator.{h,cpp}     rotator backends: GS-232 (I²C→UART), rotctl client (TCP), PstRotator (UDP), Yaesu direct (I²C ADC + outputs)
+src/rotator.{h,cpp}     rotator backends: GS-232 / Easycomm I-III / SPID (I²C→UART), rotctl client (TCP), PstRotator (UDP), Yaesu direct (I²C ADC + outputs)
+src/voicememo.{h,cpp}   SD-card voice memo recorder + browser/playback (ADV ES8311 mic via M5Unified)
+src/irbeacon.{h,cpp}    optional IR-LED pass beacon (38 kHz carrier, per-event flash counts)
+src/lora.{h,cpp}        optional LoRa text messaging radio (Cap LoRa SX1262 via RadioLib; CARDSAT_HAS_LORA)
 src/radio_profiles.h    per-model address, baud, band-select, capabilities
+tools_make_cheatcard.py generates the printable key-reference card (4x6 landscape, front + back, 2 pages)
 ```
+
+The printable **key-reference card** (`CardSat_CheatCard_4x6.pdf`) is a **4×6**
+landscape index card, front and back (two pages). Print at 100% / actual size onto
+a 4×6 card or sheet; the front covers operating, the back covers setup and tools.
+Regenerate it with `python3 tools_make_cheatcard.py`.
 
 ---
 

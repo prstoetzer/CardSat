@@ -315,7 +315,7 @@ or **DEL** always steps back.
 
 A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
 World Map · Sun / Moon · Space Wx · Weather · QRZ Lookup · Location · Update ·
-Settings · About / diagnostics · Log.** The currently
+Settings · Log · Messages · About / diagnostics.** The currently
 selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 
 ### About
@@ -359,8 +359,9 @@ selected field:
 each; `notes` is the last column, so commas there are fine).
 
 The **Log** item on the main menu offers **New QSO entry**, **View / edit log**,
-and **Export to ADIF** (writes `/CardSat/qso_log.adi`, including `STATION_CALLSIGN`
-from My callsign, for upload to LoTW/eQSL or import into your main logger).
+**Export to ADIF** (writes `/CardSat/qso_log.adi`, including `STATION_CALLSIGN`
+from My callsign, for upload to LoTW/eQSL or import into your main logger), and
+**Voice Memos** (the on-device voice-memo browser described above).
 
 LoTW limits the `SAT_NAME` field to six characters and uses its own names, so on
 export CardSat translates each satellite via **`/CardSat/lotw_sats.csv`** (rows of
@@ -394,6 +395,9 @@ The catalog (up to 220 sats from the GP data, plus any you add manually).
   next Update). To **edit** a manual satellite, delete it and re-add it with `n`.
 - `e` — open the **EQX table** (equatorial crossings) for the selected satellite,
   for use with an OSCARLOCATOR (see [Transponder/EQX screens in §8](#8-screen-reference)).
+- `2` — open the **sat-to-sat visibility finder**: the windows when this satellite
+  and a second one (chosen from your favorites) are **both above your horizon at
+  once** over the next few days (see below).
 - **ENTER** — load the satellite's transponders and open its **Passes**.
 - `` ` `` — back to Home.
 
@@ -617,11 +621,45 @@ same time** — the periods
 you could actually make a contact through the bird. Each row shows the **start
 time (UTC)**, the **duration** (m:ss), and the **maximum elevation at each end**
 — yours (`me`) and theirs (`dx`) — so you can judge how workable the window is.
-`;`/`.` scroll; `` ` `` returns to Passes.
+`;`/`.` scroll; **`d`** opens the **DX Doppler table** for the highlighted
+window (below); `` ` `` returns to Passes.
 
 > Co-visibility is computed to the **0° horizon** for both stations; a window
 > with very low max elevations may be hard to use in practice. The remote grid
 > is assumed at sea level.
+
+#### DX Doppler table (`d` from a mutual window)
+
+For a short window, the hard part of a coordinated contact is that **the dial
+frequencies are different at each end** — your Doppler and the DX station's
+Doppler aren't the same, because you're moving relative to the satellite by
+different amounts. This table solves that. It lists, **every 30 seconds across the
+window**, the predicted **RX (downlink)** and **TX (uplink)** dial frequencies for
+**both your station and the DX station**, for the transponder you've selected
+(pick it first with **`t`** on the Satellites screen).
+
+Three tracking modes, cycled with **`m`**:
+
+- **True rule** — the operating point is held fixed *in the satellite's
+  passband*; every dial Doppler-tracks, each station with its own geometry. Both
+  of you stay on the same transponder channel the whole pass.
+- **Fixed downlink** — the **anchor** station holds its **receive dial constant**
+  in real RF (the knob they don't touch). The passband operating point drifts to
+  absorb that station's downlink Doppler, and the other three dials are computed to
+  follow.
+- **Fixed uplink** — the anchor station holds its **transmit dial constant**; the
+  other three dials follow.
+
+Press **`a`** to cycle which dial is the **anchor** (my RX, my TX, DX RX, or DX
+TX). For a **linear** transponder you also choose **where in the passband** to
+operate: **`,`/`/`** move the operating point in 1 kHz steps (`<`/`>` in 5 kHz),
+and the offset is shown as `+NNk`. RX values are shown in green, TX in yellow.
+**`;`/`.`** scroll through the 30-second steps; `` ` `` returns to the mutual
+window list.
+
+> Frequencies include your station calibration offsets. The DX station is assumed
+> at sea level with no local calibration. For an SSB contact, treat the numbers as
+> the centre of where to listen/transmit and fine-tune by ear.
 
 ---
 
@@ -682,6 +720,11 @@ Controls:
 - `l` — **Log QSO** (also on the Polar screen): capture the contact you're working.
   Radio control keeps running while you fill in the entry.
 - `t` — cycle to the next transponder.
+- `n` — **jump to the beacon**: select the satellite's beacon (a downlink-only
+  entry, or one whose description names a beacon) so the radio tunes straight to
+  it with Doppler correction. Useful for finding a bird by its telemetry/CW beacon
+  before working it. Also available on the **Big readout** screen. If the satellite
+  has no beacon listed, a status note says so.
 - `c` — set the **CTCSS/PL tone** for this satellite (numeric entry: a tone in
   Hz, `0` to force it off, or blank to revert to the built-in default).
 - `r` — turn radio output **on/off** (sets modes and begins Doppler service).
@@ -784,6 +827,99 @@ the readout gives that pass's AOS time. The right-hand readout also shows az/el,
 range, range-rate, **Sun az/el**, and whether the satellite is **SUNLIT** or in
 **ECLIPSE**. `p`, ENTER, or `` ` `` return to Track.
 
+### OSCARLOCATOR (`k` from Satellites)
+
+A live **azimuthal-equidistant** plotting board — the classic OSCARLOCATOR view —
+reached with `k` on the **Satellites** screen. Unlike the **Polar** screen (which
+plots a single pass in az/el over your sky), this plots the satellite's
+**sub-point on the Earth** in real time, the way a paper OSCARLOCATOR dial does.
+It complements the tabular **EQX table** (`e`): the EQX table lists the
+equator-crossing times and longitudes, and this view shows the resulting geometry.
+
+Two modes, toggled with **`m`**:
+
+- **QTH-centred** — your station sits at the centre, with range/elevation rings
+  around it. The satellite is drawn at its true bearing and great-circle distance
+  from you, so you can see at a glance where it is relative to your horizon and
+  how far away it is.
+- **Polar** — a pole sits at the centre and the satellite is plotted by latitude
+  (distance from the pole) and longitude (angle). CardSat **automatically chooses
+  the North or South polar sheet** from the satellite's current hemisphere and
+  **flips between them live** as the bird crosses the equator, so the satellite
+  always stays on the visible chart.
+
+Both modes draw a coarse coastline, a lat/lon graticule, the satellite marker
+(yellow when sunlit, cyan in eclipse) and its **ground footprint** circle. They
+also draw a **QTH range ring** as a dashed amber circle — the satellite's footprint
+radius at the bird's mean altitude, centred on your station, so anything the
+satellite's sub-point reaches inside that ring is a workable pass (dashed so it
+stays distinct from the same-size instantaneous footprint) — and the **ground-track
+arc** in blue: the satellite's full sub-point track across the disc — a complete
+orbit's worth of ground track centred on the current time, so it sweeps the whole
+projection like a real OSCARLOCATOR (portions outside the plotted radius are
+clipped). Green and orange markers show where the current pass's **AOS** and **LOS**
+fall along that track, and a white arrowhead at the satellite shows the direction
+of travel. The right-hand readout
+shows the sub-satellite lat/lon, az/el, slant range, altitude, and sunlit/eclipse
+state; an **(off chart)** note appears when the satellite is outside the plotted
+area (e.g. below the horizon in QTH mode, or in the other hemisphere in polar mode
+just before the view flips). `m` toggles the mode; `` ` `` returns to Satellites.
+
+### 3D Globe (`3` from Satellites)
+
+A three-dimensional wireframe Earth, reached with `3` on the **Satellites** screen.
+Where the world map is a flat projection and the OSCARLOCATOR is a flat azimuthal
+disc, this is an **orthographic globe** — the Earth as a sphere you're looking at
+from space. Only the near hemisphere is drawn; anything on the far side of the
+Earth is hidden behind the curve, just as it would be in real life.
+
+The globe **auto-follows the selected satellite**: it rotates continuously so that
+satellite's sub-point stays at the centre of the disc. Drawn on it:
+
+- a **graticule** (meridians and parallels every 30°) and a coarse **coastline**,
+  both clipped at the limb so only the visible hemisphere shows;
+- a **day/night terminator** in yellow — the line dividing the sunlit and dark
+  halves of the Earth, computed from the Sun's current sub-point;
+- your **QTH** as a white cross;
+- **all your favourites** as small dim-green dots (those on the near hemisphere),
+  with the **selected satellite** drawn larger and centred (yellow when sunlit,
+  cyan in eclipse);
+- the selected satellite's **ground footprint** as a green circle, which wraps
+  around the limb of the globe naturally as the bird nears the horizon;
+- the selected satellite's **ground-track trail** in blue — a full orbit's worth of
+  sub-points projected onto the sphere, so you can see where the bird came from and
+  where it's heading;
+- optionally a **second (DX) location**: press **`g`** and enter a Maidenhead grid
+  square (e.g. `IO91`). The DX station is drawn as an orange box with its own
+  footprint ring at the selected satellite's altitude; where that ring overlaps the
+  satellite's own footprint is the **live mutual-visibility region** for that bird —
+  the area from which both you and the DX station could work it at once. Press
+  **`G`** (shift-g) to clear the DX location.
+
+The right-hand readout shows the selected satellite's sub-lat/lon, az/el, altitude,
+sunlit/eclipse state, the view mode (**follow** or **free**), and either the DX grid
+(when set) or the favourite count. **Arrow keys** turn the globe by hand — this
+drops into **free-look** so you can inspect any part of the Earth; **ENTER**
+re-snaps to auto-follow. `` ` `` returns to Satellites.
+
+### Sat-to-sat visibility (`2` from Satellites)
+
+Press **`2`** to find the windows when the selected satellite **and a second
+satellite** are **both above your horizon at the same time** over the next five
+days — for cross-satellite relay experiments, or simply to plan back-to-back
+working of two birds on one outing. The second satellite is taken from your
+**favorites** list; press **`n`** to cycle to the next favorite, **`r`** to
+recompute.
+
+Each row is one overlap window, showing its **start time (UTC)**, **duration**,
+and the **peak elevation of each satellite** during the window (the first in
+green, the second in cyan) so you can judge how usable it is. `;`/`.` scroll;
+`` ` `` returns to Satellites.
+
+> Both satellites are evaluated to your **0° horizon**. A window with very low
+> peak elevations on either bird may be hard to use. The search looks five days
+> ahead and lists up to sixteen windows.
+
 ### Voice memo (`v`, SD card required)
 
 Press `v` on the **Track**, **Manual**, **large-font readout** (Track or Manual),
@@ -795,9 +931,23 @@ the normal tracking updates). Press `v` again to stop, or it stops automatically
 the 30-second cap.
 
 Memos are saved as 16 kHz mono WAV files under **`/CardSat/audio/`** on the SD card,
-named by UTC timestamp (e.g. `memo_20260617_203145.wav`). **An SD card is required** —
-with no card, `v` reports "Memo: SD card required" and does nothing. Retrieve memos
-by reading the SD card on a computer; CardSat does not play them back on-device.
+named by UTC timestamp and (when a satellite is selected) the bird being tracked,
+e.g. `memo_20260617_203145_AO-91.wav`. **An SD card is required** — with no card,
+`v` reports "Memo: SD card required" and does nothing.
+
+**Voice Memos browser (Log → Voice Memos).** Memos can be reviewed on-device from
+the **Log** menu's **Voice Memos** entry. The browser lists every memo on the card
+**newest first**, showing each one's date, time, the **satellite** it was recorded
+on (or `-` for a standalone memo), and its length. Keys:
+
+- **ENTER** — play the selected memo through the speaker. Playback streams from the
+  SD card a block at a time; **any key stops** it early.
+- **`n`** — record a **new standalone memo** right from the browser, not attached to
+  any satellite. A `REC` timer shows while it records; **any key stops and saves**.
+- **`d`** — delete the selected memo (with a confirm prompt).
+- **`r`** — refresh the list; **`` ` ``** returns to the Log menu.
+
+You can still copy the WAV files off the card on a computer as well.
 
 > **Cardputer ADV — voice memo requires building against ESP-IDF 5.4.x.** The ADV
 > captures through an ES8311 codec (the original Cardputer used a PDM mic), and the
@@ -878,7 +1028,59 @@ whichever screen opened it.
 - `p` — enable/disable **GPS**.
 - `s` — cycle the **GPS source** (Grove 9600, Grove 115200, Cap LoRa868, Cap LoRa1262).
 - `c` — set the **UTC clock** manually (`YYYY-MM-DD HH:MM:SS`).
+- `v` — open the **live GPS position** screen (below).
+- **ENTER** — open the **GPS sky plot** (GNSS satellites in view).
 - `` ` `` — back (applies the position to the predictor).
+
+#### Live GPS position (`v`)
+
+A full-precision readout of where you are, for rovers, portable ops, and grid-line
+activations. It shows your **latitude and longitude in degrees-minutes-seconds**
+to 0.001″ (about 3 cm — finer than the fix itself), the same coordinates in
+**decimal degrees** to six places, your **altitude**, your **Maidenhead grid**,
+and — from a live fix — your **ground speed** (km/h and knots) and **course over
+ground** (degrees true with a cardinal label). The top line shows the fix status,
+the number of satellites used, and the HDOP. The grid recomputes live as you move,
+so you can watch it flip as you cross a grid boundary. `` ` `` returns to Location.
+
+### LoRa Messages (Home → Messages)
+
+CardSat-to-CardSat **text messaging** over LoRa, using the M5Stack **Cap LoRa
+(SX1262)** module. It is a **broadcast group chat**: every CardSat tuned to the
+same frequency, spreading factor and bandwidth sees every message — there is no
+addressing or routing, which keeps it simple and reliable for a group on an
+outing, a club net, or a SOTA/portable activation.
+
+> **Untested hardware + extra library.** The LoRa radio path is written to the
+> M5Stack Cap LoRa reference and the SX1262 datasheet but has **not** been
+> confirmed on a device, and it needs the **RadioLib** library plus a build with
+> `CARDSAT_HAS_LORA` enabled (see below). Until you've verified two units talk to
+> each other, treat it as experimental. Know your band's rules: 433.775 MHz at
+> 125 kHz is the global LoRa-APRS-style default and is fine for amateur use in
+> much of the world, but in the US the 70 cm band is limited to 100 kHz occupied
+> bandwidth, so 915 MHz ISM is the cleaner US path. You pick the frequency.
+
+**Using it.** Set your callsign (Settings → Station, or the QRZ screen), enable
+**LoRa msg** in Settings → Network/data, and set the frequency/SF/bandwidth to
+match the other stations. Open **Messages** from the Home menu. Press `n` to write
+a message on the full keyboard and **ENTER** to send; `;`/`.` scroll back through
+history. Your own messages show in cyan as `>me`; received messages show in green
+by the sender's callsign. The top line shows the current frequency, SF, bandwidth
+and your callsign. History holds the most recent 24 messages (a fixed ring — no
+SD card needed, lost on reboot).
+
+**Settings.** In Settings → Network/data: **LoRa msg** on/off (turning it on
+brings the radio up); **LoRa freq** (arrow-adjust in 100 kHz steps, or ENTER to
+type an exact MHz value, 150–960 MHz); **LoRa SF** (7–12; 12 = maximum range and
+sensitivity, the default; lower = faster but shorter range); **LoRa BW** (62.5 /
+125 / 250 kHz); **LoRa TX pwr** (0–22 dBm). Both ends must use the same frequency,
+SF and BW to hear each other.
+
+**Enabling the build.** The LoRa code is wrapped so the firmware compiles without
+the radio. To actually use it: install **RadioLib** (Arduino Library Manager →
+search "RadioLib" by Jan Gromes), and define `CARDSAT_HAS_LORA=1` for the build
+(e.g. edit the define at the top of `src/lora.h` / the inlined block in
+`CardSat.ino`). Without that, the Messages screen reports the radio is off.
 
 ### Update
 
@@ -1223,7 +1425,7 @@ microcontroller. The flashing is fully non-blocking — it runs one burst at a t
 between the normal tracking updates, so radio, rotator, and web control keep running
 throughout. Build whatever receiver and logic you want around the counts above.
 
-> The IR pass beacon is **new in v0.9.22 and host-verified only** — the carrier
+> The IR pass beacon is **new in v0.9.23 and host-verified only** — the carrier
 > timing and flash-count logic were checked off-device, but the actual IR output and
 > a receiver decoding it have not been confirmed on hardware. The 38 kHz carrier,
 > duty cycle, and burst/gap timing may need tuning for your particular receiver;
@@ -1282,6 +1484,27 @@ Behavior notes:
 - The Moon ephemeris is a low-precision series (~arc-minutes after topocentric
   parallax correction) — far finer than any amateur antenna beamwidth. The Sun
   is good to ~0.01°.
+
+#### Sky sources (`s`)
+
+Press **`s`** on the Sun/Moon screen for a secondary **sky-sources** plot: the
+classical planets and the strongest cosmic radio sources, on the same sky dome
+(zenith centre, North up, elevation = radius). It's an antenna-pointing aid and a
+reference for the brightest RF sources crossing the sky — handy for a Sun-noise-style
+gain check against a strong source, or simply to know what's overhead.
+
+**Radio sources** are drawn as orange crosses and **planets** as cyan dots; an
+object below the horizon sits just outside the rim in grey so its bearing is still
+readable. `;`/`.` step through the objects (a green ring marks the selection); the
+right-hand panel shows the selected object's azimuth, elevation, above/below-horizon
+status, and whether it's a radio source or a planet. `` ` `` returns to Sun/Moon.
+
+The catalogue covers the planets **Mercury, Venus, Mars, Jupiter, Saturn**
+(computed live) and the fixed radio sources **Cassiopeia A** (the brightest
+galactic source), **Cygnus A**, the **galactic centre (Sgr A\*)**, the **Crab
+nebula (Tau A)**, and **Virgo A (M87)**, plus a few bright stars (Polaris, Vega,
+Antares) for orientation. Positions use the same low-precision ephemeris as the
+Moon — far finer than any amateur beamwidth.
 
 ### Space weather
 
@@ -2076,8 +2299,10 @@ listed below.
   right-edge mark shows AMSAT activity: a filled dot = heard, filled square =
   telemetry only, ring = not heard, nothing = no reports. Favorites are flagged.
 - **Keys** — `;`/`.` move (`{`/`}` page); `f` toggle favorite; `v` show
-  favorites only; `n` add a new satellite by hand; `o` open **Orbital analysis**;
-  `s` open **Simulation**; `t` open the **Transponder database**; `d` open the
+  favorites only; `n` add a new satellite by hand; `x` delete a manual satellite;
+  `o` open **Orbital analysis**; `s` open **Simulation**; `t` open the
+  **Transponder database**; `e` open the **EQX table**; `k` open the
+  **OSCARLOCATOR** view; `3` open the **3D Globe**; `d` open the
   **10-day pass overview**; `i` open the **Illumination** raster; **ENTER** opens
   **Passes** for the highlighted bird.
 
@@ -2225,7 +2450,33 @@ listed below.
 - **Reached from** — Passes → `x`.
 - **Shows** — the other station's grid (editable) and a list of mutual-visibility
   windows with start/end and the overlap duration.
-- **Keys** — `;`/`.` scroll the windows; **ENTER** edit the remote grid; `` ` `` back.
+- **Keys** — `;`/`.` scroll the windows; **`d`** open the **DX Doppler table** for
+  the highlighted window; **ENTER** edit the remote grid; `` ` `` back.
+
+### DX Doppler table
+
+- **Purpose** — for a selected mutual window, the per-30-second RX/TX dial
+  frequencies for **both stations** through the pass, for manual tuning of a
+  coordinated contact.
+- **Reached from** — Mutual windows → `d`.
+- **Shows** — a scrolling table (UTC, my RX/TX, DX RX/TX) for the selected
+  transponder, in one of three modes — **true rule**, **fixed downlink**, or
+  **fixed uplink** — with an anchor dial and (for a linear transponder) a passband
+  operating point.
+- **Keys** — `m` cycle mode; `a` cycle anchor (my RX/TX, DX RX/TX); `,`/`/` move
+  the linear passband point (1 kHz; `<`/`>` 5 kHz); `;`/`.` scroll the time steps;
+  `` ` `` back to the mutual list.
+
+### Sat-to-sat visibility
+
+- **Purpose** — the windows when the selected satellite and a second satellite are
+  both above your horizon at once, over the next few days; detail in
+  [§8 → Sat-to-sat visibility](#sat-to-sat-visibility-2-from-satellites).
+- **Reached from** — Satellites → `2`.
+- **Shows** — the second satellite (from favorites) and a scrolling list of overlap
+  windows with start time (UTC), duration, and the peak elevation of each bird.
+- **Keys** — `n` cycle the second satellite; `r` recompute; `;`/`.` scroll;
+  `` ` `` back to Satellites.
 
 ### 10-day pass overview
 
@@ -2271,7 +2522,8 @@ listed below.
   that need one.
 - **Keys** — `m` switch TUNE/CAL; `d` cycle Doppler tune mode (linear birds);
   `t` next transponder; `c` set CTCSS/PL tone; `r` radio output on/off; `o`
-  rotator on/off; `p` **Polar**; `f` **Manual mode**; `l` **Log QSO**;
+  rotator on/off; `p` **Polar**; `z` large-font readout; `f` **Manual mode**;
+  `l` **Log QSO**; `v` voice memo (SD card); `y` tilt tuning on/off (ADV, if IMU);
   `g`/`w`/`e` workable grids / US states / DXCC now; in TUNE: `,`/`/` move spot,
   `s` step, `x` recenter; in CAL: `,`/`/` trim downlink, `;`/`.` trim uplink, `s`
   step, `x` zero; **ENTER** save calibration.
@@ -2284,8 +2536,8 @@ listed below.
 - **Shows** — the same RX/TX figures as Track, formatted for manual dialing, with
   the passband/tune controls but no CAT output.
 - **Keys** — mirror Track's tuning set: `m`, `t`, `s`, `x`, the `,`/`/`,`;`/`.`
-  tune/cal keys, `g`/`w`/`e` workable lists, `l` log, `p` polar, `u`/`e`/`f` as on
-  Track; `` ` `` back.
+  tune/cal keys, `g`/`w`/`e` workable lists, `l` log, `p` polar, `v` voice memo,
+  `z` large-font Manual, `u`/`e`/`f` as on Track; `` ` `` back.
 
 ### Polar
 
@@ -2294,6 +2546,37 @@ listed below.
 - **Reached from** — Track → `p`.
 - **Shows** — the current az/el as a marker on a polar grid, with the pass arc.
 - **Keys** — `p` toggle back to Track; `l` **Log QSO**; `` ` `` back.
+
+### OSCARLOCATOR
+
+- **Purpose** — a live azimuthal-equidistant "plotting board" showing the
+  satellite's sub-point on the Earth in real time, with its footprint; the
+  graphical companion to the tabular **EQX table**.
+- **Reached from** — Satellites → `k`.
+- **Shows** — a disc centred on your station (QTH mode) or a pole (polar mode),
+  with a coastline, graticule, the satellite marker (sunlit/eclipse colour), its
+  ground footprint, an amber **QTH range ring** (footprint radius at mean altitude),
+  the blue **full ground-track arc** across the disc (AOS green, LOS orange, travel arrow), and a
+  sub-point/az/el/range readout. In polar mode the North/South sheet is chosen
+  automatically and flips live as the satellite crosses the equator.
+- **Keys** — `m` toggle QTH-centred ↔ polar; `` ` `` back to Satellites.
+
+### 3D Globe
+
+- **Purpose** — an orthographic 3-D wireframe Earth that auto-follows the selected
+  satellite, for an at-a-glance view of where it (and your other favourites) are on
+  the planet, with the day/night terminator.
+- **Reached from** — Satellites → `3`.
+- **Shows** — a wireframe globe (near hemisphere only) with graticule, coastline,
+  a yellow **day/night terminator**, your QTH (white cross), all favourites as
+  green dots, the selected satellite centred (sunlit/eclipse colour) with its
+  **ground footprint** and a blue **ground-track trail** (one orbit), and a
+  sub-point/az/el/altitude readout. A **second (DX) location** entered by grid
+  (`g`) adds an orange marker and footprint; the overlap with the satellite
+  footprint is the mutual-visibility region. The globe rotates to keep the selected
+  satellite centred.
+- **Keys** — arrow keys turn the globe (free-look); **ENTER** re-snaps to
+  auto-follow; **`g`** set a DX grid, **`G`** clear it; `` ` `` back to Satellites.
 
 ### Workable grids
 
@@ -2335,7 +2618,18 @@ listed below.
 - **Shows** — the selected body's live az/el (and a sky-dome graphic in graphic
   view). An orange SUN/MOON header tag appears while it is driving the rotator.
 - **Keys** — `;`/`.` switch Sun↔Moon; `g` toggle graphic/list view; `o` rotator
-  tracking on/off; `x` stop; `` ` `` park and back.
+  tracking on/off; **`s`** open the **Sky sources** plot; `x` stop; `` ` `` park and back.
+
+### Sky sources
+
+- **Purpose** — the planets and the strongest cosmic radio sources on a sky dome,
+  for antenna pointing and as an RF-source reference; detail in
+  [§13 → Sky sources](#sky-sources-s).
+- **Reached from** — Sun / Moon → `s`.
+- **Shows** — a sky dome (zenith centre) with planets as cyan dots and radio
+  sources (Cas A, Cyg A, Sgr A\*, Tau A, Vir A) as orange crosses; a readout gives
+  the selected object's az/el and type.
+- **Keys** — `;`/`.` select an object; `` ` `` back to Sun / Moon.
 
 ### Space weather
 
@@ -2381,7 +2675,31 @@ listed below.
   status when enabled.
 - **Keys** — `e` edit latitude; `o` edit longitude; `a` edit altitude; `g` enter a
   Maidenhead grid; `p` enable/disable GPS; `s` pick the GPS source; `c` set the UTC
-  clock by hand; **ENTER** open the **GPS sky plot**; `` ` `` back.
+  clock by hand; **`v`** open the **live GPS position** screen; **ENTER** open the
+  **GPS sky plot**; `` ` `` back.
+
+### Live GPS position
+
+- **Purpose** — a full-precision position readout (DMS, decimal, grid) plus ground
+  speed and course, for rovers and portable ops; detail in
+  [§13 → Live GPS position](#live-gps-position-v).
+- **Reached from** — Location → `v`.
+- **Shows** — latitude/longitude in degrees-minutes-seconds to 0.001″ and in
+  decimal degrees, altitude, Maidenhead grid, ground speed (km/h and knots) and
+  course; a status line with fix/sat-count/HDOP.
+- **Keys** — `` ` `` back to Location.
+
+### LoRa Messages
+
+- **Purpose** — CardSat-to-CardSat broadcast text chat over the Cap LoRa (SX1262);
+  detail in [§8 → LoRa Messages](#lora-messages-home--messages).
+- **Reached from** — Home → Messages.
+- **Shows** — a scrolling message history (yours in cyan as `>me`, others in green
+  by callsign) with a status line of frequency / SF / bandwidth / your callsign.
+- **Keys** — `n` write + send a message; `;`/`.` scroll history; `r` retry the
+  radio bring-up if it wasn't ready; `` ` `` back to Home.
+- **Notes** — needs LoRa enabled in Settings, your callsign set, the RadioLib
+  library, and a `CARDSAT_HAS_LORA` build; untested hardware path.
 
 ### GPS sky plot
 
@@ -2404,7 +2722,8 @@ listed below.
   status, space weather and terrestrial weather.
 - **Keys** — `k` (or ENTER) download GP + sync clock (NTP) + AMSAT + space wx +
   weather; `f` fast update (GP + AMSAT + favorites' transponders, skips space wx/weather);
-  `a` fetch and cache **all** transponders for offline use; `` ` `` back.
+  `a` fetch and cache **all** transponders for offline use; `w` connect WiFi only;
+  `` ` `` back.
 
 ### GP source
 
@@ -2463,7 +2782,7 @@ listed below.
 
 - **Purpose** — the QSO logging hub.
 - **Reached from** — Home → Log.
-- **Shows** — New QSO entry, View / edit log, Export to ADIF.
+- **Shows** — New QSO entry, View / edit log, Export to ADIF, Voice Memos.
 - **Keys** — `;`/`.` move; **ENTER** open the selected item; `` ` `` back.
 
 ### Log entry
@@ -2489,6 +2808,17 @@ listed below.
 - **Shows** — a scrollable list of the most recent 120 QSOs.
 - **Keys** — `;`/`.` move; **ENTER** open a record to edit; (within a record)
   `x` twice to delete; `` ` `` back.
+
+### Voice Memos
+
+- **Purpose** — browse, play back, and manage the voice memos on the SD card, and
+  record new standalone memos.
+- **Reached from** — Log menu → Voice Memos.
+- **Shows** — all memos newest-first: date, time, the satellite recorded on (or `-`
+  for a standalone memo), and length. A `REC` timer replaces the list while recording.
+- **Keys** — `;`/`.` move; **ENTER** play the selected memo (any key stops);
+  `n` record a new standalone memo (any key stops & saves); `d` delete (with confirm);
+  `r` refresh; `` ` `` back to the Log menu.
 
 ### World map
 
@@ -2539,18 +2869,23 @@ listed below.
 
 ## 22. Key reference (cheat sheet)
 
+> A **printable version** of this reference is included as
+> `CardSat_CheatCard_4x6.pdf` — a **4×6** landscape index card, front and back
+> (two pages). Print at actual size; the front covers operating and the back
+> covers setup and tools. Regenerate it with `python3 tools_make_cheatcard.py`.
+
 **Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot · `h` help.
 
 | Screen | Keys |
 |---|---|
-| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `o` orbital analysis · `s` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
+| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `k` OSCARLOCATOR · `3` 3D globe · `2` sat-to-sat visibility · `o` orbital analysis · `s` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports |
 | **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / Pass outlook / Orbit position) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Live: az/el/range/Doppler, mean anomaly/phase, sunlit/eclipse + **eclipse depth** (deg; >0 = in shadow) · Next pass: slant ranges + path delay + peak eclipse depth · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · Pass outlook: 7-day pass count/>30° count/longest/avg gap + the best upcoming pass (elevation, when, duration) · Orbit position: mean/true anomaly, argument of latitude, time to perigee/apogee, RAAN, rev number · `r` recompute · `` ` `` back |
 | **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |
 | **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `v` voice memo (SD card) · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
+| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `n` jump to beacon · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `v` voice memo (SD card) · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
 | **Large-font readout** (`z` from Track) | big RX/TX + az/el + tune mode · `,`/`/` tune · `s`/`x` step/center · `m` TUNE/CAL · `d` mode · `t` next TX · `r` radio · `o` rotator · `y` tilt · `l` log · `z`/`` ` `` back to Track |
 | **Manual mode** (`f` from Track) | no-radio calculator; `u` swap fixed leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z` large-font · `l`/`p`/`g` (return here) · `` ` ``/`f` back |
 | **Manual large-font** (`z` from Manual) | HOLD/TUNE legs in big digits · `u` swap leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z`/`` ` `` back to Manual |
@@ -2565,8 +2900,10 @@ listed below.
 | **Mutual** | `;`/`.` scroll · `` ` ``/ENTER back to passes |
 | **10-day** | `;`/`.` scroll ∓1 day (forward indefinitely, oldest day off the top; not before today) · `r` recompute · `` ` ``/ENTER back |
 | **Illum** | `,`/`/` scroll ∓1 day (forward indefinitely; not before today) · `r` recompute · `` ` ``/ENTER back |
-| **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock · ENTER GPS sky plot |
+| **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock · `v` live GPS position · ENTER GPS sky plot |
+| **Live GPS position** | DMS + decimal lat/lon, altitude, grid, speed, course · `` ` `` back |
 | **GPS sky plot** | live GNSS az/el coloured by signal · `` ` `` back |
+| **Messages** | LoRa CardSat-to-CardSat chat · `n` write/send · `;`/`.` scroll · `r` retry radio · `` ` `` back |
 | **World map** | `f` cycle highlighted favorite · `c` recenter on QTH / 0° (sun terminator drawn automatically) · `` ` `` back |
 | **Rotator (manual)** | `,`/`/` az · `;`/`.` el · `s` step · `x` stop · *(Yaesu direct only)* `1`/`2`/`3`/`4` capture ADC at az 0 / az full / el 0 / el full · `` ` `` back |
 | **Help** | `;`/`.` scroll · `` ` `` back |

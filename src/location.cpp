@@ -33,6 +33,9 @@ bool Location::pollGps() {
         updated = true;
       }
       if (gps.satellites.isValid()) _sats = gps.satellites.value();
+      if (gps.speed.isValid())   _speedKmh = gps.speed.kmph();
+      if (gps.course.isValid())  _courseDeg = gps.course.deg();
+      if (gps.hdop.isValid())    _hdop = gps.hdop.hdop();
       // Opportunistically set the clock from GPS time if NTP wasn't available.
       if (gps.date.isValid() && gps.time.isValid() && gps.date.year() > 2020) {
         struct tm t = {};

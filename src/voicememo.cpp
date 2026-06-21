@@ -7,6 +7,7 @@
 #include <M5Cardputer.h>   // M5.Mic / .Speaker (ADV: needs IDF 5.4.x, see MANUAL.md)
 #include <M5Unified.h>
 #include <time.h>
+#include <string.h>
 
 // One capture block. At 16 kHz mono 16-bit, 1024 samples = 64 ms = 2048 bytes.
 // Small enough that pulling one per loop tick leaves the radio/rotator/web
@@ -49,7 +50,7 @@ void VoiceMemo::writeWavHeader(uint32_t dataBytes) {
   _file.write(h, sizeof(h));
 }
 
-bool VoiceMemo::start() {
+bool VoiceMemo::start(const char* satName) {
   _err = "";
   if (_state == RECORDING) return true;
 
@@ -67,17 +68,41 @@ bool VoiceMemo::start() {
     _err = "SD nearly full"; _state = ERROR; return false;
   }
 
-  // Build a timestamped filename: /CardSat/audio/memo_YYYYMMDD_HHMMSS.wav, or a
-  // millis()-based name if the clock isn't set.
+  // Sanitize the satellite name into a short filename-safe tag: keep only
+  // [A-Za-z0-9-], cap at 12 chars. e.g. "AO-91" -> "AO-91", "ISS (ZARYA)" ->
+  // "ISSZARYA". Empty if no sat. The browser parses this back out of the name.
+  char tag[16] = {0};
+  if (satName && *satName) {
+    int j = 0;
+    for (const char* p = satName; *p && j < 12; ++p) {
+      char ch = *p;
+      if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+          (ch >= '0' && ch <= '9') || ch == '-')
+        tag[j++] = ch;
+    }
+    tag[j] = 0;
+  }
+
+  // Build a timestamped filename: /CardSat/audio/memo_YYYYMMDD_HHMMSS[_TAG].wav,
+  // or a millis()-based name if the clock isn't set.
   time_t now = time(nullptr);
   if (now > 1700000000) {
     struct tm tmv; gmtime_r(&now, &tmv);
-    snprintf(_path, sizeof(_path), "%s/memo_%04d%02d%02d_%02d%02d%02d.wav",
-             AUDIO_DIR, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-             tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    if (tag[0])
+      snprintf(_path, sizeof(_path), "%s/memo_%04d%02d%02d_%02d%02d%02d_%s.wav",
+               AUDIO_DIR, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+               tmv.tm_hour, tmv.tm_min, tmv.tm_sec, tag);
+    else
+      snprintf(_path, sizeof(_path), "%s/memo_%04d%02d%02d_%02d%02d%02d.wav",
+               AUDIO_DIR, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+               tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
   } else {
-    snprintf(_path, sizeof(_path), "%s/memo_%lu.wav", AUDIO_DIR,
-             (unsigned long)millis());
+    if (tag[0])
+      snprintf(_path, sizeof(_path), "%s/memo_%lu_%s.wav", AUDIO_DIR,
+               (unsigned long)millis(), tag);
+    else
+      snprintf(_path, sizeof(_path), "%s/memo_%lu.wav", AUDIO_DIR,
+               (unsigned long)millis());
   }
 
   _file = fsx.open(_path, "w");
@@ -213,4 +238,175 @@ uint32_t VoiceMemo::secondsLeft() const {
   if (_state != RECORDING) return 0;
   uint32_t el = (millis() - _startMs) / 1000;
   return el >= MEMO_MAX_SECS ? 0 : (MEMO_MAX_SECS - el);
+}
+
+// ===========================================================================
+//  Browser / playback support (SCR_MEMOS)
+// ===========================================================================
+
+// Parse a memo filename into a MemoEntry. Recognizes:
+//   memo_YYYYMMDD_HHMMSS[_TAG].wav   (clock was set)
+//   memo_<millis>[_TAG].wav          (clock not set -> haveTime=false)
+// Fills time fields + sat tag + a sortable stamp. Returns false if it doesn't
+// look like a memo file at all.
+static bool parseMemoName(const char* fn, VoiceMemo::MemoEntry& e) {
+  e.sat[0] = 0; e.stamp = 0; e.haveTime = false;
+  e.year = 0; e.mon = e.day = e.hh = e.mm = e.ss = 0;
+  if (strncmp(fn, "memo_", 5) != 0) return false;
+  const char* p = fn + 5;
+
+  // Try the dated form: 8 digits, '_', 6 digits.
+  int nd = 0; while (p[nd] >= '0' && p[nd] <= '9') nd++;
+  if (nd == 8 && p[8] == '_') {
+    int td = 0; const char* q = p + 9;
+    while (q[td] >= '0' && q[td] <= '9') td++;
+    if (td == 6) {
+      char b[16];
+      memcpy(b, p, 8); b[8] = 0;
+      long ymd = atol(b);
+      e.year = (uint16_t)(ymd / 10000);
+      e.mon  = (uint8_t)((ymd / 100) % 100);
+      e.day  = (uint8_t)(ymd % 100);
+      memcpy(b, p + 9, 6); b[6] = 0;
+      long hms = atol(b);
+      e.hh = (uint8_t)(hms / 10000);
+      e.mm = (uint8_t)((hms / 100) % 100);
+      e.ss = (uint8_t)(hms % 100);
+      e.stamp = (uint64_t)ymd * 1000000ull + (uint64_t)hms;
+      e.haveTime = true;
+      // Optional _TAG before .wav
+      const char* tag = p + 15;            // after HHMMSS
+      if (*tag == '_') {
+        tag++;
+        int j = 0;
+        while (*tag && *tag != '.' && j < 15) e.sat[j++] = *tag++;
+        e.sat[j] = 0;
+      }
+      return true;
+    }
+  }
+
+  // Undated form: memo_<digits>[_TAG].wav -> no real time; sort by the number.
+  if (nd > 0) {
+    char b[16]; int c = nd < 15 ? nd : 15;
+    memcpy(b, p, c); b[c] = 0;
+    e.stamp = (uint64_t)atol(b);           // millis-based; sorts undated among themselves
+    const char* tag = p + nd;
+    if (*tag == '_') {
+      tag++;
+      int j = 0;
+      while (*tag && *tag != '.' && j < 15) e.sat[j++] = *tag++;
+      e.sat[j] = 0;
+    }
+    return true;
+  }
+  return false;
+}
+
+int VoiceMemo::listMemos(MemoEntry* out, int max) {
+  if (max <= 0 || !Store::onSD()) return 0;
+  fs::FS& fsx = Store::fs();
+  File dir = fsx.open(AUDIO_DIR);
+  if (!dir || !dir.isDirectory()) return 0;
+
+  int n = 0;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    if (f.isDirectory()) { f.close(); continue; }
+    const char* nm = f.name();
+    // f.name() may be a full path on some cores; reduce to the basename.
+    const char* slash = strrchr(nm, '/');
+    const char* base = slash ? slash + 1 : nm;
+    // Only .wav memo files.
+    size_t L = strlen(base);
+    bool isWav = L > 4 && strcasecmp(base + L - 4, ".wav") == 0;
+    if (isWav && n < max) {
+      MemoEntry e;
+      if (parseMemoName(base, e)) {
+        strncpy(e.file, base, sizeof(e.file) - 1);
+        e.file[sizeof(e.file) - 1] = 0;
+        uint32_t sz = (uint32_t)f.size();
+        uint32_t pcm = sz > 44 ? sz - 44 : 0;          // strip WAV header
+        e.secs = pcm / (2u * MEMO_SAMPLE_HZ);          // 16-bit mono
+        out[n++] = e;
+      }
+    }
+    f.close();
+  }
+  dir.close();
+
+  // Sort newest-first by stamp (simple insertion sort; n is small, <= 64).
+  for (int i = 1; i < n; ++i) {
+    MemoEntry key = out[i];
+    int j = i - 1;
+    while (j >= 0 && out[j].stamp < key.stamp) { out[j + 1] = out[j]; --j; }
+    out[j + 1] = key;
+  }
+  return n;
+}
+
+bool VoiceMemo::deleteMemo(const char* file) {
+  if (!Store::onSD() || !file || !*file) return false;
+  char path[96];
+  snprintf(path, sizeof(path), "%s/%s", AUDIO_DIR, file);
+  return Store::fs().remove(path);
+}
+
+bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)()) {
+  _err = "";
+  if (_state == RECORDING) { _err = "busy recording"; return false; }
+  if (!Store::onSD()) { _err = "SD card required"; return false; }
+
+  char path[96];
+  snprintf(path, sizeof(path), "%s/%s", AUDIO_DIR, file);
+  File f = Store::fs().open(path, "r");
+  if (!f) { _err = "open failed"; return false; }
+
+  // Read the 44-byte header to learn the sample rate; fall back to MEMO_SAMPLE_HZ.
+  uint8_t hdr[44];
+  uint32_t rate = MEMO_SAMPLE_HZ;
+  if (f.read(hdr, 44) == 44 &&
+      hdr[0]=='R'&&hdr[1]=='I'&&hdr[2]=='F'&&hdr[3]=='F') {
+    uint32_t r = (uint32_t)hdr[24] | ((uint32_t)hdr[25]<<8) |
+                 ((uint32_t)hdr[26]<<16) | ((uint32_t)hdr[27]<<24);
+    if (r >= 8000 && r <= 48000) rate = r;
+  } else {
+    f.seek(44);   // not a clean header; assume our format and skip 44 bytes
+  }
+
+  // The mic and speaker share I2S. If the mic happens to be up (it shouldn't be
+  // outside recording), end it. Ensure the speaker is running.
+  if (M5.Mic.isEnabled()) M5.Mic.end();
+  bool spkWasOn = M5Cardputer.Speaker.isEnabled();
+  if (!spkWasOn) M5Cardputer.Speaker.begin();
+  M5Cardputer.Speaker.setVolume(200);
+
+  // Stream blocks: read PCM from SD into a small buffer, hand to playRaw, wait
+  // for it to drain (polling the cancel hook), repeat. No whole-clip buffer.
+  static int16_t pbuf[MEMO_PLAY_SAMPLES];
+  bool cancelled = false;
+  for (;;) {
+    size_t got = f.read((uint8_t*)pbuf, sizeof(pbuf));
+    if (got < 2) break;                       // EOF
+    size_t nsamp = got / 2;
+    // Wait for the previous block to finish so we don't overrun the channel.
+    while (M5Cardputer.Speaker.isPlaying()) {
+      M5.delay(1);
+      if (cancelPoll && cancelPoll()) { cancelled = true; break; }
+    }
+    if (cancelled) break;
+    M5Cardputer.Speaker.playRaw(pbuf, nsamp, rate, false, 1, 0);
+  }
+  // Let the final block finish unless cancelled.
+  if (!cancelled) {
+    while (M5Cardputer.Speaker.isPlaying()) {
+      M5.delay(1);
+      if (cancelPoll && cancelPoll()) break;
+    }
+  } else {
+    M5Cardputer.Speaker.stop();
+  }
+
+  f.close();
+  if (!spkWasOn) { /* leave speaker on; app expects it available */ }
+  return true;
 }

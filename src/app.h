@@ -12,13 +12,14 @@
 #include "rotator.h"
 #include "voicememo.h"
 #include "irbeacon.h"
+#include "lora.h"
 
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -69,6 +70,7 @@ private:
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
   VoiceMemo memo;            // SD-card voice memo recorder ('v' on Track family)
   IrBeacon  irBeacon;        // IR pass-alert beacon (distinct flash count per event)
+  LoraRadio lora;            // SX1262 LoRa radio for CardSat-to-CardSat messaging
   void toggleMemo();         // start/stop a memo; shared by the Track-family keys
   void drawMemoIndicator();  // red REC badge overlay while a memo is recording
 
@@ -168,6 +170,93 @@ private:
   bool     simMap = false;          // Sim screen: world-map view vs data list
   int      simStepIdx = 2;          // index into SIM_STEP[] (1m/10m/1h/6h/1d)
   int      homeScroll = 0;          // scroll offset for the (now scrollable) home menu
+  // Voice-memo browser (SCR_MEMOS): list of memos on the SD card, newest first.
+  VoiceMemo::MemoEntry memos[MEMO_LIST_MAX];
+  int      memoN = 0;               // number of memos currently listed
+  int      memoSel = 0;             // selected row
+  int      memoScroll = 0;          // scroll offset
+  bool      memoConfirmDel = false; // true while a delete confirmation is pending
+  // OSCARLOCATOR polar view (SCR_OSCAR): live azimuthal-equidistant plot.
+  // oscarMode: 0 = QTH-centred (your station at disc centre), 1 = polar (N or S
+  // pole at centre, chosen automatically from the satellite's hemisphere).
+  int       oscarMode = 0;
+  // Cached OSCARLOCATOR ground-track arc: one full orbital period of sub-points
+  // (lat/lon), sampled once and held static, so the arc covers the whole disc
+  // like a real OSCARLOCATOR. Re-projected each draw (survives QTH<->polar
+  // toggles); the parts outside the plotted radius are naturally clipped.
+  static const int OSCAR_ARC_PTS = 96;
+  float     oscarArcLat[OSCAR_ARC_PTS];
+  float     oscarArcLon[OSCAR_ARC_PTS];
+  int       oscarArcN = 0;           // valid sample count (0 = no arc)
+  time_t    oscarArcEnd = 0;         // rebuild when now passes this (one period out)
+  time_t    oscarArcAos = 0, oscarArcLos = 0;  // AOS/LOS within the track (for markers)
+  uint32_t  oscarArcTriedMs = 0;     // millis() of last build attempt (throttle retries)
+  // 3D globe view (SCR_GLOBE): orthographic wireframe Earth that auto-follows the
+  // selected satellite (the globe rotates to keep its sub-point centred), with a
+  // day/night terminator and all favourites plotted. Arrow keys nudge the view
+  // away from the follow point; a key re-snaps to auto-follow.
+  double    globeViewLat = 0, globeViewLon = 0;  // current centre of the visible disc (deg)
+  bool      globeFollow = true;       // true = re-centre on the selected sat each frame
+  void drawGlobe();
+  void keyGlobe(char c, bool enter, bool back);
+  // DX Doppler table (SCR_DXDOPP): predicted RX/TX for BOTH my station and the DX
+  // station, every 30 s across the selected mutual window, for the selected
+  // transponder. Three tracking modes, and (for a linear transponder) a passband
+  // operating point anchored to one station's RX or TX dial.
+  int       dxdMode   = 0;            // 0 = true rule, 1 = fixed downlink, 2 = fixed uplink
+  int       dxdAnchor = 0;            // who/what is the fixed/selected dial: 0 me-RX 1 me-TX 2 dx-RX 3 dx-TX
+  int32_t   dxdPbOff  = 0;            // passband operating offset (Hz up from downlink low)
+  int       dxdRow    = 0;            // scroll position (top visible 30 s step)
+  int       dxdWin    = 0;            // which mutual window index this table is for
+  void drawDxDopp();
+  void keyDxDopp(char c, bool enter, bool back);
+  void dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
+                   uint32_t& dxRx, uint32_t& dxTx);  // core per-step calculator
+  // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
+  // dome, off the Sun/Moon screen. For antenna pointing and RF-source reference.
+  int       skySel = 0;               // highlighted object index
+  void drawSkyMap();
+  void keySkyMap(char c, bool enter, bool back);
+  // Live GPS position (SCR_GPSPOS): DMS lat/lon to full precision, speed, course,
+  // grid. Off the Location screen.
+  void drawGpsPos();
+  void keyGpsPos(char c, bool enter, bool back);
+  // Sat-to-sat visibility finder (SCR_SATSAT): windows where the selected
+  // satellite and a second satellite are BOTH above the horizon at a chosen
+  // location (default: my QTH) over the next days.
+  int       satsatOther = 0;          // index (into favorites/db view) of the 2nd sat
+  int       satsatSel   = 0;          // highlighted result row
+  struct SatSatWin { time_t start, end; float maxElA, maxElB; };
+  static const int SATSAT_MAX = 16;
+  SatSatWin satsatWin[SATSAT_MAX];
+  int       satsatN = 0;
+  bool      satsatComputed = false;
+  void computeSatSat();
+  void drawSatSat();
+  void keySatSat(char c, bool enter, bool back);
+  // LoRa text messaging (SCR_MESSAGES): broadcast group chat between CardSats on
+  // a shared frequency. Fixed-size history ring (no String, no heap growth).
+  struct LoraMsg {
+    char    from[14];     // sender callsign ("" = me / outgoing)
+    char    text[49];     // message text (fixed)
+    bool    mine;         // true = sent by this unit
+    int16_t rssi;         // dBm (received only)
+    int8_t  snr;          // dB  (received only)
+    uint32_t tMs;         // millis() when added (for relative-time display)
+  };
+  static const int MSG_MAX = 24;
+  LoraMsg   msgRing[MSG_MAX];
+  int       msgHead = 0;          // index of next write (ring)
+  int       msgCount = 0;         // number held (<= MSG_MAX)
+  int       msgScroll = 0;        // view scroll (0 = newest at bottom)
+  bool      loraStarted = false;  // begin() attempted/succeeded this session
+  void msgPush(const char* from, const char* text, bool mine, int rssi, int snr);
+  void loraStart();               // apply cfg, bring the radio up
+  void loraPoll();                // drain RX into the ring (call from loop)
+  void loraSendCurrent(const char* text);   // frame + transmit a typed message
+  void drawMessages();
+  void keyMessages(char c, bool enter, bool back);
+  void buildOscarArc();              // sample the current/next pass ground track
   // Sun / Moon tracking screen (off main menu)
   bool     smOut = false;           // rotator engaged on the Sun/Moon screen
   int      smSel = 0;               // 0 = Sun, 1 = Moon
@@ -508,9 +597,14 @@ private:
   void drawLogEntry();
   void drawLogList();
   void drawEdit();
+  void drawMemos();                 // voice-memo browser (list / play / delete)
+  void buildMemoList();             // (re)enumerate memos from SD, newest first
+  void drawOscar();                 // OSCARLOCATOR live azimuthal-equidistant view
 
   // ---- per-screen input ----
   void keyHome(char c, bool enter, bool back);
+  void keyMemos(char c, bool enter, bool back);
+  void keyOscar(char c, bool enter, bool back);
   void keySatList(char c, bool enter, bool back);
   void keySchedule(char c, bool enter, bool back);
   void keyPasses(char c, bool enter, bool back);

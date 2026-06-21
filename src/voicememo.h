@@ -29,7 +29,10 @@ public:
 
   // Begin a memo. Returns false (and sets lastError) if SD isn't present, the
   // audio folder can't be made, the card is too full, or the mic won't start.
-  bool start();
+  // satName (optional) is the satellite being tracked at record time; a
+  // sanitized short form is encoded into the filename so the memo browser can
+  // show which bird the memo was made on.
+  bool start(const char* satName = nullptr);
   // Pull one block from the mic into the file; call every loop tick while
   // recording. Auto-finalizes at the time cap. No-op when idle.
   void poll();
@@ -42,6 +45,28 @@ public:
   uint32_t secondsLeft() const;               // until the cap
   const char* lastError() const { return _err; }
   const char* path()      const { return _path; }
+
+  // ---- Browser / playback (SCR_MEMOS) -------------------------------------
+  // One row in the memo browser, parsed from the WAV filename + size.
+  struct MemoEntry {
+    char     file[64];     // bare filename (no dir), e.g. memo_20260619_143200_AO-91.wav
+    char     sat[16];      // parsed satellite tag, or "" if none
+    uint64_t stamp;        // YYYYMMDD*1000000 + HHMMSS for sorting, or 0 if unknown
+    uint16_t year; uint8_t mon, day, hh, mm, ss;   // parsed time fields (0 if unknown)
+    uint32_t secs;         // duration in seconds (from file size)
+    bool     haveTime;     // true if the filename carried a real timestamp
+  };
+  // Enumerate AUDIO_DIR into out[], newest-first, up to max entries. Returns the
+  // count. Safe when SD is absent (returns 0).
+  static int  listMemos(MemoEntry* out, int max);
+  // Delete a memo by bare filename (under AUDIO_DIR). Returns true on success.
+  static bool deleteMemo(const char* file);
+  // Play a memo (blocking, but polls the keyboard so any key cancels). Streams
+  // the WAV from SD in small blocks via the speaker -- no full-clip buffer, so
+  // it's safe on the no-PSRAM heap. Returns false (and sets lastError) on a bad
+  // file or speaker failure. cancelKey is called each block; if it returns true,
+  // playback stops early.
+  bool playMemo(const char* file, bool (*cancelPoll)());
 
 private:
   State    _state   = IDLE;

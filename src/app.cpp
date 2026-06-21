@@ -203,6 +203,7 @@ void App::setup() {
 
   M5Cardputer.Speaker.setVolume(180);   // AOS alarm
   irBeacon.begin();                     // IR pass-alert beacon (idle until an alert)
+  if (cfg.loraEnable) loraStart();      // LoRa messaging radio (no-op without RadioLib)
   if (timeIsSet() && favN) buildSchedule();
 
   // If we woke from the deep-sleep-until-pass timer, jump to the schedule so
@@ -382,10 +383,12 @@ void App::toggleMemo() {
   if (memo.isRecording()) {
     memo.stop();
     setStatus("Memo saved");
-  } else if (memo.start()) {
-    setStatus("Recording memo...");
   } else {
-    setStatus(String("Memo: ") + memo.lastError());   // e.g. "SD card required"
+    SatEntry* s = activeSat();
+    if (memo.start(s ? s->name : nullptr))
+      setStatus("Recording memo...");
+    else
+      setStatus(String("Memo: ") + memo.lastError());   // e.g. "SD card required"
   }
   lastDrawMs = 0;
 }
@@ -2442,6 +2445,7 @@ void App::loop() {
   serviceWebd();              // mobile web control page (opt-in, over the WiFi LAN)
   memo.poll();                // voice memo: append one block if recording (SD only)
   irBeacon.service();         // IR pass-alert beacon: advance any queued flashes
+  loraPoll();                 // LoRa messaging: drain any received frame (no-op if off)
   // If the socket-recovery path exhausted its hard resets, surface a reboot
   // prompt once (don't reboot silently). The user decides; the flag is cleared
   // so we don't re-enter while they're on the prompt.
@@ -2680,7 +2684,8 @@ void App::loop() {
   if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUALBIG || screen == SCR_POLAR || screen == SCR_WORLDMAP ||
       screen == SCR_ROTMAN || screen == SCR_GPS || screen == SCR_MANUAL ||
       (screen == SCR_ORBIT && orbitPage <= 2) || screen == SCR_SUNMOON ||
-      screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC) {
+      screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC ||
+      (screen == SCR_MEMOS && memo.isRecording()) || screen == SCR_OSCAR || screen == SCR_GLOBE || screen == SCR_DXDOPP || screen == SCR_SKYMAP || screen == SCR_GPSPOS) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL) {
@@ -2793,6 +2798,14 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_WIFISCAN: keyWifiScan(c, enter, back); break;
     case SCR_ABOUT:    keyAbout(c, enter, back); break;
     case SCR_NETREBOOT: keyNetReboot(c, enter, back); break;
+    case SCR_MEMOS:    keyMemos(c, enter, back); break;
+    case SCR_OSCAR:    keyOscar(c, enter, back); break;
+    case SCR_GLOBE:    keyGlobe(c, enter, back); break;
+    case SCR_DXDOPP:   keyDxDopp(c, enter, back); break;
+    case SCR_SKYMAP:   keySkyMap(c, enter, back); break;
+    case SCR_GPSPOS:   keyGpsPos(c, enter, back); break;
+    case SCR_SATSAT:   keySatSat(c, enter, back); break;
+    case SCR_MESSAGES: keyMessages(c, enter, back); break;
     case SCR_LOG:      keyLog(c, enter, back); break;
     case SCR_LOGENTRY: keyLogEntry(c, enter, back); break;
     case SCR_LOGLIST:  keyLogList(c, enter, back); break;
@@ -2824,7 +2837,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 14;
+  const int N = 15;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -2865,9 +2878,177 @@ void App::keyHome(char c, bool enter, bool back) {
       case 10: screen = SCR_UPDATE; break;
       case 11: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
       case 12: logMenuSel = 0; screen = SCR_LOG; break;
-      case 13: screen = SCR_ABOUT; break;
+      case 13: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
+      case 14: screen = SCR_ABOUT; break;
     }
   }
+}
+
+// ---- Voice-memo browser (SCR_MEMOS) ---------------------------------------
+// (Re)enumerate the memos on the SD card into memos[], newest first.
+void App::buildMemoList() {
+  memoN = VoiceMemo::listMemos(memos, MEMO_LIST_MAX);
+  if (memoSel >= memoN) memoSel = memoN > 0 ? memoN - 1 : 0;
+}
+
+// Poll the keyboard directly for a cancel during blocking playback. Any keypress
+// (or the back/ESC key) cancels. Static so it can be passed as a plain function
+// pointer to VoiceMemo::playMemo.
+static bool memoPlaybackCancel() {
+  M5Cardputer.update();
+  return M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed();
+}
+
+void App::drawMemos() {
+  header("Voice Memos");
+  canvas.setTextSize(1);
+
+  if (!Store::onSD()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("SD card required for voice memos.");
+    footer("` back");
+    return;
+  }
+
+  // While a standalone recording is running, show a prominent REC banner; the
+  // blinking badge is also drawn by drawMemoIndicator() via the normal overlay.
+  if (memo.isRecording()) {
+    canvas.fillRect(0, 40, 240, 40, CL_BLACK);
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.setTextSize(2);
+    canvas.setCursor(40, 48);
+    canvas.printf("REC  %lus", (unsigned long)memo.elapsedMs() / 1000);
+    canvas.setTextSize(1);
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(30, 70); canvas.print("Recording a standalone memo");
+    footer("any key = stop & save");
+    return;
+  }
+
+  if (memoN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 42); canvas.print("No voice memos yet.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 54); canvas.print("n = record  ('v' on a Track screen too)");
+    footer("n new  r refresh  ` back");
+    return;
+  }
+
+  // Column header.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.print("Date   Time   Satellite    Len");
+
+  const int VIS = 8;
+  if (memoSel < memoScroll)            memoScroll = memoSel;
+  if (memoSel > memoScroll + VIS - 1)  memoScroll = memoSel - VIS + 1;
+  if (memoScroll < 0) memoScroll = 0;
+
+  for (int r = 0; r < VIS && (memoScroll + r) < memoN; ++r) {
+    int i = memoScroll + r, y = 30 + r * 11;
+    const VoiceMemo::MemoEntry& m = memos[i];
+    if (i == memoSel) { canvas.fillRect(0, y - 2, 240, 11, CL_SELBG);
+                        canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else                canvas.setTextColor(CL_WHITE, CL_BLACK);
+    char line[48];
+    char sat[10];
+    snprintf(sat, sizeof(sat), "%-9.9s", m.sat[0] ? m.sat : "-");
+    if (m.haveTime)
+      snprintf(line, sizeof(line), "%02d-%02d  %02d:%02d  %s %lu:%02lu",
+               m.mon, m.day, m.hh, m.mm, sat,
+               (unsigned long)(m.secs / 60), (unsigned long)(m.secs % 60));
+    else
+      snprintf(line, sizeof(line), "  --     --   %s %lu:%02lu", sat,
+               (unsigned long)(m.secs / 60), (unsigned long)(m.secs % 60));
+    canvas.setCursor(4, y); canvas.print(line);
+  }
+
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (memoScroll > 0)              { canvas.setCursor(232, 30);  canvas.print("^"); }
+  if (memoScroll + VIS < memoN)    { canvas.setCursor(232, 118); canvas.print("v"); }
+
+  if (memoConfirmDel) {
+    canvas.fillRect(20, 50, 200, 34, CL_BLACK);
+    canvas.drawRect(20, 50, 200, 34, CL_RED);
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.setCursor(28, 56); canvas.print("Delete this memo?");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(28, 70); canvas.print("ENT = delete   ` = cancel");
+    footer("");
+  } else {
+    footer("ENT play  n new  d del  r refresh  ` back");
+  }
+}
+
+void App::keyMemos(char c, bool enter, bool back) {
+  // If a standalone recording (started here with 'n') is in progress, any key
+  // stops it and refreshes the list. This mirrors the toggle behavior on the
+  // Track screens but keeps the user on the browser.
+  if (memo.isRecording()) {
+    memo.stop();
+    setStatus("Memo saved");
+    buildMemoList();
+    memoSel = 0; memoScroll = 0;
+    lastDrawMs = 0;
+    return;
+  }
+
+  if (memoConfirmDel) {
+    if (enter) {
+      if (memoSel >= 0 && memoSel < memoN) {
+        if (VoiceMemo::deleteMemo(memos[memoSel].file)) setStatus("Memo deleted");
+        else                                            setStatus("Delete failed");
+        buildMemoList();
+      }
+      memoConfirmDel = false;
+    } else if (back) {
+      memoConfirmDel = false;
+    }
+    lastDrawMs = 0;
+    return;
+  }
+
+  if (isBack(c, back)) { logMenuSel = 3; screen = SCR_LOG; lastDrawMs = 0; return; }
+
+  if (memoN > 0) {
+    if (isUp(c))   memoSel = (memoSel + memoN - 1) % memoN;
+    if (isDown(c)) memoSel = (memoSel + 1) % memoN;
+  }
+  if (c == 'n') {                       // record a new standalone memo (no satellite)
+    if (memo.start(nullptr)) setStatus("Recording... (any key stops)");
+    else                     setStatus(String("Memo: ") + memo.lastError());
+    lastDrawMs = 0;
+    return;
+  }
+  if (c == 'r') { buildMemoList(); setStatus("Memo list refreshed"); }
+  if (c == 'd' && memoN > 0) { memoConfirmDel = true; }
+  if (enter && memoN > 0 && memoSel < memoN) {
+    setStatus("Playing... (any key stops)");
+    draw();                              // show the status before we block
+    bool ok = memo.playMemo(memos[memoSel].file, &memoPlaybackCancel);
+    setStatus(ok ? "Playback done" : (String("Play: ") + memo.lastError()));
+  }
+  lastDrawMs = 0;
+}
+
+void App::keyOscar(char c, bool enter, bool back) {
+  if (isBack(c, back)) { buildSatView(); screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (c == 'm') { oscarMode = (oscarMode == 0) ? 1 : 0; lastDrawMs = 0; }   // QTH <-> polar
+}
+
+void App::keyGlobe(char c, bool enter, bool back) {
+  if (isBack(c, back)) { buildSatView(); screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (enter) { globeFollow = true; lastDrawMs = 0; return; }   // re-snap to the sat
+  if (c == 'g') {                                              // enter a DX grid (2nd location)
+    editTarget = 104; editTitle = "DX grid (Maidenhead)"; editBuf = ""; screen = SCR_EDIT;
+    return;
+  }
+  if (c == 'G') { dxGrid[0] = 0; setStatus("DX cleared"); lastDrawMs = 0; return; }  // clear DX
+  // Arrow keys nudge the view; this drops out of auto-follow into free-look.
+  const double STEP = 15.0;
+  if (isUp(c))    { globeFollow = false; globeViewLat += STEP; if (globeViewLat >  90) globeViewLat =  90; lastDrawMs = 0; }
+  if (isDown(c))  { globeFollow = false; globeViewLat -= STEP; if (globeViewLat < -90) globeViewLat = -90; lastDrawMs = 0; }
+  if (isLeft(c))  { globeFollow = false; globeViewLon -= STEP; if (globeViewLon < -180) globeViewLon += 360; lastDrawMs = 0; }
+  if (isRight(c)) { globeFollow = false; globeViewLon += STEP; if (globeViewLon >  180) globeViewLon -= 360; lastDrawMs = 0; }
 }
 
 void App::keySchedule(char c, bool enter, bool back) {
@@ -2952,6 +3133,18 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   if (c == 'e' && viewN > 0) {                      // EQX table (OSCARLOCATOR)
     eqxDescending = false; buildEqx(); screen = SCR_EQX; lastDrawMs = 0;
+    return;
+  }
+  if (c == 'k' && viewN > 0) {                      // OSCARLOCATOR live polar view
+    oscarMode = 0; oscarArcN = 0; oscarArcTriedMs = 0; screen = SCR_OSCAR; lastDrawMs = 0;
+    return;
+  }
+  if (c == '3' && viewN > 0) {                      // 3D globe view (auto-follow)
+    globeFollow = true; oscarArcN = 0; oscarArcTriedMs = 0; screen = SCR_GLOBE; lastDrawMs = 0;
+    return;
+  }
+  if (c == '2' && viewN > 0) {                      // sat-to-sat visibility finder
+    satsatOther = 0; satsatSel = 0; satsatComputed = false; screen = SCR_SATSAT; lastDrawMs = 0;
     return;
   }
   if (c == 'd' && viewN > 0) {                      // 10-day pass overview
@@ -3096,6 +3289,24 @@ void App::keyTrack(char c, bool enter, bool back) {
     curTx = (curTx + 1) % activeTxCount;
     onTransponderChanged();
     if (radioOut) applyTransponderModes(activeTx[curTx]);   // refresh rig modes
+  }
+  if (c == 'n' && activeTxCount > 0) {               // jump to the beacon
+    // A beacon is a downlink-only entry (uplink == 0). Prefer one whose desc
+    // mentions "beacon"; otherwise the first downlink-only entry; else say none.
+    int found = -1, firstDlOnly = -1;
+    for (int i = 0; i < activeTxCount; ++i) {
+      if (activeTx[i].uplink == 0 && activeTx[i].downlink != 0) {
+        if (firstDlOnly < 0) firstDlOnly = i;
+        String d = activeTx[i].desc; d.toLowerCase();
+        if (d.indexOf("beacon") >= 0 || d.indexOf("bcn") >= 0) { found = i; break; }
+      }
+    }
+    if (found < 0) found = firstDlOnly;
+    if (found >= 0) {
+      curTx = found; onTransponderChanged();
+      if (radioOut) applyTransponderModes(activeTx[curTx]);
+      setStatus(String("Beacon: ") + activeTx[curTx].desc);
+    } else setStatus("No beacon listed for this sat");
   }
   if (c == 'c' && activeTxCount > 0) {               // set/clear CTCSS tone (per sat)
     float cur = activeTx[curTx].toneHz;
@@ -3344,16 +3555,206 @@ void App::drawMutual() {
     canvas.printf("%s %ld:%02ld %3.0f %3.0f", fmtMDHM(m.start).c_str(),
                   secs/60, secs%60, m.myMaxEl, m.dxMaxEl);
   }
-  footer(";/. select   ` back");
+  footer(";/. select  d Doppler  ` back");
 }
 
 void App::keyMutual(char c, bool enter, bool back) {
-  if (isBack(c, back) || enter) { screen = SCR_PASSES; return; }
+  if (isBack(c, back)) { screen = SCR_PASSES; return; }
   if (mutualN) {
     if (isUp(c))   mutualSel = (mutualSel + mutualN - 1) % mutualN;
     if (isDown(c)) mutualSel = (mutualSel + 1) % mutualN;
+    if (c == 'd' || enter) {                 // Doppler table for this window
+      if (!activeSat()) { setStatus("No satellite"); return; }
+      dxdWin = mutualSel; dxdRow = 0;
+      screen = SCR_DXDOPP; lastDrawMs = 0;
+      return;
+    }
+  }
+  if (enter) { screen = SCR_PASSES; return; }
+}
+
+// ===========================================================================
+//  DX Doppler table (SCR_DXDOPP)
+//
+//  For the selected mutual window and transponder, predict the RX (downlink) and
+//  TX (uplink) dial frequencies for BOTH this station and the DX station, every
+//  30 s across the window. Three modes:
+//    0 TRUE RULE      - operating point fixed in the satellite passband; every
+//                       dial Doppler-tracks (each station with its own range-rate)
+//    1 FIXED DOWNLINK - the ANCHOR station's RX dial is held constant in real RF;
+//                       the passband operating point drifts to absorb its downlink
+//                       Doppler, and the other three dials follow.
+//    2 FIXED UPLINK   - the ANCHOR station's TX dial is held constant in real RF;
+//                       the operating point drifts, the other three dials follow.
+//  The anchor (whose dial is fixed, or whose passband point you set in true rule)
+//  is one of: my RX, my TX, DX RX, DX TX.
+// ===========================================================================
+
+// Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
+void App::dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
+                      uint32_t& dxRx, uint32_t& dxTx) {
+  myRx = myTx = dxRx = dxTx = 0;
+  SatEntry* s = activeSat();
+  if (!s) return;
+  Transponder& tp = activeTx[curTx];
+
+  // Operating point in the passband (satellite frame), before Doppler.
+  uint32_t dlOp, ulOp;
+  Predictor::passbandFreqs(tp, dxdPbOff, dlOp, ulOp);
+
+  // Range-rate for each station at t (km/s). Switch the predictor site, sample,
+  // then restore to my site so the rest of the UI is unaffected.
+  pred.setSat(*s);
+  Observer dxObs; dxObs.lat = dxLat; dxObs.lon = dxLon; dxObs.altM = 0; dxObs.valid = true;
+  pred.setSite(loc.obs());  double rrMe = pred.rangeRateAt((double)t);
+  pred.setSite(dxObs);      double rrDx = pred.rangeRateAt((double)t);
+  pred.setSite(loc.obs());
+  const double C = 299792458.0;
+  double bMe = rrMe * 1000.0 / C, bDx = rrDx * 1000.0 / C;
+
+  if (dxdMode == 0) {
+    // True rule: same operating point for both, each with its own Doppler.
+    Predictor::dopplerFreqs(dlOp, ulOp, rrMe, calDl, calUl, myRx, myTx);
+    Predictor::dopplerFreqs(dlOp, ulOp, rrDx, calDl, calUl, dxRx, dxTx);
+    return;
+  }
+
+  // Fixed-dial modes: work out the satellite-frame operating-point drift `delta`
+  // from the anchor station's locked real-RF dial, then derive everybody else.
+  // anchorBeta is the locked station's beta; anchorIsDx picks which.
+  bool anchorIsDx = (dxdAnchor == 2 || dxdAnchor == 3);
+  double aBeta = anchorIsDx ? bDx : bMe;
+  double oneMinusA = 1.0 - aBeta; if (oneMinusA == 0.0) oneMinusA = 1e-12;
+
+  // The locked dial value: the true-rule frequency at the *current* operating
+  // point and the anchor's beta (this is what the operator set and won't touch).
+  double delta = 0.0;
+  if (dxdMode == 1) {
+    // FIXED DOWNLINK: anchor parks RX. parkedRx = dlOp*(1-aBeta)+calDl held; but
+    // to keep a stable real-RF lock across steps we anchor to the *passband* dlOp
+    // captured into the dial at entry. Here we treat the locked ground RX as the
+    // value that makes the bird emit dlOp at the anchor's CURRENT beta -- i.e. the
+    // operator tracked once then stopped, and we show drift from this instant's op.
+    double parkedRx = (double)dlOp * oneMinusA + (double)calDl;
+    double fdlSat   = (parkedRx - (double)calDl) / oneMinusA;  // bird emit (sat frame)
+    delta = fdlSat - (double)dlOp;
+  } else {
+    // FIXED UPLINK: anchor parks TX.
+    double parkedTx = (ulOp ? ((double)ulOp / oneMinusA + (double)calUl) : 0.0);
+    double fulSat   = (parkedTx - (double)calUl) * oneMinusA;  // bird hears (sat frame)
+    delta = ulOp ? (fulSat - (double)ulOp) : 0.0;
+  }
+
+  // Apply the drift to the operating point with the transponder's inversion sense.
+  double dlSat, ulSat;
+  if (dxdMode == 1) {                       // delta defined on the downlink
+    dlSat = (double)dlOp + delta;
+    ulSat = tp.invert ? ((double)ulOp - delta) : ((double)ulOp + delta);
+  } else {                                  // delta defined on the uplink
+    ulSat = (double)ulOp + delta;
+    dlSat = tp.invert ? ((double)dlOp - delta) : ((double)dlOp + delta);
+  }
+
+  // Now each station's dials from the drifted satellite-frame pair, own Doppler.
+  myRx = (uint32_t)llround(dlSat * (1.0 - bMe) + (double)calDl);
+  myTx = ulOp ? (uint32_t)llround(ulSat / (1.0 - bMe) + (double)calUl) : 0;
+  dxRx = (uint32_t)llround(dlSat * (1.0 - bDx) + (double)calDl);
+  dxTx = ulOp ? (uint32_t)llround(ulSat / (1.0 - bDx) + (double)calUl) : 0;
+}
+
+static const char* DXD_MODE_NAME[3] = { "True rule", "Fixed DL", "Fixed UL" };
+static const char* DXD_ANCHOR_NAME[4] = { "me RX", "me TX", "DX RX", "DX TX" };
+
+void App::drawDxDopp() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " DX Dopp") : String("DX Doppler"));
+  canvas.setTextSize(1);
+  if (!s) { footer("` back"); return; }
+  if (dxdWin >= mutualN) { dxdWin = 0; }
+  if (mutualN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("No mutual window.");
+    footer("` back"); return;
+  }
+  if (activeTxCount == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("No transponder. Pick one");
+    canvas.setCursor(6, 62); canvas.print("with 't' on Satellites.");
+    footer("` back"); return;
+  }
+  Transponder& tp = activeTx[curTx];
+  MutualWindow& w = mutual[dxdWin];
+
+  // Header line: transponder + mode + anchor.
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(2, 18); canvas.printf("%.18s", tp.desc);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(2, 28);
+  canvas.printf("%s", DXD_MODE_NAME[dxdMode]);
+  if (dxdMode != 0) canvas.printf("  anc:%s", DXD_ANCHOR_NAME[dxdAnchor]);
+  if (tp.isLinear && tp.bandwidth() > 0) {
+    canvas.setTextColor(CL_DGREEN, CL_BLACK);
+    canvas.printf("  +%ldk", (long)(dxdPbOff / 1000));
+  }
+
+  // Column headers.
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(2, 40);  canvas.print("UTC");
+  canvas.setCursor(40, 40); canvas.print("me RX/TX");
+  canvas.setCursor(138,40); canvas.print("DX RX/TX");
+  canvas.drawLine(0, 49, 240, 49, CL_DGREY);
+
+  // Rows: 30 s steps across the window, starting at dxdRow.
+  time_t span = w.end - w.start; if (span < 0) span = 0;
+  int nSteps = (int)(span / 30) + 1;
+  const int rowH = 9, firstY = 51, maxRows = 8;
+  for (int r = 0; r < maxRows; ++r) {
+    int step = dxdRow + r;
+    if (step >= nSteps) break;
+    time_t t = w.start + (time_t)step * 30;
+    if (t > w.end) t = w.end;
+    uint32_t mRx, mTx, dRx, dTx;
+    dxDoppFreqs(t, mRx, mTx, dRx, dTx);
+    int y = firstY + r * rowH;
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(2, y); canvas.print(fmtHM(t).c_str());
+    // me
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.setCursor(40, y); canvas.printf("%.4f", mRx / 1e6);
+    if (mTx) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
+               canvas.setCursor(92, y); canvas.printf("%.4f", mTx / 1e6); }
+    // dx
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.setCursor(138, y); canvas.printf("%.4f", dRx / 1e6);
+    if (dTx) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
+               canvas.setCursor(190, y); canvas.printf("%.4f", dTx / 1e6); }
+  }
+
+  footer("m mode  a anc  ,/ pb  ;/. scroll  `bk");
+}
+
+void App::keyDxDopp(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_MUTUAL; lastDrawMs = 0; return; }
+  if (mutualN == 0 || activeTxCount == 0) return;
+  MutualWindow& w = mutual[dxdWin];
+  time_t span = w.end - w.start; if (span < 0) span = 0;
+  int nSteps = (int)(span / 30) + 1;
+  Transponder& tp = activeTx[curTx];
+
+  if (c == 'm') { dxdMode = (dxdMode + 1) % 3; lastDrawMs = 0; return; }
+  if (c == 'a') { dxdAnchor = (dxdAnchor + 1) % 4; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (dxdRow > 0) dxdRow--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (dxdRow < nSteps - 1) dxdRow++; lastDrawMs = 0; return; }
+  // passband operating point (linear only): left/right by 1 kHz, shift by 5 kHz.
+  if (tp.isLinear && tp.bandwidth() > 0) {
+    int32_t bw = (int32_t)tp.bandwidth();
+    if (isLeft(c))  { dxdPbOff -= 1000; if (dxdPbOff < 0)  dxdPbOff = 0;  lastDrawMs = 0; }
+    if (isRight(c)) { dxdPbOff += 1000; if (dxdPbOff > bw) dxdPbOff = bw; lastDrawMs = 0; }
+    if (c == '<')   { dxdPbOff -= 5000; if (dxdPbOff < 0)  dxdPbOff = 0;  lastDrawMs = 0; }
+    if (c == '>')   { dxdPbOff += 5000; if (dxdPbOff > bw) dxdPbOff = bw; lastDrawMs = 0; }
   }
 }
+
 
 // ===========================================================================
 //  10-day pass overview (InstantTrack "Multiple Days for Single Satellite")
@@ -3558,6 +3959,7 @@ void App::keyLocation(char c, bool enter, bool back) {
                   editBuf = ""; screen = SCR_EDIT; }
   if (c == 'c') { editTarget = 300; editTitle = "UTC YYYY-MM-DD HH:MM:SS";
                   editBuf = ""; screen = SCR_EDIT; }
+  if (c == 'v') { screen = SCR_GPSPOS; lastDrawMs = 0; return; }  // live DMS position
 }
 
 void App::keyUpdate(char c, bool enter, bool back) {
@@ -3581,7 +3983,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,54,48,49,25,43};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,27,28,29};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,55,56,57,58,59,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
   (int)(sizeof(SET_RADIO)/sizeof(int)), (int)(sizeof(SET_ROTOR)/sizeof(int)),
@@ -3624,9 +4026,26 @@ void App::keySettings(char c, bool enter, bool back) {
       case 43: cfg.wxUnits = (uint8_t)((cfg.wxUnits + dir + 3) % 3); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
-      case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 8) % 8);
-              cfg.save(); applyRotatorFromCfg(); break;
+      case 55: cfg.loraEnable = !cfg.loraEnable; cfg.save();
+               if (cfg.loraEnable) loraStart(); break;
+      case 56: { long f = (long)cfg.loraFreqKHz + dir * 100;   // 100 kHz steps
+                 if (f < 150000) f = 150000; if (f > 960000) f = 960000;
+                 cfg.loraFreqKHz = (uint32_t)f; cfg.save();
+                 if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                                 cfg.loraBwHz, cfg.loraTxDbm); } break;
+      case 57: { int sf = (int)cfg.loraSf + dir; if (sf < 7) sf = 12; if (sf > 12) sf = 7;
+                 cfg.loraSf = (uint8_t)sf; cfg.save();
+                 if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                                 cfg.loraBwHz, cfg.loraTxDbm); } break;
+      case 58: { uint32_t bws[] = {62500, 125000, 250000}; int idx = 1;
+                 for (int i = 0; i < 3; ++i) if (cfg.loraBwHz == bws[i]) idx = i;
+                 idx = (idx + dir + 3) % 3; cfg.loraBwHz = bws[idx]; cfg.save();
+                 if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                                 cfg.loraBwHz, cfg.loraTxDbm); } break;
+      case 59: { int p = (int)cfg.loraTxDbm + dir; if (p < 0) p = 0; if (p > 22) p = 22;
+                 cfg.loraTxDbm = (int8_t)p; cfg.save();
+                 if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                                 cfg.loraBwHz, cfg.loraTxDbm); } break;
       case 11: { long p = (long)cfg.rotPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotPort = (uint16_t)p; cfg.save(); } break;
       case 12: { uint32_t bs[] = {1200,4800,9600};
@@ -3712,9 +4131,21 @@ void App::keySettings(char c, bool enter, bool back) {
               break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
-      case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
-               editBuf = cfg.rotHost; screen = SCR_EDIT; break;
+      case 55: cfg.loraEnable = !cfg.loraEnable; cfg.save();
+               if (cfg.loraEnable) loraStart(); break;
+      case 56: editTarget = 701; editTitle = "LoRa freq (MHz)";
+               editBuf = String(cfg.loraFreqKHz / 1000.0, 3); screen = SCR_EDIT; break;
+      case 57: { int sf = (int)cfg.loraSf + 1; if (sf > 12) sf = 7;
+                 cfg.loraSf = (uint8_t)sf; cfg.save();
+                 if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                                 cfg.loraBwHz, cfg.loraTxDbm); } break;
+      case 58: { uint32_t bws[] = {62500, 125000, 250000}; int idx = 1;
+                 for (int i = 0; i < 3; ++i) if (cfg.loraBwHz == bws[i]) idx = i;
+                 idx = (idx + 1) % 3; cfg.loraBwHz = bws[idx]; cfg.save();
+                 if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                                 cfg.loraBwHz, cfg.loraTxDbm); } break;
+      case 59: editTarget = 702; editTitle = "LoRa TX power (dBm 0-22)";
+               editBuf = String(cfg.loraTxDbm); screen = SCR_EDIT; break;
       case 11: editTarget = 206; editTitle = "Net rotator port";
                editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
       case 20: gpSrcSel = 0; gpSrcScroll = 0; screen = SCR_GPSRC; lastDrawMs = 0; break;
@@ -3765,6 +4196,7 @@ void App::keySettings(char c, bool enter, bool back) {
 }
 
 static Screen editHome(int t) {
+  if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
   if (t == 600) return SCR_LOG;         // LoTW SAT_NAME prompt (abort export)
   if (t >= 500) return SCR_LOGENTRY;    // QSO log field edit
   if (t == 340) return SCR_TRACK;       // CTCSS tone override
@@ -3773,6 +4205,7 @@ static Screen editHome(int t) {
   if (t >= 310) return SCR_SATLIST;     // manual GP entry
   if (t >= 300) return SCR_LOCATION;    // manual time
   if (t == 216) return SCR_QRZ;         // QRZ callsign prompt
+  if (t == 104) return SCR_GLOBE;       // DX grid entered from the globe
   if (t >= 200) return SCR_SETTINGS;    // radio / WiFi
   if (t >= 100) return SCR_LOCATION;    // location fields
   return SCR_HOME;
@@ -3793,6 +4226,14 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 102: cfg.altM = editBuf.toFloat(); break;
       case 103: loc.setFromGrid(editBuf);
                 cfg.lat = loc.obs().lat; cfg.lon = loc.obs().lon; break;
+      case 104: {                                   // DX grid for the globe / mutual
+        double dlat, dlon; String g = editBuf; g.trim(); g.toUpperCase();
+        if (Location::gridToLatLon(g, dlat, dlon)) {
+          strncpy(dxGrid, g.c_str(), sizeof(dxGrid) - 1); dxGrid[sizeof(dxGrid)-1] = 0;
+          dxLat = dlat; dxLon = dlon;
+          setStatus(String("DX set: ") + dxGrid);
+        } else setStatus("Bad grid (e.g. FM18lw)");
+      } break;
       case 200: cfg.civAddr = (uint8_t)strtol(editBuf.c_str(), nullptr, 16); break;
       case 201: strncpy(cfg.ssid, editBuf.c_str(), sizeof(cfg.ssid)-1);
                 cfg.ssid[sizeof(cfg.ssid)-1] = 0; break;
@@ -4030,8 +4471,35 @@ void App::keyEdit(char c, bool enter, bool back) {
         setStatus("Reset cancelled");
         screen = SCR_SETTINGS; return;
       }
+
+      // ---- send a LoRa text message (broadcast) ----
+      case 700: {
+        String t = editBuf;
+        if (t.length()) loraSendCurrent(t.c_str());
+        screen = SCR_MESSAGES; lastDrawMs = 0; return;
+      }
+      // ---- LoRa frequency (MHz) ----
+      case 701: {
+        double mhz = editBuf.toFloat();
+        if (mhz >= 150.0 && mhz <= 960.0) {
+          cfg.loraFreqKHz = (uint32_t)lround(mhz * 1000.0); cfg.save();
+          if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                          cfg.loraBwHz, cfg.loraTxDbm);
+          setStatus("LoRa freq set");
+        } else setStatus("Range 150-960 MHz");
+        screen = SCR_SETTINGS; return;
+      }
+      // ---- LoRa TX power (dBm) ----
+      case 702: {
+        int p = editBuf.toInt(); if (p < 0) p = 0; if (p > 22) p = 22;
+        cfg.loraTxDbm = (int8_t)p; cfg.save();
+        if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
+                                        cfg.loraBwHz, cfg.loraTxDbm);
+        setStatus("LoRa TX power set");
+        screen = SCR_SETTINGS; return;
+      }
     }
-    if (editTarget <= 200) {
+    if (editTarget <= 200 && editTarget != 104) {
       loc.setManual(cfg.lat, cfg.lon, cfg.altM);
       pred.setSite(loc.obs());
     }
@@ -4042,7 +4510,7 @@ void App::keyEdit(char c, bool enter, bool back) {
     return;
   }
   if (c >= 32 && c < 127) {
-    if (editTarget == 103 || editTarget == 204 || editTarget == 216 ||
+    if (editTarget == 103 || editTarget == 104 || editTarget == 204 || editTarget == 216 ||
         editTarget == 330 ||
         editTarget == 500 || editTarget == 503 || editTarget == 600) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
@@ -4457,8 +4925,8 @@ bool App::exportAdif() {
 void App::drawLog() {
   header("Log");
   canvas.setTextSize(1);
-  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF" };
-  for (int i = 0; i < 3; ++i) {
+  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF", "Voice Memos" };
+  for (int i = 0; i < 4; ++i) {
     int y = 26 + i*14;
     if (i == logMenuSel) { canvas.fillRect(0, y-2, 240, 13, CL_SELBG);
                            canvas.setTextColor(CL_BLACK, CL_SELBG); }
@@ -4466,20 +4934,22 @@ void App::drawLog() {
     canvas.setCursor(6, y); canvas.print(items[i]);
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 26 + 3*14 + 6);
+  canvas.setCursor(6, 26 + 4*14 + 6);
   canvas.printf("%d logged  (qso_log.csv)", qsoCount());
   footer("; / . move  ENT  ` back");
 }
 
 void App::keyLog(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
-  const int N = 3;
+  const int N = 4;
   if (isUp(c))   logMenuSel = (logMenuSel + N - 1) % N;
   if (isDown(c)) logMenuSel = (logMenuSel + 1) % N;
   if (enter) {
     if (logMenuSel == 0) beginQso();
     else if (logMenuSel == 1) { loadLog(); screen = SCR_LOGLIST; }
-    else beginAdifExport();
+    else if (logMenuSel == 2) beginAdifExport();
+    else { buildMemoList(); memoSel = 0; memoScroll = 0; memoConfirmDel = false;
+           screen = SCR_MEMOS; lastDrawMs = 0; }
   }
 }
 
@@ -4707,6 +5177,14 @@ void App::draw() {
     case SCR_WIFISCAN: drawWifiScan(); break;
     case SCR_ABOUT:    drawAbout(); break;
     case SCR_NETREBOOT: drawNetReboot(); break;
+    case SCR_MEMOS:    drawMemos(); break;
+    case SCR_OSCAR:    drawOscar(); break;
+    case SCR_GLOBE:    drawGlobe(); break;
+    case SCR_DXDOPP:   drawDxDopp(); break;
+    case SCR_SKYMAP:   drawSkyMap(); break;
+    case SCR_GPSPOS:   drawGpsPos(); break;
+    case SCR_SATSAT:   drawSatSat(); break;
+    case SCR_MESSAGES: drawMessages(); break;
     case SCR_LOG:      drawLog(); break;
     case SCR_LOGENTRY: drawLogEntry(); break;
     case SCR_LOGLIST:  drawLogList(); break;
@@ -5141,12 +5619,17 @@ void App::drawHelp() {
     "SUN / MOON",
     " ;/. pick Sun or Moon",
     " o rotor track  x stop",
+    " s sky sources (planets,",
+    "   radio sources)",
     " parks while body is set",
     " takes rotor from sat trk",
     "SATELLITES",
     " ENT  toggle favorite",
     " o  orbital analysis",
     " s  simulation (time)",
+    " e  EQX table",
+    " k  OSCARLOCATOR view",
+    " 2  sat-to-sat windows",
     " arrows scroll the list",
     " AMSAT: dot=heard",
     "  sq=telemetry  ring=no",
@@ -5172,20 +5655,71 @@ void App::drawHelp() {
     " w workable US states",
     " e workable DXCC",
     " v 10-day  i illum  x DX",
+    "MUTUAL WINDOWS (x)",
+    " co-visibility with a DX",
+    " ;/. scroll  d Doppler",
+    "DX DOPPLER TABLE (Mutual d)",
+    " both stns RX/TX per 30s",
+    " m mode  a anchor dial",
+    " ,/ linear passband pt",
     "TRACK (selected sat)",
     " r  engage radio (Doppler)",
     " arrows tune / adjust",
+    " m TUNE/CAL  d tune mode",
+    " t next TX  n beacon",
+    " c CTCSS tone",
+    " o rotator  p polar",
+    " z big readout  l log QSO",
+    " v voice memo (SD)",
+    " y tilt tuning (ADV)",
     " g grids now  p polar",
     " w US states now",
     " e DXCC now",
+    "BIG READOUT (z)",
+    " large RX/TX + az/el;",
+    " radio+rotator keep going",
+    " ,// tune  t TX  z/` back",
+    "MANUAL MODE (f, no radio)",
+    " read Doppler, tune by hand",
+    " u swap HOLD/TUNE leg",
+    " ,// passband  m CAL",
+    " z big view  l log",
+    "TRANSPONDER DB (t)",
+    " sat's TX/beacon entries",
+    " ;/. select (* = manual)",
+    " x delete manual (2-press)",
+    "EQX TABLE (e)",
+    " equator-crossing UTC+lon",
+    " (OSCARLOCATOR reference)",
+    " d asc/desc  r recompute",
+    "OSCARLOCATOR (k)",
+    " live azimuthal-equidist.",
+    " plot: sub-point + foot-",
+    " print + QTH range ring",
+    " + ground track (AOS/LOS)",
+    " m  toggle QTH / polar",
+    "3D GLOBE (3)",
+    " wireframe Earth, follows",
+    "  selected sat; all favs",
+    " + footprint + trail",
+    " + day/night terminator",
+    " g DX 2nd loc (grid)",
+    " arrows turn  ENT follow",
+    "VOICE MEMOS (Log)",
+    " browse memos newest-first",
+    " ENT play  n new standalone",
+    " d delete  r refresh",
     "WORKABLE GRIDS",
     " grids under footprint",
     " ;/. {} scroll",
     "LOCATION",
     " e/o/a edit lat/lon/alt",
     " g grid  p GPS  s source",
-    " c  set clock manually",
+    " c set clock  v position",
     " ENT  GPS data + sky plot",
+    "GPS POSITION (Location v)",
+    " DMS lat/lon max precision",
+    " speed, course, grid live",
     "GPS SKY PLOT",
     " GNSS sats by az/el",
     " green=strong  grey=weak",
@@ -5231,6 +5765,11 @@ void App::drawHelp() {
     " w WiFi connect only",
     "LOG",
     " ENT new / browse / ADIF",
+    "MESSAGES (LoRa)",
+    " CardSat-to-CardSat chat",
+    " n write/send  r retry",
+    " ;/. scroll  (needs Cap",
+    " LoRa + RadioLib build)",
     "ABOUT",
     " build, IP, free heap,",
     " diagnostics",
@@ -6150,7 +6689,7 @@ void App::drawSunMoon() {
                   : (elv[smSel] <= 0 ? (smSel ? "MOON set (parked)" : "SUN set (parked)")
                                      : (smSel ? "tracking MOON" : "tracking SUN"));
   canvas.printf("Rotator: %s", rs);
-  footer("` bk  ;/. pick  g view  o rotor  x stop");
+  footer("` bk  ;/. pick  g view  o rotor  s sky  x stop");
 }
 
 void App::keySunMoon(char c, bool enter, bool back) {
@@ -6170,6 +6709,524 @@ void App::keySunMoon(char c, bool enter, bool back) {
     lastDrawMs = 0; return;
   }
   if (c == 'x') { if (rot) rot->stop(); smOut = false; lastDrawMs = 0; return; }
+  if (c == 's') { skySel = 0; screen = SCR_SKYMAP; lastDrawMs = 0; return; }  // sky plot
+}
+
+// ===========================================================================
+//  Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
+//  dome (zenith centre, N up, elevation = radius), reached with `s` from the
+//  Sun/Moon screen. Useful for antenna pointing (Sun/Moon/planet) and as a
+//  reference for the strongest cosmic radio sources crossing the sky.
+// ===========================================================================
+
+// Equatorial (RA/Dec, degrees, J2000-ish) -> horizontal (az/el) for the observer
+// at time t. The same conversion used inside skyObjAzEl, factored out so fixed
+// catalogue sources and computed planet positions can share it.
+static void raDecToAzEl(time_t t, double latDeg, double lonDeg,
+                        double raDeg, double decDeg, double& az, double& el) {
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232,
+               TWO_PI_ = 6.283185307179586;
+  double d = ((double)t - 946728000.0) / 86400.0;
+  double gmst = fmod(280.46061837 + 360.98564736629 * d, 360.0);
+  if (gmst < 0) gmst += 360.0;
+  double ra = raDeg * D2R, dec = decDeg * D2R, latR = latDeg * D2R;
+  double lst = (gmst + lonDeg) * D2R, ha = lst - ra;
+  double sinAlt = sin(latR) * sin(dec) + cos(latR) * cos(dec) * cos(ha);
+  double alt = asin(sinAlt);
+  double cosA = (sin(dec) - sin(latR) * sinAlt) / (cos(latR) * cos(alt));
+  if (cosA > 1) cosA = 1; if (cosA < -1) cosA = -1;
+  double A = acos(cosA);
+  if (sin(ha) > 0) A = TWO_PI_ - A;
+  az = A * R2D; el = alt * R2D;
+}
+
+// Low-precision heliocentric -> geocentric RA/Dec for the classical planets,
+// using Schlyter's elements (good to ~1-2 arcmin, far finer than a 112 px dome).
+static void planetRaDec(int p, time_t t, double& raDeg, double& decDeg) {
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232;
+  double d = ((double)t - 946728000.0) / 86400.0;          // days since J2000
+  double ecl = (23.4393 - 3.563e-7 * d) * D2R;
+  // Orbital elements: N, i, w, a, e, M (deg / AU), linear in d (Schlyter).
+  // p: 0 Mercury 1 Venus 2 Mars 3 Jupiter 4 Saturn.
+  struct El { double N0,Nr,i0,ir,w0,wr,a0,ar,e0,er,M0,Mr; };
+  static const El E[5] = {
+    { 48.3313,3.24587e-5, 7.0047,5.00e-8, 29.1241,1.01444e-5, 0.387098,0,      0.205635,5.59e-10, 168.6562,4.0923344368},
+    { 76.6799,2.46590e-5, 3.3946,2.75e-8, 54.8910,1.38374e-5, 0.723330,0,      0.006773,-1.302e-9,48.0052,1.6021302244},
+    { 49.5574,2.11081e-5, 1.8497,-1.78e-8,286.5016,2.92961e-5,1.523688,0,      0.093405,2.516e-9, 18.6021,0.5240207766},
+    {100.4542,2.76854e-5, 1.3030,-1.557e-7,273.8777,1.64505e-5,5.20256,0,      0.048498,4.469e-9, 19.8950,0.0830853001},
+    {113.6634,2.38980e-5, 2.4886,-1.081e-7,339.3939,2.97661e-5,9.55475,0,      0.055546,-9.499e-9,316.9670,0.0334442282},
+  };
+  const El& e = E[p];
+  auto rad = [&](double deg){ return deg * D2R; };
+  double N = rad(e.N0 + e.Nr * d), i = rad(e.i0 + e.ir * d), w = rad(e.w0 + e.wr * d);
+  double a = e.a0, ecc = e.e0 + e.er * d, M = rad(e.M0 + e.Mr * d);
+  M = fmod(M, 2 * M_PI); if (M < 0) M += 2 * M_PI;
+  double Ea = M + ecc * sin(M) * (1 + ecc * cos(M));
+  for (int k = 0; k < 5; ++k) Ea -= (Ea - ecc * sin(Ea) - M) / (1 - ecc * cos(Ea));
+  double xv = a * (cos(Ea) - ecc), yv = a * sqrt(1 - ecc * ecc) * sin(Ea);
+  double v = atan2(yv, xv), r = sqrt(xv * xv + yv * yv);
+  double xh = r * (cos(N) * cos(v + w) - sin(N) * sin(v + w) * cos(i));
+  double yh = r * (sin(N) * cos(v + w) + cos(N) * sin(v + w) * cos(i));
+  double zh = r * (sin(v + w) * sin(i));
+  // Sun's geocentric position (Earth heliocentric, negated).
+  double Ms = rad(356.0470 + 0.9856002585 * d), ws = rad(282.9404 + 4.70935e-5 * d);
+  double es = 0.016709 - 1.151e-9 * d;
+  double Es = Ms + es * sin(Ms) * (1 + es * cos(Ms));
+  double xvs = cos(Es) - es, yvs = sqrt(1 - es * es) * sin(Es);
+  double lonsun = atan2(yvs, xvs) + ws, rs = sqrt(xvs * xvs + yvs * yvs);
+  double xs = rs * cos(lonsun), ys = rs * sin(lonsun);
+  // Geocentric ecliptic -> equatorial.
+  double xg = xh + xs, yg = yh + ys, zg = zh;
+  double xe = xg;
+  double ye = yg * cos(ecl) - zg * sin(ecl);
+  double ze = yg * sin(ecl) + zg * cos(ecl);
+  raDeg = atan2(ye, xe) * R2D; if (raDeg < 0) raDeg += 360.0;
+  decDeg = atan2(ze, sqrt(xe * xe + ye * ye)) * R2D;
+}
+
+// Catalogue of strong cosmic radio sources (fixed J2000 RA/Dec, degrees) plus a
+// couple of bright orientation stars. Names kept short for the 240 px display.
+struct SkySrc { const char* name; double ra, dec; bool rf; };
+static const SkySrc SKY_RF[] = {
+  { "CasA",  350.85,  58.81, true },   // brightest galactic radio source
+  { "CygA",  299.87,  40.73, true },   // radio galaxy
+  { "SgrA",  266.42, -29.01, true },   // galactic centre
+  { "TauA",   83.63,  22.01, true },   // Crab nebula / pulsar
+  { "VirA",  187.71,  12.39, true },   // M87
+  { "Sun",     0.0,    0.0,  true },   // placeholder (computed live)
+  { "Polaris",37.95,  89.26, false },  // orientation
+  { "Vega",  279.23,  38.78, false },
+  { "Antares",247.35,-26.43, false },
+};
+static const int SKY_RF_N = sizeof(SKY_RF) / sizeof(SKY_RF[0]);
+static const char* PLANET_NAME[5] = { "Mercury", "Venus", "Mars", "Jupiter", "Saturn" };
+
+void App::drawSkyMap() {
+  header("Sky sources");
+  canvas.setTextSize(1);
+  Observer o = loc.obs();
+  if (!o.valid || !timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+    canvas.print(!o.valid ? "Set your location first." : "Clock not set (NTP/GPS).");
+    footer("` back"); return;
+  }
+  time_t now = nowUtc();
+
+  // Build the combined object list: 5 planets, then the catalogue sources.
+  const int NP = 5, NTOT = NP + SKY_RF_N;
+  double az[32], el[32]; const char* nm[32]; bool isRf[32];
+  for (int p = 0; p < NP; ++p) {
+    double ra, dec; planetRaDec(p, now, ra, dec);
+    raDecToAzEl(now, o.lat, o.lon, ra, dec, az[p], el[p]);
+    nm[p] = PLANET_NAME[p]; isRf[p] = false;
+  }
+  for (int i = 0; i < SKY_RF_N; ++i) {
+    int k = NP + i;
+    if (i == 5) {  // "Sun" entry: compute live
+      skyObjAzEl(now, o.lat, o.lon, false, az[k], el[k]);
+    } else {
+      raDecToAzEl(now, o.lat, o.lon, SKY_RF[i].ra, SKY_RF[i].dec, az[k], el[k]);
+    }
+    nm[k] = SKY_RF[i].name; isRf[k] = SKY_RF[i].rf;
+  }
+  if (skySel < 0) skySel = NTOT - 1;
+  if (skySel >= NTOT) skySel = 0;
+
+  // Sky dome: zenith centre, N up, elevation = radius (same as Sun/Moon graphic).
+  const int cx = 62, cy = 70, R = 50;
+  drawPolarGrid(cx, cy, R);
+  auto domeXY = [&](double a, double e, int& x, int& y) {
+    double ee = e; if (ee > 90) ee = 90; if (ee < -6) ee = -6;
+    double rr = (ee >= 0) ? R * (90.0 - ee) / 90.0 : R + 4;
+    double ar = a * (M_PI / 180.0);
+    x = cx + (int)lround(rr * sin(ar));
+    y = cy - (int)lround(rr * cos(ar));
+  };
+  for (int k = 0; k < NTOT; ++k) {
+    int x, y; domeXY(az[k], el[k], x, y);
+    bool up = el[k] > 0;
+    uint16_t col = isRf[k] ? (up ? CL_ORANGE : CL_DGREY)
+                           : (up ? CL_CYAN   : CL_DGREY);
+    if (isRf[k]) {                       // RF source: small cross
+      canvas.drawLine(x - 2, y, x + 2, y, col);
+      canvas.drawLine(x, y - 2, x, y + 2, col);
+    } else {                             // planet: filled dot
+      canvas.fillCircle(x, y, 2, col);
+    }
+    if (k == skySel) canvas.drawCircle(x, y, 5, CL_GREEN);
+  }
+
+  // Right-hand readout for the selected object.
+  int px = 122;
+  canvas.setTextSize(2);
+  canvas.setTextColor(isRf[skySel] ? CL_ORANGE : CL_CYAN, CL_BLACK);
+  canvas.setCursor(px, 20); canvas.printf("%.10s", nm[skySel]);
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(px, 44); canvas.print("Az");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(px + 18, 44); canvas.printf("%.1f%c", az[skySel], 248);
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(px, 56); canvas.print("El");
+  canvas.setTextColor(el[skySel] > 0 ? CL_WHITE : CL_GREY, CL_BLACK);
+  canvas.setCursor(px + 18, 56); canvas.printf("%.1f%c", el[skySel], 248);
+  canvas.setTextColor(el[skySel] > 0 ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setCursor(px, 70); canvas.print(el[skySel] > 0 ? "above horizon" : "below horizon");
+  canvas.setTextColor(isRf[skySel] ? CL_ORANGE : CL_CYAN, CL_BLACK);
+  canvas.setCursor(px, 86); canvas.print(isRf[skySel] ? "radio source" : "planet");
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(px, 104); canvas.printf("%d/%d", skySel + 1, NTOT);
+
+  footer(";/. select  ` back");
+}
+
+void App::keySkyMap(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_SUNMOON; lastDrawMs = 0; return; }
+  const int NTOT = 5 + SKY_RF_N;
+  if (isUp(c) || isLeft(c))    { skySel = (skySel + NTOT - 1) % NTOT; lastDrawMs = 0; }
+  if (isDown(c) || isRight(c)) { skySel = (skySel + 1) % NTOT;        lastDrawMs = 0; }
+}
+
+// ===========================================================================
+//  Live GPS position (SCR_GPSPOS): latitude/longitude in degrees-minutes-seconds
+//  to full precision, plus ground speed, course, altitude and grid square.
+//  Reached with `p` from the Location screen.
+// ===========================================================================
+
+// Format a signed decimal degree as D M' S.sss" with a hemisphere letter.
+static String fmtDMS(double deg, bool isLat) {
+  char hemi = isLat ? (deg >= 0 ? 'N' : 'S') : (deg >= 0 ? 'E' : 'W');
+  double a = fabs(deg);
+  int d = (int)a;
+  double mfull = (a - d) * 60.0;
+  int m = (int)mfull;
+  double s = (mfull - m) * 60.0;        // seconds, keep 3 decimals (~0.03 m)
+  char buf[40];
+  snprintf(buf, sizeof(buf), "%d%c%02d' %06.3f\" %c", d, 248, m, s, hemi);
+  return String(buf);
+}
+
+void App::drawGpsPos() {
+  header("GPS position");
+  canvas.setTextSize(1);
+  bool fix = loc.gpsHasFix();
+  const Observer& o = loc.obs();
+
+  if (!fix && !o.valid) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("No GPS fix yet.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 64); canvas.print("Needs a GPS module + sky view.");
+    footer("` back"); return;
+  }
+
+  // Status line: fix source + satellite count + HDOP.
+  canvas.setTextColor(fix ? CL_GREEN : CL_ORANGE, CL_BLACK);
+  canvas.setCursor(2, 18);
+  if (fix) canvas.printf("FIX  %d sats  HDOP %.1f", loc.gpsSats(), loc.gpsHdop());
+  else     canvas.print("No live fix (last known)");
+
+  // Latitude / longitude in DMS.
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, 34); canvas.print("Lat");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(24, 34); canvas.print(fmtDMS(o.lat, true).c_str());
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, 46); canvas.print("Lon");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(24, 46); canvas.print(fmtDMS(o.lon, false).c_str());
+
+  // Decimal degrees (full precision) underneath, for copy/reference.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(24, 58); canvas.printf("%.6f, %.6f", o.lat, o.lon);
+
+  // Altitude + grid.
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, 72); canvas.print("Alt");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(24, 72); canvas.printf("%.1f m", o.altM);
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(120, 72); canvas.print("Grid");
+  canvas.setTextColor(CL_CYAN, CL_BLACK);  canvas.setCursor(148, 72); canvas.print(Location::toGrid(o.lat, o.lon).c_str());
+
+  // Speed + course (only meaningful with a live fix).
+  double spd = loc.gpsSpeedKmh(), crs = loc.gpsCourseDeg();
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, 88);  canvas.print("Spd");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(24, 88);
+  canvas.printf("%.1f km/h  %.1f kn", spd, spd * 0.539957);
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, 100); canvas.print("Crs");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(24, 100);
+  static const char* CARD[8] = { "N","NE","E","SE","S","SW","W","NW" };
+  canvas.printf("%.0f%c %s", crs, 248, CARD[((int)((crs + 22.5) / 45.0)) & 7]);
+
+  footer("` back");
+}
+
+void App::keyGpsPos(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_LOCATION; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Sat-to-sat visibility finder (SCR_SATSAT): the windows over the next few days
+//  when the selected satellite AND a second satellite (chosen from favourites)
+//  are BOTH above the horizon at your location at the same time — e.g. for
+//  cross-satellite relay experiments or back-to-back working. Reached with `2`
+//  from the Satellites screen.
+// ===========================================================================
+
+void App::computeSatSat() {
+  satsatN = 0; satsatComputed = true;
+  SatEntry* a = activeSat();
+  if (!a || !timeIsSet() || favN == 0) return;
+  // Resolve the "other" satellite from the favourites list.
+  if (satsatOther < 0) satsatOther = 0;
+  if (satsatOther >= favN) satsatOther = favN - 1;
+  int bIdx = db.indexOfNorad(favs[satsatOther]);
+  if (bIdx < 0) return;
+  SatEntry& b = db.at(bIdx);
+  if (b.norad == a->norad) return;          // same bird; nothing to compute
+
+  Observer me = loc.obs();
+  time_t now = nowUtc();
+  const time_t HORIZON = (time_t)5 * 24 * 3600;   // search 5 days out
+  const time_t STEP = 30;                          // 30 s sampling
+  const double MINEL = 0.0;
+
+  bool inWin = false; time_t wStart = 0; float maxA = 0, maxB = 0;
+  for (time_t t = now; t < now + HORIZON; t += STEP) {
+    double az, elA, elB;
+    pred.setSite(me);
+    pred.setSat(*a); pred.azelAt(t, az, elA);
+    pred.setSat(b);  pred.azelAt(t, az, elB);
+    bool both = (elA > MINEL && elB > MINEL);
+    if (both && !inWin) { inWin = true; wStart = t; maxA = (float)elA; maxB = (float)elB; }
+    else if (both) { if (elA > maxA) maxA = (float)elA; if (elB > maxB) maxB = (float)elB; }
+    else if (!both && inWin) {
+      inWin = false;
+      if (satsatN < SATSAT_MAX) {
+        satsatWin[satsatN].start = wStart; satsatWin[satsatN].end = t;
+        satsatWin[satsatN].maxElA = maxA;  satsatWin[satsatN].maxElB = maxB;
+        satsatN++;
+      } else break;
+    }
+  }
+  if (inWin && satsatN < SATSAT_MAX) {       // window still open at search end
+    satsatWin[satsatN].start = wStart; satsatWin[satsatN].end = now + HORIZON;
+    satsatWin[satsatN].maxElA = maxA; satsatWin[satsatN].maxElB = maxB; satsatN++;
+  }
+  // restore predictor to the primary sat for the rest of the UI
+  pred.setSite(me); pred.setSat(*a);
+  satsatSel = 0;
+}
+
+void App::drawSatSat() {
+  SatEntry* a = activeSat();
+  header(a ? (String(a->name) + " + sat") : String("Sat-to-sat"));
+  canvas.setTextSize(1);
+  if (!a) { footer("` back"); return; }
+  if (favN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("No favorites. Star sats");
+    canvas.setCursor(6, 62); canvas.print("with 'f' to pick a 2nd.");
+    footer("` back"); return;
+  }
+  if (!satsatComputed) computeSatSat();
+
+  // Which 2nd sat.
+  int bIdx = db.indexOfNorad(favs[satsatOther]);
+  const char* bName = (bIdx >= 0) ? db.at(bIdx).name : "?";
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(2, 18);
+  canvas.print("2nd:");
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(28, 18);
+  canvas.printf("%.16s", bName);
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(2, 28);
+  canvas.print("Both up @ your QTH:");
+
+  if (satsatN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("No overlap in 5 days.");
+    footer("n next sat  r recompute  `bk"); return;
+  }
+
+  // Column header + rows.
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(2, 40);
+  canvas.print("Start UTC    Dur   elA elB");
+  const int VIS = 7;
+  int scroll = (satsatSel >= VIS) ? (satsatSel - VIS + 1) : 0;
+  for (int v = 0; v < VIS && (scroll + v) < satsatN; ++v) {
+    int i = scroll + v;
+    SatSatWin& w = satsatWin[i];
+    long secs = (long)(w.end - w.start);
+    int y = 50 + v * 10;
+    if (i == satsatSel) canvas.fillRect(0, y - 1, 240, 10, CL_SELBG);
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(2, y);
+    canvas.print(fmtMDHM(w.start).c_str());
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(96, y);
+    canvas.printf("%ld:%02ld", secs / 60, secs % 60);
+    canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(150, y);
+    canvas.printf("%.0f", w.maxElA);
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(180, y);
+    canvas.printf("%.0f", w.maxElB);
+  }
+
+  footer("n next sat  r recompute  `bk");
+}
+
+void App::keySatSat(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { buildSatView(); screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (favN == 0) return;
+  if (c == 'n') {                             // cycle the 2nd satellite
+    satsatOther = (satsatOther + 1) % favN;
+    satsatComputed = false; lastDrawMs = 0; return;
+  }
+  if (c == 'r') { satsatComputed = false; lastDrawMs = 0; return; }   // recompute
+  if (isUp(c))   { if (satsatSel > 0) satsatSel--; lastDrawMs = 0; }
+  if (isDown(c)) { if (satsatSel < satsatN - 1) satsatSel++; lastDrawMs = 0; }
+}
+
+// ===========================================================================
+//  LoRa text messaging (SCR_MESSAGES)
+//
+//  Broadcast group chat between CardSats sharing a frequency/SF/BW. The wire
+//  frame is deliberately tiny and fixed-layout so there is no heap churn:
+//      [0]    magic   0xC5
+//      [1]    version 0x01
+//      [2..15] from callsign, space-padded, 14 bytes
+//      [16..] message text, up to 48 bytes (not null-terminated on air)
+//  Anything that doesn't start 0xC5 0x01 is ignored (other LoRa users on band).
+//  History is a fixed ring of MSG_MAX entries; nothing here allocates.
+// ===========================================================================
+
+static const uint8_t LORA_MSG_MAGIC = 0xC5;
+static const uint8_t LORA_MSG_VER   = 0x01;
+static const int     LORA_FROM_LEN  = 14;
+static const int     LORA_TEXT_MAX  = 48;
+
+void App::msgPush(const char* from, const char* text, bool mine, int rssi, int snr) {
+  LoraMsg& m = msgRing[msgHead];
+  strncpy(m.from, from ? from : "", sizeof(m.from) - 1); m.from[sizeof(m.from)-1] = 0;
+  strncpy(m.text, text ? text : "", sizeof(m.text) - 1); m.text[sizeof(m.text)-1] = 0;
+  m.mine = mine;
+  m.rssi = (int16_t)rssi;
+  m.snr  = (int8_t)snr;
+  m.tMs  = millis();
+  msgHead = (msgHead + 1) % MSG_MAX;
+  if (msgCount < MSG_MAX) msgCount++;
+  msgScroll = 0;                    // jump to newest on any new message
+}
+
+void App::loraStart() {
+  int8_t tx = cfg.loraTxDbm; if (tx > 22) tx = 22; if (tx < 0) tx = 0;
+  loraStarted = lora.begin(cfg.loraFreqKHz, cfg.loraSf, cfg.loraBwHz, tx);
+}
+
+void App::loraPoll() {
+  if (!lora.ready()) return;
+  uint8_t buf[64]; size_t n = 0; float rssi = 0, snr = 0;
+  if (!lora.poll(buf, sizeof(buf), n, rssi, snr)) return;
+  if (n < 2 || buf[0] != LORA_MSG_MAGIC || buf[1] != LORA_MSG_VER) return;  // not ours
+
+  char from[LORA_FROM_LEN + 1]; char text[LORA_TEXT_MAX + 1];
+  size_t fEnd = 2 + LORA_FROM_LEN;
+  size_t fLen = (n >= fEnd) ? LORA_FROM_LEN : (n > 2 ? n - 2 : 0);
+  memcpy(from, buf + 2, fLen); from[fLen] = 0;
+  for (int i = (int)strlen(from) - 1; i >= 0 && from[i] == ' '; --i) from[i] = 0; // trim pad
+  size_t tLen = (n > fEnd) ? (n - fEnd) : 0;
+  if (tLen > LORA_TEXT_MAX) tLen = LORA_TEXT_MAX;
+  memcpy(text, buf + fEnd, tLen); text[tLen] = 0;
+
+  msgPush(from[0] ? from : "?", text, false, (int)lroundf(rssi), (int)lroundf(snr));
+  if (screen == SCR_MESSAGES) lastDrawMs = 0;
+}
+
+void App::loraSendCurrent(const char* text) {
+  if (!lora.ready()) { setStatus("LoRa radio not ready"); return; }
+  uint8_t frame[2 + LORA_FROM_LEN + LORA_TEXT_MAX];
+  frame[0] = LORA_MSG_MAGIC; frame[1] = LORA_MSG_VER;
+  // from callsign, space-padded to fixed width
+  char call[LORA_FROM_LEN + 1];
+  strncpy(call, cfg.myCall[0] ? cfg.myCall : "NOCALL", LORA_FROM_LEN); call[LORA_FROM_LEN] = 0;
+  for (int i = 0; i < LORA_FROM_LEN; ++i)
+    frame[2 + i] = (i < (int)strlen(call)) ? (uint8_t)call[i] : (uint8_t)' ';
+  // text (clamped)
+  int tLen = (int)strlen(text); if (tLen > LORA_TEXT_MAX) tLen = LORA_TEXT_MAX;
+  memcpy(frame + 2 + LORA_FROM_LEN, text, tLen);
+  size_t total = 2 + LORA_FROM_LEN + tLen;
+
+  bool ok = lora.sendRaw(frame, total);
+  char shown[LORA_TEXT_MAX + 1];
+  strncpy(shown, text, LORA_TEXT_MAX); shown[LORA_TEXT_MAX] = 0;
+  msgPush("", shown, true, 0, 0);            // echo my own message into history
+  setStatus(ok ? "Sent" : "TX failed");
+}
+
+void App::drawMessages() {
+  header("Messages");
+  canvas.setTextSize(1);
+
+  if (!cfg.loraEnable) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("LoRa messaging is off.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 58); canvas.print("Enable it in Settings,");
+    canvas.setCursor(6, 70); canvas.print("then set your callsign.");
+    footer("` back");
+    return;
+  }
+  if (!loraStarted || !lora.ready()) {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("Radio not ready.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 58); canvas.print("Needs the Cap LoRa + a");
+    canvas.setCursor(6, 70); canvas.print("RadioLib build (see docs).");
+    footer("r retry   ` back");
+    return;
+  }
+
+  // Status line: freq / SF / BW + my call.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(2, 16);
+  canvas.printf("%.3fMHz SF%d %ldk  %s",
+                cfg.loraFreqKHz / 1000.0, cfg.loraSf, (long)(cfg.loraBwHz / 1000),
+                cfg.myCall[0] ? cfg.myCall : "NOCALL");
+  canvas.drawLine(0, 25, 240, 25, CL_DGREY);
+
+  // Message list: newest at the bottom, scrollable with ;/. (msgScroll counts
+  // back from newest). Each message is one or two lines.
+  const int VIS = 9, rowY0 = 28, rowH = 10;
+  // Build a display order: oldest..newest indices.
+  int order[MSG_MAX]; int on = 0;
+  for (int i = 0; i < msgCount; ++i) {
+    int idx = (msgHead - msgCount + i + MSG_MAX * 2) % MSG_MAX;
+    order[on++] = idx;
+  }
+  // bottom item shown is (newest - msgScroll)
+  int bottom = on - 1 - msgScroll; if (bottom < 0) bottom = 0;
+  int top = bottom - VIS + 1; if (top < 0) top = 0;
+  int y = rowY0;
+  for (int r = top; r <= bottom && y < 120; ++r) {
+    LoraMsg& m = msgRing[order[r]];
+    canvas.setTextColor(m.mine ? CL_CYAN : CL_GREEN, CL_BLACK);
+    canvas.setCursor(2, y);
+    canvas.printf("%s%s:", m.mine ? ">" : "", m.mine ? "me" : m.from);
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.printf(" %.30s", m.text);
+    if (!m.mine) {                        // signal info, dim, right side
+      canvas.setTextColor(CL_DGREY, CL_BLACK);
+      canvas.setCursor(2, y); // (rssi shown only if room; keep simple)
+    }
+    y += rowH;
+  }
+
+  footer("n write   ;/. scroll   ` back");
+}
+
+void App::keyMessages(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (!cfg.loraEnable) return;
+  if ((!loraStarted || !lora.ready())) {
+    if (c == 'r') { loraStart(); lastDrawMs = 0; }
+    return;
+  }
+  if (c == 'n') {                          // compose a new message (reuse SCR_EDIT)
+    editTarget = 700; editTitle = "Message"; editBuf = ""; screen = SCR_EDIT; return;
+  }
+  if (isUp(c))   { if (msgScroll < msgCount - 1) msgScroll++; lastDrawMs = 0; }
+  if (isDown(c)) { if (msgScroll > 0) msgScroll--; lastDrawMs = 0; }
 }
 
 // ===========================================================================
@@ -7502,9 +8559,9 @@ void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
                           "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "QRZ Lookup", "Location", "Update",
-                          "Settings", "Log", "About" };
+                          "Settings", "Log", "Messages", "About" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
-  static_assert(sizeof(items) / sizeof(items[0]) == 14,
+  static_assert(sizeof(items) / sizeof(items[0]) == 15,
                 "Home menu item count must match keyHome's N");
   const int VIS = 9;
   if (homeSel < homeScroll)           homeScroll = homeSel;
@@ -7618,8 +8675,8 @@ void App::drawSatList() {
     }
   }
   bool selManual = (viewN > 0 && viewSel < viewN && db.isManualGp(db.at(view[viewSel]).norad));
-  if (selManual) footer("ENT pass o orb t tx e eqx f fav x del `bk");
-  else           footer("ENT pass o orb s sim t tx e eqx d 10d i illum f fav `bk");
+  if (selManual) footer("ENT pass o orb t tx e eqx k osc f fav x del `bk");
+  else           footer("ENT pass o orb s sim t tx e eqx k osc 3 glb 2 s2s d 10d i illum f fav `bk");
 }
 
 void App::drawPasses() {
@@ -7836,10 +8893,10 @@ void App::drawTrack() {
     canvas.print("! verify MAIN/SUB for this rig");
   }
   if (trackMode == 0)
-    footer(imuReady ? ",/tune s x=ctr m=cal t r o p f y=tilt"
-                    : ",/tune s=stp x=ctr m=cal t r o p f=man");
+    footer(imuReady ? ",/tune s x=ctr m=cal t r o p n=bcn y=tilt"
+                    : ",/tune s=stp x=ctr m=cal t r o p n=bcn f=man");
   else
-    footer(",/DN ;.UP s=stp x=0 m=tn t r o p f=man");
+    footer(",/DN ;.UP s=stp x=0 m=tn t r o p n=bcn f=man");
 }
 
 // Large-font "operating" readout: only the values you need at arm's length during
@@ -8330,6 +9387,560 @@ void App::drawPolar() {
   footer("p / ENT / ` back to track");
 }
 
+// ===========================================================================
+//  OSCARLOCATOR live view (SCR_OSCAR): an azimuthal-equidistant "plotting
+//  board" centred either on your station (QTH mode) or on a pole (polar mode).
+//  Live: it follows the satellite's sub-point in real time, drawing the
+//  graticule, a coarse coastline, the satellite marker + ground footprint, and
+//  (QTH mode) range rings. Modelled on the OSCARLOCATOR simulator; the same
+//  footprint/great-circle math used by the world map is reused here.
+// ===========================================================================
+
+// Azimuthal-equidistant projection onto the disc. Returns false if the point
+// falls outside the plotted radius (rmaxDeg). mode 0 = QTH-centred (great-circle
+// bearing/range from the observer), mode 1/2 = North/South polar.
+//   qth   : t = azimuth, 0=N at top, clockwise
+//   polarN: t = longitude, rho = 90-lat   (north pole at centre)
+//   polarS: t = longitude, rho = 90+lat   (south pole at centre)
+static bool oscarProject(int mode, double qlat, double qlon,
+                         double lat, double lon, double rmaxDeg,
+                         int cx, int cy, int R, int& sx, int& sy) {
+  const double D2R = 0.0174532925199433, R2D = 57.2957795130823;
+  double rhoDeg, tdeg;
+  if (mode == 0) {
+    // central angle + initial bearing from (qlat,qlon) to (lat,lon)
+    double p1 = qlat * D2R, p2 = lat * D2R, dl = (lon - qlon) * D2R;
+    double ca = sin(p1) * sin(p2) + cos(p1) * cos(p2) * cos(dl);
+    if (ca > 1) ca = 1; if (ca < -1) ca = -1;
+    rhoDeg = acos(ca) * R2D;
+    double y = sin(dl) * cos(p2);
+    double x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl);
+    tdeg = atan2(y, x) * R2D; if (tdeg < 0) tdeg += 360.0;
+  } else if (mode == 1) {                 // north polar
+    rhoDeg = 90.0 - lat; tdeg = lon;
+  } else {                                // south polar
+    rhoDeg = 90.0 + lat; tdeg = lon;
+  }
+  if (rhoDeg > rmaxDeg) return false;
+  double r = rhoDeg / rmaxDeg * R;
+  double a = tdeg * D2R;
+  if (mode == 0)      { sx = cx + (int)lround(r * sin(a)); sy = cy - (int)lround(r * cos(a)); }
+  else if (mode == 1) { sx = cx + (int)lround(r * sin(a)); sy = cy + (int)lround(r * cos(a)); }
+  else                { sx = cx - (int)lround(r * sin(a)); sy = cy + (int)lround(r * cos(a)); }
+  return true;
+}
+
+// Sample one full orbital period of sub-points centred on "now", cached and held
+// static so the ground-track arc covers the whole disc like a real OSCARLOCATOR
+// (off-disc parts are clipped by the projection). Also record the AOS/LOS of the
+// current/next pass so those markers can be placed on the track. Rebuilt only
+// once the cached window has elapsed.
+void App::buildOscarArc() {
+  oscarArcN = 0; oscarArcEnd = 0; oscarArcAos = 0; oscarArcLos = 0;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet() || s->meanMotion <= 0) return;
+  pred.setSite(loc.obs());
+  if (!pred.setSat(*s)) return;
+  time_t now = nowUtc();
+  double periodMin = 1440.0 / s->meanMotion;          // orbital period (minutes)
+  time_t periodS = (time_t)llround(periodMin * 60.0);
+  if (periodS < 60) periodS = 60;
+  // Centre the track on now: half an orbit back, half forward, so the satellite
+  // marker sits in the middle of the drawn track.
+  time_t t0 = now - periodS / 2;
+  for (int i = 0; i < OSCAR_ARC_PTS; ++i) {
+    time_t t = t0 + (time_t)llround((double)periodS * i / (double)(OSCAR_ARC_PTS - 1));
+    LiveLook A = pred.look(t);
+    oscarArcLat[i] = (float)A.subLat;
+    oscarArcLon[i] = (float)A.subLon;
+  }
+  oscarArcN = OSCAR_ARC_PTS;
+  oscarArcEnd = now + periodS / 2;                    // rebuild after the track scrolls off
+
+  // Find the current/next pass so AOS/LOS markers can be drawn on the track.
+  PassPredict pp[3];
+  int np = pred.predictPasses(now - 1800, 0.5f, pp, 3);
+  for (int i = 0; i < np; ++i) if (pp[i].los > now) { oscarArcAos = pp[i].aos; oscarArcLos = pp[i].los; break; }
+}
+
+void App::drawOscar() {
+  SatEntry* s = activeSat();
+  const char* modeName = (oscarMode == 0) ? "QTH" : "Polar";
+  header(s ? (String(s->name) + "  OSCAR " + modeName) : String("OSCARLOCATOR"));
+  canvas.setTextSize(1);
+  if (!s) { footer("` back"); return; }
+  if (!timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("Clock not set (GPS or Location -> c).");
+    footer("m mode  ` back");
+    return;
+  }
+
+  const int cx = 70, cy = 70, R = 56;
+  const Observer& o = loc.obs();
+  const double qlat = o.lat, qlon = o.lon;
+
+  // Resolve effective mode: QTH (0) as chosen; polar picks N/S from the sat's
+  // current sub-point hemisphere so the bird stays on the visible sheet.
+  pred.setSite(o); pred.setSat(*s);
+  LiveLook L = pred.look(nowUtc());
+  int pm = 0;
+  if (oscarMode != 0) pm = (L.subLat >= 0) ? 1 : 2;
+
+  // Plotted radius: polar shows a full hemisphere (90 deg); QTH shows out to a
+  // little past the antipode-limited useful range (clamped 50..80 deg).
+  double rmax = 90.0;
+  if (pm == 0) { rmax = fabs(qlat) + 25.0; if (rmax < 50) rmax = 50; if (rmax > 80) rmax = 80; }
+
+  // disc + facecolor
+  canvas.fillCircle(cx, cy, R, CL_BLACK);
+  // graticule: range/elevation rings
+  canvas.drawCircle(cx, cy, R, CL_GREY);
+  canvas.drawCircle(cx, cy, (R * 2) / 3, CL_DGREY);
+  canvas.drawCircle(cx, cy, R / 3, CL_DGREY);
+  canvas.drawLine(cx, cy - R, cx, cy + R, CL_DGREY);
+  canvas.drawLine(cx - R, cy, cx + R, cy, CL_DGREY);
+  canvas.drawPixel(cx, cy, CL_WHITE);
+
+  // Coarse coastline, reprojected through the disc. Break the polyline whenever
+  // a vertex leaves the disc or a segment would jump across it.
+  {
+    int px = 0, py = 0; bool pen = false;
+    for (int i = 0; i + 1 < COAST_N; i += 2) {
+      int lo = COAST[i], la = COAST[i + 1];
+      int x, y;
+      if (oscarProject(pm, qlat, qlon, (double)la, (double)lo, rmax, cx, cy, R, x, y)) {
+        if (pen) {
+          long dx = x - px, dy = y - py;
+          if (dx * dx + dy * dy < (long)(R * R))     // skip wild cross-disc jumps
+            canvas.drawLine(px, py, x, y, CL_MGREY);
+        }
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+
+  // Compass / pole labels.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (pm == 0) {
+    canvas.setCursor(cx - 2, cy - R - 9); canvas.print("N");
+    canvas.setCursor(cx - 2, cy + R + 2); canvas.print("S");
+    canvas.setCursor(cx + R + 2, cy - 3); canvas.print("E");
+    canvas.setCursor(cx - R - 8, cy - 3); canvas.print("W");
+  } else {
+    canvas.setCursor(cx - 8, cy - R - 9);
+    canvas.print(pm == 1 ? "N pole" : "S pole");
+  }
+
+  // QTH range ring (amber, dashed): the satellite's footprint radius at MEAN
+  // altitude, centred on the station. Inside this great-circle ring the bird is
+  // above the horizon and workable. Drawn dashed so it stays distinct from the
+  // (same-radius) instantaneous footprint circle when the sat is near your QTH.
+  // Re-projects correctly in both QTH (a circle centred on you) and polar (an
+  // off-centre oval) modes.
+  if (s->meanMotion > 0.0) {
+    const double D2R = 0.0174532925199433, R2D = 57.2957795130823, RE = 6371.0;
+    const double MU = 398600.4418;
+    double nRadSec = s->meanMotion * 2.0 * M_PI / 86400.0;       // rev/day -> rad/s
+    double aKm = cbrt(MU / (nRadSec * nRadSec));                 // semi-major axis
+    double meanAltKm = aKm - RE; if (meanAltKm < 1) meanAltKm = 1;
+    double rng = acos(RE / (RE + meanAltKm)) * R2D;              // footprint radius (deg)
+    double la1 = qlat * D2R, lo1 = qlon * D2R;
+    double sb = sin(rng * D2R), cb = cos(rng * D2R), s1 = sin(la1), c1 = cos(la1);
+    int px = 0, py = 0; bool pen = false; int seg = 0;
+    for (int a = 0; a <= 360; a += 9) {
+      double az = a * D2R;
+      double la2 = asin(s1 * cb + c1 * sb * cos(az));
+      double lo2 = lo1 + atan2(sin(az) * sb * c1, cb - s1 * sin(la2));
+      double la2d = la2 * R2D, lo2d = lo2 * R2D;
+      while (lo2d < -180) lo2d += 360; while (lo2d > 180) lo2d -= 360;
+      int x, y;
+      if (oscarProject(pm, qlat, qlon, la2d, lo2d, rmax, cx, cy, R, x, y)) {
+        if (pen && (seg & 1)) {        // draw every other segment -> dashed
+          long dx = x - px, dy = y - py;
+          if (dx * dx + dy * dy < (long)(R * R)) canvas.drawLine(px, py, x, y, CL_ORANGE);
+        }
+        px = x; py = y; pen = true; seg++;
+      } else { pen = false; }
+    }
+  }
+
+  // Satellite footprint (green outline) at the live sub-point. Drawn before the
+  // pass arc so the arc and marker sit on top (most important features).
+  if (L.satAltKm > 1.0) {
+    const double D2R = 0.0174532925199433, R2D = 57.2957795130823, RE = 6371.0;
+    double beta = acos(RE / (RE + L.satAltKm)) * R2D;     // footprint angular radius
+    double la1 = L.subLat * D2R, lo1 = L.subLon * D2R;
+    double sb = sin(beta * D2R), cb = cos(beta * D2R), s1 = sin(la1), c1 = cos(la1);
+    int px = 0, py = 0; bool pen = false;
+    for (int a = 0; a <= 360; a += 15) {
+      double az = a * D2R;
+      double la2 = asin(s1 * cb + c1 * sb * cos(az));
+      double lo2 = lo1 + atan2(sin(az) * sb * c1, cb - s1 * sin(la2));
+      double la2d = la2 * R2D, lo2d = lo2 * R2D;
+      while (lo2d < -180) lo2d += 360; while (lo2d > 180) lo2d -= 360;
+      int x, y;
+      if (oscarProject(pm, qlat, qlon, la2d, lo2d, rmax, cx, cy, R, x, y)) {
+        if (pen) { long dx = x - px, dy = y - py;
+                   if (dx * dx + dy * dy < (long)(R * R)) canvas.drawLine(px, py, x, y, CL_DGREEN); }
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+
+  // Ground-track arc (blue): the full orbital track across the disc, drawn from
+  // the cached sub-points (off-disc parts clipped by the projection), like a real
+  // OSCARLOCATOR. Built once and held static; rebuilt once the track scrolls off.
+  // AOS/LOS of the current pass are marked along the track (green/orange); a white
+  // arrowhead at the track midpoint (= now) shows the direction of travel.
+  bool needArc = (oscarArcN < 2) || (oscarArcEnd != 0 && nowUtc() > oscarArcEnd);
+  // If no track could be built, only retry every few seconds (avoid per-frame SGP4).
+  if (needArc && oscarArcN < 2 && oscarArcTriedMs != 0 &&
+      (millis() - oscarArcTriedMs) < 5000) needArc = false;
+  if (needArc) { oscarArcTriedMs = millis(); buildOscarArc(); }
+  if (oscarArcN >= 2) {
+    int px = 0, py = 0; bool pen = false;
+    int midX = 0, midY = 0, nextX = 0, nextY = 0; bool haveMid = false, haveNext = false;
+    for (int i = 0; i < oscarArcN; ++i) {
+      int x, y;
+      if (oscarProject(pm, qlat, qlon, oscarArcLat[i], oscarArcLon[i], rmax, cx, cy, R, x, y)) {
+        if (pen) { long dx = x - px, dy = y - py;
+                   if (dx * dx + dy * dy < (long)(R * R)) canvas.drawLine(px, py, x, y, CL_BLUE); }
+        if (i == oscarArcN / 2)     { midX = x; midY = y; haveMid = true; }
+        if (i == oscarArcN / 2 + 1) { nextX = x; nextY = y; haveNext = true; }
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+    // AOS / LOS markers, placed at their time positions along the track. The
+    // track spans [now - P/2, now + P/2]; map a pass time to a sample index.
+    time_t now2 = nowUtc();
+    double periodS2 = (s->meanMotion > 0) ? (86400.0 / s->meanMotion) : 0;
+    if (periodS2 > 1) {
+      time_t t0 = now2 - (time_t)llround(periodS2 / 2.0);
+      auto markAt = [&](time_t tt, uint16_t col, bool fill) {
+        double f = (double)(tt - t0) / periodS2;
+        if (f < 0 || f > 1) return;
+        int idx = (int)lround(f * (oscarArcN - 1));
+        if (idx < 0) idx = 0; if (idx >= oscarArcN) idx = oscarArcN - 1;
+        int x, y;
+        if (oscarProject(pm, qlat, qlon, oscarArcLat[idx], oscarArcLon[idx], rmax, cx, cy, R, x, y)) {
+          if (fill) canvas.fillCircle(x, y, 2, col); else canvas.drawCircle(x, y, 3, col);
+        }
+      };
+      if (oscarArcAos != 0) markAt(oscarArcAos, CL_GREEN, false);   // AOS ring
+      if (oscarArcLos != 0) markAt(oscarArcLos, CL_ORANGE, true);   // LOS dot
+    }
+    // travel-direction arrowhead at the track midpoint (= now)
+    if (haveMid && haveNext) {
+      double ddx = nextX - midX, ddy = nextY - midY, dl = sqrt(ddx*ddx + ddy*ddy);
+      if (dl > 0.5) {
+        ddx /= dl; ddy /= dl;
+        double ex = -ddy, ey = ddx;
+        int tx = midX + (int)lround(5*ddx),  ty = midY + (int)lround(5*ddy);
+        int b1x = midX + (int)lround(-2*ddx + 2*ex), b1y = midY + (int)lround(-2*ddy + 2*ey);
+        int b2x = midX + (int)lround(-2*ddx - 2*ex), b2y = midY + (int)lround(-2*ddy - 2*ey);
+        canvas.fillTriangle(tx, ty, b1x, b1y, b2x, b2y, CL_WHITE);
+      }
+    }
+  }
+
+  // The satellite marker itself.
+  int satx, saty;
+  bool onDisc = oscarProject(pm, qlat, qlon, L.subLat, L.subLon, rmax, cx, cy, R, satx, saty);
+  if (onDisc) {
+    uint16_t col = L.sunlit ? CL_YELLOW : CL_CYAN;
+    canvas.fillCircle(satx, saty, 3, col);
+    canvas.drawCircle(satx, saty, 4, CL_BLACK);
+  }
+
+  // QTH marker (amber star-ish dot at centre in QTH mode; a small ring in polar).
+  if (pm == 0) canvas.fillCircle(cx, cy, 2, CL_ORANGE);
+
+  // ---- right-hand readout ----
+  int rx = 140;
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(rx, 20);
+  canvas.printf("Sub %.1f%c", fabs(L.subLat), L.subLat >= 0 ? 'N' : 'S');
+  canvas.setCursor(rx, 32);
+  canvas.printf("    %.1f%c", fabs(L.subLon), L.subLon >= 0 ? 'E' : 'W');
+  canvas.setCursor(rx, 48);
+  if (L.el > 0) { canvas.setTextColor(CL_GREEN, CL_BLACK);
+                  canvas.printf("El %.0f%c", L.el, 248); }
+  else          { canvas.setTextColor(CL_GREY, CL_BLACK);
+                  canvas.printf("El %.0f%c", L.el, 248); }
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(rx, 60); canvas.printf("Az %.0f%c", L.az, 248);
+  canvas.setCursor(rx, 72); canvas.printf("Rng %.0fkm", L.rangeKm);
+  canvas.setCursor(rx, 84); canvas.printf("Alt %.0fkm", L.satAltKm);
+  canvas.setTextColor(L.sunlit ? CL_YELLOW : CL_CYAN, CL_BLACK);
+  canvas.setCursor(rx, 96); canvas.print(L.sunlit ? "sunlit" : "eclipse");
+  if (!onDisc) { canvas.setTextColor(CL_GREY, CL_BLACK);
+                 canvas.setCursor(rx, 108); canvas.print("(off chart)"); }
+
+  footer("m mode  ` back");
+}
+
+// ===========================================================================
+//  3D globe view (SCR_GLOBE): an orthographic wireframe Earth that auto-follows
+//  the selected satellite. The globe rotates so the satellite's sub-point stays
+//  centred; a day/night terminator and all favourites are drawn. Arrow keys nudge
+//  the view; ENTER re-snaps to follow. Front hemisphere only (z>=0 culled).
+// ===========================================================================
+
+// Sub-solar point (geographic lat/lon where the Sun is overhead) at time t.
+// Reuses the same low-precision solar model as the Sun az/el code: subsolar
+// latitude = solar declination, subsolar longitude = RA - GMST.
+static void subSolarPoint(time_t t, double& slat, double& slon) {
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232;
+  double d  = ((double)t - 946728000.0) / 86400.0;          // days since J2000.0
+  double ecl = (23.4393 - 3.563e-7 * d) * D2R;
+  double gmst = fmod(280.46061837 + 360.98564736629 * d, 360.0);
+  if (gmst < 0) gmst += 360.0;
+  double g = (357.529 + 0.98560028 * d) * D2R;
+  double L = fmod(280.459 + 0.98564736 * d, 360.0) * D2R;
+  double lon = L + (1.915 * sin(g) + 0.020 * sin(2 * g)) * D2R;
+  double X = cos(lon), Y = cos(ecl) * sin(lon), Z = sin(ecl) * sin(lon);
+  double ra = atan2(Y, X) * R2D, dec = atan2(Z, sqrt(X * X + Y * Y)) * R2D;
+  slat = dec;
+  slon = ra - gmst;                                          // degrees
+  while (slon < -180) slon += 360; while (slon > 180) slon -= 360;
+}
+
+// Orthographic projection: rotate a geographic point by the view centre, then
+// drop Z. Returns false if the point is on the far hemisphere (z < 0, hidden).
+// Precomputed sin/cos of the view lat/lon are passed in for speed.
+static bool globeProject(double lat, double lon, double svlat, double cvlat,
+                         double vlon, int cx, int cy, int R, int& sx, int& sy) {
+  const double D2R = 0.017453292519943295;
+  double la = lat * D2R, dlo = (lon - vlon) * D2R;
+  double x = cos(la) * sin(dlo);
+  double y = cos(la) * cos(dlo);
+  double z = sin(la);
+  // Rotate about the X axis by the view latitude so the view centre (lat=vlat,
+  // dlo=0) maps to the front pole (yr=0, zr=1): screen-centre, facing viewer.
+  double yr = z * cvlat - y * svlat;    // vertical on screen (+ = up = north)
+  double zr = y * cvlat + z * svlat;    // + = toward viewer (front hemisphere)
+  if (zr < 0) return false;             // far side, hidden
+  sx = cx + (int)lround(x  * R);
+  sy = cy - (int)lround(yr * R);
+  return true;
+}
+
+void App::drawGlobe() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + "  Globe") : String("Globe"));
+  canvas.setTextSize(1);
+  if (!s) { footer("` back"); return; }
+  if (!timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("Clock not set (GPS or Location).");
+    footer("` back");
+    return;
+  }
+
+  const int cx = 70, cy = 70, R = 56;
+  time_t now = nowUtc();
+  pred.setSite(loc.obs());
+  pred.setSat(*s);
+  LiveLook L = pred.look(now);
+
+  // Auto-follow: keep the selected satellite's sub-point centred.
+  if (globeFollow) { globeViewLat = L.subLat; globeViewLon = L.subLon; }
+  double sv = sin(globeViewLat * 0.017453292519943295);
+  double cv = cos(globeViewLat * 0.017453292519943295);
+
+  // Globe body + limb.
+  canvas.fillCircle(cx, cy, R, CL_BLACK);
+  canvas.drawCircle(cx, cy, R, CL_GREY);
+
+  // Graticule: meridians every 30 deg, parallels every 30 deg (front side only).
+  for (int lon = -180; lon < 180; lon += 30) {
+    int px = 0, py = 0; bool pen = false;
+    for (int lat = -90; lat <= 90; lat += 10) {
+      int x, y;
+      if (globeProject(lat, lon, sv, cv, globeViewLon, cx, cy, R, x, y)) {
+        if (pen) canvas.drawLine(px, py, x, y, CL_DGREY);
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+  for (int lat = -60; lat <= 60; lat += 30) {
+    int px = 0, py = 0; bool pen = false;
+    for (int lon = -180; lon <= 180; lon += 10) {
+      int x, y;
+      if (globeProject(lat, lon, sv, cv, globeViewLon, cx, cy, R, x, y)) {
+        if (pen) canvas.drawLine(px, py, x, y, CL_DGREY);
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+
+  // Coastline (front hemisphere).
+  {
+    int px = 0, py = 0; bool pen = false;
+    for (int i = 0; i + 1 < COAST_N; i += 2) {
+      int x, y;
+      if (globeProject((double)COAST[i + 1], (double)COAST[i], sv, cv, globeViewLon, cx, cy, R, x, y)) {
+        if (pen) { long dx = x - px, dy = y - py;
+                   if (dx * dx + dy * dy < (long)(R * R)) canvas.drawLine(px, py, x, y, CL_MGREY); }
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+
+  // Ground-track trail: the selected satellite's full-orbit ground track (the
+  // same cached track the OSCARLOCATOR view uses), reprojected onto the globe and
+  // clipped at the limb. Built once per orbit and held static.
+  if (oscarArcN < 2 || (oscarArcEnd != 0 && now > oscarArcEnd)) {
+    if (oscarArcTriedMs == 0 || (millis() - oscarArcTriedMs) >= 5000) {
+      oscarArcTriedMs = millis(); buildOscarArc();
+    }
+  }
+  if (oscarArcN >= 2) {
+    int px = 0, py = 0; bool pen = false;
+    for (int i = 0; i < oscarArcN; ++i) {
+      int x, y;
+      if (globeProject(oscarArcLat[i], oscarArcLon[i], sv, cv, globeViewLon, cx, cy, R, x, y)) {
+        if (pen) { long dx = x - px, dy = y - py;
+                   if (dx * dx + dy * dy < (long)(R * R)) canvas.drawLine(px, py, x, y, CL_BLUE); }
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+
+  // Day/night terminator: the great circle 90 deg from the sub-solar point.
+  {
+    double slat, slon; subSolarPoint(now, slat, slon);
+    const double D2R = 0.017453292519943295, R2D = 57.29577951308232;
+    double la1 = slat * D2R, lo1 = slon * D2R;
+    double sb = sin(90.0 * D2R), cb = cos(90.0 * D2R), s1 = sin(la1), c1 = cos(la1);
+    int px = 0, py = 0; bool pen = false;
+    for (int a = 0; a <= 360; a += 6) {
+      double az = a * D2R;
+      double la2 = asin(s1 * cb + c1 * sb * cos(az));
+      double lo2 = lo1 + atan2(sin(az) * sb * c1, cb - s1 * sin(la2));
+      double la2d = la2 * R2D, lo2d = lo2 * R2D;
+      while (lo2d < -180) lo2d += 360; while (lo2d > 180) lo2d -= 360;
+      int x, y;
+      if (globeProject(la2d, lo2d, sv, cv, globeViewLon, cx, cy, R, x, y)) {
+        if (pen) { long dx = x - px, dy = y - py;
+                   if (dx * dx + dy * dy < (long)(R * R)) canvas.drawLine(px, py, x, y, CL_YELLOW); }
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+
+  // QTH marker.
+  {
+    const Observer& o = loc.obs();
+    int x, y;
+    if (globeProject(o.lat, o.lon, sv, cv, globeViewLon, cx, cy, R, x, y)) {
+      canvas.drawLine(x - 2, y, x + 2, y, CL_WHITE);
+      canvas.drawLine(x, y - 2, x, y + 2, CL_WHITE);
+    }
+  }
+
+  // Second (DX) location, if a grid has been entered (g): an orange box marker
+  // plus its footprint ring at the SAME altitude as the selected satellite, so the
+  // overlap of the two footprints is the live mutual-visibility region for that
+  // satellite. Clipped at the limb like everything else.
+  if (dxGrid[0] && L.satAltKm > 1.0) {
+    int dx0, dy0;
+    bool dxFront = globeProject(dxLat, dxLon, sv, cv, globeViewLon, cx, cy, R, dx0, dy0);
+    if (dxFront) {
+      canvas.drawRect(dx0 - 2, dy0 - 2, 5, 5, CL_ORANGE);
+    }
+    // DX footprint (orange) at the satellite's altitude.
+    const double D2R = 0.017453292519943295, R2D = 57.29577951308232, RE = 6371.0;
+    double beta = acos(RE / (RE + L.satAltKm)) * R2D;
+    double la1 = dxLat * D2R, lo1 = dxLon * D2R;
+    double sb = sin(beta * D2R), cb = cos(beta * D2R), s1 = sin(la1), c1 = cos(la1);
+    int px = 0, py = 0; bool pen = false;
+    for (int a = 0; a <= 360; a += 10) {
+      double az = a * D2R;
+      double la2 = asin(s1 * cb + c1 * sb * cos(az));
+      double lo2 = lo1 + atan2(sin(az) * sb * c1, cb - s1 * sin(la2));
+      double la2d = la2 * R2D, lo2d = lo2 * R2D;
+      while (lo2d < -180) lo2d += 360; while (lo2d > 180) lo2d -= 360;
+      int x, y;
+      if (globeProject(la2d, lo2d, sv, cv, globeViewLon, cx, cy, R, x, y)) {
+        if (pen) { long ddx = x - px, ddy = y - py;
+                   if (ddx * ddx + ddy * ddy < (long)(R * R)) canvas.drawLine(px, py, x, y, CL_ORANGE); }
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+
+  // All favourites as dots (selected sat drawn last, larger). Non-selected use a
+  // dim green dot when on the visible hemisphere.
+  int selX = -1, selY = 0;
+  for (int i = 0; i < favN; ++i) {
+    int idx = db.indexOfNorad(favs[i]);
+    if (idx < 0) continue;
+    SatEntry& f = db.at(idx);
+    if (!pred.setSat(f)) continue;
+    LiveLook FL = pred.look(now);
+    int x, y;
+    if (!globeProject(FL.subLat, FL.subLon, sv, cv, globeViewLon, cx, cy, R, x, y)) continue;
+    if (f.norad == s->norad) { selX = x; selY = y; }
+    else canvas.fillCircle(x, y, 1, CL_DGREEN);
+  }
+  // restore predictor to the selected sat for the readout
+  pred.setSat(*s);
+
+  // Selected satellite's ground footprint: the small circle at central angle beta
+  // around its sub-point. globeProject culls far-side points, so the footprint is
+  // drawn only where it falls on the visible hemisphere (it wraps around the limb
+  // naturally, exactly like the coastline).
+  if (L.satAltKm > 1.0) {
+    const double D2R = 0.017453292519943295, R2D = 57.29577951308232, RE = 6371.0;
+    double beta = acos(RE / (RE + L.satAltKm)) * R2D;     // footprint angular radius
+    double la1 = L.subLat * D2R, lo1 = L.subLon * D2R;
+    double sb = sin(beta * D2R), cb = cos(beta * D2R), s1 = sin(la1), c1 = cos(la1);
+    int px = 0, py = 0; bool pen = false;
+    for (int a = 0; a <= 360; a += 10) {
+      double az = a * D2R;
+      double la2 = asin(s1 * cb + c1 * sb * cos(az));
+      double lo2 = lo1 + atan2(sin(az) * sb * c1, cb - s1 * sin(la2));
+      double la2d = la2 * R2D, lo2d = lo2 * R2D;
+      while (lo2d < -180) lo2d += 360; while (lo2d > 180) lo2d -= 360;
+      int x, y;
+      if (globeProject(la2d, lo2d, sv, cv, globeViewLon, cx, cy, R, x, y)) {
+        if (pen) { long dx = x - px, dy = y - py;
+                   if (dx * dx + dy * dy < (long)(R * R)) canvas.drawLine(px, py, x, y, CL_DGREEN); }
+        px = x; py = y; pen = true;
+      } else pen = false;
+    }
+  }
+
+  if (selX >= 0) {
+    uint16_t col = L.sunlit ? CL_YELLOW : CL_CYAN;
+    canvas.fillCircle(selX, selY, 3, col);
+    canvas.drawCircle(selX, selY, 4, CL_BLACK);
+  }
+
+  // Right-hand readout.
+  int rx = 140;
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(rx, 20); canvas.printf("Sub %.1f%c", fabs(L.subLat), L.subLat >= 0 ? 'N' : 'S');
+  canvas.setCursor(rx, 32); canvas.printf("    %.1f%c", fabs(L.subLon), L.subLon >= 0 ? 'E' : 'W');
+  canvas.setTextColor(L.el > 0 ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setCursor(rx, 48); canvas.printf("El %.0f%c", L.el, 248);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(rx, 60); canvas.printf("Az %.0f%c", L.az, 248);
+  canvas.setCursor(rx, 72); canvas.printf("Alt %.0fkm", L.satAltKm);
+  canvas.setTextColor(L.sunlit ? CL_YELLOW : CL_CYAN, CL_BLACK);
+  canvas.setCursor(rx, 84); canvas.print(L.sunlit ? "sunlit" : "eclipse");
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(rx, 96); canvas.print(globeFollow ? "follow" : "free");
+  if (dxGrid[0]) { canvas.setTextColor(CL_ORANGE, CL_BLACK);
+                   canvas.setCursor(rx, 108); canvas.printf("DX %s", dxGrid); }
+  else           { canvas.setTextColor(CL_GREY, CL_BLACK);
+                   canvas.setCursor(rx, 108); canvas.printf("%d favs", favN); }
+
+  footer("arrows turn  g DX  ENT follow  `bk");
+}
+
 void App::drawLocation() {
   header("Location");
   canvas.setTextSize(1);
@@ -8347,7 +9958,7 @@ void App::drawLocation() {
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 86);
   canvas.printf("Src: %s", GPS_PROFILES[cfg.gpsSource % GPS_SRC_COUNT].name);
-  footer("e/o/a grd p gps s src c clk ENT sky");
+  footer("e/o/a grd p gps s src c clk v=pos ENT sky");
 }
 
 void App::drawUpdate() {
@@ -8371,7 +9982,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 55;
+  const int N = 60;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -8388,6 +9999,11 @@ void App::drawSettings() {
   rows[53] = String("Web port: ") + String(cfg.webPort);
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[54] = String("IR pass beacon: ") + (cfg.irBeacon ? "on" : "off");
+  rows[55] = String("LoRa msg: ") + (cfg.loraEnable ? "on" : "off");
+  rows[56] = String("LoRa freq: ") + String(cfg.loraFreqKHz / 1000.0, 3) + " MHz";
+  rows[57] = String("LoRa SF: ") + String(cfg.loraSf);
+  rows[58] = String("LoRa BW: ") + String(cfg.loraBwHz / 1000) + " kHz";
+  rows[59] = String("LoRa TX pwr: ") + String(cfg.loraTxDbm) + " dBm";
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
   rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
                      : cfg.rotType == ROT_NET ? "rotctl (net)"

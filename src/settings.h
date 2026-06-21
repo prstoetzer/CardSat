@@ -150,6 +150,13 @@ struct Settings {
   bool     webEnable   = false;
   uint16_t webPort     = 80;
 
+  // LoRa text messaging (CardSat-to-CardSat broadcast). Uses the Cap LoRa SX1262.
+  bool     loraEnable  = false;     // bring the radio up at boot
+  uint32_t loraFreqKHz = 433775;    // carrier in kHz (433.775 MHz default)
+  uint8_t  loraSf      = 12;        // spreading factor 7..12 (12 = max range)
+  uint32_t loraBwHz    = 125000;    // bandwidth in Hz (125 kHz standard)
+  int8_t   loraTxDbm   = 20;        // TX power dBm (<=22 on SX1262)
+
   bool load();
   bool save();
 };

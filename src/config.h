@@ -98,7 +98,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.22";
+static constexpr const char* FW_VERSION = "0.9.23";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -177,6 +177,8 @@ static constexpr uint32_t MEMO_SAMPLE_HZ  = 16000;  // 16 kHz mono
 static constexpr uint32_t MEMO_MAX_SECS   = 30;     // hard cap per memo
 static constexpr uint32_t MEMO_MIN_FREE_KB = 512;   // refuse if SD has less free
 static constexpr int      MEMO_AC_GAIN     = 8;     // gain on DC-blocked AC signal (tunable)
+static constexpr int      MEMO_LIST_MAX    = 64;    // max memos shown in the browser
+static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samples)
 #define FILE_GP      "/CardSat/gp.json"       // cached GP/OMM download (JSON array)
 #define FILE_CFG     "/CardSat/config.json"
 #define FILE_TXCACHE "/CardSat/tx_%lu.json"   // %lu = norad id

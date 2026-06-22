@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -274,6 +274,8 @@ private:
   int       msgHead = 0;          // index of next write (ring)
   int       msgCount = 0;         // number held (<= MSG_MAX)
   int       msgScroll = 0;        // view scroll (0 = newest at bottom)
+  uint16_t  msgUnread = 0;        // inbound messages not yet viewed (header badge)
+  char      msgLastFrom[16] = {0};// sender of the most recent unread (for the banner)
   bool      loraStarted = false;  // begin() attempted/succeeded this session
   void msgPush(const char* from, const char* text, bool mine, int rssi, int snr);
   void loraStart();               // apply cfg, bring the radio up
@@ -378,6 +380,8 @@ private:
   bool     manFixUp = false;      // Manual mode: false = fix downlink, true = fix uplink
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
   TuneMode tuneMode = TM_HOLD;    // Doppler tune mode (cycle with 'd' on Track)
+  bool     cwMode   = false;      // linear bird: force CW on both legs (toggle 'm');
+                                  // per-session, reset on every transponder change
                                   // holds a constant frequency AT THE SATELLITE
   uint32_t lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
   uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
@@ -715,6 +719,17 @@ private:
   void runCatTest();
   void drawCatTest();
   void keyCatTest(char c, bool enter, bool back);
+
+  // Charge / Sleep screen: a minimal low-power mode (Launcher-style). The screen
+  // backlight blanks and only a tiny loop runs; any key wakes it to show battery
+  // status; back/ESC returns to the home menu. chargeWoke gates the wake redraw.
+  void enterChargeMode();
+  void drawCharge();
+  void keyCharge(char c, bool enter, bool back);
+  int  batteryPercent();        // voltage-curve % (more accurate than raw level)
+  void heapDefragViaReconnect();// drop WiFi/TLS to coalesce the heap on demand
+  bool     chargeWoke = false;  // true briefly after a keypress wakes the screen
+  uint32_t chargeWokeMs = 0;    // when the wake happened (auto-blank after a few s)
   // Append one result line: echo to Serial and store for the on-screen list.
   void catLog(const String& line);
   void catStep(const String& name, bool ok, const String& detail = String());

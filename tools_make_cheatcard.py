@@ -56,13 +56,13 @@ FRONT = [
   "<b>v</b> 10-day &middot; <b>i</b> illum &middot; <b>g</b> grids &middot; <b>w</b> US states &middot; <b>e</b> DXCC"),
  ("TRACK (sel)",
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
-  "<b>c</b> CTCSS &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>z</b> big readout &middot; "
+  "<b>c</b> CTCSS &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>z</b> big readout &middot; "
   "<b>y</b> tilt on/off (ADV) &middot; "
   "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
  ("BIG READOUT (z from Track)",
   "Big RX/TX + az/el + tune mode (follows Track). Radio+rotator keep tracking &middot; "
   "<b>,</b>/<b>/</b> tune &middot; <b>s</b>/<b>x</b> step/ctr &middot; <b>m</b>/<b>d</b> mode &middot; "
-  "<b>t</b> TX &middot; <b>n</b> beacon &middot; <b>r</b> radio &middot; <b>o</b> rot &middot; <b>y</b> tilt &middot; <b>l</b> log &middot; <b>z</b>/<b>`</b> back"),
+  "<b>t</b> TX &middot; <b>n</b> beacon &middot; <b>k</b> CW (linear) &middot; <b>r</b> radio &middot; <b>o</b> rot &middot; <b>y</b> tilt &middot; <b>l</b> log &middot; <b>z</b>/<b>`</b> back"),
  ("MANUAL (no radio)",
   "Fix one leg, read Doppler freq to tune the other by hand. <b>u</b> toggle "
   "HOLD/TUNE leg &middot; <b>,</b>/<b>/</b> passband (linear) &middot; <b>m</b> CAL &middot; "
@@ -131,7 +131,7 @@ BACK = [
  ("VOICE MEMOS (Log &rarr; Voice Memos)",
   "Browse newest-first (date/time/sat/len). <b>ENTER</b> play &middot; <b>n</b> new &middot; <b>d</b> del &middot; <b>r</b> refresh &middot; record via <b>v</b> on Track. SD req'd"),
  ("LORA MESSAGES (Home &rarr; Messages)",
-  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll &middot; <b>r</b> retry &middot; <b>`</b> back. Needs RadioLib build. Untested HW"),
+  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll &middot; <b>r</b> retry &middot; <b>`</b> back. <b>Rx always on</b>: new msgs show an envelope+count badge in the header on any screen, plus a banner (opt-in beep) &mdash; set <b>Msg notify</b> (off/banner/banner+beep) in Settings. Needs RadioLib build. Untested HW"),
  ("UPDATE",
   "<b>k</b>/<b>ENTER</b> GP+clock+AMSAT+space-wx+weather &middot; <b>f</b> fast (GP+AMSAT+favs' TX) &middot; "
   "<b>a</b> cache all TX (auto-reboots) &middot; <b>w</b> WiFi only"),

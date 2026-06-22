@@ -29,10 +29,12 @@ public:
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override { selectSub(); }
   void selectMainBand()         override { selectMain(); }
+  bool assignBands(uint32_t mainHz, uint32_t subHz) override;
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
   bool hasTone()     const override { return RADIOS[_model].hasTone; }
+  bool canAssignBand() const override { return RADIOS[_model].canAssignBand; }
   bool selVerified() const override { return RADIOS[_model].selVerified; }
   const char* name() const override { return RADIOS[_model].name; }
 

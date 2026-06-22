@@ -403,11 +403,20 @@ namespace Store {
 //                           S-meter); Hamlib caches the last set value. false.
 //    * Kenwood TS-790/2000: ASCII "FA;" reads the frequency. true.
 //
-//  IMPORTANT shared limitation of the older sat rigs (FT-736R, TS-790, and the
-//  Yaesu/Kenwood pairs generally): CAT cannot switch the BAND PAIR. The operator
-//  selects the uplink/downlink bands (and engages the rig's own satellite / full-
-//  duplex mode) manually on the radio; CardSat only Doppler-tunes within them.
-//  This is exactly how SatPC32 drives these radios.
+//  IMPORTANT shared limitation of the older sat rigs (IC-820, IC-821, IC-970,
+//  FT-736R, TS-790, TS-2000, and the Yaesu/Kenwood pairs generally): CAT cannot
+//  switch the BAND PAIR, cannot assign which band sits on MAIN vs SUB, and on the
+//  IC-820/821/970 cannot toggle satellite mode either. The operator selects the
+//  uplink/downlink bands, sets up MAIN/SUB, engages the rig's own satellite /
+//  full-duplex mode, AND sets any uplink CTCSS (PL) tone -- all manually on the
+//  radio. CardSat then only Doppler-tunes within that pre-configured pairing.
+//  The IC-820/821 sat-mode CI-V command is a no-op on real hardware (verified
+//  on an IC-821, N8HM), so hasSatMode is false for them; their D0/D1 bytes are
+//  band *access* (which band a read/write targets), NOT a MAIN/SUB assignment.
+//  This matches how SatPC32, Gpredict/Hamlib, and OscarWatch drive these radios:
+//  e.g. Hamlib's IC-821 backend has no MAIN/SUB or satmode; OscarWatch lists the
+//  IC-821 as "Satellite Main/Sub only, uplink tone manual on radio"; and the
+//  Kenwood TS-2000 requires the band pair configured on the rig before tracking.
 // ===========================================================================
 
 enum RigProtocol : uint8_t { PROTO_CIV, PROTO_YAESU, PROTO_KENWOOD };
@@ -445,6 +454,10 @@ struct RadioProfile {
   uint8_t     toneEncSub;    // CI-V tone-encoder on/off sub-cmd under 0x16:
                              // IC-9100/9700 = 0x42 (Repeater tone), IC-910 = 0x43
                              // (Subaudible tone; on the 910, 0x42 is auto-notch). 0 = n/a.
+  bool        canAssignBand; // CAT can ASSIGN which band sits on MAIN vs SUB
+                             // (Icom CI-V 07 D2). true only for IC-9100/IC-9700;
+                             // the 820/821/970 D0/D1 are band *access* only.
+                             // UNTESTED on hardware.
 };
 
 // Order MUST match RadioModel.
@@ -455,24 +468,35 @@ static const RadioProfile RADIOS[RIG_COUNT] = {
   //   IC-821H: Main band access = D0, Sub band access = D1  (addr 4C)
   //   IC-820H: Main band access = D1, Sub band access = D0  (addr 42)  <- REVERSED
   // So selMain/selSub are intentionally swapped between the two rows below.
+  //
+  // IC-910 is DIFFERENT from the 9700-style "main access / sub access" model.
+  // Its 07 group is: D1 = Select MAIN VFO, D0 = Switch VFO A and VFO B (swap),
+  // and a separate "Select SUB VFO" entry. (Confirmed from the IC-910 CONTROL
+  // COMMAND table and a live Hamlib/gpredict trace: 07 D1 selects MAIN, 07 D0
+  // swaps.) So for the 910 selMain = {07,D1}. There is no clean independent
+  // "sub access" byte that the Hamlib traces use -- they reach SUB by selecting
+  // MAIN then swapping. We set selSub = {07,D0} (the swap) as the least-wrong
+  // value; the 910's addressed-SUB read/write path is UNVERIFIED on hardware and
+  // a 910 owner should confirm it. (Earlier this row had selMain = {07,D0},
+  // i.e. it was issuing a SWAP where a MAIN-select was intended -- now fixed.)
   // satCmd/satSub: satellite-mode toggle. IC-9100/9700 = 0x16/0x5A (confirmed: 9700
   // CI-V Reference Guide & live 9100 trace fe fe 7c e0 16 5a fd). IC-910 is DIFFERENT:
   // 0x1A/0x07 (verified from the IC-910 CONTROL COMMAND table, cmd 1A sub 07
   // "Set satellite mode"). 0/0 where there's no CAT satmode.
   // tnEnc: tone-encoder on/off sub under 0x16. IC-9100/9700 = 0x42 (Repeater tone);
   // IC-910 = 0x43 (Subaudible tone; its 0x42 is auto-notch). 0 where no CAT tone.
-  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, true, 0x16, 0x5A, true, false, 0x00 },
-  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, false, 0x00 },
-  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x1A, 0x07, true, true,  0x43 },
-  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x16, 0x5A, true, false, 0x00 },
-  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42 },
-  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42 },
+  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, false, 0x00, 0x00, true, false, 0x00, false },
+  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false, 0x00, 0x00, true, false, 0x00, false },
+  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, true, 0x1A, 0x07, true, true,  0x43, true  },
+  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x16, 0x5A, true, false, 0x00, false },
+  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42, true },
+  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42, true },
   // Yaesu: 5-byte CAT. baud is the radio's CAT menu setting. No CI-V select.
-  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00 },
-  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, false,false, 0x00 },
+  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00, false },
+  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, false,false, 0x00, false },
   // Kenwood: ASCII CAT over RS-232 (needs a MAX3232-class level interface).
-  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, false, 0x00 },
-  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00 },
+  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, false, 0x00, false },
+  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00, false },
 };
 
 
@@ -548,6 +572,17 @@ public:
   virtual void selectSubBand() = 0;
   virtual void selectMainBand() = 0;
 
+  // Assign which frequency BAND (2 m / 70 cm / 23 cm) sits on the MAIN vs SUB
+  // VFO, so the uplink/downlink land on the correct bands when radio control is
+  // engaged. Only radios with a CAT band-assignment command implement this
+  // (IC-9100/IC-9700 via CI-V 07 D2); everyone else returns false and the
+  // operator sets the band pair up on the radio. mainHz/subHz are the actual
+  // frequencies whose bands should be placed on MAIN/SUB respectively.
+  // UNTESTED on hardware -- see canAssignBand() and the CivRig implementation.
+  virtual bool assignBands(uint32_t mainHz, uint32_t subHz) {
+    (void)mainHz; (void)subHz; return false;
+  }
+
   // Set the transmit CTCSS (PL) tone encoder. Used for FM satellites whose
   // uplink requires a subaudible tone (SO-50, AO-91, ISS, PO-101...). The tone
   // is applied to the uplink (Main/TX). on=false disables it. Backends that
@@ -558,6 +593,7 @@ public:
   virtual bool canReadFreq() const = 0;
   virtual bool hasSatMode()  const = 0;
   virtual bool hasTone()     const { return false; }   // CAT CTCSS supported
+  virtual bool canAssignBand() const { return false; } // CAT MAIN/SUB band assign
   virtual bool selVerified() const = 0;
   virtual const char* name() const = 0;
 
@@ -653,10 +689,12 @@ public:
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override { selectSub(); }
   void selectMainBand()         override { selectMain(); }
+  bool assignBands(uint32_t mainHz, uint32_t subHz) override;
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
   bool hasTone()     const override { return RADIOS[_model].hasTone; }
+  bool canAssignBand() const override { return RADIOS[_model].canAssignBand; }
   bool selVerified() const override { return RADIOS[_model].selVerified; }
   const char* name() const override { return RADIOS[_model].name; }
 
@@ -1752,6 +1790,7 @@ struct Settings {
   uint8_t  loraSf      = 12;        // spreading factor 7..12 (12 = max range)
   uint32_t loraBwHz    = 125000;    // bandwidth in Hz (125 kHz standard)
   int8_t   loraTxDbm   = 20;        // TX power dBm (<=22 on SX1262)
+  uint8_t  msgNotify   = 1;         // LoRa msg alert: 0=off, 1=banner, 2=banner+beep
   void loraApplyRegion(uint8_t region);   // seed freq/BW from a region preset
 
   bool load();
@@ -1772,7 +1811,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -2168,6 +2207,8 @@ private:
   int       msgHead = 0;          // index of next write (ring)
   int       msgCount = 0;         // number held (<= MSG_MAX)
   int       msgScroll = 0;        // view scroll (0 = newest at bottom)
+  uint16_t  msgUnread = 0;        // inbound messages not yet viewed (header badge)
+  char      msgLastFrom[16] = {0};// sender of the most recent unread (for the banner)
   bool      loraStarted = false;  // begin() attempted/succeeded this session
   void msgPush(const char* from, const char* text, bool mine, int rssi, int snr);
   void loraStart();               // apply cfg, bring the radio up
@@ -2272,6 +2313,8 @@ private:
   bool     manFixUp = false;      // Manual mode: false = fix downlink, true = fix uplink
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
   TuneMode tuneMode = TM_HOLD;    // Doppler tune mode (cycle with 'd' on Track)
+  bool     cwMode   = false;      // linear bird: force CW on both legs (toggle 'm');
+                                  // per-session, reset on every transponder change
                                   // holds a constant frequency AT THE SATELLITE
   uint32_t lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
   uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
@@ -2605,6 +2648,17 @@ private:
   void runCatTest();
   void drawCatTest();
   void keyCatTest(char c, bool enter, bool back);
+
+  // Charge / Sleep screen: a minimal low-power mode (Launcher-style). The screen
+  // backlight blanks and only a tiny loop runs; any key wakes it to show battery
+  // status; back/ESC returns to the home menu. chargeWoke gates the wake redraw.
+  void enterChargeMode();
+  void drawCharge();
+  void keyCharge(char c, bool enter, bool back);
+  int  batteryPercent();        // voltage-curve % (more accurate than raw level)
+  void heapDefragViaReconnect();// drop WiFi/TLS to coalesce the heap on demand
+  bool     chargeWoke = false;  // true briefly after a keypress wakes the screen
+  uint32_t chargeWokeMs = 0;    // when the wake happened (auto-blank after a few s)
   // Append one result line: echo to Serial and store for the on-screen list.
   void catLog(const String& line);
   void catStep(const String& name, bool ok, const String& detail = String());
@@ -3003,6 +3057,73 @@ void CivRig::selectMain() {
 void CivRig::selectSub() {
   const RadioProfile& p = RADIOS[_model];
   if (p.selLen) sendFrame(p.selSub, p.selLen);
+}
+
+// Map a frequency to the Icom CI-V band code used by the "07 D2" band-selection
+// command: 0x01 = 144 MHz, 0x02 = 430/440 MHz, 0x03 = 1.2 GHz. Returns 0 for a
+// frequency outside those amateur VHF/UHF bands (caller skips the assignment).
+static uint8_t civBandCode(uint32_t hz) {
+  if (hz >= 144000000UL && hz <= 148000000UL) return 0x01;   // 2 m
+  if (hz >= 430000000UL && hz <= 450000000UL) return 0x02;   // 70 cm
+  if (hz >= 1240000000UL && hz <= 1300000000UL) return 0x03; // 23 cm
+  return 0x00;
+}
+
+// Assign which band sits on MAIN vs SUB via CI-V "07 D2 00/01 <bandcode>".
+// MAIN gets the band of mainHz, SUB gets the band of subHz. Only rigs whose
+// profile sets canAssignBand (IC-9100/IC-9700) act; others return false.
+//
+// *** UNTESTED ON HARDWARE. *** The author operates an IC-821, which has no
+// band-assignment command, so this path has never been exercised on a real
+// radio. The frame format (07 D2 00 = main, 07 D2 01 = sub; band codes
+// 01/02/03) is taken from the IC-9700 CI-V Reference Guide. It is sent once at
+// CAT-engage, never per-tick, so a wrong frame cannot spam the bus.
+bool CivRig::assignBands(uint32_t mainHz, uint32_t subHz) {
+  if (!RADIOS[_model].canAssignBand) return false;
+  uint8_t mb = civBandCode(mainHz);
+  uint8_t sb = civBandCode(subHz);
+  if (!mb || !sb) return false;                 // unknown band -> leave to operator
+
+  // --- IC-910: read MAIN's band, swap MAIN/SUB if it's the wrong one. ---
+  // The 910 has no "07 D2" band-assignment. Its 07 group instead exposes
+  //   07 D1 = Select MAIN VFO,  07 D0 = Switch VFO A and VFO B (swap MAIN/SUB).
+  // Because the 910's MAIN and SUB can never be on the same band, checking MAIN
+  // alone is sufficient: if MAIN isn't the band we want there, one swap fixes
+  // both legs. This mirrors how Hamlib drives the 910 (confirmed from its serial
+  // trace: 07 D1 then 03 to read MAIN, 07 D0 to swap). readMainFreq() issues the
+  // (now-corrected) selMain = 07 D1 then 03. Fired once at engage.
+  // *** UNTESTED ON HARDWARE *** (author has no IC-910).
+  if (_model == RIG_IC910) {
+    uint32_t mainNow = 0;
+    if (!readMainFreq(mainNow) || !mainNow) {
+      if (CIV_DEBUG) Serial.println("[CAT] 910 assignBands: MAIN read failed, no swap");
+      return false;                               // can't tell -> don't guess
+    }
+    bool ok = true;
+    if (civBandCode(mainNow) != mb) {             // wrong band on MAIN -> swap
+      uint8_t swapAB[2] = { 0x07, 0xD0 };         // Switch VFO A and VFO B
+      ok = sendFrame(swapAB, 2);
+      if (CIV_DEBUG)
+        Serial.printf("[CAT] 910 assignBands: MAIN had band%02X, want band%02X -> SWAP %s\n",
+                      civBandCode(mainNow), mb, ok ? "sent" : "FAILED");
+    } else if (CIV_DEBUG) {
+      Serial.printf("[CAT] 910 assignBands: MAIN already band%02X, no swap\n", mb);
+    }
+    return ok;
+  }
+
+  // --- IC-9100 / IC-9700: direct band-selection set via 07 D2. ---
+  bool ok = true;
+  uint8_t main[4] = { 0x07, 0xD2, 0x00, mb };   // assign MAIN band
+  uint8_t sub [4] = { 0x07, 0xD2, 0x01, sb };   // assign SUB band
+  ok &= sendFrame(main, 4);
+  ok &= sendFrame(sub,  4);
+  if (CIV_DEBUG) {
+    Serial.printf("[CAT] assignBands: MAIN<-band%02X (%lu Hz) SUB<-band%02X (%lu Hz) %s\n",
+                  mb, (unsigned long)mainHz, sb, (unsigned long)subHz,
+                  ok ? "sent" : "FAILED");
+  }
+  return ok;
 }
 
 bool CivRig::setFreqCiv(bool sub, uint32_t hz) {
@@ -7311,10 +7432,18 @@ void App::applyTransponderModes(const Transponder& t) {
   // sits and where the One-True-Rule read-back happens. (On the IC-821 the SUB
   // band must be the last one selected before a read, so ending here helps.)
   if (t.isLinear) {
-    bool hf = (t.uplink   && t.uplink   < 30000000UL) ||
-              (t.downlink && t.downlink < 30000000UL);
-    if (t.uplink) rigSetUplinkMode(hf ? RM_USB : RM_LSB);     // uplink: LSB (USB if HF)
-    rigSetDownlinkMode(RM_USB);                               // downlink: USB (selected last)
+    if (cwMode) {
+      // Operator chose CW on this linear bird: CW on BOTH legs. On an inverting
+      // transponder the sideband flips but CW is CW on both ends, so no sideband
+      // handling is needed -- the operator just zero-beats the downlink.
+      if (t.uplink) rigSetUplinkMode(RM_CW);
+      rigSetDownlinkMode(RM_CW);                               // selected last
+    } else {
+      bool hf = (t.uplink   && t.uplink   < 30000000UL) ||
+                (t.downlink && t.downlink < 30000000UL);
+      if (t.uplink) rigSetUplinkMode(hf ? RM_USB : RM_LSB);   // uplink: LSB (USB if HF)
+      rigSetDownlinkMode(RM_USB);                             // downlink: USB (selected last)
+    }
   } else {
     RigMode m = Rig::modeFromString(t.mode);
     if (t.uplink) rigSetUplinkMode(m);
@@ -7470,6 +7599,7 @@ bool App::ensureTransponders(SatEntry& s) {
 // track-screen mode for the currently selected transponder.
 void App::onTransponderChanged() {
   tuneMode = TM_HOLD; lastRxSet = 0; lastUlHz = 0;   // start each channel holding both legs
+  cwMode = false;                                    // CW override never persists across channels
   if (activeTxCount <= 0) { pbOffset = 0; trackMode = 1; return; }
   Transponder& t = activeTx[curTx];
   if (t.isLinear && t.bandwidth() > 0) {
@@ -9608,7 +9738,9 @@ void App::loop() {
     auto ks = M5Cardputer.Keyboard.keysState();
     char c = ks.word.empty() ? 0 : ks.word.front();
     lastInputMs = millis();
-    if (screenAsleep) {                       // first key just wakes the display
+    if (screen == SCR_CHARGE) {                // charge mode handles its own keys
+      handleKey(c, ks.enter, ks.del);          // (wakes/blanks/exits internally)
+    } else if (screenAsleep) {                 // first key just wakes the display
       M5Cardputer.Display.setBrightness(cfg.bright);
       screenAsleep = false;
     } else {
@@ -9828,6 +9960,18 @@ void App::loop() {
   bool alarmActive = (millis() < aosFlashUntil) || (cfg.aosAlarm && dt <= 60 && dt > -2);
   if (alarmActive && ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
 
+  // Charge / Sleep screen: while awake (just woken), refresh battery once a
+  // second, then auto-blank ~5 s after the wake to return to the dark idle.
+  if (screen == SCR_CHARGE && chargeWoke) {
+    if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }
+    if (millis() - chargeWokeMs > 5000) {
+      chargeWoke = false;
+      M5Cardputer.Display.setBrightness(0);
+      screenAsleep = true;
+      lastDrawMs = 0;                              // force the dark redraw
+    }
+  }
+
   // Screen power management: blank the backlight after inactivity. Never while
   // actively tracking (radio/rotator) or alarming; any key wakes it (above).
   if (!screenAsleep) {
@@ -9945,6 +10089,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_GPS:      keyGps(c, enter, back); break;
     case SCR_HELP:     keyHelp(c, enter, back); break;
     case SCR_CATTEST:  keyCatTest(c, enter, back); break;
+    case SCR_CHARGE:   keyCharge(c, enter, back); break;
     case SCR_ORBIT:    keyOrbit(c, enter, back); break;
     case SCR_SIM:      keySim(c, enter, back); break;
     case SCR_SUNMOON:  keySunMoon(c, enter, back); break;
@@ -9969,7 +10114,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 15;
+  const int N = 16;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -10012,6 +10157,7 @@ void App::keyHome(char c, bool enter, bool back) {
       case 12: logMenuSel = 0; screen = SCR_LOG; break;
       case 13: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
       case 14: screen = SCR_ABOUT; break;
+      case 15: enterChargeMode(); screen = SCR_CHARGE; break;
     }
   }
 }
@@ -10448,6 +10594,15 @@ void App::keyTrack(char c, bool enter, bool back) {
       setStatus(String("Beacon: ") + activeTx[curTx].desc);
     } else setStatus("No beacon listed for this sat");
   }
+  if (c == 'k' && activeTxCount > 0) {               // toggle CW on both legs (linear)
+    Transponder& t = activeTx[curTx];
+    if (!t.isLinear) { setStatus("CW: linear birds only"); }
+    else {
+      cwMode = !cwMode;
+      if (radioOut && rig) applyTransponderModes(t);  // re-apply modes now
+      setStatus(cwMode ? "CW both legs" : "SSB (auto)");
+    }
+  }
   if (c == 'c' && activeTxCount > 0) {               // set/clear CTCSS tone (per sat)
     float cur = activeTx[curTx].toneHz;
     editTarget = 340;
@@ -10464,6 +10619,19 @@ void App::keyTrack(char c, bool enter, bool back) {
       // per the Sat Mode setting. Which physical VFO carries up/downlink otherwise
       // follows the VFO Type setting (see the rigSet*/rigSelect* helpers).
       if (rig) rig->enableSatMode(cfg.satMode && !txReceiveOnly());
+      // On rigs that can assign MAIN/SUB bands over CAT (IC-9100/9700), put the
+      // correct band on each VFO once, now, so the uplink/downlink land on the
+      // right bands without the operator pre-arranging them. Two-way transponders
+      // only (need both legs to know both bands); fired once at engage, never per
+      // tick. No-op on every other radio. UNTESTED on hardware.
+      if (rig && rig->canAssignBand() && activeTxCount > 0) {
+        uint32_t up = activeTx[curTx].uplink, dn = activeTx[curTx].downlink;
+        if (up && dn) {
+          uint32_t mainHz = dlOnSub() ? up : dn;   // MAIN carries uplink in Main-Up/Sub-Dn
+          uint32_t subHz  = dlOnSub() ? dn : up;
+          rig->assignBands(mainHz, subHz);
+        }
+      }
       if (activeTxCount > 0) applyTransponderModes(activeTx[curTx]);
       lastDoppMs = 0; lastRxSet = 0; lastUlHz = 0; uplinkDeferTicks = 0;   // re-sync tracking cleanly
       // Bound how long any single CAT read may block the cooperative loop, so a
@@ -11146,7 +11314,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37,62};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,54,48,49,25,43};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,27,28,29};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
   (int)(sizeof(SET_RADIO)/sizeof(int)), (int)(sizeof(SET_ROTOR)/sizeof(int)),
@@ -11213,6 +11381,8 @@ void App::keySettings(char c, bool enter, bool back) {
                  cfg.loraApplyRegion((uint8_t)r); cfg.save();
                  if (lora.ready()) lora.setRadio(cfg.loraFreqKHz, cfg.loraSf,
                                                  cfg.loraBwHz, cfg.loraTxDbm); } break;
+      case 61: { int v = ((int)cfg.msgNotify + dir + 3) % 3;
+                 cfg.msgNotify = (uint8_t)v; cfg.save(); } break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 8) % 8);
               cfg.save(); applyRotatorFromCfg(); break;
@@ -11323,6 +11493,9 @@ void App::keySettings(char c, bool enter, bool back) {
                                                  cfg.loraBwHz, cfg.loraTxDbm);
                  setStatus(r == 0 ? "US 33cm 906.875" : r == 1 ? "EU 70cm 433.775"
                                                                : "JP 430 431.000"); } break;
+      case 61: { int v = ((int)cfg.msgNotify + 1) % 3; cfg.msgNotify = (uint8_t)v; cfg.save();
+                 setStatus(v == 0 ? "Msg notify off" : v == 2 ? "Msg notify banner+beep"
+                                                              : "Msg notify banner"); } break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
@@ -11722,6 +11895,20 @@ void App::header(const String& t) {
   // space that's left over.
   String clk;
   int rightLimit = bx;                          // title must stop before the battery
+  // Unread LoRa-message indicator: a small envelope + count just left of the
+  // battery, shown on every screen when there are unread messages. Silent and
+  // always-on; the banner/beep (see loraPoll) is the active alert.
+  if (msgUnread > 0) {
+    int ex = bx - 26, ey = 4, ew = 12, eh = 8;   // envelope box left of battery
+    canvas.drawRect(ex, ey, ew, eh, CL_YELLOW);
+    canvas.drawLine(ex, ey, ex + ew/2, ey + eh - 2, CL_YELLOW);     // flap
+    canvas.drawLine(ex + ew, ey, ex + ew/2, ey + eh - 2, CL_YELLOW);
+    canvas.setTextColor(CL_YELLOW, CL_BLUE);
+    canvas.setTextSize(1);
+    int cnt = msgUnread > 9 ? 9 : (int)msgUnread;  // single digit (or +)
+    canvas.setCursor(ex - 7, 4); canvas.print(msgUnread > 9 ? "+" : String(cnt).c_str());
+    rightLimit = ex - 9;                          // keep the title clear of it
+  }
   if (timeIsSet()) {
     clk = fmtClock(nowUtc()) + "Z";
     rightLimit = bx - (int)clk.length() * 6 - 5;  // …and before the clock when it's shown
@@ -12374,6 +12561,7 @@ void App::draw() {
     case SCR_GPS:      drawGps(); break;
     case SCR_HELP:     drawHelp(); break;
     case SCR_CATTEST:  drawCatTest(); break;
+    case SCR_CHARGE:   drawCharge(); break;
     case SCR_ORBIT:    drawOrbit(); break;
     case SCR_SIM:      drawSim(); break;
     case SCR_SUNMOON:  drawSunMoon(); break;
@@ -12850,6 +13038,7 @@ void App::drawHelp() {
     " m TUNE/CAL  d tune mode",
     " t next TX  n beacon",
     " c CTCSS tone",
+    " k CW both legs (linear)",
     " o rotator  p polar",
     " z big readout  l log QSO",
     " v voice memo (SD)",
@@ -12962,9 +13151,16 @@ void App::drawHelp() {
     " n write/send  r retry",
     " ;/. scroll  (needs Cap",
     " LoRa + RadioLib build)",
+    " alerts: envelope badge,",
+    " banner/beep (settings)",
     "ABOUT",
     " build, IP, free heap,",
     " diagnostics",
+    "CHARGE / SLEEP",
+    " low-power: screen off,",
+    " any key shows battery,",
+    " H  heap reset (TLS fix),",
+    " ESC  back to menu",
   };
   const int total = (int)(sizeof(H) / sizeof(H[0]));
   const int rows = 9;
@@ -13144,6 +13340,139 @@ void App::keyCatTest(char c, bool enter, bool back) {
   if (isUp(c))   { catScroll--; lastDrawMs = 0; }
   if (isDown(c)) { catScroll++; lastDrawMs = 0; }
   if (isBack(c, back)) { setSel = 0; setCat = -1; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Charge / Sleep screen (Launcher-style low-power mode)
+// ===========================================================================
+// Replicates the spirit of bmorcelli/Launcher's charging mode: the operator
+// parks CardSat on the charger, the backlight blanks, and almost nothing runs.
+// A keypress wakes the screen briefly to show battery status; ESC/back exits to
+// the home menu. This is a *cooperative* idle (not deep sleep) so a keypress
+// wakes it instantly and a long session's heap can be coalesced (see below) --
+// deep sleep is already offered separately by the AOS sleep path.
+
+// More accurate battery % than the raw fuel-gauge level. The Cardputer's PMIC
+// level can be a coarse linear map; deriving % from the cell voltage against a
+// LiPo discharge curve tracks reality better, especially in the flat 3.6-3.9 V
+// region. Voltage is clamped to a single 3.0-4.2 V cell. Falls back to the raw
+// level if voltage is unavailable.
+int App::batteryPercent() {
+  int mv = M5Cardputer.Power.getBatteryVoltage();   // mV, single cell
+  if (mv <= 0) {                                     // no voltage -> raw gauge
+    int lvl = M5Cardputer.Power.getBatteryLevel();
+    return (lvl < 0) ? -1 : (lvl > 100 ? 100 : lvl);
+  }
+  // Piecewise LiPo curve (open-circuit-ish), monotonic, 3.30 V=0% .. 4.20 V=100%.
+  static const struct { int mv; int pct; } C[] = {
+    {4200,100},{4150,95},{4110,90},{4080,85},{4020,80},{3980,75},{3950,70},
+    {3910,65},{3870,60},{3850,55},{3840,50},{3820,45},{3800,40},{3790,35},
+    {3770,30},{3750,25},{3730,20},{3710,15},{3690,10},{3610,5},{3300,0}
+  };
+  const int N = (int)(sizeof(C) / sizeof(C[0]));
+  if (mv >= C[0].mv)     return 100;
+  if (mv <= C[N-1].mv)   return 0;
+  for (int i = 0; i < N - 1; ++i) {
+    if (mv <= C[i].mv && mv > C[i+1].mv) {           // linear-interp this segment
+      int dmv = C[i].mv - C[i+1].mv, dpc = C[i].pct - C[i+1].pct;
+      return C[i+1].pct + (int)((long)(mv - C[i+1].mv) * dpc / (dmv ? dmv : 1));
+    }
+  }
+  return -1;
+}
+
+// On-demand heap de-fragmentation. Over a long session, repeated TLS handshakes
+// (HTTPS) can fragment the heap on the no-PSRAM ESP32-S3 until the largest free
+// block is too small for a new TLS context, even though total free heap looks
+// fine -- TLS then starts failing. Dropping the WiFi/TLS stack and reconnecting
+// frees and coalesces those transient allocations. net.hardResetWifi() already
+// does the disconnect(true)+reconnect+pool-flush dance; we just call it here and
+// report the before/after largest contiguous block.
+void App::heapDefragViaReconnect() {
+  size_t before = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (net.connected()) net.hardResetWifi();          // drop + reconnect, flush pool
+  size_t after  = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[HEAP] defrag: largest block %u -> %u bytes (free heap %u)\n",
+                (unsigned)before, (unsigned)after, (unsigned)ESP.getFreeHeap());
+  setStatus(String("Heap block ") + (unsigned)(before/1024) + "K -> " +
+            (unsigned)(after/1024) + "K");
+}
+
+// Enter charge mode: stop the radio/rotator output (no tracking while parked),
+// blank the backlight, and mark the screen asleep. We deliberately do NOT enter
+// deep sleep so any key wakes instantly and WiFi can stay up for a heap reset.
+void App::enterChargeMode() {
+  radioOut = false; rotOut = false;                  // no tracking while charging
+  chargeWoke = false; chargeWokeMs = 0;
+  M5Cardputer.Display.setBrightness(0);
+  screenAsleep = true;
+  lastDrawMs = 0;
+}
+
+void App::drawCharge() {
+  // When asleep, keep the panel dark and cheap: clear to black, no backlight.
+  if (screenAsleep && !chargeWoke) {
+    canvas.fillSprite(CL_BLACK);
+    canvas.pushSprite(0, 0);
+    return;
+  }
+  // Woken (or first entry): show battery status, then auto-blank after ~5 s.
+  canvas.fillSprite(CL_BLACK);
+  bool charging = M5Cardputer.Power.isCharging();
+  int  pct = batteryPercent();
+  int  mv  = M5Cardputer.Power.getBatteryVoltage();
+
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setTextSize(1);
+  canvas.setCursor(6, 6); canvas.print("Charge / Sleep");
+
+  // Big battery glyph centered.
+  const int bx = 70, by = 40, bw = 100, bh = 44;
+  canvas.drawRect(bx, by, bw, bh, CL_WHITE);
+  canvas.fillRect(bx + bw, by + 14, 5, bh - 28, CL_WHITE);   // terminal nub
+  int fill = (pct < 0) ? 0 : (pct * (bw - 4)) / 100;
+  uint16_t col = charging ? CL_GREEN : (pct > 50 ? CL_GREEN : (pct > 20 ? CL_YELLOW : CL_RED));
+  if (fill > 0) canvas.fillRect(bx + 2, by + 2, fill, bh - 4, col);
+
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setTextSize(2);
+  String p = (pct < 0) ? String("--") : String(pct);
+  canvas.setCursor(120 - (int)(p.length() + 1) * 6, by + bh / 2 - 7);
+  canvas.print(p); canvas.print("%");
+
+  canvas.setTextSize(1);
+  canvas.setTextColor(charging ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 96);
+  canvas.print(charging ? "Charging" : "On battery");
+  if (mv > 0) { canvas.setTextColor(CL_GREY, CL_BLACK);
+                canvas.setCursor(150, 96); canvas.printf("%d.%02d V", mv/1000, (mv%1000)/10); }
+
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 112); canvas.print("ENT redraw  H heap-reset");
+  canvas.setCursor(6, 122); canvas.print("ESC exit to menu");
+  canvas.pushSprite(0, 0);
+}
+
+void App::keyCharge(char c, bool enter, bool back) {
+  // ESC/back always exits to the home menu and restores the backlight.
+  if (isBack(c, back)) {
+    M5Cardputer.Display.setBrightness(cfg.bright);
+    screenAsleep = false; chargeWoke = false;
+    homeSel = 15; screen = SCR_HOME; lastDrawMs = 0;
+    return;
+  }
+  // 'h' triggers an on-demand heap de-frag (WiFi/TLS reset) for long sessions.
+  if (c == 'h' || c == 'H') {
+    M5Cardputer.Display.setBrightness(cfg.bright);
+    chargeWoke = true; chargeWokeMs = millis();
+    heapDefragViaReconnect();
+    lastDrawMs = 0;
+    return;
+  }
+  // Any other key wakes the screen to show status for a few seconds.
+  M5Cardputer.Display.setBrightness(cfg.bright);
+  chargeWoke = true; chargeWokeMs = millis();
+  lastDrawMs = 0;
 }
 
 // ===========================================================================
@@ -14558,7 +14887,21 @@ void App::loraPoll() {
   memcpy(text, buf + fEnd, tLen); text[tLen] = 0;
 
   msgPush(from[0] ? from : "?", text, false, (int)lroundf(rssi), (int)lroundf(snr));
-  if (screen == SCR_MESSAGES) lastDrawMs = 0;
+
+  // Notify: track unread for the header badge, and (unless on the Messages screen
+  // already, or in charge/sleep mode) raise a brief cross-screen banner and an
+  // opt-in beep. cfg.msgNotify: 0=off, 1=banner, 2=banner+beep.
+  if (screen == SCR_MESSAGES) {
+    lastDrawMs = 0;                                 // visible already: just refresh
+  } else {
+    if (msgUnread < 0xFFFF) msgUnread++;
+    strncpy(msgLastFrom, from[0] ? from : "?", sizeof(msgLastFrom) - 1);
+    msgLastFrom[sizeof(msgLastFrom) - 1] = 0;
+    if (cfg.msgNotify >= 1 && screen != SCR_CHARGE) {
+      setStatus(String("Msg from ") + msgLastFrom, 3000);
+      if (cfg.msgNotify >= 2) beep(1568, 60);       // opt-in chirp (G6)
+    }
+  }
 }
 
 void App::loraSendCurrent(const char* text) {
@@ -14584,6 +14927,7 @@ void App::loraSendCurrent(const char* text) {
 
 void App::drawMessages() {
   header("Messages");
+  msgUnread = 0;            // viewing the list clears the unread badge
   canvas.setTextSize(1);
 
   if (!cfg.loraEnable) {
@@ -15988,9 +16332,9 @@ void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
                           "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "QRZ Lookup", "Location", "Update",
-                          "Settings", "Log", "Messages", "About" };
+                          "Settings", "Log", "Messages", "About", "Charge / Sleep" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
-  static_assert(sizeof(items) / sizeof(items[0]) == 15,
+  static_assert(sizeof(items) / sizeof(items[0]) == 16,
                 "Home menu item count must match keyHome's N");
   const int VIS = 9;
   if (homeSel < homeScroll)           homeScroll = homeSel;
@@ -16277,8 +16621,8 @@ void App::drawTrack() {
       }
       canvas.setTextColor(col, CL_BLACK);
       canvas.setCursor(4, 79);
-      canvas.printf("PB %+.1fk bw%.1fk %s%s", posk, halfk,
-                    t.invert ? "INV " : "", tag);
+      canvas.printf("PB %+.1fk bw%.1fk %s%s%s", posk, halfk,
+                    t.invert ? "INV " : "", cwMode ? "CW " : "", tag);
       if (cfg.tiltTune && imuReady && trackMode == 0) {
         canvas.setTextColor(CL_CYAN, CL_BLACK);
         canvas.setCursor(210, 79); canvas.print("TLT");
@@ -16401,7 +16745,7 @@ void App::drawBig() {
     canvas.setCursor(4, 118);
     if (linear && trackMode == 0) {
       float posk = (pbOffset - (int32_t)(t.bandwidth()/2)) / 1000.0f;
-      canvas.printf("%s  PB %+.1fk%s", mtag, posk, t.invert ? " INV" : "");
+      canvas.printf("%s  PB %+.1fk%s%s", mtag, posk, cwMode ? " CW" : "", t.invert ? " INV" : "");
     } else {
       canvas.printf("%s", mtag);
     }
@@ -16538,8 +16882,8 @@ void App::drawManual() {
     float posk  = (pbOffset - (int32_t)(t.bandwidth()/2)) / 1000.0f;
     canvas.setTextColor(trackMode == 0 ? CL_CYAN : CL_GREY, CL_BLACK);
     canvas.setCursor(4, 79);
-    canvas.printf("PB %+.1fk bw%.1fk %s%s", posk, halfk,
-                  t.invert ? "INV " : "", trackMode == 0 ? "<TUNE>" : "");
+    canvas.printf("PB %+.1fk bw%.1fk %s%s%s", posk, halfk,
+                  t.invert ? "INV " : "", cwMode ? "CW " : "", trackMode == 0 ? "<TUNE>" : "");
     if (cfg.tiltTune && imuReady && trackMode == 0) {
       canvas.setTextColor(CL_CYAN, CL_BLACK);
       canvas.setCursor(210, 79); canvas.print("TLT");
@@ -17439,6 +17783,8 @@ void App::drawSettings() {
   rows[59] = String("LoRa TX pwr: ") + String(cfg.loraTxDbm) + " dBm";
   { const char* rg = (cfg.loraRegion == 1) ? "EU 70cm" : (cfg.loraRegion == 2) ? "JP 430" : "US 33cm";
     rows[60] = String("LoRa region: ") + rg; }
+  { const char* mn = (cfg.msgNotify == 0) ? "off" : (cfg.msgNotify == 2) ? "banner+beep" : "banner";
+    rows[61] = String("Msg notify: ") + mn; }
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
   rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
                      : cfg.rotType == ROT_NET ? "rotctl (net)"

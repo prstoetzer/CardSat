@@ -70,6 +70,17 @@ public:
   virtual void selectSubBand() = 0;
   virtual void selectMainBand() = 0;
 
+  // Assign which frequency BAND (2 m / 70 cm / 23 cm) sits on the MAIN vs SUB
+  // VFO, so the uplink/downlink land on the correct bands when radio control is
+  // engaged. Only radios with a CAT band-assignment command implement this
+  // (IC-9100/IC-9700 via CI-V 07 D2); everyone else returns false and the
+  // operator sets the band pair up on the radio. mainHz/subHz are the actual
+  // frequencies whose bands should be placed on MAIN/SUB respectively.
+  // UNTESTED on hardware -- see canAssignBand() and the CivRig implementation.
+  virtual bool assignBands(uint32_t mainHz, uint32_t subHz) {
+    (void)mainHz; (void)subHz; return false;
+  }
+
   // Set the transmit CTCSS (PL) tone encoder. Used for FM satellites whose
   // uplink requires a subaudible tone (SO-50, AO-91, ISS, PO-101...). The tone
   // is applied to the uplink (Main/TX). on=false disables it. Backends that
@@ -80,6 +91,7 @@ public:
   virtual bool canReadFreq() const = 0;
   virtual bool hasSatMode()  const = 0;
   virtual bool hasTone()     const { return false; }   // CAT CTCSS supported
+  virtual bool canAssignBand() const { return false; } // CAT MAIN/SUB band assign
   virtual bool selVerified() const = 0;
   virtual const char* name() const = 0;
 

@@ -272,7 +272,8 @@ not shown in any footer.
    - **VFO Type** — which physical VFO carries each leg: *Main Up/Sub Dn* (default)
      or *Main Dn/Sub Up*.
    - **Sat mode** — command the rig's own satellite mode on/off when you engage CAT
-     (a no-op on rigs without one).
+     (a no-op on rigs without CAT sat mode, including the IC-820/821/970 — engage
+     SAT on those from the front panel).
    - **CAT rate** — how often Doppler/CAT updates are sent to the radio (default
      **500 ms**, adjustable in 10 ms steps). A soft floor keeps the *effective*
      rate no faster than the CAT baud can service one update; the row shows
@@ -323,6 +324,26 @@ selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 Author credit (**Paul Stoetzer, N8HM**), firmware version and build date, storage
 backend (microSD or internal flash), GP catalog size and freshest element age,
 WiFi/IP, battery level, free heap, and uptime. `` ` `` or ENTER returns home.
+
+### Charge / Sleep
+
+The last item on the home menu is a minimal low-power mode for charging or
+parking the device. Selecting it **blanks the backlight and stops radio/rotator
+output** so almost nothing runs. **Any key wakes the screen** to show battery
+status — a large gauge, charging state, and the cell voltage — then it auto-blanks
+again after about 5 seconds. **ESC/back** returns to the home menu.
+
+The battery percentage here is derived from the cell **voltage** against a LiPo
+discharge curve (3.30 V ≈ 0 %, 4.20 V ≈ 100 %), which is more accurate in the flat
+middle of the discharge than the PMIC's raw level; it falls back to the raw level
+if voltage isn't available. Charging state comes from the Cardputer ADV's PMIC.
+
+Pressing **H** in this mode triggers an **on-demand heap reset**: on a long
+session, repeated HTTPS/TLS handshakes can fragment the (no-PSRAM) heap until the
+largest free block is too small for a new TLS context and fetches start failing,
+even though total free heap still looks healthy. The reset drops and reconnects
+WiFi/TLS to free and coalesce those transient allocations, and reports the
+before/after largest contiguous block.
 
 ### Logging QSOs (Log)
 
@@ -734,6 +755,14 @@ Controls:
   OscarWatch and the SDR-Control apps handle receive-only birds.
 - `c` — set the **CTCSS/PL tone** for this satellite (numeric entry: a tone in
   Hz, `0` to force it off, or blank to revert to the built-in default).
+- `k` — on a **linear (SSB/CW) transponder**, toggle **CW mode on both legs** so
+  you can work CW through the bird instead of SSB. CardSat sets CW on the uplink
+  and downlink; on an inverting transponder the sideband flips but CW is CW on both
+  ends, so you just zero-beat your downlink. The choice is **per channel** (it
+  resets when you change satellite or transponder), shows a `CW` tag on the Track
+  and large-font screens, and applies live whether the radio is already engaged or
+  you turn it on afterward. On an FM bird the key is a no-op ("CW: linear birds
+  only"). Available on both the Track and large-font screens.
 - `r` — turn radio output **on/off** (sets modes and begins Doppler service).
 - `o` — turn **rotator** pointing **on/off** (if a rotator is configured; sends
   live az/el to the selected backend, parks on stop). See [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server).
@@ -1098,6 +1127,18 @@ seeds a legal default frequency + 125 kHz bandwidth for that band); **LoRa freq*
 **LoRa SF** (7–12; 12 = maximum range and sensitivity, the default; lower = faster
 but shorter range); **LoRa BW** (62.5 / 125 / 250 kHz); **LoRa TX pwr** (0–22 dBm).
 Both ends must use the same frequency, SF and BW to hear each other.
+
+**Notifications.** CardSat listens for messages continuously in the background (the
+receiver is left on whenever LoRa is enabled), so a message can arrive while you're
+on any screen. When one does, an **envelope badge with an unread count** appears in
+the header (top, just left of the battery) on every screen, and — depending on the
+**Msg notify** setting (Settings → Network/data) — a brief banner shows the
+sender's callsign, optionally with a short beep. Opening **Messages** clears the
+badge. **Msg notify** options: *off* (silent badge only), *banner* (the default,
+a cross-screen banner on arrival), or *banner+beep* (adds an audible chirp — handy
+when the screen is parked, but off by default so it can't surprise you mid-pass).
+In the Charge / Sleep screen the badge updates silently and no banner or beep
+fires, keeping that mode minimal.
 
 **Enabling the build.** The LoRa code is wrapped so the firmware compiles without
 the radio. To actually use it: install **RadioLib** (Arduino Library Manager →
@@ -1810,9 +1851,36 @@ real radio — watch the serial trace and confirm the rig shows the tone.
 
 **Icom.** CardSat drives MAIN/SUB directly and forces the rig's built-in satellite
 mode **off** at startup on the rigs that expose it over CAT (IC-910, IC-9100,
-IC-9700). Downlink on SUB, uplink on MAIN. Read-back uses `0x03` and works on all
-six (including the IC-820/821/970, per Hamlib). Wrong-VFO fixes live in
-`radio_profiles.h`.
+IC-9700). Downlink on SUB, uplink on MAIN. Read-back uses `0x03`; it is confirmed
+working on hardware for the **IC-821** and supported in firmware for the
+IC-820/910/970/9100/9700. Wrong-VFO fixes live in `radio_profiles.h`.
+
+> **IC-820/821/970 satellite mode and band pairing are MANUAL.** Unlike the
+> IC-910/9100/9700, these three rigs have **no working CI-V command** to toggle
+> satellite mode (the IC-821's sat-mode command is a no-op on real hardware —
+> confirmed on an IC-821) or to assign which band sits on MAIN vs SUB. Their
+> `0x07 D0`/`D1` bytes are band *access* (which band a read/write targets), not a
+> MAIN/SUB assignment. So on these radios you must **engage satellite/full-duplex
+> mode, set up the band pair, and set any uplink PL tone on the radio's front
+> panel**; CardSat then only Doppler-tunes within that layout. See
+> **[RADIO_SETTINGS.md](RADIO_SETTINGS.md)** for the full per-radio CAT-vs-manual
+> breakdown. This matches how Hamlib, OscarWatch, SatPC32, and Gpredict treat the
+> same radios.
+>
+> By contrast, the **IC-910, IC-9100, and IC-9700 _can_ set up MAIN/SUB over CAT**,
+> and **CardSat now orients MAIN/SUB automatically** on all three when you turn radio
+> control on for a two-way transponder (once at engage, never per tick), so you don't
+> pre-arrange the bands:
+> - **IC-9100/9700** issue `0x07 D2 00/01 <bandcode>` to set MAIN/SUB band selection
+>   directly.
+> - **IC-910** reads MAIN (`0x07 D1` then `0x03`) and, if it's the wrong band, issues
+>   one swap (`0x07 D0`) — the 910's MAIN/SUB can't share a band, so one check fixes
+>   both. This also **fixes a latent bug**: the 910's MAIN-select byte was previously
+>   `0x07 D0` (the *swap* command); it is corrected to `0x07 D1`.
+>
+> ⚠️ **Host-verified only — untested on real 910/9100/9700** (the author runs an
+> IC-821, which has none of these commands); a leg outside 2 m/70 cm/23 cm is skipped
+> and set manually. The 820/821/970 remain fully manual for band setup.
 
 > **IC-910 satellite-mode & tone commands differ from the IC-9100/9700.** The
 > IC-9100/9700 toggle satellite mode with CI-V `0x16 0x5A`, but the **IC-910 uses a

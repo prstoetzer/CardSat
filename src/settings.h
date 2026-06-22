@@ -166,6 +166,7 @@ struct Settings {
   uint8_t  loraSf      = 12;        // spreading factor 7..12 (12 = max range)
   uint32_t loraBwHz    = 125000;    // bandwidth in Hz (125 kHz standard)
   int8_t   loraTxDbm   = 20;        // TX power dBm (<=22 on SX1262)
+  uint8_t  msgNotify   = 1;         // LoRa msg alert: 0=off, 1=banner, 2=banner+beep
   void loraApplyRegion(uint8_t region);   // seed freq/BW from a region preset
 
   bool load();

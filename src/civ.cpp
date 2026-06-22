@@ -153,6 +153,73 @@ void CivRig::selectSub() {
   if (p.selLen) sendFrame(p.selSub, p.selLen);
 }
 
+// Map a frequency to the Icom CI-V band code used by the "07 D2" band-selection
+// command: 0x01 = 144 MHz, 0x02 = 430/440 MHz, 0x03 = 1.2 GHz. Returns 0 for a
+// frequency outside those amateur VHF/UHF bands (caller skips the assignment).
+static uint8_t civBandCode(uint32_t hz) {
+  if (hz >= 144000000UL && hz <= 148000000UL) return 0x01;   // 2 m
+  if (hz >= 430000000UL && hz <= 450000000UL) return 0x02;   // 70 cm
+  if (hz >= 1240000000UL && hz <= 1300000000UL) return 0x03; // 23 cm
+  return 0x00;
+}
+
+// Assign which band sits on MAIN vs SUB via CI-V "07 D2 00/01 <bandcode>".
+// MAIN gets the band of mainHz, SUB gets the band of subHz. Only rigs whose
+// profile sets canAssignBand (IC-9100/IC-9700) act; others return false.
+//
+// *** UNTESTED ON HARDWARE. *** The author operates an IC-821, which has no
+// band-assignment command, so this path has never been exercised on a real
+// radio. The frame format (07 D2 00 = main, 07 D2 01 = sub; band codes
+// 01/02/03) is taken from the IC-9700 CI-V Reference Guide. It is sent once at
+// CAT-engage, never per-tick, so a wrong frame cannot spam the bus.
+bool CivRig::assignBands(uint32_t mainHz, uint32_t subHz) {
+  if (!RADIOS[_model].canAssignBand) return false;
+  uint8_t mb = civBandCode(mainHz);
+  uint8_t sb = civBandCode(subHz);
+  if (!mb || !sb) return false;                 // unknown band -> leave to operator
+
+  // --- IC-910: read MAIN's band, swap MAIN/SUB if it's the wrong one. ---
+  // The 910 has no "07 D2" band-assignment. Its 07 group instead exposes
+  //   07 D1 = Select MAIN VFO,  07 D0 = Switch VFO A and VFO B (swap MAIN/SUB).
+  // Because the 910's MAIN and SUB can never be on the same band, checking MAIN
+  // alone is sufficient: if MAIN isn't the band we want there, one swap fixes
+  // both legs. This mirrors how Hamlib drives the 910 (confirmed from its serial
+  // trace: 07 D1 then 03 to read MAIN, 07 D0 to swap). readMainFreq() issues the
+  // (now-corrected) selMain = 07 D1 then 03. Fired once at engage.
+  // *** UNTESTED ON HARDWARE *** (author has no IC-910).
+  if (_model == RIG_IC910) {
+    uint32_t mainNow = 0;
+    if (!readMainFreq(mainNow) || !mainNow) {
+      if (CIV_DEBUG) Serial.println("[CAT] 910 assignBands: MAIN read failed, no swap");
+      return false;                               // can't tell -> don't guess
+    }
+    bool ok = true;
+    if (civBandCode(mainNow) != mb) {             // wrong band on MAIN -> swap
+      uint8_t swapAB[2] = { 0x07, 0xD0 };         // Switch VFO A and VFO B
+      ok = sendFrame(swapAB, 2);
+      if (CIV_DEBUG)
+        Serial.printf("[CAT] 910 assignBands: MAIN had band%02X, want band%02X -> SWAP %s\n",
+                      civBandCode(mainNow), mb, ok ? "sent" : "FAILED");
+    } else if (CIV_DEBUG) {
+      Serial.printf("[CAT] 910 assignBands: MAIN already band%02X, no swap\n", mb);
+    }
+    return ok;
+  }
+
+  // --- IC-9100 / IC-9700: direct band-selection set via 07 D2. ---
+  bool ok = true;
+  uint8_t main[4] = { 0x07, 0xD2, 0x00, mb };   // assign MAIN band
+  uint8_t sub [4] = { 0x07, 0xD2, 0x01, sb };   // assign SUB band
+  ok &= sendFrame(main, 4);
+  ok &= sendFrame(sub,  4);
+  if (CIV_DEBUG) {
+    Serial.printf("[CAT] assignBands: MAIN<-band%02X (%lu Hz) SUB<-band%02X (%lu Hz) %s\n",
+                  mb, (unsigned long)mainHz, sb, (unsigned long)subHz,
+                  ok ? "sent" : "FAILED");
+  }
+  return ok;
+}
+
 bool CivRig::setFreqCiv(bool sub, uint32_t hz) {
   sub ? selectSub() : selectMain();
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);

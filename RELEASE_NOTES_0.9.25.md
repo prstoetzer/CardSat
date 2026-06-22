@@ -1,5 +1,106 @@
 # CardSat v0.9.25 — Release Notes
 
+## CW mode on linear transponders
+
+On a linear (SSB/CW) transponder you can now press **`k`** on the **Track** or
+**large-font** screen to switch **both legs to CW** and work CW through the bird.
+CardSat sets CW on the uplink and downlink; on an inverting transponder the
+sideband flips but CW is CW on both ends, so you just zero-beat your own downlink.
+The choice is **per channel** — it resets whenever you change satellite or
+transponder — shows a `CW` tag on the Track and large-font passband lines, and
+applies live for both running CAT tracking and manual tracking (it re-applies the
+moment you toggle it). On an FM bird the key is a no-op.
+
+## Continuous LoRa monitoring + message notifications
+
+CardSat already listened for LoRa messages in the background; now it **tells you**
+when one arrives while you're on another screen. An **envelope badge with an unread
+count** appears in the header on every screen, and a brief **banner** shows the
+sender's callsign (with an **opt-in beep**). Opening **Messages** clears the badge.
+A new **Msg notify** setting (Settings → Network/data) selects *off* / *banner*
+(default) / *banner+beep*. In the Charge / Sleep screen the badge updates silently
+with no banner or beep, keeping that mode minimal.
+
+## Charge / Sleep screen (Launcher-style low-power mode)
+
+New **Charge / Sleep** item at the bottom of the home menu. It parks CardSat in a
+minimal low-power state for charging: the backlight blanks and tracking output
+stops, so almost nothing runs. **Any key wakes the screen** to show battery status
+(a large gauge, charging state, and cell voltage), then it auto-blanks again after
+~5 seconds. **ESC/back** returns to the home menu.
+
+- **More accurate battery %**: the screen derives charge from the cell **voltage**
+  against a LiPo discharge curve (3.30 V = 0 % … 4.20 V = 100 %), which tracks the
+  flat mid-discharge region far better than the PMIC's coarse linear level. Falls
+  back to the raw fuel-gauge level if voltage is unavailable. Uses the Cardputer
+  ADV PMIC's `isCharging()` for charge state.
+- **On-demand heap de-fragmentation** (press **H** in charge mode): over a long
+  session, repeated TLS handshakes can fragment the no-PSRAM heap until the largest
+  contiguous block is too small for a new TLS context, even when total free heap
+  looks fine — and HTTPS fetches start failing. The heap reset drops and reconnects
+  WiFi/TLS (`net.hardResetWifi()`), freeing and coalescing those transient
+  allocations, and reports the before/after largest block.
+
+## Scope documents (design only — no code)
+
+Five forward-looking scope/design documents were added to the repo:
+- **SAME_BAND_DOPPLER_SCOPE.md** — same-band / half-duplex (PTT-switched) Doppler
+  for ISS-packet-style and in-band birds (SatPC32ISS / Gpredict Simplex TRX review).
+- **CW_MODE_SCOPE.md** — CW-on-both-legs override for linear transponders.
+- **HALFDUPLEX_RADIOS_SCOPE.md** — adding half-duplex split-VFO support for more
+  all-mode V/U rigs (IC-705 over LAN in scope; USB-only rigs out of scope).
+- **CARDPUTER_ZERO_PORT_SCOPE.md** — porting CardSat to the Linux-based Cardputer
+  Zero (USB-host CAT, multi-radio, Hamlib).
+- **LORA_MONITOR_SCOPE.md** — continuous LoRa monitoring with arrival notifications.
+
+## Automatic MAIN/SUB band assignment (IC-9100 / IC-9700 / IC-910)
+
+When radio control is turned on for a two-way transponder, CardSat now puts the
+correct band on each VFO automatically on the rigs that support it over CAT.
+
+- **IC-9100 / IC-9700** — uses CI-V `07 D2 00/01 <bandcode>` (01=144, 02=430,
+  03=1.2 GHz) to set MAIN and SUB band selection directly.
+- **IC-910** — has no `07 D2`; instead CardSat reads MAIN's frequency (`07 D1`
+  then `03`) and, if MAIN is on the wrong band, issues one **swap (`07 D0`)**.
+  Because the 910's MAIN/SUB can never share a band, that single check fixes both
+  legs. This mirrors how Hamlib drives the 910.
+
+The uplink/downlink land on the right bands per the VFO-type setting, so you no
+longer pre-arrange MAIN/SUB on these radios. Fired **once at engage** (never per
+tick); a leg outside 2 m/70 cm/23 cm is skipped; no-op on every other radio.
+
+**Also fixes a latent IC-910 profile bug:** its MAIN-select byte was set to
+`07 D0` (which is actually the *swap* command), so band addressing could be
+inverted. Corrected to `selMain = 07 D1` (Select MAIN VFO), confirmed from the
+IC-910 command table and a live Hamlib/gpredict trace.
+
+> ⚠️ **Untested on hardware.** The author runs an IC-821, which has none of these
+> commands, so this whole path is host-verified only. The IC-910 in particular has
+> a non-standard MAIN/SUB CAT model; a 910/9100/9700 owner should confirm and
+> report back via a GitHub issue with a serial trace.
+
+## Per-radio CAT capability audit + IC-820/821 sat-mode fix
+
+Audited what each supported radio can control over CAT versus what the operator
+must set up by hand, cross-checked against the radios' own command tables, Hamlib,
+OscarWatch, SatPC32, and Gpredict. Outcomes:
+
+- **IC-820 and IC-821 `hasSatMode` → false.** Their CI-V satellite-mode command is
+  a no-op on real hardware (confirmed on an IC-821), so CardSat no longer pretends
+  to toggle it. On these rigs — and the IC-970 — satellite mode, the band pair, the
+  MAIN/SUB assignment, and any uplink PL tone are **manual front-panel** operations;
+  CAT only Doppler-tunes within that layout. Their `0x07 D0/D1` bytes are band
+  *access*, not a MAIN/SUB assignment.
+- **New [RADIO_SETTINGS.md](RADIO_SETTINGS.md)** — a per-radio settings and
+  CAT-vs-manual capability reference covering all ten radios (recommended baud,
+  read-back, sat-mode, tone, and what must be set up on the radio), with the
+  cross-references to how Hamlib / OscarWatch / SatPC32 / Gpredict treat each rig.
+- **Doc consistency pass** — MANUAL.md and README.md updated to match; the README's
+  Icom-LAN claim corrected to **IC-9700 only** (IC-705/7610/785x are not supported).
+
+> Only the IC-821 is bench-verified by the author. Feedback from users with other
+> radios is welcome — a serial trace in a GitHub issue is the most useful form.
+
 ## CAT self-test (Settings → Radio / CAT)
 
 A new **Run CAT self-test** action exercises every CAT function the active backend

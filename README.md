@@ -111,11 +111,17 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
   Doppler engine is protocol-agnostic: Icom **CI-V** (IC-820/821/910/970/9100/9700),
   Yaesu (**FT-847**, **FT-736R**), and Kenwood (**TS-790**, **TS-2000**). Wire-level
   command sets follow the Hamlib backends. Every frame is traced to the serial monitor.
-- **Native Icom LAN control (no CI-V wiring).** Network-capable Icoms (IC-9700,
-  IC-705, IC-7610, IC-785x) can be driven over WiFi/Ethernet using the radio's own
-  **RS-BA1 UDP** protocol — the same one Icom's remote software uses — with no level
-  shifter or UART. Pick **CAT type → Icom LAN** in Settings; MAIN/SUB, Doppler, sat
-  mode and CTCSS all work as on a wired Icom (CAT only — the audio stream is not opened).
+  Per-radio settings and a CAT-vs-manual capability breakdown are in
+  **[RADIO_SETTINGS.md](RADIO_SETTINGS.md)** (note: on the older sat rigs the band
+  pair, MAIN/SUB, sat mode, and tone are set up **on the radio** — CAT only
+  Doppler-tunes within that layout).
+- **Native Icom LAN control (no CI-V wiring).** The **IC-9700** can be driven over
+  WiFi/Ethernet using the radio's own **RS-BA1 UDP** protocol — the same one Icom's
+  remote software uses — with no level shifter or UART. (Among the radios CardSat
+  supports, Icom LAN is **IC-9700 only**; other network-capable Icoms like the
+  IC-705/7610/785x are not supported here.) Pick **CAT type → Icom LAN** in
+  Settings; MAIN/SUB, Doppler, sat mode and CTCSS all work as on a wired Icom
+  (CAT only — the audio stream is not opened).
 - **Linear-transponder passband tracking** with correct inversion, and automatic
   sideband selection (USB down / LSB up; USB/USB for HF birds below 30 MHz).
 - **Automatic PL/CTCSS tone** on FM uplinks (SO-50, AO-91, ISS, PO-101…): CardSat

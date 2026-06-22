@@ -3843,39 +3843,43 @@ void App::dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
     return;
   }
 
-  // Fixed-dial modes: work out the satellite-frame operating-point drift `delta`
-  // from the anchor station's locked real-RF dial, then derive everybody else.
-  // anchorBeta is the locked station's beta; anchorIsDx picks which.
+  // Fixed-dial modes: the ANCHOR station's chosen dial is locked to a single
+  // real-RF value across the whole window, and the satellite-frame operating
+  // point drifts so that, at THIS step's beta, the anchor's dial reproduces that
+  // locked value. Everybody else then follows from the drifted operating point.
+  //
+  // The lock value is captured ONCE at a fixed reference instant (the window
+  // start), not recomputed each step -- that was the bug: deriving the "parked"
+  // dial from the live per-step beta made it collapse to zero drift, so the
+  // supposedly-fixed dial actually swung with Doppler across the pass.
   bool anchorIsDx = (dxdAnchor == 2 || dxdAnchor == 3);
+
+  // Anchor beta at the reference instant (window start).
+  time_t tRef = mutual[dxdWin].start;
+  pred.setSite(anchorIsDx ? dxObs : loc.obs());
+  double rrRef = pred.rangeRateAt((double)tRef);
+  pred.setSite(loc.obs());
+  double aBetaRef = rrRef * 1000.0 / C;
+
+  // Anchor beta at THIS step.
   double aBeta = anchorIsDx ? bDx : bMe;
-  double oneMinusA = 1.0 - aBeta; if (oneMinusA == 0.0) oneMinusA = 1e-12;
 
-  // The locked dial value: the true-rule frequency at the *current* operating
-  // point and the anchor's beta (this is what the operator set and won't touch).
-  double delta = 0.0;
-  if (dxdMode == 1) {
-    // FIXED DOWNLINK: anchor parks RX. parkedRx = dlOp*(1-aBeta)+calDl held; but
-    // to keep a stable real-RF lock across steps we anchor to the *passband* dlOp
-    // captured into the dial at entry. Here we treat the locked ground RX as the
-    // value that makes the bird emit dlOp at the anchor's CURRENT beta -- i.e. the
-    // operator tracked once then stopped, and we show drift from this instant's op.
-    double parkedRx = (double)dlOp * oneMinusA + (double)calDl;
-    double fdlSat   = (parkedRx - (double)calDl) / oneMinusA;  // bird emit (sat frame)
-    delta = fdlSat - (double)dlOp;
-  } else {
-    // FIXED UPLINK: anchor parks TX.
-    double parkedTx = (ulOp ? ((double)ulOp / oneMinusA + (double)calUl) : 0.0);
-    double fulSat   = (parkedTx - (double)calUl) * oneMinusA;  // bird hears (sat frame)
-    delta = ulOp ? (fulSat - (double)ulOp) : 0.0;
-  }
-
-  // Apply the drift to the operating point with the transponder's inversion sense.
+  // Solve the drifted satellite-frame operating pair so the locked dial holds.
   double dlSat, ulSat;
-  if (dxdMode == 1) {                       // delta defined on the downlink
-    dlSat = (double)dlOp + delta;
+  if (dxdMode == 1) {
+    // FIXED DOWNLINK: lock the anchor's RX dial = dlOp*(1-aBetaRef)+calDl.
+    // At this step we need dlSat with dlSat*(1-aBeta)+calDl == lock, so
+    // dlSat = dlOp*(1-aBetaRef)/(1-aBeta).
+    double oneMinusStep = 1.0 - aBeta; if (oneMinusStep == 0.0) oneMinusStep = 1e-12;
+    dlSat = (double)dlOp * (1.0 - aBetaRef) / oneMinusStep;
+    double delta = dlSat - (double)dlOp;                 // passband drift on the downlink
     ulSat = tp.invert ? ((double)ulOp - delta) : ((double)ulOp + delta);
-  } else {                                  // delta defined on the uplink
-    ulSat = (double)ulOp + delta;
+  } else {
+    // FIXED UPLINK: lock the anchor's TX dial = ulOp/(1-aBetaRef)+calUl.
+    // At this step ulSat/(1-aBeta)+calUl == lock, so ulSat = ulOp*(1-aBeta)/(1-aBetaRef).
+    double oneMinusRef = 1.0 - aBetaRef; if (oneMinusRef == 0.0) oneMinusRef = 1e-12;
+    ulSat = ulOp ? ((double)ulOp * (1.0 - aBeta) / oneMinusRef) : 0.0;
+    double delta = ulOp ? (ulSat - (double)ulOp) : 0.0;  // passband drift on the uplink
     dlSat = tp.invert ? ((double)dlOp - delta) : ((double)dlOp + delta);
   }
 

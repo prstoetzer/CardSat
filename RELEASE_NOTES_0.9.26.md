@@ -1,4 +1,20 @@
-# CardSat v0.9.25 — Release Notes
+# CardSat v0.9.26 — Release Notes
+
+**0.9.26** is a point release over 0.9.25. The new item is the DX Doppler
+fixed-dial fix below; everything after it carried over from 0.9.25 and is included
+here for completeness.
+
+## Fix: DX Doppler fixed-uplink / fixed-downlink now actually hold the dial
+
+The **DX Doppler table**'s Fixed-UL and Fixed-DL modes were not holding the
+anchored dial constant — e.g. in Fixed-UL the "fixed" uplink frequency still drifted
+with Doppler across the window instead of staying put. The cause was that the locked
+dial value was recomputed from the live per-step range-rate each step, which made the
+computed passband drift collapse to zero. The anchor dial is now **locked once at the
+window reference instant** and the satellite-frame operating point is solved per step
+so the anchored dial reproduces exactly, with the other three dials (and the
+cross-band leg, respecting transponder inversion) following correctly. Verified
+against a multi-step host simulation for all four anchor choices (my/DX × RX/TX).
 
 ## CW mode on linear transponders
 

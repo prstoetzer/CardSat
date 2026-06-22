@@ -6,8 +6,22 @@ from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame,
                                 Paragraph, PageBreak)
 from reportlab.lib.styles import ParagraphStyle
 from pypdf import PdfReader
+import os, re
 
 OUT = "/home/claude/CardSat_CheatCard_4x6.pdf"
+
+# Pull the firmware version from src/config.h so the card never goes stale.
+def _fw_version():
+    here = os.path.dirname(os.path.abspath(__file__))
+    cfg = os.path.join(here, "src", "config.h")
+    try:
+        m = re.search(r'FW_VERSION\s*=\s*"([0-9.]+)"', open(cfg).read())
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return "0.0.0"
+FW_VER = _fw_version()
 PAGE_W, PAGE_H = 6 * inch, 4 * inch            # 432 x 288 pt (landscape 4x6)
 ACCENT    = colors.HexColor('#0B7A3B')
 ACCENT_DK = colors.HexColor('#064F26')
@@ -165,7 +179,7 @@ def header(canvas, doc):
     canvas.setFillColor(colors.white)
     canvas.setFont('Helvetica-Bold', 10.5); canvas.drawString(9, PAGE_H - 13.4, 'CardSat')
     canvas.setFont('Helvetica', 7.6)
-    canvas.drawString(62, PAGE_H - 13.0, 'v0.9.23  \u00b7  Key Reference')
+    canvas.drawString(62, PAGE_H - 13.0, 'v' + FW_VER + '  \u00b7  Key Reference')
     pg = canvas.getPageNumber()
     side = 'Front \u00b7 operating' if pg == 1 else 'Back \u00b7 setup & tools'
     canvas.drawRightString(PAGE_W - 9, PAGE_H - 13.0, '%s   %d/%d' % (side, pg, TOTAL_PAGES))

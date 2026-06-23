@@ -3815,6 +3815,11 @@ void App::dxdCenterPassband() {
   dxdPbOff = 0;
 }
 
+// DXD_ANCHOR_NAME is defined here (rather than next to drawDxDopp) because
+// dxdStepAnchorDial below references it; a file-scope static const array must be
+// defined before first use. DXD_MODE_NAME stays near drawDxDopp.
+static const char* DXD_ANCHOR_NAME[4] = { "me RX", "me TX", "DX RX", "DX TX" };
+
 // Step the passband so the ANCHORED dial moves to the next round 1 kHz value
 // (dir = -1 down, +1 up). Only meaningful in a fixed mode (the anchor is the dial
 // the operator is parking). The grid is round kHz, so the anchored dial reads e.g.
@@ -3933,7 +3938,6 @@ void App::dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
 }
 
 static const char* DXD_MODE_NAME[3] = { "True rule", "Fixed DL", "Fixed UL" };
-static const char* DXD_ANCHOR_NAME[4] = { "me RX", "me TX", "DX RX", "DX TX" };
 
 void App::drawDxDopp() {
   SatEntry* s = activeSat();

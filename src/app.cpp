@@ -2847,7 +2847,8 @@ void App::loop() {
       screen == SCR_ROTMAN || screen == SCR_GPS || screen == SCR_MANUAL ||
       (screen == SCR_ORBIT && orbitPage <= 2) || screen == SCR_SUNMOON ||
       screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC ||
-      (screen == SCR_MEMOS && memo.isRecording()) || screen == SCR_OSCAR || screen == SCR_GLOBE || screen == SCR_DXDOPP || screen == SCR_SKYMAP || screen == SCR_GPSPOS) {
+      (screen == SCR_MEMOS && memo.isRecording()) || screen == SCR_OSCAR || screen == SCR_GLOBE || screen == SCR_DXDOPP || screen == SCR_SKYMAP || screen == SCR_GPSPOS ||
+      (screen == SCR_SATSAT && !satsatComputed)) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL) {

@@ -3322,7 +3322,8 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   if (c == '2' && viewN > 0) {                      // sat-to-sat visibility finder
     satsatOther = 0; satsatSel = 0; screen = SCR_SATSAT; lastDrawMs = 0;
-    satsatStartJob();
+    satsatPicking = true;                           // choose the 2nd sat first; calc on ENTER
+    satsatComputed = false; satsatN = 0;
     return;
   }
   if (c == 'd' && viewN > 0) {                      // 10-day pass overview
@@ -3814,6 +3815,47 @@ void App::dxdCenterPassband() {
   dxdPbOff = 0;
 }
 
+// Step the passband so the ANCHORED dial moves to the next round 1 kHz value
+// (dir = -1 down, +1 up). Only meaningful in a fixed mode (the anchor is the dial
+// the operator is parking). The grid is round kHz, so the anchored dial reads e.g.
+// 145.949 / 145.950 / 145.951 MHz, never 145.9502. We target
+// round(currentDial/1k)*1k + dir*1k, then converge dxdPbOff onto it (the iteration
+// absorbs the ~0.4% Doppler dial/passband ratio so the dial lands within ~1 Hz).
+// True-rule mode does not call this -- it keeps the plain 1 kHz passband nudge.
+void App::dxdStepAnchorDial(int dir) {
+  if (activeTxCount == 0 || mutualN == 0) return;
+  Transponder& tp = activeTx[curTx];
+  if (!tp.isLinear || tp.bandwidth() == 0) return;     // FM/single-channel: nothing to step
+
+  time_t tRef = mutual[dxdWin].start;                  // anchored dial is defined here
+  uint32_t mRx, mTx, dRx, dTx;
+  dxDoppFreqs(tRef, mRx, mTx, dRx, dTx);
+  uint32_t dial = (dxdAnchor == 0) ? mRx : (dxdAnchor == 1) ? mTx
+                : (dxdAnchor == 2) ? dRx : dTx;
+  if (dial == 0) { setStatus("Step: anchor has no TX"); return; }
+
+  const int32_t g = 1000;                              // 1 kHz grid
+  int64_t base = ((int64_t)dial + g / 2) / g * g;      // nearest round kHz
+  int64_t tgt  = base + (int64_t)dir * g;              // one step from there
+  if (tgt < 0) return;
+
+  int32_t  bw = (int32_t)tp.bandwidth();
+  bool anchorIsTx = (dxdAnchor == 1 || dxdAnchor == 3);
+  for (int pass = 0; pass < 4; ++pass) {
+    int32_t diff = (int32_t)(tgt - (int64_t)dial);     // Hz the dial must still move
+    if (diff > -2 && diff < 2) break;                  // within ~1 Hz
+    int32_t step = (anchorIsTx && tp.invert) ? -diff : diff;
+    int32_t want = dxdPbOff + step;
+    if (want < 0) want = 0; if (want > bw) want = bw;   // clamp inside the passband
+    if (want == dxdPbOff) break;                        // hit an edge; can't get closer
+    dxdPbOff = want;
+    dxDoppFreqs(tRef, mRx, mTx, dRx, dTx);
+    dial = (dxdAnchor == 0) ? mRx : (dxdAnchor == 1) ? mTx
+         : (dxdAnchor == 2) ? dRx : dTx;
+  }
+  setStatus(String(DXD_ANCHOR_NAME[dxdAnchor]) + " " + String((double)tgt / 1e6, 3) + " MHz");
+}
+
 // Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
 void App::dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
                       uint32_t& dxRx, uint32_t& dxTx) {
@@ -3922,7 +3964,9 @@ void App::drawDxDopp() {
   if (dxdMode != 0) canvas.printf("  anc:%s", DXD_ANCHOR_NAME[dxdAnchor]);
   if (tp.isLinear && tp.bandwidth() > 0) {
     canvas.setTextColor(CL_DGREEN, CL_BLACK);
-    canvas.printf("  +%ldk", (long)(dxdPbOff / 1000));
+    int32_t fromCtr = dxdPbOff - (int32_t)(tp.bandwidth() / 2);   // +/- from passband center
+    if (fromCtr == 0)      canvas.printf("  ctr");
+    else                   canvas.printf("  %+.1fk", fromCtr / 1000.0f);
   }
 
   // Column headers.
@@ -3961,7 +4005,7 @@ void App::drawDxDopp() {
     if (dTx) { canvas.setCursor(150, yDx); canvas.printf("%.4f", dTx / 1e6); }
   }
 
-  footer("t tx  m mode  a anc  ,/ pb  ;/. `bk");
+  footer("t m a   ,// dial 1k   ;/. `bk");
 }
 
 void App::keyDxDopp(char c, bool enter, bool back) {
@@ -3980,13 +4024,19 @@ void App::keyDxDopp(char c, bool enter, bool back) {
   if (c == 'a') { dxdAnchor = (dxdAnchor + 1) % 4; lastDrawMs = 0; return; }
   if (isUp(c))   { if (dxdRow > 0) dxdRow--; lastDrawMs = 0; return; }
   if (isDown(c)) { if (dxdRow < nSteps - 1) dxdRow++; lastDrawMs = 0; return; }
-  // passband operating point (linear only): left/right by 1 kHz, shift by 5 kHz.
+  // Passband operating point (linear only). In a FIXED mode the left/right keys
+  // step the ANCHORED dial to the next round 1 kHz (so you park on, e.g.,
+  // 145.950 MHz, not 145.9502); in true-rule mode they nudge the passband
+  // operating point by a plain 1 kHz.
   if (tp.isLinear && tp.bandwidth() > 0) {
     int32_t bw = (int32_t)tp.bandwidth();
-    if (isLeft(c))  { dxdPbOff -= 1000; if (dxdPbOff < 0)  dxdPbOff = 0;  lastDrawMs = 0; }
-    if (isRight(c)) { dxdPbOff += 1000; if (dxdPbOff > bw) dxdPbOff = bw; lastDrawMs = 0; }
-    if (c == '<')   { dxdPbOff -= 5000; if (dxdPbOff < 0)  dxdPbOff = 0;  lastDrawMs = 0; }
-    if (c == '>')   { dxdPbOff += 5000; if (dxdPbOff > bw) dxdPbOff = bw; lastDrawMs = 0; }
+    if (dxdMode != 0) {                              // fixed DL / fixed UL
+      if (isLeft(c))  { dxdStepAnchorDial(-1); lastDrawMs = 0; }
+      if (isRight(c)) { dxdStepAnchorDial(+1); lastDrawMs = 0; }
+    } else {                                         // true rule: plain passband nudge
+      if (isLeft(c))  { dxdPbOff -= 1000; if (dxdPbOff < 0)  dxdPbOff = 0;  lastDrawMs = 0; }
+      if (isRight(c)) { dxdPbOff += 1000; if (dxdPbOff > bw) dxdPbOff = bw; lastDrawMs = 0; }
+    }
   }
 }
 
@@ -5928,7 +5978,8 @@ void App::drawHelp() {
     "DX DOPPLER TABLE (Mutual d)",
     " both stns RX/TX per 30s",
     " m mode  a anchor dial",
-    " ,/ linear passband pt",
+    " ,/ step dial 1k (fixed)",
+    " pb shown +/- from center",
     "TRACK (selected sat)",
     " r  engage radio (Doppler)",
     " arrows tune / adjust",
@@ -7658,6 +7709,25 @@ void App::drawSatSat() {
     canvas.setCursor(6, 62); canvas.print("with 'f' to pick a 2nd.");
     footer("` back"); return;
   }
+  // Picking state: let the operator choose the 2nd satellite WITHOUT running the
+  // (multi-day) search on every cycle. n/p change the pick instantly; ENTER or 'r'
+  // starts the calculation. This avoids waiting through a full search just to scroll
+  // past a satellite that isn't the one they want.
+  if (satsatPicking) {
+    int bIdx = db.indexOfNorad(favs[satsatOther]);
+    const char* bName = (bIdx >= 0) ? db.at(bIdx).name : "?";
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(2, 28);
+    canvas.print("2nd satellite:");
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(2, 42);
+    canvas.printf("%.24s", bName);
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(2, 58);
+    canvas.printf("(%d of %d favorites)", satsatOther + 1, favN);
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, 78);
+    canvas.print("ENTER to find windows");
+    footer("n/p pick  ENTER find  `bk");
+    return;
+  }
+
   // While the incremental search runs, show a live progress bar. The actual
   // sampling happens a chunk per loop() tick in satsatJobTick(), so this screen
   // stays responsive (the back key still works) and always finishes.
@@ -7693,7 +7763,7 @@ void App::drawSatSat() {
   if (satsatN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 60); canvas.print("No overlap in 5 days.");
-    footer("n next sat  r recompute  `bk"); return;
+    footer("n/p pick  r recompute  `bk"); return;
   }
 
   // Column header + rows.
@@ -7706,29 +7776,42 @@ void App::drawSatSat() {
     SatSatWin& w = satsatWin[i];
     long secs = (long)(w.end - w.start);
     int y = 50 + v * 10;
-    if (i == satsatSel) canvas.fillRect(0, y - 1, 240, 10, CL_SELBG);
-    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(2, y);
+    bool sel = (i == satsatSel);
+    // Selected row: a solid SELBG bar with black text in every column (matching
+    // the memo/mutual/log lists). Drawing the per-column colours with a CL_BLACK
+    // text background used to punch black cells through the highlight, which made
+    // the selected row look striped and hard to read.
+    uint16_t bg = sel ? CL_SELBG : CL_BLACK;
+    if (sel) canvas.fillRect(0, y - 1, 240, 10, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, bg); canvas.setCursor(2, y);
     canvas.print(fmtMDHM(w.start).c_str());
-    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(96, y);
+    canvas.setTextColor(sel ? CL_BLACK : CL_GREY, bg);  canvas.setCursor(96, y);
     canvas.printf("%ld:%02ld", secs / 60, secs % 60);
-    canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(150, y);
+    canvas.setTextColor(sel ? CL_BLACK : CL_GREEN, bg); canvas.setCursor(150, y);
     canvas.printf("%.0f", w.maxElA);
-    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(180, y);
+    canvas.setTextColor(sel ? CL_BLACK : CL_CYAN, bg);  canvas.setCursor(180, y);
     canvas.printf("%.0f", w.maxElB);
   }
 
-  footer("n next sat  r recompute  `bk");
+  footer("n/p pick  r recompute  `bk");
 }
 
 void App::keySatSat(char c, bool enter, bool back) {
-  (void)enter;
   if (isBack(c, back)) { satsatAbortJob(); buildSatView(); screen = SCR_SATLIST; lastDrawMs = 0; return; }
   if (favN == 0) return;
-  if (c == 'n') {                             // cycle the 2nd satellite
+  // n / p just change WHICH 2nd satellite is selected -- no calculation yet, so
+  // cycling through favorites is instant. The search only runs on ENTER or 'r'.
+  if (c == 'n') {
     satsatOther = (satsatOther + 1) % favN;
-    satsatStartJob(); lastDrawMs = 0; return;
+    satsatPicking = true; satsatComputed = false; satsatN = 0; lastDrawMs = 0; return;
   }
-  if (c == 'r') { satsatStartJob(); lastDrawMs = 0; return; }   // recompute
+  if (c == 'p') {
+    satsatOther = (satsatOther - 1 + favN) % favN;
+    satsatPicking = true; satsatComputed = false; satsatN = 0; lastDrawMs = 0; return;
+  }
+  if (c == 'r' || enter) {                     // run (or re-run) the search for the pick
+    satsatPicking = false; satsatStartJob(); lastDrawMs = 0; return;
+  }
   if (isUp(c))   { if (satsatSel > 0) satsatSel--; lastDrawMs = 0; }
   if (isDown(c)) { if (satsatSel < satsatN - 1) satsatSel++; lastDrawMs = 0; }
 }

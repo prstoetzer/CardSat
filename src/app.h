@@ -221,6 +221,7 @@ private:
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
   void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
+  void dxdStepAnchorDial(int dir);   // step the anchored dial by 1 kHz (fixed modes)
   void dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
                    uint32_t& dxRx, uint32_t& dxTx);  // core per-step calculator
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
@@ -236,6 +237,8 @@ private:
   // satellite and a second satellite are BOTH above the horizon at a chosen
   // location (default: my QTH) over the next days.
   int       satsatOther = 0;          // index (into favorites/db view) of the 2nd sat
+  bool      satsatPicking = true;     // true = choosing the 2nd sat (no calc yet);
+                                      // n/p change the pick, ENTER/r runs the search
   int       satsatSel   = 0;          // highlighted result row
   struct SatSatWin { time_t start, end; float maxElA, maxElB; };
   static const int SATSAT_MAX = 16;

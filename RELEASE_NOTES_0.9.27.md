@@ -1,8 +1,39 @@
-# CardSat v0.9.26 — Release Notes
+# CardSat v0.9.27 — Release Notes
 
-**0.9.26** is a point release over 0.9.25. The new item is the DX Doppler
-fixed-dial fix below; everything after it carried over from 0.9.25 and is included
-here for completeness.
+**0.9.27** is a point release over 0.9.26. The new items are the DX Doppler 1 kHz
+dial stepping, the passband-from-centre display, and the sat-to-sat usability
+changes below; everything after them carried over from earlier 0.9.x releases and
+is included here for completeness.
+
+## DX Doppler: 1 kHz dial stepping + passband shown from centre
+
+Two changes to the **DX Doppler table** for linear transponders:
+
+- **Step the anchored dial to round 1 kHz.** In a fixed mode, the `,`/`/` keys now
+  move the **anchored dial** to the next **round 1 kHz** (grid-aligned to passband
+  centre), so you park your fixed RX or TX on a clean number — 145.949, 145.950,
+  145.951 MHz, never 145.9502. Cycle the anchor (`a`) to the dial you care about,
+  then step. CardSat nudges the passband so the dial lands exactly on the kHz
+  (converging to within a Hz, accounting for the Doppler dial/passband ratio) and
+  recomputes the rest of the table around it. In true-rule mode `,`/`/` keep the
+  plain 1 kHz passband nudge. (The old 5 kHz `<`/`>` shift and the short-lived `s`
+  snap key are removed in favour of this.)
+- **Passband shown relative to centre.** The header displays the operating point as
+  a signed offset from the **centre of the passband's downlink** — `ctr`, `+7.5k`,
+  `-12.5k` — instead of an absolute up-from-bottom figure, so it's obvious how far
+  off-centre you're working.
+
+## Sat-to-sat: pick the second satellite before searching
+
+The sat-to-sat visibility finder no longer runs a multi-day search every time you
+cycle the second satellite. It now opens on a **pick screen**: `n`/`p` step
+through your favorites **instantly**, and the window search only runs when you press
+**ENTER** (or `r`). A `p` key was added for stepping backward. This makes choosing
+the right second satellite immediate instead of waiting through a full calculation
+per cycle. The selected-row highlight on the results list was also fixed — it was
+hard to read (black cells punched through the highlight bar, green text invisible on
+green); the selected row is now a clean solid bar with black text, matching the
+other lists.
 
 ## Fix: DX Doppler fixed-uplink / fixed-downlink now actually hold the dial
 

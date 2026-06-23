@@ -677,10 +677,24 @@ Three tracking modes, cycled with **`m`**:
 Press **`a`** to cycle which dial is the **anchor** (my RX, my TX, DX RX, or DX
 TX). For a **linear** transponder you also choose **where in the passband** to
 operate: the table **opens at the centre of the passband** (and re-centres when you
-switch transponders with **`t`**), and **`,`/`/`** move the operating point in
-1 kHz steps (`<`/`>` in 5 kHz), shown as `+NNk`. RX values are shown in green, TX
-in yellow. **`;`/`.`** scroll through the 30-second steps; `` ` `` returns to the
-mutual window list.
+switch transponders with **`t`**). The header shows the operating point **relative
+to the centre of the passband's downlink** — `ctr` at centre, or a signed offset
+like `+7.5k` / `-12.5k` — so you always know how far off-centre you are.
+
+How the **`,`/`/`** keys step depends on the mode:
+
+- In a **fixed** mode (fixed downlink or fixed uplink), `,`/`/` step the **anchored
+  dial** to the next **round 1 kHz**, grid-aligned to the centre of the passband.
+  This is what lets you park your fixed RX or TX on a clean, easy-to-call number:
+  cycle the anchor to the dial you care about (say *my TX*), and each press lands
+  that transmit dial on 145.949, 145.950, 145.951 MHz — never 145.9502. CardSat
+  nudges the passband so the anchored dial sits exactly on the kHz, then recomputes
+  the rest of the table around it.
+- In **true rule** mode (nothing anchored), `,`/`/` simply nudge the passband
+  operating point by 1 kHz, as before.
+
+RX values are shown in green, TX in yellow. **`;`/`.`** scroll through the
+30-second steps; `` ` `` returns to the mutual window list.
 
 > Frequencies include your station calibration offsets. The DX station is assumed
 > at sea level with no local calibration. For an SSB contact, treat the numbers as
@@ -944,8 +958,15 @@ Press **`2`** to find the windows when the selected satellite **and a second
 satellite** are **both above your horizon at the same time** over the next five
 days — for cross-satellite relay experiments, or simply to plan back-to-back
 working of two birds on one outing. The second satellite is taken from your
-**favorites** list; press **`n`** to cycle to the next favorite, **`r`** to
-recompute.
+**favorites** list.
+
+You first land on a **pick screen** that shows the currently-selected second
+satellite and its position in your favorites (e.g. "3 of 7"). Press **`n`** /
+**`p`** to step forward/back through favorites — this is **instant**, because no
+search runs while you are choosing. When you have the satellite you want, press
+**ENTER** (or **`r`**) to run the window search. After results appear, `n`/`p`
+return you to the pick screen to choose a different second satellite, so you never
+sit through a calculation just to scroll past a bird you didn't want.
 
 Each row is one overlap window, showing its **start time (UTC)**, **duration**,
 and the **peak elevation of each satellite** during the window (the first in
@@ -2584,9 +2605,13 @@ listed below.
   30-second step: your dials (green, "me") and the DX station's (cyan, "DX"), each
   with RX and TX — in one of three modes — **true rule**, **fixed downlink**, or
   **fixed uplink** — with an anchor dial and (for a linear transponder) a passband
-  operating point.
+  operating point. The header shows the passband point **relative to the centre of
+  the passband's downlink** (e.g. `ctr`, `+7.5k`, `-12.5k`), so you can see at a
+  glance how far off-centre you are working.
 - **Keys** — `t` cycle transponder; `m` cycle mode; `a` cycle anchor (my RX/TX, DX
-  RX/TX); `,`/`/` move the linear passband point (1 kHz; `<`/`>` 5 kHz); `;`/`.`
+  RX/TX); `,`/`/` step the passband — in a **fixed** mode they move the **anchored
+  dial** to the next **round 1 kHz** (so you park on, e.g., 145.950 MHz, not
+  145.9502), and in **true rule** they nudge the operating point by 1 kHz; `;`/`.`
   scroll the time steps; `` ` `` back to the mutual list.
 
 ### Sat-to-sat visibility
@@ -2595,10 +2620,14 @@ listed below.
   both above your horizon at once, over the next few days; detail in
   [§8 → Sat-to-sat visibility](#sat-to-sat-visibility-2-from-satellites).
 - **Reached from** — Satellites → `2`.
-- **Shows** — the second satellite (from favorites) and a scrolling list of overlap
-  windows with start time (UTC), duration, and the peak elevation of each bird.
-- **Keys** — `n` cycle the second satellite; `r` recompute; `;`/`.` scroll;
-  `` ` `` back to Satellites.
+- **Shows** — first a **pick screen** (choose the second satellite, no calculation
+  yet), then after you start the search a scrolling list of overlap windows with
+  start time (UTC), duration, and the peak elevation of each bird.
+- **Keys** — `n`/`p` step the second satellite forward/back **instantly** (no search
+  runs while you cycle); **ENTER** (or `r`) runs the window search for the chosen
+  pair; `;`/`.` scroll the results; `` ` `` back to Satellites. Because cycling no
+  longer triggers a multi-day search on every step, choosing a different second
+  satellite is immediate.
 
 ### 10-day pass overview
 

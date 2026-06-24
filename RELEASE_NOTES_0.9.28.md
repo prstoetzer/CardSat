@@ -28,6 +28,15 @@ recommended, more reliable option; single-pin depends on open-drain behaviour an
 external pull-up. Yaesu/Kenwood/LAN are unaffected. See `CIV_SINGLE_PIN.md`, and mind
 the 5 V / 3.3 V cautions before wiring.
 
+
+**Fix (single-pin idles correctly now):** the single-pin path was leaving the shared
+line stuck at ~0 V. Root cause: UART signal inversion (an inverted TX line idles LOW,
+not HIGH). The setup now clears inversion (`uart_set_line_inverse(..., DISABLE)`), routes
+both UART TX and RX to the one pad via the IDF (`uart_set_pin`), and makes the pad
+open-drain with a pull-up using `GPIO_MODE_INPUT_OUTPUT_OD` (which keeps the UART driving
+the pad, unlike Arduino `pinMode(OUTPUT_OPEN_DRAIN)`). The shared pin now idles near
+3.3 V and is pulled low only for data. Confirmed on hardware (idle level reads HIGH); the
+on-air CI-V exchange is still unverified.
 ## DX Doppler: 1 kHz dial stepping + passband shown from centre
 
 Two changes to the **DX Doppler table** for linear transponders:

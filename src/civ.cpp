@@ -3,6 +3,8 @@
 // ===========================================================================
 #include "civ.h"
 #include <HardwareSerial.h>
+#include <driver/gpio.h>   // gpio_set_direction / gpio_set_pull_mode for open-drain
+#include <driver/uart.h>   // uart_set_pin: route TX+RX to one pad for single-wire
 
 // Set to 0 to silence the CI-V trace on the serial monitor (115200 baud).
 #define CIV_DEBUG 1
@@ -75,18 +77,25 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
     // Normal, recommended path: separate wires. G2 = TX (push-pull), G1 = RX.
     hs->begin(baud, SERIAL_8N1, rxPin, txPin);
   } else {
-    // Single-pin CI-V: one shared GPIO carries both directions, exactly like a
-    // real CI-V one-wire bus. We route the UART's RX and TX to the SAME pin so the
-    // controller hears its own echo and the radio's reply on that wire (the CI-V
-    // layer already drains the echo). The pin is set OPEN-DRAIN so CardSat can only
-    // pull the line low; an external pull-up (the radio's internal CI-V pull-up,
-    // and/or a level-shifter) returns it high. UNVERIFIED -- see CIV_SINGLE_PIN.md.
+    // Single-pin CI-V: one shared GPIO carries both directions, like a real CI-V
+    // one-wire bus. We begin() with TX on the pin and RX detached (a clean push-pull
+    // TX that idles HIGH), CLEAR UART signal inversion (an inverted line idles LOW --
+    // this was the cause of an earlier "stuck at 0 V" bug), route BOTH UART TX and RX
+    // to the pad via the IDF (uart_set_pin), then switch the pad to open-drain with a
+    // pull-up. The UART then drives the pad: released HIGH (pull-up) at idle/mark,
+    // pulled LOW only for data, and the same pad is heard on RX. The line idles near
+    // 3.3 V. An external pull-up (the radio's CI-V bus and/or a level-shifter) should
+    // still be present for real communication. UNVERIFIED on-air -- see
+    // CIV_SINGLE_PIN.md and mind the 5 V / 3.3 V cautions before connecting a radio.
     int pin = (_pinMode == 2) ? rxPin : txPin;   // 1 -> tx pin (G2), 2 -> rx pin (G1)
-    hs->begin(baud, SERIAL_8N1, pin, pin);       // RX and TX share one GPIO
-    // Re-assert the shared pin as open-drain with a weak pull-up. begin() leaves
-    // the TX pad push-pull; open-drain is what lets the wire be shared without the
-    // controller fighting the radio or the pull-up.
-    pinMode(pin, OUTPUT_OPEN_DRAIN | PULLUP);
+    hs->begin(baud, SERIAL_8N1, -1, pin);        // TX on pin, RX detached for now
+    uart_set_line_inverse((uart_port_t)uartNum, UART_SIGNAL_INV_DISABLE);  // idle = mark/HIGH
+    uart_set_pin((uart_port_t)uartNum, pin, pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT_OUTPUT_OD);   // OD, matrix kept
+    gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLUP_ONLY);
+    delay(2);
+    Serial.printf("[CI-V 1-pin] G%d ready, idle level = %d (expect 1)\n",
+                  pin, digitalRead(pin));
   }
 
   _stream = hs;

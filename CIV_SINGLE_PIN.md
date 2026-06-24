@@ -33,13 +33,18 @@ restored across reboots.
 
 ### What the firmware does in single-pin mode
 
-It routes the UART's transmit and receive to the **same** GPIO, and re-configures that
-pin as **open-drain with a weak internal pull-up**. Open-drain means CardSat can only
-pull the line **low**; it never drives it high. The line is returned to its idle (high)
-state by a pull-up — primarily the radio's own internal CI-V pull-up (and any pull-up in
-a level-shifter you add). Because everything is on one wire, CardSat hears its own
-transmission echoed back; the CI-V protocol layer already expects and discards that
-echo, exactly as on a real multi-device CI-V bus.
+It routes the UART's transmit and receive to the **same** GPIO, and configures that
+pin as **open-drain with a pull-up**, using the ESP32 `GPIO_MODE_INPUT_OUTPUT_OD` mode
+so the UART keeps driving the pad through the peripheral matrix (UART signal inversion is
+explicitly cleared, so the line idles at its mark/HIGH state rather than low). Open-drain means
+CardSat only ever pulls the line **low** (for data); the line is **released high** by a
+pull-up the rest of the time. On the bench with nothing attached, the shared pin should
+**idle near 3.3 V** (held up by the chip's internal ~45 kΩ pull-up) and dip low only
+while bytes are being sent. If you measure ~0 V at idle, something is wrong — the line
+should sit high. The radio's own CI-V pull-up (and any level-shifter) reinforces this
+once connected. Because everything is on one wire, CardSat hears its own transmission
+echoed back; the CI-V protocol layer already expects and discards that echo, exactly as
+on a real multi-device CI-V bus.
 
 ---
 

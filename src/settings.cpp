@@ -30,6 +30,8 @@ bool Settings::load() {
   radioModel = d["rig"] | (uint8_t)RIG_IC9700;
   civAddr    = d["addr"]| (uint8_t)0xA2;
   civBaud    = d["baud"]| 19200u;
+  civPinMode = d["civpin"] | (uint8_t)0;     // CI-V wiring: 0 TX/RX, 1 G2, 2 G1
+  if (civPinMode > 2) civPinMode = 0;
   catType    = d["cattype"] | (uint8_t)CAT_WIRED;
   if (catType > CAT_RIGCTL) catType = CAT_WIRED;
   strncpy(catHost, d["cathost"] | "", sizeof(catHost)-1); catHost[sizeof(catHost)-1]=0;
@@ -125,6 +127,7 @@ bool Settings::save() {
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
+  d["civpin"] = civPinMode;
   d["cattype"] = catType; d["cathost"] = catHost; d["catport"] = catPort;
   d["catuser"] = catUser; d["catpass"] = catPass;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;

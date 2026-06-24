@@ -5,12 +5,13 @@ instead of the usual separate transmit and receive wires. This matches the way C
 actually works electrically — it is a one-wire, half-duplex bus — and it halves the
 number of signal wires to the radio.
 
-> ⚠️ **This mode is UNVERIFIED.** The normal separate **TX/RX** path is the
-> recommended, more reliable option and is what the author runs on the bench. Single-pin
-> mode is provided for experimentation. It depends on open-drain pin behavior and an
-> external pull-up that this firmware cannot guarantee, and it has not been confirmed on
-> hardware. **Use the separate TX/RX path unless you specifically want to try this and
-> are comfortable verifying the wiring with a meter.** Wrong wiring can damage a GPIO.
+> ✅ **This mode is confirmed working on hardware** (verified on an IC-821: full
+> bidirectional CI-V — frequency reads and ACKs — over one shared open-drain wire).
+> That said, the normal separate **TX/RX** path is still the simplest, most robust
+> option and is recommended for a dependable station. Single-pin depends on correct
+> open-drain behaviour and an external pull-up, and on proper 5 V / 3.3 V level
+> interfacing to the radio. **Verify the wiring with a meter before connecting a
+> radio — wrong wiring can damage a GPIO.**
 
 This applies to **wired Icom CI-V only.** It has no effect on Yaesu, Kenwood, or the
 IC-9700 RS-BA1 LAN backend.

@@ -73,6 +73,9 @@
 #include <HardwareSerial.h>
 #include <driver/gpio.h>
 #include <driver/uart.h>
+#include <soc/gpio_struct.h>
+#include <esp_rom_gpio.h>
+#include <soc/gpio_sig_map.h>
 #include <Wire.h>
 #include <TinyGPSPlus.h>
 #include <Sgp4.h>
@@ -208,7 +211,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.28";
+static constexpr const char* FW_VERSION = "0.9.29";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -3042,29 +3045,60 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   static HardwareSerial* hs = nullptr;   // construct once, reuse on re-begin
   if (!hs) hs = new HardwareSerial(uartNum);
 
+  // hs (the UART peripheral) is static and survives rig delete/recreate, so a
+  // previous begin() may have left pins attached to the UART matrix. When the
+  // wiring mode changes (e.g. TX/RX -> single-pin G1) the OLD pins must be released
+  // back to plain GPIO first, or a stale pad keeps its UART routing -- the symptom
+  // being the wrong pin still held high and the new pin never driven. Track the
+  // pins we last attached (static, like hs) and reset them before reconfiguring.
+  static int lastA = -1, lastB = -1;
+  if (lastA >= 0) gpio_reset_pin((gpio_num_t)lastA);
+  if (lastB >= 0 && lastB != lastA) gpio_reset_pin((gpio_num_t)lastB);
+  lastA = lastB = -1;
+
   if (_pinMode == 0) {
     // Normal, recommended path: separate wires. G2 = TX (push-pull), G1 = RX.
+    hs->end();                                   // release any prior pin bindings
     hs->begin(baud, SERIAL_8N1, rxPin, txPin);
+    lastA = rxPin; lastB = txPin;
   } else {
     // Single-pin CI-V: one shared GPIO carries both directions, like a real CI-V
-    // one-wire bus. We begin() with TX on the pin and RX detached (a clean push-pull
-    // TX that idles HIGH), CLEAR UART signal inversion (an inverted line idles LOW --
-    // this was the cause of an earlier "stuck at 0 V" bug), route BOTH UART TX and RX
-    // to the pad via the IDF (uart_set_pin), then switch the pad to open-drain with a
-    // pull-up. The UART then drives the pad: released HIGH (pull-up) at idle/mark,
-    // pulled LOW only for data, and the same pad is heard on RX. The line idles near
-    // 3.3 V. An external pull-up (the radio's CI-V bus and/or a level-shifter) should
-    // still be present for real communication. UNVERIFIED on-air -- see
-    // CIV_SINGLE_PIN.md and mind the 5 V / 3.3 V cautions before connecting a radio.
+    // one-wire bus. The line idles near 3.3 V (UART mark, held by the pull-up) and is
+    // pulled low only for data. An external pull-up (the radio's CI-V bus and/or a
+    // level-shifter) should still be present for real communication. UNVERIFIED
+    // on-air -- see CIV_SINGLE_PIN.md and mind the 5 V / 3.3 V cautions before
+    // connecting a radio.
     int pin = (_pinMode == 2) ? rxPin : txPin;   // 1 -> tx pin (G2), 2 -> rx pin (G1)
-    hs->begin(baud, SERIAL_8N1, -1, pin);        // TX on pin, RX detached for now
-    uart_set_line_inverse((uart_port_t)uartNum, UART_SIGNAL_INV_DISABLE);  // idle = mark/HIGH
-    uart_set_pin((uart_port_t)uartNum, pin, pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT_OUTPUT_OD);   // OD, matrix kept
+
+    // Single-pin CI-V setup (verified on the bench step by step):
+    //  1. begin(pin, pin) puts BOTH UART TX and RX on the chosen pad. This is the
+    //     same call shape as the known-good two-wire begin(rx,tx), and a scope
+    //     confirmed real UART data comes out of `pin` this way.
+    //  2. Clear UART signal inversion so the idle/mark state is HIGH, not LOW.
+    //  3. Add a pull-up.
+    //  4. Enable OPEN-DRAIN at the PAD REGISTER (GPIO.pin[pin].pad_driver = 1).
+    //     This is the crucial bit: gpio_set_direction(...OD) re-runs the pad's
+    //     direction config and DETACHES the UART output matrix, parking the pad LOW
+    //     (the earlier "idle = 0" bug). Setting pad_driver directly flips only the
+    //     open-drain bit, leaving the UART TX matrix output attached -- so the pin
+    //     idles HIGH via the pull-up and is pulled low only for data, while still
+    //     letting the radio pull it low (shared one-wire bus).
+    hs->end();
+    hs->begin(baud, SERIAL_8N1, pin, pin);       // TX and RX both on `pin`
+    uart_set_line_inverse((uart_port_t)uartNum, UART_SIGNAL_INV_DISABLE);  // idle = HIGH
     gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLUP_ONLY);
+    GPIO.pin[pin].pad_driver = 1;                // open-drain at the pad; matrix kept
+    // Re-assert the UART RX input on the same pad. begin(pin,pin) bound RX, but the
+    // TX output binding on a shared pad can leave the input path disabled; this only
+    // (re)connects the pad to the RX signal -- it never touches the TX output or the
+    // pad direction, so the working TX is undisturbed. Without this CardSat may not
+    // hear the bus (not even its own echo). Needed to receive the radio's replies.
+    { uint32_t rxSig = (uartNum == 0) ? U0RXD_IN_IDX
+                     : (uartNum == 2) ? U2RXD_IN_IDX : U1RXD_IN_IDX;
+      esp_rom_gpio_connect_in_signal((gpio_num_t)pin, rxSig, false); }
+    lastA = pin; lastB = pin;
     delay(2);
-    Serial.printf("[CI-V 1-pin] G%d ready, idle level = %d (expect 1)\n",
-                  pin, digitalRead(pin));
+    Serial.printf("[CI-V 1-pin] G%d ready (idle=%d)\n", pin, digitalRead(pin));
   }
 
   _stream = hs;

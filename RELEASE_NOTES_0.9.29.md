@@ -1,10 +1,25 @@
-# CardSat v0.9.28 — Release Notes
+# CardSat v0.9.29 — Release Notes
 
-**0.9.28** is a point release over 0.9.27. The new item is the experimental
-single-pin CI-V wiring option below; the DX Doppler 1 kHz dial stepping, the
-passband-from-centre display, and the sat-to-sat usability changes carried over from
-0.9.27, and everything after them from earlier 0.9.x releases, included here for
-completeness.
+**0.9.29** is a point release over 0.9.28. The headline is that **single-pin CI-V
+wiring now works end-to-end on real hardware** (verified on an IC-821: full
+bidirectional CI-V over one shared open-drain wire, frequency reads and ACKs). It also
+carries the CAT serial monitor and the other 0.9.28 items, plus the earlier 0.9.x
+features, included here for completeness.
+
+## Single-pin CI-V: working bidirectionally on hardware
+
+The experimental single-pin CI-V mode (*Settings -> Radio -> CI-V wiring -> 1-pin G2 /
+1-pin G1*) is now confirmed working: CardSat drives and receives the full CI-V exchange
+over **one shared GPIO**, exactly like a real CI-V one-wire bus. Getting there required
+solving a chain of ESP32-S3 pin-mux issues -- UART signal inversion (idled the line
+low), the `uart_set_pin` same-pad routing disabling TX, and `gpio_set_direction`
+detaching the UART output and parking the pad low. The final setup: `begin(pin, pin)`
+for a real driving UART on the shared pad, clear UART inversion, enable open-drain via
+the pad register (`pad_driver`) so the UART output stays attached and the line idles
+high, and re-assert the RX input signal so replies are heard. On a one-wire bus CardSat
+hears its own echo followed by the radio's reply; the existing `drainEcho()` handles
+that. Still requires correct 5 V / 3.3 V level interfacing to the radio -- see
+`CIV_SINGLE_PIN.md`. The separate TX/RX path remains the simplest, most robust option.
 
 ## CAT serial monitor / terminal (diagnostic)
 
@@ -18,25 +33,6 @@ already exchanging, so it does not contend with normal CAT operation. **Caution:
 sending raw frames transmits arbitrary bytes to the radio and a wrong frame can mis-set
 the rig. Host-verified only.
 
-## Experimental: single-pin CI-V wiring (Icom only)
-
-A new **Settings -> Radio -> "CI-V wiring"** option lets Icom CI-V run over a single
-shared open-drain GPIO instead of separate TX/RX wires, matching CI-V's true one-wire
-electrical nature. Choices are **TX/RX (G2/G1)** (default, recommended), **1-pin G2**,
-and **1-pin G1**. This is **UNVERIFIED** and the separate TX/RX path remains the
-recommended, more reliable option; single-pin depends on open-drain behaviour and an
-external pull-up. Yaesu/Kenwood/LAN are unaffected. See `CIV_SINGLE_PIN.md`, and mind
-the 5 V / 3.3 V cautions before wiring.
-
-
-**Fix (single-pin idles correctly now):** the single-pin path was leaving the shared
-line stuck at ~0 V. Root cause: UART signal inversion (an inverted TX line idles LOW,
-not HIGH). The setup now clears inversion (`uart_set_line_inverse(..., DISABLE)`), routes
-both UART TX and RX to the one pad via the IDF (`uart_set_pin`), and makes the pad
-open-drain with a pull-up using `GPIO_MODE_INPUT_OUTPUT_OD` (which keeps the UART driving
-the pad, unlike Arduino `pinMode(OUTPUT_OPEN_DRAIN)`). The shared pin now idles near
-3.3 V and is pulled low only for data. Confirmed on hardware (idle level reads HIGH); the
-on-air CI-V exchange is still unverified.
 ## DX Doppler: 1 kHz dial stepping + passband shown from centre
 
 Two changes to the **DX Doppler table** for linear transponders:

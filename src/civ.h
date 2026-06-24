@@ -18,6 +18,15 @@ public:
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override { return _stream != nullptr; }
 
+  // CI-V wiring mode. Call BEFORE begin(). 0 = separate TX/RX (default),
+  // 1 = single shared open-drain wire on the txPin, 2 = single wire on the rxPin.
+  // Single-pin uses one GPIO for both directions (true CI-V one-wire bus) and is
+  // UNVERIFIED; the separate path is recommended. Ignored by other backends.
+  void setPinMode(uint8_t mode) override { _pinMode = mode; }
+
+  // Raw byte write for the serial-terminal diagnostic.
+  bool sendRaw(const uint8_t* b, size_t n) override;
+
   bool setMainFreq(uint32_t hz) override;        // uplink (TX) on MAIN
   bool setSubFreq (uint32_t hz) override;        // downlink (RX) on SUB
   bool setMainMode(RigMode m)   override;
@@ -47,6 +56,7 @@ private:
   uint8_t    _addr;
   int8_t     _pttRead = -1;   // -1 unknown, 0 unsupported (stop polling), 1 supported
   uint8_t    _pttFails = 0;   // consecutive read misses before marking unsupported
+  uint8_t    _pinMode = 0;    // 0 separate TX/RX, 1 single-pin on tx, 2 single-pin on rx
   uint32_t   _lastMainHz = 0; // last frequency we COMMANDED on MAIN (uplink)
   uint32_t   _lastSubHz  = 0; // last frequency we COMMANDED on SUB  (downlink)
 

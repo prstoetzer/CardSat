@@ -33,6 +33,7 @@ public:
 
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override { return _stream != nullptr; }
+  bool sendRaw(const uint8_t* b, size_t n) override;
 
   bool setMainFreq(uint32_t hz) override { return setFreq(0x21, hz); } // SAT TX
   bool setSubFreq (uint32_t hz) override { _lastSubHz = hz;            // SAT RX

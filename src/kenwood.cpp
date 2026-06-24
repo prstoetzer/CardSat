@@ -29,6 +29,15 @@ void KenwoodRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   _stream = hs;
 }
 
+// Raw byte write for the serial-terminal diagnostic.
+bool KenwoodRig::sendRaw(const uint8_t* b, size_t n) {
+  if (!_stream || !b || !n) return false;
+  _stream->write(b, n);
+  _stream->flush();
+  catTrace("TX", b, n);
+  return true;
+}
+
 char KenwoodRig::modeDigit(RigMode m) {
   switch (m) {                 // Kenwood mode codes
     case RM_LSB: return '1';
@@ -44,6 +53,7 @@ char KenwoodRig::modeDigit(RigMode m) {
 bool KenwoodRig::sendCmd(const String& cmd) {
   if (!_stream) return false;
   kwLog("TX", cmd);
+  catTrace("TX", (const uint8_t*)cmd.c_str(), cmd.length());
   _stream->print(cmd);
   _stream->flush();
   return true;
@@ -77,6 +87,7 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
     delay(1);
   }
   kwLog("RX", rx);
+  if (rx.length()) catTrace("RX", (const uint8_t*)rx.c_str(), rx.length());
   int i = rx.indexOf("FA");
   if (i >= 0 && (int)rx.length() >= i + 13) {       // "FA" + 11 digits
     uint32_t hz = 0; bool ok = false;

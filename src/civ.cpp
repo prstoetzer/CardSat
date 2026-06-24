@@ -70,8 +70,35 @@ static inline void civLogRaw(const char*, const uint8_t*, size_t) {}
 void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   static HardwareSerial* hs = nullptr;   // construct once, reuse on re-begin
   if (!hs) hs = new HardwareSerial(uartNum);
-  hs->begin(baud, SERIAL_8N1, rxPin, txPin);
+
+  if (_pinMode == 0) {
+    // Normal, recommended path: separate wires. G2 = TX (push-pull), G1 = RX.
+    hs->begin(baud, SERIAL_8N1, rxPin, txPin);
+  } else {
+    // Single-pin CI-V: one shared GPIO carries both directions, exactly like a
+    // real CI-V one-wire bus. We route the UART's RX and TX to the SAME pin so the
+    // controller hears its own echo and the radio's reply on that wire (the CI-V
+    // layer already drains the echo). The pin is set OPEN-DRAIN so CardSat can only
+    // pull the line low; an external pull-up (the radio's internal CI-V pull-up,
+    // and/or a level-shifter) returns it high. UNVERIFIED -- see CIV_SINGLE_PIN.md.
+    int pin = (_pinMode == 2) ? rxPin : txPin;   // 1 -> tx pin (G2), 2 -> rx pin (G1)
+    hs->begin(baud, SERIAL_8N1, pin, pin);       // RX and TX share one GPIO
+    // Re-assert the shared pin as open-drain with a weak pull-up. begin() leaves
+    // the TX pad push-pull; open-drain is what lets the wire be shared without the
+    // controller fighting the radio or the pull-up.
+    pinMode(pin, OUTPUT_OPEN_DRAIN | PULLUP);
+  }
+
   _stream = hs;
+}
+
+// Raw byte write for the serial-terminal diagnostic: push arbitrary bytes onto
+// the CAT port exactly as typed, and trace them as TX so the monitor shows them.
+bool CivRig::sendRaw(const uint8_t* b, size_t n) {
+  if (!_stream || !b || !n) return false;
+  _stream->write(b, n);
+  catTrace("TX", b, n);
+  return true;
 }
 
 CivMode CivRig::toCiv(RigMode m) {
@@ -105,6 +132,7 @@ bool CivRig::sendFrame(const uint8_t* payload, size_t len) {
   for (size_t i = 0; i < len && n < sizeof(buf) - 1; ++i) buf[n++] = payload[i];
   buf[n++] = 0xFD;        // end of message
   civLog("TX", buf, n);   // trace the command to the serial monitor
+  catTrace("TX", buf, n); // and to the on-device serial-terminal monitor
   _stream->write(buf, n);
   _stream->flush();
   drainEcho();            // swallow our own echo + radio's OK/NG (0xFB/0xFA)
@@ -119,12 +147,16 @@ bool CivRig::drainEcho(uint32_t timeoutMs) {
 #if CIV_DEBUG
   uint8_t rx[40]; size_t rn = 0;
 #endif
+  // Capture received bytes for the on-device serial monitor (separate small
+  // buffer so it works even when CIV_DEBUG is off).
+  uint8_t mon[48]; size_t mn = 0;
   while (millis() - t0 < timeoutMs) {
     while (_stream->available()) {
       uint8_t b = (uint8_t)_stream->read();
 #if CIV_DEBUG
       if (rn < sizeof(rx)) rx[rn++] = b;
 #endif
+      if (mn < sizeof(mon)) mon[mn++] = b;
       if (b == 0xFD) fd++;
       t0 = millis();
     }
@@ -132,6 +164,7 @@ bool CivRig::drainEcho(uint32_t timeoutMs) {
     if (fd >= 1 && millis() - t0 > 25) break;  // echo seen, radio not replying
     delay(1);
   }
+  if (mn) catTrace("RX", mon, mn);     // report raw received bytes to the monitor
 #if CIV_DEBUG
   // Report only the radio's reply (ACK/NAK), not the echo of our own frame.
   for (size_t i = 0; i + 5 < rn; ++i) {

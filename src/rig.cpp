@@ -7,6 +7,13 @@
 #include "yaesu.h"
 #include "kenwood.h"
 
+// CAT serial trace sink (see rig.h). Null unless the serial-terminal screen sets
+// it; catTrace() is the null-safe wrapper the backends call on every frame.
+CatTraceFn catTraceSink = nullptr;
+void catTrace(const char* dir, const uint8_t* b, size_t n) {
+  if (catTraceSink) catTraceSink(dir, b, n);
+}
+
 RigMode Rig::modeFromString(const String& s) {
   String u = s; u.toUpperCase();
   if (u.indexOf("FM")  >= 0) return RM_FM;

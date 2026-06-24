@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -100,6 +100,17 @@ private:
   String   catLines[CATTEST_MAX];
   int      catCount  = 0;        // number of result lines filled
   int      catScroll = 0;        // scroll offset on the results screen
+
+  // CAT serial terminal/monitor (SCR_CATMON): a small ring buffer of the most
+  // recent raw CAT frames (TX/RX hex), filled by the catTraceSink hook. Read-only
+  // diagnostic; the operator can also type a raw hex frame to transmit.
+  static const int CATMON_MAX = 64;     // ring-buffer depth (lines)
+  String   catMonLines[CATMON_MAX];
+  bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (colour), false = RX
+  int      catMonHead = 0;              // next write index (ring)
+  int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
+  int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
+  bool     catMonActive = false;        // true while the screen owns the trace sink
   int      catPass   = 0;        // tally for the summary line
   int      catFail   = 0;
   int      view[MAX_SATS];        // db indices currently shown
@@ -500,6 +511,7 @@ private:
                                                // blocking download; they auto-rebuild
   static App* s_self;                          // for the static Net TLS hook to reach us
   static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
+  static void catMonTrampoline(const char* dir, const uint8_t* b, size_t n);  // CatTraceFn target
   static int  s_fetchDepth;                    // >0 while any outbound fetch is active
   static bool netFetchActive();                // service*() skip rebuild while true
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
@@ -722,6 +734,11 @@ private:
   void runCatTest();
   void drawCatTest();
   void keyCatTest(char c, bool enter, bool back);
+  void enterCatMon();                       // open the monitor, claim the trace sink
+  void drawCatMon();
+  void keyCatMon(char c, bool enter, bool back);
+  void catMonPush(const char* dir, const uint8_t* b, size_t n);  // append a trace line
+  void catMonSendHex(const String& hex);    // parse "FE FE 4C..." and transmit
 
   // Charge / Sleep screen: a minimal low-power mode (Launcher-style). The screen
   // backlight blanks and only a tiny loop runs; any key wakes it to show battery

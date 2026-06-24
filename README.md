@@ -17,6 +17,36 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
+> **New in v0.9.28:** an experimental **single-pin CI-V** wiring option (*Settings →
+> Radio → CI-V wiring*) that drives the whole Icom CI-V bus over one shared open-drain
+> GPIO instead of separate TX/RX — true to CI-V's one-wire nature, but **unverified**;
+> the normal TX/RX path stays recommended. This release also folds in the recent
+> operating additions: **DX Doppler** now steps the anchored dial to even **1 kHz**
+> frequencies in fixed modes and shows the passband offset from centre; **sat-to-sat**
+> lets you pick the second satellite *before* the multi-day search runs (instant
+> cycling with `n`/`p`, calculate on ENTER); **CW mode** on linear transponders; a
+> low-power **Charge/Sleep** screen; **LoRa message notifications**; and a fix so DX
+> Doppler fixed-uplink/downlink truly hold the dial.
+> See **[RELEASE_NOTES_0.9.28.md](RELEASE_NOTES_0.9.28.md)** and `CIV_SINGLE_PIN.md`.
+
+> **New in v0.9.22:** **voice memo now records on the Cardputer ADV** (the ADV's
+> ES8311 mic codec is initialized correctly), and **downloads no longer freeze the
+> screen** on the required ESP-IDF 5.4.x toolchain. Adds the build-your-own **IR pass
+> beacon** trigger (blink an IR LED with a distinct flash count at T-60/30/10, AOS,
+> TCA, and LOS). See **[RELEASE_NOTES_0.9.22.md](RELEASE_NOTES_0.9.22.md)**.
+
+> **New in v0.9.20:** stronger **socket-failure recovery** (LAN listeners stay freed
+> for the whole update burst, and a reboot prompt appears if WiFi recovery is
+> exhausted), the new **Easycomm (I/II/III)** and **SPID Rot2Prog** rotator protocols,
+> and **voice memo** recording (SD card required).
+> See **[RELEASE_NOTES_0.9.20.md](RELEASE_NOTES_0.9.20.md)**.
+
+> **New in v0.9.19:** a **world map you can recenter on your QTH** (your station in the
+> middle, or the classic 0°-meridian view), a **fast update** that refreshes just your
+> favorites, **more robust downloads** with socket-failure recovery, and the first
+> **Easycomm** and **SPID Rot2Prog** rotator backends.
+> See **[RELEASE_NOTES_0.9.19.md](RELEASE_NOTES_0.9.19.md)**.
+
 > **New in v0.9.18:** an opt-in **mobile web control page** served over WiFi — pick
 > a satellite, view pass times, and drive the radio/rotator from your phone; the
 > **large-font readout** now shows the frequencies even
@@ -356,6 +386,11 @@ to fetch GP elements.
 
 ### Build from source — Arduino IDE (single-file `CardSat.ino`)
 
+> 📖 **New to this?** See **[ARDUINO_SETUP.md](ARDUINO_SETUP.md)** for complete
+> step-by-step instructions on setting up a fresh Arduino IDE environment from
+> scratch — installing the IDE, the ESP32 core, every library at a known-good
+> version, the board settings, and flashing. The summary below is the short version.
+
 Install **M5Cardputer**, **ArduinoJson** (v7), **TinyGPSPlus** from Library
 Manager, and the Hopperpop **Sgp4** library via *Add .ZIP Library*
 (<https://github.com/Hopperpop/Sgp4-Library>). Then under **Tools**:
@@ -398,6 +433,10 @@ differs by family**, because the electrical layer is different:
 - **Icom CI-V** — single-wire half-duplex bus idling near 5 V. Use a 3.3 V-safe
   CI-V interface (the common one-transistor circuit or a ready-made board) on the
   radio's REMOTE jack. Full build guide: **[CIV_INTERFACE.md](CIV_INTERFACE.md)**.
+  CardSat also has an experimental **single-pin CI-V** mode (one shared open-drain
+  GPIO for the whole bus) selectable in *Settings → Radio → CI-V wiring* — it is
+  **unverified**; the normal TX/RX path is recommended. See
+  **[CIV_SINGLE_PIN.md](CIV_SINGLE_PIN.md)**.
 - **Kenwood (TS-790, TS-2000)** — true **RS-232** on a DB-9 COM port (±12 V). Use a
   **MAX3232-class level shifter** between the DB-9 and G1/G2; do **not** use the CI-V
   circuit. On the TS-2000, a straight 3-wire cable with **CTS/RTS bridged** (or the

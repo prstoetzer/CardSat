@@ -29,6 +29,7 @@ public:
 
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override { return _stream != nullptr; }
+  bool sendRaw(const uint8_t* b, size_t n) override;
 
   bool setMainFreq(uint32_t hz) override { return setVfoFreq("FB", hz); } // uplink/TX
   bool setSubFreq (uint32_t hz) override { return setVfoFreq("FA", hz); } // downlink/RX

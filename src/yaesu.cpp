@@ -38,6 +38,15 @@ void YaesuRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   send(catOn);
 }
 
+// Raw byte write for the serial-terminal diagnostic.
+bool YaesuRig::sendRaw(const uint8_t* b, size_t n) {
+  if (!_stream || !b || !n) return false;
+  _stream->write(b, n);
+  _stream->flush();
+  catTrace("TX", b, n);
+  return true;
+}
+
 uint8_t YaesuRig::modeCode(RigMode m) {
   switch (m) {                       // FT-847 operating-mode codes
     case RM_LSB: return 0x00;
@@ -62,6 +71,7 @@ void YaesuRig::freqToBcd(uint32_t hz, uint8_t out[4]) {
 bool YaesuRig::send(const uint8_t cmd[5]) {
   if (!_stream) return false;
   yaLog("TX", cmd, 5);
+  catTrace("TX", cmd, 5);
   _stream->write(cmd, 5);
   _stream->flush();
   delay(_postMs);              // Yaesu CAT dislikes back-to-back fast writes
@@ -99,6 +109,7 @@ bool YaesuRig::readSubFreq(uint32_t& hzOut) {
   while (_stream->available()) _stream->read();                 // flush stale bytes
   const uint8_t cmd[5] = { 0x00, 0x00, 0x00, 0x00, 0x13 };      // read SAT-RX
   yaLog("TX", cmd, 5);
+  catTrace("TX", cmd, 5);
   _stream->write(cmd, 5);
   _stream->flush();
   uint8_t r[5]; size_t n = 0; uint32_t t0 = millis();
@@ -106,6 +117,7 @@ bool YaesuRig::readSubFreq(uint32_t& hzOut) {
     if (_stream->available()) { r[n++] = (uint8_t)_stream->read(); t0 = millis(); }
     else delay(1);
   }
+  if (n) catTrace("RX", r, n);
 #if YAESU_DEBUG
   Serial.print("[CAT RX]");
   for (size_t i = 0; i < n; ++i) Serial.printf(" %02X", r[i]);

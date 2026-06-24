@@ -257,6 +257,18 @@ not shown in any footer.
    - **Radio** — select your model; CAT baud (and, for Icom, the CI-V address) auto-fill.
    - **CAT baud** — set to match the radio's CAT menu (applies to every CAT family).
    - **CI-V addr** — set to match the radio; **Icom only**.
+   - **CI-V wiring** — *(Icom wired CI-V only)* choose **TX/RX (G2/G1)** — the normal,
+     recommended separate-wire path — or a **single-pin** mode (**1-pin G2** or
+     **1-pin G1**) that drives the whole CI-V bus over one shared open-drain GPIO.
+     Single-pin is **unverified**; prefer TX/RX. See `CIV_SINGLE_PIN.md` and mind the
+     5 V/3.3 V cautions before wiring.
+   - **CAT serial monitor** — opens a live diagnostic that shows raw CAT traffic
+     (TX in cyan, RX in green) as hex, for any wired protocol (CI-V, Yaesu, Kenwood).
+     Press **`s`** to type a raw frame in hex (e.g. `FE FE 4C E0 03 FD`) and transmit
+     it; `;`/`.` scroll back through the log; `` ` `` exits. **Caution:** sending raw
+     frames transmits arbitrary bytes to the radio — a malformed or wrong-address frame
+     can mis-set the rig. The monitor is passive otherwise (it only displays traffic
+     that CardSat is already exchanging).
    - **Min pass el** — passes whose **peak elevation** never reaches this value are
      hidden from the pass lists and schedule (default 5°).
    - **WiFi SSID / WiFi pass** — enter your network, then **Save & test WiFi**.
@@ -1218,6 +1230,7 @@ on-screen key reference. The notable rows:
 |---|---|
 | Radio | `,`/`/` select model (auto-sets address + baud) |
 | CI-V addr | ENTER → edit (hex); Icom only |
+| CI-V wiring | `,`/`/` cycle **TX/RX (G2/G1)** / **1-pin G2** / **1-pin G1** — Icom wired CI-V only; single-pin is **unverified**, TX/RX recommended (see CIV_SINGLE_PIN.md) |
 | CAT baud | `,`/`/` cycle 1200…115200 (incl. 57600) — applies to all radio protocols |
 | Min pass el | `,`/`/` 0–30° |
 | Decay solar | `,`/`/` cycle assumed solar activity **mean → min → max → auto** for the orbital-analysis decay estimate (changes the headline number and the bracket). **auto** uses the live F10.7 flux fetched with GP data |

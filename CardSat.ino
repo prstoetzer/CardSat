@@ -206,7 +206,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.27";
+static constexpr const char* FW_VERSION = "0.9.28";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -601,6 +601,15 @@ public:
   virtual void    setAddress(uint8_t) {}
   virtual uint8_t address() const { return 0; }
 
+  // CI-V wiring mode (Icom wired only; no-op elsewhere). Call before begin().
+  // 0 = separate TX/RX, 1 = single-pin on TX (G2), 2 = single-pin on RX (G1).
+  virtual void    setPinMode(uint8_t) {}
+
+  // Raw serial diagnostics: write arbitrary bytes straight to the CAT port (the
+  // serial-terminal tool). Returns false if the backend has no byte stream (e.g.
+  // the Icom LAN backend, which is packetized, not a raw UART). Default: no-op.
+  virtual bool    sendRaw(const uint8_t*, size_t) { return false; }
+
   // Map a SatNOGS/AMSAT mode string ("FM","USB","CW","DATA"...) to a RigMode.
   static RigMode modeFromString(const String& s);
 };
@@ -656,6 +665,14 @@ private:
 Rig* makeRig(RadioModel model, uint8_t catType = 0, const char* host = "",
              uint16_t port = 50001, const char* user = "", const char* pass = "");
 
+// CAT serial trace sink. When set (by the serial-terminal screen), every backend
+// reports each raw CAT frame it sends or receives here: dir is "TX" or "RX", b/n
+// are the raw bytes. Off (nullptr) by default so there is zero overhead normally.
+// Used only for the on-device diagnostic monitor; does not affect operation.
+typedef void (*CatTraceFn)(const char* dir, const uint8_t* b, size_t n);
+extern CatTraceFn catTraceSink;
+void catTrace(const char* dir, const uint8_t* b, size_t n);  // safe wrapper (null-checks)
+
 
 // =========================================================================
 //  civ.h
@@ -677,6 +694,15 @@ public:
 
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override { return _stream != nullptr; }
+
+  // CI-V wiring mode. Call BEFORE begin(). 0 = separate TX/RX (default),
+  // 1 = single shared open-drain wire on the txPin, 2 = single wire on the rxPin.
+  // Single-pin uses one GPIO for both directions (true CI-V one-wire bus) and is
+  // UNVERIFIED; the separate path is recommended. Ignored by other backends.
+  void setPinMode(uint8_t mode) override { _pinMode = mode; }
+
+  // Raw byte write for the serial-terminal diagnostic.
+  bool sendRaw(const uint8_t* b, size_t n) override;
 
   bool setMainFreq(uint32_t hz) override;        // uplink (TX) on MAIN
   bool setSubFreq (uint32_t hz) override;        // downlink (RX) on SUB
@@ -707,6 +733,7 @@ private:
   uint8_t    _addr;
   int8_t     _pttRead = -1;   // -1 unknown, 0 unsupported (stop polling), 1 supported
   uint8_t    _pttFails = 0;   // consecutive read misses before marking unsupported
+  uint8_t    _pinMode = 0;    // 0 separate TX/RX, 1 single-pin on tx, 2 single-pin on rx
   uint32_t   _lastMainHz = 0; // last frequency we COMMANDED on MAIN (uplink)
   uint32_t   _lastSubHz  = 0; // last frequency we COMMANDED on SUB  (downlink)
 
@@ -758,6 +785,7 @@ public:
 
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override { return _stream != nullptr; }
+  bool sendRaw(const uint8_t* b, size_t n) override;
 
   bool setMainFreq(uint32_t hz) override { return setFreq(0x21, hz); } // SAT TX
   bool setSubFreq (uint32_t hz) override { _lastSubHz = hz;            // SAT RX
@@ -824,6 +852,7 @@ public:
 
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override { return _stream != nullptr; }
+  bool sendRaw(const uint8_t* b, size_t n) override;
 
   bool setMainFreq(uint32_t hz) override { return setVfoFreq("FB", hz); } // uplink/TX
   bool setSubFreq (uint32_t hz) override { return setVfoFreq("FA", hz); } // downlink/RX
@@ -1701,6 +1730,13 @@ struct Settings {
   uint8_t  radioModel = RIG_IC9700;
   uint8_t  civAddr    = 0xA2;   // 0 => use model default
   uint32_t civBaud    = 19200;
+  // CI-V wiring mode (Icom wired CI-V only; ignored for Yaesu/Kenwood/LAN):
+  //   0 = separate TX/RX  -> G2 = TX, G1 = RX (the normal, most reliable path)
+  //   1 = single-pin on G2 -> one shared open-drain wire on G2 (G1 unused)
+  //   2 = single-pin on G1 -> one shared open-drain wire on G1 (G2 unused)
+  // Single-pin uses the real CI-V one-wire bus electrically; it is UNVERIFIED and
+  // the separate TX/RX path is recommended. See CIV_SINGLE_PIN.md.
+  uint8_t  civPinMode = 0;
   // CAT transport. CAT_NET drives the radio over the RS-BA1 LAN protocol using
   // the host/port/credentials below instead of the wired CI-V UART.
   uint8_t  catType    = CAT_WIRED;
@@ -1811,7 +1847,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -2033,6 +2069,17 @@ private:
   String   catLines[CATTEST_MAX];
   int      catCount  = 0;        // number of result lines filled
   int      catScroll = 0;        // scroll offset on the results screen
+
+  // CAT serial terminal/monitor (SCR_CATMON): a small ring buffer of the most
+  // recent raw CAT frames (TX/RX hex), filled by the catTraceSink hook. Read-only
+  // diagnostic; the operator can also type a raw hex frame to transmit.
+  static const int CATMON_MAX = 64;     // ring-buffer depth (lines)
+  String   catMonLines[CATMON_MAX];
+  bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (colour), false = RX
+  int      catMonHead = 0;              // next write index (ring)
+  int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
+  int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
+  bool     catMonActive = false;        // true while the screen owns the trace sink
   int      catPass   = 0;        // tally for the summary line
   int      catFail   = 0;
   int      view[MAX_SATS];        // db indices currently shown
@@ -2433,6 +2480,7 @@ private:
                                                // blocking download; they auto-rebuild
   static App* s_self;                          // for the static Net TLS hook to reach us
   static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
+  static void catMonTrampoline(const char* dir, const uint8_t* b, size_t n);  // CatTraceFn target
   static int  s_fetchDepth;                    // >0 while any outbound fetch is active
   static bool netFetchActive();                // service*() skip rebuild while true
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
@@ -2651,6 +2699,11 @@ private:
   void runCatTest();
   void drawCatTest();
   void keyCatTest(char c, bool enter, bool back);
+  void enterCatMon();                       // open the monitor, claim the trace sink
+  void drawCatMon();
+  void keyCatMon(char c, bool enter, bool back);
+  void catMonPush(const char* dir, const uint8_t* b, size_t n);  // append a trace line
+  void catMonSendHex(const String& hex);    // parse "FE FE 4C..." and transmit
 
   // Charge / Sleep screen: a minimal low-power mode (Launcher-style). The screen
   // backlight blanks and only a tiny loop runs; any key wakes it to show battery
@@ -2776,6 +2829,13 @@ bool formatInternal() {
 // ===========================================================================
 //  rig.cpp  -  Rig factory + shared helpers
 // ===========================================================================
+
+// CAT serial trace sink (see declaration above). Null unless the serial-terminal
+// screen sets it; catTrace() is the null-safe wrapper the backends call.
+CatTraceFn catTraceSink = nullptr;
+void catTrace(const char* dir, const uint8_t* b, size_t n) {
+  if (catTraceSink) catTraceSink(dir, b, n);
+}
 
 RigMode Rig::modeFromString(const String& s) {
   String u = s; u.toUpperCase();
@@ -2979,8 +3039,35 @@ static inline void civLogRaw(const char*, const uint8_t*, size_t) {}
 void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   static HardwareSerial* hs = nullptr;   // construct once, reuse on re-begin
   if (!hs) hs = new HardwareSerial(uartNum);
-  hs->begin(baud, SERIAL_8N1, rxPin, txPin);
+
+  if (_pinMode == 0) {
+    // Normal, recommended path: separate wires. G2 = TX (push-pull), G1 = RX.
+    hs->begin(baud, SERIAL_8N1, rxPin, txPin);
+  } else {
+    // Single-pin CI-V: one shared GPIO carries both directions, exactly like a
+    // real CI-V one-wire bus. We route the UART's RX and TX to the SAME pin so the
+    // controller hears its own echo and the radio's reply on that wire (the CI-V
+    // layer already drains the echo). The pin is set OPEN-DRAIN so CardSat can only
+    // pull the line low; an external pull-up (the radio's internal CI-V pull-up,
+    // and/or a level-shifter) returns it high. UNVERIFIED -- see CIV_SINGLE_PIN.md.
+    int pin = (_pinMode == 2) ? rxPin : txPin;   // 1 -> tx pin (G2), 2 -> rx pin (G1)
+    hs->begin(baud, SERIAL_8N1, pin, pin);       // RX and TX share one GPIO
+    // Re-assert the shared pin as open-drain with a weak pull-up. begin() leaves
+    // the TX pad push-pull; open-drain is what lets the wire be shared without the
+    // controller fighting the radio or the pull-up.
+    pinMode(pin, OUTPUT_OPEN_DRAIN | PULLUP);
+  }
+
   _stream = hs;
+}
+
+// Raw byte write for the serial-terminal diagnostic: push arbitrary bytes onto
+// the CAT port exactly as typed, and trace them as TX so the monitor shows them.
+bool CivRig::sendRaw(const uint8_t* b, size_t n) {
+  if (!_stream || !b || !n) return false;
+  _stream->write(b, n);
+  catTrace("TX", b, n);
+  return true;
 }
 
 CivMode CivRig::toCiv(RigMode m) {
@@ -3014,6 +3101,7 @@ bool CivRig::sendFrame(const uint8_t* payload, size_t len) {
   for (size_t i = 0; i < len && n < sizeof(buf) - 1; ++i) buf[n++] = payload[i];
   buf[n++] = 0xFD;        // end of message
   civLog("TX", buf, n);   // trace the command to the serial monitor
+  catTrace("TX", buf, n); // and to the on-device serial-terminal monitor
   _stream->write(buf, n);
   _stream->flush();
   drainEcho();            // swallow our own echo + radio's OK/NG (0xFB/0xFA)
@@ -3028,12 +3116,16 @@ bool CivRig::drainEcho(uint32_t timeoutMs) {
 #if CIV_DEBUG
   uint8_t rx[40]; size_t rn = 0;
 #endif
+  // Capture received bytes for the on-device serial monitor (separate small
+  // buffer so it works even when CIV_DEBUG is off).
+  uint8_t mon[48]; size_t mn = 0;
   while (millis() - t0 < timeoutMs) {
     while (_stream->available()) {
       uint8_t b = (uint8_t)_stream->read();
 #if CIV_DEBUG
       if (rn < sizeof(rx)) rx[rn++] = b;
 #endif
+      if (mn < sizeof(mon)) mon[mn++] = b;
       if (b == 0xFD) fd++;
       t0 = millis();
     }
@@ -3041,6 +3133,7 @@ bool CivRig::drainEcho(uint32_t timeoutMs) {
     if (fd >= 1 && millis() - t0 > 25) break;  // echo seen, radio not replying
     delay(1);
   }
+  if (mn) catTrace("RX", mon, mn);     // report raw received bytes to the monitor
 #if CIV_DEBUG
   // Report only the radio's reply (ACK/NAK), not the echo of our own frame.
   for (size_t i = 0; i + 5 < rn; ++i) {
@@ -3321,6 +3414,15 @@ void YaesuRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   send(catOn);
 }
 
+// Raw byte write for the serial-terminal diagnostic.
+bool YaesuRig::sendRaw(const uint8_t* b, size_t n) {
+  if (!_stream || !b || !n) return false;
+  _stream->write(b, n);
+  _stream->flush();
+  catTrace("TX", b, n);
+  return true;
+}
+
 uint8_t YaesuRig::modeCode(RigMode m) {
   switch (m) {                       // FT-847 operating-mode codes
     case RM_LSB: return 0x00;
@@ -3345,6 +3447,7 @@ void YaesuRig::freqToBcd(uint32_t hz, uint8_t out[4]) {
 bool YaesuRig::send(const uint8_t cmd[5]) {
   if (!_stream) return false;
   yaLog("TX", cmd, 5);
+  catTrace("TX", cmd, 5);
   _stream->write(cmd, 5);
   _stream->flush();
   delay(_postMs);              // Yaesu CAT dislikes back-to-back fast writes
@@ -3382,6 +3485,7 @@ bool YaesuRig::readSubFreq(uint32_t& hzOut) {
   while (_stream->available()) _stream->read();                 // flush stale bytes
   const uint8_t cmd[5] = { 0x00, 0x00, 0x00, 0x00, 0x13 };      // read SAT-RX
   yaLog("TX", cmd, 5);
+  catTrace("TX", cmd, 5);
   _stream->write(cmd, 5);
   _stream->flush();
   uint8_t r[5]; size_t n = 0; uint32_t t0 = millis();
@@ -3389,6 +3493,7 @@ bool YaesuRig::readSubFreq(uint32_t& hzOut) {
     if (_stream->available()) { r[n++] = (uint8_t)_stream->read(); t0 = millis(); }
     else delay(1);
   }
+  if (n) catTrace("RX", r, n);
 #if YAESU_DEBUG
   Serial.print("[CAT RX]");
   for (size_t i = 0; i < n; ++i) Serial.printf(" %02X", r[i]);
@@ -3479,6 +3584,15 @@ void KenwoodRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   _stream = hs;
 }
 
+// Raw byte write for the serial-terminal diagnostic.
+bool KenwoodRig::sendRaw(const uint8_t* b, size_t n) {
+  if (!_stream || !b || !n) return false;
+  _stream->write(b, n);
+  _stream->flush();
+  catTrace("TX", b, n);
+  return true;
+}
+
 char KenwoodRig::modeDigit(RigMode m) {
   switch (m) {                 // Kenwood mode codes
     case RM_LSB: return '1';
@@ -3494,6 +3608,7 @@ char KenwoodRig::modeDigit(RigMode m) {
 bool KenwoodRig::sendCmd(const String& cmd) {
   if (!_stream) return false;
   kwLog("TX", cmd);
+  catTrace("TX", (const uint8_t*)cmd.c_str(), cmd.length());
   _stream->print(cmd);
   _stream->flush();
   return true;
@@ -3527,6 +3642,7 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
     delay(1);
   }
   kwLog("RX", rx);
+  if (rx.length()) catTrace("RX", (const uint8_t*)rx.c_str(), rx.length());
   int i = rx.indexOf("FA");
   if (i >= 0 && (int)rx.length() >= i + 13) {       // "FA" + 11 digits
     uint32_t hz = 0; bool ok = false;
@@ -7344,6 +7460,10 @@ void App::applyRadioFromCfg() {
   if (rig) { delete rig; rig = nullptr; }
   rig = makeRig(m, cfg.catType, cfg.catHost, cfg.catPort, cfg.catUser, cfg.catPass);
   if (!rig) return;
+  // CI-V wiring mode must be set before begin() (it decides one-pin vs two-pin
+  // UART setup). Only meaningful for wired CI-V; a no-op on Yaesu/Kenwood/LAN.
+  if (RADIOS[m].proto == PROTO_CIV && cfg.catType == CAT_WIRED)
+    rig->setPinMode(cfg.civPinMode);
   rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);   // net backend ignores UART args
   if (RADIOS[m].proto == PROTO_CIV)
     rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
@@ -9952,7 +10072,7 @@ void App::loop() {
       (screen == SCR_ORBIT && orbitPage <= 2) || screen == SCR_SUNMOON ||
       screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC ||
       (screen == SCR_MEMOS && memo.isRecording()) || screen == SCR_OSCAR || screen == SCR_GLOBE || screen == SCR_DXDOPP || screen == SCR_SKYMAP || screen == SCR_GPSPOS ||
-      (screen == SCR_SATSAT && !satsatComputed)) {
+      (screen == SCR_SATSAT && !satsatComputed) || screen == SCR_CATMON) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL) {
@@ -10093,6 +10213,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_GPS:      keyGps(c, enter, back); break;
     case SCR_HELP:     keyHelp(c, enter, back); break;
     case SCR_CATTEST:  keyCatTest(c, enter, back); break;
+    case SCR_CATMON:   keyCatMon(c, enter, back); break;
     case SCR_CHARGE:   keyCharge(c, enter, back); break;
     case SCR_ORBIT:    keyOrbit(c, enter, back); break;
     case SCR_SIM:      keySim(c, enter, back); break;
@@ -11373,7 +11494,7 @@ static const int SET_CAT_N = 4;
 static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Station / display", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,1,2,31,32,33,34,21,22,23,24,44,45,46,36,37,62};
+static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,54,48,49,25,43};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
@@ -11414,6 +11535,8 @@ void App::keySettings(char c, bool enter, bool back) {
                 int idx=2; for (int i=0;i<7;i++) if (bs[i]==cfg.civBaud) idx=i;
                 idx = (idx + dir + 7) % 7; cfg.civBaud = bs[idx];
                 cfg.save(); applyRadioFromCfg(); } break;
+      case 63: cfg.civPinMode = (uint8_t)((cfg.civPinMode + dir + 3) % 3);
+               cfg.save(); applyRadioFromCfg(); break;   // 0 TX/RX, 1 G2, 2 G1
       case 3: cfg.minPassEl = constrain(cfg.minPassEl + dir, 0, 30); cfg.save(); break;
       case 40: cfg.solarAct = (uint8_t)((cfg.solarAct + dir + 4) % 4); cfg.save(); break;
       case 43: cfg.wxUnits = (uint8_t)((cfg.wxUnits + dir + 3) % 3); cfg.save(); break;
@@ -11532,6 +11655,7 @@ void App::keySettings(char c, bool enter, bool back) {
       case 6: setStatus(connectWifiCfg() ? "WiFi OK" : "WiFi FAIL");
               break;
       case 62: runCatTest(); break;
+      case 64: enterCatMon(); break;   // open the CAT serial terminal/monitor
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
       case 55: cfg.loraEnable = !cfg.loraEnable; cfg.save();
@@ -11612,6 +11736,7 @@ void App::keySettings(char c, bool enter, bool back) {
 
 static Screen editHome(int t) {
   if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
+  if (t == 250) return SCR_CATMON;      // CAT monitor: raw hex send (cancel/commit)
   if (t == 600) return SCR_LOG;         // LoTW SAT_NAME prompt (abort export)
   if (t >= 500) return SCR_LOGENTRY;    // QSO log field edit
   if (t == 340) return SCR_TRACK;       // CTCSS tone override
@@ -11650,6 +11775,7 @@ void App::keyEdit(char c, bool enter, bool back) {
         } else setStatus("Bad grid (e.g. FM18lw)");
       } break;
       case 200: cfg.civAddr = (uint8_t)strtol(editBuf.c_str(), nullptr, 16); break;
+      case 250: catMonSendHex(editBuf); break;   // CAT monitor: transmit typed hex
       case 201: strncpy(cfg.ssid, editBuf.c_str(), sizeof(cfg.ssid)-1);
                 cfg.ssid[sizeof(cfg.ssid)-1] = 0; break;
       case 202: strncpy(cfg.pass, editBuf.c_str(), sizeof(cfg.pass)-1);
@@ -12623,6 +12749,7 @@ void App::draw() {
     case SCR_GPS:      drawGps(); break;
     case SCR_HELP:     drawHelp(); break;
     case SCR_CATTEST:  drawCatTest(); break;
+    case SCR_CATMON:   drawCatMon(); break;
     case SCR_CHARGE:   drawCharge(); break;
     case SCR_ORBIT:    drawOrbit(); break;
     case SCR_SIM:      drawSim(); break;
@@ -13404,6 +13531,116 @@ void App::keyCatTest(char c, bool enter, bool back) {
   if (isDown(c)) { catScroll++; lastDrawMs = 0; }
   if (isBack(c, back)) { setSel = 0; setCat = -1; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
 }
+
+// ===========================================================================
+//  CAT serial terminal / monitor (SCR_CATMON)
+// ===========================================================================
+// A diagnostic that shows raw CAT serial traffic (TX and RX, as hex) live on the
+// device, for all three wired protocols (CI-V, Yaesu, Kenwood). The operator can
+// also type a raw frame in hex and transmit it. It works by registering a trace
+// sink that every backend calls on each frame it sends or receives; the sink
+// routes through the App singleton (s_self) into a small ring buffer.
+//
+// WARNING surfaced in the UI and docs: typing raw frames transmits arbitrary
+// bytes to the radio. A malformed or wrong-address frame can mis-set the rig.
+
+// Static trampoline matching CatTraceFn; forwards to the live App instance.
+void App::catMonTrampoline(const char* dir, const uint8_t* b, size_t n) {
+  if (s_self) s_self->catMonPush(dir, b, n);
+}
+
+void App::catMonPush(const char* dir, const uint8_t* b, size_t n) {
+  bool isTx = (dir && dir[0] == 'T');
+  String line;
+  for (size_t i = 0; i < n && i < 32; ++i) {
+    char h[4]; snprintf(h, sizeof(h), "%02X ", b[i]);
+    line += h;
+  }
+  if (n > 32) line += "...";
+  catMonLines[catMonHead] = line;
+  catMonIsTx[catMonHead]  = isTx;
+  catMonHead = (catMonHead + 1) % CATMON_MAX;
+  if (catMonCount < CATMON_MAX) catMonCount++;
+  // If the operator is following the tail (scroll 0), stay there; otherwise hold
+  // their scroll position by advancing it as the ring rolls.
+  if (catMonScroll > 0 && catMonScroll < CATMON_MAX) catMonScroll++;
+}
+
+void App::enterCatMon() {
+  catMonCount = 0; catMonHead = 0; catMonScroll = 0;
+  catMonActive = true;
+  catTraceSink = &App::catMonTrampoline;   // start capturing
+  screen = SCR_CATMON; lastDrawMs = 0;
+}
+
+void App::drawCatMon() {
+  header("CAT serial monitor");
+  canvas.setTextSize(1);
+  const int rows = 8;
+  // Oldest-to-newest index of the ring. tail = most recent line.
+  int total = catMonCount;
+  int firstShown = total - rows - catMonScroll;   // scroll 0 => show newest rows
+  if (firstShown < 0) firstShown = 0;
+  for (int i = 0; i < rows; ++i) {
+    int idx = firstShown + i;
+    if (idx >= total) break;
+    // Map logical index (0 = oldest) to ring slot.
+    int slot = (catMonHead - total + idx + CATMON_MAX * 2) % CATMON_MAX;
+    bool tx = catMonIsTx[slot];
+    canvas.setTextColor(tx ? CL_CYAN : CL_GREEN, CL_BLACK);
+    canvas.setCursor(2, 20 + i * 12);
+    canvas.printf("%s %s", tx ? "T" : "R", catMonLines[slot].substring(0, 36).c_str());
+  }
+  if (total == 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(2, 20);
+    canvas.print("(no traffic yet)");
+    canvas.setCursor(2, 32);
+    canvas.print("engage CAT or press 's' to send");
+  }
+  footer("s send hex  ;/. scroll  ` back");
+}
+
+void App::keyCatMon(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) {
+    catTraceSink = nullptr;            // release the sink so there's no overhead
+    catMonActive = false;
+    setSel = 0; setCat = -1; screen = SCR_SETTINGS; lastDrawMs = 0; return;
+  }
+  if (c == 's') {                       // type a raw hex frame to transmit
+    editTarget = 250; editTitle = "Send hex (e.g. FE FE 4C E0 03 FD)";
+    editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+  if (isUp(c))   { if (catMonScroll < catMonCount) catMonScroll++; lastDrawMs = 0; }
+  if (isDown(c)) { if (catMonScroll > 0) catMonScroll--; lastDrawMs = 0; }
+}
+
+// Parse a string of hex byte tokens ("FE FE 4C E0 03 FD", spaces optional) and
+// transmit the bytes verbatim on the current CAT port via the backend's raw write.
+void App::catMonSendHex(const String& hex) {
+  uint8_t buf[48]; size_t n = 0; int hi = -1;
+  auto nib = [](char ch)->int {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    return -1;
+  };
+  for (size_t i = 0; i < hex.length() && n < sizeof(buf); ++i) {
+    int v = nib(hex[i]);
+    if (v < 0) {                        // separator: flush a pending nibble
+      if (hi >= 0) { buf[n++] = (uint8_t)hi; hi = -1; }
+      continue;
+    }
+    if (hi < 0) hi = v;                 // first nibble of a byte
+    else { buf[n++] = (uint8_t)((hi << 4) | v); hi = -1; }   // second completes it
+  }
+  if (hi >= 0 && n < sizeof(buf)) buf[n++] = (uint8_t)hi;    // trailing nibble
+  if (!n) { setStatus("No hex bytes parsed"); return; }
+  if (!rig || !rig->sendRaw(buf, n)) { setStatus("Send failed (no CAT port)"); return; }
+  setStatus(String("Sent ") + n + " byte(s)");
+}
+
 
 // ===========================================================================
 //  Charge / Sleep screen (Launcher-style low-power mode)
@@ -17854,7 +18091,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 63;
+  const int N = 65;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -17959,6 +18196,8 @@ void App::drawSettings() {
   rows[49] = String("Tilt tuning: ") + (!imuReady ? String("n/a (no IMU)")
                                                    : (cfg.tiltTune ? String("on") : String("off")));
   rows[62] = String("Run CAT self-test");
+  { const char* pm = (cfg.civPinMode == 1) ? "1-pin G2" : (cfg.civPinMode == 2) ? "1-pin G1" : "TX/RX (G2/G1)";
+    rows[63] = String("CI-V wiring: ") + pm; }
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

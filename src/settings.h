@@ -77,6 +77,13 @@ struct Settings {
   uint8_t  radioModel = RIG_IC9700;
   uint8_t  civAddr    = 0xA2;   // 0 => use model default
   uint32_t civBaud    = 19200;
+  // CI-V wiring mode (Icom wired CI-V only; ignored for Yaesu/Kenwood/LAN):
+  //   0 = separate TX/RX  -> G2 = TX, G1 = RX (the normal, most reliable path)
+  //   1 = single-pin on G2 -> one shared open-drain wire on G2 (G1 unused)
+  //   2 = single-pin on G1 -> one shared open-drain wire on G1 (G2 unused)
+  // Single-pin uses the real CI-V one-wire bus electrically; it is UNVERIFIED and
+  // the separate TX/RX path is recommended. See CIV_SINGLE_PIN.md.
+  uint8_t  civPinMode = 0;
   // CAT transport. CAT_NET drives the radio over the RS-BA1 LAN protocol using
   // the host/port/credentials below instead of the wired CI-V UART.
   uint8_t  catType    = CAT_WIRED;

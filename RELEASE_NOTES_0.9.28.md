@@ -1,9 +1,32 @@
-# CardSat v0.9.27 — Release Notes
+# CardSat v0.9.28 — Release Notes
 
-**0.9.27** is a point release over 0.9.26. The new items are the DX Doppler 1 kHz
-dial stepping, the passband-from-centre display, and the sat-to-sat usability
-changes below; everything after them carried over from earlier 0.9.x releases and
-is included here for completeness.
+**0.9.28** is a point release over 0.9.27. The new item is the experimental
+single-pin CI-V wiring option below; the DX Doppler 1 kHz dial stepping, the
+passband-from-centre display, and the sat-to-sat usability changes carried over from
+0.9.27, and everything after them from earlier 0.9.x releases, included here for
+completeness.
+
+## CAT serial monitor / terminal (diagnostic)
+
+A new **Settings -> Radio -> "CAT serial monitor"** opens a live, on-device view of
+raw CAT traffic -- every TX and RX frame shown as hex (TX cyan, RX green) -- for all
+three wired protocols (CI-V, Yaesu, Kenwood). It is built for bench debugging: you can
+finally watch on the Cardputer itself whether the radio is replying, with no laptop
+attached. Press **`s`** to type a raw frame in hex and transmit it; `;`/`.` scroll the
+log; `` ` `` exits. The monitor is passive otherwise -- it taps frames CardSat is
+already exchanging, so it does not contend with normal CAT operation. **Caution:**
+sending raw frames transmits arbitrary bytes to the radio and a wrong frame can mis-set
+the rig. Host-verified only.
+
+## Experimental: single-pin CI-V wiring (Icom only)
+
+A new **Settings -> Radio -> "CI-V wiring"** option lets Icom CI-V run over a single
+shared open-drain GPIO instead of separate TX/RX wires, matching CI-V's true one-wire
+electrical nature. Choices are **TX/RX (G2/G1)** (default, recommended), **1-pin G2**,
+and **1-pin G1**. This is **UNVERIFIED** and the separate TX/RX path remains the
+recommended, more reliable option; single-pin depends on open-drain behaviour and an
+external pull-up. Yaesu/Kenwood/LAN are unaffected. See `CIV_SINGLE_PIN.md`, and mind
+the 5 V / 3.3 V cautions before wiring.
 
 ## DX Doppler: 1 kHz dial stepping + passband shown from centre
 

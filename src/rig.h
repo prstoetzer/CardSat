@@ -99,6 +99,15 @@ public:
   virtual void    setAddress(uint8_t) {}
   virtual uint8_t address() const { return 0; }
 
+  // CI-V wiring mode (Icom wired only; no-op elsewhere). Call before begin().
+  // 0 = separate TX/RX, 1 = single-pin on TX (G2), 2 = single-pin on RX (G1).
+  virtual void    setPinMode(uint8_t) {}
+
+  // Raw serial diagnostics: write arbitrary bytes straight to the CAT port (the
+  // serial-terminal tool). Returns false if the backend has no byte stream (e.g.
+  // the Icom LAN backend, which is packetized, not a raw UART). Default: no-op.
+  virtual bool    sendRaw(const uint8_t*, size_t) { return false; }
+
   // Map a SatNOGS/AMSAT mode string ("FM","USB","CW","DATA"...) to a RigMode.
   static RigMode modeFromString(const String& s);
 };
@@ -153,3 +162,11 @@ private:
 // which case host/port/user/pass configure the RS-BA1 UDP connection.
 Rig* makeRig(RadioModel model, uint8_t catType = 0, const char* host = "",
              uint16_t port = 50001, const char* user = "", const char* pass = "");
+
+// CAT serial trace sink. When set (by the serial-terminal screen), every backend
+// reports each raw CAT frame it sends or receives here: dir is "TX" or "RX", b/n
+// are the raw bytes. Off (nullptr) by default so there is zero overhead normally.
+// Used only for the on-device diagnostic monitor; does not affect operation.
+typedef void (*CatTraceFn)(const char* dir, const uint8_t* b, size_t n);
+extern CatTraceFn catTraceSink;
+void catTrace(const char* dir, const uint8_t* b, size_t n);  // safe wrapper (null-checks)

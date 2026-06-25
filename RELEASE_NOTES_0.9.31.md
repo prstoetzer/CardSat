@@ -1,9 +1,46 @@
-# CardSat v0.9.30 — Release Notes
+# CardSat v0.9.31 — Release Notes
 
-**0.9.30** is a point release over 0.9.29. The new items are smoother manual-tuning
-behavior (less "fighting the dial") and a selectable downlink VFO for beacon /
-receive-only entries. The single-pin CI-V hardware support and the CAT serial monitor
-shipped in 0.9.29 and are summarized below for reference.
+**0.9.31** is a point release over 0.9.30. It adds four observer/operator features:
+**visual pass predictions**, **decay/reentry watch flags**, **Sun/Moon transit
+predictions**, and **per-satellite operating notes**. The smoother manual-tuning
+behavior, the selectable beacon/receive-only downlink VFO, and the rig-polling CAT
+serial monitor shipped in 0.9.30 and are summarized below for reference.
+
+## Visual pass predictions ("can I see it?")
+
+The pass schedule now flags **visually observable** passes — satellite sunlit,
+your sky dark, and the bird high enough — with a yellow `*`, and the pass-detail
+screen shows a verdict and the reason ("Visible: YES", or "daylight" / "sat in
+shadow" / "too low"). New settings (*Settings -> Station*): **Visible passes** on/off,
+a **Sky-dark gate** (civil -6 / nautical -12 / astronomical -18), and a **Visible min
+el**. Turns the schedule into a "what can I go outside and watch tonight" tool.
+
+## Decay / reentry watch flags
+
+The satellite list now shows a small coloured **down-arrow** on decaying orbits —
+yellow (watch), orange (decaying), red (reentry imminent) — derived from perigee
+altitude and the lifetime estimate, and the Orbital-analysis screen gained a
+**Perigee** line with the level. An at-a-glance cue to work a bird before it's gone,
+or to spot objects nearing reentry. It's an order-of-magnitude estimate from the
+elements, not a precise reentry date.
+
+## Sun / Moon transit predictions
+
+A new **transit finder** (press `t` on the Sun/Moon screen) scans the next 48 h for
+times the active satellite crosses or closely approaches the **Sun or Moon** from
+your location — the ISS-on-the-disc astrophotography event. It runs incrementally
+with a progress bar, then lists each event with a countdown, minimum separation,
+body elevation, and TRANSIT/conjunction label. It's a point prediction for your exact
+site. **Use proper solar filtering for any solar transit.**
+
+## Per-satellite operating notes
+
+Press **`N`** on the Track screen to attach a short **operating note** to a
+satellite (active modes, schedule, PL tone, your own reminders). It's keyed by NORAD,
+shows on Track (a `*` by the name and the note text), and persists across reboots and
+reflashes. A field notebook that travels with each bird.
+
+# From 0.9.30 (shipped previously, for reference)
 
 ## Smoother knob tracking (less "fighting the dial")
 

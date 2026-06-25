@@ -115,6 +115,11 @@ struct Settings {
   uint16_t doppLeadMs      = 50;  // predictive-lead cap (ms); 0 = lead off
   // Tracking
   float    minPassEl  = 5.0f;
+  // Visual-pass prediction: flag passes where the satellite is sunlit, the observer
+  // is in darkness, and the bird clears a min elevation -- "can I see it?".
+  bool     visPasses   = true;    // compute + show the visible-pass flag
+  int8_t   visSunElMax = -6;      // observer-darkness gate: Sun below this (deg). -6 civil, -12 naut, -18 astro
+  float    visMinEl    = 10.0f;   // min peak elevation to call a pass visible
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
   bool     irBeacon   = false;  // also flash the IR LED on each pass alert
                                 // (distinct flash count per event; user-built RX)

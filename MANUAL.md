@@ -277,6 +277,15 @@ not shown in any footer.
      to the radio — a malformed or wrong-address frame can mis-set the rig.
    - **Min pass el** — passes whose **peak elevation** never reaches this value are
      hidden from the pass lists and schedule (default 5°).
+   - **Visible passes** — when on, the schedule flags passes that are **visually
+     observable** (satellite sunlit, sky dark at your location, and the bird high
+     enough) with a yellow `*`, and the pass-detail screen shows a verdict
+     ("Visible: YES", or the reason it isn't — daylight, satellite in shadow, or too
+     low). **Sky-dark gate** chooses how dark the sky must be — civil (Sun −6°),
+     nautical (−12°), or astronomical (−18°) — and **Visible min el** is the minimum
+     peak elevation to count (default 10°). This turns the schedule into a "what can
+     I go outside and watch" tool; the ISS and other bright objects light up `*` on a
+     good evening pass.
    - **WiFi SSID / WiFi pass** — enter your network, then **Save & test WiFi**.
      On the **WiFi SSID** row you can instead press **`s`** to **scan** for nearby
      networks, pick one from the list (strongest first; `*` = secured), and then
@@ -457,6 +466,15 @@ page](https://www.amsat.org/status/) and are refreshed whenever you run
 **Update** (see [§GP source](#14-gp-age-and-accuracy)). Matching is by base
 designator, so it works for AMSAT-named birds; satellites loaded from CelesTrak
 categories usually won't match and simply show no mark.
+
+Each row may also show a small **down-arrow** to the left of the activity mark — a
+**decay flag** for orbits that are dropping. It's coloured by severity: **yellow**
+(watch), **orange** (decaying), or **red** (reentry imminent), derived from the
+satellite's perigee altitude and the lifetime estimate (see the **Perigee** line on
+the Orbital-analysis screen). It's an at-a-glance "this bird is on its way down" cue
+— useful for working a satellite before it's gone, and for spotting objects nearing
+reentry. The level is an order-of-magnitude estimate from the elements, **not** a
+precise reentry prediction; for that, consult CelesTrak or Space-Track.
 
 ### Orbital analysis (`o`)
 
@@ -793,6 +811,12 @@ Controls:
   OscarWatch and the SDR-Control apps handle receive-only birds.
 - `c` — set the **CTCSS/PL tone** for this satellite (numeric entry: a tone in
   Hz, `0` to force it off, or blank to revert to the built-in default).
+- `N` — edit a **per-satellite operating note**: a short free-text reminder that
+  travels with the bird (active modes, schedule, "PL 67.0, use high passes," your
+  own observations). It's stored by NORAD and shown on the Track screen — a `*`
+  appears next to the satellite name in the header and the note text on its own
+  line. Leave it blank to clear. Notes persist across reboots and reflashes (in
+  `notes.txt`).
 - `k` — on a **linear (SSB/CW) transponder**, toggle **CW mode on both legs** so
   you can work CW through the bird instead of SSB. CardSat sets CW on the uplink
   and downlink; on an inverting transponder the sideband flips but CW is CW on both
@@ -1640,6 +1664,23 @@ galactic source), **Cygnus A**, the **galactic centre (Sgr A\*)**, the **Crab
 nebula (Tau A)**, and **Virgo A (M87)**, plus a few bright stars (Polaris, Vega,
 Antares) for orientation. Positions use the same low-precision ephemeris as the
 Moon — far finer than any amateur beamwidth.
+
+#### Sun / Moon transits (`t`)
+
+Press **`t`** on the Sun/Moon screen to open the **transit finder** for the active
+satellite. It scans the next **48 hours** for times the satellite passes in front of
+(or close to) the **Sun or Moon** as seen from your location — the dramatic
+astrophotography event where the ISS is silhouetted on the solar or lunar disc. The
+scan runs incrementally with a progress bar (it never blocks the device), then lists
+each close approach: the body (Sun/Moon), a countdown to the event, the minimum
+angular separation, the body's elevation, and whether it's a true **TRANSIT** (the
+satellite crosses the disc) or a near **conjunction**. Press `r` to rescan, `;`/`.`
+to move the selection.
+
+Because the ground path of a transit is only a few kilometres wide, this is a
+**point prediction for your exact location** — moving a few km changes it, and fresh
+elements matter for the centre-line. **Never observe a solar transit without proper
+solar filtering on your eyes and optics.**
 
 ### Space weather
 

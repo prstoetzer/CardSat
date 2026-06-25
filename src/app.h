@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -37,6 +37,8 @@ struct SchedEntry {
   time_t   aos = 0, los = 0;
   float    maxEl = 0;
   bool     inProgress = false;
+  bool     visible = false;     // visually observable (sunlit + observer dark + high enough)
+  uint8_t  visWhy = 0;          // 0 not-eval, 1 visible, 2 daylight, 3 sat-in-shadow, 4 too-low
 };
 
 // One QSO being entered on the log screen (snapshotted auto fields + typed fields).
@@ -274,6 +276,38 @@ private:
   void      satsatStartJob();        // begin/refresh the incremental search
   void      satsatJobTick();         // advance the job a little; called from loop()
   void      satsatAbortJob();        // free buffers + stop (on leaving the screen)
+
+  // ---- Sun/Moon transit finder (SCR_TRANSIT) ------------------------------
+  // Scans the next ~48 h for times the active satellite passes close to the Sun
+  // or Moon as seen from the observer. Incremental (a chunk per loop tick) so it
+  // never blocks: coarse 2 s steps, refined locally around each close approach.
+  struct TransitHit {
+    time_t  t;          // time of minimum separation (UTC)
+    float   sepDeg;     // minimum angular separation (deg)
+    float   bodyEl;     // body elevation at that time (deg)
+    uint8_t body;       // 0 = Sun, 1 = Moon
+    bool    central;    // true if separation < body radius (true transit), else conjunction
+  };
+  static const int TRANSIT_MAX = 16;       // results cap
+  static const long TRANSIT_WIN_S = 48*3600;   // search window (s)
+  static const int  TRANSIT_STEP_S = 2;        // coarse scan step (s)
+  TransitHit transitHits[TRANSIT_MAX];
+  int        transitN = 0;
+  int        transitSel = 0;
+  int        transitJobPhase = 0;          // 0 idle / 1 scanning
+  long       transitJobOff = 0;            // seconds offset into the window (progress)
+  time_t     transitT0 = 0;                // window start
+  int        transitJobPct = 0;
+  float      transitSep1[2] = {0, 0};      // separation one step ago, per body (0=Sun,1=Moon)
+  float      transitSep2[2] = {0, 0};      // separation two steps ago, per body
+  uint8_t    transitHist[2] = {0, 0};      // how many valid prior samples per body (0..2)
+  float      transitMaxThreshDeg = 1.0f;   // report transits + conjunctions within this
+  void       transitStartJob();
+  void       transitJobTick();
+  void       drawTransit();
+  void       keyTransit(char c, bool enter, bool back);
+  // angular separation (deg) between two az/el points
+  static float angSepDeg(double az1, double el1, double az2, double el2);
   void drawSatSat();
   void keySatSat(char c, bool enter, bool back);
   // LoRa text messaging (SCR_MESSAGES): broadcast group chat between CardSats on
@@ -662,14 +696,26 @@ private:
   const char* wxWindUnit();                // "mph" / "km/h" / "m/s" per cfg.wxUnits
   void loadSpaceWeather();                 // load cached F10.7 from flash at boot
   double decayDensityScale() const;        // density scale for the decay point estimate
+  uint8_t decayLevelFor(const SatEntry& s); // 0 none / 1 watch / 2 soon / 3 imminent (list flag)
   void loadCalForSat(uint32_t norad);      // per-satellite calibration -> calDl/calUl
   void saveCalForSat(uint32_t norad);      // persist current calDl/calUl for this sat
+  // Per-satellite operating notes (keyed by NORAD, persisted in FILE_NOTES).
+  static constexpr int NOTE_MAX = 120;     // max note length (chars), no-PSRAM cap
+  static constexpr int NOTE_FILE_MAX = 64; // max stored notes (file-size cap)
+  char     satNote[NOTE_MAX + 1] = {0};    // active satellite's note (RAM)
+  void     loadNoteForSat(uint32_t norad); // fills satNote from FILE_NOTES (or "")
+  void     saveNoteForSat(uint32_t norad, const char* text);  // persist/clear a note
+  bool     satHasNote(uint32_t norad);     // quick test for the list glyph
   void loadFavs();
   void saveFavs();
   bool isFav(uint32_t norad) const;
   void toggleFav(uint32_t norad);
   void buildSatView();                     // (re)build the filtered satellite list
   void buildSchedule();                    // next pass for every favorite, sorted
+  // Evaluate whether a pass is visually observable (satellite sunlit, observer in
+  // darkness, peak elevation over the gate). Samples the above-horizon interval.
+  // Returns the visWhy code and sets vis=true when observable.
+  uint8_t visEvalPass(time_t aos, time_t los, float maxEl, bool& vis);
   void buildPassDetail(const PassPredict& p);  // sample one pass into pdEl/pdAz/pdSunlit
   void buildPolarPath();                       // sample current/next pass for the live polar
   void computeMutual(const String& grid);      // co-visibility windows vs a DX grid

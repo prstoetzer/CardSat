@@ -53,6 +53,9 @@ bool Settings::load() {
   doppLeadMs      = d["dplead"]| (uint16_t)50;
   if (doppLeadMs > 100) doppLeadMs = 100;
   minPassEl  = d["minel"] | 5.0f;
+  visPasses   = d["vispass"] | true;
+  visSunElMax = (int8_t)(int)(d["vissun"] | -6);
+  visMinEl    = d["visel"] | 10.0f;
   aosAlarm   = d["aosalarm"] | true;
   irBeacon   = d["irbeacon"] | false;
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
@@ -137,6 +140,7 @@ bool Settings::save() {
   d["catdly"] = catDelayMs;
   d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
+  d["vispass"] = visPasses; d["vissun"] = visSunElMax; d["visel"] = visMinEl;
   d["aosalarm"] = aosAlarm;
   d["irbeacon"] = irBeacon;
   d["beacon"] = beaconMHz;

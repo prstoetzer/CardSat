@@ -6,6 +6,20 @@ predictions**, and **per-satellite operating notes**. The smoother manual-tuning
 behavior, the selectable beacon/receive-only downlink VFO, and the rig-polling CAT
 serial monitor shipped in 0.9.30 and are summarized below for reference.
 
+## Upgrading
+
+Two prebuilt binaries ship with the release. **`CardSat.bin`** installs through
+**[Launcher](https://github.com/bmorcelli/Launcher)** and **preserves your saved data**
+(settings, calibration, per-satellite notes, favorites, cached elements) — the
+recommended path for an in-place update: drop the new file in Launcher's bin folder and
+pick CardSat. **`CardSat_Merged.bin`** is a complete standalone image for **M5Burner**
+or a **direct flash** at `0x0`; it carries an empty filesystem, so flashing it erases
+**internally-stored** data. Note that CardSat prefers a **microSD card** for storage, so
+**if you run with an SD card in, your configuration persists across any flash** — the
+data-loss case only applies to internal (no-SD) storage with a full merged flash.
+Confirm the new version on the **About** screen after flashing. Full details in the
+README and the manual (§5 Installing the firmware).
+
 ## Visual pass predictions ("can I see it?")
 
 The pass schedule now flags **visually observable** passes — satellite sunlit,
@@ -217,7 +231,7 @@ OscarWatch, SatPC32, and Gpredict. Outcomes:
   MAIN/SUB assignment, and any uplink PL tone are **manual front-panel** operations;
   CAT only Doppler-tunes within that layout. Their `0x07 D0/D1` bytes are band
   *access*, not a MAIN/SUB assignment.
-- **New [RADIO_SETTINGS.md](RADIO_SETTINGS.md)** — a per-radio settings and
+- **New [RADIO_SETTINGS.md](../interfaces/RADIO_SETTINGS.md)** — a per-radio settings and
   CAT-vs-manual capability reference covering all ten radios (recommended baud,
   read-back, sat-mode, tone, and what must be set up on the radio), with the
   cross-references to how Hamlib / OscarWatch / SatPC32 / Gpredict treat each rig.

@@ -111,6 +111,9 @@ private:
   int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
   int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
   bool     catMonActive = false;        // true while the screen owns the trace sink
+  bool     catMonPoll   = true;         // actively poll the rig so there's live traffic
+  uint32_t catMonLastPollMs = 0;        // millis() of the last monitor poll
+  static constexpr uint32_t CATMON_POLL_MS = 700;  // monitor heartbeat read interval
   int      catPass   = 0;        // tally for the summary line
   int      catFail   = 0;
   int      view[MAX_SATS];        // db indices currently shown
@@ -403,7 +406,30 @@ private:
                                   // move (OscarWatch "defer uplink after dial move"); lets the SUB
                                   // read + downlink settle before the bus is used for the MAIN uplink
   static constexpr uint32_t FREQ_GUARD_HZ = 2;   // skip a re-send within this many Hz of the last value
-  static constexpr uint32_t KNOB_MOVE_HZ  = 5;   // read-vs-last delta that counts as an operator knob move
+  // Operator-knob-move detection. A read-back that differs from the last value we
+  // wrote, by more than the threshold, is treated as a deliberate dial move (vs.
+  // rig tuning-step rounding or read-back jitter). The threshold is mode-aware --
+  // SSB/CW need fine resolution, FM channels are coarse -- following SatPC32, which
+  // uses ~100 Hz for SSB/CW and 500 Hz+ for FM. RIG_STEP_HZ is the rounding margin:
+  // most CAT rigs (Icom/Yaesu/Kenwood) resolve frequency to <=10 Hz, so a delta
+  // below this is rig rounding, never a knob move.
+  static constexpr uint32_t RIG_STEP_HZ      = 10;   // assumed worst-case rig freq resolution
+  static constexpr uint32_t KNOB_MOVE_SSB_HZ = 30;   // SSB/CW: deliberate dial move threshold
+  static constexpr uint32_t KNOB_MOVE_FM_HZ  = 250;  // FM: coarse, avoid chasing channelized jitter
+  // While the operator is actively turning the dial, stop pushing Doppler writes to
+  // the downlink for a short grace window so we never tug against the knob; we still
+  // read and adopt their new passband point each tick. Resumes correcting once they
+  // let go (no further moves for the window).
+  static constexpr uint32_t TUNE_GRACE_MS    = 400;  // quiet-down window after a detected knob move
+  uint32_t lastKnobMoveMs = 0;                       // millis() of the last detected dial move
+
+  // Mode-aware knob-move threshold for the active transponder (FM vs SSB/CW),
+  // floored at the rig's rounding step so quantization never reads as a move.
+  uint32_t knobMoveThreshHz(const Transponder& t) const {
+    bool fm = (Rig::modeFromString(t.mode) == RM_FM);
+    uint32_t base = fm ? KNOB_MOVE_FM_HZ : KNOB_MOVE_SSB_HZ;
+    return base > RIG_STEP_HZ ? base : RIG_STEP_HZ;
+  }
   static constexpr uint8_t  UPLINK_DEFER_TICKS = 1; // ticks to hold off the uplink write after a downlink
                                                     // write/knob move, so the SUB read + RX settle first
   // ---- CAT write deadband + adaptive threshold + predictive lead (OscarWatch-
@@ -544,7 +570,13 @@ private:
     return activeTxCount > 0 && activeTx[curTx].uplink == 0 && activeTx[curTx].downlink != 0;
   }
   bool dlOnSub() const {
-    if (txReceiveOnly()) return false;               // receive-only: downlink on MAIN
+    if (txReceiveOnly()) {                            // receive-only (beacon/telemetry)
+      switch (cfg.rxOnlyVfo) {
+        case RXO_MAIN: return false;                 // force downlink to MAIN (legacy)
+        case RXO_SUB:  return true;                  // force downlink to SUB
+        default: break;                              // RXO_FOLLOW: fall through to vfoType
+      }
+    }
     return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN;
   }
   bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }

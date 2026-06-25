@@ -12,6 +12,17 @@ enum VfoType : uint8_t {
   VFO_MAIN_DOWN_SUB_UP = 1,   // uplink on SUB,  downlink on MAIN
 };
 
+// Which VFO carries the downlink for receive-only transponders (beacons, telemetry,
+// SSTV, CW -- entries with a downlink but no uplink). Historically these were forced
+// to MAIN (some Icom rigs read MAIN back more reliably for receive-only), but that
+// overrides the operator's VFO layout and is disruptive when swapping to a beacon
+// mid-pass. This setting makes the choice explicit.
+enum RxOnlyVfo : uint8_t {
+  RXO_FOLLOW = 0,   // use the same downlink VFO as full transponders (per vfoType)
+  RXO_MAIN   = 1,   // force receive-only downlink to MAIN (legacy behaviour)
+  RXO_SUB    = 2,   // force receive-only downlink to SUB
+};
+
 // CAT transport for the (Icom) radio: the wired CI-V UART, or the RS-BA1 LAN
 // (UDP) protocol straight to the radio's network port (no PC/rigctld bridge).
 enum CatType : uint8_t {
@@ -94,6 +105,7 @@ struct Settings {
   // (CI-V is TTL serial only.) VFO roles + whether to command the rig's own
   // satellite mode when engaging radio control.
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
+  uint8_t  rxOnlyVfo  = RXO_FOLLOW;   // downlink VFO for receive-only (beacon) entries
   bool     satMode    = false;
   uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
   uint16_t catDelayMs = 70;    // pause after each CAT command before the next (ms)

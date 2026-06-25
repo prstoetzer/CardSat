@@ -211,7 +211,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.29";
+static constexpr const char* FW_VERSION = "0.9.30";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1670,6 +1670,17 @@ enum VfoType : uint8_t {
   VFO_MAIN_DOWN_SUB_UP = 1,   // uplink on SUB,  downlink on MAIN
 };
 
+// Which VFO carries the downlink for receive-only transponders (beacons, telemetry,
+// SSTV, CW -- entries with a downlink but no uplink). Historically these were forced
+// to MAIN (some Icom rigs read MAIN back more reliably for receive-only), but that
+// overrides the operator's VFO layout and is disruptive when swapping to a beacon
+// mid-pass. This setting makes the choice explicit.
+enum RxOnlyVfo : uint8_t {
+  RXO_FOLLOW = 0,   // use the same downlink VFO as full transponders (per vfoType)
+  RXO_MAIN   = 1,   // force receive-only downlink to MAIN (legacy behaviour)
+  RXO_SUB    = 2,   // force receive-only downlink to SUB
+};
+
 // CAT transport for the (Icom) radio: the wired CI-V UART, or the RS-BA1 LAN
 // (UDP) protocol straight to the radio's network port (no PC/rigctld bridge).
 enum CatType : uint8_t {
@@ -1752,6 +1763,7 @@ struct Settings {
   // (CI-V is TTL serial only.) VFO roles + whether to command the rig's own
   // satellite mode when engaging radio control.
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
+  uint8_t  rxOnlyVfo  = RXO_FOLLOW;   // downlink VFO for receive-only (beacon) entries
   bool     satMode    = false;
   uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
   uint16_t catDelayMs = 70;    // pause after each CAT command before the next (ms)
@@ -2085,6 +2097,9 @@ private:
   int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
   int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
   bool     catMonActive = false;        // true while the screen owns the trace sink
+  bool     catMonPoll   = true;         // actively poll the rig so there's live traffic
+  uint32_t catMonLastPollMs = 0;        // millis() of the last monitor poll
+  static constexpr uint32_t CATMON_POLL_MS = 700;  // monitor heartbeat read interval
   int      catPass   = 0;        // tally for the summary line
   int      catFail   = 0;
   int      view[MAX_SATS];        // db indices currently shown
@@ -2377,7 +2392,30 @@ private:
                                   // move (OscarWatch "defer uplink after dial move"); lets the SUB
                                   // read + downlink settle before the bus is used for the MAIN uplink
   static constexpr uint32_t FREQ_GUARD_HZ = 2;   // skip a re-send within this many Hz of the last value
-  static constexpr uint32_t KNOB_MOVE_HZ  = 5;   // read-vs-last delta that counts as an operator knob move
+  // Operator-knob-move detection. A read-back that differs from the last value we
+  // wrote, by more than the threshold, is treated as a deliberate dial move (vs.
+  // rig tuning-step rounding or read-back jitter). The threshold is mode-aware --
+  // SSB/CW need fine resolution, FM channels are coarse -- following SatPC32, which
+  // uses ~100 Hz for SSB/CW and 500 Hz+ for FM. RIG_STEP_HZ is the rounding margin:
+  // most CAT rigs (Icom/Yaesu/Kenwood) resolve frequency to <=10 Hz, so a delta
+  // below this is rig rounding, never a knob move.
+  static constexpr uint32_t RIG_STEP_HZ      = 10;   // assumed worst-case rig freq resolution
+  static constexpr uint32_t KNOB_MOVE_SSB_HZ = 30;   // SSB/CW: deliberate dial move threshold
+  static constexpr uint32_t KNOB_MOVE_FM_HZ  = 250;  // FM: coarse, avoid chasing channelized jitter
+  // While the operator is actively turning the dial, stop pushing Doppler writes to
+  // the downlink for a short grace window so we never tug against the knob; we still
+  // read and adopt their new passband point each tick. Resumes correcting once they
+  // let go (no further moves for the window).
+  static constexpr uint32_t TUNE_GRACE_MS    = 400;  // quiet-down window after a detected knob move
+  uint32_t lastKnobMoveMs = 0;                       // millis() of the last detected dial move
+
+  // Mode-aware knob-move threshold for the active transponder (FM vs SSB/CW),
+  // floored at the rig's rounding step so quantization never reads as a move.
+  uint32_t knobMoveThreshHz(const Transponder& t) const {
+    bool fm = (Rig::modeFromString(t.mode) == RM_FM);
+    uint32_t base = fm ? KNOB_MOVE_FM_HZ : KNOB_MOVE_SSB_HZ;
+    return base > RIG_STEP_HZ ? base : RIG_STEP_HZ;
+  }
   static constexpr uint8_t  UPLINK_DEFER_TICKS = 1; // ticks to hold off the uplink write after a downlink
                                                     // write/knob move, so the SUB read + RX settle first
   // ---- CAT write deadband + adaptive threshold + predictive lead (OscarWatch-
@@ -2518,7 +2556,13 @@ private:
     return activeTxCount > 0 && activeTx[curTx].uplink == 0 && activeTx[curTx].downlink != 0;
   }
   bool dlOnSub() const {
-    if (txReceiveOnly()) return false;               // receive-only: downlink on MAIN
+    if (txReceiveOnly()) {                            // receive-only (beacon/telemetry)
+      switch (cfg.rxOnlyVfo) {
+        case RXO_MAIN: return false;                 // force downlink to MAIN (legacy)
+        case RXO_SUB:  return true;                  // force downlink to SUB
+        default: break;                              // RXO_FOLLOW: fall through to vfoType
+      }
+    }
     return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN;
   }
   bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }
@@ -7140,6 +7184,8 @@ bool Settings::load() {
   strncpy(catUser, d["catuser"] | "", sizeof(catUser)-1); catUser[sizeof(catUser)-1]=0;
   strncpy(catPass, d["catpass"] | "", sizeof(catPass)-1); catPass[sizeof(catPass)-1]=0;
   vfoType    = d["vfotype"] | (uint8_t)VFO_MAIN_UP_SUB_DOWN;
+  rxOnlyVfo  = d["rxovfo"]  | (uint8_t)RXO_FOLLOW;
+  if (rxOnlyVfo > RXO_SUB) rxOnlyVfo = RXO_FOLLOW;
   satMode    = d["satmode"] | false;
   if (vfoType > VFO_MAIN_DOWN_SUB_UP) vfoType = VFO_MAIN_UP_SUB_DOWN;
   catRateMs  = d["catms"] | 500u;
@@ -7231,6 +7277,7 @@ bool Settings::save() {
   d["cattype"] = catType; d["cathost"] = catHost; d["catport"] = catPort;
   d["catuser"] = catUser; d["catpass"] = catPass;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
+  d["rxovfo"] = rxOnlyVfo;
   d["catdly"] = catDelayMs;
   d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
@@ -9955,6 +10002,7 @@ void App::loop() {
           uint32_t rxNow; bool txNow = false;
           bool transmitting = rig->readPtt(txNow) && txNow;
           bool knobMoved = false;
+          if (lastRxSet == 0) lastKnobMoveMs = 0;   // re-sync clears any stale grace window
           // Skip the knob read on (re)sync (lastRxSet==0): PUSH our current
           // passband point to the rig instead of adopting whatever freq it is
           // parked on (push-then-track). Also skip while transmitting -- the rig
@@ -9962,29 +10010,38 @@ void App::loop() {
           if (lastRxSet != 0 && !transmitting && rigReadDownlinkFreq(rxNow)) {
             double beta = L.rangeRate * 1000.0 / 299792458.0;
             // lastRxSet is the actual read-back freq, so a difference beyond the
-            // threshold is a deliberate operator knob move, not rig rounding.
+            // mode-aware threshold (floored at the rig's rounding step) is a
+            // deliberate operator knob move, not rig rounding or read-back jitter.
             uint32_t dHz = (rxNow > lastRxSet) ? rxNow - lastRxSet : lastRxSet - rxNow;
-            if (dHz > KNOB_MOVE_HZ) {
+            if (dHz > knobMoveThreshHz(t)) {
               double dlSat = ((double)rxNow - (double)calDl) / (1.0 - beta);
               int32_t off = (int32_t)llround(dlSat - (double)t.downlink);
               int32_t bw  = (int32_t)t.bandwidth();
               if (off < 0) off = 0; if (off > bw) off = bw;
               pbOffset = off;                       // new fixed satellite point
               knobMoved = true;
+              lastKnobMoveMs = ms;                  // open the tuning-grace window
             }
           }
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
+          // While the operator is actively tuning (within the grace window of the
+          // last detected move), don't write Doppler back to the downlink -- we'd
+          // only be tugging against the knob. We already adopted their new point
+          // above; just hold off the correction until they let go. The uplink is
+          // likewise deferred so it doesn't chase a moving downlink.
+          bool tuningNow = (lastKnobMoveMs != 0 && (ms - lastKnobMoveMs) < TUNE_GRACE_MS);
           // Downlink first; read it back (unless transmitting) so the rig's
           // rounding can't later look like a knob move.
-          bool dlWrote = (drvDL && t.downlink && driveDownlink(rx, !transmitting, threshHz));
+          bool dlWrote = (!tuningNow && drvDL && t.downlink && driveDownlink(rx, !transmitting, threshHz));
           // Uplink with a one-tick defer after a downlink write or operator knob
           // move (OscarWatch "defer uplink after a dial move"): consume any pending
           // defer, drive the uplink only if not currently deferred, then re-arm if
           // this tick wrote/moved the downlink. The "&& ulOk" guard means that
           // during a fast Doppler slew (downlink writing every tick) the uplink
-          // still services every other tick instead of starving.
-          driveUplinkDeferred(tx, threshHz, (dlWrote || knobMoved), drvUL && t.uplink);
+          // still services every other tick instead of starving. Held off entirely
+          // while the operator is actively tuning.
+          driveUplinkDeferred(tx, threshHz, (dlWrote || knobMoved), !tuningNow && drvUL && t.uplink);
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
@@ -9993,6 +10050,18 @@ void App::loop() {
         }
         applyCtcssForCurrentTx();   // FM uplink PL tone (only re-sends on change)
       }
+    }
+    // CAT serial-monitor heartbeat: while the monitor screen is open and polling is
+    // on, periodically read the rig's frequency so the screen always shows live
+    // traffic (the read frame is traced as TX, the reply as RX) -- without this the
+    // monitor is silent unless tracking happens to be sending. Skipped while the
+    // Doppler service is actively writing (radioOut) so the two don't collide, and
+    // only when the backend can actually read.
+    if (catMonActive && catMonPoll && !radioOut && rig && rig->ready() &&
+        rig->canReadFreq() && ms - catMonLastPollMs >= CATMON_POLL_MS) {
+      catMonLastPollMs = ms;
+      uint32_t hz;
+      (void)rigReadDownlinkFreq(hz);   // result unused; the trace taps show TX+RX
     }
     // Rotator pointing (independent of radio output). Rotators are slow, so
     // update at ~1 Hz and only when az/el has moved past the deadband.
@@ -11540,7 +11609,7 @@ static const int SET_CAT_N = 4;
 static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Station / display", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,22,23,24,44,45,46,36,37,62,64};
+static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,40,7,54,48,49,25,43};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
@@ -11641,6 +11710,8 @@ void App::keySettings(char c, bool enter, bool back) {
                lastAzCmd = lastElCmd = -999.0f; break;
       case 21: cfg.vfoType = (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN)
                              ? VFO_MAIN_DOWN_SUB_UP : VFO_MAIN_UP_SUB_DOWN;
+               cfg.save(); break;
+      case 65: cfg.rxOnlyVfo = (uint8_t)((cfg.rxOnlyVfo + dir + 3) % 3);
                cfg.save(); break;
       case 22: cfg.satMode = !cfg.satMode; cfg.save(); break;
       case 23: { long v = (long)cfg.catRateMs + dir*10; if (v < 10) v = 10;
@@ -13615,6 +13686,7 @@ void App::catMonPush(const char* dir, const uint8_t* b, size_t n) {
 void App::enterCatMon() {
   catMonCount = 0; catMonHead = 0; catMonScroll = 0;
   catMonActive = true;
+  catMonLastPollMs = 0;                     // poll immediately on first service tick
   catTraceSink = &App::catMonTrampoline;   // start capturing
   screen = SCR_CATMON; lastDrawMs = 0;
 }
@@ -13642,9 +13714,11 @@ void App::drawCatMon() {
     canvas.setCursor(2, 20);
     canvas.print("(no traffic yet)");
     canvas.setCursor(2, 32);
-    canvas.print("engage CAT or press 's' to send");
+    canvas.print(catMonPoll ? "polling rig... check CAT wiring/baud"
+                            : "poll off: 'p' to poll, 's' to send");
   }
-  footer("s send hex  ;/. scroll  ` back");
+  footer(catMonPoll ? "s send  p poll:on  ;/. scroll  ` back"
+                    : "s send  p poll:off  ;/. scroll  ` back");
 }
 
 void App::keyCatMon(char c, bool enter, bool back) {
@@ -13658,6 +13732,7 @@ void App::keyCatMon(char c, bool enter, bool back) {
     editTarget = 250; editTitle = "Send hex (e.g. FE FE 4C E0 03 FD)";
     editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; return;
   }
+  if (c == 'p') { catMonPoll = !catMonPoll; lastDrawMs = 0; return; }   // toggle heartbeat poll
   if (isUp(c))   { if (catMonScroll < catMonCount) catMonScroll++; lastDrawMs = 0; }
   if (isDown(c)) { if (catMonScroll > 0) catMonScroll--; lastDrawMs = 0; }
 }
@@ -18137,7 +18212,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 65;
+  const int N = 66;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -18193,6 +18268,9 @@ void App::drawSettings() {
   rows[20] = String("GP source: ") + gpSourceLabel();
   rows[21] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
                                 ? "Main Up/Sub Dn" : "Main Dn/Sub Up");
+  { const char* rv = (cfg.rxOnlyVfo == RXO_MAIN) ? "Main"
+                   : (cfg.rxOnlyVfo == RXO_SUB)  ? "Sub" : "Follow VFO";
+    rows[65] = String("Beacon/RX-only DL: ") + rv; }
   rows[22] = String("Sat mode: ") + (cfg.satMode ? "on" : "off");
   {
     uint32_t eff = effectiveCatRateMs();

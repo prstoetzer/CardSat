@@ -40,6 +40,8 @@ bool Settings::load() {
   strncpy(catUser, d["catuser"] | "", sizeof(catUser)-1); catUser[sizeof(catUser)-1]=0;
   strncpy(catPass, d["catpass"] | "", sizeof(catPass)-1); catPass[sizeof(catPass)-1]=0;
   vfoType    = d["vfotype"] | (uint8_t)VFO_MAIN_UP_SUB_DOWN;
+  rxOnlyVfo  = d["rxovfo"]  | (uint8_t)RXO_FOLLOW;
+  if (rxOnlyVfo > RXO_SUB) rxOnlyVfo = RXO_FOLLOW;
   satMode    = d["satmode"] | false;
   if (vfoType > VFO_MAIN_DOWN_SUB_UP) vfoType = VFO_MAIN_UP_SUB_DOWN;
   catRateMs  = d["catms"] | 500u;
@@ -131,6 +133,7 @@ bool Settings::save() {
   d["cattype"] = catType; d["cathost"] = catHost; d["catport"] = catPort;
   d["catuser"] = catUser; d["catpass"] = catPass;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
+  d["rxovfo"] = rxOnlyVfo;
   d["catdly"] = catDelayMs;
   d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;

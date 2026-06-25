@@ -260,15 +260,21 @@ not shown in any footer.
    - **CI-V wiring** — *(Icom wired CI-V only)* choose **TX/RX (G2/G1)** — the normal,
      recommended separate-wire path — or a **single-pin** mode (**1-pin G2** or
      **1-pin G1**) that drives the whole CI-V bus over one shared open-drain GPIO.
-     Single-pin is **unverified**; prefer TX/RX. See `CIV_SINGLE_PIN.md` and mind the
-     5 V/3.3 V cautions before wiring.
+     Single-pin is confirmed working on hardware (verified on an IC-821) but still
+     needs correct 5 V/3.3 V level interfacing; the separate TX/RX path is simplest.
+     See `CIV_SINGLE_PIN.md` and mind the level cautions before wiring.
    - **CAT serial monitor** — opens a live diagnostic that shows raw CAT traffic
      (TX in cyan, RX in green) as hex, for any wired protocol (CI-V, Yaesu, Kenwood).
-     Press **`s`** to type a raw frame in hex (e.g. `FE FE 4C E0 03 FD`) and transmit
-     it; `;`/`.` scroll back through the log; `` ` `` exits. **Caution:** sending raw
-     frames transmits arbitrary bytes to the radio — a malformed or wrong-address frame
-     can mis-set the rig. The monitor is passive otherwise (it only displays traffic
-     that CardSat is already exchanging).
+     While open it **actively polls the rig** (~once per 700 ms) by reading the
+     downlink frequency, so you always see live traffic — your read request as TX and
+     the radio's reply as RX — making it a real bench check of the CAT link with no
+     satellite pass required. Press **`p`** to toggle polling off for a purely passive
+     view; **`s`** to type a raw frame in hex (e.g. `FE FE 4C E0 03 FD`) and transmit
+     it; `;`/`.` scroll back through the log; `` ` `` exits. Polling pauses
+     automatically while Doppler tracking is engaged so the two don't collide. If you
+     see "(no traffic yet)" with polling on, check the CAT wiring, baud, and (for
+     Icom) the CI-V address. **Caution:** sending raw frames transmits arbitrary bytes
+     to the radio — a malformed or wrong-address frame can mis-set the rig.
    - **Min pass el** — passes whose **peak elevation** never reaches this value are
      hidden from the pass lists and schedule (default 5°).
    - **WiFi SSID / WiFi pass** — enter your network, then **Save & test WiFi**.
@@ -283,6 +289,12 @@ not shown in any footer.
    - **AOS alarm** — on/off for the pre-pass beeps.
    - **VFO Type** — which physical VFO carries each leg: *Main Up/Sub Dn* (default)
      or *Main Dn/Sub Up*.
+   - **Beacon/RX-only DL** — which VFO carries the downlink for receive-only entries
+     (beacons, telemetry, SSTV, CW — anything with a downlink but no uplink). *Follow
+     VFO* (default) puts it on the same VFO as a normal transponder downlink, per VFO
+     Type; *Main* or *Sub* force it to that VFO. Use *Follow VFO* if swapping to a
+     beacon mid-pass moves your receive to the wrong VFO; force *Main* only if your
+     rig reads that VFO back more reliably for receive-only.
    - **Sat mode** — command the rig's own satellite mode on/off when you engage CAT
      (a no-op on rigs without CAT sat mode, including the IC-820/821/970 — engage
      SAT on those from the front panel).
@@ -1374,6 +1386,17 @@ On a **linear transponder** you can move through the passband two ways:
 For an **inverting** transponder the uplink moves opposite to the downlink (tune
 the downlink up, the uplink goes down); for a non-inverting one they track
 together. CardSat handles the mapping automatically.
+
+> **Smoother knob tracking.** When you turn the radio's knob in FULL or
+> downlink-only mode, CardSat distinguishes a deliberate dial move from the rig's
+> own tuning-step rounding and read-back jitter using a **mode-aware threshold**
+> (about 30 Hz on SSB/CW, 250 Hz on FM, never below the rig's tuning step). The
+> moment it detects a real move it adopts your new spot and then **holds off its
+> own Doppler writes for a short grace window (~400 ms)** so it never tugs against
+> the knob while you're turning — it resumes correcting once you let go. If you ever
+> find tracking feels slightly sticky or slightly loose for your operating style,
+> these are the `KNOB_MOVE_SSB_HZ`, `KNOB_MOVE_FM_HZ`, and `TUNE_GRACE_MS` constants
+> in the firmware.
 
 ### Sidebands
 

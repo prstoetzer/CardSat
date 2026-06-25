@@ -1,37 +1,48 @@
-# CardSat v0.9.29 — Release Notes
+# CardSat v0.9.30 — Release Notes
 
-**0.9.29** is a point release over 0.9.28. The headline is that **single-pin CI-V
-wiring now works end-to-end on real hardware** (verified on an IC-821: full
-bidirectional CI-V over one shared open-drain wire, frequency reads and ACKs). It also
-carries the CAT serial monitor and the other 0.9.28 items, plus the earlier 0.9.x
-features, included here for completeness.
+**0.9.30** is a point release over 0.9.29. The new items are smoother manual-tuning
+behavior (less "fighting the dial") and a selectable downlink VFO for beacon /
+receive-only entries. The single-pin CI-V hardware support and the CAT serial monitor
+shipped in 0.9.29 and are summarized below for reference.
 
-## Single-pin CI-V: working bidirectionally on hardware
+## Smoother knob tracking (less "fighting the dial")
 
-The experimental single-pin CI-V mode (*Settings -> Radio -> CI-V wiring -> 1-pin G2 /
-1-pin G1*) is now confirmed working: CardSat drives and receives the full CI-V exchange
-over **one shared GPIO**, exactly like a real CI-V one-wire bus. Getting there required
-solving a chain of ESP32-S3 pin-mux issues -- UART signal inversion (idled the line
-low), the `uart_set_pin` same-pad routing disabling TX, and `gpio_set_direction`
-detaching the UART output and parking the pad low. The final setup: `begin(pin, pin)`
-for a real driving UART on the shared pad, clear UART inversion, enable open-drain via
-the pad register (`pad_driver`) so the UART output stays attached and the line idles
-high, and re-assert the RX input signal so replies are heard. On a one-wire bus CardSat
-hears its own echo followed by the radio's reply; the existing `drainEcho()` handles
-that. Still requires correct 5 V / 3.3 V level interfacing to the radio -- see
-`CIV_SINGLE_PIN.md`. The separate TX/RX path remains the simplest, most robust option.
+Manual tuning during Doppler correction is much less likely to fight the operator's
+knob. Three changes, informed by how Gpredict and SatPC32 handle the same problem:
+the operator-knob-move threshold is now **mode-aware** (about 30 Hz on SSB/CW, 250 Hz
+on FM) instead of a too-tight fixed 5 Hz that mistook rig rounding and read-back jitter
+for dial moves; the threshold is **floored at the rig's tuning step** so quantization
+never reads as a move; and a short **tuning-grace window** holds off Doppler writes for
+~400 ms after a detected dial move, so CardSat stops pushing back while you are actively
+tuning and resumes correcting once you let go.
 
-## CAT serial monitor / terminal (diagnostic)
+## Beacon / receive-only downlink VFO is now selectable
 
-A new **Settings -> Radio -> "CAT serial monitor"** opens a live, on-device view of
-raw CAT traffic -- every TX and RX frame shown as hex (TX cyan, RX green) -- for all
-three wired protocols (CI-V, Yaesu, Kenwood). It is built for bench debugging: you can
-finally watch on the Cardputer itself whether the radio is replying, with no laptop
-attached. Press **`s`** to type a raw frame in hex and transmit it; `;`/`.` scroll the
-log; `` ` `` exits. The monitor is passive otherwise -- it taps frames CardSat is
-already exchanging, so it does not contend with normal CAT operation. **Caution:**
-sending raw frames transmits arbitrary bytes to the radio and a wrong frame can mis-set
-the rig. Host-verified only.
+A new **Settings -> Radio -> "Beacon/RX-only DL"** option chooses which VFO carries the
+downlink for receive-only entries (beacons, telemetry, SSTV, CW). Previously these were
+always forced to MAIN, which overrode your VFO layout and was disruptive when swapping
+to a beacon mid-pass. Choose *Follow VFO* (default) to keep the downlink on the same VFO
+as a normal transponder, or force *Main* / *Sub*.
+
+## CAT serial monitor now polls the rig
+
+The CAT serial monitor (*Settings -> Radio -> CAT serial monitor*) was passive -- it
+only showed traffic that tracking happened to be sending, so opening it without a pass
+in progress showed "(no traffic yet)" and never updated. It now **actively polls** the
+rig (~once per 700 ms) while open, so you always see live frames -- your read request as
+TX and the radio's reply as RX -- which makes it a real bench diagnostic for the CI-V
+link with no satellite pass required. Press **`p`** to toggle polling off for a purely
+passive view. Polling pauses automatically while Doppler tracking is engaged so the two
+don't collide.
+
+## From 0.9.29 (for reference)
+
+**Single-pin CI-V** works end-to-end on hardware (verified on an IC-821): CardSat drives
+and receives the full CI-V exchange over one shared open-drain GPIO. Select it in
+*Settings -> Radio -> CI-V wiring -> 1-pin G2 / 1-pin G1*; still needs correct 5 V /
+3.3 V level interfacing (see `CIV_SINGLE_PIN.md`). The separate TX/RX path remains the
+simplest option. The **CAT serial monitor** (*Settings -> Radio -> CAT serial monitor*)
+shows live raw CI-V/Yaesu/Kenwood traffic as hex with raw-hex send for diagnostics.
 
 ## DX Doppler: 1 kHz dial stepping + passband shown from centre
 

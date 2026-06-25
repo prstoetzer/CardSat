@@ -17,12 +17,21 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > network client, PstRotator UDP, the new rigctld/rotctld servers, and the direct-Yaesu I²C interface) are host-tested but have **not** yet driven a real
 > radio or rotator — verify those on the air. See **[Things to verify](#things-to-verify)**.
 
+> **New in v0.9.30:** **smoother manual tuning** — Doppler correction no longer fights
+> the dial. The operator-knob-move threshold is now mode-aware (≈30 Hz SSB/CW, 250 Hz
+> FM) and floored at the rig's tuning step, and a short grace window holds off Doppler
+> writes while you're actively turning, so CardSat stops pushing back and resumes once
+> you let go. Also new: a selectable **Beacon/RX-only downlink VFO** (*Settings → Radio
+> → Beacon/RX-only DL*) so swapping to a beacon mid-pass keeps the downlink on the VFO
+> you want instead of forcing MAIN. See
+> **[RELEASE_NOTES_0.9.30.md](RELEASE_NOTES_0.9.30.md)**.
+
 > **New in v0.9.29:** **single-pin CI-V now works end-to-end on hardware** — CardSat
 > drives and receives the full Icom CI-V exchange over one shared open-drain GPIO
 > (verified on an IC-821: frequency reads and ACKs over a single wire). Select it in
 > *Settings → Radio → CI-V wiring → 1-pin G2 / 1-pin G1*. The separate TX/RX path
 > remains the simplest option; single-pin still needs correct 5 V / 3.3 V level
-> interfacing — see **[RELEASE_NOTES_0.9.29.md](RELEASE_NOTES_0.9.29.md)** and
+> interfacing — see **[RELEASE_NOTES_0.9.30.md](RELEASE_NOTES_0.9.30.md)** and
 > `CIV_SINGLE_PIN.md`.
 
 > **New in v0.9.28:** the **CAT serial monitor** (*Settings → Radio → CAT serial
@@ -33,7 +42,7 @@ pass schedule, an AOS alarm, sun/eclipse status, and more.
 > *before* the multi-day search runs (instant cycling with `n`/`p`, calculate on
 > ENTER); **CW mode** on linear transponders; a low-power **Charge/Sleep** screen;
 > **LoRa message notifications**; and a fix so DX Doppler fixed-uplink/downlink truly
-> hold the dial. See **[RELEASE_NOTES_0.9.29.md](RELEASE_NOTES_0.9.29.md)**.
+> hold the dial. See **[RELEASE_NOTES_0.9.30.md](RELEASE_NOTES_0.9.30.md)**.
 
 > **New in v0.9.22:** **voice memo now records on the Cardputer ADV** (the ADV's
 > ES8311 mic codec is initialized correctly), and **downloads no longer freeze the

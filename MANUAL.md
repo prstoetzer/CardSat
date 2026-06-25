@@ -1392,8 +1392,10 @@ together. CardSat handles the mapping automatically.
 > own tuning-step rounding and read-back jitter using a **mode-aware threshold**
 > (about 30 Hz on SSB/CW, 250 Hz on FM, never below the rig's tuning step). The
 > moment it detects a real move it adopts your new spot and then **holds off its
-> own Doppler writes for a short grace window (~400 ms)** so it never tugs against
-> the knob while you're turning — it resumes correcting once you let go. If you ever
+> own Doppler writes to the downlink for a short grace window (~400 ms)** so it never
+> tugs against the knob while you're turning — it resumes downlink correction once you
+> let go. The uplink isn't connected to your knob, so it **keeps following** your new
+> passband point immediately and tracks the move without lag. If you ever
 > find tracking feels slightly sticky or slightly loose for your operating style,
 > these are the `KNOB_MOVE_SSB_HZ`, `KNOB_MOVE_FM_HZ`, and `TUNE_GRACE_MS` constants
 > in the firmware.

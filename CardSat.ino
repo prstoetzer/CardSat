@@ -10026,22 +10026,23 @@ void App::loop() {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
           // While the operator is actively tuning (within the grace window of the
-          // last detected move), don't write Doppler back to the downlink -- we'd
+          // last detected move), don't write Doppler back to the DOWNLINK -- we'd
           // only be tugging against the knob. We already adopted their new point
-          // above; just hold off the correction until they let go. The uplink is
-          // likewise deferred so it doesn't chase a moving downlink.
+          // above. The UPLINK is not connected to the operator's knob, so it keeps
+          // following the adopted passband point immediately (suppressing it would
+          // just make the uplink lag the downlink, which it must not).
           bool tuningNow = (lastKnobMoveMs != 0 && (ms - lastKnobMoveMs) < TUNE_GRACE_MS);
           // Downlink first; read it back (unless transmitting) so the rig's
-          // rounding can't later look like a knob move.
+          // rounding can't later look like a knob move. Held off while tuning.
           bool dlWrote = (!tuningNow && drvDL && t.downlink && driveDownlink(rx, !transmitting, threshHz));
           // Uplink with a one-tick defer after a downlink write or operator knob
           // move (OscarWatch "defer uplink after a dial move"): consume any pending
           // defer, drive the uplink only if not currently deferred, then re-arm if
-          // this tick wrote/moved the downlink. The "&& ulOk" guard means that
-          // during a fast Doppler slew (downlink writing every tick) the uplink
-          // still services every other tick instead of starving. Held off entirely
-          // while the operator is actively tuning.
-          driveUplinkDeferred(tx, threshHz, (dlWrote || knobMoved), !tuningNow && drvUL && t.uplink);
+          // this tick wrote/moved the downlink. The defer guard means that during a
+          // fast Doppler slew (downlink writing every tick) the uplink still services
+          // every other tick instead of starving. Drives on a knob move so the
+          // uplink follows the new passband point right away.
+          driveUplinkDeferred(tx, threshHz, (dlWrote || knobMoved), drvUL && t.uplink);
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);

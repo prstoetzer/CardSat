@@ -14,7 +14,10 @@ on FM) instead of a too-tight fixed 5 Hz that mistook rig rounding and read-back
 for dial moves; the threshold is **floored at the rig's tuning step** so quantization
 never reads as a move; and a short **tuning-grace window** holds off Doppler writes for
 ~400 ms after a detected dial move, so CardSat stops pushing back while you are actively
-tuning and resumes correcting once you let go.
+tuning and resumes correcting once you let go. The tuning-grace
+window applies only to the **downlink** write (the leg connected to your knob); the
+**uplink keeps following** your new passband point immediately, so it tracks downlink
+moves without lag.
 
 ## Beacon / receive-only downlink VFO is now selectable
 

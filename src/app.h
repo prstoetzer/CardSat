@@ -702,6 +702,9 @@ private:
   // Per-satellite operating notes (keyed by NORAD, persisted in FILE_NOTES).
   static constexpr int NOTE_MAX = 120;     // max note length (chars), no-PSRAM cap
   static constexpr int NOTE_FILE_MAX = 64; // max stored notes (file-size cap)
+  // Max LoRa message text (chars). Must match the on-air LORA_TEXT_MAX in app.cpp;
+  // used to cap the compose field so long messages can't overflow the screen.
+  static constexpr int MSG_TEXT_MAX = 48;
   char     satNote[NOTE_MAX + 1] = {0};    // active satellite's note (RAM)
   void     loadNoteForSat(uint32_t norad); // fills satNote from FILE_NOTES (or "")
   void     saveNoteForSat(uint32_t norad, const char* text);  // persist/clear a note

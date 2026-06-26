@@ -102,8 +102,19 @@ bool Settings::load() {
   loraSf     = d["lorasf"] | (uint8_t)12;
   loraBwHz   = d["lorabw"] | (uint32_t)125000;
   loraTxDbm  = d["loratx"] | (int8_t)20;
+  msgNotify  = d["msgntfy"] | (uint8_t)1;
+  if (msgNotify > 2) msgNotify = 1;
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
+#ifdef CARDSAT_CFG_DEBUG
+  // Diagnostic: dump the LoRa group as read back, plus the raw JSON key presence,
+  // so a serial log shows whether SF persisted, was dropped, or mis-read.
+  Serial.printf("[cfg] load lora: en=%d rgn=%u fk=%lu sf=%u bw=%lu tx=%d  "
+                "(json has lorasf=%d)\n",
+                (int)loraEnable, loraRegion, (unsigned long)loraFreqKHz, loraSf,
+                (unsigned long)loraBwHz, (int)loraTxDbm,
+                (int)d["lorasf"].is<uint8_t>());
+#endif
   return true;
 }
 
@@ -160,9 +171,16 @@ bool Settings::save() {
   d["weben"]=webEnable; d["webport"]=webPort;
   d["loraen"]=loraEnable; d["lorargn"]=loraRegion; d["lorafk"]=loraFreqKHz; d["lorasf"]=loraSf;
   d["lorabw"]=loraBwHz; d["loratx"]=loraTxDbm;
+  d["msgntfy"]=msgNotify;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
-  serializeJson(d, f);
+  size_t wrote = serializeJson(d, f);
   f.close();
-  return true;
+#ifdef CARDSAT_CFG_DEBUG
+  // Diagnostic: report the serialized size and the SF value committed, so a
+  // partial/failed write (size 0 or short) or a wrong SF is visible on serial.
+  Serial.printf("[cfg] save: wrote %u bytes to %s, sf=%u\n",
+                (unsigned)wrote, FILE_CFG, loraSf);
+#endif
+  return wrote > 0;
 }

@@ -2690,6 +2690,9 @@ private:
   // Per-satellite operating notes (keyed by NORAD, persisted in FILE_NOTES).
   static constexpr int NOTE_MAX = 120;     // max note length (chars), no-PSRAM cap
   static constexpr int NOTE_FILE_MAX = 64; // max stored notes (file-size cap)
+  // Max LoRa message text (chars). Must match the on-air LORA_TEXT_MAX in app.cpp;
+  // used to cap the compose field so long messages can't overflow the screen.
+  static constexpr int MSG_TEXT_MAX = 48;
   char     satNote[NOTE_MAX + 1] = {0};    // active satellite's note (RAM)
   void     loadNoteForSat(uint32_t norad); // fills satNote from FILE_NOTES (or "")
   void     saveNoteForSat(uint32_t norad, const char* text);  // persist/clear a note
@@ -7298,8 +7301,19 @@ bool Settings::load() {
   loraSf     = d["lorasf"] | (uint8_t)12;
   loraBwHz   = d["lorabw"] | (uint32_t)125000;
   loraTxDbm  = d["loratx"] | (int8_t)20;
+  msgNotify  = d["msgntfy"] | (uint8_t)1;
+  if (msgNotify > 2) msgNotify = 1;
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
+#ifdef CARDSAT_CFG_DEBUG
+  // Diagnostic: dump the LoRa group as read back, plus the raw JSON key presence,
+  // so a serial log shows whether SF persisted, was dropped, or mis-read.
+  Serial.printf("[cfg] load lora: en=%d rgn=%u fk=%lu sf=%u bw=%lu tx=%d  "
+                "(json has lorasf=%d)\n",
+                (int)loraEnable, loraRegion, (unsigned long)loraFreqKHz, loraSf,
+                (unsigned long)loraBwHz, (int)loraTxDbm,
+                (int)d["lorasf"].is<uint8_t>());
+#endif
   return true;
 }
 
@@ -7356,11 +7370,18 @@ bool Settings::save() {
   d["weben"]=webEnable; d["webport"]=webPort;
   d["loraen"]=loraEnable; d["lorargn"]=loraRegion; d["lorafk"]=loraFreqKHz; d["lorasf"]=loraSf;
   d["lorabw"]=loraBwHz; d["loratx"]=loraTxDbm;
+  d["msgntfy"]=msgNotify;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
-  serializeJson(d, f);
+  size_t wrote = serializeJson(d, f);
   f.close();
-  return true;
+#ifdef CARDSAT_CFG_DEBUG
+  // Diagnostic: report the serialized size and the SF value committed, so a
+  // partial/failed write (size 0 or short) or a wrong SF is visible on serial.
+  Serial.printf("[cfg] save: wrote %u bytes to %s, sf=%u\n",
+                (unsigned)wrote, FILE_CFG, loraSf);
+#endif
+  return wrote > 0;
 }
 
 
@@ -12357,7 +12378,8 @@ void App::keyEdit(char c, bool enter, bool back) {
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
     }
     if (!(editTarget == 600 && editBuf.length() >= 6) &&
-        !(editTarget == 260 && (int)editBuf.length() >= NOTE_MAX)) editBuf += c;  // caps
+        !(editTarget == 260 && (int)editBuf.length() >= NOTE_MAX) &&
+        !(editTarget == 700 && (int)editBuf.length() >= MSG_TEXT_MAX)) editBuf += c;  // caps
   }
 }
 
@@ -15699,7 +15721,7 @@ void App::loraPoll() {
   // already, or in charge/sleep mode) raise a brief cross-screen banner and an
   // opt-in beep. cfg.msgNotify: 0=off, 1=banner, 2=banner+beep.
   if (screen == SCR_MESSAGES) {
-    lastDrawMs = 0;                                 // visible already: just refresh
+    lastDrawMs = 0; draw();                          // visible already: refresh now
   } else {
     if (msgUnread < 0xFFFF) msgUnread++;
     strncpy(msgLastFrom, from[0] ? from : "?", sizeof(msgLastFrom) - 1);
@@ -15773,9 +15795,14 @@ void App::drawMessages() {
     int idx = (msgHead - msgCount + i + MSG_MAX * 2) % MSG_MAX;
     order[on++] = idx;
   }
-  // bottom item shown is (newest - msgScroll)
-  int bottom = on - 1 - msgScroll; if (bottom < 0) bottom = 0;
-  int top = bottom - VIS + 1; if (top < 0) top = 0;
+  // bottom item shown is (newest - msgScroll). Anchor the TOP of the window and
+  // derive the bottom from it so the visible window keeps its full height when
+  // scrolled into the oldest messages (deriving top from a clamped bottom would
+  // shrink the window row-by-row -- it would look like lines being deleted).
+  int maxScroll = (on > VIS) ? on - VIS : 0;
+  if (msgScroll > maxScroll) msgScroll = maxScroll;
+  int top = (on - VIS) - msgScroll; if (top < 0) top = 0;
+  int bottom = top + VIS - 1; if (bottom > on - 1) bottom = on - 1;
   int y = rowY0;
   for (int r = top; r <= bottom && y < 120; ++r) {
     LoraMsg& m = msgRing[order[r]];
@@ -15805,7 +15832,9 @@ void App::keyMessages(char c, bool enter, bool back) {
   if (c == 'n') {                          // compose a new message (reuse SCR_EDIT)
     editTarget = 700; editTitle = "Message"; editBuf = ""; screen = SCR_EDIT; return;
   }
-  if (isUp(c))   { if (msgScroll < msgCount - 1) msgScroll++; lastDrawMs = 0; }
+  const int VIS = 9;
+  int maxScroll = (msgCount > VIS) ? msgCount - VIS : 0;
+  if (isUp(c))   { if (msgScroll < maxScroll) msgScroll++; lastDrawMs = 0; }
   if (isDown(c)) { if (msgScroll > 0) msgScroll--; lastDrawMs = 0; }
 }
 

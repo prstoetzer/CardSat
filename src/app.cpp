@@ -4983,7 +4983,8 @@ void App::keyEdit(char c, bool enter, bool back) {
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
     }
     if (!(editTarget == 600 && editBuf.length() >= 6) &&
-        !(editTarget == 260 && (int)editBuf.length() >= NOTE_MAX)) editBuf += c;  // caps
+        !(editTarget == 260 && (int)editBuf.length() >= NOTE_MAX) &&
+        !(editTarget == 700 && (int)editBuf.length() >= MSG_TEXT_MAX)) editBuf += c;  // caps
   }
 }
 
@@ -8324,7 +8325,7 @@ void App::loraPoll() {
   // already, or in charge/sleep mode) raise a brief cross-screen banner and an
   // opt-in beep. cfg.msgNotify: 0=off, 1=banner, 2=banner+beep.
   if (screen == SCR_MESSAGES) {
-    lastDrawMs = 0;                                 // visible already: just refresh
+    lastDrawMs = 0; draw();                          // visible already: refresh now
   } else {
     if (msgUnread < 0xFFFF) msgUnread++;
     strncpy(msgLastFrom, from[0] ? from : "?", sizeof(msgLastFrom) - 1);
@@ -8398,9 +8399,14 @@ void App::drawMessages() {
     int idx = (msgHead - msgCount + i + MSG_MAX * 2) % MSG_MAX;
     order[on++] = idx;
   }
-  // bottom item shown is (newest - msgScroll)
-  int bottom = on - 1 - msgScroll; if (bottom < 0) bottom = 0;
-  int top = bottom - VIS + 1; if (top < 0) top = 0;
+  // bottom item shown is (newest - msgScroll). Anchor the TOP of the window and
+  // derive the bottom from it so the visible window keeps its full height when
+  // scrolled into the oldest messages (deriving top from a clamped bottom would
+  // shrink the window row-by-row -- it would look like lines being deleted).
+  int maxScroll = (on > VIS) ? on - VIS : 0;
+  if (msgScroll > maxScroll) msgScroll = maxScroll;
+  int top = (on - VIS) - msgScroll; if (top < 0) top = 0;
+  int bottom = top + VIS - 1; if (bottom > on - 1) bottom = on - 1;
   int y = rowY0;
   for (int r = top; r <= bottom && y < 120; ++r) {
     LoraMsg& m = msgRing[order[r]];
@@ -8430,7 +8436,9 @@ void App::keyMessages(char c, bool enter, bool back) {
   if (c == 'n') {                          // compose a new message (reuse SCR_EDIT)
     editTarget = 700; editTitle = "Message"; editBuf = ""; screen = SCR_EDIT; return;
   }
-  if (isUp(c))   { if (msgScroll < msgCount - 1) msgScroll++; lastDrawMs = 0; }
+  const int VIS = 9;
+  int maxScroll = (msgCount > VIS) ? msgCount - VIS : 0;
+  if (isUp(c))   { if (msgScroll < maxScroll) msgScroll++; lastDrawMs = 0; }
   if (isDown(c)) { if (msgScroll > 0) msgScroll--; lastDrawMs = 0; }
 }
 

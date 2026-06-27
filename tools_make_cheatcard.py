@@ -41,7 +41,7 @@ FRONT = [
   "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "World Map, Sun/Moon, Space Wx, Weather, QRZ Lookup, Location, Update, Settings, Log, Messages, About"),
+  "World Map, Sun/Moon, Space Wx, Weather, Activations, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; <b>x</b> del manual sat &middot; "
   "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
@@ -65,12 +65,13 @@ FRONT = [
  ("NEXT PASSES (favs)",
   "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
  ("PASSES (sel)",
-  "<b>;</b>/<b>.</b> select &middot; <b>d</b> detail &middot; <b>t</b>/<b>ENTER</b> track &middot; "
+  "<b>*</b> = optically visible. <b>;</b>/<b>.</b> select &middot; <b>d</b> detail &middot; <b>t</b>/<b>ENTER</b> track &middot; "
   "<b>n</b> add TX &middot; <b>r</b> recompute &middot; <b>x</b> mutual-DX &middot; "
-  "<b>v</b> 10-day &middot; <b>i</b> illum &middot; <b>g</b> grids &middot; <b>w</b> US states &middot; <b>e</b> DXCC"),
+  "<b>v</b> 10-day chart &middot; <b>V</b> visible-pass list &middot; <b>i</b> illum &middot; <b>g</b> grids &middot; <b>w</b> US states &middot; <b>e</b> DXCC"),
  ("TRACK (sel)",
+  "<b>`</b> exits to previous screen &amp; KEEPS radio/rotator tracking (green RAD/ROT/R+R in header); <b>r</b>/<b>o</b> to stop. "
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
-  "<b>c</b> CTCSS &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>z</b> big readout &middot; "
+  "<b>c</b> CTCSS &middot; <b>N</b> sat note &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>z</b> big readout &middot; "
   "<b>y</b> tilt on/off (ADV) &middot; "
   "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
  ("BIG READOUT (z from Track)",
@@ -94,7 +95,7 @@ FRONT = [
   "<b>g</b> 4-char grids &middot; <b>w</b> US states+DC &middot; <b>e</b> DXCC (all 340, "
   "hybrid polygons+points). <b>;</b>/<b>.</b> &amp; <b>{</b>/<b>}</b> scroll &middot; <b>`</b> back"),
  ("POLAR / PASS DETAIL",
-  "Pass detail: <b>p</b> polar of this pass. Polar: <b>l</b> log QSO &middot; "
+  "Pass detail: <b>p</b> polar of this pass. Polar: <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; "
   "<b>p</b>/<b>ENTER</b>/<b>`</b> back"),
 ]
 
@@ -117,9 +118,11 @@ BACK = [
  ("QRZ LOOKUP (menu)",
   "Callsign lookup via QRZ.com XML (needs QRZ XML subscription + user/pass in "
   "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
+ ("ACTIVATIONS (menu)",
+  "Upcoming sat activations scheduled on hams.at (roves, grid/special ops). List: date, call, sat, grid. <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail (UTC times, mode, freq, comment) &middot; <b>r</b> refresh &middot; <b>`</b> back. WiFi req'd"),
  ("TRANSPONDER DB (Sats &rarr; t)",
-  "Sat's transponder/beacon entries: <b>D</b> downlink+mode, "
-  "<b>U</b> uplink+tone/inv &middot; <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
+  "Sat's transponder/beacon entries, two lines each: <b>D</b>=downlink+mode line, "
+  "<b>U</b>=uplink+tone/inv line. <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
   "<b>,</b>/<b>/</b> 9 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
   "Pass outlook / Orbit position &middot; <b>r</b> recompute &middot; Doppler <b>f</b> sets beacon freq"),
@@ -139,9 +142,11 @@ BACK = [
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
   "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
  ("LOG",
-  "Menu: <b>ENTER</b> new QSO / browse / export ADIF / voice memos &middot; List: <b>;</b>/<b>.</b> scroll, "
+  "Menu: <b>ENTER</b> new QSO / browse / export ADIF / voice memos / LoTW upload &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete"),
+ ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; last)",
+  "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/, set DXCC/CQ/ITU in Settings) &mdash; see manual §8. <b>u</b> upload &middot; <b>`</b> back"),
  ("VOICE MEMOS (Log &rarr; Voice Memos)",
   "Browse newest-first (date/time/sat/len). <b>ENTER</b> play &middot; <b>n</b> new &middot; <b>d</b> del &middot; <b>r</b> refresh &middot; record via <b>v</b> on Track. SD req'd"),
  ("LORA MESSAGES (Home &rarr; Messages)",
@@ -159,7 +164,8 @@ BACK = [
   "<b>x</b> stop &middot; <b>`</b> back"),
  ("NETWORK SERVERS",
   "<b>rigctld</b> PC drives rig (VFOA=DL/B=UL) &middot; <b>rotctld</b> PC drives GS-232 &middot; "
-  "<b>rigctl</b> drives remote rig &middot; <b>Web</b> opt-in mobile page (no auth, trusted LAN)"),
+  "<b>rigctl</b> drives remote rig &middot; <b>Web</b> opt-in mobile page (no auth, trusted LAN): live sky plot, "
+  "Doppler readout, tap-to-copy freqs, visible-pass list + AOS alerts, radio/rotator control"),
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
@@ -193,10 +199,10 @@ def header(canvas, doc):
 def _styles(body_fs):
     tf = body_fs + 0.7
     t = ParagraphStyle('t', fontName='Helvetica-Bold', fontSize=tf,
-                       leading=tf + 1.0, textColor=ACCENT_DK,
-                       spaceBefore=2.8, spaceAfter=0.8)
+                       leading=tf + 0.8, textColor=ACCENT_DK,
+                       spaceBefore=2.4, spaceAfter=0.6)
     b = ParagraphStyle('b', fontName='Helvetica', fontSize=body_fs,
-                       leading=body_fs + 1.4, spaceAfter=2.2, textColor=colors.black)
+                       leading=body_fs + 1.1, spaceAfter=1.8, textColor=colors.black)
     return t, b
 
 
@@ -218,7 +224,7 @@ def measure(sections, fs):
     return doc.page
 
 
-def best_fs(sections, hi=9.5, lo=5.0):
+def best_fs(sections, hi=9.5, lo=4.0):
     fs = hi
     while fs >= lo:
         if measure(sections, fs) <= 1:

@@ -420,14 +420,24 @@ not shown in any footer.
 ## 8. Screen map and navigation
 
 CardSat is a simple state machine. From **Home** you reach every screen; `` ` ``
-or **DEL** always steps back.
+or **DEL** always steps back. Backing out **returns you to the screen you came
+from** — so opening **Passes** from the Home menu backs to Home, while opening it
+from the **Satellites** list backs to the list; the same applies to **Track**,
+which returns to Passes, Next Passes, or Home depending on where you launched it.
+
+One deliberate exception: leaving the **Track** screen does **not** stop tracking.
+If the radio and/or rotator are engaged they keep running in the background (CAT
+Doppler and rotator pointing are serviced regardless of the current screen), and a
+green **RAD** / **ROT** / **R+R** tag appears in the header so you know the rig may
+still be transmitting. Stop with `r` (radio) or `o` (rotator) — see
+[§8 → Track](#track).
 
 ### Home
 
 A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
-World Map · Sun / Moon · Space Wx · Weather · QRZ Lookup · Location · Update ·
-Settings · Log · Messages · About / diagnostics.** The currently
-selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
+World Map · Sun / Moon · Space Wx · Weather · Activations · QRZ Lookup · Location ·
+Update · Settings · Log · Messages · About / diagnostics · Charge / Sleep.** The
+currently selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 
 ### About
 
@@ -491,8 +501,9 @@ each; `notes` is the last column, so commas there are fine).
 
 The **Log** item on the main menu offers **New QSO entry**, **View / edit log**,
 **Export to ADIF** (writes `/CardSat/qso_log.adi`, including `STATION_CALLSIGN`
-from My callsign, for upload to LoTW/eQSL or import into your main logger), and
-**Voice Memos** (the on-device voice-memo browser described above).
+from My callsign, for upload to LoTW/eQSL or import into your main logger),
+**Voice Memos** (the on-device voice-memo browser described above), and
+**Sign & upload to LoTW** (see [LoTW upload](#logbook-of-the-world-lotw-direct-upload) below).
 
 LoTW limits the `SAT_NAME` field to six characters and uses its own names, so on
 export CardSat translates each satellite via **`/CardSat/lotw_sats.csv`** (rows of
@@ -500,6 +511,60 @@ export CardSat translates each satellite via **`/CardSat/lotw_sats.csv`** (rows 
 absent). If a logged satellite has no match, CardSat prompts you for its `SAT_NAME`
 (entry capped at six characters, uppercased) and saves it back to the CSV, so it's
 only asked once. Update that CSV on the card as new satellites appear.
+
+### Logbook of the World (LoTW) direct upload
+
+**Sign & upload to LoTW** (on the **Log** menu) signs your un-uploaded satellite
+QSOs into a `.tq8` file and sends them straight to ARRL's Logbook of the World over
+WiFi — no PC, no TQSL, no separate upload step. CardSat builds the same
+cryptographically-signed file TQSL would, signs each QSO with your callsign
+certificate's private key, and posts it to LoTW's self-authenticating upload
+service (the signed payload authenticates itself, so no login is needed).
+
+> **!  This feature requires a microSD card, and your LoTW private key lives on
+> it.** Read this whole section before using it. The key is your amateur-radio
+> identity credential. Treat the card like you'd treat that key: keep it in your
+> possession, and don't use a shared or disposable card. CardSat loads the key only
+> when you run an upload, keeps it in RAM only, and never copies or transmits it
+> anywhere except as the signature inside the `.tq8`. **Use this at your own risk.**
+
+**This is an upload feature, not enrollment.** ARRL issues first-time certificates
+only through TQSL plus a postcard mailed to your FCC address — that can't happen on
+a handheld. You enroll once on a computer the normal way, then copy your existing
+credential to the card.
+
+**One-time setup (on your computer):**
+
+1. In TQSL, you already have your callsign certificate. Export it to a `.p12`
+   file (TQSL: *Callsign Certificates → right-click your call → Save Callsign
+   Certificate*, choosing the `.p12`/PKCS#12 format with a password).
+2. Split the `.p12` into the two PEM files CardSat reads, using OpenSSL:
+
+   ```
+   openssl pkcs12 -in CALL.p12 -nocerts -nodes | openssl rsa -out lotw_key.pem
+   openssl pkcs12 -in CALL.p12 -clcerts -nokeys -out lotw_cert.pem
+   ```
+
+   (To keep the key encrypted on the card, drop `-nodes` from the first command and
+   set a password; CardSat will ask for it at upload time.)
+3. Copy **`lotw_key.pem`** and **`lotw_cert.pem`** into the **`/CardSat/`** folder
+   on the microSD card.
+4. In **Settings → Station / display**, set **LoTW DXCC** (your DXCC entity number —
+   `291` for the USA), **LoTW CQ zone**, and **LoTW ITU zone**. Your callsign and
+   grid come from **My callsign** and your location, which CardSat already has.
+
+**Uploading:** open **Log → Sign & upload to LoTW**. The screen shows whether the
+card, the key/cert, and the station fields are present, and how many QSOs haven't
+been uploaded yet. Press **`u`** to sign and send; if your key is password-protected
+you'll be asked for the password (leave it blank if you exported with `-nodes`).
+CardSat signs each pending QSO, posts the `.tq8`, shows how many were accepted, and
+flags those QSOs so they're never sent twice. (LoTW rejects duplicate uploads, and
+CardSat tracks what it has sent in a new `uploaded` column in `qso_log.csv`.) Large
+backlogs are sent in batches of up to 50 per upload; just run it again for the rest.
+
+The satellite `SAT_NAME` translation described above applies here too — the same
+`/CardSat/lotw_sats.csv` map is used, so make sure each bird you've worked has a
+LoTW name before uploading.
 
 **View / edit log** is a scrollable list of recent contacts (`;`/`.` to move).
 Open one with ENTER to correct **any field — including the date, time, satellite
@@ -730,7 +795,10 @@ prediction is enabled in Settings — see [§7 → Visible passes](#7-first-time
 ### Passes
 
 Upcoming passes for the selected satellite, in UTC: **AOS time, duration, max
-elevation, LOS time.** The element-set age is shown top-right, color-graded.
+elevation, LOS time.** The element-set age is shown top-right, color-graded. A
+yellow **`*`** to the right of a pass marks it as **optically visible** — the
+satellite is sunlit while your sky is dark and the pass clears the visibility
+elevation gate (see Settings → Visible passes).
 
 - `;`/`.` — select a pass.
 - `d` — open the **pass-detail plot** (below).
@@ -739,8 +807,23 @@ elevation, LOS time.** The element-set age is shown top-right, color-graded.
 - `r` — recompute the pass list.
 - `x` — **mutual window**: enter a remote grid to find co-visibility passes (below).
 - `v` — **10-day pass overview** (InstantTrack-style visibility chart; below).
+- `V` — **visible-pass list**: every optically-visible pass for this satellite over
+  the next 10 days, as a scrollable list (below).
 - `i` — **illumination** (60-day Sun/eclipse raster; below).
-- `` ` `` — back to Satellites.
+- `` ` `` — back to where you came from (Satellites, or Home if you opened Passes
+  from the Home menu).
+
+### Visible-pass list (`V` from Passes)
+
+A scrollable list of every **optically-visible** pass for the selected satellite
+over the next 10 days — filtered to passes where the satellite is **sunlit**, your
+**sky is dark** (Sun below the configured gate), and the **peak elevation** clears
+the visibility minimum. Each row shows AOS time, duration, peak elevation, and LOS,
+the same columns as the Passes screen. `;`/`.` scroll; **ENTER** opens the
+**pass-detail plot** for the highlighted pass (and returns here when you back out);
+`r` recomputes; `` ` `` returns to Passes. This complements the **10-day chart**
+(`v`), which shows *all* passes graphically — the `V` list is just the ones you
+could actually see. Requires the **UTC clock** and your **location** to be set.
 
 ### Pass detail
 
@@ -922,7 +1005,19 @@ Controls:
 - `f` — open **Manual mode** (frequency calculator; see below). Useful when you
   have no CAT-controlled radio and are tuning by hand.
 - **ENTER** — save the current calibration **for this satellite**.
-- `` ` `` — first press stops the radio output; second press goes back.
+- `` ` `` — leave the Track screen, **returning to the screen you came from**
+  (Passes, Next Passes, or Home). If the radio and/or rotator are engaged, they
+  **keep tracking in the background** — the loop's Doppler and rotator service runs
+  regardless of which screen you're on, so you can browse passes, log a QSO, check
+  the map, etc. while the rig stays Doppler-corrected and the antenna stays pointed.
+  A green **RAD** / **ROT** / **R+R** tag in the header on those other screens shows
+  tracking is still live (and that the rig may be transmitting). Use **`r`** to stop
+  the radio and **`o`** to stop (and park) the rotator. When neither is engaged, `` ` ``
+  is just a plain exit. Background tracking stays locked to the satellite it was
+  started on: if you **select a different satellite** while it's running (for example
+  by opening another bird from the Satellites list), tracking **stops and the rotator
+  parks** rather than silently retargeting the rig — re-engage with `r`/`o` once
+  you've opened the new satellite's Track screen.
 
 TUNE-mode keys: `,`/`/` tune down/up the passband, `s` cycle step
 (100/1000/5000 Hz), `x` recenter. CAL-mode keys: `,`/`/` trim downlink, `;`/`.`
@@ -1004,7 +1099,8 @@ across the sky for the current pass** is drawn as a cyan arc with **A** (AOS) an
 When the bird is below the horizon the arc shows the **next** pass instead, and
 the readout gives that pass's AOS time. The right-hand readout also shows az/el,
 range, range-rate, **Sun az/el**, and whether the satellite is **SUNLIT** or in
-**ECLIPSE**. `p`, ENTER, or `` ` `` return to Track.
+**ECLIPSE**. `l` logs a QSO and `v` starts/stops a **voice memo** (microSD, ADV)
+without leaving the plot. `p`, ENTER, or `` ` `` return to Track.
 
 ### OSCARLOCATOR (`k` from Satellites)
 
@@ -1372,6 +1468,7 @@ on-screen key reference. The notable rows:
 | Brightness | `,`/`/` adjust the active screen brightness in ~6% steps; previews live. Under *Station / display* |
 | Tilt tuning | `,`/`/` or ENTER toggle **accelerometer passband tuning** on/off. Shown as **n/a (no IMU)** on boards without one (only the Cardputer **ADV** has the sensor). When on, roll the device left/right in TUNE mode on a linear bird to move through the passband. Under *Station / display* |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
+| LoTW DXCC / CQ zone / ITU zone | ENTER → enter your DXCC entity number (e.g. `291` = USA), CQ zone, and ITU zone for the **LoTW upload** station location. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
 | QRZ user / QRZ pass | ENTER → enter your QRZ.com username / password for the **QRZ Lookup** screen (requires a QRZ XML-data subscription). Password shown masked. Under *Network / data*. |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
 | Restore config+favs | ENTER → restore them from the backup files |
@@ -1379,7 +1476,7 @@ on-screen key reference. The notable rows:
 | CAT type (+ host / port / user / pass) | `,`/`/` cycle **Wired CI-V** → **Icom LAN** → **rigctl (net)**. Icom LAN drives the **IC-9700** over RS-BA1 (see [§3](#3-connecting-your-radio)); **rigctl** drives a radio attached to a remote Hamlib **rigctld** server over TCP (set host/port to your rigctld; Hamlib's conventional port is 4532). Under *Radio / CAT*. |
 | Rigctld server (+ port) | `,`/`/` enable a **rigctld server** so a PC (Gpredict, WSJT-X, a logger) drives the radio through CardSat over TCP (default 4532); VFOA=downlink, VFOB=uplink. Under *Radio / CAT*. |
 | Rotctld server (+ port) | `,`/`/` enable a **rotctld server** so a PC (Gpredict, …) drives **whichever rotator CardSat is configured for** through CardSat over TCP (default 4533). Under *Rotator*. |
-| Web control (+ port) | `,`/`/` or ENTER enable the **mobile web control page** served over WiFi (default port 80). When on and connected, the row shows the URL to open (e.g. `http://192.168.1.42`). Under *Network / data*. Plain HTTP on the LAN, **no authentication** — see [§18](#18-mobile-web-control). |
+| Web control (+ port) | `,`/`/` or ENTER enable the **mobile web control page** served over WiFi (default port 80). When on and connected, the row shows the device's IP address to browse to (e.g. `192.168.1.42` — open it as `http://192.168.1.42`). Under *Network / data*. Plain HTTP on the LAN, **no authentication** — see [§18](#18-mobile-web-control). |
 | Rotator: manual control | ENTER opens a screen to jog az/el by hand with live read-back. For a **Yaesu (direct)** rotator this is also where you **calibrate the ADC**: it shows live ADC counts and you capture the axis endpoints with `1`/`2`/`3`/`4` (az 0 / az full / el 0 / el full) — see [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server) and [ROTOR_INTERFACE.md](docs/interfaces/ROTOR_INTERFACE.md). Under *Rotator*. |
 
 ### WiFi scan
@@ -1847,6 +1944,28 @@ The screen handles the obvious cases plainly:
 
 Your QRZ password is stored on the device the same way the WiFi and radio-LAN
 passwords are; it is shown masked in Settings. CardSat talks to QRZ over HTTPS.
+
+### Upcoming activations (Activations)
+
+**Activations** on the main menu shows the **upcoming satellite activations** that
+operators have scheduled on **[hams.at](https://hams.at)** — roves, grid
+activations, and special operations announced ahead of time. It's a quick way to see
+who's planning to be on which bird, from where, and when, so you can be listening for
+a rare grid or a wanted station.
+
+Open it from the main menu; if WiFi is connected, CardSat downloads the latest feed
+and shows a scrollable list, one row per activation with the **date, callsign,
+satellite and grid**. Move with `;`/`.`, press **ENTER** on a row for the full
+detail — **start and end times (UTC), mode, frequency, and the activator's
+comment** — and `` ` `` to go back to the list. Press **`r`** at any time to refresh
+the feed. If you open the screen with no WiFi, it says so; connect via Update or
+Settings and press `r`.
+
+The feed is fetched over HTTPS from `https://hams.at/feeds/upcoming_alerts` and held
+in memory for the session (up to 30 activations). Times are shown exactly as the feed
+provides them, in UTC. Some activations list "(none)" for frequency or elevation —
+those simply weren't specified by the operator, and the activator's comment often
+fills in the detail (e.g. a frequency that depends on conditions).
 
 ---
 
@@ -2440,14 +2559,23 @@ to WiFi, the **Web control** row shows the address to open — for example
 - **In-pass indicator & AOS countdown** — the header shows a live **"IN PASS — LOS
   in m:ss"** while the active satellite is up (with the peak elevation and time
   under the sky plot), and a **"Next AOS in m:ss"** countdown otherwise, so you
-  know at a glance when to be ready.
+  know at a glance when to be ready. A small green **RAD** / **ROT** / **R+R** badge
+  in the header lights up whenever the device's radio and/or rotator are tracking —
+  mirroring the on-device header tag — so you can tell from your phone that the rig
+  may be transmitting even after you've left the device's Track screen.
 - **Live sky plot** — a polar plot (N up, elevation as distance from the rim) with
-  a moving dot showing the satellite's current azimuth/elevation, updated about
-  once a second. While the satellite is **below the horizon**, the plot instead
-  draws the **next pass as an arc** (its azimuth/elevation track), so you can see
-  where it will rise and set; the live dot takes over the moment it comes up.
+  a moving dot showing the satellite's current azimuth/elevation. While the
+  satellite is **below the horizon**, the plot instead draws the **next pass as an
+  arc** (its azimuth/elevation track), so you can see where it will rise and set;
+  the live dot takes over the moment it comes up.
+- **Adaptive refresh** — the page polls **faster during a pass** (sub-second, so the
+  fast-moving Doppler frequencies stay current) and **slows down between passes** to
+  save battery and network traffic, backing off automatically if the connection
+  drops and showing **"reconnecting…"** until it recovers.
 - **Live readout** — downlink (RX) and uplink (TX) frequencies, azimuth/elevation,
-  and the current tune mode, refreshed about once a second.
+  and the current tune mode. Beside the RX label a small **±N.NN kHz** figure shows
+  how much **Doppler shift** is being applied right now. **Tap either frequency to
+  copy it** to the clipboard (handy for setting a second radio by hand).
 - **Transponder selection** — a drop-down lists the active satellite's
   transponders by name and mode; choosing one selects it on the device (the same
   selection the `t` key cycles), so you can pick the FM channel or the linear
@@ -2456,7 +2584,8 @@ to WiFi, the **Web control** row shows the address to open — for example
   transponder, cycle the Doppler tune mode, recenter the passband, toggle CAL, and
   switch **radio** and **rotator** output on/off. These do exactly what the
   corresponding keys do on the Track screen — the web page drives the same
-  controls, it doesn't second-guess them.
+  controls, it doesn't second-guess them. Rapid taps are debounced so a burst can't
+  queue up stale commands.
 - **Direct calibration entry** — type an exact **RX cal** or **TX cal** offset in
   Hz and tap **Set** to apply it (the value is saved per-satellite, the same as the
   on-device calibration); **Zero cal** clears both. For a linear bird the current
@@ -2476,6 +2605,13 @@ to WiFi, the **Web control** row shows the address to open — for example
   sub-point, sunlit/eclipse state, beta angle, J2 node and perigee drift (with a
   sun-synchronous flag), mean/true anomaly, time to perigee/apogee, and the
   multi-day pass outlook. It's view-only — nothing on the device changes.
+- **Upcoming passes** — a table of the next passes (AOS, peak time, max elevation,
+  duration, rise→set azimuth) with a **★** marking each **optically-visible** pass
+  (sunlit satellite, dark sky). Above it, a compact **timeline bar** shows the same
+  passes laid out in time — visible ones in orange, a white tick for "now" — so you
+  can eyeball spacing at a glance. **Tap a pass** (row or bar) to arm a **browser
+  AOS notification**: your phone alerts you when that pass begins (grant the
+  notification permission when prompted).
 
 The page is **responsive** — a single column on a phone, and a two-column layout on
 a tablet or computer. It coexists with the rigctld/rotctld servers and the normal
@@ -2656,9 +2792,9 @@ listed below.
   favorites only; `n` add a new satellite by hand; `x` delete a manual satellite;
   `o` open **Orbital analysis**; `s` open **Simulation**; `t` open the
   **Transponder database**; `e` open the **EQX table**; `k` open the
-  **OSCARLOCATOR** view; `3` open the **3D Globe**; `d` open the
-  **10-day pass overview**; `i` open the **Illumination** raster; **ENTER** opens
-  **Passes** for the highlighted bird.
+  **OSCARLOCATOR** view; `2` open the **sat-to-sat visibility finder**; `3` open
+  the **3D Globe**; `d` open the **10-day pass overview**; `i` open the
+  **Illumination** raster; **ENTER** opens **Passes** for the highlighted bird.
 
 ### Orbital analysis
 
@@ -2768,11 +2904,12 @@ listed below.
   point to tracking, the visualizers, and the workable lists.
 - **Reached from** — Satellites → ENTER, or Home → Passes (sel).
 - **Shows** — up to twelve upcoming passes for the bird (AOS/LOS, max elevation,
-  duration).
+  duration). A yellow `*` marks an **optically-visible** pass.
 - **Keys** — `;`/`.` select; `d` **Pass detail**; `t` or **ENTER** open
   **Track**; `n` add a manual transponder; `r` recompute; `x` **Mutual windows**;
-  `v` **10-day overview**; `i` **Illumination**; `g`/`w`/`e` workable
-  grids / US states / DXCC **for this pass**; `` ` `` back.
+  `v` **10-day overview**; `V` **visible-pass list** (next 10 days); `i`
+  **Illumination**; `g`/`w`/`e` workable grids / US states / DXCC **for this pass**;
+  `` ` `` back (to Satellites, or Home if opened from the Home menu).
 
 ### Pass detail
 
@@ -2889,7 +3026,12 @@ listed below.
   `l` **Log QSO**; `v` voice memo (SD card); `y` tilt tuning on/off (ADV, if IMU);
   `g`/`w`/`e` workable grids / US states / DXCC now; in TUNE: `,`/`/` move spot,
   `s` step, `x` recenter; in CAL: `,`/`/` trim downlink, `;`/`.` trim uplink, `s`
-  step, `x` zero; **ENTER** save calibration.
+  step, `x` zero; **ENTER** save calibration; `` ` `` leave (returns to where you
+  came from).
+- **Leaving keeps tracking** — pressing `` ` `` returns to the previous screen and,
+  if the radio/rotator are engaged, **they keep tracking in the background** (a green
+  **RAD**/**ROT**/**R+R** header tag appears on other screens). Stop with `r`
+  (radio) or `o` (rotator, which also parks).
 
 ### Manual mode
 
@@ -2908,7 +3050,8 @@ listed below.
   tracking, for visual aiming.
 - **Reached from** — Track → `p`.
 - **Shows** — the current az/el as a marker on a polar grid, with the pass arc.
-- **Keys** — `p` toggle back to Track; `l` **Log QSO**; `` ` `` back.
+- **Keys** — `p` toggle back to Track; `l` **Log QSO**; `v` voice memo (microSD,
+  ADV); `` ` `` back.
 
 ### OSCARLOCATOR
 
@@ -3042,6 +3185,18 @@ listed below.
   station's details.
 - **Keys** — **ENTER** type a callsign to look up; `;`/`.` scroll a long result;
   `` ` `` back.
+
+### Activations
+
+- **Purpose** — list the upcoming satellite activations scheduled on hams.at (roves,
+  grid activations, special operations); detail in
+  [§13 → Upcoming activations](#upcoming-activations-activations).
+- **Reached from** — Home → Activations.
+- **Shows** — a scrollable list of upcoming activations (date, callsign, satellite,
+  grid); ENTER opens a detail view with start/end times (UTC), mode, frequency and
+  the activator's comment.
+- **Keys** — `;`/`.` move; **ENTER** open the selected activation's detail; `r`
+  refresh the feed; `` ` `` back (from detail, `` ` `` returns to the list).
 
 ### Location
 
@@ -3183,8 +3338,20 @@ listed below.
 
 - **Purpose** — the QSO logging hub.
 - **Reached from** — Home → Log.
-- **Shows** — New QSO entry, View / edit log, Export to ADIF, Voice Memos.
+- **Shows** — New QSO entry, View / edit log, Export to ADIF, Voice Memos,
+  Sign & upload to LoTW.
 - **Keys** — `;`/`.` move; **ENTER** open the selected item; `` ` `` back.
+
+### Sign & upload to LoTW
+
+- **Purpose** — sign un-uploaded satellite QSOs into a `.tq8` and upload them
+  directly to ARRL's Logbook of the World (microSD card + your LoTW key required;
+  full setup in [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload)).
+- **Reached from** — Log menu → Sign & upload to LoTW.
+- **Shows** — SD-card status, whether the LoTW key/cert are on the card, your
+  station DXCC/CQ/ITU fields, and the count of QSOs not yet uploaded.
+- **Keys** — `u` sign & upload (prompts for the key password if encrypted);
+  `` ` `` back.
 
 ### Log entry
 
@@ -3287,14 +3454,14 @@ listed below.
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
 | **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `n` jump to beacon · `N` per-sat operating note · `k` CW both legs (linear) · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `v` voice memo (SD card) · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
-| **Large-font readout** (`z` from Track) | big RX/TX + az/el + tune mode · `,`/`/` tune · `s`/`x` step/center · `m` TUNE/CAL · `d` mode · `t` next TX · `r` radio · `o` rotator · `y` tilt · `l` log · `z`/`` ` `` back to Track |
+| **Large-font readout** (`z` from Track) | big RX/TX + az/el + tune mode · `,`/`/` tune · `s`/`x` step/center · `m` TUNE/CAL · `d` mode · `t` next TX · `n` beacon · `k` CW (linear) · `r` radio · `o` rotator · `y` tilt · `l` log · `v` voice memo · `z`/`` ` `` back to Track |
 | **Manual mode** (`f` from Track) | no-radio calculator; `u` swap fixed leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z` large-font · `l`/`p`/`g` (return here) · `` ` ``/`f` back |
 | **Manual large-font** (`z` from Manual) | HOLD/TUNE legs in big digits · `u` swap leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z`/`` ` `` back to Manual |
 | **Manual mode** | no-radio frequency calculator · `u` toggle which leg is fixed (HOLD vs TUNE>) · `,`/`/` move fixed freq in passband (linear) · `s` step · `x` center · `m` CAL · `t` next TX · `l` log · `p` polar · `g` grids (all return here) · ENTER save cal · `` ` ``/`f` back to Track |
 | **Workable grids** | 4-char Maidenhead grids under the footprint (per-pass union or live, refreshing ~3 s; uncapped, works to high orbits) · count shown on a cyan line above the list · `;`/`.` and `{`/`}` scroll · `` ` `` back |
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
 | **Track · CAL** | `,`/`/` downlink ∓ · `;`/`.` uplink ∓ · `s` step (10/100/1k) · `x` zero |
-| **Polar** | `l` log QSO · `p`/ENTER/`` ` `` back to track |
+| **Polar** | `l` log QSO · `v` voice memo (SD card) · `p`/ENTER/`` ` `` back to track |
 | **Log (menu)** | `;`/`.` select · ENTER → new QSO / browse / export ADIF |
 | **Log · list** | `;`/`.` scroll · ENTER edit entry · `` ` `` back |
 | **Log · entry** | `;`/`.` field · ENTER edit · `s` save · `x`×2 delete · `` ` `` back |

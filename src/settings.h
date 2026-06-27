@@ -77,6 +77,11 @@ struct Settings {
   // Orbital data source (GP/OMM JSON). Editable in Settings.
   char     gpUrl[160] = AMSAT_GP_URL;
   char     myCall[14] = "";   // operator's own callsign (stored uppercase)
+  // LoTW station location (for the .tq8 tSTATION section). Grid + call come from
+  // the existing location/myCall; these three are the LoTW-specific extras.
+  char     lotwDxcc[6] = "";  // DXCC entity number (e.g. "291" = USA); "" => omit
+  char     lotwCqz[4]  = "";  // CQ zone; "" => omit
+  char     lotwItuz[4] = "";  // ITU zone; "" => omit
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password

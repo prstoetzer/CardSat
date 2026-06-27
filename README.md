@@ -18,13 +18,19 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.32:** a bug-fix release for **LoRa messaging** — incoming messages
-> now refresh the screen immediately, message scrolling no longer collapses, the
-> compose field is length-capped, and a **shared-SPI-bus fix** restores the microSD
-> card after LoRa radio operations (changing a LoRa channel/SF/bandwidth/power no
-> longer breaks SD access). See the
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.32.md)** and the full
-> **[feature list](docs/FEATURES.md)**.
+> **New in v0.9.34:** **direct Logbook of the World (LoTW) upload.** CardSat can now
+> sign your satellite QSOs and send them straight to ARRL's LoTW over WiFi — no PC,
+> no TQSL, no separate upload step. It builds the same cryptographically-signed
+> `.tq8` TQSL would and posts it to LoTW's self-authenticating service. It needs a
+> **microSD card** and your existing LoTW certificate exported to the card (a
+> one-time `openssl pkcs12` step); **your private key lives on the SD card**, so use
+> a card you control. New **Sign & upload to LoTW** action on the Log menu, plus
+> **LoTW DXCC / CQ zone / ITU zone** fields in Settings. Sent QSOs are flagged so
+> they're never uploaded twice. Also new: an **Activations** screen on the main menu
+> that downloads the **hams.at** upcoming-activations feed (roves, grid activations,
+> special ops) and lists them with times, mode, frequency and comments. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.34.md)** and **§8 → LoTW upload**
+> in the manual.
 
 ---
 

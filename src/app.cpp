@@ -6,6 +6,7 @@
 #include <M5Cardputer.h>
 #include <LittleFS.h>
 #include "storage.h"
+#include "lotw.h"        // LoTW .tq8 build + upload (SD-required)
 #include <time.h>
 #include <sys/time.h>
 #include <math.h>
@@ -927,6 +928,210 @@ const char* App::wxWindUnit() {
   return cfg.wxUnits == WX_IMPERIAL ? "mph" : (cfg.wxUnits == WX_METRIC_MS ? "m/s" : "km/h");
 }
 
+// ===================== Upcoming activations (hams.at) ======================
+// Parse the hams.at Atom feed into hamsatList[]. No XML library on the ESP32;
+// the feed is small and regular, so we string-scan it. Each <entry> has a
+// <title> "[YYYY-MM-DD] CALL on SAT from GRID" and a CDATA <content> with
+// <li>Label: value</li> rows (Start time, End time, Max elevation, Frequency,
+// Mode, Comment). Logic validated host-side against the live feed.
+static String hamsatTagText(const String& block, const char* tag) {
+  // returns the inner text of the first <tag ...>...</tag>, trimmed
+  String open = String("<") + tag;
+  int a = block.indexOf(open);
+  if (a < 0) return "";
+  int gt = block.indexOf('>', a);
+  if (gt < 0) return "";
+  String close = String("</") + tag + ">";
+  int b = block.indexOf(close, gt + 1);
+  if (b < 0) return "";
+  String s = block.substring(gt + 1, b);
+  s.trim();
+  return s;
+}
+static String hamsatLi(const String& content, const char* label) {
+  // returns value from "<li>Label: value</li>"
+  String key = String("<li>") + label + ":";
+  int a = content.indexOf(key);
+  if (a < 0) return "";
+  a += key.length();
+  int b = content.indexOf("</li>", a);
+  if (b < 0) return "";
+  String s = content.substring(a, b);
+  s.trim();
+  if (s == "(none)") return "";
+  return s;
+}
+static void hamsatCopy(char* dst, size_t cap, const String& src) {
+  strncpy(dst, src.c_str(), cap - 1); dst[cap - 1] = 0;
+}
+
+int App::parseHamsat(const String& xml) {
+  hamsatN = 0;
+  int pos = 0;
+  while (hamsatN < HAMSAT_MAX) {
+    int es = xml.indexOf("<entry>", pos);
+    if (es < 0) break;
+    int ee = xml.indexOf("</entry>", es);
+    if (ee < 0) break;
+    String block = xml.substring(es + 7, ee);
+    pos = ee + 8;
+
+    String title = hamsatTagText(block, "title");
+    String content = hamsatTagText(block, "content");
+    // strip the CDATA wrapper if present
+    content.replace("<![CDATA[", ""); content.replace("]]>", "");
+
+    Activation& a = hamsatList[hamsatN];
+    memset(&a, 0, sizeof(a));
+
+    // Title: [YYYY-MM-DD] CALL on SAT from GRID
+    if (title.length() && title[0] == '[') {
+      int rb = title.indexOf(']');
+      if (rb > 0) {
+        hamsatCopy(a.date, sizeof(a.date), title.substring(1, rb));
+        String rest = title.substring(rb + 1); rest.trim();
+        int onP = rest.indexOf(" on ");
+        int frP = rest.indexOf(" from ");
+        if (onP > 0 && frP > onP) {
+          hamsatCopy(a.call, sizeof(a.call), rest.substring(0, onP));
+          hamsatCopy(a.sat,  sizeof(a.sat),  rest.substring(onP + 4, frP));
+          hamsatCopy(a.grid, sizeof(a.grid), rest.substring(frP + 6));
+        } else {
+          hamsatCopy(a.call, sizeof(a.call), rest);   // fallback: whole remainder
+        }
+      }
+    }
+    if (!a.date[0] && title.length())                 // unparseable title -> keep raw in comment
+      hamsatCopy(a.comment, sizeof(a.comment), title);
+
+    hamsatCopy(a.start, sizeof(a.start), hamsatLi(content, "Start time"));
+    hamsatCopy(a.end,   sizeof(a.end),   hamsatLi(content, "End time"));
+    hamsatCopy(a.mode,  sizeof(a.mode),  hamsatLi(content, "Mode"));
+    hamsatCopy(a.freq,  sizeof(a.freq),  hamsatLi(content, "Frequency"));
+    String cm = hamsatLi(content, "Comment");
+    if (cm.length()) hamsatCopy(a.comment, sizeof(a.comment), cm);
+
+    hamsatN++;
+  }
+  return hamsatN;
+}
+
+// Download the feed to the shared temp file, parse it, fill hamsatList[].
+// Best-effort: leaves any previously-parsed list intact on failure.
+void App::fetchHamsat() {
+  if (!net.connected()) { hamsatStatus = "No WiFi - connect in Settings"; return; }
+  hamsatStatus = "Fetching activations..."; draw();
+  // The feed is a few KB but can grow with more scheduled activations; allow room.
+  if (!net.httpsGetToFileRetry(HAMSAT_FEED_URL, FILE_DL_TMP, 60000, nullptr, 3, 20000)) {
+    Store::fs().remove(FILE_DL_TMP);
+    hamsatStatus = "Feed fetch failed (" + net.lastErr + ")";
+    return;
+  }
+  String body = readSmallFile(FILE_DL_TMP, 60000);
+  Store::fs().remove(FILE_DL_TMP);
+  if (body.length() == 0) { hamsatStatus = "Empty feed response"; return; }
+  int n = parseHamsat(body);
+  hamsatStatus = n ? "" : "No upcoming activations";
+  hamsatSel = 0; hamsatScroll = 0; hamsatDetail = false;
+}
+
+void App::hamsatEnter() {
+  hamsatDetail = false; hamsatSel = 0; hamsatScroll = 0;
+  if (net.connected()) fetchHamsat();
+  else if (hamsatN == 0) hamsatStatus = "No WiFi - connect in Settings";
+  screen = SCR_HAMSAT; lastDrawMs = 0;
+}
+
+void App::drawHamsat() {
+  header("Activations");
+  canvas.setTextSize(1);
+
+  // Status line (fetching / error / empty) takes over the body when set.
+  if (hamsatStatus.length()) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 60);
+    String s = hamsatStatus; if (s.length() > 38) s = s.substring(0, 38);
+    canvas.print(s);
+    footer("r refresh   ` back");
+    return;
+  }
+  if (hamsatN == 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("No activations. r to refresh.");
+    footer("r refresh   ` back");
+    return;
+  }
+
+  if (hamsatDetail) {
+    // Detail view of the selected activation.
+    const Activation& a = hamsatList[hamsatSel];
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    int y = 20;
+    canvas.setCursor(6, y); y += 12;
+    canvas.printf("%s  %s", a.call[0] ? a.call : "?", a.sat[0] ? a.sat : "?");
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(6, y); y += 12;
+    canvas.printf("%s  grid %s", a.date, a.grid[0] ? a.grid : "-");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, y); y += 12;
+    canvas.printf("UTC %s - %s", a.start[0] ? a.start : "?", a.end[0] ? a.end : "?");
+    canvas.setCursor(6, y); y += 12;
+    canvas.printf("Mode %s", a.mode[0] ? a.mode : "-");
+    canvas.setCursor(6, y); y += 12;
+    { String f = a.freq[0] ? String(a.freq) : String("(see comment)");
+      if (f.length() > 32) f = f.substring(0, 32);
+      canvas.printf("Freq %s", f.c_str()); }
+    if (a.comment[0]) {
+      canvas.setTextColor(CL_GREY, CL_BLACK);
+      // wrap the comment across up to two lines
+      String c = a.comment;
+      canvas.setCursor(6, y); y += 10;
+      canvas.print(c.length() > 38 ? c.substring(0, 38) : c);
+      if (c.length() > 38) { canvas.setCursor(6, y);
+        canvas.print(c.length() > 76 ? c.substring(38, 76) : c.substring(38)); }
+    }
+    footer("` back to list");
+    return;
+  }
+
+  // List view: one row per activation (date, call, sat, grid).
+  const int ROWS = 8;
+  if (hamsatSel < hamsatScroll) hamsatScroll = hamsatSel;
+  if (hamsatSel >= hamsatScroll + ROWS) hamsatScroll = hamsatSel - ROWS + 1;
+  for (int i = 0; i < ROWS && hamsatScroll + i < hamsatN; ++i) {
+    int idx = hamsatScroll + i;
+    const Activation& a = hamsatList[idx];
+    int y = 18 + i*13;
+    if (idx == hamsatSel) { canvas.fillRect(0, y-2, 240, 12, CL_SELBG);
+                            canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else                    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    // "MM-DD CALL SAT GRID" -- compact; date month-day only to save width
+    const char* md = (strlen(a.date) >= 10) ? a.date + 5 : a.date;  // MM-DD
+    canvas.setCursor(4, y);
+    canvas.printf("%s %-9.9s %-7.7s %s", md, a.call, a.sat, a.grid);
+  }
+  // scroll indicator
+  if (hamsatN > ROWS) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(212, 18);
+    canvas.printf("%d/%d", hamsatSel + 1, hamsatN);
+  }
+  footer("; / . move  ENT detail  r refr  ` back");
+}
+
+void App::keyHamsat(char c, bool enter, bool back) {
+  if (hamsatDetail) {
+    if (isBack(c, back) || enter) { hamsatDetail = false; lastDrawMs = 0; }
+    return;
+  }
+  if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (c == 'r') { fetchHamsat(); lastDrawMs = 0; return; }
+  if (hamsatN == 0) return;
+  if (isUp(c))   { hamsatSel = (hamsatSel + hamsatN - 1) % hamsatN; lastDrawMs = 0; }
+  if (isDown(c)) { hamsatSel = (hamsatSel + 1) % hamsatN; lastDrawMs = 0; }
+  if (enter) { hamsatDetail = true; lastDrawMs = 0; }
+}
+
 // Fetch current + WX_FORECAST_DAYS-day forecast for the site. Best-effort: leaves
 // the cache intact on any failure. Streams the (small) JSON to flash, parses it,
 // then rewrites the cache file.
@@ -1550,6 +1755,23 @@ void App::buildSchedule() {
 }
 
 // ---- Feature 7: sample one pass into the elevation curve cache -------------
+// Predict the active satellite's upcoming passes into passes[]/passN AND fill the
+// passVis[] optical-visibility cache in one place. Visibility is evaluated once
+// here (each visEvalPass is ~13 SGP4 samples) rather than every frame in
+// drawPasses(), which redraws once a second for the live clock.
+void App::computePasses() {
+  passN = 0; passSel = 0;
+  for (int i = 0; i < PASS_LIST_LEN; ++i) passVis[i] = false;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet()) return;
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  passN = pred.predictPasses(nowUtc(), cfg.minPassEl, passes, PASS_LIST_LEN);
+  for (int i = 0; i < passN; ++i) {
+    bool vis = false;
+    passVis[i] = (visEvalPass(passes[i].aos, passes[i].los, passes[i].maxEl, vis) == 1 && vis);
+  }
+}
+
 void App::buildPassDetail(const PassPredict& p) {
   pdValid = false; pdPass = p;
   SatEntry* s = activeSat(); if (!s) return;
@@ -1912,8 +2134,20 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;b
 .hint{font-size:12px;color:var(--mut);margin-top:6px}
 .fld{display:flex;gap:8px;align-items:center;margin-top:8px}.fld label{flex:0 0 auto;width:84px;color:var(--mut);font-size:13px}.fld input{flex:1}.fld button{flex:0 0 auto;min-width:64px}
 .pillrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.sm{min-width:auto;min-height:auto;padding:8px 12px}
+.dop{font-size:12px;color:var(--cy);font-variant-numeric:tabular-nums;margin-left:8px}
+.copyable{cursor:pointer}.copyable:active{opacity:.6}.copied{color:var(--grn) !important}
+.vis{color:var(--org);font-weight:700}
+tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{background:#1d2b22}
+.tl{display:flex;flex-direction:column;gap:3px;margin:8px 0 2px}
+.tlrow{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--mut)}
+.tlbar{position:relative;flex:1;height:14px;background:#0d1117;border:1px solid #222a35;border-radius:4px;overflow:hidden}
+.tlseg{position:absolute;top:1px;height:10px;border-radius:2px;background:var(--acc)}
+.tlseg.v{background:var(--org)}.tlnow{position:absolute;top:0;width:2px;height:14px;background:#fff;opacity:.7}
+.tag.off{color:var(--org)}
+.trk{font-size:11px;font-weight:700;padding:2px 7px;border-radius:6px;letter-spacing:.5px}
+.trk.on{background:rgba(57,211,83,.18);color:var(--grn);border:1px solid rgba(57,211,83,.5)}
 </style></head><body>
-<header><b>CardSat</b><span class="tag" id="tag">connecting...</span></header>
+<header><b>CardSat</b><span class="tag" id="tag">connecting...</span><span id="trk" class="trk"></span></header>
 <main>
 <div class="card span2"><div class="tools">
 <input id="search" placeholder="filter..." style="flex:1;min-width:120px">
@@ -1922,8 +2156,8 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;b
 <button id="go" class="flt">Track</button></div></div>
 <div class="cols">
 <div class="card">
-<div class="lab">Downlink (RX)</div><div class="freq rx" id="rx">--.-----</div>
-<div class="lab" style="margin-top:8px">Uplink (TX)</div><div class="freq tx" id="tx">--.-----</div>
+<div class="lab">Downlink (RX) <span class="dop" id="dop"></span></div><div class="freq rx copyable" id="rx" title="tap to copy">--.-----</div>
+<div class="lab" style="margin-top:8px">Uplink (TX)</div><div class="freq tx copyable" id="tx" title="tap to copy">--.-----</div>
 <div class="row" style="margin-top:10px">
 <div class="az lab">Az <span id="az" style="color:var(--fg)">--</span>&deg;</div>
 <div class="az lab">El <span id="el" style="color:var(--fg)">--</span>&deg;</div>
@@ -1968,11 +2202,30 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;b
 <div class="lab">Orbital analysis</div>
 <table id="orbTbl"><tr><td class="mut">&mdash;</td></tr></table></div></div>
 <div class="card span2"><div class="lab" style="margin-bottom:6px">Upcoming passes</div>
+<div class="tl" id="tl"></div>
 <table id="passes"><tr><td class="mut">&mdash;</td></tr></table></div>
 </div></main>
 <script>
 var lastSat=0,mode='rad',passList=[],lastTxKey='';
+var selPass=-1,notifyAt=0,notifyName='',pollMs=1500,failN=0,inPass=false;
 function j(u,o){return fetch(u,o).then(r=>r.json())}
+/* Browser AOS notification for a tapped pass (client-only; needs permission). */
+function scheduleNotify(p){if(!p)return;
+ if('Notification'in window&&Notification.permission==='default'){Notification.requestPermission()}
+ notifyAt=p.aos;notifyName=(window._satname||'satellite');
+ gid('aos').textContent='Alarm set: AOS '+hhmm(p.aos)+' (max '+p.el+'\u00b0)';}
+function fireNotifyIfDue(){if(!notifyAt)return;var now=Date.now()/1000;
+ if(now>=notifyAt-1){var msg=notifyName+' AOS now';
+  if('Notification'in window&&Notification.permission==='granted'){try{new Notification('CardSat',{body:msg})}catch(e){}}
+  notifyAt=0;}}
+/* Tap a frequency to copy it. */
+function copyFreq(id){var t=gid(id).textContent.replace(/[^0-9.]/g,'');if(!t)return;
+ var done=function(){gid(id).classList.add('copied');setTimeout(()=>gid(id).classList.remove('copied'),700)};
+ if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,()=>{})}else{
+  var ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch(e){}document.body.removeChild(ta)}}
+/* Debounce rapid control taps so we don't queue a burst of /api/cmd posts. */
+var _busy=false;
+function sendCmd(u){if(_busy)return;_busy=true;j(u,{method:'POST'}).then(s=>{_busy=false;tick()}).catch(e=>{_busy=false})}
 function pad(n){return(n<10?'0':'')+n}
 function hhmm(t){var d=new Date(t*1000);return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+'Z'}
 function dur(s){return Math.round(s/60)+'m'}
@@ -2009,21 +2262,39 @@ o.list.forEach(x=>{var op=document.createElement('option');op.value=x.i;
 op.textContent=x.d+(x.m?(' ('+x.m+')'):'');if(x.i==o.cur)op.selected=true;s.appendChild(op)});
 if(!o.list.length){var op=document.createElement('option');op.textContent='(none)';s.appendChild(op)}})}
 function passes(){j('/api/passes').then(d=>{var a=(d&&d.passes)?d.passes:[];passList=a;window._arc=(d&&d.arc)?d.arc:[];var t=gid('passes');
-if(!a.length){t.innerHTML='<tr><td class="mut">no passes</td></tr>';drawArc([]);return}
-var h='<tr><th>AOS</th><th>Peak</th><th>El</th><th>Dur</th><th>Az</th></tr>';
-a.forEach(p=>{h+='<tr><td>'+hhmm(p.aos)+'</td><td>'+hhmm(p.tca)+'</td><td>'+p.el+'&deg;</td><td>'+dur(p.los-p.aos)+'</td><td>'+p.azaos+'&rarr;'+p.azlos+'</td></tr>'});
-t.innerHTML=h})}
-function updCountdown(){var tag=gid('tag'),aos=gid('aos'),now=Date.now()/1000;
-if(!passList.length){return}
-var p=passList[0];
-if(now>=p.aos&&now<=p.los){tag.textContent='IN PASS \u2014 LOS in '+ms(p.los-now);tag.classList.add('pass');aos.textContent='Max el '+p.el+'\u00b0 at '+hhmm(p.tca)}
-else if(now<p.aos){tag.classList.remove('pass');var nm=document.title;tag.textContent=(window._satname||'')||'idle';aos.textContent='Next AOS in '+ms(p.aos-now)+' ('+hhmm(p.aos)+', max '+p.el+'\u00b0)'}
-else{aos.textContent='\u2014'}}
-function tick(){j('/api/status').then(s=>{window._satname=s.name;
+if(!a.length){t.innerHTML='<tr><td class="mut">no passes</td></tr>';drawArc([]);renderTl();return}
+var h='<tr><th></th><th>AOS</th><th>Peak</th><th>El</th><th>Dur</th><th>Az</th></tr>';
+a.forEach((p,i)=>{h+='<tr class="pclk'+(i==selPass?' psel':'')+'" data-i="'+i+'"><td>'+(p.vis?'<span class="vis" title="optically visible">&#9733;</span>':'')+'</td><td>'+hhmm(p.aos)+'</td><td>'+hhmm(p.tca)+'</td><td>'+p.el+'&deg;</td><td>'+dur(p.los-p.aos)+'</td><td>'+p.azaos+'&rarr;'+p.azlos+'</td></tr>'});
+t.innerHTML=h;
+t.querySelectorAll('tr.pclk').forEach(r=>{r.onclick=function(){var i=+this.dataset.i;selPass=(selPass==i?-1:i);
+ if(selPass>=0)scheduleNotify(a[selPass]);
+ passes();}});
+renderTl();})}
+/* Horizontal timeline of the next passes over ~the span they cover. Visible
+   passes are orange; a white tick marks "now". Tap a bar to select that pass. */
+function renderTl(){var el=gid('tl');var a=passList;if(!a||!a.length){el.innerHTML='';return}
+var now=Date.now()/1000;var t0=Math.min(now,a[0].aos);var t1=a[a.length-1].los;var span=Math.max(1,t1-t0);
+var bars='';a.forEach((p,i)=>{var x=100*(p.aos-t0)/span;var w=Math.max(1.2,100*(p.los-p.aos)/span);
+ bars+='<div class="tlseg'+(p.vis?' v':'')+(i==selPass?'" style="outline:2px solid #fff;':'"')+' style="left:'+x.toFixed(2)+'%;width:'+w.toFixed(2)+'%" data-i="'+i+'" title="'+hhmm(p.aos)+' max '+p.el+'\u00b0"></div>'});
+var nx=100*(now-t0)/span;if(nx>=0&&nx<=100)bars+='<div class="tlnow" style="left:'+nx.toFixed(2)+'%"></div>';
+el.innerHTML='<div class="tlrow"><span>'+hhmm(t0)+'</span><div class="tlbar">'+bars+'</div><span>'+hhmm(t1)+'</span></div>';
+el.querySelectorAll('.tlseg').forEach(s=>{s.onclick=function(){var i=+this.dataset.i;selPass=(selPass==i?-1:i);
+ if(selPass>=0)scheduleNotify(passList[selPass]);passes()}})}
+function updCountdown(){var tag=gid('tag'),aos=gid('aos'),now=Date.now()/1000;fireNotifyIfDue();
+if(!passList.length){inPass=false;return}
+var p=passList[0];inPass=(now>=p.aos&&now<=p.los);
+if(inPass){tag.textContent='IN PASS \u2014 LOS in '+ms(p.los-now);tag.classList.add('pass');if(selPass<0)aos.textContent='Max el '+p.el+'\u00b0 at '+hhmm(p.tca)}
+else if(now<p.aos){tag.classList.remove('pass');if(selPass<0)aos.textContent='Next AOS in '+ms(p.aos-now)+' ('+hhmm(p.aos)+', max '+p.el+'\u00b0)'}
+else{if(selPass<0)aos.textContent='\u2014'}}
+function tick(){j('/api/status').then(s=>{window._satname=s.name;failN=0;gid('tag').classList.remove('off');
 gid('tag').classList.contains('pass')||(gid('tag').textContent=s.name||'no sat');
 gid('rx').textContent=s.rx;gid('tx').textContent=s.tx;
 gid('az').textContent=Math.round(s.az);gid('el').textContent=Math.round(s.el);
 gid('mode').textContent=s.mode;
+/* Doppler shift applied right now (signed kHz) */
+var dp=gid('dop');if(s.radio&&typeof s.dop=='number'&&s.dop!=0){var k=s.dop/1000;dp.textContent=(k>=0?'+':'')+k.toFixed(2)+' kHz';}else{dp.textContent=''}
+/* background tracking indicator (mirrors the device header RAD/ROT/R+R tag) */
+var trk=gid('trk');if(s.radio||s.rot){trk.className='trk on';trk.textContent=(s.radio&&s.rot)?'R+R':(s.radio?'RAD':'ROT')}else{trk.className='trk';trk.textContent=''}
 gid('brad').classList.toggle('on',s.radio);gid('brot').classList.toggle('on',s.rot);
 gid('hold').textContent=s.hold;gid('mtune').textContent=s.tune;
 gid('mhl').textContent=s.fixup?'HOLD uplink (park TX here)':'HOLD downlink (park RX here)';
@@ -2036,9 +2307,9 @@ if(document.activeElement!=gid('calul'))gid('calul').placeholder=s.calul;
 gid('pbline').textContent=s.lin?('Linear passband: '+Math.round(s.pbOff/1000)+' / '+Math.round(s.pbBw/1000)+' kHz'):'';
 /* transponder dropdown sync */
 var key=s.norad+':'+s.txn;if(key!=lastTxKey){lastTxKey=key;loadTx()}else{var ts=gid('tpsel');if(ts.value!=s.txi&&s.txi>=0)ts.value=s.txi}
-if(s.norad&&s.norad!=lastSat){lastSat=s.norad;passes()}
+if(s.norad&&s.norad!=lastSat){lastSat=s.norad;selPass=-1;notifyAt=0;passes()}
 updCountdown();
-}).catch(e=>{gid('tag').textContent='offline';gid('tag').classList.remove('pass')})}
+}).catch(e=>{failN++;gid('tag').textContent=failN>1?'reconnecting...':'offline';gid('tag').classList.add('off');gid('tag').classList.remove('pass')})}
 gid('go').onclick=function(){var n=gid('sat').value;j('/api/select?norad='+n,{method:'POST'}).then(()=>{lastSat=0;lastTxKey='';tick()})}
 gid('search').oninput=function(){renderSats(this.value.toLowerCase())}
 gid('sat').onchange=reflectFav;
@@ -2052,9 +2323,17 @@ gid('calzero').onclick=function(){j('/api/cal?dl=0&ul=0',{method:'POST'}).then(t
 gid('mRadio').onclick=function(){setMode('rad')}
 gid('mMan').onclick=function(){setMode('man')}
 gid('mOrb').onclick=function(){setMode('orb')}
-document.querySelectorAll('button[data-k]').forEach(b=>{b.onclick=function(){j('/api/cmd?k='+encodeURIComponent(b.dataset.k),{method:'POST'}).then(tick)}})
-document.querySelectorAll('button[data-m]').forEach(b=>{b.onclick=function(){j('/api/cmd?man=1&k='+encodeURIComponent(b.dataset.m),{method:'POST'}).then(tick)}})
-loadSats();tick();setInterval(tick,1500);setInterval(updCountdown,1000);
+gid('rx').onclick=function(){copyFreq('rx')};gid('tx').onclick=function(){copyFreq('tx')};
+document.querySelectorAll('button[data-k]').forEach(b=>{b.onclick=function(){sendCmd('/api/cmd?k='+encodeURIComponent(b.dataset.k))}})
+document.querySelectorAll('button[data-m]').forEach(b=>{b.onclick=function(){sendCmd('/api/cmd?man=1&k='+encodeURIComponent(b.dataset.m))}})
+/* Adaptive polling: fast during a pass, slow when idle, back off on errors.
+   Self-scheduling (not a fixed setInterval) so the cadence can change. */
+function nextPoll(){var d=inPass?750:1500;
+ if(failN>0)d=Math.min(8000,1500*Math.pow(2,failN));      /* exponential backoff while offline */
+ else if(!inPass&&passList.length){var dt=passList[0].aos-Date.now()/1000;if(dt>180)d=4000}/* far from AOS: relax */
+ return d}
+function loop(){tick();setTimeout(loop,nextPoll())}
+loadSats();loop();setInterval(updCountdown,1000);
 </script></body></html>
 )HTMLPAGE";
 
@@ -2323,6 +2602,15 @@ void App::webdSendStatusJson() {
   j += "\"norad\":"; j += (s ? s->norad : 0); j += ",";
   j += "\"rx\":\""; j += (activeTxCount > 0 ? fmtMHz(rx) : String("--.-----")); j += "\",";
   j += "\"tx\":\""; j += ((activeTxCount > 0 && ulOp) ? fmtMHz(tx) : String("--.-----")); j += "\",";
+  // Downlink Doppler shift actually applied right now (Hz, signed): the corrected
+  // RX freq minus the nominal+cal downlink. Lets the web page show "+/-N.NkHz" so
+  // the operator can see how hard Doppler is working without doing the math.
+  { long dop = 0;
+    // Compute in 64-bit: rx/dlOp can exceed INT32_MAX on 13cm/3cm bands (e.g. a
+    // QO-100 10489 MHz downlink is ~1.05e10 Hz), which would overflow a 32-bit
+    // long. The Doppler difference itself is small and fits a long.
+    if (activeTxCount > 0 && dlOp) dop = (long)((int64_t)rx - ((int64_t)dlOp + (int64_t)calDl));
+    j += "\"dop\":"; j += dop; j += ","; }
   j += "\"az\":"; j += String(L.az, 1); j += ",";
   j += "\"el\":"; j += String(L.el, 1); j += ",";
   j += "\"mode\":\""; j += mtag; j += "\",";
@@ -2382,15 +2670,19 @@ void App::webdSendPassesJson() {
   PassPredict pp[8];
   int n = 0;
   if (s && timeIsSet()) {
+    pred.setSite(loc.obs()); pred.setSat(*s);   // prime for visEvalPass() below
     n = pred.predictPasses(nowUtc(), cfg.minPassEl, pp, 8);
     for (int i = 0; i < n; ++i) {
       if (i) webdCli.print(',');
+      bool vis = false;
+      bool optical = (visEvalPass(pp[i].aos, pp[i].los, pp[i].maxEl, vis) == 1 && vis);
       String o = "{\"aos\":"; o += (uint32_t)pp[i].aos;
       o += ",\"los\":"; o += (uint32_t)pp[i].los;
       o += ",\"tca\":"; o += (uint32_t)pp[i].tca;
       o += ",\"el\":"; o += (int)(pp[i].maxEl + 0.5f);
       o += ",\"azaos\":"; o += (int)(pp[i].azAos + 0.5f);
       o += ",\"azlos\":"; o += (int)(pp[i].azLos + 0.5f);
+      o += ",\"vis\":"; o += (optical ? "true" : "false");
       o += "}";
       webdCli.print(o);
     }
@@ -2763,6 +3055,19 @@ void App::loop() {
   // independent of the current screen, so CAT keeps tracking while you make a log
   // entry, browse passes, etc. The radioOut guard makes it a no-op otherwise.
   uint32_t ms = millis();
+  // Background-tracking safety: if tracking is engaged but the active satellite
+  // has been changed away from the one tracking was started for (e.g. the user
+  // scrolled to and opened a different bird in the Satellites list), stop tracking
+  // and park the rotator rather than silently retarget the rig onto the new sat.
+  // Track/Big can't change satSel, so this only fires after navigating away.
+  if ((radioOut || rotOut) && trackedNorad != 0) {
+    SatEntry* as = activeSat();
+    if (as && as->norad != trackedNorad) {
+      if (rotOut && rot) { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); rotParked = true; }
+      radioOut = false; rotOut = false; trackedNorad = 0;
+      setStatus("Tracking stopped (satellite changed)");
+    }
+  }
   if (radioOut && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
       lastDoppMs = ms;
       SatEntry* s = activeSat();
@@ -3100,6 +3405,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_PASSPOLAR: keyPassPolar(c, enter, back); break;
     case SCR_MUTUAL:   keyMutual(c, enter, back); break;
     case SCR_VIS:      keyVis(c, enter, back); break;
+    case SCR_VISLIST:  keyVisList(c, enter, back); break;
     case SCR_ILLUM:    keyIllum(c, enter, back); break;
     case SCR_LOCATION: keyLocation(c, enter, back); break;
     case SCR_UPDATE:   keyUpdate(c, enter, back); break;
@@ -3118,6 +3424,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_TRANSIT:  keyTransit(c, enter, back); break;
     case SCR_MESSAGES: keyMessages(c, enter, back); break;
     case SCR_LOG:      keyLog(c, enter, back); break;
+    case SCR_LOTW:     keyLotw(c, enter, back); break;
+    case SCR_HAMSAT:   keyHamsat(c, enter, back); break;
     case SCR_LOGENTRY: keyLogEntry(c, enter, back); break;
     case SCR_LOGLIST:  keyLogList(c, enter, back); break;
     case SCR_WORLDMAP: keyWorldMap(c, enter, back); break;
@@ -3151,7 +3459,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 16;
+  const int N = 17;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -3165,10 +3473,8 @@ void App::keyHome(char c, bool enter, bool back) {
         pred.setSite(loc.obs());
         pred.setSat(*s);
         if (homeSel == 2) {
-          passN = timeIsSet()
-                ? pred.predictPasses(nowUtc(), cfg.minPassEl, passes, PASS_LIST_LEN)
-                : 0;
-          passSel = 0;
+          computePasses();
+          passesReturn = SCR_HOME;
           screen = SCR_PASSES;
         } else {
           ensureTransponders(*s);
@@ -3176,6 +3482,7 @@ void App::keyHome(char c, bool enter, bool back) {
           loadCalForSat(s->norad);
           loadNoteForSat(s->norad);
           radioOut = false;
+          trackReturn = SCR_HOME;
           screen = SCR_TRACK;
         }
       } break;
@@ -3188,14 +3495,15 @@ void App::keyHome(char c, bool enter, bool back) {
           if (o.lat != 0.0 || o.lon != 0.0) fetchWeather();
         }
         screen = SCR_WEATHER; lastDrawMs = 0; break;
-      case 8: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
-      case 9: screen = SCR_LOCATION; break;
-      case 10: screen = SCR_UPDATE; break;
-      case 11: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
-      case 12: logMenuSel = 0; screen = SCR_LOG; break;
-      case 13: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
-      case 14: screen = SCR_ABOUT; break;
-      case 15: enterChargeMode(); screen = SCR_CHARGE; break;
+      case 8: hamsatEnter(); break;   // upcoming activations (hams.at)
+      case 9: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+      case 10: screen = SCR_LOCATION; break;
+      case 11: screen = SCR_UPDATE; break;
+      case 12: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
+      case 13: logMenuSel = 0; screen = SCR_LOG; break;
+      case 14: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
+      case 15: screen = SCR_ABOUT; break;
+      case 16: enterChargeMode(); screen = SCR_CHARGE; break;
     }
   }
 }
@@ -3291,7 +3599,7 @@ void App::drawMemos() {
     canvas.setCursor(28, 70); canvas.print("ENT = delete   ` = cancel");
     footer("");
   } else {
-    footer("ENT play  n new  d del  r refresh  ` back");
+    footer("ENT play n new d del r refr `back");
   }
 }
 
@@ -3386,6 +3694,7 @@ void App::keySchedule(char c, bool enter, bool back) {
       loadCalForSat(s->norad);
       loadNoteForSat(s->norad);
       radioOut = false; lastDoppMs = 0;
+      trackReturn = SCR_SCHEDULE;
       screen = SCR_TRACK;
     }
   }
@@ -3485,16 +3794,14 @@ void App::keySatList(char c, bool enter, bool back) {
       seedQsoSatDefaults();      // sat + mode + non-Doppler centre/nominal freqs
       logSel = 0; screen = SCR_LOGENTRY; lastDrawMs = 0; return;
     }
-    passN = timeIsSet()
-          ? pred.predictPasses(nowUtc(), cfg.minPassEl, passes, PASS_LIST_LEN)
-          : 0;
-    passSel = 0;
+    computePasses();
+    passesReturn = SCR_SATLIST;
     screen = SCR_PASSES;
   }
 }
 
 void App::keyPasses(char c, bool enter, bool back) {
-  if (isBack(c, back)) { screen = SCR_SATLIST; return; }
+  if (isBack(c, back)) { screen = passesReturn; lastDrawMs = 0; return; }
   int visN = (passN < 9) ? passN : 9;            // only the visible rows
   if (isUp(c)   && visN) passSel = (passSel + visN - 1) % visN;
   if (isDown(c) && visN) passSel = (passSel + 1) % visN;
@@ -3505,11 +3812,10 @@ void App::keyPasses(char c, bool enter, bool back) {
     return;
   }
   if (c == 'r') {  // recompute
-    if (timeIsSet()) { passN = pred.predictPasses(nowUtc(), cfg.minPassEl,
-                                                  passes, PASS_LIST_LEN);
-                       passSel = 0; }
+    computePasses();
   }
   if (c == 'd' && passN > 0 && passSel < passN) {  // open the pass-detail plot
+    passDetailReturn = SCR_PASSES;
     buildPassDetail(passes[passSel]);
     screen = SCR_PASSDETAIL; lastDrawMs = 0;
     return;
@@ -3534,30 +3840,32 @@ void App::keyPasses(char c, bool enter, bool back) {
     setStatus(""); screen = SCR_DXCC; lastDrawMs = 0; return;
   }
   if (c == 'v') { visReturn = SCR_PASSES; visDayOff = 0; buildVis();   screen = SCR_VIS;   lastDrawMs = 0; return; }
+  if (c == 'V') { buildVisList(); screen = SCR_VISLIST; lastDrawMs = 0; return; }  // visible-pass LIST (10 days)
   if (c == 'i') { visReturn = SCR_PASSES; illumDayOff = 0; buildIllum(); screen = SCR_ILLUM; lastDrawMs = 0; return; }
   if (enter || c == 't') {     // enter tracking
     SatEntry* s = activeSat();
     if (s) { loadCalForSat(s->norad); loadNoteForSat(s->norad); }
     radioOut = false;
     lastDoppMs = 0;
+    trackReturn = SCR_PASSES;
     screen = SCR_TRACK;
   }
 }
 
 void App::keyPassDetail(char c, bool enter, bool back) {
   if (c == 'p') { screen = SCR_PASSPOLAR; lastDrawMs = 0; return; }  // polar of this pass
-  if (isBack(c, back) || enter) { screen = SCR_PASSES; lastDrawMs = 0; }
+  if (isBack(c, back) || enter) { screen = passDetailReturn; lastDrawMs = 0; }
 }
 
 void App::keyTrack(char c, bool enter, bool back) {
   if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (isBack(c, back)) {
-    if (radioOut) { radioOut = false; }     // stop sending on first back
-    else {
-      if (rotOut && rot) { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
-                           rotOut = false; rotParked = true; }
-      screen = SCR_PASSES;
-    }
+    // Leaving the Track screen no longer stops tracking: if the radio and/or
+    // rotator are engaged, they keep running in the background (the loop's
+    // Doppler/rotator service is gated on radioOut/rotOut, not on the screen),
+    // and the header shows a RAD/ROT/R+R tag so it's visible elsewhere. Use the
+    // 'r' / 'o' toggles to stop. When neither is engaged this is a plain exit.
+    screen = trackReturn; lastDrawMs = 0;
     return;
   }
 
@@ -3663,6 +3971,7 @@ void App::keyTrack(char c, bool enter, bool back) {
   if (c == 'r') {                                    // toggle radio output
     radioOut = !radioOut;
     if (radioOut) {
+      { SatEntry* ts = activeSat(); trackedNorad = ts ? ts->norad : 0; }  // lock tracking to this bird
       // Command the rig's satellite mode (a no-op on rigs without one). A
       // receive-only transponder (beacon/telemetry, no uplink) turns satellite
       // mode OFF and tunes the downlink on MAIN; a two-way transponder turns it on
@@ -3708,6 +4017,7 @@ void App::keyTrack(char c, bool enter, bool back) {
       else {
         rotOut = !rotOut;
         if (rotOut) {
+          { SatEntry* ts = activeSat(); trackedNorad = ts ? ts->norad : 0; }  // lock tracking to this bird
           smOut = false;                       // sat tracking takes the rotator
           lastRotMs = 0; lastAzCmd = lastElCmd = -999.0f;
           lastUnwrappedAz = -999.0f; rotParked = false; rotFlipUntil = 0;
@@ -3858,7 +4168,7 @@ void App::drawPassPolar() {
 
 void App::keyPassPolar(char c, bool enter, bool back) {
   if (c == 'p') { screen = SCR_PASSDETAIL; lastDrawMs = 0; return; }  // toggle to elev plot
-  if (isBack(c, back) || enter) { screen = SCR_PASSES; lastDrawMs = 0; }
+  if (isBack(c, back) || enter) { screen = passDetailReturn; lastDrawMs = 0; }
 }
 
 // ---- Mutual (co-visibility) windows vs a remote DX grid --------------------
@@ -4270,6 +4580,99 @@ void App::keyVis(char c, bool enter, bool back) {
   if (isUp(c) && visDayOff > 0) { visDayOff--; buildVis(); lastDrawMs = 0; return; } // ; scroll 1 day back (>= today)
 }
 
+// ---- Visible-passes LIST (SCR_VISLIST) -----------------------------------
+// A scrollable list of OPTICALLY-VISIBLE passes (sunlit satellite, dark sky,
+// peak elevation over the visMinEl gate) for the active satellite across the
+// next VIS_DAYS days. Unlike the 10-day chart (SCR_VIS), this filters to only
+// the passes you could actually see, and lists each with its time and geometry.
+void App::buildVisList() {
+  vlN = 0; vlSel = 0; vlScroll = 0;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet() || !loc.obs().valid) return;
+  building = true;
+  setStatus("Finding visible passes..."); draw();
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  time_t now = nowUtc();
+  time_t winEnd = now + (time_t)VIS_DAYS * 86400;
+  // Scan the 10-day span in 1-day windows and keep only the optically-visible
+  // passes. Windowing avoids predictPasses' VIS_PASS_MAX cap silently dropping
+  // the tail of the span for high-pass-rate LEO sats (~15 passes/day x 10 days
+  // would exceed a single 128-pass batch). vlPasses[] holds only the VISIBLE
+  // passes, which are far fewer, so its cap is rarely a constraint.
+  static PassPredict day[VIS_PASS_MAX];
+  time_t from = now;
+  while (from < winEnd && vlN < VIS_PASS_MAX) {
+    time_t segEnd = from + 86400; if (segEnd > winEnd) segEnd = winEnd;
+    int n = pred.predictPasses(from, cfg.minPassEl, day, VIS_PASS_MAX, segEnd);
+    if (n <= 0) { from = segEnd; continue; }
+    for (int i = 0; i < n && vlN < VIS_PASS_MAX; ++i) {
+      bool vis = false;
+      if (visEvalPass(day[i].aos, day[i].los, day[i].maxEl, vis) == 1 && vis)
+        vlPasses[vlN++] = day[i];
+    }
+    // Advance past the last pass found so the next window doesn't re-list it.
+    time_t lastLos = day[n - 1].los;
+    from = (lastLos > from) ? lastLos + 1 : segEnd;
+  }
+  building = false;
+  setStatus("");
+}
+
+void App::drawVisList() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " visible") : String("Visible passes"));
+  canvas.setTextSize(1);
+  if (building) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("Finding visible passes...");
+    footer("` back"); return;
+  }
+  if (!timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("Clock not set (NTP or GPS).");
+    footer("` back"); return;
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.print("AOS (UTC)    Dur El  LOS");
+  if (vlN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("No visible passes in the");
+    canvas.setCursor(6, 56); canvas.printf("next %d days.", VIS_DAYS);
+    footer("r recompute  ` back");
+    return;
+  }
+  const int VISROWS = 9;
+  if (vlSel < vlScroll) vlScroll = vlSel;
+  if (vlSel >= vlScroll + VISROWS) vlScroll = vlSel - VISROWS + 1;
+  for (int r = 0; r < VISROWS && (vlScroll + r) < vlN; ++r) {
+    int i = vlScroll + r;
+    int y = 30 + r*10;
+    PassPredict& p = vlPasses[i];
+    long mins = (p.los - p.aos) / 60;
+    if (i == vlSel) { canvas.fillRect(0, y-1, 240, 10, CL_SELBG);
+                      canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else canvas.setTextColor(CL_YELLOW, CL_BLACK);   // all rows are visible passes
+    canvas.setCursor(4, y);
+    canvas.printf("%s  %2ldm %3.0f %s",
+                  fmtMDHM(p.aos).c_str(), mins, p.maxEl, fmtHM(p.los).c_str());
+  }
+  footer("ENT detail  r recomp  ` back");
+}
+
+void App::keyVisList(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_PASSES; lastDrawMs = 0; return; }
+  if (c == 'r') { buildVisList(); lastDrawMs = 0; return; }
+  if (vlN == 0) return;
+  if (isUp(c))   { if (vlSel > 0) vlSel--; lastDrawMs = 0; }
+  if (isDown(c)) { if (vlSel < vlN - 1) vlSel++; lastDrawMs = 0; }
+  if (enter) {                                   // open the selected pass's detail plot
+    SatEntry* s = activeSat();
+    if (s) { pred.setSite(loc.obs()); pred.setSat(*s);
+             passDetailReturn = SCR_VISLIST;
+             buildPassDetail(vlPasses[vlSel]); screen = SCR_PASSDETAIL; lastDrawMs = 0; }
+  }
+}
+
 // ===========================================================================
 //  60-day illumination (DK3WN "illum"): date x orbit-phase sun/shadow raster
 // ===========================================================================
@@ -4420,7 +4823,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -4620,6 +5023,12 @@ void App::keySettings(char c, bool enter, bool back) {
                editBuf = cfg.qrzUser; screen = SCR_EDIT; break;
       case 42: editTarget = 215; editTitle = "QRZ password";
                editBuf = cfg.qrzPass; screen = SCR_EDIT; break;
+      case 69: editTarget = 220; editTitle = "LoTW DXCC entity #";
+               editBuf = cfg.lotwDxcc; screen = SCR_EDIT; break;
+      case 70: editTarget = 221; editTitle = "LoTW CQ zone";
+               editBuf = cfg.lotwCqz; screen = SCR_EDIT; break;
+      case 71: editTarget = 222; editTitle = "LoTW ITU zone";
+               editBuf = cfg.lotwItuz; screen = SCR_EDIT; break;
       case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
@@ -4723,6 +5132,12 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.qrzUser[sizeof(cfg.qrzUser)-1] = 0; qrzSessionKey = ""; break;
       case 215: strncpy(cfg.qrzPass, editBuf.c_str(), sizeof(cfg.qrzPass)-1);
                 cfg.qrzPass[sizeof(cfg.qrzPass)-1] = 0; qrzSessionKey = ""; break;
+      case 220: strncpy(cfg.lotwDxcc, editBuf.c_str(), sizeof(cfg.lotwDxcc)-1);
+                cfg.lotwDxcc[sizeof(cfg.lotwDxcc)-1] = 0; break;
+      case 221: strncpy(cfg.lotwCqz, editBuf.c_str(), sizeof(cfg.lotwCqz)-1);
+                cfg.lotwCqz[sizeof(cfg.lotwCqz)-1] = 0; break;
+      case 222: strncpy(cfg.lotwItuz, editBuf.c_str(), sizeof(cfg.lotwItuz)-1);
+                cfg.lotwItuz[sizeof(cfg.lotwItuz)-1] = 0; break;
       case 210: { double v = editBuf.toFloat(); if (v >= 0.1 && v <= 50000.0) cfg.beaconMHz = v;
                   cfg.save(); screen = SCR_ORBIT; orbitPage = 4; lastDrawMs = 0;
                   setStatus("Saved"); return; }
@@ -4734,6 +5149,12 @@ void App::keyEdit(char c, bool enter, bool back) {
         String err;
         if (qrzLookup(call, err)) { qrzHaveResult = true; setStatus(""); }
         else { qrzHaveResult = false; setStatus("QRZ: " + err); }
+        return; }
+
+      case 230: {                                   // LoTW key password -> upload
+        String pass = editBuf;
+        screen = SCR_LOTW; lastDrawMs = 0;
+        doLotwUpload(pass);
         return; }
 
       // ---- rotctld (network rotator) host / port ----
@@ -5015,10 +5436,12 @@ void App::header(const String& t) {
   // Clock (left of the battery). Build it first so the title can be fit to the
   // space that's left over.
   String clk;
+  int clkX = 0;                                 // where the clock text is drawn
   int rightLimit = bx;                          // title must stop before the battery
   // Unread LoRa-message indicator: a small envelope + count just left of the
   // battery, shown on every screen when there are unread messages. Silent and
   // always-on; the banner/beep (see loraPoll) is the active alert.
+  int msgLeft = bx;                             // left edge of the envelope cluster (bx = none)
   if (msgUnread > 0) {
     int ex = bx - 26, ey = 4, ew = 12, eh = 8;   // envelope box left of battery
     canvas.drawRect(ex, ey, ew, eh, CL_YELLOW);
@@ -5028,11 +5451,15 @@ void App::header(const String& t) {
     canvas.setTextSize(1);
     int cnt = msgUnread > 9 ? 9 : (int)msgUnread;  // single digit (or +)
     canvas.setCursor(ex - 7, 4); canvas.print(msgUnread > 9 ? "+" : String(cnt).c_str());
-    rightLimit = ex - 9;                          // keep the title clear of it
+    msgLeft = ex - 7;                             // count digit is the leftmost part
+    rightLimit = msgLeft - 2;                     // keep the title clear of it
   }
   if (timeIsSet()) {
     clk = fmtClock(nowUtc()) + "Z";
-    rightLimit = bx - (int)clk.length() * 6 - 5;  // …and before the clock when it's shown
+    // Sit the clock to the LEFT of the envelope cluster (or the battery if there's
+    // no envelope) so the two never overlap.
+    clkX = msgLeft - (int)clk.length() * 6 - 5;
+    rightLimit = clkX - 3;                        // …and the title before the clock
   }
   String trk;                                   // background Sun/Moon tracking tag
   int trkX = 0;
@@ -5040,6 +5467,15 @@ void App::header(const String& t) {
     trk = smSel ? "MOON" : "SUN";
     trkX = rightLimit - (int)trk.length() * 6 - 6;
     rightLimit = trkX;
+  }
+  // Background satellite tracking tag: radio and/or rotator are still engaged
+  // while off the Track/Big screen, so the user can see (and that the rig may be
+  // transmitting). Shown on every other screen; cleared by the r/o toggles.
+  String btrk; int btrkX = 0;
+  if ((radioOut || rotOut) && screen != SCR_TRACK && screen != SCR_BIG) {
+    btrk = (radioOut && rotOut) ? "R+R" : (radioOut ? "RAD" : "ROT");
+    btrkX = rightLimit - (int)btrk.length() * 6 - 6;
+    rightLimit = btrkX;
   }
 
   // Title (satellite name) at text size 2 = 12 px/char. Truncate to whatever
@@ -5056,13 +5492,18 @@ void App::header(const String& t) {
 
   if (clk.length()) {
     canvas.setTextColor(CL_WHITE, CL_BLUE);
-    canvas.setCursor(bx - (int)clk.length() * 6 - 5, 4);    // left of the battery
+    canvas.setCursor(clkX, 4);                              // left of the envelope/battery
     canvas.print(clk);
   }
   if (trk.length()) {                           // Sun/Moon tracking runs in background
     canvas.setTextColor(CL_ORANGE, CL_BLUE);
     canvas.setCursor(trkX, 4);
     canvas.print(trk);
+  }
+  if (btrk.length()) {                          // radio/rotator tracking runs in background
+    canvas.setTextColor(CL_GREEN, CL_BLUE);
+    canvas.setCursor(btrkX, 4);
+    canvas.print(btrk);
   }
 }
 void App::drawAbout() {
@@ -5167,16 +5608,17 @@ static void writeQsoCsv(File& f, const PendingQso& q) {
     return o;
   };
   String notes = q.notes; notes.replace("\n", " "); notes.replace("\r", " ");
-  f.printf("%lu,%s,%s,%s,%lu,%lu,%s,%s,%s,%s,%s,%s\n",
+  f.printf("%lu,%s,%s,%s,%lu,%lu,%s,%s,%s,%s,%s,%s,%u\n",
            (unsigned long)q.utc, cl(q.call).c_str(), cl(q.sat).c_str(),
            cl(q.mode).c_str(), (unsigned long)q.dlHz, (unsigned long)q.ulHz,
            cl(q.rstS).c_str(), cl(q.rstR).c_str(), cl(q.myGrid).c_str(),
-           cl(q.grid).c_str(), cl(q.myCall).c_str(), notes.c_str());
+           cl(q.grid).c_str(), cl(q.myCall).c_str(), notes.c_str(),
+           (unsigned)(q.uploaded & 1));
 }
 
 static bool parseQsoCsv(const String& line, PendingQso& q) {
-  String f[12]; int n = 0, start = 0;
-  for (int i = 0; i < (int)line.length() && n < 11; ++i)
+  String f[13]; int n = 0, start = 0;
+  for (int i = 0; i < (int)line.length() && n < 12; ++i)
     if (line[i] == ',') { f[n++] = line.substring(start, i); start = i + 1; }
   f[n++] = line.substring(start);
   if (n < 11) return false;
@@ -5197,6 +5639,7 @@ static bool parseQsoCsv(const String& line, PendingQso& q) {
   } else {                                         // legacy schema: no mycall column
     strncpy(q.notes,  f[10].c_str(), sizeof(q.notes)-1);
   }
+  if (n >= 13) q.uploaded = (uint8_t)(strtoul(f[12].c_str(), nullptr, 10) & 1);
   return true;
 }
 
@@ -5320,6 +5763,12 @@ static int lotwSatResolve(const char* amsat, char out[7]) {
   return (strlen(amsat) > 6) ? 1 : 0;
 }
 
+// Non-static wrapper so lotw.cpp can reuse the same sat-name mapping the ADIF
+// export uses (keeps the .tq8 and the exported ADIF in agreement).
+int lotwSatResolveExt(const char* amsat, char out[7]) {
+  return lotwSatResolve(amsat, out);
+}
+
 void App::promptNextLotw() {
   editTarget = 600;
   editTitle  = String("LoTW name: ") + exportSats[exportPendIdx];
@@ -5413,8 +5862,8 @@ bool App::exportAdif() {
 void App::drawLog() {
   header("Log");
   canvas.setTextSize(1);
-  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF", "Voice Memos" };
-  for (int i = 0; i < 4; ++i) {
+  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF", "Voice Memos", "Sign & upload to LoTW" };
+  for (int i = 0; i < 5; ++i) {
     int y = 26 + i*14;
     if (i == logMenuSel) { canvas.fillRect(0, y-2, 240, 13, CL_SELBG);
                            canvas.setTextColor(CL_BLACK, CL_SELBG); }
@@ -5422,23 +5871,215 @@ void App::drawLog() {
     canvas.setCursor(6, y); canvas.print(items[i]);
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 26 + 4*14 + 6);
+  canvas.setCursor(6, 26 + 5*14 + 6);
   canvas.printf("%d logged  (qso_log.csv)", qsoCount());
   footer("; / . move  ENT  ` back");
 }
 
 void App::keyLog(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
-  const int N = 4;
+  const int N = 5;
   if (isUp(c))   logMenuSel = (logMenuSel + N - 1) % N;
   if (isDown(c)) logMenuSel = (logMenuSel + 1) % N;
   if (enter) {
     if (logMenuSel == 0) beginQso();
     else if (logMenuSel == 1) { loadLog(); screen = SCR_LOGLIST; }
     else if (logMenuSel == 2) beginAdifExport();
-    else { buildMemoList(); memoSel = 0; memoScroll = 0; memoConfirmDel = false;
+    else if (logMenuSel == 3) { buildMemoList(); memoSel = 0; memoScroll = 0; memoConfirmDel = false;
            screen = SCR_MEMOS; lastDrawMs = 0; }
+    else { lotwEnter(); }
   }
+}
+
+// ===================== LoTW upload screen ==================================
+// Counts the un-uploaded QSOs and opens the LoTW screen. Sat QSOs only (CardSat
+// logs are all satellite QSOs; PROP_MODE=SAT is emitted for every record).
+void App::lotwEnter() {
+  lotwBusy = false; lotwLastSent = 0; lotwStatus = "";
+  lotwPending = 0;
+  if (Store::fs().exists(FILE_LOG)) {
+    File f = Store::fs().open(FILE_LOG, "r");
+    if (f) {
+      while (f.available()) {
+        String l = f.readStringUntil('\n'); l.trim();
+        if (!l.length() || l.startsWith("utc,")) continue;
+        PendingQso q;
+        if (parseQsoCsv(l, q) && !(q.uploaded & 1)) lotwPending++;
+      }
+      f.close();
+    }
+  }
+  screen = SCR_LOTW; lastDrawMs = 0;
+}
+
+void App::drawLotw() {
+  header("LoTW upload");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  int y = 20;
+  bool haveCred = Lotw::credentialPresent();
+  bool haveCard = Store::ready();
+
+  canvas.setCursor(6, y); y += 12;
+  canvas.printf("SD card: %s", haveCard ? "yes" : "NO (required)");
+  canvas.setCursor(6, y); y += 12;
+  canvas.printf("Key+cert: %s", haveCred ? "found" : "not on SD");
+  canvas.setCursor(6, y); y += 12;
+  canvas.printf("Station: DXCC %s CQ %s ITU %s",
+                cfg.lotwDxcc[0] ? cfg.lotwDxcc : "-",
+                cfg.lotwCqz[0]  ? cfg.lotwCqz  : "-",
+                cfg.lotwItuz[0] ? cfg.lotwItuz : "-");
+  canvas.setCursor(6, y); y += 14;
+  canvas.printf("Un-uploaded QSOs: %d", lotwPending);
+
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (lotwStatus.length()) {
+    canvas.setCursor(6, y); y += 12;
+    // clip to the screen width
+    String s = lotwStatus; if (s.length() > 38) s = s.substring(0, 38);
+    canvas.print(s);
+  }
+
+  if (!haveCard)        footer("` back   (insert SD card)");
+  else if (!haveCred)   footer("` back   (no LoTW key on SD)");
+  else if (lotwPending) footer("u sign & upload   ` back");
+  else                  footer("` back   (nothing to upload)");
+}
+
+void App::keyLotw(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
+  if (lotwBusy) return;
+  if (c == 'u' && Store::ready() && Lotw::credentialPresent() && lotwPending > 0) {
+    // Prompt for the key password (blank if the key is unencrypted).
+    editTarget = 230; editTitle = "Key password (blank=none)";
+    editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+}
+
+// Build the .tq8 from all un-uploaded QSOs, POST it, and -- on an accepted
+// upload -- mark those QSOs uploaded so they aren't sent again.
+void App::doLotwUpload(const String& keyPass) {
+  lotwBusy = true; lastDrawMs = 0;
+  lotwStatus = "Collecting QSOs..."; draw();
+
+  // Gather un-uploaded QSOs into a heap array. Capped to keep the uncompressed
+  // .tq8 text (~600 B/QSO) within a safe heap budget on the no-PSRAM S3; any
+  // remainder is sent on the next upload (they stay un-flagged).
+  const int CAP = 50;
+  PendingQso* batch = (PendingQso*)malloc(sizeof(PendingQso) * CAP);
+  if (!batch) { lotwStatus = "Out of memory"; lotwBusy = false; return; }
+  int n = 0;
+  if (Store::fs().exists(FILE_LOG)) {
+    File f = Store::fs().open(FILE_LOG, "r");
+    if (f) {
+      while (f.available() && n < CAP) {
+        String l = f.readStringUntil('\n'); l.trim();
+        if (!l.length() || l.startsWith("utc,")) continue;
+        PendingQso q;
+        if (parseQsoCsv(l, q) && !(q.uploaded & 1) && q.call[0]) batch[n++] = q;
+      }
+      f.close();
+    }
+  }
+  if (n == 0) { free(batch); lotwStatus = "Nothing to upload"; lotwBusy = false; return; }
+
+  LotwStation st;
+  st.call = cfg.myCall;
+  st.dxcc = cfg.lotwDxcc;
+  st.grid = loc.toGrid(loc.obs().lat, loc.obs().lon);
+  st.cqz  = cfg.lotwCqz;
+  st.ituz = cfg.lotwItuz;
+
+  lotwStatus = "Signing " + String(n) + " QSOs..."; draw();
+  String err; size_t gz = 0;
+  bool built = Lotw::buildTq8(batch, n, st, keyPass, err, &gz);
+  free(batch);
+  if (!built) { lotwStatus = "Sign failed: " + err; lotwBusy = false; lastDrawMs = 0; return; }
+
+  // Free the canvas sprite for the TLS handshake, then POST the staged file.
+  lotwStatus = "Uploading (" + String((unsigned)gz) + " B)..."; draw();
+  String resp;
+  bool posted = net.httpsPostMultipart(LOTW_UPLOAD_URL, "upfile",
+                                       LOTW_TQ8_OUT, "cardsat.tq8",
+                                       "application/octet-stream", resp);
+  if (!posted) {
+    lotwStatus = "Upload failed: " + net.lastErr;
+    lotwBusy = false; lastDrawMs = 0; return;
+  }
+
+  // Parse LoTW's response. The web service reports the result in its body; look
+  // for an explicit accepted/rejected count, else treat HTTP 200 as accepted.
+  int accepted = lotwParseAccepted(resp, n);
+  if (accepted > 0) {
+    // Flag the n QSOs we actually put in the .tq8 -- whether LoTW counted them as
+    // newly accepted or as duplicates, they've reached LoTW and must not be re-sent.
+    int marked = markLogUploaded(n);
+    lotwLastSent = accepted;
+    lotwStatus = "Accepted " + String(accepted) + " (" + String(marked) + " flagged)";
+    lotwPending -= marked; if (lotwPending < 0) lotwPending = 0;
+  } else {
+    lotwStatus = "Server rejected upload";
+  }
+  lotwBusy = false; lastDrawMs = 0;
+}
+
+// Parse the LoTW upload response for an accepted-QSO count. The service wording
+// has varied; accept a few forms, and fall back to the batch size on a clear
+// success indication. Returns 0 if the response looks like a failure.
+int App::lotwParseAccepted(const String& resp, int batchN) {
+  String r = resp; r.toLowerCase();
+  if (r.indexOf("rejected") >= 0 && r.indexOf("0 out of") < 0 &&
+      r.indexOf("accepted") < 0)
+    return 0;
+  // "<n> qso(s) ... accepted" or "accepted <n>"
+  int idx = r.indexOf("accepted");
+  if (idx >= 0) {
+    // scan backwards/forwards for a number near "accepted"
+    int lo = idx > 12 ? idx - 12 : 0;
+    String win = r.substring(lo, idx + 12);
+    long val = -1; String num;
+    for (size_t i = 0; i < win.length(); ++i) {
+      char ch = win[i];
+      if (ch >= '0' && ch <= '9') num += ch;
+      else if (num.length()) { val = num.toInt(); num = ""; }
+    }
+    if (num.length()) val = num.toInt();
+    if (val > 0) return (int)min((long)batchN, val);
+    return batchN;  // accepted with no parseable count
+  }
+  // Some success responses just say the file was received/queued.
+  if (r.indexOf("success") >= 0 || r.indexOf("received") >= 0 ||
+      r.indexOf("queued")  >= 0 || r.indexOf("good")     >= 0)
+    return batchN;
+  return 0;
+}
+
+// Mark up to 'limit' currently-un-uploaded QSOs as uploaded by rewriting the log
+// file (the same first-N, in file order, that doLotwUpload collected and sent).
+// Returns the number of records flagged.
+int App::markLogUploaded(int limit) {
+  if (!Store::fs().exists(FILE_LOG)) return 0;
+  File in = Store::fs().open(FILE_LOG, "r");
+  if (!in) return 0;
+  String tmp = String(FILE_LOG) + ".tmp";
+  File out = Store::fs().open(tmp.c_str(), "w");
+  if (!out) { in.close(); return 0; }
+  int flagged = 0;
+  while (in.available()) {
+    String l = in.readStringUntil('\n');
+    String t = l; t.trim();
+    if (!t.length()) continue;
+    if (t.startsWith("utc,")) { out.println(t); continue; }
+    PendingQso q;
+    if (parseQsoCsv(t, q)) {
+      if (!(q.uploaded & 1) && flagged < limit) { q.uploaded = 1; flagged++; }
+      writeQsoCsv(out, q);
+    }
+  }
+  in.close(); out.close();
+  Store::fs().remove(FILE_LOG);
+  Store::fs().rename(tmp.c_str(), FILE_LOG);
+  return flagged;
 }
 
 void App::drawLogEntry() {
@@ -5656,8 +6297,8 @@ void App::draw() {
     case SCR_POLAR:    drawPolar(); break;
     case SCR_PASSPOLAR: drawPassPolar(); break;
     case SCR_MUTUAL:   drawMutual(); break;
-    case SCR_VIS:      drawVis(); break;
-    case SCR_ILLUM:    drawIllum(); break;
+    case SCR_VIS:      drawVis(); break;    case SCR_ILLUM:    drawIllum(); break;
+    case SCR_VISLIST:  drawVisList(); break;
     case SCR_LOCATION: drawLocation(); break;
     case SCR_UPDATE:   drawUpdate(); break;
     case SCR_SETTINGS: drawSettings(); break;
@@ -5675,6 +6316,8 @@ void App::draw() {
     case SCR_TRANSIT:  drawTransit(); break;
     case SCR_MESSAGES: drawMessages(); break;
     case SCR_LOG:      drawLog(); break;
+    case SCR_LOTW:     drawLotw(); break;
+    case SCR_HAMSAT:   drawHamsat(); break;
     case SCR_LOGENTRY: drawLogEntry(); break;
     case SCR_LOGLIST:  drawLogList(); break;
     case SCR_WORLDMAP: drawWorldMap(); break;
@@ -6111,6 +6754,7 @@ void App::drawHelp() {
     "SUN / MOON",
     " ;/. pick Sun or Moon",
     " o rotor track  x stop",
+    " g graphic  t transits",
     " s sky sources (planets,",
     "   radio sources)",
     " parks while body is set",
@@ -6143,10 +6787,9 @@ void App::drawHelp() {
     " r refresh  z deep-sleep",
     "PASSES",
     " ENT/t track  d detail",
-    " g workable grids",
-    " w workable US states",
-    " e workable DXCC",
-    " v 10-day  i illum  x DX",
+    " g grids  w states  e DXCC",
+    " v 10-day  V vis-list",
+    " i illum  x DX mutual",
     "MUTUAL WINDOWS (x)",
     " co-visibility with a DX",
     " ;/. scroll  d Doppler",
@@ -6844,25 +7487,41 @@ static double perigeeAltKm(const SatEntry& s) {
   return (rp - RE) / 1000.0;                          // km
 }
 
+// True for crewed / regularly-reboosted space stations, whose orbits are
+// actively maintained -- a decay estimate is meaningless for them, so they must
+// never raise a decay flag. Matched by NORAD id (robust vs. name variants):
+// ISS (ZARYA) 25544, CSS/Tiangong (TIANHE) 48274. Docked vehicles co-orbit but
+// carry their own ids; the stations themselves are what matters here.
+static bool isSpaceStation(const SatEntry& s) {
+  switch (s.norad) {
+    case 25544:   // ISS (ZARYA)
+    case 48274:   // CSS (TIANHE) / Tiangong
+      return true;
+    default:
+      return false;
+  }
+}
+
 // At-a-glance decay classification for the list flag and watch view.
-// 0 = none/stable, 1 = watch, 2 = soon, 3 = imminent. Combines the King-Hele
-// lifetime estimate (using the configured solar density) with perigee altitude,
-// so a low perigee or a short estimated life both raise the flag.
+// 0 = none/stable, 1 = watch, 2 = soon, 3 = imminent. Driven by the King-Hele
+// time-to-decay estimate and gated so NO flag appears unless the satellite is
+// within one year of decay; a low perigee only escalates the urgency *within*
+// that window, it does not raise a flag on its own. Reboosted space stations
+// are excluded entirely.
 uint8_t App::decayLevelFor(const SatEntry& s) {
-  double hp = perigeeAltKm(s);
+  if (isSpaceStation(s)) return 0;                  // reboosted -> never flag
   double days = estimateDecayDays(s, decayDensityScale());
-  uint8_t lvl = 0;
-  // Perigee-driven (independent of B* quality).
+  // Need a valid, finite estimate inside the one-year window to flag at all.
+  if (days < 0 || days >= 365) return 0;
+  double hp = perigeeAltKm(s);
+  uint8_t lvl;
+  if (days < 30)       lvl = 3;                     // imminent
+  else if (days < 90)  lvl = 2;                     // soon
+  else                 lvl = 1;                     // watch (90..365 days)
+  // A very low perigee escalates urgency within the flagged window.
   if (hp >= 0) {
     if (hp < 200)      lvl = 3;
-    else if (hp < 300) lvl = (lvl < 2 ? 2 : lvl);
-    else if (hp < 400) lvl = (lvl < 1 ? 1 : lvl);
-  }
-  // Lifetime-driven (only when the estimate is valid and finite).
-  if (days >= 0 && days < 1e9) {
-    if (days < 30)       lvl = 3;
-    else if (days < 180) { if (lvl < 2) lvl = 2; }
-    else if (days < 730) { if (lvl < 1) lvl = 1; }
+    else if (hp < 300 && lvl < 2) lvl = 2;
   }
   return lvl;
 }
@@ -6990,11 +7649,6 @@ void App::drawOrbit() {
     row("Incl/Ecc",     String(s->incl, 2) + " / " + String(s->ecc, 5));
     row("SMA (a)",      String(a, 0) + " km");
     row("B* / decay",   String(s->bstar, 6) + " " + fmtDecay(orbDecayDays));
-    { double hp = perigeeAltKm(*s);
-      uint8_t dl = decayLevelFor(*s);
-      const char* lvl = (dl == 3) ? "  IMMINENT" : (dl == 2) ? "  decaying"
-                      : (dl == 1) ? "  watch" : "";
-      row("Perigee", (hp >= 0 ? String((long)lround(hp)) + " km" : String("--")) + lvl); }
     if (orbDecayDays >= 0 && orbDecayDays < 36500)        // show the solar bracket
       row("Decay rng",  fmtDecayShort(orbDecayHi) + "-" + fmtDecayShort(orbDecayLo) +
                         " (" + solarActLabel(cfg.solarAct) + ")");
@@ -7645,7 +8299,7 @@ void App::drawSunMoon() {
                   : (elv[smSel] <= 0 ? (smSel ? "MOON set (parked)" : "SUN set (parked)")
                                      : (smSel ? "tracking MOON" : "tracking SUN"));
   canvas.printf("Rotator: %s", rs);
-  footer("` bk ;/. pick g view o rot s sky t trans x stop");
+  footer("` bk ;/. pick g o rot s sky t x stop");
 }
 
 void App::keySunMoon(char c, bool enter, bool back) {
@@ -8021,7 +8675,11 @@ void App::satsatJobTick() {
     satsatComputed = true; satsatJobPct = 100; satsatSel = 0;
     SatEntry* a = activeSat();
     if (a) { pred.setSite(loc.obs()); pred.setSat(*a); }
+    // Completion sets satsatComputed, which also stops the periodic redraw that
+    // was painting the progress bar -- so draw the results now rather than
+    // waiting for a keypress. (Setting lastDrawMs=0 alone wouldn't repaint.)
     lastDrawMs = 0;
+    if (screen == SCR_SATSAT) draw();
     return;
   }
 }
@@ -8097,7 +8755,11 @@ void App::transitJobTick() {
     transitJobPhase = 0; transitJobPct = 100;
     SatEntry* a = activeSat();
     if (a) { pred.setSite(loc.obs()); pred.setSat(*a); }
+    // Completion clears transitJobPhase, which also stops the periodic redraw
+    // that was painting the progress bar -- so draw the results now rather than
+    // waiting for a keypress. (Setting lastDrawMs=0 alone wouldn't repaint.)
     lastDrawMs = 0;
+    if (screen == SCR_TRANSIT) draw();
   }
 }
 
@@ -8418,9 +9080,15 @@ void App::drawMessages() {
     LoraMsg& m = msgRing[order[r]];
     canvas.setTextColor(m.mine ? CL_CYAN : CL_GREEN, CL_BLACK);
     canvas.setCursor(2, y);
-    canvas.printf("%s%s:", m.mine ? ">" : "", m.mine ? "me" : m.from);
+    const char* who = m.mine ? "me" : m.from;
+    canvas.printf("%s%s:", m.mine ? ">" : "", who);
     canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.printf(" %.30s", m.text);
+    // Cap the text to whatever space is left on the 240 px (~39 char) line after the
+    // "who:" prefix, so a long callsign + long message can't run off the right edge.
+    int prefixCh = (m.mine ? 1 : 0) + (int)strlen(who) + 1;   // ">"/"" + name + ":"
+    int textMax  = 39 - prefixCh - 1;                          // -1 for the leading space
+    if (textMax < 1) textMax = 1;
+    canvas.printf(" %.*s", textMax, m.text);
     if (!m.mine) {                        // signal info, dim, right side
       canvas.setTextColor(CL_DGREY, CL_BLACK);
       canvas.setCursor(2, y); // (rssi shown only if room; keep simple)
@@ -9777,10 +10445,10 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "QRZ Lookup", "Location", "Update",
+                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "QRZ Lookup", "Location", "Update",
                           "Settings", "Log", "Messages", "About", "Charge / Sleep" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
-  static_assert(sizeof(items) / sizeof(items[0]) == 16,
+  static_assert(sizeof(items) / sizeof(items[0]) == 17,
                 "Home menu item count must match keyHome's N");
   const int VIS = 9;
   if (homeSel < homeScroll)           homeScroll = homeSel;
@@ -9857,7 +10525,7 @@ void App::drawSchedule() {
       canvas.setCursor(232, y); canvas.print("!");
     }
   }
-  footer("ENT trk  m map  * = visible  r refr  ` bk");
+  footer("ENT trk m map *=vis r refr `bk");
 }
 
 void App::drawSatList() {
@@ -9885,7 +10553,7 @@ void App::drawSatList() {
                          canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                 canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y);
-    canvas.printf("%c%-21s%5lu", isFav(s.norad) ? '*' : ' ',
+    canvas.printf("%c%-21.21s%5lu", isFav(s.norad) ? '*' : ' ',
                   s.name, (unsigned long)s.norad);
     if (s.amsatStatus) {                       // AMSAT activity, if recently reported
       bool sel = (vi == viewSel); int cx = 233, cy = y + 3;
@@ -9906,8 +10574,8 @@ void App::drawSatList() {
     }
   }
   bool selManual = (viewN > 0 && viewSel < viewN && db.isManualGp(db.at(view[viewSel]).norad));
-  if (selManual) footer("ENT pass o orb t tx e eqx k osc f fav x del `bk");
-  else           footer("ENT pass o orb s sim t tx e eqx k osc 3 glb 2 s2s d 10d i illum f fav `bk");
+  if (selManual) footer("ENT pass o orb t tx x del h=help `bk");
+  else           footer("ENT pass o orb t tx f fav h=help `bk");
 }
 
 void App::drawPasses() {
@@ -9950,8 +10618,12 @@ void App::drawPasses() {
     canvas.setCursor(4, y);
     canvas.printf("%s  %2ldm %3.0f %s",
                   fmtMDHM(p.aos).c_str(), mins, p.maxEl, fmtHM(p.los).c_str());
+    if (passVis[i]) {                              // optically visible (cached)
+      canvas.setTextColor(CL_YELLOW, (i == passSel) ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(232, y); canvas.print("*");
+    }
   }
-  footer("ENT trk d dtl n+TX g grd w st e dx x mut `bk");
+  footer("ENT trk d dtl n g w e dx x V vis* `bk");
 }
 
 void App::drawPassDetail() {
@@ -10140,10 +10812,10 @@ void App::drawTrack() {
     canvas.print(nb);
   }
   if (trackMode == 0)
-    footer(imuReady ? ",/tune s x=ctr m=cal t r o p n=bcn N=note y=tilt"
-                    : ",/tune s=stp x=ctr m=cal t r o p n=bcn N=note f=man");
+    footer(imuReady ? ",/tune s x=ctr m=cal t o n N h=help"
+                    : ",/tune s=stp x=ctr m=cal t o h=help");
   else
-    footer(",/DN ;.UP s=stp x=0 m=tn t r o p n=bcn N=note f=man");
+    footer(",/DN ;.UP s=stp x=0 t o n h=help");
 }
 
 // Large-font "operating" readout: only the values you need at arm's length during
@@ -11210,7 +11882,7 @@ void App::drawLocation() {
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 86);
   canvas.printf("Src: %s", GPS_PROFILES[cfg.gpsSource % GPS_SRC_COUNT].name);
-  footer("e/o/a grd p gps s src c clk v=pos ENT sky");
+  footer("e/o/a grd p gps s src c clk v=pos ENT");
 }
 
 void App::drawUpdate() {
@@ -11234,7 +11906,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 69;
+  const int N = 72;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -11252,7 +11924,7 @@ void App::drawSettings() {
   rows[51] = String("WiFi 2 pass: ") + String(strlen(cfg.pass2) ? "******" : "(none)");
   rows[52] = String("Web control: ") + (cfg.webEnable ? "on" : "off")
              + (cfg.webEnable && net.connected()
-                ? String(" (http://") + WiFi.localIP().toString() + ")" : String(""));
+                ? String(" (") + WiFi.localIP().toString() + ")" : String(""));
   rows[53] = String("Web port: ") + String(cfg.webPort);
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[54] = String("IR pass beacon: ") + (cfg.irBeacon ? "on" : "off");
@@ -11349,6 +12021,9 @@ void App::drawSettings() {
   { const char* pm = (cfg.civPinMode == 1) ? "1-pin G2" : (cfg.civPinMode == 2) ? "1-pin G1" : "TX/RX (G2/G1)";
     rows[63] = String("CI-V wiring: ") + pm; }
   rows[64] = String("CAT serial monitor");
+  rows[69] = String("LoTW DXCC: ") + (cfg.lotwDxcc[0] ? cfg.lotwDxcc : "(not set)");
+  rows[70] = String("LoTW CQ zone: ") + (cfg.lotwCqz[0] ? cfg.lotwCqz : "(not set)");
+  rows[71] = String("LoTW ITU zone: ") + (cfg.lotwItuz[0] ? cfg.lotwItuz : "(not set)");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

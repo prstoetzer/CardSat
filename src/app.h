@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -54,6 +54,7 @@ struct PendingQso {
   char     rstR[6];
   char     grid[10];
   char     notes[40];
+  uint8_t  uploaded;              // bit0: sent to LoTW (CSV col 13, absent => 0)
 };
 
 class App {
@@ -127,6 +128,10 @@ private:
   uint32_t mtxDl = 0, mtxUl = 0, mtxDlHigh = 0, mtxUlHigh = 0;
   bool     mtxInv = false;
   PassPredict passes[PASS_LIST_LEN];
+  bool     passVis[PASS_LIST_LEN] = {false};  // cached optical visibility per pass,
+                                              // filled by computePasses() so the
+                                              // passes screen never re-runs the
+                                              // (expensive) visibility scan per frame
   int      passSel = 0;          // cursor into the passes list
 
   // pass-detail plot: cached elevation + azimuth curve over one pass
@@ -151,7 +156,15 @@ private:
   PassPredict visPasses[VIS_PASS_MAX];
   int      visN = 0;
   int      visDayOff = 0;         // 10-day overview start offset from today, in DAYS (>=0)
+  // Visible-passes LIST screen (SCR_VISLIST): optically-visible passes for the
+  // active sat over the next VIS_DAYS days, as a scrollable list (distinct from
+  // the 10-day chart above).
+  PassPredict vlPasses[VIS_PASS_MAX];
+  int      vlN = 0;
+  int      vlSel = 0;
+  int      vlScroll = 0;
   Screen   visReturn = SCR_PASSES; // screen to return to from vis/illum (Satellites or Passes)
+  Screen   passDetailReturn = SCR_PASSES; // where pass-detail returns to (Passes or VisList)
   bool     building = false;      // a build is in progress (suppress empty-state placeholders)
 
   // EQX table (equatorial crossings, ascending node) for OSCARLOCATOR use.
@@ -430,6 +443,12 @@ private:
   uint32_t lastTiltMs = 0;        // last tilt-tune service time (rate integration)
   bool     manFixUp = false;      // Manual mode: false = fix downlink, true = fix uplink
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
+  Screen   trackReturn = SCR_PASSES; // where the Track screen's back key returns to
+  Screen   passesReturn = SCR_SATLIST; // where the Passes screen's back key returns to
+  uint32_t trackedNorad = 0;     // NORAD that radio/rotator tracking is engaged for;
+                                 // if the active sat changes away from this while
+                                 // tracking runs off-screen, the loop stops tracking
+                                 // so the rig never silently retargets a new bird
   TuneMode tuneMode = TM_HOLD;    // Doppler tune mode (cycle with 'd' on Track)
   bool     cwMode   = false;      // linear bird: force CW on both legs (toggle 'm');
                                   // per-session, reset on every transponder change
@@ -720,6 +739,8 @@ private:
   // Returns the visWhy code and sets vis=true when observable.
   uint8_t visEvalPass(time_t aos, time_t los, float maxEl, bool& vis);
   void buildPassDetail(const PassPredict& p);  // sample one pass into pdEl/pdAz/pdSunlit
+  void computePasses();                        // predict passes[] for the active sat
+                                               // and fill passVis[] once (not per frame)
   void buildPolarPath();                       // sample current/next pass for the live polar
   void computeMutual(const String& grid);      // co-visibility windows vs a DX grid
   void drawPolarGrid(int cx, int cy, int R);   // shared polar rings + cardinal cross
@@ -778,6 +799,7 @@ private:
   void keyPassPolar(char c, bool enter, bool back);
   void keyMutual(char c, bool enter, bool back);
   void buildVis();   void drawVis();   void keyVis(char c, bool enter, bool back);
+  void buildVisList(); void drawVisList(); void keyVisList(char c, bool enter, bool back);
   void buildIllum(); void drawIllum(); void keyIllum(char c, bool enter, bool back);
   void buildOrbit(bool quiet = false); void drawOrbit(); void keyOrbit(char c, bool enter, bool back);
   void buildEqx();   void drawEqx();   void keyEqx(char c, bool enter, bool back);
@@ -796,6 +818,39 @@ private:
   String qrzName, qrzAddr, qrzGrid, qrzCountry, qrzClass;  // parsed result fields
   bool   qrzHaveResult = false;    // a result is on screen
   int    qrzScroll = 0;            // result scroll (for long bios/addresses)
+  // ---- LoTW upload screen (SCR_LOTW) ----
+  void drawLotw();    void keyLotw(char c, bool enter, bool back);
+  void doLotwUpload(const String& keyPass);  // build .tq8 + POST + mark uploaded
+  void lotwEnter();                          // count pending QSOs + open screen
+  int  lotwParseAccepted(const String& resp, int batchN);  // read accepted count
+  int  markLogUploaded(int limit);           // flag up to 'limit' un-uploaded QSOs as sent
+  int    lotwPending = 0;          // un-uploaded sat QSOs counted on entry
+  int    lotwLastSent = 0;         // signed/accepted from the last attempt
+  String lotwStatus;               // last result/error line shown on the screen
+  bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
+  // ---- Upcoming activations feed (SCR_HAMSAT, from hams.at) ----
+  struct Activation {
+    char date[11];     // YYYY-MM-DD
+    char call[14];     // activator callsign (may include /portable)
+    char sat[12];      // satellite name
+    char grid[10];     // Maidenhead grid
+    char start[9];     // HH:MM:SS UTC
+    char end[9];       // HH:MM:SS UTC
+    char mode[10];     // SSB / FM / CW ...
+    char freq[20];     // frequency text (or "" if none)
+    char comment[60];  // activator comment (truncated)
+  };
+  static const int HAMSAT_MAX = 30;
+  Activation hamsatList[HAMSAT_MAX];
+  int    hamsatN = 0;              // parsed activations
+  int    hamsatSel = 0;           // list cursor
+  int    hamsatScroll = 0;        // list scroll offset
+  bool   hamsatDetail = false;    // detail view of the selected activation
+  String hamsatStatus;            // status/error line ("" when a list is shown)
+  void drawHamsat();   void keyHamsat(char c, bool enter, bool back);
+  void fetchHamsat();              // download + parse the feed (WiFi)
+  int  parseHamsat(const String& xml);  // fill hamsatList[]; returns count
+  void hamsatEnter();              // open screen, fetch if WiFi up
   void buildGrids(time_t a, time_t b);
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);

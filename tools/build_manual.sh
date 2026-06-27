@@ -24,7 +24,7 @@ body='\n'.join(lines[i:])
 body=re.sub(r'^## (\d+)\.\s+',r'# ',body,flags=re.M)
 for f in (body,):
     pass
-sub=lambda s:s.replace('\u26a0\ufe0f','**!**').replace('\u26a0','**!**')
+sub=lambda s:s.replace('\u26a0\ufe0f','**!**').replace('\u26a0','**!**').replace('\u2605','star')
 open(sys.argv[2],'w').write(sub(body))
 open(sys.argv[3],'w').write(sub('\n'.join(intro).strip()))
 PY

@@ -376,3 +376,76 @@ bool Net::fetchSatnogsTransmittersToFile(uint32_t norad, const char* path) {
   // ample for the busiest sat (the ISS, ~54 transmitters).
   return httpsGetToFile(url, path, 200000, nullptr);
 }
+
+// POST a (small) file as multipart/form-data. Built for the LoTW .tq8 upload:
+// the staged file is ~1-2 KB, so it's read into one buffer and framed with the
+// standard multipart boundary. Mirrors the GET TLS pattern (insecure CA + busy
+// guard + forced socket close). Returns true on HTTP 200; 'response' gets the
+// server's reply text (capped at maxResp) for the caller to parse.
+bool Net::httpsPostMultipart(const String& url, const char* fieldName,
+                             const char* filePath, const char* fileName,
+                             const char* contentType, String& response,
+                             size_t maxResp) {
+  lastCode = 0; lastErr = ""; response = "";
+  if (!connected()) { lastErr = "no WiFi"; return false; }
+  TlsBusyGuard _tls;
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
+
+  // Read the file to upload (small; the .tq8 is a few KB).
+  File f = Store::fs().open(filePath, "r");
+  if (!f) { lastErr = "open upload file failed"; return false; }
+  size_t flen = f.size();
+  if (flen == 0 || flen > 256000) { f.close(); lastErr = "upload file size bad"; return false; }
+
+  const String boundary = "----CardSatLoTW8b2f4c1d";
+  String head;
+  head  = "--" + boundary + "\r\n";
+  head += "Content-Disposition: form-data; name=\"" + String(fieldName) +
+          "\"; filename=\"" + String(fileName) + "\"\r\n";
+  head += "Content-Type: " + String(contentType) + "\r\n\r\n";
+  const String tail = "\r\n--" + boundary + "--\r\n";
+
+  size_t bodyLen = head.length() + flen + tail.length();
+  uint8_t* body = (uint8_t*)malloc(bodyLen);
+  if (!body) { f.close(); lastErr = "oom building body"; return false; }
+  memcpy(body, head.c_str(), head.length());
+  size_t got = f.read(body + head.length(), flen);
+  f.close();
+  if (got != flen) { free(body); lastErr = "read upload file short"; return false; }
+  memcpy(body + head.length() + flen, tail.c_str(), tail.length());
+
+  Serial.printf("[net] POST %s (%u-byte body) -> %s\n",
+                fileName, (unsigned)bodyLen, url.c_str());
+
+  WiFiClientSecure client;
+  struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
+  client.setInsecure();
+  client.setTimeout(20000);
+
+  HTTPClient http;
+  http.setUserAgent("CardSat-Cardputer/1.0");
+  http.setConnectTimeout(20000);
+  http.setTimeout(20000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.useHTTP10(true);
+
+  if (!http.begin(client, url)) { free(body); lastErr = "begin failed"; return false; }
+  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+  int code = http.POST(body, bodyLen);
+  free(body);
+  lastCode = code;
+  noteConnResult(code);
+  if (code != HTTP_CODE_OK) {
+    lastErr = (code > 0) ? ("HTTP " + String(code))
+                         : HTTPClient::errorToString(code);
+    Serial.printf("[net] POST failed: code=%d (%s)\n", code, lastErr.c_str());
+    http.end();
+    return false;
+  }
+
+  response = http.getString();
+  if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
+  http.end();
+  return true;
+}

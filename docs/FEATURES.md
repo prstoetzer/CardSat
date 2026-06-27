@@ -144,6 +144,11 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   callsign to name, location, grid and licence class over the QRZ XML API (needs a
   QRZ XML-data subscription and WiFi) — handy for working a station you've just
   contacted.
+- **Upcoming activations feed** — an **Activations** screen (main menu) downloads the
+  **hams.at** upcoming-activations feed and lists scheduled roves, grid activations,
+  and special operations (date, callsign, satellite, grid), with a detail view for
+  each (start/end times UTC, mode, frequency, the activator's comment) and a refresh
+  key. See who's planning to be on which bird, from where, and when. WiFi required.
 - **On-device Help** — press `h` on (almost) any screen for a scrollable key reference.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without
@@ -152,6 +157,17 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   nominal) and editing the **date, time, satellite and frequencies** as needed. The
   same fields are editable when you review past entries; **export ADIF** on demand for
   LoTW/eQSL or your main logger.
+- **Direct LoTW upload** (microSD card + your LoTW key required) — **Sign & upload to
+  LoTW** on the Log menu signs your un-uploaded satellite QSOs into a `.tq8` and sends
+  them straight to ARRL's Logbook of the World over WiFi, with no PC and no TQSL. It
+  builds the same cryptographically-signed file TQSL would (RSA-PKCS#1-v1.5 over SHA-1,
+  via the firmware's built-in mbedTLS) and posts it to LoTW's self-authenticating
+  service. You enroll once on a computer the normal way and copy your certificate to
+  the card as two PEM files (a one-line `openssl pkcs12` step); **your private key
+  lives on the SD card**, loaded only at upload time and never copied or transmitted
+  except as the signature. Station DXCC/CQ/ITU zones live in Settings; sent QSOs are
+  flagged (a new `uploaded` column) so they're never uploaded twice. See
+  [MANUAL.md → LoTW upload](../MANUAL.md).
 - **Voice memos.** Press **`v`** while tracking to record a quick voice note to the
   SD card **without interrupting Doppler control** — the filename is stamped with the
   UTC time and the **satellite** you're on (e.g. `memo_20260617_203145_AO-91.wav`). A

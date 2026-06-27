@@ -13,6 +13,9 @@
 
 namespace Store {
   bool   begin();            // mount LittleFS (format on fail), else SD card
+  bool   remount();          // re-establish the SD bus/mount after another driver
+                             // (e.g. the LoRa SX1262) shared and reconfigured the
+                             // SPI bus; no-op when running on internal LittleFS
   fs::FS& fs();              // the active filesystem (LittleFS or SD)
   bool   ready();            // true if some filesystem mounted
   bool   onSD();             // true if we fell back to the SD card

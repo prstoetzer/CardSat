@@ -211,7 +211,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.31";
+static constexpr const char* FW_VERSION = "0.9.32";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -341,6 +341,9 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 
 namespace Store {
   bool   begin();            // mount LittleFS (format on fail), else SD card
+  bool   remount();          // re-establish the SD bus/mount after another driver
+                             // (e.g. the LoRa SX1262) shared and reconfigured the
+                             // SPI bus; no-op when running on internal LittleFS
   fs::FS& fs();              // the active filesystem (LittleFS or SD)
   bool   ready();            // true if some filesystem mounted
   bool   onSD();             // true if we fell back to the SD card
@@ -1852,6 +1855,11 @@ struct Settings {
   uint8_t  msgNotify   = 1;         // LoRa msg alert: 0=off, 1=banner, 2=banner+beep
   void loraApplyRegion(uint8_t region);   // seed freq/BW from a region preset
 
+  // Set by load(): true only when the config file was genuinely absent (real
+  // first boot). A parse failure on an existing file leaves this false so the
+  // caller knows NOT to overwrite a present-but-unreadable file with defaults.
+  bool cfgFileMissing = false;
+
   bool load();
   bool save();
 };
@@ -2901,6 +2909,24 @@ bool begin() {
 fs::FS& fs()  { return *g_fs; }
 bool ready()  { return g_ready; }
 bool onSD()   { return g_sd; }
+
+bool remount() {
+  // Only the SD card shares the SPI bus with the LoRa SX1262. After RadioLib runs
+  // a transaction it releases the bus at its own clock/mode (2 MHz / MODE0), which
+  // can leave the already-mounted SD driver unable to talk to the card at 25 MHz.
+  // Re-assert the SD pins and re-run SD.begin() to restore the card's bus config.
+  // LittleFS is on internal flash and never needs this.
+  if (!g_sd) return g_ready;
+  SD.end();
+  SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  bool ok = SD.begin(SD_CS_PIN, SPI, SD_FREQ_HZ);
+  if (!ok) ok = SD.begin(SD_CS_PIN, SPI, 1000000);   // retry slower
+  g_ready = ok; g_sd = ok; g_fs = ok ? (fs::FS*)&SD : (fs::FS*)&LittleFS;
+#ifdef CARDSAT_CFG_DEBUG
+  Serial.printf("[fs] remount SD -> %s\n", ok ? "ok" : "FAILED");
+#endif
+  return ok;
+}
 
 size_t freeBytes() {
   // On the internal LittleFS partition free space is tight and worth checking
@@ -5531,30 +5557,48 @@ bool LoraRadio::begin(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm)
   g_radio->setDio1Action(loraIsr);
   _ready = true;
   listen();
-  digitalWrite(SD_CS_PIN_SHARED, HIGH);     // leave SD deselected & reachable
+  Store::remount();     // restore the SD bus after RadioLib reconfigured SPI
   return true;
 }
 
 bool LoraRadio::setRadio(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm) {
   if (!g_radio) return false;
+  // setRadio() runs a burst of SX1262 SPI commands on the bus shared with the SD
+  // card. begin() brackets its SPI work by keeping the SD chip-select idle-HIGH;
+  // this path must do the same, or a channel/SF/BW change can leave the SD line
+  // mid-transaction and the very next cfg.save() write fails (corrupting the
+  // config file -> settings revert on the next boot). Deselect SD before, and
+  // re-assert HIGH after, leaving the card reachable.
+  pinMode(SD_CS_PIN_SHARED, OUTPUT);  digitalWrite(SD_CS_PIN_SHARED, HIGH);
   float freqMHz = (float)freqKHz / 1000.0f;
   float bwKHz   = (float)bwHz / 1000.0f;
-  if (g_radio->setFrequency(freqMHz)      != RADIOLIB_ERR_NONE) return false;
-  if (g_radio->setSpreadingFactor(sf)     != RADIOLIB_ERR_NONE) return false;
-  if (g_radio->setBandwidth(bwKHz)        != RADIOLIB_ERR_NONE) return false;
-  if (g_radio->setCodingRate(5)           != RADIOLIB_ERR_NONE) return false; // 4/5
-  g_radio->setOutputPower(txDbm);
-  // A private sync word so CardSat traffic won't trigger on LoRaWAN gateways.
-  g_radio->setSyncWord(0x12);
-  return true;
+  bool ok = true;
+  if (g_radio->setFrequency(freqMHz)      != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setSpreadingFactor(sf) != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setBandwidth(bwKHz)  != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setCodingRate(5)     != RADIOLIB_ERR_NONE) ok = false; // 4/5
+  if (ok) {
+    g_radio->setOutputPower(txDbm);
+    // A private sync word so CardSat traffic won't trigger on LoRaWAN gateways.
+    g_radio->setSyncWord(0x12);
+  }
+  // After the SX1262 commands, RadioLib leaves the shared SPI bus at its own
+  // clock/mode (2 MHz / MODE0); the SD card was mounted at 25 MHz and can no
+  // longer be reached until its bus is re-established. A bare CS-deselect is not
+  // enough (that was tried and the SD still failed) -- fully remount the card so
+  // the NEXT SD access (sat list, logs, cfg.save) works.
+  Store::remount();
+  return ok;
 }
 
 bool LoraRadio::sendRaw(const uint8_t* data, size_t len) {
   if (!_ready || !g_radio) return false;
+  pinMode(SD_CS_PIN_SHARED, OUTPUT);  digitalWrite(SD_CS_PIN_SHARED, HIGH);
   rfSwitchTx();
   int st = g_radio->transmit((uint8_t*)data, len);  // blocking
   rfSwitchRx();
   listen();
+  Store::remount();     // restore the SD bus after RadioLib reconfigured SPI
   return (st == RADIOLIB_ERR_NONE);
 }
 
@@ -5571,11 +5615,12 @@ bool LoraRadio::poll(uint8_t* buf, size_t bufLen, size_t& outLen,
   g_irqFired = false;
 
   size_t n = g_radio->getPacketLength();
-  if (n == 0 || n > bufLen) { g_radio->startReceive(); return false; }
+  if (n == 0 || n > bufLen) { g_radio->startReceive(); Store::remount(); return false; }
   int st = g_radio->readData(buf, n);
   rssi = g_radio->getRSSI();
   snr  = g_radio->getSNR();
   g_radio->startReceive();                 // back to listening
+  Store::remount();     // restore the SD bus so a log/cfg write after RX works
   if (st != RADIOLIB_ERR_NONE) return false;
   outLen = n;
   return true;
@@ -7208,10 +7253,26 @@ int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int max
 
 bool Settings::load() {
   File f = Store::fs().open(FILE_CFG, "r");
-  if (!f) return false;
+  if (!f) {
+#ifdef CARDSAT_CFG_DEBUG
+    Serial.printf("[cfg] load: %s absent (first boot?)\n", FILE_CFG);
+#endif
+    cfgFileMissing = true;            // genuinely no file -> defaults are correct
+    return false;
+  }
+  cfgFileMissing = false;            // a file exists; a failure here is a READ error
   JsonDocument d;
-  if (deserializeJson(d, f)) { f.close(); return false; }
+  DeserializationError err = deserializeJson(d, f);
+  size_t sz = f.size();
   f.close();
+  if (err) {
+#ifdef CARDSAT_CFG_DEBUG
+    Serial.printf("[cfg] load: PARSE FAILED (%s) on %u-byte file -- "
+                  "keeping file intact, using defaults this boot\n",
+                  err.c_str(), (unsigned)sz);
+#endif
+    return false;                    // do NOT let the caller overwrite a real file
+  }
 
   strncpy(ssid, d["ssid"] | "", sizeof(ssid)-1);
   strncpy(pass, d["pass"] | "", sizeof(pass)-1);
@@ -7549,7 +7610,13 @@ void App::setup() {
     setStatus("No filesystem! Allocate SPIFFS or insert SD.", 8000);
   else if (Store::onSD())
     setStatus("Using SD card for storage", 4000);
-  if (!cfg.load()) { cfg.save(); }     // first boot: write defaults
+  if (!cfg.load()) {
+    // Only seed defaults to disk on a true first boot (file absent). If the file
+    // EXISTS but failed to parse (transient SD/SPI read glitch, half-written file
+    // from a power-cut), keep defaults in RAM for this session but leave the file
+    // intact -- overwriting it here is what silently reverted saved settings.
+    if (cfg.cfgFileMissing) cfg.save();
+  }
   M5Cardputer.Display.setBrightness(cfg.bright);   // apply the saved brightness
   calDl = cfg.calDlHz; calUl = cfg.calUlHz;
 

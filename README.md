@@ -18,10 +18,12 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.31:** four observer/operator features — **visual pass predictions**,
-> **decay/reentry flags**, **Sun/Moon transit predictions**, and **per-satellite
-> operating notes**. See the
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.31.md)** and the full
+> **New in v0.9.32:** a bug-fix release for **LoRa messaging** — incoming messages
+> now refresh the screen immediately, message scrolling no longer collapses, the
+> compose field is length-capped, and a **shared-SPI-bus fix** restores the microSD
+> card after LoRa radio operations (changing a LoRa channel/SF/bandwidth/power no
+> longer breaks SD access). See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.32.md)** and the full
 > **[feature list](docs/FEATURES.md)**.
 
 ---

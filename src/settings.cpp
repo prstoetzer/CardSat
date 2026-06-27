@@ -9,10 +9,26 @@
 
 bool Settings::load() {
   File f = Store::fs().open(FILE_CFG, "r");
-  if (!f) return false;
+  if (!f) {
+#ifdef CARDSAT_CFG_DEBUG
+    Serial.printf("[cfg] load: %s absent (first boot?)\n", FILE_CFG);
+#endif
+    cfgFileMissing = true;            // genuinely no file -> defaults are correct
+    return false;
+  }
+  cfgFileMissing = false;            // a file exists; a failure here is a READ error
   JsonDocument d;
-  if (deserializeJson(d, f)) { f.close(); return false; }
+  DeserializationError err = deserializeJson(d, f);
+  size_t sz = f.size();
   f.close();
+  if (err) {
+#ifdef CARDSAT_CFG_DEBUG
+    Serial.printf("[cfg] load: PARSE FAILED (%s) on %u-byte file -- "
+                  "keeping file intact, using defaults this boot\n",
+                  err.c_str(), (unsigned)sz);
+#endif
+    return false;                    // do NOT let the caller overwrite a real file
+  }
 
   strncpy(ssid, d["ssid"] | "", sizeof(ssid)-1);
   strncpy(pass, d["pass"] | "", sizeof(pass)-1);

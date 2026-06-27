@@ -52,6 +52,24 @@ fs::FS& fs()  { return *g_fs; }
 bool ready()  { return g_ready; }
 bool onSD()   { return g_sd; }
 
+bool remount() {
+  // Only the SD card shares the SPI bus with the LoRa SX1262. After RadioLib runs
+  // a transaction it releases the bus at its own clock/mode (2 MHz / MODE0), which
+  // can leave the already-mounted SD driver unable to talk to the card at 25 MHz.
+  // Re-assert the SD pins and re-run SD.begin() to restore the card's bus config.
+  // LittleFS is on internal flash and never needs this.
+  if (!g_sd) return g_ready;
+  SD.end();
+  SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  bool ok = SD.begin(SD_CS_PIN, SPI, SD_FREQ_HZ);
+  if (!ok) ok = SD.begin(SD_CS_PIN, SPI, 1000000);   // retry slower
+  g_ready = ok; g_sd = ok; g_fs = ok ? (fs::FS*)&SD : (fs::FS*)&LittleFS;
+#ifdef CARDSAT_CFG_DEBUG
+  Serial.printf("[fs] remount SD -> %s\n", ok ? "ok" : "FAILED");
+#endif
+  return ok;
+}
+
 size_t freeBytes() {
   // On the internal LittleFS partition free space is tight and worth checking
   // before a streamed download; on an SD card it's effectively unlimited for

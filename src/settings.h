@@ -193,6 +193,11 @@ struct Settings {
   uint8_t  msgNotify   = 1;         // LoRa msg alert: 0=off, 1=banner, 2=banner+beep
   void loraApplyRegion(uint8_t region);   // seed freq/BW from a region preset
 
+  // Set by load(): true only when the config file was genuinely absent (real
+  // first boot). A parse failure on an existing file leaves this false so the
+  // caller knows NOT to overwrite a present-but-unreadable file with defaults.
+  bool cfgFileMissing = false;
+
   bool load();
   bool save();
 };

@@ -168,7 +168,13 @@ void App::setup() {
     setStatus("No filesystem! Allocate SPIFFS or insert SD.", 8000);
   else if (Store::onSD())
     setStatus("Using SD card for storage", 4000);
-  if (!cfg.load()) { cfg.save(); }     // first boot: write defaults
+  if (!cfg.load()) {
+    // Only seed defaults to disk on a true first boot (file absent). If the file
+    // EXISTS but failed to parse (transient SD/SPI read glitch, half-written file
+    // from a power-cut), keep defaults in RAM for this session but leave the file
+    // intact -- overwriting it here is what silently reverted saved settings.
+    if (cfg.cfgFileMissing) cfg.save();
+  }
   M5Cardputer.Display.setBrightness(cfg.bright);   // apply the saved brightness
   calDl = cfg.calDlHz; calUl = cfg.calUlHz;
 

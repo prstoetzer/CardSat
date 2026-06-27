@@ -11,6 +11,7 @@
 #if CARDSAT_HAS_LORA
 #include <RadioLib.h>
 #include <Wire.h>
+#include "storage.h"   // Store::remount() to restore the SD bus after RF SPI use
 
 // RadioLib module instance for the SX1262 at the Cap LoRa pinmap.
 // NOTE: allocated on the heap via a pointer (constructed in begin()) rather than
@@ -76,30 +77,48 @@ bool LoraRadio::begin(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm)
   g_radio->setDio1Action(loraIsr);
   _ready = true;
   listen();
-  digitalWrite(SD_CS_PIN_SHARED, HIGH);     // leave SD deselected & reachable
+  Store::remount();     // restore the SD bus after RadioLib reconfigured SPI
   return true;
 }
 
 bool LoraRadio::setRadio(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm) {
   if (!g_radio) return false;
+  // setRadio() runs a burst of SX1262 SPI commands on the bus shared with the SD
+  // card. begin() brackets its SPI work by keeping the SD chip-select idle-HIGH;
+  // this path must do the same, or a channel/SF/BW change can leave the SD line
+  // mid-transaction and the very next cfg.save() write fails (corrupting the
+  // config file -> settings revert on the next boot). Deselect SD before, and
+  // re-assert HIGH after, leaving the card reachable.
+  pinMode(SD_CS_PIN_SHARED, OUTPUT);  digitalWrite(SD_CS_PIN_SHARED, HIGH);
   float freqMHz = (float)freqKHz / 1000.0f;
   float bwKHz   = (float)bwHz / 1000.0f;
-  if (g_radio->setFrequency(freqMHz)      != RADIOLIB_ERR_NONE) return false;
-  if (g_radio->setSpreadingFactor(sf)     != RADIOLIB_ERR_NONE) return false;
-  if (g_radio->setBandwidth(bwKHz)        != RADIOLIB_ERR_NONE) return false;
-  if (g_radio->setCodingRate(5)           != RADIOLIB_ERR_NONE) return false; // 4/5
-  g_radio->setOutputPower(txDbm);
-  // A private sync word so CardSat traffic won't trigger on LoRaWAN gateways.
-  g_radio->setSyncWord(0x12);
-  return true;
+  bool ok = true;
+  if (g_radio->setFrequency(freqMHz)      != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setSpreadingFactor(sf) != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setBandwidth(bwKHz)  != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setCodingRate(5)     != RADIOLIB_ERR_NONE) ok = false; // 4/5
+  if (ok) {
+    g_radio->setOutputPower(txDbm);
+    // A private sync word so CardSat traffic won't trigger on LoRaWAN gateways.
+    g_radio->setSyncWord(0x12);
+  }
+  // After the SX1262 commands, RadioLib leaves the shared SPI bus at its own
+  // clock/mode (2 MHz / MODE0); the SD card was mounted at 25 MHz and can no
+  // longer be reached until its bus is re-established. A bare CS-deselect is not
+  // enough (that was tried and the SD still failed) -- fully remount the card so
+  // the NEXT SD access (sat list, logs, cfg.save) works.
+  Store::remount();
+  return ok;
 }
 
 bool LoraRadio::sendRaw(const uint8_t* data, size_t len) {
   if (!_ready || !g_radio) return false;
+  pinMode(SD_CS_PIN_SHARED, OUTPUT);  digitalWrite(SD_CS_PIN_SHARED, HIGH);
   rfSwitchTx();
   int st = g_radio->transmit((uint8_t*)data, len);  // blocking
   rfSwitchRx();
   listen();
+  Store::remount();     // restore the SD bus after RadioLib reconfigured SPI
   return (st == RADIOLIB_ERR_NONE);
 }
 
@@ -116,11 +135,12 @@ bool LoraRadio::poll(uint8_t* buf, size_t bufLen, size_t& outLen,
   g_irqFired = false;
 
   size_t n = g_radio->getPacketLength();
-  if (n == 0 || n > bufLen) { g_radio->startReceive(); return false; }
+  if (n == 0 || n > bufLen) { g_radio->startReceive(); Store::remount(); return false; }
   int st = g_radio->readData(buf, n);
   rssi = g_radio->getRSSI();
   snr  = g_radio->getSNR();
   g_radio->startReceive();                 // back to listening
+  Store::remount();     // restore the SD bus so a log/cfg write after RX works
   if (st != RADIOLIB_ERR_NONE) return false;
   outLen = n;
   return true;

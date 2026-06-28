@@ -28,6 +28,14 @@
   endpoint and method were already correct (no change needed there). **If you uploaded
   satellite QSOs with an earlier version and they didn't appear in LoTW, use the new
   re-send option below to upload them again.**
+- **Fixed: LoTW rejected the station record on US uploads (county field).** The signed
+  `.tq8`'s station record used the ADIF field names `STATE`/`CNTY`, but inside a `.tq8` the
+  station record must use TrustedQSL's internal field names — `US_STATE`/`US_COUNTY`. LoTW
+  didn't recognize the bare `CNTY`, applied a tiny default length limit, reported a "data
+  length overflow", and discarded the whole station record — which then orphaned every
+  contact ("STATION_UID doesn't match any tSTATION"). Both errors are fixed by emitting the
+  correct field names. If you have a US county set and your QSOs were rejected, re-send them
+  with the new re-send option.
 - **New: re-send already-uploaded QSOs.** On the **Sign & upload to LoTW** screen, press
   **`a`** to toggle re-send mode, which includes QSOs already marked as uploaded (normally
   they're skipped). Press **`u`** to upload. This is useful for re-sending contacts that an
@@ -43,16 +51,22 @@
   is never logged. Only relevant for anyone with a serial monitor attached, but worth
   fixing.
 
-- **Orbital analysis: live altitude could read higher than the reported apogee.** On
-  the orbital-analysis **Info** page (and the mobile web page), the live **Altitude**
-  was a *geodetic* height — measured from the oblate ellipsoid surface directly below
-  the satellite — while **Apo/Peri** are computed the conventional way, as a
-  *geocentric* distance from the equatorial radius. Because the ellipsoid surface is
-  up to ~21 km closer to Earth's center near the poles, the geodetic altitude near a
-  pole could exceed the equatorial-radius apogee, which looked wrong. The Info-page
-  and web **Altitude** readouts now report a **geocentric** altitude (geocentric
-  radius minus the equatorial radius), matching the convention apogee and perigee
-  already use, so altitude always sits between perigee and apogee as expected. The
-  **footprint** calculation is unchanged — it still uses the true geodetic
-  height-above-ground, which is what actually governs which stations can see the
-  satellite.
+- **Orbital analysis: live altitude could still read higher than the reported apogee.**
+  An earlier fix made the live **Altitude** geocentric (matching how apogee/perigee are
+  measured), which removed the large near-pole discrepancy. But a smaller one remained: the
+  displayed **Apo/Peri** were computed from the satellite's *mean* orbital elements, while
+  the live altitude comes from the full perturbed (SGP4) orbit, whose instantaneous height
+  oscillates a few km around the mean orbit. Near apogee the live altitude could therefore
+  edge a few km above the mean-element apogee — most visibly on near-circular orbits where
+  that wobble is larger than the whole apogee-to-perigee spread. The Info page and web view
+  now derive **Apo/Peri** by sampling that same perturbed altitude across a full orbit, so
+  the live **Altitude** is always within the displayed apogee/perigee. The **footprint**
+  calculation is unchanged — it still uses the true geodetic height-above-ground.
+
+- **More robust uploads when memory is tight.** A failed upload (for example, after
+  mistyping the Cloudlog URL) could leave the heap fragmented, and a subsequent upload would
+  then fail to start its secure connection — a frustrating cascade that only cleared with a
+  reboot. Before each secure upload CardSat now reclaims fragmented memory and, if there
+  still isn't enough contiguous space for the TLS handshake, declines cleanly with a "low
+  memory; try again" message instead of failing in a way that makes things worse. In
+  practice a retry now succeeds without a reboot.

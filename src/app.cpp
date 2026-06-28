@@ -3100,8 +3100,8 @@ void App::webdSendOrbitJson() {
   j += "\"name\":\""; j += s->name; j += "\",\"norad\":"; j += s->norad; j += ",";
   // page 0: info
   j += "\"alt\":"; j += num(altNow,0); j += ",\"footprint\":"; j += num(fpDia(geoAlt),0); j += ",";
-  j += "\"period\":"; j += num(periodMin,1); j += ",\"apo\":"; j += num(apo,0);
-  j += ",\"peri\":"; j += num(peri,0); j += ",\"sma\":"; j += num(a,0); j += ",";
+  j += "\"period\":"; j += num(periodMin,1); j += ",\"apo\":"; j += num(orbApoKm,0);
+  j += ",\"peri\":"; j += num(orbPeriKm,0); j += ",\"sma\":"; j += num(a,0); j += ",";
   j += "\"incl\":"; j += num(s->incl,2); j += ",\"ecc\":"; j += num(s->ecc,5);
   j += ",\"bstar\":"; j += num(s->bstar,6); j += ",";
   j += "\"decayDays\":"; j += num(orbDecayDays,1);
@@ -8239,6 +8239,34 @@ void App::buildOrbit(bool quiet) {
   time_t now = nowUtc();
   double periodSec = 86400.0 / s->meanMotion;
 
+  // Apogee/perigee for the Info page: sample the geocentric altitude (the same value
+  // the live readout shows) across one full orbit and take the extremes. Doing it this
+  // way -- rather than the mean-element a(1+/-e)-RE -- guarantees the displayed Altitude
+  // always lies within [perigee, apogee]. SGP4's osculating altitude oscillates a few km
+  // around the mean orbit (short-period J2), so a mean-element apogee can read just below
+  // the live altitude near apogee, which looked like a bug. Seed with the mean-element
+  // values so there's always something sane even before the loop runs.
+  {
+    const double MU_ = 398600.4418, RE_ = 6378.137;
+    double nrad = s->meanMotion * 6.283185307179586 / 86400.0;
+    double a_ = (nrad > 0) ? pow(MU_ / (nrad * nrad), 1.0 / 3.0) : 0;
+    orbApoKm  = a_ * (1.0 + s->ecc) - RE_;
+    orbPeriKm = a_ * (1.0 - s->ecc) - RE_;
+    double hi = -1e9, lo = 1e9;
+    // ~120 samples over one period catches the extremes to a fraction of a km; a small
+    // pad absorbs the residual granularity so the live altitude (sampled at an arbitrary
+    // instant between grid points) can never read just outside [perigee, apogee].
+    long step = (long)(periodSec / 120.0); if (step < 2) step = 2;
+    for (long dt = 0; dt <= (long)periodSec + step; dt += step) {
+      LiveLook L = pred.look(now + dt);
+      double h = geocentricAltKm(L.subLat, L.satAltKm);
+      if (h > hi) hi = h;
+      if (h < lo) lo = h;
+    }
+    if (hi > -1e8) orbApoKm = hi + 1.0;            // +1 km pad (see note above)
+    if (lo <  1e8) orbPeriKm = lo - 1.0;           // -1 km pad
+  }
+
   // Next ascending node: step up to one period, find a subLat - -> + crossing,
   // then bisect to refine the time and read its sub-longitude.
   double prevLat = pred.look(now).subLat; time_t prevT = now;
@@ -8353,7 +8381,7 @@ void App::drawOrbit() {
     row("Altitude",     String(altNow, 0) + " km");
     row("Footprint",    String(fpDia(geoAlt), 0) + " km dia");
     row("Period",       String(periodMin, 1) + " min");
-    row("Apo/Peri",     String(apo, 0) + "/" + String(peri, 0) + " km");
+    row("Apo/Peri",     String(orbApoKm, 0) + "/" + String(orbPeriKm, 0) + " km");
     row("Fp apo/peri",  String(fpDia(apo), 0) + "/" + String(fpDia(peri), 0) + " km");
     row("Incl/Ecc",     String(s->incl, 2) + " / " + String(s->ecc, 5));
     row("SMA (a)",      String(a, 0) + " km");

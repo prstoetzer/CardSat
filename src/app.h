@@ -194,6 +194,14 @@ private:
   double   orbDecayDays = -1;       // rough days-to-reentry (-1 n/a, 1e9 stable)
   double   orbDecayLo = -1;         // low-density (solar-min) bound: longer life
   double   orbDecayHi = -1;         // high-density (solar-max) bound: shorter life
+  // Apogee/perigee shown on the Info page, sampled from the SAME perturbed predictor
+  // that produces the live altitude (geocentric, over one orbit), so the displayed
+  // Altitude is always within [perigee, apogee]. A mean-element apogee (a(1+e)-RE) can
+  // read a few km BELOW the osculating altitude near apogee (SGP4 adds short-period J2
+  // oscillation), which made the live altitude appear to exceed apogee. Cached in
+  // buildOrbit(); fall back to the mean-element values until populated.
+  double   orbApoKm = 0;            // max geocentric altitude over one orbit (km)
+  double   orbPeriKm = 0;           // min geocentric altitude over one orbit (km)
 
   // Pass outlook (page 7): aggregate stats over the next ORB_OUTLOOK_DAYS days,
   // computed once in buildOrbit().

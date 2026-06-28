@@ -307,8 +307,13 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   adifSp(text, "CALL",       st.call);
   adifSp(text, "DXCC",       st.dxcc);
   adifSp(text, "GRIDSQUARE", st.grid);
-  adifSp(text, "STATE",      st.state);
-  adifSp(text, "CNTY",       st.cnty);
+  // The tSTATION record uses TQSL's internal (gabbi) field names, which for the US
+  // state/county are US_STATE / US_COUNTY -- NOT the ADIF names STATE / CNTY. LoTW's
+  // parser doesn't recognize a bare CNTY/STATE here and rejects the whole tSTATION
+  // (which then orphans every tCONTACT's STATION_UID). US_COUNTY also has a length
+  // limit of 30, vs the tiny default applied to an unrecognized field.
+  adifSp(text, "US_STATE",   st.state);
+  adifSp(text, "US_COUNTY",  st.cnty);
   adifSp(text, "CQZ",        st.cqz);
   adifSp(text, "ITUZ",       st.ituz);
   text += "<eor>\n";

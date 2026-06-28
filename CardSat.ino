@@ -1529,6 +1529,16 @@ public:
                      const char* contentType = "application/json",
                      size_t maxResp = 8192, bool redactBody = true);
 
+  // Best-effort heap defragment before a TLS handshake. A failed prior fetch can leave
+  // the heap fragmented so the largest contiguous block falls below what mbedTLS needs
+  // (TLS_MIN_BLOCK), which then makes the next connect() fail with -1 -- the cascade the
+  // user hit after a mistyped upload URL. This gives async socket/TLS buffers from the
+  // previous attempt time to actually return to the heap and the allocator a chance to
+  // coalesce adjacent free blocks, retrying a few times. Returns the largest free block
+  // (bytes) afterwards, so the caller can decline gracefully if it's still too small
+  // rather than entering a handshake that fails messily and fragments further.
+  static size_t reclaimHeapForTls();
+
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
   String lastErr  = "";    // short human-readable reason
@@ -2283,6 +2293,14 @@ private:
   double   orbDecayDays = -1;       // rough days-to-reentry (-1 n/a, 1e9 stable)
   double   orbDecayLo = -1;         // low-density (solar-min) bound: longer life
   double   orbDecayHi = -1;         // high-density (solar-max) bound: shorter life
+  // Apogee/perigee shown on the Info page, sampled from the SAME perturbed predictor
+  // that produces the live altitude (geocentric, over one orbit), so the displayed
+  // Altitude is always within [perigee, apogee]. A mean-element apogee (a(1+e)-RE) can
+  // read a few km BELOW the osculating altitude near apogee (SGP4 adds short-period J2
+  // oscillation), which made the live altitude appear to exceed apogee. Cached in
+  // buildOrbit(); fall back to the mean-element values until populated.
+  double   orbApoKm = 0;            // max geocentric altitude over one orbit (km)
+  double   orbPeriKm = 0;           // min geocentric altitude over one orbit (km)
 
   // Pass outlook (page 7): aggregate stats over the next ORB_OUTLOOK_DAYS days,
   // computed once in buildOrbit().
@@ -6676,8 +6694,13 @@ int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before r
 int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
 uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
                                         // just-closed socket leaves the LWIP pool
-uint32_t Net::TLS_MIN_BLOCK  = 42000;   // mbedTLS handshake needs a contiguous block this
-                                        // big; below it we defragment before connecting
+uint32_t Net::TLS_MIN_BLOCK  = 28000;   // mbedTLS handshake needs a contiguous block at
+                                        // least this big; below it we defragment first and
+                                        // decline if still short. Set from observation: an
+                                        // upload connected fine at largest-block ~31.7 KB,
+                                        // so the true floor is under that -- 28 KB leaves a
+                                        // margin while still catching real exhaustion (the
+                                        // post-failed-upload fragmentation the user hit).
 
 // Flush the LWIP socket pool by tearing the STA association down hard, then
 // reconnect with the credentials WiFi already holds. This is the reliable cure
@@ -7074,11 +7097,24 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
 
   Serial.printf("[net] POST %s (%u-byte body) -> %s\n",
                 fileName, (unsigned)bodyLen, redactUrl(url).c_str());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   WiFiClientSecure client;
   struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
   client.setInsecure();
   client.setTimeout(20000);
+
+  // Defragment if needed, then bail before a handshake we can't complete (see the note
+  // in httpsPostJson). free() the assembled body first so the abort doesn't leak it.
+  if (reclaimHeapForTls() < TLS_MIN_BLOCK) {
+    free(body);
+    lastErr = "low memory; try again";
+    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
+    return false;
+  }
 
   HTTPClient http;
   http.setUserAgent("CardSat-Cardputer/1.0");
@@ -7108,6 +7144,29 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   return true;
 }
 
+// Best-effort heap defragment before a TLS handshake (see net.h). The ESP-IDF heap is
+// not a moving collector, so we can't truly compact -- but a failed prior fetch leaves
+// LWIP/mbedTLS buffers that the stack frees asynchronously, and the allocator coalesces
+// adjacent free blocks as they are returned. Giving that a few short delays usually
+// brings the largest contiguous block back above TLS_MIN_BLOCK. We deliberately do NOT
+// free the drawing sprite here: doing so was tried and reverted (the freed hole didn't
+// reliably merge, and a failed re-create blanked the screen).
+size_t Net::reclaimHeapForTls() {
+  size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largest >= TLS_MIN_BLOCK) return largest;
+  // Up to ~5 short waits (≈600 ms total) for in-flight frees to land and coalesce.
+  for (int i = 0; i < 5; ++i) {
+    delay(120);
+    yield();                                     // let the WiFi/LWIP task run its frees
+    size_t now = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (now > largest) largest = now;
+    if (largest >= TLS_MIN_BLOCK) break;
+  }
+  Serial.printf("[net] heap reclaim: largest block now %u (need %u)\n",
+                (unsigned)largest, (unsigned)TLS_MIN_BLOCK);
+  return largest;
+}
+
 // POST a text/JSON body. Used for Cloudlog/Wavelog (self-hosted) uploads, which take a
 // JSON document and may live on a LAN over plain HTTP, so both http:// and https://
 // are accepted. The request body can carry an API key, so it is never logged verbatim
@@ -7122,6 +7181,10 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
   Serial.printf("[net] POST(json) %u-byte body -> %s\n",
                 (unsigned)body.length(), redactUrl(url).c_str());
   if (!redactBody) Serial.printf("[net] body: %s\n", body.c_str());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   const bool isHttps = url.startsWith("https:");
   WiFiClientSecure tls;
@@ -7129,6 +7192,16 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
   struct StopAll { WiFiClientSecure& t; WiFiClient& p; bool s;
                    ~StopAll() { if (s) t.stop(); else p.stop(); } } _stop{tls, plain, isHttps};
   if (isHttps) { tls.setInsecure(); tls.setTimeout(20000); }
+
+  // Defragment if needed, then refuse to start a handshake we can't complete: a doomed
+  // connect() fails with -1 and fragments the heap further (the cascade the user hit
+  // after a mistyped URL led to repeated failures). Bailing here with a clear message
+  // keeps the heap intact so a retry can succeed. (Plain HTTP needs no big TLS block.)
+  if (isHttps && reclaimHeapForTls() < TLS_MIN_BLOCK) {
+    lastErr = "low memory; try again";
+    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
+    return false;
+  }
 
   HTTPClient http;
   http.setUserAgent("CardSat-Cardputer/1.0");
@@ -11047,8 +11120,8 @@ void App::webdSendOrbitJson() {
   j += "\"name\":\""; j += s->name; j += "\",\"norad\":"; j += s->norad; j += ",";
   // page 0: info
   j += "\"alt\":"; j += num(altNow,0); j += ",\"footprint\":"; j += num(fpDia(geoAlt),0); j += ",";
-  j += "\"period\":"; j += num(periodMin,1); j += ",\"apo\":"; j += num(apo,0);
-  j += ",\"peri\":"; j += num(peri,0); j += ",\"sma\":"; j += num(a,0); j += ",";
+  j += "\"period\":"; j += num(periodMin,1); j += ",\"apo\":"; j += num(orbApoKm,0);
+  j += ",\"peri\":"; j += num(orbPeriKm,0); j += ",\"sma\":"; j += num(a,0); j += ",";
   j += "\"incl\":"; j += num(s->incl,2); j += ",\"ecc\":"; j += num(s->ecc,5);
   j += ",\"bstar\":"; j += num(s->bstar,6); j += ",";
   j += "\"decayDays\":"; j += num(orbDecayDays,1);
@@ -14415,8 +14488,13 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   adifSp(text, "CALL",       st.call);
   adifSp(text, "DXCC",       st.dxcc);
   adifSp(text, "GRIDSQUARE", st.grid);
-  adifSp(text, "STATE",      st.state);
-  adifSp(text, "CNTY",       st.cnty);
+  // The tSTATION record uses TQSL's internal (gabbi) field names, which for the US
+  // state/county are US_STATE / US_COUNTY -- NOT the ADIF names STATE / CNTY. LoTW's
+  // parser doesn't recognize a bare CNTY/STATE here and rejects the whole tSTATION
+  // (which then orphans every tCONTACT's STATION_UID). US_COUNTY also has a length
+  // limit of 30, vs the tiny default applied to an unrecognized field.
+  adifSp(text, "US_STATE",   st.state);
+  adifSp(text, "US_COUNTY",  st.cnty);
   adifSp(text, "CQZ",        st.cqz);
   adifSp(text, "ITUZ",       st.ituz);
   text += "<eor>\n";
@@ -16521,6 +16599,34 @@ void App::buildOrbit(bool quiet) {
   time_t now = nowUtc();
   double periodSec = 86400.0 / s->meanMotion;
 
+  // Apogee/perigee for the Info page: sample the geocentric altitude (the same value
+  // the live readout shows) across one full orbit and take the extremes. Doing it this
+  // way -- rather than the mean-element a(1+/-e)-RE -- guarantees the displayed Altitude
+  // always lies within [perigee, apogee]. SGP4's osculating altitude oscillates a few km
+  // around the mean orbit (short-period J2), so a mean-element apogee can read just below
+  // the live altitude near apogee, which looked like a bug. Seed with the mean-element
+  // values so there's always something sane even before the loop runs.
+  {
+    const double MU_ = 398600.4418, RE_ = 6378.137;
+    double nrad = s->meanMotion * 6.283185307179586 / 86400.0;
+    double a_ = (nrad > 0) ? pow(MU_ / (nrad * nrad), 1.0 / 3.0) : 0;
+    orbApoKm  = a_ * (1.0 + s->ecc) - RE_;
+    orbPeriKm = a_ * (1.0 - s->ecc) - RE_;
+    double hi = -1e9, lo = 1e9;
+    // ~120 samples over one period catches the extremes to a fraction of a km; a small
+    // pad absorbs the residual granularity so the live altitude (sampled at an arbitrary
+    // instant between grid points) can never read just outside [perigee, apogee].
+    long step = (long)(periodSec / 120.0); if (step < 2) step = 2;
+    for (long dt = 0; dt <= (long)periodSec + step; dt += step) {
+      LiveLook L = pred.look(now + dt);
+      double h = geocentricAltKm(L.subLat, L.satAltKm);
+      if (h > hi) hi = h;
+      if (h < lo) lo = h;
+    }
+    if (hi > -1e8) orbApoKm = hi + 1.0;            // +1 km pad (see note above)
+    if (lo <  1e8) orbPeriKm = lo - 1.0;           // -1 km pad
+  }
+
   // Next ascending node: step up to one period, find a subLat - -> + crossing,
   // then bisect to refine the time and read its sub-longitude.
   double prevLat = pred.look(now).subLat; time_t prevT = now;
@@ -16635,7 +16741,7 @@ void App::drawOrbit() {
     row("Altitude",     String(altNow, 0) + " km");
     row("Footprint",    String(fpDia(geoAlt), 0) + " km dia");
     row("Period",       String(periodMin, 1) + " min");
-    row("Apo/Peri",     String(apo, 0) + "/" + String(peri, 0) + " km");
+    row("Apo/Peri",     String(orbApoKm, 0) + "/" + String(orbPeriKm, 0) + " km");
     row("Fp apo/peri",  String(fpDia(apo), 0) + "/" + String(fpDia(peri), 0) + " km");
     row("Incl/Ecc",     String(s->incl, 2) + " / " + String(s->ecc, 5));
     row("SMA (a)",      String(a, 0) + " km");

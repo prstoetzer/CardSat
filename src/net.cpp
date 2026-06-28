@@ -55,8 +55,13 @@ int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before r
 int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
 uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
                                         // just-closed socket leaves the LWIP pool
-uint32_t Net::TLS_MIN_BLOCK  = 42000;   // mbedTLS handshake needs a contiguous block this
-                                        // big; below it we defragment before connecting
+uint32_t Net::TLS_MIN_BLOCK  = 28000;   // mbedTLS handshake needs a contiguous block at
+                                        // least this big; below it we defragment first and
+                                        // decline if still short. Set from observation: an
+                                        // upload connected fine at largest-block ~31.7 KB,
+                                        // so the true floor is under that -- 28 KB leaves a
+                                        // margin while still catching real exhaustion (the
+                                        // post-failed-upload fragmentation the user hit).
 
 // Flush the LWIP socket pool by tearing the STA association down hard, then
 // reconnect with the credentials WiFi already holds. This is the reliable cure
@@ -451,11 +456,24 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
 
   Serial.printf("[net] POST %s (%u-byte body) -> %s\n",
                 fileName, (unsigned)bodyLen, redactUrl(url).c_str());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   WiFiClientSecure client;
   struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
   client.setInsecure();
   client.setTimeout(20000);
+
+  // Defragment if needed, then bail before a handshake we can't complete (see the note
+  // in httpsPostJson). free() the assembled body first so the abort doesn't leak it.
+  if (reclaimHeapForTls() < TLS_MIN_BLOCK) {
+    free(body);
+    lastErr = "low memory; try again";
+    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
+    return false;
+  }
 
   HTTPClient http;
   http.setUserAgent("CardSat-Cardputer/1.0");
@@ -485,7 +503,30 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   return true;
 }
 
-// POST a text/JSON body. Used for Cloudlog/Wavelog (self-hosted) uploads, which take a
+// Best-effort heap defragment before a TLS handshake (see net.h). The ESP-IDF heap is
+// not a moving collector, so we can't truly compact -- but a failed prior fetch leaves
+// LWIP/mbedTLS buffers that the stack frees asynchronously, and the allocator coalesces
+// adjacent free blocks as they are returned. Giving that a few short delays usually
+// brings the largest contiguous block back above TLS_MIN_BLOCK. We deliberately do NOT
+// free the drawing sprite here: doing so was tried and reverted (the freed hole didn't
+// reliably merge, and a failed re-create blanked the screen).
+size_t Net::reclaimHeapForTls() {
+  size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largest >= TLS_MIN_BLOCK) return largest;
+  // Up to ~5 short waits (≈600 ms total) for in-flight frees to land and coalesce.
+  for (int i = 0; i < 5; ++i) {
+    delay(120);
+    yield();                                     // let the WiFi/LWIP task run its frees
+    size_t now = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (now > largest) largest = now;
+    if (largest >= TLS_MIN_BLOCK) break;
+  }
+  Serial.printf("[net] heap reclaim: largest block now %u (need %u)\n",
+                (unsigned)largest, (unsigned)TLS_MIN_BLOCK);
+  return largest;
+}
+
+
 // JSON document and may live on a LAN over plain HTTP, so both http:// and https://
 // are accepted. The request body can carry an API key, so it is never logged verbatim
 // unless redactBody is false; we log only its length plus the redacted URL.
@@ -499,6 +540,10 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
   Serial.printf("[net] POST(json) %u-byte body -> %s\n",
                 (unsigned)body.length(), redactUrl(url).c_str());
   if (!redactBody) Serial.printf("[net] body: %s\n", body.c_str());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   const bool isHttps = url.startsWith("https:");
   WiFiClientSecure tls;
@@ -506,6 +551,16 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
   struct StopAll { WiFiClientSecure& t; WiFiClient& p; bool s;
                    ~StopAll() { if (s) t.stop(); else p.stop(); } } _stop{tls, plain, isHttps};
   if (isHttps) { tls.setInsecure(); tls.setTimeout(20000); }
+
+  // Defragment if needed, then refuse to start a handshake we can't complete: a doomed
+  // connect() fails with -1 and fragments the heap further (the cascade the user hit
+  // after a mistyped URL led to repeated failures). Bailing here with a clear message
+  // keeps the heap intact so a retry can succeed. (Plain HTTP needs no big TLS block.)
+  if (isHttps && reclaimHeapForTls() < TLS_MIN_BLOCK) {
+    lastErr = "low memory; try again";
+    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
+    return false;
+  }
 
   HTTPClient http;
   http.setUserAgent("CardSat-Cardputer/1.0");

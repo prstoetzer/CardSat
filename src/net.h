@@ -60,6 +60,16 @@ public:
                      const char* contentType = "application/json",
                      size_t maxResp = 8192, bool redactBody = true);
 
+  // Best-effort heap defragment before a TLS handshake. A failed prior fetch can leave
+  // the heap fragmented so the largest contiguous block falls below what mbedTLS needs
+  // (TLS_MIN_BLOCK), which then makes the next connect() fail with -1 -- the cascade the
+  // user hit after a mistyped upload URL. This gives async socket/TLS buffers from the
+  // previous attempt time to actually return to the heap and the allocator a chance to
+  // coalesce adjacent free blocks, retrying a few times. Returns the largest free block
+  // (bytes) afterwards, so the caller can decline gracefully if it's still too small
+  // rather than entering a handshake that fails messily and fragments further.
+  static size_t reclaimHeapForTls();
+
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
   String lastErr  = "";    // short human-readable reason

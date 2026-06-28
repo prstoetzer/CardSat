@@ -74,9 +74,14 @@ static void utcToAdif(uint32_t utc, String& date, String& time) {
   if (!utc) return;
   time_t tt = (time_t)utc; struct tm* g = gmtime(&tt);
   if (!g) return;
-  char d[9], t[7];
-  strftime(d, sizeof(d), "%Y%m%d", g);
-  strftime(t, sizeof(t), "%H%M%S", g);
+  // TQSL's .tq8 uses TEXT date/time, not the compact ADIF forms: the date is
+  // YYYY-MM-DD and the time is HH:MM:SSZ (tqsl_convertDateToText/TimeToText). LoTW's
+  // parser rejects the compact 20260628 / 011800 forms as "Invalid Date/Time". The
+  // SAME formatted strings go into both the tCONTACT record and the signed data (TQSL
+  // signs the converted-to-text values), so producing them here fixes both at once.
+  char d[12], t[12];
+  strftime(d, sizeof(d), "%Y-%m-%d", g);
+  strftime(t, sizeof(t), "%H:%M:%SZ", g);
   date = d; time = t;
 }
 
@@ -110,7 +115,16 @@ String Lotw::signData(const PendingQso& q, const LotwStation& st) {
   if (st.cqz.length())   s += st.cqz;        // CQZ
   if (st.grid.length())  s += st.grid;       // GRIDSQUARE
   if (st.ituz.length())  s += st.ituz;       // ITUZ
-  if (st.cnty.length())  s += st.cnty;       // US_COUNTY ("ST,County")
+  // US_COUNTY is signed as the county NAME ALONE (TQSL keeps state and county in
+  // separate location fields, so its signed value is just "Arlington", not the
+  // "ST,County" CardSat stores). Must match the value emitted in the tSTATION record.
+  if (st.cnty.length()) {
+    String cnty = st.cnty;
+    int comma = cnty.indexOf(',');
+    if (comma >= 0) cnty = cnty.substring(comma + 1);
+    cnty.trim();
+    s += cnty;                                // US_COUNTY
+  }
   if (st.state.length()) s += st.state;      // US_STATE
   // --- contact values, in sigspec (alphabetical) order ---
   s += bandUpper(ulM);                        // BAND (uplink)
@@ -150,7 +164,7 @@ static String contactRec(const PendingQso& q, const String& sd,
   adifSp(r, "MODE",      q.mode);
   adifSp(r, "PROP_MODE", "SAT");
   adifSp(r, "QSO_DATE",  date);
-  adifSp(r, "TIME_ON",   tm);
+  adifSp(r, "QSO_TIME",  tm);          // TQSL uses QSO_TIME in the record, not TIME_ON
   if (satnm[0]) adifSp(r, "SAT_NAME", String(satnm));
   adifTy(r, "SIGN_LOTW_V2.0", '6', sigB64);
   adifT(r, "SIGNDATA",      sd);
@@ -313,7 +327,17 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   // (which then orphans every tCONTACT's STATION_UID). US_COUNTY also has a length
   // limit of 30, vs the tiny default applied to an unrecognized field.
   adifSp(text, "US_STATE",   st.state);
-  adifSp(text, "US_COUNTY",  st.cnty);
+  // CardSat stores the county as "ST,County" (one field), but the US_COUNTY value LoTW
+  // validates against its enumeration is the county NAME ALONE (e.g. "Arlington"); the
+  // state is already carried in US_STATE. Sending "VA,Arlington" is rejected as an
+  // invalid value, so strip everything up to and including the comma.
+  {
+    String cnty = st.cnty;
+    int comma = cnty.indexOf(',');
+    if (comma >= 0) cnty = cnty.substring(comma + 1);
+    cnty.trim();
+    adifSp(text, "US_COUNTY", cnty);
+  }
   adifSp(text, "CQZ",        st.cqz);
   adifSp(text, "ITUZ",       st.ituz);
   text += "<eor>\n";

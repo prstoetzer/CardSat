@@ -54,27 +54,33 @@ Sun-Moon-transit / per-satellite-note features, and the offline GP/transponder c
 
 ## Implemented in 0.9.36
 
-- **DONE — LoTW `.tq8` rewritten to LOTW V2.0; transport confirmed no-auth; re-send
-  toggle added.** Summary of what shipped:
-  - `signData()` now emits the V2.0 normalized string (station VALUES + contact VALUES,
-    no adif tags, sigspec order, UPPERCASED, worked CALL included, station CALL/DXCC
-    excluded). Host-verified the exact byte string matches tqsl 2.8.6 and that it
-    signs+verifies with `openssl dgst -sha1 -verify`.
-  - Records carry `CERT_UID`/`STATION_UID` linkage; signature field is now
-    `<SIGN_LOTW_V2.0:LEN:6>`.
-  - Response parser keys off the real `<!-- UPL_<status> -->` marker (tqsl 2.8.6
-    apps/tqsl_prefs.h), not the bare word "accepted".
+- **DONE & CONFIRMED WORKING ON A REAL LoTW ACCOUNT — LoTW `.tq8` rewritten to LOTW V2.0.**
+  A satellite QSO built by CardSat was uploaded and **successfully posted to the operator's
+  LoTW account** (N8HM, the FO-29 QSO). Getting there took several fixes beyond the initial
+  signing rewrite, each found from LoTW's server-side processing log:
+  - `signData()` emits the V2.0 normalized string (station VALUES + contact VALUES, no adif
+    tags, sigspec order, UPPERCASED, worked CALL included, station CALL/DXCC excluded).
+    Host-verified the byte string and that it signs+verifies with `openssl dgst -sha1`.
+  - Records carry `CERT_UID`/`STATION_UID` linkage; signature field is `<SIGN_LOTW_V2.0:LEN:6>`.
+  - **Station record field names:** the tSTATION uses TQSL's internal names `US_STATE` /
+    `US_COUNTY`, NOT the ADIF `STATE`/`CNTY`. A bare `CNTY` is rejected ("data length
+    overflow"), which discards the whole tSTATION and orphans the tCONTACT.
+  - **County value:** `US_COUNTY` is the county NAME ALONE (`Arlington`), not the combined
+    `VA,Arlington` (which LoTW rejects as "Invalid value"). CardSat stores `ST,County` and
+    strips the prefix when building both the record and the signed data. The state is in
+    `US_STATE`.
+  - **Date/time format:** the tCONTACT uses TEXT forms `YYYY-MM-DD` and `HH:MM:SSZ` under the
+    field name `QSO_TIME` (not the compact `20260628`/`011800`, not `TIME_ON`) — otherwise
+    "Invalid Date/Time in tCONTACT record". The signed data uses the same text forms.
+  - **Response parser:** keys off LoTW's REAL marker `<!-- .UPL. accepted -->` (dots + space),
+    not `<!-- UPL_ -->` (underscore) which never matched — that mismatch made an accepted
+    upload report as a failure. Reports "Queued N at LoTW" on success (acceptance = queued
+    for processing; per-QSO results are server-side).
   - Upload transport verified against tqsl 2.8.6 apps/tqsl.cpp: endpoint
-    `https://lotw.arrl.org/lotw/upload`, multipart field `upfile`, **no login/cookie/auth**
-    (the .tq8 self-authenticates). CardSat already matched this.
-  - New opt-in **re-send** toggle (`a` on the LoTW screen) re-uploads QSOs already marked
-    uploaded -- needed because pre-0.9.36 QSOs were flagged uploaded but never posted.
-  - Full format spec: `docs/design/LOTW_TQ8_FORMAT.md`.
-  - **NOT YET CONFIRMED ON A REAL LoTW ACCOUNT.** Host crypto passes and the format
-    matches tqsl byte-for-byte in the worked example, but no QSO has actually been
-    confirmed to post yet. Real-world test pending: flash 0.9.36, use the re-send toggle
-    to re-upload the FO-29 QSO, confirm it appears in LoTW activity; ideally byte-diff a
-    CardSat file vs a desktop-TQSL file for the same QSO.
+    `https://lotw.arrl.org/lotw/upload`, multipart field `upfile`, **no login/cookie/auth**.
+  - Opt-in **re-send** toggle (`a` on the LoTW screen) re-uploads QSOs already marked
+    uploaded -- needed because pre-fix QSOs were flagged uploaded but never posted.
+  - Full, corrected format spec: `docs/design/LOTW_TQ8_FORMAT.md`.
 
 ## Reference: how the root cause was found (kept for context)
 
@@ -105,8 +111,13 @@ Sun-Moon-transit / per-satellite-note features, and the offline GP/transponder c
      case. e.g. `145.9500`->unchanged, `FO-29`->`FO-29`, `fm18lu`->`FM18LU`.
   5. SHA-1 hash that, RSA-sign (PKCS#1 v1.5) -> base64. (CardSat's sign primitive is fine;
      only the INPUT bytes are wrong.)
-  Worked example (N8HM, this QSO): signed string =
+  Worked example (N8HM, this QSO), as understood at this *initial* stage — signed string =
   `5FM18LU8VA,ARLINGTONVA2M70CMN9EAT/VE3145.9500435.8500SSBSAT20260628011800FO-29`
+  **(SUPERSEDED — this intermediate string is wrong: later real-account testing showed the
+  county must be name-only and the date/time must be text-formatted. The corrected,
+  confirmed-working string is `5FM18LU8ARLINGTONVA2M70CMN9EAT/VE3145.9500435.8500SSBSAT2026-
+  06-2801:18:00ZFO-29`. See `docs/design/LOTW_TQ8_FORMAT.md` §6.4 for the authoritative
+  version.)**
 
   **File STRUCTURE changes (also required):**
   - tCERT: add `<CERT_UID:n>1` after the Rec_Type (before CERTIFICATE).

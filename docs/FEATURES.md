@@ -168,6 +168,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   except as the signature. Station DXCC/CQ/ITU zones live in Settings; sent QSOs are
   flagged (a new `uploaded` column) so they're never uploaded twice. See
   [MANUAL.md → LoTW upload](../MANUAL.md).
+- **Cloudlog / Wavelog upload** — **Upload to Cloudlog** on the Log menu sends your
+  satellite QSOs to a self-hosted **Cloudlog** (or compatible **Wavelog**) online logbook
+  over WiFi, via its JSON QSO API. Set your instance URL, a read-write API key, and your
+  numeric station profile ID in Settings. Because a Cloudlog instance can itself forward
+  QSOs on to LoTW, this is an alternative to the on-device LoTW upload — the two are
+  tracked independently (separate flags) so a QSO sent to one isn't assumed sent to the
+  other. Supports re-sending already-uploaded QSOs. The API key is treated as a secret and
+  never written to the serial log. See [MANUAL.md → Cloudlog upload](../MANUAL.md).
 - **Voice memos.** Press **`v`** while tracking to record a quick voice note to the
   SD card **without interrupting Doppler control** — the filename is stamped with the
   UTC time and the **satellite** you're on (e.g. `memo_20260617_203145_AO-91.wav`). A

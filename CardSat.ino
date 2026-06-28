@@ -13410,7 +13410,7 @@ void App::keySettings(char c, bool enter, bool back) {
                editBuf = cfg.lotwItuz; screen = SCR_EDIT; break;
       case 72: editTarget = 223; editTitle = "LoTW state (2-ltr, US)";
                editBuf = cfg.lotwState; screen = SCR_EDIT; break;
-      case 73: editTarget = 224; editTitle = "LoTW county ST,Name";
+      case 73: editTarget = 224; editTitle = "LoTW county (e.g. VA,Arlington)";
                editBuf = cfg.lotwCnty; screen = SCR_EDIT; break;
       case 74: editTarget = 225; editTitle = "Cloudlog URL (https://...)";
                editBuf = cfg.clUrl; screen = SCR_EDIT; break;
@@ -14254,9 +14254,14 @@ static void utcToAdif(uint32_t utc, String& date, String& time) {
   if (!utc) return;
   time_t tt = (time_t)utc; struct tm* g = gmtime(&tt);
   if (!g) return;
-  char d[9], t[7];
-  strftime(d, sizeof(d), "%Y%m%d", g);
-  strftime(t, sizeof(t), "%H%M%S", g);
+  // TQSL's .tq8 uses TEXT date/time, not the compact ADIF forms: the date is
+  // YYYY-MM-DD and the time is HH:MM:SSZ (tqsl_convertDateToText/TimeToText). LoTW's
+  // parser rejects the compact 20260628 / 011800 forms as "Invalid Date/Time". The
+  // SAME formatted strings go into both the tCONTACT record and the signed data (TQSL
+  // signs the converted-to-text values), so producing them here fixes both at once.
+  char d[12], t[12];
+  strftime(d, sizeof(d), "%Y-%m-%d", g);
+  strftime(t, sizeof(t), "%H:%M:%SZ", g);
   date = d; time = t;
 }
 
@@ -14290,7 +14295,16 @@ String Lotw::signData(const PendingQso& q, const LotwStation& st) {
   if (st.cqz.length())   s += st.cqz;        // CQZ
   if (st.grid.length())  s += st.grid;       // GRIDSQUARE
   if (st.ituz.length())  s += st.ituz;       // ITUZ
-  if (st.cnty.length())  s += st.cnty;       // US_COUNTY ("ST,County")
+  // US_COUNTY is signed as the county NAME ALONE (TQSL keeps state and county in
+  // separate location fields, so its signed value is just "Arlington", not the
+  // "ST,County" CardSat stores). Must match the value emitted in the tSTATION record.
+  if (st.cnty.length()) {
+    String cnty = st.cnty;
+    int comma = cnty.indexOf(',');
+    if (comma >= 0) cnty = cnty.substring(comma + 1);
+    cnty.trim();
+    s += cnty;                                // US_COUNTY
+  }
   if (st.state.length()) s += st.state;      // US_STATE
   // --- contact values, in sigspec (alphabetical) order ---
   s += bandUpper(ulM);                        // BAND (uplink)
@@ -14330,7 +14344,7 @@ static String contactRec(const PendingQso& q, const String& sd,
   adifSp(r, "MODE",      q.mode);
   adifSp(r, "PROP_MODE", "SAT");
   adifSp(r, "QSO_DATE",  date);
-  adifSp(r, "TIME_ON",   tm);
+  adifSp(r, "QSO_TIME",  tm);          // TQSL uses QSO_TIME in the record, not TIME_ON
   if (satnm[0]) adifSp(r, "SAT_NAME", String(satnm));
   adifTy(r, "SIGN_LOTW_V2.0", '6', sigB64);
   adifT(r, "SIGNDATA",      sd);
@@ -14494,7 +14508,17 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   // (which then orphans every tCONTACT's STATION_UID). US_COUNTY also has a length
   // limit of 30, vs the tiny default applied to an unrecognized field.
   adifSp(text, "US_STATE",   st.state);
-  adifSp(text, "US_COUNTY",  st.cnty);
+  // CardSat stores the county as "ST,County" (one field), but the US_COUNTY value LoTW
+  // validates against its enumeration is the county NAME ALONE (e.g. "Arlington"); the
+  // state is already carried in US_STATE. Sending "VA,Arlington" is rejected as an
+  // invalid value, so strip everything up to and including the comma.
+  {
+    String cnty = st.cnty;
+    int comma = cnty.indexOf(',');
+    if (comma >= 0) cnty = cnty.substring(comma + 1);
+    cnty.trim();
+    adifSp(text, "US_COUNTY", cnty);
+  }
   adifSp(text, "CQZ",        st.cqz);
   adifSp(text, "ITUZ",       st.ituz);
   text += "<eor>\n";
@@ -14833,14 +14857,16 @@ void App::doLotwUpload(const String& keyPass) {
       // Re-send mode: the QSOs were already flagged uploaded; nothing new to flag.
       // Drop back to normal mode and report.
       lotwLastSent = accepted;
-      lotwStatus = "Re-sent " + String(n) + ", accepted " + String(accepted);
+      lotwStatus = "Re-sent " + String(n) + ", queued " + String(accepted);
       lotwResend = false;
     } else {
       // Flag the n QSOs we actually put in the .tq8 -- whether LoTW counted them as
       // newly accepted or as duplicates, they've reached LoTW and must not be re-sent.
       int marked = markLogUploaded(n, 0x1);
       lotwLastSent = accepted;
-      lotwStatus = "Accepted " + String(accepted) + " (" + String(marked) + " flagged)";
+      // "Accepted" here means LoTW queued the file for processing; per-QSO results are
+      // determined server-side afterward (check your LoTW account).
+      lotwStatus = "Queued " + String(accepted) + " at LoTW";
       lotwPending -= marked; if (lotwPending < 0) lotwPending = 0;
     }
   } else {
@@ -14853,24 +14879,30 @@ void App::doLotwUpload(const String& keyPass) {
 // has varied; accept a few forms, and fall back to the batch size on a clear
 // success indication. Returns 0 if the response looks like a failure.
 int App::lotwParseAccepted(const String& resp, int batchN) {
-  // LoTW reports the upload result inside an HTML COMMENT marker, the same one the
-  // real TQSL client looks for (tqsl 2.8.6, apps/tqsl_prefs.h):
-  //   status:  <!-- UPL_<status> -->   (regex <!-- .UPL.\s*([^-]+)\s*-->), success
-  //            when <status> contains "accepted"
-  //   message: <!-- UPLMESSAGE_<text> -->
-  // Matching the bare word "accepted" anywhere in the page is WRONG -- a login or
-  // landing page can contain it and yield a false success (this produced a phantom
-  // "Accepted: 1" on an upload that never posted). So key off the marker.
-  int m = resp.indexOf("<!-- UPL_");
-  if (m < 0) m = resp.indexOf("<!--UPL_");          // tolerate missing space
+  // LoTW reports the upload result inside an HTML COMMENT marker. The real markers (seen
+  // in the server's response) look like:
+  //   status:  <!-- .UPL. accepted -->          (the '.' wildcards + a leading space)
+  //   message: <!-- .UPLMESSAGE. File queued for processing -->
+  // tqsl matches these with the regex <!-- .UPL.\s*([^-]+)\s*-->. An earlier version
+  // looked for "<!-- UPL_" with an underscore, which never matches LoTW's real output --
+  // so a perfectly accepted upload was reported as a failure. Match the real format, and
+  // do NOT just search for the bare word "accepted" anywhere (a login/landing page can
+  // contain it and yield a phantom success).
+  // Find the status marker "<!-- .UPL." but NOT "<!-- .UPLMESSAGE." (which also starts
+  // with ".UPL"). The status marker is ".UPL." immediately followed by whitespace.
+  int m = -1;
+  for (int i = resp.indexOf("<!-- .UPL."); i >= 0; i = resp.indexOf("<!-- .UPL.", i + 1)) {
+    int after = i + 10;                          // index just past "<!-- .UPL."
+    if (after < (int)resp.length() &&
+        (resp[after] == ' ' || resp[after] == '\t')) { m = i; break; }
+  }
   if (m >= 0) {
     int end = resp.indexOf("-->", m);
     String marker = (end > m) ? resp.substring(m, end) : resp.substring(m);
     String lower = marker; lower.toLowerCase();
     if (lower.indexOf("accepted") >= 0) {
       // Pull a QSO count out of the message marker if present, else assume the batch.
-      int mm = resp.indexOf("<!-- UPLMESSAGE_");
-      if (mm < 0) mm = resp.indexOf("<!--UPLMESSAGE_");
+      int mm = resp.indexOf("<!-- .UPLMESSAGE.");
       if (mm >= 0) {
         int me = resp.indexOf("-->", mm);
         String msg = (me > mm) ? resp.substring(mm, me) : resp.substring(mm);
@@ -14889,7 +14921,7 @@ int App::lotwParseAccepted(const String& resp, int batchN) {
   }
   // No UPL marker at all -> not a real LoTW upload result (login/landing/error page,
   // or a transport that didn't reach the processor). Treat as failure, and log a hint.
-  Serial.println("[lotw] no <!-- UPL_... --> status marker in response -> upload did "
+  Serial.println("[lotw] no <!-- .UPL. ... --> status marker in response -> upload did "
                  "NOT post (see serial dump above)");
   return 0;
 }

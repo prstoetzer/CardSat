@@ -65,8 +65,8 @@ Informational; LoTW does not gate on it.
 <CALL:n>...        (human-readable station fields)
 <DXCC:n>...
 <GRIDSQUARE:n>...
-<STATE:n>...       (US: 2-letter)
-<CNTY:n>...        (US: "ST,County", e.g. VA,Arlington)
+<US_STATE:n>...    (US: 2-letter, e.g. VA)
+<US_COUNTY:n>...   (US: county NAME ALONE, e.g. Arlington -- NOT "ST,County")
 <CQZ:n>...
 <ITUZ:n>...
 <eor>
@@ -74,6 +74,16 @@ Informational; LoTW does not gate on it.
 
 - `STATION_UID` (CardSat uses `1`) is referenced by every tCONTACT.
 - `CERT_UID` links this station to the certificate above.
+- **Field names matter.** The station record uses TrustedQSL's *internal* field names, which
+  for the US state and county are **`US_STATE`** and **`US_COUNTY`** — NOT the ADIF names
+  `STATE`/`CNTY`. If you emit a bare `CNTY`, LoTW doesn't recognize it, applies a tiny
+  default length limit, reports "ADIF field data length overflow", and rejects the entire
+  tSTATION — which then orphans every tCONTACT (`STATION_UID doesn't match any tSTATION`).
+- **`US_COUNTY`'s value is the county name only** (e.g. `Arlington`), because TQSL keeps the
+  state and county in separate location fields. The state is carried in `US_STATE`. Sending
+  the combined `VA,Arlington` is rejected as "US_COUNTY: Invalid value in field". CardSat
+  stores the county as `ST,County` (the ADIF `MY_CNTY` convention, entered that way in
+  Settings) and strips everything up to and including the comma when building the record.
 - These human-readable fields are **separate** from the bytes that get signed (Section 6).
   They are what LoTW displays/uses for the location; the *signature* is computed over a
   different normalized string.
@@ -93,8 +103,8 @@ Informational; LoTW does not gate on it.
 [<PROP_MODE:n>...] (SAT for satellite QSOs)
 [<SAT_NAME:n>...]  (required when PROP_MODE=SAT; format cc-nn, e.g. FO-29)
 [<BAND_RX:n>...]
-<QSO_DATE:n>...    (YYYYMMDD, UTC)
-<QSO_TIME:n>...    (HHMMSS, UTC)
+<QSO_DATE:n>...    (TEXT date "YYYY-MM-DD", UTC -- e.g. 2026-06-28)
+<QSO_TIME:n>...    (TEXT time "HH:MM:SSZ", UTC -- e.g. 01:18:00Z)
 <SIGN_LOTW_V2.0:LEN:6>BASE64_SIGNATURE
 <SIGNDATA:n>NORMALIZED_SIGNED_STRING
 <eor>
@@ -102,6 +112,12 @@ Informational; LoTW does not gate on it.
 
 - `STATION_UID` ties the QSO to the station location (and thus the certificate). **Without
   it LoTW cannot resolve the station location and drops the QSO.**
+- **Date/time are TEXT, not compact ADIF.** `QSO_DATE` is `YYYY-MM-DD` (with dashes) and
+  `QSO_TIME` is `HH:MM:SSZ` (colons, trailing `Z`), matching `tqsl_convertDateToText` /
+  `tqsl_convertTimeToText`. The compact ADIF forms `20260628` / `011800` are rejected as
+  "Invalid Date/Time in tCONTACT record". The time field is named **`QSO_TIME`**, not the
+  ADIF `TIME_ON`. The same text-formatted strings appear in the signed data (Section 6),
+  because tqsl signs the converted-to-text values.
 - The signature field name is literally `SIGN_LOTW_V2.0` (built by tqsl as
   `"SIGN_" + sigspec_name + "_V" + sigspec_version`). The **`:6`** is the ADIF type
   annotation emitted by `tqsl_adifMakeField(name, '6', ...)` — its presence is required;
@@ -131,8 +147,9 @@ RU_OBLAST, US_COUNTY, US_PARK, US_STATE
 ```
 
 For a typical US station that reduces to: **CQZ, GRIDSQUARE, ITUZ, US_COUNTY, US_STATE**.
-`US_COUNTY`'s value is the `ST,County` string (e.g. `VA,Arlington`). **CALL and DXCC are
-NOT part of the signed data.**
+`US_COUNTY`'s signed value is the **county name alone** (e.g. `ARLINGTON` after
+uppercasing) — *not* the combined `ST,County`. This must match the county-name-only value
+emitted in the tSTATION record. **CALL and DXCC are NOT part of the signed data.**
 
 ### 6.2 Contact portion appended (LOTW V2.0 `tCONTACT` sigspec order — alphabetical)
 
@@ -151,15 +168,19 @@ The entire concatenation is upper-cased (`string_toupper`). e.g. `fm18lu` → `F
 
 ### 6.4 Worked example
 
-Station: CALL N8HM, GRID FM18LU, STATE VA, CNTY VA,Arlington, CQZ 5, ITUZ 8.
+Station: CALL N8HM, GRID FM18LU, US_STATE VA, US_COUNTY Arlington, CQZ 5, ITUZ 8.
 QSO: worked N9EAT/VE3, 2M/70CM, FREQ 145.9500 / FREQ_RX 435.8500, SSB, SAT, FO-29,
 2026-06-28 01:18:00Z.
 
-Signed string (before SHA-1):
+Signed string (before SHA-1) — this is the exact string that produced a QSO LoTW accepted
+and posted:
 
 ```
-5FM18LU8VA,ARLINGTONVA2M70CMN9EAT/VE3145.9500435.8500SSBSAT20260628011800FO-29
+5FM18LU8ARLINGTONVA2M70CMN9EAT/VE3145.9500435.8500SSBSAT2026-06-2801:18:00ZFO-29
 ```
+
+Note the county is `ARLINGTON` (name only, not `VA,ARLINGTON`) and the date/time are the
+text forms `2026-06-28` and `01:18:00Z` (not `20260628` / `011800`).
 
 Then `SHA-1` → `RSA PKCS#1 v1.5 sign` → base64 → goes in `SIGN_LOTW_V2.0`, and the string
 above goes in `SIGNDATA`.

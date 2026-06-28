@@ -18,7 +18,21 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.35:** a built-in **Notes** editor on the **Log** menu — a free-form,
+> **New in v0.9.36:** **upload to Cloudlog / Wavelog.** CardSat can now send your
+> satellite QSOs straight to a self-hosted **Cloudlog** (or **Wavelog**) online logbook
+> over WiFi — set your instance URL, a read-write API key, and your station profile ID in
+> Settings, then **Log → Upload to Cloudlog**. Because Cloudlog can forward to LoTW
+> itself, it's an alternative to the on-device LoTW upload; the two are tracked separately
+> so nothing is double-counted. This release also makes the **LoTW upload work end to
+> end** — a CardSat-built satellite QSO now signs, uploads, and **posts to a real LoTW
+> account** (the `.tq8` station/contact field names, US county value, and date/time format
+> are now exactly what LoTW's processor expects, and an accepted upload is reported
+> correctly). Plus: **API keys and passwords are kept out of the USB serial log**, the
+> orbital-analysis **altitude no longer reads above apogee**, and **uploads are more
+> robust when memory is tight**. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.36.md)**.
+>
+> **In v0.9.35:** a built-in **Notes** editor on the **Log** menu — a free-form,
 > multi-page text editor with a file browser, for sked details, grids you still need,
 > antenna settings, or any operating reminder. Notes are plain `.txt` files under
 > `/CardSat/notes/` (SD card or internal flash), listed newest-first with a saved

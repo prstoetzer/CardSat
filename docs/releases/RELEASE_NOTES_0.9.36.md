@@ -1,6 +1,10 @@
 # CardSat v0.9.36 — release notes
 
-*Work in progress.*
+This release adds **direct upload to Cloudlog / Wavelog**, makes the **LoTW upload work end
+to end** (a CardSat-built satellite QSO now signs, uploads, and posts to a real LoTW
+account — verified), keeps **API keys and passwords out of the serial log**, fixes the
+**orbital-analysis altitude vs. apogee** readout, and makes **uploads more robust when
+memory is tight**.
 
 ## Logbook of the World
 
@@ -28,14 +32,29 @@
   endpoint and method were already correct (no change needed there). **If you uploaded
   satellite QSOs with an earlier version and they didn't appear in LoTW, use the new
   re-send option below to upload them again.**
+- **Fixed: LoTW rejected the contact record's date/time.** Inside a `.tq8`, TrustedQSL
+  writes the QSO date and time as *text* — `YYYY-MM-DD` and `HH:MM:SSZ` — and names the time
+  field `QSO_TIME`. CardSat was writing the compact ADIF forms (`20260628` / `011800`) under
+  the field name `TIME_ON`, which LoTW reported as "Invalid Date/Time in tCONTACT record".
+  The record and the cryptographically signed data now use the text date/time format and the
+  correct field name. (CardSat's normal ADIF *export* still uses the standard ADIF
+  `TIME_ON`/compact format — that's correct for ADIF; only the `.tq8` differs.)
 - **Fixed: LoTW rejected the station record on US uploads (county field).** The signed
   `.tq8`'s station record used the ADIF field names `STATE`/`CNTY`, but inside a `.tq8` the
-  station record must use TrustedQSL's internal field names — `US_STATE`/`US_COUNTY`. LoTW
-  didn't recognize the bare `CNTY`, applied a tiny default length limit, reported a "data
-  length overflow", and discarded the whole station record — which then orphaned every
-  contact ("STATION_UID doesn't match any tSTATION"). Both errors are fixed by emitting the
-  correct field names. If you have a US county set and your QSOs were rejected, re-send them
-  with the new re-send option.
+  station record must use TrustedQSL's internal field names — `US_STATE`/`US_COUNTY` — and
+  the **US_COUNTY value is the county name alone** (e.g. `Arlington`), with the state carried
+  separately in `US_STATE`. CardSat was sending the bare ADIF name and the combined
+  `ST,County` value, so LoTW first reported a length overflow, then (once the name was
+  fixed) an "invalid value" — either way it discarded the whole station record, which
+  orphaned every contact. Both the record and the cryptographically signed data now use the
+  correct field names and county-name-only value. If you have a US county set and your QSOs
+  were rejected, re-send them with the re-send option below.
+- **Fixed: an accepted LoTW upload was reported as a failure.** CardSat looked for the wrong
+  marker in LoTW's response (`<!-- UPL_… -->`), but LoTW actually emits `<!-- .UPL. accepted
+  -->`. A successful upload was therefore shown as failed. CardSat now reads the real marker
+  and reports "Queued N at LoTW" on success. Note that *queued* means LoTW accepted the file
+  for processing; the per-QSO results are determined on LoTW's side afterward, so always
+  confirm in your LoTW account.
 - **New: re-send already-uploaded QSOs.** On the **Sign & upload to LoTW** screen, press
   **`a`** to toggle re-send mode, which includes QSOs already marked as uploaded (normally
   they're skipped). Press **`u`** to upload. This is useful for re-sending contacts that an

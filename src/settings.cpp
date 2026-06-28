@@ -46,6 +46,8 @@ bool Settings::load() {
   strncpy(lotwItuz, d["lotwituz"] | "", sizeof(lotwItuz)-1); lotwItuz[sizeof(lotwItuz)-1]=0;
   strncpy(lotwState, d["lotwstate"] | "", sizeof(lotwState)-1); lotwState[sizeof(lotwState)-1]=0;
   strncpy(lotwCnty,  d["lotwcnty"]  | "", sizeof(lotwCnty)-1);  lotwCnty[sizeof(lotwCnty)-1]=0;
+  strncpy(lotwSubdiv, d["lotwsubdiv"] | "", sizeof(lotwSubdiv)-1); lotwSubdiv[sizeof(lotwSubdiv)-1]=0;
+  strncpy(lotwIota,  d["lotwiota"]  | "", sizeof(lotwIota)-1);  lotwIota[sizeof(lotwIota)-1]=0;
   lat        = d["lat"] | 0.0;
   lon        = d["lon"] | 0.0;
   altM       = d["alt"] | 0.0;
@@ -167,6 +169,7 @@ bool Settings::save() {
   d["clurl"] = clUrl; d["clkey"] = clKey; d["clstation"] = clStation;
   d["lotwdxcc"] = lotwDxcc; d["lotwcqz"] = lotwCqz; d["lotwituz"] = lotwItuz;
   d["lotwstate"] = lotwState; d["lotwcnty"] = lotwCnty;
+  d["lotwsubdiv"] = lotwSubdiv; d["lotwiota"] = lotwIota;
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;

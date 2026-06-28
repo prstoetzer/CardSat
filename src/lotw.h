@@ -32,6 +32,12 @@ struct LotwStation {
   String ituz;       // ITU zone
   String state;      // US/AK/HI: STATE (2-letter); required by LoTW for those DXCCs
   String cnty;       // US: county as "STATE,County" (ADIF MY_CNTY form); optional
+  // Non-US primary subdivision: the value is the LoTW enum CODE and subdivField is
+  // the LoTW field NAME it fills (e.g. "CA_PROVINCE"). Both empty => omit. The US
+  // path above is unchanged; these are only set for non-US entities.
+  String subdiv;     // subdivision code (e.g. "ON")
+  String subdivField;// LoTW field name (e.g. "CA_PROVINCE")
+  String iota;       // IOTA reference (e.g. "NA-005"); any DXCC; "" => omit
 };
 
 // Result of a build+upload attempt.

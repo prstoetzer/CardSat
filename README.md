@@ -18,7 +18,21 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.36:** **upload to Cloudlog / Wavelog.** CardSat can now send your
+> **New in v0.9.37:** **worldwide LoTW locations and an easier certificate setup.**
+> The LoTW station fields now cover **non-US entities** — Settings has a DXCC-aware
+> **subdivision picker** (Canadian province, Russian oblast, Japanese prefecture,
+> Chinese province, Australian state, Finnish kunta) plus an **IOTA** field, all signed
+> into the upload at the exact field/order LoTW expects. (US state + county are
+> unchanged.) Getting your certificate onto the card is simpler too: a **browser-based
+> converter** (`tools/lotw_cert_converter.html`) turns the `.p12` you export from TQSL
+> into the two `.pem` files CardSat needs — entirely in your browser, offline, with your
+> private key never leaving your computer (no more `openssl` command line). Plus: the
+> **upcoming-activations** list (hams.at) is now **cached to the card** so it shows the
+> last-known roster with no WiFi, displays a **"Downloading activations…"** banner while
+> it refreshes, and the **Update** screen's `k` now **pulls activations alongside the GP
+> update**. See the **[release notes](docs/releases/RELEASE_NOTES_0.9.37.md)**.
+>
+> **In v0.9.36:** **upload to Cloudlog / Wavelog.** CardSat can now send your
 > satellite QSOs straight to a self-hosted **Cloudlog** (or **Wavelog**) online logbook
 > over WiFi — set your instance URL, a read-write API key, and your station profile ID in
 > Settings, then **Log → Upload to Cloudlog**. Because Cloudlog can forward to LoTW

@@ -546,24 +546,44 @@ credential to the card.
 1. In TQSL, you already have your callsign certificate. Export it to a `.p12`
    file (TQSL: *Callsign Certificates → right-click your call → Save Callsign
    Certificate*, choosing the `.p12`/PKCS#12 format with a password).
-2. Split the `.p12` into the two PEM files CardSat reads, using OpenSSL:
+2. Convert the `.p12` into the two PEM files CardSat reads. The easy way is the
+   **bundled converter**: open **`tools/lotw_cert_converter.html`** in any web
+   browser, choose your `.p12` file, enter the export password, and click
+   **Convert** — it produces **`lotw_key.pem`** and **`lotw_cert.pem`** for you. It
+   runs entirely in the browser (it even works with your network disconnected), and
+   your private key and password never leave your computer.
+
+   If you'd rather use the command line, OpenSSL does the same thing:
 
    ```
    openssl pkcs12 -in CALL.p12 -nocerts -nodes | openssl rsa -out lotw_key.pem
    openssl pkcs12 -in CALL.p12 -clcerts -nokeys -out lotw_cert.pem
    ```
 
-   (To keep the key encrypted on the card, drop `-nodes` from the first command and
-   set a password; CardSat will ask for it at upload time.)
+   (The converter writes an unencrypted key, which is what CardSat expects. With the
+   OpenSSL route you can instead keep the key encrypted on the card by dropping
+   `-nodes` and setting a password; CardSat will ask for it at upload time.)
 3. Copy **`lotw_key.pem`** and **`lotw_cert.pem`** into the **`/CardSat/`** folder
    on the microSD card.
 4. In **Settings → Station / display**, set **LoTW DXCC** (your DXCC entity number —
-   `291` for the USA), **LoTW CQ zone**, and **LoTW ITU zone**. **US, Alaska and
-   Hawaii stations must also set LoTW state** (the two-letter abbreviation, e.g.
-   `VA`) — LoTW rejects uploads from those entities without it. **LoTW county**
-   (entered as `ST,County name`, e.g. `VA,Arlington`) is optional but lets your
-   contacts earn county awards. Your callsign and grid come from **My callsign** and
-   your location, which CardSat already has.
+   `291` for the USA), **LoTW CQ zone**, and **LoTW ITU zone**. Then set your
+   **primary subdivision** if your entity has one:
+   - **US, Alaska and Hawaii** stations set **LoTW state** (the two-letter
+     abbreviation, e.g. `VA`) — LoTW rejects uploads from those entities without it —
+     and optionally **LoTW county** (entered as `ST,County name`, e.g.
+     `VA,Arlington`), which lets your contacts earn county awards.
+   - **Other entities with subdivisions** (Canada, Russia, Japan, China, Australia,
+     Finland/Åland) use **LoTW subdiv (intl)**: press ENTER on that row and CardSat
+     shows a **picker of the valid subdivisions for your DXCC** (province, oblast,
+     prefecture, province, state, or kunta) — scroll with `;`/`.` and press ENTER to
+     choose. CardSat fills in the correct LoTW field automatically; you don't need to
+     know the code. (Entities with no subdivision show "no subdivisions for this
+     entity" — just leave it blank.)
+   - **LoTW IOTA** is optional and works for any entity: enter your island reference
+     (e.g. `NA-005`) if you're operating from a qualifying island.
+
+   Your callsign and grid come from **My callsign** and your location, which CardSat
+   already has.
 
 **Uploading:** open **Log → Sign & upload to LoTW**. The screen shows whether the
 card, the key/cert, and the station fields are present, and how many QSOs haven't
@@ -1541,7 +1561,7 @@ on-screen key reference. The notable rows:
 | Brightness | `,`/`/` adjust the active screen brightness in ~6% steps; previews live. Under *Station / display* |
 | Tilt tuning | `,`/`/` or ENTER toggle **accelerometer passband tuning** on/off. Shown as **n/a (no IMU)** on boards without one (only the Cardputer **ADV** has the sensor). When on, roll the device left/right in TUNE mode on a linear bird to move through the passband. Under *Station / display* |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
-| LoTW DXCC / CQ zone / ITU zone / state / county | ENTER → enter your DXCC entity number (e.g. `291` = USA), CQ zone, ITU zone, and — for US/AK/HI — your 2-letter state (required by LoTW for those entities) and optionally county (`ST,County`), for the **LoTW upload** station location. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
+| LoTW DXCC / CQ zone / ITU zone / state / county / subdiv / IOTA | ENTER → enter your DXCC entity number (e.g. `291` = USA), CQ zone, and ITU zone. For US/AK/HI, set your 2-letter **state** (required by LoTW for those entities) and optionally **county** (`ST,County`). For other entities with subdivisions (Canada, Russia, Japan, China, Australia, Finland/Åland), use **LoTW subdiv (intl)** — ENTER opens a DXCC-aware picker of the valid province/oblast/prefecture/state/kunta. **LoTW IOTA** (e.g. `NA-005`) is optional for any entity. All feed the **LoTW upload** station location. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
 | Cloudlog URL / key / station ID | ENTER → enter your self-hosted **Cloudlog** (or Wavelog) base URL (`https://…` or `http://…`), a **read-write API key**, and the numeric **station profile id** to file QSOs under, for **Log → Upload to Cloudlog**. Under *Station / display*. See [§8 → Cloudlog upload](#cloudlog--wavelog-upload). |
 | QRZ user / QRZ pass | ENTER → enter your QRZ.com username / password for the **QRZ Lookup** screen (requires a QRZ XML-data subscription). Password shown masked. Under *Network / data*. |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |

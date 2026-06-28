@@ -7,6 +7,7 @@
 #include <LittleFS.h>
 #include "storage.h"
 #include "lotw.h"        // LoTW .tq8 build + upload (SD-required)
+#include "lotw_subdiv.h" // LoTW intl administrative-subdivision tables (flash const)
 #include "notes.h"       // plain-text note browser + editor storage
 #include <time.h>
 #include <sys/time.h>
@@ -1019,9 +1020,55 @@ int App::parseHamsat(const String& xml) {
 
 // Download the feed to the shared temp file, parse it, fill hamsatList[].
 // Best-effort: leaves any previously-parsed list intact on failure.
+// Binary cache header: a tiny magic+version+count so a stale/corrupt file (or a
+// struct layout change between firmware builds) is detected and ignored rather
+// than mis-read. The records that follow are fixed-size Activation structs, so a
+// straight array dump round-trips. Lives in flash -> survives reboot with no WiFi.
+static const uint32_t HAMSAT_CACHE_MAGIC = 0x48414D31;  // "HAM1"
+
+bool App::saveHamsatCache() {
+  File f = Store::fs().open(FILE_HAMSAT, "w");
+  if (!f) return false;
+  uint32_t magic = HAMSAT_CACHE_MAGIC;
+  uint16_t ver = (uint16_t)sizeof(Activation);   // layout guard: record size
+  uint16_t cnt = (uint16_t)hamsatN;
+  f.write((const uint8_t*)&magic, sizeof(magic));
+  f.write((const uint8_t*)&ver,   sizeof(ver));
+  f.write((const uint8_t*)&cnt,   sizeof(cnt));
+  if (hamsatN > 0)
+    f.write((const uint8_t*)hamsatList, sizeof(Activation) * hamsatN);
+  f.close();
+  return true;
+}
+
+int App::loadHamsatCache() {
+  File f = Store::fs().open(FILE_HAMSAT, "r");
+  if (!f) return 0;
+  uint32_t magic = 0; uint16_t ver = 0, cnt = 0;
+  if (f.read((uint8_t*)&magic, sizeof(magic)) != (int)sizeof(magic) ||
+      f.read((uint8_t*)&ver,   sizeof(ver))   != (int)sizeof(ver)   ||
+      f.read((uint8_t*)&cnt,   sizeof(cnt))   != (int)sizeof(cnt)) {
+    f.close(); return 0;
+  }
+  // Reject a file from a different build (magic) or a changed struct (ver).
+  if (magic != HAMSAT_CACHE_MAGIC || ver != (uint16_t)sizeof(Activation)) {
+    f.close(); return 0;
+  }
+  if (cnt > HAMSAT_MAX) cnt = HAMSAT_MAX;
+  int got = 0;
+  for (int i = 0; i < cnt; i++) {
+    if (f.read((uint8_t*)&hamsatList[i], sizeof(Activation)) != (int)sizeof(Activation))
+      break;
+    got++;
+  }
+  f.close();
+  hamsatN = got;
+  return got;
+}
+
 void App::fetchHamsat() {
   if (!net.connected()) { hamsatStatus = "No WiFi - connect in Settings"; return; }
-  hamsatStatus = "Fetching activations..."; draw();
+  hamsatStatus = "Downloading activations..."; draw();
   // The feed is a few KB but can grow with more scheduled activations; allow room.
   if (!net.httpsGetToFileRetry(HAMSAT_FEED_URL, FILE_DL_TMP, 60000, nullptr, 3, 20000)) {
     Store::fs().remove(FILE_DL_TMP);
@@ -1034,12 +1081,17 @@ void App::fetchHamsat() {
   int n = parseHamsat(body);
   hamsatStatus = n ? "" : "No upcoming activations";
   hamsatSel = 0; hamsatScroll = 0; hamsatDetail = false;
+  if (n > 0) saveHamsatCache();    // refresh the offline cache after a good fetch
 }
 
 void App::hamsatEnter() {
   hamsatDetail = false; hamsatSel = 0; hamsatScroll = 0;
+  // Show the last-known list immediately (even with no WiFi) by loading the cache
+  // first; a live fetch below replaces it when we're online.
+  if (hamsatN == 0) loadHamsatCache();
   if (net.connected()) fetchHamsat();
   else if (hamsatN == 0) hamsatStatus = "No WiFi - connect in Settings";
+  else hamsatStatus = "";          // offline but we have cached activations to show
   screen = SCR_HAMSAT; lastDrawMs = 0;
 }
 
@@ -3761,6 +3813,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_LOG:      keyLog(c, enter, back); break;
     case SCR_LOTW:     keyLotw(c, enter, back); break;
     case SCR_CLOUDLOG: keyCloudlog(c, enter, back); break;
+    case SCR_LOTWSUB:  keyLotwSub(c, enter, back); break;
     case SCR_HAMSAT:   keyHamsat(c, enter, back); break;
     case SCR_NOTES:    keyNotes(c, enter, back); break;
     case SCR_NOTEEDIT: keyNoteEdit(c, enter, back); break;
@@ -5157,7 +5210,12 @@ void App::keyLocation(char c, bool enter, bool back) {
 
 void App::keyUpdate(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
-  if (c == 'k' || enter) { doUpdateGp(); }
+  if (c == 'k' || enter) {
+    doUpdateGp();
+    // Piggyback an activations refresh on the full update: WiFi is already up if
+    // the GP fetch succeeded, so this is cheap and keeps the hams.at list current.
+    if (net.connected()) { String s = status; fetchHamsat(); setStatus(s); }
+  }
   if (c == 'f') { doFastUpdate(); }             // GP + favorites' transponders only
   if (c == 'a') { doCacheAllTransponders(); }   // cache all TX for offline use
   if (c == 'w') {
@@ -5175,7 +5233,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73,74,75,76};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73,77,78,74,75,76};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -5391,6 +5449,9 @@ void App::keySettings(char c, bool enter, bool back) {
                editBuf = cfg.clKey; screen = SCR_EDIT; break;
       case 76: editTarget = 227; editTitle = "Cloudlog station ID (number)";
                editBuf = cfg.clStation; screen = SCR_EDIT; break;
+      case 77: lotwSubEnter(); break;   // intl subdivision picker (DXCC-aware)
+      case 78: editTarget = 228; editTitle = "LoTW IOTA ref (e.g. NA-005)";
+               editBuf = cfg.lotwIota; screen = SCR_EDIT; break;
       case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
@@ -5514,6 +5575,9 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.clKey[sizeof(cfg.clKey)-1] = 0; break;
       case 227: strncpy(cfg.clStation, editBuf.c_str(), sizeof(cfg.clStation)-1);
                 cfg.clStation[sizeof(cfg.clStation)-1] = 0; break;
+      case 228: { String u = editBuf; u.trim(); u.toUpperCase();   // IOTA ref e.g. NA-005
+                  strncpy(cfg.lotwIota, u.c_str(), sizeof(cfg.lotwIota)-1);
+                  cfg.lotwIota[sizeof(cfg.lotwIota)-1] = 0; } break;
       case 210: { double v = editBuf.toFloat(); if (v >= 0.1 && v <= 50000.0) cfg.beaconMHz = v;
                   cfg.save(); screen = SCR_ORBIT; orbitPage = 4; lastDrawMs = 0;
                   setStatus("Saved"); return; }
@@ -5803,7 +5867,7 @@ void App::keyEdit(char c, bool enter, bool back) {
   }
   if (c >= 32 && c < 127) {
     if (editTarget == 103 || editTarget == 104 || editTarget == 204 || editTarget == 216 ||
-        editTarget == 330 || editTarget == 223 ||
+        editTarget == 330 || editTarget == 223 || editTarget == 228 ||
         editTarget == 500 || editTarget == 503 || editTarget == 600) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
@@ -6390,6 +6454,131 @@ void App::keyLotw(char c, bool enter, bool back) {
   }
 }
 
+// ---- LoTW intl administrative-subdivision picker -------------------------------
+// LoTW gates a station's primary subdivision (state/province/oblast/...) on its
+// DXCC entity. Only a handful of entities have one. This maps the DXCC number to
+// the LoTW field NAME and the choice table (from src/lotw_subdiv.h). The US-style
+// entities (6/110/291) are flagged usCounty so the caller routes them to the
+// existing state+county rows instead of this picker. Returns "" for entities with
+// no subdivision (the picker then just shows "no subdivisions for this entity").
+const char* App::lotwSubdivField(const char* dxcc, const SubdivEntry** list,
+                                 int* n, bool* usCounty) {
+  if (list) *list = nullptr;
+  if (n) *n = 0;
+  if (usCounty) *usCounty = false;
+  if (!dxcc || !dxcc[0]) return "";
+  int d = atoi(dxcc);
+  switch (d) {
+    // US, Alaska, Hawaii: state + county, handled by the dedicated rows.
+    case 6: case 110: case 291:
+      if (usCounty) *usCounty = true;
+      if (list) *list = SUB_US_STATE; if (n) *n = SUB_US_STATE_N;
+      return "US_STATE";
+    case 1:                                   // Canada
+      if (list) *list = SUB_CA_PROVINCE; if (n) *n = SUB_CA_PROVINCE_N;
+      return "CA_PROVINCE";
+    case 15: case 54: case 61: case 126: case 151:  // Russia (Asiatic/European/Kalin/etc.)
+      if (list) *list = SUB_RU_OBLAST; if (n) *n = SUB_RU_OBLAST_N;
+      return "RU_OBLAST";
+    case 339:                                 // Japan
+      if (list) *list = SUB_JA_PREFECTURE; if (n) *n = SUB_JA_PREFECTURE_N;
+      return "JA_PREFECTURE";
+    case 318:                                 // China
+      if (list) *list = SUB_CN_PROVINCE; if (n) *n = SUB_CN_PROVINCE_N;
+      return "CN_PROVINCE";
+    case 150:                                 // Australia
+      if (list) *list = SUB_AU_STATE; if (n) *n = SUB_AU_STATE_N;
+      return "AU_STATE";
+    case 5: case 167: case 224:               // Finland / Aland / Market Reef
+      if (list) *list = SUB_FI_KUNTA; if (n) *n = SUB_FI_KUNTA_N;
+      return "FI_KUNTA";
+    default:
+      return "";
+  }
+}
+
+void App::lotwSubEnter() {
+  const SubdivEntry* list = nullptr; int n = 0; bool usCounty = false;
+  const char* field = lotwSubdivField(cfg.lotwDxcc, &list, &n, &usCounty);
+  lotwSubList = list; lotwSubN = n;
+  lotwSubFieldName = field[0] ? field : "";
+  // Preselect the currently-stored code (lotwSubdiv, or lotwState for US entities).
+  const char* cur = usCounty ? cfg.lotwState : cfg.lotwSubdiv;
+  lotwSubSel = 0;
+  if (cur && cur[0] && list) {
+    for (int i = 0; i < n; i++)
+      if (strcasecmp(list[i].code, cur) == 0) { lotwSubSel = i; break; }
+  }
+  lotwSubScroll = 0;
+  screen = SCR_LOTWSUB; lastDrawMs = 0;
+}
+
+void App::drawLotwSub() {
+  header("LoTW subdivision");
+  canvas.setTextSize(1);
+  // No subdivision for this DXCC (or none configured): explain and offer back.
+  if (lotwSubN == 0 || lotwSubList == nullptr) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 40);
+    if (!cfg.lotwDxcc[0]) canvas.print("Set LoTW DXCC entity first.");
+    else                  canvas.print("No subdivisions for this entity.");
+    canvas.setCursor(6, 56);
+    canvas.print("LoTW needs none here - leave blank.");
+    footer("` back");
+    return;
+  }
+  // Header line: which LoTW field these codes fill.
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, 16);
+  { String h = lotwSubFieldName; if (h.length() > 30) h = h.substring(0, 30);
+    canvas.printf("%s (%d)", h.c_str(), lotwSubN); }
+
+  const int ROWS = 7;
+  if (lotwSubSel < lotwSubScroll) lotwSubScroll = lotwSubSel;
+  if (lotwSubSel >= lotwSubScroll + ROWS) lotwSubScroll = lotwSubSel - ROWS + 1;
+  for (int i = 0; i < ROWS && lotwSubScroll + i < lotwSubN; ++i) {
+    int idx = lotwSubScroll + i;
+    const SubdivEntry& e = lotwSubList[idx];
+    int y = 30 + i*13;
+    if (idx == lotwSubSel) { canvas.fillRect(0, y-2, 240, 12, CL_SELBG);
+                             canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else                     canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, y);
+    // "CODE  Name" -- code is short (2-4 chars); name truncated to fit 240px.
+    char name[34]; strncpy(name, e.name, sizeof(name)-1); name[sizeof(name)-1] = 0;
+    canvas.printf("%-4.4s %-30.30s", e.code, name);
+  }
+  if (lotwSubN > ROWS) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(208, 16);
+    canvas.printf("%d/%d", lotwSubSel + 1, lotwSubN);
+  }
+  footer("; / . move  ENT select  ` back");
+}
+
+void App::keyLotwSub(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_SETTINGS; lastDrawMs = 0; return; }
+  if (lotwSubN == 0 || lotwSubList == nullptr) return;
+  if (isUp(c))   { lotwSubSel = (lotwSubSel + lotwSubN - 1) % lotwSubN; lastDrawMs = 0; }
+  if (isDown(c)) { lotwSubSel = (lotwSubSel + 1) % lotwSubN; lastDrawMs = 0; }
+  if (enter) {
+    const SubdivEntry& e = lotwSubList[lotwSubSel];
+    bool usCounty = false;
+    lotwSubdivField(cfg.lotwDxcc, nullptr, nullptr, &usCounty);
+    if (usCounty) {
+      // US entity: the picker writes the 2-letter state (county stays its own row).
+      strncpy(cfg.lotwState, e.code, sizeof(cfg.lotwState)-1);
+      cfg.lotwState[sizeof(cfg.lotwState)-1] = 0;
+    } else {
+      strncpy(cfg.lotwSubdiv, e.code, sizeof(cfg.lotwSubdiv)-1);
+      cfg.lotwSubdiv[sizeof(cfg.lotwSubdiv)-1] = 0;
+    }
+    cfg.save();
+    setStatus(String("Set ") + e.code);
+    screen = SCR_SETTINGS; lastDrawMs = 0;
+  }
+}
+
 // Build the .tq8 from all un-uploaded QSOs, POST it, and -- on an accepted
 // upload -- mark those QSOs uploaded so they aren't sent again.
 void App::doLotwUpload(const String& keyPass) {
@@ -6427,6 +6616,16 @@ void App::doLotwUpload(const String& keyPass) {
   st.ituz = cfg.lotwItuz;
   st.state = cfg.lotwState;
   st.cnty  = cfg.lotwCnty;
+  // Non-US primary subdivision + IOTA. Resolve the LoTW field name from the DXCC so
+  // the signer emits the right tag (CA_PROVINCE, RU_OBLAST, ...). US entities keep
+  // using state/cnty above, so only set subdiv for non-US (usCounty==false).
+  { bool usCounty = false;
+    const char* fld = lotwSubdivField(cfg.lotwDxcc, nullptr, nullptr, &usCounty);
+    if (!usCounty && fld[0] && cfg.lotwSubdiv[0]) {
+      st.subdiv = cfg.lotwSubdiv; st.subdivField = fld;
+    }
+  }
+  st.iota = cfg.lotwIota;
 
   // Sign and stage the .tq8, then POST it. The gzip step uses stored (uncompressed)
   // framing so it needs no working memory, and the TLS upload fits the same
@@ -7024,6 +7223,7 @@ void App::draw() {
     case SCR_LOG:      drawLog(); break;
     case SCR_LOTW:     drawLotw(); break;
     case SCR_CLOUDLOG: drawCloudlog(); break;
+    case SCR_LOTWSUB:  drawLotwSub(); break;
     case SCR_HAMSAT:   drawHamsat(); break;
     case SCR_NOTES:    drawNotes(); break;
     case SCR_NOTEEDIT: drawNoteEdit(); break;
@@ -12651,7 +12851,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 74;
+  const int N = 80;          // must exceed the highest rows[] index used below
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -12774,6 +12974,8 @@ void App::drawSettings() {
   rows[74] = String("Cloudlog URL: ") + (cfg.clUrl[0] ? cfg.clUrl : "(not set)");
   rows[75] = String("Cloudlog key: ") + String(strlen(cfg.clKey) ? "******" : "(none)");
   rows[76] = String("Cloudlog station ID: ") + (cfg.clStation[0] ? cfg.clStation : "(not set)");
+  rows[77] = String("LoTW subdiv (intl): ") + (cfg.lotwSubdiv[0] ? cfg.lotwSubdiv : "(not set)");
+  rows[78] = String("LoTW IOTA: ") + (cfg.lotwIota[0] ? cfg.lotwIota : "(not set)");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

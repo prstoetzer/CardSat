@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -840,6 +840,19 @@ private:
   String lotwStatus;               // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
   bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
+  // ---- LoTW intl subdivision picker (SCR_LOTWSUB) ----
+  // Resolve a DXCC entity number to its LoTW primary-subdivision field. Returns the
+  // LoTW field NAME (e.g. "CA_PROVINCE") or "" if the entity has no subdivision, and
+  // fills list/n with the choice table. usCounty=true means the entity uses US-style
+  // state+county (handled by the existing state/county rows, not this picker).
+  const char* lotwSubdivField(const char* dxcc, const SubdivEntry** list, int* n, bool* usCounty);
+  void lotwSubEnter();             // open the picker for the configured DXCC
+  void drawLotwSub();   void keyLotwSub(char c, bool enter, bool back);
+  const SubdivEntry* lotwSubList = nullptr;  // active choice table (flash)
+  int    lotwSubN = 0;             // entries in the active table
+  int    lotwSubSel = 0;           // picker cursor
+  int    lotwSubScroll = 0;        // picker scroll offset
+  String lotwSubFieldName;         // LoTW field name for the active DXCC (header text)
   // ---- Cloudlog/Wavelog upload screen (SCR_CLOUDLOG) ----
   void drawCloudlog();   void keyCloudlog(char c, bool enter, bool back);
   void cloudlogEnter();                     // count pending QSOs + open screen
@@ -872,6 +885,8 @@ private:
   void fetchHamsat();              // download + parse the feed (WiFi)
   int  parseHamsat(const String& xml);  // fill hamsatList[]; returns count
   void hamsatEnter();              // open screen, fetch if WiFi up
+  bool saveHamsatCache();          // persist hamsatList[] to flash (survives reboot)
+  int  loadHamsatCache();          // restore hamsatList[] from flash; returns count
   // ---- Notes: text-file browser (SCR_NOTES) + editor (SCR_NOTEEDIT) ----
   static const int NOTES_LIST_MAX = 64;   // files listed in the browser
   static const int NOTE_NAME_MAX  = 32;   // filename length (without path/.txt)

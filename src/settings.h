@@ -84,6 +84,11 @@ struct Settings {
   char     lotwItuz[4] = "";  // ITU zone; "" => omit
   char     lotwState[4] = ""; // US/AK/HI 2-letter state (LoTW requires for those DXCCs)
   char     lotwCnty[34] = ""; // US county as "ST,County name"; optional, for awards
+  // International primary subdivision (non-US DXCCs that have one): province/oblast/
+  // prefecture/etc. Stored as the LoTW enum CODE; the field NAME LoTW expects is
+  // chosen from the DXCC (CA_PROVINCE, RU_OBLAST, JA_PREFECTURE, ...). "" => omit.
+  char     lotwSubdiv[34] = "";
+  char     lotwIota[10] = "";  // IOTA reference (e.g. "NA-005"); any DXCC; "" => omit
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password

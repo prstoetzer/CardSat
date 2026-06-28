@@ -100,8 +100,9 @@ static void utcToAdif(uint32_t utc, String& date, String& time) {
 //   tSTATION order (non-empty only): AU_STATE, CA_PROVINCE, CA_US_PARK, CN_PROVINCE,
 //     CQZ, DX_US_PARK, FI_KUNTA, GRIDSQUARE, IOTA, ITUZ, JA_CITY_GUN_KU,
 //     JA_PREFECTURE, RU_OBLAST, US_COUNTY, US_PARK, US_STATE
-//     (CardSat populates only CQZ, GRIDSQUARE, ITUZ, US_COUNTY=cnty, US_STATE=state;
-//      CALL and DXCC are deliberately NOT signed.)
+//     (CardSat populates CQZ, GRIDSQUARE, ITUZ, US_STATE=state, US_COUNTY=cnty, plus
+//      one non-US primary subdivision (AU_STATE/CA_PROVINCE/CN_PROVINCE/FI_KUNTA/
+//      JA_PREFECTURE/RU_OBLAST) and IOTA when set; CALL and DXCC are NOT signed.)
 //   tCONTACT order (non-empty only): BAND, BAND_RX, CALL, FREQ, FREQ_RX, MODE,
 //     PROP_MODE, QSO_DATE, QSO_TIME, SAT_NAME   (the worked CALL IS included)
 // ---------------------------------------------------------------------------
@@ -111,10 +112,24 @@ String Lotw::signData(const PendingQso& q, const LotwStation& st) {
   char satnm[7] = ""; lotwSatResolveExt(q.sat, satnm);
 
   String s;
-  // --- station values, in sigspec order (only the fields CardSat can populate) ---
-  if (st.cqz.length())   s += st.cqz;        // CQZ
-  if (st.grid.length())  s += st.grid;       // GRIDSQUARE
-  if (st.ituz.length())  s += st.ituz;       // ITUZ
+  // --- station values, in sigspec order (alphabetical by LoTW field name) ---
+  // The single non-US primary subdivision (st.subdiv) carries its LoTW field name in
+  // st.subdivField; emit its value at that field's alphabetical slot. Field order:
+  // AU_STATE, CA_PROVINCE, CN_PROVINCE, CQZ, FI_KUNTA, GRIDSQUARE, IOTA, ITUZ,
+  // JA_PREFECTURE, RU_OBLAST, US_COUNTY, US_STATE (the fields CardSat can populate).
+  auto subIs = [&](const char* f) {
+    return st.subdiv.length() && st.subdivField == f;
+  };
+  if (subIs("AU_STATE"))    s += st.subdiv;   // AU_STATE
+  if (subIs("CA_PROVINCE")) s += st.subdiv;   // CA_PROVINCE
+  if (subIs("CN_PROVINCE")) s += st.subdiv;   // CN_PROVINCE
+  if (st.cqz.length())   s += st.cqz;         // CQZ
+  if (subIs("FI_KUNTA"))    s += st.subdiv;   // FI_KUNTA
+  if (st.grid.length())  s += st.grid;        // GRIDSQUARE
+  if (st.iota.length())  s += st.iota;        // IOTA
+  if (st.ituz.length())  s += st.ituz;        // ITUZ
+  if (subIs("JA_PREFECTURE")) s += st.subdiv; // JA_PREFECTURE
+  if (subIs("RU_OBLAST"))   s += st.subdiv;   // RU_OBLAST
   // US_COUNTY is signed as the county NAME ALONE (TQSL keeps state and county in
   // separate location fields, so its signed value is just "Arlington", not the
   // "ST,County" CardSat stores). Must match the value emitted in the tSTATION record.
@@ -340,6 +355,13 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   }
   adifSp(text, "CQZ",        st.cqz);
   adifSp(text, "ITUZ",       st.ituz);
+  // Non-US primary subdivision: emit under its LoTW field name (CA_PROVINCE,
+  // RU_OBLAST, JA_PREFECTURE, ...). The field name and value are validated against
+  // LoTW's per-DXCC enumeration, same as US_STATE/US_COUNTY. Order here is free; only
+  // the signed string (signData) must be alphabetical.
+  if (st.subdiv.length() && st.subdivField.length())
+    adifSp(text, st.subdivField.c_str(), st.subdiv);
+  adifSp(text, "IOTA",       st.iota);     // IOTA reference (any DXCC); skipped if ""
   text += "<eor>\n";
 
   int signedN = 0;

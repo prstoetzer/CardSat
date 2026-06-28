@@ -148,7 +148,11 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   **hams.at** upcoming-activations feed and lists scheduled roves, grid activations,
   and special operations (date, callsign, satellite, grid), with a detail view for
   each (start/end times UTC, mode, frequency, the activator's comment) and a refresh
-  key. See who's planning to be on which bird, from where, and when. WiFi required.
+  key. See who's planning to be on which bird, from where, and when. The list is
+  **cached to the card**, so re-opening the screen shows the last-known roster even
+  with no WiFi; a **"Downloading activations…"** banner shows while it refreshes
+  online. The **Update** screen's `k` pulls a fresh activations list alongside the GP
+  update, so one keypress refreshes both.
 - **On-device Help** — press `h` on (almost) any screen for a scrollable key reference.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without
@@ -163,10 +167,17 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   builds the same cryptographically-signed file TQSL would (RSA-PKCS#1-v1.5 over SHA-1,
   via the firmware's built-in mbedTLS) and posts it to LoTW's self-authenticating
   service. You enroll once on a computer the normal way and copy your certificate to
-  the card as two PEM files (a one-line `openssl pkcs12` step); **your private key
-  lives on the SD card**, loaded only at upload time and never copied or transmitted
-  except as the signature. Station DXCC/CQ/ITU zones live in Settings; sent QSOs are
-  flagged (a new `uploaded` column) so they're never uploaded twice. See
+  the card as two PEM files — a **bundled browser converter**
+  (`tools/lotw_cert_converter.html`) turns your TQSL `.p12` into those PEMs entirely
+  in-browser and offline, with the private key never leaving your computer (or use a
+  one-line `openssl pkcs12` step). **Your private key lives on the SD card**, loaded
+  only at upload time and never copied or transmitted except as the signature.
+  Station DXCC/CQ/ITU zones live in Settings, along with your **primary subdivision**:
+  US state + county, or — for entities that have one — a **DXCC-aware picker** for
+  Canadian province, Russian oblast, Japanese prefecture, Chinese province, Australian
+  state, or Finnish kunta, plus an optional **IOTA** reference. Each is signed into the
+  upload under the exact LoTW field name and sigspec order. Sent QSOs are flagged (an
+  `uploaded` column) so they're never uploaded twice. See
   [MANUAL.md → LoTW upload](../MANUAL.md).
 - **Cloudlog / Wavelog upload** — **Upload to Cloudlog** on the Log menu sends your
   satellite QSOs to a self-hosted **Cloudlog** (or compatible **Wavelog**) online logbook

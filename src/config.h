@@ -29,6 +29,7 @@ static constexpr double C_LIGHT = 299792458.0;
 #define LOTW_UPLOAD_URL    "https://lotw.arrl.org/lotw/upload"
 // hams.at upcoming satellite activations (Atom feed of scheduled rove/activations).
 #define HAMSAT_FEED_URL    "https://hams.at/feeds/upcoming_alerts"
+#define FILE_HAMSAT  "/CardSat/hamsat.dat"   // cached parsed activations (binary, survives reboot)
 // "Cache all" runs in small per-sat batches across reboots: a fresh socket pool
 // and WiFi association each boot keeps the LWIP pool from exhausting on this
 // link. This marker file holds the next satellite index to cache; its presence
@@ -104,7 +105,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.36";
+static constexpr const char* FW_VERSION = "0.9.37";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.

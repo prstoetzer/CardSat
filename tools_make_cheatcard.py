@@ -119,7 +119,7 @@ BACK = [
   "Callsign lookup via QRZ.com XML (needs QRZ XML subscription + user/pass in "
   "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
  ("ACTIVATIONS (menu)",
-  "Upcoming sat activations scheduled on hams.at (roves, grid/special ops). List: date, call, sat, grid. <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail (UTC times, mode, freq, comment) &middot; <b>r</b> refresh &middot; <b>`</b> back. WiFi req'd"),
+  "Upcoming sat activations scheduled on hams.at (roves, grid/special ops). List: date, call, sat, grid. <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail (UTC times, mode, freq, comment) &middot; <b>r</b> refresh &middot; <b>`</b> back. Cached to card &mdash; last list shows offline; WiFi to refresh"),
  ("TRANSPONDER DB (Sats &rarr; t)",
   "Sat's transponder/beacon entries, two lines each: <b>D</b>=downlink+mode line, "
   "<b>U</b>=uplink+tone/inv line. <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
@@ -146,7 +146,7 @@ BACK = [
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete"),
  ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; Sign &amp; upload)",
-  "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/, set DXCC/CQ/ITU in Settings) &mdash; see manual §8. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
+  "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/ &mdash; make them from your TQSL .p12 with tools/lotw_cert_converter.html in a browser; set DXCC/CQ/ITU + state/county or intl subdiv picker + IOTA in Settings) &mdash; see manual §8. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
  ("UPLOAD TO CLOUDLOG (Log &rarr; Upload to Cloudlog)",
   "Uploads sat QSOs to a self-hosted Cloudlog/Wavelog over WiFi (an alternative to LoTW &mdash; Cloudlog can forward to LoTW). Set <b>URL</b> + read-write <b>API key</b> + <b>station ID</b> in Settings. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
  ("VOICE MEMOS (Log &rarr; Voice Memos)",

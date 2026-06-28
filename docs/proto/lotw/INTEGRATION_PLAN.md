@@ -1,5 +1,11 @@
 # CardSat — Direct LoTW Upload: Prototype Results & Integration Plan
 
+> ⚠️ **OUTDATED (kept for history).** This prototype used LoTW's legacy `SIGN_LOTW_1.0`
+> format, which the current LoTW server accepts but then silently drops. The QSO does NOT
+> post. The correct, current format is **LOTW V2.0** — see
+> **[`docs/design/LOTW_TQ8_FORMAT.md`](../../design/LOTW_TQ8_FORMAT.md)** for the
+> authoritative spec (reverse-engineered from tqsl 2.8.6). Do not implement from this file.
+
 **Status:** Format and signing **proven host-side**. Not yet integrated into firmware.
 Target firmware version: **0.9.34** (a feature release; out of scope for 0.9.33).
 

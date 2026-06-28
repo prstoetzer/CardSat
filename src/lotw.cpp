@@ -27,6 +27,12 @@ static void adifSp(String& o, const char* name, const String& v) {
 static void adifT(String& o, const char* name, const String& v) {
   o += "<"; o += name; o += ":"; o += String(v.length()); o += ">"; o += v;
 }
+// ADIF field with a type annotation: <NAME:LEN:TYPE>VALUE. tqsl emits the signature
+// field this way via tqsl_adifMakeField(name, '6', ...), i.e. <SIGN_LOTW_V2.0:LEN:6>.
+static void adifTy(String& o, const char* name, char type, const String& v) {
+  o += "<"; o += name; o += ":"; o += String(v.length());
+  o += ":"; o += type; o += ">"; o += v;
+}
 
 // SHA-1 one-shot, version-portable: mbedTLS 2.x exposes the *_ret forms (the
 // un-suffixed ones are deprecated there); mbedTLS 3.x (ESP32) dropped the suffix.
@@ -75,37 +81,67 @@ static void utcToAdif(uint32_t utc, String& date, String& time) {
 }
 
 // ---------------------------------------------------------------------------
-// SIGNDATA: normalized ADIF fields in the EXACT order from developer-tq8,
-// optional fields skipped when empty, no trailing spaces. For a satellite QSO
-// CardSat maps uplink->BAND/FREQ (TX) and downlink->BAND_RX/FREQ_RX.
+// SIGNDATA for LoTW signature spec "LOTW V2.0" (reverse-engineered from tqsl
+// 2.8.6 src/location.cpp make_sign_data + tqsl_getGABBItCONTACTData and the
+// <sigspecs> in src/config.xml; the public developer-tq8 page documents the OLD
+// 1.0 scheme and is wrong about what is signed -- see docs/design/LOTW_TQ8_FORMAT.md).
+//
+// The signed string is the concatenation of station field VALUES then contact
+// field VALUES -- VALUES ONLY, no <adif:tags> -- in the exact sigspec order, with
+// the whole result UPPERCASED. LoTW re-derives this same string and verifies the
+// signature against it; any mismatch (tags, case, order, missing station data or
+// worked CALL) makes LoTW silently drop the QSO even though the file is accepted.
+//
+//   tSTATION order (non-empty only): AU_STATE, CA_PROVINCE, CA_US_PARK, CN_PROVINCE,
+//     CQZ, DX_US_PARK, FI_KUNTA, GRIDSQUARE, IOTA, ITUZ, JA_CITY_GUN_KU,
+//     JA_PREFECTURE, RU_OBLAST, US_COUNTY, US_PARK, US_STATE
+//     (CardSat populates only CQZ, GRIDSQUARE, ITUZ, US_COUNTY=cnty, US_STATE=state;
+//      CALL and DXCC are deliberately NOT signed.)
+//   tCONTACT order (non-empty only): BAND, BAND_RX, CALL, FREQ, FREQ_RX, MODE,
+//     PROP_MODE, QSO_DATE, QSO_TIME, SAT_NAME   (the worked CALL IS included)
 // ---------------------------------------------------------------------------
-String Lotw::signData(const PendingQso& q) {
+String Lotw::signData(const PendingQso& q, const LotwStation& st) {
   double dlM = q.dlHz / 1e6, ulM = q.ulHz / 1e6;
   String date, tm; utcToAdif(q.utc, date, tm);
   char satnm[7] = ""; lotwSatResolveExt(q.sat, satnm);
 
   String s;
-  adifT(s, "BAND",      bandUpper(ulM));
-  if (dlM > 0) adifT(s, "BAND_RX", bandUpper(dlM));
-  if (ulM > 0) adifT(s, "FREQ",    String(ulM, 4));
-  if (dlM > 0) adifT(s, "FREQ_RX", String(dlM, 4));
-  adifT(s, "MODE",      q.mode);
-  adifT(s, "PROP_MODE", "SAT");
-  adifT(s, "QSO_DATE",  date);
-  adifT(s, "QSO_TIME",  tm);
-  if (satnm[0]) adifT(s, "SAT_NAME", String(satnm));
+  // --- station values, in sigspec order (only the fields CardSat can populate) ---
+  if (st.cqz.length())   s += st.cqz;        // CQZ
+  if (st.grid.length())  s += st.grid;       // GRIDSQUARE
+  if (st.ituz.length())  s += st.ituz;       // ITUZ
+  if (st.cnty.length())  s += st.cnty;       // US_COUNTY ("ST,County")
+  if (st.state.length()) s += st.state;      // US_STATE
+  // --- contact values, in sigspec (alphabetical) order ---
+  s += bandUpper(ulM);                        // BAND (uplink)
+  if (dlM > 0) s += bandUpper(dlM);           // BAND_RX (downlink)
+  s += q.call;                                // CALL (worked station)
+  if (ulM > 0) s += String(ulM, 4);           // FREQ
+  if (dlM > 0) s += String(dlM, 4);           // FREQ_RX
+  s += q.mode;                                // MODE
+  s += "SAT";                                 // PROP_MODE
+  s += date;                                  // QSO_DATE
+  s += tm;                                    // QSO_TIME
+  if (satnm[0]) s += satnm;                   // SAT_NAME
+
+  s.toUpperCase();                            // entire string is uppercased
   return s;
 }
 
-// One tCONTACT record (spaced outer fields) given the precomputed signature.
+// One tCONTACT record given the precomputed signature. stationUid links the QSO to
+// the tSTATION (and thus the certificate); LoTW drops the QSO without it. The
+// SIGNDATA field stores the exact normalized string that was signed (V2.0: the
+// uppercased station+contact values from signData), and the signature is emitted as
+// <SIGN_LOTW_V2.0:LEN:6> (the ":6" is tqsl's ADIF type annotation).
 static String contactRec(const PendingQso& q, const String& sd,
-                         const String& sigB64) {
+                         const String& sigB64, int stationUid) {
   double dlM = q.dlHz / 1e6, ulM = q.ulHz / 1e6;
   String date, tm; utcToAdif(q.utc, date, tm);
   char satnm[7] = ""; lotwSatResolveExt(q.sat, satnm);
 
   String r;
   adifT(r, "Rec_Type", "tCONTACT");
+  adifSp(r, "STATION_UID", String(stationUid));
   adifSp(r, "CALL",      q.call);
   adifSp(r, "BAND",      bandUpper(ulM));
   if (dlM > 0) adifSp(r, "BAND_RX", bandUpper(dlM));
@@ -116,8 +152,8 @@ static String contactRec(const PendingQso& q, const String& sd,
   adifSp(r, "QSO_DATE",  date);
   adifSp(r, "TIME_ON",   tm);
   if (satnm[0]) adifSp(r, "SAT_NAME", String(satnm));
+  adifTy(r, "SIGN_LOTW_V2.0", '6', sigB64);
   adifT(r, "SIGNDATA",      sd);
-  adifT(r, "SIGN_LOTW_1.0", sigB64);
   r += "<eor>\n";
   return r;
 }
@@ -252,15 +288,22 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   }
 
   // --- assemble the .tq8 text ---
+  // A single certificate (CERT_UID 1) and single station location (STATION_UID 1)
+  // per file; every tCONTACT references STATION_UID 1, which references CERT_UID 1.
+  const int CERT_UID = 1, STATION_UID = 1;
+
   String text;
   adifT(text, "TQSL_IDENT",
         String("TQSL CardSat ") + FW_VERSION + " Lib(CardSat) Config()");
   text += "\n";
   adifT(text, "Rec_Type", "tCERT");
+  adifT(text, "CERT_UID", String(CERT_UID));
   adifT(text, "CERTIFICATE", certB64);
   text += "<eor>\n";
 
   adifT(text, "Rec_Type", "tSTATION");
+  adifSp(text, "STATION_UID", String(STATION_UID));
+  adifSp(text, "CERT_UID",    String(CERT_UID));
   adifSp(text, "CALL",       st.call);
   adifSp(text, "DXCC",       st.dxcc);
   adifSp(text, "GRIDSQUARE", st.grid);
@@ -273,7 +316,7 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   int signedN = 0;
   for (int i = 0; i < n; ++i) {
     const PendingQso& q = qsos[i];
-    String sd = signData(q);
+    String sd = signData(q, st);
 
     // SHA-1(SIGNDATA) -> RSA PKCS#1 v1.5 sign (mbedtls_pk_sign).
     uint8_t hash[20];
@@ -287,7 +330,7 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
     String sigB64 = b64(sig, siglen);
     if (!sigB64.length()) { err = "sig encode failed"; break; }
 
-    text += contactRec(q, sd, sigB64);
+    text += contactRec(q, sd, sigB64, STATION_UID);
     signedN++;
   }
 

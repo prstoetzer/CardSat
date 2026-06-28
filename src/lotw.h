@@ -55,7 +55,7 @@ public:
 
   // Build the normalized SIGNDATA for one QSO (exact developer-tq8 field order,
   // no trailing spaces). Public so it can be unit-checked.
-  static String signData(const PendingQso& q);
+  static String signData(const PendingQso& q, const LotwStation& st);
 
   // Convenience: are the credential files present on the SD card?
   static bool credentialPresent();

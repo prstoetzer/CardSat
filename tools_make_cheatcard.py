@@ -142,11 +142,13 @@ BACK = [
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
   "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
  ("LOG",
-  "Menu: <b>ENTER</b> new QSO / browse / export ADIF / voice memos / LoTW upload / notes &middot; List: <b>;</b>/<b>.</b> scroll, "
+  "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete"),
- ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; last)",
-  "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/, set DXCC/CQ/ITU in Settings) &mdash; see manual §8. <b>u</b> upload &middot; <b>`</b> back"),
+ ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; Sign &amp; upload)",
+  "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/, set DXCC/CQ/ITU in Settings) &mdash; see manual §8. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
+ ("UPLOAD TO CLOUDLOG (Log &rarr; Upload to Cloudlog)",
+  "Uploads sat QSOs to a self-hosted Cloudlog/Wavelog over WiFi (an alternative to LoTW &mdash; Cloudlog can forward to LoTW). Set <b>URL</b> + read-write <b>API key</b> + <b>station ID</b> in Settings. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
  ("VOICE MEMOS (Log &rarr; Voice Memos)",
   "Browse newest-first (date/time/sat/len). <b>ENTER</b> play &middot; <b>n</b> new &middot; <b>d</b> del &middot; <b>r</b> refresh &middot; record via <b>v</b> on Track. SD req'd"),
  ("NOTES (Log &rarr; Notes)",

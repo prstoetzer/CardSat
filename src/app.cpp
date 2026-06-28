@@ -1294,7 +1294,7 @@ void App::keyNotes(char c, bool enter, bool back) {
     lastDrawMs = 0;
     return;
   }
-  if (isBack(c, back)) { logMenuSel = 5; screen = SCR_LOG; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { logMenuSel = 6; screen = SCR_LOG; lastDrawMs = 0; return; }
   if (c == 'n') { noteEditNew(); return; }
   if (noteListN == 0) return;
   if (isUp(c))   { noteSel = (noteSel + noteListN - 1) % noteListN; lastDrawMs = 0; }
@@ -3028,6 +3028,23 @@ void App::webdSendPassesJson() {
 // identical formulas drawOrbit() uses, so the web view never disagrees with the
 // device. Two pages are curves: "track" (sub-points over the next ~2 orbits) and
 // "doppler" (Hz across the next pass) are emitted as short arrays.
+// Geocentric altitude (km) of the satellite: the live look gives a GEODETIC height
+// (above the oblate ellipsoid, so it reads up to ~21 km higher near the poles),
+// which can exceed the mean-element apogee shown on the orbital pages and confuse the
+// reader. Reconstruct the geocentric radius from the geodetic sub-point and subtract
+// the equatorial radius, matching the convention apogee/perigee use (a(1+-e)-RE_eq),
+// so the displayed altitude sits between perigee and apogee as expected. WGS72
+// ellipsoid (e2 = 6.694318e-3) to match the predictor that produced satAltKm.
+static double geocentricAltKm(double subLatDeg, double geodeticAltKm) {
+  const double RE = 6378.137, E2 = 6.694318e-3;
+  double phi = subLatDeg * 0.017453292519943295;   // deg -> rad
+  double s = sin(phi), c = cos(phi);
+  double N = RE / sqrt(1.0 - E2 * s * s);           // prime vertical radius of curvature
+  double x = (N + geodeticAltKm) * c;               // ECEF x (longitude irrelevant to |r|)
+  double z = (N * (1.0 - E2) + geodeticAltKm) * s;  // ECEF z
+  return sqrt(x * x + z * z) - RE;                  // geocentric radius - equatorial radius
+}
+
 void App::webdSendOrbitJson() {
   webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
                   "Connection:close\r\n\r\n"));
@@ -3048,7 +3065,8 @@ void App::webdSendOrbitJson() {
   auto fpDia = [&](double h){ return (h > 0) ? 2.0 * RE * acos(RE / (RE + h)) : 0.0; };
 
   LiveLook L = pred.look(now);
-  double altNow = L.satAltKm;
+  double geoAlt = L.satAltKm;                          // geodetic (for footprint)
+  double altNow = geocentricAltKm(L.subLat, L.satAltKm); // geocentric (vs apo/peri)
   double maNow = fmod(s->ma + 360.0 * mm * (now - s->epochUnix) / 86400.0, 360.0);
   if (maNow < 0) maNow += 360.0;
 
@@ -3081,7 +3099,7 @@ void App::webdSendOrbitJson() {
   String j = "{\"ok\":true,";
   j += "\"name\":\""; j += s->name; j += "\",\"norad\":"; j += s->norad; j += ",";
   // page 0: info
-  j += "\"alt\":"; j += num(altNow,0); j += ",\"footprint\":"; j += num(fpDia(altNow),0); j += ",";
+  j += "\"alt\":"; j += num(altNow,0); j += ",\"footprint\":"; j += num(fpDia(geoAlt),0); j += ",";
   j += "\"period\":"; j += num(periodMin,1); j += ",\"apo\":"; j += num(apo,0);
   j += ",\"peri\":"; j += num(peri,0); j += ",\"sma\":"; j += num(a,0); j += ",";
   j += "\"incl\":"; j += num(s->incl,2); j += ",\"ecc\":"; j += num(s->ecc,5);
@@ -3742,6 +3760,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_MESSAGES: keyMessages(c, enter, back); break;
     case SCR_LOG:      keyLog(c, enter, back); break;
     case SCR_LOTW:     keyLotw(c, enter, back); break;
+    case SCR_CLOUDLOG: keyCloudlog(c, enter, back); break;
     case SCR_HAMSAT:   keyHamsat(c, enter, back); break;
     case SCR_NOTES:    keyNotes(c, enter, back); break;
     case SCR_NOTEEDIT: keyNoteEdit(c, enter, back); break;
@@ -3956,7 +3975,7 @@ void App::keyMemos(char c, bool enter, bool back) {
     return;
   }
 
-  if (isBack(c, back)) { logMenuSel = 3; screen = SCR_LOG; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { logMenuSel = 5; screen = SCR_LOG; lastDrawMs = 0; return; }
 
   if (memoN > 0) {
     if (isUp(c))   memoSel = (memoSel + memoN - 1) % memoN;
@@ -5156,7 +5175,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73,74,75,76};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -5366,6 +5385,12 @@ void App::keySettings(char c, bool enter, bool back) {
                editBuf = cfg.lotwState; screen = SCR_EDIT; break;
       case 73: editTarget = 224; editTitle = "LoTW county ST,Name";
                editBuf = cfg.lotwCnty; screen = SCR_EDIT; break;
+      case 74: editTarget = 225; editTitle = "Cloudlog URL (https://...)";
+               editBuf = cfg.clUrl; screen = SCR_EDIT; break;
+      case 75: editTarget = 226; editTitle = "Cloudlog API key (read-write)";
+               editBuf = cfg.clKey; screen = SCR_EDIT; break;
+      case 76: editTarget = 227; editTitle = "Cloudlog station ID (number)";
+               editBuf = cfg.clStation; screen = SCR_EDIT; break;
       case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
@@ -5480,6 +5505,15 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.lotwState[sizeof(cfg.lotwState)-1] = 0; break;
       case 224: strncpy(cfg.lotwCnty, editBuf.c_str(), sizeof(cfg.lotwCnty)-1);
                 cfg.lotwCnty[sizeof(cfg.lotwCnty)-1] = 0; break;
+      case 225: { String u = editBuf; u.trim();
+                  // strip a trailing slash so we can append the API path cleanly
+                  while (u.length() && u.charAt(u.length()-1) == '/') u.remove(u.length()-1);
+                  strncpy(cfg.clUrl, u.c_str(), sizeof(cfg.clUrl)-1);
+                  cfg.clUrl[sizeof(cfg.clUrl)-1] = 0; } break;
+      case 226: strncpy(cfg.clKey, editBuf.c_str(), sizeof(cfg.clKey)-1);
+                cfg.clKey[sizeof(cfg.clKey)-1] = 0; break;
+      case 227: strncpy(cfg.clStation, editBuf.c_str(), sizeof(cfg.clStation)-1);
+                cfg.clStation[sizeof(cfg.clStation)-1] = 0; break;
       case 210: { double v = editBuf.toFloat(); if (v >= 0.1 && v <= 50000.0) cfg.beaconMHz = v;
                   cfg.save(); screen = SCR_ORBIT; orbitPage = 4; lastDrawMs = 0;
                   setStatus("Saved"); return; }
@@ -6228,32 +6262,49 @@ bool App::exportAdif() {
 void App::drawLog() {
   header("Log");
   canvas.setTextSize(1);
-  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF", "Voice Memos", "Sign & upload to LoTW", "Notes" };
-  for (int i = 0; i < 6; ++i) {
-    int y = 26 + i*14;
+  // Core logging functions first; the non-core Voice Memos / Notes tools at the bottom.
+  // Cloudlog sits next to LoTW as the two upload options (uploading to Cloudlog can feed
+  // LoTW, so they're alternatives). The list scrolls since it no longer fits at once.
+  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF",
+                          "Sign & upload to LoTW", "Upload to Cloudlog",
+                          "Voice Memos", "Notes" };
+  const int N = 7;
+  const int VIS = 6;                              // rows visible at once (leaves room
+                                                  // for the count line + footer)
+  int top = 0;
+  if (logMenuSel >= VIS) top = logMenuSel - VIS + 1;
+  if (top > N - VIS) top = N - VIS;
+  if (top < 0) top = 0;
+  for (int v = 0; v < VIS && top + v < N; ++v) {
+    int i = top + v;
+    int y = 22 + v*14;
     if (i == logMenuSel) { canvas.fillRect(0, y-2, 240, 13, CL_SELBG);
                            canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                   canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(6, y); canvas.print(items[i]);
   }
+  // Scroll hint arrows when there's content above/below the window.
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 26 + 6*14 + 4);
+  if (top > 0)            { canvas.setCursor(230, 22); canvas.print("^"); }
+  if (top + VIS < N)      { canvas.setCursor(230, 22 + (VIS-1)*14); canvas.print("v"); }
+  canvas.setCursor(6, 22 + VIS*14 + 2);
   canvas.printf("%d logged  (qso_log.csv)", qsoCount());
   footer("; / . move  ENT  ` back");
 }
 
 void App::keyLog(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
-  const int N = 6;
+  const int N = 7;
   if (isUp(c))   logMenuSel = (logMenuSel + N - 1) % N;
   if (isDown(c)) logMenuSel = (logMenuSel + 1) % N;
   if (enter) {
     if (logMenuSel == 0) beginQso();
     else if (logMenuSel == 1) { loadLog(); screen = SCR_LOGLIST; }
     else if (logMenuSel == 2) beginAdifExport();
-    else if (logMenuSel == 3) { buildMemoList(); memoSel = 0; memoScroll = 0; memoConfirmDel = false;
+    else if (logMenuSel == 3) { lotwEnter(); }
+    else if (logMenuSel == 4) { cloudlogEnter(); }
+    else if (logMenuSel == 5) { buildMemoList(); memoSel = 0; memoScroll = 0; memoConfirmDel = false;
            screen = SCR_MEMOS; lastDrawMs = 0; }
-    else if (logMenuSel == 4) { lotwEnter(); }
     else { notesEnter(); }
   }
 }
@@ -6263,7 +6314,7 @@ void App::keyLog(char c, bool enter, bool back) {
 // logs are all satellite QSOs; PROP_MODE=SAT is emitted for every record).
 void App::lotwEnter() {
   lotwBusy = false; lotwLastSent = 0; lotwStatus = "";
-  lotwPending = 0;
+  lotwPending = 0; lotwTotal = 0;
   if (Store::fs().exists(FILE_LOG)) {
     File f = Store::fs().open(FILE_LOG, "r");
     if (f) {
@@ -6271,7 +6322,10 @@ void App::lotwEnter() {
         String l = f.readStringUntil('\n'); l.trim();
         if (!l.length() || l.startsWith("utc,")) continue;
         PendingQso q;
-        if (parseQsoCsv(l, q) && !(q.uploaded & 1)) lotwPending++;
+        if (parseQsoCsv(l, q) && q.call[0]) {
+          lotwTotal++;
+          if (!(q.uploaded & 1)) lotwPending++;
+        }
       }
       f.close();
     }
@@ -6297,7 +6351,11 @@ void App::drawLotw() {
                 cfg.lotwCqz[0]  ? cfg.lotwCqz  : "-",
                 cfg.lotwItuz[0] ? cfg.lotwItuz : "-");
   canvas.setCursor(6, y); y += 14;
-  canvas.printf("Un-uploaded QSOs: %d", lotwPending);
+  int toSend = lotwResend ? lotwTotal : lotwPending;
+  if (lotwResend)
+    canvas.printf("Re-send ALL QSOs: %d", lotwTotal);
+  else
+    canvas.printf("Un-uploaded QSOs: %d", lotwPending);
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
   if (lotwStatus.length()) {
@@ -6309,14 +6367,23 @@ void App::drawLotw() {
 
   if (!haveCard)        footer("` back   (insert SD card)");
   else if (!haveCred)   footer("` back   (no LoTW key on SD)");
-  else if (lotwPending) footer("u sign & upload   ` back");
+  else if (toSend)      footer(lotwResend ? "u upload ALL  a un-uploaded only  ` back"
+                                          : "u sign & upload  a re-send all  ` back");
+  else if (lotwTotal)   footer("a re-send all   ` back");
   else                  footer("` back   (nothing to upload)");
 }
 
 void App::keyLotw(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
   if (lotwBusy) return;
-  if (c == 'u' && Store::ready() && Lotw::credentialPresent() && lotwPending > 0) {
+  // 'a' toggles re-send mode: include QSOs already marked uploaded. Useful when a
+  // previous upload didn't actually post (e.g. a format LoTW didn't accept) and the
+  // QSOs need to be sent again. Only meaningful if there are any QSOs at all.
+  if (c == 'a' && lotwTotal > 0) {
+    lotwResend = !lotwResend; lotwStatus = ""; lastDrawMs = 0; return;
+  }
+  int toSend = lotwResend ? lotwTotal : lotwPending;
+  if (c == 'u' && Store::ready() && Lotw::credentialPresent() && toSend > 0) {
     // Prompt for the key password (blank if the key is unencrypted).
     editTarget = 230; editTitle = "Key password (blank=none)";
     editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; return;
@@ -6329,9 +6396,10 @@ void App::doLotwUpload(const String& keyPass) {
   lotwBusy = true; lastDrawMs = 0;
   lotwStatus = "Collecting QSOs..."; draw();
 
-  // Gather un-uploaded QSOs into a heap array. Capped to keep the uncompressed
-  // .tq8 text (~600 B/QSO) within a safe heap budget on the no-PSRAM S3; any
-  // remainder is sent on the next upload (they stay un-flagged).
+  // Gather QSOs into a heap array. Normally only un-uploaded ones; in re-send mode
+  // (user opted in) include QSOs already marked uploaded too. Capped to keep the
+  // uncompressed .tq8 text (~600 B/QSO) within a safe heap budget on the no-PSRAM
+  // S3; any remainder is sent on the next upload (un-uploaded ones stay un-flagged).
   const int CAP = 50;
   PendingQso* batch = (PendingQso*)malloc(sizeof(PendingQso) * CAP);
   if (!batch) { lotwStatus = "Out of memory"; lotwBusy = false; return; }
@@ -6343,7 +6411,8 @@ void App::doLotwUpload(const String& keyPass) {
         String l = f.readStringUntil('\n'); l.trim();
         if (!l.length() || l.startsWith("utc,")) continue;
         PendingQso q;
-        if (parseQsoCsv(l, q) && !(q.uploaded & 1) && q.call[0]) batch[n++] = q;
+        if (parseQsoCsv(l, q) && q.call[0] && (lotwResend || !(q.uploaded & 1)))
+          batch[n++] = q;
       }
       f.close();
     }
@@ -6386,16 +6455,34 @@ void App::doLotwUpload(const String& keyPass) {
     lotwBusy = false; lastDrawMs = 0; return;
   }
 
-  // Parse LoTW's response. The web service reports the result in its body; look
-  // for an explicit accepted/rejected count, else treat HTTP 200 as accepted.
+  // Log the FULL server response to serial. "Accepted" at the HTTP layer does not
+  // guarantee the QSO is processed -- LoTW can accept the upload and then silently
+  // ignore a record whose station fields (STATE, SAT_NAME, DXCC, ...) don't match
+  // the certificate or its accepted-satellite list. The response body is where the
+  // real outcome (and any per-QSO complaint) is reported, so dump it verbatim to aid
+  // diagnosis of a QSO that uploads but never appears. Chunked so long bodies aren't
+  // truncated by the serial line buffer.
+  Serial.printf("[lotw] response (%u bytes):\n", (unsigned)resp.length());
+  for (size_t i = 0; i < resp.length(); i += 200) Serial.println(resp.substring(i, i + 200));
+  Serial.println("[lotw] --- end response ---");
+
+  // Parse LoTW's response for the per-upload status marker.
   int accepted = lotwParseAccepted(resp, n);
   if (accepted > 0) {
-    // Flag the n QSOs we actually put in the .tq8 -- whether LoTW counted them as
-    // newly accepted or as duplicates, they've reached LoTW and must not be re-sent.
-    int marked = markLogUploaded(n);
-    lotwLastSent = accepted;
-    lotwStatus = "Accepted " + String(accepted) + " (" + String(marked) + " flagged)";
-    lotwPending -= marked; if (lotwPending < 0) lotwPending = 0;
+    if (lotwResend) {
+      // Re-send mode: the QSOs were already flagged uploaded; nothing new to flag.
+      // Drop back to normal mode and report.
+      lotwLastSent = accepted;
+      lotwStatus = "Re-sent " + String(n) + ", accepted " + String(accepted);
+      lotwResend = false;
+    } else {
+      // Flag the n QSOs we actually put in the .tq8 -- whether LoTW counted them as
+      // newly accepted or as duplicates, they've reached LoTW and must not be re-sent.
+      int marked = markLogUploaded(n, 0x1);
+      lotwLastSent = accepted;
+      lotwStatus = "Accepted " + String(accepted) + " (" + String(marked) + " flagged)";
+      lotwPending -= marked; if (lotwPending < 0) lotwPending = 0;
+    }
   } else {
     lotwStatus = "Server rejected upload";
   }
@@ -6406,37 +6493,55 @@ void App::doLotwUpload(const String& keyPass) {
 // has varied; accept a few forms, and fall back to the batch size on a clear
 // success indication. Returns 0 if the response looks like a failure.
 int App::lotwParseAccepted(const String& resp, int batchN) {
-  String r = resp; r.toLowerCase();
-  if (r.indexOf("rejected") >= 0 && r.indexOf("0 out of") < 0 &&
-      r.indexOf("accepted") < 0)
-    return 0;
-  // "<n> qso(s) ... accepted" or "accepted <n>"
-  int idx = r.indexOf("accepted");
-  if (idx >= 0) {
-    // scan backwards/forwards for a number near "accepted"
-    int lo = idx > 12 ? idx - 12 : 0;
-    String win = r.substring(lo, idx + 12);
-    long val = -1; String num;
-    for (size_t i = 0; i < win.length(); ++i) {
-      char ch = win[i];
-      if (ch >= '0' && ch <= '9') num += ch;
-      else if (num.length()) { val = num.toInt(); num = ""; }
+  // LoTW reports the upload result inside an HTML COMMENT marker, the same one the
+  // real TQSL client looks for (tqsl 2.8.6, apps/tqsl_prefs.h):
+  //   status:  <!-- UPL_<status> -->   (regex <!-- .UPL.\s*([^-]+)\s*-->), success
+  //            when <status> contains "accepted"
+  //   message: <!-- UPLMESSAGE_<text> -->
+  // Matching the bare word "accepted" anywhere in the page is WRONG -- a login or
+  // landing page can contain it and yield a false success (this produced a phantom
+  // "Accepted: 1" on an upload that never posted). So key off the marker.
+  int m = resp.indexOf("<!-- UPL_");
+  if (m < 0) m = resp.indexOf("<!--UPL_");          // tolerate missing space
+  if (m >= 0) {
+    int end = resp.indexOf("-->", m);
+    String marker = (end > m) ? resp.substring(m, end) : resp.substring(m);
+    String lower = marker; lower.toLowerCase();
+    if (lower.indexOf("accepted") >= 0) {
+      // Pull a QSO count out of the message marker if present, else assume the batch.
+      int mm = resp.indexOf("<!-- UPLMESSAGE_");
+      if (mm < 0) mm = resp.indexOf("<!--UPLMESSAGE_");
+      if (mm >= 0) {
+        int me = resp.indexOf("-->", mm);
+        String msg = (me > mm) ? resp.substring(mm, me) : resp.substring(mm);
+        long val = -1; String num;
+        for (size_t i = 0; i < msg.length(); ++i) {
+          char ch = msg[i];
+          if (ch >= '0' && ch <= '9') num += ch;
+          else if (num.length()) { val = num.toInt(); break; }
+        }
+        if (num.length() && val < 0) val = num.toInt();
+        if (val > 0) return (int)min((long)batchN, val);
+      }
+      return batchN;   // accepted, no parseable count
     }
-    if (num.length()) val = num.toInt();
-    if (val > 0) return (int)min((long)batchN, val);
-    return batchN;  // accepted with no parseable count
+    return 0;          // marker present but not "accepted" -> rejected
   }
-  // Some success responses just say the file was received/queued.
-  if (r.indexOf("success") >= 0 || r.indexOf("received") >= 0 ||
-      r.indexOf("queued")  >= 0 || r.indexOf("good")     >= 0)
-    return batchN;
+  // No UPL marker at all -> not a real LoTW upload result (login/landing/error page,
+  // or a transport that didn't reach the processor). Treat as failure, and log a hint.
+  Serial.println("[lotw] no <!-- UPL_... --> status marker in response -> upload did "
+                 "NOT post (see serial dump above)");
   return 0;
 }
 
 // Mark up to 'limit' currently-un-uploaded QSOs as uploaded by rewriting the log
 // file (the same first-N, in file order, that doLotwUpload collected and sent).
 // Returns the number of records flagged.
-int App::markLogUploaded(int limit) {
+// Flag up to 'limit' QSOs that don't yet have 'bit' set in their uploaded mask, by
+// rewriting the log. bit 1 (mask 0x1) = uploaded to LoTW; bit 2 (mask 0x2) = uploaded
+// to Cloudlog. The two are tracked independently so a QSO sent to one service isn't
+// assumed sent to the other.
+int App::markLogUploaded(int limit, uint8_t bit) {
   if (!Store::fs().exists(FILE_LOG)) return 0;
   File in = Store::fs().open(FILE_LOG, "r");
   if (!in) return 0;
@@ -6451,7 +6556,7 @@ int App::markLogUploaded(int limit) {
     if (t.startsWith("utc,")) { out.println(t); continue; }
     PendingQso q;
     if (parseQsoCsv(t, q)) {
-      if (!(q.uploaded & 1) && flagged < limit) { q.uploaded = 1; flagged++; }
+      if (!(q.uploaded & bit) && flagged < limit) { q.uploaded |= bit; flagged++; }
       writeQsoCsv(out, q);
     }
   }
@@ -6459,6 +6564,220 @@ int App::markLogUploaded(int limit) {
   Store::fs().remove(FILE_LOG);
   Store::fs().rename(tmp.c_str(), FILE_LOG);
   return flagged;
+}
+
+// Minimal JSON string-escaper for building request bodies (quotes, backslash,
+// control chars, and the newlines that appear in an ADIF payload).
+static String jsonEscape(const String& in) {
+  String out; out.reserve(in.length() + 16);
+  for (size_t i = 0; i < in.length(); ++i) {
+    char c = in[i];
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if ((uint8_t)c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
+        else out += c;
+    }
+  }
+  return out;
+}
+
+// Extract a top-level JSON string/number value by key from a flat response, e.g.
+// {"status":"created","imported_count":3}. Returns the raw value (unquoted) or "".
+// Good enough for Cloudlog's simple, flat responses; not a general JSON parser.
+static String jsonField(const String& json, const char* key) {
+  String pat = String("\"") + key + "\"";
+  int k = json.indexOf(pat);
+  if (k < 0) return "";
+  int colon = json.indexOf(':', k + pat.length());
+  if (colon < 0) return "";
+  int i = colon + 1;
+  while (i < (int)json.length() && (json[i] == ' ' || json[i] == '\t')) i++;
+  if (i >= (int)json.length()) return "";
+  if (json[i] == '"') {                      // string value
+    int end = i + 1; String out;
+    while (end < (int)json.length() && json[end] != '"') {
+      if (json[end] == '\\' && end + 1 < (int)json.length()) { out += json[end+1]; end += 2; }
+      else { out += json[end]; end++; }
+    }
+    return out;
+  }
+  int end = i;                                // number/bareword value
+  while (end < (int)json.length() && json[end] != ',' && json[end] != '}' &&
+         json[end] != ' ' && json[end] != '\n' && json[end] != '\r') end++;
+  return json.substring(i, end);
+}
+
+// ===========================================================================
+//  Cloudlog / Wavelog upload (self-hosted online logbook)
+//  Uploads QSOs to a user's Cloudlog instance via its JSON QSO API. Because a
+//  Cloudlog instance can itself forward QSOs to LoTW/eQSL, this is an alternative
+//  to the on-device LoTW upload rather than something to do in addition. Tracked
+//  independently of LoTW via bit 0x2 of each QSO's "uploaded" mask.
+//  API contract (see docs/design/CLOUDLOG_UPLOAD_SCOPING.md, from the Cloudlog
+//  source): POST {url}/index.php/api/qso  with JSON
+//    {"key","station_profile_id","type":"adif","string":"<one ADIF record><EOR>"}
+//  Success = HTTP 201 with {"status":"created","imported_count":N,...}.
+// ===========================================================================
+
+// Count QSOs not yet sent to Cloudlog (bit 0x2 unset) and the total, then open the
+// Cloudlog screen.
+void App::cloudlogEnter() {
+  clBusy = false; clStatus = "";
+  clPending = 0; clTotal = 0;
+  if (Store::fs().exists(FILE_LOG)) {
+    File f = Store::fs().open(FILE_LOG, "r");
+    if (f) {
+      while (f.available()) {
+        String l = f.readStringUntil('\n'); l.trim();
+        if (!l.length() || l.startsWith("utc,")) continue;
+        PendingQso q;
+        if (parseQsoCsv(l, q) && q.call[0]) {
+          clTotal++;
+          if (!(q.uploaded & 0x2)) clPending++;
+        }
+      }
+      f.close();
+    }
+  }
+  screen = SCR_CLOUDLOG; lastDrawMs = 0;
+}
+
+void App::drawCloudlog() {
+  header("Cloudlog upload");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  int y = 20;
+  bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
+
+  canvas.setCursor(6, y); y += 12;
+  canvas.printf("Server: %s", cfg.clUrl[0] ? cfg.clUrl : "(set in Settings)");
+  canvas.setCursor(6, y); y += 12;
+  canvas.printf("API key: %s   Station: %s",
+                cfg.clKey[0] ? "set" : "NO",
+                cfg.clStation[0] ? cfg.clStation : "-");
+  canvas.setCursor(6, y); y += 14;
+  int toSend = clResend ? clTotal : clPending;
+  if (clResend) canvas.printf("Re-send ALL QSOs: %d", clTotal);
+  else          canvas.printf("Not yet sent: %d", clPending);
+
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (clStatus.length()) {
+    canvas.setCursor(6, y); y += 12;
+    String s = clStatus; if (s.length() > 38) s = s.substring(0, 38);
+    canvas.print(s);
+  }
+
+  if (!cfg.ssid[0])      footer("` back   (set WiFi first)");
+  else if (!haveCfg)     footer("` back   (set Cloudlog in Settings)");
+  else if (toSend)       footer(clResend ? "u upload ALL  a not-sent only  ` back"
+                                         : "u upload  a re-send all  ` back");
+  else if (clTotal)      footer("a re-send all   ` back");
+  else                   footer("` back   (nothing to upload)");
+}
+
+void App::keyCloudlog(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
+  if (clBusy) return;
+  if (c == 'a' && clTotal > 0) { clResend = !clResend; clStatus = ""; lastDrawMs = 0; return; }
+  int toSend = clResend ? clTotal : clPending;
+  bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
+  if (c == 'u' && haveCfg && toSend > 0) { doCloudlogUpload(); }
+}
+
+// Build an ADIF batch from the pending (or all, in re-send mode) QSOs, POST it to the
+// Cloudlog instance as JSON, and on success flag those QSOs (bit 0x2).
+void App::doCloudlogUpload() {
+  clBusy = true; lastDrawMs = 0;
+  if (!net.connected()) {
+    clStatus = "Connecting WiFi..."; draw();
+    if (!connectWifiCfg()) { clStatus = "WiFi failed"; clBusy = false; lastDrawMs = 0; return; }
+  }
+  clStatus = "Collecting QSOs..."; draw();
+
+  // Build the ADIF string for up to CAP QSOs. Each record carries STATION_CALLSIGN so
+  // Cloudlog can match it to the chosen station profile (it rejects a mismatch).
+  const int CAP = 50;
+  String adif; adif.reserve(8192);
+  int n = 0;
+  if (Store::fs().exists(FILE_LOG)) {
+    File f = Store::fs().open(FILE_LOG, "r");
+    if (f) {
+      while (f.available() && n < CAP) {
+        String l = f.readStringUntil('\n'); l.trim();
+        if (!l.length() || l.startsWith("utc,")) continue;
+        PendingQso q;
+        if (!parseQsoCsv(l, q) || !q.call[0]) continue;
+        if (!(clResend || !(q.uploaded & 0x2))) continue;
+        time_t tt = (time_t)q.utc; struct tm* g = gmtime(&tt);
+        char d[9] = "", tm6[7] = "";
+        if (g) { strftime(d, sizeof(d), "%Y%m%d", g); strftime(tm6, sizeof(tm6), "%H%M%S", g); }
+        double dlM = q.dlHz / 1e6, ulM = q.ulHz / 1e6;
+        String rec;
+        adifField(rec, "CALL", q.call);
+        if (q.utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
+        adifField(rec, "MODE", q.mode);
+        char satnm[7]; lotwSatResolve(q.sat, satnm);
+        adifField(rec, "SAT_NAME", satnm);
+        adifField(rec, "PROP_MODE", "SAT");
+        if (ulM > 0) { adifField(rec, "FREQ", String(ulM, 4)); adifField(rec, "BAND", bandFor(ulM)); }
+        if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
+        adifField(rec, "RST_SENT", q.rstS);
+        adifField(rec, "RST_RCVD", q.rstR);
+        adifField(rec, "GRIDSQUARE", q.grid);
+        adifField(rec, "MY_GRIDSQUARE", q.myGrid);
+        adifField(rec, "STATION_CALLSIGN", q.myCall[0] ? q.myCall : cfg.myCall);
+        rec += "<EOR>\n";
+        adif += rec;
+        n++;
+      }
+      f.close();
+    }
+  }
+  if (n == 0) { clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; return; }
+
+  // JSON-encode the request. The ADIF string needs JSON-escaping (it contains '<','>',
+  // and newlines). Keys/URL come from settings.
+  clStatus = "Uploading " + String(n) + " QSO(s)..."; draw();
+  String url = String(cfg.clUrl) + "/index.php/api/qso";
+  String body = "{\"key\":\"" + jsonEscape(cfg.clKey) +
+                "\",\"station_profile_id\":\"" + jsonEscape(cfg.clStation) +
+                "\",\"type\":\"adif\",\"string\":\"" + jsonEscape(adif) + "\"}";
+
+  String resp;
+  bool ok = net.httpsPostJson(url, body, resp);   // redactBody=true: key stays out of serial
+  // Log the response (no secrets in it) to aid debugging.
+  Serial.printf("[cloudlog] response (%u bytes): %s\n",
+                (unsigned)resp.length(), resp.c_str());
+
+  if (!ok) {
+    // Surface the server's reason if present (e.g. wrong key rights / station id).
+    String reason = jsonField(resp, "reason");
+    clStatus = reason.length() ? ("Failed: " + reason)
+                               : ("Upload failed: " + net.lastErr);
+    clBusy = false; lastDrawMs = 0; return;
+  }
+
+  // Success: Cloudlog returns {"status":"created","imported_count":N,...}.
+  int imported = jsonField(resp, "imported_count").toInt();
+  if (jsonField(resp, "status") == "created") {
+    if (!clResend) {
+      int marked = markLogUploaded(n, 0x2);
+      clPending -= marked; if (clPending < 0) clPending = 0;
+      clStatus = "Uploaded " + String(n) + ", imported " + String(imported);
+    } else {
+      clStatus = "Re-sent " + String(n) + ", imported " + String(imported);
+      clResend = false;
+    }
+  } else {
+    String reason = jsonField(resp, "reason");
+    clStatus = reason.length() ? ("Rejected: " + reason) : "Server rejected upload";
+  }
+  clBusy = false; lastDrawMs = 0;
 }
 
 void App::drawLogEntry() {
@@ -6696,6 +7015,7 @@ void App::draw() {
     case SCR_MESSAGES: drawMessages(); break;
     case SCR_LOG:      drawLog(); break;
     case SCR_LOTW:     drawLotw(); break;
+    case SCR_CLOUDLOG: drawCloudlog(); break;
     case SCR_HAMSAT:   drawHamsat(); break;
     case SCR_NOTES:    drawNotes(); break;
     case SCR_NOTEEDIT: drawNoteEdit(); break;
@@ -8011,10 +8331,18 @@ void App::drawOrbit() {
   };
 
   if (orbitPage == 0) {                              // ---------- Satellite info ----------
-    double altNow = 0;
-    if (now) { pred.setSat(*s); altNow = pred.look(now).satAltKm; }
+    double geoAlt = 0;          // geodetic height above the ellipsoid (for footprint)
+    double altNow = 0;          // geocentric altitude (for the readout, vs apo/peri)
+    if (now) {
+      pred.setSat(*s);
+      LiveLook lk = pred.look(now);
+      geoAlt = lk.satAltKm;
+      altNow = geocentricAltKm(lk.subLat, lk.satAltKm);
+    }
     // Footprint circle diameter (km) = 2*Re*acos(Re/(Re+h)). This is the widest
-    // surface span both able to see the bird at once -> longest possible QSO.
+    // surface span both able to see the bird at once -> longest possible QSO. Uses
+    // the geodetic height (true height above ground), which is what governs who can
+    // actually see the satellite.
     auto fpDia = [&](double h) -> double {
       return (h > 0) ? 2.0 * RE * acos(RE / (RE + h)) : 0.0;
     };
@@ -8023,7 +8351,7 @@ void App::drawOrbit() {
                   (now ? (long)floor((now - s->epochUnix) / (periodMin * 60.0)) : 0);
     row("NORAD",        String(s->norad));
     row("Altitude",     String(altNow, 0) + " km");
-    row("Footprint",    String(fpDia(altNow), 0) + " km dia");
+    row("Footprint",    String(fpDia(geoAlt), 0) + " km dia");
     row("Period",       String(periodMin, 1) + " min");
     row("Apo/Peri",     String(apo, 0) + "/" + String(peri, 0) + " km");
     row("Fp apo/peri",  String(fpDia(apo), 0) + "/" + String(fpDia(peri), 0) + " km");
@@ -12407,6 +12735,9 @@ void App::drawSettings() {
   rows[71] = String("LoTW ITU zone: ") + (cfg.lotwItuz[0] ? cfg.lotwItuz : "(not set)");
   rows[72] = String("LoTW state (US): ") + (cfg.lotwState[0] ? cfg.lotwState : "(not set)");
   rows[73] = String("LoTW county (US): ") + (cfg.lotwCnty[0] ? cfg.lotwCnty : "(not set)");
+  rows[74] = String("Cloudlog URL: ") + (cfg.clUrl[0] ? cfg.clUrl : "(not set)");
+  rows[75] = String("Cloudlog key: ") + String(strlen(cfg.clKey) ? "******" : "(none)");
+  rows[76] = String("Cloudlog station ID: ") + (cfg.clStation[0] ? cfg.clStation : "(not set)");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

@@ -38,6 +38,9 @@ bool Settings::load() {
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
   strncpy(qrzUser, d["qrzuser"] | "", sizeof(qrzUser)-1); qrzUser[sizeof(qrzUser)-1]=0;
   strncpy(qrzPass, d["qrzpass"] | "", sizeof(qrzPass)-1); qrzPass[sizeof(qrzPass)-1]=0;
+  strncpy(clUrl,  d["clurl"]  | "", sizeof(clUrl)-1);  clUrl[sizeof(clUrl)-1]=0;
+  strncpy(clKey,  d["clkey"]  | "", sizeof(clKey)-1);  clKey[sizeof(clKey)-1]=0;
+  strncpy(clStation, d["clstation"] | "", sizeof(clStation)-1); clStation[sizeof(clStation)-1]=0;
   strncpy(lotwDxcc, d["lotwdxcc"] | "", sizeof(lotwDxcc)-1); lotwDxcc[sizeof(lotwDxcc)-1]=0;
   strncpy(lotwCqz,  d["lotwcqz"]  | "", sizeof(lotwCqz)-1);  lotwCqz[sizeof(lotwCqz)-1]=0;
   strncpy(lotwItuz, d["lotwituz"] | "", sizeof(lotwItuz)-1); lotwItuz[sizeof(lotwItuz)-1]=0;
@@ -161,6 +164,7 @@ bool Settings::save() {
   d["gpurl"] = gpUrl;
   d["mycall"] = myCall;
   d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
+  d["clurl"] = clUrl; d["clkey"] = clKey; d["clstation"] = clStation;
   d["lotwdxcc"] = lotwDxcc; d["lotwcqz"] = lotwCqz; d["lotwituz"] = lotwItuz;
   d["lotwstate"] = lotwState; d["lotwcnty"] = lotwCnty;
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;

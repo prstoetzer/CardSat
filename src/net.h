@@ -52,6 +52,14 @@ public:
                           const char* contentType, String& response,
                           size_t maxResp = 8192);
 
+  // POST a JSON (or other text) body to 'url' and capture the server's response.
+  // Accepts http:// or https:// (self-hosted Cloudlog/Wavelog instances may be on a
+  // LAN over plain HTTP). 'redactBody' (default true) keeps secrets out of the serial
+  // log; pass the request body in 'body'. Returns true on a 2xx HTTP status.
+  bool httpsPostJson(const String& url, const String& body, String& response,
+                     const char* contentType = "application/json",
+                     size_t maxResp = 8192, bool redactBody = true);
+
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
   String lastErr  = "";    // short human-readable reason

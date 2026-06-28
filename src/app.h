@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -825,11 +825,22 @@ private:
   void doLotwUpload(const String& keyPass);  // build .tq8 + POST + mark uploaded
   void lotwEnter();                          // count pending QSOs + open screen
   int  lotwParseAccepted(const String& resp, int batchN);  // read accepted count
-  int  markLogUploaded(int limit);           // flag up to 'limit' un-uploaded QSOs as sent
+  int  markLogUploaded(int limit, uint8_t bit = 0x1);  // flag up to 'limit' QSOs sent (bit: 0x1=LoTW, 0x2=Cloudlog)
   int    lotwPending = 0;          // un-uploaded sat QSOs counted on entry
+  int    lotwTotal = 0;            // total sat QSOs in the log (for re-send mode)
   int    lotwLastSent = 0;         // signed/accepted from the last attempt
   String lotwStatus;               // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
+  bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
+  // ---- Cloudlog/Wavelog upload screen (SCR_CLOUDLOG) ----
+  void drawCloudlog();   void keyCloudlog(char c, bool enter, bool back);
+  void cloudlogEnter();                     // count pending QSOs + open screen
+  void doCloudlogUpload();                  // build ADIF + JSON POST + mark uploaded
+  int  clPending = 0;              // QSOs not yet sent to Cloudlog (bit 0x2 unset)
+  int  clTotal = 0;                // total sat QSOs in the log (for re-send mode)
+  String clStatus;                 // last result/error line shown on the screen
+  bool clBusy = false;             // an upload is in progress (suppress re-entry)
+  bool clResend = false;           // include QSOs already sent to Cloudlog (opt-in)
   // ---- Upcoming activations feed (SCR_HAMSAT, from hams.at) ----
   struct Activation {
     char date[11];     // YYYY-MM-DD

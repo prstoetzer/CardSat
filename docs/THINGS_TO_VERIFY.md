@@ -52,6 +52,122 @@ Sun-Moon-transit / per-satellite-note features, and the offline GP/transponder c
 - **TLS** uses `WiFiClientSecure::setInsecure()` (no cert validation) — fine for public
   GP data; pin a CA root if you care.
 
+## Implemented in 0.9.36
+
+- **DONE — LoTW `.tq8` rewritten to LOTW V2.0; transport confirmed no-auth; re-send
+  toggle added.** Summary of what shipped:
+  - `signData()` now emits the V2.0 normalized string (station VALUES + contact VALUES,
+    no adif tags, sigspec order, UPPERCASED, worked CALL included, station CALL/DXCC
+    excluded). Host-verified the exact byte string matches tqsl 2.8.6 and that it
+    signs+verifies with `openssl dgst -sha1 -verify`.
+  - Records carry `CERT_UID`/`STATION_UID` linkage; signature field is now
+    `<SIGN_LOTW_V2.0:LEN:6>`.
+  - Response parser keys off the real `<!-- UPL_<status> -->` marker (tqsl 2.8.6
+    apps/tqsl_prefs.h), not the bare word "accepted".
+  - Upload transport verified against tqsl 2.8.6 apps/tqsl.cpp: endpoint
+    `https://lotw.arrl.org/lotw/upload`, multipart field `upfile`, **no login/cookie/auth**
+    (the .tq8 self-authenticates). CardSat already matched this.
+  - New opt-in **re-send** toggle (`a` on the LoTW screen) re-uploads QSOs already marked
+    uploaded -- needed because pre-0.9.36 QSOs were flagged uploaded but never posted.
+  - Full format spec: `docs/design/LOTW_TQ8_FORMAT.md`.
+  - **NOT YET CONFIRMED ON A REAL LoTW ACCOUNT.** Host crypto passes and the format
+    matches tqsl byte-for-byte in the worked example, but no QSO has actually been
+    confirmed to post yet. Real-world test pending: flash 0.9.36, use the re-send toggle
+    to re-upload the FO-29 QSO, confirm it appears in LoTW activity; ideally byte-diff a
+    CardSat file vs a desktop-TQSL file for the same QSO.
+
+## Reference: how the root cause was found (kept for context)
+
+- **ROOT CAUSE CONFIRMED + FULL FIX SPEC (reverse-engineered from tqsl-2.8.6 source).**
+  The user's `.tq8` uploaded via the LoTW website was accepted/queued but the QSO never
+  posted. Direct inspection proved the file is cryptographically self-consistent (sig
+  verifies against the cert with `openssl dgst -sha1`), cert valid 2026-2029, all fields
+  well-formed, date in range. **The problem: CardSat builds the SIGNED DATA completely
+  differently from real TQSL, so LoTW re-derives a different hash and silently drops the
+  QSO.** CardSat implements ARRL's *developer-tq8* doc, but that doc is STALE (documents
+  only `SIGN_LOTW_1.0` and is wrong about what's signed). The authoritative definition is
+  tqsllib's `make_sign_data()` + `tqsl_getGABBItCONTACTData()` in `src/location.cpp` and
+  the `<sigspecs>` in `src/config.xml` (downloaded from SourceForge, tqsl-2.8.6).
+
+  **The correct LOTW V2.0 signed-data algorithm (what LoTW actually verifies):**
+  1. Build a single string = concatenation of STATION field VALUES then CONTACT field
+     VALUES — **values only, NO `<adif:tags>`**.
+  2. **tSTATION** fields, in this exact `config.xml` sigspec order, non-empty only:
+     `AU_STATE, CA_PROVINCE, CA_US_PARK, CN_PROVINCE, CQZ(as int), DX_US_PARK, FI_KUNTA,
+     GRIDSQUARE, IOTA, ITUZ(as int), JA_CITY_GUN_KU, JA_PREFECTURE, RU_OBLAST, US_COUNTY,
+     US_PARK, US_STATE`. For a US station that's effectively: CQZ, GRIDSQUARE, ITUZ,
+     US_COUNTY (value `ST,County`), US_STATE. **NOTE: CALL and DXCC are NOT signed.**
+  3. **tCONTACT** fields appended, in this exact order (alphabetical, per sigspec /
+     `tCONTACT_sign` loop): `BAND, BAND_RX, CALL, FREQ, FREQ_RX, MODE, PROP_MODE,
+     QSO_DATE, QSO_TIME, SAT_NAME`. **The worked station's CALL IS included here** (CardSat
+     currently omits it from signdata). Required: BAND, CALL, MODE, QSO_DATE, QSO_TIME.
+  4. **UPPERCASE the entire concatenated string** (`string_toupper`) — CardSat keeps mixed
+     case. e.g. `145.9500`->unchanged, `FO-29`->`FO-29`, `fm18lu`->`FM18LU`.
+  5. SHA-1 hash that, RSA-sign (PKCS#1 v1.5) -> base64. (CardSat's sign primitive is fine;
+     only the INPUT bytes are wrong.)
+  Worked example (N8HM, this QSO): signed string =
+  `5FM18LU8VA,ARLINGTONVA2M70CMN9EAT/VE3145.9500435.8500SSBSAT20260628011800FO-29`
+
+  **File STRUCTURE changes (also required):**
+  - tCERT: add `<CERT_UID:n>1` after the Rec_Type (before CERTIFICATE).
+  - tSTATION: add `<STATION_UID:n>1` and `<CERT_UID:n>1`.
+  - tCONTACT: add `<STATION_UID:n>1` right after `<Rec_Type:8>tCONTACT`.
+  - The signature field tag is `<SIGN_LOTW_V2.0:N:6>base64sig` where N = base64 length
+    and `6` is the ADIF "type 6" annotation (verified: `tqsl_adifMakeField` emits
+    `<name:len:type>value`, so type '6' -> trailing `:6`). NOT CardSat's
+    `<SIGN_LOTW_1.0:N>`. The sigspec name string is built as `SIGN_` + name + `_V` +
+    version = `SIGN_LOTW_V2.0`. (The wavelog reference file's `<SIGN_LOTW_V2.0:1:6>` had
+    a 1-char placeholder value; real value is the ~172-char base64 sig.)
+  - The SIGNDATA field stored in the file is the SAME uppercased station+contact value
+    string from step 1-4 (not CardSat's tagged contact-only blob).
+  - tSTATION record itself still lists the human fields (CALL, DXCC, GRIDSQUARE, US_STATE
+    as `STATE`, US_COUNTY as `CNTY`, CQZ, ITUZ) as it does now — those are separate from
+    the signed string.
+
+  **Implementation plan:**
+  1. Rewrite `signData()` in `src/lotw.cpp` to emit the station+contact UPPERCASED
+     values-only string in the orders above (this is the load-bearing change).
+  2. Add CERT_UID/STATION_UID to the three records; change the sig tag to
+     `SIGN_LOTW_V2.0` with the `:6:` type annotation.
+  3. Include the worked CALL in the signed data; drop the adif tags from signdata.
+  4. Verify against tqsl: ideally sign the same one-QSO ADIF with desktop TQSL 2.7.2+ and
+     byte-compare; at minimum confirm a CardSat file's stored SIGNDATA matches the
+     step-1-4 reconstruction and the signature verifies, THEN test-upload ONE QSO and
+     confirm it posts before shipping.
+  5. Update the stale references in code comments/docs that cite the developer-tq8 page.
+
+  Source refs in /tmp (this session): tqsl-2.8.6/src/location.cpp lines ~752 (make_sign_data),
+  ~3760 (tqsl_getGABBItCONTACTData), config.xml <sigspecs>. The string_toupper at
+  location.cpp:3827 is the easy-to-miss key step.
+
+- **`.tq8` vs `.tq7` (DEMOTED — do NOT switch yet).** Earlier theory: our stored
+    (uncompressed) gzip should use `.tq7` (the documented uncompressed extension) rather
+    than `.tq8` (documented as compressed). Re-examined and the evidence now argues
+    *against* switching: our `.tq8` got "Accepted: 1", and a genuine format/compression
+    rejection produces an upload error (`400 Bad Request` / "bad file format"), not an
+    acceptance — so the file was NOT rejected for being uncompressed. There is also
+    *conflicting information* on whether LoTW still accepts `.tq7` at all, so switching
+    risks trading a file that demonstrably uploaded for one that may not. Keep `.tq8`.
+    Only revisit if the serial response specifically shows a compression/format error.
+    (A stored gzip is a valid gzip stream — gunzip-verified — and "stored" is a legal
+    DEFLATE method, so `.tq8` is defensible.)
+
+## Investigated and intentionally left as-is — do NOT "fix"
+
+- **Two `SAT_NAME` occurrences in a `.tq8` tCONTACT record are correct.** A grep of a
+  signed `.tq8` shows `<SAT_NAME:n>` twice in one QSO record, which looks like a
+  duplicate field but is not. One is the QSO's own ADIF field at the record level; the
+  other is *inside* the `<SIGNDATA:n>` value, where `n` is the byte length of the whole
+  normalized-and-signed blob. A length-tag-driven ADIF parser (LoTW's) consumes exactly
+  `n` bytes of SIGNDATA as one opaque value, so at the record level there is exactly one
+  `SAT_NAME`. The copy inside SIGNDATA is load-bearing: SIGNDATA is the normalized field
+  sequence that gets SHA-1-hashed and signed, and SAT_NAME is field 9 of that sequence
+  (per the ARRL developer-tq8 sigspec) — removing it would break signature verification.
+  This is exactly how TQSL builds the file, and LoTW's "Accepted: 1" confirms the
+  signature verified. Verified by reparsing a generated record host-side (one record-level
+  `SAT_NAME`). Leave both emitters in `src/lotw.cpp` (`signData()` and `contactRec()`) as
+  they are.
+
 ## Source file map
 
 ```

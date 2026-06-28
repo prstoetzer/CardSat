@@ -15,6 +15,41 @@
 // TLS-session hook (see net.h). Null by default; the app installs it at startup.
 void (*Net::onTlsBusy)(bool) = nullptr;
 
+// Redact secrets from a URL before logging it. QRZ (and any future credentialed
+// endpoint) carry username/password/session keys in the query string; logging the
+// raw URL to serial would leak them. This masks the VALUE of any sensitive parameter
+// (password, passwd, pwd, username, user, s, key, apikey, api_key, token) while
+// keeping the rest of the URL useful for debugging. Parameters may be separated by
+// '&' or ';' (QRZ uses ';'). Case-insensitive on the parameter name.
+static String redactUrl(const String& url) {
+  static const char* kSecret[] = { "password", "passwd", "pwd", "username", "user",
+                                   "s", "key", "apikey", "api_key", "token" };
+  int q = url.indexOf('?');
+  if (q < 0) return url;                          // no query string, nothing to mask
+  String out = url.substring(0, q + 1);
+  String qs = url.substring(q + 1);
+  int i = 0, len = qs.length();
+  while (i < len) {
+    int sep = len;
+    for (int j = i; j < len; ++j) { char ch = qs[j]; if (ch == '&' || ch == ';') { sep = j; break; } }
+    String pair = qs.substring(i, sep);
+    int eq = pair.indexOf('=');
+    if (eq > 0) {
+      String name = pair.substring(0, eq);
+      String lname = name; lname.toLowerCase();
+      bool secret = false;
+      for (size_t k = 0; k < sizeof(kSecret) / sizeof(kSecret[0]); ++k)
+        if (lname == kSecret[k]) { secret = true; break; }
+      out += secret ? (name + "=***") : pair;
+    } else {
+      out += pair;
+    }
+    if (sep < len) out += qs[sep];                // preserve the original separator
+    i = sep + 1;
+  }
+  return out;
+}
+
 // Socket-failure recovery tunables (see net.h).
 int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before reset
 int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
@@ -130,7 +165,7 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
-  Serial.printf("[net] GET %s\n", url.c_str());
+  Serial.printf("[net] GET %s\n", redactUrl(url).c_str());
   Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
                 (unsigned)ESP.getFreeHeap(),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
@@ -225,7 +260,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
-  Serial.printf("[net] GET %s -> %s\n", url.c_str(), path);
+  Serial.printf("[net] GET %s -> %s\n", redactUrl(url).c_str(), path);
   Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
                 (unsigned)ESP.getFreeHeap(),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
@@ -415,7 +450,7 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   memcpy(body + head.length() + flen, tail.c_str(), tail.length());
 
   Serial.printf("[net] POST %s (%u-byte body) -> %s\n",
-                fileName, (unsigned)bodyLen, url.c_str());
+                fileName, (unsigned)bodyLen, redactUrl(url).c_str());
 
   WiFiClientSecure client;
   struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
@@ -440,6 +475,60 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
     lastErr = (code > 0) ? ("HTTP " + String(code))
                          : HTTPClient::errorToString(code);
     Serial.printf("[net] POST failed: code=%d (%s)\n", code, lastErr.c_str());
+    http.end();
+    return false;
+  }
+
+  response = http.getString();
+  if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
+  http.end();
+  return true;
+}
+
+// POST a text/JSON body. Used for Cloudlog/Wavelog (self-hosted) uploads, which take a
+// JSON document and may live on a LAN over plain HTTP, so both http:// and https://
+// are accepted. The request body can carry an API key, so it is never logged verbatim
+// unless redactBody is false; we log only its length plus the redacted URL.
+bool Net::httpsPostJson(const String& url, const String& body, String& response,
+                        const char* contentType, size_t maxResp, bool redactBody) {
+  lastCode = 0; lastErr = ""; response = "";
+  if (!connected()) { lastErr = "no WiFi"; return false; }
+  TlsBusyGuard _tls;
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
+
+  Serial.printf("[net] POST(json) %u-byte body -> %s\n",
+                (unsigned)body.length(), redactUrl(url).c_str());
+  if (!redactBody) Serial.printf("[net] body: %s\n", body.c_str());
+
+  const bool isHttps = url.startsWith("https:");
+  WiFiClientSecure tls;
+  WiFiClient plain;
+  struct StopAll { WiFiClientSecure& t; WiFiClient& p; bool s;
+                   ~StopAll() { if (s) t.stop(); else p.stop(); } } _stop{tls, plain, isHttps};
+  if (isHttps) { tls.setInsecure(); tls.setTimeout(20000); }
+
+  HTTPClient http;
+  http.setUserAgent("CardSat-Cardputer/1.0");
+  http.setConnectTimeout(20000);
+  http.setTimeout(20000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.useHTTP10(true);
+
+  bool began = isHttps ? http.begin(tls, url) : http.begin(plain, url);
+  if (!began) { lastErr = "begin failed"; return false; }
+  http.addHeader("Content-Type", contentType);
+
+  int code = http.POST((uint8_t*)body.c_str(), body.length());
+  lastCode = code;
+  noteConnResult(code);
+  // Accept any 2xx (Cloudlog returns 201 Created on success).
+  if (code < 200 || code >= 300) {
+    lastErr = (code > 0) ? ("HTTP " + String(code))
+                         : HTTPClient::errorToString(code);
+    Serial.printf("[net] POST(json) failed: code=%d (%s)\n", code, lastErr.c_str());
+    // Capture the error body too -- callers surface the server's reason string.
+    response = http.getString();
+    if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
     http.end();
     return false;
   }

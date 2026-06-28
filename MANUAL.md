@@ -503,9 +503,15 @@ each; `notes` is the last column, so commas there are fine).
 The **Log** item on the main menu offers **New QSO entry**, **View / edit log**,
 **Export to ADIF** (writes `/CardSat/qso_log.adi`, including `STATION_CALLSIGN`
 from My callsign, for upload to LoTW/eQSL or import into your main logger),
-**Voice Memos** (the on-device voice-memo browser described above),
 **Sign & upload to LoTW** (see [LoTW upload](#logbook-of-the-world-lotw-direct-upload) below),
+**Upload to Cloudlog** (see [Cloudlog upload](#cloudlog--wavelog-upload) below),
+**Voice Memos** (the on-device voice-memo browser described above),
 and **Notes** (a free-form text editor, see [Notes](#notes-free-form-text-editor) below).
+The two upload options sit together: uploading to Cloudlog can itself forward your QSOs
+to LoTW (if your Cloudlog instance is configured for that), so for most operators they're
+alternatives rather than things to do separately. The core logging functions are listed
+first and the menu scrolls; the non-core **Voice Memos** and **Notes** tools are grouped
+together at the bottom.
 
 LoTW limits the `SAT_NAME` field to six characters and uses its own names, so on
 export CardSat translates each satellite via **`/CardSat/lotw_sats.csv`** (rows of
@@ -578,6 +584,36 @@ and frequencies** — then `s` to save, or press `x` twice to delete it; changes
 written straight back to the CSV. The most recent **60**
 QSOs are available on the device — the complete log always lives in
 `/CardSat/qso_log.csv`, which you can also read or edit on a computer.
+
+### Cloudlog / Wavelog upload
+
+CardSat can upload your satellite QSOs to a self-hosted **Cloudlog** (or the compatible
+**Wavelog**) online logbook over WiFi. Because a Cloudlog instance can itself be set up to
+forward QSOs on to LoTW, eQSL, and others, for most operators this is an **alternative** to
+the on-device LoTW upload, not something to do in addition. CardSat tracks the two
+independently, so a QSO uploaded to Cloudlog is not marked as sent to LoTW, and vice-versa.
+
+**Setup** (all under *Settings → Station / display*):
+
+- **Cloudlog URL** — the base address of your Cloudlog instance, e.g.
+  `https://log.example.com`. Both `https://` and `http://` (for a LAN instance) are
+  accepted. A trailing slash is trimmed automatically; CardSat appends the API path for
+  you.
+- **Cloudlog API key** — generate a **read-write** key in your Cloudlog account's API page
+  and enter it here. (A read-only key is rejected for uploads.)
+- **Cloudlog station ID** — the numeric *station profile id* the QSOs should be filed
+  under, shown in your Cloudlog station-profile settings. Cloudlog verifies that this
+  profile belongs to your key and that its callsign matches each QSO's station callsign, so
+  make sure your **My callsign** setting matches the profile.
+
+**Uploading:** open **Log → Upload to Cloudlog**. The screen shows your server, whether the
+key and station ID are set, and the count of QSOs not yet sent to Cloudlog. Press `u` to
+upload (CardSat connects to WiFi if needed). To re-send contacts that are already marked
+uploaded — for instance after fixing a setting — press `a` to toggle re-send mode, then
+`u`. On success the screen reports how many QSOs Cloudlog imported; on failure it shows the
+server's reason (a wrong key, insufficient key rights, or a station-ID/callsign mismatch
+are the usual causes). Your API key is treated as a secret and is never written to the
+serial log.
 
 ### Notes (free-form text editor)
 
@@ -1506,6 +1542,7 @@ on-screen key reference. The notable rows:
 | Tilt tuning | `,`/`/` or ENTER toggle **accelerometer passband tuning** on/off. Shown as **n/a (no IMU)** on boards without one (only the Cardputer **ADV** has the sensor). When on, roll the device left/right in TUNE mode on a linear bird to move through the passband. Under *Station / display* |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
 | LoTW DXCC / CQ zone / ITU zone / state / county | ENTER → enter your DXCC entity number (e.g. `291` = USA), CQ zone, ITU zone, and — for US/AK/HI — your 2-letter state (required by LoTW for those entities) and optionally county (`ST,County`), for the **LoTW upload** station location. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
+| Cloudlog URL / key / station ID | ENTER → enter your self-hosted **Cloudlog** (or Wavelog) base URL (`https://…` or `http://…`), a **read-write API key**, and the numeric **station profile id** to file QSOs under, for **Log → Upload to Cloudlog**. Under *Station / display*. See [§8 → Cloudlog upload](#cloudlog--wavelog-upload). |
 | QRZ user / QRZ pass | ENTER → enter your QRZ.com username / password for the **QRZ Lookup** screen (requires a QRZ XML-data subscription). Password shown masked. Under *Network / data*. |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
 | Restore config+favs | ENTER → restore them from the backup files |
@@ -3375,8 +3412,9 @@ listed below.
 
 - **Purpose** — the QSO logging hub.
 - **Reached from** — Home → Log.
-- **Shows** — New QSO entry, View / edit log, Export to ADIF, Voice Memos,
-  Sign & upload to LoTW, Notes.
+- **Shows** — New QSO entry, View / edit log, Export to ADIF, Sign & upload to LoTW,
+  Upload to Cloudlog, Voice Memos, Notes. (The list scrolls; a `^`/`v` marker shows when
+  there are more items above or below.)
 - **Keys** — `;`/`.` move; **ENTER** open the selected item; `` ` `` back.
 
 ### Sign & upload to LoTW
@@ -3388,7 +3426,20 @@ listed below.
 - **Shows** — SD-card status, whether the LoTW key/cert are on the card, your
   station DXCC/CQ/ITU fields, and the count of QSOs not yet uploaded.
 - **Keys** — `u` sign & upload (prompts for the key password if encrypted);
-  `` ` `` back.
+  `a` toggle re-send mode (include QSOs already uploaded); `` ` `` back.
+
+### Upload to Cloudlog
+
+- **Purpose** — upload satellite QSOs to a self-hosted **Cloudlog** (or **Wavelog**)
+  online logbook over WiFi. Because a Cloudlog instance can itself forward QSOs to
+  LoTW/eQSL, this is usually an alternative to the on-device LoTW upload rather than an
+  addition. Tracked independently of LoTW, so a QSO sent to one isn't marked sent to the
+  other. Full setup in [§8 → Cloudlog upload](#cloudlog--wavelog-upload).
+- **Reached from** — Log menu → Upload to Cloudlog.
+- **Shows** — your configured Cloudlog server, whether the API key and station ID are
+  set, and the count of QSOs not yet sent to Cloudlog.
+- **Keys** — `u` upload (connects WiFi if needed); `a` toggle re-send mode (include QSOs
+  already sent to Cloudlog); `` ` `` back.
 
 ### Log entry
 

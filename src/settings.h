@@ -87,6 +87,12 @@ struct Settings {
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password
+  // Cloudlog/Wavelog upload (self-hosted online logbook). Uploading here also feeds
+  // LoTW if the user has LoTW configured in Cloudlog, so it's an alternative to the
+  // on-device LoTW upload rather than something to do in addition.
+  char     clUrl[80]  = "";   // base URL of the Cloudlog instance (https://... or http://...)
+  char     clKey[40]  = "";   // Cloudlog API key (read-write)
+  char     clStation[8] = ""; // station_profile_id (numeric, from the Cloudlog UI)
   // Location
   double   lat = 0.0, lon = 0.0, altM = 0.0;
   bool     useGps = false;

@@ -838,9 +838,9 @@ private:
     char end[9];       // HH:MM:SS UTC
     char mode[10];     // SSB / FM / CW ...
     char freq[20];     // frequency text (or "" if none)
-    char comment[60];  // activator comment (truncated)
+    char comment[48];  // activator comment (truncated; screen shows ~38 chars)
   };
-  static const int HAMSAT_MAX = 30;
+  static const int HAMSAT_MAX = 20;   // cap kept modest: the array lives in .bss
   Activation hamsatList[HAMSAT_MAX];
   int    hamsatN = 0;              // parsed activations
   int    hamsatSel = 0;           // list cursor

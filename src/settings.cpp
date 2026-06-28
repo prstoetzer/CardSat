@@ -41,6 +41,8 @@ bool Settings::load() {
   strncpy(lotwDxcc, d["lotwdxcc"] | "", sizeof(lotwDxcc)-1); lotwDxcc[sizeof(lotwDxcc)-1]=0;
   strncpy(lotwCqz,  d["lotwcqz"]  | "", sizeof(lotwCqz)-1);  lotwCqz[sizeof(lotwCqz)-1]=0;
   strncpy(lotwItuz, d["lotwituz"] | "", sizeof(lotwItuz)-1); lotwItuz[sizeof(lotwItuz)-1]=0;
+  strncpy(lotwState, d["lotwstate"] | "", sizeof(lotwState)-1); lotwState[sizeof(lotwState)-1]=0;
+  strncpy(lotwCnty,  d["lotwcnty"]  | "", sizeof(lotwCnty)-1);  lotwCnty[sizeof(lotwCnty)-1]=0;
   lat        = d["lat"] | 0.0;
   lon        = d["lon"] | 0.0;
   altM       = d["alt"] | 0.0;
@@ -160,6 +162,7 @@ bool Settings::save() {
   d["mycall"] = myCall;
   d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
   d["lotwdxcc"] = lotwDxcc; d["lotwcqz"] = lotwCqz; d["lotwituz"] = lotwItuz;
+  d["lotwstate"] = lotwState; d["lotwcnty"] = lotwCnty;
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;

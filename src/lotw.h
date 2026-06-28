@@ -30,7 +30,8 @@ struct LotwStation {
   String grid;       // Maidenhead grid
   String cqz;        // CQ zone
   String ituz;       // ITU zone
-  String state;      // optional (US): STATE
+  String state;      // US/AK/HI: STATE (2-letter); required by LoTW for those DXCCs
+  String cnty;       // US: county as "STATE,County" (ADIF MY_CNTY form); optional
 };
 
 // Result of a build+upload attempt.

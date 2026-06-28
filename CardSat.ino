@@ -100,7 +100,6 @@
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/version.h>   // MBEDTLS_VERSION_MAJOR for the SHA-1 API guard
 #include <miniz.h>
-#include <esp_rom_crc.h>
 
 
 
@@ -234,7 +233,7 @@ static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
 static constexpr uint8_t SCREEN_BRIGHT = 180;
 // Most-recent QSO log entries loaded into RAM for the on-device view/edit list.
-static constexpr int     LOG_VIEW_MAX  = 120;
+static constexpr int     LOG_VIEW_MAX  = 60;
 
 // ---------------------------------------------------------------------------
 //  Antenna rotator: GS-232 over an I2C->UART bridge (SC16IS750/752)
@@ -280,7 +279,7 @@ static constexpr uint16_t YAESU_ADC_MS    = 6;     // single-shot settle for 250
 // ---------------------------------------------------------------------------
 //  Limits (kept modest - no PSRAM on the StampS3A)
 // ---------------------------------------------------------------------------
-static constexpr int   MAX_SATS        = 220;  // sats held in RAM from GP data
+static constexpr int   MAX_SATS        = 150;  // sats held in RAM from GP data
 static constexpr int   MAX_TX_PER_SAT  = 64;   // transmitters held for active sat (e.g. ISS has ~49 on SatNOGS)
 static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
@@ -1769,6 +1768,8 @@ struct Settings {
   char     lotwDxcc[6] = "";  // DXCC entity number (e.g. "291" = USA); "" => omit
   char     lotwCqz[4]  = "";  // CQ zone; "" => omit
   char     lotwItuz[4] = "";  // ITU zone; "" => omit
+  char     lotwState[4] = ""; // US/AK/HI 2-letter state (LoTW requires for those DXCCs)
+  char     lotwCnty[34] = ""; // US county as "ST,County name"; optional, for awards
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password
@@ -1962,7 +1963,8 @@ struct LotwStation {
   String grid;       // Maidenhead grid
   String cqz;        // CQ zone
   String ituz;       // ITU zone
-  String state;      // optional (US): STATE
+  String state;      // US/AK/HI: STATE (2-letter); required by LoTW for those DXCCs
+  String cnty;       // US: county as "STATE,County" (ADIF MY_CNTY form); optional
 };
 
 struct LotwResult {
@@ -2900,9 +2902,9 @@ private:
     char end[9];       // HH:MM:SS UTC
     char mode[10];     // SSB / FM / CW ...
     char freq[20];     // frequency text (or "" if none)
-    char comment[60];  // activator comment (truncated)
+    char comment[48];  // activator comment (truncated; screen shows ~38 chars)
   };
-  static const int HAMSAT_MAX = 30;
+  static const int HAMSAT_MAX = 20;   // cap kept modest: the array lives in .bss
   Activation hamsatList[HAMSAT_MAX];
   int    hamsatN = 0;              // parsed activations
   int    hamsatSel = 0;           // list cursor
@@ -7479,6 +7481,8 @@ bool Settings::load() {
   strncpy(lotwDxcc, d["lotwdxcc"] | "", sizeof(lotwDxcc)-1); lotwDxcc[sizeof(lotwDxcc)-1]=0;
   strncpy(lotwCqz,  d["lotwcqz"]  | "", sizeof(lotwCqz)-1);  lotwCqz[sizeof(lotwCqz)-1]=0;
   strncpy(lotwItuz, d["lotwituz"] | "", sizeof(lotwItuz)-1); lotwItuz[sizeof(lotwItuz)-1]=0;
+  strncpy(lotwState, d["lotwstate"] | "", sizeof(lotwState)-1); lotwState[sizeof(lotwState)-1]=0;
+  strncpy(lotwCnty,  d["lotwcnty"]  | "", sizeof(lotwCnty)-1);  lotwCnty[sizeof(lotwCnty)-1]=0;
   lat        = d["lat"] | 0.0;
   lon        = d["lon"] | 0.0;
   altM       = d["alt"] | 0.0;
@@ -7598,6 +7602,7 @@ bool Settings::save() {
   d["mycall"] = myCall;
   d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
   d["lotwdxcc"] = lotwDxcc; d["lotwcqz"] = lotwCqz; d["lotwituz"] = lotwItuz;
+  d["lotwstate"] = lotwState; d["lotwcnty"] = lotwCnty;
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
@@ -10009,8 +10014,14 @@ void App::suspendNetServers() {
 // the screen). These remain as no-ops so the trampoline call sites and the
 // canvasFreed contract stay intact; canvasFreed is never set, so draw() always
 // runs. Socket suspension around fetches is handled separately in the trampoline.
+// Canvas sprite is kept allocated across TLS sessions (these are intentionally
+// no-ops): freeing the ~32 KB sprite mid-fetch yielded a fragmented hole that
+// didn't reliably give mbedTLS its contiguous block, and a failed re-create left
+// the screen dark. Instead the baseline DRAM footprint is kept low enough (see
+// MAX_SATS / LOG_VIEW_MAX) that the handshake's block is available with the
+// sprite resident. The trampoline + tick hooks below are retained as call sites.
 void App::freeCanvasForTls() {
-  // intentionally a no-op: the 8bpp sprite is small enough to keep allocated
+  // intentionally a no-op: keep the sprite allocated (see note above)
 }
 void App::restoreCanvasAfterTls() {
   // nothing to restore; the sprite is never freed
@@ -11125,11 +11136,17 @@ void App::keyHome(char c, bool enter, bool back) {
           passesReturn = SCR_HOME;
           screen = SCR_PASSES;
         } else {
+          bool sameTracked = (s->norad == trackedNorad);
           ensureTransponders(*s);
-          onTransponderChanged();
+          // Returning to the bird already tracking? Preserve the operator's
+          // transponder/tuning/cal and the engaged radio+rotator. Only re-init
+          // and reset output when starting a different satellite.
+          if (!sameTracked) {
+            onTransponderChanged();
+            radioOut = false; rotOut = false;
+          }
           loadCalForSat(s->norad);
           loadNoteForSat(s->norad);
-          radioOut = false;
           trackReturn = SCR_HOME;
           screen = SCR_TRACK;
         }
@@ -11337,12 +11354,18 @@ void App::keySchedule(char c, bool enter, bool back) {
     if (idx >= 0) {
       satSel = idx;
       SatEntry* s = &db.at(idx);
+      bool sameTracked = (s->norad == trackedNorad);
       pred.setSite(loc.obs()); pred.setSat(*s);
       ensureTransponders(*s);
-      onTransponderChanged();
+      // Preserve tuning + engaged radio/rotator when returning to the tracked
+      // bird; only re-init and reset output when switching satellites.
+      if (!sameTracked) {
+        onTransponderChanged();
+        radioOut = false; rotOut = false;
+      }
       loadCalForSat(s->norad);
       loadNoteForSat(s->norad);
-      radioOut = false; lastDoppMs = 0;
+      lastDoppMs = 0;
       trackReturn = SCR_SCHEDULE;
       screen = SCR_TRACK;
     }
@@ -11494,7 +11517,9 @@ void App::keyPasses(char c, bool enter, bool back) {
   if (enter || c == 't') {     // enter tracking
     SatEntry* s = activeSat();
     if (s) { loadCalForSat(s->norad); loadNoteForSat(s->norad); }
-    radioOut = false;
+    // Keep radio/rotator engaged when re-entering the bird already tracking in
+    // the background; only reset output when this is a different satellite.
+    if (!s || s->norad != trackedNorad) { radioOut = false; rotOut = false; }
     lastDoppMs = 0;
     trackReturn = SCR_PASSES;
     screen = SCR_TRACK;
@@ -12470,7 +12495,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -12682,6 +12707,10 @@ void App::keySettings(char c, bool enter, bool back) {
                editBuf = cfg.lotwCqz; screen = SCR_EDIT; break;
       case 71: editTarget = 222; editTitle = "LoTW ITU zone";
                editBuf = cfg.lotwItuz; screen = SCR_EDIT; break;
+      case 72: editTarget = 223; editTitle = "LoTW state (2-ltr, US)";
+               editBuf = cfg.lotwState; screen = SCR_EDIT; break;
+      case 73: editTarget = 224; editTitle = "LoTW county ST,Name";
+               editBuf = cfg.lotwCnty; screen = SCR_EDIT; break;
       case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
@@ -12791,6 +12820,10 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.lotwCqz[sizeof(cfg.lotwCqz)-1] = 0; break;
       case 222: strncpy(cfg.lotwItuz, editBuf.c_str(), sizeof(cfg.lotwItuz)-1);
                 cfg.lotwItuz[sizeof(cfg.lotwItuz)-1] = 0; break;
+      case 223: strncpy(cfg.lotwState, editBuf.c_str(), sizeof(cfg.lotwState)-1);
+                cfg.lotwState[sizeof(cfg.lotwState)-1] = 0; break;
+      case 224: strncpy(cfg.lotwCnty, editBuf.c_str(), sizeof(cfg.lotwCnty)-1);
+                cfg.lotwCnty[sizeof(cfg.lotwCnty)-1] = 0; break;
       case 210: { double v = editBuf.toFloat(); if (v >= 0.1 && v <= 50000.0) cfg.beaconMHz = v;
                   cfg.save(); screen = SCR_ORBIT; orbitPage = 4; lastDrawMs = 0;
                   setStatus("Saved"); return; }
@@ -13057,7 +13090,7 @@ void App::keyEdit(char c, bool enter, bool back) {
   }
   if (c >= 32 && c < 127) {
     if (editTarget == 103 || editTarget == 104 || editTarget == 204 || editTarget == 216 ||
-        editTarget == 330 ||
+        editTarget == 330 || editTarget == 223 ||
         editTarget == 500 || editTarget == 503 || editTarget == 600) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
@@ -13574,18 +13607,24 @@ static bool gzipToFile(const String& text, const char* path, size_t* outBytes) {
   static const uint8_t hdr[10] = {0x1f,0x8b,0x08,0x00,0,0,0,0,0,0xff};
   if (f.write(hdr, sizeof(hdr)) != sizeof(hdr)) { f.close(); return false; }
 
-  // raw DEFLATE (negative window => no zlib wrapper) at level 6.
+  // raw DEFLATE (no zlib header) at the default probe depth. The ESP32 ROM miniz
+  // omits tdefl_create_comp_flags_from_zip_params (it's gated behind the zlib API
+  // macros), so we build the flags directly: TDEFL_DEFAULT_MAX_PROBES gives the
+  // standard 128-probe search, and omitting TDEFL_WRITE_ZLIB_HEADER yields raw
+  // deflate -- which is what our manual gzip framing wraps.
   GzSink sink{&f, false};
   tdefl_compressor* c = (tdefl_compressor*)malloc(sizeof(tdefl_compressor));
   if (!c) { f.close(); return false; }
-  int flags = tdefl_create_comp_flags_from_zip_params(6, -15, MZ_DEFAULT_STRATEGY);
+  mz_uint flags = TDEFL_DEFAULT_MAX_PROBES;   // raw deflate, no zlib header/Adler-32
   tdefl_init(c, gzPut, &sink, flags);
   tdefl_status st = tdefl_compress_buffer(c, text.c_str(), text.length(), TDEFL_FINISH);
   free(c);
   if (st != TDEFL_STATUS_DONE || sink.err) { f.close(); return false; }
 
   // trailer: CRC32 of the uncompressed text, then ISIZE (mod 2^32), little-endian.
-  uint32_t crc = esp_rom_crc32_le(0, (const uint8_t*)text.c_str(), text.length());
+  // mz_crc32 (ROM miniz) is the standard gzip CRC-32 -- using it avoids the
+  // bit-convention ambiguity of esp_rom_crc32_le and needs no extra dependency.
+  uint32_t crc = (uint32_t)mz_crc32(MZ_CRC32_INIT, (const uint8_t*)text.c_str(), text.length());
   uint32_t isize = (uint32_t)text.length();
   uint8_t tr[8] = {
     (uint8_t)(crc), (uint8_t)(crc>>8), (uint8_t)(crc>>16), (uint8_t)(crc>>24),
@@ -13665,6 +13704,7 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   adifSp(text, "DXCC",       st.dxcc);
   adifSp(text, "GRIDSQUARE", st.grid);
   adifSp(text, "STATE",      st.state);
+  adifSp(text, "CNTY",       st.cnty);
   adifSp(text, "CQZ",        st.cqz);
   adifSp(text, "ITUZ",       st.ituz);
   text += "<eor>\n";
@@ -13919,14 +13959,26 @@ void App::doLotwUpload(const String& keyPass) {
   st.grid = loc.toGrid(loc.obs().lat, loc.obs().lon);
   st.cqz  = cfg.lotwCqz;
   st.ituz = cfg.lotwItuz;
+  st.state = cfg.lotwState;
+  st.cnty  = cfg.lotwCnty;
 
+  // Signing assembles the whole .tq8 text in RAM (~600 B/QSO) plus the cert/key
+  // PEM and mbedTLS contexts, then the upload needs a large contiguous block for
+  // the TLS handshake. The heap log here helps confirm there's room on the bench;
+  // the batch is capped (CAP) to keep the .tq8 text within budget on the no-PSRAM S3.
   lotwStatus = "Signing " + String(n) + " QSOs..."; draw();
+  Serial.printf("[lotw] signing %d QSOs (heap free %u, largest %u)\n",
+                n, (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
   String err; size_t gz = 0;
   bool built = Lotw::buildTq8(batch, n, st, keyPass, err, &gz);
   free(batch);
-  if (!built) { lotwStatus = "Sign failed: " + err; lotwBusy = false; lastDrawMs = 0; return; }
+  if (!built) {
+    lotwStatus = "Sign failed: " + err; lotwBusy = false; lastDrawMs = 0; return;
+  }
 
-  // Free the canvas sprite for the TLS handshake, then POST the staged file.
+  // POST the staged .tq8 to LoTW.
   lotwStatus = "Uploading (" + String((unsigned)gz) + " B)..."; draw();
   String resp;
   bool posted = net.httpsPostMultipart(LOTW_UPLOAD_URL, "upfile",
@@ -14011,42 +14063,6 @@ int App::markLogUploaded(int limit) {
   Store::fs().rename(tmp.c_str(), FILE_LOG);
   return flagged;
 }
-
-void App::drawLogEntry() {
-  header(logEditIdx >= 0 ? "Edit QSO" : "Log QSO");
-  canvas.setTextSize(1);
-  canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(4, 18);
-  canvas.printf("MyGrid %s  MyCall %s", qso.myGrid[0] ? qso.myGrid : "-",
-                qso.myCall[0] ? qso.myCall : "-");
-
-  const int LF = 11;
-  char dbuf[16], tbuf[16], dlb[16], ulb[16];
-  if (qso.utc) { time_t tt = (time_t)qso.utc; struct tm g; gmtime_r(&tt, &g);
-                 strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &g);
-                 strftime(tbuf, sizeof(tbuf), "%H:%M:%SZ", &g); }
-  else { strcpy(dbuf, "(set)"); strcpy(tbuf, "(set)"); }
-  if (qso.dlHz) snprintf(dlb, sizeof(dlb), "%.4f", qso.dlHz / 1e6); else strcpy(dlb, "(set)");
-  if (qso.ulHz) snprintf(ulb, sizeof(ulb), "%.4f", qso.ulHz / 1e6); else strcpy(ulb, "(set)");
-  const char* labels[LF] = { "Date", "Time", "Sat", "DL MHz", "UL MHz",
-                             "Call", "Mode", "RST S", "RST R", "Grid", "Notes" };
-  const char* vals[LF]   = { dbuf, tbuf, qso.sat[0] ? qso.sat : "(pick)", dlb, ulb,
-                             qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes };
-  const int VIS = 8;
-  int scroll = (logSel >= VIS) ? (logSel - VIS + 1) : 0;
-  for (int v = 0; v < VIS && scroll + v < LF; ++v) {
-    int i = scroll + v;
-    int y = 30 + v*11;
-    bool sel = (i == logSel);
-    if (sel) { canvas.fillRect(0, y-1, 240, 11, CL_BLUE);
-               canvas.setTextColor(CL_WHITE, CL_BLUE); }
-    else        canvas.setTextColor(CL_CYAN, CL_BLACK);
-    canvas.setCursor(4, y); canvas.printf("%-6s %.27s", labels[i], vals[i]);
-  }
-  footer(logEditIdx >= 0 ? "ENT edit  s save  x del  ` back"
-                         : "ENT edit  s save  ` cancel");
-}
-
 
 void App::drawLogEntry() {
   header(logEditIdx >= 0 ? "Edit QSO" : "Log QSO");
@@ -19872,7 +19888,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 72;
+  const int N = 74;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -19991,6 +20007,8 @@ void App::drawSettings() {
   rows[69] = String("LoTW DXCC: ") + (cfg.lotwDxcc[0] ? cfg.lotwDxcc : "(not set)");
   rows[70] = String("LoTW CQ zone: ") + (cfg.lotwCqz[0] ? cfg.lotwCqz : "(not set)");
   rows[71] = String("LoTW ITU zone: ") + (cfg.lotwItuz[0] ? cfg.lotwItuz : "(not set)");
+  rows[72] = String("LoTW state (US): ") + (cfg.lotwState[0] ? cfg.lotwState : "(not set)");
+  rows[73] = String("LoTW county (US): ") + (cfg.lotwCnty[0] ? cfg.lotwCnty : "(not set)");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

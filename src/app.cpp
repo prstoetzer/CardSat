@@ -2363,8 +2363,14 @@ void App::suspendNetServers() {
 // the screen). These remain as no-ops so the trampoline call sites and the
 // canvasFreed contract stay intact; canvasFreed is never set, so draw() always
 // runs. Socket suspension around fetches is handled separately in the trampoline.
+// Canvas sprite is kept allocated across TLS sessions (these are intentionally
+// no-ops): freeing the ~32 KB sprite mid-fetch yielded a fragmented hole that
+// didn't reliably give mbedTLS its contiguous block, and a failed re-create left
+// the screen dark. Instead the baseline DRAM footprint is kept low enough (see
+// MAX_SATS / LOG_VIEW_MAX) that the handshake's block is available with the
+// sprite resident. The trampoline + tick hooks below are retained as call sites.
 void App::freeCanvasForTls() {
-  // intentionally a no-op: the 8bpp sprite is small enough to keep allocated
+  // intentionally a no-op: keep the sprite allocated (see note above)
 }
 void App::restoreCanvasAfterTls() {
   // nothing to restore; the sprite is never freed
@@ -3477,11 +3483,17 @@ void App::keyHome(char c, bool enter, bool back) {
           passesReturn = SCR_HOME;
           screen = SCR_PASSES;
         } else {
+          bool sameTracked = (s->norad == trackedNorad);
           ensureTransponders(*s);
-          onTransponderChanged();
+          // Returning to the bird already tracking? Preserve the operator's
+          // transponder/tuning/cal and the engaged radio+rotator. Only re-init
+          // and reset output when starting a different satellite.
+          if (!sameTracked) {
+            onTransponderChanged();
+            radioOut = false; rotOut = false;
+          }
           loadCalForSat(s->norad);
           loadNoteForSat(s->norad);
-          radioOut = false;
           trackReturn = SCR_HOME;
           screen = SCR_TRACK;
         }
@@ -3688,12 +3700,18 @@ void App::keySchedule(char c, bool enter, bool back) {
     if (idx >= 0) {
       satSel = idx;
       SatEntry* s = &db.at(idx);
+      bool sameTracked = (s->norad == trackedNorad);
       pred.setSite(loc.obs()); pred.setSat(*s);
       ensureTransponders(*s);
-      onTransponderChanged();
+      // Preserve tuning + engaged radio/rotator when returning to the tracked
+      // bird; only re-init and reset output when switching satellites.
+      if (!sameTracked) {
+        onTransponderChanged();
+        radioOut = false; rotOut = false;
+      }
       loadCalForSat(s->norad);
       loadNoteForSat(s->norad);
-      radioOut = false; lastDoppMs = 0;
+      lastDoppMs = 0;
       trackReturn = SCR_SCHEDULE;
       screen = SCR_TRACK;
     }
@@ -3845,7 +3863,9 @@ void App::keyPasses(char c, bool enter, bool back) {
   if (enter || c == 't') {     // enter tracking
     SatEntry* s = activeSat();
     if (s) { loadCalForSat(s->norad); loadNoteForSat(s->norad); }
-    radioOut = false;
+    // Keep radio/rotator engaged when re-entering the bird already tracking in
+    // the background; only reset output when this is a different satellite.
+    if (!s || s->norad != trackedNorad) { radioOut = false; rotOut = false; }
     lastDoppMs = 0;
     trackReturn = SCR_PASSES;
     screen = SCR_TRACK;
@@ -4823,7 +4843,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -5029,6 +5049,10 @@ void App::keySettings(char c, bool enter, bool back) {
                editBuf = cfg.lotwCqz; screen = SCR_EDIT; break;
       case 71: editTarget = 222; editTitle = "LoTW ITU zone";
                editBuf = cfg.lotwItuz; screen = SCR_EDIT; break;
+      case 72: editTarget = 223; editTitle = "LoTW state (2-ltr, US)";
+               editBuf = cfg.lotwState; screen = SCR_EDIT; break;
+      case 73: editTarget = 224; editTitle = "LoTW county ST,Name";
+               editBuf = cfg.lotwCnty; screen = SCR_EDIT; break;
       case 27: {
         bool ok = copyFile(FILE_CFG, FILE_CFG_BAK) && copyFile(FILE_FAVS, FILE_FAVS_BAK);
         setStatus(ok ? "Backed up to SD" : "Backup failed");
@@ -5138,6 +5162,10 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.lotwCqz[sizeof(cfg.lotwCqz)-1] = 0; break;
       case 222: strncpy(cfg.lotwItuz, editBuf.c_str(), sizeof(cfg.lotwItuz)-1);
                 cfg.lotwItuz[sizeof(cfg.lotwItuz)-1] = 0; break;
+      case 223: strncpy(cfg.lotwState, editBuf.c_str(), sizeof(cfg.lotwState)-1);
+                cfg.lotwState[sizeof(cfg.lotwState)-1] = 0; break;
+      case 224: strncpy(cfg.lotwCnty, editBuf.c_str(), sizeof(cfg.lotwCnty)-1);
+                cfg.lotwCnty[sizeof(cfg.lotwCnty)-1] = 0; break;
       case 210: { double v = editBuf.toFloat(); if (v >= 0.1 && v <= 50000.0) cfg.beaconMHz = v;
                   cfg.save(); screen = SCR_ORBIT; orbitPage = 4; lastDrawMs = 0;
                   setStatus("Saved"); return; }
@@ -5404,7 +5432,7 @@ void App::keyEdit(char c, bool enter, bool back) {
   }
   if (c >= 32 && c < 127) {
     if (editTarget == 103 || editTarget == 104 || editTarget == 204 || editTarget == 216 ||
-        editTarget == 330 ||
+        editTarget == 330 || editTarget == 223 ||
         editTarget == 500 || editTarget == 503 || editTarget == 600) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
@@ -5989,14 +6017,26 @@ void App::doLotwUpload(const String& keyPass) {
   st.grid = loc.toGrid(loc.obs().lat, loc.obs().lon);
   st.cqz  = cfg.lotwCqz;
   st.ituz = cfg.lotwItuz;
+  st.state = cfg.lotwState;
+  st.cnty  = cfg.lotwCnty;
 
+  // Signing assembles the whole .tq8 text in RAM (~600 B/QSO) plus the cert/key
+  // PEM and mbedTLS contexts, then the upload needs a large contiguous block for
+  // the TLS handshake. The heap log here helps confirm there's room on the bench;
+  // the batch is capped (CAP) to keep the .tq8 text within budget on the no-PSRAM S3.
   lotwStatus = "Signing " + String(n) + " QSOs..."; draw();
+  Serial.printf("[lotw] signing %d QSOs (heap free %u, largest %u)\n",
+                n, (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
   String err; size_t gz = 0;
   bool built = Lotw::buildTq8(batch, n, st, keyPass, err, &gz);
   free(batch);
-  if (!built) { lotwStatus = "Sign failed: " + err; lotwBusy = false; lastDrawMs = 0; return; }
+  if (!built) {
+    lotwStatus = "Sign failed: " + err; lotwBusy = false; lastDrawMs = 0; return;
+  }
 
-  // Free the canvas sprite for the TLS handshake, then POST the staged file.
+  // POST the staged .tq8 to LoTW.
   lotwStatus = "Uploading (" + String((unsigned)gz) + " B)..."; draw();
   String resp;
   bool posted = net.httpsPostMultipart(LOTW_UPLOAD_URL, "upfile",
@@ -11906,7 +11946,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 72;
+  const int N = 74;
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -12024,6 +12064,8 @@ void App::drawSettings() {
   rows[69] = String("LoTW DXCC: ") + (cfg.lotwDxcc[0] ? cfg.lotwDxcc : "(not set)");
   rows[70] = String("LoTW CQ zone: ") + (cfg.lotwCqz[0] ? cfg.lotwCqz : "(not set)");
   rows[71] = String("LoTW ITU zone: ") + (cfg.lotwItuz[0] ? cfg.lotwItuz : "(not set)");
+  rows[72] = String("LoTW state (US): ") + (cfg.lotwState[0] ? cfg.lotwState : "(not set)");
+  rows[73] = String("LoTW county (US): ") + (cfg.lotwCnty[0] ? cfg.lotwCnty : "(not set)");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

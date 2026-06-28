@@ -82,6 +82,8 @@ struct Settings {
   char     lotwDxcc[6] = "";  // DXCC entity number (e.g. "291" = USA); "" => omit
   char     lotwCqz[4]  = "";  // CQ zone; "" => omit
   char     lotwItuz[4] = "";  // ITU zone; "" => omit
+  char     lotwState[4] = ""; // US/AK/HI 2-letter state (LoTW requires for those DXCCs)
+  char     lotwCnty[34] = ""; // US county as "ST,County name"; optional, for awards
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password

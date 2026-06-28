@@ -12,8 +12,7 @@
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/version.h>   // MBEDTLS_VERSION_MAJOR for the SHA-1 API guard
 
-#include <miniz.h>           // ESP32 ROM miniz: tdefl_* raw DEFLATE
-#include <esp_rom_crc.h>     // esp_rom_crc32_le for the gzip trailer
+#include <miniz.h>           // ESP32 ROM miniz: tdefl_* raw DEFLATE + mz_crc32
 
 // ---------------------------------------------------------------------------
 // ADIF field emitters. The OUTER record uses spaced fields (<NAME:len>val<sp>);
@@ -168,18 +167,24 @@ static bool gzipToFile(const String& text, const char* path, size_t* outBytes) {
   static const uint8_t hdr[10] = {0x1f,0x8b,0x08,0x00,0,0,0,0,0,0xff};
   if (f.write(hdr, sizeof(hdr)) != sizeof(hdr)) { f.close(); return false; }
 
-  // raw DEFLATE (negative window => no zlib wrapper) at level 6.
+  // raw DEFLATE (no zlib header) at the default probe depth. The ESP32 ROM miniz
+  // omits tdefl_create_comp_flags_from_zip_params (it's gated behind the zlib API
+  // macros), so we build the flags directly: TDEFL_DEFAULT_MAX_PROBES gives the
+  // standard 128-probe search, and omitting TDEFL_WRITE_ZLIB_HEADER yields raw
+  // deflate -- which is what our manual gzip framing wraps.
   GzSink sink{&f, false};
   tdefl_compressor* c = (tdefl_compressor*)malloc(sizeof(tdefl_compressor));
   if (!c) { f.close(); return false; }
-  int flags = tdefl_create_comp_flags_from_zip_params(6, -15, MZ_DEFAULT_STRATEGY);
+  mz_uint flags = TDEFL_DEFAULT_MAX_PROBES;   // raw deflate, no zlib header/Adler-32
   tdefl_init(c, gzPut, &sink, flags);
   tdefl_status st = tdefl_compress_buffer(c, text.c_str(), text.length(), TDEFL_FINISH);
   free(c);
   if (st != TDEFL_STATUS_DONE || sink.err) { f.close(); return false; }
 
   // trailer: CRC32 of the uncompressed text, then ISIZE (mod 2^32), little-endian.
-  uint32_t crc = esp_rom_crc32_le(0, (const uint8_t*)text.c_str(), text.length());
+  // mz_crc32 (ROM miniz) is the standard gzip CRC-32 -- using it avoids the
+  // bit-convention ambiguity of esp_rom_crc32_le and needs no extra dependency.
+  uint32_t crc = (uint32_t)mz_crc32(MZ_CRC32_INIT, (const uint8_t*)text.c_str(), text.length());
   uint32_t isize = (uint32_t)text.length();
   uint8_t tr[8] = {
     (uint8_t)(crc), (uint8_t)(crc>>8), (uint8_t)(crc>>16), (uint8_t)(crc>>24),
@@ -259,6 +264,7 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   adifSp(text, "DXCC",       st.dxcc);
   adifSp(text, "GRIDSQUARE", st.grid);
   adifSp(text, "STATE",      st.state);
+  adifSp(text, "CNTY",       st.cnty);
   adifSp(text, "CQZ",        st.cqz);
   adifSp(text, "ITUZ",       st.ituz);
   text += "<eor>\n";

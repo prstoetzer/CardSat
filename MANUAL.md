@@ -550,8 +550,12 @@ credential to the card.
 3. Copy **`lotw_key.pem`** and **`lotw_cert.pem`** into the **`/CardSat/`** folder
    on the microSD card.
 4. In **Settings → Station / display**, set **LoTW DXCC** (your DXCC entity number —
-   `291` for the USA), **LoTW CQ zone**, and **LoTW ITU zone**. Your callsign and
-   grid come from **My callsign** and your location, which CardSat already has.
+   `291` for the USA), **LoTW CQ zone**, and **LoTW ITU zone**. **US, Alaska and
+   Hawaii stations must also set LoTW state** (the two-letter abbreviation, e.g.
+   `VA`) — LoTW rejects uploads from those entities without it. **LoTW county**
+   (entered as `ST,County name`, e.g. `VA,Arlington`) is optional but lets your
+   contacts earn county awards. Your callsign and grid come from **My callsign** and
+   your location, which CardSat already has.
 
 **Uploading:** open **Log → Sign & upload to LoTW**. The screen shows whether the
 card, the key/cert, and the station fields are present, and how many QSOs haven't
@@ -1468,7 +1472,7 @@ on-screen key reference. The notable rows:
 | Brightness | `,`/`/` adjust the active screen brightness in ~6% steps; previews live. Under *Station / display* |
 | Tilt tuning | `,`/`/` or ENTER toggle **accelerometer passband tuning** on/off. Shown as **n/a (no IMU)** on boards without one (only the Cardputer **ADV** has the sensor). When on, roll the device left/right in TUNE mode on a linear bird to move through the passband. Under *Station / display* |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
-| LoTW DXCC / CQ zone / ITU zone | ENTER → enter your DXCC entity number (e.g. `291` = USA), CQ zone, and ITU zone for the **LoTW upload** station location. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
+| LoTW DXCC / CQ zone / ITU zone / state / county | ENTER → enter your DXCC entity number (e.g. `291` = USA), CQ zone, ITU zone, and — for US/AK/HI — your 2-letter state (required by LoTW for those entities) and optionally county (`ST,County`), for the **LoTW upload** station location. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
 | QRZ user / QRZ pass | ENTER → enter your QRZ.com username / password for the **QRZ Lookup** screen (requires a QRZ XML-data subscription). Password shown masked. Under *Network / data*. |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
 | Restore config+favs | ENTER → restore them from the backup files |

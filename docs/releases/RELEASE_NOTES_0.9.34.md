@@ -31,9 +31,12 @@ flash**. Confirm the new version on the **About** screen after flashing.
   command — see the manual). **Your private key lives on the SD card; use a card you
   control.** CardSat loads the key only at upload time, keeps it in RAM only, and
   never copies or transmits it except as the signature inside the `.tq8`.
-- **Station location in Settings.** New **LoTW DXCC**, **LoTW CQ zone**, and **LoTW
-  ITU zone** fields under *Settings → Station / display* fill out the `.tq8` station
-  record; your callsign and grid come from the values CardSat already has.
+- **Station location in Settings.** New **LoTW DXCC**, **LoTW CQ zone**, **LoTW ITU
+  zone**, **LoTW state**, and **LoTW county** fields under *Settings → Station /
+  display* fill out the `.tq8` station record; your callsign and grid come from the
+  values CardSat already has. US, Alaska and Hawaii stations must set the state —
+  LoTW rejects uploads from those entities without it — and county (entered as
+  `ST,County`) is optional but enables county awards for your contacts.
 - **No duplicate uploads.** LoTW rejects re-uploads, so CardSat tracks what it has
   sent (a new `uploaded` column in `qso_log.csv`) and flags QSOs once they've reached
   LoTW so they're never sent twice. Large backlogs go in batches of up to 50.
@@ -58,6 +61,23 @@ your LoTW account's activity page.
   where, and when. The feed parser was validated host-side against the live feed.
 
 ## Notes
+
+- Bug fix: returning to the Track screen for the satellite that's already tracking
+  in the background no longer disengages the radio and rotator. Re-entering the
+  tracked bird now preserves the engaged radio/rotator and your transponder, tuning,
+  and calibration; selecting a *different* satellite still starts fresh (and cleanly
+  stops the previous one) as before.
+
+- Memory: this release reclaims roughly 19 KB of permanent RAM so the TLS handshake
+  has room without any risky sprite juggling. The in-RAM satellite catalog cap was
+  reduced from 220 to 150 (the AMSAT GP bulletin currently lists ~94 amateur
+  satellites, so the full active list still fits with headroom), the on-device
+  log-browser cache from 120 to 60 recent QSOs (the full log stays on the SD card,
+  and ADIF export and LoTW upload read the file directly, so only the depth of the
+  on-screen scrollback changes), and the activations buffer was trimmed. The drawing
+  canvas stays resident during network activity, so the screen is never blanked by a
+  fetch. A one-line heap report is logged to serial at the start of a LoTW signing
+  to aid bench diagnosis.
 
 - The printed **cheat card** stays **2 pages**; the font was reduced slightly and
   line spacing tightened to fit the new LoTW reference. The 4×6 layout is otherwise

@@ -110,7 +110,7 @@ static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
 static constexpr uint8_t SCREEN_BRIGHT = 180;
 // Most-recent QSO log entries loaded into RAM for the on-device view/edit list.
-static constexpr int     LOG_VIEW_MAX  = 120;
+static constexpr int     LOG_VIEW_MAX  = 60;
 
 // ---------------------------------------------------------------------------
 //  Antenna rotator: GS-232 over an I2C->UART bridge (SC16IS750/752)
@@ -156,7 +156,7 @@ static constexpr uint16_t YAESU_ADC_MS    = 6;     // single-shot settle for 250
 // ---------------------------------------------------------------------------
 //  Limits (kept modest - no PSRAM on the StampS3A)
 // ---------------------------------------------------------------------------
-static constexpr int   MAX_SATS        = 220;  // sats held in RAM from GP data
+static constexpr int   MAX_SATS        = 150;  // sats held in RAM from GP data
 static constexpr int   MAX_TX_PER_SAT  = 64;   // transmitters held for active sat (e.g. ISS has ~49 on SatNOGS)
 static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule

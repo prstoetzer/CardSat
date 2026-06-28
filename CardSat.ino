@@ -2001,7 +2001,7 @@ public:
   static bool buildTq8(const PendingQso* qsos, int n,
                        const LotwStation& st, const String& keyPass,
                        String& err, size_t* gzippedBytes = nullptr);
-  static String signData(const PendingQso& q);
+  static String signData(const PendingQso& q, const LotwStation& st);
   static bool credentialPresent();
 };
 

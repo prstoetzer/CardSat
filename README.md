@@ -18,7 +18,17 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.34:** **direct Logbook of the World (LoTW) upload.** CardSat can now
+> **New in v0.9.35:** a built-in **Notes** editor on the **Log** menu — a free-form,
+> multi-page text editor with a file browser, for sked details, grids you still need,
+> antenna settings, or any operating reminder. Notes are plain `.txt` files under
+> `/CardSat/notes/` (SD card or internal flash), listed newest-first with a saved
+> date/time. The editor's commands use the **Fn** modifier so the `;` `.` `,` `/`
+> keys stay typeable. This release also fixes a memory bug that could make **LoTW
+> uploads fail** on the no-PSRAM Cardputer. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.35.md)** and **§8 → Notes** in
+> the manual.
+>
+> **In v0.9.34:** **direct Logbook of the World (LoTW) upload.** CardSat can
 > sign your satellite QSOs and send them straight to ARRL's LoTW over WiFi — no PC,
 > no TQSL, no separate upload step. It builds the same cryptographically-signed
 > `.tq8` TQSL would and posts it to LoTW's self-authenticating service. It needs a
@@ -26,11 +36,9 @@ transit prediction, sun/eclipse status, and more.
 > one-time `openssl pkcs12` step); **your private key lives on the SD card**, so use
 > a card you control. New **Sign & upload to LoTW** action on the Log menu, plus
 > **LoTW DXCC / CQ zone / ITU zone** fields in Settings. Sent QSOs are flagged so
-> they're never uploaded twice. Also new: an **Activations** screen on the main menu
+> they're never uploaded twice. Also: an **Activations** screen on the main menu
 > that downloads the **hams.at** upcoming-activations feed (roves, grid activations,
-> special ops) and lists them with times, mode, frequency and comments. See the
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.34.md)** and **§8 → LoTW upload**
-> in the manual.
+> special ops) and lists them with times, mode, frequency and comments.
 
 ---
 
@@ -53,8 +61,8 @@ transit prediction, sun/eclipse status, and more.
   transit** prediction, **illumination/eclipse**, and **decay/reentry** watch flags.
 - **Operating aids** — **jump-to-beacon**, per-satellite **calibration** and
   **operating notes**, an **AOS alarm**, **deep sleep until the next pass**, a built-in
-  **logbook** (ADIF/LoTW) with DXCC/grid/state tracking, optional **LoRa messaging**,
-  voice memos, and an optional IR-LED pass beacon.
+  **logbook** (ADIF/LoTW) with DXCC/grid/state tracking, a free-form **Notes** editor,
+  optional **LoRa messaging**, voice memos, and an optional IR-LED pass beacon.
 - **Offline-first** — GP elements, transponders, and DXCC data are cached to microSD
   (or internal flash) for full operation with no network.
 

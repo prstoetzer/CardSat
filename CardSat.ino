@@ -127,6 +127,13 @@
 //  config.h  -  compile-time configuration and shared constants
 // ===========================================================================
 
+// ---- Notes editor wrapped-row type ----
+// Defined as the very first declaration in the sketch (before any function) so the
+// Arduino IDE's auto-generated prototypes for noteWrap()/noteLocate() -- which it
+// injects right here, ahead of the first statement -- can see the type. The
+// modular src/ build keeps this file-static in app.cpp and needs no early decl.
+struct NoteVRow { int start, end; bool hardBreak; };
+
 // ---- Speed of light (m/s) used for Doppler ----
 static constexpr double C_LIGHT = 299792458.0;
 
@@ -227,7 +234,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.34";
+static constexpr const char* FW_VERSION = "0.9.35";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1909,7 +1916,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -2614,6 +2621,8 @@ private:
   String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
+  bool     keyFn = false;         // Fn modifier state for the current keypress
+                                  // (read by the notes editor for cursor moves)
   bool     screenAsleep = false;  // backlight blanked for power saving
   bool     lastGpsFix  = false;   // for Location-screen auto-refresh
   int      lastGpsSats = 0;
@@ -2915,6 +2924,30 @@ private:
   void fetchHamsat();              // download + parse the feed (WiFi)
   int  parseHamsat(const String& xml);  // fill hamsatList[]; returns count
   void hamsatEnter();              // open screen, fetch if WiFi up
+  // ---- Notes: text-file browser (SCR_NOTES) + editor (SCR_NOTEEDIT) ----
+  static const int NOTES_LIST_MAX = 64;   // files listed in the browser
+  static const int NOTE_NAME_MAX  = 32;   // filename length (without path/.txt)
+  static const int NOTE_BUF_MAX   = 4096; // max note size held/edited in RAM
+  char     noteList[NOTES_LIST_MAX][NOTE_NAME_MAX]; // base names (no dir, no .txt)
+  time_t   noteTime[NOTES_LIST_MAX];                 // each note's last-write time
+  int      noteListN = 0;          // files found
+  int      noteSel = 0;            // browser cursor
+  int      noteScroll = 0;         // browser scroll offset
+  bool     noteConfirmDel = false; // two-step delete confirmation in the browser
+  String   noteBuf;                // editor text buffer (current file contents)
+  String   noteName;               // base name of the file being edited
+  int      noteCur = 0;            // cursor index into noteBuf (0..length)
+  int      noteTopLine = 0;        // first visible wrapped line (editor scroll)
+  bool     noteDirty = false;      // unsaved changes
+  bool     noteIsNew = false;      // editing a not-yet-saved new file
+  void drawNotes();    void keyNotes(char c, bool enter, bool back);
+  void drawNoteEdit(); void keyNoteEdit(char c, bool enter, bool back);
+  void notesEnter();               // build the list + open the browser
+  void buildNoteList();            // (re)enumerate /CardSat/notes/*.txt
+  bool noteLoad(const char* base); // read a file into noteBuf
+  bool noteSave();                 // write noteBuf to its file
+  void noteEditNew();              // start a blank new note
+  void noteEditOpen(const char* base); // open an existing note in the editor
   void buildGrids(time_t a, time_t b);
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);
@@ -8779,6 +8812,450 @@ void App::keyHamsat(char c, bool enter, bool back) {
   if (enter) { hamsatDetail = true; lastDrawMs = 0; }
 }
 
+namespace Notes {
+
+static const char* NOTES_DIR = "/CardSat/notes";
+
+// Build the full "/CardSat/notes/<base>.txt" path into buf.
+static void pathFor(const char* base, char* buf, size_t cap) {
+  snprintf(buf, cap, "%s/%s.txt", NOTES_DIR, base);
+}
+
+bool ensureDir() {
+  fs::FS& fsx = Store::fs();
+  if (fsx.exists(NOTES_DIR)) return true;
+  return fsx.mkdir(NOTES_DIR);
+}
+
+bool exists(const char* base) {
+  if (!base || !base[0]) return false;
+  char path[96];
+  pathFor(base, path, sizeof(path));
+  return Store::fs().exists(path);
+}
+
+int list(char out[][32], time_t* times, int max, int nameCap) {
+  if (max <= 0) return 0;
+  if (!ensureDir()) return 0;
+  fs::FS& fsx = Store::fs();
+  File dir = fsx.open(NOTES_DIR);
+  if (!dir || !dir.isDirectory()) return 0;
+
+  int n = 0;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    if (f.isDirectory()) { f.close(); continue; }
+    const char* nm = f.name();
+    const char* slash = strrchr(nm, '/');
+    const char* bn = slash ? slash + 1 : nm;       // basename (some cores give a path)
+    size_t L = strlen(bn);
+    bool isTxt = L > 4 && strcasecmp(bn + L - 4, ".txt") == 0;
+    if (isTxt && n < max) {
+      size_t baseLen = L - 4;                       // strip ".txt"
+      if (baseLen <= (size_t)(nameCap - 1)) {
+        memcpy(out[n], bn, baseLen);
+        out[n][baseLen] = 0;
+        if (times) times[n] = f.getLastWrite();     // file mtime (0 if FS lacks it)
+        n++;
+      }
+    }
+    f.close();
+  }
+  dir.close();
+
+  // Newest-first insertion sort by mtime; ties (or no-mtime filesystems, where all
+  // are 0) fall back to case-insensitive A->Z so the order is still stable. Name
+  // and time move together. n is small (<= max).
+  for (int i = 1; i < n; ++i) {
+    char keyName[32];
+    strncpy(keyName, out[i], sizeof(keyName) - 1); keyName[sizeof(keyName) - 1] = 0;
+    time_t keyT = times ? times[i] : 0;
+    int j = i - 1;
+    while (j >= 0) {
+      time_t jt = times ? times[j] : 0;
+      bool jAfterKey = (jt != keyT) ? (jt < keyT)            // older sorts below newer
+                                    : (strcasecmp(out[j], keyName) > 0);
+      if (!jAfterKey) break;
+      strncpy(out[j + 1], out[j], nameCap - 1); out[j + 1][nameCap - 1] = 0;
+      if (times) times[j + 1] = times[j];
+      --j;
+    }
+    strncpy(out[j + 1], keyName, nameCap - 1); out[j + 1][nameCap - 1] = 0;
+    if (times) times[j + 1] = keyT;
+  }
+  return n;
+}
+
+bool read(const char* base, String& dst, size_t maxBytes) {
+  dst = "";
+  if (!base || !base[0]) return false;
+  char path[96];
+  pathFor(base, path, sizeof(path));
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists(path)) return false;
+  File f = fsx.open(path, "r");
+  if (!f) return false;
+  size_t n = f.size();
+  if (n > maxBytes) n = maxBytes;       // truncate oversized files to the buffer cap
+  dst.reserve(n + 1);
+  size_t got = 0;
+  while (f.available() && got < maxBytes) {
+    int ch = f.read();
+    if (ch < 0) break;
+    dst += (char)ch;
+    got++;
+  }
+  f.close();
+  return true;
+}
+
+bool write(const char* base, const String& text) {
+  if (!base || !base[0]) return false;
+  if (!ensureDir()) return false;
+  char path[96];
+  pathFor(base, path, sizeof(path));
+  fs::FS& fsx = Store::fs();
+  File f = fsx.open(path, "w");          // truncates/creates
+  if (!f) return false;
+  size_t len = text.length();
+  size_t wrote = (len > 0) ? f.write((const uint8_t*)text.c_str(), len) : 0;
+  f.close();
+  return wrote == len;
+}
+
+bool remove(const char* base) {
+  if (!base || !base[0]) return false;
+  char path[96];
+  pathFor(base, path, sizeof(path));
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists(path)) return true;   // already gone
+  fsx.remove(path);
+  return !fsx.exists(path);
+}
+
+bool sanitizeName(char* name, size_t cap) {
+  if (!name || cap < 2) return false;
+  // Trim leading spaces.
+  char* p = name;
+  while (*p == ' ') p++;
+  // Copy allowed chars, mapping disallowed ones to '_'.
+  char tmp[64];
+  size_t lim = (cap - 1 < sizeof(tmp) - 1) ? cap - 1 : sizeof(tmp) - 1;
+  size_t o = 0;
+  for (; *p && o < lim; ++p) {
+    char ch = *p;
+    bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+              (ch >= '0' && ch <= '9') || ch == ' ' || ch == '_' || ch == '-';
+    tmp[o++] = ok ? ch : '_';
+  }
+  tmp[o] = 0;
+  // Trim trailing spaces/underscores.
+  while (o > 0 && (tmp[o - 1] == ' ')) tmp[--o] = 0;
+  if (o == 0) return false;
+  strncpy(name, tmp, cap - 1);
+  name[cap - 1] = 0;
+  return true;
+}
+
+} // namespace Notes
+
+// ===================== Notes: browser + full-screen text editor ============
+// Plain-text notes (.txt) under /CardSat/notes/, on LittleFS or SD (so they work
+// with no SD card). The browser lists files with new/open/delete; the editor is a
+// full multi-line editor with a cursor moved by Fn + the nav keys (Fn+,/Fn+/ =
+// left/right, Fn+;/Fn+. = up/down), leaving ; . , / free to type. Wrapping and
+// cursor mapping were validated host-side (docs/proto not needed -- pure logic).
+
+static const int NOTE_COLS = 39;   // chars per row at size 1 (240px / 6px, margin)
+static const int NOTE_ROWS = 12;   // visible text rows between header and footer
+
+// NoteVRow (the wrapped-row struct) is defined near the top of this file so the
+// Arduino IDE's auto-generated prototypes can see it; see that definition above.
+
+// Wrap the buffer into visual rows. A logical line longer than NOTE_COLS splits
+// across rows; an empty logical line yields one empty row.
+static int noteWrap(const String& buf, NoteVRow* rows, int maxRows) {
+  int i = 0, n = (int)buf.length(), ls = 0, k = 0;
+  while (i <= n && k < maxRows) {
+    if (i == n || buf[i] == '\n') {
+      int s = ls;
+      if (s == i) { rows[k++] = { s, i, i < n }; }
+      else {
+        while (s < i && k < maxRows) {
+          int e = s + NOTE_COLS; if (e > i) e = i;
+          rows[k++] = { s, e, (e == i) && (i < n) };
+          s = e;
+        }
+      }
+      ls = i + 1;
+    }
+    i++;
+  }
+  if (k == 0) rows[k++] = { 0, 0, false };
+  return k;
+}
+
+// Find the visual row + column holding the cursor.
+static void noteLocate(const NoteVRow* rows, int nrows, int cur, int& row, int& col) {
+  for (int r = 0; r < nrows; ++r) {
+    if (cur >= rows[r].start && cur <= rows[r].end) {
+      if (cur == rows[r].end && r + 1 < nrows &&
+          rows[r + 1].start == rows[r].end && !rows[r].hardBreak &&
+          rows[r].end != rows[r].start) continue;   // soft-wrap: belongs to next row
+      row = r; col = cur - rows[r].start; return;
+    }
+  }
+  row = nrows - 1; col = rows[row].end - rows[row].start;
+}
+
+void App::buildNoteList() {
+  noteListN = Notes::list(noteList, noteTime, NOTES_LIST_MAX, NOTE_NAME_MAX);
+  if (noteSel >= noteListN) noteSel = noteListN > 0 ? noteListN - 1 : 0;
+}
+
+void App::notesEnter() {
+  buildNoteList();
+  noteSel = 0; noteScroll = 0; noteConfirmDel = false;
+  screen = SCR_NOTES; lastDrawMs = 0;
+}
+
+bool App::noteLoad(const char* base) {
+  bool ok = Notes::read(base, noteBuf, NOTE_BUF_MAX);
+  noteName = base;
+  noteCur = 0; noteTopLine = 0; noteDirty = false;
+  return ok;
+}
+
+bool App::noteSave() {
+  char nm[NOTE_NAME_MAX];
+  strncpy(nm, noteName.c_str(), sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
+  if (!Notes::sanitizeName(nm, sizeof(nm))) { setStatus("Bad note name"); return false; }
+  if (!Notes::write(nm, noteBuf)) { setStatus("Note save failed"); return false; }
+  noteName = nm; noteDirty = false; noteIsNew = false;
+  setStatus(String("Saved ") + nm);
+  return true;
+}
+
+void App::noteEditNew() {
+  noteBuf = ""; noteName = ""; noteCur = 0; noteTopLine = 0;
+  noteDirty = false; noteIsNew = true;
+  // Prompt for a name first so we have somewhere to save.
+  editTarget = 710; editTitle = "New note name";
+  editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0;
+}
+
+void App::noteEditOpen(const char* base) {
+  noteLoad(base);
+  noteIsNew = false;
+  screen = SCR_NOTEEDIT; lastDrawMs = 0;
+}
+
+// ---- Browser (SCR_NOTES) ----
+void App::drawNotes() {
+  header("Notes");
+  canvas.setTextSize(1);
+
+  if (noteConfirmDel && noteSel >= 0 && noteSel < noteListN) {
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.setCursor(6, 50);
+    canvas.printf("Delete \"%s\"?", noteList[noteSel]);
+    footer("ENT delete   ` cancel");
+    return;
+  }
+
+  if (noteListN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("No notes yet.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 58); canvas.print("n = new note");
+    footer("n new   ` back");
+    return;
+  }
+
+  if (noteSel < noteScroll)               noteScroll = noteSel;
+  if (noteSel > noteScroll + NOTE_ROWS - 2) noteScroll = noteSel - (NOTE_ROWS - 2);
+  if (noteScroll < 0) noteScroll = 0;
+
+  for (int r = 0; r < NOTE_ROWS - 1 && (noteScroll + r) < noteListN; ++r) {
+    int idx = noteScroll + r;
+    int y = 20 + r * 12;
+    if (idx == noteSel) { canvas.fillRect(0, y - 2, 240, 12, CL_SELBG);
+                          canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else                  canvas.setTextColor(CL_WHITE, CL_BLACK);
+    // Name on the left (truncated to leave room for the date), date on the right.
+    canvas.setCursor(6, y);
+    canvas.printf("%.22s", noteList[idx]);
+    // Compact mtime in UTC (the device runs on UTC, like all other times):
+    // "MM-DD HH:MM". Skipped if the filesystem reported no time (== 0), e.g. a
+    // freshly created note saved before the clock was set.
+    if (noteTime[idx] > 0) {
+      time_t tt = noteTime[idx]; struct tm g; gmtime_r(&tt, &g);
+      char ds[12];
+      strftime(ds, sizeof(ds), "%m-%d %H:%M", &g);
+      if (idx != noteSel) canvas.setTextColor(CL_GREY, CL_BLACK);
+      canvas.setCursor(150, y);
+      canvas.print(ds);
+    }
+  }
+  if (noteListN > NOTE_ROWS - 1) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(210, 20); canvas.printf("%d/%d", noteSel + 1, noteListN);
+  }
+  footer("ENT open  n new  d del  ` back");
+}
+
+void App::keyNotes(char c, bool enter, bool back) {
+  if (noteConfirmDel) {
+    if (enter) {
+      if (noteSel >= 0 && noteSel < noteListN) {
+        if (Notes::remove(noteList[noteSel])) setStatus("Note deleted");
+        else                                  setStatus("Delete failed");
+        buildNoteList();
+      }
+      noteConfirmDel = false;
+    } else if (isBack(c, back)) {
+      noteConfirmDel = false;
+    }
+    lastDrawMs = 0;
+    return;
+  }
+  if (isBack(c, back)) { logMenuSel = 5; screen = SCR_LOG; lastDrawMs = 0; return; }
+  if (c == 'n') { noteEditNew(); return; }
+  if (noteListN == 0) return;
+  if (isUp(c))   { noteSel = (noteSel + noteListN - 1) % noteListN; lastDrawMs = 0; }
+  if (isDown(c)) { noteSel = (noteSel + 1) % noteListN; lastDrawMs = 0; }
+  if (c == 'd') { noteConfirmDel = true; lastDrawMs = 0; return; }
+  if (enter)     { noteEditOpen(noteList[noteSel]); }
+}
+
+// ---- Editor (SCR_NOTEEDIT) ----
+void App::drawNoteEdit() {
+  // Header shows the name + a dirty marker.
+  header(String("Edit: ") + (noteName.length() ? noteName : String("(unnamed)")) +
+         (noteDirty ? " *" : ""));
+  canvas.setTextSize(1);
+
+  NoteVRow rows[128];
+  int nrows = noteWrap(noteBuf, rows, 128);
+  int cr, cc; noteLocate(rows, nrows, noteCur, cr, cc);
+
+  // Keep the cursor row on screen.
+  if (cr < noteTopLine)               noteTopLine = cr;
+  if (cr > noteTopLine + NOTE_ROWS - 1) noteTopLine = cr - (NOTE_ROWS - 1);
+  if (noteTopLine < 0) noteTopLine = 0;
+
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  for (int v = 0; v < NOTE_ROWS && (noteTopLine + v) < nrows; ++v) {
+    int r = noteTopLine + v;
+    int y = 18 + v * 9;
+    int len = rows[r].end - rows[r].start;
+    for (int i = 0; i < len; ++i) {
+      char ch = noteBuf[rows[r].start + i];
+      int x = 4 + i * 6;
+      // Draw the cursor cell as an inverted block.
+      if (r == cr && i == cc) {
+        canvas.fillRect(x, y, 6, 8, CL_WHITE);
+        canvas.setTextColor(CL_BLACK, CL_WHITE);
+        canvas.setCursor(x, y); canvas.print(ch);
+        canvas.setTextColor(CL_WHITE, CL_BLACK);
+      } else {
+        canvas.setCursor(x, y); canvas.print(ch);
+      }
+    }
+    // Cursor sitting at end-of-row (past last char): draw a block caret.
+    if (r == cr && cc == len) {
+      int x = 4 + len * 6;
+      if (x <= 4 + NOTE_COLS * 6) canvas.fillRect(x, y, 6, 8, CL_DGREY);
+    }
+  }
+
+  // Footer: cursor position + key hints (kept short to fit).
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(2, 127);
+  canvas.printf("Fn+;./ move  Fn+s save  ` exit  ln%d/%d", cr + 1, nrows);
+}
+
+void App::keyNoteEdit(char c, bool enter, bool back) {
+  // Exit to the browser (`` ` `` -- not a typeable text char, so it needs no Fn).
+  // Auto-save unsaved changes so work is never lost: a named note is written
+  // silently; an unnamed note with content prompts for a name first; an empty
+  // unnamed note just exits.
+  if (c == '`') {
+    if (noteDirty && noteName.length() > 0) {
+      noteSave();
+    } else if (noteDirty && noteName.length() == 0 && noteBuf.length() > 0) {
+      editTarget = 710; editTitle = "Name to save (or ` to discard)"; editBuf = "";
+      screen = SCR_EDIT; lastDrawMs = 0; return;
+    }
+    buildNoteList();
+    screen = SCR_NOTES; lastDrawMs = 0;
+    return;
+  }
+
+  // All editor COMMANDS are Fn-modified so every plain key (including s/b/h and the
+  // nav punctuation ; . , /) types literally. Fn+s = save, Fn+,/ = left/right,
+  // Fn+;/. = up/down.
+  if (keyFn) {
+    if (c == 's') {                              // Fn+s: save
+      if (noteName.length() == 0) {              // unnamed new note -> prompt for a name
+        editTarget = 710; editTitle = "Note name"; editBuf = "";
+        screen = SCR_EDIT; lastDrawMs = 0; return;
+      }
+      noteSave();
+      lastDrawMs = 0;
+      return;
+    }
+    NoteVRow rows[128];
+    int nrows = noteWrap(noteBuf, rows, 128);
+    if (c == ',') { if (noteCur > 0) noteCur--; lastDrawMs = 0; return; }            // left
+    if (c == '/') { if (noteCur < (int)noteBuf.length()) noteCur++; lastDrawMs = 0; return; } // right
+    if (c == ';' || c == '.') {                                                     // up / down
+      int r, col; noteLocate(rows, nrows, noteCur, r, col);
+      int tr = r + (c == ';' ? -1 : 1);
+      if (tr >= 0 && tr < nrows) {
+        int rowLen = rows[tr].end - rows[tr].start;
+        int tc = col > rowLen ? rowLen : col;
+        noteCur = rows[tr].start + tc;
+      }
+      lastDrawMs = 0; return;
+    }
+    // Fn + any other key: ignore (don't insert a character).
+    return;
+  }
+
+  // Backspace: delete the char before the cursor.
+  if (back || c == 8 || c == 127) {
+    if (noteCur > 0) {
+      noteBuf.remove(noteCur - 1, 1);
+      noteCur--;
+      noteDirty = true;
+    }
+    lastDrawMs = 0;
+    return;
+  }
+
+  // Enter: insert a newline at the cursor.
+  if (enter) {
+    if ((int)noteBuf.length() < NOTE_BUF_MAX) {
+      noteBuf = noteBuf.substring(0, noteCur) + "\n" + noteBuf.substring(noteCur);
+      noteCur++;
+      noteDirty = true;
+    } else setStatus("Note full");
+    lastDrawMs = 0;
+    return;
+  }
+
+  // Any printable character: insert at the cursor.
+  if (c >= 32 && c < 127) {
+    if ((int)noteBuf.length() < NOTE_BUF_MAX) {
+      noteBuf = noteBuf.substring(0, noteCur) + String(c) + noteBuf.substring(noteCur);
+      noteCur++;
+      noteDirty = true;
+    } else setStatus("Note full");
+    lastDrawMs = 0;
+  }
+}
+
+
 // Fetch current + WX_FORECAST_DAYS-day forecast for the site. Best-effort: leaves
 // the cache intact on any failure. Streams the (small) JSON to flash, parses it,
 // then rewrites the cache file.
@@ -10020,6 +10497,13 @@ void App::suspendNetServers() {
 // the screen dark. Instead the baseline DRAM footprint is kept low enough (see
 // MAX_SATS / LOG_VIEW_MAX) that the handshake's block is available with the
 // sprite resident. The trampoline + tick hooks below are retained as call sites.
+// Canvas sprite is kept allocated at all times (these are intentionally no-ops).
+// Freeing the ~32 KB sprite to gain a contiguous block proved both unreliable
+// (the freed hole didn't always merge into a usable block) and dangerous (a failed
+// re-create left the screen dark). The two things that needed a big block no longer
+// do: the LoTW gzip now uses stored framing (zero working memory), and TLS fetches
+// fit the contiguous block that exists with the sprite resident. Retained as call
+// sites / for the loop tick in case a future path needs them.
 void App::freeCanvasForTls() {
   // intentionally a no-op: keep the sprite allocated (see note above)
 }
@@ -10041,13 +10525,17 @@ App* App::s_self = nullptr;
 int  App::s_fetchDepth = 0;
 void App::tlsBusyTrampoline(bool busy) {
   if (!s_self) return;
+  // NOTE: this does NOT free the drawing sprite. General fetches (GP, weather,
+  // QRZ, hams.at) keep the sprite resident so the display never goes dark if a
+  // post-fetch restore can't reclaim the block. Only the LoTW upload frees the
+  // sprite, explicitly and locally (see doLotwUpload), because its gzip step needs
+  // a contiguous ~32 KB block that doesn't otherwise exist on this no-PSRAM part.
+  // The listeners stay suspended while s_fetchDepth > 0 (the service*() functions
+  // gate on netFetchActive()) and rebuild themselves once it returns to 0.
   if (busy) {
-    if (s_fetchDepth++ == 0) {
-      s_self->suspendNetServers();
-      s_self->freeCanvasForTls();   // free ~64 KB sprite for the TLS handshake heap
-    }
+    if (s_fetchDepth++ == 0) s_self->suspendNetServers();
   } else if (s_fetchDepth > 0) {
-    if (--s_fetchDepth == 0) s_self->restoreCanvasAfterTls();
+    --s_fetchDepth;
   }
 }
 bool App::netFetchActive() { return s_fetchDepth > 0; }
@@ -10698,6 +11186,7 @@ void App::loop() {
   if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
     auto ks = M5Cardputer.Keyboard.keysState();
     char c = ks.word.empty() ? 0 : ks.word.front();
+    keyFn = ks.fn;          // Fn held? read by the notes editor for cursor moves
     lastInputMs = millis();
     if (screen == SCR_CHARGE) {                // charge mode handles its own keys
       handleKey(c, ks.enter, ks.del);          // (wakes/blanks/exits internally)
@@ -11044,10 +11533,10 @@ void App::takeScreenshot() {
 
 void App::handleKey(char c, bool enter, bool back) {
   // Hidden screenshot hotkey: 'b' saves a BMP of the screen to the SD card.
-  // Skipped during text entry (SCR_EDIT) so it can still be typed normally.
-  if (c == 'b' && screen != SCR_EDIT) { takeScreenshot(); return; }
-  // Help is reachable with 'h' from anywhere except while typing (SCR_EDIT).
-  if (c == 'h' && screen != SCR_EDIT && screen != SCR_HELP) {
+  // Skipped during text entry (SCR_EDIT/note editor) so it can still be typed.
+  if (c == 'b' && screen != SCR_EDIT && screen != SCR_NOTEEDIT) { takeScreenshot(); return; }
+  // Help is reachable with 'h' from anywhere except while typing.
+  if (c == 'h' && screen != SCR_EDIT && screen != SCR_NOTEEDIT && screen != SCR_HELP) {
     helpReturn = screen; helpScroll = 0; screen = SCR_HELP; lastDrawMs = 0; return;
   }
   switch (screen) {
@@ -11085,6 +11574,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_LOG:      keyLog(c, enter, back); break;
     case SCR_LOTW:     keyLotw(c, enter, back); break;
     case SCR_HAMSAT:   keyHamsat(c, enter, back); break;
+    case SCR_NOTES:    keyNotes(c, enter, back); break;
+    case SCR_NOTEEDIT: keyNoteEdit(c, enter, back); break;
     case SCR_LOGENTRY: keyLogEntry(c, enter, back); break;
     case SCR_LOGLIST:  keyLogList(c, enter, back); break;
     case SCR_WORLDMAP: keyWorldMap(c, enter, back); break;
@@ -12753,6 +13244,7 @@ void App::keySettings(char c, bool enter, bool back) {
 
 static Screen editHome(int t) {
   if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
+  if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
   if (t == 250) return SCR_CATMON;      // CAT monitor: raw hex send (cancel/commit)
   if (t == 260) return SCR_TRACK;       // per-satellite operating note
   if (t == 600) return SCR_LOG;         // LoTW SAT_NAME prompt (abort export)
@@ -12841,6 +13333,29 @@ void App::keyEdit(char c, bool enter, bool back) {
         String pass = editBuf;
         screen = SCR_LOTW; lastDrawMs = 0;
         doLotwUpload(pass);
+        return; }
+
+      case 710: {                                   // note name -> create/open editor
+        char nm[NOTE_NAME_MAX];
+        strncpy(nm, editBuf.c_str(), sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
+        if (!Notes::sanitizeName(nm, sizeof(nm))) {
+          setStatus("Bad name"); screen = SCR_NOTES; lastDrawMs = 0; return;
+        }
+        if (noteIsNew && Notes::exists(nm)) {        // don't silently clobber on 'new'
+          setStatus("Name exists - pick another");
+          editTarget = 710; editTitle = "New note name"; editBuf = "";
+          screen = SCR_EDIT; lastDrawMs = 0; return;
+        }
+        noteName = nm;
+        if (noteIsNew) {                             // fresh blank note
+          noteBuf = ""; noteCur = 0; noteTopLine = 0; noteDirty = false;
+          Notes::write(nm, "");                      // create the file now
+          noteIsNew = false;
+          setStatus(String("New note: ") + nm);
+        } else {                                     // naming an existing unnamed buffer
+          noteSave();
+        }
+        screen = SCR_NOTEEDIT; lastDrawMs = 0;
         return; }
 
       // ---- rotctld (network rotator) host / port ----
@@ -13097,6 +13612,7 @@ void App::keyEdit(char c, bool enter, bool back) {
     }
     if (!(editTarget == 600 && editBuf.length() >= 6) &&
         !(editTarget == 260 && (int)editBuf.length() >= NOTE_MAX) &&
+        !(editTarget == 710 && (int)editBuf.length() >= NOTE_NAME_MAX - 1) &&
         !(editTarget == 700 && (int)editBuf.length() >= MSG_TEXT_MAX)) editBuf += c;  // caps
   }
 }
@@ -13586,46 +14102,47 @@ static bool readFile(const char* path, String& out) {
 }
 
 // ---------------------------------------------------------------------------
-// gzip framing: raw DEFLATE (miniz tdefl) wrapped in a 10-byte gzip header and
-// an 8-byte CRC32+ISIZE trailer. Validated against gunzip in docs/proto/lotw/.
-// Streams the deflate output directly to the open file to avoid a second large
-// RAM buffer on the no-PSRAM heap.
+// gzip framing, STORED (uncompressed) DEFLATE blocks. A .tq8 is gzipped ADIF;
+// TQSL compresses it, but a *stored* gzip stream is equally valid and LoTW accepts
+// it. We use stored blocks deliberately: the miniz tdefl_compressor is ~160 KB+
+// (a 32 KB LZ dictionary plus 64 KB m_next/m_hash tables), which cannot be
+// allocated as one contiguous block on the no-PSRAM ESP32-S3 -- that was the
+// "gzip/write failed" / "low memory (gzip)" failure. Stored framing needs ZERO
+// working memory: a 5-byte header per <=64 KB block, no dictionary, no allocation.
+// The upload is a few KB for a typical batch, so the lost compression is moot.
+// Validated against gunzip host-side. CRC32 uses ROM miniz mz_crc32 (a function,
+// no allocation). Streamed directly to the file -- no second RAM buffer.
 // ---------------------------------------------------------------------------
-struct GzSink { File* f; bool err; };
-static mz_bool gzPut(const void* buf, int len, void* user) {
-  GzSink* s = (GzSink*)user;
-  if (s->err) return MZ_FALSE;
-  if (s->f->write((const uint8_t*)buf, len) != (size_t)len) { s->err = true; return MZ_FALSE; }
-  return MZ_TRUE;
-}
-
 static bool gzipToFile(const String& text, const char* path, size_t* outBytes) {
   File f = Store::fs().open(path, "w");
   if (!f) return false;
 
-  // gzip header: magic, method=deflate, flags=0, mtime=0, xfl=0, os=255(unknown).
+  // gzip header: magic, CM=8(deflate), FLG=0, MTIME=0, XFL=0, OS=255(unknown).
   static const uint8_t hdr[10] = {0x1f,0x8b,0x08,0x00,0,0,0,0,0,0xff};
   if (f.write(hdr, sizeof(hdr)) != sizeof(hdr)) { f.close(); return false; }
 
-  // raw DEFLATE (no zlib header) at the default probe depth. The ESP32 ROM miniz
-  // omits tdefl_create_comp_flags_from_zip_params (it's gated behind the zlib API
-  // macros), so we build the flags directly: TDEFL_DEFAULT_MAX_PROBES gives the
-  // standard 128-probe search, and omitting TDEFL_WRITE_ZLIB_HEADER yields raw
-  // deflate -- which is what our manual gzip framing wraps.
-  GzSink sink{&f, false};
-  tdefl_compressor* c = (tdefl_compressor*)malloc(sizeof(tdefl_compressor));
-  if (!c) { f.close(); return false; }
-  mz_uint flags = TDEFL_DEFAULT_MAX_PROBES;   // raw deflate, no zlib header/Adler-32
-  tdefl_init(c, gzPut, &sink, flags);
-  tdefl_status st = tdefl_compress_buffer(c, text.c_str(), text.length(), TDEFL_FINISH);
-  free(c);
-  if (st != TDEFL_STATUS_DONE || sink.err) { f.close(); return false; }
+  // DEFLATE stored blocks. Each: 1 byte (BFINAL|BTYPE=00) + LEN(2,LE) + NLEN(2,LE)
+  // + raw bytes. LEN <= 65535, so split long text across blocks; BFINAL set on the
+  // last. An empty payload still emits one final zero-length block.
+  const uint8_t* data = (const uint8_t*)text.c_str();
+  size_t len = text.length(), off = 0;
+  do {
+    size_t chunk = len - off;
+    if (chunk > 65535) chunk = 65535;
+    uint8_t bfinal = (off + chunk >= len) ? 0x01 : 0x00;   // BFINAL, BTYPE=00 stored
+    if (f.write(&bfinal, 1) != 1) { f.close(); return false; }
+    uint16_t L = (uint16_t)chunk, N = (uint16_t)~L;
+    uint8_t ln[4] = { (uint8_t)(L & 0xff), (uint8_t)(L >> 8),
+                      (uint8_t)(N & 0xff), (uint8_t)(N >> 8) };
+    if (f.write(ln, 4) != 4) { f.close(); return false; }
+    if (chunk && f.write(data + off, chunk) != chunk) { f.close(); return false; }
+    off += chunk;
+  } while (off < len);
 
   // trailer: CRC32 of the uncompressed text, then ISIZE (mod 2^32), little-endian.
-  // mz_crc32 (ROM miniz) is the standard gzip CRC-32 -- using it avoids the
-  // bit-convention ambiguity of esp_rom_crc32_le and needs no extra dependency.
-  uint32_t crc = (uint32_t)mz_crc32(MZ_CRC32_INIT, (const uint8_t*)text.c_str(), text.length());
-  uint32_t isize = (uint32_t)text.length();
+  // mz_crc32 (ROM miniz) is the standard gzip CRC-32 and allocates nothing.
+  uint32_t crc = (uint32_t)mz_crc32(MZ_CRC32_INIT, data, len);
+  uint32_t isize = (uint32_t)len;
   uint8_t tr[8] = {
     (uint8_t)(crc), (uint8_t)(crc>>8), (uint8_t)(crc>>16), (uint8_t)(crc>>24),
     (uint8_t)(isize), (uint8_t)(isize>>8), (uint8_t)(isize>>16), (uint8_t)(isize>>24)
@@ -13734,7 +14251,7 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   if (err.length()) return false;
   if (signedN == 0) { err = "no QSOs to sign"; return false; }
 
-  // --- gzip to the staged .tq8 file ---
+  // --- gzip (stored/uncompressed framing -> zero working memory) to the .tq8 ---
   if (!gzipToFile(text, LOTW_TQ8_OUT, gzippedBytes)) { err = "gzip/write failed"; return false; }
   return true;
 }
@@ -13832,8 +14349,8 @@ bool App::exportAdif() {
 void App::drawLog() {
   header("Log");
   canvas.setTextSize(1);
-  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF", "Voice Memos", "Sign & upload to LoTW" };
-  for (int i = 0; i < 5; ++i) {
+  const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF", "Voice Memos", "Sign & upload to LoTW", "Notes" };
+  for (int i = 0; i < 6; ++i) {
     int y = 26 + i*14;
     if (i == logMenuSel) { canvas.fillRect(0, y-2, 240, 13, CL_SELBG);
                            canvas.setTextColor(CL_BLACK, CL_SELBG); }
@@ -13841,14 +14358,14 @@ void App::drawLog() {
     canvas.setCursor(6, y); canvas.print(items[i]);
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 26 + 5*14 + 6);
+  canvas.setCursor(6, 26 + 6*14 + 4);
   canvas.printf("%d logged  (qso_log.csv)", qsoCount());
   footer("; / . move  ENT  ` back");
 }
 
 void App::keyLog(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
-  const int N = 5;
+  const int N = 6;
   if (isUp(c))   logMenuSel = (logMenuSel + N - 1) % N;
   if (isDown(c)) logMenuSel = (logMenuSel + 1) % N;
   if (enter) {
@@ -13857,7 +14374,8 @@ void App::keyLog(char c, bool enter, bool back) {
     else if (logMenuSel == 2) beginAdifExport();
     else if (logMenuSel == 3) { buildMemoList(); memoSel = 0; memoScroll = 0; memoConfirmDel = false;
            screen = SCR_MEMOS; lastDrawMs = 0; }
-    else { lotwEnter(); }
+    else if (logMenuSel == 4) { lotwEnter(); }
+    else { notesEnter(); }
   }
 }
 
@@ -13962,10 +14480,10 @@ void App::doLotwUpload(const String& keyPass) {
   st.state = cfg.lotwState;
   st.cnty  = cfg.lotwCnty;
 
-  // Signing assembles the whole .tq8 text in RAM (~600 B/QSO) plus the cert/key
-  // PEM and mbedTLS contexts, then the upload needs a large contiguous block for
-  // the TLS handshake. The heap log here helps confirm there's room on the bench;
-  // the batch is capped (CAP) to keep the .tq8 text within budget on the no-PSRAM S3.
+  // Sign and stage the .tq8, then POST it. The gzip step uses stored (uncompressed)
+  // framing so it needs no working memory, and the TLS upload fits the same
+  // contiguous block the other HTTPS fetches use -- so the drawing sprite stays
+  // resident throughout and the screen keeps updating normally.
   lotwStatus = "Signing " + String(n) + " QSOs..."; draw();
   Serial.printf("[lotw] signing %d QSOs (heap free %u, largest %u)\n",
                 n, (unsigned)ESP.getFreeHeap(),
@@ -14301,6 +14819,8 @@ void App::draw() {
     case SCR_LOG:      drawLog(); break;
     case SCR_LOTW:     drawLotw(); break;
     case SCR_HAMSAT:   drawHamsat(); break;
+    case SCR_NOTES:    drawNotes(); break;
+    case SCR_NOTEEDIT: drawNoteEdit(); break;
     case SCR_LOGENTRY: drawLogEntry(); break;
     case SCR_LOGLIST:  drawLogList(); break;
     case SCR_WORLDMAP: drawWorldMap(); break;

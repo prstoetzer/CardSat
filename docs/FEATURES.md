@@ -176,6 +176,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   one, or record a **new standalone memo** (`n`, not tied to a satellite) on the spot.
   SD-card only; recording needs an **ESP-IDF 5.4.x** build on the ADV (see
   [MANUAL.md](../MANUAL.md)).
+- **Notes.** A free-form, multi-page **text editor** on the **Log** menu for sked
+  details, grids you still need, antenna settings, or any operating reminder. Each
+  note is a plain `.txt` file under `/CardSat/notes/` (on the SD card if fitted,
+  otherwise internal flash, so it works with or without a card), so you can also read
+  or edit them on a computer. The browser lists notes newest-first with the last-saved
+  date/time; the editor is full multi-line with a cursor moved by the **Fn** modifier
+  (**Fn+`,`/`/`** left/right, **Fn+`;`/`.`** up/down, **Fn+`s`** save), leaving
+  `;` `.` `,` `/` free to type as punctuation. Notes can be up to 4 KB each.
 - **IR pass beacon** (optional, off by default) — on each AOS-alarm event CardSat can
   also blink the Cardputer's **built-in IR LED** with a distinct flash count per event
   (T-60/T-30/T-10/AOS/TCA/LOS), a 38 kHz carrier any common IR receiver decodes, so you

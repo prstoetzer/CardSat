@@ -12,7 +12,7 @@
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/version.h>   // MBEDTLS_VERSION_MAJOR for the SHA-1 API guard
 
-#include <miniz.h>           // ESP32 ROM miniz: tdefl_* raw DEFLATE + mz_crc32
+#include <miniz.h>           // ESP32 ROM miniz: mz_crc32 (gzip CRC-32; no allocation)
 
 // ---------------------------------------------------------------------------
 // ADIF field emitters. The OUTER record uses spaced fields (<NAME:len>val<sp>);
@@ -146,46 +146,47 @@ static bool readFile(const char* path, String& out) {
 }
 
 // ---------------------------------------------------------------------------
-// gzip framing: raw DEFLATE (miniz tdefl) wrapped in a 10-byte gzip header and
-// an 8-byte CRC32+ISIZE trailer. Validated against gunzip in docs/proto/lotw/.
-// Streams the deflate output directly to the open file to avoid a second large
-// RAM buffer on the no-PSRAM heap.
+// gzip framing, STORED (uncompressed) DEFLATE blocks. A .tq8 is gzipped ADIF;
+// TQSL compresses it, but a *stored* gzip stream is equally valid and LoTW accepts
+// it. We use stored blocks deliberately: the miniz tdefl_compressor is ~160 KB+
+// (a 32 KB LZ dictionary plus 64 KB m_next/m_hash tables), which cannot be
+// allocated as one contiguous block on the no-PSRAM ESP32-S3 -- that was the
+// "gzip/write failed" / "low memory (gzip)" failure. Stored framing needs ZERO
+// working memory: a 5-byte header per <=64 KB block, no dictionary, no allocation.
+// The upload is a few KB for a typical batch, so the lost compression is moot.
+// Validated against gunzip host-side. CRC32 uses ROM miniz mz_crc32 (a function,
+// no allocation). Streamed directly to the file -- no second RAM buffer.
 // ---------------------------------------------------------------------------
-struct GzSink { File* f; bool err; };
-static mz_bool gzPut(const void* buf, int len, void* user) {
-  GzSink* s = (GzSink*)user;
-  if (s->err) return MZ_FALSE;
-  if (s->f->write((const uint8_t*)buf, len) != (size_t)len) { s->err = true; return MZ_FALSE; }
-  return MZ_TRUE;
-}
-
 static bool gzipToFile(const String& text, const char* path, size_t* outBytes) {
   File f = Store::fs().open(path, "w");
   if (!f) return false;
 
-  // gzip header: magic, method=deflate, flags=0, mtime=0, xfl=0, os=255(unknown).
+  // gzip header: magic, CM=8(deflate), FLG=0, MTIME=0, XFL=0, OS=255(unknown).
   static const uint8_t hdr[10] = {0x1f,0x8b,0x08,0x00,0,0,0,0,0,0xff};
   if (f.write(hdr, sizeof(hdr)) != sizeof(hdr)) { f.close(); return false; }
 
-  // raw DEFLATE (no zlib header) at the default probe depth. The ESP32 ROM miniz
-  // omits tdefl_create_comp_flags_from_zip_params (it's gated behind the zlib API
-  // macros), so we build the flags directly: TDEFL_DEFAULT_MAX_PROBES gives the
-  // standard 128-probe search, and omitting TDEFL_WRITE_ZLIB_HEADER yields raw
-  // deflate -- which is what our manual gzip framing wraps.
-  GzSink sink{&f, false};
-  tdefl_compressor* c = (tdefl_compressor*)malloc(sizeof(tdefl_compressor));
-  if (!c) { f.close(); return false; }
-  mz_uint flags = TDEFL_DEFAULT_MAX_PROBES;   // raw deflate, no zlib header/Adler-32
-  tdefl_init(c, gzPut, &sink, flags);
-  tdefl_status st = tdefl_compress_buffer(c, text.c_str(), text.length(), TDEFL_FINISH);
-  free(c);
-  if (st != TDEFL_STATUS_DONE || sink.err) { f.close(); return false; }
+  // DEFLATE stored blocks. Each: 1 byte (BFINAL|BTYPE=00) + LEN(2,LE) + NLEN(2,LE)
+  // + raw bytes. LEN <= 65535, so split long text across blocks; BFINAL set on the
+  // last. An empty payload still emits one final zero-length block.
+  const uint8_t* data = (const uint8_t*)text.c_str();
+  size_t len = text.length(), off = 0;
+  do {
+    size_t chunk = len - off;
+    if (chunk > 65535) chunk = 65535;
+    uint8_t bfinal = (off + chunk >= len) ? 0x01 : 0x00;   // BFINAL, BTYPE=00 stored
+    if (f.write(&bfinal, 1) != 1) { f.close(); return false; }
+    uint16_t L = (uint16_t)chunk, N = (uint16_t)~L;
+    uint8_t ln[4] = { (uint8_t)(L & 0xff), (uint8_t)(L >> 8),
+                      (uint8_t)(N & 0xff), (uint8_t)(N >> 8) };
+    if (f.write(ln, 4) != 4) { f.close(); return false; }
+    if (chunk && f.write(data + off, chunk) != chunk) { f.close(); return false; }
+    off += chunk;
+  } while (off < len);
 
   // trailer: CRC32 of the uncompressed text, then ISIZE (mod 2^32), little-endian.
-  // mz_crc32 (ROM miniz) is the standard gzip CRC-32 -- using it avoids the
-  // bit-convention ambiguity of esp_rom_crc32_le and needs no extra dependency.
-  uint32_t crc = (uint32_t)mz_crc32(MZ_CRC32_INIT, (const uint8_t*)text.c_str(), text.length());
-  uint32_t isize = (uint32_t)text.length();
+  // mz_crc32 (ROM miniz) is the standard gzip CRC-32 and allocates nothing.
+  uint32_t crc = (uint32_t)mz_crc32(MZ_CRC32_INIT, data, len);
+  uint32_t isize = (uint32_t)len;
   uint8_t tr[8] = {
     (uint8_t)(crc), (uint8_t)(crc>>8), (uint8_t)(crc>>16), (uint8_t)(crc>>24),
     (uint8_t)(isize), (uint8_t)(isize>>8), (uint8_t)(isize>>16), (uint8_t)(isize>>24)
@@ -294,7 +295,7 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   if (err.length()) return false;
   if (signedN == 0) { err = "no QSOs to sign"; return false; }
 
-  // --- gzip to the staged .tq8 file ---
+  // --- gzip (stored/uncompressed framing -> zero working memory) to the .tq8 ---
   if (!gzipToFile(text, LOTW_TQ8_OUT, gzippedBytes)) { err = "gzip/write failed"; return false; }
   return true;
 }

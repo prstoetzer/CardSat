@@ -319,6 +319,7 @@ CardSat uses the arrow legends printed on the Cardputer keys:
 | **ENTER** | select / confirm |
 | `` ` `` or **DEL** | back / cancel |
 | `{` `}` | page up / page down (lists) |
+| **Fn** + key | a modifier used by the Notes editor for cursor movement and save, so the `;` `.` `,` `/` keys stay typeable as punctuation (see [§8 → Notes](#notes-free-form-text-editor)) |
 | `b` | save a screenshot to the SD card (see §18) |
 
 Other letter keys are screen-specific actions and are shown in the **footer** at
@@ -502,8 +503,9 @@ each; `notes` is the last column, so commas there are fine).
 The **Log** item on the main menu offers **New QSO entry**, **View / edit log**,
 **Export to ADIF** (writes `/CardSat/qso_log.adi`, including `STATION_CALLSIGN`
 from My callsign, for upload to LoTW/eQSL or import into your main logger),
-**Voice Memos** (the on-device voice-memo browser described above), and
-**Sign & upload to LoTW** (see [LoTW upload](#logbook-of-the-world-lotw-direct-upload) below).
+**Voice Memos** (the on-device voice-memo browser described above),
+**Sign & upload to LoTW** (see [LoTW upload](#logbook-of-the-world-lotw-direct-upload) below),
+and **Notes** (a free-form text editor, see [Notes](#notes-free-form-text-editor) below).
 
 LoTW limits the `SAT_NAME` field to six characters and uses its own names, so on
 export CardSat translates each satellite via **`/CardSat/lotw_sats.csv`** (rows of
@@ -573,9 +575,40 @@ LoTW name before uploading.
 **View / edit log** is a scrollable list of recent contacts (`;`/`.` to move).
 Open one with ENTER to correct **any field — including the date, time, satellite
 and frequencies** — then `s` to save, or press `x` twice to delete it; changes are
-written straight back to the CSV. The most recent **120**
+written straight back to the CSV. The most recent **60**
 QSOs are available on the device — the complete log always lives in
 `/CardSat/qso_log.csv`, which you can also read or edit on a computer.
+
+### Notes (free-form text editor)
+
+**Notes** on the **Log** menu is a simple multi-page text editor for jotting things
+down on the device — a sked frequency, a grid you still need, antenna settings, a
+reminder for the next pass. Each note is a plain `.txt` file stored under
+**`/CardSat/notes/`** (on the microSD card if one is fitted, otherwise in internal
+flash, so notes work with or without a card), which means you can also read or edit
+them on a computer.
+
+The **browser** lists your notes newest-first, each with the date and time it was
+last saved (UTC, like every other time on the device). Press **`n`** to start a new
+note, **ENTER** to open the highlighted one, and **`d`** then **ENTER** to delete it
+(a confirmation step guards against an accidental press). **`` ` ``** returns to the
+Log menu.
+
+The **editor** is a full multi-line editor: just type, with **ENTER** for a new line
+and the **delete** key for backspace. Because the Cardputer's `;` `.` `,` `/` keys
+are needed as ordinary punctuation in your text, the editor's commands all use the
+**Fn** modifier, so every plain key types literally:
+
+- **Fn + `,`** and **Fn + `/`** move the cursor **left** and **right**.
+- **Fn + `;`** and **Fn + `.`** move the cursor **up** and **down**.
+- **Fn + `s`** **saves** (the first time, you're asked for a name; allowed
+  characters are letters, numbers, spaces, `-` and `_`, capped at 31 characters).
+- **`` ` ``** **exits** to the browser. If you have unsaved changes, a named note is
+  saved automatically; an unnamed note prompts you for a name first (or press
+  **`` ` ``** again at that prompt to discard it).
+
+Notes are limited to 4 KB each, which is several pages of text — ample for operating
+notes.
 
 ### Satellites
 
@@ -3343,7 +3376,7 @@ listed below.
 - **Purpose** — the QSO logging hub.
 - **Reached from** — Home → Log.
 - **Shows** — New QSO entry, View / edit log, Export to ADIF, Voice Memos,
-  Sign & upload to LoTW.
+  Sign & upload to LoTW, Notes.
 - **Keys** — `;`/`.` move; **ENTER** open the selected item; `` ` `` back.
 
 ### Sign & upload to LoTW
@@ -3377,7 +3410,7 @@ listed below.
 
 - **Purpose** — review and correct stored contacts.
 - **Reached from** — Log menu → View / edit log.
-- **Shows** — a scrollable list of the most recent 120 QSOs.
+- **Shows** — a scrollable list of the most recent 60 QSOs.
 - **Keys** — `;`/`.` move; **ENTER** open a record to edit; (within a record)
   `x` twice to delete; `` ` `` back.
 
@@ -3391,6 +3424,28 @@ listed below.
 - **Keys** — `;`/`.` move; **ENTER** play the selected memo (any key stops);
   `n` record a new standalone memo (any key stops & saves); `d` delete (with confirm);
   `r` refresh; `` ` `` back to the Log menu.
+
+### Notes (browser)
+
+- **Purpose** — browse, open, create and delete the plain-text notes stored under
+  `/CardSat/notes/`. Full description in [§8 → Notes](#notes-free-form-text-editor).
+- **Reached from** — Log menu → Notes.
+- **Shows** — your notes newest-first, each with the date and time it was last saved
+  (UTC).
+- **Keys** — `;`/`.` move; **ENTER** open the selected note; `n` new note; `d` then
+  **ENTER** delete (with confirm); `` ` `` back to the Log menu.
+
+### Notes (editor)
+
+- **Purpose** — a full multi-line text editor for one note. Because `;` `.` `,` `/`
+  are typed as punctuation, all editor commands use the **Fn** modifier.
+- **Reached from** — Notes browser → ENTER on a note, or `n` for a new one.
+- **Shows** — the note text with a block cursor; the header shows the note name and a
+  `*` when there are unsaved changes; the footer shows the line number.
+- **Keys** — type normally (**ENTER** = new line, **delete** = backspace);
+  **Fn + `,`/`/`** cursor left/right; **Fn + `;`/`.`** cursor up/down;
+  **Fn + `s`** save (prompts for a name the first time); `` ` `` exit (unsaved work
+  is saved automatically, or you're prompted for a name).
 
 ### World map
 
@@ -3466,9 +3521,11 @@ listed below.
 | **Track · TUNE** | `,`/`/` tune ∓ · `s` step (100/1k/5k) · `x` recenter |
 | **Track · CAL** | `,`/`/` downlink ∓ · `;`/`.` uplink ∓ · `s` step (10/100/1k) · `x` zero |
 | **Polar** | `l` log QSO · `v` voice memo (SD card) · `p`/ENTER/`` ` `` back to track |
-| **Log (menu)** | `;`/`.` select · ENTER → new QSO / browse / export ADIF |
+| **Log (menu)** | `;`/`.` select · ENTER → new QSO / browse / export ADIF / voice memos / LoTW upload / notes |
 | **Log · list** | `;`/`.` scroll · ENTER edit entry · `` ` `` back |
 | **Log · entry** | `;`/`.` field · ENTER edit · `s` save · `x`×2 delete · `` ` `` back |
+| **Notes (browser)** | `;`/`.` select · ENTER open · `n` new · `d`+ENTER delete · `` ` `` back · list shows last-saved date/time (UTC), newest first |
+| **Notes (editor)** | type freely (ENTER = newline, DEL = backspace) · **Fn+`,`/`/`** cursor L/R · **Fn+`;`/`.`** cursor up/down · **Fn+`s`** save (names it the first time) · `` ` `` exit (auto-saves) |
 | **Mutual** | `;`/`.` scroll · `` ` ``/ENTER back to passes |
 | **10-day** | `;`/`.` scroll ∓1 day (forward indefinitely, oldest day off the top; not before today) · `r` recompute · `` ` ``/ENTER back |
 | **Illum** | `,`/`/` scroll ∓1 day (forward indefinitely; not before today) · `r` recompute · `` ` ``/ENTER back |

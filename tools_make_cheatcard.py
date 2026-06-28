@@ -142,13 +142,16 @@ BACK = [
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
   "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
  ("LOG",
-  "Menu: <b>ENTER</b> new QSO / browse / export ADIF / voice memos / LoTW upload &middot; List: <b>;</b>/<b>.</b> scroll, "
+  "Menu: <b>ENTER</b> new QSO / browse / export ADIF / voice memos / LoTW upload / notes &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete"),
  ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; last)",
   "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/, set DXCC/CQ/ITU in Settings) &mdash; see manual §8. <b>u</b> upload &middot; <b>`</b> back"),
  ("VOICE MEMOS (Log &rarr; Voice Memos)",
   "Browse newest-first (date/time/sat/len). <b>ENTER</b> play &middot; <b>n</b> new &middot; <b>d</b> del &middot; <b>r</b> refresh &middot; record via <b>v</b> on Track. SD req'd"),
+ ("NOTES (Log &rarr; Notes)",
+  "Free-form text notes (.txt in /CardSat/notes/, newest-first w/ date/time). Browser: <b>ENTER</b> open &middot; <b>n</b> new &middot; <b>d</b>+ENTER del. "
+  "Editor (commands use <b>Fn</b> so <b>;</b><b>.</b><b>,</b><b>/</b> type): type freely, ENTER=newline, DEL=backspace &middot; <b>Fn+,</b>/<b>Fn+/</b> cursor L/R &middot; <b>Fn+;</b>/<b>Fn+.</b> up/down &middot; <b>Fn+s</b> save &middot; <b>`</b> exit (auto-saves)"),
  ("LORA MESSAGES (Home &rarr; Messages)",
   "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll &middot; <b>r</b> retry &middot; <b>`</b> back. <b>Rx always on</b>: new msgs show an envelope+count badge in the header on any screen, plus a banner (opt-in beep) &mdash; set <b>Msg notify</b> (off/banner/banner+beep) in Settings. Needs RadioLib build. Untested HW"),
  ("UPDATE",

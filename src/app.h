@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -546,6 +546,8 @@ private:
   String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
+  bool     keyFn = false;         // Fn modifier state for the current keypress
+                                  // (read by the notes editor for cursor moves)
   bool     screenAsleep = false;  // backlight blanked for power saving
   bool     lastGpsFix  = false;   // for Location-screen auto-refresh
   int      lastGpsSats = 0;
@@ -851,6 +853,30 @@ private:
   void fetchHamsat();              // download + parse the feed (WiFi)
   int  parseHamsat(const String& xml);  // fill hamsatList[]; returns count
   void hamsatEnter();              // open screen, fetch if WiFi up
+  // ---- Notes: text-file browser (SCR_NOTES) + editor (SCR_NOTEEDIT) ----
+  static const int NOTES_LIST_MAX = 64;   // files listed in the browser
+  static const int NOTE_NAME_MAX  = 32;   // filename length (without path/.txt)
+  static const int NOTE_BUF_MAX   = 4096; // max note size held/edited in RAM
+  char     noteList[NOTES_LIST_MAX][NOTE_NAME_MAX]; // base names (no dir, no .txt)
+  time_t   noteTime[NOTES_LIST_MAX];                 // each note's last-write time
+  int      noteListN = 0;          // files found
+  int      noteSel = 0;            // browser cursor
+  int      noteScroll = 0;         // browser scroll offset
+  bool     noteConfirmDel = false; // two-step delete confirmation in the browser
+  String   noteBuf;                // editor text buffer (current file contents)
+  String   noteName;               // base name of the file being edited
+  int      noteCur = 0;            // cursor index into noteBuf (0..length)
+  int      noteTopLine = 0;        // first visible wrapped line (editor scroll)
+  bool     noteDirty = false;      // unsaved changes
+  bool     noteIsNew = false;      // editing a not-yet-saved new file
+  void drawNotes();    void keyNotes(char c, bool enter, bool back);
+  void drawNoteEdit(); void keyNoteEdit(char c, bool enter, bool back);
+  void notesEnter();               // build the list + open the browser
+  void buildNoteList();            // (re)enumerate /CardSat/notes/*.txt
+  bool noteLoad(const char* base); // read a file into noteBuf
+  bool noteSave();                 // write noteBuf to its file
+  void noteEditNew();              // start a blank new note
+  void noteEditOpen(const char* base); // open an existing note in the editor
   void buildGrids(time_t a, time_t b);
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);

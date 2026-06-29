@@ -565,25 +565,34 @@ credential to the card.
    `-nodes` and setting a password; CardSat will ask for it at upload time.)
 3. Copy **`lotw_key.pem`** and **`lotw_cert.pem`** into the **`/CardSat/`** folder
    on the microSD card.
-4. In **Settings → Station / display**, set **LoTW DXCC** (your DXCC entity number —
-   `291` for the USA), **LoTW CQ zone**, and **LoTW ITU zone**. Then set your
-   **primary subdivision** if your entity has one:
-   - **US, Alaska and Hawaii** stations set **LoTW state** (the two-letter
-     abbreviation, e.g. `VA`) — LoTW rejects uploads from those entities without it —
-     and optionally **LoTW county** (entered as `ST,County name`, e.g.
-     `VA,Arlington`), which lets your contacts earn county awards.
-   - **Other entities with subdivisions** (Canada, Russia, Japan, China, Australia,
-     Finland/Åland) use **LoTW subdiv (intl)**: press ENTER on that row and CardSat
-     shows a **picker of the valid subdivisions for your DXCC** (province, oblast,
-     prefecture, province, state, or kunta) — scroll with `;`/`.` and press ENTER to
-     choose. CardSat fills in the correct LoTW field automatically; you don't need to
-     know the code. (Entities with no subdivision show "no subdivisions for this
-     entity" — just leave it blank.)
-   - **LoTW IOTA** is optional and works for any entity: enter your island reference
-     (e.g. `NA-005`) if you're operating from a qualifying island.
+4. In **Settings → Station / display**, set your LoTW station location. The fields
+   form a chain — each one narrows the next:
+   - **LoTW DXCC** — press ENTER to pick your entity from the full DXCC list. The
+     entities that have a subdivision (United States, Canada, Japan, the Russias,
+     China, Australia, Finland/Åland/Market Reef) are grouped at the **top** of the
+     list, marked with a `>`; everything else follows alphabetically. Start typing to
+     filter the list (e.g. "japan" or "unit"). The list is long, so the typeahead is
+     the fast way in.
+   - **LoTW CQ zone** and **LoTW ITU zone** — your zones.
+   - **LoTW (primary)** — the row is labelled with your entity's actual subdivision
+     name: **state** (US), **province** (Canada/China), **oblast** (Russia),
+     **prefecture** (Japan), **state** (Australia), or **kunta** (Finland). Press
+     ENTER to pick from the valid list for your DXCC; type to filter. If your entity
+     has no subdivision the row shows **(n/a)** and you can skip it. (US/AK/HI **must**
+     set a state — LoTW rejects uploads from those entities without one.)
+   - **LoTW (secondary)** — only two entities have a second level: the **United
+     States** (county, which lets your contacts earn county awards) and **Japan**
+     (city/gun/ku). The row is gated by your primary choice — pick the state first and
+     the county list follows; pick the prefecture first and the city list follows.
+     Other entities show **(n/a)**.
+   - **LoTW IOTA** — optional, any entity: enter your island reference (e.g. `NA-005`)
+     if you're operating from a qualifying island.
 
-   Your callsign and grid come from **My callsign** and your location, which CardSat
-   already has.
+   This is the same flow for everyone — the US is just the DXCC "United States" with
+   "state" and "county" as its two levels, exactly like Japan's "prefecture" and
+   "city". Your callsign and grid come from **My callsign** and your location, which
+   CardSat already has. (Inside any picker: `;`/`.` move, ENTER selects, typing
+   filters, and `` ` `` clears the filter or backs out.)
 
 **Uploading:** open **Log → Sign & upload to LoTW**. The screen shows whether the
 card, the key/cert, and the station fields are present, and how many QSOs haven't
@@ -1429,12 +1438,12 @@ same frequency, spreading factor and bandwidth sees every message — there is n
 addressing or routing, which keeps it simple and reliable for a group on an
 outing, a club net, or a SOTA/portable activation.
 
-> **Untested hardware + extra library.** The LoRa radio path is written to the
-> M5Stack Cap LoRa reference and the SX1262 datasheet but has **not** been
-> confirmed on a device, and it needs the **RadioLib** library plus a build with
-> `CARDSAT_HAS_LORA` enabled (see below). Until you've verified two units talk to
-> each other, treat it as experimental. **Know your band's rules** — pick the
-> **LoRa region** preset that matches where you operate (see Settings below):
+> **Untested hardware path.** The LoRa radio path is written to the M5Stack Cap LoRa
+> reference and the SX1262 datasheet but has **not** been confirmed on a device. It is
+> built into the standard binaries (RadioLib is a required build dependency), but until
+> you've verified two units talk to each other, treat it as experimental. **Know your
+> band's rules** — pick the **LoRa region** preset that matches where you operate (see
+> Settings below):
 >
 > - **US (default)** — the **33 cm amateur band (902–928 MHz)**. The US 70 cm band
 >   is held to ~100 kHz occupied bandwidth, which is tight for 125 kHz LoRa, so
@@ -1479,23 +1488,21 @@ when the screen is parked, but off by default so it can't surprise you mid-pass)
 In the Charge / Sleep screen the badge updates silently and no banner or beep
 fires, keeping that mode minimal.
 
-**Enabling the build.** The LoRa code is wrapped so the firmware compiles without
-the radio. To actually use it: install **RadioLib** (Arduino Library Manager →
-search "RadioLib" by Jan Gromes), and define `CARDSAT_HAS_LORA=1` for the build
-(e.g. edit the define at the top of `src/lora.h` / the inlined block in
-`CardSat.ino`). Without that, the Messages screen reports the radio is off.
+**The build.** LoRa is a **standard, always-built feature** — official binaries ship
+with it compiled in (`CARDSAT_HAS_LORA` defaults to `1`), so **RadioLib is a required
+build dependency**: install it via the Arduino Library Manager (search "RadioLib" by
+Jan Gromes) before compiling. The `#if CARDSAT_HAS_LORA` guards remain in the source
+only so the tree still compiles if you deliberately override the define to `0` in your
+own build flags; you should not need to.
 
-> **If the single-file `CardSat.ino` fails to link with `CARDSAT_HAS_LORA=1`**
-> showing `dangerous relocation: l32r: literal target out of range`, that is an
-> Xtensa toolchain limit: the very large single translation unit pushes RadioLib's
-> code out of the reach of the `l32r` instruction's literal pool. CardSat
-> mitigates this by constructing the SX1262 on the heap (a pointer, not a static
-> global) so its destructor/vtable stay out of the sketch's static-init code. If
-> the single-file build still fails to link with LoRa enabled, **build from the
-> modular `src/` folder instead** (open `src/main.cpp` / use the PlatformIO build):
-> there `lora.cpp` is its own small translation unit and the literal-range problem
-> does not arise. The non-LoRa build (`CARDSAT_HAS_LORA=0`, the default) links
-> fine either way.
+> **If the single-file `CardSat.ino` fails to link** showing `dangerous relocation:
+> l32r: literal target out of range`, that is an Xtensa toolchain limit: the very large
+> single translation unit pushes RadioLib's code out of the reach of the `l32r`
+> instruction's literal pool. CardSat mitigates this by constructing the SX1262 on the
+> heap (a pointer, not a static global) so its destructor/vtable stay out of the
+> sketch's static-init code. If the single-file build still fails to link, **build from
+> the modular `src/` folder instead** (use the PlatformIO build): there `lora.cpp` is
+> its own small translation unit and the literal-range problem does not arise.
 
 ### Update
 
@@ -1561,7 +1568,7 @@ on-screen key reference. The notable rows:
 | Brightness | `,`/`/` adjust the active screen brightness in ~6% steps; previews live. Under *Station / display* |
 | Tilt tuning | `,`/`/` or ENTER toggle **accelerometer passband tuning** on/off. Shown as **n/a (no IMU)** on boards without one (only the Cardputer **ADV** has the sensor). When on, roll the device left/right in TUNE mode on a linear bird to move through the passband. Under *Station / display* |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
-| LoTW DXCC / CQ zone / ITU zone / state / county / subdiv / IOTA | ENTER → enter your DXCC entity number (e.g. `291` = USA), CQ zone, and ITU zone. For US/AK/HI, set your 2-letter **state** (required by LoTW for those entities) and optionally **county** (`ST,County`). For other entities with subdivisions (Canada, Russia, Japan, China, Australia, Finland/Åland), use **LoTW subdiv (intl)** — ENTER opens a DXCC-aware picker of the valid province/oblast/prefecture/state/kunta. **LoTW IOTA** (e.g. `NA-005`) is optional for any entity. All feed the **LoTW upload** station location. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
+| LoTW DXCC / CQ zone / ITU zone / primary / secondary / IOTA | A chained set of pickers for the **LoTW upload** station location. **DXCC** opens a full entity list (subdivision-bearing entities grouped at the top, marked `>`; type to filter). **CQ/ITU zone** are typed. **Primary** (labelled state/province/oblast/prefecture/kunta per your DXCC) opens a gated picker — required for US/AK/HI, **(n/a)** for entities without one. **Secondary** is county (US) or city/gun/ku (Japan), gated by the primary; **(n/a)** elsewhere. **IOTA** (e.g. `NA-005`) is optional for any entity. Inside a picker: `;`/`.` move, ENTER selects, typing filters, `` ` `` clears/back. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
 | Cloudlog URL / key / station ID | ENTER → enter your self-hosted **Cloudlog** (or Wavelog) base URL (`https://…` or `http://…`), a **read-write API key**, and the numeric **station profile id** to file QSOs under, for **Log → Upload to Cloudlog**. Under *Station / display*. See [§8 → Cloudlog upload](#cloudlog--wavelog-upload). |
 | QRZ user / QRZ pass | ENTER → enter your QRZ.com username / password for the **QRZ Lookup** screen (requires a QRZ XML-data subscription). Password shown masked. Under *Network / data*. |
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
@@ -3325,8 +3332,9 @@ listed below.
   by callsign) with a status line of frequency / SF / bandwidth / your callsign.
 - **Keys** — `n` write + send a message; `;`/`.` scroll history; `r` retry the
   radio bring-up if it wasn't ready; `` ` `` back to Home.
-- **Notes** — needs LoRa enabled in Settings, your callsign set, the RadioLib
-  library, and a `CARDSAT_HAS_LORA` build; untested hardware path.
+- **Notes** — needs LoRa enabled in Settings and your callsign set; the LoRa radio
+  is built into the standard binaries (RadioLib required at build time). Untested
+  hardware path.
 
 ### GPS sky plot
 

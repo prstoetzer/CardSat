@@ -6,7 +6,38 @@ county), confirmed working in v0.9.36, is unchanged.
 
 ## Logbook of the World
 
-- **New: international primary subdivisions.** LoTW's station location can now carry the
+- **New: unified station-location entry.** The LoTW station location is now a single
+  consistent flow for every entity, replacing the previous hybrid where US stations used
+  text "state/county" rows and everyone else used a separate international picker (which
+  was confusing for US users). Now you pick **DXCC → primary → secondary** as a chain of
+  gated pickers:
+  - **DXCC** is chosen from the full entity list. The entities that actually have a
+    subdivision (US, Canada, Japan, the Russias, China, Australia, Finland/Åland/Market
+    Reef) are grouped at the **top** and marked with a `>`; the rest follow
+    alphabetically. A **typeahead filter** narrows the list as you type — the fast way
+    through 340 entities.
+  - **Primary** is gated by the DXCC and labelled with the real term for that entity —
+    *state* (US), *province* (Canada/China), *oblast* (Russia), *prefecture* (Japan),
+    *state* (Australia), *kunta* (Finland). Entities without a subdivision show *(n/a)*.
+  - **Secondary** is gated by the primary: US **county** (pick the state first) or
+    Japanese **city/gun/ku** (pick the prefecture first). Every other entity shows
+    *(n/a)*.
+  - **IOTA** stays a free-text field for any entity.
+
+  The US is now simply "United States → state → county," structurally identical to
+  Japan's "prefecture → city" — no special cases in the UI.
+
+- **New: full Japanese city/gun/ku data.** Japan now has a complete secondary picker
+  (all 1,720 city/gun/ku entries across the 47 prefectures), gated by prefecture, signed
+  as `JA_CITY_GUN_KU` at the correct sigspec position. The Finnish kunta list is also now
+  complete (all 499 entries).
+
+- The full DXCC list (340 current entities) and all subdivision tables are generated
+  directly from the TrustedQSL (tqsl) 2.8.6 config the LoTW distributes. The US
+  state/county signing path is unchanged and byte-for-byte identical to before — existing
+  configurations keep working with no re-entry.
+
+
   primary subdivision for non-US entities, not just US state/county. Under *Settings →
   Station / display*, the new **LoTW subdiv (intl)** row opens a **DXCC-aware picker**:
   CardSat reads your **LoTW DXCC** entity and shows only the subdivisions valid for it —
@@ -48,6 +79,32 @@ county), confirmed working in v0.9.36, is unchanged.
   the **Update** screen now pulls a fresh activations list right after the orbital-element
   (GP) update, so a single keypress brings both up to date. The GP result message is
   preserved.
+
+## Reliability fixes
+
+- **Fixed: Cloudlog / Wavelog uploads failing with "connection refused."** After the
+  device had done other network activity in a session (e.g. a GP update), a Cloudlog
+  upload could fail with `code=-1` even though every other TLS operation — including the
+  LoTW upload — worked. The cause was the Cloudlog request body being assembled with
+  chained `String` operators, which churns the no-PSRAM heap free-list right before the
+  TLS handshake; the upload is now built in a single pre-sized buffer (the way the LoTW
+  upload already was), which resolves it. The produced JSON is byte-for-byte unchanged.
+  A full writeup is in
+  [docs/design/CLOUDLOG_UPLOAD_POSTMORTEM.md](../design/CLOUDLOG_UPLOAD_POSTMORTEM.md).
+- **Improved: long-session heap stability.** The AMSAT status parse now streams the feed
+  one record at a time instead of loading the whole array, so peak heap stays high
+  through a GP update (previously it briefly dropped to a few KB). This keeps long
+  sessions stable.
+- **New: `R` (reboot + upload) on the Cloudlog screen** — a resilient fallback that
+  reboots, uploads from a clean boot, and returns to the screen. With the body fix above
+  this is rarely needed, but it's there for any heap-state edge case.
+
+## Build
+
+- **LoRa is now built into the standard binaries** (`CARDSAT_HAS_LORA` defaults to `1`).
+  Official builds ship with every feature compiled in, so **RadioLib is now a required
+  build dependency** (Arduino Library Manager, or the PlatformIO `lib_deps`). The LoRa
+  *runtime* path remains untested on hardware — see the manual.
 
 ## Notes
 

@@ -20,9 +20,13 @@
 // ===========================================================================
 #include <Arduino.h>
 
-// Define CARDSAT_HAS_LORA=1 in the build (or here) once RadioLib is installed.
+// LoRa (SX1262 via RadioLib) is a standard, always-built feature: official binaries
+// ship with every feature compiled in. RadioLib is therefore a required build
+// dependency (install via the Arduino Library Manager). The #if guards below are kept
+// only so the tree still compiles if someone deliberately overrides this to 0 in their
+// own build flags; the default is ON.
 #ifndef CARDSAT_HAS_LORA
-#define CARDSAT_HAS_LORA 0
+#define CARDSAT_HAS_LORA 1
 #endif
 
 // Cap LoRa (SX1262) SPI pinmap, confirmed from the M5Stack Cap LoRa pinmap /

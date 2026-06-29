@@ -165,6 +165,7 @@ static constexpr double C_LIGHT = 299792458.0;
 // link. This marker file holds the next satellite index to cache; its presence
 // means a resume is pending and setup() auto-continues. Deleted when done.
 #define FILE_TX_RESUME     "/CardSat/tx_resume.txt"
+#define FILE_CL_RESUME     "/CardSat/cl_resume.txt"  // Cloudlog upload-after-reboot marker
 #define TX_CACHE_BATCH     12                       // sats cached per boot
 
 // ---------------------------------------------------------------------------
@@ -1800,6 +1801,8 @@ struct Settings {
   // prefecture/etc. Stored as the LoTW enum CODE; the field NAME LoTW expects is
   // chosen from the DXCC (CA_PROVINCE, RU_OBLAST, JA_PREFECTURE, ...). "" => omit.
   char     lotwSubdiv[34] = "";
+  char     lotwSubdiv2[10] = ""; // secondary subdivision code gated by primary: JA city/
+                                 // gun/ku (US county still uses lotwCnty). "" => omit.
   char     lotwIota[10] = "";  // IOTA reference (e.g. "NA-005"); any DXCC; "" => omit
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
@@ -1994,19 +1997,368 @@ struct PendingQso {
 #define LOTW_CERT_PEM  "/CardSat/lotw_cert.pem"
 #define LOTW_TQ8_OUT   "/CardSat/lotw_upload.tq8"
 
-// ===== inlined from src/lotw_subdiv.h (LoTW intl subdivision tables) =====
-// AUTO-GENERATED from tqsl-2.8.6 config.xml. LoTW administrative subdivisions.
+// ===== inlined from src/lotw_subdiv.h (LoTW DXCC + subdivision tables) =====
+// AUTO-GENERATED from tqsl-2.8.6 config.xml. LoTW DXCC + administrative subdivisions.
 // Flash-resident const tables (ESP32-S3 maps const to flash; zero heap cost).
 // Do not hand-edit; regenerate from config.xml if LoTW updates its enums.
 //
-// Layout: SubdivEntry{code,name}. Primary subdivisions are one array each;
-// US counties are one array per state, indexed by US_COUNTY_INDEX (state-gated,
-// so only a single state's county list is ever scanned).
+// Model (LoTW dependsOn chain): DXCC -> primary (state/province/oblast/prefecture/
+// province/state/kunta) -> secondary (US county, or JA city/gun/ku). IOTA is free.
+// DXCC list is ordered so entities WITH a primary subdivision come first
+// (alphabetical), then all remaining current entities (alphabetical).
 
 struct SubdivEntry { const char* code; const char* name; };
 
+// ---- DXCC entities; subdivision-bearing first ----
+struct DxccEntry { int id; const char* name; const char* primaryField; const char* secondaryField; };
+static const DxccEntry DXCC_LIST[] = {
+  {5, "ALAND ISLANDS", "FI_KUNTA", ""},
+  {6, "ALASKA", "US_STATE", "US_COUNTY"},
+  {15, "ASIATIC RUSSIA", "RU_OBLAST", ""},
+  {150, "AUSTRALIA", "AU_STATE", ""},
+  {1, "CANADA", "CA_PROVINCE", ""},
+  {318, "CHINA", "CN_PROVINCE", ""},
+  {54, "EUROPEAN RUSSIA", "RU_OBLAST", ""},
+  {224, "FINLAND", "FI_KUNTA", ""},
+  {61, "FRANZ JOSEF LAND", "RU_OBLAST", ""},
+  {110, "HAWAII", "US_STATE", "US_COUNTY"},
+  {339, "JAPAN", "JA_PREFECTURE", "JA_CITY_GUN_KU"},
+  {126, "KALININGRAD", "RU_OBLAST", ""},
+  {167, "MARKET REEF", "FI_KUNTA", ""},
+  {291, "UNITED STATES OF AMERICA", "US_STATE", "US_COUNTY"},
+  {3, "AFGHANISTAN", "", ""},
+  {4, "AGALEGA & SAINT BRANDON ISLANDS", "", ""},
+  {7, "ALBANIA", "", ""},
+  {400, "ALGERIA", "", ""},
+  {9, "AMERICAN SAMOA", "", ""},
+  {10, "AMSTERDAM & SAINT PAUL ISLANDS", "", ""},
+  {11, "ANDAMAN & NICOBAR ISLANDS", "", ""},
+  {203, "ANDORRA", "", ""},
+  {401, "ANGOLA", "", ""},
+  {12, "ANGUILLA", "", ""},
+  {195, "ANNOBON", "", ""},
+  {13, "ANTARCTICA", "", ""},
+  {94, "ANTIGUA & BARBUDA", "", ""},
+  {100, "ARGENTINA", "", ""},
+  {14, "ARMENIA", "", ""},
+  {91, "ARUBA", "", ""},
+  {205, "ASCENSION ISLAND", "", ""},
+  {508, "AUSTRAL ISLANDS", "", ""},
+  {206, "AUSTRIA", "", ""},
+  {17, "AVES ISLAND", "", ""},
+  {18, "AZERBAIJAN", "", ""},
+  {149, "AZORES", "", ""},
+  {60, "BAHAMAS", "", ""},
+  {304, "BAHRAIN", "", ""},
+  {20, "BAKER & HOWLAND ISLANDS", "", ""},
+  {21, "BALEARIC ISLANDS", "", ""},
+  {490, "BANABA ISLAND", "", ""},
+  {305, "BANGLADESH", "", ""},
+  {62, "BARBADOS", "", ""},
+  {27, "BELARUS", "", ""},
+  {209, "BELGIUM", "", ""},
+  {66, "BELIZE", "", ""},
+  {416, "BENIN", "", ""},
+  {64, "BERMUDA", "", ""},
+  {306, "BHUTAN", "", ""},
+  {104, "BOLIVIA", "", ""},
+  {520, "BONAIRE", "", ""},
+  {501, "BOSNIA-HERZEGOVINA", "", ""},
+  {402, "BOTSWANA", "", ""},
+  {24, "BOUVET ISLAND", "", ""},
+  {108, "BRAZIL", "", ""},
+  {65, "BRITISH VIRGIN ISLANDS", "", ""},
+  {345, "BRUNEI", "", ""},
+  {212, "BULGARIA", "", ""},
+  {480, "BURKINA FASO", "", ""},
+  {404, "BURUNDI", "", ""},
+  {312, "CAMBODIA", "", ""},
+  {406, "CAMEROON", "", ""},
+  {29, "CANARY ISLANDS", "", ""},
+  {409, "CAPE VERDE", "", ""},
+  {69, "CAYMAN ISLANDS", "", ""},
+  {408, "CENTRAL AFRICAN REPUBLIC", "", ""},
+  {31, "CENTRAL KIRIBATI", "", ""},
+  {32, "CEUTA & MELILLA", "", ""},
+  {410, "CHAD", "", ""},
+  {33, "CHAGOS ISLANDS", "", ""},
+  {34, "CHATHAM ISLAND", "", ""},
+  {512, "CHESTERFIELD ISLANDS", "", ""},
+  {112, "CHILE", "", ""},
+  {35, "CHRISTMAS ISLAND", "", ""},
+  {36, "CLIPPERTON ISLAND", "", ""},
+  {38, "COCOS (KEELING) ISLANDS", "", ""},
+  {37, "COCOS ISLAND", "", ""},
+  {116, "COLOMBIA", "", ""},
+  {411, "COMOROS", "", ""},
+  {489, "CONWAY REEF", "", ""},
+  {214, "CORSICA", "", ""},
+  {308, "COSTA RICA", "", ""},
+  {428, "COTE D&apos;IVOIRE", "", ""},
+  {40, "CRETE", "", ""},
+  {497, "CROATIA", "", ""},
+  {41, "CROZET ISLAND", "", ""},
+  {70, "CUBA", "", ""},
+  {517, "CURACAO", "", ""},
+  {215, "CYPRUS", "", ""},
+  {503, "CZECH REPUBLIC", "", ""},
+  {414, "DEMOCRATIC REPUBLIC OF THE CONGO", "", ""},
+  {221, "DENMARK", "", ""},
+  {43, "DESECHEO ISLAND", "", ""},
+  {382, "DJIBOUTI", "", ""},
+  {45, "DODECANESE", "", ""},
+  {95, "DOMINICA", "", ""},
+  {72, "DOMINICAN REPUBLIC", "", ""},
+  {344, "DPRK (NORTH KOREA)", "", ""},
+  {513, "DUCIE ISLAND", "", ""},
+  {46, "EAST MALAYSIA", "", ""},
+  {47, "EASTER ISLAND", "", ""},
+  {48, "EASTERN KIRIBATI", "", ""},
+  {120, "ECUADOR", "", ""},
+  {478, "EGYPT", "", ""},
+  {74, "EL SALVADOR", "", ""},
+  {223, "ENGLAND", "", ""},
+  {49, "EQUATORIAL GUINEA", "", ""},
+  {51, "ERITREA", "", ""},
+  {52, "ESTONIA", "", ""},
+  {53, "ETHIOPIA", "", ""},
+  {141, "FALKLAND ISLANDS", "", ""},
+  {222, "FAROE ISLANDS", "", ""},
+  {230, "FEDERAL REPUBLIC OF GERMANY", "", ""},
+  {56, "FERNANDO DE NORONHA", "", ""},
+  {176, "FIJI ISLANDS", "", ""},
+  {227, "FRANCE", "", ""},
+  {63, "FRENCH GUIANA", "", ""},
+  {175, "FRENCH POLYNESIA", "", ""},
+  {420, "GABON", "", ""},
+  {71, "GALAPAGOS ISLANDS", "", ""},
+  {75, "GEORGIA", "", ""},
+  {424, "GHANA", "", ""},
+  {233, "GIBRALTAR", "", ""},
+  {99, "GLORIOSO ISLAND", "", ""},
+  {236, "GREECE", "", ""},
+  {237, "GREENLAND", "", ""},
+  {77, "GRENADA", "", ""},
+  {79, "GUADELOUPE", "", ""},
+  {103, "GUAM", "", ""},
+  {105, "GUANTANAMO BAY", "", ""},
+  {76, "GUATEMALA", "", ""},
+  {106, "GUERNSEY", "", ""},
+  {107, "GUINEA", "", ""},
+  {109, "GUINEA-BISSAU", "", ""},
+  {129, "GUYANA", "", ""},
+  {78, "HAITI", "", ""},
+  {111, "HEARD ISLAND", "", ""},
+  {80, "HONDURAS", "", ""},
+  {321, "HONG KONG", "", ""},
+  {239, "HUNGARY", "", ""},
+  {242, "ICELAND", "", ""},
+  {324, "INDIA", "", ""},
+  {327, "INDONESIA", "", ""},
+  {330, "IRAN", "", ""},
+  {333, "IRAQ", "", ""},
+  {245, "IRELAND", "", ""},
+  {114, "ISLE OF MAN", "", ""},
+  {336, "ISRAEL", "", ""},
+  {248, "ITALY", "", ""},
+  {117, "ITU HQ", "", ""},
+  {82, "JAMAICA", "", ""},
+  {118, "JAN MAYEN", "", ""},
+  {122, "JERSEY", "", ""},
+  {123, "JOHNSTON ISLAND", "", ""},
+  {342, "JORDAN", "", ""},
+  {124, "JUAN DE NOVA, EUROPA", "", ""},
+  {125, "JUAN FERNANDEZ ISLAND", "", ""},
+  {130, "KAZAKHSTAN", "", ""},
+  {430, "KENYA", "", ""},
+  {131, "KERGUELEN ISLAND", "", ""},
+  {133, "KERMADEC ISLAND", "", ""},
+  {468, "KINGDOM OF ESWATINI", "", ""},
+  {138, "KURE ISLAND", "", ""},
+  {348, "KUWAIT", "", ""},
+  {135, "KYRGYZSTAN", "", ""},
+  {142, "LAKSHADWEEP ISLANDS", "", ""},
+  {143, "LAOS", "", ""},
+  {145, "LATVIA", "", ""},
+  {354, "LEBANON", "", ""},
+  {432, "LESOTHO", "", ""},
+  {434, "LIBERIA", "", ""},
+  {436, "LIBYA", "", ""},
+  {251, "LIECHTENSTEIN", "", ""},
+  {146, "LITHUANIA", "", ""},
+  {147, "LORD HOWE ISLAND", "", ""},
+  {254, "LUXEMBOURG", "", ""},
+  {152, "MACAO", "", ""},
+  {153, "MACQUARIE ISLAND", "", ""},
+  {438, "MADAGASCAR", "", ""},
+  {256, "MADEIRA ISLANDS", "", ""},
+  {440, "MALAWI", "", ""},
+  {159, "MALDIVES", "", ""},
+  {442, "MALI", "", ""},
+  {161, "MALPELO ISLAND", "", ""},
+  {257, "MALTA", "", ""},
+  {166, "MARIANA ISLANDS", "", ""},
+  {509, "MARQUESAS ISLANDS", "", ""},
+  {168, "MARSHALL ISLANDS", "", ""},
+  {84, "MARTINIQUE", "", ""},
+  {444, "MAURITANIA", "", ""},
+  {165, "MAURITIUS ISLAND", "", ""},
+  {169, "MAYOTTE ISLAND", "", ""},
+  {171, "MELLISH REEF", "", ""},
+  {50, "MEXICO", "", ""},
+  {173, "MICRONESIA", "", ""},
+  {174, "MIDWAY ISLAND", "", ""},
+  {177, "MINAMI TORISHIMA", "", ""},
+  {179, "MOLDOVA", "", ""},
+  {260, "MONACO", "", ""},
+  {363, "MONGOLIA", "", ""},
+  {514, "MONTENEGRO", "", ""},
+  {96, "MONTSERRAT", "", ""},
+  {446, "MOROCCO", "", ""},
+  {180, "MOUNT ATHOS", "", ""},
+  {181, "MOZAMBIQUE", "", ""},
+  {309, "MYANMAR", "", ""},
+  {464, "NAMIBIA", "", ""},
+  {157, "NAURU", "", ""},
+  {182, "NAVASSA ISLAND", "", ""},
+  {369, "NEPAL", "", ""},
+  {263, "NETHERLANDS", "", ""},
+  {162, "NEW CALEDONIA", "", ""},
+  {170, "NEW ZEALAND", "", ""},
+  {16, "NEW ZEALAND SUBANTARCTIC ISLANDS", "", ""},
+  {86, "NICARAGUA", "", ""},
+  {187, "NIGER", "", ""},
+  {450, "NIGERIA", "", ""},
+  {188, "NIUE", "", ""},
+  {189, "NORFOLK ISLAND", "", ""},
+  {191, "NORTH COOK ISLANDS", "", ""},
+  {502, "NORTH MACEDONIA", "", ""},
+  {265, "NORTHERN IRELAND", "", ""},
+  {266, "NORWAY", "", ""},
+  {192, "OGASAWARA", "", ""},
+  {370, "OMAN", "", ""},
+  {372, "PAKISTAN", "", ""},
+  {22, "PALAU", "", ""},
+  {510, "PALESTINE", "", ""},
+  {197, "PALMYRA & JARVIS ISLANDS", "", ""},
+  {88, "PANAMA", "", ""},
+  {163, "PAPUA NEW GUINEA", "", ""},
+  {132, "PARAGUAY", "", ""},
+  {136, "PERU", "", ""},
+  {199, "PETER 1 ISLAND", "", ""},
+  {375, "PHILIPPINES", "", ""},
+  {172, "PITCAIRN ISLAND", "", ""},
+  {269, "POLAND", "", ""},
+  {272, "PORTUGAL", "", ""},
+  {505, "PRATAS ISLAND", "", ""},
+  {201, "PRINCE EDWARD & MARION ISLANDS", "", ""},
+  {202, "PUERTO RICO", "", ""},
+  {376, "QATAR", "", ""},
+  {137, "REPUBLIC OF KOREA", "", ""},
+  {522, "REPUBLIC OF KOSOVO", "", ""},
+  {462, "REPUBLIC OF SOUTH AFRICA", "", ""},
+  {521, "REPUBLIC OF SOUTH SUDAN", "", ""},
+  {412, "REPUBLIC OF THE CONGO", "", ""},
+  {453, "REUNION ISLAND", "", ""},
+  {204, "REVILLAGIGEDO", "", ""},
+  {207, "RODRIGUEZ ISLAND", "", ""},
+  {275, "ROMANIA", "", ""},
+  {460, "ROTUMA", "", ""},
+  {454, "RWANDA", "", ""},
+  {519, "SABA & SAINT EUSTATIUS", "", ""},
+  {211, "SABLE ISLAND", "", ""},
+  {516, "SAINT BARTHELEMY", "", ""},
+  {250, "SAINT HELENA", "", ""},
+  {249, "SAINT KITTS & NEVIS", "", ""},
+  {97, "SAINT LUCIA", "", ""},
+  {213, "SAINT MARTIN", "", ""},
+  {252, "SAINT PAUL ISLAND", "", ""},
+  {253, "SAINT PETER AND PAUL ROCKS", "", ""},
+  {277, "SAINT PIERRE & MIQUELON", "", ""},
+  {98, "SAINT VINCENT", "", ""},
+  {190, "SAMOA", "", ""},
+  {216, "SAN ANDRES ISLAND", "", ""},
+  {217, "SAN FELIX ISLAND", "", ""},
+  {278, "SAN MARINO", "", ""},
+  {219, "SAO TOME & PRINCIPE", "", ""},
+  {225, "SARDINIA", "", ""},
+  {378, "SAUDI ARABIA", "", ""},
+  {506, "SCARBOROUGH REEF", "", ""},
+  {279, "SCOTLAND", "", ""},
+  {456, "SENEGAL", "", ""},
+  {296, "SERBIA", "", ""},
+  {379, "SEYCHELLES ISLANDS", "", ""},
+  {458, "SIERRA LEONE", "", ""},
+  {381, "SINGAPORE", "", ""},
+  {518, "SINT MAARTEN", "", ""},
+  {504, "SLOVAK REPUBLIC", "", ""},
+  {499, "SLOVENIA", "", ""},
+  {185, "SOLOMON ISLANDS", "", ""},
+  {232, "SOMALIA", "", ""},
+  {234, "SOUTH COOK ISLANDS", "", ""},
+  {235, "SOUTH GEORGIA ISLAND", "", ""},
+  {238, "SOUTH ORKNEY ISLANDS", "", ""},
+  {240, "SOUTH SANDWICH ISLANDS", "", ""},
+  {241, "SOUTH SHETLAND ISLANDS", "", ""},
+  {246, "SOVEREIGN MILITARY ORDER OF MALTA", "", ""},
+  {281, "SPAIN", "", ""},
+  {247, "SPRATLY ISLANDS", "", ""},
+  {315, "SRI LANKA", "", ""},
+  {466, "SUDAN", "", ""},
+  {140, "SURINAME", "", ""},
+  {259, "SVALBARD", "", ""},
+  {515, "SWAINS ISLAND", "", ""},
+  {284, "SWEDEN", "", ""},
+  {287, "SWITZERLAND", "", ""},
+  {384, "SYRIA", "", ""},
+  {386, "TAIWAN", "", ""},
+  {262, "TAJIKISTAN", "", ""},
+  {470, "TANZANIA", "", ""},
+  {507, "TEMOTU PROVINCE", "", ""},
+  {387, "THAILAND", "", ""},
+  {422, "THE GAMBIA", "", ""},
+  {511, "TIMOR - LESTE", "", ""},
+  {483, "TOGO", "", ""},
+  {270, "TOKELAU ISLANDS", "", ""},
+  {160, "TONGA", "", ""},
+  {273, "TRINDADE & MARTIM VAZ ISLANDS", "", ""},
+  {90, "TRINIDAD & TOBAGO", "", ""},
+  {274, "TRISTAN DA CUNHA & GOUGH ISLANDS", "", ""},
+  {276, "TROMELIN ISLAND", "", ""},
+  {474, "TUNISIA", "", ""},
+  {390, "TURKEY", "", ""},
+  {280, "TURKMENISTAN", "", ""},
+  {89, "TURKS & CAICOS ISLANDS", "", ""},
+  {282, "TUVALU", "", ""},
+  {283, "U K BASES ON CYPRUS", "", ""},
+  {286, "UGANDA", "", ""},
+  {288, "UKRAINE", "", ""},
+  {391, "UNITED ARAB EMIRATES", "", ""},
+  {289, "UNITED NATIONS HQ", "", ""},
+  {144, "URUGUAY", "", ""},
+  {285, "US VIRGIN ISLANDS", "", ""},
+  {292, "UZBEKISTAN", "", ""},
+  {158, "VANUATU", "", ""},
+  {295, "VATICAN CITY", "", ""},
+  {148, "VENEZUELA", "", ""},
+  {293, "VIET NAM", "", ""},
+  {297, "WAKE ISLAND", "", ""},
+  {294, "WALES", "", ""},
+  {298, "WALLIS & FUTUNA ISLANDS", "", ""},
+  {299, "WEST MALAYSIA", "", ""},
+  {301, "WESTERN KIRIBATI", "", ""},
+  {302, "WESTERN SAHARA", "", ""},
+  {303, "WILLIS ISLAND", "", ""},
+  {492, "YEMEN", "", ""},
+  {482, "ZAMBIA", "", ""},
+  {452, "ZIMBABWE", "", ""},
+};
+static const int DXCC_LIST_N = 340;
+static const int DXCC_SUBDIV_COUNT = 14;  // first N entities have a primary subdivision
+
+// ---- Primary subdivision tables ----
 static const SubdivEntry SUB_US_STATE[] = {
-  {"AL","Alabama"},{"AZ","Arizona"},{"AR","Arkansas"},{"CA","California"},{"CO","Colorado"},
+  {"HI","Hawaii"},{"AL","Alabama"},{"AZ","Arizona"},{"AR","Arkansas"},{"CA","California"},{"CO","Colorado"},
   {"CT","Connecticut"},{"DE","Delaware"},{"DC","District of Columbia"},{"FL","Florida"},{"GA","Georgia"},
   {"ID","Idaho"},{"IL","Illinois"},{"IN","Indiana"},{"IA","Iowa"},{"KS","Kansas"},{"KY","Kentucky"},
   {"LA","Louisiana"},{"ME","Maine"},{"MD","Maryland"},{"MA","Massachusetts"},{"MI","Michigan"},
@@ -2015,7 +2367,7 @@ static const SubdivEntry SUB_US_STATE[] = {
   {"NC","North Carolina"},{"ND","North Dakota"},{"OH","Ohio"},{"OK","Oklahoma"},{"OR","Oregon"},
   {"PA","Pennsylvania"},{"RI","Rhode Island"},{"SC","South Carolina"},{"SD","South Dakota"},
   {"TN","Tennessee"},{"TX","Texas"},{"UT","Utah"},{"VT","Vermont"},{"VA","Virginia"},{"WA","Washington"},
-  {"WV","West Virginia"},{"WI","Wisconsin"},{"WY","Wyoming"},{"AK","Alaska"},{"HI","Hawaii"},
+  {"WV","West Virginia"},{"WI","Wisconsin"},{"WY","Wyoming"},{"AK","Alaska"},
 };
 static const int SUB_US_STATE_N = 51;
 
@@ -2126,13 +2478,122 @@ static const SubdivEntry SUB_AU_STATE[] = {
 static const int SUB_AU_STATE_N = 8;
 
 static const SubdivEntry SUB_FI_KUNTA[] = {
-  {"6","Hammarland"},{"1","Brändö"},{"2","Eckerö"},{"3","Finström"},{"4","Föglö"},{"5","Geta"},
-  {"6","Hammarland"},{"7","Jomala"},{"8","Kumlinge"},{"9","Kökar"},{"10","Lemland"},{"11","Lumparland"},
-  {"12","Maarianhamina (Mariehamn)"},{"13","Saltvik"},{"14","Sottunga"},{"15","Sund"},{"16","Vårdö"},
-  {"51","Märket Reef"},
+  {"6","Hammarland"},{"100","Somero"},{"101","Ahlainen"},{"102","Alastaro"},{"103","Askainen (Villnäs)"},
+  {"104","Aura"},{"105","Dragsfjärd"},{"106","Eura"},{"107","Eurajoki"},{"108","Halikko"},
+  {"109","Harjavalta"},{"110","Honkajoki"},{"111","Houtskari (Houtskär)"},{"112","Huittinen"},
+  {"113","Hämeenkyrö"},{"114","Ikaalinen"},{"115","Iniö"},{"116","Jämijärvi"},
+  {"117","Kaarina (St. Karins)"},{"118","Kalanti"},{"119","Kankaanpää"},{"120","Karinainen"},
+  {"121","Karjala"},{"122","Karvia"},{"123","Äetsä (Keikyä)"},{"124","Kemiönsaari (Kemiö)"},
+  {"125","Kihniö"},{"126","Kiikala"},{"127","Kiikka"},{"128","Kiikoinen"},{"129","Kisko"},
+  {"130","Kiukainen"},{"131","Kodisjoki"},{"132","Kokemäki (Kumo)"},{"133","Korppoo (Korpo)"},
+  {"134","Koski tl"},{"135","Kullaa"},{"136","Kustavi (Gustavs)"},{"137","Kuusjoki"},
+  {"138","Köyliö (Kjulo)"},{"139","Laitila"},{"140","Lappi"},{"141","Lavia"},{"142","Lemu"},{"143","Lieto"},
+  {"144","Loimaa"},{"145","Loimaan kunta (Loimaan mlk)"},{"146","Lokalahti"},{"147","Luvia"},
+  {"148","Marttila"},{"149","Masku"},{"150","Mellilä"},{"151","Merikarvia"},{"152","Merimasku"},
+  {"153","Metsämaa"},{"154","Mietoinen"},{"155","Mouhijärvi"},{"156","Muurla"},{"157","Mynämäki"},
+  {"158","Naantali (Nådendal)"},{"159","Nakkila"},{"160","Nauvo (Nagu)"},{"161","Noormarkku (Norrmark)"},
+  {"162","Nousiainen"},{"163","Oripää"},{"164","Paimio (Permar)"},{"165","Parainen (Pargas)"},
+  {"166","Parkano"},{"167","Perniö (Bjärnå)"},{"168","Pertteli"},{"169","Piikkiö (Pikis)"},
+  {"170","Pomarkku (Påmark)"},{"171","Pori (Björneborg)"},{"172","Punkalaidun"},{"173","Pyhäranta"},
+  {"174","Pöytyä"},{"175","Raisio (Reso)"},{"176","Rauma (Raumo)"},{"177","Rauman mlk (Raumo lk)"},
+  {"178","Rusko"},{"179","Rymättylä (Rimito)"},{"180","Salo"},{"181","Sauvo"},{"182","Siikainen"},
+  {"183","Suodenniemi"},{"184","Suomusjärvi"},{"185","Säkylä"},{"186","Särkisalo"},{"187","Taivassalo"},
+  {"188","Tarvasjoki"},{"189","Turku (Åbo)"},{"190","Ulvila"},{"191","Uusikaupunki (Nystad)"},
+  {"192","Vahto"},{"193","Sastamala (Vammala)"},{"194","Vampula"},{"195","Vehmaa"},{"196","Velkua"},
+  {"197","Viljakkala"},{"198","Västanfjärd"},{"199","Yläne"},{"201","Artjärvi (Artsjö)"},{"202","Askola"},
+  {"203","Bromarv"},{"204","Espoo (Esbo)"},{"205","Hanko (Hangö)"},{"206","Helsinki (Helsingfors)"},
+  {"207","Hyvinkää (Hyvinge)"},{"208","Inkoo (Ingå)"},{"209","Järvenpää"},{"210","Karjaa (Karis)"},
+  {"211","Karjalohja (Karislojo)"},{"212","Karkkila"},{"213","Kauniainen (Grankulla)"},
+  {"214","Kerava (Kervo)"},{"215","Kirkkonummi (Kyrkslätt)"},{"216","Lapinjärvi (Lappträsk)"},
+  {"217","Liljendal"},{"218","Lohja (Lojo)"},{"219","Lohjan kunta (Lohjan mlk)"},{"220","Loviisa (Lovisa)"},
+  {"221","Myrskylä (Mörskom)"},{"222","Mäntsälä"},{"223","Nummi-Pusula (Nummi)"},{"224","Nurmijärvi"},
+  {"225","Orimattila"},{"226","Pernaja (Perna)"},{"227","Pohja (Pojo)"},{"228","Pornainen (Borgnäs)"},
+  {"229","Porvoo (Borgå)"},{"230","Porvoon mlk (Borgå lk)"},{"231","Pukkila"},{"232","Pusula"},
+  {"233","Ruotsinpyhtää (Strömfors)"},{"234","Sammatti"},{"235","Sipoo (Sibbo)"},
+  {"236","Siuntio (Sjundeå)"},{"237","Snappertuna"},{"238","Tammisaari (Ekenäs)"},
+  {"239","Tammisaaren mlk (Ekenäs lk)"},{"240","Tenhola (Tenala)"},{"241","Tuusula (Tusby)"},
+  {"242","Vantaa (Vanda)"},{"243","Vihti"},{"244","Raasepori"},{"301","Asikkala"},{"302","Eräjärvi"},
+  {"303","Forssa"},{"304","Hattula"},{"305","Hauho"},{"306","Hausjärvi"},{"307","Hollola"},
+  {"308","Humppila"},{"309","Hämeenlinna (Tavastehus)"},{"310","Janakkala"},{"311","Jokioinen"},
+  {"312","Juupajoki"},{"313","Kalvola"},{"314","Kangasala"},{"315","Hämeenkoski (Koski hl)"},
+  {"316","Kuhmalahti"},{"317","Kuorevesi"},{"318","Kuru"},{"319","Kylmäkoski"},{"320","Kärkölä"},
+  {"321","Lahti"},{"322","Lammi"},{"323","Lempäälä"},{"324","Loppi"},{"325","Luopioinen"},
+  {"326","Längelmäki"},{"327","Mänttä"},{"328","Nastola"},{"329","Nokia"},{"330","Orivesi"},
+  {"331","Padasjoki"},{"332","Pirkkala"},{"333","Pälkäne"},{"334","Renko"},{"335","Riihimäki"},
+  {"336","Ruovesi"},{"337","Sahalahti"},{"338","Somerniemi"},{"339","Somero"},{"340","Tammela"},
+  {"341","Tampere (Tammerfors)"},{"342","Toijala"},{"343","Tottijärvi"},{"344","Tuulos"},{"345","Urjala"},
+  {"346","Valkeakoski"},{"347","Vesilahti"},{"348","Viiala"},{"349","Vilppula"},{"350","Virrat"},
+  {"351","Ylöjärvi"},{"352","Ypäjä"},{"353","Hämeenkyrö (Tavastkyro)"},{"354","Ikaalinen"},{"355","Kihniö"},
+  {"356","Mouhijärvi"},{"357","Parkano"},{"358","Viljakkala"},{"359","Akaa"},{"360","Mänttä-Vilppula"},
+  {"401","Anttola"},{"402","Enonkoski"},{"403","Hartola"},{"404","Haukivuori"},{"405","Heinola"},
+  {"406","Heinolan mlk (Heinola lk)"},{"407","Heinävesi"},{"408","Hirvensalmi"},{"409","Joroinen"},
+  {"410","Juva"},{"411","Jäppilä"},{"412","Kangaslampi"},{"413","Kangasniemi"},{"414","Kerimäki"},
+  {"415","Mikkeli (St. Michel)"},{"416","Mikkelin mlk (St. Michel&apos;s lk)"},{"417","Mäntyharju"},
+  {"418","Pertunmaa"},{"419","Pieksämäki"},{"420","Pieksänmaa (Pieksämäen mlk)"},{"421","Punkaharju"},
+  {"422","Puumala"},{"423","Rantasalmi"},{"424","Ristiina"},{"425","Savonlinna (Nyslott)"},
+  {"426","Savonranta"},{"427","Sulkava"},{"428","Sysmä"},{"429","Virtasalmi"},{"501","Anjala"},
+  {"502","Elimäki"},{"503","Hamina (Fredrikshamn)"},{"504","Iitti"},{"505","Imatra"},{"506","Jaala"},
+  {"507","Joutseno"},{"508","Karhula"},{"509","Kotka"},{"510","Kouvola"},{"511","Kuusankoski"},
+  {"512","Kymi (Kymmene)"},{"513","Lappeenranta (Villmanstrand)"},{"514","Lemi"},{"515","Luumäki"},
+  {"516","Miehikkälä"},{"517","Nuijamaa"},{"518","Parikkala"},{"519","Pyhtää (Pyttis)"},{"520","Rautjärvi"},
+  {"521","Ruokolahti"},{"522","Saari"},{"523","Savitaipale"},{"524","Sippola"},{"525","Suomenniemi"},
+  {"526","Taipalsaari"},{"527","Uudenkaarlepyyn mlk (Nykarleby lk)"},{"528","Valkeala"},
+  {"529","Vehkalahti"},{"530","Virolahti"},{"531","Ylämaa"},{"532","Anjalankoski"},{"601","Alahärmä"},
+  {"602","Alajärvi"},{"603","Alavus (Alavo)"},{"604","Evijärvi"},{"605","Halsua"},{"606","Hankasalmi"},
+  {"607","Himanka"},{"608","Ilmajoki"},{"609","Isojoki (Stora)"},{"610","Isokyrö (Storkyro)"},
+  {"611","Jalasjärvi"},{"612","Joutsa"},{"613","Jurva"},{"614","Jyväskylä"},
+  {"615","Jyväskylän mlk (Jyväskylä lk)"},{"616","Jämsä"},{"617","Jämsänkoski"},
+  {"618","Kaarlela (Karleby)"},{"619","Kannonkoski"},{"620","Kannus"},{"621","Karijoki (Bötom)"},
+  {"622","Karstula"},{"623","Kaskinen (Kasköo)"},{"624","Kauhajoki"},{"625","Kauhava"},
+  {"626","Kaustinen (Kaustby)"},{"627","Keuruu"},{"628","Kinnula"},{"629","Kivijärvi"},
+  {"630","Kokkola (Gamlakarleby)"},{"631","Konginkangas"},{"632","Konnevesi"},{"633","Korpilahti"},
+  {"634","Korsnäs"},{"635","Kortesjärvi"},{"636","Kristiinankaupunki (Kristinestad)"},
+  {"637","Kruunupyy (Kronoby)"},{"638","Kuhmoinen"},{"639","Kuortane"},{"640","Kurikka"},{"641","Kyyjärvi"},
+  {"642","Kälviä"},{"643","Laihia"},{"644","Lappajärvi"},{"645","Lapua (Lappo)"},{"646","Laukaa"},
+  {"647","Lehtimäki"},{"648","Leivonmäki"},{"649","Lestijärvi"},{"650","Lohtaja"},{"651","Luhanka"},
+  {"652","Luoto (Larsmo)"},{"653","Maalahti (Malax)"},{"654","Maksamaa (Maxmo)"},{"655","Multia"},
+  {"656","Mustasaari (Korsholm)"},{"657","Muurame"},{"658","Nurmo"},{"659","Närpiö (Närpes)"},
+  {"660","Oravainen (Gravais)"},{"661","Perho"},{"662","Peräseinäjoki"},{"663","Petäjävesi"},
+  {"664","Pietarsaari (Jakobstad)"},{"665","Pedersöre (Pietarsaaren mlk)"},{"666","Pihtipudas"},
+  {"667","Purmo"},{"668","Pylkönmäki"},{"669","Saarijärvi"},{"670","Seinäjoki"},{"671","Soini"},
+  {"672","Sumiainen"},{"673","Suolahti"},{"674","Säynätsalo"},{"675","Teuva (Östermark)"},
+  {"676","Toholampi"},{"677","Toivakka"},{"678","Töysä"},{"679","Ullava"},{"680","Uurainen"},
+  {"681","Uusikaarlepyy (Nykarleby)"},{"682","Vaasa (Vasa)"},{"683","Veteli (Vetil)"},{"684","Viitasaari"},
+  {"685","Vimpeli (Vindala)"},{"686","Vähäkyrö (Lillkyro)"},{"687","Vöyri (Vörå)"},{"688","Ylihärmä"},
+  {"689","Ylistaro"},{"690","Ähtäri"},{"691","Ähtävä (Esse)"},{"692","Äänekoski"},{"693","Jepua (Jeppo)"},
+  {"694","Munsala"},{"695","Uudenkaarlepyyn mlk"},{"696","Vöyri-Maksamaa (Vörå-Maxmo)"},{"701","Eno"},
+  {"702","Iisalmi"},{"703","Ilomantsi"},{"704","Joensuu"},{"705","Juankoski"},{"706","Juuka"},
+  {"707","Kaavi"},{"708","Karttula"},{"709","Keitele"},{"710","Kesälahti"},{"711","Kiihtelysvaara"},
+  {"712","Kitee"},{"713","Kiuruvesi"},{"714","Kontiolahti"},{"715","Kuopio"},{"716","Lapinlahti"},
+  {"717","Leppävirta"},{"718","Lieksa"},{"719","Liperi"},{"720","Maaninka"},{"721","Nilsiä"},
+  {"722","Nurmes"},{"723","Outokumpu"},{"724","Pielavesi"},{"725","Polvijärvi"},{"726","Pyhäselkä"},
+  {"727","Rautalampi"},{"728","Rautavaara"},{"729","Rääkkylä"},{"730","Siilinjärvi"},{"731","Sonkajärvi"},
+  {"732","Suonenjoki"},{"733","Tervo"},{"734","Tohmajärvi"},{"735","Tuupovaara"},{"736","Tuusniemi"},
+  {"737","Valtimo"},{"738","Varkaus"},{"739","Varpaisjärvi"},{"740","Vehmersalmi"},{"741","Vesanto"},
+  {"742","Vieremä"},{"743","Värtsilä"},{"801","Alavieska"},{"802","Haapajärvi"},{"803","Haapavesi"},
+  {"804","Hailuoto (Karlö)"},{"805","Haukipudas"},{"806","Hyrynsalmi"},{"807","Ii"},{"808","Kajaani"},
+  {"809","Kajaanin mlk (Kajaani lk)"},{"810","Kalajoki"},{"811","Kempele"},{"812","Kestilä"},
+  {"813","Kiiminki"},{"814","Kuhmo"},{"815","Kuivaniemi"},{"816","Kuusamo"},{"817","Kärsämäki"},
+  {"818","Liminka"},{"819","Lumijoki"},{"820","Merijärvi"},{"821","Muhos"},{"822","Nivala"},
+  {"823","Oulainen"},{"824","Oulu (Uleåborg)"},{"825","Oulunsalo"},{"826","Paltamo"},{"827","Pattijoki"},
+  {"828","Piippola"},{"829","Pudasjärvi"},{"830","Pulkkila"},{"831","Puolanka"},{"832","Pyhäjoki"},
+  {"833","Pyhäjärvi"},{"834","Pyhäntä"},{"835","Raahe (Brahestad)"},{"836","Rantsila"},{"837","Reisjärvi"},
+  {"838","Ristijärvi"},{"839","Ruukki"},{"840","Sievi"},{"841","Siikajoki"},{"842","Sotkamo"},
+  {"843","Suomussalmi"},{"844","Taivalkoski"},{"845","Temmes"},{"846","Tyrnävä"},{"847","Utajärvi"},
+  {"848","Vaala"},{"849","Vihanti"},{"850","Vuolijoki"},{"851","Yli-Ii"},{"852","Ylikiiminki"},
+  {"853","Ylivieska"},{"854","Siikalatva"},{"901","Enontekiö"},{"902","Inari (Enare)"},{"903","Kemi"},
+  {"904","Keminmaa (Kemin mlk)"},{"905","Kemijärvi"},{"906","Kemijärven mlk"},{"907","Kittilä"},
+  {"908","Kolari"},{"909","Muonio"},{"910","Pelkosenniemi"},{"911","Pello"},{"912","Posio"},{"913","Ranua"},
+  {"914","Rovaniemi"},{"915","Rovaniemen mlk (Rovaniemi lk)"},{"916","Salla"},{"917","Savukoski"},
+  {"918","Simo"},{"919","Sodankylä"},{"920","Tervola"},{"921","Tornio (Torneå)"},{"922","Utsjoki"},
+  {"923","Ylitornio (Övertorneå)"},{"1","Brändö"},{"2","Eckerö"},{"3","Finström"},{"4","Föglö"},
+  {"5","Geta"},{"6","Hammarland"},{"7","Jomala"},{"8","Kumlinge"},{"9","Kökar"},{"10","Lemland"},
+  {"11","Lumparland"},{"12","Maarianhamina (Mariehamn)"},{"13","Saltvik"},{"14","Sottunga"},{"15","Sund"},
+  {"16","Vårdö"},{"51","Märket Reef"},
 };
-static const int SUB_FI_KUNTA_N = 18;
+static const int SUB_FI_KUNTA_N = 499;
 
+// ---- US counties, one array per state (secondary, gated by US_STATE) ----
 static const SubdivEntry CNTY_AK[] = {
   {"Aleutians East","Aleutians East Borough"},{"Aleutians West","Aleutians West Census Area"},
   {"Anchorage","Anchorage Municipality"},{"Bethel","Bethel Census Area"},
@@ -2152,7 +2613,6 @@ static const SubdivEntry CNTY_AK[] = {
   {"Skagway Hoonah Angoon","Skagway-Hoonah-Angoon Census Area"},
 };
 static const int CNTY_AK_N = 31;
-
 static const SubdivEntry CNTY_AL[] = {
   {"Autauga","Autauga"},{"Baldwin","Baldwin"},{"Barbour","Barbour"},{"Bibb","Bibb"},{"Blount","Blount"},
   {"Bullock","Bullock"},{"Butler","Butler"},{"Calhoun","Calhoun"},{"Chambers","Chambers"},
@@ -2171,7 +2631,6 @@ static const SubdivEntry CNTY_AL[] = {
   {"Washington","Washington"},{"Wilcox","Wilcox"},{"Winston","Winston"},
 };
 static const int CNTY_AL_N = 67;
-
 static const SubdivEntry CNTY_AR[] = {
   {"Arkansas","Arkansas"},{"Ashley","Ashley"},{"Baxter","Baxter"},{"Benton","Benton"},{"Boone","Boone"},
   {"Bradley","Bradley"},{"Calhoun","Calhoun"},{"Carroll","Carroll"},{"Chicot","Chicot"},{"Clark","Clark"},
@@ -2193,7 +2652,6 @@ static const SubdivEntry CNTY_AR[] = {
   {"Yell","Yell"},
 };
 static const int CNTY_AR_N = 75;
-
 static const SubdivEntry CNTY_AZ[] = {
   {"Apache","Apache"},{"Cochise","Cochise"},{"Coconino","Coconino"},{"Gila","Gila"},{"Graham","Graham"},
   {"Greenlee","Greenlee"},{"La Paz","La Paz"},{"Maricopa","Maricopa"},{"Mohave","Mohave"},
@@ -2201,7 +2659,6 @@ static const SubdivEntry CNTY_AZ[] = {
   {"Yuma","Yuma"},
 };
 static const int CNTY_AZ_N = 15;
-
 static const SubdivEntry CNTY_CA[] = {
   {"Alameda","Alameda"},{"Alpine","Alpine"},{"Amador","Amador"},{"Butte","Butte"},{"Calaveras","Calaveras"},
   {"Colusa","Colusa"},{"Contra Costa","Contra Costa"},{"Del Norte","Del Norte"},{"El Dorado","El Dorado"},
@@ -2219,7 +2676,6 @@ static const SubdivEntry CNTY_CA[] = {
   {"Ventura","Ventura"},{"Yolo","Yolo"},{"Yuba","Yuba"},
 };
 static const int CNTY_CA_N = 58;
-
 static const SubdivEntry CNTY_CO[] = {
   {"Adams","Adams"},{"Alamosa","Alamosa"},{"Arapahoe","Arapahoe"},{"Archuleta","Archuleta"},{"Baca","Baca"},
   {"Bent","Bent"},{"Boulder","Boulder"},{"Broomfield","Broomfield"},{"Chaffee","Chaffee"},
@@ -2238,18 +2694,15 @@ static const SubdivEntry CNTY_CO[] = {
   {"Washington","Washington"},{"Weld","Weld"},{"Yuma","Yuma"},
 };
 static const int CNTY_CO_N = 64;
-
 static const SubdivEntry CNTY_CT[] = {
   {"Fairfield","Fairfield"},{"Hartford","Hartford"},{"Litchfield","Litchfield"},{"Middlesex","Middlesex"},
   {"New Haven","New Haven"},{"New London","New London"},{"Tolland","Tolland"},{"Windham","Windham"},
 };
 static const int CNTY_CT_N = 8;
-
 static const SubdivEntry CNTY_DE[] = {
   {"Kent","Kent"},{"New Castle","New Castle"},{"Sussex","Sussex"},
 };
 static const int CNTY_DE_N = 3;
-
 static const SubdivEntry CNTY_FL[] = {
   {"Alachua","Alachua"},{"Baker","Baker"},{"Bay","Bay"},{"Bradford","Bradford"},{"Brevard","Brevard"},
   {"Broward","Broward"},{"Calhoun","Calhoun"},{"Charlotte","Charlotte"},{"Citrus","Citrus"},{"Clay","Clay"},
@@ -2268,7 +2721,6 @@ static const SubdivEntry CNTY_FL[] = {
   {"Wakulla","Wakulla"},{"Walton","Walton"},{"Washington","Washington"},
 };
 static const int CNTY_FL_N = 67;
-
 static const SubdivEntry CNTY_GA[] = {
   {"Appling","Appling"},{"Atkinson","Atkinson"},{"Bacon","Bacon"},{"Baker","Baker"},{"Baldwin","Baldwin"},
   {"Banks","Banks"},{"Barrow","Barrow"},{"Bartow","Bartow"},{"Ben Hill","Ben Hill"},{"Berrien","Berrien"},
@@ -2307,12 +2759,10 @@ static const SubdivEntry CNTY_GA[] = {
   {"Wilkinson","Wilkinson"},{"Worth","Worth"},
 };
 static const int CNTY_GA_N = 159;
-
 static const SubdivEntry CNTY_HI[] = {
   {"Hawaii","Hawaii"},{"Honolulu","Honolulu"},{"Kalawao","Kalawao"},{"Kauai","Kauai"},{"Maui","Maui"},
 };
 static const int CNTY_HI_N = 5;
-
 static const SubdivEntry CNTY_IA[] = {
   {"Adair","Adair"},{"Adams","Adams"},{"Allamakee","Allamakee"},{"Appanoose","Appanoose"},
   {"Audubon","Audubon"},{"Benton","Benton"},{"Black Hawk","Black Hawk"},{"Boone","Boone"},
@@ -2339,7 +2789,6 @@ static const SubdivEntry CNTY_IA[] = {
   {"Worth","Worth"},{"Wright","Wright"},
 };
 static const int CNTY_IA_N = 99;
-
 static const SubdivEntry CNTY_ID[] = {
   {"Ada","Ada"},{"Adams","Adams"},{"Bannock","Bannock"},{"Bear Lake","Bear Lake"},{"Benewah","Benewah"},
   {"Bingham","Bingham"},{"Blaine","Blaine"},{"Boise","Boise"},{"Bonner","Bonner"},
@@ -2353,7 +2802,6 @@ static const SubdivEntry CNTY_ID[] = {
   {"Teton","Teton"},{"Twin Falls","Twin Falls"},{"Valley","Valley"},{"Washington","Washington"},
 };
 static const int CNTY_ID_N = 44;
-
 static const SubdivEntry CNTY_IL[] = {
   {"Adams","Adams"},{"Alexander","Alexander"},{"Bond","Bond"},{"Boone","Boone"},{"Brown","Brown"},
   {"Bureau","Bureau"},{"Calhoun","Calhoun"},{"Carroll","Carroll"},{"Cass","Cass"},{"Champaign","Champaign"},
@@ -2381,7 +2829,6 @@ static const SubdivEntry CNTY_IL[] = {
   {"Woodford","Woodford"},
 };
 static const int CNTY_IL_N = 102;
-
 static const SubdivEntry CNTY_IN[] = {
   {"Adams","Adams"},{"Allen","Allen"},{"Bartholomew","Bartholomew"},{"Benton","Benton"},
   {"Blackford","Blackford"},{"Boone","Boone"},{"Brown","Brown"},{"Carroll","Carroll"},{"Cass","Cass"},
@@ -2405,7 +2852,6 @@ static const SubdivEntry CNTY_IN[] = {
   {"Washington","Washington"},{"Wayne","Wayne"},{"Wells","Wells"},{"White","White"},{"Whitley","Whitley"},
 };
 static const int CNTY_IN_N = 92;
-
 static const SubdivEntry CNTY_KS[] = {
   {"Allen","Allen"},{"Anderson","Anderson"},{"Atchison","Atchison"},{"Barber","Barber"},{"Barton","Barton"},
   {"Bourbon","Bourbon"},{"Brown","Brown"},{"Butler","Butler"},{"Chase","Chase"},{"Chautauqua","Chautauqua"},
@@ -2433,7 +2879,6 @@ static const SubdivEntry CNTY_KS[] = {
   {"Wyandotte","Wyandotte"},
 };
 static const int CNTY_KS_N = 105;
-
 static const SubdivEntry CNTY_KY[] = {
   {"Adair","Adair"},{"Allen","Allen"},{"Anderson","Anderson"},{"Ballard","Ballard"},{"Barren","Barren"},
   {"Bath","Bath"},{"Bell","Bell"},{"Boone","Boone"},{"Bourbon","Bourbon"},{"Boyd","Boyd"},{"Boyle","Boyle"},
@@ -2464,7 +2909,6 @@ static const SubdivEntry CNTY_KY[] = {
   {"Wolfe","Wolfe"},{"Woodford","Woodford"},
 };
 static const int CNTY_KY_N = 120;
-
 static const SubdivEntry CNTY_LA[] = {
   {"Acadia","Acadia"},{"Allen","Allen"},{"Ascension","Ascension"},{"Assumption","Assumption"},
   {"Avoyelles","Avoyelles"},{"Beauregard","Beauregard"},{"Bienville","Bienville"},{"Bossier","Bossier"},
@@ -2487,7 +2931,6 @@ static const SubdivEntry CNTY_LA[] = {
   {"West Feliciana","West Feliciana"},{"Winn","Winn"},
 };
 static const int CNTY_LA_N = 64;
-
 static const SubdivEntry CNTY_MA[] = {
   {"Barnstable","Barnstable"},{"Berkshire","Berkshire"},{"Bristol","Bristol"},{"Dukes","Dukes"},
   {"Essex","Essex"},{"Franklin","Franklin"},{"Hampden","Hampden"},{"Hampshire","Hampshire"},
@@ -2495,7 +2938,6 @@ static const SubdivEntry CNTY_MA[] = {
   {"Suffolk","Suffolk"},{"Worcester","Worcester"},
 };
 static const int CNTY_MA_N = 14;
-
 static const SubdivEntry CNTY_MD[] = {
   {"Allegany","Allegany"},{"Anne Arundel","Anne Arundel"},{"Baltimore","Baltimore"},
   {"Baltimore City","Baltimore City"},{"Calvert","Calvert"},{"Caroline","Caroline"},{"Carroll","Carroll"},
@@ -2506,7 +2948,6 @@ static const SubdivEntry CNTY_MD[] = {
   {"Wicomico","Wicomico"},{"Worcester","Worcester"},
 };
 static const int CNTY_MD_N = 24;
-
 static const SubdivEntry CNTY_ME[] = {
   {"Androscoggin","Androscoggin"},{"Aroostook","Aroostook"},{"Cumberland","Cumberland"},
   {"Franklin","Franklin"},{"Hancock","Hancock"},{"Kennebec","Kennebec"},{"Knox","Knox"},
@@ -2515,7 +2956,6 @@ static const SubdivEntry CNTY_ME[] = {
   {"York","York"},
 };
 static const int CNTY_ME_N = 16;
-
 static const SubdivEntry CNTY_MI[] = {
   {"Alcona","Alcona"},{"Alger","Alger"},{"Allegan","Allegan"},{"Alpena","Alpena"},{"Antrim","Antrim"},
   {"Arenac","Arenac"},{"Baraga","Baraga"},{"Barry","Barry"},{"Bay","Bay"},{"Benzie","Benzie"},
@@ -2539,7 +2979,6 @@ static const SubdivEntry CNTY_MI[] = {
   {"Washtenaw","Washtenaw"},{"Wayne","Wayne"},{"Wexford","Wexford"},
 };
 static const int CNTY_MI_N = 83;
-
 static const SubdivEntry CNTY_MN[] = {
   {"Aitkin","Aitkin"},{"Anoka","Anoka"},{"Becker","Becker"},{"Beltrami","Beltrami"},{"Benton","Benton"},
   {"Big Stone","Big Stone"},{"Blue Earth","Blue Earth"},{"Brown","Brown"},{"Carlton","Carlton"},
@@ -2563,7 +3002,6 @@ static const SubdivEntry CNTY_MN[] = {
   {"Wilkin","Wilkin"},{"Winona","Winona"},{"Wright","Wright"},{"Yellow Medicine","Yellow Medicine"},
 };
 static const int CNTY_MN_N = 87;
-
 static const SubdivEntry CNTY_MO[] = {
   {"Adair","Adair"},{"Andrew","Andrew"},{"Atchison","Atchison"},{"Audrain","Audrain"},{"Barry","Barry"},
   {"Barton","Barton"},{"Bates","Bates"},{"Benton","Benton"},{"Bollinger","Bollinger"},{"Boone","Boone"},
@@ -2592,7 +3030,6 @@ static const SubdivEntry CNTY_MO[] = {
   {"Washington","Washington"},{"Wayne","Wayne"},{"Webster","Webster"},{"Worth","Worth"},{"Wright","Wright"},
 };
 static const int CNTY_MO_N = 115;
-
 static const SubdivEntry CNTY_MS[] = {
   {"Adams","Adams"},{"Alcorn","Alcorn"},{"Amite","Amite"},{"Attala","Attala"},{"Benton","Benton"},
   {"Bolivar","Bolivar"},{"Calhoun","Calhoun"},{"Carroll","Carroll"},{"Chickasaw","Chickasaw"},
@@ -2616,7 +3053,6 @@ static const SubdivEntry CNTY_MS[] = {
   {"Yazoo","Yazoo"},
 };
 static const int CNTY_MS_N = 82;
-
 static const SubdivEntry CNTY_MT[] = {
   {"Beaverhead","Beaverhead"},{"Big Horn","Big Horn"},{"Blaine","Blaine"},{"Broadwater","Broadwater"},
   {"Carbon","Carbon"},{"Carter","Carter"},{"Cascade","Cascade"},{"Chouteau","Chouteau"},{"Custer","Custer"},
@@ -2634,7 +3070,6 @@ static const SubdivEntry CNTY_MT[] = {
   {"Valley","Valley"},{"Wheatland","Wheatland"},{"Wibaux","Wibaux"},{"Yellowstone","Yellowstone"},
 };
 static const int CNTY_MT_N = 56;
-
 static const SubdivEntry CNTY_NC[] = {
   {"Alamance","Alamance"},{"Alexander","Alexander"},{"Alleghany","Alleghany"},{"Anson","Anson"},
   {"Ashe","Ashe"},{"Avery","Avery"},{"Beaufort","Beaufort"},{"Bertie","Bertie"},{"Bladen","Bladen"},
@@ -2661,7 +3096,6 @@ static const SubdivEntry CNTY_NC[] = {
   {"Wilson","Wilson"},{"Yadkin","Yadkin"},{"Yancey","Yancey"},
 };
 static const int CNTY_NC_N = 100;
-
 static const SubdivEntry CNTY_ND[] = {
   {"Adams","Adams"},{"Barnes","Barnes"},{"Benson","Benson"},{"Billings","Billings"},
   {"Bottineau","Bottineau"},{"Bowman","Bowman"},{"Burke","Burke"},{"Burleigh","Burleigh"},{"Cass","Cass"},
@@ -2677,7 +3111,6 @@ static const SubdivEntry CNTY_ND[] = {
   {"Wells","Wells"},{"Williams","Williams"},
 };
 static const int CNTY_ND_N = 53;
-
 static const SubdivEntry CNTY_NE[] = {
   {"Adams","Adams"},{"Antelope","Antelope"},{"Arthur","Arthur"},{"Banner","Banner"},{"Blaine","Blaine"},
   {"Boone","Boone"},{"Box Butte","Box Butte"},{"Boyd","Boyd"},{"Brown","Brown"},{"Buffalo","Buffalo"},
@@ -2701,14 +3134,12 @@ static const SubdivEntry CNTY_NE[] = {
   {"Wheeler","Wheeler"},{"York","York"},
 };
 static const int CNTY_NE_N = 93;
-
 static const SubdivEntry CNTY_NH[] = {
   {"Belknap","Belknap"},{"Carroll","Carroll"},{"Cheshire","Cheshire"},{"Coos","Coos"},{"Grafton","Grafton"},
   {"Hillsborough","Hillsborough"},{"Merrimack","Merrimack"},{"Rockingham","Rockingham"},
   {"Strafford","Strafford"},{"Sullivan","Sullivan"},
 };
 static const int CNTY_NH_N = 10;
-
 static const SubdivEntry CNTY_NJ[] = {
   {"Atlantic","Atlantic"},{"Bergen","Bergen"},{"Burlington","Burlington"},{"Camden","Camden"},
   {"Cape May","Cape May"},{"Cumberland","Cumberland"},{"Essex","Essex"},{"Gloucester","Gloucester"},
@@ -2717,7 +3148,6 @@ static const SubdivEntry CNTY_NJ[] = {
   {"Somerset","Somerset"},{"Sussex","Sussex"},{"Union","Union"},{"Warren","Warren"},
 };
 static const int CNTY_NJ_N = 21;
-
 static const SubdivEntry CNTY_NM[] = {
   {"Bernalillo","Bernalillo"},{"Catron","Catron"},{"Chaves","Chaves"},{"Cibola","Cibola"},
   {"Colfax","Colfax"},{"Curry","Curry"},{"De Baca","De Baca"},{"Dona Ana","Doña Ana"},{"Eddy","Eddy"},
@@ -2729,7 +3159,6 @@ static const SubdivEntry CNTY_NM[] = {
   {"Valencia","Valencia"},
 };
 static const int CNTY_NM_N = 33;
-
 static const SubdivEntry CNTY_NV[] = {
   {"Carson City","Carson City"},{"Churchill","Churchill"},{"Clark","Clark"},{"Douglas","Douglas"},
   {"Elko","Elko"},{"Esmeralda","Esmeralda"},{"Eureka","Eureka"},{"Humboldt","Humboldt"},{"Lander","Lander"},
@@ -2737,7 +3166,6 @@ static const SubdivEntry CNTY_NV[] = {
   {"Storey","Storey"},{"Washoe","Washoe"},{"White Pine","White Pine"},
 };
 static const int CNTY_NV_N = 17;
-
 static const SubdivEntry CNTY_NY[] = {
   {"Albany","Albany"},{"Allegany","Allegany"},{"Bronx","Bronx"},{"Broome","Broome"},
   {"Cattaraugus","Cattaraugus"},{"Cayuga","Cayuga"},{"Chautauqua","Chautauqua"},{"Chemung","Chemung"},
@@ -2757,7 +3185,6 @@ static const SubdivEntry CNTY_NY[] = {
   {"Westchester","Westchester"},{"Wyoming","Wyoming"},{"Yates","Yates"},
 };
 static const int CNTY_NY_N = 62;
-
 static const SubdivEntry CNTY_OH[] = {
   {"Adams","Adams"},{"Allen","Allen"},{"Ashland","Ashland"},{"Ashtabula","Ashtabula"},{"Athens","Athens"},
   {"Auglaize","Auglaize"},{"Belmont","Belmont"},{"Brown","Brown"},{"Butler","Butler"},{"Carroll","Carroll"},
@@ -2781,7 +3208,6 @@ static const SubdivEntry CNTY_OH[] = {
   {"Wyandot","Wyandot"},
 };
 static const int CNTY_OH_N = 88;
-
 static const SubdivEntry CNTY_OK[] = {
   {"Adair","Adair"},{"Alfalfa","Alfalfa"},{"Atoka","Atoka"},{"Beaver","Beaver"},{"Beckham","Beckham"},
   {"Blaine","Blaine"},{"Bryan","Bryan"},{"Caddo","Caddo"},{"Canadian","Canadian"},{"Carter","Carter"},
@@ -2803,7 +3229,6 @@ static const SubdivEntry CNTY_OK[] = {
   {"Woodward","Woodward"},
 };
 static const int CNTY_OK_N = 77;
-
 static const SubdivEntry CNTY_OR[] = {
   {"Baker","Baker"},{"Benton","Benton"},{"Clackamas","Clackamas"},{"Clatsop","Clatsop"},
   {"Columbia","Columbia"},{"Coos","Coos"},{"Crook","Crook"},{"Curry","Curry"},{"Deschutes","Deschutes"},
@@ -2816,7 +3241,6 @@ static const SubdivEntry CNTY_OR[] = {
   {"Yamhill","Yamhill"},
 };
 static const int CNTY_OR_N = 36;
-
 static const SubdivEntry CNTY_PA[] = {
   {"Adams","Adams"},{"Allegheny","Allegheny"},{"Armstrong","Armstrong"},{"Beaver","Beaver"},
   {"Bedford","Bedford"},{"Berks","Berks"},{"Blair","Blair"},{"Bradford","Bradford"},{"Bucks","Bucks"},
@@ -2836,13 +3260,11 @@ static const SubdivEntry CNTY_PA[] = {
   {"Wayne","Wayne"},{"Westmoreland","Westmoreland"},{"Wyoming","Wyoming"},{"York","York"},
 };
 static const int CNTY_PA_N = 67;
-
 static const SubdivEntry CNTY_RI[] = {
   {"Bristol","Bristol"},{"Kent","Kent"},{"Newport","Newport"},{"Providence","Providence"},
   {"Washington","Washington"},
 };
 static const int CNTY_RI_N = 5;
-
 static const SubdivEntry CNTY_SC[] = {
   {"Abbeville","Abbeville"},{"Aiken","Aiken"},{"Allendale","Allendale"},{"Anderson","Anderson"},
   {"Bamberg","Bamberg"},{"Barnwell","Barnwell"},{"Beaufort","Beaufort"},{"Berkeley","Berkeley"},
@@ -2858,7 +3280,6 @@ static const SubdivEntry CNTY_SC[] = {
   {"Union","Union"},{"Williamsburg","Williamsburg"},{"York","York"},
 };
 static const int CNTY_SC_N = 46;
-
 static const SubdivEntry CNTY_SD[] = {
   {"Aurora","Aurora"},{"Beadle","Beadle"},{"Bennett","Bennett"},{"Bon Homme","Bon Homme"},
   {"Brookings","Brookings"},{"Brown","Brown"},{"Brule","Brule"},{"Buffalo","Buffalo"},{"Butte","Butte"},
@@ -2877,7 +3298,6 @@ static const SubdivEntry CNTY_SD[] = {
   {"Walworth","Walworth"},{"Yankton","Yankton"},{"Ziebach","Ziebach"},
 };
 static const int CNTY_SD_N = 67;
-
 static const SubdivEntry CNTY_TN[] = {
   {"Anderson","Anderson"},{"Bedford","Bedford"},{"Benton","Benton"},{"Bledsoe","Bledsoe"},
   {"Blount","Blount"},{"Bradley","Bradley"},{"Campbell","Campbell"},{"Cannon","Cannon"},
@@ -2903,7 +3323,6 @@ static const SubdivEntry CNTY_TN[] = {
   {"Williamson","Williamson"},{"Wilson","Wilson"},
 };
 static const int CNTY_TN_N = 95;
-
 static const SubdivEntry CNTY_TX[] = {
   {"Anderson","Anderson"},{"Andrews","Andrews"},{"Angelina","Angelina"},{"Aransas","Aransas"},
   {"Archer","Archer"},{"Armstrong","Armstrong"},{"Atascosa","Atascosa"},{"Austin","Austin"},
@@ -2964,7 +3383,6 @@ static const SubdivEntry CNTY_TX[] = {
   {"Yoakum","Yoakum"},{"Young","Young"},{"Zapata","Zapata"},{"Zavala","Zavala"},
 };
 static const int CNTY_TX_N = 254;
-
 static const SubdivEntry CNTY_UT[] = {
   {"Beaver","Beaver"},{"Box Elder","Box Elder"},{"Cache","Cache"},{"Carbon","Carbon"},{"Daggett","Daggett"},
   {"Davis","Davis"},{"Duchesne","Duchesne"},{"Emery","Emery"},{"Garfield","Garfield"},{"Grand","Grand"},
@@ -2974,7 +3392,6 @@ static const SubdivEntry CNTY_UT[] = {
   {"Wasatch","Wasatch"},{"Washington","Washington"},{"Wayne","Wayne"},{"Weber","Weber"},
 };
 static const int CNTY_UT_N = 29;
-
 static const SubdivEntry CNTY_VA[] = {
   {"Accomack","Accomack"},{"Albemarle","Albemarle"},{"Alexandria City","Alexandria City"},
   {"Alleghany","Alleghany"},{"Amelia","Amelia"},{"Amherst","Amherst"},{"Appomattox","Appomattox"},
@@ -3019,7 +3436,6 @@ static const SubdivEntry CNTY_VA[] = {
   {"Wythe","Wythe"},{"York","York"},
 };
 static const int CNTY_VA_N = 135;
-
 static const SubdivEntry CNTY_VT[] = {
   {"Addison","Addison"},{"Bennington","Bennington"},{"Caledonia","Caledonia"},{"Chittenden","Chittenden"},
   {"Essex","Essex"},{"Franklin","Franklin"},{"Grand Isle","Grand Isle"},{"Lamoille","Lamoille"},
@@ -3027,7 +3443,6 @@ static const SubdivEntry CNTY_VT[] = {
   {"Windham","Windham"},{"Windsor","Windsor"},
 };
 static const int CNTY_VT_N = 14;
-
 static const SubdivEntry CNTY_WA[] = {
   {"Adams","Adams"},{"Asotin","Asotin"},{"Benton","Benton"},{"Chelan","Chelan"},{"Clallam","Clallam"},
   {"Clark","Clark"},{"Columbia","Columbia"},{"Cowlitz","Cowlitz"},{"Douglas","Douglas"},{"Ferry","Ferry"},
@@ -3040,7 +3455,6 @@ static const SubdivEntry CNTY_WA[] = {
   {"Walla Walla","Walla Walla"},{"Whatcom","Whatcom"},{"Whitman","Whitman"},{"Yakima","Yakima"},
 };
 static const int CNTY_WA_N = 39;
-
 static const SubdivEntry CNTY_WI[] = {
   {"Adams","Adams"},{"Ashland","Ashland"},{"Barron","Barron"},{"Bayfield","Bayfield"},{"Brown","Brown"},
   {"Buffalo","Buffalo"},{"Burnett","Burnett"},{"Calumet","Calumet"},{"Chippewa","Chippewa"},
@@ -3061,7 +3475,6 @@ static const SubdivEntry CNTY_WI[] = {
   {"Winnebago","Winnebago"},{"Wood","Wood"},
 };
 static const int CNTY_WI_N = 72;
-
 static const SubdivEntry CNTY_WV[] = {
   {"Barbour","Barbour"},{"Berkeley","Berkeley"},{"Boone","Boone"},{"Braxton","Braxton"},{"Brooke","Brooke"},
   {"Cabell","Cabell"},{"Calhoun","Calhoun"},{"Clay","Clay"},{"Doddridge","Doddridge"},{"Fayette","Fayette"},
@@ -3078,7 +3491,6 @@ static const SubdivEntry CNTY_WV[] = {
   {"Wyoming","Wyoming"},
 };
 static const int CNTY_WV_N = 55;
-
 static const SubdivEntry CNTY_WY[] = {
   {"Albany","Albany"},{"Big Horn","Big Horn"},{"Campbell","Campbell"},{"Carbon","Carbon"},
   {"Converse","Converse"},{"Crook","Crook"},{"Fremont","Fremont"},{"Goshen","Goshen"},
@@ -3143,6 +3555,648 @@ static const CountyIndex US_COUNTY_INDEX[] = {
   {"WY", CNTY_WY, CNTY_WY_N},
 };
 static const int US_COUNTY_INDEX_N = 50;
+
+// ---- Japanese city/gun/ku, one array per prefecture (secondary, gated by JA_PREFECTURE) ----
+static const SubdivEntry JACITY_01[] = {
+  {"0101","Sapporo-shi"},{"0102","Asahikawa-shi"},{"0103","Otaru-shi"},{"0104","Hakodate-shi"},
+  {"0105","Muroran-shi"},{"0106","Kushiro-shi"},{"0107","Obihiro-shi"},{"0108","Kitami-shi"},
+  {"0109","Yubari-shi"},{"0110","Iwamizawa-shi"},{"0111","Abashiri-shi"},{"0112","Rumoi-shi"},
+  {"0113","Tomakomai-shi"},{"0114","Wakkanai-shi"},{"0115","Bibai-shi"},{"0116","Ashibetsu-shi"},
+  {"0117","Ebetsu-shi"},{"0118","Akabira-shi"},{"0119","Mombetsu-shi"},{"0120","Shibetsu-shi"},
+  {"0121","Nayoro-shi"},{"0122","Mikasa-shi"},{"0123","Nemuro-shi"},{"0124","Chitose-shi"},
+  {"0125","Takikawa-shi"},{"0126","Sunagawa-shi"},{"0127","Utashinai-shi"},{"0128","Fukagawa-shi"},
+  {"0129","Furano-shi"},{"0130","Noboribetsu-shi"},{"0131","Eniwa-shi"},{"0132","Kameda-shi"},
+  {"0133","Date-shi"},{"0134","Kitahiroshima-shi"},{"0135","Ishikari-shi"},{"0136","Hokuto-shi"},
+  {"01001","Akan-gun"},{"01002","Ashoro-gun"},{"01003","Atsukeshi-gun"},{"01004","Atsuta-gun"},
+  {"01005","Abashiri-gun"},{"01006","Abuta-gun (Shiribeshi)"},{"01007","Abuta-gun (Iburi)"},
+  {"01008","Ishikari-gun"},{"01009","Isoya-gun"},{"01010","Iwanai-gun"},{"01011","Usu-gun"},
+  {"01012","Utasutsu-gun"},{"01013","Urakawa-gun"},{"01014","Uryu-gun (Sorachi)"},{"01015","Esashi-gun"},
+  {"01016","Okushiri-gun"},{"01017","Oshoro-gun"},{"01018","Kasai-gun"},{"01019","Kato-gun"},
+  {"01020","Kabato-gun"},{"01021","Kamiiso-gun"},{"01022","Kamikawa-gun (Tokachi)"},
+  {"01023","Kamikawa-gun (Kamikawa)"},{"01024","Kameda-gun"},{"01025","Kayabe-gun"},
+  {"01026","Kawakami-gun"},{"01027","Kushiro-gun"},{"01028","Kudo-gun"},{"01029","Sapporo-gun"},
+  {"01030","Samani-gun"},{"01031","Saru-gun"},{"01032","Shizunai-gun"},{"01033","Shibetsu-gun"},
+  {"01034","Shimamaki-gun"},{"01035","Shakotan-gun"},{"01036","Shari-gun"},{"01037","Shiraoi-gun"},
+  {"01038","Shiranuka-gun"},{"01039","Suttsu-gun"},{"01040","Setana-gun"},{"01041","Soya-gun"},
+  {"01042","Sorachi-gun (Sorachi)"},{"01043","Sorachi-gun (Kamikawa)"},{"01044","Chitose-gun"},
+  {"01045","Teshio-gun (Rumoi)"},{"01046","Teshio-gun (Soya)"},{"01047","Tokachi-gun"},
+  {"01048","Tokoro-gun"},{"01049","Tomamae-gun"},{"01050","Nakagawa-gun (Kamikawa)"},
+  {"01051","Nakagawa-gun (Tokachi)"},{"01052","Niikappu-gun"},{"01053","Nishi-gun"},{"01054","Nemuro-gun"},
+  {"01055","Notsuke-gun"},{"01056","Hanasaki-gun"},{"01057","Hamamasu-gun"},{"01058","Bikuni-gun"},
+  {"01059","Hiyama-gun"},{"01060","Hiroo-gun"},{"01061","Futoro-gun"},{"01062","Furuu-gun"},
+  {"01063","Furubira-gun"},{"01064","Horoizumi-gun"},{"01065","Horobetsu-gun"},{"01066","Mashike-gun"},
+  {"01067","Matsumae-gun"},{"01068","Mitsuishi-gun"},{"01069","Menashi-gun"},{"01070","Mombetsu-gun"},
+  {"01071","Yamakoshi-gun"},{"01072","Yubari-gun"},{"01073","Yufutsu-gun (Iburi)"},
+  {"01074","Yufutsu-gun (Kamikawa)"},{"01075","Yoichi-gun"},{"01076","Rishiri-gun"},{"01077","Rumoi-gun"},
+  {"01078","Rebun-gun"},{"01079","Futami-gun"},{"01080","Hidaka-gun"},{"01081","Uryu-gun (Kamikawa)"},
+  {"010101","Chuo-ku"},{"010102","Kita-ku"},{"010103","Higashi-ku"},{"010104","Shiroishi-ku"},
+  {"010105","Toyohira-ku"},{"010106","Minami-ku"},{"010107","Nishi-ku"},{"010108","Atsubetsu-ku"},
+  {"010109","Teine-ku"},{"010110","Kiyota-ku"},
+};
+static const int JACITY_01_N = 127;
+static const SubdivEntry JACITY_02[] = {
+  {"0201","Aomori-shi"},{"0202","Hirosaki-shi"},{"0203","Hachinohe-shi"},{"0204","Kuroishi-shi"},
+  {"0205","Goshogawara-shi"},{"0206","Towada-shi"},{"0207","Misawa-shi"},{"0208","Mutsu-shi"},
+  {"0209","Tsugaru-shi"},{"0210","Hirakawa-shi"},{"02001","Kamikita-gun"},{"02002","Kitatsugaru-gun"},
+  {"02003","Sannohe-gun"},{"02004","Shimokita-gun"},{"02005","Nakatsugaru-gun"},
+  {"02006","Nishitsugaru-gun"},{"02007","Higashitsugaru-gun"},{"02008","Minamitsugaru-gun"},
+};
+static const int JACITY_02_N = 18;
+static const SubdivEntry JACITY_03[] = {
+  {"0301","Morioka-shi"},{"0302","Kamaishi-shi"},{"0303","Miyako-shi"},{"0304","Ichinoseki-shi"},
+  {"0305","Ofunato-shi"},{"0306","Mizusawa-shi"},{"0307","Hanamaki-shi"},{"0308","Kitakami-shi"},
+  {"0309","Kuji-shi"},{"0310","Tono-shi"},{"0311","Rikuzentakata-shi"},{"0312","Esashi-shi"},
+  {"0313","Ninohe-shi"},{"0314","Hachimantai-shi"},{"0315","Oshu-shi"},{"0316","Takizawa-shi"},
+  {"03001","Isawa-gun"},{"03002","Iwate-gun"},{"03003","Esashi-gun"},{"03004","Kamihei-gun"},
+  {"03005","Kunohe-gun"},{"03006","Kesen-gun"},{"03007","Shimohei-gun"},{"03008","Shiwa-gun"},
+  {"03009","Nishiiwai-gun"},{"03010","Ninohe-gun"},{"03011","Hienuki-gun"},{"03012","Higashiiwai-gun"},
+  {"03013","Waga-gun"},
+};
+static const int JACITY_03_N = 29;
+static const SubdivEntry JACITY_04[] = {
+  {"0401","Akita-shi"},{"0402","Noshiro-shi"},{"0403","Odate-shi"},{"0404","Yokote-shi"},
+  {"0405","Honjo-shi"},{"0406","Oga-shi"},{"0407","Yuzawa-shi"},{"0408","Omagari-shi"},
+  {"0409","Kazuno-shi"},{"0410","Yurihonjo-shi"},{"0411","Katagami-shi"},{"0412","Daisen-shi"},
+  {"0413","Kitaakita-shi"},{"0414","Nikaho-shi"},{"0415","Senboku-shi"},{"04001","Ogachi-gun"},
+  {"04002","Kaduno-gun"},{"04003","Kawabe-gun"},{"04004","Kitaakita-gun"},{"04005","Semboku-gun"},
+  {"04006","Hiraka-gun"},{"04007","Minamiakita-gun"},{"04008","Yamamoto-gun"},{"04009","Yuri-gun"},
+};
+static const int JACITY_04_N = 24;
+static const SubdivEntry JACITY_05[] = {
+  {"0501","Yamagata-shi"},{"0502","Yonezawa-shi"},{"0503","Tsuruoka-shi"},{"0504","Sakata-shi"},
+  {"0505","Shinjo-shi"},{"0506","Sagae-shi"},{"0507","Kaminoyama-shi"},{"0508","Murayama-shi"},
+  {"0509","Nagai-shi"},{"0510","Tendo-shi"},{"0511","Higashine-shi"},{"0512","Obanazawa-shi"},
+  {"0513","Nan01yo-shi"},{"05001","Akumi-gun"},{"05002","Kitamurayama-gun"},{"05003","Nishiokitama-gun"},
+  {"05004","Nishitagawa-gun"},{"05005","Nishimurayama-gun"},{"05006","Higashiokitama-gun"},
+  {"05007","Higashitagawa-gun"},{"05008","Higashimurayama-gun"},{"05009","Minamiokitama-gun"},
+  {"05010","Minamimurayama-gun"},{"05011","Mogami-gun"},
+};
+static const int JACITY_05_N = 24;
+static const SubdivEntry JACITY_06[] = {
+  {"0601","Sendai-shi"},{"0602","Ishinomaki-shi"},{"0603","Shiogama-shi"},{"0604","Furukawa-shi"},
+  {"0605","Kesennuma-shi"},{"0606","Shiroishi-shi"},{"0607","Natori-shi"},{"0608","Kakuda-shi"},
+  {"0609","Tagajo-shi"},{"0610","Izumi-shi"},{"0611","Iwanuma-shi"},{"0612","Tome-shi"},
+  {"0613","Kuruhara-shi"},{"0614","Higashimatsushima-shi"},{"0615","Osaki-shi"},{"0616","Tomiya-shi"},
+  {"06001","Igu-gun"},{"06002","Oshika-gun"},{"06003","Katta-gun"},{"06004","Kami-gun"},
+  {"06005","Kurihara-gun"},{"06006","Kurokawa-gun"},{"06007","Shida-gun"},{"06008","Shibata-gun"},
+  {"06009","Tamadukuri-gun"},{"06010","Toda-gun"},{"06011","Tome-gun"},{"06012","Natori-gun"},
+  {"06013","Miyagi-gun"},{"06014","Motoyoshi-gun"},{"06015","Monou-gun"},{"06016","Watari-gun"},
+  {"060101","Aoba-ku"},{"060102","Miyagino-ku"},{"060103","Wakabayashi-ku"},{"060104","Taihaku-ku"},
+  {"060105","Izumi-ku"},
+};
+static const int JACITY_06_N = 37;
+static const SubdivEntry JACITY_07[] = {
+  {"0701","Fukushima-shi"},{"0702","Aizuwakamatsu-shi"},{"0703","Koriyama-shi"},{"0704","Taira-shi"},
+  {"0705","Shirakawa-shi"},{"0706","Haramachi-shi"},{"0707","Sukagawa-shi"},{"0708","Kitakata-shi"},
+  {"0709","Joban-shi"},{"0710","Iwaki-shi"},{"0711","Soma-shi"},{"0712","Uchigo-shi"},{"0713","Nakoso-shi"},
+  {"0714","Nihonmatsu-shi"},{"0715","Iwaki-shi"},{"0716","Wakamatsu-shi"},{"0717","Tamura-shi"},
+  {"0718","Minamisoma-shi"},{"0719","Date-shi"},{"0720","Motomiya-shi"},{"07001","Asaka-gun"},
+  {"07002","Adachi-gun"},{"07003","Ishikawa-gun"},{"07004","Ishiki-gun"},{"07005","Iwase-gun"},
+  {"07006","Onuma-gun"},{"07007","Kawanuma-gun"},{"07008","Kitaaidu-gun"},{"07009","Shinobu-gun"},
+  {"07010","Soma-gun"},{"07011","Date-gun"},{"07012","Tamura-gun"},{"07013","Nishishirakawa-gun"},
+  {"07014","Higashishirakawa-gun"},{"07015","Futaba-gun"},{"07016","Minamiaidu-gun"},{"07017","Yama-gun"},
+};
+static const int JACITY_07_N = 37;
+static const SubdivEntry JACITY_08[] = {
+  {"0801","Niigata-shi"},{"0802","Nagaoka-shi"},{"0803","Takada-shi"},{"0804","Sanjo-shi"},
+  {"0805","Kashiwazaki-shi"},{"0806","Shibata-shi"},{"0807","Niitsu-shi"},{"0808","Ojiya-shi"},
+  {"0809","Kamo-shi"},{"0810","Tokamachi-shi"},{"0811","Mitsuke-shi"},{"0812","Murakami-shi"},
+  {"0813","Tsubame-shi"},{"0814","Naoetsu-shi"},{"0815","Tochio-shi"},{"0816","Itoigawa-shi"},
+  {"0817","Arai-shi"},{"0818","Gosen-shi"},{"0819","Ryotsu-shi"},{"0820","Shirone-shi"},
+  {"0821","Toyosaka-shi"},{"0822","Joetsu-shi"},{"0823","Agano-shi"},{"0824","Sado-shi"},
+  {"0825","Uonuma-shi"},{"0826","Minamiuonuma-shi"},{"0827","Myoko-shi"},{"0828","Tainai-shi"},
+  {"08001","Iwafune-gun"},{"08002","Kariwa-gun"},{"08003","Kitauonuma-gun"},{"08004","Kitakambara-gun"},
+  {"08005","Koshi-gun"},{"08006","Sado-gun"},{"08007","Santo-gun"},{"08008","Nakauonuma-gun"},
+  {"08009","Nakakambara-gun"},{"08010","Nakakubiki-gun"},{"08011","Nishikambara-gun"},
+  {"08012","Nishikubiki-gun"},{"08013","Higashikambara-gun"},{"08014","Higashikubiki-gun"},
+  {"08015","Minamiuonuma-gun"},{"08016","Minamikambara-gun"},{"080101","Kita-ku"},{"080102","Higashi-ku"},
+  {"080103","Chuo-ku"},{"080104","Konan-ku"},{"080105","Akiha-ku"},{"080106","Minami-ku"},
+  {"080107","Nishi-ku"},{"080108","Nishikan-ku"},
+};
+static const int JACITY_08_N = 52;
+static const SubdivEntry JACITY_09[] = {
+  {"0901","Nagano-shi"},{"0902","Matsumoto-shi"},{"0903","Ueda-shi"},{"0904","Okaya-shi"},
+  {"0905","Iida-shi"},{"0906","Suwa-shi"},{"0907","Suzaka-shi"},{"0908","Komoro-shi"},{"0909","Ina-shi"},
+  {"0910","Komagane-shi"},{"0911","Nakano-shi"},{"0912","Omachi-shi"},{"0913","Iiyama-shi"},
+  {"0914","Chino-shi"},{"0915","Shiojiri-shi"},{"0916","Shinonoi-shi"},{"0917","Koshoku-shi"},
+  {"0918","Saku-shi"},{"0919","Chikuma-shi"},{"0920","Tomi-shi"},{"0921","Azumino-shi"},
+  {"09001","Kamiina-gun"},{"09002","Kamitakai-gun"},{"09003","Kamiminochi-gun"},{"09004","Kiso-gun"},
+  {"09005","Kitaazumi-gun"},{"09006","Kitasaku-gun"},{"09007","Sarashina-gun"},{"09008","Shimoina-gun"},
+  {"09009","Shimotakai-gun"},{"09010","Shimominochi-gun"},{"09011","Suwa-gun"},{"09012","Chiisagata-gun"},
+  {"09014","Hanishina-gun"},{"09015","Higashichikuma-gun"},{"09016","Minamiazumi-gun"},
+  {"09017","Minamisaku-gun"},
+};
+static const int JACITY_09_N = 37;
+static const SubdivEntry JACITY_10[] = {
+  {"100101","Chiyoda-ku"},{"100102","Chuo-ku"},{"100103","Minato-ku"},{"100104","Shinjuku-ku"},
+  {"100105","Bunkyo-ku"},{"100106","Taito-ku"},{"100107","Sumida-ku"},{"100108","Koto-ku"},
+  {"100109","Shinagawa-ku"},{"100110","Meguro-ku"},{"100111","Ota-ku"},{"100112","Setagaya-ku"},
+  {"100113","Shibuya-ku"},{"100114","Nakano-ku"},{"100115","Suginami-ku"},{"100116","Toshima-ku"},
+  {"100117","Kita-ku"},{"100118","Arakawa-ku"},{"100119","Itabashi-ku"},{"100120","Nerima-ku"},
+  {"100121","Adachi-ku"},{"100122","Katsushika-ku"},{"100123","Edogawa-ku"},{"1001","Tokyo 23-wards"},
+  {"1002","Hachioji-shi"},{"1003","Tachikawa-shi"},{"1004","Musashino-shi"},{"1005","Mitaka-shi"},
+  {"1006","Ome-shi"},{"1007","Fuchu-shi"},{"1008","Akishima-shi"},{"1009","Chofu-shi"},
+  {"1010","Machida-shi"},{"1011","Koganei-shi"},{"1012","Kodaira-shi"},{"1013","Hino-shi"},
+  {"1014","Higashimurayama-shi"},{"1015","Kokubunji-shi"},{"1016","Kunitachi-shi"},{"1017","Hoya-shi"},
+  {"1018","Tanashi-shi"},{"1019","Fussa-shi"},{"1020","Komae-shi"},{"1021","Higashiyamato-shi"},
+  {"1022","Kiyose-shi"},{"1023","Higashikurume-shi"},{"1024","Musashimurayama-shi"},{"1025","Tama-shi"},
+  {"1026","Inagi-shi"},{"1027","Akigawa-shi"},{"1028","Hamura-shi"},{"1029","Akiruno-shi"},
+  {"1030","Nishitokyo-shi"},{"10001","Kitatama-gun"},{"10002","Nishitama-gun"},{"10003","Minamitama-gun"},
+  {"10004","Oshima-gun"},{"10005","Miyake-gun"},{"10006","Hachijo-gun"},{"10007","Ogawasara-gun"},
+};
+static const int JACITY_10_N = 60;
+static const SubdivEntry JACITY_11[] = {
+  {"1101","Yokohama-shi"},{"1102","Yokosuka-shi"},{"1103","Kawasaki-shi"},{"1104","Hiratsuka-shi"},
+  {"1105","Kamakura-shi"},{"1106","Fujisawa-shi"},{"1107","Odawara-shi"},{"1108","Chigasaki-shi"},
+  {"1109","Zushi-shi"},{"1110","Sagamihara-shi"},{"1111","Miura-shi"},{"1112","Hadano-shi"},
+  {"1113","Atsugi-shi"},{"1114","Yamato-shi"},{"1115","Isehara-shi"},{"1116","Ebina-shi"},
+  {"1117","Zama-shi"},{"1118","Minamiashigara-shi"},{"1119","Ayase-shi"},{"11001","Aiko-gun"},
+  {"11002","Ahigarakami-gun"},{"11003","Ashigarashimo-gun"},{"11004","Koza-gun"},{"11005","Tsukui-gun"},
+  {"11006","Naka-gun"},{"11007","Miura-gun"},{"110101","Tsurumi-ku"},{"110102","Kanagawa-ku"},
+  {"110103","Nishi-ku"},{"110104","Naka-ku"},{"110105","Minami-ku"},{"110106","Hodogaya-ku"},
+  {"110107","Isogo-ku"},{"110108","Kanazawa-ku"},{"110109","Kohoku-ku"},{"110110","Totsuka-ku"},
+  {"110111","Konan-ku"},{"110112","Asahi-ku"},{"110113","Midori-ku"},{"110114","Seya-ku"},
+  {"110115","Sakae-ku"},{"110116","Izumi-ku"},{"110117","Aoba-ku"},{"110118","Tsuzuki-ku"},
+  {"110301","Kawasaki-ku"},{"110302","Saiwai-ku"},{"110303","Nakahara-ku"},{"110304","Takatsu-ku"},
+  {"110305","Tama-ku"},{"110306","Miyamae-ku"},{"110307","Asao-ku"},{"111001","Midori-ku"},
+  {"111002","Chuou-ku"},{"111003","Minami-ku"},
+};
+static const int JACITY_11_N = 54;
+static const SubdivEntry JACITY_12[] = {
+  {"1201","Chiba-shi"},{"1202","Choshi-shi"},{"1203","Ichikawa-shi"},{"1204","Funabashi-shi"},
+  {"1205","Tateyama-shi"},{"1206","Kisarazu-shi"},{"1207","Matsudo-shi"},{"1208","Noda-shi"},
+  {"1209","Sawara-shi"},{"1210","Mobara-shi"},{"1211","Narita-shi"},{"1212","Sakura-shi"},
+  {"1213","Togane-shi"},{"1214","Yokaichiba-shi"},{"1215","Asahi-shi"},{"1216","Narashino-shi"},
+  {"1217","Kashiwa-shi"},{"1218","Katsuura-shi"},{"1219","Ichihara-shi"},{"1220","Nagareyama-shi"},
+  {"1221","Yachiyo-shi"},{"1222","Abiko-shi"},{"1223","Kamogawa-shi"},{"1224","Kimitsu-shi"},
+  {"1225","Kamagaya-shi"},{"1226","Futtu-shi"},{"1227","Urayasu-shi"},{"1228","Yotsukaido-shi"},
+  {"1229","Sodegaura-shi"},{"1230","Yachimata-shi"},{"1231","Inzai-shi"},{"1232","Shiroi-shi"},
+  {"1233","Tomisato-shi"},{"1234","Minamiboso-shi"},{"1235","Sosa-shi"},{"1236","Katori-shi"},
+  {"1237","Sanmu-shi"},{"1238","Isumi-shi"},{"1239","Oamishirasato-shi"},{"12001","Awa-gun"},
+  {"12002","Isumi-gun"},{"12003","Ichihara-gun"},{"12004","Inba-gun"},{"12005","Kaijo-gun"},
+  {"12006","Katori-gun"},{"12007","Kimitsu-gun"},{"12008","Sambu-gun"},{"12009","Sosa-gun"},
+  {"12010","Chiba-gun"},{"12011","Chosei-gun"},{"12012","Higashikatsushika-gun"},{"120101","Chuo-ku"},
+  {"120102","Hanamigawa-ku"},{"120103","Inage-ku"},{"120104","Wakaba-ku"},{"120105","Midori-ku"},
+  {"120106","Mihama-ku"},
+};
+static const int JACITY_12_N = 57;
+static const SubdivEntry JACITY_13[] = {
+  {"1301","Urawa-shi"},{"1302","Kawagoe-shi"},{"1303","Kumagaya-shi"},{"1304","Kawaguchi-shi"},
+  {"1305","Omiya-shi"},{"1306","Gyoda-shi"},{"1307","Chichibu-shi"},{"1308","Tokorozawa-shi"},
+  {"1309","Hanno-shi"},{"1310","Kazo-shi"},{"1311","Honjo-shi"},{"1312","Higashimatsuyama-shi"},
+  {"1313","Iwatsuki-shi"},{"1314","Kasukabe-shi"},{"1315","Sayama-shi"},{"1316","Hanyu-shi"},
+  {"1317","Konosu-shi"},{"1318","Fukaya-shi"},{"1319","Ageo-shi"},{"1320","Yono-shi"},{"1321","Soka-shi"},
+  {"1322","Koshigaya-shi"},{"1323","Warabi-shi"},{"1324","Toda-shi"},{"1325","Iruma-shi"},
+  {"1326","Hatogaya-shi"},{"1327","Asaka-shi"},{"1328","Shiki-shi"},{"1329","Wako-shi"},
+  {"1330","Niiza-shi"},{"1331","Okegawa-shi"},{"1332","Kuki-shi"},{"1333","Kitamoto-shi"},
+  {"1334","Yashio-shi"},{"1335","Kamifukuoka-shi"},{"1336","Fujimi-shi"},{"1337","Misato-shi"},
+  {"1338","Hasuda-shi"},{"1339","Sakado-shi"},{"1340","Satte-shi"},{"1341","Tsurugashima-shi"},
+  {"1342","Hidaka-shi"},{"1343","Yoshikawa-shi"},{"1344","Saitama-shi"},{"1345","Fujimino-shi"},
+  {"1346","Shiraoka-shi"},{"13001","Iruma-gun"},{"13002","Osato-gun"},{"13003","Kitaadachi-gun"},
+  {"13004","Kitakatsushika-gun"},{"13005","Kitasaitama-gun"},{"13006","Kodama-gun"},
+  {"13007","Chichibu-gun"},{"13008","Hiki-gun"},{"13009","Minamisaitama-gun"},{"134401","Nishi-ku"},
+  {"134402","Kita-ku"},{"134403","Omiya-ku"},{"134404","Minuma-ku"},{"134405","Chuo-ku"},
+  {"134406","Sakura-ku"},{"134407","Urawa-ku"},{"134408","Minami-ku"},{"134409","Midori-ku"},
+  {"134410","Iwatsuki-ku"},
+};
+static const int JACITY_13_N = 65;
+static const SubdivEntry JACITY_14[] = {
+  {"1401","Mito-shi"},{"1402","Hitachi-shi"},{"1403","Tsuchiura-shi"},{"1404","Koga-shi"},
+  {"1405","Ishioka-shi"},{"1406","Shimodate-shi"},{"1407","Yuki-shi"},{"1408","Ryugasaki-shi"},
+  {"1409","Nakaminato-shi"},{"1410","Shimotsuma-shi"},{"1411","Mitsukaido-shi"},{"1412","Hitachiota-shi"},
+  {"1413","Katsuta-shi"},{"1414","Takahagi-shi"},{"1415","Kitaibaraki-shi"},{"1416","Kasama-shi"},
+  {"1417","Toride-shi"},{"1418","Iwai-shi"},{"1419","Ushiku-shi"},{"1420","Tsukuba-shi"},
+  {"1421","Hitachinaka-shi"},{"1422","Kashima-shi"},{"1423","Itako-shi"},{"1424","Moriya-shi"},
+  {"1425","Hitachiomiya-shi"},{"1426","Naka-shi"},{"1427","Chikusei-shi"},{"1428","Bandou-shi"},
+  {"1429","Inashiki-shi"},{"1430","Kasumigaura-shi"},{"1431","Sakuragawa-shi"},{"1432","Kamisu-shi"},
+  {"1433","Namegata-shi"},{"1434","Hokota-shi"},{"1435","Joso-shi"},{"1436","Tsukubamirai-shi"},
+  {"1437","Omitama-shi"},{"14001","Inashiki-gun"},{"14002","Kashima-gun"},{"14003","Kitasoma-gun"},
+  {"14004","Kuji-gun"},{"14005","Sashima-gun"},{"14006","Taga-gun"},{"14007","Tsukuba-gun"},
+  {"14008","Naka-gun"},{"14009","Namegata-gun"},{"14010","Niihari-gun"},{"14011","Nishiibaraki-gun"},
+  {"14012","Higashiibaraki-gun"},{"14013","Makabe-gun"},{"14014","Yuki-gun"},
+};
+static const int JACITY_14_N = 51;
+static const SubdivEntry JACITY_15[] = {
+  {"1501","Utsunomiya-shi"},{"1502","Ashikaga-shi"},{"1503","Tochigi-shi"},{"1504","Sano-shi"},
+  {"1505","Kanuma-shi"},{"1506","Nikko-shi"},{"1507","Imaichi-shi"},{"1508","Oyama-shi"},
+  {"1509","Mooka-shi"},{"1510","Otawara-shi"},{"1511","Yaita-shi"},{"1512","Kuroiso-shi"},
+  {"1513","Nasushiobara-shi"},{"1514","Sakura-shi"},{"1515","Nasukarasuyama-shi"},{"1516","Shimotsuke-shi"},
+  {"15001","Ashikaga-gun"},{"15002","Aso-gun"},{"15003","Kamitsuga-gun"},{"15004","Kawachi-gun"},
+  {"15005","Shioya-gun"},{"15006","Shimotsuga-gun"},{"15007","Nasu-gun"},{"15008","Haga-gun"},
+};
+static const int JACITY_15_N = 24;
+static const SubdivEntry JACITY_16[] = {
+  {"1601","Maebashi-shi"},{"1602","Takasaki-shi"},{"1603","Kiryu-shi"},{"1604","Isesaki-shi"},
+  {"1605","Ota-shi"},{"1606","Numata-shi"},{"1607","Tatebayashi-shi"},{"1608","Shibukawa-shi"},
+  {"1609","Fujioka-shi"},{"1610","Tomioka-shi"},{"1611","Annaka-shi"},{"1612","Midori-shi"},
+  {"16001","Agatsuma-gun"},{"16002","Usui-gun"},{"16003","Ora-gun"},{"16004","Kanra-gun"},
+  {"16005","Kitagumma-gun"},{"16006","Gumma-gun"},{"16007","Sawa-gun"},{"16008","Seta-gun"},
+  {"16009","Tano-gun"},{"16010","Tone-gun"},{"16011","Nitta-gun"},{"16012","Yamada-gun"},
+};
+static const int JACITY_16_N = 24;
+static const SubdivEntry JACITY_17[] = {
+  {"1701","Kofu-shi"},{"1702","Fujiyoshida-shi"},{"1703","Enzan-shi"},{"1704","Tsuru-shi"},
+  {"1705","Yamanashi-shi"},{"1706","Otsuki-shi"},{"1707","Nirasaki-shi"},{"1708","Minami-Alps"},
+  {"1709","Hokuto-shi"},{"1710","Kai-shi"},{"1711","Fuehuki-shi"},{"1712","Uenohara-shi"},
+  {"1713","Koshu-shi"},{"1714","Chuo-shi"},{"17001","Kitakoma-gun"},{"17002","Kitatsuru-gun"},
+  {"17003","Nakakoma-gun"},{"17004","Nishiyatsushiro-gun"},{"17005","Higashiyatsushiro-gun"},
+  {"17006","Higashiyamanashi-gun"},{"17007","Minamikoma-gun"},{"17008","Minamitsuru-gun"},
+};
+static const int JACITY_17_N = 22;
+static const SubdivEntry JACITY_18[] = {
+  {"1801","Shizuoka-shi"},{"1802","Hamamatsu-shi"},{"1803","Numadu-shi"},{"1804","Shimizu-shi"},
+  {"1805","Atami-shi"},{"1806","Mishima-shi"},{"1807","Fujinomiya-shi"},{"1808","Ito-shi"},
+  {"1809","Shimada-shi"},{"1810","Yoshiwara-shi"},{"1811","Iwata-shi"},{"1812","Yaidu-shi"},
+  {"1813","Fuji-shi"},{"1814","Kakegawa-shi"},{"1815","Fujieda-shi"},{"1816","Gotemba-shi"},
+  {"1817","Fukuroi-shi"},{"1818","Tenryu-shi"},{"1819","Hamakita-shi"},{"1820","Shimoda-shi"},
+  {"1821","Susono-shi"},{"1822","Kosai-shi"},{"1823","Izu-shi"},{"1824","Omaezaki-shi"},
+  {"1825","Kikugawa-shi"},{"1826","Izunokuni-shi"},{"1827","Makinohara-shi"},{"18001","Abe-gun"},
+  {"18002","Inasa-gun"},{"18003","Ihara-gun"},{"18004","Iwata-gun"},{"18005","Ogasa-gun"},
+  {"18006","Kamo-gun"},{"18007","Shida-gun"},{"18008","Shuchi-gun"},{"18009","Sunto-gun"},
+  {"18010","Tagata-gun"},{"18011","Haibara-gun"},{"18012","Hamana-gun"},{"18013","Fuji-gun"},
+  {"180101","Aoi-ku"},{"180102","Suruga-ku"},{"180103","Shimizu-ku"},{"180201","Naka-ku"},
+  {"180202","Higashi-ku"},{"180203","Nishi-ku"},{"180204","Minami-ku"},{"180205","Kita-ku"},
+  {"180206","Hamakita-ku"},{"180207","Tenryu-ku"},{"180208","Chuo-ku"},{"180209","Hamana-ku"},
+};
+static const int JACITY_18_N = 52;
+static const SubdivEntry JACITY_19[] = {
+  {"1901","Gifu-shi"},{"1902","Ogaki-shi"},{"1903","Takayama-shi"},{"1904","Tajimi-shi"},
+  {"1905","Seki-shi"},{"1906","Nakatsugawa-shi"},{"1907","Mino-shi"},{"1908","Mizunami-shi"},
+  {"1909","Hashima-shi"},{"1910","Ena-shi"},{"1911","Minokamo-shi"},{"1912","Toki-shi"},
+  {"1913","Kakamigahara-shi"},{"1914","Kani-shi"},{"1915","Yamagata-shi"},{"1916","Mizuho-shi"},
+  {"1917","Hida-shi"},{"1918","Motosu-shi"},{"1919","Gujo-shi"},{"1920","Gero-shi"},{"1921","Kaizu-shi"},
+  {"19001","Ampachi-gun"},{"19002","Inaba-gun"},{"19003","Ibi-gun"},{"19004","Ena-gun"},{"19005","Ono-gun"},
+  {"19006","Kaizu-gun"},{"19007","Kani-gun"},{"19008","Kamo-gun"},{"19009","Gujo-gun"},{"19010","Toki-gun"},
+  {"19011","Hashima-gun"},{"19012","Fuwa-gun"},{"19013","Mashita-gun"},{"19014","Mugi-gun"},
+  {"19015","Motosu-gun"},{"19016","Yamagata-gun"},{"19017","Yoro-gun"},{"19018","Yoshiki-gun"},
+};
+static const int JACITY_19_N = 39;
+static const SubdivEntry JACITY_20[] = {
+  {"2001","Nagoya-shi"},{"2002","Toyohashi-shi"},{"2003","Okazaki-shi"},{"2004","Ichinomiya-shi"},
+  {"2005","Seto-shi"},{"2006","Handa-shi"},{"2007","Kasugai-shi"},{"2008","Toyokawa-shi"},
+  {"2009","Tsushima-shi"},{"2010","Hekinan-shi"},{"2011","Kariya-shi"},{"2012","Toyota-shi"},
+  {"2013","Anjo-shi"},{"2014","Nishio-shi"},{"2015","Gamagori-shi"},{"2016","Inuyama-shi"},
+  {"2017","Tokoname-shi"},{"2018","Moriyama-shi"},{"2019","Konan-shi"},{"2020","Bisai-shi"},
+  {"2021","Komaki-shi"},{"2022","Inazawa-shi"},{"2023","Shinshiro-shi"},{"2024","Tokai-shi"},
+  {"2025","Obu-shi"},{"2026","Chita-shi"},{"2027","Takahama-shi"},{"2028","Chiryu-shi"},
+  {"2029","Owariasahi-shi"},{"2030","Iwakura-shi"},{"2031","Toyoake-shi"},{"2032","Nissin-shi"},
+  {"2033","Tahara-shi"},{"2034","Aisai-shi"},{"2035","Kiyosu-shi"},{"2036","Kitanagoya-shi"},
+  {"2037","Yatomi-shi"},{"2038","Miyoshi-shi"},{"2039","Ama-shi"},{"2040","Nagakute-shi"},
+  {"20001","Aichi-gun"},{"20002","Atsumi-gun"},{"20003","Ama-gun"},{"20004","Kitashitara-gun"},
+  {"20005","Chita-gun"},{"20006","Nakashima-gun"},{"20007","Nishikasugai-gun"},{"20008","Nishikamo-gun"},
+  {"20009","Niwa-gun"},{"20010","Nukata-gun"},{"20011","Haguri-gun"},{"20012","Hazu-gun"},
+  {"20013","Higashikasugai-gun"},{"20014","Higashikamo-gun"},{"20015","Hekikai-gun"},{"20016","Hoi-gun"},
+  {"20017","Minamishitara-gun"},{"20018","Yana-gun"},{"200101","Chikusa-ku"},{"200102","Higashi-ku"},
+  {"200103","Kita-ku"},{"200104","Nishi-ku"},{"200105","Nakamura-ku"},{"200106","Naka-ku"},
+  {"200107","Showa-ku"},{"200108","Mizuho-ku"},{"200109","Atsuta-ku"},{"200110","Nakagawa-ku"},
+  {"200111","Minato-ku"},{"200112","Minami-ku"},{"200113","Moriyama-ku"},{"200114","Midori-ku"},
+  {"200115","Meito-ku"},{"200116","Tenpaku-ku"},
+};
+static const int JACITY_20_N = 74;
+static const SubdivEntry JACITY_21[] = {
+  {"2101","Tsu-shi"},{"2102","Yokkaichi-shi"},{"2103","Ise-shi"},{"2104","Matsusaka-shi"},
+  {"2105","Kuwana-shi"},{"2106","Ueno-shi"},{"2107","Suzuka-shi"},{"2108","Nabari-shi"},
+  {"2109","Owase-shi"},{"2110","Kameyama-shi"},{"2111","Toba-shi"},{"2112","Kumano-shi"},
+  {"2113","Hisai-shi"},{"2114","Ujiyamada-shi"},{"2115","Inabe-shi"},{"2116","Shima-shi"},
+  {"2117","Iga-shi"},{"21001","Age-gun"},{"21002","Ano-gun"},{"21003","Ayama-gun"},{"21004","Iinan-gun"},
+  {"21005","Ichishi-gun"},{"21006","Inabe-gun"},{"21007","Kawage-gun"},{"21008","Kitamuro-gun"},
+  {"21009","Kuwana-gun"},{"21010","Shima-gun"},{"21011","Suzuka-gun"},{"21012","Taki-gun"},
+  {"21013","Naga-gun"},{"21014","Mie-gun"},{"21015","Minamimuro-gun"},{"21016","Watarai-gun"},
+};
+static const int JACITY_21_N = 33;
+static const SubdivEntry JACITY_22[] = {
+  {"2201","Kyoto-shi"},{"2202","Fukuchiyama-shi"},{"2203","Maiduru-shi"},{"2204","Ayabe-shi"},
+  {"2205","Uji-shi"},{"2206","Miyazu-shi"},{"2207","Kameoka-shi"},{"2208","Joyo-shi"},
+  {"2209","Nagaokakyo-shi"},{"2210","Muko-shi"},{"2211","Yawata-shi"},{"2212","Kyotanabe-shi"},
+  {"2213","Kyotango-shi"},{"2214","Nantan-shi"},{"2215","Kizugawa-shi"},{"22001","Amada-gun"},
+  {"22002","Ikaruga-gun"},{"22003","Otokuni-gun"},{"22004","Kasa-gun"},{"22005","Kitakuwada-gun"},
+  {"22006","Kuze-gun"},{"22007","Kumano-gun"},{"22008","Soraku-gun"},{"22009","Takeno-gun"},
+  {"22010","Tsuduki-gun"},{"22011","Naka-gun"},{"22012","Funai-gun"},{"22013","Minamikuwada-gun"},
+  {"22014","Yoza-gun"},{"220101","Kita-ku"},{"220102","Kamigyo-ku"},{"220103","Sakyo-ku"},
+  {"220104","Nakagyo-ku"},{"220105","Higashiyama-ku"},{"220106","Shimogyo-ku"},{"220107","Minami-ku"},
+  {"220108","Ukyo-ku"},{"220109","Fushimi-ku"},{"220110","Yamashina-ku"},{"220111","Nishikyo-ku"},
+};
+static const int JACITY_22_N = 40;
+static const SubdivEntry JACITY_23[] = {
+  {"2301","Otsu-shi"},{"2302","Hikone-shi"},{"2303","Nagahama-shi"},{"2304","Omihachiman-shi"},
+  {"2305","Yokaichi-shi"},{"2306","Kusatsu-shi"},{"2307","Moriyama-shi"},{"2308","Ritto-shi"},
+  {"2309","Koka-shi"},{"2310","Yasu-shi"},{"2311","Konan-shi"},{"2312","Takashima-shi"},
+  {"2313","Higashioumi-shi"},{"2314","Maibara-shi"},{"23001","Ika-gun"},{"23002","Inukami-gun"},
+  {"23003","Echi-gun"},{"23004","Gamou-gun"},{"23005","Kanzaki-gun"},{"23006","Kurita-gun"},
+  {"23007","Koka-gun"},{"23008","Sakata-gun"},{"23009","Shiga-gun"},{"23010","Takashima-gun"},
+  {"23011","Higashiazai-gun"},{"23012","Yasu-gun"},
+};
+static const int JACITY_23_N = 26;
+static const SubdivEntry JACITY_24[] = {
+  {"2401","Nara-shi"},{"2402","Yamatotakada-shi"},{"2403","Yamatokoriyama-shi"},{"2404","Tenri-shi"},
+  {"2405","Kashihara-shi"},{"2406","Sakurai-shi"},{"2407","Gojo-shi"},{"2408","Gose-shi"},
+  {"2409","Ikoma-shi"},{"2410","Kashiba-shi"},{"2411","Katsuragi-shi"},{"2412","Uda-shi"},
+  {"24001","Ikoma-gun"},{"24002","Uda-gun"},{"24003","Uchi-gun"},{"24004","Kitakatsuragi-gun"},
+  {"24005","Shiki-gun"},{"24006","Soekami-gun"},{"24007","Takaichi-gun"},{"24008","Minamikatsuragi-gun"},
+  {"24009","Yamabe-gun"},{"24010","Yoshino-gun"},
+};
+static const int JACITY_24_N = 22;
+static const SubdivEntry JACITY_25[] = {
+  {"2501","Osaka-shi"},{"2502","Sakai-shi"},{"2503","Kishiwada-shi"},{"2504","Toyonaka-shi"},
+  {"2505","Fuse-shi"},{"2506","Ikeda-shi"},{"2507","Suita-shi"},{"2508","Izumiotsu-shi"},
+  {"2509","Takatsuki-shi"},{"2510","Kaiduka-shi"},{"2511","Moriguchi-shi"},{"2512","Hirakata-shi"},
+  {"2513","Ibaraki-shi"},{"2514","Yao-shi"},{"2515","Izumisano-shi"},{"2516","Tondabayashi-shi"},
+  {"2517","Neyagawa-shi"},{"2518","Kawachinagano-shi"},{"2519","Hiraoka-shi"},{"2520","Kawachi-shi"},
+  {"2521","Matsubara-shi"},{"2522","Daito-shi"},{"2523","Izumi-shi"},{"2524","Mino-shi"},
+  {"2525","Kashiwara-shi"},{"2526","Habikino-shi"},{"2527","Kadoma-shi"},{"2528","Settsu-shi"},
+  {"2529","Fujiidera-shi"},{"2530","Takaishi-shi"},{"2531","Higashiosaka-shi"},{"2532","Sennan-shi"},
+  {"2533","Shijonawate-shi"},{"2534","Katano-shi"},{"2535","Osakasayama-shi"},{"2536","Hannan-shi"},
+  {"25001","Kitakawachi-gun"},{"25002","Sennan-gun"},{"25003","Senboku-gun"},{"25004","Toyono-gun"},
+  {"25005","Nakakawachi-gun"},{"25006","Mishima-gun"},{"25007","Minamikawachi-gun"},{"250101","Kita-ku"},
+  {"250102","Miyakojima-ku"},{"250103","Fukushima-ku"},{"250104","Konohana-ku"},{"250105","Higashi-ku"},
+  {"250106","Nishi-ku"},{"250107","Minato-ku"},{"250108","Taisho-ku"},{"250109","Tennoji-ku"},
+  {"250110","Minami-ku"},{"250111","Naniwa-ku"},{"250112","Oyodo-ku"},{"250113","Nishiyodogawa-ku"},
+  {"250114","Higashiyodogawa-ku"},{"250115","Higashinari-ku"},{"250116","Ikuno-ku"},{"250117","Asahi-ku"},
+  {"250118","Joto-ku"},{"250119","Abeno-ku"},{"250120","Sumiyoshi-ku"},{"250121","Higashisumiyoshi-ku"},
+  {"250122","Nishinari-ku"},{"250123","Yodogawa-ku"},{"250124","Tsurumi-ku"},{"250125","Suminoe-ku"},
+  {"250126","Hirano-ku"},{"250127","Chuo-ku"},{"250201","Sakai-ku"},{"250202","Naka-ku"},
+  {"250203","Higashi-ku"},{"250204","Nishi-ku"},{"250205","Minami-ku"},{"250206","Kita-ku"},
+  {"250207","Mihara-ku"},
+};
+static const int JACITY_25_N = 77;
+static const SubdivEntry JACITY_26[] = {
+  {"2601","Wakayama-shi"},{"2602","Shingu-shi"},{"2603","Kainan-shi"},{"2604","Tanabe-shi"},
+  {"2605","Gobo-shi"},{"2606","Hashimoto-shi"},{"2607","Arida-shi"},{"2608","Kinokawa-shi"},
+  {"2609","Iwade-shi"},{"26001","Arida-gun"},{"26002","Ito-gun"},{"26003","Kaiso-gun"},{"26004","Naga-gun"},
+  {"26005","Nishimuro-gun"},{"26006","Higashimuro-gun"},{"26007","Hidaka-gun"},
+};
+static const int JACITY_26_N = 16;
+static const SubdivEntry JACITY_27[] = {
+  {"2701","Kobe-shi"},{"2702","Himeji-shi"},{"2703","Amagasaki-shi"},{"2704","Akashi-shi"},
+  {"2705","Nishinomiya-shi"},{"2706","Sumoto-shi"},{"2707","Ashiya-shi"},{"2708","Itami-shi"},
+  {"2709","Aioi-shi"},{"2710","Toyooka-shi"},{"2711","Kakogawa-shi"},{"2712","Tatsuno-shi"},
+  {"2713","Ako-shi"},{"2714","Nishiwaki-shi"},{"2715","Takaraduka-shi"},{"2716","Miki-shi"},
+  {"2717","Takasago-shi"},{"2718","Kawanishi-shi"},{"2719","Ono-shi"},{"2720","Sanda-shi"},
+  {"2721","Kasai-shi"},{"2722","Sasayama-shi"},{"2723","Yabu-shi"},{"2724","Tanba-shi"},
+  {"2725","Minamiawaji-shi"},{"2726","Asago-shi"},{"2727","Awaji-shi"},{"2728","Shiso-shi"},
+  {"2729","Kato-shi"},{"2730","Tatsuno-shi"},{"2731","Tanbasasayama-shi"},{"27001","Akou-gun"},
+  {"27002","Asago-gun"},{"27003","Arima-gun"},{"27004","Izushi-gun"},{"27005","Ibo-gun"},
+  {"27006","Innami-gun"},{"27007","Kako-gun"},{"27008","Kasai-gun"},{"27009","Kato-gun"},
+  {"27010","Kawabe-gun"},{"27011","Kanzaki-gun"},{"27012","Kinosaki-gun"},{"27013","Sayo-gun"},
+  {"27014","Shikama-gun"},{"27015","Shiso-gun"},{"27016","Taka-gun"},{"27017","Taki-gun"},
+  {"27018","Tsuna-gun"},{"27019","Hikami-gun"},{"27020","Mikata-gun"},{"27021","Mino-gun"},
+  {"27022","Mihara-gun"},{"27023","Muko-gun"},{"27024","Yabu-gun"},{"270101","Higashinada-ku"},
+  {"270102","Nada-ku"},{"270103","Hyogo-ku"},{"270104","Nagata-ku"},{"270105","Suma-ku"},
+  {"270106","Tarumi-ku"},{"270107","Kita-ku"},{"270108","Chuo-ku"},{"270109","Nishi-ku"},
+  {"270110","Fukiai-ku"},{"270111","Ikuta-ku"},
+};
+static const int JACITY_27_N = 66;
+static const SubdivEntry JACITY_28[] = {
+  {"2801","Toyama-shi"},{"2802","Takaoka-shi"},{"2803","Shinminato-shi"},{"2804","Uodu-shi"},
+  {"2805","Himi-shi"},{"2806","Namerikawa-shi"},{"2807","Kurobe-shi"},{"2808","Tonami-shi"},
+  {"2809","Oyabe-shi"},{"2810","Nanto-shi"},{"2811","Imizu-shi"},{"28001","Imizu-gun"},
+  {"28002","Kaminiikawa-gun"},{"28003","Shimoniikawa-gun"},{"28004","Nakaniikawa-gun"},
+  {"28005","Nishitonami-gun"},{"28006","Nei-gun"},{"28007","Himi-gun"},{"28008","Higashitonami-gun"},
+};
+static const int JACITY_28_N = 19;
+static const SubdivEntry JACITY_29[] = {
+  {"2901","Fukui-shi"},{"2902","Tsuruga-shi"},{"2903","Takefu-shi"},{"2904","Obama-shi"},{"2905","Ono-shi"},
+  {"2906","Katsuyama-shi"},{"2907","Sabae-shi"},{"2908","Awara-shi"},{"2909","Echizen-shi"},
+  {"2910","Sakai-shi"},{"29001","Asuwa-gun"},{"29002","Imadate-gun"},{"29003","Oi-gun"},{"29004","Ono-gun"},
+  {"29005","Onyu-gun"},{"29006","Sakai-gun"},{"29007","Tsuruga-gun"},{"29008","Nanjo-gun"},
+  {"29009","Nyuu-gun"},{"29010","Mikata-gun"},{"29011","Yoshida-gun"},{"29012","Mikatakaminaka-gun"},
+};
+static const int JACITY_29_N = 22;
+static const SubdivEntry JACITY_30[] = {
+  {"3001","Kanazawa-shi"},{"3002","Nanao-shi"},{"3003","Komatsu-shi"},{"3004","Wajima-shi"},
+  {"3005","Suzu-shi"},{"3006","Kaga-shi"},{"3007","Hakui-shi"},{"3008","Matsuto-shi"},{"3009","Kahoku-shi"},
+  {"3010","Hakusan-shi"},{"3011","Nomi-shi"},{"3012","Nonoichi-shi"},{"30001","Ishikawa-gun"},
+  {"30002","Enuma-gun"},{"30003","Kashima-gun"},{"30004","Kahoku-gun"},{"30005","Suzu-gun"},
+  {"30006","Nomi-gun"},{"30007","Hakui-gun"},{"30008","Fugeshi-gun"},{"30009","Housu-gun"},
+};
+static const int JACITY_30_N = 21;
+static const SubdivEntry JACITY_31[] = {
+  {"3101","Okayama-shi"},{"3102","Kurashiki-shi"},{"3103","Tsuyama-shi"},{"3104","Tamano-shi"},
+  {"3105","Kojima-shi"},{"3106","Tamashima-shi"},{"3107","Kasaoka-shi"},{"3108","saidaiji-shi"},
+  {"3109","Ibara-shi"},{"3110","Soja-shi"},{"3111","Takahashi-shi"},{"3112","Niimi-shi"},
+  {"3113","Bizen-shi"},{"3114","Setouchi-shi"},{"3115","Akaiwa-shi"},{"3116","Maniwa-shi"},
+  {"3117","Mimasaka-shi"},{"3118","Asakuchi-shi"},{"31001","Aida-gun"},{"31002","Akaiwa-gun"},
+  {"31003","Asakuchi-gun"},{"31004","Atetsu-gun"},{"31005","Oku-gun"},{"31006","Oda-gun"},
+  {"31007","Katsuta-gun"},{"31008","Kawakami-gun"},{"31009","Kibi-gun"},{"31010","Kume-gun"},
+  {"31011","Kojima-gun"},{"31012","Shitsuki-gun"},{"31013","Jodo-gun"},{"31014","Jobo-gun"},
+  {"31015","Tsukubo-gun"},{"31016","Tomada-gun"},{"31017","Maniwa-gun"},{"31018","Mitsu-gun"},
+  {"31019","Wake-gun"},{"31020","Kaga-gun"},{"310101","Kita-ku"},{"310102","Naka-ku"},
+  {"310103","Higashi-ku"},{"310104","Minami-ku"},
+};
+static const int JACITY_31_N = 42;
+static const SubdivEntry JACITY_32[] = {
+  {"3201","Matsue-shi"},{"3202","Hamada-shi"},{"3203","Izumo-shi"},{"3204","Masuda-shi"},{"3205","Oda-shi"},
+  {"3206","Yasugi-shi"},{"3207","Gotsu-shi"},{"3208","Hirata-shi"},{"3209","Unnan-shi"},{"32001","Ano-gun"},
+  {"32002","Ama-gun"},{"32003","Iishi-gun"},{"32004","Ochi-gun"},{"32005","Ohara-gun"},{"32006","Oki-gun"},
+  {"32007","Ochi-gun"},{"32008","Kanoashi-gun"},{"32009","Suki-gun"},{"32010","Chibu-gun"},
+  {"32011","Naka-gun"},{"32012","Nita-gun"},{"32013","Nima-gun"},{"32014","Nogi-gun"},
+  {"32015","Hikawa-gun"},{"32016","Mino-gun"},{"32017","Yatsuka-gun"},{"33001","Asa-gun"},
+};
+static const int JACITY_32_N = 27;
+static const SubdivEntry JACITY_33[] = {
+  {"3301","Yamaguchi-shi"},{"3302","Shimonoseki-shi"},{"3303","Ube-shi"},{"3304","Hagi-shi"},
+  {"3305","Tokuyama-shi"},{"3306","Hofu-shi"},{"3307","Kudamatsu-shi"},{"3308","Iwakuni-shi"},
+  {"3309","Onoda-shi"},{"3310","Hikari-shi"},{"3311","Nagato-shi"},{"3312","Yanai-shi"},{"3313","Mine-shi"},
+  {"3314","Shinnan01yo-shi"},{"3315","Shunan-shi"},{"3316","San01yoonoda-shi"},{"33002","Abu-gun"},
+  {"33003","Oshima-gun"},{"33004","Otsu-gun"},{"33005","Kuga-gun"},{"33006","Kumage-gun"},
+  {"33007","Saba-gun"},{"33008","Tsuno-gun"},{"33009","Toyoura-gun"},{"33010","Mine-gun"},
+  {"33011","Yoshiki-gun"},
+};
+static const int JACITY_33_N = 26;
+static const SubdivEntry JACITY_34[] = {
+  {"3401","Tottori-shi"},{"3402","Kurayoshi-shi"},{"3403","Yonago-shi"},{"3404","Sakaiminato-shi"},
+  {"34001","Iwami-gun"},{"34002","Ketaka-gun"},{"34003","Saihaku-gun"},{"34004","Tohaku-gun"},
+  {"34005","Hino-gun"},{"34006","Yazu-gun"},
+};
+static const int JACITY_34_N = 10;
+static const SubdivEntry JACITY_35[] = {
+  {"3501","Hiroshima-shi"},{"3502","Kure-shi"},{"3503","Takehara-shi"},{"3504","Mihara-shi"},
+  {"3505","Onomichi-shi"},{"3506","Innoshima-shi"},{"3507","Matsunaga-shi"},{"3508","Fukuyama-shi"},
+  {"3509","Fuchu-shi"},{"3510","Miyoshi-shi"},{"3511","Syoubara-shi"},{"3512","Otake-shi"},
+  {"3513","Higashihiroshima-shi"},{"3514","Hatsukaichi-shi"},{"3515","Akitakata-shi"},
+  {"3516","Etajima-shi"},{"35001","Aki-gun"},{"35002","Asa-gun"},{"35003","Ashina-gun"},
+  {"35004","Kamo-gun"},{"35005","Konu-gun"},{"35006","Saeki-gun"},{"35007","Jinseki-gun"},
+  {"35008","Sera-gun"},{"35009","Takata-gun"},{"35010","Toyota-gun"},{"35011","Numakuma-gun"},
+  {"35012","Hiba-gun"},{"35013","Fukayasu-gun"},{"35014","Futami-gun"},{"35015","Mitsugi-gun"},
+  {"35016","Yamagata-gun"},{"350101","Naka-ku"},{"350102","Higashi-ku"},{"350103","Minami-ku"},
+  {"350104","Nishi-ku"},{"350105","Asaminami-ku"},{"350106","Asakita-ku"},{"350107","Aki-ku"},
+  {"350108","Saeki-ku"},
+};
+static const int JACITY_35_N = 40;
+static const SubdivEntry JACITY_36[] = {
+  {"3601","Takamatsu-shi"},{"3602","Marugame-shi"},{"3603","Sakaide-shi"},{"3604","Zentsuji-shi"},
+  {"3605","Kan01onji-shi"},{"3606","Sanuki-shi"},{"3607","Higashikagawa-shi"},{"3608","Mitoyo-shi"},
+  {"36001","Ayauta-gun"},{"36002","Okawa-gun"},{"36003","Kagawa-gun"},{"36004","Kita-gun"},
+  {"36005","Syozu-gun"},{"36006","Nakatado-gun"},{"36007","Mitoyo-gun"},
+};
+static const int JACITY_36_N = 15;
+static const SubdivEntry JACITY_37[] = {
+  {"3701","Tokushima-shi"},{"3702","Naruto-shi"},{"3703","Komatsushima-shi"},{"3704","Anan-shi"},
+  {"3705","Yoshinogawa-shi"},{"3706","Awa-shi"},{"3707","Mima-shi"},{"3708","Miyoshi-shi"},
+  {"37001","Awa-gun"},{"37002","Itano-gun"},{"37003","Oe-gun"},{"37004","Kaifu-gun"},
+  {"37005","Katsuura-gun"},{"37006","Naka-gun"},{"37007","Myozai-gun"},{"37008","Myodo-gun"},
+  {"37009","Mima-gun"},{"37010","Miyoshi-gun"},
+};
+static const int JACITY_37_N = 18;
+static const SubdivEntry JACITY_38[] = {
+  {"3801","Matsuyama-shi"},{"3802","Imabari-shi"},{"3803","Uwajima-shi"},{"3804","Yawatahama-shi"},
+  {"3805","Niihama-shi"},{"3806","Saijo-shi"},{"3807","Ozu-shi"},{"3808","Iyomishima-shi"},
+  {"3809","Kawanoe-shi"},{"3810","Iyo-shi"},{"3811","Hojo-shi"},{"3812","Toyo-shi"},
+  {"3813","Shikokuchuo-shi"},{"3814","Seiyo-shi"},{"3815","Toon-shi"},{"38001","Iyo-gun"},
+  {"38002","Uma-gun"},{"38003","Ochi-gun"},{"38004","Onsen-gun"},{"38005","Kamiukena-gun"},
+  {"38006","Kita-gun"},{"38007","Kitauwa-gun"},{"38008","Shuso-gun"},{"38009","Nii-gun"},
+  {"38010","Nishiuwa-gun"},{"38011","Higashiuwa-gun"},{"38012","Minamiuwa-gun"},
+};
+static const int JACITY_38_N = 27;
+static const SubdivEntry JACITY_39[] = {
+  {"3901","Kochi-shi"},{"3902","Muroto-shi"},{"3903","Aki-shi"},{"3904","Tosa-shi"},{"3905","Susaki-shi"},
+  {"3906","Nakamura-shi"},{"3907","Sukumo-shi"},{"3908","Tosashimizu-shi"},{"3909","Nankoku-shi"},
+  {"3910","Shimanto-shi"},{"3911","Konan-shi"},{"3912","Kami-shi"},{"39001","Agawa-gun"},
+  {"39002","Aki-gun"},{"39003","Kami-gun"},{"39004","Takaoka-gun"},{"39005","Tosa-gun"},
+  {"39006","Nagaoka-gun"},{"39007","Hata-gun"},
+};
+static const int JACITY_39_N = 19;
+static const SubdivEntry JACITY_40[] = {
+  {"4001","Fukuoka-shi"},{"4002","Kokura-shi"},{"4003","Moji-shi"},{"4004","Yahata-shi"},
+  {"4005","Tobata-shi"},{"4006","Wakamatsu-shi"},{"4007","Kurume-shi"},{"4008","Omuta-shi"},
+  {"4009","Noogata-shi"},{"4010","Iizuka-shi"},{"4011","Tagawa-shi"},{"4012","Yanagawa-shi"},
+  {"4013","Amagi-shi"},{"4014","Yamada-shi"},{"4015","Yame-shi"},{"4016","Chikugo-shi"},
+  {"4017","Okawa-shi"},{"4018","Yukuhashi-shi"},{"4019","Buzen-shi"},{"4020","Nakama-shi"},
+  {"4021","Kitakyushu-shi"},{"4022","Ogoori-shi"},{"4023","Kasuga-shi"},{"4024","Chikushino-shi"},
+  {"4025","Onojo-shi"},{"4026","Munakata-shi"},{"4027","Dazaifu-shi"},{"4028","Maebaru-shi"},
+  {"4029","Koga-shi"},{"4030","Fukutsu-shi"},{"4031","Ukiha-shi"},{"4032","Miyawaka-shi"},
+  {"4033","Kama-shi"},{"4034","Asakura-shi"},{"4035","Miyama-shi"},{"4036","Itoshima-shi"},
+  {"4037","Nakagawa-shi"},{"40001","Asakura-gun"},{"40002","Itoshima-gun"},{"40003","Ukiha-gun"},
+  {"40004","Onga-gun"},{"40005","Kasuya-gun"},{"40006","Kaho-gun"},{"40007","Kurate-gun"},
+  {"40008","Sawara-gun"},{"40009","Tagawa-gun"},{"40010","Chikushi-gun"},{"40011","Chikujo-gun"},
+  {"40012","Mii-gun"},{"40013","Miike-gun"},{"40014","Mizuma-gun"},{"40015","Miyako-gun"},
+  {"40016","Munakata-gun"},{"40017","Yamato-gun"},{"40018","Yame-gun"},{"400101","Higashi-ku"},
+  {"400102","Hakata-ku"},{"400103","Chuo-ku"},{"400104","Minami-ku"},{"400105","Nishi-ku"},
+  {"400106","Jonan-ku"},{"400107","Sawara-ku"},{"402101","Moji-ku"},{"402102","Wakamatsu-ku"},
+  {"402103","Tobata-ku"},{"402104","Kokurakita-ku"},{"402105","Kokuraminami-ku"},
+  {"402106","Yahatahigashi-ku"},{"402107","Yahatanishi-ku"},{"402108","Yahata-ku"},{"402109","Kokura-ku"},
+};
+static const int JACITY_40_N = 71;
+static const SubdivEntry JACITY_41[] = {
+  {"4101","Saga-shi"},{"4102","Karatsu-shi"},{"4103","Tosu-shi"},{"4104","Taku-shi"},{"4105","Imari-shi"},
+  {"4106","Takeo-shi"},{"4107","Kashima-shi"},{"4108","Ogi-shi"},{"4109","Ureshino-shi"},
+  {"4110","Kanzaki-shi"},{"41001","Ogi-gun"},{"41002","Kanzaki-gun"},{"41003","Kishima-gun"},
+  {"41004","Saga-gun"},{"41005","Nishimatsuura-gun"},{"41006","Higashimatsuura-gun"},
+  {"41007","Fujitsu-gun"},{"41008","Miyaki-gun"},
+};
+static const int JACITY_41_N = 18;
+static const SubdivEntry JACITY_42[] = {
+  {"4201","Nagasaki-shi"},{"4202","Sasebo-shi"},{"4203","Shimabara-shi"},{"4204","Isahaya-shi"},
+  {"4205","Omura-shi"},{"4206","Fukue-shi"},{"4207","Hirado-shi"},{"4208","Matsuura-shi"},
+  {"4209","Tsushima-shi"},{"4210","Iki-shi"},{"4211","Goto-shi"},{"4212","Saikai-shi"},{"4213","Unzen-shi"},
+  {"4214","Minamishimabara-shi"},{"42001","Iki-gun"},{"42002","Kamiagata-gun"},{"42003","Kitatakaki-gun"},
+  {"42004","Kitamatsuura-gun"},{"42005","Shimoagata-gun"},{"42006","Nishisonogi-gun"},
+  {"42007","Higashisonogi-gun"},{"42008","Minamitakaki-gun"},{"42009","Minamimatsuura-gun"},
+};
+static const int JACITY_42_N = 23;
+static const SubdivEntry JACITY_43[] = {
+  {"4301","Kumamoto-shi"},{"4302","Yatsushiro-shi"},{"4303","Hitoyoshi-shi"},{"4304","Arao-shi"},
+  {"4305","Minamata-shi"},{"4306","Tamana-shi"},{"4307","Hondo-shi"},{"4308","Yamaga-shi"},
+  {"4309","Ushibuka-shi"},{"4310","Kikuchi-shi"},{"4311","Uto-shi"},{"4312","Kamiamakusa-shi"},
+  {"4313","Uki-shi"},{"4314","Aso-shi"},{"4315","Amakusa-shi"},{"4316","Koshi-shi"},
+  {"43001","Ashikita-gun"},{"43002","Aso-gun"},{"43003","Amakusa-gun"},{"43004","Uto-gun"},
+  {"43005","Kamimashiki-gun"},{"43006","Kamoto-gun"},{"43007","Kikuchi-gun"},{"43008","Kuma-gun"},
+  {"43009","Shimomashiki-gun"},{"43010","Tamana-gun"},{"43011","Hotaku-gun"},{"43012","Yatsushiro-gun"},
+  {"430101","Chuo-ku"},{"430102","Higashi-ku"},{"430103","Nishi-ku"},{"430104","Minami-ku"},
+  {"430105","Kita-ku"},
+};
+static const int JACITY_43_N = 33;
+static const SubdivEntry JACITY_44[] = {
+  {"4401","Oita-shi"},{"4402","Beppu-shi"},{"4403","Nakatsu-shi"},{"4404","Hita-shi"},{"4405","Saiki-shi"},
+  {"4406","Usuki-shi"},{"4407","Tsukumi-shi"},{"4408","Taketa-shi"},{"4409","Tsurusaki-shi"},
+  {"4410","Bungotakada-shi"},{"4411","Kitsuki-shi"},{"4412","Usa-shi"},{"4413","Bungoono-shi"},
+  {"4414","Yufu-shi"},{"4415","Kunisaki-shi"},{"44001","Usa-gun"},{"44002","Oita-gun"},{"44003","Ono-gun"},
+  {"44004","Kitaamabe-gun"},{"44005","Kusu-gun"},{"44006","Shimoge-gun"},{"44007","Naoiri-gun"},
+  {"44008","Nishikunisaki-gun"},{"44009","Hayami-gun"},{"44010","Higashikunisaki-gun"},{"44011","Hita-gun"},
+  {"44012","Minamiamabe-gun"},
+};
+static const int JACITY_44_N = 27;
+static const SubdivEntry JACITY_45[] = {
+  {"4501","Miyazaki-shi"},{"4502","Miyakonojo-shi"},{"4503","Nobeoka-shi"},{"4504","Nichinan-shi"},
+  {"4505","Kobayashi-shi"},{"4506","Hyuga-shi"},{"4507","Kushima-shi"},{"4508","Saito-shi"},
+  {"4509","Ebino-shi"},{"45001","Kitamorokata-gun"},{"45002","Koyu-gun"},{"45003","Nishiusuki-gun"},
+  {"45004","Nishimorokata-gun"},{"45005","Higashiusuki-gun"},{"45006","Higashimorokata-gun"},
+  {"45007","Minaminaka-gun"},{"45008","Miyazaki-gun"},
+};
+static const int JACITY_45_N = 17;
+static const SubdivEntry JACITY_46[] = {
+  {"4601","Kagoshima-shi"},{"4602","Sendai-shi"},{"4603","Kanoya-shi"},{"4604","Makurazaki-shi"},
+  {"4605","Kushikino-shi"},{"4606","Akune-shi"},{"4607","Izumi-shi"},{"4608","Naze-shi"},
+  {"4609","Okuchi-shi"},{"4610","Ibusuki-shi"},{"4611","Kaseda-shi"},{"4612","Kokubu-shi"},
+  {"4613","Taniyama-shi"},{"4614","Nishinoomote-shi"},{"4615","Tarumizu-shi"},{"4616","Satsumasendai-shi"},
+  {"4617","Hioki-shi"},{"4618","Soo-shi"},{"4619","Kirishima-shi"},{"4620","Ichikikushikino-shi"},
+  {"4621","Minamisatsuma-shi"},{"4622","Shibushi-shi"},{"4623","Amami-shi"},{"4624","Minamikyushu-shi"},
+  {"4625","Isa-shi"},{"4626","Aira-shi"},{"46001","Aira-gun"},{"46002","Isa-gun"},{"46003","Izumi-gun"},
+  {"46004","Ibusuki-gun"},{"46005","Oshima-gun"},{"46006","Kagoshima-gun"},{"46007","Kawanabe-gun"},
+  {"46008","Kimotsuki-gun"},{"46009","Kumage-gun"},{"46010","Satsuma-gun"},{"46011","Soo-gun"},
+  {"46012","Hioki-gun"},
+};
+static const int JACITY_46_N = 38;
+static const SubdivEntry JACITY_47[] = {
+  {"4701","Naha-shi"},{"4702","Ishikawa-shi"},{"4703","Hirara-shi"},{"4704","Ishigaki-shi"},
+  {"4705","Koza-shi"},{"4706","Ginowan-shi"},{"4707","Gushikawa-shi"},{"4708","Nago-shi"},
+  {"4709","Urasoe-shi"},{"4710","Itoman-shi"},{"4711","Okinawa-shi"},{"4712","Tomigusuku-shi"},
+  {"4713","Uruma-shi"},{"4714","Miyakojima-shi"},{"4715","Nanjo-shi"},{"47001","Kunigami-gun"},
+  {"47002","Shimajiri-gun"},{"47003","Nakagami-gun"},{"47004","Miyako-gun"},{"47005","Yaeyama-gun"},
+};
+static const int JACITY_47_N = 20;
+
+struct JaCityIndex { const char* pref; const SubdivEntry* list; int n; };
+static const JaCityIndex JA_CITY_INDEX[] = {
+  {"01", JACITY_01, JACITY_01_N},
+  {"02", JACITY_02, JACITY_02_N},
+  {"03", JACITY_03, JACITY_03_N},
+  {"04", JACITY_04, JACITY_04_N},
+  {"05", JACITY_05, JACITY_05_N},
+  {"06", JACITY_06, JACITY_06_N},
+  {"07", JACITY_07, JACITY_07_N},
+  {"08", JACITY_08, JACITY_08_N},
+  {"09", JACITY_09, JACITY_09_N},
+  {"10", JACITY_10, JACITY_10_N},
+  {"11", JACITY_11, JACITY_11_N},
+  {"12", JACITY_12, JACITY_12_N},
+  {"13", JACITY_13, JACITY_13_N},
+  {"14", JACITY_14, JACITY_14_N},
+  {"15", JACITY_15, JACITY_15_N},
+  {"16", JACITY_16, JACITY_16_N},
+  {"17", JACITY_17, JACITY_17_N},
+  {"18", JACITY_18, JACITY_18_N},
+  {"19", JACITY_19, JACITY_19_N},
+  {"20", JACITY_20, JACITY_20_N},
+  {"21", JACITY_21, JACITY_21_N},
+  {"22", JACITY_22, JACITY_22_N},
+  {"23", JACITY_23, JACITY_23_N},
+  {"24", JACITY_24, JACITY_24_N},
+  {"25", JACITY_25, JACITY_25_N},
+  {"26", JACITY_26, JACITY_26_N},
+  {"27", JACITY_27, JACITY_27_N},
+  {"28", JACITY_28, JACITY_28_N},
+  {"29", JACITY_29, JACITY_29_N},
+  {"30", JACITY_30, JACITY_30_N},
+  {"31", JACITY_31, JACITY_31_N},
+  {"32", JACITY_32, JACITY_32_N},
+  {"33", JACITY_33, JACITY_33_N},
+  {"34", JACITY_34, JACITY_34_N},
+  {"35", JACITY_35, JACITY_35_N},
+  {"36", JACITY_36, JACITY_36_N},
+  {"37", JACITY_37, JACITY_37_N},
+  {"38", JACITY_38, JACITY_38_N},
+  {"39", JACITY_39, JACITY_39_N},
+  {"40", JACITY_40, JACITY_40_N},
+  {"41", JACITY_41, JACITY_41_N},
+  {"42", JACITY_42, JACITY_42_N},
+  {"43", JACITY_43, JACITY_43_N},
+  {"44", JACITY_44, JACITY_44_N},
+  {"45", JACITY_45, JACITY_45_N},
+  {"46", JACITY_46, JACITY_46_N},
+  {"47", JACITY_47, JACITY_47_N},
+};
+static const int JA_CITY_INDEX_N = 47;
 // ===== end src/lotw_subdiv.h =====
 
 struct LotwStation {
@@ -3158,6 +4212,8 @@ struct LotwStation {
   // path above is unchanged; these are only set for non-US entities.
   String subdiv;     // subdivision code (e.g. "ON")
   String subdivField;// LoTW field name (e.g. "CA_PROVINCE")
+  String subdiv2;     // secondary subdivision code (JA city/gun/ku, e.g. "0101")
+  String subdiv2Field;// LoTW secondary field name (e.g. "JA_CITY_GUN_KU")
   String iota;       // IOTA reference (e.g. "NA-005"); any DXCC; "" => omit
 };
 
@@ -3198,9 +4254,13 @@ private:
 // ===========================================================================
 //  LoRa SX1262 radio wrapper (inlined from src/lora.h) for CardSat messaging
 // ===========================================================================
-// Define CARDSAT_HAS_LORA=1 in the build (or here) once RadioLib is installed.
+// LoRa (SX1262 via RadioLib) is a standard, always-built feature: official binaries
+// ship with every feature compiled in. RadioLib is therefore a required build
+// dependency (install via the Arduino Library Manager). The #if guards below are kept
+// only so the tree still compiles if someone deliberately overrides this to 0 in their
+// own build flags; the default is ON.
 #ifndef CARDSAT_HAS_LORA
-#define CARDSAT_HAS_LORA 0
+#define CARDSAT_HAS_LORA 1
 #endif
 
 // Cap LoRa (SX1262) SPI pinmap, confirmed from the M5Stack Cap LoRa pinmap /
@@ -4098,23 +5158,38 @@ private:
   String lotwStatus;               // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
   bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
-  // ---- LoTW intl subdivision picker (SCR_LOTWSUB) ----
-  // Resolve a DXCC entity number to its LoTW primary-subdivision field. Returns the
-  // LoTW field NAME (e.g. "CA_PROVINCE") or "" if the entity has no subdivision, and
-  // fills list/n with the choice table. usCounty=true means the entity uses US-style
-  // state+county (handled by the existing state/county rows, not this picker).
-  const char* lotwSubdivField(const char* dxcc, const SubdivEntry** list, int* n, bool* usCounty);
-  void lotwSubEnter();             // open the picker for the configured DXCC
+  // ---- Unified LoTW location picker (SCR_LOTWSUB) ----
+  // One context-aware list picker drives the whole DXCC -> primary -> secondary chain.
+  // lotwPickKind selects what's being chosen; the list/codes come from the flash tables
+  // in lotw_subdiv.h. A typeahead filter narrows the long lists (340 DXCC, JA cities).
+  enum LotwPick { LP_DXCC = 0, LP_PRIMARY = 1, LP_SECONDARY = 2 };
+  // Resolve, for the configured DXCC, the primary field name + its choice list, and
+  // whether that primary maps to US_STATE (so secondary = county) or JA_PREFECTURE
+  // (secondary = city). Returns "" if the entity has no primary subdivision.
+  const char* lotwPrimaryField(const char* dxcc, const SubdivEntry** list, int* n);
+  // Resolve the secondary field + list, gated by the stored PRIMARY code. Returns "" if
+  // the entity/primary has no secondary level.
+  const char* lotwSecondaryField(const char* dxcc, const char* primaryCode,
+                                 const SubdivEntry** list, int* n);
+  void lotwPickEnter(LotwPick kind);   // open the picker in a given context
   void drawLotwSub();   void keyLotwSub(char c, bool enter, bool back);
-  const SubdivEntry* lotwSubList = nullptr;  // active choice table (flash)
+  LotwPick lotwPickKind = LP_DXCC; // what the picker is currently choosing
+  const SubdivEntry* lotwSubList = nullptr;  // active choice table (flash), for PRIMARY/SECONDARY
   int    lotwSubN = 0;             // entries in the active table
-  int    lotwSubSel = 0;           // picker cursor
+  int    lotwSubSel = 0;           // picker cursor (index into the FILTERED view)
   int    lotwSubScroll = 0;        // picker scroll offset
-  String lotwSubFieldName;         // LoTW field name for the active DXCC (header text)
+  String lotwSubFieldName;         // header label for the active context
+  String lotwPickFilter;           // typeahead filter string (matches name or code)
+  // Filtered-view helpers: map a filtered row position to the underlying table index.
+  int    lotwFilteredCount();                 // # rows passing the current filter
+  int    lotwFilteredIndex(int filteredPos);  // underlying index of the Nth filtered row
+  bool   lotwRowMatches(const char* code, const char* name);  // filter predicate
   // ---- Cloudlog/Wavelog upload screen (SCR_CLOUDLOG) ----
   void drawCloudlog();   void keyCloudlog(char c, bool enter, bool back);
   void cloudlogEnter();                     // count pending QSOs + open screen
   void doCloudlogUpload();                  // build ADIF + JSON POST + mark uploaded
+  void cloudlogRebootUpload();              // write marker + reboot, then upload on fresh boot
+  void resumeCloudlogIfPending();           // setup(): if marker set, upload in a clean boot
   int  clPending = 0;              // QSOs not yet sent to Cloudlog (bit 0x2 unset)
   int  clTotal = 0;                // total sat QSOs in the log (for re-send mode)
   String clStatus;                 // last result/error line shown on the screen
@@ -7360,32 +8435,91 @@ void SatDb::applyAmsatStatusFile(const char* path) {
   if (_n <= 0) return;
   File f = Store::fs().open(path, "r");
   if (!f) return;
-  JsonDocument filter;
-  filter["data"][0]["name"] = true;
-  filter["data"][0]["report"] = true;
-  filter["data"][0]["report_count"] = true;
-  JsonDocument doc;
-  DeserializationError e = deserializeJson(doc, f, DeserializationOption::Filter(filter));
-  f.close();
-  if (e) return;
+
+  // Pre-compute the base callsign of each catalog sat once (cb[i]), so the per-report
+  // matching below is a cheap strcmp.
   char (*cb)[16] = (char (*)[16])malloc((size_t)_n * 16);
-  if (!cb) return;
+  if (!cb) { f.close(); return; }
   for (int i = 0; i < _n; ++i) amsatBase(_sats[i].name, cb[i], 16);
-  for (JsonObject r : doc["data"].as<JsonArray>()) {
-    const char* nm  = r["name"]  | "";
-    const char* rep = r["report"] | "";
-    long cnt = r["report_count"] | 0;
-    if (!nm[0] || cnt <= 0) continue;
-    uint8_t st = !strcmp(rep, "Not Heard")      ? 2    // category -> status code
-               : !strcmp(rep, "Telemetry Only") ? 3
-                                                : 1;   // Heard / Crew Active
-    char sb[16]; amsatBase(nm, sb, 16);
-    for (int i = 0; i < _n; ++i) {
-      if (strcmp(sb, cb[i]) != 0) continue;
-      if (amsatPrio(st) > amsatPrio(_sats[i].amsatStatus)) _sats[i].amsatStatus = st;
+
+  // Parse the "data" array ONE OBJECT AT A TIME instead of loading the whole filtered
+  // document. The summary.php payload is large (hundreds of reports); deserializing it
+  // whole spiked free heap to a few KB, which churned the no-PSRAM free-list and (per a
+  // long debugging trail) destabilised later TLS connects. Here we scan the file for each
+  // top-level {...} inside the array, deserialize just that object, apply it, and discard
+  // it -- so peak heap is one small object (~200 B), not the entire array.
+  // Bounded object buffer: AMSAT records are short; anything longer than this is skipped
+  // safely (we only need name/report/report_count, which sit well within it).
+  static const size_t OBJ_MAX = 512;
+  char obj[OBJ_MAX];
+  size_t objLen = 0;
+  int depth = 0;          // brace depth; we capture while depth>=1 inside an object
+  bool inObj = false;     // currently accumulating an object
+  bool inStr = false;     // inside a JSON string (so braces/quotes are literal)
+  bool esc = false;       // previous char was a backslash inside a string
+  bool sawData = false;   // only start capturing objects after the "data" key
+
+  // We don't need a full tokenizer: just find the "data" marker, then capture each
+  // brace-balanced object that follows until the array closes.
+  int c;
+  // Cheap scan to the "data" array opener so we don't capture any objects before it.
+  // (The top-level wrapper {"data":[ ... ]} -- skip until the '[' after "data".)
+  {
+    const char* key = "\"data\"";
+    int ki = 0;
+    while ((c = f.read()) >= 0) {
+      char ch = (char)c;
+      if (ch == key[ki]) { if (++ki == 6) { sawData = true; break; } }
+      else ki = (ch == '"') ? 1 : 0;
+    }
+    if (sawData) { while ((c = f.read()) >= 0 && (char)c != '['); }  // advance to '['
+  }
+  if (!sawData) { free(cb); f.close(); return; }
+
+  while ((c = f.read()) >= 0) {
+    char ch = (char)c;
+    if (inObj) {
+      if (objLen < OBJ_MAX - 1) obj[objLen++] = ch;   // capture (truncate over-long safely)
+    }
+    if (inStr) {
+      if (esc)            esc = false;
+      else if (ch == '\\') esc = true;
+      else if (ch == '"')  inStr = false;
+      continue;
+    }
+    if (ch == '"') { inStr = true; continue; }
+    if (ch == '{') {
+      if (depth == 0) { inObj = true; objLen = 0; if (objLen < OBJ_MAX-1) obj[objLen++] = ch; }
+      depth++;
+    } else if (ch == '}') {
+      depth--;
+      if (depth == 0 && inObj) {
+        obj[objLen] = 0;
+        // Deserialize just this one object and apply it.
+        JsonDocument one;
+        if (!deserializeJson(one, obj)) {
+          const char* nm  = one["name"]  | "";
+          const char* rep = one["report"] | "";
+          long cnt = one["report_count"] | 0;
+          if (nm[0] && cnt > 0) {
+            uint8_t st = !strcmp(rep, "Not Heard")      ? 2
+                       : !strcmp(rep, "Telemetry Only") ? 3
+                                                        : 1;
+            char sb[16]; amsatBase(nm, sb, 16);
+            for (int i = 0; i < _n; ++i) {
+              if (strcmp(sb, cb[i]) != 0) continue;
+              if (amsatPrio(st) > amsatPrio(_sats[i].amsatStatus)) _sats[i].amsatStatus = st;
+            }
+          }
+        }
+        inObj = false;
+      }
+    } else if (ch == ']' && depth == 0) {
+      break;   // end of the data array
     }
   }
   free(cb);
+  f.close();
 }
 
 // Stream-parse a GP/OMM JSON array from a file, one object at a time, using a
@@ -7831,6 +8965,24 @@ String Location::toGrid(double lat, double lon) {
 
 // TLS-session hook (see class Net). Null by default; app installs it at startup.
 void (*Net::onTlsBusy)(bool) = nullptr;
+
+// Log the full heap picture (not just the single largest block) at a labeled point.
+// Retained as a diagnostic on the upload path: a fragmented heap can show a healthy
+// largest block while a TLS handshake -- which needs several allocations at once --
+// still fails on a later, smaller one. free_blocks (the count of separate free chunks)
+// and total_free vs largest expose that. This was the key instrument in tracking down
+// the Cloudlog upload failure (see docs/design/CLOUDLOG_UPLOAD_POSTMORTEM.md).
+static void logHeapDetail(const char* where) {
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+  Serial.printf("[heap] %s: free=%u largest=%u min_free_ever=%u free_blocks=%u alloc_blocks=%u\n",
+                where,
+                (unsigned)info.total_free_bytes,
+                (unsigned)info.largest_free_block,
+                (unsigned)info.minimum_free_bytes,
+                (unsigned)info.free_blocks,
+                (unsigned)info.allocated_blocks);
+}
 
 // Redact secrets from a URL before logging it. QRZ (and any future credentialed
 // endpoint) carry username/password/session keys in the query string; logging the
@@ -8392,6 +9544,7 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
   if (!began) { lastErr = "begin failed"; return false; }
   http.addHeader("Content-Type", contentType);
 
+  logHeapDetail("pre-POST-connect");   // full heap shape right before the handshake
   int code = http.POST((uint8_t*)body.c_str(), body.length());
   lastCode = code;
   noteConnResult(code);
@@ -8885,6 +10038,7 @@ bool Settings::load() {
   strncpy(lotwState, d["lotwstate"] | "", sizeof(lotwState)-1); lotwState[sizeof(lotwState)-1]=0;
   strncpy(lotwCnty,  d["lotwcnty"]  | "", sizeof(lotwCnty)-1);  lotwCnty[sizeof(lotwCnty)-1]=0;
   strncpy(lotwSubdiv, d["lotwsubdiv"] | "", sizeof(lotwSubdiv)-1); lotwSubdiv[sizeof(lotwSubdiv)-1]=0;
+  strncpy(lotwSubdiv2, d["lotwsubdiv2"] | "", sizeof(lotwSubdiv2)-1); lotwSubdiv2[sizeof(lotwSubdiv2)-1]=0;
   strncpy(lotwIota,  d["lotwiota"]  | "", sizeof(lotwIota)-1);  lotwIota[sizeof(lotwIota)-1]=0;
   lat        = d["lat"] | 0.0;
   lon        = d["lon"] | 0.0;
@@ -9007,7 +10161,7 @@ bool Settings::save() {
   d["clurl"] = clUrl; d["clkey"] = clKey; d["clstation"] = clStation;
   d["lotwdxcc"] = lotwDxcc; d["lotwcqz"] = lotwCqz; d["lotwituz"] = lotwItuz;
   d["lotwstate"] = lotwState; d["lotwcnty"] = lotwCnty;
-  d["lotwsubdiv"] = lotwSubdiv; d["lotwiota"] = lotwIota;
+  d["lotwsubdiv"] = lotwSubdiv; d["lotwsubdiv2"] = lotwSubdiv2; d["lotwiota"] = lotwIota;
   d["lat"]  = lat;   d["lon"]  = lon;  d["alt"] = altM;  d["gps"] = useGps;
   d["gpssrc"] = gpsSource;
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
@@ -9297,6 +10451,9 @@ void App::setup() {
   // If a batched "cache all transponders" run is in progress, continue it now
   // (caches the next batch and reboots, until every sat is done).
   resumeCacheIfPending();
+  // If a "reboot to upload to Cloudlog" was requested, do that upload now in this
+  // pristine boot (before other fetches use up socket/heap headroom).
+  resumeCloudlogIfPending();
 }
 
 void App::applyRadioFromCfg() {
@@ -10139,10 +11296,15 @@ void App::hamsatEnter() {
   // Show the last-known list immediately (even with no WiFi) by loading the cache
   // first; a live fetch below replaces it when we're online.
   if (hamsatN == 0) loadHamsatCache();
-  if (net.connected()) fetchHamsat();
+  // Switch to the Activations screen FIRST so the "Downloading activations..." banner
+  // that fetchHamsat() paints lands on THIS screen, not the one we came from. Without
+  // this ordering the blocking fetch runs while the previous screen is still current,
+  // so the banner is never visible.
+  screen = SCR_HAMSAT; lastDrawMs = 0;
+  if (net.connected()) { draw(); fetchHamsat(); }
   else if (hamsatN == 0) hamsatStatus = "No WiFi - connect in Settings";
   else hamsatStatus = "";          // offline but we have cached activations to show
-  screen = SCR_HAMSAT; lastDrawMs = 0;
+  lastDrawMs = 0;
 }
 
 void App::drawHamsat() {
@@ -14434,7 +15596,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73,77,78,74,75,76};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73,78,74,75,76};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -14640,23 +15802,19 @@ void App::keySettings(char c, bool enter, bool back) {
                editBuf = cfg.qrzUser; screen = SCR_EDIT; break;
       case 42: editTarget = 215; editTitle = "QRZ password";
                editBuf = cfg.qrzPass; screen = SCR_EDIT; break;
-      case 69: editTarget = 220; editTitle = "LoTW DXCC entity #";
-               editBuf = cfg.lotwDxcc; screen = SCR_EDIT; break;
+      case 69: lotwPickEnter(LP_DXCC); break;   // DXCC entity picker (full list, subdiv-bearing first)
       case 70: editTarget = 221; editTitle = "LoTW CQ zone";
                editBuf = cfg.lotwCqz; screen = SCR_EDIT; break;
       case 71: editTarget = 222; editTitle = "LoTW ITU zone";
                editBuf = cfg.lotwItuz; screen = SCR_EDIT; break;
-      case 72: editTarget = 223; editTitle = "LoTW state (2-ltr, US)";
-               editBuf = cfg.lotwState; screen = SCR_EDIT; break;
-      case 73: editTarget = 224; editTitle = "LoTW county (e.g. VA,Arlington)";
-               editBuf = cfg.lotwCnty; screen = SCR_EDIT; break;
+      case 72: lotwPickEnter(LP_PRIMARY); break;   // primary subdivision (state/province/oblast/...)
+      case 73: lotwPickEnter(LP_SECONDARY); break;   // secondary subdivision (county/city)
       case 74: editTarget = 225; editTitle = "Cloudlog URL (https://...)";
                editBuf = cfg.clUrl; screen = SCR_EDIT; break;
       case 75: editTarget = 226; editTitle = "Cloudlog API key (read-write)";
                editBuf = cfg.clKey; screen = SCR_EDIT; break;
       case 76: editTarget = 227; editTitle = "Cloudlog station ID (number)";
                editBuf = cfg.clStation; screen = SCR_EDIT; break;
-      case 77: lotwSubEnter(); break;   // intl subdivision picker (DXCC-aware)
       case 78: editTarget = 228; editTitle = "LoTW IOTA ref (e.g. NA-005)";
                editBuf = cfg.lotwIota; screen = SCR_EDIT; break;
       case 27: {
@@ -14763,16 +15921,10 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.qrzUser[sizeof(cfg.qrzUser)-1] = 0; qrzSessionKey = ""; break;
       case 215: strncpy(cfg.qrzPass, editBuf.c_str(), sizeof(cfg.qrzPass)-1);
                 cfg.qrzPass[sizeof(cfg.qrzPass)-1] = 0; qrzSessionKey = ""; break;
-      case 220: strncpy(cfg.lotwDxcc, editBuf.c_str(), sizeof(cfg.lotwDxcc)-1);
-                cfg.lotwDxcc[sizeof(cfg.lotwDxcc)-1] = 0; break;
       case 221: strncpy(cfg.lotwCqz, editBuf.c_str(), sizeof(cfg.lotwCqz)-1);
                 cfg.lotwCqz[sizeof(cfg.lotwCqz)-1] = 0; break;
       case 222: strncpy(cfg.lotwItuz, editBuf.c_str(), sizeof(cfg.lotwItuz)-1);
                 cfg.lotwItuz[sizeof(cfg.lotwItuz)-1] = 0; break;
-      case 223: strncpy(cfg.lotwState, editBuf.c_str(), sizeof(cfg.lotwState)-1);
-                cfg.lotwState[sizeof(cfg.lotwState)-1] = 0; break;
-      case 224: strncpy(cfg.lotwCnty, editBuf.c_str(), sizeof(cfg.lotwCnty)-1);
-                cfg.lotwCnty[sizeof(cfg.lotwCnty)-1] = 0; break;
       case 225: { String u = editBuf; u.trim();
                   // strip a trailing slash so we can append the API path cleanly
                   while (u.length() && u.charAt(u.length()-1) == '/') u.remove(u.length()-1);
@@ -15074,7 +16226,7 @@ void App::keyEdit(char c, bool enter, bool back) {
   }
   if (c >= 32 && c < 127) {
     if (editTarget == 103 || editTarget == 104 || editTarget == 204 || editTarget == 216 ||
-        editTarget == 330 || editTarget == 223 || editTarget == 228 ||
+        editTarget == 330 || editTarget == 228 ||
         editTarget == 500 || editTarget == 503 || editTarget == 600) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
@@ -15285,7 +16437,7 @@ static void writeQsoCsv(File& f, const PendingQso& q) {
            cl(q.mode).c_str(), (unsigned long)q.dlHz, (unsigned long)q.ulHz,
            cl(q.rstS).c_str(), cl(q.rstR).c_str(), cl(q.myGrid).c_str(),
            cl(q.grid).c_str(), cl(q.myCall).c_str(), notes.c_str(),
-           (unsigned)(q.uploaded & 1));
+           (unsigned)(q.uploaded & 0x3));   // bit0=LoTW, bit1=Cloudlog (persist BOTH)
 }
 
 static bool parseQsoCsv(const String& line, PendingQso& q) {
@@ -15311,7 +16463,7 @@ static bool parseQsoCsv(const String& line, PendingQso& q) {
   } else {                                         // legacy schema: no mycall column
     strncpy(q.notes,  f[10].c_str(), sizeof(q.notes)-1);
   }
-  if (n >= 13) q.uploaded = (uint8_t)(strtoul(f[12].c_str(), nullptr, 10) & 1);
+  if (n >= 13) q.uploaded = (uint8_t)(strtoul(f[12].c_str(), nullptr, 10) & 0x3);  // bit0=LoTW, bit1=Cloudlog
   return true;
 }
 
@@ -15540,7 +16692,7 @@ String Lotw::signData(const PendingQso& q, const LotwStation& st) {
   // The single non-US primary subdivision (st.subdiv) carries its LoTW field name in
   // st.subdivField; emit its value at that field's alphabetical slot. Field order:
   // AU_STATE, CA_PROVINCE, CN_PROVINCE, CQZ, FI_KUNTA, GRIDSQUARE, IOTA, ITUZ,
-  // JA_PREFECTURE, RU_OBLAST, US_COUNTY, US_STATE (the fields CardSat can populate).
+  // JA_CITY_GUN_KU, JA_PREFECTURE, RU_OBLAST, US_COUNTY, US_STATE.
   auto subIs = [&](const char* f) {
     return st.subdiv.length() && st.subdivField == f;
   };
@@ -15552,6 +16704,8 @@ String Lotw::signData(const PendingQso& q, const LotwStation& st) {
   if (st.grid.length())  s += st.grid;        // GRIDSQUARE
   if (st.iota.length())  s += st.iota;        // IOTA
   if (st.ituz.length())  s += st.ituz;        // ITUZ
+  // JA_CITY_GUN_KU (secondary, gated by JA_PREFECTURE) sorts before JA_PREFECTURE.
+  if (st.subdiv2.length() && st.subdiv2Field == "JA_CITY_GUN_KU") s += st.subdiv2;
   if (subIs("JA_PREFECTURE")) s += st.subdiv; // JA_PREFECTURE
   if (subIs("RU_OBLAST"))   s += st.subdiv;   // RU_OBLAST
   // US_COUNTY is signed as the county NAME ALONE (TQSL keeps state and county in
@@ -15786,6 +16940,9 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   // the signed string (signData) must be alphabetical.
   if (st.subdiv.length() && st.subdivField.length())
     adifSp(text, st.subdivField.c_str(), st.subdiv);
+  // Secondary subdivision (JA city/gun/ku). US county is already emitted above via cnty.
+  if (st.subdiv2.length() && st.subdiv2Field.length())
+    adifSp(text, st.subdiv2Field.c_str(), st.subdiv2);
   adifSp(text, "IOTA",       st.iota);     // IOTA reference (any DXCC); skipped if ""
   text += "<eor>\n";
 
@@ -16040,124 +17197,288 @@ void App::keyLotw(char c, bool enter, bool back) {
   }
 }
 
-// ---- LoTW intl administrative-subdivision picker -------------------------------
-// LoTW gates a station's primary subdivision (state/province/oblast/...) on its
-// DXCC entity. Only a handful of entities have one. This maps the DXCC number to
-// the LoTW field NAME and the choice table (from src/lotw_subdiv.h). The US-style
-// entities (6/110/291) are flagged usCounty so the caller routes them to the
-// existing state+county rows instead of this picker. Returns "" for entities with
-// no subdivision (the picker then just shows "no subdivisions for this entity").
-const char* App::lotwSubdivField(const char* dxcc, const SubdivEntry** list,
-                                 int* n, bool* usCounty) {
-  if (list) *list = nullptr;
-  if (n) *n = 0;
-  if (usCounty) *usCounty = false;
-  if (!dxcc || !dxcc[0]) return "";
-  int d = atoi(dxcc);
-  switch (d) {
-    // US, Alaska, Hawaii: state + county, handled by the dedicated rows.
-    case 6: case 110: case 291:
-      if (usCounty) *usCounty = true;
-      if (list) *list = SUB_US_STATE; if (n) *n = SUB_US_STATE_N;
-      return "US_STATE";
-    case 1:                                   // Canada
-      if (list) *list = SUB_CA_PROVINCE; if (n) *n = SUB_CA_PROVINCE_N;
-      return "CA_PROVINCE";
-    case 15: case 54: case 61: case 126: case 151:  // Russia (Asiatic/European/Kalin/etc.)
-      if (list) *list = SUB_RU_OBLAST; if (n) *n = SUB_RU_OBLAST_N;
-      return "RU_OBLAST";
-    case 339:                                 // Japan
-      if (list) *list = SUB_JA_PREFECTURE; if (n) *n = SUB_JA_PREFECTURE_N;
-      return "JA_PREFECTURE";
-    case 318:                                 // China
-      if (list) *list = SUB_CN_PROVINCE; if (n) *n = SUB_CN_PROVINCE_N;
-      return "CN_PROVINCE";
-    case 150:                                 // Australia
-      if (list) *list = SUB_AU_STATE; if (n) *n = SUB_AU_STATE_N;
-      return "AU_STATE";
-    case 5: case 167: case 224:               // Finland / Aland / Market Reef
-      if (list) *list = SUB_FI_KUNTA; if (n) *n = SUB_FI_KUNTA_N;
-      return "FI_KUNTA";
-    default:
-      return "";
-  }
+// ---- Unified LoTW location picker (DXCC -> primary -> secondary) -----------------
+// LoTW's station location is a dependency chain: DXCC entity gates the primary
+// subdivision (state/province/oblast/prefecture/...), which (for the US and Japan)
+// gates a secondary (county / city-gun-ku). One context-aware picker handles all
+// three levels, driven by lotwPickKind, reading the flash tables in lotw_subdiv.h.
+
+// Friendly label for a LoTW field name (for Settings rows / picker headers).
+static String lotwFieldLabel(const char* field) {
+  if (!field || !field[0]) return "subdivision";
+  if (!strcmp(field, "US_STATE"))      return "state";
+  if (!strcmp(field, "CA_PROVINCE"))   return "province";
+  if (!strcmp(field, "RU_OBLAST"))     return "oblast";
+  if (!strcmp(field, "JA_PREFECTURE")) return "prefecture";
+  if (!strcmp(field, "CN_PROVINCE"))   return "province";
+  if (!strcmp(field, "AU_STATE"))      return "state";
+  if (!strcmp(field, "FI_KUNTA"))      return "kunta";
+  if (!strcmp(field, "US_COUNTY"))     return "county";
+  if (!strcmp(field, "JA_CITY_GUN_KU"))return "city/gun/ku";
+  return "subdivision";
 }
 
-void App::lotwSubEnter() {
-  const SubdivEntry* list = nullptr; int n = 0; bool usCounty = false;
-  const char* field = lotwSubdivField(cfg.lotwDxcc, &list, &n, &usCounty);
-  lotwSubList = list; lotwSubN = n;
-  lotwSubFieldName = field[0] ? field : "";
-  // Preselect the currently-stored code (lotwSubdiv, or lotwState for US entities).
-  const char* cur = usCounty ? cfg.lotwState : cfg.lotwSubdiv;
-  lotwSubSel = 0;
-  if (cur && cur[0] && list) {
-    for (int i = 0; i < n; i++)
-      if (strcasecmp(list[i].code, cur) == 0) { lotwSubSel = i; break; }
+// Look up a DXCC entity row in DXCC_LIST by its number. Returns nullptr if not found.
+static const DxccEntry* lotwFindDxcc(const char* dxcc) {
+  if (!dxcc || !dxcc[0]) return nullptr;
+  int d = atoi(dxcc);
+  for (int i = 0; i < DXCC_LIST_N; i++)
+    if (DXCC_LIST[i].id == d) return &DXCC_LIST[i];
+  return nullptr;
+}
+
+// Map a primary FIELD NAME to its choice table (the per-entity primary list).
+static const SubdivEntry* lotwPrimaryTable(const char* field, int* n) {
+  *n = 0;
+  if (!field || !field[0]) return nullptr;
+  if (!strcmp(field, "US_STATE"))      { *n = SUB_US_STATE_N;      return SUB_US_STATE; }
+  if (!strcmp(field, "CA_PROVINCE"))   { *n = SUB_CA_PROVINCE_N;   return SUB_CA_PROVINCE; }
+  if (!strcmp(field, "RU_OBLAST"))     { *n = SUB_RU_OBLAST_N;     return SUB_RU_OBLAST; }
+  if (!strcmp(field, "JA_PREFECTURE")) { *n = SUB_JA_PREFECTURE_N; return SUB_JA_PREFECTURE; }
+  if (!strcmp(field, "CN_PROVINCE"))   { *n = SUB_CN_PROVINCE_N;   return SUB_CN_PROVINCE; }
+  if (!strcmp(field, "AU_STATE"))      { *n = SUB_AU_STATE_N;      return SUB_AU_STATE; }
+  if (!strcmp(field, "FI_KUNTA"))      { *n = SUB_FI_KUNTA_N;      return SUB_FI_KUNTA; }
+  return nullptr;
+}
+
+const char* App::lotwPrimaryField(const char* dxcc, const SubdivEntry** list, int* n) {
+  if (list) *list = nullptr;
+  if (n) *n = 0;
+  const DxccEntry* e = lotwFindDxcc(dxcc);
+  if (!e || !e->primaryField[0]) return "";
+  int cnt = 0; const SubdivEntry* tbl = lotwPrimaryTable(e->primaryField, &cnt);
+  if (list) *list = tbl;
+  if (n) *n = cnt;
+  return e->primaryField;
+}
+
+const char* App::lotwSecondaryField(const char* dxcc, const char* primaryCode,
+                                    const SubdivEntry** list, int* n) {
+  if (list) *list = nullptr;
+  if (n) *n = 0;
+  const DxccEntry* e = lotwFindDxcc(dxcc);
+  if (!e || !e->secondaryField[0]) return "";
+  if (!primaryCode || !primaryCode[0]) return e->secondaryField;  // field exists but no list yet
+  if (!strcmp(e->secondaryField, "US_COUNTY")) {
+    // county list gated by the 2-letter state code
+    for (int i = 0; i < US_COUNTY_INDEX_N; i++)
+      if (!strcasecmp(US_COUNTY_INDEX[i].state, primaryCode)) {
+        if (list) *list = US_COUNTY_INDEX[i].list;
+        if (n) *n = US_COUNTY_INDEX[i].n;
+        break;
+      }
+  } else if (!strcmp(e->secondaryField, "JA_CITY_GUN_KU")) {
+    // city list gated by the 2-digit prefecture code
+    for (int i = 0; i < JA_CITY_INDEX_N; i++)
+      if (!strcmp(JA_CITY_INDEX[i].pref, primaryCode)) {
+        if (list) *list = JA_CITY_INDEX[i].list;
+        if (n) *n = JA_CITY_INDEX[i].n;
+        break;
+      }
   }
-  lotwSubScroll = 0;
+  return e->secondaryField;
+}
+
+// ---- typeahead filter over the active list ----
+bool App::lotwRowMatches(const char* code, const char* name) {
+  if (lotwPickFilter.length() == 0) return true;
+  String f = lotwPickFilter; f.toLowerCase();
+  String c = code ? String(code) : ""; c.toLowerCase();
+  String nm = name ? String(name) : ""; nm.toLowerCase();
+  return c.indexOf(f) >= 0 || nm.indexOf(f) >= 0;
+}
+
+// Number of rows in the active context that pass the filter.
+int App::lotwFilteredCount() {
+  if (lotwPickKind == LP_DXCC) {
+    int k = 0;
+    for (int i = 0; i < DXCC_LIST_N; i++)
+      if (lotwRowMatches(nullptr, DXCC_LIST[i].name)) k++;
+    return k;
+  }
+  if (!lotwSubList) return 0;
+  int k = 0;
+  for (int i = 0; i < lotwSubN; i++)
+    if (lotwRowMatches(lotwSubList[i].code, lotwSubList[i].name)) k++;
+  return k;
+}
+
+// Underlying table index of the Nth filtered row (-1 if out of range).
+int App::lotwFilteredIndex(int pos) {
+  int k = 0;
+  if (lotwPickKind == LP_DXCC) {
+    for (int i = 0; i < DXCC_LIST_N; i++)
+      if (lotwRowMatches(nullptr, DXCC_LIST[i].name)) { if (k == pos) return i; k++; }
+    return -1;
+  }
+  if (!lotwSubList) return -1;
+  for (int i = 0; i < lotwSubN; i++)
+    if (lotwRowMatches(lotwSubList[i].code, lotwSubList[i].name)) { if (k == pos) return i; k++; }
+  return -1;
+}
+
+void App::lotwPickEnter(LotwPick kind) {
+  lotwPickKind = kind;
+  lotwPickFilter = "";
+  lotwSubList = nullptr; lotwSubN = 0;
+  lotwSubSel = 0; lotwSubScroll = 0;
+  const char* curCode = "";
+  if (kind == LP_DXCC) {
+    lotwSubFieldName = "DXCC entity";
+    curCode = cfg.lotwDxcc;   // (numeric; preselect handled below by id match)
+  } else if (kind == LP_PRIMARY) {
+    const SubdivEntry* list = nullptr; int n = 0;
+    const char* fld = lotwPrimaryField(cfg.lotwDxcc, &list, &n);
+    lotwSubList = list; lotwSubN = n;
+    lotwSubFieldName = fld[0] ? fld : "";
+    // primary is stored in lotwState for US_STATE entities, else lotwSubdiv
+    const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);
+    bool usState = e && !strcmp(e->primaryField, "US_STATE");
+    curCode = usState ? cfg.lotwState : cfg.lotwSubdiv;
+  } else { // LP_SECONDARY
+    const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);
+    bool usState = e && e->primaryField[0] && !strcmp(e->primaryField, "US_STATE");
+    const char* primaryCode = usState ? cfg.lotwState : cfg.lotwSubdiv;
+    const SubdivEntry* list = nullptr; int n = 0;
+    const char* fld = lotwSecondaryField(cfg.lotwDxcc, primaryCode, &list, &n);
+    lotwSubList = list; lotwSubN = n;
+    lotwSubFieldName = fld[0] ? fld : "";
+    bool usCounty = e && !strcmp(e->secondaryField, "US_COUNTY");
+    curCode = usCounty ? cfg.lotwCnty : cfg.lotwSubdiv2;
+  }
+  // Preselect the currently-stored value within the (unfiltered) list.
+  if (kind == LP_DXCC) {
+    int d = atoi(cfg.lotwDxcc);
+    for (int i = 0; i < DXCC_LIST_N; i++)
+      if (DXCC_LIST[i].id == d) { lotwSubSel = i; break; }
+  } else if (lotwSubList && curCode && curCode[0]) {
+    for (int i = 0; i < lotwSubN; i++)
+      if (!strcasecmp(lotwSubList[i].code, curCode)) { lotwSubSel = i; break; }
+  }
   screen = SCR_LOTWSUB; lastDrawMs = 0;
 }
 
 void App::drawLotwSub() {
-  header("LoTW subdivision");
+  // Title reflects the context.
+  const char* title = (lotwPickKind == LP_DXCC) ? "LoTW DXCC"
+                    : (lotwPickKind == LP_PRIMARY) ? "LoTW primary"
+                    : "LoTW secondary";
+  header(title);
   canvas.setTextSize(1);
-  // No subdivision for this DXCC (or none configured): explain and offer back.
-  if (lotwSubN == 0 || lotwSubList == nullptr) {
+
+  // For primary/secondary: if there's no list, the entity simply has no division here.
+  if (lotwPickKind != LP_DXCC && (lotwSubN == 0 || lotwSubList == nullptr)) {
     canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.setCursor(6, 40);
-    if (!cfg.lotwDxcc[0]) canvas.print("Set LoTW DXCC entity first.");
-    else                  canvas.print("No subdivisions for this entity.");
+    if (!cfg.lotwDxcc[0]) canvas.print("Set LoTW DXCC first.");
+    else if (lotwPickKind == LP_SECONDARY && lotwSubFieldName.length() == 0)
+                          canvas.print("No secondary division here.");
+    else if (lotwPickKind == LP_SECONDARY)
+                          canvas.print("Pick the primary first.");
+    else                  canvas.print("No subdivision for this entity.");
     canvas.setCursor(6, 56);
-    canvas.print("LoTW needs none here - leave blank.");
+    canvas.print("LoTW needs none - leave blank.");
     footer("` back");
     return;
   }
-  // Header line: which LoTW field these codes fill.
+
+  int total = lotwFilteredCount();
+  // Header line: field/context label + filter echo + position.
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 16);
-  { String h = lotwSubFieldName; if (h.length() > 30) h = h.substring(0, 30);
-    canvas.printf("%s (%d)", h.c_str(), lotwSubN); }
+  { String h = lotwSubFieldName.length() ? lotwSubFieldName
+                                         : (lotwPickKind == LP_DXCC ? String("entity") : String());
+    if (lotwPickFilter.length()) h += " /" + lotwPickFilter;
+    if (h.length() > 30) h = h.substring(0, 30);
+    canvas.print(h); }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(196, 16);
+  canvas.printf("%d/%d", total ? lotwSubSel + 1 : 0, total);
 
   const int ROWS = 7;
+  if (lotwSubSel >= total) lotwSubSel = total > 0 ? total - 1 : 0;
   if (lotwSubSel < lotwSubScroll) lotwSubScroll = lotwSubSel;
   if (lotwSubSel >= lotwSubScroll + ROWS) lotwSubScroll = lotwSubSel - ROWS + 1;
-  for (int i = 0; i < ROWS && lotwSubScroll + i < lotwSubN; ++i) {
-    int idx = lotwSubScroll + i;
-    const SubdivEntry& e = lotwSubList[idx];
+
+  for (int i = 0; i < ROWS && lotwSubScroll + i < total; ++i) {
+    int filteredPos = lotwSubScroll + i;
+    int idx = lotwFilteredIndex(filteredPos);
+    if (idx < 0) continue;
     int y = 30 + i*13;
-    if (idx == lotwSubSel) { canvas.fillRect(0, y-2, 240, 12, CL_SELBG);
-                             canvas.setTextColor(CL_BLACK, CL_SELBG); }
-    else                     canvas.setTextColor(CL_WHITE, CL_BLACK);
+    bool sel = (filteredPos == lotwSubSel);
+    if (sel) { canvas.fillRect(0, y-2, 240, 12, CL_SELBG);
+               canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y);
-    // "CODE  Name" -- code is short (2-4 chars); name truncated to fit 240px.
-    char name[34]; strncpy(name, e.name, sizeof(name)-1); name[sizeof(name)-1] = 0;
-    canvas.printf("%-4.4s %-30.30s", e.code, name);
+    if (lotwPickKind == LP_DXCC) {
+      const DxccEntry& e = DXCC_LIST[idx];
+      // Mark entities that have a subdivision with a '>' so users see which gate further.
+      char tag = e.primaryField[0] ? '>' : ' ';
+      canvas.printf("%c%-34.34s", tag, e.name);
+    } else {
+      const SubdivEntry& e = lotwSubList[idx];
+      canvas.printf("%-5.5s %-29.29s", e.code, e.name);
+    }
   }
-  if (lotwSubN > ROWS) {
-    canvas.setTextColor(CL_GREY, CL_BLACK);
-    canvas.setCursor(208, 16);
-    canvas.printf("%d/%d", lotwSubSel + 1, lotwSubN);
-  }
-  footer("; / . move  ENT select  ` back");
+  footer("type=filter  ;/. move  ENT pick  ` back");
 }
 
 void App::keyLotwSub(char c, bool enter, bool back) {
-  if (isBack(c, back)) { screen = SCR_SETTINGS; lastDrawMs = 0; return; }
-  if (lotwSubN == 0 || lotwSubList == nullptr) return;
-  if (isUp(c))   { lotwSubSel = (lotwSubSel + lotwSubN - 1) % lotwSubN; lastDrawMs = 0; }
-  if (isDown(c)) { lotwSubSel = (lotwSubSel + 1) % lotwSubN; lastDrawMs = 0; }
+  if (isBack(c, back)) {
+    // Back-out: if a filter is active, the first ` clears it instead of leaving.
+    if (lotwPickFilter.length()) { lotwPickFilter = ""; lotwSubSel = 0; lotwSubScroll = 0; lastDrawMs = 0; return; }
+    screen = SCR_SETTINGS; lastDrawMs = 0; return;
+  }
+  int total = lotwFilteredCount();
+  if (isUp(c))   { if (total) lotwSubSel = (lotwSubSel + total - 1) % total; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (total) lotwSubSel = (lotwSubSel + 1) % total; lastDrawMs = 0; return; }
+  // Backspace edits the typeahead filter.
+  if (c == 8 || c == 127) {
+    if (lotwPickFilter.length()) { lotwPickFilter.remove(lotwPickFilter.length()-1);
+                                   lotwSubSel = 0; lotwSubScroll = 0; lastDrawMs = 0; }
+    return;
+  }
+  // Printable -> extend the filter (letters/digits/space match names and codes).
+  if (c >= 32 && c < 127 && !enter) {
+    if (lotwPickFilter.length() < 24) { lotwPickFilter += c; lotwSubSel = 0; lotwSubScroll = 0; lastDrawMs = 0; }
+    return;
+  }
   if (enter) {
-    const SubdivEntry& e = lotwSubList[lotwSubSel];
-    bool usCounty = false;
-    lotwSubdivField(cfg.lotwDxcc, nullptr, nullptr, &usCounty);
-    if (usCounty) {
-      // US entity: the picker writes the 2-letter state (county stays its own row).
-      strncpy(cfg.lotwState, e.code, sizeof(cfg.lotwState)-1);
-      cfg.lotwState[sizeof(cfg.lotwState)-1] = 0;
-    } else {
-      strncpy(cfg.lotwSubdiv, e.code, sizeof(cfg.lotwSubdiv)-1);
-      cfg.lotwSubdiv[sizeof(cfg.lotwSubdiv)-1] = 0;
+    if (total == 0) return;
+    int idx = lotwFilteredIndex(lotwSubSel);
+    if (idx < 0) return;
+    if (lotwPickKind == LP_DXCC) {
+      const DxccEntry& e = DXCC_LIST[idx];
+      char buf[8]; snprintf(buf, sizeof(buf), "%d", e.id);
+      // Changing DXCC invalidates any previously-chosen subdivisions.
+      if (strcmp(cfg.lotwDxcc, buf) != 0) {
+        cfg.lotwState[0] = 0; cfg.lotwCnty[0] = 0;
+        cfg.lotwSubdiv[0] = 0; cfg.lotwSubdiv2[0] = 0;
+      }
+      strncpy(cfg.lotwDxcc, buf, sizeof(cfg.lotwDxcc)-1); cfg.lotwDxcc[sizeof(cfg.lotwDxcc)-1] = 0;
+      cfg.save();
+      setStatus(String("DXCC ") + buf);
+      screen = SCR_SETTINGS; lastDrawMs = 0;
+      return;
+    }
+    const SubdivEntry& e = lotwSubList[idx];
+    const DxccEntry* ent = lotwFindDxcc(cfg.lotwDxcc);
+    if (lotwPickKind == LP_PRIMARY) {
+      bool usState = ent && !strcmp(ent->primaryField, "US_STATE");
+      if (usState) { strncpy(cfg.lotwState, e.code, sizeof(cfg.lotwState)-1); cfg.lotwState[sizeof(cfg.lotwState)-1]=0; }
+      else         { strncpy(cfg.lotwSubdiv, e.code, sizeof(cfg.lotwSubdiv)-1); cfg.lotwSubdiv[sizeof(cfg.lotwSubdiv)-1]=0; }
+      // Changing the primary clears any stale secondary.
+      cfg.lotwCnty[0] = 0; cfg.lotwSubdiv2[0] = 0;
+    } else { // LP_SECONDARY
+      bool usCounty = ent && !strcmp(ent->secondaryField, "US_COUNTY");
+      if (usCounty) {
+        // US county is stored as "ST,County" (the signing path expects that form).
+        const char* st = cfg.lotwState[0] ? cfg.lotwState : "";
+        String v = String(st) + "," + e.name;   // county VALUE is the name (e.code is numeric id)
+        strncpy(cfg.lotwCnty, v.c_str(), sizeof(cfg.lotwCnty)-1); cfg.lotwCnty[sizeof(cfg.lotwCnty)-1]=0;
+      } else {
+        strncpy(cfg.lotwSubdiv2, e.code, sizeof(cfg.lotwSubdiv2)-1); cfg.lotwSubdiv2[sizeof(cfg.lotwSubdiv2)-1]=0;
+      }
     }
     cfg.save();
     setStatus(String("Set ") + e.code);
@@ -16202,13 +17523,21 @@ void App::doLotwUpload(const String& keyPass) {
   st.ituz = cfg.lotwItuz;
   st.state = cfg.lotwState;
   st.cnty  = cfg.lotwCnty;
-  // Non-US primary subdivision + IOTA. Resolve the LoTW field name from the DXCC so
-  // the signer emits the right tag (CA_PROVINCE, RU_OBLAST, ...). US entities keep
-  // using state/cnty above, so only set subdiv for non-US (usCounty==false).
-  { bool usCounty = false;
-    const char* fld = lotwSubdivField(cfg.lotwDxcc, nullptr, nullptr, &usCounty);
-    if (!usCounty && fld[0] && cfg.lotwSubdiv[0]) {
-      st.subdiv = cfg.lotwSubdiv; st.subdivField = fld;
+  // Resolve primary + secondary subdivisions for this DXCC from the unified tables.
+  // The US path is unchanged: US_STATE entities keep using state/cnty above, so we only
+  // set st.subdiv for NON-US primaries (province/oblast/prefecture/...). The secondary
+  // (st.subdiv2) carries the JA city/gun/ku code; US county stays in st.cnty.
+  { const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);
+    if (e && e->primaryField[0]) {
+      bool usState = !strcmp(e->primaryField, "US_STATE");
+      if (!usState && cfg.lotwSubdiv[0]) {
+        st.subdiv = cfg.lotwSubdiv; st.subdivField = e->primaryField;
+      }
+      // Secondary: only JA_CITY_GUN_KU lives in lotwSubdiv2 (US county is in cnty).
+      if (e->secondaryField[0] && !strcmp(e->secondaryField, "JA_CITY_GUN_KU")
+          && cfg.lotwSubdiv2[0]) {
+        st.subdiv2 = cfg.lotwSubdiv2; st.subdiv2Field = e->secondaryField;
+      }
     }
   }
   st.iota = cfg.lotwIota;
@@ -16379,6 +17708,29 @@ static String jsonEscape(const String& in) {
   return out;
 }
 
+// Append a JSON-escaped copy of `in` to `out` IN PLACE -- no temporary return String.
+// Same escaping as jsonEscape() above, but it writes straight into the caller's buffer.
+// Used by the Cloudlog body builder so the whole request is assembled in ONE pre-sized
+// allocation instead of a cascade of String-operator temporaries: on the no-PSRAM heap,
+// that concatenation churn fragments the free-list right before the TLS handshake and
+// is what makes the upload connect fail (-1) once the heap has seen any prior activity.
+static void jsonEscapeAppend(String& out, const char* in) {
+  if (!in) return;
+  for (const char* p = in; *p; ++p) {
+    char c = *p;
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if ((uint8_t)c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
+        else out += c;
+    }
+  }
+}
+
 // Extract a top-level JSON string/number value by key from a flat response, e.g.
 // {"status":"created","imported_count":3}. Returns the raw value (unquoted) or "".
 // Good enough for Cloudlog's simple, flat responses; not a general JSON parser.
@@ -16467,8 +17819,8 @@ void App::drawCloudlog() {
 
   if (!cfg.ssid[0])      footer("` back   (set WiFi first)");
   else if (!haveCfg)     footer("` back   (set Cloudlog in Settings)");
-  else if (toSend)       footer(clResend ? "u upload ALL  a not-sent only  ` back"
-                                         : "u upload  a re-send all  ` back");
+  else if (toSend)       footer(clResend ? "u upload  R reboot+up  a not-sent  ` back"
+                                         : "u upload  R reboot+up  a resend  ` back");
   else if (clTotal)      footer("a re-send all   ` back");
   else                   footer("` back   (nothing to upload)");
 }
@@ -16480,6 +17832,9 @@ void App::keyCloudlog(char c, bool enter, bool back) {
   int toSend = clResend ? clTotal : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
   if (c == 'u' && haveCfg && toSend > 0) { doCloudlogUpload(); }
+  // 'R' = reboot first, then upload in a clean boot. Use this if a normal upload
+  // fails with "connection refused" after the device has been running a while.
+  if ((c == 'R' || c == 'r') && haveCfg && toSend > 0) { cloudlogRebootUpload(); }
 }
 
 // Build an ADIF batch from the pending (or all, in re-send mode) QSOs, POST it to the
@@ -16494,8 +17849,10 @@ void App::doCloudlogUpload() {
 
   // Build the ADIF string for up to CAP QSOs. Each record carries STATION_CALLSIGN so
   // Cloudlog can match it to the chosen station profile (it rejects a mismatch).
+  // Reserve per-record (~256 B each) rather than a flat 8 KB: a smaller, right-sized
+  // allocation keeps the heap free-list cleaner ahead of the TLS handshake.
   const int CAP = 50;
-  String adif; adif.reserve(8192);
+  String adif; adif.reserve(CAP * 64 + 256);   // grows if needed; avoids the flat 8 KB block
   int n = 0;
   if (Store::fs().exists(FILE_LOG)) {
     File f = Store::fs().open(FILE_LOG, "r");
@@ -16534,12 +17891,24 @@ void App::doCloudlogUpload() {
   if (n == 0) { clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; return; }
 
   // JSON-encode the request. The ADIF string needs JSON-escaping (it contains '<','>',
-  // and newlines). Keys/URL come from settings.
+  // and newlines). Build the whole body in ONE pre-sized buffer with the escaping done
+  // inline -- NOT via chained String operators + jsonEscape() temporaries. On the
+  // no-PSRAM heap that concatenation churn fragments the free-list right before the TLS
+  // handshake, which is what makes the connect fail (-1) once the heap has seen prior
+  // activity this session. LoTW's upload already builds its body in a single malloc and
+  // never hit this; matching that approach here removes the difference.
   clStatus = "Uploading " + String(n) + " QSO(s)..."; draw();
   String url = String(cfg.clUrl) + "/index.php/api/qso";
-  String body = "{\"key\":\"" + jsonEscape(cfg.clKey) +
-                "\",\"station_profile_id\":\"" + jsonEscape(cfg.clStation) +
-                "\",\"type\":\"adif\",\"string\":\"" + jsonEscape(adif) + "\"}";
+  String body;
+  // prefix + escaped(key) + mid1 + escaped(station) + mid2 + escaped(adif) + suffix
+  body.reserve(adif.length() + adif.length()/8 + 96);   // headroom for escaping + framing
+  body += "{\"key\":\"";
+  jsonEscapeAppend(body, cfg.clKey);
+  body += "\",\"station_profile_id\":\"";
+  jsonEscapeAppend(body, cfg.clStation);
+  body += "\",\"type\":\"adif\",\"string\":\"";
+  jsonEscapeAppend(body, adif.c_str());
+  body += "\"}";
 
   String resp;
   bool ok = net.httpsPostJson(url, body, resp);   // redactBody=true: key stays out of serial
@@ -16572,6 +17941,42 @@ void App::doCloudlogUpload() {
   }
   clBusy = false; lastDrawMs = 0;
 }
+
+// Reboot-then-upload: the in-session POST can hit a connect wall (-1) once a boot has
+// already run several TLS fetches (the same pattern the batched transponder cache hits
+// -- see doCacheAllTransponders). The reliable cure is a pristine boot. This writes a
+// one-shot marker and restarts; resumeCloudlogIfPending() in setup() then performs the
+// upload before anything else touches the network, and drops the user back here with
+// the result. The marker is cleared the instant it's read, so a failure can't loop.
+void App::cloudlogRebootUpload() {
+  File f = Store::fs().open(FILE_CL_RESUME, "w");
+  if (f) { f.println("1"); f.close(); }
+  Serial.println("[cloudlog] reboot-to-upload requested; restarting");
+  setStatus("Rebooting to upload...", 2000);
+  draw(); delay(1500);
+  ESP.restart();
+}
+
+// Called near the end of setup(): if the reboot-upload marker is present, this is the
+// pristine boot we rebooted for. Clear the marker FIRST (one-shot: never loop, even if
+// the upload crashes), bring up WiFi, open the Cloudlog screen, and run the upload now --
+// before the GP/AMSAT/weather fetches consume socket/heap headroom.
+void App::resumeCloudlogIfPending() {
+  if (!Store::fs().exists(FILE_CL_RESUME)) return;
+  Store::fs().remove(FILE_CL_RESUME);          // one-shot: consume before doing anything
+  Serial.println("[cloudlog] resuming upload in fresh boot");
+  cloudlogEnter();                             // counts pending + sets screen = SCR_CLOUDLOG
+  screen = SCR_CLOUDLOG; lastDrawMs = 0; draw();
+  if (!net.connected() && !connectWifiCfg()) {
+    clStatus = "WiFi failed (upload after reboot)"; lastDrawMs = 0; return;
+  }
+  int toSend = clResend ? clTotal : clPending;
+  bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
+  if (haveCfg && toSend > 0) doCloudlogUpload();
+  else clStatus = "Nothing to upload";
+  lastDrawMs = 0;
+}
+
 void App::drawLogEntry() {
   header(logEditIdx >= 0 ? "Edit QSO" : "Log QSO");
   canvas.setTextSize(1);
@@ -22425,8 +23830,8 @@ void App::drawUpdate() {
   canvas.setCursor(6, 52); canvas.print("a       : cache ALL transponders");
   canvas.setCursor(6, 66); canvas.print("w       : connect WiFi only");
   canvas.setTextColor(CL_CYAN, CL_BLACK);
-  canvas.setCursor(6, 82); canvas.print("k adds space wx + weather;");
-  canvas.setCursor(6, 92); canvas.print("f does GP+AMSAT+fav TX.");
+  canvas.setCursor(6, 82); canvas.print("k adds space wx, weather,");
+  canvas.setCursor(6, 92); canvas.print("activations; f=GP+AMSAT+favs.");
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(6, 106);
   canvas.printf("Sats: %d   Favs: %d", db.count(), favN);
@@ -22552,15 +23957,36 @@ void App::drawSettings() {
   { const char* pm = (cfg.civPinMode == 1) ? "1-pin G2" : (cfg.civPinMode == 2) ? "1-pin G1" : "TX/RX (G2/G1)";
     rows[63] = String("CI-V wiring: ") + pm; }
   rows[64] = String("CAT serial monitor");
-  rows[69] = String("LoTW DXCC: ") + (cfg.lotwDxcc[0] ? cfg.lotwDxcc : "(not set)");
-  rows[70] = String("LoTW CQ zone: ") + (cfg.lotwCqz[0] ? cfg.lotwCqz : "(not set)");
-  rows[71] = String("LoTW ITU zone: ") + (cfg.lotwItuz[0] ? cfg.lotwItuz : "(not set)");
-  rows[72] = String("LoTW state (US): ") + (cfg.lotwState[0] ? cfg.lotwState : "(not set)");
-  rows[73] = String("LoTW county (US): ") + (cfg.lotwCnty[0] ? cfg.lotwCnty : "(not set)");
+  // ---- LoTW station location (unified DXCC -> primary -> secondary) ----
+  { const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);
+    // DXCC row shows the entity NAME (not just the number) when known.
+    String dxLbl = "(not set)";
+    if (cfg.lotwDxcc[0]) dxLbl = e ? String(e->name) : String(cfg.lotwDxcc);
+    rows[69] = String("LoTW DXCC: ") + dxLbl;
+    rows[70] = String("LoTW CQ zone: ") + (cfg.lotwCqz[0] ? cfg.lotwCqz : "(not set)");
+    rows[71] = String("LoTW ITU zone: ") + (cfg.lotwItuz[0] ? cfg.lotwItuz : "(not set)");
+    // Primary row: label by the entity's primary field; value from state or subdiv.
+    bool usState = e && e->primaryField[0] && !strcmp(e->primaryField, "US_STATE");
+    const char* primCode = usState ? cfg.lotwState : cfg.lotwSubdiv;
+    String primName = (e && e->primaryField[0]) ? lotwFieldLabel(e->primaryField) : String("subdivision");
+    rows[72] = (e && e->primaryField[0])
+                 ? (String("LoTW ") + primName + ": " + (primCode[0] ? primCode : "(not set)"))
+                 : String("LoTW subdivision: (n/a)");
+    // Secondary row: county (US) or city (JA); hidden meaning when entity has none.
+    bool usCounty = e && e->secondaryField[0] && !strcmp(e->secondaryField, "US_COUNTY");
+    String secName = (e && e->secondaryField[0]) ? lotwFieldLabel(e->secondaryField) : String("");
+    if (e && e->secondaryField[0]) {
+      String secVal;
+      if (usCounty) { String c = cfg.lotwCnty; int k = c.indexOf(','); secVal = (k>=0)? c.substring(k+1) : c; }
+      else          secVal = cfg.lotwSubdiv2;
+      rows[73] = String("LoTW ") + secName + ": " + (secVal.length() ? secVal : "(not set)");
+    } else {
+      rows[73] = String("LoTW county/city: (n/a)");
+    }
+  }
   rows[74] = String("Cloudlog URL: ") + (cfg.clUrl[0] ? cfg.clUrl : "(not set)");
   rows[75] = String("Cloudlog key: ") + String(strlen(cfg.clKey) ? "******" : "(none)");
   rows[76] = String("Cloudlog station ID: ") + (cfg.clStation[0] ? cfg.clStation : "(not set)");
-  rows[77] = String("LoTW subdiv (intl): ") + (cfg.lotwSubdiv[0] ? cfg.lotwSubdiv : "(not set)");
   rows[78] = String("LoTW IOTA: ") + (cfg.lotwIota[0] ? cfg.lotwIota : "(not set)");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {

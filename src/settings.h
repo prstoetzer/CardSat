@@ -88,6 +88,8 @@ struct Settings {
   // prefecture/etc. Stored as the LoTW enum CODE; the field NAME LoTW expects is
   // chosen from the DXCC (CA_PROVINCE, RU_OBLAST, JA_PREFECTURE, ...). "" => omit.
   char     lotwSubdiv[34] = "";
+  char     lotwSubdiv2[10] = ""; // secondary subdivision code gated by primary: JA city/
+                                 // gun/ku (US county still uses lotwCnty). "" => omit.
   char     lotwIota[10] = "";  // IOTA reference (e.g. "NA-005"); any DXCC; "" => omit
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username

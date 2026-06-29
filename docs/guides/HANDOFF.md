@@ -130,9 +130,9 @@ docs/
   FEATURES.md  WIRING.md  BUILD_AND_FLASH.md  RADIOS.md  THINGS_TO_VERIFY.md
   interfaces/   CIV_INTERFACE, CIV_SINGLE_PIN, ICOM_LAN_PROTOCOL,
                 ROTOR_INTERFACE, RS232_INTERFACE, RADIO_SETTINGS
-  design/       10 *_SCOPE.md (feature/architecture design notes) + 2 CardSatZero port docs
+  design/       10 *_SCOPE.md + CLOUDLOG_UPLOAD_POSTMORTEM.md + 2 CardSatZero port docs
   guides/       ARDUINO_SETUP, PORTING, CODE_REFERENCE, HANDOFF_0.9.31 (the old one)
-  releases/     RELEASE_NOTES_0.9.{10–20,22,31}.md
+  releases/     RELEASE_NOTES_0.9.{10–20,22,31,37}.md
   img/          screenshots
 ```
 

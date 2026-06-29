@@ -37,6 +37,8 @@ struct LotwStation {
   // path above is unchanged; these are only set for non-US entities.
   String subdiv;     // subdivision code (e.g. "ON")
   String subdivField;// LoTW field name (e.g. "CA_PROVINCE")
+  String subdiv2;     // secondary subdivision code (JA city/gun/ku, e.g. "0101")
+  String subdiv2Field;// LoTW secondary field name (e.g. "JA_CITY_GUN_KU")
   String iota;       // IOTA reference (e.g. "NA-005"); any DXCC; "" => omit
 };
 

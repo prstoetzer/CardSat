@@ -90,7 +90,7 @@ transit prediction, sun/eclipse status, and more.
 - **Operating aids** — **jump-to-beacon**, per-satellite **calibration** and
   **operating notes**, an **AOS alarm**, **deep sleep until the next pass**, a built-in
   **logbook** (ADIF/LoTW) with DXCC/grid/state tracking, a free-form **Notes** editor,
-  optional **LoRa messaging**, voice memos, and an optional IR-LED pass beacon.
+  **LoRa messaging**, voice memos, and an optional IR-LED pass beacon.
 - **Offline-first** — GP elements, transponders, and DXCC data are cached to microSD
   (or internal flash) for full operation with no network.
 

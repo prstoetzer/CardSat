@@ -146,7 +146,7 @@ BACK = [
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete"),
  ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; Sign &amp; upload)",
-  "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/ &mdash; make them from your TQSL .p12 with tools/lotw_cert_converter.html in a browser; set DXCC/CQ/ITU + state/county or intl subdiv picker + IOTA in Settings) &mdash; see manual §8. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
+  "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/ &mdash; make them from your TQSL .p12 with tools/lotw_cert_converter.html in a browser; in Settings pick DXCC &rarr; primary (state/province/...) &rarr; secondary (county/city) + zones + IOTA, all gated pickers w/ type-to-filter) &mdash; see manual §8. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
  ("UPLOAD TO CLOUDLOG (Log &rarr; Upload to Cloudlog)",
   "Uploads sat QSOs to a self-hosted Cloudlog/Wavelog over WiFi (an alternative to LoTW &mdash; Cloudlog can forward to LoTW). Set <b>URL</b> + read-write <b>API key</b> + <b>station ID</b> in Settings. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
  ("VOICE MEMOS (Log &rarr; Voice Memos)",

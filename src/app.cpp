@@ -250,6 +250,9 @@ void App::setup() {
   // If a batched "cache all transponders" run is in progress, continue it now
   // (caches the next batch and reboots, until every sat is done).
   resumeCacheIfPending();
+  // If a "reboot to upload to Cloudlog" was requested, do that upload now in this
+  // pristine boot (before other fetches use up socket/heap headroom).
+  resumeCloudlogIfPending();
 }
 
 void App::applyRadioFromCfg() {
@@ -1089,10 +1092,15 @@ void App::hamsatEnter() {
   // Show the last-known list immediately (even with no WiFi) by loading the cache
   // first; a live fetch below replaces it when we're online.
   if (hamsatN == 0) loadHamsatCache();
-  if (net.connected()) fetchHamsat();
+  // Switch to the Activations screen FIRST so the "Downloading activations..." banner
+  // that fetchHamsat() paints lands on THIS screen, not the one we came from. Without
+  // this ordering the blocking fetch runs while the previous screen is still current,
+  // so the banner is never visible.
+  screen = SCR_HAMSAT; lastDrawMs = 0;
+  if (net.connected()) { draw(); fetchHamsat(); }
   else if (hamsatN == 0) hamsatStatus = "No WiFi - connect in Settings";
   else hamsatStatus = "";          // offline but we have cached activations to show
-  screen = SCR_HAMSAT; lastDrawMs = 0;
+  lastDrawMs = 0;
 }
 
 void App::drawHamsat() {
@@ -5233,7 +5241,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73,77,78,74,75,76};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73,78,74,75,76};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -5433,23 +5441,19 @@ void App::keySettings(char c, bool enter, bool back) {
                editBuf = cfg.qrzUser; screen = SCR_EDIT; break;
       case 42: editTarget = 215; editTitle = "QRZ password";
                editBuf = cfg.qrzPass; screen = SCR_EDIT; break;
-      case 69: editTarget = 220; editTitle = "LoTW DXCC entity #";
-               editBuf = cfg.lotwDxcc; screen = SCR_EDIT; break;
+      case 69: lotwPickEnter(LP_DXCC); break;   // DXCC entity picker (full list, subdiv-bearing first)
       case 70: editTarget = 221; editTitle = "LoTW CQ zone";
                editBuf = cfg.lotwCqz; screen = SCR_EDIT; break;
       case 71: editTarget = 222; editTitle = "LoTW ITU zone";
                editBuf = cfg.lotwItuz; screen = SCR_EDIT; break;
-      case 72: editTarget = 223; editTitle = "LoTW state (2-ltr, US)";
-               editBuf = cfg.lotwState; screen = SCR_EDIT; break;
-      case 73: editTarget = 224; editTitle = "LoTW county (e.g. VA,Arlington)";
-               editBuf = cfg.lotwCnty; screen = SCR_EDIT; break;
+      case 72: lotwPickEnter(LP_PRIMARY); break;   // primary subdivision (state/province/oblast/...)
+      case 73: lotwPickEnter(LP_SECONDARY); break;   // secondary subdivision (county/city)
       case 74: editTarget = 225; editTitle = "Cloudlog URL (https://...)";
                editBuf = cfg.clUrl; screen = SCR_EDIT; break;
       case 75: editTarget = 226; editTitle = "Cloudlog API key (read-write)";
                editBuf = cfg.clKey; screen = SCR_EDIT; break;
       case 76: editTarget = 227; editTitle = "Cloudlog station ID (number)";
                editBuf = cfg.clStation; screen = SCR_EDIT; break;
-      case 77: lotwSubEnter(); break;   // intl subdivision picker (DXCC-aware)
       case 78: editTarget = 228; editTitle = "LoTW IOTA ref (e.g. NA-005)";
                editBuf = cfg.lotwIota; screen = SCR_EDIT; break;
       case 27: {
@@ -5556,16 +5560,10 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.qrzUser[sizeof(cfg.qrzUser)-1] = 0; qrzSessionKey = ""; break;
       case 215: strncpy(cfg.qrzPass, editBuf.c_str(), sizeof(cfg.qrzPass)-1);
                 cfg.qrzPass[sizeof(cfg.qrzPass)-1] = 0; qrzSessionKey = ""; break;
-      case 220: strncpy(cfg.lotwDxcc, editBuf.c_str(), sizeof(cfg.lotwDxcc)-1);
-                cfg.lotwDxcc[sizeof(cfg.lotwDxcc)-1] = 0; break;
       case 221: strncpy(cfg.lotwCqz, editBuf.c_str(), sizeof(cfg.lotwCqz)-1);
                 cfg.lotwCqz[sizeof(cfg.lotwCqz)-1] = 0; break;
       case 222: strncpy(cfg.lotwItuz, editBuf.c_str(), sizeof(cfg.lotwItuz)-1);
                 cfg.lotwItuz[sizeof(cfg.lotwItuz)-1] = 0; break;
-      case 223: strncpy(cfg.lotwState, editBuf.c_str(), sizeof(cfg.lotwState)-1);
-                cfg.lotwState[sizeof(cfg.lotwState)-1] = 0; break;
-      case 224: strncpy(cfg.lotwCnty, editBuf.c_str(), sizeof(cfg.lotwCnty)-1);
-                cfg.lotwCnty[sizeof(cfg.lotwCnty)-1] = 0; break;
       case 225: { String u = editBuf; u.trim();
                   // strip a trailing slash so we can append the API path cleanly
                   while (u.length() && u.charAt(u.length()-1) == '/') u.remove(u.length()-1);
@@ -5867,7 +5865,7 @@ void App::keyEdit(char c, bool enter, bool back) {
   }
   if (c >= 32 && c < 127) {
     if (editTarget == 103 || editTarget == 104 || editTarget == 204 || editTarget == 216 ||
-        editTarget == 330 || editTarget == 223 || editTarget == 228 ||
+        editTarget == 330 || editTarget == 228 ||
         editTarget == 500 || editTarget == 503 || editTarget == 600) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
@@ -6077,7 +6075,7 @@ static void writeQsoCsv(File& f, const PendingQso& q) {
            cl(q.mode).c_str(), (unsigned long)q.dlHz, (unsigned long)q.ulHz,
            cl(q.rstS).c_str(), cl(q.rstR).c_str(), cl(q.myGrid).c_str(),
            cl(q.grid).c_str(), cl(q.myCall).c_str(), notes.c_str(),
-           (unsigned)(q.uploaded & 1));
+           (unsigned)(q.uploaded & 0x3));   // bit0=LoTW, bit1=Cloudlog (persist BOTH)
 }
 
 static bool parseQsoCsv(const String& line, PendingQso& q) {
@@ -6103,7 +6101,7 @@ static bool parseQsoCsv(const String& line, PendingQso& q) {
   } else {                                         // legacy schema: no mycall column
     strncpy(q.notes,  f[10].c_str(), sizeof(q.notes)-1);
   }
-  if (n >= 13) q.uploaded = (uint8_t)(strtoul(f[12].c_str(), nullptr, 10) & 1);
+  if (n >= 13) q.uploaded = (uint8_t)(strtoul(f[12].c_str(), nullptr, 10) & 0x3);  // bit0=LoTW, bit1=Cloudlog
   return true;
 }
 
@@ -6454,124 +6452,288 @@ void App::keyLotw(char c, bool enter, bool back) {
   }
 }
 
-// ---- LoTW intl administrative-subdivision picker -------------------------------
-// LoTW gates a station's primary subdivision (state/province/oblast/...) on its
-// DXCC entity. Only a handful of entities have one. This maps the DXCC number to
-// the LoTW field NAME and the choice table (from src/lotw_subdiv.h). The US-style
-// entities (6/110/291) are flagged usCounty so the caller routes them to the
-// existing state+county rows instead of this picker. Returns "" for entities with
-// no subdivision (the picker then just shows "no subdivisions for this entity").
-const char* App::lotwSubdivField(const char* dxcc, const SubdivEntry** list,
-                                 int* n, bool* usCounty) {
-  if (list) *list = nullptr;
-  if (n) *n = 0;
-  if (usCounty) *usCounty = false;
-  if (!dxcc || !dxcc[0]) return "";
-  int d = atoi(dxcc);
-  switch (d) {
-    // US, Alaska, Hawaii: state + county, handled by the dedicated rows.
-    case 6: case 110: case 291:
-      if (usCounty) *usCounty = true;
-      if (list) *list = SUB_US_STATE; if (n) *n = SUB_US_STATE_N;
-      return "US_STATE";
-    case 1:                                   // Canada
-      if (list) *list = SUB_CA_PROVINCE; if (n) *n = SUB_CA_PROVINCE_N;
-      return "CA_PROVINCE";
-    case 15: case 54: case 61: case 126: case 151:  // Russia (Asiatic/European/Kalin/etc.)
-      if (list) *list = SUB_RU_OBLAST; if (n) *n = SUB_RU_OBLAST_N;
-      return "RU_OBLAST";
-    case 339:                                 // Japan
-      if (list) *list = SUB_JA_PREFECTURE; if (n) *n = SUB_JA_PREFECTURE_N;
-      return "JA_PREFECTURE";
-    case 318:                                 // China
-      if (list) *list = SUB_CN_PROVINCE; if (n) *n = SUB_CN_PROVINCE_N;
-      return "CN_PROVINCE";
-    case 150:                                 // Australia
-      if (list) *list = SUB_AU_STATE; if (n) *n = SUB_AU_STATE_N;
-      return "AU_STATE";
-    case 5: case 167: case 224:               // Finland / Aland / Market Reef
-      if (list) *list = SUB_FI_KUNTA; if (n) *n = SUB_FI_KUNTA_N;
-      return "FI_KUNTA";
-    default:
-      return "";
-  }
+// ---- Unified LoTW location picker (DXCC -> primary -> secondary) -----------------
+// LoTW's station location is a dependency chain: DXCC entity gates the primary
+// subdivision (state/province/oblast/prefecture/...), which (for the US and Japan)
+// gates a secondary (county / city-gun-ku). One context-aware picker handles all
+// three levels, driven by lotwPickKind, reading the flash tables in lotw_subdiv.h.
+
+// Friendly label for a LoTW field name (for Settings rows / picker headers).
+static String lotwFieldLabel(const char* field) {
+  if (!field || !field[0]) return "subdivision";
+  if (!strcmp(field, "US_STATE"))      return "state";
+  if (!strcmp(field, "CA_PROVINCE"))   return "province";
+  if (!strcmp(field, "RU_OBLAST"))     return "oblast";
+  if (!strcmp(field, "JA_PREFECTURE")) return "prefecture";
+  if (!strcmp(field, "CN_PROVINCE"))   return "province";
+  if (!strcmp(field, "AU_STATE"))      return "state";
+  if (!strcmp(field, "FI_KUNTA"))      return "kunta";
+  if (!strcmp(field, "US_COUNTY"))     return "county";
+  if (!strcmp(field, "JA_CITY_GUN_KU"))return "city/gun/ku";
+  return "subdivision";
 }
 
-void App::lotwSubEnter() {
-  const SubdivEntry* list = nullptr; int n = 0; bool usCounty = false;
-  const char* field = lotwSubdivField(cfg.lotwDxcc, &list, &n, &usCounty);
-  lotwSubList = list; lotwSubN = n;
-  lotwSubFieldName = field[0] ? field : "";
-  // Preselect the currently-stored code (lotwSubdiv, or lotwState for US entities).
-  const char* cur = usCounty ? cfg.lotwState : cfg.lotwSubdiv;
-  lotwSubSel = 0;
-  if (cur && cur[0] && list) {
-    for (int i = 0; i < n; i++)
-      if (strcasecmp(list[i].code, cur) == 0) { lotwSubSel = i; break; }
+// Look up a DXCC entity row in DXCC_LIST by its number. Returns nullptr if not found.
+static const DxccEntry* lotwFindDxcc(const char* dxcc) {
+  if (!dxcc || !dxcc[0]) return nullptr;
+  int d = atoi(dxcc);
+  for (int i = 0; i < DXCC_LIST_N; i++)
+    if (DXCC_LIST[i].id == d) return &DXCC_LIST[i];
+  return nullptr;
+}
+
+// Map a primary FIELD NAME to its choice table (the per-entity primary list).
+static const SubdivEntry* lotwPrimaryTable(const char* field, int* n) {
+  *n = 0;
+  if (!field || !field[0]) return nullptr;
+  if (!strcmp(field, "US_STATE"))      { *n = SUB_US_STATE_N;      return SUB_US_STATE; }
+  if (!strcmp(field, "CA_PROVINCE"))   { *n = SUB_CA_PROVINCE_N;   return SUB_CA_PROVINCE; }
+  if (!strcmp(field, "RU_OBLAST"))     { *n = SUB_RU_OBLAST_N;     return SUB_RU_OBLAST; }
+  if (!strcmp(field, "JA_PREFECTURE")) { *n = SUB_JA_PREFECTURE_N; return SUB_JA_PREFECTURE; }
+  if (!strcmp(field, "CN_PROVINCE"))   { *n = SUB_CN_PROVINCE_N;   return SUB_CN_PROVINCE; }
+  if (!strcmp(field, "AU_STATE"))      { *n = SUB_AU_STATE_N;      return SUB_AU_STATE; }
+  if (!strcmp(field, "FI_KUNTA"))      { *n = SUB_FI_KUNTA_N;      return SUB_FI_KUNTA; }
+  return nullptr;
+}
+
+const char* App::lotwPrimaryField(const char* dxcc, const SubdivEntry** list, int* n) {
+  if (list) *list = nullptr;
+  if (n) *n = 0;
+  const DxccEntry* e = lotwFindDxcc(dxcc);
+  if (!e || !e->primaryField[0]) return "";
+  int cnt = 0; const SubdivEntry* tbl = lotwPrimaryTable(e->primaryField, &cnt);
+  if (list) *list = tbl;
+  if (n) *n = cnt;
+  return e->primaryField;
+}
+
+const char* App::lotwSecondaryField(const char* dxcc, const char* primaryCode,
+                                    const SubdivEntry** list, int* n) {
+  if (list) *list = nullptr;
+  if (n) *n = 0;
+  const DxccEntry* e = lotwFindDxcc(dxcc);
+  if (!e || !e->secondaryField[0]) return "";
+  if (!primaryCode || !primaryCode[0]) return e->secondaryField;  // field exists but no list yet
+  if (!strcmp(e->secondaryField, "US_COUNTY")) {
+    // county list gated by the 2-letter state code
+    for (int i = 0; i < US_COUNTY_INDEX_N; i++)
+      if (!strcasecmp(US_COUNTY_INDEX[i].state, primaryCode)) {
+        if (list) *list = US_COUNTY_INDEX[i].list;
+        if (n) *n = US_COUNTY_INDEX[i].n;
+        break;
+      }
+  } else if (!strcmp(e->secondaryField, "JA_CITY_GUN_KU")) {
+    // city list gated by the 2-digit prefecture code
+    for (int i = 0; i < JA_CITY_INDEX_N; i++)
+      if (!strcmp(JA_CITY_INDEX[i].pref, primaryCode)) {
+        if (list) *list = JA_CITY_INDEX[i].list;
+        if (n) *n = JA_CITY_INDEX[i].n;
+        break;
+      }
   }
-  lotwSubScroll = 0;
+  return e->secondaryField;
+}
+
+// ---- typeahead filter over the active list ----
+bool App::lotwRowMatches(const char* code, const char* name) {
+  if (lotwPickFilter.length() == 0) return true;
+  String f = lotwPickFilter; f.toLowerCase();
+  String c = code ? String(code) : ""; c.toLowerCase();
+  String nm = name ? String(name) : ""; nm.toLowerCase();
+  return c.indexOf(f) >= 0 || nm.indexOf(f) >= 0;
+}
+
+// Number of rows in the active context that pass the filter.
+int App::lotwFilteredCount() {
+  if (lotwPickKind == LP_DXCC) {
+    int k = 0;
+    for (int i = 0; i < DXCC_LIST_N; i++)
+      if (lotwRowMatches(nullptr, DXCC_LIST[i].name)) k++;
+    return k;
+  }
+  if (!lotwSubList) return 0;
+  int k = 0;
+  for (int i = 0; i < lotwSubN; i++)
+    if (lotwRowMatches(lotwSubList[i].code, lotwSubList[i].name)) k++;
+  return k;
+}
+
+// Underlying table index of the Nth filtered row (-1 if out of range).
+int App::lotwFilteredIndex(int pos) {
+  int k = 0;
+  if (lotwPickKind == LP_DXCC) {
+    for (int i = 0; i < DXCC_LIST_N; i++)
+      if (lotwRowMatches(nullptr, DXCC_LIST[i].name)) { if (k == pos) return i; k++; }
+    return -1;
+  }
+  if (!lotwSubList) return -1;
+  for (int i = 0; i < lotwSubN; i++)
+    if (lotwRowMatches(lotwSubList[i].code, lotwSubList[i].name)) { if (k == pos) return i; k++; }
+  return -1;
+}
+
+void App::lotwPickEnter(LotwPick kind) {
+  lotwPickKind = kind;
+  lotwPickFilter = "";
+  lotwSubList = nullptr; lotwSubN = 0;
+  lotwSubSel = 0; lotwSubScroll = 0;
+  const char* curCode = "";
+  if (kind == LP_DXCC) {
+    lotwSubFieldName = "DXCC entity";
+    curCode = cfg.lotwDxcc;   // (numeric; preselect handled below by id match)
+  } else if (kind == LP_PRIMARY) {
+    const SubdivEntry* list = nullptr; int n = 0;
+    const char* fld = lotwPrimaryField(cfg.lotwDxcc, &list, &n);
+    lotwSubList = list; lotwSubN = n;
+    lotwSubFieldName = fld[0] ? fld : "";
+    // primary is stored in lotwState for US_STATE entities, else lotwSubdiv
+    const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);
+    bool usState = e && !strcmp(e->primaryField, "US_STATE");
+    curCode = usState ? cfg.lotwState : cfg.lotwSubdiv;
+  } else { // LP_SECONDARY
+    const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);
+    bool usState = e && e->primaryField[0] && !strcmp(e->primaryField, "US_STATE");
+    const char* primaryCode = usState ? cfg.lotwState : cfg.lotwSubdiv;
+    const SubdivEntry* list = nullptr; int n = 0;
+    const char* fld = lotwSecondaryField(cfg.lotwDxcc, primaryCode, &list, &n);
+    lotwSubList = list; lotwSubN = n;
+    lotwSubFieldName = fld[0] ? fld : "";
+    bool usCounty = e && !strcmp(e->secondaryField, "US_COUNTY");
+    curCode = usCounty ? cfg.lotwCnty : cfg.lotwSubdiv2;
+  }
+  // Preselect the currently-stored value within the (unfiltered) list.
+  if (kind == LP_DXCC) {
+    int d = atoi(cfg.lotwDxcc);
+    for (int i = 0; i < DXCC_LIST_N; i++)
+      if (DXCC_LIST[i].id == d) { lotwSubSel = i; break; }
+  } else if (lotwSubList && curCode && curCode[0]) {
+    for (int i = 0; i < lotwSubN; i++)
+      if (!strcasecmp(lotwSubList[i].code, curCode)) { lotwSubSel = i; break; }
+  }
   screen = SCR_LOTWSUB; lastDrawMs = 0;
 }
 
 void App::drawLotwSub() {
-  header("LoTW subdivision");
+  // Title reflects the context.
+  const char* title = (lotwPickKind == LP_DXCC) ? "LoTW DXCC"
+                    : (lotwPickKind == LP_PRIMARY) ? "LoTW primary"
+                    : "LoTW secondary";
+  header(title);
   canvas.setTextSize(1);
-  // No subdivision for this DXCC (or none configured): explain and offer back.
-  if (lotwSubN == 0 || lotwSubList == nullptr) {
+
+  // For primary/secondary: if there's no list, the entity simply has no division here.
+  if (lotwPickKind != LP_DXCC && (lotwSubN == 0 || lotwSubList == nullptr)) {
     canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.setCursor(6, 40);
-    if (!cfg.lotwDxcc[0]) canvas.print("Set LoTW DXCC entity first.");
-    else                  canvas.print("No subdivisions for this entity.");
+    if (!cfg.lotwDxcc[0]) canvas.print("Set LoTW DXCC first.");
+    else if (lotwPickKind == LP_SECONDARY && lotwSubFieldName.length() == 0)
+                          canvas.print("No secondary division here.");
+    else if (lotwPickKind == LP_SECONDARY)
+                          canvas.print("Pick the primary first.");
+    else                  canvas.print("No subdivision for this entity.");
     canvas.setCursor(6, 56);
-    canvas.print("LoTW needs none here - leave blank.");
+    canvas.print("LoTW needs none - leave blank.");
     footer("` back");
     return;
   }
-  // Header line: which LoTW field these codes fill.
+
+  int total = lotwFilteredCount();
+  // Header line: field/context label + filter echo + position.
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 16);
-  { String h = lotwSubFieldName; if (h.length() > 30) h = h.substring(0, 30);
-    canvas.printf("%s (%d)", h.c_str(), lotwSubN); }
+  { String h = lotwSubFieldName.length() ? lotwSubFieldName
+                                         : (lotwPickKind == LP_DXCC ? String("entity") : String());
+    if (lotwPickFilter.length()) h += " /" + lotwPickFilter;
+    if (h.length() > 30) h = h.substring(0, 30);
+    canvas.print(h); }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(196, 16);
+  canvas.printf("%d/%d", total ? lotwSubSel + 1 : 0, total);
 
   const int ROWS = 7;
+  if (lotwSubSel >= total) lotwSubSel = total > 0 ? total - 1 : 0;
   if (lotwSubSel < lotwSubScroll) lotwSubScroll = lotwSubSel;
   if (lotwSubSel >= lotwSubScroll + ROWS) lotwSubScroll = lotwSubSel - ROWS + 1;
-  for (int i = 0; i < ROWS && lotwSubScroll + i < lotwSubN; ++i) {
-    int idx = lotwSubScroll + i;
-    const SubdivEntry& e = lotwSubList[idx];
+
+  for (int i = 0; i < ROWS && lotwSubScroll + i < total; ++i) {
+    int filteredPos = lotwSubScroll + i;
+    int idx = lotwFilteredIndex(filteredPos);
+    if (idx < 0) continue;
     int y = 30 + i*13;
-    if (idx == lotwSubSel) { canvas.fillRect(0, y-2, 240, 12, CL_SELBG);
-                             canvas.setTextColor(CL_BLACK, CL_SELBG); }
-    else                     canvas.setTextColor(CL_WHITE, CL_BLACK);
+    bool sel = (filteredPos == lotwSubSel);
+    if (sel) { canvas.fillRect(0, y-2, 240, 12, CL_SELBG);
+               canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y);
-    // "CODE  Name" -- code is short (2-4 chars); name truncated to fit 240px.
-    char name[34]; strncpy(name, e.name, sizeof(name)-1); name[sizeof(name)-1] = 0;
-    canvas.printf("%-4.4s %-30.30s", e.code, name);
+    if (lotwPickKind == LP_DXCC) {
+      const DxccEntry& e = DXCC_LIST[idx];
+      // Mark entities that have a subdivision with a '>' so users see which gate further.
+      char tag = e.primaryField[0] ? '>' : ' ';
+      canvas.printf("%c%-34.34s", tag, e.name);
+    } else {
+      const SubdivEntry& e = lotwSubList[idx];
+      canvas.printf("%-5.5s %-29.29s", e.code, e.name);
+    }
   }
-  if (lotwSubN > ROWS) {
-    canvas.setTextColor(CL_GREY, CL_BLACK);
-    canvas.setCursor(208, 16);
-    canvas.printf("%d/%d", lotwSubSel + 1, lotwSubN);
-  }
-  footer("; / . move  ENT select  ` back");
+  footer("type=filter  ;/. move  ENT pick  ` back");
 }
 
 void App::keyLotwSub(char c, bool enter, bool back) {
-  if (isBack(c, back)) { screen = SCR_SETTINGS; lastDrawMs = 0; return; }
-  if (lotwSubN == 0 || lotwSubList == nullptr) return;
-  if (isUp(c))   { lotwSubSel = (lotwSubSel + lotwSubN - 1) % lotwSubN; lastDrawMs = 0; }
-  if (isDown(c)) { lotwSubSel = (lotwSubSel + 1) % lotwSubN; lastDrawMs = 0; }
+  if (isBack(c, back)) {
+    // Back-out: if a filter is active, the first ` clears it instead of leaving.
+    if (lotwPickFilter.length()) { lotwPickFilter = ""; lotwSubSel = 0; lotwSubScroll = 0; lastDrawMs = 0; return; }
+    screen = SCR_SETTINGS; lastDrawMs = 0; return;
+  }
+  int total = lotwFilteredCount();
+  if (isUp(c))   { if (total) lotwSubSel = (lotwSubSel + total - 1) % total; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (total) lotwSubSel = (lotwSubSel + 1) % total; lastDrawMs = 0; return; }
+  // Backspace edits the typeahead filter.
+  if (c == 8 || c == 127) {
+    if (lotwPickFilter.length()) { lotwPickFilter.remove(lotwPickFilter.length()-1);
+                                   lotwSubSel = 0; lotwSubScroll = 0; lastDrawMs = 0; }
+    return;
+  }
+  // Printable -> extend the filter (letters/digits/space match names and codes).
+  if (c >= 32 && c < 127 && !enter) {
+    if (lotwPickFilter.length() < 24) { lotwPickFilter += c; lotwSubSel = 0; lotwSubScroll = 0; lastDrawMs = 0; }
+    return;
+  }
   if (enter) {
-    const SubdivEntry& e = lotwSubList[lotwSubSel];
-    bool usCounty = false;
-    lotwSubdivField(cfg.lotwDxcc, nullptr, nullptr, &usCounty);
-    if (usCounty) {
-      // US entity: the picker writes the 2-letter state (county stays its own row).
-      strncpy(cfg.lotwState, e.code, sizeof(cfg.lotwState)-1);
-      cfg.lotwState[sizeof(cfg.lotwState)-1] = 0;
-    } else {
-      strncpy(cfg.lotwSubdiv, e.code, sizeof(cfg.lotwSubdiv)-1);
-      cfg.lotwSubdiv[sizeof(cfg.lotwSubdiv)-1] = 0;
+    if (total == 0) return;
+    int idx = lotwFilteredIndex(lotwSubSel);
+    if (idx < 0) return;
+    if (lotwPickKind == LP_DXCC) {
+      const DxccEntry& e = DXCC_LIST[idx];
+      char buf[8]; snprintf(buf, sizeof(buf), "%d", e.id);
+      // Changing DXCC invalidates any previously-chosen subdivisions.
+      if (strcmp(cfg.lotwDxcc, buf) != 0) {
+        cfg.lotwState[0] = 0; cfg.lotwCnty[0] = 0;
+        cfg.lotwSubdiv[0] = 0; cfg.lotwSubdiv2[0] = 0;
+      }
+      strncpy(cfg.lotwDxcc, buf, sizeof(cfg.lotwDxcc)-1); cfg.lotwDxcc[sizeof(cfg.lotwDxcc)-1] = 0;
+      cfg.save();
+      setStatus(String("DXCC ") + buf);
+      screen = SCR_SETTINGS; lastDrawMs = 0;
+      return;
+    }
+    const SubdivEntry& e = lotwSubList[idx];
+    const DxccEntry* ent = lotwFindDxcc(cfg.lotwDxcc);
+    if (lotwPickKind == LP_PRIMARY) {
+      bool usState = ent && !strcmp(ent->primaryField, "US_STATE");
+      if (usState) { strncpy(cfg.lotwState, e.code, sizeof(cfg.lotwState)-1); cfg.lotwState[sizeof(cfg.lotwState)-1]=0; }
+      else         { strncpy(cfg.lotwSubdiv, e.code, sizeof(cfg.lotwSubdiv)-1); cfg.lotwSubdiv[sizeof(cfg.lotwSubdiv)-1]=0; }
+      // Changing the primary clears any stale secondary.
+      cfg.lotwCnty[0] = 0; cfg.lotwSubdiv2[0] = 0;
+    } else { // LP_SECONDARY
+      bool usCounty = ent && !strcmp(ent->secondaryField, "US_COUNTY");
+      if (usCounty) {
+        // US county is stored as "ST,County" (the signing path expects that form).
+        const char* st = cfg.lotwState[0] ? cfg.lotwState : "";
+        String v = String(st) + "," + e.name;   // county VALUE is the name (e.code is numeric id)
+        strncpy(cfg.lotwCnty, v.c_str(), sizeof(cfg.lotwCnty)-1); cfg.lotwCnty[sizeof(cfg.lotwCnty)-1]=0;
+      } else {
+        strncpy(cfg.lotwSubdiv2, e.code, sizeof(cfg.lotwSubdiv2)-1); cfg.lotwSubdiv2[sizeof(cfg.lotwSubdiv2)-1]=0;
+      }
     }
     cfg.save();
     setStatus(String("Set ") + e.code);
@@ -6616,13 +6778,21 @@ void App::doLotwUpload(const String& keyPass) {
   st.ituz = cfg.lotwItuz;
   st.state = cfg.lotwState;
   st.cnty  = cfg.lotwCnty;
-  // Non-US primary subdivision + IOTA. Resolve the LoTW field name from the DXCC so
-  // the signer emits the right tag (CA_PROVINCE, RU_OBLAST, ...). US entities keep
-  // using state/cnty above, so only set subdiv for non-US (usCounty==false).
-  { bool usCounty = false;
-    const char* fld = lotwSubdivField(cfg.lotwDxcc, nullptr, nullptr, &usCounty);
-    if (!usCounty && fld[0] && cfg.lotwSubdiv[0]) {
-      st.subdiv = cfg.lotwSubdiv; st.subdivField = fld;
+  // Resolve primary + secondary subdivisions for this DXCC from the unified tables.
+  // The US path is unchanged: US_STATE entities keep using state/cnty above, so we only
+  // set st.subdiv for NON-US primaries (province/oblast/prefecture/...). The secondary
+  // (st.subdiv2) carries the JA city/gun/ku code; US county stays in st.cnty.
+  { const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);
+    if (e && e->primaryField[0]) {
+      bool usState = !strcmp(e->primaryField, "US_STATE");
+      if (!usState && cfg.lotwSubdiv[0]) {
+        st.subdiv = cfg.lotwSubdiv; st.subdivField = e->primaryField;
+      }
+      // Secondary: only JA_CITY_GUN_KU lives in lotwSubdiv2 (US county is in cnty).
+      if (e->secondaryField[0] && !strcmp(e->secondaryField, "JA_CITY_GUN_KU")
+          && cfg.lotwSubdiv2[0]) {
+        st.subdiv2 = cfg.lotwSubdiv2; st.subdiv2Field = e->secondaryField;
+      }
     }
   }
   st.iota = cfg.lotwIota;
@@ -6793,6 +6963,29 @@ static String jsonEscape(const String& in) {
   return out;
 }
 
+// Append a JSON-escaped copy of `in` to `out` IN PLACE -- no temporary return String.
+// Same escaping as jsonEscape() above, but it writes straight into the caller's buffer.
+// Used by the Cloudlog body builder so the whole request is assembled in ONE pre-sized
+// allocation instead of a cascade of String-operator temporaries: on the no-PSRAM heap,
+// that concatenation churn fragments the free-list right before the TLS handshake and
+// is what makes the upload connect fail (-1) once the heap has seen any prior activity.
+static void jsonEscapeAppend(String& out, const char* in) {
+  if (!in) return;
+  for (const char* p = in; *p; ++p) {
+    char c = *p;
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if ((uint8_t)c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
+        else out += c;
+    }
+  }
+}
+
 // Extract a top-level JSON string/number value by key from a flat response, e.g.
 // {"status":"created","imported_count":3}. Returns the raw value (unquoted) or "".
 // Good enough for Cloudlog's simple, flat responses; not a general JSON parser.
@@ -6881,8 +7074,8 @@ void App::drawCloudlog() {
 
   if (!cfg.ssid[0])      footer("` back   (set WiFi first)");
   else if (!haveCfg)     footer("` back   (set Cloudlog in Settings)");
-  else if (toSend)       footer(clResend ? "u upload ALL  a not-sent only  ` back"
-                                         : "u upload  a re-send all  ` back");
+  else if (toSend)       footer(clResend ? "u upload  R reboot+up  a not-sent  ` back"
+                                         : "u upload  R reboot+up  a resend  ` back");
   else if (clTotal)      footer("a re-send all   ` back");
   else                   footer("` back   (nothing to upload)");
 }
@@ -6894,6 +7087,9 @@ void App::keyCloudlog(char c, bool enter, bool back) {
   int toSend = clResend ? clTotal : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
   if (c == 'u' && haveCfg && toSend > 0) { doCloudlogUpload(); }
+  // 'R' = reboot first, then upload in a clean boot. Use this if a normal upload
+  // fails with "connection refused" after the device has been running a while.
+  if ((c == 'R' || c == 'r') && haveCfg && toSend > 0) { cloudlogRebootUpload(); }
 }
 
 // Build an ADIF batch from the pending (or all, in re-send mode) QSOs, POST it to the
@@ -6908,8 +7104,10 @@ void App::doCloudlogUpload() {
 
   // Build the ADIF string for up to CAP QSOs. Each record carries STATION_CALLSIGN so
   // Cloudlog can match it to the chosen station profile (it rejects a mismatch).
+  // Reserve per-record (~256 B each) rather than a flat 8 KB: a smaller, right-sized
+  // allocation keeps the heap free-list cleaner ahead of the TLS handshake.
   const int CAP = 50;
-  String adif; adif.reserve(8192);
+  String adif; adif.reserve(CAP * 64 + 256);   // grows if needed; avoids the flat 8 KB block
   int n = 0;
   if (Store::fs().exists(FILE_LOG)) {
     File f = Store::fs().open(FILE_LOG, "r");
@@ -6948,12 +7146,24 @@ void App::doCloudlogUpload() {
   if (n == 0) { clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; return; }
 
   // JSON-encode the request. The ADIF string needs JSON-escaping (it contains '<','>',
-  // and newlines). Keys/URL come from settings.
+  // and newlines). Build the whole body in ONE pre-sized buffer with the escaping done
+  // inline -- NOT via chained String operators + jsonEscape() temporaries. On the
+  // no-PSRAM heap that concatenation churn fragments the free-list right before the TLS
+  // handshake, which is what makes the connect fail (-1) once the heap has seen prior
+  // activity this session. LoTW's upload already builds its body in a single malloc and
+  // never hit this; matching that approach here removes the difference.
   clStatus = "Uploading " + String(n) + " QSO(s)..."; draw();
   String url = String(cfg.clUrl) + "/index.php/api/qso";
-  String body = "{\"key\":\"" + jsonEscape(cfg.clKey) +
-                "\",\"station_profile_id\":\"" + jsonEscape(cfg.clStation) +
-                "\",\"type\":\"adif\",\"string\":\"" + jsonEscape(adif) + "\"}";
+  String body;
+  // prefix + escaped(key) + mid1 + escaped(station) + mid2 + escaped(adif) + suffix
+  body.reserve(adif.length() + adif.length()/8 + 96);   // headroom for escaping + framing
+  body += "{\"key\":\"";
+  jsonEscapeAppend(body, cfg.clKey);
+  body += "\",\"station_profile_id\":\"";
+  jsonEscapeAppend(body, cfg.clStation);
+  body += "\",\"type\":\"adif\",\"string\":\"";
+  jsonEscapeAppend(body, adif.c_str());
+  body += "\"}";
 
   String resp;
   bool ok = net.httpsPostJson(url, body, resp);   // redactBody=true: key stays out of serial
@@ -6985,6 +7195,41 @@ void App::doCloudlogUpload() {
     clStatus = reason.length() ? ("Rejected: " + reason) : "Server rejected upload";
   }
   clBusy = false; lastDrawMs = 0;
+}
+
+// Reboot-then-upload: the in-session POST can hit a connect wall (-1) once a boot has
+// already run several TLS fetches (the same pattern the batched transponder cache hits
+// -- see doCacheAllTransponders). The reliable cure is a pristine boot. This writes a
+// one-shot marker and restarts; resumeCloudlogIfPending() in setup() then performs the
+// upload before anything else touches the network, and drops the user back here with
+// the result. The marker is cleared the instant it's read, so a failure can't loop.
+void App::cloudlogRebootUpload() {
+  File f = Store::fs().open(FILE_CL_RESUME, "w");
+  if (f) { f.println("1"); f.close(); }
+  Serial.println("[cloudlog] reboot-to-upload requested; restarting");
+  setStatus("Rebooting to upload...", 2000);
+  draw(); delay(1500);
+  ESP.restart();
+}
+
+// Called near the end of setup(): if the reboot-upload marker is present, this is the
+// pristine boot we rebooted for. Clear the marker FIRST (one-shot: never loop, even if
+// the upload crashes), bring up WiFi, open the Cloudlog screen, and run the upload now --
+// before the GP/AMSAT/weather fetches consume socket/heap headroom.
+void App::resumeCloudlogIfPending() {
+  if (!Store::fs().exists(FILE_CL_RESUME)) return;
+  Store::fs().remove(FILE_CL_RESUME);          // one-shot: consume before doing anything
+  Serial.println("[cloudlog] resuming upload in fresh boot");
+  cloudlogEnter();                             // counts pending + sets screen = SCR_CLOUDLOG
+  screen = SCR_CLOUDLOG; lastDrawMs = 0; draw();
+  if (!net.connected() && !connectWifiCfg()) {
+    clStatus = "WiFi failed (upload after reboot)"; lastDrawMs = 0; return;
+  }
+  int toSend = clResend ? clTotal : clPending;
+  bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
+  if (haveCfg && toSend > 0) doCloudlogUpload();
+  else clStatus = "Nothing to upload";
+  lastDrawMs = 0;
 }
 
 void App::drawLogEntry() {
@@ -12840,8 +13085,8 @@ void App::drawUpdate() {
   canvas.setCursor(6, 52); canvas.print("a       : cache ALL transponders");
   canvas.setCursor(6, 66); canvas.print("w       : connect WiFi only");
   canvas.setTextColor(CL_CYAN, CL_BLACK);
-  canvas.setCursor(6, 82); canvas.print("k adds space wx + weather;");
-  canvas.setCursor(6, 92); canvas.print("f does GP+AMSAT+fav TX.");
+  canvas.setCursor(6, 82); canvas.print("k adds space wx, weather,");
+  canvas.setCursor(6, 92); canvas.print("activations; f=GP+AMSAT+favs.");
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(6, 106);
   canvas.printf("Sats: %d   Favs: %d", db.count(), favN);
@@ -12966,15 +13211,36 @@ void App::drawSettings() {
   { const char* pm = (cfg.civPinMode == 1) ? "1-pin G2" : (cfg.civPinMode == 2) ? "1-pin G1" : "TX/RX (G2/G1)";
     rows[63] = String("CI-V wiring: ") + pm; }
   rows[64] = String("CAT serial monitor");
-  rows[69] = String("LoTW DXCC: ") + (cfg.lotwDxcc[0] ? cfg.lotwDxcc : "(not set)");
-  rows[70] = String("LoTW CQ zone: ") + (cfg.lotwCqz[0] ? cfg.lotwCqz : "(not set)");
-  rows[71] = String("LoTW ITU zone: ") + (cfg.lotwItuz[0] ? cfg.lotwItuz : "(not set)");
-  rows[72] = String("LoTW state (US): ") + (cfg.lotwState[0] ? cfg.lotwState : "(not set)");
-  rows[73] = String("LoTW county (US): ") + (cfg.lotwCnty[0] ? cfg.lotwCnty : "(not set)");
+  // ---- LoTW station location (unified DXCC -> primary -> secondary) ----
+  { const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);
+    // DXCC row shows the entity NAME (not just the number) when known.
+    String dxLbl = "(not set)";
+    if (cfg.lotwDxcc[0]) dxLbl = e ? String(e->name) : String(cfg.lotwDxcc);
+    rows[69] = String("LoTW DXCC: ") + dxLbl;
+    rows[70] = String("LoTW CQ zone: ") + (cfg.lotwCqz[0] ? cfg.lotwCqz : "(not set)");
+    rows[71] = String("LoTW ITU zone: ") + (cfg.lotwItuz[0] ? cfg.lotwItuz : "(not set)");
+    // Primary row: label by the entity's primary field; value from state or subdiv.
+    bool usState = e && e->primaryField[0] && !strcmp(e->primaryField, "US_STATE");
+    const char* primCode = usState ? cfg.lotwState : cfg.lotwSubdiv;
+    String primName = (e && e->primaryField[0]) ? lotwFieldLabel(e->primaryField) : String("subdivision");
+    rows[72] = (e && e->primaryField[0])
+                 ? (String("LoTW ") + primName + ": " + (primCode[0] ? primCode : "(not set)"))
+                 : String("LoTW subdivision: (n/a)");
+    // Secondary row: county (US) or city (JA); hidden meaning when entity has none.
+    bool usCounty = e && e->secondaryField[0] && !strcmp(e->secondaryField, "US_COUNTY");
+    String secName = (e && e->secondaryField[0]) ? lotwFieldLabel(e->secondaryField) : String("");
+    if (e && e->secondaryField[0]) {
+      String secVal;
+      if (usCounty) { String c = cfg.lotwCnty; int k = c.indexOf(','); secVal = (k>=0)? c.substring(k+1) : c; }
+      else          secVal = cfg.lotwSubdiv2;
+      rows[73] = String("LoTW ") + secName + ": " + (secVal.length() ? secVal : "(not set)");
+    } else {
+      rows[73] = String("LoTW county/city: (n/a)");
+    }
+  }
   rows[74] = String("Cloudlog URL: ") + (cfg.clUrl[0] ? cfg.clUrl : "(not set)");
   rows[75] = String("Cloudlog key: ") + String(strlen(cfg.clKey) ? "******" : "(none)");
   rows[76] = String("Cloudlog station ID: ") + (cfg.clStation[0] ? cfg.clStation : "(not set)");
-  rows[77] = String("LoTW subdiv (intl): ") + (cfg.lotwSubdiv[0] ? cfg.lotwSubdiv : "(not set)");
   rows[78] = String("LoTW IOTA: ") + (cfg.lotwIota[0] ? cfg.lotwIota : "(not set)");
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {

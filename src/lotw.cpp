@@ -116,7 +116,7 @@ String Lotw::signData(const PendingQso& q, const LotwStation& st) {
   // The single non-US primary subdivision (st.subdiv) carries its LoTW field name in
   // st.subdivField; emit its value at that field's alphabetical slot. Field order:
   // AU_STATE, CA_PROVINCE, CN_PROVINCE, CQZ, FI_KUNTA, GRIDSQUARE, IOTA, ITUZ,
-  // JA_PREFECTURE, RU_OBLAST, US_COUNTY, US_STATE (the fields CardSat can populate).
+  // JA_CITY_GUN_KU, JA_PREFECTURE, RU_OBLAST, US_COUNTY, US_STATE.
   auto subIs = [&](const char* f) {
     return st.subdiv.length() && st.subdivField == f;
   };
@@ -128,6 +128,8 @@ String Lotw::signData(const PendingQso& q, const LotwStation& st) {
   if (st.grid.length())  s += st.grid;        // GRIDSQUARE
   if (st.iota.length())  s += st.iota;        // IOTA
   if (st.ituz.length())  s += st.ituz;        // ITUZ
+  // JA_CITY_GUN_KU (secondary, gated by JA_PREFECTURE) sorts before JA_PREFECTURE.
+  if (st.subdiv2.length() && st.subdiv2Field == "JA_CITY_GUN_KU") s += st.subdiv2;
   if (subIs("JA_PREFECTURE")) s += st.subdiv; // JA_PREFECTURE
   if (subIs("RU_OBLAST"))   s += st.subdiv;   // RU_OBLAST
   // US_COUNTY is signed as the county NAME ALONE (TQSL keeps state and county in
@@ -361,6 +363,9 @@ bool Lotw::buildTq8(const PendingQso* qsos, int n, const LotwStation& st,
   // the signed string (signData) must be alphabetical.
   if (st.subdiv.length() && st.subdivField.length())
     adifSp(text, st.subdivField.c_str(), st.subdiv);
+  // Secondary subdivision (JA city/gun/ku). US county is already emitted above via cnty.
+  if (st.subdiv2.length() && st.subdiv2Field.length())
+    adifSp(text, st.subdiv2Field.c_str(), st.subdiv2);
   adifSp(text, "IOTA",       st.iota);     // IOTA reference (any DXCC); skipped if ""
   text += "<eor>\n";
 

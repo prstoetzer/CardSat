@@ -341,32 +341,91 @@ void SatDb::applyAmsatStatusFile(const char* path) {
   if (_n <= 0) return;
   File f = Store::fs().open(path, "r");
   if (!f) return;
-  JsonDocument filter;
-  filter["data"][0]["name"] = true;
-  filter["data"][0]["report"] = true;
-  filter["data"][0]["report_count"] = true;
-  JsonDocument doc;
-  DeserializationError e = deserializeJson(doc, f, DeserializationOption::Filter(filter));
-  f.close();
-  if (e) return;
+
+  // Pre-compute the base callsign of each catalog sat once (cb[i]), so the per-report
+  // matching below is a cheap strcmp.
   char (*cb)[16] = (char (*)[16])malloc((size_t)_n * 16);
-  if (!cb) return;
+  if (!cb) { f.close(); return; }
   for (int i = 0; i < _n; ++i) amsatBase(_sats[i].name, cb[i], 16);
-  for (JsonObject r : doc["data"].as<JsonArray>()) {
-    const char* nm  = r["name"]  | "";
-    const char* rep = r["report"] | "";
-    long cnt = r["report_count"] | 0;
-    if (!nm[0] || cnt <= 0) continue;
-    uint8_t st = !strcmp(rep, "Not Heard")      ? 2    // category -> status code
-               : !strcmp(rep, "Telemetry Only") ? 3
-                                                : 1;   // Heard / Crew Active
-    char sb[16]; amsatBase(nm, sb, 16);
-    for (int i = 0; i < _n; ++i) {
-      if (strcmp(sb, cb[i]) != 0) continue;
-      if (amsatPrio(st) > amsatPrio(_sats[i].amsatStatus)) _sats[i].amsatStatus = st;
+
+  // Parse the "data" array ONE OBJECT AT A TIME instead of loading the whole filtered
+  // document. The summary.php payload is large (hundreds of reports); deserializing it
+  // whole spiked free heap to a few KB, which churned the no-PSRAM free-list and (per a
+  // long debugging trail) destabilised later TLS connects. Here we scan the file for each
+  // top-level {...} inside the array, deserialize just that object, apply it, and discard
+  // it -- so peak heap is one small object (~200 B), not the entire array.
+  // Bounded object buffer: AMSAT records are short; anything longer than this is skipped
+  // safely (we only need name/report/report_count, which sit well within it).
+  static const size_t OBJ_MAX = 512;
+  char obj[OBJ_MAX];
+  size_t objLen = 0;
+  int depth = 0;          // brace depth; we capture while depth>=1 inside an object
+  bool inObj = false;     // currently accumulating an object
+  bool inStr = false;     // inside a JSON string (so braces/quotes are literal)
+  bool esc = false;       // previous char was a backslash inside a string
+  bool sawData = false;   // only start capturing objects after the "data" key
+
+  // We don't need a full tokenizer: just find the "data" marker, then capture each
+  // brace-balanced object that follows until the array closes.
+  int c;
+  // Cheap scan to the "data" array opener so we don't capture any objects before it.
+  // (The top-level wrapper {"data":[ ... ]} -- skip until the '[' after "data".)
+  {
+    const char* key = "\"data\"";
+    int ki = 0;
+    while ((c = f.read()) >= 0) {
+      char ch = (char)c;
+      if (ch == key[ki]) { if (++ki == 6) { sawData = true; break; } }
+      else ki = (ch == '"') ? 1 : 0;
+    }
+    if (sawData) { while ((c = f.read()) >= 0 && (char)c != '['); }  // advance to '['
+  }
+  if (!sawData) { free(cb); f.close(); return; }
+
+  while ((c = f.read()) >= 0) {
+    char ch = (char)c;
+    if (inObj) {
+      if (objLen < OBJ_MAX - 1) obj[objLen++] = ch;   // capture (truncate over-long safely)
+    }
+    if (inStr) {
+      if (esc)            esc = false;
+      else if (ch == '\\') esc = true;
+      else if (ch == '"')  inStr = false;
+      continue;
+    }
+    if (ch == '"') { inStr = true; continue; }
+    if (ch == '{') {
+      if (depth == 0) { inObj = true; objLen = 0; if (objLen < OBJ_MAX-1) obj[objLen++] = ch; }
+      depth++;
+    } else if (ch == '}') {
+      depth--;
+      if (depth == 0 && inObj) {
+        obj[objLen] = 0;
+        // Deserialize just this one object and apply it.
+        JsonDocument one;
+        if (!deserializeJson(one, obj)) {
+          const char* nm  = one["name"]  | "";
+          const char* rep = one["report"] | "";
+          long cnt = one["report_count"] | 0;
+          if (nm[0] && cnt > 0) {
+            uint8_t st = !strcmp(rep, "Not Heard")      ? 2
+                       : !strcmp(rep, "Telemetry Only") ? 3
+                                                        : 1;
+            char sb[16]; amsatBase(nm, sb, 16);
+            for (int i = 0; i < _n; ++i) {
+              if (strcmp(sb, cb[i]) != 0) continue;
+              if (amsatPrio(st) > amsatPrio(_sats[i].amsatStatus)) _sats[i].amsatStatus = st;
+            }
+          }
+        }
+        inObj = false;
+      }
+    } else if (ch == ']' && depth == 0) {
+      break;   // end of the data array
     }
   }
   free(cb);
+  f.close();
 }
 
 // Stream-parse a GP/OMM JSON array from a file, one object at a time, using a

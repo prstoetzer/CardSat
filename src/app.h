@@ -840,23 +840,38 @@ private:
   String lotwStatus;               // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
   bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
-  // ---- LoTW intl subdivision picker (SCR_LOTWSUB) ----
-  // Resolve a DXCC entity number to its LoTW primary-subdivision field. Returns the
-  // LoTW field NAME (e.g. "CA_PROVINCE") or "" if the entity has no subdivision, and
-  // fills list/n with the choice table. usCounty=true means the entity uses US-style
-  // state+county (handled by the existing state/county rows, not this picker).
-  const char* lotwSubdivField(const char* dxcc, const SubdivEntry** list, int* n, bool* usCounty);
-  void lotwSubEnter();             // open the picker for the configured DXCC
+  // ---- Unified LoTW location picker (SCR_LOTWSUB) ----
+  // One context-aware list picker drives the whole DXCC -> primary -> secondary chain.
+  // lotwPickKind selects what's being chosen; the list/codes come from the flash tables
+  // in lotw_subdiv.h. A typeahead filter narrows the long lists (340 DXCC, JA cities).
+  enum LotwPick { LP_DXCC = 0, LP_PRIMARY = 1, LP_SECONDARY = 2 };
+  // Resolve, for the configured DXCC, the primary field name + its choice list, and
+  // whether that primary maps to US_STATE (so secondary = county) or JA_PREFECTURE
+  // (secondary = city). Returns "" if the entity has no primary subdivision.
+  const char* lotwPrimaryField(const char* dxcc, const SubdivEntry** list, int* n);
+  // Resolve the secondary field + list, gated by the stored PRIMARY code. Returns "" if
+  // the entity/primary has no secondary level.
+  const char* lotwSecondaryField(const char* dxcc, const char* primaryCode,
+                                 const SubdivEntry** list, int* n);
+  void lotwPickEnter(LotwPick kind);   // open the picker in a given context
   void drawLotwSub();   void keyLotwSub(char c, bool enter, bool back);
-  const SubdivEntry* lotwSubList = nullptr;  // active choice table (flash)
+  LotwPick lotwPickKind = LP_DXCC; // what the picker is currently choosing
+  const SubdivEntry* lotwSubList = nullptr;  // active choice table (flash), for PRIMARY/SECONDARY
   int    lotwSubN = 0;             // entries in the active table
-  int    lotwSubSel = 0;           // picker cursor
+  int    lotwSubSel = 0;           // picker cursor (index into the FILTERED view)
   int    lotwSubScroll = 0;        // picker scroll offset
-  String lotwSubFieldName;         // LoTW field name for the active DXCC (header text)
+  String lotwSubFieldName;         // header label for the active context
+  String lotwPickFilter;           // typeahead filter string (matches name or code)
+  // Filtered-view helpers: map a filtered row position to the underlying table index.
+  int    lotwFilteredCount();                 // # rows passing the current filter
+  int    lotwFilteredIndex(int filteredPos);  // underlying index of the Nth filtered row
+  bool   lotwRowMatches(const char* code, const char* name);  // filter predicate
   // ---- Cloudlog/Wavelog upload screen (SCR_CLOUDLOG) ----
   void drawCloudlog();   void keyCloudlog(char c, bool enter, bool back);
   void cloudlogEnter();                     // count pending QSOs + open screen
   void doCloudlogUpload();                  // build ADIF + JSON POST + mark uploaded
+  void cloudlogRebootUpload();              // write marker + reboot, then upload on fresh boot
+  void resumeCloudlogIfPending();           // setup(): if marker set, upload in a clean boot
   int  clPending = 0;              // QSOs not yet sent to Cloudlog (bit 0x2 unset)
   int  clTotal = 0;                // total sat QSOs in the log (for re-send mode)
   String clStatus;                 // last result/error line shown on the screen

@@ -15,6 +15,24 @@
 // TLS-session hook (see net.h). Null by default; the app installs it at startup.
 void (*Net::onTlsBusy)(bool) = nullptr;
 
+// Log the full heap picture (not just the single largest block) at a labeled point.
+// Retained as a diagnostic on the upload path: a fragmented heap can show a healthy
+// largest block while a TLS handshake -- which needs several allocations at once --
+// still fails on a later, smaller one. free_blocks (the count of separate free chunks)
+// and total_free vs largest expose that. This was the key instrument in tracking down
+// the Cloudlog upload failure (see docs/design/CLOUDLOG_UPLOAD_POSTMORTEM.md).
+static void logHeapDetail(const char* where) {
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+  Serial.printf("[heap] %s: free=%u largest=%u min_free_ever=%u free_blocks=%u alloc_blocks=%u\n",
+                where,
+                (unsigned)info.total_free_bytes,
+                (unsigned)info.largest_free_block,
+                (unsigned)info.minimum_free_bytes,
+                (unsigned)info.free_blocks,
+                (unsigned)info.allocated_blocks);
+}
+
 // Redact secrets from a URL before logging it. QRZ (and any future credentialed
 // endpoint) carry username/password/session keys in the query string; logging the
 // raw URL to serial would leak them. This masks the VALUE of any sensitive parameter
@@ -573,6 +591,7 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
   if (!began) { lastErr = "begin failed"; return false; }
   http.addHeader("Content-Type", contentType);
 
+  logHeapDetail("pre-POST-connect");   // full heap shape right before the handshake
   int code = http.POST((uint8_t*)body.c_str(), body.length());
   lastCode = code;
   noteConnResult(code);

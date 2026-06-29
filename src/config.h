@@ -35,6 +35,7 @@ static constexpr double C_LIGHT = 299792458.0;
 // link. This marker file holds the next satellite index to cache; its presence
 // means a resume is pending and setup() auto-continues. Deleted when done.
 #define FILE_TX_RESUME     "/CardSat/tx_resume.txt"
+#define FILE_CL_RESUME     "/CardSat/cl_resume.txt"  // Cloudlog upload-after-reboot marker
 #define TX_CACHE_BATCH     12                       // sats cached per boot
 
 // ---------------------------------------------------------------------------

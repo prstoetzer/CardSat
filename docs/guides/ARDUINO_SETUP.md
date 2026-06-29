@@ -198,19 +198,16 @@ A successful compile ends with the sketch size and the FQBN line
 
 ---
 
-## 7. Optional: enable LoRa features at build time
+## 7. LoRa is built in — install RadioLib
 
-The LoRa text-messaging and beacon code is wrapped in `#if CARDSAT_HAS_LORA` and is
-**off by default** (`CARDSAT_HAS_LORA` defaults to `0`). To build with it:
+The LoRa text-messaging and beacon code is built into the standard binaries
+(`CARDSAT_HAS_LORA` defaults to `1`), so **RadioLib is a required dependency**:
 
-1. Install **RadioLib** (§3.3).
-2. Turn the flag on. The simplest, IDE-friendly way is to edit the definition in the
-   source from `0` to `1`:
-   - In the single-file build, find the `CARDSAT_HAS_LORA` define near the top of
-     `CardSat.ino` and set it to `1`.
-   - (The modular source mirrors this in `src/lora.h`.)
-3. Recompile. Without RadioLib installed, leave the flag at `0` or the build will fail
-   on the missing `RadioLib.h`.
+1. Install **RadioLib** (§3.3) before compiling, or the build fails on the missing
+   `RadioLib.h`.
+2. That's it — nothing to toggle. The `#if CARDSAT_HAS_LORA` guards remain in the
+   source only so the tree still compiles if you deliberately set the flag to `0` in
+   your own build (you shouldn't need to).
 
 > The LoRa hardware integration is **experimental/untested** on the ADV; see the LoRa
 > notes in `README.md` before wiring anything.

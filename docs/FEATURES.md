@@ -172,13 +172,19 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   in-browser and offline, with the private key never leaving your computer (or use a
   one-line `openssl pkcs12` step). **Your private key lives on the SD card**, loaded
   only at upload time and never copied or transmitted except as the signature.
-  Station DXCC/CQ/ITU zones live in Settings, along with your **primary subdivision**:
-  US state + county, or — for entities that have one — a **DXCC-aware picker** for
-  Canadian province, Russian oblast, Japanese prefecture, Chinese province, Australian
-  state, or Finnish kunta, plus an optional **IOTA** reference. Each is signed into the
-  upload under the exact LoTW field name and sigspec order. Sent QSOs are flagged (an
-  `uploaded` column) so they're never uploaded twice. See
-  [MANUAL.md → LoTW upload](../MANUAL.md).
+  The station location is a **unified, chained picker** that works the same for every
+  entity: pick your **DXCC** from the full list (the entities that have subdivisions are
+  grouped at the top, and a typeahead filters the list), then a **primary** subdivision
+  gated by that DXCC (US state, Canadian province, Russian oblast, Japanese prefecture,
+  Chinese province, Australian state, Finnish kunta — the row is labelled with the right
+  term and shows *(n/a)* for entities without one), then a **secondary** gated by the
+  primary (US **county** or Japanese **city/gun/ku**), plus a free-text **IOTA** field.
+  No more separate US-vs-international entry — the US is just "United States → state →
+  county," exactly like Japan's "prefecture → city." Each level is signed into the upload
+  under the exact LoTW field name and sigspec order, fully data-driven from the
+  TrustedQSL config (340 DXCC entities, all primary lists, every US county and Japanese
+  city). Sent QSOs are flagged (an `uploaded` column) so they're never uploaded twice.
+  See [MANUAL.md → LoTW upload](../MANUAL.md).
 - **Cloudlog / Wavelog upload** — **Upload to Cloudlog** on the Log menu sends your
   satellite QSOs to a self-hosted **Cloudlog** (or compatible **Wavelog**) online logbook
   over WiFi, via its JSON QSO API. Set your instance URL, a read-write API key, and your
@@ -208,14 +214,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   (T-60/T-30/T-10/AOS/TCA/LOS), a 38 kHz carrier any common IR receiver decodes, so you
   can trigger external hardware (relays, preamps, recorders, shack lights) off a pass.
   Non-blocking; ⚠️ host-verified only, see [MANUAL.md](../MANUAL.md).
-- **LoRa text messaging** (optional, off by default) — CardSat-to-CardSat **broadcast
-  group chat** over the M5Stack **Cap LoRa (SX1262)**: every unit on the same
-  frequency/SF/bandwidth sees every message, for a club net or SOTA/portable group.
-  Selectable frequency (150–960 MHz; the SX1262 is unfiltered), spreading factor
-  (7–12, default 12) and bandwidth; fixed-size message ring (no SD, no heap growth).
-  Needs the **RadioLib** library and a `CARDSAT_HAS_LORA` build. ⚠️ Untested
-  hardware path — verify two units talk before relying on it; mind your band's
-  bandwidth rules. See [MANUAL.md](../MANUAL.md).
+- **LoRa text messaging** — CardSat-to-CardSat **broadcast group chat** over the
+  M5Stack **Cap LoRa (SX1262)**: every unit on the same frequency/SF/bandwidth sees
+  every message, for a club net or SOTA/portable group. Selectable frequency
+  (150–960 MHz; the SX1262 is unfiltered), spreading factor (7–12, default 12) and
+  bandwidth; fixed-size message ring (no SD, no heap growth). Built into the standard
+  binaries (requires the **RadioLib** library at build time). ⚠️ Untested hardware
+  path — verify two units talk before relying on it; mind your band's bandwidth rules.
+  See [MANUAL.md](../MANUAL.md).
 - **Auto-refresh, power management, and diagnostics.** If WiFi is configured,
   CardSat connects and NTP-syncs at boot and **auto-refreshes GP when the cached
   elements are over a week old**; a **fast update** (`f` on the Update screen) refreshes

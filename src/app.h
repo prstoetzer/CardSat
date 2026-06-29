@@ -569,6 +569,8 @@ private:
   int      logMenuSel = 0;        // selected row on the Log menu
   Screen   logReturn = SCR_HOME;  // screen to return to after entry
   PendingQso logRecs[LOG_VIEW_MAX]; // recent log entries loaded for view/edit
+  int      logFileRows[LOG_VIEW_MAX]; // file data-row index for each logRecs[] entry
+                                      // (parallel array; survives the date sort)
   int      logRecN = 0;           // number loaded
   int      logFirstIdx = 0;       // file data-row index of logRecs[0]
   int      logListSel = 0;        // selected row in the log list
@@ -718,6 +720,8 @@ private:
   void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
   void fetchSpaceWeather();                // fetch F10.7 solar flux (best-effort, with GP)
   void fetchWeather();                     // fetch terrestrial weather (Open-Meteo, best-effort)
+  void spaceWxEnter();                     // open Space Wx screen, show cache, fetch if WiFi up
+  void weatherEnter();                     // open Weather screen, show cache, fetch if WiFi up
   bool loadWeatherCache();                 // load cached weather from flash on boot
   static const char* wxCodeText(int code); // WMO weather code -> short label
   static const char* windDirName(int deg);  // degrees -> 16-point compass ("" if <0)
@@ -832,6 +836,8 @@ private:
   void drawLotw();    void keyLotw(char c, bool enter, bool back);
   void doLotwUpload(const String& keyPass);  // build .tq8 + POST + mark uploaded
   void lotwEnter();                          // count pending QSOs + open screen
+  void lotwRebootUpload();                   // write marker + reboot, re-prompt + upload on fresh boot
+  void resumeLotwIfPending();                // setup(): if marker set, re-prompt passphrase + upload
   int  lotwParseAccepted(const String& resp, int batchN);  // read accepted count
   int  markLogUploaded(int limit, uint8_t bit = 0x1);  // flag up to 'limit' QSOs sent (bit: 0x1=LoTW, 0x2=Cloudlog)
   int    lotwPending = 0;          // un-uploaded sat QSOs counted on entry
@@ -840,6 +846,7 @@ private:
   String lotwStatus;               // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
   bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
+  bool   lotwRebootPrompt = false; // upload hit a -1 connect; asking to reboot-and-retry
   // ---- Unified LoTW location picker (SCR_LOTWSUB) ----
   // One context-aware list picker drives the whole DXCC -> primary -> secondary chain.
   // lotwPickKind selects what's being chosen; the list/codes come from the flash tables
@@ -877,6 +884,7 @@ private:
   String clStatus;                 // last result/error line shown on the screen
   bool clBusy = false;             // an upload is in progress (suppress re-entry)
   bool clResend = false;           // include QSOs already sent to Cloudlog (opt-in)
+  bool clRebootPrompt = false;     // upload hit a -1 connect; asking to reboot-and-retry
   // ---- Upcoming activations feed (SCR_HAMSAT, from hams.at) ----
   struct Activation {
     char date[11];     // YYYY-MM-DD
@@ -981,7 +989,8 @@ private:
   void beginAdifExport();         // resolve LoTW names (prompt for misses), then export
   void promptNextLotw();          // prompt for the next unmapped sat's LoTW SAT_NAME
   void keyLogList(char c, bool enter, bool back);
-  void loadLog();                 // load recent entries into logRecs[]
+  void loadLog();                 // load recent entries into logRecs[] (newest-first)
+  int  logFileRow(int recIdx) const;  // map a logRecs[] index back to its on-disk row
   bool rewriteLog(int fileIdx, const PendingQso* rec, bool del);  // edit/delete a row
   void keyEdit(char c, bool enter, bool back);
 

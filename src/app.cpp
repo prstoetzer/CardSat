@@ -253,6 +253,8 @@ void App::setup() {
   // If a "reboot to upload to Cloudlog" was requested, do that upload now in this
   // pristine boot (before other fetches use up socket/heap headroom).
   resumeCloudlogIfPending();
+  // Same for a "reboot to upload to LoTW" request (re-prompts for the key passphrase).
+  resumeLotwIfPending();
 }
 
 void App::applyRadioFromCfg() {
@@ -804,7 +806,7 @@ void App::fetchAmsatStatus() {
 // range; we scan a bounded slice rather than fully parsing the array.
 void App::fetchSpaceWeather() {
   if (!net.connected()) return;
-  setStatus("Space weather..."); draw();
+  setStatus("Updating Space Wx"); draw();
 
   // --- Solar 10.7 cm flux ---
   // f107_cm_flux.json is an array of objects, newest first, e.g.
@@ -1071,16 +1073,20 @@ int App::loadHamsatCache() {
 
 void App::fetchHamsat() {
   if (!net.connected()) { hamsatStatus = "No WiFi - connect in Settings"; return; }
-  hamsatStatus = "Downloading activations..."; draw();
+  // In-progress indicator on the shared bottom status bar (like Weather / Space Wx),
+  // keeping the cached list visible underneath while it refreshes.
+  setStatus("Updating Activations"); draw();
   // The feed is a few KB but can grow with more scheduled activations; allow room.
   if (!net.httpsGetToFileRetry(HAMSAT_FEED_URL, FILE_DL_TMP, 60000, nullptr, 3, 20000)) {
     Store::fs().remove(FILE_DL_TMP);
-    hamsatStatus = "Feed fetch failed (" + net.lastErr + ")";
+    // Keep any cached list visible (the bottom bar reports the failure); only take over
+    // the body with an error if there's nothing cached to show.
+    if (hamsatN == 0) hamsatStatus = "Feed fetch failed (" + net.lastErr + ")";
     return;
   }
   String body = readSmallFile(FILE_DL_TMP, 60000);
   Store::fs().remove(FILE_DL_TMP);
-  if (body.length() == 0) { hamsatStatus = "Empty feed response"; return; }
+  if (body.length() == 0) { if (hamsatN == 0) hamsatStatus = "Empty feed response"; return; }
   int n = parseHamsat(body);
   hamsatStatus = n ? "" : "No upcoming activations";
   hamsatSel = 0; hamsatScroll = 0; hamsatDetail = false;
@@ -1089,17 +1095,44 @@ void App::fetchHamsat() {
 
 void App::hamsatEnter() {
   hamsatDetail = false; hamsatSel = 0; hamsatScroll = 0;
-  // Show the last-known list immediately (even with no WiFi) by loading the cache
-  // first; a live fetch below replaces it when we're online.
+  // Show the last-known list immediately (even with no WiFi) by loading the cache first.
   if (hamsatN == 0) loadHamsatCache();
-  // Switch to the Activations screen FIRST so the "Downloading activations..." banner
-  // that fetchHamsat() paints lands on THIS screen, not the one we came from. Without
-  // this ordering the blocking fetch runs while the previous screen is still current,
-  // so the banner is never visible.
-  screen = SCR_HAMSAT; lastDrawMs = 0;
-  if (net.connected()) { draw(); fetchHamsat(); }
-  else if (hamsatN == 0) hamsatStatus = "No WiFi - connect in Settings";
-  else hamsatStatus = "";          // offline but we have cached activations to show
+  hamsatStatus = "";                       // body stays clean; progress goes on the bar
+  screen = SCR_HAMSAT; lastDrawMs = 0; draw();   // cached list (or empty state) on screen now
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi not connected"); lastDrawMs = 0; return; }
+  int before = hamsatN;
+  fetchHamsat();                           // shows "Updating Activations" while it runs
+  // Result on the bottom bar, then the loop clears it when it times out.
+  if (net.lastCode > 0 || hamsatN > 0)
+    setStatus(hamsatN != before ? "Activations updated" : "Activations unchanged");
+  else
+    setStatus("Activations update failed");
+  lastDrawMs = 0;
+}
+
+// Space Wx and Weather entry: same shape as hamsatEnter -- show the screen with its
+// already-loaded cache immediately, then (if online) fetch with an "Updating ..." bar
+// and leave a result that the loop drops when it expires.
+void App::spaceWxEnter() {
+  screen = SCR_SPACEWX; lastDrawMs = 0; draw();   // cached values (loaded at boot) shown now
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi not connected"); lastDrawMs = 0; return; }
+  float beforeF = spaceF107, beforeK = spaceKp;
+  fetchSpaceWeather();                     // shows "Updating Space Wx" while it runs
+  bool got = (spaceF107 > 0 || spaceKp >= 0);
+  bool changed = (spaceF107 != beforeF || spaceKp != beforeK);
+  setStatus(got ? (changed ? "Space Wx updated" : "Space Wx unchanged")
+                : "Space Wx update failed");
+  lastDrawMs = 0;
+}
+
+void App::weatherEnter() {
+  screen = SCR_WEATHER; lastDrawMs = 0; draw();   // cached forecast (loaded at boot) shown now
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi not connected"); lastDrawMs = 0; return; }
+  const Observer& o = loc.obs();
+  if (!(o.lat != 0.0 || o.lon != 0.0)) { setStatus("Set a location first"); lastDrawMs = 0; return; }
+  time_t before = wxEpoch;
+  fetchWeather();                          // shows "Updating Weather" while it runs
+  setStatus(wxEpoch != before ? "Weather updated" : "Weather update failed");
   lastDrawMs = 0;
 }
 
@@ -1186,7 +1219,7 @@ void App::keyHamsat(char c, bool enter, bool back) {
     return;
   }
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
-  if (c == 'r') { fetchHamsat(); lastDrawMs = 0; return; }
+  if (c == 'r') { hamsatEnter(); return; }   // same show-cache + fetch + result flow
   if (hamsatN == 0) return;
   if (isUp(c))   { hamsatSel = (hamsatSel + hamsatN - 1) % hamsatN; lastDrawMs = 0; }
   if (isDown(c)) { hamsatSel = (hamsatSel + 1) % hamsatN; lastDrawMs = 0; }
@@ -1498,7 +1531,7 @@ void App::fetchWeather() {
   if (!net.connected()) return;
   const Observer& o = loc.obs();
   if (!(o.lat != 0.0 || o.lon != 0.0)) return;       // no location set -> nothing to do
-  setStatus("Weather..."); draw();
+  setStatus("Updating Weather"); draw();
 
   const char* tu = (cfg.wxUnits == WX_IMPERIAL) ? "fahrenheit" : "celsius";
   const char* wu = (cfg.wxUnits == WX_IMPERIAL) ? "mph"
@@ -1618,7 +1651,6 @@ void App::fetchWeather() {
                wxDayHi[i], wxDayLo[i], wxDayPop[i]);
     w.close();
   }
-  setStatus("");
 }
 
 // Restore cached weather at boot so the screen has data offline.
@@ -3688,6 +3720,14 @@ void App::loop() {
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
+  } else if (screen == SCR_WEATHER || screen == SCR_SPACEWX || screen == SCR_HAMSAT) {
+    // These are otherwise static (repaint on keypress only). The fetch flow leaves a
+    // transient result banner ("... updated/failed") on the bottom status bar; repaint
+    // while it's visible, then once more right after it times out so the cleared bar is
+    // painted exactly once -- after which this branch goes quiet again.
+    bool banner = status.length() && millis() < statusUntil;
+    if (banner) { if (ms - lastDrawMs > 300) { lastDrawMs = ms; draw(); } }
+    else if (status.length()) { status = ""; lastDrawMs = ms; draw(); }  // expired: clear + repaint once
   }
 
   // While an AOS alarm is flashing or counting down, animate on any screen.
@@ -3893,13 +3933,8 @@ void App::keyHome(char c, bool enter, bool back) {
       } break;
       case 4: mapHi = -1; mapReturn = SCR_HOME; screen = SCR_WORLDMAP; lastDrawMs = 0; break;  // all footprints
       case 5: screen = SCR_SUNMOON; lastDrawMs = 0; break;
-      case 6: screen = SCR_SPACEWX; lastDrawMs = 0; break;
-      case 7: // Weather: refresh on entry if WiFi already up, else show cache
-        if (net.connected()) {
-          const Observer& o = loc.obs();
-          if (o.lat != 0.0 || o.lon != 0.0) fetchWeather();
-        }
-        screen = SCR_WEATHER; lastDrawMs = 0; break;
+      case 6: spaceWxEnter(); break;  // space weather (NOAA SWPC)
+      case 7: weatherEnter(); break;  // local terrestrial weather (open-meteo)
       case 8: hamsatEnter(); break;   // upcoming activations (hams.at)
       case 9: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
       case 10: screen = SCR_LOCATION; break;
@@ -6156,7 +6191,12 @@ void App::beginQso() {
   } else if (activeTxCount > 0) {
     seedQsoSatDefaults();          // pre-fill from the selected sat (non-Doppler)
   }
-  logSel = 0; logEditIdx = -1;
+  // Entering from a live tracking screen (the common "work a station now" case):
+  // pre-select the Call field so a callsign can be typed immediately. Field index 5
+  // is "Call" in drawLogEntry's label/value arrays. Other entry points (e.g. the log
+  // menu) start at the top (Date) as before.
+  logSel = live ? 5 : 0;
+  logEditIdx = -1;
   screen = SCR_LOGENTRY;
 }
 
@@ -6427,7 +6467,8 @@ void App::drawLotw() {
     canvas.print(s);
   }
 
-  if (!haveCard)        footer("` back   (insert SD card)");
+  if (lotwRebootPrompt) footer("ENT reboot + upload   ` cancel");
+  else if (!haveCard)        footer("` back   (insert SD card)");
   else if (!haveCred)   footer("` back   (no LoTW key on SD)");
   else if (toSend)      footer(lotwResend ? "u upload ALL  a un-uploaded only  ` back"
                                           : "u sign & upload  a re-send all  ` back");
@@ -6436,6 +6477,16 @@ void App::drawLotw() {
 }
 
 void App::keyLotw(char c, bool enter, bool back) {
+  // Answer the reboot-and-upload prompt (after a -1 connect): ENTER confirms, ` cancels.
+  if (lotwRebootPrompt) {
+    if (enter) { lotwRebootPrompt = false; lotwRebootUpload(); return; }
+    if (isBack(c, back)) {
+      lotwRebootPrompt = false;
+      lotwStatus = "Upload cancelled - QSOs still pending";
+      lastDrawMs = 0; draw(); return;
+    }
+    return;   // ignore other keys while the prompt is up
+  }
   if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
   if (lotwBusy) return;
   // 'a' toggles re-send mode: include QSOs already marked uploaded. Useful when a
@@ -6820,8 +6871,18 @@ void App::doLotwUpload(const String& keyPass) {
                                        LOTW_TQ8_OUT, "cardsat.tq8",
                                        "application/octet-stream", resp);
   if (!posted) {
+    // Negative lastCode = transport/connect failure (the -1 a churned heap can cause),
+    // not a server response -- a clean-boot reboot is the cure. Offer it (confirm first;
+    // a reboot drops a live pass / CAT link, and LoTW will re-prompt for the key
+    // passphrase after boot since it is never stored). A positive code is a real server
+    // reply a reboot won't fix.
+    if (net.lastCode < 0) {
+      lotwRebootPrompt = true;
+      lotwStatus = "Connect failed. Reboot to upload? ENT=yes  `=no";
+      lotwBusy = false; lastDrawMs = 0; draw(); return;
+    }
     lotwStatus = "Upload failed: " + net.lastErr;
-    lotwBusy = false; lastDrawMs = 0; return;
+    lotwBusy = false; lastDrawMs = 0; draw(); return;
   }
 
   // Log the FULL server response to serial. "Accepted" at the HTTP layer does not
@@ -6858,6 +6919,42 @@ void App::doLotwUpload(const String& keyPass) {
     lotwStatus = "Server rejected upload";
   }
   lotwBusy = false; lastDrawMs = 0;
+}
+
+// Reboot-then-upload for LoTW, mirroring the Cloudlog path but WITHOUT persisting the
+// key passphrase: the passphrase is never stored, so we only drop a one-shot marker and
+// restart. resumeLotwIfPending() in setup() then re-opens the LoTW screen and re-prompts
+// for the passphrase in the clean boot. The marker is consumed before anything else.
+void App::lotwRebootUpload() {
+  File f = Store::fs().open(FILE_LOTW_RESUME, "w");
+  if (f) { f.println("1"); f.close(); }
+  Serial.println("[lotw] reboot-to-upload requested; restarting");
+  setStatus("Rebooting to upload...", 2000);
+  draw(); delay(1500);
+  ESP.restart();
+}
+
+// setup(): if the LoTW reboot-upload marker is present, this is the pristine boot we
+// rebooted for. Clear the marker FIRST (one-shot), bring up WiFi, open the LoTW screen,
+// and re-prompt for the key passphrase (editTarget 230) -- entering it runs the upload
+// in this clean-heap boot. The passphrase is re-entered, never stored.
+void App::resumeLotwIfPending() {
+  if (!Store::fs().exists(FILE_LOTW_RESUME)) return;
+  Store::fs().remove(FILE_LOTW_RESUME);        // one-shot: consume before doing anything
+  Serial.println("[lotw] resuming upload in fresh boot");
+  lotwEnter();                                 // counts pending + sets screen = SCR_LOTW
+  screen = SCR_LOTW; lastDrawMs = 0; draw();
+  if (!net.connected() && !connectWifiCfg()) {
+    lotwStatus = "WiFi failed (upload after reboot)"; lastDrawMs = 0; draw(); return;
+  }
+  int toSend = lotwResend ? lotwTotal : lotwPending;
+  if (Store::ready() && Lotw::credentialPresent() && toSend > 0) {
+    // Re-prompt for the passphrase; confirming it runs doLotwUpload in the clean boot.
+    editTarget = 230; editTitle = "Key password (blank=none)";
+    editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; draw();
+  } else {
+    lotwStatus = "Nothing to upload"; lastDrawMs = 0; draw();
+  }
 }
 
 // Parse the LoTW upload response for an accepted-QSO count. The service wording
@@ -7072,24 +7169,33 @@ void App::drawCloudlog() {
     canvas.print(s);
   }
 
-  if (!cfg.ssid[0])      footer("` back   (set WiFi first)");
+  if (clRebootPrompt)    footer("ENT reboot + upload   ` cancel");
+  else if (!cfg.ssid[0])      footer("` back   (set WiFi first)");
   else if (!haveCfg)     footer("` back   (set Cloudlog in Settings)");
-  else if (toSend)       footer(clResend ? "u upload  R reboot+up  a not-sent  ` back"
-                                         : "u upload  R reboot+up  a resend  ` back");
+  else if (toSend)       footer(clResend ? "u upload  a not-sent  ` back"
+                                         : "u upload  a resend  ` back");
   else if (clTotal)      footer("a re-send all   ` back");
   else                   footer("` back   (nothing to upload)");
 }
 
 void App::keyCloudlog(char c, bool enter, bool back) {
+  // If we're asking whether to reboot-and-upload (after a -1 connect), this keypress
+  // answers that prompt and nothing else: ENTER confirms the reboot, ` cancels.
+  if (clRebootPrompt) {
+    if (enter) { clRebootPrompt = false; cloudlogRebootUpload(); return; }
+    if (isBack(c, back)) {
+      clRebootPrompt = false;
+      clStatus = "Upload cancelled - QSOs still pending";
+      lastDrawMs = 0; draw(); return;
+    }
+    return;   // ignore any other key while the prompt is up
+  }
   if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
   if (clBusy) return;
   if (c == 'a' && clTotal > 0) { clResend = !clResend; clStatus = ""; lastDrawMs = 0; return; }
   int toSend = clResend ? clTotal : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
   if (c == 'u' && haveCfg && toSend > 0) { doCloudlogUpload(); }
-  // 'R' = reboot first, then upload in a clean boot. Use this if a normal upload
-  // fails with "connection refused" after the device has been running a while.
-  if ((c == 'R' || c == 'r') && haveCfg && toSend > 0) { cloudlogRebootUpload(); }
 }
 
 // Build an ADIF batch from the pending (or all, in re-send mode) QSOs, POST it to the
@@ -7098,7 +7204,7 @@ void App::doCloudlogUpload() {
   clBusy = true; lastDrawMs = 0;
   if (!net.connected()) {
     clStatus = "Connecting WiFi..."; draw();
-    if (!connectWifiCfg()) { clStatus = "WiFi failed"; clBusy = false; lastDrawMs = 0; return; }
+    if (!connectWifiCfg()) { clStatus = "WiFi failed"; clBusy = false; lastDrawMs = 0; draw(); return; }
   }
   clStatus = "Collecting QSOs..."; draw();
 
@@ -7143,7 +7249,7 @@ void App::doCloudlogUpload() {
       f.close();
     }
   }
-  if (n == 0) { clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; return; }
+  if (n == 0) { clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; draw(); return; }
 
   // JSON-encode the request. The ADIF string needs JSON-escaping (it contains '<','>',
   // and newlines). Build the whole body in ONE pre-sized buffer with the escaping done
@@ -7172,11 +7278,21 @@ void App::doCloudlogUpload() {
                 (unsigned)resp.length(), resp.c_str());
 
   if (!ok) {
+    // A negative lastCode is a transport/connect failure (the -1 "connection refused"
+    // that a churned heap can cause), NOT a server rejection -- a reboot to a clean heap
+    // is the reliable cure. Offer it (confirm before rebooting, since a reboot drops a
+    // live pass / CAT link). A positive code (e.g. 401/500) is a real server response a
+    // reboot wouldn't fix, so just report it.
+    if (net.lastCode < 0) {
+      clRebootPrompt = true;
+      clStatus = "Connect failed. Reboot to upload? ENT=yes  `=no";
+      clBusy = false; lastDrawMs = 0; draw(); return;
+    }
     // Surface the server's reason if present (e.g. wrong key rights / station id).
     String reason = jsonField(resp, "reason");
     clStatus = reason.length() ? ("Failed: " + reason)
                                : ("Upload failed: " + net.lastErr);
-    clBusy = false; lastDrawMs = 0; return;
+    clBusy = false; lastDrawMs = 0; draw(); return;
   }
 
   // Success: Cloudlog returns {"status":"created","imported_count":N,...}.
@@ -7195,6 +7311,9 @@ void App::doCloudlogUpload() {
     clStatus = reason.length() ? ("Rejected: " + reason) : "Server rejected upload";
   }
   clBusy = false; lastDrawMs = 0;
+  draw();   // repaint with the final result: SCR_CLOUDLOG is a static screen, so the
+            // loop won't auto-refresh it; without this the screen stays on "Uploading..."
+            // until the next keypress (and the reboot-upload path has no keypress at all).
 }
 
 // Reboot-then-upload: the in-session POST can hit a connect wall (-1) once a boot has
@@ -7223,13 +7342,12 @@ void App::resumeCloudlogIfPending() {
   cloudlogEnter();                             // counts pending + sets screen = SCR_CLOUDLOG
   screen = SCR_CLOUDLOG; lastDrawMs = 0; draw();
   if (!net.connected() && !connectWifiCfg()) {
-    clStatus = "WiFi failed (upload after reboot)"; lastDrawMs = 0; return;
+    clStatus = "WiFi failed (upload after reboot)"; lastDrawMs = 0; draw(); return;
   }
   int toSend = clResend ? clTotal : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
-  if (haveCfg && toSend > 0) doCloudlogUpload();
-  else clStatus = "Nothing to upload";
-  lastDrawMs = 0;
+  if (haveCfg && toSend > 0) doCloudlogUpload();   // ends with its own draw()
+  else { clStatus = "Nothing to upload"; lastDrawMs = 0; draw(); }
 }
 
 void App::drawLogEntry() {
@@ -7275,7 +7393,7 @@ void App::keyLogEntry(char c, bool enter, bool back) {
   if (isDown(c)) logSel = (logSel + 1) % LF;
   if (c == 'x' && logEditIdx >= 0) {           // delete this entry (two-press)
     if (!logDelArm) { logDelArm = true; setStatus("Press x again to delete"); return; }
-    bool ok = rewriteLog(logFirstIdx + logEditIdx, nullptr, true);
+    bool ok = rewriteLog(logFileRow(logEditIdx), nullptr, true);
     setStatus(ok ? "QSO deleted" : "Delete failed");
     logDelArm = false; logEditIdx = -1;
     if (ok) loadLog();
@@ -7283,7 +7401,7 @@ void App::keyLogEntry(char c, bool enter, bool back) {
   }
   if (c == 's') {
     if (!qso.call[0]) { setStatus("Call required to log"); return; }
-    bool ok = (logEditIdx >= 0) ? rewriteLog(logFirstIdx + logEditIdx, &qso, false)
+    bool ok = (logEditIdx >= 0) ? rewriteLog(logFileRow(logEditIdx), &qso, false)
                                 : saveQso();
     setStatus(ok ? (logEditIdx >= 0 ? "QSO updated" : "QSO logged") : "Log write failed");
     if (ok && logReturn == SCR_LOGLIST) loadLog();
@@ -7343,11 +7461,32 @@ void App::loadLog() {
       line.remove(line.length() - 1);
     if (!line.length() || line.startsWith("utc,")) continue;
     if (idx >= logFirstIdx && logRecN < LOG_VIEW_MAX)
-      if (parseQsoCsv(line, logRecs[logRecN])) logRecN++;
+      if (parseQsoCsv(line, logRecs[logRecN])) { logFileRows[logRecN] = idx; logRecN++; }
     idx++;
   }
   f.close();
-  if (logRecN > 0) logListSel = logRecN - 1;       // default to the newest
+  // Show the log in date/time order, NEWEST FIRST. The file is append-only (insertion
+  // order), which is usually chronological but not guaranteed once a QSO's time is
+  // edited or backdated -- so sort by utc descending rather than just reversing. The
+  // parallel logFileRows[] is sorted in lockstep so edit/delete still target the right
+  // on-disk line. Simple insertion sort; LOG_VIEW_MAX is small (<=60).
+  for (int a = 1; a < logRecN; ++a) {
+    PendingQso kq = logRecs[a]; int kr = logFileRows[a];
+    int b = a - 1;
+    while (b >= 0 && logRecs[b].utc < kq.utc) {     // '<' => descending (newest first)
+      logRecs[b+1] = logRecs[b]; logFileRows[b+1] = logFileRows[b]; --b;
+    }
+    logRecs[b+1] = kq; logFileRows[b+1] = kr;
+  }
+  logListSel = 0;                                  // default to the newest (now at top)
+}
+
+// File row on disk for a logRecs[] index, for rewriteLog() on edit/delete. Records are
+// date-sorted in the view, so this is a direct lookup into the parallel array (NOT
+// logFirstIdx + i, which only held before the sort).
+int App::logFileRow(int recIdx) const {
+  if (recIdx < 0 || recIdx >= logRecN) return -1;
+  return logFileRows[recIdx];
 }
 
 // Edit (rec, del=false) or delete (del=true) one data row by file index, by
@@ -10396,19 +10535,7 @@ void App::drawSpaceWx() {
 void App::keySpaceWx(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
-  if (c == 'r') {
-    if (!net.connected()) connectWifiCfg();
-    if (net.connected()) {
-      float beforeF = spaceF107, beforeK = spaceKp;
-      fetchSpaceWeather();
-      bool got = (spaceF107 > 0 || spaceKp >= 0);
-      bool changed = (spaceF107 != beforeF || spaceKp != beforeK);
-      setStatus(got ? (changed ? "Space wx updated" : "Space wx unchanged")
-                    : "Space wx: fetch failed");
-    }
-    else setStatus("No WiFi");
-    lastDrawMs = 0; return;
-  }
+  if (c == 'r') { spaceWxEnter(); return; }   // same show-cache + fetch + result flow
 }
 
 // ===========================================================================
@@ -10499,19 +10626,7 @@ void App::drawWeather() {
 void App::keyWeather(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
-  if (c == 'r') {
-    if (!net.connected()) connectWifiCfg();
-    if (net.connected()) {
-      const Observer& o = loc.obs();
-      if (!(o.lat != 0.0 || o.lon != 0.0)) { setStatus("Set a location first"); }
-      else {
-        time_t before = wxEpoch;
-        fetchWeather();
-        setStatus(wxEpoch != before ? "Weather updated" : "Weather: fetch failed");
-      }
-    } else setStatus("No WiFi");
-    lastDrawMs = 0; return;
-  }
+  if (c == 'r') { weatherEnter(); return; }   // same show-cache + fetch + result flow
 }
 
 // ===========================================================================

@@ -36,6 +36,7 @@ static constexpr double C_LIGHT = 299792458.0;
 // means a resume is pending and setup() auto-continues. Deleted when done.
 #define FILE_TX_RESUME     "/CardSat/tx_resume.txt"
 #define FILE_CL_RESUME     "/CardSat/cl_resume.txt"  // Cloudlog upload-after-reboot marker
+#define FILE_LOTW_RESUME   "/CardSat/lotw_resume.txt" // LoTW upload-after-reboot marker
 #define TX_CACHE_BATCH     12                       // sats cached per boot
 
 // ---------------------------------------------------------------------------
@@ -106,7 +107,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.37";
+static constexpr const char* FW_VERSION = "0.9.38";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.

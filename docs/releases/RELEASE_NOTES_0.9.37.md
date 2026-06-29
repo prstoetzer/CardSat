@@ -73,8 +73,6 @@ county), confirmed working in v0.9.36, is unchanged.
   and a live fetch replaces it when you're online. The cache is self-validating (it's
   ignored if it's from a different firmware build), so it never shows stale or malformed
   data.
-- **New: a "Downloading activations…" banner** appears while the feed refreshes, so it's
-  clear the screen is working rather than empty.
 - **New: the Update screen refreshes activations too.** Pressing **`k`** (full update) on
   the **Update** screen now pulls a fresh activations list right after the orbital-element
   (GP) update, so a single keypress brings both up to date. The GP result message is
@@ -95,9 +93,6 @@ county), confirmed working in v0.9.36, is unchanged.
   one record at a time instead of loading the whole array, so peak heap stays high
   through a GP update (previously it briefly dropped to a few KB). This keeps long
   sessions stable.
-- **New: `R` (reboot + upload) on the Cloudlog screen** — a resilient fallback that
-  reboots, uploads from a clean boot, and returns to the screen. With the body fix above
-  this is rarely needed, but it's there for any heap-state edge case.
 
 ## Build
 

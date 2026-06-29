@@ -18,7 +18,17 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.37:** **worldwide LoTW locations and an easier certificate setup.**
+> **New in v0.9.38:** **logging polish + an upload failsafe for LoTW.** When you log a
+> QSO from a live tracking screen, the **Call** field is now pre-selected so you can type
+> the callsign right away, and the **QSO log lists newest-first**. The automatic
+> **reboot-to-upload** failsafe (confirm with ENTER, cancel with `` ` ``) now covers
+> **LoTW** as well as Cloudlog — for the rare post-long-session "connection refused" — and
+> the upload screen now updates the moment an upload finishes. The **Space Wx**,
+> **Weather**, and **Activations** screens now refresh the same way — show cached data
+> immediately, fetch in the background with an "Updating…" bar, then a brief result. See
+> the **[release notes](docs/releases/RELEASE_NOTES_0.9.38.md)**.
+>
+> **In v0.9.37:** **worldwide LoTW locations and an easier certificate setup.**
 > The LoTW station fields now cover **non-US entities** — Settings has a DXCC-aware
 > **subdivision picker** (Canadian province, Russian oblast, Japanese prefecture,
 > Chinese province, Australian state, Finnish kunta) plus an **IOTA** field, all signed
@@ -28,9 +38,9 @@ transit prediction, sun/eclipse status, and more.
 > into the two `.pem` files CardSat needs — entirely in your browser, offline, with your
 > private key never leaving your computer (no more `openssl` command line). Plus: the
 > **upcoming-activations** list (hams.at) is now **cached to the card** so it shows the
-> last-known roster with no WiFi, displays a **"Downloading activations…"** banner while
-> it refreshes, and the **Update** screen's `k` now **pulls activations alongside the GP
-> update**. See the **[release notes](docs/releases/RELEASE_NOTES_0.9.37.md)**.
+> last-known roster with no WiFi, and the **Update** screen's `k` now **pulls activations
+> alongside the GP update**. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.37.md)**.
 >
 > **In v0.9.36:** **upload to Cloudlog / Wavelog.** CardSat can now send your
 > satellite QSOs straight to a self-hosted **Cloudlog** (or **Wavelog**) online logbook

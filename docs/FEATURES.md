@@ -150,9 +150,10 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   each (start/end times UTC, mode, frequency, the activator's comment) and a refresh
   key. See who's planning to be on which bird, from where, and when. The list is
   **cached to the card**, so re-opening the screen shows the last-known roster even
-  with no WiFi; a **"Downloading activations…"** banner shows while it refreshes
-  online. The **Update** screen's `k` pulls a fresh activations list alongside the GP
-  update, so one keypress refreshes both.
+  with no WiFi; an **"Activations…"** indicator shows on the bottom status bar while it
+  refreshes online (like the Weather fetch), with the cached list visible underneath. The
+  **Update** screen's `k` pulls a fresh activations list alongside the GP update, so one
+  keypress refreshes both.
 - **On-device Help** — press `h` on (almost) any screen for a scrollable key reference.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without

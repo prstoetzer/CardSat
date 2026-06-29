@@ -135,10 +135,13 @@ failure — and was identified because the heap instrumentation showed the spike
 
 ## Belt-and-suspenders
 
-The Cloudlog screen also gained an **`R` = reboot-and-upload** action (writes a one-shot
-marker, reboots, uploads in a pristine boot, returns to the screen). With the body fix in
-place this is no longer load-bearing, but it remains as a resilient fallback for any future
-heap-state edge case.
+The Cloudlog screen also offers an **automatic reboot-and-upload prompt**: if a normal
+upload hits the -1 connect wall, CardSat asks whether to reboot and retry (ENTER reboots
+into a clean-heap upload via a one-shot marker consumed in setup(); ` cancels). With the
+body fix above this is rarely needed, but it remains as a resilient fallback for any
+future heap-state edge case. The same prompt now also guards the LoTW upload (which
+re-prompts for the certificate passphrase after the reboot, since that secret is never
+stored).
 
 ## Lessons for the next maintainer
 

@@ -474,7 +474,8 @@ There are two ways to start an entry:
   contact you're working; radio control keeps running while you type. CardSat
   snapshots the UTC time, satellite, mode and the live **Doppler-corrected**
   uplink/downlink frequencies, plus your grid and callsign (from **My callsign**
-  in Settings).
+  in Settings). The form opens with the **Call** field already selected, so you can
+  press ENTER and type the callsign straight away.
 - **After the fact** — choose **New QSO entry** from the **Log** menu when you're
   *not* working a pass. The entry opens with the time set to now and everything
   ready to edit, so you can log a contact you made earlier or on another rig.
@@ -603,12 +604,19 @@ flags those QSOs so they're never sent twice. (LoTW rejects duplicate uploads, a
 CardSat tracks what it has sent in a new `uploaded` column in `qso_log.csv`.) Large
 backlogs are sent in batches of up to 50 per upload; just run it again for the rest.
 
+As with the Cloudlog upload, if the connection itself is refused (the rare
+post-long-session memory-fragmentation case), CardSat offers to **reboot and upload** —
+**ENTER** to reboot and finish from a clean start, **`` ` ``** to cancel. Because the
+LoTW key password is never stored on the device, CardSat re-prompts for it after the
+reboot before signing.
+
 The satellite `SAT_NAME` translation described above applies here too — the same
 `/CardSat/lotw_sats.csv` map is used, so make sure each bird you've worked has a
 LoTW name before uploading.
 
-**View / edit log** is a scrollable list of recent contacts (`;`/`.` to move).
-Open one with ENTER to correct **any field — including the date, time, satellite
+**View / edit log** is a scrollable list of recent contacts (`;`/`.` to move),
+**ordered newest-first** — the most recent QSO is at the top, and the list opens
+there. Open one with ENTER to correct **any field — including the date, time, satellite
 and frequencies** — then `s` to save, or press `x` twice to delete it; changes are
 written straight back to the CSV. The most recent **60**
 QSOs are available on the device — the complete log always lives in
@@ -639,10 +647,17 @@ independently, so a QSO uploaded to Cloudlog is not marked as sent to LoTW, and 
 key and station ID are set, and the count of QSOs not yet sent to Cloudlog. Press `u` to
 upload (CardSat connects to WiFi if needed). To re-send contacts that are already marked
 uploaded — for instance after fixing a setting — press `a` to toggle re-send mode, then
-`u`. On success the screen reports how many QSOs Cloudlog imported; on failure it shows the
-server's reason (a wrong key, insufficient key rights, or a station-ID/callsign mismatch
-are the usual causes). Your API key is treated as a secret and is never written to the
-serial log.
+`u`. On success the screen reports how many QSOs Cloudlog imported. If the **server**
+rejects the upload it shows the reason (a wrong key, insufficient key rights, or a
+station-ID/callsign mismatch are the usual causes). Your API key is treated as a secret and
+is never written to the serial log.
+
+If instead the upload can't even **connect** (a rare "connection refused" that can occur
+after a long operating session has fragmented memory), CardSat offers a failsafe: it asks
+whether to **reboot and upload** — press **ENTER** to reboot and complete the upload from a
+clean start, or **`` ` ``** to cancel and leave the QSOs pending. A fresh boot reliably
+clears the condition. (This only appears for a true connection failure; a server rejection,
+which a reboot wouldn't fix, is just reported.)
 
 ### Notes (free-form text editor)
 
@@ -1975,14 +1990,19 @@ solar filtering on your eyes and optics.**
 propagation: the **solar 10.7 cm radio flux** (F10.7, a proxy for solar activity
 and ionospheric ionisation), the **planetary Kp index** (geomagnetic disturbance,
 0–9), and the **running A index** (the daily-equivalent geomagnetic amplitude,
-shown when the feed provides it). They're fetched from NOAA SWPC together with GP
-updates, or on demand with **`r`** (needs WiFi). The Kp and A fetch is independent
-of the flux fetch, so a hiccup in one never suppresses the other. Each value is
+shown when the feed provides it). Each value is
 labelled in plain terms — flux low/moderate/good/very-high, Kp
 quiet/unsettled/minor-storm/moderate-storm/major-storm, and A
 quiet/unsettled/active/storm — and colour-coded, with a short **operating outlook**
 line translating the numbers into what to expect on HF and satellite paths, plus a
 note of how old the data is.
+
+Opening **Space Wx** shows the last cached values immediately, then — if WiFi is up —
+fetches an update in the background, showing an **"Updating Space Wx"** banner on the
+bottom status bar and then a brief result (**Space Wx updated/unchanged**, **update
+failed**, or **WiFi not connected**) before the banner clears. The indices are also
+refreshed whenever you run **Update**, and **`r`** forces a refresh on demand. The Kp and
+A fetch is independent of the flux fetch, so a hiccup in one never suppresses the other.
 
 This is a planning cue, not a forecast: the flux and Kp are observed values, and
 the outlook text is a simple heuristic reading of them, not a calibrated
@@ -1999,11 +2019,13 @@ low, and chance of precipitation.
 
 The data comes from **Open-Meteo** (open-meteo.com), a free, no-key weather service.
 The location is taken from the same site coordinates the prediction engine uses
-(your GPS fix or manually set lat/lon), so set your location first. Weather is
-fetched when you run **Update**, and also refreshes automatically on entry to the
-screen if WiFi is already connected; **`r`** forces a refresh. Like Space Wx, the
-last result is cached to flash, so it remains viewable offline with a note of its
-age.
+(your GPS fix or manually set lat/lon), so set your location first. Opening **Weather**
+shows the cached forecast immediately, then — if WiFi is up — fetches an update in the
+background with an **"Updating Weather"** banner on the bottom status bar, followed by a
+brief result (**Weather updated**, **update failed**, **WiFi not connected**, or **Set a
+location first**) before the banner clears. It also refreshes when you run **Update**, and
+**`r`** forces a refresh. Like Space Wx, the last result is cached to flash, so it remains
+viewable offline with a note of its age.
 
 Units (°F·mph, °C·km/h, or °C·m/s) are selectable in *Settings → Station / display
 → Weather units*; changing them re-labels the cached values immediately without
@@ -2054,19 +2076,21 @@ activations, and special operations announced ahead of time. It's a quick way to
 who's planning to be on which bird, from where, and when, so you can be listening for
 a rare grid or a wanted station.
 
-Open it from the main menu; if WiFi is connected, CardSat downloads the latest feed
-and shows a scrollable list, one row per activation with the **date, callsign,
-satellite and grid**. Move with `;`/`.`, press **ENTER** on a row for the full
-detail — **start and end times (UTC), mode, frequency, and the activator's
-comment** — and `` ` `` to go back to the list. Press **`r`** at any time to refresh
-the feed. If you open the screen with no WiFi, it says so; connect via Update or
-Settings and press `r`.
+Opening **Activations** shows the last-known list immediately from the on-device cache —
+even with no WiFi — then, if WiFi is up, fetches an update in the background with an
+**"Updating Activations"** banner on the bottom status bar, followed by a brief result
+(**Activations updated/unchanged**, **update failed**, or **WiFi not connected**) before
+the banner clears. Each row shows the **date, callsign, satellite and grid**. Move with
+`;`/`.`, press **ENTER** on a row for the full detail — **start and end times (UTC), mode,
+frequency, and the activator's comment** — and `` ` `` to go back to the list. Press
+**`r`** at any time to refresh.
 
-The feed is fetched over HTTPS from `https://hams.at/feeds/upcoming_alerts` and held
-in memory for the session (up to 30 activations). Times are shown exactly as the feed
-provides them, in UTC. Some activations list "(none)" for frequency or elevation —
-those simply weren't specified by the operator, and the activator's comment often
-fills in the detail (e.g. a frequency that depends on conditions).
+The feed is fetched over HTTPS from `https://hams.at/feeds/upcoming_alerts`, parsed (up to
+30 activations), and **cached to flash** so the last-known roster survives a reboot and
+shows instantly offline. The **Update** screen's `k` also refreshes it alongside the GP
+update. Times are shown exactly as the feed provides them, in UTC. Some activations list
+"(none)" for frequency or elevation — those simply weren't specified by the operator, and
+the activator's comment often fills in the detail.
 
 ---
 
@@ -3489,7 +3513,7 @@ listed below.
 
 - **Purpose** — review and correct stored contacts.
 - **Reached from** — Log menu → View / edit log.
-- **Shows** — a scrollable list of the most recent 60 QSOs.
+- **Shows** — a scrollable list of the most recent 60 QSOs, newest first.
 - **Keys** — `;`/`.` move; **ENTER** open a record to edit; (within a record)
   `x` twice to delete; `` ` `` back.
 
@@ -3619,8 +3643,8 @@ listed below.
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
 | **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |
 | **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · `s` sky sources (radio sources/planets) · `t` Sun/Moon transit finder · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
-| **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labelled & colour-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · `r` refresh over WiFi · `` ` `` back |
-| **Weather** (main menu) | terrestrial current conditions + multi-day forecast for the operating site from Open-Meteo · current temp/sky/wind/humidity then per-day hi/lo & precip chance · refreshes on entry (if on WiFi) and with Update · `r` refresh · cached offline · `` ` `` back |
+| **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labelled & colour-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Space Wx" bar + result · also refreshes with Update · `r` refresh · `` ` `` back |
+| **Weather** (main menu) | terrestrial current conditions + multi-day forecast for the operating site from Open-Meteo · current temp/sky/wind/humidity then per-day hi/lo & precip chance · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Weather" bar + result · also refreshes with Update · `r` refresh · cached offline · `` ` `` back |
 | **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
 | **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |

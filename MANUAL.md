@@ -2000,7 +2000,7 @@ note of how old the data is.
 Opening **Space Wx** shows the last cached values immediately, then — if WiFi is up —
 fetches an update in the background, showing an **"Updating Space Wx"** banner on the
 bottom status bar and then a brief result (**Space Wx updated/unchanged**, **update
-failed**, or **WiFi not connected**) before the banner clears. The indices are also
+failed**, or **WiFi failed**) before the banner clears. The indices are also
 refreshed whenever you run **Update**, and **`r`** forces a refresh on demand. The Kp and
 A fetch is independent of the flux fetch, so a hiccup in one never suppresses the other.
 
@@ -2022,7 +2022,7 @@ The location is taken from the same site coordinates the prediction engine uses
 (your GPS fix or manually set lat/lon), so set your location first. Opening **Weather**
 shows the cached forecast immediately, then — if WiFi is up — fetches an update in the
 background with an **"Updating Weather"** banner on the bottom status bar, followed by a
-brief result (**Weather updated**, **update failed**, **WiFi not connected**, or **Set a
+brief result (**Weather updated**, **update failed**, **WiFi failed**, or **Set a
 location first**) before the banner clears. It also refreshes when you run **Update**, and
 **`r`** forces a refresh. Like Space Wx, the last result is cached to flash, so it remains
 viewable offline with a note of its age.
@@ -2079,7 +2079,7 @@ a rare grid or a wanted station.
 Opening **Activations** shows the last-known list immediately from the on-device cache —
 even with no WiFi — then, if WiFi is up, fetches an update in the background with an
 **"Updating Activations"** banner on the bottom status bar, followed by a brief result
-(**Activations updated/unchanged**, **update failed**, or **WiFi not connected**) before
+(**Activations updated/unchanged**, **update failed**, or **WiFi failed**) before
 the banner clears. Each row shows the **date, callsign, satellite and grid**. Move with
 `;`/`.`, press **ENTER** on a row for the full detail — **start and end times (UTC), mode,
 frequency, and the activator's comment** — and `` ` `` to go back to the list. Press

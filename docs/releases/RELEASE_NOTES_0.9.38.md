@@ -47,8 +47,8 @@ Cloudlog-reliability work that precedes this.
   behave consistently: opening one shows its **cached data immediately**, then — if WiFi
   is up — it fetches an update in the background with an **"Updating Space Wx / Updating
   Weather / Updating Activations"** banner on the bottom status bar. When the fetch
-  finishes it briefly shows the result (**updated**, **update failed**, or **WiFi not
-  connected**) and the banner clears itself. Previously each screen behaved differently:
+  finishes it briefly shows the result (**updated**, **update failed**, or **WiFi
+  failed**) and the banner clears itself. Previously each screen behaved differently:
   Space Wx never auto-fetched (it sat on a blank screen asking you to refresh), Weather
   fetched before switching screens (so the banner showed on the menu), and the Activations
   banner could linger until you pressed a key. The on-screen **`r`** refresh uses the same

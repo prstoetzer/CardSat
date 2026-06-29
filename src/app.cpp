@@ -1099,7 +1099,7 @@ void App::hamsatEnter() {
   if (hamsatN == 0) loadHamsatCache();
   hamsatStatus = "";                       // body stays clean; progress goes on the bar
   screen = SCR_HAMSAT; lastDrawMs = 0; draw();   // cached list (or empty state) on screen now
-  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi not connected"); lastDrawMs = 0; return; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
   int before = hamsatN;
   fetchHamsat();                           // shows "Updating Activations" while it runs
   // Result on the bottom bar, then the loop clears it when it times out.
@@ -1115,7 +1115,7 @@ void App::hamsatEnter() {
 // and leave a result that the loop drops when it expires.
 void App::spaceWxEnter() {
   screen = SCR_SPACEWX; lastDrawMs = 0; draw();   // cached values (loaded at boot) shown now
-  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi not connected"); lastDrawMs = 0; return; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
   float beforeF = spaceF107, beforeK = spaceKp;
   fetchSpaceWeather();                     // shows "Updating Space Wx" while it runs
   bool got = (spaceF107 > 0 || spaceKp >= 0);
@@ -1127,7 +1127,7 @@ void App::spaceWxEnter() {
 
 void App::weatherEnter() {
   screen = SCR_WEATHER; lastDrawMs = 0; draw();   // cached forecast (loaded at boot) shown now
-  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi not connected"); lastDrawMs = 0; return; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
   const Observer& o = loc.obs();
   if (!(o.lat != 0.0 || o.lon != 0.0)) { setStatus("Set a location first"); lastDrawMs = 0; return; }
   time_t before = wxEpoch;
@@ -4152,6 +4152,7 @@ void App::keySatList(char c, bool enter, bool back) {
     if (logPickSat) { logPickSat = false; screen = SCR_LOGENTRY; lastDrawMs = 0; return; }
     screen = SCR_HOME; return;
   }
+  if (c != 'x') satDelArm = false;             // any key other than x disarms the delete
   if (c == 'n') {                              // new manual GP entry
     mtSat = SatEntry();
     editTarget = 310; editTitle = "Sat name"; editBuf = ""; screen = SCR_EDIT;
@@ -4986,7 +4987,7 @@ void App::drawVis() {
   if (visN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 56); canvas.print("No passes in this 10-day window.");
-    footer("` bk  ;/. +/-1d  r recomp"); return;
+    footer(";/. +/-1d  r recomp  ` bk"); return;
   }
   const int barX0 = 40, barW = 196;          // 196 px = 24 h
   const int y0 = 19, rowH = 10;
@@ -5018,7 +5019,7 @@ void App::drawVis() {
   // "Now" marker only on today's row (first row when not scrolled into the future).
   if (visDayOff == 0)
     canvas.drawFastVLine(barX0 + (int)(barW * (nowUtc() - mid0) / 86400), y0, rowH, CL_RED);
-  footer("` bk  ;/. +/-1d  r recomp");
+  footer(";/. +/-1d  r recomp  ` bk");
 }
 
 void App::keyVis(char c, bool enter, bool back) {
@@ -5176,7 +5177,7 @@ void App::drawIllum() {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 56);
     canvas.print((s && s->meanMotion > 0) ? "No passes / orbit data." : "No orbit data.");
-    footer("` back   r recompute"); return;
+    footer("r recompute  ` back"); return;
   }
   const int px0 = 24, py0 = 18, cw = 3, ph = ILLUM_ROWS;   // 60*3 = 180 wide
   const int pw = ILLUM_DAYS * cw;
@@ -5211,7 +5212,7 @@ void App::drawIllum() {
     canvas.printf("-> %s in %ldm", illumNextEclipse ? "shadow" : "sun",
                   illumNextSec / 60);
   }
-  footer("` bk  ,// +/-60d  r recomp");
+  footer(",// +/-60d  r recomp  ` bk");
 }
 
 void App::keyIllum(char c, bool enter, bool back) {
@@ -8988,13 +8989,13 @@ void App::drawOrbit() {
                            orbAscLon < 0 ? 'W' : 'E', tmv.tm_hour, tmv.tm_min);
       row("Asc node", String(b));
     } else row("Asc node", "--");
-    footer("` bk  ,// page  r refresh");
+    footer(",// page  r refresh  ` bk");
     return;
   }
 
   if (orbitPage == 1) {                              // ---------- Live geometry ----------
     if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-                canvas.print("Clock not set."); footer("` bk  ,// page"); return; }
+                canvas.print("Clock not set."); footer(",// page  ` bk"); return; }
     pred.setSat(*s); LiveLook L = pred.look(now);
     row("Az / El",    String(L.az, 1) + " / " + String(L.el, 1));
     row("Range",      String(L.rangeKm, 0) + " km");
@@ -9010,13 +9011,13 @@ void App::drawOrbit() {
     canvas.setCursor(2, y); canvas.print(L.sunlit ? "SUNLIT" : "ECLIPSE");
     canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.printf("  sun el %.0f  ecl dep %+.1f", L.sunEl, pred.eclipseDepthDeg(now));
-    footer("` bk  ,// page");
+    footer(",// page  ` bk");
     return;
   }
 
   if (orbitPage == 2) {                              // ---------- Next pass ----------
     if (!orbHasPass) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-      canvas.print("No upcoming pass."); footer("` bk  ,// page  r refresh"); return; }
+      canvas.print("No upcoming pass."); footer(",// page  r refresh  ` bk"); return; }
     auto hms = [](long sec) -> String { if (sec < 0) sec = 0; char b[12];
       snprintf(b, sizeof(b), "%ld:%02ld", sec / 60, sec % 60); return String(b); };
     row("AOS in",   hms((long)(orbPass.aos - now)));
@@ -9046,7 +9047,7 @@ void App::drawOrbit() {
     canvas.setTextColor(orbVisible ? CL_YELLOW : CL_GREY, CL_BLACK);
     canvas.setCursor(2, y); canvas.print(orbVisible ? "Optically VISIBLE pass"
                                                     : "Not optically visible");
-    footer("` bk  ,// page  r refresh");
+    footer(",// page  r refresh  ` bk");
     return;
   }
 
@@ -9081,7 +9082,7 @@ void App::drawOrbit() {
     }
     canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.setCursor(2, MY + MH + 2); canvas.print("ground track: next 2 orbits");
-    footer("` bk  ,// page");
+    footer(",// page  ` bk");
     return;
   }
 
@@ -9132,19 +9133,19 @@ void App::drawOrbit() {
         row(wantFull ? "-> full sun" : "-> eclipses", ">180d");
       }
     }
-    footer("` bk  ,// page  r refresh");
+    footer(",// page  r refresh  ` bk");
     return;
   }
 
   if (orbitPage == 7) {                              // ---------- Pass outlook ----------
     if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-                canvas.print("Clock not set."); footer("` bk  ,// page  r refresh"); return; }
+                canvas.print("Clock not set."); footer(",// page  r refresh  ` bk"); return; }
     canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(2, y);
     canvas.printf("Next %d days", ORB_OUTLOOK_DAYS); y += LH;
     if (orbOutlookN == 0) {
       canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, y);
       canvas.print("No passes above mask.");
-      footer("` bk  ,// page  r refresh"); return;
+      footer(",// page  r refresh  ` bk"); return;
     }
     auto hms = [](long sec) -> String { if (sec < 0) sec = 0; char b[12];
       snprintf(b, sizeof(b), "%ld:%02ld", sec / 60, sec % 60); return String(b); };
@@ -9161,13 +9162,13 @@ void App::drawOrbit() {
       row("Best in",  hms((long)(orbBestT - now)));
       row("Best dur", hms((long)orbBestDur));
     }
-    footer("` bk  ,// page  r refresh");
+    footer(",// page  r refresh  ` bk");
     return;
   }
 
   if (orbitPage == 8) {                              // ---------- Orbit position ----------
     if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-                canvas.print("Clock not set."); footer("` bk  ,// page"); return; }
+                canvas.print("Clock not set."); footer(",// page  ` bk"); return; }
     const double D2R = 0.017453292519943295, TWO_PI2 = 6.283185307179586;
     double periodS = (mm > 0) ? 86400.0 / mm : 0.0;
     // Mean anomaly now (deg) advanced from epoch.
@@ -9196,7 +9197,7 @@ void App::drawOrbit() {
     row("RAAN",      String(s->raan, 1) + " deg");
     row("Rev now",   String(revNow));
     row("Epoch age", String((now - s->epochUnix) / 86400.0, 2) + " d");
-    footer("` bk  ,// page");
+    footer(",// page  ` bk");
     return;
   }
 
@@ -9238,7 +9239,7 @@ void App::drawOrbit() {
       double tmax = (wApo > 0) ? 2.0 * lamA / wApo / 60.0 : 0.0;
       row("Max pass",  String(tmax, 1) + " min");
     }
-    footer("` bk  ,// page  r refresh");
+    footer(",// page  r refresh  ` bk");
     return;
   }
 
@@ -9247,7 +9248,7 @@ void App::drawOrbit() {
     const int PX = 30, PY = 20, PW = 204, PH = 90;
     canvas.drawRect(PX - 1, PY - 1, PW + 2, PH + 2, CL_MGREY);
     if (!orbHasPass) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-      canvas.print("No upcoming pass."); footer("` bk  ,// page"); return; }
+      canvas.print("No upcoming pass."); footer(",// page  ` bk"); return; }
     pred.setSat(*s);
     static float buf[PW > 0 ? PW : 1];
     double dur = (double)(orbPass.los - orbPass.aos);
@@ -9274,7 +9275,7 @@ void App::drawOrbit() {
     canvas.setCursor(2, PY + PH - 6);   canvas.printf("%+.0f", mn);
     canvas.setCursor(2, PY + PH + 2);   canvas.printf("@%g MHz  pk %.1f kHz  RR %.2f",
                                                       cfg.beaconMHz, peak, maxRR);
-    footer("` bk  ,// page  f freq");
+    footer(",// page  f freq  ` bk");
     return;
   }
 }
@@ -9492,7 +9493,7 @@ void App::drawSim() {
     canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(2, MY + MH + 11);
     canvas.printf("El %.0f  step %s  %s", L.el, SIM_STEPL[simStepIdx],
                   L.el > 0 ? "VIS" : "---");
-    footer("` bk  m data  ,// time  ;/. step");
+    footer("m data  ,// time  ;/. step  ` bk");
     return;
   }
 
@@ -9518,7 +9519,7 @@ void App::drawSim() {
   canvas.setCursor(2, y); canvas.print(L.el > 0 ? "ABOVE horizon" : "below horizon");
   canvas.setTextColor(L.sunlit ? CL_YELLOW : CL_CYAN, CL_BLACK);
   canvas.printf("  %s", L.sunlit ? "sunlit" : "eclipse");
-  footer("` bk  m map  ,// time  ;/. step  x now");
+  footer("m map  ,// time  ;/. step  x now  ` bk");
 }
 
 void App::keySim(char c, bool enter, bool back) {
@@ -9628,7 +9629,7 @@ void App::drawSunMoon() {
                   : (elv[smSel] <= 0 ? (smSel ? "MOON set (parked)" : "SUN set (parked)")
                                      : (smSel ? "tracking MOON" : "tracking SUN"));
   canvas.printf("Rotator: %s", rs);
-  footer("` bk ;/. pick g o rot s sky t x stop");
+  footer(";/. pick g o rot s sky t x stop  ` bk");
 }
 
 void App::keySunMoon(char c, bool enter, bool back) {
@@ -10464,7 +10465,7 @@ void App::drawSpaceWx() {
     canvas.print("No data yet.");
     canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 70);
     canvas.print("Update GP or press r (WiFi).");
-    footer("` back   r refresh");
+    footer("r refresh  ` back");
     return;
   }
   // --- Solar 10.7 cm flux ---
@@ -10529,7 +10530,7 @@ void App::drawSpaceWx() {
                : (String(ageH / 24) + "d old");
     canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
   }
-  footer("` back   r refresh");
+  footer("r refresh  ` back");
 }
 
 void App::keySpaceWx(char c, bool enter, bool back) {
@@ -10553,7 +10554,7 @@ void App::drawWeather() {
     canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 66);
     canvas.print("Press r on WiFi, or run");
     canvas.setCursor(6, 76); canvas.print("Update. Needs a location set.");
-    footer("` back  r refresh");
+    footer("r refresh  ` back");
     return;
   }
 
@@ -10620,7 +10621,7 @@ void App::drawWeather() {
                : (String(ageH / 24) + "d old");
     canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
   }
-  footer("` back  r refresh");
+  footer("r refresh  ` back");
 }
 
 void App::keyWeather(char c, bool enter, bool back) {
@@ -10697,6 +10698,7 @@ void App::drawTxDb() {
 void App::keyTxDb(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { txDbDelArm = false; screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (c != 'x') txDbDelArm = false;            // any key other than x disarms the delete
   if (activeTxCount == 0) return;
   const int perPage = 3;
   if (isUp(c))   { if (txDbSel > 0) txDbSel--; txDbDelArm = false; }
@@ -11891,7 +11893,7 @@ void App::drawPasses() {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 40); canvas.print("Clock not set.");
     canvas.setCursor(6, 52); canvas.print("Run Update (NTP) or GPS.");
-    footer("` back  r recompute");
+    footer("r recompute  ` back");
     return;
   }
   if (!loc.obs().valid) {
@@ -12264,7 +12266,7 @@ void App::drawManual() {
   if (activeTxCount == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(4, 50); canvas.print("No transponder data.");
-    footer("` back  t=tp  l p"); return;
+    footer("t=tp  l p  ` back"); return;
   }
 
   Transponder& t = activeTx[curTx];

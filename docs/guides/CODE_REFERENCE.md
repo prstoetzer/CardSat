@@ -262,9 +262,12 @@ code** — only `HardwareSerial`. Ports cleanly by swapping the UART.
 
 ### `icomnet.{h,cpp}` (160 + 513 lines) — Tier C
 
-**Icom LAN (RS-BA1) backend** (`class IcomNetRig`) — drives an **IC-9700 only** over
+**Icom LAN (RS-BA1) backend** (`class IcomNetRig`) — drives a network-capable Icom over
 WiFi/Ethernet using Icom's own UDP protocol (control/serial streams; CardSat never opens
-the audio stream). Implements the connect/auth/keepalive handshake plus the CI-V frames
+the audio stream). **Confirmed controlling an IC-705** on real hardware; **intended for the
+IC-9700** (the only model in CardSat's list with the full-duplex MAIN/SUB satellite
+architecture — the IC-9700 itself is not yet bench-tested over LAN). Implements the
+connect/auth/keepalive handshake plus the CI-V frames
 tunneled inside. Socket-bound (`WiFi`/`WiFiUDP`).
 
 **Porting note:** portable in spirit but tied to UDP sockets; on Linux it would become

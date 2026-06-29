@@ -13,8 +13,40 @@ change), the AOS alarm and speaker, deep sleep, the visual-pass / decay /
 Sun-Moon-transit / per-satellite-note features, and the offline GP/transponder caches.
 
 **Single-pin CI-V is confirmed on an IC-821** — the full bidirectional CI-V exchange
-(frequency reads and ACKs) works over one shared open-drain GPIO. See
+(frequency reads and ACKs) works over one shared open-drain GPIO, including **Doppler
+compensation and full radio-knob tuning**. See
 **[interfaces/CIV_SINGLE_PIN.md](interfaces/CIV_SINGLE_PIN.md)**.
+
+**LoRa text messaging is confirmed on hardware** — two-way messaging between CardSat and a
+LilyGo T-LoRa unit running the companion CardSat Pager firmware works (on-air frame format,
+sync word, and CRC interoperate). See
+**[design/LORA_MONITOR_SCOPE.md](design/LORA_MONITOR_SCOPE.md)**.
+
+**The Icom LAN (RS-BA1 UDP) CAT path is confirmed able to control an Icom radio** — CardSat
+successfully controlled an **IC-705** over the network once the CI-V address was set
+correctly (connect / auth / keepalive handshake and CI-V framing all work). Practical
+satellite use needs a radio with proper satellite mode: on the IC-705 the two VFOs just
+swap back and forth (single-RX limitation), so it isn't usable for live satellite work, but
+the path is proven and **should work with an IC-9700**, which has true satellite (dual-RX)
+operation. Still unverified specifically against an IC-9700.
+
+## Network commands verified, but not yet tested against a physical device
+
+These send correct, protocol-accurate traffic on the wire (confirmed by the author), but
+have **not** been driven against a real rotator or radio on the far end:
+
+- **rotctl / rigctl network clients.** The **rigctl** client and the **rotctld**-protocol
+  rotator client send accurate Hamlib TCP commands over the network. Exercise the client
+  against `rigctld -m 2` / `rotctld -m 1`; the on-air commands look correct but the
+  device side (a real rig or rotor actually moving) is untested.
+- **PstRotator (UDP).** Sends accurate PstRotator UDP commands over the network
+  (host-verified against the PstRotator manual). Not yet tested driving a real rotator
+  through PstRotator.
+- **Icom LAN against an IC-9700 specifically.** The LAN path is confirmed controlling an
+  IC-705 (see above); the IC-9700 — the radio it's actually intended for, with real
+  satellite mode — has not been tested directly.
+
+For all of these, keep the network servers/clients on a trusted LAN (no auth).
 
 ## Still to verify on real equipment
 
@@ -28,27 +60,21 @@ Sun-Moon-transit / per-satellite-note features, and the offline GP/transponder c
   (≈30 Hz SSB/CW, 250 Hz FM, floored at the rig's tuning step), with a short grace
   window that holds off downlink writes while you're turning — tune
   `KNOB_MOVE_SSB_HZ` / `KNOB_MOVE_FM_HZ` / `TUNE_GRACE_MS` in `app.h` if the feel needs
-  adjusting.
-- **Icom LAN (RS-BA1).** The network CAT backend is host-tested only: the connect /
-  auth / keepalive handshake and CI-V framing follow the protocol spec but haven't run
-  against a real radio. Open question: whether the radio tolerates the audio stream
-  never being opened (CardSat is CAT-only). There is no transmit retransmit buffer (a
-  dropped CAT frame re-sends next cycle). Watch the `[NET]` serial trace. **Icom LAN is
-  IC-9700 only.**
-- **Antenna rotator.** Backends are host-tested only. For **GS-232**, the I²C pins
-  (G8/G9) are confirmed from the Cap LoRa-1262 pinmap, but the SC16IS750 I²C→UART
-  bridge and command path are host-tested for baud math and framing only — confirm the
-  bridge address (`ROT_I2C_ADDR`) and controller baud **before keying real motors**.
-  **rotctld (net)** follows the Hamlib TCP protocol and can be exercised against
-  `rotctld -m 1`. **PstRotator (net)** is host-verified for UDP formatting against the
-  PstRotator manual (Rev. 7.5). The **direct-Yaesu** I²C backend (ADS1115 feedback +
-  PCF8574 direction) is host-tested only.
-- **Network control surfaces.** The **rigctl** client, the **rigctld server**, and the
-  **rotctld server** are host-tested only. Exercise the client against `rigctld -m 2`
-  and the servers against `rigctl` / `rotctl` or Gpredict; keep both servers on a
+  adjusting. (The IC-821 single-pin path above is the one CAT backend that **is**
+  hardware-confirmed.)
+- **Antenna rotator (hardware paths).** The motor-driving backends are host-tested only.
+  For **GS-232**, the I²C pins (G8/G9) are confirmed from the Cap LoRa-1262 pinmap, but
+  the SC16IS750 I²C→UART bridge and command path are host-tested for baud math and
+  framing only — confirm the bridge address (`ROT_I2C_ADDR`) and controller baud
+  **before keying real motors**. The **direct-Yaesu** I²C backend (ADS1115 feedback +
+  PCF8574 direction) is host-tested only. (The network rotator surfaces — rotctld and
+  PstRotator — are covered in the section above: their commands are verified, only the
+  physical rotor is untested.)
+- **Network *server* surfaces (CardSat as the server).** Separate from the client
+  commands above: CardSat can also *act as* a **rigctld server** and a **rotctld server**
+  for Gpredict / `rigctl` / `rotctl` to connect into. Those inbound paths are host-tested
+  only — exercise them with `rigctl` / `rotctl` or Gpredict pointed at CardSat, on a
   trusted LAN (no auth).
-- **LoRa messaging** — the SX1262 path is marked UNTESTED in firmware; verify before
-  relying on it. See **[design/LORA_MONITOR_SCOPE.md](design/LORA_MONITOR_SCOPE.md)**.
 - **TLS** uses `WiFiClientSecure::setInsecure()` (no cert validation) — fine for public
   GP data; pin a CA root if you care.
 
@@ -195,7 +221,7 @@ src/location.{h,cpp}    manual / grid / GPS position, Maidenhead conversion
 src/predict.{h,cpp}     SGP4 wrapper: look angles, passes, Doppler, Sun/eclipse, polar path, mutual windows
 src/rig.{h,cpp}         abstract Rig interface + rigctl (rigctld) network client backend
 src/civ.{h,cpp}         Icom CI-V framing, freq/mode set + read, MAIN/SUB select, single-pin
-src/icomnet.{h,cpp}     Icom LAN (RS-BA1 UDP) CAT backend — IC-9700 only, no wiring
+src/icomnet.{h,cpp}     Icom LAN (RS-BA1 UDP) CAT backend — confirmed controlling an IC-705; intended for the IC-9700
 src/yaesu.{h,cpp}       Yaesu 5-byte CAT (FT-847 / FT-736R)
 src/kenwood.{h,cpp}     Kenwood ASCII CAT (TS-790 / TS-2000)
 src/rotator.{h,cpp}     rotator backends: GS-232 / Easycomm / SPID (I²C→UART), rotctl (TCP), PstRotator (UDP), Yaesu direct (I²C)

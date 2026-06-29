@@ -1,10 +1,12 @@
 // ===========================================================================
 //  lora.cpp  -  SX1262 LoRa radio wrapper implementation (RadioLib)
 // ===========================================================================
-//  *** UNTESTED hardware path -- see lora.h. ***
-//  Everything here is compiled only when CARDSAT_HAS_LORA is set (RadioLib
-//  installed). Without it, the class is a set of safe no-ops so the rest of the
-//  firmware still builds and the messaging screen simply reports "radio off".
+//  Hardware-verified (0.9.39): TX/RX text messaging is confirmed working on the
+//  M5Stack Cap LoRa (SX1262), tested two-way against a LilyGo T-LoRa unit running
+//  the companion CardSat Pager firmware. Everything here is compiled only when
+//  CARDSAT_HAS_LORA is set (RadioLib installed). Without it, the class is a set of
+//  safe no-ops so the firmware still builds and the messaging screen reports
+//  "radio off".
 // ===========================================================================
 #include "lora.h"
 
@@ -118,6 +120,14 @@ bool LoraRadio::sendRaw(const uint8_t* data, size_t len) {
   int st = g_radio->transmit((uint8_t*)data, len);  // blocking
   rfSwitchRx();
   listen();
+  // DIO1 fires on BOTH RX-done and TX-done into the same g_irqFired flag. The
+  // transmit() we just did raised TX-done, so the flag is now set even though no
+  // packet was received. Clear it AFTER re-arming receive, or the next poll() would
+  // treat this TX-done as an incoming packet and read stale bytes out of the radio's
+  // buffer -- which surfaced as our own just-sent message "echoing" back (often with
+  // leftover text from a previous message appended). startReceive() above also clears
+  // the SX1262's hardware IRQ status; this clears our software latch to match.
+  g_irqFired = false;
   Store::remount();     // restore the SD bus after RadioLib reconfigured SPI
   return (st == RADIOLIB_ERR_NONE);
 }

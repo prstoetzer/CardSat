@@ -102,8 +102,12 @@ and host-verified (not yet all hardware-confirmed):
 **Hardware-confirmed:** single-pin CI-V works end-to-end on the IC-821 (full bidirectional
 exchange over one open-drain wire); plus all the prediction/display/GPS/alarm/deep-sleep
 paths. **Still host-tested only** (verify on the air): separate-pin CI-V on that specific
-rig, Yaesu/Kenwood encoders, Icom LAN (RS-BA1, IC-9700 only), all rotator backends, the
-LoRa path, and the rigctld/rotctld/web servers. The authoritative list is
+rig, Yaesu/Kenwood encoders, the GS-232/Easycomm/SPID and direct-Yaesu rotator backends,
+and the rigctld/rotctld inbound servers. **Confirmed on hardware:** single-pin CI-V on the
+IC-821 (Doppler + knob tuning), LoRa messaging (vs the CardSat Pager), and the Icom LAN path
+(controlled an IC-705 — the IC-9700 itself is still untested). The **rotctl/rigctl and
+PstRotator** network clients emit verified-accurate commands but haven't driven a physical
+rotor/rig. The authoritative list is
 **docs/THINGS_TO_VERIFY.md**.
 
 **The radio layer:** abstract `Rig` base class (rig.h) with `CivRig`/`YaesuRig`/
@@ -172,7 +176,8 @@ What changed, and the rules that came out of it (honor these when editing docs):
 **Doc invariants:** after any doc edit, verify all internal anchors and all cross-doc
 `.md`/`.pdf` links resolve (a small Python script does this — see §7). Interface docs carry
 prominent untested/at-your-own-risk banners. Scope facts to keep stated explicitly: **Icom
-LAN = IC-9700 only**; the **Grove port is 5 V** (GPIOs not 5 V-tolerant — never wire CAT
+LAN is intended for the IC-9700** (confirmed controlling an IC-705, IC-9700 itself
+untested); the **Grove port is 5 V** (GPIOs not 5 V-tolerant — never wire CAT
 direct).
 
 ---
@@ -189,7 +194,7 @@ direct).
   settings change, run the `rows[NN]` audit.
 - **Rig/CAT:** civ/yaesu/kenwood `begin(baud,uartNum,rxPin,txPin)`; CI-V on `CIV_UART_NUM=1`,
   G1(RX)/G2(TX); `civPinMode` 0=TX/RX, 1=1-pin G2, 2=1-pin G1. `icomnet.cpp` = RS-BA1 UDP,
-  IC-9700 only. `catType` = `CAT_WIRED`/`CAT_NET`/`CAT_RIGCTL`.
+  for the IC-9700 (confirmed on an IC-705). `catType` = `CAT_WIRED`/`CAT_NET`/`CAT_RIGCTL`.
 - **Predictor:** `predict.h` `Predictor` class — `setSite(loc.obs())` / `setSat(*s)` /
   `look(t)→LiveLook` (az/el/range/rangeRate/sunlit/sunAz/El/subpoint) / `azelAt` /
   `predictPasses`; static `dopplerFreqs(dlNom,ulNom,rangeRate,calDl,calUl, rxHz&, txHz&)`

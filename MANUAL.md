@@ -141,13 +141,18 @@ The **IC-9700** can be controlled over **WiFi/Ethernet** instead of the wired CI
 bus — CardSat speaks the same RS-BA1 UDP protocol as Icom's own remote software. No
 level shifter, no UART: the radio's CI-V/G1/G2 pins stay free.
 
-> **Scope.** Icom LAN in CardSat is intended and tested only for the **IC-9700** —
-> the one network-capable Icom in CardSat's radio list that is a full-duplex
-> satellite rig. Other networked Icoms (IC-705, IC-7610, IC-785x) speak the same
-> RS-BA1 protocol, so the transport would work, but they are single-receiver HF/VHF
-> radios without the MAIN/SUB satellite architecture CardSat drives, so they are not
-> supported here. Select **Icom LAN** only with the **IC-9700** chosen as the radio
-> model.
+> **Scope.** Icom LAN in CardSat is **intended for the IC-9700** — the one
+> network-capable Icom in CardSat's radio list that is a full-duplex satellite rig.
+> The LAN transport itself is **confirmed working**: CardSat has successfully
+> controlled an **IC-705** over the network (with the correct CI-V address set),
+> which proves the RS-BA1 connect/auth/CI-V path drives a real Icom radio. The IC-705
+> isn't usable for live satellite work, though — it's a single-receiver radio, so its
+> two VFOs just swap back and forth rather than offering the simultaneous MAIN/SUB
+> downlink+uplink the IC-9700 provides. Other networked Icoms (IC-7610, IC-785x) speak
+> the same protocol but likewise lack the satellite architecture. **The IC-9700 itself
+> has not yet been tested** over LAN — the path should work given the IC-705 result,
+> but confirm it before relying on it. Select **Icom LAN** with the **IC-9700** as the
+> radio model.
 
 On the radio (IC-9700: **MENU > SET > Network**): set **Network Control = ON**, set a
 **Network User1** id + password, leave the **Control** port at **50001** (Serial =
@@ -1453,12 +1458,11 @@ same frequency, spreading factor and bandwidth sees every message — there is n
 addressing or routing, which keeps it simple and reliable for a group on an
 outing, a club net, or a SOTA/portable activation.
 
-> **Untested hardware path.** The LoRa radio path is written to the M5Stack Cap LoRa
-> reference and the SX1262 datasheet but has **not** been confirmed on a device. It is
-> built into the standard binaries (RadioLib is a required build dependency), but until
-> you've verified two units talk to each other, treat it as experimental. **Know your
-> band's rules** — pick the **LoRa region** preset that matches where you operate (see
-> Settings below):
+> **Hardware-verified.** Two-way LoRa text messaging is confirmed working on the M5Stack
+> Cap LoRa (SX1262), tested against a LilyGo T-LoRa unit running the companion CardSat
+> Pager firmware. It's built into the standard binaries (RadioLib is a required build
+> dependency). **Know your band's rules** — pick the **LoRa region** preset that matches
+> where you operate (see Settings below):
 >
 > - **US (default)** — the **33 cm amateur band (902–928 MHz)**. The US 70 cm band
 >   is held to ~100 kHz occupied bandwidth, which is tight for 125 kHz LoRa, so

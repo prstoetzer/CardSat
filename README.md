@@ -18,7 +18,13 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.38:** **logging polish + an upload failsafe for LoTW.** When you log a
+> **New in v0.9.39:** **LoRa messaging is hardware-verified.** Two-way LoRa text messaging
+> between CardSat and a LilyGo T-LoRa unit running the companion CardSat Pager firmware is
+> confirmed working — this release fixes a bug where a sent message could echo back to you
+> (a transmit-complete interrupt was being mistaken for an incoming packet). See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.39.md)**.
+>
+> **In v0.9.38:** **logging polish + an upload failsafe for LoTW.** When you log a
 > QSO from a live tracking screen, the **Call** field is now pre-selected so you can type
 > the callsign right away, and the **QSO log lists newest-first**. The automatic
 > **reboot-to-upload** failsafe (confirm with ENTER, cancel with `` ` ``) now covers

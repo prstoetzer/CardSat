@@ -209,8 +209,8 @@ The LoRa text-messaging and beacon code is built into the standard binaries
    source only so the tree still compiles if you deliberately set the flag to `0` in
    your own build (you shouldn't need to).
 
-> The LoRa hardware integration is **experimental/untested** on the ADV; see the LoRa
-> notes in `README.md` before wiring anything.
+> LoRa text messaging is **hardware-verified** (two-way against a LilyGo T-LoRa unit
+> running the companion CardSat Pager firmware); see the LoRa notes in `README.md`.
 
 ---
 

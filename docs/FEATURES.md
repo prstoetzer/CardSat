@@ -22,9 +22,11 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   Doppler-tunes within that layout).
 - **Native Icom LAN control (no CI-V wiring).** The **IC-9700** can be driven over
   WiFi/Ethernet using the radio's own **RS-BA1 UDP** protocol — the same one Icom's
-  remote software uses — with no level shifter or UART. (Among the radios CardSat
-  supports, Icom LAN is **IC-9700 only**; other network-capable Icoms like the
-  IC-705/7610/785x are not supported here.) Pick **CAT type → Icom LAN** in
+  remote software uses — with no level shifter or UART. The LAN path is
+  **hardware-confirmed** (it successfully controlled an IC-705 over the network),
+  though the IC-9700 itself is intended-but-not-yet-tested, and only the IC-9700 has the
+  full-duplex MAIN/SUB satellite architecture CardSat drives (the IC-705/7610/785x speak
+  the same protocol but are single-receiver). Pick **CAT type → Icom LAN** in
   Settings; MAIN/SUB, Doppler, sat mode and CTCSS all work as on a wired Icom
   (CAT only — the audio stream is not opened).
 - **Linear-transponder passband tracking** with correct inversion, and automatic
@@ -89,10 +91,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   G-5500 + GS-232B, SPID MD-01/02, K3NG/RadioArtisan, SatNOGS/ERC via **Easycomm I/II/III**) through an I²C→UART bridge so the radio
   and GPS keep their UARTs, or over WiFi to a **Hamlib rotctld** server or a
   **PstRotator** instance, or wire a **Yaesu G-5500-class controller directly**
-  (I²C ADC + outputs, no GS-232 box — see **[ROTOR_INTERFACE.md](interfaces/ROTOR_INTERFACE.md)**,
-  ⚠️ untested). Deadband, park-on-LOS, pre-positioning before AOS,
+  (I²C ADC + outputs, no GS-232 box — see **[ROTOR_INTERFACE.md](interfaces/ROTOR_INTERFACE.md)**).
+  Deadband, park-on-LOS, pre-positioning before AOS,
   alignment offsets, optional **per-pass flip**, and a **manual control** screen
   for jogging the antenna by hand with live position read-back.
+  *(Status: the **rotctl** and **PstRotator** network paths are confirmed to emit
+  accurate commands on the wire, but have not been driven against a physical rotator;
+  the **GS-232/Easycomm/SPID** I²C→UART bridge and the **direct-Yaesu** backend are
+  host-tested only — verify before keying real motors.)*
 - **CardSat as a network server.** Run a **rigctld server** so a PC (Gpredict,
   WSJT-X, a logger) drives the wired/LAN radio through CardSat, and/or a
   **rotctld server** so a PC drives the wired GS-232 rotator through CardSat —
@@ -220,9 +226,9 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   every message, for a club net or SOTA/portable group. Selectable frequency
   (150–960 MHz; the SX1262 is unfiltered), spreading factor (7–12, default 12) and
   bandwidth; fixed-size message ring (no SD, no heap growth). Built into the standard
-  binaries (requires the **RadioLib** library at build time). ⚠️ Untested hardware
-  path — verify two units talk before relying on it; mind your band's bandwidth rules.
-  See [MANUAL.md](../MANUAL.md).
+  binaries (requires the **RadioLib** library at build time). ✅ Hardware-verified —
+  two-way messaging confirmed against a LilyGo T-LoRa unit running the companion CardSat
+  Pager firmware; mind your band's bandwidth rules. See [MANUAL.md](../MANUAL.md).
 - **Auto-refresh, power management, and diagnostics.** If WiFi is configured,
   CardSat connects and NTP-syncs at boot and **auto-refreshes GP when the cached
   elements are over a week old**; a **fast update** (`f` on the Update screen) refreshes

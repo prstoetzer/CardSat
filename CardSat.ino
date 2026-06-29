@@ -237,7 +237,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.38";
+static constexpr const char* FW_VERSION = "0.9.39";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -8060,6 +8060,14 @@ bool LoraRadio::sendRaw(const uint8_t* data, size_t len) {
   int st = g_radio->transmit((uint8_t*)data, len);  // blocking
   rfSwitchRx();
   listen();
+  // DIO1 fires on BOTH RX-done and TX-done into the same g_irqFired flag. The
+  // transmit() we just did raised TX-done, so the flag is now set even though no
+  // packet was received. Clear it AFTER re-arming receive, or the next poll() would
+  // treat this TX-done as an incoming packet and read stale bytes out of the radio's
+  // buffer -- which surfaced as our own just-sent message "echoing" back (often with
+  // leftover text from a previous message appended). startReceive() above also clears
+  // the SX1262's hardware IRQ status; this clears our software latch to match.
+  g_irqFired = false;
   Store::remount();     // restore the SD bus after RadioLib reconfigured SPI
   return (st == RADIOLIB_ERR_NONE);
 }

@@ -9,10 +9,11 @@
 //  uses. The messaging protocol, history buffer, and UI live in app.cpp and are
 //  hardware-independent.
 //
-//  *** UNTESTED hardware path. The SX1262 init, the PI4IOE5V6408 RF-switch
-//  control, and TX/RX have been written to the M5Stack Cap LoRa reference and
-//  the SX1262 datasheet, but have NOT been confirmed on a device. Build and use
-//  at your own risk; verify TX/RX between two units before relying on it. ***
+//  Hardware-verified (0.9.39): the SX1262 init, the PI4IOE5V6408 RF-switch
+//  control, and TX/RX text messaging are confirmed working on the M5Stack Cap
+//  LoRa, tested two-way against a LilyGo T-LoRa unit running the companion
+//  CardSat Pager firmware. (The earlier self-echo bug, where a transmit-complete
+//  IRQ was mistaken for a received packet, is fixed in sendRaw().)
 //
 //  Requires the RadioLib library (install via Arduino Library Manager). The
 //  whole module is wrapped in `#if CARDSAT_HAS_LORA` so a build without RadioLib

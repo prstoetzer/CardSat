@@ -113,7 +113,9 @@ drives the 910. Fired once at engage. **UNTESTED on hardware** (author has no 91
 Frequency/mode/read-back, **MAIN/SUB band assignment over CAT** — Exchange MAIN/SUB
 (`07 B0`) and Send/read main/sub band selection (`07 D2 00`/`01`) — satellite mode
 (`16 5A`), CTCSS (`16 42`), RIT. The IC-9700 additionally supports **Icom LAN**
-(network CAT, RS-BA1) — 9700 only among the supported set. Least manual intervention.
+(network CAT, RS-BA1) — the IC-9700 is the intended target among the supported set (the
+LAN path is confirmed controlling an IC-705, but only the IC-9700 has true satellite mode).
+Least manual intervention.
 
 **CardSat sends the band assignment automatically** on these two rigs: when radio
 control is turned on for a two-way transponder, it issues `07 D2 00 <band>` /

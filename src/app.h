@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -451,6 +451,37 @@ private:
   SchedEntry sched[SCHED_MAX];
   int        schedN = 0, schedSel = 0;
   uint32_t   lastSchedMs = 0;          // throttle background rebuilds
+  // "Sky at a glance": a horizontal timeline of upcoming passes for all favorites
+  // over the next SKY_HOURS. One row per favorite that has a pass in the window;
+  // each bar is one pass, coloured by peak elevation. Fixed-size (.bss), no heap.
+  static const int SKY_ROWS = 12;      // favorites shown (rows)
+  static const int SKY_BARS = 60;      // total passes drawn across all rows
+  static const int SKY_HOURS = 6;      // timeline span (hours)
+  struct SkyBar { uint8_t row; time_t aos, los; float maxEl; bool vis; };
+  SkyBar     skyBars[SKY_BARS];
+  int        skyBarN = 0;
+  char       skyName[SKY_ROWS][12];    // short sat name per row
+  uint32_t   skyRowNorad[SKY_ROWS];
+  int        skyRowN = 0;
+  time_t     skyStart = 0;             // window start (== build time)
+  uint32_t   skyBuiltMs = 0;
+  // Awards tracking: tallies derived from the QSO log. The all-sats view uses the
+  // shared grid/state/DXCC bitsets (computed once on entry); per-satellite drill-down
+  // recomputes those bitsets filtered to one sat. Distinct sats and per-band counts
+  // are accumulated while streaming. All fixed-size, no heap.
+  static const int AW_SATS = 24;       // distinct satellites tracked in the log
+  static const int AW_BANDS = 11;      // matches bandFor's enumeration length
+  int        awQsoTotal = 0;           // total QSOs in the log
+  int        awGridN = 0, awStateN = 0, awDxccN = 0;   // all-sats unique counts
+  int        awBandQso[AW_BANDS];      // QSOs per band (all sats)
+  char       awSatName[AW_SATS][18];   // distinct sat names
+  int        awSatQso[AW_SATS];        // QSOs per distinct sat
+  int        awSatN = 0;               // number of distinct sats
+  int        awSel = 0, awScroll = 0;  // list cursor on the awards screen
+  int        awSatSel = -1;            // which distinct sat is being drilled into
+  int        awSatGridN = 0, awSatStateN = 0, awSatDxccN = 0;  // per-sat unique counts
+  int        awSatBandQso[AW_BANDS];   // per-sat QSOs per band
+  uint32_t   awBuiltMs = 0;
   time_t     nextAos = 0;              // soonest upcoming favorite AOS (alarm)
   char       nextAosName[26] = {0};
   time_t     alarmAos = 0;             // AOS we're currently counting down to
@@ -858,6 +889,10 @@ private:
   void keyOscar(char c, bool enter, bool back);
   void keySatList(char c, bool enter, bool back);
   void keySchedule(char c, bool enter, bool back);
+  void buildSkyGlance(); void drawSkyGlance(); void keySkyGlance(char c, bool enter, bool back);
+  void buildAwards(); void drawAwards(); void keyAwards(char c, bool enter, bool back);
+  void drawAwardSat(); void keyAwardSat(char c, bool enter, bool back);
+  void awardsForSat(const char* satName);   // per-sat tally (drill-down), reuses shared bitsets
   void keyPasses(char c, bool enter, bool back);
   void keyPassDetail(char c, bool enter, bool back);
   void keyTrack(char c, bool enter, bool back);

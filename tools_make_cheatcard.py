@@ -64,7 +64,7 @@ FRONT = [
   "RX/TX dial freqs for BOTH stations every 30s across a mutual window. Two lines/step: me (green) + DX (cyan). "
   "<b>t</b> cycle transponder &middot; <b>m</b> mode: true rule / fixed DL / fixed UL &middot; <b>a</b> anchor dial (me/DX RX/TX) &middot; <b>,</b>/<b>/</b> in fixed mode step anchored dial to round 1 kHz (else passband 1 kHz) &middot; header shows pb +/- from center &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("NEXT PASSES (favs)",
-  "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
+  "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>t</b> sky-at-a-glance timeline (bars by elev) &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
  ("PASSES (sel)",
   "<b>*</b> = optically visible. <b>;</b>/<b>.</b> select &middot; <b>d</b> detail &middot; <b>t</b>/<b>ENTER</b> track &middot; "
   "<b>n</b> add TX &middot; <b>r</b> recompute &middot; <b>x</b> mutual-DX &middot; "
@@ -139,13 +139,13 @@ BACK = [
  ("GPS SKY PLOT",
   "Live GNSS by az/el, coloured by signal (green=strong, grey=weak) &middot; <b>`</b> back"),
  ("WORLD MAP",
-  "All footprints &middot; <b>f</b> highlight favorite &middot; <b>c</b> recenter on QTH/0&deg; &middot; "
+  "All footprints + night-side shading &middot; <b>f</b> highlight favorite &middot; <b>c</b> recenter on QTH/0&deg; &middot; "
   "yellow=sunlit cyan=eclipse &middot; <b>`</b> back"),
  ("SCHEDULES",
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
   "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
  ("LOG",
-  "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes &middot; List: <b>;</b>/<b>.</b> scroll, "
+  "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes / awards &middot; <b>Awards</b>: QSO/grid/state/DXCC totals (states+DXCC derived from grid) + per-sat &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete &middot; editing a QSO re-arms its upload; extra <b>LoTW</b>/<b>Cloudlog</b> rows (ENTER toggles) override that"),
  ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; Sign &amp; upload)",

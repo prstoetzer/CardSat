@@ -458,21 +458,28 @@ ENTER returns home.
 
 The last item on the home menu is a minimal low-power mode for charging or
 parking the device. Selecting it **blanks the backlight and stops radio/rotator
-output** so almost nothing runs. **Any key wakes the screen** to show battery
-status — a large gauge, charging state, and the cell voltage — then it auto-blanks
-again after about 5 seconds. **ESC/back** returns to the home menu.
+output**, and goes further to cut power: it **powers the WiFi radio fully off**
+(WiFi is the single largest consumer) and **drops the CPU clock from 240 MHz to
+80 MHz**, and the main loop skips all network and radio services while parked — so
+the device idles at a fraction of its normal draw. **Any key wakes the screen** to
+show battery status — a large gauge, charging state, and the cell voltage — then it
+auto-blanks again after about 5 seconds; the keyboard is still polled even in the
+low-power state, so a keypress responds instantly. **ESC/back** returns to the home
+menu and **restores full speed and reconnects WiFi**.
 
 The battery percentage here is derived from the cell **voltage** against a LiPo
 discharge curve (3.30 V ≈ 0 %, 4.20 V ≈ 100 %), which is more accurate in the flat
 middle of the discharge than the PMIC's raw level; it falls back to the raw level
 if voltage isn't available. Charging state comes from the Cardputer ADV's PMIC.
+The favorites **AOS alarm keeps running** while parked (it's pure computation, no
+WiFi), so you still get pass-countdown beeps on the charger.
 
 Pressing **H** in this mode triggers an **on-demand heap reset**: on a long
 session, repeated HTTPS/TLS handshakes can fragment the (no-PSRAM) heap until the
 largest free block is too small for a new TLS context and fetches start failing,
-even though total free heap still looks healthy. The reset drops and reconnects
-WiFi/TLS to free and coalesce those transient allocations, and reports the
-before/after largest contiguous block.
+even though total free heap still looks healthy. The reset restores full speed,
+reconnects WiFi/TLS to free and coalesce those transient allocations, and reports
+the before/after largest contiguous block.
 
 ### Logging QSOs (Log)
 
@@ -526,7 +533,8 @@ from My callsign, for upload to LoTW/eQSL or import into your main logger),
 **Sign & upload to LoTW** (see [LoTW upload](#logbook-of-the-world-lotw-direct-upload) below),
 **Upload to Cloudlog** (see [Cloudlog upload](#cloudlog--wavelog-upload) below),
 **Voice Memos** (the on-device voice-memo browser described above),
-and **Notes** (a free-form text editor, see [Notes](#notes-free-form-text-editor) below).
+and **Notes** (a free-form text editor, see [Notes](#notes-free-form-text-editor) below),
+and **Awards** (a summary of your worked totals, see [Awards](#awards-log--awards) below).
 The two upload options sit together: uploading to Cloudlog can itself forward your QSOs
 to LoTW (if your Cloudlog instance is configured for that), so for most operators they're
 alternatives rather than things to do separately. The core logging functions are listed
@@ -708,6 +716,60 @@ are needed as ordinary punctuation in your text, the editor's commands all use t
 
 Notes are limited to 4 KB each, which is several pages of text — ample for operating
 notes.
+
+### Awards (Log → Awards)
+
+**Awards** on the **Log** menu summarises what you've worked, read straight from
+`/CardSat/qso_log.csv`. The top of the screen shows the **all-satellites totals**:
+total **QSOs**, unique **grid squares**, the number of distinct **satellites** in
+your log, unique US **states** (out of 51, counting DC), and unique **DXCC entities**.
+Below that is a scrollable list of every satellite you have a QSO with and how many
+contacts you've made through each; press **ENTER** on one to open a **per-satellite**
+breakdown with that bird's own QSO, grid, state and DXCC counts plus a by-band
+tally. **`;`/`.`** move the list and **`` ` ``** steps back.
+
+> **How states and DXCC are counted.** CardSat does **not** store a state or DXCC
+> field per QSO. It **derives** both from each contact's **grid square** by the same
+> geographic point-in-polygon calculation the workable-states and workable-DXCC
+> footprint screens use (with the island/micro-entity entities matched to the nearest
+> reference point from a bundled `cty.dat`-derived table). This has two consequences:
+> a QSO logged **without a grid** counts toward your QSO, satellite and band totals
+> but **cannot** be placed in a state or entity; and a grid that sits very close to a
+> border, or a rare entity not in the built-in table, may occasionally be attributed
+> differently than an official award check would. Treat the state and DXCC numbers as
+> a **good working estimate for your own tracking**, not as an authoritative award
+> credit. The QSO, grid, satellite and band counts are exact (grids are taken directly
+> from the log).
+
+Awards are computed each time you open the screen, so they always reflect the current
+log, including QSOs you've just added or imported.
+
+### Importing an existing ADIF log (`tools/adif2csv.py`)
+
+If you already have a satellite log in another program, you can seed CardSat's log
+with it. The bundled **`tools/adif2csv.py`** converts a standard **ADIF** export into
+the CSV format CardSat stores on the device:
+
+```
+python3 tools/adif2csv.py mylog.adi              # writes qso_log.csv next to it
+python3 tools/adif2csv.py mylog.adi out.csv      # explicit output name
+```
+
+It keeps **only satellite QSOs** — records whose ADIF `PROP_MODE` is `SAT` (if a
+record has no `PROP_MODE` but does carry a `SAT_NAME`, it's treated as a satellite
+contact) — and **drops everything else**, so your terrestrial HF/VHF contacts are left
+out. Only the fields CardSat uses are carried across (callsign, satellite, mode,
+up/downlink frequency, RST sent/received, your grid and the worked grid, your
+callsign, and a comment); anything else in the ADIF is ignored. Callsigns and grids
+are upper-cased to match CardSat's own entry rule, and frequencies are converted from
+MHz to Hz. Copy the resulting **`qso_log.csv`** onto the card at
+**`/CardSat/qso_log.csv`** (see below for transferring files).
+
+> The same caveat as the Awards screen applies: the converter does not read or write
+> any state or DXCC field — CardSat derives those from the grid square — so make sure
+> your ADIF records include `GRIDSQUARE` if you want imported QSOs to count toward
+> states and DXCC. Records without a grid still import fine; they just won't be placed
+> in a state or entity.
 
 ### Satellites
 
@@ -924,9 +986,19 @@ prediction is enabled in Settings — see [§7 → Visible passes](#7-first-time
 - `;`/`.` move.
 - **ENTER** — jump straight to **Track** for that satellite.
 - `m` — open the live **World map** (all footprints; see [World map](#world-map)).
+- `t` — open **Sky at a glance**, a horizontal timeline of upcoming passes (below).
 - `r` — recompute the schedule.
 - `z` — **deep-sleep** until ~60 s before the next AOS (see [§12](#12-aos-alarm-and-deep-sleep)).
 - `` ` `` — back.
+
+**Sky at a glance (`t`).** A horizontal timeline of the **next few hours** for all
+your favorites: time runs left to right across the top (hour ticks, with a green
+"now" line at the left edge), and each favorite that has a pass in the window gets a
+row with one bar per pass. Bars are coloured by **peak elevation** — **green** for a
+high pass (≥ 30°) and **yellow** for a lower one — the same convention as the
+**Overhead now** screen, and a white tick on a bar marks an **optically visible**
+pass. It's the fastest way to see which birds are coming up and when they overlap.
+**`r`** recomputes; **`;`/`.`** or **`` ` ``** return to the list.
 
 ### Passes
 
@@ -3676,7 +3748,9 @@ listed below.
 - **Reached from** — Home → World Map, or Next Passes → `m`. Back returns to
   wherever you entered from.
 - **Shows** — every favorite's sub-point and footprint, your station marker, the
-  graticule, and the sun terminator (drawn automatically).
+  graticule, and **day/night shading**: the night hemisphere is shaded a dim grey so
+  you can see at a glance which footprints (and which part of your own sky) are in
+  darkness. The shaded region is computed from the sub-solar point and updates live.
 - **Keys** — `f` cycle which favorite is highlighted; **`c` recenter the map on
   your QTH** (press again to return to the classic 0°-centered view); `` ` `` back.
 - **Recentering** — by default the map is centered on 0° longitude. Press `c` to

@@ -36,7 +36,9 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   and clears it when you leave the bird or stop radio output. Tones are also
   **settable per satellite** (`c` on Track) for any FM bird, and persist. Icom /
   FT-847 / TS-2000.
-- **Next Passes** — one schedule across *all* your favorites, soonest AOS first.
+- **Next Passes** — one schedule across *all* your favorites, soonest AOS first,
+  with a **Sky-at-a-glance timeline** view (`t`): a horizontal time axis with one row
+  per favorite and pass bars coloured by peak elevation (green ≥30°, yellow below).
 - **AOS alarm** — countdown beeps + a screen flash before a favorite rises.
 - **Deep-sleep until the next pass** — park the unit between passes for big
   battery savings; it wakes ~60 s before AOS.
@@ -195,6 +197,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   nominal) and editing the **date, time, satellite and frequencies** as needed. The
   same fields are editable when you review past entries; **export ADIF** on demand for
   LoTW/eQSL or your main logger.
+- **Awards tracking.** A summary on the Log menu tallies your worked totals from the
+  log — total QSOs, unique grids, distinct satellites, US states (of 51) and DXCC
+  entities — with a per-satellite drill-down (each bird's own grid/state/DXCC counts
+  and a by-band breakdown). States and DXCC are **derived from each QSO's grid square**
+  by the same point-in-polygon machinery as the footprint screens, not stored fields.
+- **ADIF import.** `tools/adif2csv.py` converts an existing ADIF log to CardSat's CSV,
+  keeping only satellite QSOs (`PROP_MODE = SAT`) and only the fields CardSat uses, so
+  you can seed the on-device log from your main logger.
 - **Direct LoTW upload** (microSD card + your LoTW key required) — **Sign & upload to
   LoTW** on the Log menu signs your un-uploaded satellite QSOs into a `.tq8` and sends
   them straight to ARRL's Logbook of the World over WiFi, with no PC and no TQSL. It

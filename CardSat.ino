@@ -1951,7 +1951,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -4775,6 +4775,37 @@ private:
   SchedEntry sched[SCHED_MAX];
   int        schedN = 0, schedSel = 0;
   uint32_t   lastSchedMs = 0;          // throttle background rebuilds
+  // "Sky at a glance": a horizontal timeline of upcoming passes for all favorites
+  // over the next SKY_HOURS. One row per favorite that has a pass in the window;
+  // each bar is one pass, coloured by peak elevation. Fixed-size (.bss), no heap.
+  static const int SKY_ROWS = 12;      // favorites shown (rows)
+  static const int SKY_BARS = 60;      // total passes drawn across all rows
+  static const int SKY_HOURS = 6;      // timeline span (hours)
+  struct SkyBar { uint8_t row; time_t aos, los; float maxEl; bool vis; };
+  SkyBar     skyBars[SKY_BARS];
+  int        skyBarN = 0;
+  char       skyName[SKY_ROWS][12];    // short sat name per row
+  uint32_t   skyRowNorad[SKY_ROWS];
+  int        skyRowN = 0;
+  time_t     skyStart = 0;             // window start (== build time)
+  uint32_t   skyBuiltMs = 0;
+  // Awards tracking: tallies derived from the QSO log. The all-sats view uses the
+  // shared grid/state/DXCC bitsets (computed once on entry); per-satellite drill-down
+  // recomputes those bitsets filtered to one sat. Distinct sats and per-band counts
+  // are accumulated while streaming. All fixed-size, no heap.
+  static const int AW_SATS = 24;       // distinct satellites tracked in the log
+  static const int AW_BANDS = 11;      // matches bandFor's enumeration length
+  int        awQsoTotal = 0;           // total QSOs in the log
+  int        awGridN = 0, awStateN = 0, awDxccN = 0;   // all-sats unique counts
+  int        awBandQso[AW_BANDS];      // QSOs per band (all sats)
+  char       awSatName[AW_SATS][18];   // distinct sat names
+  int        awSatQso[AW_SATS];        // QSOs per distinct sat
+  int        awSatN = 0;               // number of distinct sats
+  int        awSel = 0, awScroll = 0;  // list cursor on the awards screen
+  int        awSatSel = -1;            // which distinct sat is being drilled into
+  int        awSatGridN = 0, awSatStateN = 0, awSatDxccN = 0;  // per-sat unique counts
+  int        awSatBandQso[AW_BANDS];   // per-sat QSOs per band
+  uint32_t   awBuiltMs = 0;
   time_t     nextAos = 0;              // soonest upcoming favorite AOS (alarm)
   char       nextAosName[26] = {0};
   time_t     alarmAos = 0;             // AOS we're currently counting down to
@@ -5178,6 +5209,10 @@ private:
   void keyOscar(char c, bool enter, bool back);
   void keySatList(char c, bool enter, bool back);
   void keySchedule(char c, bool enter, bool back);
+  void buildSkyGlance(); void drawSkyGlance(); void keySkyGlance(char c, bool enter, bool back);
+  void buildAwards(); void drawAwards(); void keyAwards(char c, bool enter, bool back);
+  void drawAwardSat(); void keyAwardSat(char c, bool enter, bool back);
+  void awardsForSat(const char* satName);   // per-sat tally (drill-down), reuses shared bitsets
   void keyPasses(char c, bool enter, bool back);
   void keyPassDetail(char c, bool enter, bool back);
   void keyTrack(char c, bool enter, bool back);
@@ -14114,14 +14149,21 @@ uint32_t App::dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
 
 void App::loop() {
   M5Cardputer.update();
-  if (rig) rig->service();    // net CAT (Icom LAN): advance connect + keepalives
-  if (rot) rot->service();    // self-driven rotators (Yaesu direct) run their loop here
-  serviceRigctld();           // rigctld TCP server: let a PC drive the rig via CardSat
-  serviceRotctld();           // rotctld TCP server: let a PC drive the wired rotator
-  serviceWebd();              // mobile web control page (opt-in, over the WiFi LAN)
-  memo.poll();                // voice memo: append one block if recording (SD only)
-  irBeacon.service();         // IR pass-alert beacon: advance any queued flashes
-  loraPoll();                 // LoRa messaging: drain any received frame (no-op if off)
+  // While parked on the Charge / Sleep screen WiFi is powered off and the CPU is
+  // down-clocked, so the network/radio services below are both pointless and (for the
+  // WiFi ones) operating on a downed stack. Skip them there; the keyboard read further
+  // down still runs, so a keypress wakes instantly. This keeps the park near-idle.
+  bool parked = (screen == SCR_CHARGE);
+  if (!parked) {
+    if (rig) rig->service();  // net CAT (Icom LAN): advance connect + keepalives
+    if (rot) rot->service();  // self-driven rotators (Yaesu direct) run their loop here
+    serviceRigctld();         // rigctld TCP server: let a PC drive the rig via CardSat
+    serviceRotctld();         // rotctld TCP server: let a PC drive the wired rotator
+    serviceWebd();            // mobile web control page (opt-in, over the WiFi LAN)
+    memo.poll();              // voice memo: append one block if recording (SD only)
+    irBeacon.service();       // IR pass-alert beacon: advance any queued flashes
+    loraPoll();               // LoRa messaging: drain any received frame (no-op if off)
+  }
   // If the socket-recovery path exhausted its hard resets, surface a reboot
   // prompt once (don't reboot silently). The user decides; the flag is cleared
   // so we don't re-enter while they're on the prompt.
@@ -14423,7 +14465,7 @@ void App::loop() {
       (screen == SCR_TRANSIT && transitJobPhase != 0)) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
-             screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL) {
+             screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
   } else if (screen == SCR_WEATHER || screen == SCR_SPACEWX || screen == SCR_HAMSAT) {
     // These are otherwise static (repaint on keypress only). The fetch flow leaves a
@@ -14597,6 +14639,9 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_OVERHEAD: keyOverhead(c, enter, back); break;
     case SCR_SKEDENTRY:keySkedEntry(c, enter, back); break;
     case SCR_GAME:     keyGame(c, enter, back); break;
+    case SCR_SKYGLANCE:keySkyGlance(c, enter, back); break;
+    case SCR_AWARDS:   keyAwards(c, enter, back); break;
+    case SCR_AWARDSAT: keyAwardSat(c, enter, back); break;
     case SCR_CATTEST:  keyCatTest(c, enter, back); break;
     case SCR_CATMON:   keyCatMon(c, enter, back); break;
     case SCR_CHARGE:   keyCharge(c, enter, back); break;
@@ -14850,7 +14895,8 @@ void App::keySchedule(char c, bool enter, bool back) {
   if (c == 'r') { setStatus("Computing passes..."); draw(); buildSchedule();
                   lastSchedMs = millis(); setStatus("Schedule updated"); }
   if (c == 'z') { sleepUntilNextPass(); return; }     // deep-sleep until AOS
-  if (c == 'm') { screen = SCR_WORLDMAP; lastDrawMs = 0; return; }  // live world map
+  if (c == 'm') { mapReturn = SCR_SCHEDULE; screen = SCR_WORLDMAP; lastDrawMs = 0; return; }  // live world map
+  if (c == 't') { buildSkyGlance(); screen = SCR_SKYGLANCE; lastDrawMs = 0; return; }            // sky-at-a-glance timeline
   if (enter && schedN > 0) {
     int idx = db.indexOfNorad(sched[schedSel].norad);
     if (idx >= 0) {
@@ -14871,6 +14917,143 @@ void App::keySchedule(char c, bool enter, bool back) {
       trackReturn = SCR_SCHEDULE;
       screen = SCR_TRACK;
     }
+  }
+}
+
+// ===========================================================================
+//  "Sky at a glance" -- a horizontal timeline of upcoming passes for ALL
+//  favourites over the next SKY_HOURS. Time runs left to right; each favourite
+//  with a pass in the window gets a row, and every pass is a bar coloured by
+//  peak elevation (green >= 30 deg, yellow below) -- the same convention as the
+//  Overhead-now screen. Reuses the existing pass predictor; all state is
+//  fixed-size (.bss), no heap.
+// ===========================================================================
+
+void App::buildSkyGlance() {
+  skyBarN = 0; skyRowN = 0;
+  skyStart = nowUtc();
+  skyBuiltMs = millis();
+  if (!timeIsSet()) return;
+  pred.setSite(loc.obs());
+  time_t winEnd = skyStart + (time_t)SKY_HOURS * 3600;
+
+  for (int i = 0; i < favN && skyRowN < SKY_ROWS && skyBarN < SKY_BARS; ++i) {
+    int idx = db.indexOfNorad(favs[i]);
+    if (idx < 0) continue;
+    SatEntry& s = db.at(idx);
+    if (!pred.setSat(s)) continue;
+
+    // Collect this favourite's passes in the window (including one in progress).
+    PassPredict pp[6];
+    int n = pred.predictPasses(skyStart, cfg.minPassEl, pp, 6, winEnd);
+    if (n <= 0) continue;
+
+    int rowSlot = skyRowN;             // tentatively this row
+    bool anyBar = false;
+    for (int k = 0; k < n && skyBarN < SKY_BARS; ++k) {
+      time_t a = pp[k].aos, b = pp[k].los;
+      if (b <= skyStart || a >= winEnd) continue;     // outside window
+      SkyBar& bar = skyBars[skyBarN++];
+      bar.row = (uint8_t)rowSlot;
+      bar.aos = a; bar.los = b; bar.maxEl = pp[k].maxEl;
+      bool vis = false; visEvalPass(a, b, pp[k].maxEl, vis); bar.vis = vis;
+      anyBar = true;
+    }
+    if (anyBar) {
+      strncpy(skyName[rowSlot], s.name, sizeof(skyName[rowSlot]) - 1);
+      skyName[rowSlot][sizeof(skyName[rowSlot]) - 1] = 0;
+      skyRowNorad[rowSlot] = s.norad;
+      skyRowN++;
+    }
+  }
+  // Restore the propagator to the user's active satellite.
+  SatEntry* act = activeSat();
+  if (act) { pred.setSite(loc.obs()); pred.setSat(*act); }
+}
+
+void App::drawSkyGlance() {
+  header("Sky at a glance");
+  canvas.setTextSize(1);
+  if (favN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 42); canvas.print("No favorites yet.");
+    canvas.setCursor(6, 54); canvas.print("Star sats with 'f' in Satellites.");
+    footer("` back");
+    return;
+  }
+  if (!timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 42); canvas.print("Clock not set (NTP or GPS).");
+    footer("r refresh  ` back");
+    return;
+  }
+
+  // Timeline geometry: a label gutter on the left, then the time axis.
+  const int gutter = 56;                 // x of the axis start (names to its left)
+  const int axisX = gutter, axisW = 240 - gutter - 2;
+  const int y0 = 30, rowH = 8;
+  const time_t span = (time_t)SKY_HOURS * 3600;
+
+  // Hour gridlines + labels along the top. Ticks at each whole hour from now.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(2, 18); canvas.printf("next %dh", SKY_HOURS);
+  {
+    struct tm tmn; time_t t0 = skyStart; gmtime_r(&t0, &tmn);
+    // First whole hour after skyStart.
+    int minsPast = tmn.tm_min;
+    time_t firstHour = skyStart + (time_t)((60 - minsPast) % 60) * 60;
+    if (firstHour == skyStart) firstHour += 3600;
+    for (time_t t = firstHour; t < skyStart + span; t += 3600) {
+      int x = axisX + (int)(axisW * (t - skyStart) / span);
+      canvas.drawFastVLine(x, y0 - 2, rowH * skyRowN + 2, CL_DGREY);
+      struct tm tmh; gmtime_r(&t, &tmh);
+      canvas.setTextColor(CL_GREY, CL_BLACK);
+      canvas.setCursor(x - 5, 19); canvas.printf("%02d", tmh.tm_hour);
+    }
+  }
+  // "Now" marker at the left edge of the axis.
+  canvas.drawFastVLine(axisX, y0 - 2, rowH * skyRowN + 2, CL_GREEN);
+
+  if (skyRowN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.printf("No passes in the next %dh.", SKY_HOURS);
+    footer("r refresh  ` back");
+    return;
+  }
+
+  // One row per favourite with a pass; draw its bars.
+  for (int r = 0; r < skyRowN; ++r) {
+    int ry = y0 + r * rowH;
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(2, ry); canvas.printf("%-8.8s", skyName[r]);
+    canvas.drawFastHLine(axisX, ry + rowH - 1, axisW, CL_DGREY);   // row baseline
+  }
+  for (int i = 0; i < skyBarN; ++i) {
+    SkyBar& bar = skyBars[i];
+    if (bar.row >= skyRowN) continue;
+    time_t a = (bar.aos > skyStart) ? bar.aos : skyStart;
+    time_t b = (bar.los < skyStart + span) ? bar.los : skyStart + span;
+    if (b <= a) continue;
+    int x1 = axisX + (int)(axisW * (a - skyStart) / span);
+    int x2 = axisX + (int)(axisW * (b - skyStart) / span);
+    int w = (x2 - x1 < 2) ? 2 : x2 - x1;
+    int ry = y0 + bar.row * rowH;
+    uint16_t col = (bar.maxEl >= 30.0f) ? CL_GREEN : CL_YELLOW;   // Overhead-now colours
+    canvas.fillRect(x1, ry, w, rowH - 2, col);
+    if (bar.vis) {                          // visually observable: white tick on the bar
+      canvas.drawFastVLine(x1 + w / 2, ry, rowH - 2, CL_WHITE);
+    }
+  }
+  footer("r refresh  ; sched  ` back");
+}
+
+void App::keySkyGlance(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_SCHEDULE; lastDrawMs = 0; return; }
+  if (c == 'r') { setStatus("Computing timeline..."); draw(); buildSkyGlance();
+                  setStatus("Timeline updated"); lastDrawMs = 0; return; }
+  if (isUp(c) || isDown(c) || c == ';' || c == '.') {     // back to the list view
+    screen = SCR_SCHEDULE; lastDrawMs = 0; return;
   }
 }
 
@@ -15110,6 +15293,8 @@ void App::keyTrack(char c, bool enter, bool back) {
     return;
   }
   if (c == 'n' && activeTxCount > 0) {               // jump to the beacon
+    // A beacon is a downlink-only entry (uplink == 0). Prefer one whose desc
+    // mentions "beacon"; otherwise the first downlink-only entry; else say none.
     int found = -1, firstDlOnly = -1;
     for (int i = 0; i < activeTxCount; ++i) {
       if (activeTx[i].uplink == 0 && activeTx[i].downlink != 0) {
@@ -16200,11 +16385,11 @@ void App::keySettings(char c, bool enter, bool back) {
       case 61: { int v = ((int)cfg.msgNotify + 1) % 3; cfg.msgNotify = (uint8_t)v; cfg.save();
                  setStatus(v == 0 ? "Msg notify off" : v == 2 ? "Msg notify banner+beep"
                                                               : "Msg notify banner"); } break;
+      case 11: editTarget = 206; editTitle = "Net rotator port";
+               editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
-      case 11: editTarget = 206; editTitle = "Net rotator port";
-               editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
       case 20: gpSrcSel = 0; gpSrcScroll = 0; screen = SCR_GPSRC; lastDrawMs = 0; break;
       case 26: editTarget = 204; editTitle = "My callsign";
                editBuf = cfg.myCall; screen = SCR_EDIT; break;
@@ -17564,8 +17749,8 @@ void App::drawLog() {
   // LoTW, so they're alternatives). The list scrolls since it no longer fits at once.
   const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF",
                           "Sign & upload to LoTW", "Upload to Cloudlog",
-                          "Voice Memos", "Notes" };
-  const int N = 7;
+                          "Voice Memos", "Notes", "Awards" };
+  const int N = 8;
   const int VIS = 6;                              // rows visible at once (leaves room
                                                   // for the count line + footer)
   int top = 0;
@@ -17591,7 +17776,7 @@ void App::drawLog() {
 
 void App::keyLog(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
-  const int N = 7;
+  const int N = 8;
   if (isUp(c))   logMenuSel = (logMenuSel + N - 1) % N;
   if (isDown(c)) logMenuSel = (logMenuSel + 1) % N;
   if (enter) {
@@ -17602,7 +17787,9 @@ void App::keyLog(char c, bool enter, bool back) {
     else if (logMenuSel == 4) { cloudlogEnter(); }
     else if (logMenuSel == 5) { buildMemoList(); memoSel = 0; memoScroll = 0; memoConfirmDel = false;
            screen = SCR_MEMOS; lastDrawMs = 0; }
-    else { notesEnter(); }
+    else if (logMenuSel == 6) { notesEnter(); }
+    else { setStatus("Scanning log..."); draw(); buildAwards();
+           screen = SCR_AWARDS; lastDrawMs = 0; }   // Awards
   }
 }
 
@@ -18821,9 +19008,8 @@ void App::draw() {
     case SCR_POLAR:    drawPolar(); break;
     case SCR_PASSPOLAR: drawPassPolar(); break;
     case SCR_MUTUAL:   drawMutual(); break;
-    case SCR_VIS:      drawVis(); break;
+    case SCR_VIS:      drawVis(); break;    case SCR_ILLUM:    drawIllum(); break;
     case SCR_VISLIST:  drawVisList(); break;
-    case SCR_ILLUM:    drawIllum(); break;
     case SCR_LOCATION: drawLocation(); break;
     case SCR_UPDATE:   drawUpdate(); break;
     case SCR_SETTINGS: drawSettings(); break;
@@ -18863,17 +19049,20 @@ void App::draw() {
     case SCR_OVERHEAD: drawOverhead(); break;
     case SCR_SKEDENTRY:drawSkedEntry(); break;
     case SCR_GAME:     drawGame(); break;
+    case SCR_SKYGLANCE:drawSkyGlance(); break;
+    case SCR_AWARDS:   drawAwards(); break;
+    case SCR_AWARDSAT: drawAwardSat(); break;
     case SCR_CATTEST:  drawCatTest(); break;
     case SCR_CATMON:   drawCatMon(); break;
     case SCR_CHARGE:   drawCharge(); break;
     case SCR_ORBIT:    drawOrbit(); break;
     case SCR_SIM:      drawSim(); break;
-    case SCR_SUNMOON:  drawSunMoon(); break;
     case SCR_SPACEWX:  drawSpaceWx(); break;
     case SCR_TXDB:     drawTxDb(); break;
     case SCR_EQX:      drawEqx(); break;
     case SCR_QRZ:      drawQrz(); break;
     case SCR_WEATHER:  drawWeather(); break;
+    case SCR_SUNMOON:  drawSunMoon(); break;
     case SCR_GRID:     drawGrid(); break;
     case SCR_STATES:   drawStates(); break;
     case SCR_DXCC:     drawDxcc(); break;
@@ -19028,12 +19217,42 @@ static inline int mapLonToX(double lon, double centerLon, int MX, int MW) {
   return MX + (int)lround((d + 180.0) / 360.0 * MW);
 }
 
+// Sub-solar point (defined later, near the globe code) -- forward declaration so
+// the flat world map can shade its night hemisphere with the same solar model.
+static void subSolarPoint(time_t t, double& slat, double& slon);
+
 void App::drawWorldMap() {
   header("World Map");
   const int MX = 0, MY = 16, MW = 240, MH = 108;     // map rect (y 16..124)
   const uint16_t GRID = CL_MGREY;                      // dim grey graticule
   const double centerLon = (double)cfg.mapCenterLon; // 0 = classic 0-centered view
   canvas.fillRect(MX, MY, MW, MH, CL_BLACK);
+
+  // Day/night terminator: shade the night hemisphere a dim blue-grey before the
+  // coastline and graticule are drawn on top. A point (lat,lon) is in daylight
+  // when its angular distance to the sub-solar point is < 90 deg, i.e.
+  //   sin(lat)sin(Slat) + cos(lat)cos(Slat)cos(lon-Slon) >= 0.
+  // For each column we solve for the terminator latitude and fill the night side;
+  // near the poles one whole column can be all day or all night (polar day/night),
+  // which the per-pixel test handles naturally. Stepped 2 px for speed.
+  if (timeIsSet()) {
+    double slat, slon; subSolarPoint(nowUtc(), slat, slon);
+    const double D2R = 0.017453292519943295;
+    double sS = sin(slat * D2R), cS = cos(slat * D2R);
+    for (int x = MX; x < MX + MW; x += 2) {
+      // Column x -> longitude (inverse of mapLonToX): d = x/MW*360 - 180, then
+      // un-shift by the map centre.
+      double d = ((double)(x - MX) / MW) * 360.0 - 180.0;
+      double lon = d + centerLon;
+      double clonTerm = cos((lon - slon) * D2R);
+      for (int y = MY; y < MY + MH; y += 2) {
+        double lat = 90.0 - ((double)(y - MY) / MH) * 180.0;
+        double laR = lat * D2R;
+        if (sin(laR) * sS + cos(laR) * cS * clonTerm < 0.0)     // night
+          canvas.fillRect(x, y, 2, 2, CL_DGREY);
+      }
+    }
+  }
 
   // Coarse public-domain coastline outline (land), drawn under the graticule.
   // The seam test is done in shifted space: skip a segment whose two endpoints
@@ -19442,6 +19661,7 @@ void App::drawHelp() {
     "SETTINGS",
     " ;/. move  ,// change",
     " ENT select / edit field",
+    " row: Run CAT self-test",
     " row: Rotator manual ctrl",
     " row: Rigctld server +port",
     " row: GP source picker",
@@ -20405,7 +20625,7 @@ void App::drawArrow() {
   LiveLook L = pred.look(nowUtc());
 
   // --- Compass rose on the left: arrow points to the satellite azimuth ---
-  const int cx = 66, cy = 74, R = 46;
+  const int cx = 62, cy = 72, R = 40;
   canvas.drawCircle(cx, cy, R, CL_DGREY);
   canvas.drawCircle(cx, cy, R / 2, CL_DGREY);
   // Cardinal ticks + labels (N up, E right, S down, W left).
@@ -20422,8 +20642,8 @@ void App::drawArrow() {
   // Tip near the rim, tail near the centre.
   int tipX = cx + (int)lround(sx * (R - 4));
   int tipY = cy + (int)lround(cy_ * (R - 4));
-  int tailX = cx - (int)lround(sx * (R - 18));
-  int tailY = cy - (int)lround(cy_ * (R - 18));
+  int tailX = cx - (int)lround(sx * (R - 16));
+  int tailY = cy - (int)lround(cy_ * (R - 16));
   // Above the horizon = bright green arrow; below = dim grey (not workable).
   uint16_t aCol = (L.el >= 0.0) ? CL_GREEN : CL_DGREY;
   // Shaft.
@@ -20441,7 +20661,9 @@ void App::drawArrow() {
   canvas.fillCircle(cx, cy, 2, CL_WHITE);
 
   // --- Elevation bar on the right: 0 at bottom, 90 at top ---
-  const int bx = 150, bTop = 30, bBot = 118, bW = 14;
+  // (No side "El" label here -- the numeric column to the right has its own El row,
+  // and the 90/0 endpoints make the bar self-evident; this avoids crowding the range.)
+  const int bx = 150, bTop = 32, bBot = 112, bW = 12;
   canvas.drawRect(bx, bTop, bW, bBot - bTop, CL_DGREY);
   double elc = L.el; if (elc < 0) elc = 0; if (elc > 90) elc = 90;
   int fillH = (int)lround((bBot - bTop) * (elc / 90.0));
@@ -20449,37 +20671,35 @@ void App::drawArrow() {
   if (fillH > 0) canvas.fillRect(bx + 1, bBot - fillH, bW - 2, fillH, eCol);
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(bx - 2, bTop - 10); canvas.print("90");
-  canvas.setCursor(bx + 2, bBot + 2);  canvas.print("0");
-  canvas.setCursor(bx + bW + 4, (bTop + bBot) / 2 - 3); canvas.print("El");
+  canvas.setCursor(bx + 3, bBot + 2);  canvas.print("0");
 
-  // --- Numeric readout on the right ---
-  canvas.setCursor(176, 32);
+  // --- Numeric readout on the right (column at x=170, clear of the bar at x<=162) ---
+  canvas.setCursor(170, 32);
   canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.print("Az");
-  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(196, 32);
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(192, 32);
   { char b[8]; snprintf(b, sizeof(b), "%3.0f", L.az); canvas.print(b); }
-  canvas.setTextColor(CL_CYAN, CL_BLACK);  canvas.setCursor(176, 44);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);  canvas.setCursor(170, 44);
   canvas.print(windDirName((int)(L.az + 0.5)));
 
-  canvas.setCursor(176, 60);
+  canvas.setCursor(170, 60);
   canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.print("El");
-  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(196, 60);
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(192, 60);
   { char b[8]; snprintf(b, sizeof(b), "%3.0f", L.el); canvas.print(b); }
 
-  canvas.setCursor(176, 76);
+  canvas.setCursor(170, 76);
   canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.print("Rng");
-  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(176, 88);
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(170, 88);
   { char b[12]; snprintf(b, sizeof(b), "%.0fkm", L.rangeKm); canvas.print(b); }
 
-  // Status line under the compass.
-  canvas.setCursor(6, 124);
+  // Up/down state as a compact word in the right column (replaces the old full-width
+  // bottom line, which overlapped the footer). Short enough to clear the screen edge.
+  canvas.setCursor(170, 106);
   if (L.el >= 0.0) {
-    canvas.setTextColor(CL_GREEN, CL_BLACK);
-    canvas.print("UP - aim the arrow & raise to El");
+    canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.print("UP - aim");
   } else {
-    canvas.setTextColor(CL_GREY, CL_BLACK);
-    canvas.print("Below horizon - not yet visible");
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.print("below hzn");
   }
-  footer("` back   (radio/rotor keep running)");
+  footer("` back  (radio/rotor keep running)");
 }
 
 void App::keyArrow(char c, bool enter, bool back) {
@@ -21130,6 +21350,14 @@ void App::enterChargeMode() {
   chargeWoke = false; chargeWokeMs = 0;
   M5Cardputer.Display.setBrightness(0);
   screenAsleep = true;
+  // Minimal-power park: this screen only needs to wake on a keypress and show the
+  // charge state, so shut down the big consumers. The WiFi radio is the largest
+  // draw -- turn it fully off (not just disconnect) -- and drop the CPU clock right
+  // down. A keypress still wakes instantly (the keyboard is polled by
+  // M5Cardputer.update(), which is unaffected). Both are restored on exit.
+  WiFi.disconnect(true);                             // drop association + power down the PHY
+  WiFi.mode(WIFI_OFF);
+  setCpuFrequencyMhz(80);                            // 240 -> 80 MHz (~3x less core power)
   lastDrawMs = 0;
 }
 
@@ -21180,13 +21408,17 @@ void App::drawCharge() {
 void App::keyCharge(char c, bool enter, bool back) {
   // ESC/back always exits to the home menu and restores the backlight.
   if (isBack(c, back)) {
+    setCpuFrequencyMhz(240);                         // restore full clock
+    connectWifiCfg();                                // bring WiFi back up (was powered off)
     M5Cardputer.Display.setBrightness(cfg.bright);
     screenAsleep = false; chargeWoke = false;
-    homeSel = 16; screen = SCR_HOME; lastDrawMs = 0;
+    homeSel = 17; screen = SCR_HOME; lastDrawMs = 0;
     return;
   }
   // 'h' triggers an on-demand heap de-frag (WiFi/TLS reset) for long sessions.
+  // (Needs WiFi + full speed; bring them back first since the park powered them down.)
   if (c == 'h' || c == 'H') {
+    setCpuFrequencyMhz(240);
     M5Cardputer.Display.setBrightness(cfg.bright);
     chargeWoke = true; chargeWokeMs = millis();
     heapDefragViaReconnect();
@@ -24283,6 +24515,287 @@ void App::keyDxcc(char c, bool enter, bool back) {
   if (c == '{')  { dxccScroll -= PER; if (dxccScroll < 0) dxccScroll = 0; lastDrawMs = 0; return; }
 }
 
+// ===========================================================================
+//  Awards tracking -- tallies worked totals from the QSO log: total QSOs, unique
+//  Maidenhead grids, unique US states, unique DXCC entities, and a per-band
+//  breakdown. States and DXCC are DERIVED from each QSO's grid square by the same
+//  point-in-polygon machinery the footprint screens use (cty.dat-style), NOT read
+//  from any stored field -- a QSO with no grid contributes to the QSO/sat/band
+//  totals but cannot be placed in a state or entity. The all-sats view is computed
+//  once on entry; drilling into a single satellite recomputes the same tallies
+//  filtered to that sat. All state is fixed-size; the only large buffers are the
+//  shared grid/state/DXCC bitsets, reused for both views.
+// ===========================================================================
+
+// Frequency (MHz) -> band array index, parallel to bandFor()'s order. -1 if none.
+static int bandIdx(double mhz) {
+  if (mhz >= 28    && mhz <= 29.7)  return 0;   // 10m
+  if (mhz >= 50    && mhz <= 54)    return 1;   // 6m
+  if (mhz >= 144   && mhz <= 148)   return 2;   // 2m
+  if (mhz >= 222   && mhz <= 225)   return 3;   // 1.25m
+  if (mhz >= 420   && mhz <= 450)   return 4;   // 70cm
+  if (mhz >= 902   && mhz <= 928)   return 5;   // 33cm
+  if (mhz >= 1240  && mhz <= 1300)  return 6;   // 23cm
+  if (mhz >= 2300  && mhz <= 2450)  return 7;   // 13cm
+  if (mhz >= 3300  && mhz <= 3500)  return 8;   // 9cm
+  if (mhz >= 5650  && mhz <= 5925)  return 9;   // 6cm
+  if (mhz >= 10000 && mhz <= 10500) return 10;  // 3cm
+  return -1;
+}
+static const char* AW_BAND_NAME[] = {
+  "10m","6m","2m","1.25m","70cm","33cm","23cm","13cm","9cm","6cm","3cm"
+};
+
+// Set the state bit for the state containing (lon,lat), if any. Single-point
+// analogue of addFootprintStates: bbox-reject then ray-cast each state.
+static void awardStateAt(double lon, double lat, uint8_t* bits) {
+  int16_t qlo = (int16_t)lround(lon * 10.0), qla = (int16_t)lround(lat * 10.0);
+  for (int idx = 0; idx < STATE_N; ++idx) {
+    if (bits[idx >> 3] & (1 << (idx & 7))) continue;          // already set
+    if (qlo < STATEPOLY_LOMIN[idx] || qlo > STATEPOLY_LOMAX[idx] ||
+        qla < STATEPOLY_LAMIN[idx] || qla > STATEPOLY_LAMAX[idx]) continue;
+    if (statePipAt(lon, lat, STATEPOLY_START[idx]))
+      bits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+  }
+}
+
+// Set the DXCC bit for the entity at (lon,lat): polygon test first, else nearest
+// point entity within a small claim radius. Single-point analogue of
+// addFootprintDxcc with a zero-size footprint (the QSO is at one location).
+static void awardDxccAt(double lon, double lat, uint8_t* bits) {
+  int16_t qlo = (int16_t)lround(lon * 10.0), qla = (int16_t)lround(lat * 10.0);
+  for (int idx = 0; idx < DXCCPOLY_N; ++idx) {
+    if (bits[idx >> 3] & (1 << (idx & 7))) continue;
+    if (qlo < DXCCPOLY_LOMIN[idx] || qlo > DXCCPOLY_LOMAX[idx] ||
+        qla < DXCCPOLY_LAMIN[idx] || qla > DXCCPOLY_LAMAX[idx]) continue;
+    if (dxccPipAt(lon, lat, DXCCPOLY_START[idx])) {
+      bits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+      return;                                  // a point is in at most one polygon
+    }
+  }
+  // Point entities: claim the nearest within CLAIM_KM (islands/micro-entities).
+  const double CLAIM = 120.0;
+  int best = -1; double bestKm = CLAIM;
+  for (int k = 0; k < DXCCPT_N; ++k) {
+    double ela = DXCCPT[k*2 + 1] / 10.0, elo = DXCCPT[k*2] / 10.0;
+    if (fabs(ela - lat) > 2.0) continue;
+    double km = dxccGcKm(lat, lon, ela, elo);
+    if (km < bestKm) { bestKm = km; best = k; }
+  }
+  if (best >= 0) { int gi = DXCCPOLY_N + best; bits[gi >> 3] |= (uint8_t)(1 << (gi & 7)); }
+}
+
+static int popcountBits(const uint8_t* bits, int nbytes) {
+  int c = 0;
+  for (int i = 0; i < nbytes; ++i)
+    for (uint8_t v = bits[i]; v; v &= (uint8_t)(v - 1)) ++c;
+  return c;
+}
+
+// Stream the log once and tally everything for the all-sats view.
+void App::buildAwards() {
+  awQsoTotal = 0; awGridN = awStateN = awDxccN = 0; awSatN = 0;
+  for (int i = 0; i < AW_BANDS; ++i) awBandQso[i] = 0;
+  awSel = 0; awScroll = 0; awSatSel = -1;
+  awBuiltMs = millis();
+  memset(gridBits, 0, sizeof(gridBits));
+  memset(stateBits, 0, sizeof(stateBits));
+  memset(dxccBits, 0, sizeof(dxccBits));
+
+  if (!Store::fs().exists(FILE_LOG)) return;
+  File f = Store::fs().open(FILE_LOG, "r");
+  if (!f) return;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    while (line.length() && (line[line.length()-1] == '\r' || line[line.length()-1] == '\n'))
+      line.remove(line.length() - 1);
+    if (!line.length() || line.startsWith("utc,")) continue;
+    PendingQso q;
+    if (!parseQsoCsv(line, q)) continue;
+    awQsoTotal++;
+
+    // Per-band: prefer the downlink, else uplink.
+    double mhz = (q.dlHz ? q.dlHz : q.ulHz) / 1e6;
+    int bi = bandIdx(mhz);
+    if (bi >= 0) awBandQso[bi]++;
+
+    // Distinct satellite list (+ per-sat QSO count).
+    if (q.sat[0]) {
+      int si = -1;
+      for (int k = 0; k < awSatN; ++k) if (!strcmp(awSatName[k], q.sat)) { si = k; break; }
+      if (si < 0 && awSatN < AW_SATS) {
+        si = awSatN++;
+        strncpy(awSatName[si], q.sat, sizeof(awSatName[si]) - 1);
+        awSatName[si][sizeof(awSatName[si]) - 1] = 0;
+        awSatQso[si] = 0;
+      }
+      if (si >= 0) awSatQso[si]++;
+    }
+
+    // Grid / state / DXCC from the worked grid square.
+    if (q.grid[0]) {
+      double glat, glon;
+      if (Location::gridToLatLon(q.grid, glat, glon)) {
+        // Grid bit: encode the 4-char field/square into the gridBits index.
+        String g = q.grid; g.trim(); g.toUpperCase();
+        if (g.length() >= 4 && g[0] >= 'A' && g[0] <= 'R' && g[1] >= 'A' && g[1] <= 'R' &&
+            g[2] >= '0' && g[2] <= '9' && g[3] >= '0' && g[3] <= '9') {
+          int fLon = g[0] - 'A', fLat = g[1] - 'A', sLon = g[2] - '0', sLat = g[3] - '0';
+          int gi = ((fLon * 18 + fLat) * 10 + sLon) * 10 + sLat;
+          gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+        }
+        awardStateAt(glon, glat, stateBits);
+        awardDxccAt(glon, glat, dxccBits);
+      }
+    }
+  }
+  f.close();
+  awGridN  = popcountBits(gridBits, sizeof(gridBits));
+  awStateN = popcountBits(stateBits, sizeof(stateBits));
+  awDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
+}
+
+// Recompute the tallies filtered to one distinct satellite (drill-down). Reuses
+// the shared bitsets, so it clobbers the all-sats view -- buildAwards() must be
+// re-run when returning to the list (keyAwardSat does this).
+
+void App::drawAwards() {
+  header("Awards");
+  canvas.setTextSize(1);
+  if (awBuiltMs == 0) buildAwards();           // safety: compute if entered cold
+
+  // Totals block.
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(4, 19); canvas.printf("QSOs %d", awQsoTotal);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(92, 19);  canvas.printf("Grids %d", awGridN);
+  canvas.setCursor(168, 19); canvas.printf("Sats %d", awSatN);
+  canvas.setCursor(4, 30);   canvas.setTextColor(CL_GREEN, CL_BLACK);
+  canvas.printf("States %d/51", awStateN);
+  canvas.setTextColor(CL_YELLOW, CL_BLACK);
+  canvas.setCursor(120, 30); canvas.printf("DXCC %d", awDxccN);
+
+  if (awQsoTotal == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("No QSOs logged yet.");
+    footer("` back");
+    return;
+  }
+
+  // Per-satellite list (drill-down). Header + rows.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 44); canvas.print("Satellite        QSOs");
+  canvas.drawFastHLine(0, 53, 240, CL_DGREY);
+  const int VIS = 6, rowH = 11, y0 = 56;
+  if (awSel < awScroll) awScroll = awSel;
+  if (awSel > awScroll + VIS - 1) awScroll = awSel - VIS + 1;
+  if (awScroll < 0) awScroll = 0;
+  for (int v = 0; v < VIS && (awScroll + v) < awSatN; ++v) {
+    int i = awScroll + v, y = y0 + v * rowH;
+    if (i == awSel) { canvas.fillRect(0, y - 1, 240, rowH, CL_SELBG);
+                      canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else            canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, y); canvas.printf("%-16.16s %4d", awSatName[i], awSatQso[i]);
+  }
+  if (awScroll > 0)               { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, y0); canvas.print("^"); }
+  if (awScroll + VIS < awSatN)    { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, y0 + (VIS-1)*rowH); canvas.print("v"); }
+  footer(awSatN ? "ENT per-sat  ;/. move  ` bk" : "` back");
+}
+
+void App::keyAwards(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
+  if (isUp(c)   && awSatN) { awSel = (awSel + awSatN - 1) % awSatN; lastDrawMs = 0; return; }
+  if (isDown(c) && awSatN) { awSel = (awSel + 1) % awSatN; lastDrawMs = 0; return; }
+  if (enter && awSatN > 0) {
+    awSatSel = awSel;
+    setStatus("Scanning sat...");  draw();
+    awardsForSat(awSatName[awSatSel]);
+    screen = SCR_AWARDSAT; lastDrawMs = 0; return;
+  }
+}
+
+void App::drawAwardSat() {
+  canvas.setTextSize(1);
+  const char* nm = (awSatSel >= 0 && awSatSel < awSatN) ? awSatName[awSatSel] : "Sat";
+  header(String("Awards: ") + nm);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(4, 22);  canvas.printf("QSOs %d", (awSatSel >= 0) ? awSatQso[awSatSel] : 0);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(96, 22); canvas.printf("Grids %d", awSatGridN);
+  canvas.setTextColor(CL_GREEN, CL_BLACK);
+  canvas.setCursor(4, 34);  canvas.printf("States %d/51", awSatStateN);
+  canvas.setTextColor(CL_YELLOW, CL_BLACK);
+  canvas.setCursor(120, 34); canvas.printf("DXCC %d", awSatDxccN);
+
+  // Per-band breakdown for this sat.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 50); canvas.print("By band:");
+  int x = 4, y = 62, shown = 0;
+  for (int b = 0; b < AW_BANDS; ++b) {
+    if (awSatBandQso[b] <= 0) continue;
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(x, y); canvas.printf("%s %d", AW_BAND_NAME[b], awSatBandQso[b]);
+    x += 64; shown++;
+    if (x > 200) { x = 4; y += 11; }
+  }
+  if (shown == 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(70, 62); canvas.print("(no band data)"); }
+  footer("` back to awards");
+}
+
+void App::keyAwardSat(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) {
+    buildAwards();                  // restore the all-sats view (bitsets were reused)
+    screen = SCR_AWARDS; lastDrawMs = 0; return;
+  }
+}
+
+// Stream the log filtered to one satellite and fill the per-sat tallies. Reuses
+// the shared grid/state/DXCC bitsets (so it clobbers the all-sats view; the
+// caller rebuilds those on exit).
+void App::awardsForSat(const char* satName) {
+  awSatGridN = awSatStateN = awSatDxccN = 0;
+  for (int i = 0; i < AW_BANDS; ++i) awSatBandQso[i] = 0;
+  memset(gridBits, 0, sizeof(gridBits));
+  memset(stateBits, 0, sizeof(stateBits));
+  memset(dxccBits, 0, sizeof(dxccBits));
+  if (!Store::fs().exists(FILE_LOG)) return;
+  File f = Store::fs().open(FILE_LOG, "r");
+  if (!f) return;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    while (line.length() && (line[line.length()-1] == '\r' || line[line.length()-1] == '\n'))
+      line.remove(line.length() - 1);
+    if (!line.length() || line.startsWith("utc,")) continue;
+    PendingQso q;
+    if (!parseQsoCsv(line, q)) continue;
+    if (strcmp(q.sat, satName)) continue;       // this sat only
+
+    double mhz = (q.dlHz ? q.dlHz : q.ulHz) / 1e6;
+    int bi = bandIdx(mhz);
+    if (bi >= 0) awSatBandQso[bi]++;
+
+    if (q.grid[0]) {
+      double glat, glon;
+      if (Location::gridToLatLon(q.grid, glat, glon)) {
+        String g = q.grid; g.trim(); g.toUpperCase();
+        if (g.length() >= 4 && g[0] >= 'A' && g[0] <= 'R' && g[1] >= 'A' && g[1] <= 'R' &&
+            g[2] >= '0' && g[2] <= '9' && g[3] >= '0' && g[3] <= '9') {
+          int fLon = g[0] - 'A', fLat = g[1] - 'A', sLon = g[2] - '0', sLat = g[3] - '0';
+          int gi = ((fLon * 18 + fLat) * 10 + sLon) * 10 + sLat;
+          gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+        }
+        awardStateAt(glon, glat, stateBits);
+        awardDxccAt(glon, glat, dxccBits);
+      }
+    }
+  }
+  f.close();
+  awSatGridN  = popcountBits(gridBits, sizeof(gridBits));
+  awSatStateN = popcountBits(stateBits, sizeof(stateBits));
+  awSatDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
+}
+
 
 
 
@@ -24455,7 +24968,7 @@ void App::drawSchedule() {
       canvas.setCursor(232, y); canvas.print("!");
     }
   }
-  footer("ENT trk m map *=vis r refr `bk");
+  footer("ENT trk m map t timeline `bk");
 }
 
 void App::drawSatList() {
@@ -25942,8 +26455,7 @@ void App::drawSettings() {
   rows[45] = String("Dopp linear band: ") + String(cfg.doppThreshLinHz) + " Hz";
   rows[46] = String("Dopp lead: ") + (cfg.doppLeadMs == 0 ? String("off")
                      : String(cfg.doppLeadMs) + " ms");
-  rows[47] = String("Rot az lookahead: ") + (cfg.rotAzLookSec == 0 ? String("off")
-                     : String(cfg.rotAzLookSec) + " s");
+  rows[47] = String("Rot az lookahead: ") + (cfg.rotAzLookSec == 0 ? String("off")                     : String(cfg.rotAzLookSec) + " s");
   rows[48] = String("Brightness: ") + String((int)((cfg.bright * 100 + 127) / 255)) + "%";
   rows[49] = String("Tilt tuning: ") + (!imuReady ? String("n/a (no IMU)")
                                                    : (cfg.tiltTune ? String("on") : String("off")));

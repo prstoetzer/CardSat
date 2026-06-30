@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -482,6 +482,12 @@ private:
   int        awSatGridN = 0, awSatStateN = 0, awSatDxccN = 0;  // per-sat unique counts
   int        awSatBandQso[AW_BANDS];   // per-sat QSOs per band
   uint32_t   awBuiltMs = 0;
+  // Awards list sub-view: a scrollable list of the actual worked grids / states /
+  // DXCC entities (decoded from the bitsets), for either the all-sats totals or one
+  // satellite. awListKind 0=grids 1=states 2=DXCC; awListSat -1=all sats else sat idx.
+  int        awListKind = 0;
+  int        awListScroll = 0;
+  int        awListSat = -1;
   time_t     nextAos = 0;              // soonest upcoming favorite AOS (alarm)
   char       nextAosName[26] = {0};
   time_t     alarmAos = 0;             // AOS we're currently counting down to
@@ -893,6 +899,8 @@ private:
   void buildAwards(); void drawAwards(); void keyAwards(char c, bool enter, bool back);
   void drawAwardSat(); void keyAwardSat(char c, bool enter, bool back);
   void awardsForSat(const char* satName);   // per-sat tally (drill-down), reuses shared bitsets
+  void openAwardList(int kind, int satIdx);  // load bitset + show grids/states/DXCC list
+  void drawAwardList(); void keyAwardList(char c, bool enter, bool back);
   void keyPasses(char c, bool enter, bool back);
   void keyPassDetail(char c, bool enter, bool back);
   void keyTrack(char c, bool enter, bool back);

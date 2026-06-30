@@ -137,12 +137,13 @@ so edited QSOs are re-uploaded, and a guide to using your own hand-curated GP da
 
 - **Awards tracking (Log → Awards).** A new summary reads your QSO log and tallies
   total QSOs, unique grid squares, distinct satellites, unique US states (of 51) and
-  unique DXCC entities, with a per-satellite drill-down showing each bird's own
-  grid/state/DXCC counts and a by-band breakdown. States and DXCC are **derived from
-  each QSO's grid square** by the same point-in-polygon machinery the workable-states
-  and workable-DXCC footprint screens use — they are not stored per QSO — so a contact
-  logged without a grid still counts toward the QSO/satellite/band totals but can't be
-  placed in a state or entity. The QSO, grid, satellite and band counts are exact.
+  unique DXCC entities, with **scrollable lists of the actual worked grids, states and
+  entities** (`g`/`s`/`d`, with paging) and a per-satellite drill-down that scopes the
+  same lists and counts to one bird. States and DXCC are **derived from each QSO's grid
+  square** by the same point-in-polygon machinery the workable-states and workable-DXCC
+  footprint screens use — they are not stored per QSO — so a contact logged without a
+  grid still counts toward the QSO/satellite totals but can't be placed in a state or
+  entity. The QSO, grid and satellite counts are exact.
 - **Sky-at-a-glance timeline (Next Passes → `t`).** A horizontal timeline of the next
   few hours for all favorites: time runs left to right with a "now" marker, one row per
   favorite, and a bar per pass coloured by peak elevation (green ≥ 30°, yellow below,

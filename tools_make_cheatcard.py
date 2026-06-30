@@ -145,7 +145,7 @@ BACK = [
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
   "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
  ("LOG",
-  "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes / awards &middot; <b>Awards</b>: QSO/grid/state/DXCC totals (states+DXCC derived from grid) + per-sat &middot; List: <b>;</b>/<b>.</b> scroll, "
+  "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes / awards &middot; <b>Awards</b>: QSO/grid/state/DXCC totals (states+DXCC derived from grid), <b>g</b>/<b>s</b>/<b>d</b> scrollable worked lists, <b>ENTER</b> per-sat &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete &middot; editing a QSO re-arms its upload; extra <b>LoTW</b>/<b>Cloudlog</b> rows (ENTER toggles) override that"),
  ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; Sign &amp; upload)",

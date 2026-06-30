@@ -199,9 +199,10 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   LoTW/eQSL or your main logger.
 - **Awards tracking.** A summary on the Log menu tallies your worked totals from the
   log — total QSOs, unique grids, distinct satellites, US states (of 51) and DXCC
-  entities — with a per-satellite drill-down (each bird's own grid/state/DXCC counts
-  and a by-band breakdown). States and DXCC are **derived from each QSO's grid square**
-  by the same point-in-polygon machinery as the footprint screens, not stored fields.
+  entities — with **scrollable lists of the actual worked grids, states and entities**
+  (`g`/`s`/`d`) and a per-satellite drill-down (each bird's own counts and lists).
+  States and DXCC are **derived from each QSO's grid square** by the same
+  point-in-polygon machinery as the footprint screens, not stored fields.
 - **ADIF import.** `tools/adif2csv.py` converts an existing ADIF log to CardSat's CSV,
   keeping only satellite QSOs (`PROP_MODE = SAT`) and only the fields CardSat uses, so
   you can seed the on-device log from your main logger.

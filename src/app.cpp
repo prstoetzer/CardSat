@@ -4156,6 +4156,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_SKYGLANCE:keySkyGlance(c, enter, back); break;
     case SCR_AWARDS:   keyAwards(c, enter, back); break;
     case SCR_AWARDSAT: keyAwardSat(c, enter, back); break;
+    case SCR_AWARDLIST:keyAwardList(c, enter, back); break;
     case SCR_CATTEST:  keyCatTest(c, enter, back); break;
     case SCR_CATMON:   keyCatMon(c, enter, back); break;
     case SCR_CHARGE:   keyCharge(c, enter, back); break;
@@ -4183,7 +4184,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 17;
+  const int N = 18;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -6919,7 +6920,7 @@ void App::keyLog(char c, bool enter, bool back) {
            screen = SCR_MEMOS; lastDrawMs = 0; }
     else if (logMenuSel == 6) { notesEnter(); }
     else { setStatus("Scanning log..."); draw(); buildAwards();
-           screen = SCR_AWARDS; lastDrawMs = 0; }   // Awards
+           status = ""; screen = SCR_AWARDS; lastDrawMs = 0; }   // Awards (clear the scan banner)
   }
 }
 
@@ -8182,6 +8183,7 @@ void App::draw() {
     case SCR_SKYGLANCE:drawSkyGlance(); break;
     case SCR_AWARDS:   drawAwards(); break;
     case SCR_AWARDSAT: drawAwardSat(); break;
+    case SCR_AWARDLIST:drawAwardList(); break;
     case SCR_CATTEST:  drawCatTest(); break;
     case SCR_CATMON:   drawCatMon(); break;
     case SCR_CHARGE:   drawCharge(); break;
@@ -13671,9 +13673,6 @@ static int bandIdx(double mhz) {
   if (mhz >= 10000 && mhz <= 10500) return 10;  // 3cm
   return -1;
 }
-static const char* AW_BAND_NAME[] = {
-  "10m","6m","2m","1.25m","70cm","33cm","23cm","13cm","9cm","6cm","3cm"
-};
 
 // Set the state bit for the state containing (lon,lat), if any. Single-point
 // analogue of addFootprintStates: bbox-reject then ray-cast each state.
@@ -13828,17 +13827,23 @@ void App::drawAwards() {
   }
   if (awScroll > 0)               { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, y0); canvas.print("^"); }
   if (awScroll + VIS < awSatN)    { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, y0 + (VIS-1)*rowH); canvas.print("v"); }
-  footer(awSatN ? "ENT per-sat  ;/. move  ` bk" : "` back");
+  footer(awSatN ? "ENT sat  g/s/d lists  ;/. `bk" : "g/s/d lists  ` back");
 }
 
 void App::keyAwards(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
   if (isUp(c)   && awSatN) { awSel = (awSel + awSatN - 1) % awSatN; lastDrawMs = 0; return; }
   if (isDown(c) && awSatN) { awSel = (awSel + 1) % awSatN; lastDrawMs = 0; return; }
+  // All-sats worked lists. The all-sats bitsets are in memory after buildAwards();
+  // openAwardList(kind, -1) uses them directly.
+  if (c == 'g') { openAwardList(0, -1); return; }
+  if (c == 's') { openAwardList(1, -1); return; }
+  if (c == 'd') { openAwardList(2, -1); return; }
   if (enter && awSatN > 0) {
     awSatSel = awSel;
     setStatus("Scanning sat...");  draw();
     awardsForSat(awSatName[awSatSel]);
+    status = "";                         // clear the scan banner before showing the sat view
     screen = SCR_AWARDSAT; lastDrawMs = 0; return;
   }
 }
@@ -13856,19 +13861,15 @@ void App::drawAwardSat() {
   canvas.setTextColor(CL_YELLOW, CL_BLACK);
   canvas.setCursor(120, 34); canvas.printf("DXCC %d", awSatDxccN);
 
-  // Per-band breakdown for this sat.
+  // Lists for this satellite (decoded from its bitsets). Press a key to scroll
+  // through the actual worked grids / states / entities.
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(4, 50); canvas.print("By band:");
-  int x = 4, y = 62, shown = 0;
-  for (int b = 0; b < AW_BANDS; ++b) {
-    if (awSatBandQso[b] <= 0) continue;
-    canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(x, y); canvas.printf("%s %d", AW_BAND_NAME[b], awSatBandQso[b]);
-    x += 64; shown++;
-    if (x > 200) { x = 4; y += 11; }
-  }
-  if (shown == 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(70, 62); canvas.print("(no band data)"); }
-  footer("` back to awards");
+  canvas.setCursor(4, 56); canvas.print("View worked lists:");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(4, 70);  canvas.print("g  grids");
+  canvas.setCursor(88, 70); canvas.print("s  states");
+  canvas.setCursor(168, 70);canvas.print("d  DXCC");
+  footer("g/s/d lists   ` back to awards");
 }
 
 void App::keyAwardSat(char c, bool enter, bool back) {
@@ -13877,6 +13878,101 @@ void App::keyAwardSat(char c, bool enter, bool back) {
     buildAwards();                  // restore the all-sats view (bitsets were reused)
     screen = SCR_AWARDS; lastDrawMs = 0; return;
   }
+  // The per-sat bitsets are already loaded (awardsForSat ran on entry), so the list
+  // view can read them directly without recomputing.
+  if (c == 'g') { awListKind = 0; awListScroll = 0; awListSat = awSatSel; screen = SCR_AWARDLIST; lastDrawMs = 0; return; }
+  if (c == 's') { awListKind = 1; awListScroll = 0; awListSat = awSatSel; screen = SCR_AWARDLIST; lastDrawMs = 0; return; }
+  if (c == 'd') { awListKind = 2; awListScroll = 0; awListSat = awSatSel; screen = SCR_AWARDLIST; lastDrawMs = 0; return; }
+}
+
+// Ensure the shared bitsets hold the right data, then open the scrollable list. For
+// the all-sats view we recompute (cheap relative to the user's reading time, and it
+// guarantees the bitset matches the totals shown); for a single sat the bitsets are
+// already loaded from the drill-down.
+void App::openAwardList(int kind, int satIdx) {
+  awListKind = kind; awListScroll = 0; awListSat = satIdx;
+  if (satIdx < 0) { setStatus("Scanning log..."); draw(); buildAwards(); status = ""; }
+  screen = SCR_AWARDLIST; lastDrawMs = 0;
+}
+
+void App::drawAwardList() {
+  canvas.setTextSize(1);
+  const char* kindName = (awListKind == 0) ? "Grids" : (awListKind == 1) ? "States" : "DXCC";
+  const char* who = (awListSat >= 0 && awListSat < awSatN) ? awSatName[awListSat] : "all sats";
+  { String h = String(kindName) + " - " + who; header(h); }
+
+  // Walk the relevant bitset, decoding each set bit to its short name. Six columns
+  // of short tokens, eight rows -> up to 48 per page (grids/states are short; DXCC
+  // prefixes are <=7 chars so they fit too).
+  const int COLS = 6, ROWS = 8, PER = COLS * ROWS;
+  int total = (awListKind == 0) ? ((awListSat < 0) ? awGridN  : awSatGridN)
+            : (awListKind == 1) ? ((awListSat < 0) ? awStateN : awSatStateN)
+                                : ((awListSat < 0) ? awDxccN  : awSatDxccN);
+  if (awListScroll >= total) awListScroll = 0;
+  { char cnt[40];
+    if (total > PER) { int from = awListScroll + 1, to = awListScroll + PER; if (to > total) to = total;
+                       snprintf(cnt, sizeof(cnt), "%d  (%d-%d)", total, from, to); }
+    else             snprintf(cnt, sizeof(cnt), "%d worked", total);
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    int w = (int)strlen(cnt) * 6; int x = 238 - w; if (x < 4) x = 4;
+    canvas.setCursor(x, 19); canvas.print(cnt); }
+
+  if (total == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+    canvas.printf("No %s worked%s.", kindName, (awListSat >= 0) ? " on this sat" : "");
+    footer("g/s/d switch   ` back"); return;
+  }
+
+  int seen = 0, drawn = 0;
+  if (awListKind == 0) {                       // grids: 32400-bit bitset
+    for (int idx = 0; idx < 32400 && drawn < PER; ++idx) {
+      if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
+      if (seen++ < awListScroll) continue;
+      char g[5]; gridStr(idx, g);
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(4 + (drawn % COLS) * 40, 31 + (drawn / COLS) * 11);
+      canvas.print(g); ++drawn;
+    }
+  } else if (awListKind == 1) {                // states: STATE_N codes
+    for (int idx = 0; idx < STATE_N && drawn < PER; ++idx) {
+      if (!(stateBits[idx >> 3] & (1 << (idx & 7)))) continue;
+      if (seen++ < awListScroll) continue;
+      char g[3]; g[0] = STATE_CODE[idx*2]; g[1] = STATE_CODE[idx*2+1]; g[2] = 0;
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(4 + (drawn % COLS) * 40, 31 + (drawn / COLS) * 11);
+      canvas.print(g); ++drawn;
+    }
+  } else {                                     // DXCC: up to DXCC_N, prefixes <=7 chars
+    const int DCOLS = 4, DPER = DCOLS * ROWS;
+    for (int idx = 0; idx < DXCC_N && drawn < DPER; ++idx) {
+      if (!(dxccBits[idx >> 3] & (1 << (idx & 7)))) continue;
+      if (seen++ < awListScroll) continue;
+      char code[8]; dxccCode(idx, code);
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(4 + (drawn % DCOLS) * 60, 31 + (drawn / DCOLS) * 11);
+      canvas.print(code); ++drawn;
+    }
+  }
+  footer(total > PER ? "g/s/d  ;/. {} pg  ` back" : "g/s/d switch   ` back");
+}
+
+void App::keyAwardList(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) {
+    screen = (awListSat >= 0) ? SCR_AWARDSAT : SCR_AWARDS; lastDrawMs = 0; return;
+  }
+  // Switch list type in place (bitsets already hold the right sat / all-sats data).
+  if (c == 'g') { awListKind = 0; awListScroll = 0; lastDrawMs = 0; return; }
+  if (c == 's') { awListKind = 1; awListScroll = 0; lastDrawMs = 0; return; }
+  if (c == 'd') { awListKind = 2; awListScroll = 0; lastDrawMs = 0; return; }
+  int total = (awListKind == 0) ? ((awListSat < 0) ? awGridN  : awSatGridN)
+            : (awListKind == 1) ? ((awListSat < 0) ? awStateN : awSatStateN)
+                                : ((awListSat < 0) ? awDxccN  : awSatDxccN);
+  const int PER = (awListKind == 2) ? 4 * 8 : 6 * 8;
+  if (isDown(c)) { if (awListScroll + PER < total) awListScroll += (awListKind == 2 ? 4 : 6); lastDrawMs = 0; return; }
+  if (isUp(c))   { if (awListScroll >= (awListKind == 2 ? 4 : 6)) awListScroll -= (awListKind == 2 ? 4 : 6); lastDrawMs = 0; return; }
+  if (c == '}')  { if (awListScroll + PER < total) awListScroll += PER; lastDrawMs = 0; return; }
+  if (c == '{')  { awListScroll -= PER; if (awListScroll < 0) awListScroll = 0; lastDrawMs = 0; return; }
 }
 
 // Stream the log filtered to one satellite and fill the per-sat tallies. Reuses

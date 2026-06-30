@@ -723,10 +723,17 @@ notes.
 `/CardSat/qso_log.csv`. The top of the screen shows the **all-satellites totals**:
 total **QSOs**, unique **grid squares**, the number of distinct **satellites** in
 your log, unique US **states** (out of 51, counting DC), and unique **DXCC entities**.
-Below that is a scrollable list of every satellite you have a QSO with and how many
-contacts you've made through each; press **ENTER** on one to open a **per-satellite**
-breakdown with that bird's own QSO, grid, state and DXCC counts plus a by-band
-tally. **`;`/`.`** move the list and **`` ` ``** steps back.
+Below that is a scrollable list of every satellite you've worked and how many contacts
+you've made through each.
+
+From either the all-satellites view or a per-satellite view you can open a
+**scrollable list of the actual worked grids, states, or DXCC entities**: press
+**`g`** for grids, **`s`** for states, or **`d`** for DXCC. The list shows the
+decoded entries in pages (`;`/`.` scroll a line, `{`/`}` page); press **`g`/`s`/`d`**
+again to switch between the three lists, and **`` ` ``** to step back. Press **ENTER**
+on a satellite in the all-sats list first to scope these lists to **that satellite's**
+worked grids/states/entities; the per-satellite screen also shows that bird's own QSO,
+grid, state and DXCC counts.
 
 > **How states and DXCC are counted.** CardSat does **not** store a state or DXCC
 > field per QSO. It **derives** both from each contact's **grid square** by the same

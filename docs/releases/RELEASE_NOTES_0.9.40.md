@@ -108,6 +108,15 @@ so edited QSOs are re-uploaded, and a guide to using your own hand-curated GP da
   (CALL, GRIDSQUARE, STATION_CALLSIGN) in the conventional upper case regardless of how they
   were typed.
 
+## Extras
+
+- **Zap the Sats.** A tiny built-in game, tucked behind `z` on the About screen, for
+  when you're waiting on a pass: a Space-Invaders homage where the marching invaders are
+  satellite sprites and your gun is a ham operator with an arrow antenna firing signals
+  upward. `,`/`/` move, space fires, ENTER starts; clear a wave to level up. It uses only
+  fixed in-RAM state and a few KB of code — no heap allocation, no effect on tracking,
+  CAT, or anything else.
+
 ## Notes
 
 - No orbital-engine or CAT-protocol changes; existing station settings, logs, and cached

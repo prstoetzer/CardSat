@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -384,6 +384,21 @@ private:
   uint32_t gridBuiltMs = 0;         // last live rebuild (millis); 0 = build now
   char     gridFilter[5] = {0};     // optional prefix filter (e.g. "EM", "EM2", "EM21"); "" = all
   int      gridShown = 0;           // grids matching the filter (== gridN when no filter)
+  // "Zap the Sats" — a tiny Space-Invaders easter egg (satellites are the invaders,
+  // a ham op with an arrow antenna is the gun). All fixed-size state, no heap.
+  static const int GAME_COLS = 6, GAME_ROWS = 3, GAME_INV = GAME_COLS * GAME_ROWS;
+  static const int GAME_SHOTS = 4;
+  uint8_t  gInvAlive[GAME_INV];     // 1 = satellite still up
+  int      gInvLeft = 0, gInvTop = 0;   // top-left of the formation block (px)
+  int      gInvDir = 1;             // +1 right, -1 left
+  uint8_t  gInvType[GAME_INV];      // which sprite (0..2) per invader
+  int      gInvAliveN = 0;          // remaining invaders
+  int      gShotX[GAME_SHOTS], gShotY[GAME_SHOTS];   // player shots; y<0 = inactive
+  int      gGunX = 0;               // gun centre x
+  int      gScore = 0, gLives = 0, gLevel = 0;
+  uint8_t  gState = 0;              // 0 attract, 1 playing, 2 win-wave, 3 game over
+  uint32_t gStepMs = 0;             // last formation step (millis)
+  uint32_t gFrameMs = 0;            // last frame advance
 
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
@@ -1005,6 +1020,9 @@ private:
   void drawArrow();     void keyArrow(char c, bool enter, bool back);
   void drawOverhead();  void keyOverhead(char c, bool enter, bool back);
   void scanOverhead();  // synchronous all-DB above-horizon snapshot
+  void drawGame();      void keyGame(char c, bool enter, bool back);  // "Zap the Sats"
+  void gameReset(bool full);   // (re)start: full=new game, else next wave
+  void gameStep();             // advance one formation step + shots
   void keyHelp(char c, bool enter, bool back);
 
   // CAT self-test: run the full sequence, render results, handle scrolling.

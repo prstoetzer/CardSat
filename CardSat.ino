@@ -1951,7 +1951,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -4708,6 +4708,21 @@ private:
   uint32_t gridBuiltMs = 0;         // last live rebuild (millis); 0 = build now
   char     gridFilter[5] = {0};     // optional prefix filter (e.g. "EM", "EM2", "EM21"); "" = all
   int      gridShown = 0;           // grids matching the filter (== gridN when no filter)
+  // "Zap the Sats" — a tiny Space-Invaders easter egg (satellites are the invaders,
+  // a ham op with an arrow antenna is the gun). All fixed-size state, no heap.
+  static const int GAME_COLS = 6, GAME_ROWS = 3, GAME_INV = GAME_COLS * GAME_ROWS;
+  static const int GAME_SHOTS = 4;
+  uint8_t  gInvAlive[GAME_INV];     // 1 = satellite still up
+  int      gInvLeft = 0, gInvTop = 0;   // top-left of the formation block (px)
+  int      gInvDir = 1;             // +1 right, -1 left
+  uint8_t  gInvType[GAME_INV];      // which sprite (0..2) per invader
+  int      gInvAliveN = 0;          // remaining invaders
+  int      gShotX[GAME_SHOTS], gShotY[GAME_SHOTS];   // player shots; y<0 = inactive
+  int      gGunX = 0;               // gun centre x
+  int      gScore = 0, gLives = 0, gLevel = 0;
+  uint8_t  gState = 0;              // 0 attract, 1 playing, 2 win-wave, 3 game over
+  uint32_t gStepMs = 0;             // last formation step (millis)
+  uint32_t gFrameMs = 0;            // last frame advance
 
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
@@ -5325,6 +5340,9 @@ private:
   void drawArrow();     void keyArrow(char c, bool enter, bool back);
   void drawOverhead();  void keyOverhead(char c, bool enter, bool back);
   void scanOverhead();  // synchronous all-DB above-horizon snapshot
+  void drawGame();      void keyGame(char c, bool enter, bool back);  // "Zap the Sats"
+  void gameReset(bool full);   // (re)start: full=new game, else next wave
+  void gameStep();             // advance one formation step + shots
 
   // CAT self-test: run the full sequence, render results, handle scrolling.
   void runCatTest();
@@ -14429,6 +14447,10 @@ void App::loop() {
        screen == SCR_MANUALBIG) &&
       ms - lastDrawMs > 120) { lastDrawMs = ms; draw(); }
 
+  // "Zap the Sats" animates continuously (~25 fps) while it's the active screen;
+  // drawGame() advances the formation/shots itself from millis().
+  if (screen == SCR_GAME && gState == 1 && ms - lastDrawMs > 40) { lastDrawMs = ms; draw(); }
+
   // Charge / Sleep screen: while awake (just woken), refresh battery once a
   // second, then auto-blank ~5 s after the wake to return to the dark idle.
   if (screen == SCR_CHARGE && chargeWoke) {
@@ -14574,6 +14596,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_ARROW:    keyArrow(c, enter, back); break;
     case SCR_OVERHEAD: keyOverhead(c, enter, back); break;
     case SCR_SKEDENTRY:keySkedEntry(c, enter, back); break;
+    case SCR_GAME:     keyGame(c, enter, back); break;
     case SCR_CATTEST:  keyCatTest(c, enter, back); break;
     case SCR_CATMON:   keyCatMon(c, enter, back); break;
     case SCR_CHARGE:   keyCharge(c, enter, back); break;
@@ -16826,11 +16849,12 @@ void App::drawAbout() {
              (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
     line(String(b));
   }
-  footer("l license/credits   ` back");
+  footer("l license/credits  z game  ` back");
 }
 
 void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'l') { licScroll = 0; screen = SCR_LICENSE; lastDrawMs = 0; return; }
+  if (c == 'z') { gState = 0; screen = SCR_GAME; lastDrawMs = 0; return; }   // "Zap the Sats"
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
 
@@ -18838,6 +18862,7 @@ void App::draw() {
     case SCR_ARROW:    drawArrow(); break;
     case SCR_OVERHEAD: drawOverhead(); break;
     case SCR_SKEDENTRY:drawSkedEntry(); break;
+    case SCR_GAME:     drawGame(); break;
     case SCR_CATTEST:  drawCatTest(); break;
     case SCR_CATMON:   drawCatMon(); break;
     case SCR_CHARGE:   drawCharge(); break;
@@ -20558,6 +20583,214 @@ void App::keyOverhead(char c, bool enter, bool back) {
   if (c == 'r') { ovhScroll = 0; scanOverhead(); lastDrawMs = 0; return; }
   if (isUp(c))   { ovhScroll--; lastDrawMs = 0; }
   if (isDown(c)) { ovhScroll++; lastDrawMs = 0; }
+}
+
+// ===========================================================================
+//  "Zap the Sats" -- a tiny Space-Invaders easter egg. The invaders are
+//  satellites; the gun is a ham operator holding an arrow (Yagi) antenna that
+//  fires signals upward. Deliberately simple. All state is fixed-size (.bss):
+//  no heap, no String, sprites drawn with primitives. Plays in the 240x135
+//  canvas like every other screen, animated by a fast redraw branch in loop().
+// ===========================================================================
+
+// Play-field geometry.
+static const int GAME_TOP    = 18;     // below the header
+static const int GAME_BOT    = 128;    // gun baseline
+static const int GAME_CELLW  = 34;     // formation cell (px)
+static const int GAME_CELLH  = 22;
+static const int GAME_INVW   = 22;     // satellite sprite extent
+static const int GAME_INVH   = 12;
+static const int GAME_GUNW   = 20;
+
+// Draw one satellite sprite at top-left (x,y). Three flavours so the formation
+// looks like a mix of birds: 0 = cubesat (body + 2 panels), 1 = drum/AO-style
+// (round body + panels), 2 = dish-sat (body + a little dish). Free functions so
+// they carry no method overhead; they draw onto the shared canvas passed in.
+static void gameDrawSat(M5Canvas& cv, int x, int y, int type) {
+  // Solar panels (both sides) -- common to all.
+  cv.fillRect(x,        y + 4, 4, 4, CL_BLUE);
+  cv.fillRect(x + 18,   y + 4, 4, 4, CL_BLUE);
+  cv.drawFastHLine(x - 2, y + 6, 4, CL_DGREY);
+  cv.drawFastHLine(x + 20, y + 6, 4, CL_DGREY);
+  if (type == 0) {                         // cubesat: yellow body
+    cv.fillRect(x + 6, y + 2, 10, 8, CL_YELLOW);
+    cv.drawRect(x + 6, y + 2, 10, 8, CL_WHITE);
+    cv.drawPixel(x + 11, y, CL_WHITE);     // whip antenna
+    cv.drawFastVLine(x + 11, y, 2, CL_WHITE);
+  } else if (type == 1) {                   // drum sat: green round body
+    cv.fillCircle(x + 11, y + 6, 5, CL_GREEN);
+    cv.drawCircle(x + 11, y + 6, 5, CL_WHITE);
+    cv.drawPixel(x + 11, y + 6, CL_BLACK);
+  } else {                                  // dish sat: cyan body + dish
+    cv.fillRect(x + 6, y + 3, 10, 7, CL_CYAN);
+    cv.drawRect(x + 6, y + 3, 10, 7, CL_WHITE);
+    cv.drawCircle(x + 11, y + 1, 3, CL_WHITE);   // dish
+  }
+}
+
+// Draw the ham-op gun (head, torso) holding an arrow antenna pointing up. cx is
+// the gun centre, base sits on GAME_BOT.
+static void gameDrawGun(M5Canvas& cv, int cx) {
+  int by = GAME_BOT;
+  // Antenna: a vertical boom with a few crossed elements (an arrow/Yagi).
+  cv.drawFastVLine(cx, by - 20, 14, CL_WHITE);
+  cv.drawFastHLine(cx - 5, by - 18, 11, CL_WHITE);
+  cv.drawFastHLine(cx - 4, by - 15, 9,  CL_WHITE);
+  cv.drawFastHLine(cx - 3, by - 12, 7,  CL_WHITE);
+  // Operator: head + body, holding the boom.
+  cv.fillCircle(cx, by - 6, 2, CL_ORANGE);          // head
+  cv.drawFastVLine(cx, by - 4, 4, CL_ORANGE);       // torso
+  cv.drawLine(cx, by - 3, cx - 3, by, CL_ORANGE);   // legs
+  cv.drawLine(cx, by - 3, cx + 3, by, CL_ORANGE);
+  cv.drawLine(cx, by - 4, cx, by - 8, CL_ORANGE);   // arm up to the boom
+}
+
+void App::gameReset(bool full) {
+  if (full) { gScore = 0; gLives = 3; gLevel = 1; }
+  else      { gLevel++; }
+  gInvAliveN = GAME_INV;
+  for (int i = 0; i < GAME_INV; ++i) { gInvAlive[i] = 1; gInvType[i] = (uint8_t)(i % 3); }
+  gInvLeft = 6; gInvTop = GAME_TOP + 6; gInvDir = 1;
+  for (int i = 0; i < GAME_SHOTS; ++i) gShotY[i] = -1;
+  gGunX = 120;
+  gStepMs = gFrameMs = millis();
+  gState = 1;                                  // playing
+}
+
+void App::gameStep() {
+  // March the formation: shift sideways; on hitting an edge, drop and reverse.
+  // Speed scales with how few invaders remain and with the level (classic feel).
+  int liveCols[GAME_COLS]; for (int c = 0; c < GAME_COLS; ++c) liveCols[c] = 0;
+  for (int i = 0; i < GAME_INV; ++i) if (gInvAlive[i]) liveCols[i % GAME_COLS] = 1;
+  int firstCol = -1, lastCol = -1;
+  for (int c = 0; c < GAME_COLS; ++c) if (liveCols[c]) { if (firstCol < 0) firstCol = c; lastCol = c; }
+  if (firstCol < 0) return;
+
+  int blockL = gInvLeft + firstCol * GAME_CELLW;
+  int blockR = gInvLeft + lastCol * GAME_CELLW + GAME_INVW;
+  bool hitEdge = (gInvDir > 0 && blockR >= 236) || (gInvDir < 0 && blockL <= 4);
+  if (hitEdge) {
+    gInvDir = -gInvDir;
+    gInvTop += 8;                              // descend a row
+  } else {
+    gInvLeft += gInvDir * 4;
+  }
+
+  // Did they reach the gun line? That's a life lost (and a reset of the wave pos).
+  int blockBottom = gInvTop + (GAME_ROWS - 1) * GAME_CELLH + GAME_INVH;
+  if (blockBottom >= GAME_BOT - 8) {
+    if (--gLives <= 0) { gState = 3; return; }   // game over
+    // Reset formation position but keep remaining invaders.
+    gInvLeft = 6; gInvTop = GAME_TOP + 6; gInvDir = 1;
+  }
+}
+
+void App::drawGame() {
+  uint32_t ms = millis();
+  // Advance shots every frame (~fast), formation on a slower cadence that speeds
+  // up as the wave thins out.
+  if (gState == 1) {
+    // Shots travel up each frame.
+    if (ms - gFrameMs >= 40) {
+      gFrameMs = ms;
+      for (int s = 0; s < GAME_SHOTS; ++s) {
+        if (gShotY[s] < 0) continue;
+        gShotY[s] -= 6;
+        if (gShotY[s] < GAME_TOP) { gShotY[s] = -1; continue; }
+        // Collision: which formation cell is the shot in?
+        for (int i = 0; i < GAME_INV; ++i) {
+          if (!gInvAlive[i]) continue;
+          int ix = gInvLeft + (i % GAME_COLS) * GAME_CELLW;
+          int iy = gInvTop  + (i / GAME_COLS) * GAME_CELLH;
+          if (gShotX[s] >= ix - 2 && gShotX[s] <= ix + GAME_INVW + 2 &&
+              gShotY[s] >= iy      && gShotY[s] <= iy + GAME_INVH) {
+            gInvAlive[i] = 0; gShotY[s] = -1;
+            gScore += 10 * gLevel; gInvAliveN--;
+            if (gInvAliveN <= 0) { gState = 2; }   // wave cleared
+            break;
+          }
+        }
+      }
+    }
+    int stepEvery = 220 - gLevel * 20 - (GAME_INV - gInvAliveN) * 8;
+    if (stepEvery < 50) stepEvery = 50;
+    if (ms - gStepMs >= (uint32_t)stepEvery) { gStepMs = ms; gameStep(); }
+  }
+
+  header("Zap the Sats");
+  canvas.setTextSize(1);
+
+  // HUD: score and lives on one line under the header.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18);  canvas.printf("Score %d", gScore);
+  canvas.setCursor(150, 18); canvas.printf("Lvl %d", gLevel);
+  { char lv[8]; int n = gLives < 0 ? 0 : gLives; if (n > 5) n = 5;
+    for (int i = 0; i < n; ++i) lv[i] = 'A'; lv[n] = 0;
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(206, 18); canvas.printf("%s", lv); }   // 'A' glyphs ~ little antennas
+
+  if (gState == 0) {                          // attract screen
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(36, 50); canvas.print("ZAP THE SATS");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(14, 70); canvas.print(", / .  move    SPACE fire");
+    canvas.setCursor(40, 84); canvas.print("ENTER to start");
+    gameDrawGun(canvas, 120);
+    footer("ENTER start   ` back");
+    return;
+  }
+  if (gState == 3) {                          // game over
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.setCursor(48, 54); canvas.print("GAME OVER");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(54, 72); canvas.printf("Score %d", gScore);
+    footer("ENTER retry   ` back");
+    return;
+  }
+  if (gState == 2) {                          // wave cleared
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.setCursor(28, 60); canvas.print("WAVE CLEARED!");
+    footer("ENTER next wave  ` back");
+    return;
+  }
+
+  // Playing: draw invaders, shots, gun.
+  for (int i = 0; i < GAME_INV; ++i) {
+    if (!gInvAlive[i]) continue;
+    int ix = gInvLeft + (i % GAME_COLS) * GAME_CELLW;
+    int iy = gInvTop  + (i / GAME_COLS) * GAME_CELLH;
+    gameDrawSat(canvas, ix, iy, gInvType[i]);
+  }
+  for (int s = 0; s < GAME_SHOTS; ++s) {
+    if (gShotY[s] < 0) continue;
+    canvas.drawFastVLine(gShotX[s], gShotY[s], 4, CL_YELLOW);
+    canvas.drawPixel(gShotX[s], gShotY[s], CL_WHITE);
+  }
+  gameDrawGun(canvas, gGunX);
+  footer(", / . move  SPACE fire  ` back");
+}
+
+void App::keyGame(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+
+  if (gState != 1) {                          // attract / over / wave: ENTER advances
+    if (enter) {
+      if (gState == 2) gameReset(false);      // next wave keeps score/lives
+      else             gameReset(true);       // attract or game-over: fresh game
+      lastDrawMs = 0;
+    }
+    return;
+  }
+
+  // Playing.
+  if (isLeft(c))  { gGunX -= 8; if (gGunX < 8)   gGunX = 8;   lastDrawMs = 0; return; }
+  if (isRight(c)) { gGunX += 8; if (gGunX > 232) gGunX = 232; lastDrawMs = 0; return; }
+  if (c == ' ') {                             // fire: use a free shot slot
+    for (int s = 0; s < GAME_SHOTS; ++s) {
+      if (gShotY[s] < 0) { gShotX[s] = gGunX; gShotY[s] = GAME_BOT - 22; break; }
+    }
+    lastDrawMs = 0; return;
+  }
 }
 
 // ===========================================================================

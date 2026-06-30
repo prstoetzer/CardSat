@@ -3751,7 +3751,22 @@ listed below.
 - **Reached from** — Home → About.
 - **Shows** — firmware version, IP address, free heap and other read-only
   diagnostics.
-- **Keys** — `l` opens **License & credits**; `` ` `` back.
+- **Keys** — `l` opens **License & credits**; **`z`** launches **Zap the Sats**
+  (a small game — see below); `` ` `` back.
+
+### Zap the Sats (`z` from About)
+
+- **Purpose** — a tiny built-in game for when you're waiting on a pass: a
+  Space-Invaders homage where the "invaders" are satellites and your "gun" is a ham
+  operator holding an arrow antenna that fires signals upward.
+- **Reached from** — `z` on the About screen.
+- **Shows** — a formation of satellite sprites marching down the screen, your score,
+  level, and remaining lives; an attract screen on entry and a game-over / wave-cleared
+  screen between rounds.
+- **Keys** — `,` / `/` move the operator left/right; **space** fires; **ENTER** starts
+  a game (and advances to the next wave or retries after one ends); `` ` `` returns to
+  About. Clearing a whole wave advances the level (the sats march faster); letting the
+  formation reach you costs a life.
 
 ### License & credits
 

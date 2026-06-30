@@ -177,7 +177,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT) &middot; <b>z</b> Zap the Sats (mini game: <b>,</b>/<b>/</b> move, SPACE fire, ENTER start)."),
 ]
 
 

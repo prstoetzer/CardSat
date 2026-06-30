@@ -73,13 +73,20 @@ int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before r
 int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
 uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
                                         // just-closed socket leaves the LWIP pool
-uint32_t Net::TLS_MIN_BLOCK  = 28000;   // mbedTLS handshake needs a contiguous block at
-                                        // least this big; below it we defragment first and
-                                        // decline if still short. Set from observation: an
-                                        // upload connected fine at largest-block ~31.7 KB,
-                                        // so the true floor is under that -- 28 KB leaves a
-                                        // margin while still catching real exhaustion (the
-                                        // post-failed-upload fragmentation the user hit).
+// --- TLS_MIN_BLOCK: pre-handshake contiguous-heap gate -----------------------
+// mbedTLS needs ~32 KB contiguous for a handshake (16 KB RX + 16 KB TX). With the
+// drawing sprite resident the largest block is ~33 KB after the 0.9.41 static-RAM
+// trim (LOG_VIEW_MAX 60->48 reclaimed ~1.7 KB, restoring the pre-feature headroom),
+// so POSTs complete without freeing the sprite. This floor only gates the POST paths
+// (GETs don't call reclaim). 28000 sits below the resident block so real attempts
+// proceed, and above a genuinely-exhausted heap so the upload declines + offers a
+// reboot rather than failing mid-handshake with a bare -1.
+uint32_t Net::TLS_MIN_BLOCK  = 28000;   // below the ~33 KB resident block; catches real OOM
+
+// --- 0.9.41 proactive WiFi-cycle defrag (see net.h / docs/design/HEAP_WIFI_CYCLE.md) ---
+// Set TLS_WIFI_CYCLE=false to revert to the passive-wait-only reclaim behaviour.
+bool     Net::TLS_WIFI_CYCLE      = true;   // enable the last-resort WiFi cycle
+uint32_t Net::WIFI_CYCLE_MIN_GAP_MS = 30000; // don't cycle more than once per 30 s
 
 // Flush the LWIP socket pool by tearing the STA association down hard, then
 // reconnect with the credentials WiFi already holds. This is the reliable cure
@@ -263,8 +270,9 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   }
   http.end();
 
-  Serial.printf("[net] received %u bytes (declared %d), heap now %u\n",
-                (unsigned)total, len, (unsigned)ESP.getFreeHeap());
+  Serial.printf("[net] received %u bytes (declared %d), heap now %u (largest %u)\n",
+                (unsigned)total, len, (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   if (out.length() == 0) { lastErr = "empty body"; return false; }
   // Declared length but got less -> truncated; report failure so callers/retries
   // don't parse a partial body.
@@ -374,8 +382,9 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   http.end();
   if (written) *written = total;
 
-  Serial.printf("[net] streamed %u bytes to %s (declared %d), heap now %u\n",
-                (unsigned)total, path, len, (unsigned)ESP.getFreeHeap());
+  Serial.printf("[net] streamed %u bytes to %s (declared %d), heap now %u (largest %u)\n",
+                (unsigned)total, path, len, (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   if (writeErr)    { lastErr = "fs write failed"; return false; }
   if (total == 0)  { lastErr = "empty body"; return false; }
   // If the server told us how big the body is and we got less, the transfer was
@@ -412,12 +421,20 @@ bool Net::fetchGpToFile(const String& url, const char* path) {
   return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
 }
 
+// DEPRECATED -- DO NOT CALL. Reads the entire GP catalog (~400 KB) into a single
+// RAM String, which cannot fit on this no-PSRAM heap and reproduces the upload/download
+// heap-exhaustion failures cured in 0.9.41. Kept only so the symbol resolves; every
+// caller MUST use fetchGpToFile() (streams to flash). See docs/design/STREAMING_TLS.md.
 bool Net::fetchGp(const String& url, String& out) {
   // GP/OMM JSON can be a few hundred KB for the full amateur list; cap higher
   // than the old TLE text. MAX_SATS still bounds what we actually store.
   return httpsGet(url, out, 400000);
 }
 
+// DEPRECATED -- DO NOT CALL. Reads a full transmitter list (up to ~200 KB) into a RAM
+// String; the String reader also silently drops chunks under TLS heap pressure (it
+// advances its byte count even when concat() fails to grow). Every caller MUST use
+// fetchSatnogsTransmittersToFile() (streams to flash). See docs/design/STREAMING_TLS.md.
 bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {
   String url = String(SATNOGS_TX_URL) + String((unsigned long)norad);
   // Busy birds return large transmitter lists (the ISS has ~49); allow ample room
@@ -449,11 +466,22 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   TlsBusyGuard _tls;
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
 
-  // Read the file to upload (small; the .tq8 is a few KB).
-  File f = Store::fs().open(filePath, "r");
-  if (!f) { lastErr = "open upload file failed"; return false; }
-  size_t flen = f.size();
-  if (flen == 0 || flen > 256000) { f.close(); lastErr = "upload file size bad"; return false; }
+  // Probe the upload file's size WITHOUT reading it into RAM yet. The ~9 KB body
+  // buffer must NOT exist during the TLS handshake: mbedTLS needs ~32 KB contiguous,
+  // and on this no-PSRAM heap the largest free block sits right at ~31.7 KB. Holding
+  // the body buffer during the handshake was tipping it over into "SSL - Memory
+  // allocation failed" every time (the larger LoTW body is why LoTW failed where the
+  // smaller Cloudlog body squeaked through). So: get the size, compute Content-Length,
+  // do the handshake with maximum free heap, and only AFTER it connects read the file
+  // into the body buffer and send it.
+  size_t flen = 0;
+  {
+    File f = Store::fs().open(filePath, "r");
+    if (!f) { lastErr = "open upload file failed"; return false; }
+    flen = f.size();
+    f.close();
+  }
+  if (flen == 0 || flen > 256000) { lastErr = "upload file size bad"; return false; }
 
   const String boundary = "----CardSatLoTW8b2f4c1d";
   String head;
@@ -462,15 +490,7 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
           "\"; filename=\"" + String(fileName) + "\"\r\n";
   head += "Content-Type: " + String(contentType) + "\r\n\r\n";
   const String tail = "\r\n--" + boundary + "--\r\n";
-
-  size_t bodyLen = head.length() + flen + tail.length();
-  uint8_t* body = (uint8_t*)malloc(bodyLen);
-  if (!body) { f.close(); lastErr = "oom building body"; return false; }
-  memcpy(body, head.c_str(), head.length());
-  size_t got = f.read(body + head.length(), flen);
-  f.close();
-  if (got != flen) { free(body); lastErr = "read upload file short"; return false; }
-  memcpy(body + head.length() + flen, tail.c_str(), tail.length());
+  size_t bodyLen = head.length() + flen + tail.length();   // Content-Length, no buffer yet
 
   Serial.printf("[net] POST %s (%u-byte body) -> %s\n",
                 fileName, (unsigned)bodyLen, redactUrl(url).c_str());
@@ -485,39 +505,123 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   client.setTimeout(20000);
 
   // Defragment if needed, then bail before a handshake we can't complete (see the note
-  // in httpsPostJson). free() the assembled body first so the abort doesn't leak it.
+  // in httpsPostJson). No body buffer allocated yet, so nothing to free on this abort.
   if (reclaimHeapForTls() < TLS_MIN_BLOCK) {
-    free(body);
+    lastCode = HEAP_ABORT_CODE;        // negative: lets callers offer reboot-to-clean-heap
     lastErr = "low memory; try again";
     Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
     return false;
   }
 
-  HTTPClient http;
-  http.setUserAgent("CardSat-Cardputer/1.0");
-  http.setConnectTimeout(20000);
-  http.setTimeout(20000);
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.useHTTP10(true);
+  // --- Manual request (same approach that fixed the Cloudlog POST) --------------
+  // HTTPClient::POST was failing here exactly as it did on the JSON path (-1 /
+  // connection refused / 408), so send the request by hand over the TLS client we
+  // control. Parse host/path/port from the URL, THEN handshake with max free heap.
+  String hostPart, pathPart; int port = 443;
+  {
+    int s = url.indexOf("://"); int st = (s >= 0) ? s + 3 : 0;
+    int slash = url.indexOf('/', st);
+    String hostPort = (slash >= 0) ? url.substring(st, slash) : url.substring(st);
+    pathPart = (slash >= 0) ? url.substring(slash) : "/";
+    int colon = hostPort.indexOf(':');
+    if (colon >= 0) { hostPart = hostPort.substring(0, colon); port = hostPort.substring(colon + 1).toInt(); }
+    else hostPart = hostPort;
+  }
 
-  if (!http.begin(client, url)) { free(body); lastErr = "begin failed"; return false; }
-  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+  uint32_t t0 = millis();
+  if (!client.connect(hostPart.c_str(), port)) {
+    lastCode = -1; lastErr = "connect failed";
+    char eb[128] = {0}; client.lastError(eb, sizeof(eb));
+    Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
+                  (unsigned)(millis() - t0), eb[0] ? eb : "(none)");
+    return false;
+  }
+  Serial.printf("[net] POST TLS connected in %ums; streaming request\n", (unsigned)(millis() - t0));
 
-  int code = http.POST(body, bodyLen);
-  free(body);
-  lastCode = code;
-  noteConnResult(code);
-  if (code != HTTP_CODE_OK) {
-    lastErr = (code > 0) ? ("HTTP " + String(code))
-                         : HTTPClient::errorToString(code);
-    Serial.printf("[net] POST failed: code=%d (%s)\n", code, lastErr.c_str());
-    http.end();
+  // Handshake done. Stream the request instead of building the whole body in one
+  // contiguous malloc: with the live TLS session already holding its two ~16 KB
+  // buffers, a ~9 KB contiguous malloc fails ("oom building body"). The .tq8 lives on
+  // SD, so we never need it all in RAM at once -- send the HTTP + multipart headers,
+  // then copy the file to the socket in small blocks, then the multipart tail. Peak
+  // RAM is one ~1 KB chunk regardless of how many QSOs the file holds. (This is the
+  // mirror of httpsGetToFile, which streams downloads to disk.)
+  String reqHead;
+  reqHead.reserve(384);
+  reqHead  = "POST " + pathPart + " HTTP/1.1\r\n";
+  reqHead += "Host: " + hostPart + "\r\n";
+  reqHead += "User-Agent: CardSat-Cardputer/1.0\r\n";
+  reqHead += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
+  reqHead += "Content-Length: " + String(bodyLen) + "\r\n";
+  reqHead += "Connection: close\r\n\r\n";
+  reqHead += head;                       // multipart part-header goes out with the request headers
+
+  // write() helper semantics: treat 0 as "TX window full, retry", not "dead".
+  auto writeAll = [&](const uint8_t* p, size_t n) -> bool {
+    size_t off = 0; uint32_t lastProgress = millis();
+    while (off < n) {
+      if (!client.connected()) return false;
+      size_t w = client.write(p + off, n - off);
+      if (w > 0) { off += w; lastProgress = millis(); }
+      else { delay(15); yield(); if (millis() - lastProgress > 30000) return false; }
+    }
+    return true;
+  };
+
+  bool ok = writeAll((const uint8_t*)reqHead.c_str(), reqHead.length());
+  size_t streamed = 0;
+  if (ok) {
+    File f = Store::fs().open(filePath, "r");
+    if (!f) { lastErr = "reopen upload file failed"; return false; }
+    uint8_t chunk[1024];
+    while (streamed < flen) {
+      size_t want = flen - streamed; if (want > sizeof(chunk)) want = sizeof(chunk);
+      size_t got = f.read(chunk, want);
+      if (got == 0) break;                // short read -> stop; length check below fails
+      if (!writeAll(chunk, got)) { ok = false; break; }
+      streamed += got;
+    }
+    f.close();
+  }
+  if (ok) ok = writeAll((const uint8_t*)tail.c_str(), tail.length());
+  client.flush();
+  Serial.printf("[net] streamed %u/%u file bytes (+headers/tail), ok=%d\n",
+                (unsigned)streamed, (unsigned)flen, ok ? 1 : 0);
+  if (!ok || streamed != flen) { lastCode = 0; lastErr = "body stream incomplete"; return false; }
+
+  // Read the response (connection-tolerant: poll available(), ignore transient close).
+  uint32_t rdStart = millis(); int code = 0;
+  while (!client.available() && millis() - rdStart < 20000) delay(10);
+  String statusLine = client.available() ? client.readStringUntil('\n') : String("");
+  Serial.printf("[net] status: %s\n", statusLine.c_str());
+  { int sp = statusLine.indexOf(' ');
+    if (sp >= 0) code = statusLine.substring(sp + 1, sp + 4).toInt(); }
+  if (statusLine.length() == 0) {
+    lastCode = 0; lastErr = "no response from server";
+    Serial.println("[net] POST: no response (empty status)");
     return false;
   }
 
-  response = http.getString();
-  if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
-  http.end();
+  uint32_t hdrStart = millis();
+  while (millis() - hdrStart < 15000) {
+    if (!client.available()) { if (!client.connected()) break; delay(5); continue; }
+    String h = client.readStringUntil('\n');
+    if (h == "\r" || h.length() == 0) break;
+  }
+  response = "";
+  uint32_t bodyStart = millis();
+  while (response.length() < maxResp && millis() - bodyStart < 15000) {
+    while (client.available() && response.length() < maxResp) response += (char)client.read();
+    if (!client.connected() && !client.available()) break;
+    delay(2);
+  }
+
+  lastCode = code;
+  noteConnResult(code);
+  if (code < 200 || code >= 300) {
+    lastErr = (code > 0) ? ("HTTP " + String(code)) : "no response";
+    Serial.printf("[net] POST failed: code=%d\n", code);
+    return false;
+  }
   return true;
 }
 
@@ -539,6 +643,43 @@ size_t Net::reclaimHeapForTls() {
     if (now > largest) largest = now;
     if (largest >= TLS_MIN_BLOCK) break;
   }
+  // --- BEGIN 0.9.41 proactive WiFi-cycle defrag (REVERSIBLE) ------------------
+  // Last resort: if the passive wait still left us short, forcibly flush the LWIP
+  // socket pool / mbedTLS async buffers with one disconnect(true)+reconnect so the
+  // freed blocks coalesce. Gated hard: only when still below the floor, only when
+  // we have a connection to recycle, only when we haven't just done this (so it
+  // can't fight the connFails/hardReset recovery or storm reconnects), and only
+  // while the master toggle is on. hardResetWifi() reuses the existing recovery
+  // path (credential reuse, 12 s bounded reconnect, connFails reset on success).
+  // TO DISABLE: set Net::TLS_WIFI_CYCLE = false. (docs/design/HEAP_WIFI_CYCLE.md)
+  if (TLS_WIFI_CYCLE && !wifiCycleIneffective && largest < TLS_MIN_BLOCK &&
+      WiFi.status() == WL_CONNECTED &&
+      (lastWifiCycleMs == 0 || millis() - lastWifiCycleMs > WIFI_CYCLE_MIN_GAP_MS)) {
+    Serial.printf("[net] proactive WiFi-cycle defrag (largest %u < %u)\n",
+                  (unsigned)largest, (unsigned)TLS_MIN_BLOCK);
+    lastWifiCycleMs = millis();
+    size_t before = largest;
+    if (hardResetWifi()) {
+      // Give the freed buffers a moment to return, then re-measure.
+      for (int i = 0; i < 3; ++i) {
+        delay(120); yield();
+        size_t now = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        if (now > largest) largest = now;
+        if (largest >= TLS_MIN_BLOCK) break;
+      }
+      Serial.printf("[net] post-cycle largest block %u\n", (unsigned)largest);
+      // If the cycle didn't grow the largest block at all, the fragmentation is
+      // mid-heap persistent allocations (mbedTLS session state that survives
+      // stop()), not freeable socket-pool buffers -- so cycling is pure cost.
+      // Remember that and don't cycle again this session (a reboot is the cure;
+      // the upload paths offer one on HEAP_ABORT_CODE).
+      if (largest <= before) {
+        wifiCycleIneffective = true;
+        Serial.println("[net] WiFi-cycle had no effect; disabling it for this session");
+      }
+    }
+  }
+  // --- END 0.9.41 proactive WiFi-cycle defrag --------------------------------
   Serial.printf("[net] heap reclaim: largest block now %u (need %u)\n",
                 (unsigned)largest, (unsigned)TLS_MIN_BLOCK);
   return largest;
@@ -575,40 +716,275 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
   // after a mistyped URL led to repeated failures). Bailing here with a clear message
   // keeps the heap intact so a retry can succeed. (Plain HTTP needs no big TLS block.)
   if (isHttps && reclaimHeapForTls() < TLS_MIN_BLOCK) {
+    lastCode = HEAP_ABORT_CODE;        // negative: lets callers offer reboot-to-clean-heap
     lastErr = "low memory; try again";
     Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
     return false;
   }
 
-  HTTPClient http;
-  http.setUserAgent("CardSat-Cardputer/1.0");
-  http.setConnectTimeout(20000);
-  http.setTimeout(20000);
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.useHTTP10(true);
-
-  bool began = isHttps ? http.begin(tls, url) : http.begin(plain, url);
-  if (!began) { lastErr = "begin failed"; return false; }
-  http.addHeader("Content-Type", contentType);
+  // --- 0.9.41: MANUAL request instead of HTTPClient::POST -----------------------
+  // HTTPClient::POST() was returning 408 (server got headers but not the body) on a
+  // completed TLS connection with ample heap, independent of HTTP/1.0-vs-1.1. Rather
+  // than keep guessing at HTTPClient's body handling, send the request by hand over the
+  // client we control, logging exactly how many body bytes are written and reading the
+  // status line directly. This removes HTTPClient's send path (the suspect) entirely.
+  // Parse host/path/port from the URL.
+  String hostPart, pathPart; int port = isHttps ? 443 : 80;
+  {
+    int s = url.indexOf("://"); int st = (s >= 0) ? s + 3 : 0;
+    int slash = url.indexOf('/', st);
+    String hostPort = (slash >= 0) ? url.substring(st, slash) : url.substring(st);
+    pathPart = (slash >= 0) ? url.substring(slash) : "/";
+    int colon = hostPort.indexOf(':');
+    if (colon >= 0) { hostPart = hostPort.substring(0, colon); port = hostPort.substring(colon + 1).toInt(); }
+    else hostPart = hostPort;
+  }
 
   logHeapDetail("pre-POST-connect");   // full heap shape right before the handshake
-  int code = http.POST((uint8_t*)body.c_str(), body.length());
-  lastCode = code;
-  noteConnResult(code);
-  // Accept any 2xx (Cloudlog returns 201 Created on success).
-  if (code < 200 || code >= 300) {
-    lastErr = (code > 0) ? ("HTTP " + String(code))
-                         : HTTPClient::errorToString(code);
-    Serial.printf("[net] POST(json) failed: code=%d (%s)\n", code, lastErr.c_str());
-    // Capture the error body too -- callers surface the server's reason string.
-    response = http.getString();
-    if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
-    http.end();
+
+  Client* cli = isHttps ? (Client*)&tls : (Client*)&plain;
+  uint32_t t0 = millis();
+  if (!cli->connect(hostPart.c_str(), port)) {
+    lastCode = -1; lastErr = "connect failed";
+    if (isHttps) { char eb[128] = {0}; tls.lastError(eb, sizeof(eb));
+      Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
+                    (unsigned)(millis() - t0), eb[0] ? eb : "(none)"); }
+    return false;
+  }
+  Serial.printf("[net] POST TLS connected in %ums; sending request\n", (unsigned)(millis() - t0));
+
+  // Build the ENTIRE request -- request line, headers, AND body -- into one buffer and
+  // send it with as few write()s as possible. Root cause of the 408 (proven host-side:
+  // the identical request bytes get an instant 401 from the server via openssl
+  // s_client, so the framing is correct): the request was arriving too SLOWLY. Apache's
+  // mod_reqtimeout returns 408 if the full request doesn't arrive quickly enough, and
+  // splitting headers (print) from body (write) plus per-chunk flushes spread the
+  // request across many small TLS records over a marginal WiFi link -> too slow.
+  // Sending headers+body as one ~3.8 KB blob goes out in a single TLS record, landing
+  // the whole request at once. (3791 bytes < the ~16 KB TLS record limit.)
+  String req;
+  req.reserve(256 + body.length());
+  req  = "POST " + pathPart + " HTTP/1.1\r\n";
+  req += "Host: " + hostPart + "\r\n";
+  req += "User-Agent: CardSat-Cardputer/1.0\r\n";
+  req += "Content-Type: " + String(contentType) + "\r\n";
+  req += "Content-Length: " + String(body.length()) + "\r\n";
+  req += "Connection: close\r\n\r\n";
+  req += body;
+
+  size_t reqLen = req.length();
+  const uint8_t* rp = (const uint8_t*)req.c_str();
+  size_t sent = cli->write(rp, reqLen);     // one shot: one TLS record if it fits
+  if (sent < reqLen) {
+    // Short write (TX window full): finish the remainder, treating write()==0 as
+    // "full, retry" rather than "dead". Keep records as large as possible.
+    uint32_t lastProgress = millis();
+    while (sent < reqLen) {
+      if (!cli->connected()) { Serial.println("[net] connection dropped mid-request"); break; }
+      size_t w = cli->write(rp + sent, reqLen - sent);
+      if (w > 0) { sent += w; lastProgress = millis(); }
+      else { delay(15); yield();
+             if (millis() - lastProgress > 30000) { Serial.println("[net] request write stalled (30s)"); break; } }
+    }
+  }
+  cli->flush();
+  Serial.printf("[net] wrote %u/%u request bytes (header+body)\n", (unsigned)sent, (unsigned)reqLen);
+
+  // Read the response. IMPORTANT: with WiFiClientSecure, connected() can momentarily
+  // report false between TLS records even while the server's reply is still arriving
+  // (the same hazard the GET path documents). So the wait must NOT bail the instant
+  // connected() looks false -- it must keep polling available() until data shows up or
+  // a real timeout elapses. Earlier this gave an empty status line + code=0: the send
+  // completed (3791/3791) but we stopped reading before the reply landed. Host-side the
+  // server answers these exact bytes instantly, so the reply IS coming -- wait for it.
+  uint32_t rdStart = millis(); int code = 0;
+  // Poll purely for decrypted data to become available. Do NOT consult connected():
+  // on WiFiClientSecure it can read false between records and immediately after the
+  // server's close even while the buffered reply is still readable. If the server
+  // closed after replying, available() stays > 0 until we drain it. Wait up to 20s.
+  while (!cli->available() && millis() - rdStart < 20000) delay(10);
+  String statusLine = cli->available() ? cli->readStringUntil('\n') : String("");
+  Serial.printf("[net] status: %s\n", statusLine.c_str());
+  { int sp = statusLine.indexOf(' ');
+    if (sp >= 0) code = statusLine.substring(sp + 1, sp + 4).toInt(); }
+  if (statusLine.length() == 0) {
+    // No response arrived within the window. Report it distinctly rather than burning
+    // the header/body timeouts on a connection that produced nothing.
+    lastCode = 0; lastErr = "no response from server";
+    Serial.println("[net] POST(json): no response (empty status)");
     return false;
   }
 
-  response = http.getString();
-  if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
-  http.end();
+  // Skip the rest of the headers (read until a blank line).
+  uint32_t hdrStart = millis();
+  while (millis() - hdrStart < 15000) {
+    if (!cli->available()) {
+      if (!cli->connected()) break;
+      delay(5); continue;
+    }
+    String h = cli->readStringUntil('\n');
+    if (h == "\r" || h.length() == 0) break;
+  }
+  // Read the body until close or timeout.
+  response = "";
+  uint32_t bodyStart = millis();
+  while (response.length() < maxResp && millis() - bodyStart < 15000) {
+    while (cli->available() && response.length() < maxResp) response += (char)cli->read();
+    if (!cli->connected() && !cli->available()) break;
+    delay(2);
+  }
+
+  lastCode = code;
+  noteConnResult(code);
+  if (code < 200 || code >= 300) {
+    lastErr = (code > 0) ? ("HTTP " + String(code)) : "no response";
+    Serial.printf("[net] POST(json) failed: code=%d\n", code);
+    return false;
+  }
+  return true;
+}
+
+// Streaming JSON POST (body from a file on Store::fs()). See the header note: this is
+// the no-PSRAM-safe path for large Cloudlog uploads -- one handshake, body streamed
+// from disk in ~1 KB chunks so peak RAM is constant. The body file already contains the
+// COMPLETE JSON request body (key + station + escaped ADIF); we only add the HTTP
+// request line and headers. https only (Cloudlog/Wavelog API). The file lives wherever
+// Store::fs() points (SD when present, else internal LittleFS) -- so this does NOT add
+// an SD-card requirement; it works on a card-less device exactly like the QSO log does.
+bool Net::httpsPostJsonFile(const String& url, const char* bodyFilePath, String& response,
+                            const char* contentType, size_t maxResp) {
+  lastCode = 0; lastErr = ""; response = "";
+  if (!connected()) { lastErr = "no WiFi"; return false; }
+  TlsBusyGuard _tls;
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
+
+  // Body size from the file (no read into RAM yet) -> Content-Length.
+  size_t bodyLen = 0;
+  {
+    File f = Store::fs().open(bodyFilePath, "r");
+    if (!f) { lastErr = "open body file failed"; return false; }
+    bodyLen = f.size();
+    f.close();
+  }
+  if (bodyLen == 0) { lastErr = "empty body file"; return false; }
+
+  Serial.printf("[net] POST(json-stream) %u-byte body -> %s\n",
+                (unsigned)bodyLen, redactUrl(url).c_str());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+
+  WiFiClientSecure tls;
+  struct StopT { WiFiClientSecure& t; ~StopT() { t.stop(); } } _stop{tls};
+  tls.setInsecure();
+  tls.setTimeout(20000);
+
+  // Refuse a handshake we can't complete; bailing keeps the heap intact for a retry.
+  if (reclaimHeapForTls() < TLS_MIN_BLOCK) {
+    lastCode = HEAP_ABORT_CODE;
+    lastErr = "low memory; try again";
+    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
+    return false;
+  }
+
+  // Parse host/path/port.
+  String hostPart, pathPart; int port = 443;
+  {
+    int s = url.indexOf("://"); int st = (s >= 0) ? s + 3 : 0;
+    int slash = url.indexOf('/', st);
+    String hostPort = (slash >= 0) ? url.substring(st, slash) : url.substring(st);
+    pathPart = (slash >= 0) ? url.substring(slash) : "/";
+    int colon = hostPort.indexOf(':');
+    if (colon >= 0) { hostPart = hostPort.substring(0, colon); port = hostPort.substring(colon + 1).toInt(); }
+    else hostPart = hostPort;
+  }
+
+  uint32_t t0 = millis();
+  if (!tls.connect(hostPart.c_str(), port)) {
+    lastCode = -1; lastErr = "connect failed";
+    char eb[128] = {0}; tls.lastError(eb, sizeof(eb));
+    Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
+                  (unsigned)(millis() - t0), eb[0] ? eb : "(none)");
+    return false;
+  }
+  Serial.printf("[net] POST TLS connected in %ums; streaming request\n", (unsigned)(millis() - t0));
+
+  // Request line + headers. The body streams from the file right after.
+  String reqHead;
+  reqHead.reserve(256);
+  reqHead  = "POST " + pathPart + " HTTP/1.1\r\n";
+  reqHead += "Host: " + hostPart + "\r\n";
+  reqHead += "User-Agent: CardSat-Cardputer/1.0\r\n";
+  reqHead += "Content-Type: " + String(contentType) + "\r\n";
+  reqHead += "Content-Length: " + String(bodyLen) + "\r\n";
+  reqHead += "Connection: close\r\n\r\n";
+
+  // write() helper: treat 0 as "TX window full, retry", not "dead".
+  auto writeAll = [&](const uint8_t* p, size_t n) -> bool {
+    size_t off = 0; uint32_t lastProgress = millis();
+    while (off < n) {
+      if (!tls.connected()) return false;
+      size_t w = tls.write(p + off, n - off);
+      if (w > 0) { off += w; lastProgress = millis(); }
+      else { delay(15); yield(); if (millis() - lastProgress > 30000) return false; }
+    }
+    return true;
+  };
+
+  bool ok = writeAll((const uint8_t*)reqHead.c_str(), reqHead.length());
+  size_t streamed = 0;
+  if (ok) {
+    File f = Store::fs().open(bodyFilePath, "r");
+    if (!f) { lastErr = "reopen body file failed"; return false; }
+    uint8_t chunk[1024];
+    while (streamed < bodyLen) {
+      size_t want = bodyLen - streamed; if (want > sizeof(chunk)) want = sizeof(chunk);
+      size_t got = f.read(chunk, want);
+      if (got == 0) break;
+      if (!writeAll(chunk, got)) { ok = false; break; }
+      streamed += got;
+    }
+    f.close();
+  }
+  tls.flush();
+  Serial.printf("[net] streamed %u/%u body bytes, ok=%d\n",
+                (unsigned)streamed, (unsigned)bodyLen, ok ? 1 : 0);
+  if (!ok || streamed != bodyLen) { lastCode = 0; lastErr = "body stream incomplete"; return false; }
+
+  // Read the response (connection-tolerant: poll available(), ignore transient close).
+  uint32_t rdStart = millis(); int code = 0;
+  while (!tls.available() && millis() - rdStart < 20000) delay(10);
+  String statusLine = tls.available() ? tls.readStringUntil('\n') : String("");
+  Serial.printf("[net] status: %s\n", statusLine.c_str());
+  { int sp = statusLine.indexOf(' ');
+    if (sp >= 0) code = statusLine.substring(sp + 1, sp + 4).toInt(); }
+  if (statusLine.length() == 0) {
+    lastCode = 0; lastErr = "no response from server";
+    Serial.println("[net] POST(json-stream): no response (empty status)");
+    return false;
+  }
+
+  uint32_t hdrStart = millis();
+  while (millis() - hdrStart < 15000) {
+    if (!tls.available()) { if (!tls.connected()) break; delay(5); continue; }
+    String h = tls.readStringUntil('\n');
+    if (h == "\r" || h.length() == 0) break;
+  }
+  response = "";
+  uint32_t bodyStart = millis();
+  while (response.length() < maxResp && millis() - bodyStart < 15000) {
+    while (tls.available() && response.length() < maxResp) response += (char)tls.read();
+    if (!tls.connected() && !tls.available()) break;
+    delay(2);
+  }
+
+  lastCode = code;
+  noteConnResult(code);
+  if (code < 200 || code >= 300) {
+    lastErr = (code > 0) ? ("HTTP " + String(code)) : "no response";
+    Serial.printf("[net] POST(json-stream) failed: code=%d\n", code);
+    return false;
+  }
   return true;
 }

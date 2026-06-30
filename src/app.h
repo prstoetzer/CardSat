@@ -488,6 +488,11 @@ private:
   int        awListKind = 0;
   int        awListScroll = 0;
   int        awListSat = -1;
+  // Which data the shared grid/state/DXCC bitsets currently hold, so list views can
+  // skip a redundant re-stream of the log: -1 = all-sats totals, >=0 = that sat index,
+  // -2 = unknown/none. (Heap note 0.9.41: avoids re-scanning the whole log just to open
+  // a list when the bitsets already hold the right data.)
+  int        awBitsSat = -2;
   time_t     nextAos = 0;              // soonest upcoming favorite AOS (alarm)
   char       nextAosName[26] = {0};
   time_t     alarmAos = 0;             // AOS we're currently counting down to

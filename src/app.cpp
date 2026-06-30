@@ -2056,12 +2056,12 @@ void App::saveCalForSat(uint32_t norad) {
   if (f) {
     while (f.available()) {
       String line = f.readStringUntil('\n');
-      String t = line; t.trim();
-      if (t.length() == 0) continue;
-      if (t[0] == '#' || t[0] == ';') { out += t; out += '\n'; continue; }  // keep comments
+      line.trim();                              // in place (no second String allocation)
+      if (line.length() == 0) continue;
+      if (line[0] == '#' || line[0] == ';') { out += line; out += '\n'; continue; }  // keep comments
       unsigned long nd;
-      if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
-      out += t; out += '\n';
+      if (sscanf(line.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
+      out += line; out += '\n';
     }
     f.close();
   }
@@ -2089,8 +2089,7 @@ void App::loadNoteForSat(uint32_t norad) {
     if (tab <= 0) continue;
     unsigned long nd = strtoul(line.c_str(), nullptr, 10);
     if (nd == norad) {
-      String txt = line.substring(tab + 1);
-      strncpy(satNote, txt.c_str(), NOTE_MAX);
+      strncpy(satNote, line.c_str() + tab + 1, NOTE_MAX);   // text after the tab, no substring alloc
       satNote[NOTE_MAX] = 0;
       break;
     }
@@ -2112,10 +2111,9 @@ void App::saveNoteForSat(uint32_t norad, const char* text) {
     while (f.available()) {
       String line = f.readStringUntil('\n');
       if (line.endsWith("\r")) line.remove(line.length() - 1);
-      String t = line; t.trim();
-      if (t.length() == 0) continue;
+      if (line.length() == 0) continue;
       int tab = line.indexOf('\t');
-      if (tab <= 0) continue;
+      if (tab <= 0) continue;                    // also drops whitespace-only lines (no tab)
       unsigned long nd = strtoul(line.c_str(), nullptr, 10);
       if (nd == norad) continue;                 // drop the old entry for this sat
       if (kept >= NOTE_FILE_MAX - 1) continue;   // count cap (leave room for ours)
@@ -2173,12 +2171,12 @@ void App::saveToneOverride(uint32_t norad, float hz) {
   File f = Store::fs().open(FILE_TONES, "r");
   if (f) {
     while (f.available()) {
-      String line = f.readStringUntil('\n'); String t = line; t.trim();
-      if (t.length() == 0) continue;
-      if (t[0] == '#' || t[0] == ';') { out += t; out += '\n'; continue; }  // keep comments
+      String line = f.readStringUntil('\n'); line.trim();   // in place, no second alloc
+      if (line.length() == 0) continue;
+      if (line[0] == '#' || line[0] == ';') { out += line; out += '\n'; continue; }  // keep comments
       unsigned long nd;
-      if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
-      out += t; out += '\n';
+      if (sscanf(line.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
+      out += line; out += '\n';
     }
     f.close();
   }
@@ -2554,10 +2552,10 @@ bool App::deleteManualTx(uint32_t norad, int manualIdx) {
   String out; int seen = 0; bool removed = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
-    String t = line; t.trim();
-    if (t.length() == 0) continue;
+    line.trim();                                // in place, no second String allocation
+    if (line.length() == 0) continue;
     if (seen == manualIdx) { seen++; removed = true; continue; }  // drop this one
-    seen++; out += t; out += '\n';
+    seen++; out += line; out += '\n';
   }
   f.close();
   if (!removed) return false;
@@ -3015,13 +3013,18 @@ void App::suspendNetServers() {
 // fit the contiguous block that exists with the sprite resident. Retained as call
 // sites / for the loop tick in case a future path needs them.
 void App::freeCanvasForTls() {
-  // intentionally a no-op: keep the sprite allocated (see note above)
+  // Intentionally a no-op: the sprite is kept resident. Freeing it to gain a contiguous
+  // block for the TLS handshake proved unrecoverable -- mbedTLS fragments the freed
+  // region so the 32 KB sprite can't be re-created afterward (screen froze). Instead the
+  // baseline static RAM was trimmed (LOG_VIEW_MAX) so the sprite-resident largest block
+  // clears the handshake's ~32 KB need (as it did before the 0.9.40/0.9.41 features grew
+  // .bss). Retained as a call site in case a future path needs it.
 }
 void App::restoreCanvasAfterTls() {
-  // nothing to restore; the sprite is never freed
+  // No-op: the sprite is never freed (see freeCanvasForTls).
 }
 void App::tickCanvasRestore() {
-  // no-op; retained for the loop call site
+  // No-op: retained for the loop call site (the sprite is never freed).
 }
 
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
@@ -7391,7 +7394,9 @@ void App::doLotwUpload(const String& keyPass) {
     // reply a reboot won't fix.
     if (net.lastCode < 0) {
       lotwRebootPrompt = true;
-      lotwStatus = "Connect failed. Reboot to upload? ENT=yes  `=no";
+      lotwStatus = (net.lastCode == Net::HEAP_ABORT_CODE)
+                 ? "Low memory after fetches. Reboot to upload? ENT=yes  `=no"
+                 : "Connect failed. Reboot to upload? ENT=yes  `=no";
       lotwBusy = false; lastDrawMs = 0; draw(); return;
     }
     lotwStatus = "Upload failed: " + net.lastErr;
@@ -7721,87 +7726,94 @@ void App::doCloudlogUpload() {
   }
   clStatus = "Collecting QSOs..."; draw();
 
-  // Build the ADIF string for up to CAP QSOs. Each record carries STATION_CALLSIGN so
-  // Cloudlog can match it to the chosen station profile (it rejects a mismatch).
-  // Reserve per-record (~256 B each) rather than a flat 8 KB: a smaller, right-sized
-  // allocation keeps the heap free-list cleaner ahead of the TLS handshake.
-  const int CAP = 50;
-  String adif; adif.reserve(CAP * 64 + 256);   // grows if needed; avoids the flat 8 KB block
+  // ONE upload, ONE handshake. The JSON body is written to a temp file on Store::fs()
+  // (SD when present, else internal LittleFS -- so this keeps Cloudlog working without
+  // an SD card) and STREAMED to the server. This replaced an earlier batching attempt:
+  // on this no-PSRAM heap, batching multiplied the TLS handshake count, and each
+  // handshake both gambles on the ~32 KB-contiguous knife-edge AND leaves the heap
+  // fragmented (largest block ~20 KB) so the NEXT batch's handshake fails -- on-device
+  // this gave a reboot-per-batch. Streaming one body keeps it to a single handshake and
+  // a constant ~1 KB of RAM regardless of QSO count. (LoTW streams its .tq8 the same way.)
+  //
+  // Write the body file: {"key":"..","station_profile_id":"..","type":"adif","string":"<escaped ADIF>"}
+  // The ADIF is escaped and streamed straight to the file so the whole body is never in
+  // RAM at once. No CAP -- the log can be any size.
   int n = 0;
-  if (Store::fs().exists(FILE_LOG)) {
-    File f = Store::fs().open(FILE_LOG, "r");
-    if (f) {
-      while (f.available() && n < CAP) {
-        String l = f.readStringUntil('\n'); l.trim();
-        if (!l.length() || l.startsWith("utc,")) continue;
-        PendingQso q;
-        if (!parseQsoCsv(l, q) || !q.call[0]) continue;
-        if (!(clResend || !(q.uploaded & 0x2))) continue;
-        time_t tt = (time_t)q.utc; struct tm* g = gmtime(&tt);
-        char d[9] = "", tm6[7] = "";
-        if (g) { strftime(d, sizeof(d), "%Y%m%d", g); strftime(tm6, sizeof(tm6), "%H%M%S", g); }
-        double dlM = q.dlHz / 1e6, ulM = q.ulHz / 1e6;
-        String rec;
-        adifField(rec, "CALL", q.call);
-        if (q.utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
-        adifField(rec, "MODE", q.mode);
-        char satnm[7]; lotwSatResolve(q.sat, satnm);
-        adifField(rec, "SAT_NAME", satnm);
-        adifField(rec, "PROP_MODE", "SAT");
-        if (ulM > 0) { adifField(rec, "FREQ", String(ulM, 4)); adifField(rec, "BAND", bandFor(ulM)); }
-        if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
-        adifField(rec, "RST_SENT", q.rstS);
-        adifField(rec, "RST_RCVD", q.rstR);
-        adifField(rec, "GRIDSQUARE", q.grid);
-        adifField(rec, "MY_GRIDSQUARE", q.myGrid);
-        adifField(rec, "STATION_CALLSIGN", q.myCall[0] ? q.myCall : cfg.myCall);
-        rec += "<EOR>\n";
-        adif += rec;
-        n++;
-      }
-      f.close();
-    }
-  }
-  if (n == 0) { clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; draw(); return; }
+  {
+    String tmp = FILE_CLOUDLOG_TMP;
+    File out = Store::fs().open(tmp.c_str(), "w");
+    if (!out) { clStatus = "Temp file open failed"; clBusy = false; lastDrawMs = 0; draw(); return; }
 
-  // JSON-encode the request. The ADIF string needs JSON-escaping (it contains '<','>',
-  // and newlines). Build the whole body in ONE pre-sized buffer with the escaping done
-  // inline -- NOT via chained String operators + jsonEscape() temporaries. On the
-  // no-PSRAM heap that concatenation churn fragments the free-list right before the TLS
-  // handshake, which is what makes the connect fail (-1) once the heap has seen prior
-  // activity this session. LoTW's upload already builds its body in a single malloc and
-  // never hit this; matching that approach here removes the difference.
+    // Fixed prefix with the escaped key + station profile id.
+    { String pre; pre.reserve(96);
+      pre += "{\"key\":\"";        jsonEscapeAppend(pre, cfg.clKey);
+      pre += "\",\"station_profile_id\":\""; jsonEscapeAppend(pre, cfg.clStation);
+      pre += "\",\"type\":\"adif\",\"string\":\"";
+      out.print(pre); }
+
+    if (Store::fs().exists(FILE_LOG)) {
+      File f = Store::fs().open(FILE_LOG, "r");
+      if (f) {
+        while (f.available()) {
+          String l = f.readStringUntil('\n'); l.trim();
+          if (!l.length() || l.startsWith("utc,")) continue;
+          PendingQso q;
+          if (!parseQsoCsv(l, q) || !q.call[0]) continue;
+          if (!(clResend || !(q.uploaded & 0x2))) continue;
+          time_t tt = (time_t)q.utc; struct tm* g = gmtime(&tt);
+          char d[9] = "", tm6[7] = "";
+          if (g) { strftime(d, sizeof(d), "%Y%m%d", g); strftime(tm6, sizeof(tm6), "%H%M%S", g); }
+          double dlM = q.dlHz / 1e6, ulM = q.ulHz / 1e6;
+          String rec;   // one record at a time -> small, no whole-body String
+          adifField(rec, "CALL", q.call);
+          if (q.utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
+          adifField(rec, "MODE", q.mode);
+          char satnm[7]; lotwSatResolve(q.sat, satnm);
+          adifField(rec, "SAT_NAME", satnm);
+          adifField(rec, "PROP_MODE", "SAT");
+          if (ulM > 0) { adifField(rec, "FREQ", String(ulM, 4)); adifField(rec, "BAND", bandFor(ulM)); }
+          if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
+          adifField(rec, "RST_SENT", q.rstS);
+          adifField(rec, "RST_RCVD", q.rstR);
+          adifField(rec, "GRIDSQUARE", q.grid);
+          adifField(rec, "MY_GRIDSQUARE", q.myGrid);
+          adifField(rec, "STATION_CALLSIGN", q.myCall[0] ? q.myCall : cfg.myCall);
+          rec += "<EOR>\n";
+          // Stream the escaped record straight into the body file.
+          String esc; esc.reserve(rec.length() + rec.length()/8 + 8);
+          jsonEscapeAppend(esc, rec.c_str());
+          out.print(esc);
+          n++;
+        }
+        f.close();
+      }
+    }
+    out.print("\"}");   // close the JSON string + object
+    out.close();
+  }
+
+  if (n == 0) {
+    Store::fs().remove(FILE_CLOUDLOG_TMP);
+    clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; draw(); return;
+  }
+
   clStatus = "Uploading " + String(n) + " QSO(s)..."; draw();
   String url = String(cfg.clUrl) + "/index.php/api/qso";
-  String body;
-  // prefix + escaped(key) + mid1 + escaped(station) + mid2 + escaped(adif) + suffix
-  body.reserve(adif.length() + adif.length()/8 + 96);   // headroom for escaping + framing
-  body += "{\"key\":\"";
-  jsonEscapeAppend(body, cfg.clKey);
-  body += "\",\"station_profile_id\":\"";
-  jsonEscapeAppend(body, cfg.clStation);
-  body += "\",\"type\":\"adif\",\"string\":\"";
-  jsonEscapeAppend(body, adif.c_str());
-  body += "\"}";
-
   String resp;
-  bool ok = net.httpsPostJson(url, body, resp);   // redactBody=true: key stays out of serial
-  // Log the response (no secrets in it) to aid debugging.
+  bool ok = net.httpsPostJsonFile(url, FILE_CLOUDLOG_TMP, resp);
+  Store::fs().remove(FILE_CLOUDLOG_TMP);   // body file no longer needed either way
   Serial.printf("[cloudlog] response (%u bytes): %s\n",
                 (unsigned)resp.length(), resp.c_str());
 
   if (!ok) {
-    // A negative lastCode is a transport/connect failure (the -1 "connection refused"
-    // that a churned heap can cause), NOT a server rejection -- a reboot to a clean heap
-    // is the reliable cure. Offer it (confirm before rebooting, since a reboot drops a
-    // live pass / CAT link). A positive code (e.g. 401/500) is a real server response a
-    // reboot wouldn't fix, so just report it.
+    // Negative code = transport/connect failure -> reboot-to-clean-heap is the cure.
     if (net.lastCode < 0) {
       clRebootPrompt = true;
-      clStatus = "Connect failed. Reboot to upload? ENT=yes  `=no";
+      clStatus = (net.lastCode == Net::HEAP_ABORT_CODE)
+               ? "Low memory after fetches. Reboot to upload? ENT=yes  `=no"
+               : "Connect failed. Reboot to upload? ENT=yes  `=no";
       clBusy = false; lastDrawMs = 0; draw(); return;
     }
-    // Surface the server's reason if present (e.g. wrong key rights / station id).
     String reason = jsonField(resp, "reason");
     clStatus = reason.length() ? ("Failed: " + reason)
                                : ("Upload failed: " + net.lastErr);
@@ -7824,9 +7836,8 @@ void App::doCloudlogUpload() {
     clStatus = reason.length() ? ("Rejected: " + reason) : "Server rejected upload";
   }
   clBusy = false; lastDrawMs = 0;
-  draw();   // repaint with the final result: SCR_CLOUDLOG is a static screen, so the
-            // loop won't auto-refresh it; without this the screen stays on "Uploading..."
-            // until the next keypress (and the reboot-upload path has no keypress at all).
+  draw();   // repaint with the final result: SCR_CLOUDLOG is static, so the loop won't
+            // auto-refresh it; without this it stays on "Uploading..." until a keypress.
 }
 
 // Reboot-then-upload: the in-session POST can hit a connect wall (-1) once a boot has
@@ -13720,6 +13731,22 @@ static int popcountBits(const uint8_t* bits, int nbytes) {
   return c;
 }
 
+// Encode a 4-char Maidenhead grid (field+square) to its gridBits index, reading
+// straight from a char buffer with NO String allocation. Uppercases the two field
+// letters inline; returns -1 if the first four characters aren't a valid grid.
+// (Heap note 0.9.41: replaces an earlier `String g = q.grid; g.toUpperCase()` that
+// allocated/freed a String per QSO and fragmented the no-PSRAM heap on long logs.)
+static int gridBitIndex(const char* g) {
+  if (!g) return -1;
+  char a = g[0], b = g[1], c = g[2], d = g[3];
+  if (a >= 'a' && a <= 'z') a -= 32;
+  if (b >= 'a' && b <= 'z') b -= 32;
+  if (a < 'A' || a > 'R' || b < 'A' || b > 'R') return -1;
+  if (c < '0' || c > '9' || d < '0' || d > '9') return -1;
+  int fLon = a - 'A', fLat = b - 'A', sLon = c - '0', sLat = d - '0';
+  return ((fLon * 18 + fLat) * 10 + sLon) * 10 + sLat;
+}
+
 // Stream the log once and tally everything for the all-sats view.
 void App::buildAwards() {
   awQsoTotal = 0; awGridN = awStateN = awDxccN = 0; awSatN = 0;
@@ -13764,14 +13791,9 @@ void App::buildAwards() {
     if (q.grid[0]) {
       double glat, glon;
       if (Location::gridToLatLon(q.grid, glat, glon)) {
-        // Grid bit: encode the 4-char field/square into the gridBits index.
-        String g = q.grid; g.trim(); g.toUpperCase();
-        if (g.length() >= 4 && g[0] >= 'A' && g[0] <= 'R' && g[1] >= 'A' && g[1] <= 'R' &&
-            g[2] >= '0' && g[2] <= '9' && g[3] >= '0' && g[3] <= '9') {
-          int fLon = g[0] - 'A', fLat = g[1] - 'A', sLon = g[2] - '0', sLat = g[3] - '0';
-          int gi = ((fLon * 18 + fLat) * 10 + sLon) * 10 + sLat;
-          gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
-        }
+        // Grid bit: encode the 4-char field/square with no String allocation.
+        int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
+        if (gi >= 0) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
         awardStateAt(glon, glat, stateBits);
         awardDxccAt(glon, glat, dxccBits);
       }
@@ -13781,6 +13803,7 @@ void App::buildAwards() {
   awGridN  = popcountBits(gridBits, sizeof(gridBits));
   awStateN = popcountBits(stateBits, sizeof(stateBits));
   awDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
+  awBitsSat = -1;                       // bitsets now hold the all-sats totals
 }
 
 // Recompute the tallies filtered to one distinct satellite (drill-down). Reuses
@@ -13843,6 +13866,7 @@ void App::keyAwards(char c, bool enter, bool back) {
     awSatSel = awSel;
     setStatus("Scanning sat...");  draw();
     awardsForSat(awSatName[awSatSel]);
+    awBitsSat = awSatSel;               // bitsets now hold this sat's data
     status = "";                         // clear the scan banner before showing the sat view
     screen = SCR_AWARDSAT; lastDrawMs = 0; return;
   }
@@ -13891,7 +13915,10 @@ void App::keyAwardSat(char c, bool enter, bool back) {
 // already loaded from the drill-down.
 void App::openAwardList(int kind, int satIdx) {
   awListKind = kind; awListScroll = 0; awListSat = satIdx;
-  if (satIdx < 0) { setStatus("Scanning log..."); draw(); buildAwards(); status = ""; }
+  // Only re-stream the log if the shared bitsets don't already hold the data we need.
+  // Opening an all-sats list right after the Awards screen (or after returning from a
+  // drill-down, which rebuilds the all-sats bitsets) needs no rescan.
+  if (satIdx < 0 && awBitsSat != -1) { setStatus("Scanning log..."); draw(); buildAwards(); status = ""; }
   screen = SCR_AWARDLIST; lastDrawMs = 0;
 }
 
@@ -14003,13 +14030,8 @@ void App::awardsForSat(const char* satName) {
     if (q.grid[0]) {
       double glat, glon;
       if (Location::gridToLatLon(q.grid, glat, glon)) {
-        String g = q.grid; g.trim(); g.toUpperCase();
-        if (g.length() >= 4 && g[0] >= 'A' && g[0] <= 'R' && g[1] >= 'A' && g[1] <= 'R' &&
-            g[2] >= '0' && g[2] <= '9' && g[3] >= '0' && g[3] <= '9') {
-          int fLon = g[0] - 'A', fLat = g[1] - 'A', sLon = g[2] - '0', sLat = g[3] - '0';
-          int gi = ((fLon * 18 + fLat) * 10 + sLon) * 10 + sLat;
-          gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
-        }
+        int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
+        if (gi >= 0) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
         awardStateAt(glon, glat, stateBits);
         awardDxccAt(glon, glat, dxccBits);
       }

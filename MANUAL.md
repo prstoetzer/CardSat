@@ -481,6 +481,12 @@ even though total free heap still looks healthy. The reset restores full speed,
 reconnects WiFi/TLS to free and coalesce those transient allocations, and reports
 the before/after largest contiguous block.
 
+As of 0.9.41 this manual reset is rarely needed: CardSat now does the same
+coalescing **automatically** just before a handshake that would otherwise fail (it
+briefly cycles WiFi to return the fragmented buffers, then proceeds or declines
+gracefully), and the firmware keeps more contiguous heap free in the first place.
+The `H` key remains as a manual override.
+
 ### Logging QSOs (Log)
 
 There are two ways to start an entry:

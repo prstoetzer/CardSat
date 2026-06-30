@@ -38,16 +38,35 @@ struct SatEntry {
   char     name[26];          // AMSAT_NAME
   uint32_t norad = 0;         // NORAD_CAT_ID (identity / display)
   char     intlDes[12] = {0}; // OBJECT_ID, e.g. "1974-089B"
-  double   epochUnix = 0;     // EPOCH as Unix UTC seconds (fractional)
-  double   incl = 0;          // INCLINATION       (deg)
-  double   ecc = 0;           // ECCENTRICITY      (dimensionless)
-  double   raan = 0;          // RA_OF_ASC_NODE    (deg)
-  double   argp = 0;          // ARG_OF_PERICENTER (deg)
-  double   ma = 0;            // MEAN_ANOMALY      (deg)
-  double   meanMotion = 0;    // MEAN_MOTION       (rev/day)
-  double   bstar = 0;         // BSTAR             (1/earth radii)
-  double   ndot = 0;          // MEAN_MOTION_DOT   (rev/day^2, = ndot/2)
-  double   nddot = 0;         // MEAN_MOTION_DDOT  (rev/day^3, = nddot/6)
+  double   epochUnix = 0;     // EPOCH as Unix UTC seconds (fractional) -- MUST stay double
+                              //   (a ~1.7e9 value; float would round it to ~128 s steps)
+  // --- BEGIN 0.9.41 float-elements optimisation (REVERSIBLE) -------------------
+  // These eight mean elements are stored as float instead of double to shrink the
+  // resident SatEntry (~32 bytes/entry, ~4-5 KB across MAX_SATS) and so leave more
+  // contiguous heap for the mbedTLS handshake on this no-PSRAM part. This is SAFE
+  // because the elements are never fed to SGP4 as raw numbers: gpToTle() formats
+  // them into a fixed-width TLE text string (which SGP4 re-parses), and float's ~7
+  // significant digits exceed every field's precision -- 4-decimal angles, 7-digit
+  // eccentricity, ~5-digit bstar/ndot. (meanMotion is deliberately NOT here: its
+  // %11.8f field wants ~10 sig figs, beyond float, so it stays double below.)
+  //
+  // TO REVERT to all-double: change the eight `float` lines below back to `double`.
+  // No other code changes are needed -- every read/write site relies on implicit
+  // float<->double conversion, and the TLE formatting promotes float to double for
+  // %f automatically. (See docs/design/HEAP_FLOAT_ELEMENTS.md.)
+  float    incl = 0;          // INCLINATION       (deg)    [float: 4-dp TLE field]
+  float    ecc = 0;           // ECCENTRICITY      (dimensionless) [float: 7-digit field]
+  float    raan = 0;          // RA_OF_ASC_NODE    (deg)    [float: 4-dp TLE field]
+  float    argp = 0;          // ARG_OF_PERICENTER (deg)    [float: 4-dp TLE field]
+  float    ma = 0;            // MEAN_ANOMALY      (deg)    [float: 4-dp TLE field]
+  // --- END 0.9.41 float-elements optimisation ---------------------------------
+  double   meanMotion = 0;    // MEAN_MOTION       (rev/day) -- MUST stay double
+                              //   (%11.8f needs ~10 sig figs; float resolves only ~7)
+  // --- 0.9.41 float-elements optimisation, continued (REVERSIBLE: -> double) ---
+  float    bstar = 0;         // BSTAR             (1/earth radii) [float: ~5-digit field]
+  float    ndot = 0;          // MEAN_MOTION_DOT   (rev/day^2, = ndot/2)  [float]
+  float    nddot = 0;         // MEAN_MOTION_DDOT  (rev/day^3, = nddot/6) [float]
+  // ----------------------------------------------------------------------------
   uint32_t revAtEpoch = 0;    // REV_AT_EPOCH
   uint16_t elsetNum = 0;      // ELEMENT_SET_NO
   bool     txLoaded = false;  // have we fetched transponders this session?

@@ -238,7 +238,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.40";
+static constexpr const char* FW_VERSION = "0.9.41";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -347,6 +347,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_WEATHER_TMP  "/CardSat/weather.tmp"   // scratch for streamed JSON (low heap)
 #define WX_FORECAST_DAYS  4                          // today + 3 days shown
 #define FILE_LOG     "/CardSat/qso_log.csv"     // QSO log (CSV, notes is last field)
+#define FILE_CLOUDLOG_TMP "/CardSat/cloudlog.tmp" // scratch: JSON upload body, streamed (low heap)
 #define FILE_ADIF    "/CardSat/qso_log.adi"     // ADIF export (generated on demand)
 #define FILE_LOTW    "/CardSat/lotw_sats.csv"   // LoTW SAT_NAME map ("SAT_NAME,AMSAT_NAME")
 
@@ -1334,16 +1335,35 @@ struct SatEntry {
   char     name[26];          // AMSAT_NAME
   uint32_t norad = 0;         // NORAD_CAT_ID (identity / display)
   char     intlDes[12] = {0}; // OBJECT_ID, e.g. "1974-089B"
-  double   epochUnix = 0;     // EPOCH as Unix UTC seconds (fractional)
-  double   incl = 0;          // INCLINATION       (deg)
-  double   ecc = 0;           // ECCENTRICITY      (dimensionless)
-  double   raan = 0;          // RA_OF_ASC_NODE    (deg)
-  double   argp = 0;          // ARG_OF_PERICENTER (deg)
-  double   ma = 0;            // MEAN_ANOMALY      (deg)
-  double   meanMotion = 0;    // MEAN_MOTION       (rev/day)
-  double   bstar = 0;         // BSTAR             (1/earth radii)
-  double   ndot = 0;          // MEAN_MOTION_DOT   (rev/day^2, = ndot/2)
-  double   nddot = 0;         // MEAN_MOTION_DDOT  (rev/day^3, = nddot/6)
+  double   epochUnix = 0;     // EPOCH as Unix UTC seconds (fractional) -- MUST stay double
+                              //   (a ~1.7e9 value; float would round it to ~128 s steps)
+  // --- BEGIN 0.9.41 float-elements optimisation (REVERSIBLE) -------------------
+  // These eight mean elements are stored as float instead of double to shrink the
+  // resident SatEntry (~32 bytes/entry, ~4-5 KB across MAX_SATS) and so leave more
+  // contiguous heap for the mbedTLS handshake on this no-PSRAM part. This is SAFE
+  // because the elements are never fed to SGP4 as raw numbers: gpToTle() formats
+  // them into a fixed-width TLE text string (which SGP4 re-parses), and float's ~7
+  // significant digits exceed every field's precision -- 4-decimal angles, 7-digit
+  // eccentricity, ~5-digit bstar/ndot. (meanMotion is deliberately NOT here: its
+  // %11.8f field wants ~10 sig figs, beyond float, so it stays double below.)
+  //
+  // TO REVERT to all-double: change the eight `float` lines below back to `double`.
+  // No other code changes are needed -- every read/write site relies on implicit
+  // float<->double conversion, and the TLE formatting promotes float to double for
+  // %f automatically. (See docs/design/HEAP_FLOAT_ELEMENTS.md.)
+  float    incl = 0;          // INCLINATION       (deg)    [float: 4-dp TLE field]
+  float    ecc = 0;           // ECCENTRICITY      (dimensionless) [float: 7-digit field]
+  float    raan = 0;          // RA_OF_ASC_NODE    (deg)    [float: 4-dp TLE field]
+  float    argp = 0;          // ARG_OF_PERICENTER (deg)    [float: 4-dp TLE field]
+  float    ma = 0;            // MEAN_ANOMALY      (deg)    [float: 4-dp TLE field]
+  // --- END 0.9.41 float-elements optimisation ---------------------------------
+  double   meanMotion = 0;    // MEAN_MOTION       (rev/day) -- MUST stay double
+                              //   (%11.8f needs ~10 sig figs; float resolves only ~7)
+  // --- 0.9.41 float-elements optimisation, continued (REVERSIBLE: -> double) ---
+  float    bstar = 0;         // BSTAR             (1/earth radii) [float: ~5-digit field]
+  float    ndot = 0;          // MEAN_MOTION_DOT   (rev/day^2, = ndot/2)  [float]
+  float    nddot = 0;         // MEAN_MOTION_DDOT  (rev/day^3, = nddot/6) [float]
+  // ----------------------------------------------------------------------------
   uint32_t revAtEpoch = 0;    // REV_AT_EPOCH
   uint16_t elsetNum = 0;      // ELEMENT_SET_NO
   bool     txLoaded = false;  // have we fetched transponders this session?
@@ -1533,6 +1553,18 @@ public:
                      const char* contentType = "application/json",
                      size_t maxResp = 8192, bool redactBody = true);
 
+  // POST a JSON body that is too large to hold in RAM all at once: the body is read
+  // from a file on Store::fs() (SD or internal LittleFS) and STREAMED to the socket in
+  // small chunks, so only one ~1 KB buffer is live regardless of body size. Crucially
+  // this also keeps the upload to a SINGLE TLS handshake (one body, one connect),
+  // unlike batching, which on this no-PSRAM heap multiplies the handshake count and the
+  // post-TLS fragmentation that degrades each subsequent handshake. The handshake is
+  // performed before the request is streamed. Returns true on a 2xx HTTP status.
+  bool httpsPostJsonFile(const String& url, const char* bodyFilePath, String& response,
+                         const char* contentType = "application/json",
+                         size_t maxResp = 8192);
+
+
   // Best-effort heap defragment before a TLS handshake. A failed prior fetch can leave
   // the heap fragmented so the largest contiguous block falls below what mbedTLS needs
   // (TLS_MIN_BLOCK), which then makes the next connect() fail with -1 -- the cascade the
@@ -1541,10 +1573,16 @@ public:
   // coalesce adjacent free blocks, retrying a few times. Returns the largest free block
   // (bytes) afterwards, so the caller can decline gracefully if it's still too small
   // rather than entering a handshake that fails messily and fragments further.
-  static size_t reclaimHeapForTls();
+  size_t reclaimHeapForTls();   // 0.9.41: now instance (uses the WiFi-cycle guard + hardResetWifi)
 
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
+  // Sentinel for "declined the handshake before connecting because the largest
+  // contiguous heap block was below TLS_MIN_BLOCK". Distinct, well outside the
+  // HTTPClient error range, and NEGATIVE so callers that treat lastCode<0 as a
+  // transport failure (e.g. the Cloudlog reboot-to-clean-heap prompt) trigger on
+  // it -- a fresh boot is exactly the cure when the heap is fragmented this way.
+  static const int HEAP_ABORT_CODE = -100;
   String lastErr  = "";    // short human-readable reason
 
   // --- Socket-failure recovery -------------------------------------------
@@ -1565,6 +1603,24 @@ public:
   static int  REBOOT_AFTER;                     // failed hard resets before prompting reboot
   static uint32_t INTER_FETCH_MS;               // settle delay before each TLS session
   static uint32_t TLS_MIN_BLOCK;                // min contiguous heap for an mbedTLS handshake
+
+  // --- 0.9.41 proactive WiFi-cycle defrag (REVERSIBLE via TLS_WIFI_CYCLE) -------
+  // When the passive coalesce-wait in reclaimHeapForTls() still leaves the largest
+  // free block below TLS_MIN_BLOCK, optionally do ONE WiFi disconnect(true)+reconnect
+  // (via hardResetWifi) to forcibly return LWIP/mbedTLS async buffers to the heap so
+  // adjacent free blocks merge -- the last resort before declining the handshake.
+  // Gated so it only fires when really needed and never twice in quick succession.
+  //
+  // TO DISABLE: set TLS_WIFI_CYCLE = false (reverts to passive-wait-only behaviour).
+  // See docs/design/HEAP_WIFI_CYCLE.md.
+  static bool     TLS_WIFI_CYCLE;               // master enable for the proactive cycle
+  static uint32_t WIFI_CYCLE_MIN_GAP_MS;        // min gap between proactive cycles
+  uint32_t        lastWifiCycleMs = 0;          // millis() of the last proactive cycle (0 = never)
+  bool            wifiCycleIneffective = false; // set once a cycle fails to grow the largest
+                                                // block: the fragmentation is mid-heap persistent
+                                                // allocations (not socket buffers), so further
+                                                // cycles are pure cost -- skip them this session.
+  // ----------------------------------------------------------------------------
 
   // Optional hook invoked around EVERY outbound TLS session: busy(true) just
   // before a connection is opened, busy(false) after it closes. The app uses it
@@ -4812,6 +4868,11 @@ private:
   int        awListKind = 0;
   int        awListScroll = 0;
   int        awListSat = -1;
+  // Which data the shared grid/state/DXCC bitsets currently hold, so list views can
+  // skip a redundant re-stream of the log: -1 = all-sats totals, >=0 = that sat index,
+  // -2 = unknown/none. (Heap note 0.9.41: avoids re-scanning the whole log just to open
+  // a list when the bitsets already hold the right data.)
+  int        awBitsSat = -2;
   time_t     nextAos = 0;              // soonest upcoming favorite AOS (alarm)
   char       nextAosName[26] = {0};
   time_t     alarmAos = 0;             // AOS we're currently counting down to
@@ -9162,13 +9223,20 @@ int      Net::RECOVER_AFTER  = 3;       // consecutive connect failures before r
 int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt reboot
 uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
                                         // just-closed socket leaves the LWIP pool
-uint32_t Net::TLS_MIN_BLOCK  = 28000;   // mbedTLS handshake needs a contiguous block at
-                                        // least this big; below it we defragment first and
-                                        // decline if still short. Set from observation: an
-                                        // upload connected fine at largest-block ~31.7 KB,
-                                        // so the true floor is under that -- 28 KB leaves a
-                                        // margin while still catching real exhaustion (the
-                                        // post-failed-upload fragmentation the user hit).
+// --- TLS_MIN_BLOCK: pre-handshake contiguous-heap gate -----------------------
+// mbedTLS needs ~32 KB contiguous for a handshake (16 KB RX + 16 KB TX). With the
+// drawing sprite resident the largest block is ~33 KB after the 0.9.41 static-RAM
+// trim (LOG_VIEW_MAX 60->48 reclaimed ~1.7 KB, restoring the pre-feature headroom),
+// so POSTs complete without freeing the sprite. This floor only gates the POST paths
+// (GETs don't call reclaim). 28000 sits below the resident block so real attempts
+// proceed, and above a genuinely-exhausted heap so the upload declines + offers a
+// reboot rather than failing mid-handshake with a bare -1.
+uint32_t Net::TLS_MIN_BLOCK  = 28000;   // below the ~33 KB resident block; catches real OOM
+
+// --- 0.9.41 proactive WiFi-cycle defrag (see net.h / docs/design/HEAP_WIFI_CYCLE.md) ---
+// Set TLS_WIFI_CYCLE=false to revert to the passive-wait-only reclaim behaviour.
+bool     Net::TLS_WIFI_CYCLE      = true;   // enable the last-resort WiFi cycle
+uint32_t Net::WIFI_CYCLE_MIN_GAP_MS = 30000; // don't cycle more than once per 30 s
 
 // Flush the LWIP socket pool by tearing the STA association down hard, then
 // reconnect with the credentials WiFi already holds. This is the reliable cure
@@ -9354,8 +9422,9 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   }
   http.end();
 
-  Serial.printf("[net] received %u bytes (declared %d), heap now %u\n",
-                (unsigned)total, len, (unsigned)ESP.getFreeHeap());
+  Serial.printf("[net] received %u bytes (declared %d), heap now %u (largest %u)\n",
+                (unsigned)total, len, (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   if (out.length() == 0) { lastErr = "empty body"; return false; }
   // Declared length but got less -> truncated; report failure so callers/retries
   // don't parse a partial body.
@@ -9465,8 +9534,9 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   http.end();
   if (written) *written = total;
 
-  Serial.printf("[net] streamed %u bytes to %s (declared %d), heap now %u\n",
-                (unsigned)total, path, len, (unsigned)ESP.getFreeHeap());
+  Serial.printf("[net] streamed %u bytes to %s (declared %d), heap now %u (largest %u)\n",
+                (unsigned)total, path, len, (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   if (writeErr)    { lastErr = "fs write failed"; return false; }
   if (total == 0)  { lastErr = "empty body"; return false; }
   // If the server told us how big the body is and we got less, the transfer was
@@ -9503,12 +9573,20 @@ bool Net::fetchGpToFile(const String& url, const char* path) {
   return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
 }
 
+// DEPRECATED -- DO NOT CALL. Reads the entire GP catalog (~400 KB) into a single
+// RAM String, which cannot fit on this no-PSRAM heap and reproduces the upload/download
+// heap-exhaustion failures cured in 0.9.41. Kept only so the symbol resolves; every
+// caller MUST use fetchGpToFile() (streams to flash). See docs/design/STREAMING_TLS.md.
 bool Net::fetchGp(const String& url, String& out) {
   // GP/OMM JSON can be a few hundred KB for the full amateur list; cap higher
   // than the old TLE text. MAX_SATS still bounds what we actually store.
   return httpsGet(url, out, 400000);
 }
 
+// DEPRECATED -- DO NOT CALL. Reads a full transmitter list (up to ~200 KB) into a RAM
+// String; the String reader also silently drops chunks under TLS heap pressure (it
+// advances its byte count even when concat() fails to grow). Every caller MUST use
+// fetchSatnogsTransmittersToFile() (streams to flash). See docs/design/STREAMING_TLS.md.
 bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {
   String url = String(SATNOGS_TX_URL) + String((unsigned long)norad);
   // Busy birds return large transmitter lists (the ISS has ~49); allow ample room
@@ -9540,11 +9618,22 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   TlsBusyGuard _tls;
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
 
-  // Read the file to upload (small; the .tq8 is a few KB).
-  File f = Store::fs().open(filePath, "r");
-  if (!f) { lastErr = "open upload file failed"; return false; }
-  size_t flen = f.size();
-  if (flen == 0 || flen > 256000) { f.close(); lastErr = "upload file size bad"; return false; }
+  // Probe the upload file's size WITHOUT reading it into RAM yet. The ~9 KB body
+  // buffer must NOT exist during the TLS handshake: mbedTLS needs ~32 KB contiguous,
+  // and on this no-PSRAM heap the largest free block sits right at ~31.7 KB. Holding
+  // the body buffer during the handshake was tipping it over into "SSL - Memory
+  // allocation failed" every time (the larger LoTW body is why LoTW failed where the
+  // smaller Cloudlog body squeaked through). So: get the size, compute Content-Length,
+  // do the handshake with maximum free heap, and only AFTER it connects read the file
+  // into the body buffer and send it.
+  size_t flen = 0;
+  {
+    File f = Store::fs().open(filePath, "r");
+    if (!f) { lastErr = "open upload file failed"; return false; }
+    flen = f.size();
+    f.close();
+  }
+  if (flen == 0 || flen > 256000) { lastErr = "upload file size bad"; return false; }
 
   const String boundary = "----CardSatLoTW8b2f4c1d";
   String head;
@@ -9553,15 +9642,7 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
           "\"; filename=\"" + String(fileName) + "\"\r\n";
   head += "Content-Type: " + String(contentType) + "\r\n\r\n";
   const String tail = "\r\n--" + boundary + "--\r\n";
-
-  size_t bodyLen = head.length() + flen + tail.length();
-  uint8_t* body = (uint8_t*)malloc(bodyLen);
-  if (!body) { f.close(); lastErr = "oom building body"; return false; }
-  memcpy(body, head.c_str(), head.length());
-  size_t got = f.read(body + head.length(), flen);
-  f.close();
-  if (got != flen) { free(body); lastErr = "read upload file short"; return false; }
-  memcpy(body + head.length() + flen, tail.c_str(), tail.length());
+  size_t bodyLen = head.length() + flen + tail.length();   // Content-Length, no buffer yet
 
   Serial.printf("[net] POST %s (%u-byte body) -> %s\n",
                 fileName, (unsigned)bodyLen, redactUrl(url).c_str());
@@ -9576,39 +9657,123 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   client.setTimeout(20000);
 
   // Defragment if needed, then bail before a handshake we can't complete (see the note
-  // in httpsPostJson). free() the assembled body first so the abort doesn't leak it.
+  // in httpsPostJson). No body buffer allocated yet, so nothing to free on this abort.
   if (reclaimHeapForTls() < TLS_MIN_BLOCK) {
-    free(body);
+    lastCode = HEAP_ABORT_CODE;        // negative: lets callers offer reboot-to-clean-heap
     lastErr = "low memory; try again";
     Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
     return false;
   }
 
-  HTTPClient http;
-  http.setUserAgent("CardSat-Cardputer/1.0");
-  http.setConnectTimeout(20000);
-  http.setTimeout(20000);
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.useHTTP10(true);
+  // --- Manual request (same approach that fixed the Cloudlog POST) --------------
+  // HTTPClient::POST was failing here exactly as it did on the JSON path (-1 /
+  // connection refused / 408), so send the request by hand over the TLS client we
+  // control. Parse host/path/port from the URL, THEN handshake with max free heap.
+  String hostPart, pathPart; int port = 443;
+  {
+    int s = url.indexOf("://"); int st = (s >= 0) ? s + 3 : 0;
+    int slash = url.indexOf('/', st);
+    String hostPort = (slash >= 0) ? url.substring(st, slash) : url.substring(st);
+    pathPart = (slash >= 0) ? url.substring(slash) : "/";
+    int colon = hostPort.indexOf(':');
+    if (colon >= 0) { hostPart = hostPort.substring(0, colon); port = hostPort.substring(colon + 1).toInt(); }
+    else hostPart = hostPort;
+  }
 
-  if (!http.begin(client, url)) { free(body); lastErr = "begin failed"; return false; }
-  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+  uint32_t t0 = millis();
+  if (!client.connect(hostPart.c_str(), port)) {
+    lastCode = -1; lastErr = "connect failed";
+    char eb[128] = {0}; client.lastError(eb, sizeof(eb));
+    Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
+                  (unsigned)(millis() - t0), eb[0] ? eb : "(none)");
+    return false;
+  }
+  Serial.printf("[net] POST TLS connected in %ums; streaming request\n", (unsigned)(millis() - t0));
 
-  int code = http.POST(body, bodyLen);
-  free(body);
-  lastCode = code;
-  noteConnResult(code);
-  if (code != HTTP_CODE_OK) {
-    lastErr = (code > 0) ? ("HTTP " + String(code))
-                         : HTTPClient::errorToString(code);
-    Serial.printf("[net] POST failed: code=%d (%s)\n", code, lastErr.c_str());
-    http.end();
+  // Handshake done. Stream the request instead of building the whole body in one
+  // contiguous malloc: with the live TLS session already holding its two ~16 KB
+  // buffers, a ~9 KB contiguous malloc fails ("oom building body"). The .tq8 lives on
+  // SD, so we never need it all in RAM at once -- send the HTTP + multipart headers,
+  // then copy the file to the socket in small blocks, then the multipart tail. Peak
+  // RAM is one ~1 KB chunk regardless of how many QSOs the file holds. (This is the
+  // mirror of httpsGetToFile, which streams downloads to disk.)
+  String reqHead;
+  reqHead.reserve(384);
+  reqHead  = "POST " + pathPart + " HTTP/1.1\r\n";
+  reqHead += "Host: " + hostPart + "\r\n";
+  reqHead += "User-Agent: CardSat-Cardputer/1.0\r\n";
+  reqHead += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
+  reqHead += "Content-Length: " + String(bodyLen) + "\r\n";
+  reqHead += "Connection: close\r\n\r\n";
+  reqHead += head;                       // multipart part-header goes out with the request headers
+
+  // write() helper semantics: treat 0 as "TX window full, retry", not "dead".
+  auto writeAll = [&](const uint8_t* p, size_t n) -> bool {
+    size_t off = 0; uint32_t lastProgress = millis();
+    while (off < n) {
+      if (!client.connected()) return false;
+      size_t w = client.write(p + off, n - off);
+      if (w > 0) { off += w; lastProgress = millis(); }
+      else { delay(15); yield(); if (millis() - lastProgress > 30000) return false; }
+    }
+    return true;
+  };
+
+  bool ok = writeAll((const uint8_t*)reqHead.c_str(), reqHead.length());
+  size_t streamed = 0;
+  if (ok) {
+    File f = Store::fs().open(filePath, "r");
+    if (!f) { lastErr = "reopen upload file failed"; return false; }
+    uint8_t chunk[1024];
+    while (streamed < flen) {
+      size_t want = flen - streamed; if (want > sizeof(chunk)) want = sizeof(chunk);
+      size_t got = f.read(chunk, want);
+      if (got == 0) break;                // short read -> stop; length check below fails
+      if (!writeAll(chunk, got)) { ok = false; break; }
+      streamed += got;
+    }
+    f.close();
+  }
+  if (ok) ok = writeAll((const uint8_t*)tail.c_str(), tail.length());
+  client.flush();
+  Serial.printf("[net] streamed %u/%u file bytes (+headers/tail), ok=%d\n",
+                (unsigned)streamed, (unsigned)flen, ok ? 1 : 0);
+  if (!ok || streamed != flen) { lastCode = 0; lastErr = "body stream incomplete"; return false; }
+
+  // Read the response (connection-tolerant: poll available(), ignore transient close).
+  uint32_t rdStart = millis(); int code = 0;
+  while (!client.available() && millis() - rdStart < 20000) delay(10);
+  String statusLine = client.available() ? client.readStringUntil('\n') : String("");
+  Serial.printf("[net] status: %s\n", statusLine.c_str());
+  { int sp = statusLine.indexOf(' ');
+    if (sp >= 0) code = statusLine.substring(sp + 1, sp + 4).toInt(); }
+  if (statusLine.length() == 0) {
+    lastCode = 0; lastErr = "no response from server";
+    Serial.println("[net] POST: no response (empty status)");
     return false;
   }
 
-  response = http.getString();
-  if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
-  http.end();
+  uint32_t hdrStart = millis();
+  while (millis() - hdrStart < 15000) {
+    if (!client.available()) { if (!client.connected()) break; delay(5); continue; }
+    String h = client.readStringUntil('\n');
+    if (h == "\r" || h.length() == 0) break;
+  }
+  response = "";
+  uint32_t bodyStart = millis();
+  while (response.length() < maxResp && millis() - bodyStart < 15000) {
+    while (client.available() && response.length() < maxResp) response += (char)client.read();
+    if (!client.connected() && !client.available()) break;
+    delay(2);
+  }
+
+  lastCode = code;
+  noteConnResult(code);
+  if (code < 200 || code >= 300) {
+    lastErr = (code > 0) ? ("HTTP " + String(code)) : "no response";
+    Serial.printf("[net] POST failed: code=%d\n", code);
+    return false;
+  }
   return true;
 }
 
@@ -9630,6 +9795,43 @@ size_t Net::reclaimHeapForTls() {
     if (now > largest) largest = now;
     if (largest >= TLS_MIN_BLOCK) break;
   }
+  // --- BEGIN 0.9.41 proactive WiFi-cycle defrag (REVERSIBLE) ------------------
+  // Last resort: if the passive wait still left us short, forcibly flush the LWIP
+  // socket pool / mbedTLS async buffers with one disconnect(true)+reconnect so the
+  // freed blocks coalesce. Gated hard: only when still below the floor, only when
+  // we have a connection to recycle, only when we haven't just done this (so it
+  // can't fight the connFails/hardReset recovery or storm reconnects), and only
+  // while the master toggle is on. hardResetWifi() reuses the existing recovery
+  // path (credential reuse, 12 s bounded reconnect, connFails reset on success).
+  // TO DISABLE: set Net::TLS_WIFI_CYCLE = false. (docs/design/HEAP_WIFI_CYCLE.md)
+  if (TLS_WIFI_CYCLE && !wifiCycleIneffective && largest < TLS_MIN_BLOCK &&
+      WiFi.status() == WL_CONNECTED &&
+      (lastWifiCycleMs == 0 || millis() - lastWifiCycleMs > WIFI_CYCLE_MIN_GAP_MS)) {
+    Serial.printf("[net] proactive WiFi-cycle defrag (largest %u < %u)\n",
+                  (unsigned)largest, (unsigned)TLS_MIN_BLOCK);
+    lastWifiCycleMs = millis();
+    size_t before = largest;
+    if (hardResetWifi()) {
+      // Give the freed buffers a moment to return, then re-measure.
+      for (int i = 0; i < 3; ++i) {
+        delay(120); yield();
+        size_t now = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        if (now > largest) largest = now;
+        if (largest >= TLS_MIN_BLOCK) break;
+      }
+      Serial.printf("[net] post-cycle largest block %u\n", (unsigned)largest);
+      // If the cycle didn't grow the largest block at all, the fragmentation is
+      // mid-heap persistent allocations (mbedTLS session state that survives
+      // stop()), not freeable socket-pool buffers -- so cycling is pure cost.
+      // Remember that and don't cycle again this session (a reboot is the cure;
+      // the upload paths offer one on HEAP_ABORT_CODE).
+      if (largest <= before) {
+        wifiCycleIneffective = true;
+        Serial.println("[net] WiFi-cycle had no effect; disabling it for this session");
+      }
+    }
+  }
+  // --- END 0.9.41 proactive WiFi-cycle defrag --------------------------------
   Serial.printf("[net] heap reclaim: largest block now %u (need %u)\n",
                 (unsigned)largest, (unsigned)TLS_MIN_BLOCK);
   return largest;
@@ -9666,41 +9868,269 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
   // after a mistyped URL led to repeated failures). Bailing here with a clear message
   // keeps the heap intact so a retry can succeed. (Plain HTTP needs no big TLS block.)
   if (isHttps && reclaimHeapForTls() < TLS_MIN_BLOCK) {
+    lastCode = HEAP_ABORT_CODE;        // negative: lets callers offer reboot-to-clean-heap
     lastErr = "low memory; try again";
     Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
     return false;
   }
 
-  HTTPClient http;
-  http.setUserAgent("CardSat-Cardputer/1.0");
-  http.setConnectTimeout(20000);
-  http.setTimeout(20000);
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.useHTTP10(true);
-
-  bool began = isHttps ? http.begin(tls, url) : http.begin(plain, url);
-  if (!began) { lastErr = "begin failed"; return false; }
-  http.addHeader("Content-Type", contentType);
+  // --- 0.9.41: MANUAL request instead of HTTPClient::POST -----------------------
+  // HTTPClient::POST() was returning 408 (server got headers but not the body) on a
+  // completed TLS connection with ample heap, independent of HTTP/1.0-vs-1.1. Rather
+  // than keep guessing at HTTPClient's body handling, send the request by hand over the
+  // client we control, logging exactly how many body bytes are written and reading the
+  // status line directly. This removes HTTPClient's send path (the suspect) entirely.
+  // Parse host/path/port from the URL.
+  String hostPart, pathPart; int port = isHttps ? 443 : 80;
+  {
+    int s = url.indexOf("://"); int st = (s >= 0) ? s + 3 : 0;
+    int slash = url.indexOf('/', st);
+    String hostPort = (slash >= 0) ? url.substring(st, slash) : url.substring(st);
+    pathPart = (slash >= 0) ? url.substring(slash) : "/";
+    int colon = hostPort.indexOf(':');
+    if (colon >= 0) { hostPart = hostPort.substring(0, colon); port = hostPort.substring(colon + 1).toInt(); }
+    else hostPart = hostPort;
+  }
 
   logHeapDetail("pre-POST-connect");   // full heap shape right before the handshake
-  int code = http.POST((uint8_t*)body.c_str(), body.length());
-  lastCode = code;
-  noteConnResult(code);
-  // Accept any 2xx (Cloudlog returns 201 Created on success).
-  if (code < 200 || code >= 300) {
-    lastErr = (code > 0) ? ("HTTP " + String(code))
-                         : HTTPClient::errorToString(code);
-    Serial.printf("[net] POST(json) failed: code=%d (%s)\n", code, lastErr.c_str());
-    // Capture the error body too -- callers surface the server's reason string.
-    response = http.getString();
-    if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
-    http.end();
+
+  Client* cli = isHttps ? (Client*)&tls : (Client*)&plain;
+  uint32_t t0 = millis();
+  if (!cli->connect(hostPart.c_str(), port)) {
+    lastCode = -1; lastErr = "connect failed";
+    if (isHttps) { char eb[128] = {0}; tls.lastError(eb, sizeof(eb));
+      Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
+                    (unsigned)(millis() - t0), eb[0] ? eb : "(none)"); }
+    return false;
+  }
+  Serial.printf("[net] POST TLS connected in %ums; sending request\n", (unsigned)(millis() - t0));
+
+  // Build the ENTIRE request -- request line, headers, AND body -- into one buffer and
+  // send it with as few write()s as possible. Root cause of the 408 (proven host-side:
+  // the identical request bytes get an instant 401 from the server via openssl
+  // s_client, so the framing is correct): the request was arriving too SLOWLY. Apache's
+  // mod_reqtimeout returns 408 if the full request doesn't arrive quickly enough, and
+  // splitting headers (print) from body (write) plus per-chunk flushes spread the
+  // request across many small TLS records over a marginal WiFi link -> too slow.
+  // Sending headers+body as one ~3.8 KB blob goes out in a single TLS record, landing
+  // the whole request at once. (3791 bytes < the ~16 KB TLS record limit.)
+  String req;
+  req.reserve(256 + body.length());
+  req  = "POST " + pathPart + " HTTP/1.1\r\n";
+  req += "Host: " + hostPart + "\r\n";
+  req += "User-Agent: CardSat-Cardputer/1.0\r\n";
+  req += "Content-Type: " + String(contentType) + "\r\n";
+  req += "Content-Length: " + String(body.length()) + "\r\n";
+  req += "Connection: close\r\n\r\n";
+  req += body;
+
+  size_t reqLen = req.length();
+  const uint8_t* rp = (const uint8_t*)req.c_str();
+  size_t sent = cli->write(rp, reqLen);     // one shot: one TLS record if it fits
+  if (sent < reqLen) {
+    // Short write (TX window full): finish the remainder, treating write()==0 as
+    // "full, retry" rather than "dead". Keep records as large as possible.
+    uint32_t lastProgress = millis();
+    while (sent < reqLen) {
+      if (!cli->connected()) { Serial.println("[net] connection dropped mid-request"); break; }
+      size_t w = cli->write(rp + sent, reqLen - sent);
+      if (w > 0) { sent += w; lastProgress = millis(); }
+      else { delay(15); yield();
+             if (millis() - lastProgress > 30000) { Serial.println("[net] request write stalled (30s)"); break; } }
+    }
+  }
+  cli->flush();
+  Serial.printf("[net] wrote %u/%u request bytes (header+body)\n", (unsigned)sent, (unsigned)reqLen);
+
+  // Read the response. IMPORTANT: with WiFiClientSecure, connected() can momentarily
+  // report false between TLS records even while the server's reply is still arriving
+  // (the same hazard the GET path documents). So the wait must NOT bail the instant
+  // connected() looks false -- it must keep polling available() until data shows up or
+  // a real timeout elapses. Earlier this gave an empty status line + code=0: the send
+  // completed (3791/3791) but we stopped reading before the reply landed. Host-side the
+  // server answers these exact bytes instantly, so the reply IS coming -- wait for it.
+  uint32_t rdStart = millis(); int code = 0;
+  // Poll purely for decrypted data to become available. Do NOT consult connected():
+  // on WiFiClientSecure it can read false between records and immediately after the
+  // server's close even while the buffered reply is still readable. If the server
+  // closed after replying, available() stays > 0 until we drain it. Wait up to 20s.
+  while (!cli->available() && millis() - rdStart < 20000) delay(10);
+  String statusLine = cli->available() ? cli->readStringUntil('\n') : String("");
+  Serial.printf("[net] status: %s\n", statusLine.c_str());
+  { int sp = statusLine.indexOf(' ');
+    if (sp >= 0) code = statusLine.substring(sp + 1, sp + 4).toInt(); }
+  if (statusLine.length() == 0) {
+    // No response arrived within the window. Report it distinctly rather than burning
+    // the header/body timeouts on a connection that produced nothing.
+    lastCode = 0; lastErr = "no response from server";
+    Serial.println("[net] POST(json): no response (empty status)");
     return false;
   }
 
-  response = http.getString();
-  if (response.length() > (int)maxResp) response = response.substring(0, maxResp);
-  http.end();
+  // Skip the rest of the headers (read until a blank line).
+  uint32_t hdrStart = millis();
+  while (millis() - hdrStart < 15000) {
+    if (!cli->available()) {
+      if (!cli->connected()) break;
+      delay(5); continue;
+    }
+    String h = cli->readStringUntil('\n');
+    if (h == "\r" || h.length() == 0) break;
+  }
+  // Read the body until close or timeout.
+  response = "";
+  uint32_t bodyStart = millis();
+  while (response.length() < maxResp && millis() - bodyStart < 15000) {
+    while (cli->available() && response.length() < maxResp) response += (char)cli->read();
+    if (!cli->connected() && !cli->available()) break;
+    delay(2);
+  }
+
+  lastCode = code;
+  noteConnResult(code);
+  if (code < 200 || code >= 300) {
+    lastErr = (code > 0) ? ("HTTP " + String(code)) : "no response";
+    Serial.printf("[net] POST(json) failed: code=%d\n", code);
+    return false;
+  }
+  return true;
+}
+
+bool Net::httpsPostJsonFile(const String& url, const char* bodyFilePath, String& response,
+                            const char* contentType, size_t maxResp) {
+  lastCode = 0; lastErr = ""; response = "";
+  if (!connected()) { lastErr = "no WiFi"; return false; }
+  TlsBusyGuard _tls;
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
+
+  // Body size from the file (no read into RAM yet) -> Content-Length.
+  size_t bodyLen = 0;
+  {
+    File f = Store::fs().open(bodyFilePath, "r");
+    if (!f) { lastErr = "open body file failed"; return false; }
+    bodyLen = f.size();
+    f.close();
+  }
+  if (bodyLen == 0) { lastErr = "empty body file"; return false; }
+
+  Serial.printf("[net] POST(json-stream) %u-byte body -> %s\n",
+                (unsigned)bodyLen, redactUrl(url).c_str());
+  Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+
+  WiFiClientSecure tls;
+  struct StopT { WiFiClientSecure& t; ~StopT() { t.stop(); } } _stop{tls};
+  tls.setInsecure();
+  tls.setTimeout(20000);
+
+  // Refuse a handshake we can't complete; bailing keeps the heap intact for a retry.
+  if (reclaimHeapForTls() < TLS_MIN_BLOCK) {
+    lastCode = HEAP_ABORT_CODE;
+    lastErr = "low memory; try again";
+    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
+    return false;
+  }
+
+  // Parse host/path/port.
+  String hostPart, pathPart; int port = 443;
+  {
+    int s = url.indexOf("://"); int st = (s >= 0) ? s + 3 : 0;
+    int slash = url.indexOf('/', st);
+    String hostPort = (slash >= 0) ? url.substring(st, slash) : url.substring(st);
+    pathPart = (slash >= 0) ? url.substring(slash) : "/";
+    int colon = hostPort.indexOf(':');
+    if (colon >= 0) { hostPart = hostPort.substring(0, colon); port = hostPort.substring(colon + 1).toInt(); }
+    else hostPart = hostPort;
+  }
+
+  uint32_t t0 = millis();
+  if (!tls.connect(hostPart.c_str(), port)) {
+    lastCode = -1; lastErr = "connect failed";
+    char eb[128] = {0}; tls.lastError(eb, sizeof(eb));
+    Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
+                  (unsigned)(millis() - t0), eb[0] ? eb : "(none)");
+    return false;
+  }
+  Serial.printf("[net] POST TLS connected in %ums; streaming request\n", (unsigned)(millis() - t0));
+
+  // Request line + headers. The body streams from the file right after.
+  String reqHead;
+  reqHead.reserve(256);
+  reqHead  = "POST " + pathPart + " HTTP/1.1\r\n";
+  reqHead += "Host: " + hostPart + "\r\n";
+  reqHead += "User-Agent: CardSat-Cardputer/1.0\r\n";
+  reqHead += "Content-Type: " + String(contentType) + "\r\n";
+  reqHead += "Content-Length: " + String(bodyLen) + "\r\n";
+  reqHead += "Connection: close\r\n\r\n";
+
+  // write() helper: treat 0 as "TX window full, retry", not "dead".
+  auto writeAll = [&](const uint8_t* p, size_t n) -> bool {
+    size_t off = 0; uint32_t lastProgress = millis();
+    while (off < n) {
+      if (!tls.connected()) return false;
+      size_t w = tls.write(p + off, n - off);
+      if (w > 0) { off += w; lastProgress = millis(); }
+      else { delay(15); yield(); if (millis() - lastProgress > 30000) return false; }
+    }
+    return true;
+  };
+
+  bool ok = writeAll((const uint8_t*)reqHead.c_str(), reqHead.length());
+  size_t streamed = 0;
+  if (ok) {
+    File f = Store::fs().open(bodyFilePath, "r");
+    if (!f) { lastErr = "reopen body file failed"; return false; }
+    uint8_t chunk[1024];
+    while (streamed < bodyLen) {
+      size_t want = bodyLen - streamed; if (want > sizeof(chunk)) want = sizeof(chunk);
+      size_t got = f.read(chunk, want);
+      if (got == 0) break;
+      if (!writeAll(chunk, got)) { ok = false; break; }
+      streamed += got;
+    }
+    f.close();
+  }
+  tls.flush();
+  Serial.printf("[net] streamed %u/%u body bytes, ok=%d\n",
+                (unsigned)streamed, (unsigned)bodyLen, ok ? 1 : 0);
+  if (!ok || streamed != bodyLen) { lastCode = 0; lastErr = "body stream incomplete"; return false; }
+
+  // Read the response (connection-tolerant: poll available(), ignore transient close).
+  uint32_t rdStart = millis(); int code = 0;
+  while (!tls.available() && millis() - rdStart < 20000) delay(10);
+  String statusLine = tls.available() ? tls.readStringUntil('\n') : String("");
+  Serial.printf("[net] status: %s\n", statusLine.c_str());
+  { int sp = statusLine.indexOf(' ');
+    if (sp >= 0) code = statusLine.substring(sp + 1, sp + 4).toInt(); }
+  if (statusLine.length() == 0) {
+    lastCode = 0; lastErr = "no response from server";
+    Serial.println("[net] POST(json-stream): no response (empty status)");
+    return false;
+  }
+
+  uint32_t hdrStart = millis();
+  while (millis() - hdrStart < 15000) {
+    if (!tls.available()) { if (!tls.connected()) break; delay(5); continue; }
+    String h = tls.readStringUntil('\n');
+    if (h == "\r" || h.length() == 0) break;
+  }
+  response = "";
+  uint32_t bodyStart = millis();
+  while (response.length() < maxResp && millis() - bodyStart < 15000) {
+    while (tls.available() && response.length() < maxResp) response += (char)tls.read();
+    if (!tls.connected() && !tls.available()) break;
+    delay(2);
+  }
+
+  lastCode = code;
+  noteConnResult(code);
+  if (code < 200 || code >= 300) {
+    lastErr = (code > 0) ? ("HTTP " + String(code)) : "no response";
+    Serial.printf("[net] POST(json-stream) failed: code=%d\n", code);
+    return false;
+  }
   return true;
 }
 
@@ -12546,12 +12976,12 @@ void App::saveCalForSat(uint32_t norad) {
   if (f) {
     while (f.available()) {
       String line = f.readStringUntil('\n');
-      String t = line; t.trim();
-      if (t.length() == 0) continue;
-      if (t[0] == '#' || t[0] == ';') { out += t; out += '\n'; continue; }  // keep comments
+      line.trim();                              // in place (no second String allocation)
+      if (line.length() == 0) continue;
+      if (line[0] == '#' || line[0] == ';') { out += line; out += '\n'; continue; }  // keep comments
       unsigned long nd;
-      if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
-      out += t; out += '\n';
+      if (sscanf(line.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
+      out += line; out += '\n';
     }
     f.close();
   }
@@ -12579,8 +13009,7 @@ void App::loadNoteForSat(uint32_t norad) {
     if (tab <= 0) continue;
     unsigned long nd = strtoul(line.c_str(), nullptr, 10);
     if (nd == norad) {
-      String txt = line.substring(tab + 1);
-      strncpy(satNote, txt.c_str(), NOTE_MAX);
+      strncpy(satNote, line.c_str() + tab + 1, NOTE_MAX);   // text after the tab, no substring alloc
       satNote[NOTE_MAX] = 0;
       break;
     }
@@ -12602,10 +13031,9 @@ void App::saveNoteForSat(uint32_t norad, const char* text) {
     while (f.available()) {
       String line = f.readStringUntil('\n');
       if (line.endsWith("\r")) line.remove(line.length() - 1);
-      String t = line; t.trim();
-      if (t.length() == 0) continue;
+      if (line.length() == 0) continue;
       int tab = line.indexOf('\t');
-      if (tab <= 0) continue;
+      if (tab <= 0) continue;                    // also drops whitespace-only lines (no tab)
       unsigned long nd = strtoul(line.c_str(), nullptr, 10);
       if (nd == norad) continue;                 // drop the old entry for this sat
       if (kept >= NOTE_FILE_MAX - 1) continue;   // count cap (leave room for ours)
@@ -12663,12 +13091,12 @@ void App::saveToneOverride(uint32_t norad, float hz) {
   File f = Store::fs().open(FILE_TONES, "r");
   if (f) {
     while (f.available()) {
-      String line = f.readStringUntil('\n'); String t = line; t.trim();
-      if (t.length() == 0) continue;
-      if (t[0] == '#' || t[0] == ';') { out += t; out += '\n'; continue; }  // keep comments
+      String line = f.readStringUntil('\n'); line.trim();   // in place, no second alloc
+      if (line.length() == 0) continue;
+      if (line[0] == '#' || line[0] == ';') { out += line; out += '\n'; continue; }  // keep comments
       unsigned long nd;
-      if (sscanf(t.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
-      out += t; out += '\n';
+      if (sscanf(line.c_str(), "%lu", &nd) == 1 && nd == norad) continue;
+      out += line; out += '\n';
     }
     f.close();
   }
@@ -13044,10 +13472,10 @@ bool App::deleteManualTx(uint32_t norad, int manualIdx) {
   String out; int seen = 0; bool removed = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
-    String t = line; t.trim();
-    if (t.length() == 0) continue;
+    line.trim();                                // in place, no second String allocation
+    if (line.length() == 0) continue;
     if (seen == manualIdx) { seen++; removed = true; continue; }  // drop this one
-    seen++; out += t; out += '\n';
+    seen++; out += line; out += '\n';
   }
   f.close();
   if (!removed) return false;
@@ -13507,13 +13935,18 @@ void App::suspendNetServers() {
 // fit the contiguous block that exists with the sprite resident. Retained as call
 // sites / for the loop tick in case a future path needs them.
 void App::freeCanvasForTls() {
-  // intentionally a no-op: keep the sprite allocated (see note above)
+  // Intentionally a no-op: the sprite is kept resident. Freeing it to gain a contiguous
+  // block for the TLS handshake proved unrecoverable -- mbedTLS fragments the freed
+  // region so the 32 KB sprite can't be re-created afterward (screen froze). Instead the
+  // baseline static RAM was trimmed (LOG_VIEW_MAX) so the sprite-resident largest block
+  // clears the handshake's ~32 KB need (as it did before the 0.9.40/0.9.41 features grew
+  // .bss). Retained as a call site in case a future path needs it.
 }
 void App::restoreCanvasAfterTls() {
-  // nothing to restore; the sprite is never freed
+  // No-op: the sprite is never freed (see freeCanvasForTls).
 }
 void App::tickCanvasRestore() {
-  // no-op; retained for the loop call site
+  // No-op: retained for the loop call site (the sprite is never freed).
 }
 
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
@@ -18269,7 +18702,9 @@ void App::doLotwUpload(const String& keyPass) {
     // reply a reboot won't fix.
     if (net.lastCode < 0) {
       lotwRebootPrompt = true;
-      lotwStatus = "Connect failed. Reboot to upload? ENT=yes  `=no";
+      lotwStatus = (net.lastCode == Net::HEAP_ABORT_CODE)
+                 ? "Low memory after fetches. Reboot to upload? ENT=yes  `=no"
+                 : "Connect failed. Reboot to upload? ENT=yes  `=no";
       lotwBusy = false; lastDrawMs = 0; draw(); return;
     }
     lotwStatus = "Upload failed: " + net.lastErr;
@@ -18599,87 +19034,94 @@ void App::doCloudlogUpload() {
   }
   clStatus = "Collecting QSOs..."; draw();
 
-  // Build the ADIF string for up to CAP QSOs. Each record carries STATION_CALLSIGN so
-  // Cloudlog can match it to the chosen station profile (it rejects a mismatch).
-  // Reserve per-record (~256 B each) rather than a flat 8 KB: a smaller, right-sized
-  // allocation keeps the heap free-list cleaner ahead of the TLS handshake.
-  const int CAP = 50;
-  String adif; adif.reserve(CAP * 64 + 256);   // grows if needed; avoids the flat 8 KB block
+  // ONE upload, ONE handshake. The JSON body is written to a temp file on Store::fs()
+  // (SD when present, else internal LittleFS -- so this keeps Cloudlog working without
+  // an SD card) and STREAMED to the server. This replaced an earlier batching attempt:
+  // on this no-PSRAM heap, batching multiplied the TLS handshake count, and each
+  // handshake both gambles on the ~32 KB-contiguous knife-edge AND leaves the heap
+  // fragmented (largest block ~20 KB) so the NEXT batch's handshake fails -- on-device
+  // this gave a reboot-per-batch. Streaming one body keeps it to a single handshake and
+  // a constant ~1 KB of RAM regardless of QSO count. (LoTW streams its .tq8 the same way.)
+  //
+  // Write the body file: {"key":"..","station_profile_id":"..","type":"adif","string":"<escaped ADIF>"}
+  // The ADIF is escaped and streamed straight to the file so the whole body is never in
+  // RAM at once. No CAP -- the log can be any size.
   int n = 0;
-  if (Store::fs().exists(FILE_LOG)) {
-    File f = Store::fs().open(FILE_LOG, "r");
-    if (f) {
-      while (f.available() && n < CAP) {
-        String l = f.readStringUntil('\n'); l.trim();
-        if (!l.length() || l.startsWith("utc,")) continue;
-        PendingQso q;
-        if (!parseQsoCsv(l, q) || !q.call[0]) continue;
-        if (!(clResend || !(q.uploaded & 0x2))) continue;
-        time_t tt = (time_t)q.utc; struct tm* g = gmtime(&tt);
-        char d[9] = "", tm6[7] = "";
-        if (g) { strftime(d, sizeof(d), "%Y%m%d", g); strftime(tm6, sizeof(tm6), "%H%M%S", g); }
-        double dlM = q.dlHz / 1e6, ulM = q.ulHz / 1e6;
-        String rec;
-        adifField(rec, "CALL", q.call);
-        if (q.utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
-        adifField(rec, "MODE", q.mode);
-        char satnm[7]; lotwSatResolve(q.sat, satnm);
-        adifField(rec, "SAT_NAME", satnm);
-        adifField(rec, "PROP_MODE", "SAT");
-        if (ulM > 0) { adifField(rec, "FREQ", String(ulM, 4)); adifField(rec, "BAND", bandFor(ulM)); }
-        if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
-        adifField(rec, "RST_SENT", q.rstS);
-        adifField(rec, "RST_RCVD", q.rstR);
-        adifField(rec, "GRIDSQUARE", q.grid);
-        adifField(rec, "MY_GRIDSQUARE", q.myGrid);
-        adifField(rec, "STATION_CALLSIGN", q.myCall[0] ? q.myCall : cfg.myCall);
-        rec += "<EOR>\n";
-        adif += rec;
-        n++;
-      }
-      f.close();
-    }
-  }
-  if (n == 0) { clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; draw(); return; }
+  {
+    String tmp = FILE_CLOUDLOG_TMP;
+    File out = Store::fs().open(tmp.c_str(), "w");
+    if (!out) { clStatus = "Temp file open failed"; clBusy = false; lastDrawMs = 0; draw(); return; }
 
-  // JSON-encode the request. The ADIF string needs JSON-escaping (it contains '<','>',
-  // and newlines). Build the whole body in ONE pre-sized buffer with the escaping done
-  // inline -- NOT via chained String operators + jsonEscape() temporaries. On the
-  // no-PSRAM heap that concatenation churn fragments the free-list right before the TLS
-  // handshake, which is what makes the connect fail (-1) once the heap has seen prior
-  // activity this session. LoTW's upload already builds its body in a single malloc and
-  // never hit this; matching that approach here removes the difference.
+    // Fixed prefix with the escaped key + station profile id.
+    { String pre; pre.reserve(96);
+      pre += "{\"key\":\"";        jsonEscapeAppend(pre, cfg.clKey);
+      pre += "\",\"station_profile_id\":\""; jsonEscapeAppend(pre, cfg.clStation);
+      pre += "\",\"type\":\"adif\",\"string\":\"";
+      out.print(pre); }
+
+    if (Store::fs().exists(FILE_LOG)) {
+      File f = Store::fs().open(FILE_LOG, "r");
+      if (f) {
+        while (f.available()) {
+          String l = f.readStringUntil('\n'); l.trim();
+          if (!l.length() || l.startsWith("utc,")) continue;
+          PendingQso q;
+          if (!parseQsoCsv(l, q) || !q.call[0]) continue;
+          if (!(clResend || !(q.uploaded & 0x2))) continue;
+          time_t tt = (time_t)q.utc; struct tm* g = gmtime(&tt);
+          char d[9] = "", tm6[7] = "";
+          if (g) { strftime(d, sizeof(d), "%Y%m%d", g); strftime(tm6, sizeof(tm6), "%H%M%S", g); }
+          double dlM = q.dlHz / 1e6, ulM = q.ulHz / 1e6;
+          String rec;   // one record at a time -> small, no whole-body String
+          adifField(rec, "CALL", q.call);
+          if (q.utc) { adifField(rec, "QSO_DATE", String(d)); adifField(rec, "TIME_ON", String(tm6)); }
+          adifField(rec, "MODE", q.mode);
+          char satnm[7]; lotwSatResolve(q.sat, satnm);
+          adifField(rec, "SAT_NAME", satnm);
+          adifField(rec, "PROP_MODE", "SAT");
+          if (ulM > 0) { adifField(rec, "FREQ", String(ulM, 4)); adifField(rec, "BAND", bandFor(ulM)); }
+          if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
+          adifField(rec, "RST_SENT", q.rstS);
+          adifField(rec, "RST_RCVD", q.rstR);
+          adifField(rec, "GRIDSQUARE", q.grid);
+          adifField(rec, "MY_GRIDSQUARE", q.myGrid);
+          adifField(rec, "STATION_CALLSIGN", q.myCall[0] ? q.myCall : cfg.myCall);
+          rec += "<EOR>\n";
+          // Stream the escaped record straight into the body file.
+          String esc; esc.reserve(rec.length() + rec.length()/8 + 8);
+          jsonEscapeAppend(esc, rec.c_str());
+          out.print(esc);
+          n++;
+        }
+        f.close();
+      }
+    }
+    out.print("\"}");   // close the JSON string + object
+    out.close();
+  }
+
+  if (n == 0) {
+    Store::fs().remove(FILE_CLOUDLOG_TMP);
+    clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; draw(); return;
+  }
+
   clStatus = "Uploading " + String(n) + " QSO(s)..."; draw();
   String url = String(cfg.clUrl) + "/index.php/api/qso";
-  String body;
-  // prefix + escaped(key) + mid1 + escaped(station) + mid2 + escaped(adif) + suffix
-  body.reserve(adif.length() + adif.length()/8 + 96);   // headroom for escaping + framing
-  body += "{\"key\":\"";
-  jsonEscapeAppend(body, cfg.clKey);
-  body += "\",\"station_profile_id\":\"";
-  jsonEscapeAppend(body, cfg.clStation);
-  body += "\",\"type\":\"adif\",\"string\":\"";
-  jsonEscapeAppend(body, adif.c_str());
-  body += "\"}";
-
   String resp;
-  bool ok = net.httpsPostJson(url, body, resp);   // redactBody=true: key stays out of serial
-  // Log the response (no secrets in it) to aid debugging.
+  bool ok = net.httpsPostJsonFile(url, FILE_CLOUDLOG_TMP, resp);
+  Store::fs().remove(FILE_CLOUDLOG_TMP);   // body file no longer needed either way
   Serial.printf("[cloudlog] response (%u bytes): %s\n",
                 (unsigned)resp.length(), resp.c_str());
 
   if (!ok) {
-    // A negative lastCode is a transport/connect failure (the -1 "connection refused"
-    // that a churned heap can cause), NOT a server rejection -- a reboot to a clean heap
-    // is the reliable cure. Offer it (confirm before rebooting, since a reboot drops a
-    // live pass / CAT link). A positive code (e.g. 401/500) is a real server response a
-    // reboot wouldn't fix, so just report it.
+    // Negative code = transport/connect failure -> reboot-to-clean-heap is the cure.
     if (net.lastCode < 0) {
       clRebootPrompt = true;
-      clStatus = "Connect failed. Reboot to upload? ENT=yes  `=no";
+      clStatus = (net.lastCode == Net::HEAP_ABORT_CODE)
+               ? "Low memory after fetches. Reboot to upload? ENT=yes  `=no"
+               : "Connect failed. Reboot to upload? ENT=yes  `=no";
       clBusy = false; lastDrawMs = 0; draw(); return;
     }
-    // Surface the server's reason if present (e.g. wrong key rights / station id).
     String reason = jsonField(resp, "reason");
     clStatus = reason.length() ? ("Failed: " + reason)
                                : ("Upload failed: " + net.lastErr);
@@ -18702,9 +19144,8 @@ void App::doCloudlogUpload() {
     clStatus = reason.length() ? ("Rejected: " + reason) : "Server rejected upload";
   }
   clBusy = false; lastDrawMs = 0;
-  draw();   // repaint with the final result: SCR_CLOUDLOG is a static screen, so the
-            // loop won't auto-refresh it; without this the screen stays on "Uploading..."
-            // until the next keypress (and the reboot-upload path has no keypress at all).
+  draw();   // repaint with the final result: SCR_CLOUDLOG is static, so the loop won't
+            // auto-refresh it; without this it stays on "Uploading..." until a keypress.
 }
 
 // Reboot-then-upload: the in-session POST can hit a connect wall (-1) once a boot has
@@ -24599,6 +25040,22 @@ static int popcountBits(const uint8_t* bits, int nbytes) {
   return c;
 }
 
+// Encode a 4-char Maidenhead grid (field+square) to its gridBits index, reading
+// straight from a char buffer with NO String allocation. Uppercases the two field
+// letters inline; returns -1 if the first four characters aren't a valid grid.
+// (Heap note 0.9.41: replaces an earlier `String g = q.grid; g.toUpperCase()` that
+// allocated/freed a String per QSO and fragmented the no-PSRAM heap on long logs.)
+static int gridBitIndex(const char* g) {
+  if (!g) return -1;
+  char a = g[0], b = g[1], c = g[2], d = g[3];
+  if (a >= 'a' && a <= 'z') a -= 32;
+  if (b >= 'a' && b <= 'z') b -= 32;
+  if (a < 'A' || a > 'R' || b < 'A' || b > 'R') return -1;
+  if (c < '0' || c > '9' || d < '0' || d > '9') return -1;
+  int fLon = a - 'A', fLat = b - 'A', sLon = c - '0', sLat = d - '0';
+  return ((fLon * 18 + fLat) * 10 + sLon) * 10 + sLat;
+}
+
 // Stream the log once and tally everything for the all-sats view.
 void App::buildAwards() {
   awQsoTotal = 0; awGridN = awStateN = awDxccN = 0; awSatN = 0;
@@ -24643,14 +25100,9 @@ void App::buildAwards() {
     if (q.grid[0]) {
       double glat, glon;
       if (Location::gridToLatLon(q.grid, glat, glon)) {
-        // Grid bit: encode the 4-char field/square into the gridBits index.
-        String g = q.grid; g.trim(); g.toUpperCase();
-        if (g.length() >= 4 && g[0] >= 'A' && g[0] <= 'R' && g[1] >= 'A' && g[1] <= 'R' &&
-            g[2] >= '0' && g[2] <= '9' && g[3] >= '0' && g[3] <= '9') {
-          int fLon = g[0] - 'A', fLat = g[1] - 'A', sLon = g[2] - '0', sLat = g[3] - '0';
-          int gi = ((fLon * 18 + fLat) * 10 + sLon) * 10 + sLat;
-          gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
-        }
+        // Grid bit: encode the 4-char field/square with no String allocation.
+        int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
+        if (gi >= 0) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
         awardStateAt(glon, glat, stateBits);
         awardDxccAt(glon, glat, dxccBits);
       }
@@ -24660,6 +25112,7 @@ void App::buildAwards() {
   awGridN  = popcountBits(gridBits, sizeof(gridBits));
   awStateN = popcountBits(stateBits, sizeof(stateBits));
   awDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
+  awBitsSat = -1;                       // bitsets now hold the all-sats totals
 }
 
 // Recompute the tallies filtered to one distinct satellite (drill-down). Reuses
@@ -24722,6 +25175,7 @@ void App::keyAwards(char c, bool enter, bool back) {
     awSatSel = awSel;
     setStatus("Scanning sat...");  draw();
     awardsForSat(awSatName[awSatSel]);
+    awBitsSat = awSatSel;               // bitsets now hold this sat's data
     status = "";                         // clear the scan banner before showing the sat view
     screen = SCR_AWARDSAT; lastDrawMs = 0; return;
   }
@@ -24770,7 +25224,10 @@ void App::keyAwardSat(char c, bool enter, bool back) {
 // already loaded from the drill-down.
 void App::openAwardList(int kind, int satIdx) {
   awListKind = kind; awListScroll = 0; awListSat = satIdx;
-  if (satIdx < 0) { setStatus("Scanning log..."); draw(); buildAwards(); status = ""; }
+  // Only re-stream the log if the shared bitsets don't already hold the data we need.
+  // Opening an all-sats list right after the Awards screen (or after returning from a
+  // drill-down, which rebuilds the all-sats bitsets) needs no rescan.
+  if (satIdx < 0 && awBitsSat != -1) { setStatus("Scanning log..."); draw(); buildAwards(); status = ""; }
   screen = SCR_AWARDLIST; lastDrawMs = 0;
 }
 
@@ -24882,13 +25339,8 @@ void App::awardsForSat(const char* satName) {
     if (q.grid[0]) {
       double glat, glon;
       if (Location::gridToLatLon(q.grid, glat, glon)) {
-        String g = q.grid; g.trim(); g.toUpperCase();
-        if (g.length() >= 4 && g[0] >= 'A' && g[0] <= 'R' && g[1] >= 'A' && g[1] <= 'R' &&
-            g[2] >= '0' && g[2] <= '9' && g[3] >= '0' && g[3] <= '9') {
-          int fLon = g[0] - 'A', fLat = g[1] - 'A', sLon = g[2] - '0', sLat = g[3] - '0';
-          int gi = ((fLon * 18 + fLat) * 10 + sLon) * 10 + sLat;
-          gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
-        }
+        int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
+        if (gi >= 0) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
         awardStateAt(glon, glat, stateBits);
         awardDxccAt(glon, glat, dxccBits);
       }

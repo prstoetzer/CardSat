@@ -60,6 +60,17 @@ public:
                      const char* contentType = "application/json",
                      size_t maxResp = 8192, bool redactBody = true);
 
+  // POST a JSON body that is too large to hold in RAM all at once: the body is read
+  // from a file on Store::fs() (SD or internal LittleFS) and STREAMED to the socket in
+  // small chunks, so only one ~1 KB buffer is live regardless of body size. Crucially
+  // this also keeps the upload to a SINGLE TLS handshake (one body, one connect),
+  // unlike batching, which on this no-PSRAM heap multiplies the handshake count and the
+  // post-TLS fragmentation that degrades each subsequent handshake. The handshake is
+  // performed before the request is streamed. Returns true on a 2xx HTTP status.
+  bool httpsPostJsonFile(const String& url, const char* bodyFilePath, String& response,
+                         const char* contentType = "application/json",
+                         size_t maxResp = 8192);
+
   // Best-effort heap defragment before a TLS handshake. A failed prior fetch can leave
   // the heap fragmented so the largest contiguous block falls below what mbedTLS needs
   // (TLS_MIN_BLOCK), which then makes the next connect() fail with -1 -- the cascade the
@@ -68,10 +79,16 @@ public:
   // coalesce adjacent free blocks, retrying a few times. Returns the largest free block
   // (bytes) afterwards, so the caller can decline gracefully if it's still too small
   // rather than entering a handshake that fails messily and fragments further.
-  static size_t reclaimHeapForTls();
+  size_t reclaimHeapForTls();   // 0.9.41: now instance (uses the WiFi-cycle guard + hardResetWifi)
 
   // Diagnostics from the most recent httpsGet (for on-screen / serial errors).
   int    lastCode = 0;     // HTTP status (>0) or HTTPClient error (<0)
+  // Sentinel for "declined the handshake before connecting because the largest
+  // contiguous heap block was below TLS_MIN_BLOCK". Distinct, well outside the
+  // HTTPClient error range, and NEGATIVE so callers that treat lastCode<0 as a
+  // transport failure (e.g. the Cloudlog reboot-to-clean-heap prompt) trigger on
+  // it -- a fresh boot is exactly the cure when the heap is fragmented this way.
+  static const int HEAP_ABORT_CODE = -100;
   String lastErr  = "";    // short human-readable reason
 
   // --- Socket-failure recovery -------------------------------------------
@@ -92,6 +109,24 @@ public:
   static int  REBOOT_AFTER;                     // failed hard resets before prompting reboot
   static uint32_t INTER_FETCH_MS;               // settle delay before each TLS session
   static uint32_t TLS_MIN_BLOCK;                // min contiguous heap for an mbedTLS handshake
+
+  // --- 0.9.41 proactive WiFi-cycle defrag (REVERSIBLE via TLS_WIFI_CYCLE) -------
+  // When the passive coalesce-wait in reclaimHeapForTls() still leaves the largest
+  // free block below TLS_MIN_BLOCK, optionally do ONE WiFi disconnect(true)+reconnect
+  // (via hardResetWifi) to forcibly return LWIP/mbedTLS async buffers to the heap so
+  // adjacent free blocks merge -- the last resort before declining the handshake.
+  // Gated so it only fires when really needed and never twice in quick succession.
+  //
+  // TO DISABLE: set TLS_WIFI_CYCLE = false (reverts to passive-wait-only behaviour).
+  // See docs/design/HEAP_WIFI_CYCLE.md.
+  static bool     TLS_WIFI_CYCLE;               // master enable for the proactive cycle
+  static uint32_t WIFI_CYCLE_MIN_GAP_MS;        // min gap between proactive cycles
+  uint32_t        lastWifiCycleMs = 0;          // millis() of the last proactive cycle (0 = never)
+  bool            wifiCycleIneffective = false; // set once a cycle fails to grow the largest
+                                                // block: the fragmentation is mid-heap persistent
+                                                // allocations (not socket buffers), so further
+                                                // cycles are pure cost -- skip them this session.
+  // ----------------------------------------------------------------------------
 
   // Optional hook invoked around EVERY outbound TLS session: busy(true) just
   // before a connection is opened, busy(false) after it closes. The app uses it

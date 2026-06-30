@@ -441,7 +441,7 @@ still be transmitting. Stop with `r` (radio) or `o` (rotator) — see
 ### Home
 
 A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
-World Map · Sun / Moon · Space Wx · Weather · Activations · QRZ Lookup · Location ·
+World Map · Sun / Moon · Space Wx · Weather · Activations · Overhead now · QRZ Lookup · Location ·
 Update · Settings · Log · Messages · About / diagnostics · Charge / Sleep.** The
 currently selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 
@@ -449,7 +449,10 @@ currently selected satellite is shown at the bottom right. `;`/`.` move, ENTER s
 
 Author credit (**Paul Stoetzer, N8HM**), firmware version and build date, storage
 backend (microSD or internal flash), GP catalog size and freshest element age,
-WiFi/IP, battery level, free heap, and uptime. `` ` `` or ENTER returns home.
+WiFi/IP, battery level, free heap, and uptime. Press **`l`** for a **License &
+credits** screen — license pointer, no-warranty and hardware disclaimers, credit
+for the outside data sources, and a recommendation to support AMSAT. `` ` `` or
+ENTER returns home.
 
 ### Charge / Sleep
 
@@ -502,6 +505,17 @@ selected field:
 - **Grid** — the other station's grid, **uppercase** by default (optional, but
   grids are the point of sat ops).
 - **Notes** — free text.
+
+When you are **editing an existing logged QSO** (via **View / edit log**), two more rows
+appear at the bottom:
+
+- **LoTW / Cloudlog** — whether this QSO is marked as already uploaded to each service.
+  ENTER toggles the flag. Editing any of the fields above **automatically clears both
+  flags** so the corrected QSO is re-sent on your next upload; these rows let you override
+  that — for example, after fixing a typo in **Notes** you can mark the QSO back as already
+  uploaded so it isn't sent again — or simply flip a flag on its own. The rows always show
+  the state that will be saved. (They don't appear when logging a brand-new QSO, which
+  starts as not-yet-uploaded.)
 
 `s` saves, `` ` `` cancels. QSOs are appended to **`/CardSat/qso_log.csv`** (one row
 each; `notes` is the last column, so commas there are fine).
@@ -940,12 +954,13 @@ elevation gate (see Settings → Visible passes).
 A scrollable list of every **optically-visible** pass for the selected satellite
 over the next 10 days — filtered to passes where the satellite is **sunlit**, your
 **sky is dark** (Sun below the configured gate), and the **peak elevation** clears
-the visibility minimum. Each row shows AOS time, duration, peak elevation, and LOS,
-the same columns as the Passes screen. `;`/`.` scroll; **ENTER** opens the
-**pass-detail plot** for the highlighted pass (and returns here when you back out);
-`r` recomputes; `` ` `` returns to Passes. This complements the **10-day chart**
-(`v`), which shows *all* passes graphically — the `V` list is just the ones you
-could actually see. Requires the **UTC clock** and your **location** to be set.
+the visibility minimum. Each row shows AOS time, duration, peak elevation, and the
+**rise compass direction** (where on the horizon to look as it comes up). `;`/`.`
+scroll; **ENTER** opens the **pass-detail plot** for the highlighted pass (and
+returns here when you back out); `r` recomputes; `` ` `` returns to Passes. This
+complements the **10-day chart** (`v`), which shows *all* passes graphically — the
+`V` list is just the ones you could actually see. Requires the **UTC clock** and
+your **location** to be set.
 
 ### Pass detail
 
@@ -1389,6 +1404,14 @@ number of grids — it works for any amateur satellite, including high orbits (a
 ~2500 km bird floods roughly 4500 grids). `` ` `` returns to whichever screen
 opened it.
 
+Press **`f`** to set a **prefix filter** that narrows the list to grids beginning
+with what you type: `EM` shows every workable EM grid, `EM2` narrows to EM2x, and
+`EM21` shows just EM21 if it's workable. The filter is entered in upper case (the
+same capitalization rule as all grid entry — lower case is accepted and converted),
+and only well-formed Maidenhead characters are kept (two field letters A–R, then two
+digits 0–9). With a filter active the count line shows it, e.g. `EM2: 9 of 1370`, and
+**`c`** clears it. The filter persists as you move between passes until you clear it.
+
 ### Workable US states (`w`)
 
 The US states (and DC) currently inside the satellite's footprint — the state
@@ -1483,8 +1506,9 @@ outing, a club net, or a SOTA/portable activation.
 the frequency/SF/bandwidth to match the other stations. Open **Messages** from the
 Home menu. Press `n` to write a message on the full keyboard and **ENTER** to send;
 `;`/`.` scroll back through history. Your own messages show in cyan as `>me`;
-received messages show in green by the sender's callsign. The top line shows the
-current frequency, SF, bandwidth and your callsign. History holds the most recent
+received messages show in green by the sender's callsign. A message too long to fit on
+one line wraps onto a second, indented line so nothing is cut off. The top line shows
+the current frequency, SF, bandwidth and your callsign. History holds the most recent
 24 messages (a fixed ring — no SD card needed, lost on reboot).
 
 **Settings.** In Settings → Network/data: **LoRa msg** on/off (turning it on
@@ -1721,6 +1745,13 @@ you let go. The uplink isn't connected to your knob, so it **keeps following** y
 passband point immediately and tracks the move without lag. If tracking ever feels
 slightly sticky or slightly loose for your operating style, the `KNOB_MOVE_SSB_HZ`,
 `KNOB_MOVE_FM_HZ`, and `TUNE_GRACE_MS` constants in the firmware are what to adjust.
+
+If you turn the knob **past either edge of the passband**, CardSat holds you at the
+edge (it can't operate you outside the transponder) and a flashing red **"OUT OF
+PASSBAND"** banner appears at the bottom of the screen, naming the edge you ran into
+(low or high), while it pulls the downlink back to that edge. Tune back inside and the
+banner clears. It's a transient nudge, not a persistent alarm — just enough to tell you
+why the dial stopped moving you through the band.
 
 ### Sidebands
 
@@ -2215,6 +2246,33 @@ CardSat is designed to operate with no network in the field:
    or manual `c` entry to set it where there's no NTP.
 
 Cached data persists across power cycles until you refresh it or perform a reset.
+
+### Hand-curating your own GP data (SD card, no online update)
+
+You don't have to use the online update at all. CardSat reads its orbital elements
+from a plain JSON file on the storage card — **`/CardSat/gp.json`** — and you can
+write that file yourself: hand-pick exactly the satellites you want, drop the file on
+the microSD card, and run CardSat with no network. This is handy for field use with
+no WiFi, for a small fixed set of birds, or for pinning known-good elements so an
+automatic refresh can't replace them mid-operation.
+
+The file is a **JSON array of OMM objects** — the same JSON format CelesTrak and
+Space-Track export when you request "JSON", so the easiest path is to download real
+OMM JSON for the satellites you want, delete the objects you don't, save it as
+`gp.json`, and copy it to `/CardSat/gp.json` on the card. Each object needs at minimum
+`NORAD_CAT_ID`, `EPOCH` (ISO 8601 **with the time of day** included), and
+`MEAN_MOTION`, plus the full Keplerian set (eccentricity, inclination, RAAN, argument
+of perigee, mean anomaly) and `BSTAR` for correct predictions. If you only have a
+classic TLE, the bundled **`tools/tle2gp.py`** helper converts it to the JSON object
+CardSat expects.
+
+Two things to remember: the clock must be set (GPS or manual entry) since you're
+offline, and **running the online Update (`k`) with WiFi overwrites `/CardSat/gp.json`**
+— so to stay fully offline, just don't run it, or keep a backup of your curated file.
+
+> See **[docs/guides/OFFLINE_GP_DATA.md](docs/guides/OFFLINE_GP_DATA.md)** for the
+> complete field reference, a full worked example, and a step-by-step curation
+> checklist.
 
 ---
 
@@ -2746,6 +2804,12 @@ The page is **responsive** — a single column on a phone, and a two-column layo
 a tablet or computer. It coexists with the rigctld/rotctld servers and the normal
 on-device UI; the device keeps tracking and you can use its keypad at the same time.
 
+> **Developers:** the page is backed by a small **HTTP + JSON API** (`/api/status`,
+> `/api/sats`, `/api/passes`, `/api/orbit`, `/api/tx`, and a few `POST` controls) that
+> a third-party client can call directly. It's fully documented — every endpoint,
+> parameter, and response field, plus the access model — in
+> `docs/interfaces/WEB_API.md`.
+
 > **Security.** This is plain **HTTP on the local network with no password** —
 > anyone who can reach your WiFi can open the page and operate the radio and
 > rotator. Use it only on networks you trust, and don't forward the port to the
@@ -3152,15 +3216,26 @@ listed below.
 - **Keys** — `m` switch TUNE/CAL; `d` cycle Doppler tune mode (linear birds);
   `t` next transponder; `c` set CTCSS/PL tone; `r` radio output on/off; `o`
   rotator on/off; `p` **Polar**; `z` large-font readout; `f` **Manual mode**;
-  `l` **Log QSO**; `v` voice memo (SD card); `y` tilt tuning on/off (ADV, if IMU);
-  `g`/`w`/`e` workable grids / US states / DXCC now; in TUNE: `,`/`/` move spot,
-  `s` step, `x` recenter; in CAL: `,`/`/` trim downlink, `;`/`.` trim uplink, `s`
-  step, `x` zero; **ENTER** save calibration; `` ` `` leave (returns to where you
-  came from).
+  `l` **Log QSO**; `v` voice memo (SD card); `a` **point-here arrow**; `y` tilt
+  tuning on/off (ADV, if IMU); `g`/`w`/`e` workable grids / US states / DXCC now;
+  in TUNE: `,`/`/` move spot, `s` step, `x` recenter; in CAL: `,`/`/` trim
+  downlink, `;`/`.` trim uplink, `s` step, `x` zero; **ENTER** save calibration;
+  `` ` `` leave (returns to where you came from).
 - **Leaving keeps tracking** — pressing `` ` `` returns to the previous screen and,
   if the radio/rotator are engaged, **they keep tracking in the background** (a green
   **RAD**/**ROT**/**R+R** header tag appears on other screens). Stop with `r`
   (radio) or `o` (rotator, which also parks).
+
+### Point-here arrow (`a` from Track)
+
+- **Purpose** — a big, glanceable compass arrow to the satellite's azimuth plus an
+  elevation bar, for hand-aiming a portable antenna without reading numbers.
+- **Reached from** — `a` on the Track screen.
+- **Shows** — a compass rose (N up) with an arrow pointing where to aim (green above
+  the horizon, dim below), an elevation bar (0 at bottom, 90 at top), the numeric
+  az/elevation/range, the rise compass direction, and a status line. The radio and
+  rotator keep running underneath.
+- **Keys** — `` ` `` back to Track.
 
 ### Manual mode
 
@@ -3222,7 +3297,8 @@ listed below.
 - **Reached from** — Track → `g` (live) or Passes → `g` (for the pass).
 - **Shows** — the list/scatter of workable grids; from Track it refreshes live
   while radio and rotator control keep running.
-- **Keys** — `;`/`.` scroll; `` ` `` back.
+- **Keys** — `;`/`.` scroll; `{`/`}` page; **`f`** set a prefix filter (e.g. `EM`,
+  `EM2`, `EM21` — upper-cased per the grid rule); **`c`** clear the filter; `` ` `` back.
 
 ### Workable US states
 
@@ -3288,8 +3364,9 @@ listed below.
 - **Purpose** — solar flux and geomagnetic indices with a plain-language operating
   outlook; detail in [§13 → Space weather](#space-weather).
 - **Reached from** — Home → Space Wx.
-- **Shows** — F10.7 flux, planetary Kp, running A index, each labelled and
-  colour-coded, an HF/satellite outlook line, and a data-freshness note.
+- **Shows** — F10.7 flux, planetary Kp, running A index, an **aurora likelihood**
+  line derived from Kp (unlikely / possible / likely, with latitude), each labelled
+  and colour-coded, an HF/satellite outlook line, and a data-freshness note.
 - **Keys** — `r` refresh over WiFi; `` ` `` back.
 
 ### Weather
@@ -3322,10 +3399,46 @@ listed below.
   [§13 → Upcoming activations](#upcoming-activations-activations).
 - **Reached from** — Home → Activations.
 - **Shows** — a scrollable list of upcoming activations (date, callsign, satellite,
-  grid); ENTER opens a detail view with start/end times (UTC), mode, frequency and
+  grid); entries you've entered yourself are marked with a leading **`*`** and shown
+  in cyan. ENTER opens a detail view with start/end times (UTC), mode, frequency and
   the activator's comment.
 - **Keys** — `;`/`.` move; **ENTER** open the selected activation's detail; `r`
-  refresh the feed; `` ` `` back (from detail, `` ` `` returns to the list).
+  refresh the feed; **`n`** add your own activation/sked (works offline — see below);
+  **`e`** edit the selected entry if it's one of your own (feed entries are
+  read-only); in the detail view, **`a`** sets a **sked reminder** for that
+  activation (it beeps a T-60/30/10 countdown and flashes "SKED!" at the start time,
+  independently of the favorites AOS alarm); when a sked is set, **`c`** on the list
+  clears it; `` ` `` back (from detail, `` ` `` returns to the list).
+
+### New / Edit sked (manual activation entry)
+
+- **Purpose** — enter your own activations or personal skeds in the **same format as
+  the hams.at feed**, for operations that aren't posted to that site. Your entries are
+  stored separately and **merged into the Activations list alongside the fetched ones**,
+  surviving feed refreshes and reboots.
+- **Reached from** — `n` (new) or `e` (edit a `*`-marked entry) on the Activations
+  screen. Works with no WiFi.
+- **Shows** — a field list: Date (YYYY-MM-DD UTC), Call, Sat, Grid, Start/End
+  (HH:MM UTC), Mode, Freq, Comment. A new entry pre-fills today's date and your
+  callsign.
+- **Keys** — `;`/`.` move between fields; **ENTER** edit the selected field; `s` save
+  (needs at least a date plus a satellite or callsign); when editing an existing entry,
+  `x` deletes it (press twice); `` ` `` cancel. Saved entries appear immediately in the
+  Activations list marked with `*`, and a sked reminder can then be set on them with
+  `a` like any other activation.
+
+### Overhead now
+
+- **Purpose** — a snapshot of every satellite in the loaded catalog that is **above
+  the horizon right now**, sorted by elevation — a quick "what can I work / see this
+  moment" glance.
+- **Reached from** — Home → Overhead now.
+- **Shows** — each satellite currently up, with its elevation, azimuth, and rise
+  compass direction (high passes in green, near-horizon in yellow), plus a count of
+  how many are up out of how many were scanned. The scan runs once when you open the
+  screen.
+- **Keys** — `r` rescan (recompute the snapshot for the current instant); `;`/`.`
+  scroll; `` ` `` back.
 
 ### Location
 
@@ -3577,7 +3690,58 @@ listed below.
 - **Purpose** — an on-device scrollable key reference, available almost anywhere.
 - **Reached from** — `h` on most screens.
 - **Shows** — per-screen key summaries.
-- **Keys** — `;`/`.` scroll; `` ` `` back.
+- **Keys** — `;`/`.` scroll; `g` opens the **Glossary & math**; `m` opens the
+  **User guide**; `s` opens the **Ham satellite history**; `t` opens the **Tech
+  help** guide; `l` opens the **Learn** (radio + orbit theory) screen; `` ` `` back.
+
+### Glossary & math
+
+- **Purpose** — concise definitions of the terms CardSat uses (AOS/LOS/TCA, grid,
+  footprint, etc.) and the math behind the orbital parameters and the Doppler shift
+  (period, semi-major axis, apogee/perigee, footprint radius, and the `beta = rr/c`
+  downlink/uplink correction).
+- **Reached from** — `g` on the Help screen.
+- **Keys** — `;`/`.` scroll; `` ` `` back to Help.
+
+### User guide
+
+- **Purpose** — a concise but reasonably complete on-device manual: first-time
+  setup, making a pass, CAT and rotator control, logging and uploads, the analysis
+  and data screens, and general tips.
+- **Reached from** — `m` on the Help screen.
+- **Keys** — `;`/`.` scroll; `` ` `` back to Help.
+
+### Ham satellite history
+
+- **Purpose** — a comprehensive history and explanation of amateur radio
+  satellites: what they are, the OSCAR series, the program from OSCAR 1 (1961)
+  through the Phase 2/3/4 orbit classes and the geostationary QO-100, the
+  microsat/CubeSat era and the ISS, how linear vs FM transponders work, why Doppler
+  matters, orbital decay, getting on the air, and a nudge to support AMSAT.
+- **Reached from** — `s` on the Help screen.
+- **Keys** — `;`/`.` scroll; `` ` `` back to Help.
+
+### Tech help
+
+- **Purpose** — a technical-assistance guide: portable satellite antennas (the
+  Arrow handheld Yagi as the top pick, plus the Elk and tape-measure alternatives),
+  polarization and feedline tips, how to point at a satellite as it arcs overhead,
+  how to work FM and linear birds, and how to get CardSat's CAT and rotator
+  interfaces, logging, and uploads working.
+- **Reached from** — `t` on the Help screen.
+- **Keys** — `;`/`.` scroll; `` ` `` back to Help.
+
+### Learn
+
+- **Purpose** — an in-depth explainer of the radio and orbital theory behind
+  satellite operating, and how amateur satellites work technically: why orbits work
+  (Newton/Kepler), the LEO/SSO/HEO/GEO orbit classes and what perturbs them (J2,
+  drag), radio bands/modes/modulation, the link budget, antenna gain and
+  polarization, the physics of Doppler, how linear transponders and FM repeater sats
+  work internally, beacons and telemetry, store-and-forward, power and attitude
+  control, and the satellite classes (CubeSat/microsat/ISS/GEO).
+- **Reached from** — `l` on the Help screen.
+- **Keys** — `;`/`.` scroll; `` ` `` back to Help.
 
 ### About
 
@@ -3587,7 +3751,15 @@ listed below.
 - **Reached from** — Home → About.
 - **Shows** — firmware version, IP address, free heap and other read-only
   diagnostics.
-- **Keys** — `` ` `` back.
+- **Keys** — `l` opens **License & credits**; `` ` `` back.
+
+### License & credits
+
+- **Purpose** — license pointer and no-warranty/hardware disclaimer, credit for the
+  outside data sources (Celestrak/SpaceTrack, NOAA SWPC, Open-Meteo, hams.at,
+  SatNOGS/AMSAT), acknowledgements, and a recommendation to support AMSAT.
+- **Reached from** — `l` on the About screen.
+- **Keys** — `;`/`.` scroll; `` ` `` back to About.
 
 ### Edit (text/number entry)
 

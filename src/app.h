@@ -19,7 +19,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -95,6 +95,22 @@ private:
   int      manStep = 5;           // manual rotator jog step (deg)
   Screen   helpReturn = SCR_HOME; // screen to return to when leaving Help
   int      helpScroll = 0;        // Help screen scroll offset
+  int      glossScroll = 0;       // Glossary screen scroll offset
+  int      guideScroll = 0;       // User-guide screen scroll offset
+  int      licScroll = 0;         // License/credits screen scroll offset
+  int      satHistScroll = 0;     // Satellite-history screen scroll offset
+  int      techScroll = 0;        // Tech-assistance screen scroll offset
+  int      learnScroll = 0;       // Learn (theory) screen scroll offset
+  // "What's overhead now" snapshot: sats currently above the horizon, by elevation.
+  static const int OVH_MAX = 40;
+  uint32_t ovhNorad[OVH_MAX] = {0};
+  char     ovhName[OVH_MAX][26] = {{0}};
+  float    ovhAz[OVH_MAX] = {0};
+  float    ovhEl[OVH_MAX] = {0};
+  int      ovhN = 0;              // entries collected
+  int      ovhScanned = 0;        // sats scanned (for the footer)
+  int      ovhScroll = 0;
+  bool     ovhValid = false;      // a scan has been done this visit
 
   // CAT self-test (SCR_CATTEST): results of exercising every CAT function, shown
   // on the device and echoed to the serial monitor. Fixed buffer (no heap churn
@@ -366,6 +382,8 @@ private:
   int      gridScroll = 0;
   bool     gridLive = false;        // true = live now (from Track), false = pass union
   uint32_t gridBuiltMs = 0;         // last live rebuild (millis); 0 = build now
+  char     gridFilter[5] = {0};     // optional prefix filter (e.g. "EM", "EM2", "EM21"); "" = all
+  int      gridShown = 0;           // grids matching the filter (== gridN when no filter)
 
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
@@ -425,8 +443,13 @@ private:
   time_t     alarmTca = 0;             // TCA of the pass in progress (0 = none)
   time_t     alarmLos = 0;             // LOS of the pass in progress (0 = none)
   uint8_t    alarmPassMarks = 0;       // TCA/LOS beeps already fired this pass
+  // user-set sked reminder (from an hams.at activation), independent of favorites
+  time_t     skedAt = 0;               // unix UTC of the sked (0 = none set)
+  uint8_t    skedMarks = 0;            // countdown beeps already fired (T-60/30/10/now)
+  char       skedName[24] = {0};       // label shown in the sked flash/status
   uint32_t   aosFlashUntil = 0;        // screen-flash overlay end (millis)
   char       aosFlashName[26] = {0};
+  uint32_t   skedFlashUntil = 0;       // sked-reminder flash overlay end (millis)
   int      curTx = 0;             // selected transponder index for active sat
   Transponder activeTx[MAX_TX_PER_SAT];
   int      activeTxCount = 0;     // transponders loaded for the active sat
@@ -483,6 +506,17 @@ private:
   // let go (no further moves for the window).
   static constexpr uint32_t TUNE_GRACE_MS    = 400;  // quiet-down window after a detected knob move
   uint32_t lastKnobMoveMs = 0;                       // millis() of the last detected dial move
+
+  // Out-of-passband warning: when an operator knob move (FULL/DL One-True-Rule)
+  // lands past a passband edge, pbOffset clamps to the edge and the downlink is
+  // pulled back -- but we flash a transient banner so the operator knows they
+  // tuned off the band. pbOobUntilMs is the millis() deadline the banner shows
+  // to; pbOobDir is +1 (above the high edge) or -1 (below the low edge) for the
+  // banner text. The banner outlives the brief grace window so it's actually
+  // readable during the pull-back.
+  static constexpr uint32_t PB_OOB_BANNER_MS = 1500; // how long the OOB banner flashes
+  uint32_t pbOobUntilMs = 0;                         // millis() the OOB banner shows until
+  int8_t   pbOobDir     = 0;                         // -1 below low edge, +1 above high edge
 
   // Mode-aware knob-move threshold for the active transponder (FM vs SSB/CW),
   // floored at the rig's rounding step so quantization never reads as a move.
@@ -761,6 +795,12 @@ private:
   void drawPolarArc(int cx, int cy, int R, const float* az, const float* el, int n);
   void refreshScheduleIfNeeded();          // rebuild in the background when due
   void serviceAosAlarm();                  // countdown beeps + flash before AOS
+  void serviceSkedAlarm();                 // countdown beeps + flash before a user sked
+  bool setSkedFromActivation(int idx);     // arm a sked from hamsatList[idx] (false if no time)
+  void drawSkedEntry();  void keySkedEntry(char c, bool enter, bool back);  // manual activation entry
+  bool saveUserSked();   int loadUserSked();   // persist/restore user-entered activations
+  void mergeUserSked();  // append userSked[] into hamsatList[] (after a feed parse / cache load)
+  void beginSkedEntry(int editIdx);  // open the entry screen for a new (-1) or existing entry
   void sleepUntilNextPass();               // deep-sleep until ~60 s before AOS
   void saveManualTx(uint32_t norad, const Transponder& t);
   int  loadManualTx(uint32_t norad, Transponder* out, int maxN);
@@ -903,6 +943,14 @@ private:
   int    hamsatSel = 0;           // list cursor
   int    hamsatScroll = 0;        // list scroll offset
   bool   hamsatDetail = false;    // detail view of the selected activation
+  // Manual activation/sked entry (user-entered, kept separate from the feed so it
+  // survives a refresh; merged into hamsatList[] after each parse/cache load).
+  Activation skedDraft;           // the entry being built on SCR_SKEDENTRY
+  int    skedField = 0;           // selected field on the entry screen
+  int    skedEditIdx = -1;        // editing an existing user sked (index into store) or -1=new
+  static const int USERSKED_MAX = 12;
+  Activation userSked[USERSKED_MAX];   // persisted manual entries
+  int    userSkedN = 0;
   String hamsatStatus;            // status/error line ("" when a list is shown)
   void drawHamsat();   void keyHamsat(char c, bool enter, bool back);
   void fetchHamsat();              // download + parse the feed (WiFi)
@@ -947,7 +995,17 @@ private:
   void drawWorldMap(); void keyWorldMap(char c, bool enter, bool back);
   void drawRotMan(); void keyRotMan(char c, bool enter, bool back);
   void drawGps(); void keyGps(char c, bool enter, bool back);
-  void drawHelp(); void keyHelp(char c, bool enter, bool back);
+  void drawHelp();
+  void drawGlossary();  void keyGlossary(char c, bool enter, bool back);
+  void drawUserGuide(); void keyUserGuide(char c, bool enter, bool back);
+  void drawLicense();   void keyLicense(char c, bool enter, bool back);
+  void drawSatHistory();void keySatHistory(char c, bool enter, bool back);
+  void drawTechHelp();  void keyTechHelp(char c, bool enter, bool back);
+  void drawLearn();     void keyLearn(char c, bool enter, bool back);
+  void drawArrow();     void keyArrow(char c, bool enter, bool back);
+  void drawOverhead();  void keyOverhead(char c, bool enter, bool back);
+  void scanOverhead();  // synchronous all-DB above-horizon snapshot
+  void keyHelp(char c, bool enter, bool back);
 
   // CAT self-test: run the full sequence, render results, handle scrolling.
   void runCatTest();
@@ -997,4 +1055,5 @@ private:
   // ---- small draw utilities ----
   void header(const String& t);
   void footer(const String& t);
+  bool drawOobBanner();           // flashing out-of-passband warning (returns true while showing)
 };

@@ -160,6 +160,7 @@ static constexpr double C_LIGHT = 299792458.0;
 // hams.at upcoming satellite activations (Atom feed of scheduled rove/activations).
 #define HAMSAT_FEED_URL    "https://hams.at/feeds/upcoming_alerts"
 #define FILE_HAMSAT  "/CardSat/hamsat.dat"   // cached parsed activations (binary, survives reboot)
+#define FILE_USERSKED "/CardSat/usersked.dat" // user-entered manual activations/skeds (binary, survives feed refresh)
 // "Cache all" runs in small per-sat batches across reboots: a fresh socket pool
 // and WiFi association each boot keeps the LWIP pool from exhausting on this
 // link. This marker file holds the next satellite index to cache; its presence
@@ -237,7 +238,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.39";
+static constexpr const char* FW_VERSION = "0.9.40";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1950,7 +1951,7 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -4418,6 +4419,22 @@ private:
   int      manStep = 5;           // manual rotator jog step (deg)
   Screen   helpReturn = SCR_HOME; // screen to return to when leaving Help
   int      helpScroll = 0;        // Help screen scroll offset
+  int      glossScroll = 0;       // Glossary screen scroll offset
+  int      guideScroll = 0;       // User-guide screen scroll offset
+  int      licScroll = 0;         // License/credits screen scroll offset
+  int      satHistScroll = 0;     // Satellite-history screen scroll offset
+  int      techScroll = 0;        // Tech-assistance screen scroll offset
+  int      learnScroll = 0;       // Learn (theory) screen scroll offset
+  // "What's overhead now" snapshot: sats currently above the horizon, by elevation.
+  static const int OVH_MAX = 40;
+  uint32_t ovhNorad[OVH_MAX] = {0};
+  char     ovhName[OVH_MAX][26] = {{0}};
+  float    ovhAz[OVH_MAX] = {0};
+  float    ovhEl[OVH_MAX] = {0};
+  int      ovhN = 0;              // entries collected
+  int      ovhScanned = 0;        // sats scanned (for the footer)
+  int      ovhScroll = 0;
+  bool     ovhValid = false;      // a scan has been done this visit
 
   // CAT self-test (SCR_CATTEST): results of exercising every CAT function, shown
   // on the device and echoed to the serial monitor. Fixed buffer (no heap churn
@@ -4689,6 +4706,8 @@ private:
   int      gridScroll = 0;
   bool     gridLive = false;        // true = live now (from Track), false = pass union
   uint32_t gridBuiltMs = 0;         // last live rebuild (millis); 0 = build now
+  char     gridFilter[5] = {0};     // optional prefix filter (e.g. "EM", "EM2", "EM21"); "" = all
+  int      gridShown = 0;           // grids matching the filter (== gridN when no filter)
 
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
@@ -4748,8 +4767,13 @@ private:
   time_t     alarmTca = 0;             // TCA of the pass in progress (0 = none)
   time_t     alarmLos = 0;             // LOS of the pass in progress (0 = none)
   uint8_t    alarmPassMarks = 0;       // TCA/LOS beeps already fired this pass
+  // user-set sked reminder (from an hams.at activation), independent of favorites
+  time_t     skedAt = 0;               // unix UTC of the sked (0 = none set)
+  uint8_t    skedMarks = 0;            // countdown beeps already fired (T-60/30/10/now)
+  char       skedName[24] = {0};       // label shown in the sked flash/status
   uint32_t   aosFlashUntil = 0;        // screen-flash overlay end (millis)
   char       aosFlashName[26] = {0};
+  uint32_t   skedFlashUntil = 0;       // sked-reminder flash overlay end (millis)
   int      curTx = 0;             // selected transponder index for active sat
   Transponder activeTx[MAX_TX_PER_SAT];
   int      activeTxCount = 0;     // transponders loaded for the active sat
@@ -4806,6 +4830,17 @@ private:
   // let go (no further moves for the window).
   static constexpr uint32_t TUNE_GRACE_MS    = 400;  // quiet-down window after a detected knob move
   uint32_t lastKnobMoveMs = 0;                       // millis() of the last detected dial move
+
+  // Out-of-passband warning: when an operator knob move (FULL/DL One-True-Rule)
+  // lands past a passband edge, pbOffset clamps to the edge and the downlink is
+  // pulled back -- but we flash a transient banner so the operator knows they
+  // tuned off the band. pbOobUntilMs is the millis() deadline the banner shows
+  // to; pbOobDir is +1 (above the high edge) or -1 (below the low edge) for the
+  // banner text. The banner outlives the brief grace window so it's actually
+  // readable during the pull-back.
+  static constexpr uint32_t PB_OOB_BANNER_MS = 1500; // how long the OOB banner flashes
+  uint32_t pbOobUntilMs = 0;                         // millis() the OOB banner shows until
+  int8_t   pbOobDir     = 0;                         // -1 below low edge, +1 above high edge
 
   // Mode-aware knob-move threshold for the active transponder (FM vs SSB/CW),
   // floored at the rig's rounding step so quantization never reads as a move.
@@ -5080,6 +5115,12 @@ private:
   void drawPolarArc(int cx, int cy, int R, const float* az, const float* el, int n);
   void refreshScheduleIfNeeded();          // rebuild in the background when due
   void serviceAosAlarm();                  // countdown beeps + flash before AOS
+  void serviceSkedAlarm();                 // countdown beeps + flash before a user sked
+  bool setSkedFromActivation(int idx);     // arm a sked from hamsatList[idx] (false if no time)
+  void drawSkedEntry();  void keySkedEntry(char c, bool enter, bool back);  // manual activation entry
+  bool saveUserSked();   int loadUserSked();   // persist/restore user-entered activations
+  void mergeUserSked();  // append userSked[] into hamsatList[] (after a feed parse / cache load)
+  void beginSkedEntry(int editIdx);  // open the entry screen for a new (-1) or existing entry
   void sleepUntilNextPass();               // deep-sleep until ~60 s before AOS
   void saveManualTx(uint32_t norad, const Transponder& t);
   int  loadManualTx(uint32_t norad, Transponder* out, int maxN);
@@ -5222,6 +5263,14 @@ private:
   int    hamsatSel = 0;           // list cursor
   int    hamsatScroll = 0;        // list scroll offset
   bool   hamsatDetail = false;    // detail view of the selected activation
+  // Manual activation/sked entry (user-entered, kept separate from the feed so it
+  // survives a refresh; merged into hamsatList[] after each parse/cache load).
+  Activation skedDraft;           // the entry being built on SCR_SKEDENTRY
+  int    skedField = 0;           // selected field on the entry screen
+  int    skedEditIdx = -1;        // editing an existing user sked (index into store) or -1=new
+  static const int USERSKED_MAX = 12;
+  Activation userSked[USERSKED_MAX];   // persisted manual entries
+  int    userSkedN = 0;
   String hamsatStatus;            // status/error line ("" when a list is shown)
   void drawHamsat();   void keyHamsat(char c, bool enter, bool back);
   void fetchHamsat();              // download + parse the feed (WiFi)
@@ -5267,6 +5316,15 @@ private:
   void drawRotMan(); void keyRotMan(char c, bool enter, bool back);
   void drawGps(); void keyGps(char c, bool enter, bool back);
   void drawHelp(); void keyHelp(char c, bool enter, bool back);
+  void drawGlossary();  void keyGlossary(char c, bool enter, bool back);
+  void drawUserGuide(); void keyUserGuide(char c, bool enter, bool back);
+  void drawLicense();   void keyLicense(char c, bool enter, bool back);
+  void drawSatHistory();void keySatHistory(char c, bool enter, bool back);
+  void drawTechHelp();  void keyTechHelp(char c, bool enter, bool back);
+  void drawLearn();     void keyLearn(char c, bool enter, bool back);
+  void drawArrow();     void keyArrow(char c, bool enter, bool back);
+  void drawOverhead();  void keyOverhead(char c, bool enter, bool back);
+  void scanOverhead();  // synchronous all-DB above-horizon snapshot
 
   // CAT self-test: run the full sequence, render results, handle scrolling.
   void runCatTest();
@@ -5316,6 +5374,7 @@ private:
   // ---- small draw utilities ----
   void header(const String& t);
   void footer(const String& t);
+  bool drawOobBanner();           // flashing out-of-passband warning (returns true while showing)
 };
 
 
@@ -11293,6 +11352,177 @@ int App::loadHamsatCache() {
   return got;
 }
 
+// ===========================================================================
+//  Manual activation / sked entry. Lets the user enter their own activations or
+//  personal skeds in the SAME format as the hams.at feed, for ops that aren't
+//  posted to that site. Stored separately (FILE_USERSKED) so they survive a feed
+//  refresh, and merged into hamsatList[] so they appear alongside fetched ones.
+// ===========================================================================
+
+// Persist the user's manual entries to flash (binary, same guard style as the
+// hamsat cache: magic + record-size version + count).
+bool App::saveUserSked() {
+  File f = Store::fs().open(FILE_USERSKED, "w");
+  if (!f) return false;
+  uint32_t magic = HAMSAT_CACHE_MAGIC ^ 0x55534B44u;   // distinct from the feed cache
+  uint16_t ver = (uint16_t)sizeof(Activation);
+  uint16_t cnt = (uint16_t)userSkedN;
+  f.write((const uint8_t*)&magic, sizeof(magic));
+  f.write((const uint8_t*)&ver,   sizeof(ver));
+  f.write((const uint8_t*)&cnt,   sizeof(cnt));
+  if (userSkedN > 0)
+    f.write((const uint8_t*)userSked, sizeof(Activation) * userSkedN);
+  f.close();
+  return true;
+}
+
+int App::loadUserSked() {
+  userSkedN = 0;
+  File f = Store::fs().open(FILE_USERSKED, "r");
+  if (!f) return 0;
+  uint32_t magic = 0; uint16_t ver = 0, cnt = 0;
+  if (f.read((uint8_t*)&magic, sizeof(magic)) != (int)sizeof(magic) ||
+      f.read((uint8_t*)&ver,   sizeof(ver))   != (int)sizeof(ver)   ||
+      f.read((uint8_t*)&cnt,   sizeof(cnt))   != (int)sizeof(cnt)) {
+    f.close(); return 0;
+  }
+  if (magic != (HAMSAT_CACHE_MAGIC ^ 0x55534B44u) || ver != (uint16_t)sizeof(Activation)) {
+    f.close(); return 0;
+  }
+  if (cnt > USERSKED_MAX) cnt = USERSKED_MAX;
+  int got = 0;
+  for (int i = 0; i < cnt; i++) {
+    if (f.read((uint8_t*)&userSked[i], sizeof(Activation)) != (int)sizeof(Activation))
+      break;
+    got++;
+  }
+  f.close();
+  userSkedN = got;
+  return got;
+}
+
+// Append the user's manual entries into hamsatList[] (up to HAMSAT_MAX). Called
+// right after a feed parse or a cache load so manual skeds always show alongside
+// the fetched ones. Marked so the UI can tell them apart (comment carries a tag).
+void App::mergeUserSked() {
+  if (userSkedN == 0) loadUserSked();     // lazy-load on first need
+  for (int i = 0; i < userSkedN && hamsatN < HAMSAT_MAX; ++i) {
+    hamsatList[hamsatN++] = userSked[i];
+  }
+}
+
+// Open the entry screen. editIdx < 0 = new (blank draft); otherwise edit the
+// existing user entry at that index.
+void App::beginSkedEntry(int editIdx) {
+  skedEditIdx = editIdx;
+  skedField = 0;
+  if (editIdx >= 0 && editIdx < userSkedN) {
+    skedDraft = userSked[editIdx];
+  } else {
+    memset(&skedDraft, 0, sizeof(skedDraft));
+    // Sensible defaults: today's date if the clock is set, blank everything else.
+    if (timeIsSet()) {
+      time_t now = nowUtc(); struct tm g; gmtime_r(&now, &g);
+      strftime(skedDraft.date, sizeof(skedDraft.date), "%Y-%m-%d", &g);
+    }
+    strncpy(skedDraft.call, cfg.myCall, sizeof(skedDraft.call) - 1);  // default to own call
+  }
+  screen = SCR_SKEDENTRY; lastDrawMs = 0;
+}
+
+void App::drawSkedEntry() {
+  header(skedEditIdx >= 0 ? "Edit sked" : "New sked");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18);
+  canvas.print("Your own activation / sked");
+
+  const char* labels[9] = { "Date", "Call", "Sat", "Grid",
+                            "Start", "End", "Mode", "Freq", "Comment" };
+  const char* vals[9]   = {
+    skedDraft.date[0]    ? skedDraft.date    : "(YYYY-MM-DD)",
+    skedDraft.call[0]    ? skedDraft.call    : "(call)",
+    skedDraft.sat[0]     ? skedDraft.sat     : "(satellite)",
+    skedDraft.grid[0]    ? skedDraft.grid    : "(grid)",
+    skedDraft.start[0]   ? skedDraft.start   : "(HH:MM UTC)",
+    skedDraft.end[0]     ? skedDraft.end     : "(HH:MM UTC)",
+    skedDraft.mode[0]    ? skedDraft.mode    : "(mode)",
+    skedDraft.freq[0]    ? skedDraft.freq    : "(freq)",
+    skedDraft.comment[0] ? skedDraft.comment : "(comment)" };
+
+  const int VIS = 8;
+  int scroll = (skedField >= VIS) ? (skedField - VIS + 1) : 0;
+  for (int v = 0; v < VIS && scroll + v < 9; ++v) {
+    int i = scroll + v;
+    int y = 30 + v*11;
+    bool sel = (i == skedField);
+    if (sel) { canvas.fillRect(0, y-1, 240, 11, CL_BLUE);
+               canvas.setTextColor(CL_WHITE, CL_BLUE); }
+    else        canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(4, y); canvas.printf("%-7s %.25s", labels[i], vals[i]);
+  }
+  footer(skedEditIdx >= 0 ? "ENT edit  s save  x del  ` back"
+                          : "ENT edit  s save  ` cancel");
+}
+
+void App::keySkedEntry(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_HAMSAT; lastDrawMs = 0; return; }
+
+  // Save: a date + at least one of (sat, call) is the minimum to be useful.
+  if (c == 's') {
+    if (!skedDraft.date[0] || (!skedDraft.sat[0] && !skedDraft.call[0])) {
+      setStatus("Need date + sat or call"); return;
+    }
+    if (skedEditIdx >= 0 && skedEditIdx < userSkedN) {
+      userSked[skedEditIdx] = skedDraft;                 // update in place
+    } else if (userSkedN < USERSKED_MAX) {
+      userSked[userSkedN++] = skedDraft;                 // append new
+    } else {
+      setStatus("Sked list full"); return;
+    }
+    saveUserSked();
+    setStatus("Sked saved");
+    // Rebuild the visible list locally (re-merge) WITHOUT forcing a WiFi fetch, so
+    // adding a sked works fully offline. Reload the feed cache, then merge users.
+    hamsatN = 0; loadHamsatCache(); mergeUserSked();
+    hamsatDetail = false; hamsatSel = 0; hamsatScroll = 0;
+    screen = SCR_HAMSAT; lastDrawMs = 0;
+    return;
+  }
+
+  // Delete an existing user entry (2-press like the log/transponder editors).
+  if (c == 'x' && skedEditIdx >= 0 && skedEditIdx < userSkedN) {
+    for (int i = skedEditIdx; i < userSkedN - 1; ++i) userSked[i] = userSked[i + 1];
+    userSkedN--;
+    saveUserSked();
+    setStatus("Sked deleted");
+    hamsatN = 0; loadHamsatCache(); mergeUserSked();
+    hamsatDetail = false; hamsatSel = 0; hamsatScroll = 0;
+    screen = SCR_HAMSAT; lastDrawMs = 0;
+    return;
+  }
+
+  if (isUp(c))   { skedField = (skedField + 9 - 1) % 9; lastDrawMs = 0; return; }
+  if (isDown(c)) { skedField = (skedField + 1) % 9; lastDrawMs = 0; return; }
+
+  if (enter) {
+    // Open the shared text editor for the selected field (editTarget 720..728).
+    switch (skedField) {
+      case 0: editTarget = 720; editTitle = "Date (YYYY-MM-DD UTC)"; editBuf = skedDraft.date; break;
+      case 1: editTarget = 721; editTitle = "Callsign";              editBuf = skedDraft.call; break;
+      case 2: editTarget = 722; editTitle = "Satellite name";        editBuf = skedDraft.sat;  break;
+      case 3: editTarget = 723; editTitle = "Grid (Maidenhead)";     editBuf = skedDraft.grid; break;
+      case 4: editTarget = 724; editTitle = "Start (HH:MM UTC)";     editBuf = skedDraft.start; break;
+      case 5: editTarget = 725; editTitle = "End (HH:MM UTC)";       editBuf = skedDraft.end;  break;
+      case 6: editTarget = 726; editTitle = "Mode (FM/SSB/CW)";      editBuf = skedDraft.mode; break;
+      case 7: editTarget = 727; editTitle = "Frequency (text)";      editBuf = skedDraft.freq; break;
+      case 8: editTarget = 728; editTitle = "Comment";               editBuf = skedDraft.comment; break;
+    }
+    screen = SCR_EDIT; lastDrawMs = 0;
+    return;
+  }
+}
+
 void App::fetchHamsat() {
   if (!net.connected()) { hamsatStatus = "No WiFi - connect in Settings"; return; }
   // In-progress indicator on the shared bottom status bar (like Weather / Space Wx),
@@ -11310,15 +11540,19 @@ void App::fetchHamsat() {
   Store::fs().remove(FILE_DL_TMP);
   if (body.length() == 0) { if (hamsatN == 0) hamsatStatus = "Empty feed response"; return; }
   int n = parseHamsat(body);
-  hamsatStatus = n ? "" : "No upcoming activations";
+  if (n > 0) saveHamsatCache();    // cache the FEED ONLY (before merge) so user entries aren't duplicated next load
+  mergeUserSked();                 // then add the user's manual entries for display
+  hamsatStatus = (n || userSkedN) ? "" : "No upcoming activations";
   hamsatSel = 0; hamsatScroll = 0; hamsatDetail = false;
-  if (n > 0) saveHamsatCache();    // refresh the offline cache after a good fetch
 }
 
 void App::hamsatEnter() {
   hamsatDetail = false; hamsatSel = 0; hamsatScroll = 0;
-  // Show the last-known list immediately (even with no WiFi) by loading the cache first.
-  if (hamsatN == 0) loadHamsatCache();
+  // Rebuild the visible list from a clean feed-only base every time, then merge the
+  // user's manual entries exactly once. (The cache is feed-only; user skeds live in
+  // their own file.) This keeps re-entry idempotent -- no duplicated manual entries.
+  hamsatN = 0; loadHamsatCache();
+  mergeUserSked();                         // include the user's manual entries
   hamsatStatus = "";                       // body stays clean; progress goes on the bar
   screen = SCR_HAMSAT; lastDrawMs = 0; draw();   // cached list (or empty state) on screen now
   if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
@@ -11373,8 +11607,9 @@ void App::drawHamsat() {
   }
   if (hamsatN == 0) {
     canvas.setTextColor(CL_GREY, CL_BLACK);
-    canvas.setCursor(6, 60); canvas.print("No activations. r to refresh.");
-    footer("r refresh   ` back");
+    canvas.setCursor(6, 56); canvas.print("No activations. r to refresh,");
+    canvas.setCursor(6, 68); canvas.print("or n to add your own sked.");
+    footer("n new  r refresh   ` back");
     return;
   }
 
@@ -11406,7 +11641,7 @@ void App::drawHamsat() {
       if (c.length() > 38) { canvas.setCursor(6, y);
         canvas.print(c.length() > 76 ? c.substring(38, 76) : c.substring(38)); }
     }
-    footer("` back to list");
+    footer("a set sked reminder   ` back");
     return;
   }
 
@@ -11414,17 +11649,19 @@ void App::drawHamsat() {
   const int ROWS = 8;
   if (hamsatSel < hamsatScroll) hamsatScroll = hamsatSel;
   if (hamsatSel >= hamsatScroll + ROWS) hamsatScroll = hamsatSel - ROWS + 1;
+  int firstUser = hamsatN - userSkedN;     // entries at/after this index are the user's own
   for (int i = 0; i < ROWS && hamsatScroll + i < hamsatN; ++i) {
     int idx = hamsatScroll + i;
     const Activation& a = hamsatList[idx];
+    bool mine = (idx >= firstUser);
     int y = 18 + i*13;
     if (idx == hamsatSel) { canvas.fillRect(0, y-2, 240, 12, CL_SELBG);
                             canvas.setTextColor(CL_BLACK, CL_SELBG); }
-    else                    canvas.setTextColor(CL_WHITE, CL_BLACK);
-    // "MM-DD CALL SAT GRID" -- compact; date month-day only to save width
+    else                    canvas.setTextColor(mine ? CL_CYAN : CL_WHITE, CL_BLACK);
+    // "*MM-DD CALL SAT GRID" -- a leading * marks your own (editable) entries.
     const char* md = (strlen(a.date) >= 10) ? a.date + 5 : a.date;  // MM-DD
     canvas.setCursor(4, y);
-    canvas.printf("%s %-9.9s %-7.7s %s", md, a.call, a.sat, a.grid);
+    canvas.printf("%c%s %-8.8s %-7.7s %s", mine ? '*' : ' ', md, a.call, a.sat, a.grid);
   }
   // scroll indicator
   if (hamsatN > ROWS) {
@@ -11432,17 +11669,35 @@ void App::drawHamsat() {
     canvas.setCursor(212, 18);
     canvas.printf("%d/%d", hamsatSel + 1, hamsatN);
   }
-  footer("; / . move  ENT detail  r refr  ` back");
+  if (skedAt) footer("sked set: c clr  n new  e edit ` bk");
+  else        footer("ENT detail  n new  e edit  r  ` bk");
 }
 
 void App::keyHamsat(char c, bool enter, bool back) {
   if (hamsatDetail) {
+    if (c == 'a') {                                   // set a sked reminder for this activation
+      if (setSkedFromActivation(hamsatSel)) setStatus("Sked reminder set");
+      else setStatus("No usable date/time");
+      lastDrawMs = 0; return;
+    }
     if (isBack(c, back) || enter) { hamsatDetail = false; lastDrawMs = 0; }
     return;
   }
+  if (c == 'c' && skedAt) { skedAt = 0; skedMarks = 0; skedName[0] = 0;  // clear a pending sked
+                            setStatus("Sked reminder cleared"); lastDrawMs = 0; return; }
+  if (c == 'n') { beginSkedEntry(-1); return; }   // add your own activation/sked (works offline)
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (c == 'r') { hamsatEnter(); return; }   // same show-cache + fetch + result flow
   if (hamsatN == 0) return;
+  // 'e' edits the selected entry, but only the user's own (manual) ones -- feed
+  // entries are read-only (a refresh would overwrite them). Manual entries occupy
+  // the last userSkedN slots after the merge.
+  if (c == 'e') {
+    int firstUser = hamsatN - userSkedN;
+    if (hamsatSel >= firstUser) beginSkedEntry(hamsatSel - firstUser);
+    else setStatus("Feed entry - not editable");
+    return;
+  }
   if (isUp(c))   { hamsatSel = (hamsatSel + hamsatN - 1) % hamsatN; lastDrawMs = 0; }
   if (isDown(c)) { hamsatSel = (hamsatSel + 1) % hamsatN; lastDrawMs = 0; }
   if (enter) { hamsatDetail = true; lastDrawMs = 0; }
@@ -12550,7 +12805,7 @@ void App::buildPassDetail(const PassPredict& p) {
 
 void App::refreshScheduleIfNeeded() {
   if (favN == 0 || !timeIsSet()) return;
-  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_MANUAL || screen == SCR_MANUALBIG) return;  // don't disturb Doppler
+  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_POLAR || screen == SCR_MANUAL || screen == SCR_MANUALBIG || screen == SCR_ARROW || screen == SCR_OVERHEAD) return;  // don't disturb Doppler
   if (screen == SCR_PASSES) return;                        // owns the propagator
   uint32_t ms = millis();
   bool due = (nextAos == 0) || (nowUtc() >= nextAos) ||
@@ -12602,6 +12857,57 @@ void App::serviceAosAlarm() {
     }
     nextAos = 0;            // force refreshScheduleIfNeeded() to find the next
   }
+}
+
+// ===========================================================================
+//  Sked reminder: a user-set alarm tied to an hams.at activation (or any sked),
+//  independent of the favorites AOS alarm. Set from the Activations detail view
+//  (key 'a'); beeps a countdown (T-60/30/10) and flashes at the sked time.
+// ===========================================================================
+bool App::setSkedFromActivation(int idx) {
+  if (idx < 0 || idx >= hamsatN) return false;
+  const Activation& a = hamsatList[idx];
+  // Need a date (YYYY-MM-DD) and a start time (HH:MM:SS or HH:MM) in UTC.
+  if (strlen(a.date) < 10 || !a.start[0]) return false;
+  struct tm tmv; memset(&tmv, 0, sizeof(tmv));
+  int Y = 0, Mo = 0, D = 0, h = 0, m = 0, s = 0;
+  if (sscanf(a.date, "%d-%d-%d", &Y, &Mo, &D) != 3) return false;
+  if (sscanf(a.start, "%d:%d:%d", &h, &m, &s) < 2) return false;   // seconds optional
+  tmv.tm_year = Y - 1900; tmv.tm_mon = Mo - 1; tmv.tm_mday = D;
+  tmv.tm_hour = h; tmv.tm_min = m; tmv.tm_sec = s;
+  time_t epoch = mktime(&tmv);                 // TZ=UTC0, so this is UTC
+  if (epoch <= 0) return false;
+  skedAt = epoch; skedMarks = 0;
+  // Label: prefer "CALL on SAT", fall back to whatever we have.
+  String lbl;
+  if (a.call[0] && a.sat[0]) lbl = String(a.call) + " " + a.sat;
+  else if (a.sat[0])         lbl = a.sat;
+  else if (a.call[0])        lbl = a.call;
+  else                       lbl = "sked";
+  strncpy(skedName, lbl.c_str(), sizeof(skedName) - 1);
+  skedName[sizeof(skedName) - 1] = 0;
+  return true;
+}
+
+void App::serviceSkedAlarm() {
+  if (skedAt == 0 || !timeIsSet()) return;
+  // Gate the *sounds* on the same toggle as the AOS alarm; the visual flash still
+  // fires so a muted user still sees the reminder.
+  time_t now = nowUtc();
+  long dt = (long)(skedAt - now);
+  if (cfg.aosAlarm) {
+    if (dt <= 60 && dt > 30 && !(skedMarks & 1)) { skedMarks |= 1; beep(1400, 80); }
+    if (dt <= 30 && dt > 10 && !(skedMarks & 2)) { skedMarks |= 2; beep(1400, 80); }
+    if (dt <= 10 && dt > 0  && !(skedMarks & 4)) { skedMarks |= 4; beep(1700, 90); }
+  }
+  if (dt <= 0 && !(skedMarks & 8)) {
+    skedMarks |= 8;
+    if (cfg.aosAlarm) { beep(2400, 250); delay(120); beep(2000, 250); }
+    skedFlashUntil = millis() + 8000;
+    if (cfg.irBeacon) irBeacon.flash(IR_N_AOS);
+  }
+  // Auto-clear a sked an hour after it fired so it doesn't linger forever.
+  if (dt < -3600) { skedAt = 0; skedMarks = 0; skedName[0] = 0; }
 }
 
 // ---- Feature 4: deep-sleep until ~60 s before the next favorite AOS --------
@@ -13821,6 +14127,7 @@ void App::loop() {
 
   refreshScheduleIfNeeded();   // keep the all-favorites schedule fresh
   serviceAosAlarm();           // countdown beeps + flash before AOS
+  serviceSkedAlarm();          // countdown beeps + flash before a user-set sked
   tickCanvasRestore();         // retry sprite realloc if a post-fetch restore failed
 
   if (satsatJobPhase != 0) satsatJobTick();   // advance the incremental sat-to-sat search
@@ -13917,7 +14224,13 @@ void App::loop() {
               double dlSat = ((double)rxNow - (double)calDl) / (1.0 - beta);
               int32_t off = (int32_t)llround(dlSat - (double)t.downlink);
               int32_t bw  = (int32_t)t.bandwidth();
-              if (off < 0) off = 0; if (off > bw) off = bw;
+              // Operator tuned PAST a passband edge: clamp to the edge (below) and
+              // arm the transient out-of-passband banner in the direction they
+              // overran. Tuning back inside clears it. The pull-back to the edge
+              // happens via the normal downlink drive once the grace window ends.
+              if (off < 0)       { pbOobDir = -1; pbOobUntilMs = ms + PB_OOB_BANNER_MS; off = 0; }
+              else if (off > bw) { pbOobDir = +1; pbOobUntilMs = ms + PB_OOB_BANNER_MS; off = bw; }
+              else               { pbOobDir = 0;  pbOobUntilMs = 0; }   // back in band: clear
               pbOffset = off;                       // new fixed satellite point
               knobMoved = true;
               lastKnobMoveMs = ms;                  // open the tuning-grace window
@@ -14088,7 +14401,7 @@ void App::loop() {
       (screen == SCR_ORBIT && orbitPage <= 2) || screen == SCR_SUNMOON ||
       screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC ||
       (screen == SCR_MEMOS && memo.isRecording()) || screen == SCR_OSCAR || screen == SCR_GLOBE || screen == SCR_DXDOPP || screen == SCR_SKYMAP || screen == SCR_GPSPOS ||
-      (screen == SCR_SATSAT && !satsatComputed) || screen == SCR_CATMON ||
+      (screen == SCR_SATSAT && !satsatComputed) || screen == SCR_CATMON || screen == SCR_ARROW ||
       (screen == SCR_TRANSIT && transitJobPhase != 0)) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
@@ -14108,6 +14421,13 @@ void App::loop() {
   long dt = (nextAos && timeIsSet()) ? (long)(nextAos - nowUtc()) : 999999;
   bool alarmActive = (millis() < aosFlashUntil) || (cfg.aosAlarm && dt <= 60 && dt > -2);
   if (alarmActive && ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
+
+  // While the out-of-passband banner is up, repaint fast enough on the Track-family
+  // screens to animate the ~2 Hz flash (the 500 ms live cadence would alias it).
+  if (millis() < pbOobUntilMs &&
+      (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUAL ||
+       screen == SCR_MANUALBIG) &&
+      ms - lastDrawMs > 120) { lastDrawMs = ms; draw(); }
 
   // Charge / Sleep screen: while awake (just woken), refresh battery once a
   // second, then auto-blank ~5 s after the wake to return to the dark idle.
@@ -14245,6 +14565,15 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_ROTMAN:   keyRotMan(c, enter, back); break;
     case SCR_GPS:      keyGps(c, enter, back); break;
     case SCR_HELP:     keyHelp(c, enter, back); break;
+    case SCR_GLOSSARY: keyGlossary(c, enter, back); break;
+    case SCR_USERGUIDE:keyUserGuide(c, enter, back); break;
+    case SCR_LICENSE:  keyLicense(c, enter, back); break;
+    case SCR_SATHIST:  keySatHistory(c, enter, back); break;
+    case SCR_TECHHELP: keyTechHelp(c, enter, back); break;
+    case SCR_LEARN:    keyLearn(c, enter, back); break;
+    case SCR_ARROW:    keyArrow(c, enter, back); break;
+    case SCR_OVERHEAD: keyOverhead(c, enter, back); break;
+    case SCR_SKEDENTRY:keySkedEntry(c, enter, back); break;
     case SCR_CATTEST:  keyCatTest(c, enter, back); break;
     case SCR_CATMON:   keyCatMon(c, enter, back); break;
     case SCR_CHARGE:   keyCharge(c, enter, back); break;
@@ -14310,14 +14639,15 @@ void App::keyHome(char c, bool enter, bool back) {
       case 6: spaceWxEnter(); break;  // space weather (NOAA SWPC)
       case 7: weatherEnter(); break;  // local terrestrial weather (open-meteo)
       case 8: hamsatEnter(); break;   // upcoming activations (hams.at)
-      case 9: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
-      case 10: screen = SCR_LOCATION; break;
-      case 11: screen = SCR_UPDATE; break;
-      case 12: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
-      case 13: logMenuSel = 0; screen = SCR_LOG; break;
-      case 14: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
-      case 15: screen = SCR_ABOUT; break;
-      case 16: enterChargeMode(); screen = SCR_CHARGE; break;
+      case 9: ovhValid = false; ovhScroll = 0; screen = SCR_OVERHEAD; lastDrawMs = 0; break;  // what's overhead now
+      case 10: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+      case 11: screen = SCR_LOCATION; break;
+      case 12: screen = SCR_UPDATE; break;
+      case 13: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
+      case 14: logMenuSel = 0; screen = SCR_LOG; break;
+      case 15: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
+      case 16: screen = SCR_ABOUT; break;
+      case 17: enterChargeMode(); screen = SCR_CHARGE; break;
     }
   }
 }
@@ -14614,6 +14944,7 @@ void App::keySatList(char c, bool enter, bool back) {
     if (logPickSat) {            // chose a satellite for a log entry
       logPickSat = false;
       seedQsoSatDefaults();      // sat + mode + non-Doppler centre/nominal freqs
+      if (logEditIdx >= 0) qso.uploaded = 0;   // changing the sat re-arms upload
       logSel = 0; screen = SCR_LOGENTRY; lastDrawMs = 0; return;
     }
     computePasses();
@@ -14683,6 +15014,7 @@ void App::keyPassDetail(char c, bool enter, bool back) {
 
 void App::keyTrack(char c, bool enter, bool back) {
   if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
+  if (c == 'a') { screen = SCR_ARROW; lastDrawMs = 0; return; }  // point-here arrow (radio/rotor keep running)
   if (isBack(c, back)) {
     // Leaving the Track screen no longer stops tracking: if the radio and/or
     // rotator are engaged, they keep running in the background (the loop's
@@ -15455,7 +15787,7 @@ void App::drawVisList() {
     footer("` back"); return;
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(4, 18); canvas.print("AOS (UTC)    Dur El  LOS");
+  canvas.setCursor(4, 18); canvas.print("AOS (UTC)    Dur El  Rise");
   if (vlN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 44); canvas.print("No visible passes in the");
@@ -15475,8 +15807,9 @@ void App::drawVisList() {
                       canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else canvas.setTextColor(CL_YELLOW, CL_BLACK);   // all rows are visible passes
     canvas.setCursor(4, y);
-    canvas.printf("%s  %2ldm %3.0f %s",
-                  fmtMDHM(p.aos).c_str(), mins, p.maxEl, fmtHM(p.los).c_str());
+    canvas.printf("%s  %2ldm %3.0f %-3s",
+                  fmtMDHM(p.aos).c_str(), mins, p.maxEl,
+                  windDirName((int)(p.azAos + 0.5f)));
   }
   footer("ENT detail  r recomp  ` back");
 }
@@ -15914,6 +16247,8 @@ void App::keySettings(char c, bool enter, bool back) {
 static Screen editHome(int t) {
   if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
   if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
+  if (t == 729) return SCR_GRID;        // workable-grids prefix filter (cancel)
+  if (t >= 720) return SCR_SKEDENTRY;   // manual activation/sked entry fields (cancel)
   if (t == 250) return SCR_CATMON;      // CAT monitor: raw hex send (cancel/commit)
   if (t == 260) return SCR_TRACK;       // per-satellite operating note
   if (t == 600) return SCR_LOG;         // LoTW SAT_NAME prompt (abort export)
@@ -15969,8 +16304,9 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.pass2[sizeof(cfg.pass2)-1] = 0; break;
       case 203: strncpy(cfg.gpUrl, editBuf.c_str(), sizeof(cfg.gpUrl)-1);
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;
-      case 204: strncpy(cfg.myCall, editBuf.c_str(), sizeof(cfg.myCall)-1);
-                cfg.myCall[sizeof(cfg.myCall)-1] = 0; break;
+      case 204: { String v = editBuf; v.trim(); v.toUpperCase();   // callsigns are upper-case
+                  strncpy(cfg.myCall, v.c_str(), sizeof(cfg.myCall)-1);
+                  cfg.myCall[sizeof(cfg.myCall)-1] = 0; break; }
       case 214: strncpy(cfg.qrzUser, editBuf.c_str(), sizeof(cfg.qrzUser)-1);
                 cfg.qrzUser[sizeof(cfg.qrzUser)-1] = 0; qrzSessionKey = ""; break;
       case 215: strncpy(cfg.qrzPass, editBuf.c_str(), sizeof(cfg.qrzPass)-1);
@@ -16032,6 +16368,65 @@ void App::keyEdit(char c, bool enter, bool back) {
         }
         screen = SCR_NOTEEDIT; lastDrawMs = 0;
         return; }
+
+      // ---- manual activation/sked entry fields (write back to skedDraft) ----
+      case 720: { String v = editBuf; v.trim();
+                  strncpy(skedDraft.date, v.c_str(), sizeof(skedDraft.date)-1);
+                  skedDraft.date[sizeof(skedDraft.date)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 721: { String v = editBuf; v.trim(); v.toUpperCase();
+                  strncpy(skedDraft.call, v.c_str(), sizeof(skedDraft.call)-1);
+                  skedDraft.call[sizeof(skedDraft.call)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 722: { String v = editBuf; v.trim();
+                  strncpy(skedDraft.sat, v.c_str(), sizeof(skedDraft.sat)-1);
+                  skedDraft.sat[sizeof(skedDraft.sat)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 723: { String v = editBuf; v.trim(); v.toUpperCase();
+                  strncpy(skedDraft.grid, v.c_str(), sizeof(skedDraft.grid)-1);
+                  skedDraft.grid[sizeof(skedDraft.grid)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 724: { String v = editBuf; v.trim();
+                  strncpy(skedDraft.start, v.c_str(), sizeof(skedDraft.start)-1);
+                  skedDraft.start[sizeof(skedDraft.start)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 725: { String v = editBuf; v.trim();
+                  strncpy(skedDraft.end, v.c_str(), sizeof(skedDraft.end)-1);
+                  skedDraft.end[sizeof(skedDraft.end)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 726: { String v = editBuf; v.trim(); v.toUpperCase();
+                  strncpy(skedDraft.mode, v.c_str(), sizeof(skedDraft.mode)-1);
+                  skedDraft.mode[sizeof(skedDraft.mode)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 727: { String v = editBuf; v.trim();
+                  strncpy(skedDraft.freq, v.c_str(), sizeof(skedDraft.freq)-1);
+                  skedDraft.freq[sizeof(skedDraft.freq)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 728: { String v = editBuf; v.trim();
+                  strncpy(skedDraft.comment, v.c_str(), sizeof(skedDraft.comment)-1);
+                  skedDraft.comment[sizeof(skedDraft.comment)-1] = 0;
+                  screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+
+      // ---- workable-grids prefix filter (respects the grid capitalization rule) ----
+      case 729: {
+        String v = editBuf; v.trim(); v.toUpperCase();     // grids are upper-case
+        if (v.length() > 4) v = v.substring(0, 4);          // a full 4-char grid at most
+        // Keep only well-formed prefix characters: positions 0-1 are field letters
+        // (A-R), positions 2-3 are square digits (0-9). Stop at the first bad char so
+        // a stray keystroke just truncates rather than filtering to nothing.
+        char f[5] = {0}; int n = 0;
+        for (int i = 0; i < (int)v.length() && n < 4; ++i) {
+          char ch = v[i]; bool ok = (n < 2) ? (ch >= 'A' && ch <= 'R')
+                                             : (ch >= '0' && ch <= '9');
+          if (!ok) break;
+          f[n++] = ch;
+        }
+        strncpy(gridFilter, f, sizeof(gridFilter) - 1);
+        gridFilter[sizeof(gridFilter) - 1] = 0;
+        gridScroll = 0;
+        if (gridFilter[0]) setStatus(String("Grid filter: ") + gridFilter);
+        else               setStatus("Grid filter cleared");
+        screen = SCR_GRID; lastDrawMs = 0; return; }
 
       // ---- rotctld (network rotator) host / port ----
       case 205: strncpy(cfg.rotHost, editBuf.c_str(), sizeof(cfg.rotHost)-1);
@@ -16179,16 +16574,23 @@ void App::keyEdit(char c, bool enter, bool back) {
         screen = SCR_PASSES; return;
       }
       // ---- QSO log fields ----
-      case 500: strncpy(qso.call, editBuf.c_str(), sizeof(qso.call)-1);
-                qso.call[sizeof(qso.call)-1]=0; screen=SCR_LOGENTRY; return;
+      case 500: { String v = editBuf; v.trim(); v.toUpperCase();   // callsigns are upper-case
+                  strncpy(qso.call, v.c_str(), sizeof(qso.call)-1);
+                  qso.call[sizeof(qso.call)-1]=0;
+                  if (logEditIdx >= 0) qso.uploaded = 0; screen=SCR_LOGENTRY; return; }
       case 501: strncpy(qso.rstS, editBuf.c_str(), sizeof(qso.rstS)-1);
-                qso.rstS[sizeof(qso.rstS)-1]=0; screen=SCR_LOGENTRY; return;
+                qso.rstS[sizeof(qso.rstS)-1]=0;
+                if (logEditIdx >= 0) qso.uploaded = 0; screen=SCR_LOGENTRY; return;
       case 502: strncpy(qso.rstR, editBuf.c_str(), sizeof(qso.rstR)-1);
-                qso.rstR[sizeof(qso.rstR)-1]=0; screen=SCR_LOGENTRY; return;
-      case 503: strncpy(qso.grid, editBuf.c_str(), sizeof(qso.grid)-1);
-                qso.grid[sizeof(qso.grid)-1]=0; screen=SCR_LOGENTRY; return;
+                qso.rstR[sizeof(qso.rstR)-1]=0;
+                if (logEditIdx >= 0) qso.uploaded = 0; screen=SCR_LOGENTRY; return;
+      case 503: { String v = editBuf; v.trim(); v.toUpperCase();   // grids are upper-case
+                  strncpy(qso.grid, v.c_str(), sizeof(qso.grid)-1);
+                  qso.grid[sizeof(qso.grid)-1]=0;
+                  if (logEditIdx >= 0) qso.uploaded = 0; screen=SCR_LOGENTRY; return; }
       case 504: strncpy(qso.notes, editBuf.c_str(), sizeof(qso.notes)-1);
-                qso.notes[sizeof(qso.notes)-1]=0; screen=SCR_LOGENTRY; return;
+                qso.notes[sizeof(qso.notes)-1]=0;
+                if (logEditIdx >= 0) qso.uploaded = 0; screen=SCR_LOGENTRY; return;
       case 505: {   // Date YYYY-MM-DD (UTC); keep the time-of-day
         int Y, Mo, D;
         if (sscanf(editBuf.c_str(), "%d-%d-%d", &Y, &Mo, &D) == 3) {
@@ -16197,6 +16599,7 @@ void App::keyEdit(char c, bool enter, bool back) {
           struct tm g; gmtime_r(&base, &g);
           g.tm_year = Y - 1900; g.tm_mon = Mo - 1; g.tm_mday = D;
           qso.utc = (uint32_t)mktime(&g);            // TZ=UTC0 -> UTC epoch
+          if (logEditIdx >= 0) qso.uploaded = 0;
         } else setStatus("Use YYYY-MM-DD");
         screen = SCR_LOGENTRY; return;
       }
@@ -16208,13 +16611,16 @@ void App::keyEdit(char c, bool enter, bool back) {
           struct tm g; gmtime_r(&base, &g);
           g.tm_hour = H; g.tm_min = Mi; g.tm_sec = S;
           qso.utc = (uint32_t)mktime(&g);
+          if (logEditIdx >= 0) qso.uploaded = 0;
         } else setStatus("Use HH:MM:SS");
         screen = SCR_LOGENTRY; return;
       }
       case 507: { double m = atof(editBuf.c_str());
-                  qso.dlHz = (uint32_t)llround(m * 1e6); screen = SCR_LOGENTRY; return; }
+                  qso.dlHz = (uint32_t)llround(m * 1e6);
+                  if (logEditIdx >= 0) qso.uploaded = 0; screen = SCR_LOGENTRY; return; }
       case 508: { double m = atof(editBuf.c_str());
-                  qso.ulHz = (uint32_t)llround(m * 1e6); screen = SCR_LOGENTRY; return; }
+                  qso.ulHz = (uint32_t)llround(m * 1e6);
+                  if (logEditIdx >= 0) qso.uploaded = 0; screen = SCR_LOGENTRY; return; }
 
       // ---- LoTW SAT_NAME prompt during ADIF export ----
       case 600: {
@@ -16420,10 +16826,11 @@ void App::drawAbout() {
              (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
     line(String(b));
   }
-  footer("` back");
+  footer("l license/credits   ` back");
 }
 
 void App::keyAbout(char c, bool enter, bool back) {
+  if (c == 'l') { licScroll = 0; screen = SCR_LICENSE; lastDrawMs = 0; return; }
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
 
@@ -18122,7 +18529,9 @@ void App::drawLogEntry() {
   canvas.printf("MyGrid %s  MyCall %s", qso.myGrid[0] ? qso.myGrid : "-",
                 qso.myCall[0] ? qso.myCall : "-");
 
-  const int LF = 11;
+  // The upload-flag rows (LoTW, Cloudlog) only apply to an existing logged QSO, so
+  // they are shown when editing (logEditIdx >= 0) and hidden when logging a new one.
+  const int LF = (logEditIdx >= 0) ? 13 : 11;
   char dbuf[16], tbuf[16], dlb[16], ulb[16];
   if (qso.utc) { time_t tt = (time_t)qso.utc; struct tm g; gmtime_r(&tt, &g);
                  strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &g);
@@ -18130,10 +18539,15 @@ void App::drawLogEntry() {
   else { strcpy(dbuf, "(set)"); strcpy(tbuf, "(set)"); }
   if (qso.dlHz) snprintf(dlb, sizeof(dlb), "%.4f", qso.dlHz / 1e6); else strcpy(dlb, "(set)");
   if (qso.ulHz) snprintf(ulb, sizeof(ulb), "%.4f", qso.ulHz / 1e6); else strcpy(ulb, "(set)");
-  const char* labels[LF] = { "Date", "Time", "Sat", "DL MHz", "UL MHz",
-                             "Call", "Mode", "RST S", "RST R", "Grid", "Notes" };
-  const char* vals[LF]   = { dbuf, tbuf, qso.sat[0] ? qso.sat : "(pick)", dlb, ulb,
-                             qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes };
+  const char* labels[13] = { "Date", "Time", "Sat", "DL MHz", "UL MHz",
+                             "Call", "Mode", "RST S", "RST R", "Grid", "Notes",
+                             "LoTW", "Cloudlog" };
+  const char* vals[13]   = { dbuf, tbuf, qso.sat[0] ? qso.sat : "(pick)", dlb, ulb,
+                             qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes,
+                             (qso.uploaded & 0x1) ? "uploaded (ENT to clear)"
+                                                  : "not uploaded (ENT to set)",
+                             (qso.uploaded & 0x2) ? "uploaded (ENT to clear)"
+                                                  : "not uploaded (ENT to set)" };
   const int VIS = 8;
   int scroll = (logSel >= VIS) ? (logSel - VIS + 1) : 0;
   for (int v = 0; v < VIS && scroll + v < LF; ++v) {
@@ -18150,7 +18564,7 @@ void App::drawLogEntry() {
 }
 
 void App::keyLogEntry(char c, bool enter, bool back) {
-  const int LF = 11;
+  const int LF = (logEditIdx >= 0) ? 13 : 11;   // +2 upload-flag rows when editing
   if (c != 'x') logDelArm = false;             // any other key disarms delete
   if (isBack(c, back)) { logEditIdx = -1; screen = logReturn; lastDrawMs = 0; return; }
   if (isUp(c))   logSel = (logSel + LF - 1) % LF;
@@ -18165,6 +18579,8 @@ void App::keyLogEntry(char c, bool enter, bool back) {
   }
   if (c == 's') {
     if (!qso.call[0]) { setStatus("Call required to log"); return; }
+    // qso.uploaded is saved as-is: editing any content field already cleared it (so the
+    // QSO re-uploads), and the LoTW/Cloudlog rows let the operator override that choice.
     bool ok = (logEditIdx >= 0) ? rewriteLog(logFileRow(logEditIdx), &qso, false)
                                 : saveQso();
     setStatus(ok ? (logEditIdx >= 0 ? "QSO updated" : "QSO logged") : "Log write failed");
@@ -18174,11 +18590,24 @@ void App::keyLogEntry(char c, bool enter, bool back) {
   }
   if (enter) {
     char b[20];
+    if (logEditIdx >= 0 && logSel == 11) {      // LoTW flag: toggle uploaded bit0
+      qso.uploaded ^= 0x1;
+      setStatus((qso.uploaded & 0x1) ? "Marked uploaded to LoTW"
+                                     : "Marked NOT uploaded to LoTW");
+      return;
+    }
+    if (logEditIdx >= 0 && logSel == 12) {      // Cloudlog flag: toggle uploaded bit1
+      qso.uploaded ^= 0x2;
+      setStatus((qso.uploaded & 0x2) ? "Marked uploaded to Cloudlog"
+                                     : "Marked NOT uploaded to Cloudlog");
+      return;
+    }
     if (logSel == 6) {                          // Mode: toggle SSB<->CW on linear
       if (strcmp(qso.mode, "FM") != 0) {
         strncpy(qso.mode, strcmp(qso.mode, "CW") == 0 ? "SSB" : "CW",
                 sizeof(qso.mode) - 1);
         qso.mode[sizeof(qso.mode) - 1] = 0;
+        if (logEditIdx >= 0) qso.uploaded = 0;  // mode change re-arms upload
       } else setStatus("FM mode is fixed");
       return;
     }
@@ -18334,6 +18763,24 @@ void App::footer(const String& t) {
   canvas.print(t);
 }
 
+// Transient out-of-passband banner. When an operator knob move (FULL/DL) overran
+// a passband edge, pbOobUntilMs was armed; flash a red bar on the y=114 status row
+// for a moment (the downlink is being pulled back to the edge meanwhile). Returns
+// true while it's showing so the live screens can repaint to keep it animating.
+bool App::drawOobBanner() {
+  if (millis() >= pbOobUntilMs || pbOobDir == 0) return false;
+  bool on = ((millis() / 250) & 1);                 // ~2 Hz flash
+  canvas.fillRect(0, 114, 240, 11, on ? CL_RED : CL_BLACK);
+  if (on) {
+    canvas.setTextColor(CL_WHITE, CL_RED);
+    canvas.setTextSize(1);
+    canvas.setCursor(4, 116);
+    canvas.printf("OUT OF PASSBAND (%s edge) - tuning back",
+                  pbOobDir < 0 ? "low" : "high");
+  }
+  return true;
+}
+
 void App::draw() {
   if (canvasFreed) return;   // sprite freed for a TLS fetch; nothing to draw to
   canvas.fillScreen(CL_BLACK);
@@ -18382,6 +18829,15 @@ void App::draw() {
     case SCR_ROTMAN:   drawRotMan(); break;
     case SCR_GPS:      drawGps(); break;
     case SCR_HELP:     drawHelp(); break;
+    case SCR_GLOSSARY: drawGlossary(); break;
+    case SCR_USERGUIDE:drawUserGuide(); break;
+    case SCR_LICENSE:  drawLicense(); break;
+    case SCR_SATHIST:  drawSatHistory(); break;
+    case SCR_TECHHELP: drawTechHelp(); break;
+    case SCR_LEARN:    drawLearn(); break;
+    case SCR_ARROW:    drawArrow(); break;
+    case SCR_OVERHEAD: drawOverhead(); break;
+    case SCR_SKEDENTRY:drawSkedEntry(); break;
     case SCR_CATTEST:  drawCatTest(); break;
     case SCR_CATMON:   drawCatMon(); break;
     case SCR_CHARGE:   drawCharge(); break;
@@ -18421,10 +18877,32 @@ void App::draw() {
     canvas.setTextSize(1); canvas.setCursor(2, 17);
     canvas.printf("AOS %.14s  T-%s", nextAosName, fmtCountdown(dt).c_str());
   }
+  // Sked-reminder overlay (user-set, from an activation): its own flash + banner,
+  // drawn on top of any screen and distinct from the favorites AOS alarm.
+  long skDt = (skedAt && timeIsSet()) ? (long)(skedAt - nowUtc()) : 999999;
+  if (millis() < skedFlashUntil) {
+    bool on = ((millis() / 400) & 1);
+    canvas.fillRect(20, 46, 200, 44, on ? CL_BLUE : CL_BLACK);
+    canvas.drawRect(20, 46, 200, 44, CL_WHITE);
+    canvas.setTextColor(CL_WHITE, on ? CL_BLUE : CL_BLACK);
+    canvas.setTextSize(2); canvas.setCursor(34, 52); canvas.print("SKED!");
+    canvas.setTextSize(1); canvas.setCursor(34, 74); canvas.printf("%.22s", skedName);
+  } else if (cfg.aosAlarm && skDt >= 0 && skDt <= 60) {
+    canvas.fillRect(0, 16, 240, 11, CL_BLUE);
+    canvas.setTextColor(CL_WHITE, CL_BLUE);
+    canvas.setTextSize(1); canvas.setCursor(2, 17);
+    canvas.printf("SKED %.13s T-%s", skedName, fmtCountdown(skDt).c_str());
+  }
   // Voice-memo REC badge: overlay on the Track-family screens while recording.
   if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUAL ||
       screen == SCR_MANUALBIG || screen == SCR_POLAR)
     drawMemoIndicator();
+  // Out-of-passband warning: flashing red bar on the Track-family tuning screens
+  // when an operator knob move overran a passband edge. Drawn last so it overlays
+  // the status row. (POLAR has no tuning UI, so it's excluded.)
+  if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUAL ||
+      screen == SCR_MANUALBIG)
+    drawOobBanner();
   canvas.pushSprite(0, 0);
 }
 
@@ -18803,6 +19281,11 @@ void App::drawHelp() {
     "GLOBAL",
     " `  back / home",
     " h  open this help",
+    " g  glossary & math",
+    " m  user guide",
+    " s  ham satellite history",
+    " t  tech help (antennas etc)",
+    " l  learn (radio+orbit theory)",
     " b  screenshot to SD",
     " ;/.  up/down",
     " ,//  left/right",
@@ -18864,6 +19347,7 @@ void App::drawHelp() {
     " c CTCSS tone",
     " k CW both legs (linear)",
     " o rotator  p polar",
+    " a point-here arrow",
     " z big readout  l log QSO",
     " v voice memo (SD)",
     " y tilt tuning (ADV)",
@@ -18997,14 +19481,1083 @@ void App::drawHelp() {
     canvas.setTextColor(hdr ? CL_CYAN : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, 20 + i * 12); canvas.print(s);
   }
-  footer("; / . scroll   ` back");
+  footer("topics: g m s t l   ;/. scrl ` bk");
 }
 
 void App::keyHelp(char c, bool enter, bool back) {
   (void)enter;
+  if (c == 'g') { glossScroll = 0; screen = SCR_GLOSSARY;  lastDrawMs = 0; return; }
+  if (c == 'm') { guideScroll = 0; screen = SCR_USERGUIDE; lastDrawMs = 0; return; }
+  if (c == 's') { satHistScroll = 0; screen = SCR_SATHIST; lastDrawMs = 0; return; }
+  if (c == 't') { techScroll = 0; screen = SCR_TECHHELP; lastDrawMs = 0; return; }
+  if (c == 'l') { learnScroll = 0; screen = SCR_LEARN; lastDrawMs = 0; return; }
   if (isUp(c))   { helpScroll--; lastDrawMs = 0; }
   if (isDown(c)) { helpScroll++; lastDrawMs = 0; }
   if (isBack(c, back)) { screen = helpReturn; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Glossary: terms + the orbital / Doppler math CardSat uses.
+//  Reached with 'g' from Help. Scrollable, screen-formatted (<=38 col).
+// ===========================================================================
+void App::drawGlossary() {
+  header("Glossary & Math");
+  static const char* G[] = {
+    "TERMS",
+    " AOS  acquisition of signal",
+    "  (sat rises above horizon)",
+    " LOS  loss of signal (sets)",
+    " TCA  time of closest approach",
+    " Az   azimuth (compass brng)",
+    " El   elevation (angle up)",
+    " Sub-point  lat/lon under sat",
+    " Footprint  area that can",
+    "  hear/work the sat at once",
+    " Pass  one horizon-to-horizon",
+    "  transit over your station",
+    " Grid  Maidenhead locator",
+    "  (e.g. FM18), 1deg x 2deg",
+    " QTH  your station location",
+    " GP/TLE  orbital elements",
+    "  (the numbers SGP4 needs)",
+    " SGP4  the orbit propagator",
+    " Beacon  sat's telemetry sig",
+    "ORBITAL ELEMENTS",
+    " Mean motion (n)  revs/day.",
+    "  Period P = 1440 / n  (min)",
+    " Semi-major axis a from n:",
+    "  a = (mu / n^2)^(1/3),",
+    "  n in rad/s, mu=398600 km3/s2",
+    " Apogee  = a(1+e) - Re",
+    " Perigee = a(1-e) - Re",
+    "  Re = 6378 km (Earth radius)",
+    " e  eccentricity (0=circle)",
+    " i  inclination (orbit tilt",
+    "  vs equator, deg)",
+    " RAAN  swivel of orbit plane",
+    " Footprint radius angle lam:",
+    "  cos(lam) = Re / (Re + alt)",
+    "NODAL / SUN-SYNC (Orbit pg)",
+    " J2  Earth's oblateness; it",
+    "  drags the orbit plane (RAAN)",
+    "  and argument of perigee.",
+    " Sun-sync  J2 drift tuned so",
+    "  the plane tracks the Sun;",
+    "  LTAN = local time at the",
+    "  ascending node.",
+    "DOPPLER SHIFT",
+    " Sat motion shifts frequency.",
+    " Range rate rr = how fast the",
+    "  sat-to-you distance changes",
+    "  (km/s, + = moving away).",
+    " Doppler factor:",
+    "  beta = rr / c  (c=speed of",
+    "  light, 299792 km/s).",
+    " Downlink you receive:",
+    "  Rx = f_dl x (1 - beta)",
+    " Uplink you transmit:",
+    "  Tx = f_ul / (1 - beta)",
+    " Moving away (beta>0): Rx",
+    "  tunes DOWN, Tx tunes UP.",
+    "  They split in opposite ways",
+    "  - that is full-duplex Dop.",
+    " Linear sat: inverting means",
+    "  tuning Rx up moves Tx down.",
+    " One True Rule: hold a fixed",
+    "  freq AT THE SAT while you",
+    "  spin the dial; let go and",
+    "  nothing drifts.",
+    " Calibration adds a fixed Hz",
+    "  offset to absorb radio LO",
+    "  error per satellite.",
+  };
+  const int total = (int)(sizeof(G) / sizeof(G[0]));
+  const int rows = 9;
+  if (glossScroll > total - rows) glossScroll = total - rows;
+  if (glossScroll < 0) glossScroll = 0;
+  canvas.setTextSize(1);
+  for (int i = 0; i < rows && (glossScroll + i) < total; i++) {
+    const char* s = G[glossScroll + i];
+    bool hdr = (s[0] != ' ');
+    canvas.setTextColor(hdr ? CL_CYAN : CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, 20 + i * 12); canvas.print(s);
+  }
+  footer("; / . scroll   ` back");
+}
+
+void App::keyGlossary(char c, bool enter, bool back) {
+  (void)enter;
+  if (isUp(c))   { glossScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { glossScroll++; lastDrawMs = 0; }
+  if (isBack(c, back)) { screen = SCR_HELP; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  User guide: a concise but reasonably complete manual, screen-formatted.
+//  Reached with 'm' from Help. Scrollable.
+// ===========================================================================
+void App::drawUserGuide() {
+  header("User Guide");
+  static const char* U[] = {
+    "WHAT CARDSAT DOES",
+    " Tracks amateur satellites,",
+    " tunes your radio for Doppler,",
+    " drives a rotator, and logs",
+    " the contacts you make.",
+    "FIRST-TIME SETUP",
+    " 1. Set your location: Home >",
+    "  Location. Enter a grid or",
+    "  lat/lon, or use GPS if",
+    "  fitted. The clock must be",
+    "  set (GPS, or via WiFi/NTP",
+    "  in Update) or nothing can",
+    "  be predicted.",
+    " 2. Load orbital data: Home >",
+    "  Update > k. Needs WiFi",
+    "  (Settings > WiFi). This",
+    "  fetches fresh GP elements",
+    "  and the clock.",
+    " 3. Pick favorites: open",
+    "  Satellites, ENTER stars a",
+    "  bird so it shows in Next",
+    "  Passes.",
+    "MAKING A PASS",
+    " Next Passes lists upcoming",
+    " passes of your favorites.",
+    " ENTER on one to Track it.",
+    " On Track, CardSat shows live",
+    " az/el/range and the Doppler-",
+    " corrected Rx/Tx.",
+    "RADIO CONTROL (CAT)",
+    " Settings > Radio: choose your",
+    " rig + how it is wired (CI-V,",
+    " Yaesu, Kenwood, LAN, rigctld)",
+    " On a linear sat, the rig dial",
+    " sets the passband; CardSat",
+    " corrects both legs (the One",
+    " True Rule). d cycles tuning",
+    " modes; if you tune past the",
+    " band edge a red banner warns.",
+    "ROTATOR CONTROL",
+    " Settings > Rotator: GS-232,",
+    " Easycomm, SPID, rotctld,",
+    " PstRotator, or direct Yaesu.",
+    " CardSat points it along the",
+    " pass. Hardware backends are",
+    " UNTESTED - see the warnings.",
+    "LOGGING",
+    " On Track press L to log the",
+    " QSO (call, RST, grid auto-",
+    " filled). Log menu: browse/",
+    " edit, export ADIF, upload to",
+    " LoTW or Cloudlog (need WiFi +",
+    " credentials). Editing a QSO",
+    " re-arms its upload; the LoTW/",
+    " Cloudlog rows let you override",
+    "ANALYSIS SCREENS",
+    " From Satellites/Passes: 3D",
+    " globe, OSCARLOCATOR, EQX,",
+    " illumination (60-day), 10-day",
+    " passes, footprint grids/",
+    " states/DXCC, sat-to-sat and",
+    " mutual (DX) windows, Sun/Moon",
+    " tracking + transits, sky",
+    " sources, simulation.",
+    "DATA SCREENS",
+    " Space weather (NOAA), local",
+    " weather (Open-Meteo), AMSAT",
+    " status (hams.at).",
+    "MESSAGING",
+    " LoRa CardSat-to-CardSat chat",
+    " (needs a LoRa-capable build).",
+    "TIPS",
+    " h  = help/keys from anywhere",
+    " `  = back / home",
+    " b  = screenshot to SD card",
+    " Most list screens scroll with",
+    " ; and . (and , / for L/R).",
+    " microSD is optional but adds",
+    " logging, voice memos, screen-",
+    " shots, and LoTW credentials.",
+  };
+  const int total = (int)(sizeof(U) / sizeof(U[0]));
+  const int rows = 9;
+  if (guideScroll > total - rows) guideScroll = total - rows;
+  if (guideScroll < 0) guideScroll = 0;
+  canvas.setTextSize(1);
+  for (int i = 0; i < rows && (guideScroll + i) < total; i++) {
+    const char* s = U[guideScroll + i];
+    bool hdr = (s[0] != ' ');
+    canvas.setTextColor(hdr ? CL_CYAN : CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, 20 + i * 12); canvas.print(s);
+  }
+  footer("; / . scroll   ` back");
+}
+
+void App::keyUserGuide(char c, bool enter, bool back) {
+  (void)enter;
+  if (isUp(c))   { guideScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { guideScroll++; lastDrawMs = 0; }
+  if (isBack(c, back)) { screen = SCR_HELP; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  License, disclaimer, data-source credits, AMSAT support. Off About ('l').
+// ===========================================================================
+void App::drawLicense() {
+  header("License & Credits");
+  static const char* L[] = {
+    "CardSat",
+    " (c) Paul Stoetzer, N8HM.",
+    " Open-source amateur radio",
+    " satellite tracker + ground",
+    " station controller.",
+    " See the LICENSE file in the",
+    " repository for full terms.",
+    "NO WARRANTY",
+    " This software is provided",
+    " AS IS, without warranty of",
+    " any kind. You use it at your",
+    " own risk.",
+    "HARDWARE DISCLAIMER",
+    " CAT and rotator wiring can",
+    " damage radios, rotators, and",
+    " the Cardputer if done wrong.",
+    " Several hardware backends are",
+    " UNTESTED. Verify your wiring",
+    " and voltages yourself. The",
+    " author accepts no liability",
+    " for any damage or for missed",
+    " or interfered-with QSOs.",
+    " Transmit only within your",
+    " license and local rules.",
+    "DATA SOURCES",
+    " Orbital elements: Celestrak /",
+    "  SpaceTrack (GP/TLE).",
+    " Space weather: NOAA SWPC.",
+    " Local weather: Open-Meteo",
+    "  (CC BY 4.0).",
+    " Satellite status: hams.at.",
+    " Transponder data: SatNOGS /",
+    "  AMSAT community sources.",
+    " Thanks to these providers;",
+    " respect their terms of use.",
+    "ACKNOWLEDGEMENTS",
+    " SGP4 propagation after",
+    "  Vallado / the standard model",
+    " The One True Rule Doppler",
+    "  method, credit KB5MU.",
+    " Built on M5Unified, RadioLib,",
+    "  mbedTLS, and the Arduino-",
+    "  ESP32 core.",
+    "SUPPORT AMSAT",
+    " The satellites CardSat tracks",
+    " exist because of AMSAT and",
+    " volunteer satellite builders.",
+    " If you find this useful,",
+    " please join or donate to",
+    " AMSAT (or your national org)",
+    " to help keep amateur sats",
+    " in orbit:  amsat.org",
+    " 73 and good passes!",
+  };
+  const int total = (int)(sizeof(L) / sizeof(L[0]));
+  const int rows = 9;
+  if (licScroll > total - rows) licScroll = total - rows;
+  if (licScroll < 0) licScroll = 0;
+  canvas.setTextSize(1);
+  for (int i = 0; i < rows && (licScroll + i) < total; i++) {
+    const char* s = L[licScroll + i];
+    bool hdr = (s[0] != ' ');
+    canvas.setTextColor(hdr ? CL_CYAN : CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, 20 + i * 12); canvas.print(s);
+  }
+  footer("; / . scroll   ` back");
+}
+
+void App::keyLicense(char c, bool enter, bool back) {
+  (void)enter;
+  if (isUp(c))   { licScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { licScroll++; lastDrawMs = 0; }
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Amateur satellite history & explanation. Reached with 's' from Help.
+//  Scrollable, screen-formatted (<=38 col).
+// ===========================================================================
+void App::drawSatHistory() {
+  header("Ham Satellites");
+  static const char* H[] = {
+    "WHAT THEY ARE",
+    " Amateur (ham) radio satellites",
+    " are spacecraft built by and for",
+    " licensed amateurs. Most carry a",
+    " transponder or repeater that",
+    " relays signals over a continent-",
+    " sized footprint, letting modest",
+    " ground stations work each other",
+    " hundreds or thousands of km away",
+    " - or just enjoy a contact via",
+    " space with a handheld and a",
+    " simple antenna.",
+    " The program is run largely by",
+    " volunteers and groups like AMSAT",
+    " (Radio Amateur Satellite Corp.)",
+    " and its sister organizations.",
+    "OSCAR",
+    " The series is called OSCAR -",
+    " Orbiting Satellite Carrying",
+    " Amateur Radio. A bird gets an",
+    " OSCAR number once in orbit and",
+    " operational (e.g. AO-7, FO-29,",
+    " SO-50, AO-91). The number is the",
+    " sequence; the letter(s) often",
+    " hint at the builder/sponsor.",
+    "THE BEGINNING (1961-1970s)",
+    " OSCAR 1, launched Dec 1961, was",
+    " the first amateur satellite -",
+    " only weeks after the first Soviet",
+    " and US craft. It was a battery",
+    " beacon sending HI in Morse and",
+    " lasted about three weeks. OSCARs",
+    " 1-4 were short-lived experiments.",
+    " AMSAT formed in 1969 and AO-6,",
+    " 7 and 8 in the 1970s brought the",
+    " first real transponders that",
+    " thousands of hams used. AO-7,",
+    " launched 1974, famously went",
+    " silent then revived in 2002 when",
+    " a shorted battery went open-",
+    " circuit - and is still worked",
+    " today on sunlight alone.",
+    "PHASE 2, 3 AND 4",
+    " AMSAT groups the orbits into",
+    " phases. PHASE 2 = low Earth",
+    " orbit (LEO): short, frequent",
+    " passes a few hundred km up.",
+    " PHASE 3 = high elliptical orbit:",
+    " a craft like AO-10, AO-13 or",
+    " AO-40 climbs far out, so it is",
+    " visible for hours and links",
+    " whole hemispheres at once.",
+    " PHASE 4 = geostationary (fixed",
+    " in the sky). The first amateur",
+    " geo payload, Es'hail-2 / QO-100,",
+    " launched in 2018 and opened to",
+    " hams in 2019 over Africa, Europe",
+    " and Asia (footprint Brazil to",
+    " Thailand) - a 24/7 transponder,",
+    " though not visible from the",
+    " Americas.",
+    "THE MICROSAT / CUBESAT ERA",
+    " From the 1980s, small low-cost",
+    " satellites multiplied: the",
+    " Microsats, UoSAT craft, and from",
+    " the 2000s the CubeSat - a unit",
+    " just 10 cm on a side. Cheap",
+    " rideshares put dozens of amateur",
+    " CubeSats in orbit, many built by",
+    " universities and AMSAT chapters.",
+    " The ISS also carries ham gear",
+    " (ARISS), with school contacts,",
+    " an FM repeater and packet.",
+    "HOW THEY WORK",
+    " A LINEAR transponder relays a",
+    " whole band of signals at once,",
+    " inverting and shifting them from",
+    " an uplink band to a downlink",
+    " band - good for SSB and CW, many",
+    " QSOs at a time. An FM repeater",
+    " relays one FM signal at a time,",
+    " worked much like a terrestrial",
+    " repeater (often with a subaudible",
+    " tone). Bands are usually paired",
+    " across VHF/UHF, called by their",
+    " wavelengths: V=2 m (145 MHz),",
+    " U=70 cm (435 MHz), L=23 cm, S=13",
+    " cm. So 'V/U' = 2 m up, 70 cm",
+    " down (aka mode J).",
+    "WHY DOPPLER MATTERS",
+    " A LEO bird moves fast, so its",
+    " frequency shifts as it passes -",
+    " higher coming toward you, lower",
+    " going away. You must retune",
+    " through the pass to stay on the",
+    " signal. That is exactly what",
+    " CardSat automates: it predicts",
+    " the orbit and tunes your radio",
+    " so the contact stays put.",
+    "DSAT / DEORBIT",
+    " LEO satellites slowly lose",
+    " altitude to atmospheric drag and",
+    " eventually re-enter and burn up.",
+    " That is why fresh orbital",
+    " elements matter - and why the",
+    " roster of workable birds keeps",
+    " changing year to year.",
+    "GETTING ON THE AIR",
+    " You need a license, a dual-band",
+    " radio (ideally full-duplex for",
+    " linear birds), a small beam or",
+    " even a handheld whip for the",
+    " easy FM passes, and a tracker.",
+    " The easy FM LEOs (like SO-50)",
+    " are a great first contact - just",
+    " a handheld and patience as the",
+    " pass arcs overhead.",
+    "KEEP THEM FLYING",
+    " These satellites exist only",
+    " because volunteers design, fund,",
+    " build and operate them. If you",
+    " enjoy working the birds, please",
+    " support AMSAT or your national",
+    " amateur satellite organization:",
+    " amsat.org",
+    " 73 and good passes!",
+  };
+  const int total = (int)(sizeof(H) / sizeof(H[0]));
+  const int rows = 9;
+  if (satHistScroll > total - rows) satHistScroll = total - rows;
+  if (satHistScroll < 0) satHistScroll = 0;
+  canvas.setTextSize(1);
+  for (int i = 0; i < rows && (satHistScroll + i) < total; i++) {
+    const char* s = H[satHistScroll + i];
+    bool hdr = (s[0] != ' ');
+    canvas.setTextColor(hdr ? CL_CYAN : CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, 20 + i * 12); canvas.print(s);
+  }
+  footer("; / . scroll   ` back");
+}
+
+void App::keySatHistory(char c, bool enter, bool back) {
+  (void)enter;
+  if (isUp(c))   { satHistScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { satHistScroll++; lastDrawMs = 0; }
+  if (isBack(c, back)) { screen = SCR_HELP; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Technical assistance: antennas, feedline, pointing, working a pass, and
+//  getting CardSat's interfaces + logging going. Reached with 't' from Help.
+//  Scrollable, screen-formatted (<=38 col).
+// ===========================================================================
+void App::drawTechHelp() {
+  header("Tech Help");
+  static const char* T[] = {
+    "PORTABLE ANTENNAS",
+    " Top pick: a handheld dual-band",
+    " Yagi - the Arrow antenna (the",
+    " 146/437 'Arrow II') is the",
+    " classic. Two short booms, 2 m",
+    " and 70 cm elements on one",
+    " handle; light, rugged, and made",
+    " for walking a pass by hand.",
+    " The duplexer model lets one",
+    " feedline carry both bands so a",
+    " full-duplex radio can hear",
+    " itself.",
+    " Alternatives: the Elk 2m/70cm",
+    " log-periodic (one boom, no",
+    " duplexer needed), or a homemade",
+    " tape-measure Yagi - cheap, packs",
+    " flat, and works surprisingly",
+    " well for FM birds.",
+    " For the easiest FM passes even a",
+    " whip or an HT rubber duck can",
+    " snag a contact, but a small beam",
+    " you can aim makes a huge",
+    " difference.",
+    "POLARIZATION",
+    " LEO sat signals tumble and",
+    " fade. If a signal drops out,",
+    " try rotating (twisting) the",
+    " antenna 45-90 deg about its",
+    " boom - you are matching the",
+    " sat's changing polarization.",
+    " A quick twist often recovers a",
+    " fading signal instantly.",
+    "FEEDLINE TIPS",
+    " Keep coax SHORT on UHF - 70 cm",
+    " loss adds up fast. A few metres",
+    " of good cable (RG-58 is okay",
+    " short; LMR-240/RG-8X better) is",
+    " fine for a handheld setup.",
+    " Use quality connectors, keep",
+    " them dry, and do not coil excess",
+    " coax in a tight bundle.",
+    " On the Arrow duplexer, one run",
+    " carries both bands; otherwise",
+    " run separate feeds for RX and",
+    " TX and keep them from touching",
+    " at the antenna.",
+    " Most loss you can avoid is in",
+    " connectors and long thin coax -",
+    " not the radio.",
+    "HOW TO POINT AT A SATELLITE",
+    " A LEO sat is not a fixed dish",
+    " target - it ARCS across the sky",
+    " over a few minutes. You aim",
+    " where it IS, and keep moving.",
+    " 1. On CardSat Track, read the",
+    "  AZIMUTH (compass bearing) and",
+    "  ELEVATION (angle above the",
+    "  horizon).",
+    " 2. Face that compass bearing.",
+    "  0=N, 90=E, 180=S, 270=W.",
+    " 3. Raise the antenna to that",
+    "  elevation: 0 = at the horizon,",
+    "  90 = straight up.",
+    " 4. Track the arc: as the pass",
+    "  runs, az and el change - swing",
+    "  and tilt to follow. Low passes",
+    "  skim the horizon; high passes",
+    "  climb overhead.",
+    " 5. Aim a bit ahead and let the",
+    "  sat catch up; fine-tune for",
+    "  the strongest signal.",
+    " The pass-polar and OSCARLOCATOR",
+    " screens show the whole arc so",
+    " you can plan where to look.",
+    "HOW TO WORK A SATELLITE",
+    " FM birds (e.g. SO-50): one",
+    " contact at a time, like a",
+    " repeater in the sky.",
+    " - Set the up/down freqs and any",
+    "   required tone (CardSat does",
+    "   this when you pick the sat).",
+    " - Listen first. Wait for a gap.",
+    " - Give your call + grid short",
+    "   and clear; exchange grids.",
+    "   Contacts are quick - many",
+    "   want in during a 10-min pass.",
+    " Linear birds (SSB/CW): a whole",
+    " passband, many QSOs at once.",
+    " - Use SSB/CW, full duplex if",
+    "   you can, and LISTEN to your",
+    "   own downlink.",
+    " - Tune for Doppler so your",
+    "   downlink stays put. CardSat",
+    "   does this for you when the",
+    "   radio is connected (CAT).",
+    " - Keep power low - work the",
+    "   bird, do not overpower it.",
+    " General: log the contact, send",
+    " a QSL/grid, and have fun - even",
+    " a handheld + Arrow makes DX via",
+    " space.",
+    "CARDSAT INTERFACES (CAT)",
+    " To let CardSat tune your radio:",
+    " 1. Settings > Radio / CAT: pick",
+    "  your radio model. This fills",
+    "  in the right protocol.",
+    " 2. Choose how it is wired:",
+    "  CI-V (Icom), Yaesu, Kenwood,",
+    "  Icom LAN, or rigctld (Hamlib).",
+    " 3. Wire it: see the WIRING and",
+    "  interface docs. CI-V can be a",
+    "  single shared pin or separate",
+    "  RX/TX. Watch voltages.",
+    " 4. Run the CAT self-test (in",
+    "  Settings > Radio) - it reports",
+    "  PASS/FAIL per function.",
+    " 5. If a rig is slow or misses",
+    "  commands, raise CAT delay",
+    "  (Settings > Radio, 0-200 ms).",
+    " Note: many hardware paths are",
+    " UNTESTED - verify your wiring,",
+    " and read the disclaimers.",
+    "ROTATOR INTERFACE",
+    " Settings > Rotator: GS-232,",
+    " Easycomm, SPID, rotctld, or",
+    " PstRotator. Wire per the rotor",
+    " interface doc, then watch the",
+    " antenna follow the first pass",
+    " before trusting it unattended.",
+    "GETTING LOGGING WORKING",
+    " On Track press L to log a QSO;",
+    " call/RST/grid are pre-filled.",
+    " Logs save to the SD card (or",
+    " internal flash) as a CSV.",
+    " UPLOADS need WiFi + credentials",
+    " (Settings):",
+    " - Cloudlog: set the URL, API",
+    "   key, and station id.",
+    " - LoTW: needs a microSD with",
+    "   your certificate exported to",
+    "   PEM files (see the manual).",
+    " Editing a QSO re-arms its",
+    " upload; the LoTW/Cloudlog rows",
+    " in the editor let you override.",
+    " QRZ lookup fills name/grid if",
+    " you add QRZ credentials.",
+    "GENERAL TIPS",
+    " - Set location + clock first,",
+    "   then Update (k) to load fresh",
+    "   elements. Stale elements =",
+    "   wrong predictions.",
+    " - microSD adds logging, voice",
+    "   memos, screenshots and LoTW.",
+    " - On a long session, if uploads",
+    "   start failing, the Charge",
+    "   screen's H key resets the",
+    "   heap (a no-PSRAM TLS fix).",
+    " - Press h anywhere for keys;",
+    "   ` goes back.",
+    "NEED MORE HELP?",
+    " See the on-device User guide",
+    " (m) and Glossary (g), the",
+    " project README and the docs/",
+    " folder, and AMSAT's operating",
+    " resources at amsat.org.",
+    " 73 and good passes!",
+  };
+  const int total = (int)(sizeof(T) / sizeof(T[0]));
+  const int rows = 9;
+  if (techScroll > total - rows) techScroll = total - rows;
+  if (techScroll < 0) techScroll = 0;
+  canvas.setTextSize(1);
+  for (int i = 0; i < rows && (techScroll + i) < total; i++) {
+    const char* s = T[techScroll + i];
+    bool hdr = (s[0] != ' ');
+    canvas.setTextColor(hdr ? CL_CYAN : CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, 20 + i * 12); canvas.print(s);
+  }
+  footer("; / . scroll   ` back");
+}
+
+void App::keyTechHelp(char c, bool enter, bool back) {
+  (void)enter;
+  if (isUp(c))   { techScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { techScroll++; lastDrawMs = 0; }
+  if (isBack(c, back)) { screen = SCR_HELP; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Learn: radio + orbital theory for satellites, and how amateur satellites
+//  work technically. Deeper companion to the Glossary. 'l' from Help.
+//  Scrollable, screen-formatted (<=38 col).
+// ===========================================================================
+void App::drawLearn() {
+  header("Learn");
+  static const char* L[] = {
+    "ORBITS: WHY THEY WORK",
+    " An orbit is just falling and",
+    " missing the Earth. Gravity",
+    " pulls a satellite down; its",
+    " sideways speed carries it past",
+    " the horizon as fast as it",
+    " falls, so it keeps curving",
+    " around instead of hitting the",
+    " ground.",
+    " Newton + Kepler: the closer the",
+    " orbit, the FASTER it must move.",
+    " Low birds (~400-800 km) circle",
+    " in ~90-100 min; higher orbits",
+    " are slower. Geostationary",
+    " (35786 km) takes exactly one",
+    " day, so it appears fixed in the",
+    " sky.",
+    "KEPLER'S LAWS (SIMPLIFIED)",
+    " 1. Orbits are ellipses with",
+    "  Earth at one focus (a circle",
+    "  is just e=0).",
+    " 2. A line from Earth to the sat",
+    "  sweeps equal areas in equal",
+    "  time - so the sat moves FASTER",
+    "  near perigee (low) and slower",
+    "  near apogee (high).",
+    " 3. Period^2 is proportional to",
+    "  size^3 (a^3). Bigger orbit =",
+    "  disproportionately longer",
+    "  period.",
+    "ORBIT SHAPES FOR HAM SATS",
+    " LEO (low Earth orbit): short,",
+    "  frequent, fast passes; most",
+    "  ham birds live here.",
+    " SSO (sun-synchronous): a near-",
+    "  polar LEO whose plane drifts",
+    "  to keep a constant Sun angle,",
+    "  so passes recur near the same",
+    "  local time each day.",
+    " HEO (highly elliptical): a low",
+    "  perigee and very high apogee.",
+    "  Near apogee the sat hangs in",
+    "  view for hours over a whole",
+    "  hemisphere (AO-10/13/40).",
+    " GEO (geostationary): fixed over",
+    "  one spot; 24/7 access but only",
+    "  where it is in view (QO-100).",
+    "WHAT PERTURBS AN ORBIT",
+    " The Earth is not a point mass",
+    " or a perfect sphere. Its",
+    " equatorial bulge (the J2 term)",
+    " slowly rotates the orbit plane",
+    " and the line of apsides.",
+    " Designers exploit J2 to make",
+    " sun-sync orbits. Atmospheric",
+    " drag steadily lowers LEO birds",
+    " until they re-enter - which is",
+    " why orbital elements go stale",
+    " and must be refreshed.",
+    "RADIO BASICS",
+    " Radio is energy radiated as an",
+    " electromagnetic wave. Frequency",
+    " (Hz) x wavelength = the speed",
+    " of light. Higher frequency =",
+    " shorter wavelength = smaller",
+    " antennas.",
+    " Ham sats mostly use VHF (2 m,",
+    " 145 MHz) and UHF (70 cm, 435",
+    " MHz), with some on 23 cm, 13 cm",
+    " and higher. These punch through",
+    " the ionosphere; HF below ~30",
+    " MHz usually bounces off it and",
+    " does not reach space reliably.",
+    "MODES & MODULATION",
+    " FM: constant-power, easy, but",
+    "  one signal fills the channel.",
+    "  Good for simple repeater sats.",
+    " SSB: a thin, power-efficient",
+    "  voice mode; many fit in one",
+    "  passband. Used on linear sats.",
+    " CW (Morse): the narrowest and",
+    "  most efficient of all - gets",
+    "  through when nothing else can.",
+    " DIGITAL: packet, FSK, and modern",
+    "  data modes for telemetry and",
+    "  store-and-forward.",
+    "THE LINK BUDGET",
+    " Whether you make the contact is",
+    " a sum of gains and losses:",
+    " TX power + antenna gains - path",
+    " loss - feedline/atmos losses =",
+    " signal at the far end.",
+    " Space is far, so every dB",
+    " counts. A small beam's gain and",
+    " low feedline loss often matter",
+    " more than raw watts. CW/SSB",
+    " need far less signal than FM,",
+    " which is why weak-signal modes",
+    " rule the linear birds.",
+    "ANTENNAS & GAIN",
+    " Gain is not free power - it",
+    " focuses energy in a direction,",
+    " like a flashlight reflector. A",
+    " Yagi aimed at the sat both",
+    " transmits and hears better that",
+    " way. That is why you POINT it.",
+    " Polarization: the wave's E-field",
+    " orientation. LEO sats often use",
+    " circular polarization; a linear",
+    " hand antenna sees the signal",
+    " spin and fade, so twisting the",
+    " antenna recovers it.",
+    "DOPPLER, PHYSICALLY",
+    " A moving source bunches the",
+    " waves ahead of it and stretches",
+    " them behind - like a passing",
+    " siren. Approaching, you hear a",
+    " HIGHER frequency; receding, a",
+    " LOWER one.",
+    " A LEO sat moving ~7 km/s shifts",
+    " UHF by several kHz across a",
+    " pass. You retune continuously",
+    " to track it - exactly what",
+    " CardSat computes from the orbit",
+    " and applies to your radio.",
+    "HOW A TRANSPONDER WORKS",
+    " A LINEAR transponder is a",
+    " frequency-shifting repeater. It",
+    " receives a whole slice of an",
+    " uplink band, amplifies it, and",
+    " re-transmits it on a downlink",
+    " band - usually INVERTED (the",
+    " low end of one maps to the high",
+    " end of the other). Everyone in",
+    " the passband is relayed at once,",
+    " so many SSB/CW QSOs coexist.",
+    " Key point: there is no channel.",
+    " You pick a spot in the passband",
+    " and your correspondent finds",
+    " your downlink.",
+    "HOW AN FM REPEATER SAT WORKS",
+    " Like a terrestrial repeater in",
+    " orbit: it receives one FM",
+    " signal on the uplink and re-",
+    " sends it on the downlink, often",
+    " gated by a sub-audible CTCSS",
+    " tone. Only one QSO at a time,",
+    " but simple to work with an HT.",
+    "BEACONS & TELEMETRY",
+    " Most sats send a BEACON - a",
+    " steady signal (CW, BPSK or",
+    " packet) carrying telemetry:",
+    " voltages, temperatures, status.",
+    " It marks the downlink edge for",
+    " tuning, confirms the bird is",
+    " alive, and lets ground stations",
+    " monitor its health.",
+    "STORE-AND-FORWARD",
+    " Some sats are orbiting mailboxes:",
+    " you upload a message on one",
+    " pass; the sat carries it and",
+    " downloads it to a station",
+    " elsewhere on a later pass - data",
+    " relay without a live link.",
+    "POWER & ATTITUDE",
+    " Solar panels charge batteries;",
+    " in eclipse the sat runs on",
+    " battery (or shuts down, like",
+    " AO-7 with dead cells). Many use",
+    " passive control - magnets to",
+    " align with Earth's field, spin",
+    " or gravity-gradient booms - to",
+    " keep antennas roughly pointed",
+    " without fuel.",
+    "SATELLITE CLASSES",
+    " CubeSats: 10 cm cube units (1U,",
+    "  3U...), cheap rideshares; most",
+    "  new ham birds.",
+    " Microsats: slightly larger,",
+    "  often carrying linear",
+    "  transponders.",
+    " The ISS: crewed station with",
+    "  ham gear (ARISS) - an FM",
+    "  repeater, packet, SSTV and",
+    "  scheduled school contacts.",
+    " GEO payloads: hosted on big",
+    "  commercial birds (QO-100).",
+    "PUTTING IT TOGETHER",
+    " CardSat ties the theory to",
+    " practice: it propagates the",
+    " orbit (SGP4) to predict where a",
+    " bird is, computes the Doppler",
+    " from its motion, and tunes your",
+    " radio so a contact through a",
+    " fast-moving repeater in space",
+    " just works.",
+    " The physics is over a century",
+    " old; the fun is brand new every",
+    " pass. 73!",
+  };
+  const int total = (int)(sizeof(L) / sizeof(L[0]));
+  const int rows = 9;
+  if (learnScroll > total - rows) learnScroll = total - rows;
+  if (learnScroll < 0) learnScroll = 0;
+  canvas.setTextSize(1);
+  for (int i = 0; i < rows && (learnScroll + i) < total; i++) {
+    const char* s = L[learnScroll + i];
+    bool hdr = (s[0] != ' ');
+    canvas.setTextColor(hdr ? CL_CYAN : CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, 20 + i * 12); canvas.print(s);
+  }
+  footer("; / . scroll   ` back");
+}
+
+void App::keyLearn(char c, bool enter, bool back) {
+  (void)enter;
+  if (isUp(c))   { learnScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { learnScroll++; lastDrawMs = 0; }
+  if (isBack(c, back)) { screen = SCR_HELP; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Point-here arrow: a big glanceable compass arrow to the satellite's azimuth
+//  plus an elevation bar, for hand-aiming a portable antenna. 'a' from Track.
+//  Reuses the active sat's live look. Radio/rotator keep running underneath.
+// ===========================================================================
+void App::drawArrow() {
+  SatEntry* s = activeSat();
+  header(s ? (String("Point: ") + s->name) : String("Point here"));
+  canvas.setTextSize(1);
+  if (!s || !timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("No satellite / clock not set.");
+    footer("` back");
+    return;
+  }
+  LiveLook L = pred.look(nowUtc());
+
+  // --- Compass rose on the left: arrow points to the satellite azimuth ---
+  const int cx = 66, cy = 74, R = 46;
+  canvas.drawCircle(cx, cy, R, CL_DGREY);
+  canvas.drawCircle(cx, cy, R / 2, CL_DGREY);
+  // Cardinal ticks + labels (N up, E right, S down, W left).
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(cx - 3, cy - R - 9);  canvas.print("N");
+  canvas.setCursor(cx - 3, cy + R + 2);  canvas.print("S");
+  canvas.setCursor(cx + R + 2, cy - 3);  canvas.print("E");
+  canvas.setCursor(cx - R - 8, cy - 3);  canvas.print("W");
+
+  // Arrow geometry: screen angle where 0deg az = up (-y), 90deg az = right (+x).
+  double az = L.az;
+  double th = az * 0.017453292519943295;   // radians
+  double sx = sin(th), cy_ = -cos(th);      // unit vector (x right, y up-screen)
+  // Tip near the rim, tail near the centre.
+  int tipX = cx + (int)lround(sx * (R - 4));
+  int tipY = cy + (int)lround(cy_ * (R - 4));
+  int tailX = cx - (int)lround(sx * (R - 18));
+  int tailY = cy - (int)lround(cy_ * (R - 18));
+  // Above the horizon = bright green arrow; below = dim grey (not workable).
+  uint16_t aCol = (L.el >= 0.0) ? CL_GREEN : CL_DGREY;
+  // Shaft.
+  canvas.drawLine(tailX, tailY, tipX, tipY, aCol);
+  canvas.drawLine(tailX + 1, tailY, tipX + 1, tipY, aCol);
+  // Arrowhead: two short barbs back from the tip.
+  double pth = th + 2.5;   // ~143 deg off, gives a neat head
+  double qth = th - 2.5;
+  int hx1 = tipX + (int)lround(sin(pth) * 10.0);
+  int hy1 = tipY + (int)lround(-cos(pth) * 10.0);
+  int hx2 = tipX + (int)lround(sin(qth) * 10.0);
+  int hy2 = tipY + (int)lround(-cos(qth) * 10.0);
+  canvas.fillTriangle(tipX, tipY, hx1, hy1, hx2, hy2, aCol);
+  // Centre dot = you.
+  canvas.fillCircle(cx, cy, 2, CL_WHITE);
+
+  // --- Elevation bar on the right: 0 at bottom, 90 at top ---
+  const int bx = 150, bTop = 30, bBot = 118, bW = 14;
+  canvas.drawRect(bx, bTop, bW, bBot - bTop, CL_DGREY);
+  double elc = L.el; if (elc < 0) elc = 0; if (elc > 90) elc = 90;
+  int fillH = (int)lround((bBot - bTop) * (elc / 90.0));
+  uint16_t eCol = (L.el >= 30.0) ? CL_GREEN : (L.el >= 0.0) ? CL_YELLOW : CL_DGREY;
+  if (fillH > 0) canvas.fillRect(bx + 1, bBot - fillH, bW - 2, fillH, eCol);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(bx - 2, bTop - 10); canvas.print("90");
+  canvas.setCursor(bx + 2, bBot + 2);  canvas.print("0");
+  canvas.setCursor(bx + bW + 4, (bTop + bBot) / 2 - 3); canvas.print("El");
+
+  // --- Numeric readout on the right ---
+  canvas.setCursor(176, 32);
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.print("Az");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(196, 32);
+  { char b[8]; snprintf(b, sizeof(b), "%3.0f", L.az); canvas.print(b); }
+  canvas.setTextColor(CL_CYAN, CL_BLACK);  canvas.setCursor(176, 44);
+  canvas.print(windDirName((int)(L.az + 0.5)));
+
+  canvas.setCursor(176, 60);
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.print("El");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(196, 60);
+  { char b[8]; snprintf(b, sizeof(b), "%3.0f", L.el); canvas.print(b); }
+
+  canvas.setCursor(176, 76);
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.print("Rng");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(176, 88);
+  { char b[12]; snprintf(b, sizeof(b), "%.0fkm", L.rangeKm); canvas.print(b); }
+
+  // Status line under the compass.
+  canvas.setCursor(6, 124);
+  if (L.el >= 0.0) {
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.print("UP - aim the arrow & raise to El");
+  } else {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.print("Below horizon - not yet visible");
+  }
+  footer("` back   (radio/rotor keep running)");
+}
+
+void App::keyArrow(char c, bool enter, bool back) {
+  (void)c; (void)enter;
+  if (isBack(c, back)) { screen = SCR_TRACK; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  "What's overhead now": a synchronous snapshot of every satellite in the GP
+//  database that is currently above the horizon, sorted by elevation. A glance-
+//  able ambient view reached from the Home menu. Heavy-ish (one look() per sat)
+//  but a single pass over the DB, like the GP-age scan on the About screen.
+// ===========================================================================
+void App::scanOverhead() {
+  ovhN = 0; ovhScanned = 0; ovhValid = true;
+  if (!timeIsSet()) return;
+  pred.setSite(loc.obs());
+  time_t now = nowUtc();
+  for (int i = 0; i < db.count(); ++i) {
+    SatEntry& s = db.at(i);
+    ovhScanned++;
+    if (!pred.setSat(s)) continue;
+    LiveLook L = pred.look(now);
+    if (L.el < 0.0) continue;                 // below horizon: skip
+    // Insert into the elevation-sorted snapshot (highest first), capped at OVH_MAX.
+    // If the list is full and this sat is not higher than the lowest kept, drop it.
+    if (ovhN == OVH_MAX && (float)L.el <= ovhEl[OVH_MAX - 1]) continue;
+    if (ovhN < OVH_MAX) ovhN++;
+    int pos = ovhN - 1;
+    while (pos > 0 && ovhEl[pos - 1] < (float)L.el) {
+      ovhNorad[pos] = ovhNorad[pos - 1];
+      memcpy(ovhName[pos], ovhName[pos - 1], sizeof(ovhName[0]));
+      ovhAz[pos] = ovhAz[pos - 1];
+      ovhEl[pos] = ovhEl[pos - 1];
+      pos--;
+    }
+    ovhNorad[pos] = s.norad;
+    strncpy(ovhName[pos], s.name, sizeof(ovhName[0]) - 1);
+    ovhName[pos][sizeof(ovhName[0]) - 1] = 0;
+    ovhAz[pos] = (float)L.az;
+    ovhEl[pos] = (float)L.el;
+  }
+  // Restore the propagator to the user's active satellite (we walked the whole DB).
+  SatEntry* a = activeSat(); if (a) pred.setSat(*a);
+}
+
+void App::drawOverhead() {
+  header("Overhead now");
+  canvas.setTextSize(1);
+  if (!timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("Clock not set (NTP or GPS).");
+    footer("` back");
+    return;
+  }
+  if (db.count() == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("No GP data. Run Update.");
+    footer("` back");
+    return;
+  }
+  if (!ovhValid) scanOverhead();   // first paint of the visit does the scan
+
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.print("Satellite        El  Az  Dir");
+
+  if (ovhN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("Nothing above the horizon");
+    canvas.setCursor(6, 56); canvas.print("right now. r to rescan.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 80); canvas.printf("Scanned %d satellites.", ovhScanned);
+    footer("r rescan   ` back");
+    return;
+  }
+
+  const int ROWS = 9;
+  if (ovhScroll > ovhN - ROWS) ovhScroll = ovhN - ROWS;
+  if (ovhScroll < 0) ovhScroll = 0;
+  for (int r = 0; r < ROWS && (ovhScroll + r) < ovhN; ++r) {
+    int i = ovhScroll + r;
+    int y = 30 + r * 10;
+    // Elevation colour: high = green (easy/overhead), low = yellow (near horizon).
+    uint16_t col = (ovhEl[i] >= 30.0f) ? CL_GREEN : CL_YELLOW;
+    canvas.setTextColor(col, CL_BLACK);
+    canvas.setCursor(4, y);
+    canvas.printf("%-15.15s %3.0f %3.0f %-3s",
+                  ovhName[i], ovhEl[i], ovhAz[i],
+                  windDirName((int)(ovhAz[i] + 0.5f)));
+  }
+  // Count + scroll indicator.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 120);
+  canvas.printf("%d up / %d scanned", ovhN, ovhScanned);
+  footer("r rescan  ;/. scroll  ` back");
+}
+
+void App::keyOverhead(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { ovhValid = false; screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (c == 'r') { ovhScroll = 0; scanOverhead(); lastDrawMs = 0; return; }
+  if (isUp(c))   { ovhScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { ovhScroll++; lastDrawMs = 0; }
 }
 
 // ===========================================================================
@@ -19396,7 +20949,7 @@ void App::keyCharge(char c, bool enter, bool back) {
   if (isBack(c, back)) {
     M5Cardputer.Display.setBrightness(cfg.bright);
     screenAsleep = false; chargeWoke = false;
-    homeSel = 15; screen = SCR_HOME; lastDrawMs = 0;
+    homeSel = 16; screen = SCR_HOME; lastDrawMs = 0;
     return;
   }
   // 'h' triggers an on-demand heap de-frag (WiFi/TLS reset) for long sessions.
@@ -21153,41 +22706,64 @@ void App::drawMessages() {
   canvas.drawLine(0, 28, 240, 28, CL_DGREY);
 
   // Message list: newest at the bottom, scrollable with ;/. (msgScroll counts
-  // back from newest). Each message is one or two lines.
-  const int VIS = 9, rowY0 = 31, rowH = 10;
+  // back from newest). Each message is one or two rows -- a message whose text
+  // doesn't fit on the first line (after the "who:" prefix) wraps the remainder
+  // onto a second, full-width line rather than being truncated.
+  const int ROWS = 9, rowY0 = 31, rowH = 10;   // ROWS = vertical line slots available
+  const int LINE_CH = 39;                       // chars per line at size-1 font (240px)
   // Build a display order: oldest..newest indices.
   int order[MSG_MAX]; int on = 0;
   for (int i = 0; i < msgCount; ++i) {
     int idx = (msgHead - msgCount + i + MSG_MAX * 2) % MSG_MAX;
     order[on++] = idx;
   }
-  // bottom item shown is (newest - msgScroll). Anchor the TOP of the window and
-  // derive the bottom from it so the visible window keeps its full height when
-  // scrolled into the oldest messages (deriving top from a clamped bottom would
-  // shrink the window row-by-row -- it would look like lines being deleted).
-  int maxScroll = (on > VIS) ? on - VIS : 0;
+  if (on == 0) { footer("n write   ;/. scroll   ` back"); return; }
+  // Row count for a message: 1, or 2 if the text overflows the first line.
+  auto rowsFor = [&](const LoraMsg& m) -> int {
+    int prefixCh = (m.mine ? 1 : 0) + (int)strlen(m.mine ? "me" : m.from) + 1; // ">"/"" + name + ":"
+    int firstMax = LINE_CH - prefixCh - 1;       // -1 for the leading space
+    if (firstMax < 1) firstMax = 1;
+    return ((int)strlen(m.text) > firstMax) ? 2 : 1;
+  };
+  // Bottom item shown is (newest - msgScroll). Walk BACKWARD from there summing
+  // row heights until the available ROWS are filled; that gives the topmost
+  // message to draw. Variable-height rows mean we anchor on the bottom and derive
+  // the top (so wrapped messages don't make the window shrink as you scroll).
+  int maxScroll = on - 1;                         // can scroll until oldest is the bottom item
   if (msgScroll > maxScroll) msgScroll = maxScroll;
-  int top = (on - VIS) - msgScroll; if (top < 0) top = 0;
-  int bottom = top + VIS - 1; if (bottom > on - 1) bottom = on - 1;
+  if (msgScroll < 0) msgScroll = 0;
+  int bottom = (on - 1) - msgScroll;              // index in order[] of the bottom message
+  if (bottom < 0) bottom = 0;
+  int top = bottom, used = 0;
+  for (int r = bottom; r >= 0; --r) {
+    int h = rowsFor(msgRing[order[r]]);
+    if (used + h > ROWS) break;                   // next message wouldn't fully fit
+    used += h; top = r;
+  }
   int y = rowY0;
   for (int r = top; r <= bottom && y < 120; ++r) {
     LoraMsg& m = msgRing[order[r]];
+    const char* who = m.mine ? "me" : m.from;
+    int prefixCh = (m.mine ? 1 : 0) + (int)strlen(who) + 1;
+    int firstMax = LINE_CH - prefixCh - 1;        // text chars that fit on line 1
+    if (firstMax < 1) firstMax = 1;
+    int len = (int)strlen(m.text);
+    // Line 1: "who:" prefix + the first slice of text.
     canvas.setTextColor(m.mine ? CL_CYAN : CL_GREEN, CL_BLACK);
     canvas.setCursor(2, y);
-    const char* who = m.mine ? "me" : m.from;
     canvas.printf("%s%s:", m.mine ? ">" : "", who);
     canvas.setTextColor(CL_WHITE, CL_BLACK);
-    // Cap the text to whatever space is left on the 240 px (~39 char) line after the
-    // "who:" prefix, so a long callsign + long message can't run off the right edge.
-    int prefixCh = (m.mine ? 1 : 0) + (int)strlen(who) + 1;   // ">"/"" + name + ":"
-    int textMax  = 39 - prefixCh - 1;                          // -1 for the leading space
-    if (textMax < 1) textMax = 1;
-    canvas.printf(" %.*s", textMax, m.text);
-    if (!m.mine) {                        // signal info, dim, right side
-      canvas.setTextColor(CL_DGREY, CL_BLACK);
-      canvas.setCursor(2, y); // (rssi shown only if room; keep simple)
-    }
+    canvas.printf(" %.*s", firstMax, m.text);
     y += rowH;
+    // Line 2 (only if the text overflowed line 1): the remainder, full width,
+    // indented two chars so it reads as a continuation of the message above.
+    if (len > firstMax && y < 120) {
+      int contMax = LINE_CH - 2;                  // continuation line width (2-char indent)
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(2, y);
+      canvas.printf("  %.*s", contMax, m.text + firstMax);
+      y += rowH;
+    }
   }
 
   footer("n write   ;/. scroll   ` back");
@@ -21204,8 +22780,10 @@ void App::keyMessages(char c, bool enter, bool back) {
   if (c == 'n') {                          // compose a new message (reuse SCR_EDIT)
     editTarget = 700; editTitle = "Message"; editBuf = ""; screen = SCR_EDIT; return;
   }
-  const int VIS = 9;
-  int maxScroll = (msgCount > VIS) ? msgCount - VIS : 0;
+  // Scroll counts back from the newest; you can scroll until the oldest message
+  // is the bottom item. (Row heights vary with wrapping, so the render derives
+  // the visible window from this bottom anchor.)
+  int maxScroll = (msgCount > 0) ? msgCount - 1 : 0;
   if (isUp(c))   { if (msgScroll < maxScroll) msgScroll++; lastDrawMs = 0; }
   if (isDown(c)) { if (msgScroll > 0) msgScroll--; lastDrawMs = 0; }
 }
@@ -21264,6 +22842,15 @@ void App::drawSpaceWx() {
     else if (spaceA < 30) { aLbl = "active";    aCol = CL_YELLOW; }
     else                  { aLbl = "storm";     aCol = CL_RED; }
     row("A index", String(spaceA, 0) + "  " + aLbl, aCol);
+  }
+  // --- Aurora likelihood (from Kp): a quick space-weather context line ---
+  if (spaceKp >= 0) {
+    const char* auLbl; uint16_t auCol;
+    if      (spaceKp < 4) { auLbl = "unlikely";       auCol = CL_GREY; }
+    else if (spaceKp < 5) { auLbl = "possible high lat"; auCol = CL_WHITE; }
+    else if (spaceKp < 7) { auLbl = "likely high lat"; auCol = CL_YELLOW; }
+    else                  { auLbl = "likely mid lat";  auCol = CL_RED; }
+    row("Aurora", String(auLbl), auCol);
   }
   y += 3;
   // --- Plain-language operating note ---
@@ -21662,6 +23249,14 @@ static void gridStr(int idx, char* out) {
   out[2] = '0' + sLon; out[3] = '0' + sLat; out[4] = 0;
 }
 
+// True if grid string g (4 chars) starts with the prefix filter f (0-4 chars).
+// f is assumed already upper-cased (the grid-entry capitalization rule); an empty
+// filter matches everything. Used to narrow the workable-grids display.
+static bool gridMatchPrefix(const char* g, const char* f) {
+  for (int i = 0; f[i]; ++i) if (g[i] != f[i]) return false;
+  return true;
+}
+
 void App::addFootprintGrids(double subLat, double subLon, double altKm) {
   const double D2R = 0.017453292519943295, R2D = 57.29577951308232, Re = 6371.0;
   if (altKm < 1) return;
@@ -21719,42 +23314,73 @@ void App::drawGrid() {
   if (gridN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
     canvas.print(timeIsSet() ? "No grids in footprint." : "Clock not set.");
-    footer("` back"); return;
+    footer("f filter   ` back"); return;
+  }
+  bool filt = (gridFilter[0] != 0);
+  // Count grids matching the filter (== gridN when no filter). One cheap pass.
+  if (filt) {
+    int m = 0;
+    for (int idx = 0; idx < 32400; ++idx) {
+      if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
+      char g[5]; gridStr(idx, g);
+      if (gridMatchPrefix(g, gridFilter)) ++m;
+    }
+    gridShown = m;
+  } else {
+    gridShown = gridN;
   }
   // Workable-grid count on its own line (no room in the header). Right-aligned,
   // and shows the scroll window position when the list spills past one page.
   const int COLS = 6, ROWS = 8, PER = COLS * ROWS;
-  if (gridScroll >= gridN) gridScroll = 0;
-  { char cnt[40];
-    if (gridN > PER) {
-      int from = gridScroll + 1, to = gridScroll + PER; if (to > gridN) to = gridN;
-      snprintf(cnt, sizeof(cnt), "%d workable  (%d-%d)", gridN, from, to);
+  if (gridScroll >= gridShown) gridScroll = 0;
+  { char cnt[48];
+    if (gridShown > PER) {
+      int from = gridScroll + 1, to = gridScroll + PER; if (to > gridShown) to = gridShown;
+      if (filt) snprintf(cnt, sizeof(cnt), "%s: %d  (%d-%d)", gridFilter, gridShown, from, to);
+      else      snprintf(cnt, sizeof(cnt), "%d workable  (%d-%d)", gridShown, from, to);
     } else {
-      snprintf(cnt, sizeof(cnt), "%d workable", gridN);
+      if (filt) snprintf(cnt, sizeof(cnt), "%s: %d of %d", gridFilter, gridShown, gridN);
+      else      snprintf(cnt, sizeof(cnt), "%d workable", gridShown);
     }
     canvas.setTextColor(CL_CYAN, CL_BLACK);
     int w = (int)strlen(cnt) * 6; int x = 238 - w; if (x < 4) x = 4;
     canvas.setCursor(x, 19); canvas.print(cnt);
   }
+  if (gridShown == 0) {                              // filter excludes everything
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
+    canvas.printf("No workable %s grids.", gridFilter);
+    footer("f filter  c clear  ` back"); return;
+  }
   int seen = 0, drawn = 0;                          // walk set bits in sorted order
   for (int idx = 0; idx < 32400 && drawn < PER; ++idx) {
     if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
-    if (seen++ < gridScroll) continue;
     char g[5]; gridStr(idx, g);
+    if (filt && !gridMatchPrefix(g, gridFilter)) continue;   // filtered out
+    if (seen++ < gridScroll) continue;
     canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4 + (drawn % COLS) * 40, 31 + (drawn / COLS) * 11);
     canvas.print(g); ++drawn;
   }
-  footer(gridN > PER ? "` bk  ;/. scroll  {} page" : "` back");
+  if (filt) footer(gridShown > PER ? "f filt c clr ;/. scrl {} pg ` bk"
+                                   : "f filter  c clear  ` back");
+  else      footer(gridShown > PER ? "f filt  ;/. scroll  {} page  ` bk"
+                                   : "f filter   ` back");
 }
 
 void App::keyGrid(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = gridLive ? liveReturn : SCR_PASSES; lastDrawMs = 0; return; }
+  if (c == 'f') {                                  // set/replace the prefix filter
+    editTarget = 729; editTitle = "Grid filter (e.g. EM, EM2, EM21)";
+    editBuf = gridFilter; screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+  if (c == 'c') {                                  // clear the filter
+    gridFilter[0] = 0; gridScroll = 0; lastDrawMs = 0; return;
+  }
   const int PER = 6 * 8;
-  if (isDown(c)) { if (gridScroll + PER < gridN) gridScroll += 6; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (gridScroll + PER < gridShown) gridScroll += 6; lastDrawMs = 0; return; }
   if (isUp(c))   { if (gridScroll >= 6) gridScroll -= 6; lastDrawMs = 0; return; }
-  if (c == '}')  { if (gridScroll + PER < gridN) gridScroll += PER; lastDrawMs = 0; return; }
+  if (c == '}')  { if (gridScroll + PER < gridShown) gridScroll += PER; lastDrawMs = 0; return; }
   if (c == '{')  { gridScroll -= PER; if (gridScroll < 0) gridScroll = 0; lastDrawMs = 0; return; }
 }
 
@@ -22516,10 +24142,10 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "QRZ Lookup", "Location", "Update",
+                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "Overhead now", "QRZ Lookup", "Location", "Update",
                           "Settings", "Log", "Messages", "About", "Charge / Sleep" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
-  static_assert(sizeof(items) / sizeof(items[0]) == 17,
+  static_assert(sizeof(items) / sizeof(items[0]) == 18,
                 "Home menu item count must match keyHome's N");
   const int VIS = 9;
   if (homeSel < homeScroll)           homeScroll = homeSel;

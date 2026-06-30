@@ -18,7 +18,22 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.39:** **LoRa messaging is hardware-verified.** Two-way LoRa text messaging
+> **New in v0.9.40:** an **out-of-passband warning** — tuning a linear transponder's knob
+> past either edge of the passband now flashes a warning while CardSat pulls you back —
+> plus **received LoRa messages wrap** to a second line instead of being cut off. Logging
+> gains a fix: **editing a QSO re-arms its upload** (the corrected record is re-sent to LoTW
+> and Cloudlog), and the Edit QSO screen now has **LoTW/Cloudlog flag rows** you can toggle to
+> override that. The on-device **Help** screen also gains five built-in references — a
+> **Glossary & math**, a **User guide**, a **Ham satellite history**, a **Tech help** guide
+> (antennas, feedline, pointing, working a pass, and the interfaces), and a **Learn** screen
+> (radio + orbital theory) — and **About** gains a **License & credits** screen. New
+> operating aids: a **point-here arrow** for hand-aiming (`a` on Track), a **"what's overhead
+> now"** screen, **sked reminders** set from the activations feed, an **aurora-likelihood**
+> line on Space Wx, and **rise directions** in the visible-pass list. There's also a guide to
+> **curating your own GP data** for offline/SD-card use instead of the online update. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.40.md)**.
+>
+> **In v0.9.39:** **LoRa messaging is hardware-verified.** Two-way LoRa text messaging
 > between CardSat and a LilyGo T-LoRa unit running the companion CardSat Pager firmware is
 > confirmed working — this release fixes a bug where a sent message could echo back to you
 > (a transmit-complete interrupt was being mistaken for an incoming packet). See the

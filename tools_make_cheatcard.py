@@ -38,10 +38,11 @@ FRONT = [
  ("GLOBAL",
   "<b>;</b> up &middot; <b>.</b> down &middot; <b>,</b> <b>/</b> left/right &middot; "
   "<b>ENTER</b> select &middot; <b>`</b>/<b>DEL</b> back &middot; "
-  "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help"),
+  "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help "
+  "(Help links: <b>g</b> glossary+math &middot; <b>m</b> user guide &middot; <b>s</b> sat history &middot; <b>t</b> tech help &middot; <b>l</b> learn theory)"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "World Map, Sun/Moon, Space Wx, Weather, Activations, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
+  "World Map, Sun/Moon, Space Wx, Weather, Activations, Overhead now, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; <b>x</b> del manual sat &middot; "
   "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
@@ -71,7 +72,7 @@ FRONT = [
  ("TRACK (sel)",
   "<b>`</b> exits to previous screen &amp; KEEPS radio/rotator tracking (green RAD/ROT/R+R in header); <b>r</b>/<b>o</b> to stop. "
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
-  "<b>c</b> CTCSS &middot; <b>N</b> sat note &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>z</b> big readout &middot; "
+  "<b>c</b> CTCSS &middot; <b>N</b> sat note &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>a</b> point-here arrow &middot; <b>z</b> big readout &middot; "
   "<b>y</b> tilt on/off (ADV) &middot; "
   "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
  ("BIG READOUT (z from Track)",
@@ -93,7 +94,7 @@ FRONT = [
  ("WORKABLE GRIDS / STATES / DXCC",
   "Footprint coverage (per-pass union or live now), count on a cyan line: "
   "<b>g</b> 4-char grids &middot; <b>w</b> US states+DC &middot; <b>e</b> DXCC (all 340, "
-  "hybrid polygons+points). <b>;</b>/<b>.</b> &amp; <b>{</b>/<b>}</b> scroll &middot; <b>`</b> back"),
+  "hybrid polygons+points). On grids, <b>f</b> prefix filter (EM/EM2/EM21, upper-cased), <b>c</b> clear. <b>;</b>/<b>.</b> &amp; <b>{</b>/<b>}</b> scroll &middot; <b>`</b> back"),
  ("POLAR / PASS DETAIL",
   "Pass detail: <b>p</b> polar of this pass. Polar: <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; "
   "<b>p</b>/<b>ENTER</b>/<b>`</b> back"),
@@ -109,8 +110,8 @@ BACK = [
   "Planets (cyan dots) + strong radio sources (orange +): Cas A, Cyg A, galactic centre, Crab, Virgo A, on a sky dome. "
   "Antenna-pointing / RF reference. <b>;</b>/<b>.</b> select &middot; <b>`</b> back"),
  ("SPACE WX (menu)",
-  "Solar 10.7cm flux + planetary Kp, labelled &amp; colour-coded, with HF/sat "
-  "operating outlook &amp; data age &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
+  "Solar 10.7cm flux + planetary Kp + A index + aurora likelihood (from Kp), labelled "
+  "&amp; colour-coded, with HF/sat operating outlook &amp; data age &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
  ("WEATHER (menu)",
   "Current conditions + multi-day forecast for your site (Open-Meteo). "
   "Refreshes on entry (WiFi) &amp; with Update. Units in Settings &middot; "
@@ -119,7 +120,9 @@ BACK = [
   "Callsign lookup via QRZ.com XML (needs QRZ XML subscription + user/pass in "
   "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
  ("ACTIVATIONS (menu)",
-  "Upcoming sat activations scheduled on hams.at (roves, grid/special ops). List: date, call, sat, grid. <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail (UTC times, mode, freq, comment) &middot; <b>r</b> refresh &middot; <b>`</b> back. Cached to card &mdash; last list shows offline; WiFi to refresh"),
+  "Upcoming sat activations scheduled on hams.at (roves, grid/special ops). List: date, call, sat, grid (* = your own entry). <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail (UTC times, mode, freq, comment) &middot; <b>n</b> add your own sked (offline OK), <b>e</b> edit a * entry &middot; in detail <b>a</b> sets a SKED reminder (T-60/30/10 beeps + flash at start, separate from AOS alarm); <b>c</b> on list clears it &middot; <b>r</b> refresh &middot; <b>`</b> back. Cached to card &mdash; last list shows offline; WiFi to refresh"),
+ ("OVERHEAD NOW (menu)",
+  "Snapshot of every catalog sat above the horizon right now, sorted by elevation, with az + rise compass dir (high=green, low=yellow) + count up/scanned. <b>r</b> rescan (this instant) &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("TRANSPONDER DB (Sats &rarr; t)",
   "Sat's transponder/beacon entries, two lines each: <b>D</b>=downlink+mode line, "
   "<b>U</b>=uplink+tone/inv line. <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
@@ -144,7 +147,7 @@ BACK = [
  ("LOG",
   "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
-  "<b>x</b> x2 delete"),
+  "<b>x</b> x2 delete &middot; editing a QSO re-arms its upload; extra <b>LoTW</b>/<b>Cloudlog</b> rows (ENTER toggles) override that"),
  ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; Sign &amp; upload)",
   "Uploads sat QSOs direct to ARRL LoTW over WiFi. Needs SD + your LoTW key (lotw_key.pem/lotw_cert.pem in /CardSat/ &mdash; make them from your TQSL .p12 with tools/lotw_cert_converter.html in a browser; in Settings pick DXCC &rarr; primary (state/province/...) &rarr; secondary (county/city) + zones + IOTA, all gated pickers w/ type-to-filter) &mdash; see manual §8. <b>u</b> upload &middot; <b>a</b> re-send all &middot; <b>`</b> back"),
  ("UPLOAD TO CLOUDLOG (Log &rarr; Upload to Cloudlog)",
@@ -174,7 +177,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT)."),
 ]
 
 

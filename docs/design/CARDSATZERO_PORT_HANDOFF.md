@@ -20,8 +20,10 @@ and on a **plain Linux PC** for development. The portable core (orbit propagatio
 the Doppler engine, prediction, calibration, data handling) moves nearly as-is; the
 **edges** (display, input, CAT/rotator transport, GPIO/SPI/serial, storage, power)
 get rebuilt behind a platform abstraction layer (PAL). Three deliberate decisions
-distinguish it from the ESP32 build: **radios/rotators exclusively via Hamlib**,
-**two radios (separate uplink/downlink)**, and an **SDL2-first abstracted UI**.
+distinguish it from the ESP32 build: **radios/rotators default to Hamlib, with
+CardSat's native drivers kept as a selectable per-radio fallback** (see the
+Hamlib-vs-native trade-off analysis in `docs/guides/PORTING.md` §5a), **two radios
+(separate uplink/downlink)**, and an **SDL2-first abstracted UI**.
 
 ---
 
@@ -31,9 +33,11 @@ All paths are in the ESP32 reference repo unless noted.
 
 1. **`docs/design/CARDPUTER_ZERO_PORT_SCOPE.md`** — the master design doc. §7 is how
    the Zero OS actually works (Wayland/labwc, login, the `.desktop` app contract,
-   reserved keys); §8 is the design direction (8.1 Hamlib-only, 8.2 dual-radio,
-   8.3 + 8.3.1 the UI/resolution/keyboard plan, 8.5 keeping the Cap LoRa for GPS +
-   messaging). **This memo is the companion to that doc — read the scope first.**
+   reserved keys); §8 is the design direction (8.1 Hamlib-default + native fallback,
+   8.2 dual-radio, 8.3 + 8.3.1 the UI/resolution/keyboard plan, 8.5 keeping the Cap
+   LoRa for GPS + messaging). **This memo is the companion to that doc — read the
+   scope first**, and see `docs/guides/PORTING.md` §5a for the Hamlib-vs-native
+   decision analysis.
 2. **`docs/guides/PORTING.md`** — especially **§2 Portability tiers** (the
    module-by-module A/B/C/D table) and **§8 "Going off-Arduino"** (the
    `arduino_shim.h` desktop approach). The tier table tells you exactly which files
@@ -58,10 +62,15 @@ These were made deliberately with Paul; treat them as the project's direction.
   ESP32 repo's monolithic `CardSat.ino` is meaningless on Linux. A monorepo would
   mostly create confusion and a constant temptation to break the portable core with
   platform `#ifdef`s. **See §3 for how to share the core across two repos.**
-- **Radios and rotators exclusively via Hamlib** (scope §8.1). The hand-rolled
-  `civ/yaesu/kenwood/icomnet` backends are **not** ported; on Linux everything goes
-  through Hamlib (link `libhamlib`, or — simpler — spawn/supervise a local
-  `rigctld`/`rotctld` and use the existing `RigctlRig`/`RotctlRotator` TCP clients).
+- **Radios and rotators default to Hamlib, native drivers kept as a per-radio
+  fallback** (scope §8.1; full trade-off analysis in `PORTING.md` §5a). Hamlib is the
+  default and unlocks the USB-CDC class — link `libhamlib`, or (simpler) spawn/supervise
+  a local `rigctld`/`rotctld` and use the existing `RigctlRig`/`RotctlRotator` TCP
+  clients. The `civ/yaesu/kenwood/icomnet` backends are kept compiled in and selectable,
+  chiefly to preserve the hardware-proven IC-821 single-pin path and as an
+  always-working baseline while each rig's Hamlib sat-mode mapping is confirmed on the
+  air. (If you instead decide on Hamlib-only per §5a, those backends just aren't built
+  into the Linux target.)
 - **Two radios** (scope §8.2): independent uplink (Main/TX) and downlink (Sub/RX)
   rigs, with single-radio mode pointing both at one rig (today's behavior).
 - **SDL2-first UI** (scope §8.3): one SDL2 backend covers the Zero, the uConsole,
@@ -195,6 +204,10 @@ same order; this is the operational version.)
    keys for the Zero. The existing `key*()` handlers should now work unchanged.
 4. **Single-radio Hamlib.** Implement the `Rig` interface over a local `rigctld`
    (start with the **Dummy** model, then a real rig). Get Doppler driving frequency.
+   Hamlib is the default; once it works, add the **per-radio driver selector** so a
+   radio can instead route to the native `civ/yaesu/kenwood/icomnet` backend ported to
+   Linux serial (the IC-821 single-pin path is the prime reason to keep this). See
+   `PORTING.md` §5a for why both paths ship.
 5. **Second radio.** Split Main/Sub onto two `Rig` handles; add the Single/Dual
    toggle and the second rig config.
 6. **Rotator via `rotctld`**, then **Cap LoRa** GPS (serial) and messaging

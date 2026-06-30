@@ -175,9 +175,11 @@ USB-CDC radios that are out of scope on the ESP32 today. Begin with the
 host-testable core port before hardware arrives in November.
 
 See **§8** for the concrete design direction this recommendation points to:
-**Hamlib-exclusive** radio/rotator control (§8.1), a **two-radio** uplink/downlink
-model (§8.2), and an **abstracted, SDL2-first UI** that also runs on other
-small-form-factor Linux devices such as the ClockworkPi uConsole (§8.3).
+**Hamlib-default** radio/rotator control with CardSat's native drivers as a
+selectable per-radio fallback (§8.1 — and `PORTING.md` §5a for the full
+Hamlib-vs-native trade-off analysis), a **two-radio** uplink/downlink model (§8.2),
+and an **abstracted, SDL2-first UI** that also runs on other small-form-factor Linux
+devices such as the ClockworkPi uConsole (§8.3).
 
 ## 7. How the Zero OS functions (and what CardSat must do to run on it)
 
@@ -317,14 +319,27 @@ from the ESP32 build, and each something the current architecture already leans
 toward. These are direction, not committed implementation — they're written so the
 work has a target the day hardware (or the emulator) is in hand.
 
-### 8.1 Radios and rotators exclusively via Hamlib
+### 8.1 Radios and rotators via Hamlib (with native drivers as a fallback)
+
+> **Read first:** `docs/guides/PORTING.md` **§5a "Hamlib vs. independent radio control
+> (decision analysis)"** weighs the three strategies — Hamlib-only, native-only, and
+> both-user-selectable — with full pros and cons, and recommends **shipping both with
+> Hamlib as the default and CardSat's native drivers as a per-radio fallback**. This
+> section covers the *mechanics* of wiring Hamlib in on the Zero specifically; that
+> section covers *which approach and why*. The wiring below is identical whether Hamlib
+> is the only backend or the default-of-two — the only difference in the "both" case is
+> that `makeRig()` keeps the native backends compiled in and selectable rather than
+> dropping them.
 
 On the ESP32, CardSat carries its own per-rig CAT backends — `CivRig` (CI-V),
 `YaesuRig` (5-byte), `KenwoodRig` (ASCII), `IcomNetRig` (RS-BA1/UDP) — because
 there is no room for a 2 MB rig library on the chip. On the Zero that constraint is
-gone and **Hamlib is available natively**, so the Zero port should **drop the
-hand-rolled backends entirely and talk to radios only through Hamlib**, and
-rotators only through Hamlib's rotator side (`rotctld`/`rotctl`).
+gone and **Hamlib is available natively**, so the Zero port should make **Hamlib the
+default radio/rotator path** (talking to radios through Hamlib, and rotators through
+`rotctld`/`rotctl`), while keeping the native backends compiled in as a selectable
+per-radio fallback — chiefly to preserve the hardware-proven IC-821 single-pin path and
+to provide an always-working baseline while each rig's Hamlib sat-mode mapping is
+confirmed on the air.
 
 **Why this is a small change, not a rewrite.** The whole app already speaks to the
 radio through the narrow `Rig` interface (`setMainFreq`/`setSubFreq`,
@@ -334,11 +349,15 @@ TCP client. The rotator side mirrors this — `RotctlRotator` already speaks Ham
 NET rotctl. So the Zero radio/rotator layer is mostly *selection and wiring*, not
 new protocol code:
 
-- **Collapse the rig factory.** On the Zero build, `makeRig()` returns a Hamlib
-  backend unconditionally instead of switching on `PROTO_CIV/YAESU/KENWOOD`. The
-  CI-V/Yaesu/Kenwood/IcomNet `.cpp` files simply aren't compiled into the Zero
-  target. (They stay in the ESP32 build untouched — this is a per-platform
-  selection, like the rest of the PAL.)
+- **Make the rig factory Hamlib-default, native-optional.** On the Zero build,
+  `makeRig()` defaults to a Hamlib backend instead of switching only on
+  `PROTO_CIV/YAESU/KENWOOD`. Gain a second selection axis — *which implementation* —
+  so a radio configured for "built-in driver" still routes to the native
+  CI-V/Yaesu/Kenwood/IcomNet backend (kept compiled in), while everything else routes
+  to Hamlib. (If you instead choose the Hamlib-only strategy from §5a, the native
+  `.cpp` files simply aren't compiled into the Zero target. Either way it's a
+  per-platform/per-radio selection, like the rest of the PAL, and the ESP32 build is
+  untouched.)
 - **Own the Hamlib connection locally.** On Linux, CardSat can either link
   `libhamlib` directly or — simpler and more robust — **launch and supervise a
   local `rigctld`** (one per radio) and drive it through the existing `RigctlRig`
@@ -459,6 +478,13 @@ SDL2/Wayland/DRM backend selected per device. The monolithic `CardSat.ino` stays
 ESP32-only and does not participate (the dual-apply discipline ends at the platform
 boundary, as noted in §3.3).
 
+> **This abstracts the UI *in-process*.** A further step — splitting the UI from the core
+> across a **network boundary** so the UI can be a separate program (a web app on a phone,
+> a headless Pi driven from a browser, multiple simultaneous clients), and even routing
+> **audio** to the server — is explored in **§9**. The clean UI-to-core seam this section
+> defines is the natural precursor to that wire boundary; §9.8 explains how designing this
+> seam well now makes the network split a cheap later promotion rather than a rewrite.
+
 #### 8.3.1 The concrete problem: resolution, layout, and a different keyboard
 
 Abstracting the *backend* is the easy half. The harder half is that the existing
@@ -548,9 +574,11 @@ this touches the propagation/Doppler/prediction core — it's confined to the
 ### 8.4 How these three fit together
 
 The Zero target becomes: the **portable core** (prediction, Doppler, calibration,
-data) unchanged; a **Hamlib-only** radio/rotator layer behind the existing `Rig`/
-`Rotator` interfaces (§8.1), extended to **two radios** (§8.2); and a **UI behind
-an SDL2-first abstraction** (§8.3) that also reaches other SFF Linux devices. All
+data) unchanged; a **Hamlib-default radio/rotator layer** (with CardSat's native
+drivers kept as a selectable per-radio fallback) behind the existing `Rig`/`Rotator`
+interfaces (§8.1; trade-off analysis in `PORTING.md` §5a), extended to **two radios**
+(§8.2); and a **UI behind an SDL2-first abstraction** (§8.3) that also reaches other
+SFF Linux devices. All
 three live behind interfaces the codebase already has — the `Rig`/`Rotator`
 abstractions and the canvas/key model — which is why this is a *re-platforming
 behind stable seams* rather than a fork. Suggested order once hardware/emulator is
@@ -614,6 +642,274 @@ position + messaging at the same time, exactly as the ESP32 build does today.
 hardware UART or a USB-serial bridge) is a **hardware-confirmation item** — the
 pin/bus specifics come from the Zero + Cap LoRa wiring when in hand, the same
 at-your-own-risk caveat the ESP32 LoRa path already carries.
+
+---
+
+## 9. A client/server architecture (headless server + remote / web UI)
+
+> **Forward-looking design exploration.** This section proposes an architecture beyond the
+> in-process UI abstraction of §8.3. Where §8.3 splits the UI from the core behind a *local*
+> drawing/input interface (still one program), this section considers splitting them across a
+> **network boundary**: a headless **CardSat server** (orbital core + radio + rotator +
+> optionally audio) and one or more **separate UI clients** (native, web, mobile) that talk to
+> it over a protocol. It is a bigger architectural commitment than §8.3; the two are
+> complementary (a native client can still use the §8.3 surface internally), and the decision
+> is whether — and how far — to introduce the wire boundary. Nothing here changes code.
+
+### 9.1 The idea in one picture
+
+```
+   ┌──────────────────────────── CardSat SERVER (headless, e.g. Raspberry Pi) ─────────────────────────┐
+   │  Orbital core (predict / Doppler / One True Rule)   Radio (Hamlib)   Rotator (rotctld)            │
+   │  Logging / GP fetch / space-wx / LoRa / GPS         State + event bus        [Audio I/O — §9.5]    │
+   │                                   ▲   server exposes a stable API/protocol   ▲                     │
+   └───────────────────────────────────┼──────────────────────────────────────────┼──────────────────┘
+                                        │ network (LAN / localhost / VPN)          │ (optional audio stream)
+            ┌───────────────────────────┼──────────────────────┐                   │
+            ▼                           ▼                       ▼                   ▼
+     Native UI client            Web UI (browser on        Headless: no local    Audio client
+     (SDL2 on the same box       phone / tablet / PC)       UI at all; the Pi    (browser WebRTC /
+      or another Linux device)   over Wi-Fi                 is driven entirely    a desktop app)
+                                                            from a browser
+```
+
+The server is the **single source of truth** for state (tracked satellite, frequencies,
+rotator position, log, config). Clients are **views and controllers**: they render server
+state and send user intents (select satellite, tune, start/stop tracking, log a QSO). The
+**same server** can serve a local native UI, a phone browser, and a desktop simultaneously.
+
+### 9.2 What this buys that §8.3 alone does not
+
+§8.3 already lets one program's UI be re-skinned per Linux device. The **network split** adds:
+
+- **The UI can be a completely separate program in a different language**, written by someone
+  who never touches the C++ core — a React/Svelte web app, a Flutter mobile app, a TUI — as
+  long as it speaks the protocol. §8.3 keeps the UI in-process and in C++; §9 removes that
+  constraint entirely.
+- **A truly headless deployment.** A Raspberry Pi in the shack with no screen, the antenna
+  rotator and rig wired to it, **operated from a phone on the couch** or a laptop across the
+  house. This is the headline use case and is impossible without the wire boundary.
+- **Multiple simultaneous clients / multi-operator.** A wall display, the operator's phone,
+  and a logging laptop can all view the same live pass; a club station could have several
+  people watching. State is consistent because there is one server.
+- **Remote operation over a network.** With a VPN or reverse tunnel, the station can be driven
+  from anywhere — the Pi-in-the-shack, you-on-a-train model. (Security then matters — §9.7.)
+- **Decoupled release cadence.** UI and core can evolve and ship independently; a UI bug fix
+  doesn't touch the radio-control code and vice versa.
+
+### 9.3 Where to put the boundary (the key design choice)
+
+The whole design hinges on **what the protocol exposes**. Three coherent levels, from
+thinnest server to thickest:
+
+1. **"Pixel/remote-display" boundary (thin client, fat nothing).** Server renders frames,
+   client is a dumb display + input forwarder (essentially VNC/RDP of the existing UI). *Pro:*
+   almost no new design — wrap the §8.3 surface in a frame transport. *Con:* defeats most of
+   the point — no native web UI, heavy bandwidth, one logical client at a time, ugly on a
+   phone. **Not recommended except as a quick bring-up hack.**
+2. **State + intent boundary (recommended).** Server owns all state and logic and exposes a
+   **semantic API**: a state model (current sat, az/el, Doppler-corrected freqs, pass list,
+   rotator position, log, config) the client subscribes to, plus **commands/intents** (select
+   sat, set passband offset, start/stop track, slew rotator, add QSO). The client renders
+   *however it likes* and is fully responsible for presentation. *Pro:* enables genuinely
+   native UIs (web, mobile, TUI), low bandwidth, multi-client, the real goal. *Con:* you must
+   design and version a real API and a state-sync model. **This is the right boundary.**
+3. **"Library/RPC of internals" boundary (fat client).** Expose low-level core calls (compute
+   this pass, send this CAT frame) and let the client orchestrate. *Pro:* maximal client
+   flexibility. *Con:* leaks core internals across the wire, ties clients to implementation
+   details, and re-implements orchestration (the One True Rule loop, tracking state machine) in
+   every client — exactly the valuable logic you don't want to duplicate. **Avoid;** keep
+   orchestration server-side.
+
+**Recommendation: boundary #2.** The server runs the orbital/Doppler/tracking/CAT/rotator
+logic (the crown jewels, unchanged) and publishes *state* + accepts *intents*. Clients are
+pure presentation.
+
+### 9.4 Protocol shape (initial considerations)
+
+Concrete, conventional choices that fit boundary #2:
+
+- **Transport:** a **WebSocket** is the pragmatic pick — it gives the browser a first-class
+  path (no plugin), is trivially available to native clients, and supports server-push for
+  live state. A plain TCP/line or gRPC option could serve native clients, but the web case
+  makes WebSocket the natural common denominator. A small **REST/HTTP** surface alongside it
+  is handy for stateless fetches (config, log export, the GP catalog).
+- **Encoding:** **JSON** for clarity and zero-friction web/debuggability (the project already
+  parses JSON for GP/OMM and CloudLog, so the muscle exists); a binary codec (CBOR/protobuf)
+  is an optional later optimization for the high-rate streams (live az/el/Doppler at a few Hz)
+  if JSON overhead ever matters — it won't at a handful of updates per second.
+- **Model:** **server-push state snapshots + deltas** for the live view (subscribe once, get a
+  full state then incremental updates as the pass progresses), and **request/response commands**
+  for intents (with an ack/result so the UI can show success/failure — e.g. "rotator slew
+  rejected: past limit," reusing the out-of-passband-style feedback the firmware already has).
+- **Discovery:** **mDNS/Zeroconf** so a phone/laptop finds `cardsat.local` on the LAN without
+  typing an IP — important for the "open the app and it's just there" experience.
+- **Versioning:** the protocol is now a **compatibility surface** between independently-released
+  client and server. Version it explicitly from day one (a handshake that negotiates protocol
+  version), or every client breaks when the server changes. This is the single most important
+  discipline the split introduces.
+
+### 9.5 Audio routing to the server (the hard, interesting dimension)
+
+The user's audio idea is the most ambitious part: route the **radio's receive (and transmit)
+audio through the server** so a remote client can *hear the satellite* (and speak through it)
+— turning the headless Pi into a full remote-operating position, not just a controller.
+
+**What it requires.** Audio is a fundamentally different beast from control:
+
+- **Capture/playback at the server.** The Pi needs the rig's audio in/out — via a **USB sound
+  interface** (the rig's USB audio, or a SignaLink/Digirig-class device), or the Pi's own
+  codec. On Linux this is **ALSA/PulseAudio/PipeWire**; PipeWire is the modern path and handles
+  routing cleanly.
+- **Streaming to/from the client with low latency.** This is the crux. RX audio must reach the
+  phone with low enough latency to be useful, and **TX audio** (operator speaking) must reach
+  the rig in time to be intelligible and properly timed against PTT. The right tool for the
+  browser case is **WebRTC** (Opus codec, designed exactly for low-latency bidirectional audio
+  over the network, with NAT traversal). For native clients, an RTP/Opus stream or even a
+  simple buffered stream can work.
+- **PTT coordination.** Transmit audio is useless without **push-to-talk** tied to it: the
+  client signals PTT (a control-channel intent), the server keys the radio (via Hamlib/CAT or a
+  GPIO/CAT PTT line) and routes the client's audio to the rig — with the timing handled so
+  audio isn't clipped at the start of transmission. This couples the audio path to the control
+  path and to the radio's PTT method.
+- **Half-duplex vs full-duplex reality.** For SSB/linear-satellite work the operator wants to
+  hear their own downlink *while transmitting* (full-duplex) — so RX and TX audio may both be
+  live at once, which is exactly what WebRTC's bidirectional model supports but raises the
+  latency/echo bar.
+
+**Honest assessment.** Audio roughly **doubles the scope** and is largely **orthogonal** to the
+control split — it's a second, parallel streaming subsystem with its own latency, codec, device,
+and PTT-timing problems. The clean design keeps it that way: a **separate audio channel**
+(WebRTC/RTP) negotiated alongside the control protocol, not muxed into it. **Strong
+recommendation: phase it.** Ship the control client/server first (it's independently valuable —
+a remote *controller* with the operator's existing audio setup at the rig is already useful),
+and add audio as a distinct later capability. Treat "remote audio" as its own mini-project with
+its own go/no-go.
+
+### 9.6 Comprehensive pros and cons
+
+**Pros**
+
+- **UI independence and proliferation.** Any number of UIs, in any language/framework, by
+  anyone, without touching the core — the central goal. Web, mobile, TUI, a big wall dashboard,
+  all from one server.
+- **Headless + web operation.** The Raspberry-Pi-in-the-shack-driven-from-a-phone model becomes
+  possible — arguably the most compelling deployment for a fixed station.
+- **Remote operation.** Drive the station from anywhere over a network/VPN.
+- **Multi-client / multi-operator** with consistent state from a single source of truth.
+- **Clean separation of concerns.** The valuable, tested orbital/CAT/rotator logic lives in one
+  place, server-side, exercised identically regardless of client — and is *more* testable
+  (drive the server's API from a test harness with no UI at all).
+- **Independent release cadence** for UI vs core; a UI iteration can't regress radio control.
+- **Natural fit with the Linux/Hamlib direction.** The server is "the core + Hamlib + rotctld
+  behind an API" — it composes cleanly with §8.1/§8.2, and the §8.3 surface still works *inside*
+  a native client.
+- **Future-proofing.** New form factors (a smartwatch glanceable view, a voice assistant, home-
+  automation integration) become "just another client."
+
+**Cons**
+
+- **Substantially more architecture and moving parts.** You now own a protocol, a state-sync
+  model, a server process lifecycle, and at least one client — versus one program. This is the
+  big cost.
+- **A new compatibility surface.** The wire protocol must be versioned and kept stable across
+  independently-released clients/servers; mismatches are a whole new class of bug.
+- **Latency and liveness.** Tracking is real-time; the UI must reflect fast-moving az/el/Doppler
+  smoothly. Network hiccups, reconnection, and "is the server still there?" handling are new
+  concerns the monolith never had.
+- **State synchronization is genuinely hard to get right.** Snapshot+delta, reconnection
+  resync, conflicting commands from two clients, optimistic vs authoritative updates — these are
+  classic distributed-state problems. Keeping the server **authoritative** (clients never assume
+  their command took effect until the server confirms) is essential and adds round-trips.
+- **Security becomes mandatory the moment it leaves localhost.** Auth, transport encryption,
+  and especially **interlocks on transmit** (you do not want an unauthenticated client keying a
+  transmitter) — see §9.7. A networked radio/rotator controller is a higher-stakes thing than a
+  self-contained gadget.
+- **Audio multiplies the difficulty** (codecs, low-latency streaming, PTT timing, echo,
+  device setup) — §9.5.
+- **Heavier client baseline.** A browser/SDL2 client on a real computer/phone is a different
+  (heavier) footprint than the bare-metal Cardputer UI; fine for a Pi/desktop, but it's no
+  longer a tiny self-contained device.
+- **Operational complexity for the user.** "Find the server, connect, deal with Wi-Fi/firewall"
+  is more setup than "turn on the Cardputer." Discovery (mDNS) and good defaults mitigate but
+  don't eliminate this.
+- **Doesn't fit the Cardputer/Tab5 targets.** This is a **Linux/server** architecture; the
+  ESP32 devices remain the self-contained monolith. The split is an *addition* for capable
+  Linux hosts, not a replacement of the embedded design — and that's two architectures to keep
+  in mind.
+
+### 9.7 Security considerations (non-optional once networked)
+
+The instant control leaves `localhost`, this is a remotely-controllable radio transmitter and
+antenna rotator — treat it accordingly:
+
+- **Authentication** on connect (at minimum a shared token/password; ideally per-client creds).
+- **Transport encryption** (WSS/TLS) for anything beyond a trusted LAN; a reverse tunnel/VPN for
+  internet exposure rather than punching holes in a firewall.
+- **Transmit interlock.** PTT/transmit and rotator slew are the dangerous intents — gate them
+  behind explicit authorization, and consider a server-side "control lock" so only one client
+  holds TX control at a time (a viewer vs operator distinction).
+- **Sane limits server-side regardless of client** — the rotator soft-limits, the
+  out-of-passband handling, band-edge checks must live in the **server**, never trusted to the
+  client, since a malicious or buggy client must not be able to drive the hardware past safe
+  bounds.
+- **Default to localhost-only / LAN-only** out of the box; remote exposure should be a
+  deliberate opt-in with a warning, mirroring how the firmware treats `setInsecure()` TLS today.
+
+### 9.8 Migration path (how to get there without a big-bang rewrite)
+
+The split does **not** require rewriting the core — it requires **wrapping** it:
+
+1. **Define the state model and intent set** from what the UI already needs — this is mostly
+   enumerating the data the `draw*()` methods read and the actions the `key*()` handlers take.
+   That inventory *is* the API. (The §8.3 work of making the UI talk to the core through a clean
+   interface is the natural precursor — the same seam, promoted to a wire.)
+2. **Wrap the core in a server** that owns an instance of the orbital/CAT/rotator logic and
+   exposes the model over WebSocket+JSON (localhost first). The existing tracking loop runs
+   server-side and publishes state each tick.
+3. **Build a first client** — easiest is a **web UI** (immediately demonstrates the headless/
+   phone goal) or an SDL2 native client reusing the §8.3 surface against the server instead of
+   the in-process core.
+4. **Harden:** discovery (mDNS), reconnection/resync, auth, the transmit interlock.
+5. **(Separate project) Audio:** add the WebRTC/RTP audio channel + PTT coordination as an
+   independent capability (§9.5), with its own go/no-go.
+
+A reasonable **incremental stance:** even if the first Linux build keeps an in-process UI
+(§8.3), designing that UI-to-core seam *as if it were the API* (clear state model, explicit
+intents, server authoritative over hardware bounds) makes a later promotion to a network
+boundary cheap, and costs almost nothing now. That is the lowest-regret way to keep the
+client/server option open without committing to all of it up front.
+
+### 9.9 Recommendation
+
+The client/server model is the **right long-term architecture for the Linux/Pi class of
+target**, and it is what makes the most exciting deployments possible — a headless shack server
+driven from a phone, multiple UIs, remote operation. But it is a **significant, distinct
+commitment** beyond the in-process Zero port, and it should be **phased**:
+
+- **Near term:** build the Linux port with the §8.3 in-process UI, but *design the UI-to-core
+  seam as a clean state+intent boundary* (§9.8 step 1) so the wire boundary is a cheap later
+  promotion, not a rewrite.
+- **Mid term:** promote that seam to a **WebSocket+JSON control API** and ship the first
+  **headless server + web client** — this delivers the Pi-from-a-phone goal and is independently
+  valuable with the operator's existing audio at the rig.
+- **Longer term / separate project:** add **server-side audio** (WebRTC + PTT coordination) to
+  reach full remote operation.
+
+Keep the **server authoritative** over all hardware-safety bounds, **version the protocol** from
+the first line, and treat **audio and security** as the two areas that need the most deliberate,
+standalone design. The ESP32 Cardputer/Tab5 builds remain the self-contained monolith; this
+architecture is an addition for capable Linux hosts, composing cleanly with the Hamlib
+(§8.1), two-radio (§8.2), and abstracted-UI (§8.3) directions already scoped here.
+
+> **The embedded counterpart.** For the *current* ESP32 Cardputer ADV, a more modest version
+> of "operate it from a browser" is scoped separately in **`WEB_CONTROL_SCOPE.md`** — extending
+> the on-device web server the firmware already ships so the whole feature set (including setup)
+> is reachable from a phone, with the no-PSRAM heap (and freeing the display sprite in a
+> web-control mode) as the governing constraint. That is the self-contained, single-device
+> answer; this §9 is the expansive, multi-client/audio answer for capable Linux hosts. They
+> target different hardware and make opposite memory trade-offs (short-poll JSON and a freed
+> sprite there; persistent WebSocket and room to spare here).
 
 ---
 

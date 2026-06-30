@@ -48,6 +48,10 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **Polar sky plot with ground track** — the live polar shows the satellite's arc
   across the sky for the current pass (or the next one when it's below the horizon),
   with AOS/LOS markers and a travel-direction arrow.
+- **Point-here arrow** — a glanceable screen (`a` on Track) that draws a big compass
+  arrow to the satellite's azimuth plus an elevation bar, sized for hand-aiming a
+  portable Yagi without reading numbers off the screen mid-pass; the radio and rotator
+  keep tracking underneath while it's open.
 - **OSCARLOCATOR live view** — a live azimuthal-equidistant plotting board (`k` on
   the Satellites screen) showing the satellite's **sub-point and footprint on the
   Earth** in real time, the graphical companion to the EQX table. It also plots a
@@ -121,6 +125,8 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **Workable grid squares** — the 4-char Maidenhead grids under the satellite's
   footprint, either as the union over a selected pass (off Passes) or live now
   (off Track, with radio/rotator tracking uninterrupted) - for VUCC/grid chasing.
+  A **prefix filter** (`f`) narrows the list to grids starting with what you type
+  (`EM`, `EM2`, or `EM21`), entered upper-case per the grid rule; `c` clears it.
 - **Workable US states** — the same idea for US states + DC (the `w` key), found
   by point-in-polygon against bundled simplified boundaries - for WAS chasing.
 - **Workable DXCC** — and again for all **340 DXCC entities** (the `e` key): a
@@ -140,8 +146,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   RF-source reference.
 - **Space weather** — a **Space Wx** screen (main menu) shows the solar **10.7 cm
   flux**, planetary **Kp**, and running **A index** from NOAA SWPC, each colour-coded
-  with a plain-language HF/satellite operating outlook; cached for offline viewing
-  and refreshed with each elements update.
+  with a plain-language HF/satellite operating outlook and an **aurora-likelihood**
+  line derived from Kp (unlikely / possible / likely, with latitude); cached for
+  offline viewing and refreshed with each elements update.
+- **What's overhead now** — an **Overhead now** screen (main menu) scans the whole
+  loaded catalog for every satellite **above the horizon at this instant** and lists
+  them sorted by elevation, with azimuth and rise compass direction (high passes in
+  green, near-horizon in yellow) — a quick "what can I work or see right now" glance,
+  with an `r` rescan for the current moment.
 - **Terrestrial weather** — a **Weather** screen (main menu) shows current
   conditions and a multi-day forecast for your operating site from **Open-Meteo**
   (free, no key): temperature, sky, wind and humidity now, then per-day high/low and
@@ -159,8 +171,23 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   with no WiFi; an **"Activations…"** indicator shows on the bottom status bar while it
   refreshes online (like the Weather fetch), with the cached list visible underneath. The
   **Update** screen's `k` pulls a fresh activations list alongside the GP update, so one
-  keypress refreshes both.
+  keypress refreshes both. From an activation's detail view, **`a` sets a sked
+  reminder** for it — a countdown (T-60/30/10) of beeps and a "SKED!" flash at the
+  scheduled start time, independent of the favorites AOS alarm, so you don't miss a
+  planned contact even if that satellite isn't one of your starred favorites. You can
+  also **enter your own activations or skeds** (`n` on the list, `e` to edit) in the
+  exact same format as the feed — for ops that aren't posted to hams.at — which are
+  stored separately, merged into the list alongside the fetched ones (marked with a
+  `*`), and survive feed refreshes; they work fully offline and can carry sked reminders
+  like any other entry.
 - **On-device Help** — press `h` on (almost) any screen for a scrollable key reference.
+  The Help screen also links to five built-in references, each formatted for the Cardputer
+  screen and scrollable: a **Glossary & math** (`g`, the terms plus the orbital and Doppler
+  formulas), a **User guide** (`m`, a concise end-to-end manual), a **Ham satellite history**
+  (`s`), a **Tech help** guide (`t`, portable antennas with the Arrow Yagi as the top pick,
+  feedline/pointing/operating tips, and getting the interfaces and logging working), and a
+  **Learn** screen (`l`, in-depth radio and orbital theory and how amateur satellites work
+  internally).
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without
   interrupting Doppler control** — or add one **after the fact** from the Log menu,
@@ -191,6 +218,9 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   under the exact LoTW field name and sigspec order, fully data-driven from the
   TrustedQSL config (340 DXCC entities, all primary lists, every US county and Japanese
   city). Sent QSOs are flagged (an `uploaded` column) so they're never uploaded twice.
+  **Editing a logged QSO clears those flags** so the corrected record is re-sent on the next
+  upload, and the Edit QSO screen exposes **LoTW** and **Cloudlog** rows you can toggle to
+  override that (mark a QSO as already-uploaded after a cosmetic fix, or flip a flag directly).
   See [MANUAL.md → LoTW upload](../MANUAL.md).
 - **Cloudlog / Wavelog upload** — **Upload to Cloudlog** on the Log menu sends your
   satellite QSOs to a self-hosted **Cloudlog** (or compatible **Wavelog**) online logbook
@@ -235,7 +265,9 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   just the elements, AMSAT activity and favorites' transponders, skipping space/terrestrial
   weather; the backlight blanks after a configurable idle
   time (any key wakes it); config + favorites **back up / restore to the SD card**;
-  and an **About** screen reports version, storage, GP age, battery, and uptime.
+  and an **About** screen reports version, storage, GP age, battery, and uptime, with a
+  **License & credits** sub-screen (`l`) carrying the no-warranty and hardware disclaimers,
+  data-source attributions, and a recommendation to support AMSAT.
 - **Fully offline** once GP + transponders are cached. CardSat stores everything in
   a **`/CardSat` folder on the microSD card** by default, falling back to internal
   **LittleFS** if no card is present.

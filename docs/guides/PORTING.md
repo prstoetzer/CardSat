@@ -107,6 +107,10 @@ Wire, SPI) are identical. The work is **display, input, and pins**:
 Result: full CardSat on new hardware, with the predictor, CAT, rotator, and net layers
 untouched.
 
+> For a **fully worked example of this scenario on a specific, well-supported board** —
+> including a large-screen reflow strategy, an I²C keyboard, PSRAM, and RS-485/USB-host
+> CAT options — see **§3e (M5Stack Tab5)** below.
+
 ### 3b. "I just want the pass predictor" (any platform)
 
 `predict.{h,cpp}` + the element model in `satdb.h` (the `SatEntry` struct) + the Hopperpop
@@ -124,7 +128,126 @@ modules port with an `<Arduino.h>` shim (§8); the network and filesystem module
 *easier* on Linux (use Berkeley sockets and stdio instead of WiFi/LittleFS); the display
 becomes whatever you like (ncurses, a GUI, a web UI). This is a substantial project, but
 the valuable algorithms — SGP4 wrapping, Doppler, the One True Rule, CAT framing — move
-over intact.
+over intact. (The **Cardputer Zero** is exactly this case on a specific device — see
+`docs/design/CARDPUTER_ZERO_PORT_SCOPE.md`.)
+
+### 3e. "I want CardSat on the M5Stack Tab5 (with the Tab5 keyboard)"
+
+**Status: forward-looking guide — not yet built or tested on hardware.** The figures
+below are from M5Stack's published Tab5 and Tab5-Keyboard documentation; treat the wiring
+specifics as "confirm against the datasheet/M5Unified before relying on them."
+
+> **Going further than a basic port?** For **USB-host radio and rotator control**, a
+> **touchscreen-first UI**, and making the **keyboard optional**, see the dedicated design
+> scope **`docs/design/TAB5_PORT_SCOPE.md`**. This section is the concise "the base port is
+> easy" overview; that document covers the three advanced capabilities and their phased plan.
+
+The Tab5 is the **best-case** non-Cardputer port: it stays inside the Arduino + M5 (M5GFX /
+M5Unified) world the firmware already lives in, so unlike the Cardputer **Zero** (a Linux
+machine — see `docs/design/CARDPUTER_ZERO_PORT_SCOPE.md`) this is *not* a re-platforming.
+It's the §3a "different ESP32 board" path, with two pieces of genuine good news and one
+real chunk of work.
+
+**What the Tab5 is, and why it's friendly to CardSat**
+
+| Tab5 fact | What it means for the port |
+|---|---|
+| **ESP32-P4** (RISC-V dual-core ~400 MHz), Arduino-supported via M5Unified | Same toolchain and `M5Canvas`/`M5GFX` drawing model as the ADV. The SoC is RISC-V rather than Xtensa, but that's the compiler's problem, not the source's — there is **no Xtensa-specific code** in CardSat to unwind. |
+| **32 MB PSRAM**, 16 MB Flash | **The single biggest relief:** every no-PSRAM constraint the firmware fights — heap fragmentation, streaming-instead-of-buffering downloads, pre-sized JSON buffers, the LittleFS tightness — simply stops mattering. You can leave the careful code in place (it still works) or relax it; either way the fragile free-list is no longer fragile. |
+| **5″ 1280×720 IPS** (MIPI-DSI; ILI9881C/ST7123 auto-detected), **GT911 capacitive multi-touch** | The opposite problem from the ADV's 240×135: you have *room to spare*, not a reflow-to-fit squeeze. This is the real work — see "Display" below. |
+| **WiFi 6 + BT 5.2** via an **ESP32-C6** co-processor over SDIO | WiFi works, but it's **not** the in-SoC radio the ADV has — `net.{h,cpp}` talks to the C6 through M5Unified's network bring-up rather than driving WiFi directly. Expect to adjust the connect path, not rewrite TLS/HTTP. |
+| **microSD**, BMI270 IMU, RX8130CE RTC | SD logging/caching, tilt-tuning (the IMU path), and a real RTC all map onto existing features. BMI270 is a different IMU than the ADV's — re-wire the tilt read to M5Unified's IMU API. |
+| **RS-485 built in** (SIT3088, switchable termination), **Grove**, **M5BUS**, **USB-A host + USB-C OTG** | CAT/rotator wiring options are *richer* than the ADV: native RS-485 for Yaesu/Kenwood-over-RS-232-class rigs and for GS-232 rotators without an external level shifter. The **USB-A host port** additionally enables driving **USB-CDC radios and rotators** directly (the modern USB-CAT rig class that's out of scope on the ADV) — a first-class feature with its own design in **`docs/design/TAB5_PORT_SCOPE.md` §2**. |
+| NP-F550 battery + INA226 monitor | The battery/charge screen maps onto INA226 instead of the ADV's gauge — re-target the read. |
+
+**The keyboard — an optional fast path.** The **Tab5 Keyboard** (70 keys, 14×5
+matrix, STM32F030C8T6) connects over **I²C on Ext.Port1** with a dedicated interrupt line,
+and — crucially — has a **"Character" mode that returns the *name string* of the pressed
+key plus the Ctrl/Alt modifier state** (Sym/Aa are handled on the keyboard itself). CardSat's
+entire UI is driven by single `char` key codes (see §3a step 3 and `App::loop()`), so this
+mode is almost a drop-in: read the character from the keyboard over I²C and feed it into the
+same key dispatch the Cardputer matrix feeds today. It's a detachable accessory, so it's the
+**fast text-entry path when present, not a requirement** (touch covers the keyboard-less case
+— see the touch note below). The mapping work is small and mechanical:
+
+- Map the keyboard's reported characters to CardSat's logical keys — the navigation legends
+  `;` `.` `,` `/`, **ENTER**, and `` ` ``/**DEL** for back, plus the letter shortcuts
+  (`r` refresh, `t` next TX, `n`, `m`, `d`, `v`, `x`, etc.). Most are literal ASCII and pass
+  straight through.
+- Decide what plays the role of the ADV's `` ` `` (back) and DEL. The Tab5 keyboard exposes
+  **Esc** — but note CardSat's text editors deliberately treat DEL as backspace and only
+  `` ` `` as back (so DEL can delete a character); pick the Tab5 keys for "back" and
+  "delete-char" with that distinction in mind (see the editor note in §5/the `isBack` helper).
+- The **70-key layout has more keys than the ADV's matrix**, so nothing has to be dropped or
+  buried under a modifier the way the cramped Cardputer sometimes forces — a usability win,
+  not a constraint.
+- **Touch and "keyboard optional."** The keyboard is a **detachable accessory**, and the
+  GT911 capacitive panel can drive the whole UI by itself, so the intended design is
+  **touchscreen-first with the keyboard optional** — both feeding one logical-input layer so
+  the existing char-driven state machine is reused unchanged. The minimal version is on-screen
+  buttons that emit the existing key chars (zero screen-logic change); the richer version adds
+  direct manipulation (tap a list row, drag the passband). This — plus an on-screen text-entry
+  path for when no keyboard is attached — is designed in full in
+  **`docs/design/TAB5_PORT_SCOPE.md` §3–§4**.
+
+**The real work: the display.** The UI is the only large task, and it's the *pleasant*
+kind — too much space rather than too little. Every `draw*()` method positions text and
+shapes with **literal 240×135 coordinates**; on a 1280×720 canvas those layouts will sit in
+a tiny corner. Two viable strategies, pick per screen or globally:
+
+1. **Integer-scale the canvas (fastest path to "it runs").** Render the existing layout to a
+   240×135 (or 320×170) off-screen `M5Canvas` exactly as today, then blit it up with a 4–5×
+   integer scale to the big panel. Near-zero layout work; the result is a crisp-but-chunky
+   "big pixels" look. Good for bring-up and arguably fine as a permanent low-effort option,
+   since M5GFX sprite scaling is cheap and you have PSRAM for the buffer.
+2. **Reflow to native resolution (the proper job).** Lay screens out for 1280×720: bigger
+   fonts, multi-column lists, a persistent status/▲▼ region, more pass rows visible at once,
+   the world map and polar plots drawn larger. This touches **many** `drawXxx` functions
+   because the geometry is literal coordinates, but the *logic* inside each is untouched —
+   you're moving numbers, not rewriting behavior. A good middle road is to introduce a few
+   layout constants (a scale factor, margins, row height) and route the worst-offender
+   screens (Track, Passes, the maps) through them first, leaving rarely-seen screens scaled
+   per strategy 1 until you get to them.
+
+Either way, **the abstraction seams already exist**: the drawing all goes through one
+`canvas`, and the input all arrives as `char`s, so the display and keyboard are genuinely the
+only edges you touch. The predictor, Doppler/One-True-Rule engine, CAT backends, rotator,
+LoRa, and net layers move with the same edits any ESP32 board needs (pins in `config.h`,
+the C6 WiFi bring-up, the IMU/battery reads).
+
+**A sensible order of work**
+
+1. **Build + bring-up.** Get the project compiling for the ESP32-P4 target under
+   Arduino/M5Unified; bring up the panel with strategy-1 scaling so the existing UI appears
+   (chunky but working) on the 1280×720 screen. Confirm WiFi via the C6 and SD mount.
+2. **Keyboard.** Wire the Tab5 Keyboard in Character mode over I²C + interrupt; translate its
+   characters into CardSat's key dispatch. At this point the whole UI is drivable and you
+   have a usable tracker.
+3. **Pins + peripherals.** Point `config.h` at the Tab5's buses; re-target the **BMI270** IMU
+   (tilt tuning), **INA226** battery read, and **RTC**. Wire CAT to **RS-485** (native) or
+   Grove/USB as appropriate for your rig.
+4. **Display reflow.** Iterate screen-by-screen from scaled to native-resolution layouts,
+   worst-offenders first (Track, Passes, world map, polar).
+5. **Relax the no-PSRAM code (optional).** With 32 MB PSRAM you may simplify the streaming
+   parsers / pre-sized buffers, but there's no need — they work as-is.
+
+> The list above is the **base** port. For the **touchscreen-first UI, optional keyboard, and
+> USB-host CAT/rotator** — which reorder and extend this plan (touch comes earlier; USB host
+> is a focused later phase) — follow the phased plan in **`docs/design/TAB5_PORT_SCOPE.md`
+> §5** instead.
+
+**Net result:** full CardSat on a 5″ 720p touch tablet with a real 70-key keyboard, the
+entire orbital/CAT/rotator/LoRa core unchanged, the heap-fragmentation constraints gone, and
+the only substantial work being a display reflow you can do incrementally (and ship scaled in
+the meantime). Of the non-Cardputer targets, this is the **lowest-risk, highest-payoff** port
+— it stays in the Arduino/M5 world, so none of the Zero's Linux/Wayland/Hamlib re-platforming
+applies here.
+
+> Compared with the **Cardputer Zero**: the Zero is a Linux machine and a substantial rewrite
+> (new UI stack, Hamlib, process model — see `docs/design/CARDPUTER_ZERO_PORT_SCOPE.md`). The
+> **Tab5 is not** — it's the same firmware on a bigger, faster, PSRAM-equipped ESP32-class
+> board. If the goal is "CardSat on a larger screen with a keyboard, soon and safely," the
+> Tab5 is the easier target by a wide margin.
 
 ---
 
@@ -227,6 +350,185 @@ you reimplement a small loop: each tick, compute corrected frequencies with
 `Predictor::dopplerFreqs`, optionally read the dial back (`readSubFreq`) to honor manual
 tuning, and call `setSubFreq`/`setMainFreq`. The pattern is ~100 lines; search `app.cpp`
 for `lastRxSet` and `knobMoveThreshHz` to see it.
+
+---
+
+## 5a. Hamlib vs. independent radio control (decision analysis)
+
+On a Linux-class target — the **Cardputer Zero** (CM0/Linux) being the motivating case,
+but this applies to any Raspberry Pi / desktop port — you face a real architectural fork
+for CAT control that you do **not** have on the ESP32. On the ESP32 the decision is made
+for you: there is no room for Hamlib's ~2 MB of library plus its hundreds of rig backends
+on the chip, so CardSat carries its own compact per-rig backends (`CivRig`, `YaesuRig`,
+`KenwoodRig`, `IcomNetRig`) and that is the only option. On Linux, **Hamlib is available
+natively**, so three strategies open up. They are not mutually exclusive, and the
+`Rig` abstraction was deliberately built so that the choice is confined to one layer.
+
+This section lays out all three with honest pros and cons so the decision can be made
+deliberately rather than by default.
+
+### The three options
+
+1. **Hamlib only** — drop the hand-rolled backends on the Linux target; talk to every
+   radio through `libhamlib` (or a supervised local `rigctld`) via the existing
+   `RigctlRig` client.
+2. **Independent only** — port CardSat's own backends to Linux serial (`/dev/ttyUSB*`),
+   keeping the byte-level protocol code that already exists and is, for the IC-821 path,
+   hardware-proven.
+3. **Both, user-selectable** — ship both paths and let the operator pick, per radio, in
+   settings: "use CardSat's built-in driver" or "use Hamlib (model + port)".
+
+### What makes this cheap to reason about
+
+The whole app speaks to the radio through the narrow `Rig` interface
+(`setMainFreq`/`setSubFreq`, `readSubFreq`/`readMainFreq`, `readPtt`, `enableSatMode`,
+`selectSubBand`, …), and **both** a Hamlib client (`RigctlRig`) and the independent
+backends **already exist and already implement that interface**. So none of these options
+is a rewrite of the app — they are different implementations behind the same seam, chosen
+in `makeRig()`. The Doppler engine, the UI, and everything above the `Rig` interface are
+untouched regardless of which you pick.
+
+### Option 1 — Hamlib only
+
+**Pros**
+- **Enormous radio coverage for zero protocol work.** Every rig Hamlib supports becomes
+  usable immediately — including the entire USB-CDC class that is OUT OF SCOPE on the
+  ESP32 today (FT-991/991A, IC-7100, and the rest of `HALFDUPLEX_RADIOS_SCOPE.md`),
+  because on Linux they enumerate as `/dev/ttyACM*` and Hamlib already knows them.
+- **The verification burden moves off CardSat.** CardSat's own backends (other than the
+  IC-821 single-pin path) are host-tested but not all hardware-confirmed; that risk is a
+  standing liability documented in `THINGS_TO_VERIFY.md`. Hamlib is the most field-tested
+  rig library in the hobby, maintained by many hands across decades of radios. Adopting
+  it retires a whole column of "verify on real hardware" items.
+- **Less code to carry.** The CI-V/Yaesu/Kenwood/IcomNet `.cpp` files simply aren't
+  compiled into the Linux target. No byte tables, no per-rig quirk handling to maintain.
+- **Matches the platform idiom.** "Spawn and supervise a helper daemon, talk to it over a
+  socket" (`rigctld` on `localhost`) is exactly how the Zero's own OS is structured, and
+  keeps CardSat's process model clean. Rotators get the identical treatment via `rotctld`
+  and the existing `RotctlRotator`.
+- **Network and multi-radio fall out naturally.** One `rigctld` per physical radio means
+  the two-radio (separate uplink/downlink) model and mixing wired + USB + LAN rigs is just
+  more daemon instances — no new CardSat code.
+
+**Cons**
+- **A heavy external dependency.** Hamlib (or `rigctld`) must be installed, version-matched,
+  and present at runtime. CardSat goes from self-contained to depending on a large library
+  whose packaging, versioning, and occasional regressions are outside the project's control.
+  A Hamlib that's too old may lack a rig; one that's too new may have changed a behavior.
+- **The satellite/split semantics are Hamlib's, not CardSat's — and they vary by rig.**
+  CardSat's whole value is precise full-duplex satellite control (One True Rule, MAIN=TX /
+  SUB=RX, sat mode, band assignment). Mapping that convention onto a given Hamlib model's
+  VFO/split/sat handling is genuinely new logic and **must be confirmed per rig on the
+  air**. Hamlib's sat-mode coverage is uneven; some rigs expose it cleanly, some don't, and
+  `rigctld`'s split handling has its own corner cases. You inherit Hamlib's model of the
+  radio, which is not always the satellite-operator's model.
+- **Less direct control over timing and the knob-read loop.** The One True Rule depends on
+  reading the dial back quickly and writing tightly within a deadband. Going through
+  `rigctld`'s socket adds a hop and Hamlib's own polling cadence; for most rigs this is
+  fine, but you have less control over the exact read/write timing than when you own the
+  serial bytes. Tuning the feel (the grace window, thresholds) now interacts with Hamlib's
+  behavior.
+- **Loss of the one thing CardSat has proven.** The IC-821 single-pin CI-V path is
+  hardware-confirmed and is a genuinely bespoke capability (single shared open-drain GPIO,
+  full knob tuning + Doppler). Some of that specific, tested behavior would be handed to
+  Hamlib's generic Icom backend, which may or may not behave identically on that radio.
+- **Harder to debug end-to-end.** When something misbehaves, the fault could be in CardSat,
+  in Hamlib, in `rigctld`, or in the rig — more layers between the operator and the bytes.
+
+### Option 2 — Independent only
+
+**Pros**
+- **Full control of the bytes and the timing.** CardSat owns the exact CAT exchange, so
+  the One True Rule's read-back-and-correct loop, deadband, and grace window behave exactly
+  as designed and tested — no intermediary cadence to fight. This is the path the project's
+  crown-jewel tuning behavior was built and proven on.
+- **Self-contained, no runtime dependency.** The Linux build stays a single program with no
+  external library to install, version-match, or break. Simpler packaging, simpler support.
+- **Preserves the hardware-proven IC-821 path** and the rest of the bespoke behavior exactly
+  as it exists today; porting it is "swap `HardwareSerial` for `/dev/ttyUSB0`," not a
+  re-implementation (see the reuse notes in §5 above).
+- **Satellite semantics stay CardSat's.** MAIN=TX/SUB=RX, sat mode, and band assignment are
+  expressed in CardSat's own terms with no impedance-mismatch against a general library's
+  VFO model.
+
+**Cons**
+- **The verification burden stays on the project, and grows.** Every radio CardSat wants to
+  support needs its own backend written and **confirmed on that physical radio**. Today only
+  the IC-821 is hardware-proven; Yaesu, Kenwood, separate-pin CI-V, and IcomNet are all
+  host-tested only. Independent-only means owning that long tail forever.
+- **The USB-CDC class is a large amount of new work.** Reaching the modern USB rigs (the
+  headline capability the Zero's USB host unlocks) means writing and testing those backends
+  from scratch — exactly the radios Hamlib already handles for free.
+- **Reinventing a solved problem.** Hamlib exists precisely because per-rig CAT is fiddly
+  and endless. Choosing independent-only on a platform where Hamlib is freely available is
+  re-solving a problem the community already solved, with a fraction of the test coverage.
+- **Slower to grow the supported-radio list**, and that growth is gated on having each rig
+  on the bench.
+
+### Option 3 — Both, user-selectable (recommended)
+
+Ship both backends on the Linux target and expose the choice **per radio** in settings:
+a toggle between "CardSat built-in driver" (the independent backend for that rig family)
+and "Hamlib" (enter a Hamlib model id + device/port). `makeRig()` already switches on a
+profile; it gains one more axis — *which implementation* — rather than a new app.
+
+**Pros**
+- **Best of both, and the cons of each are largely cancelled.** Operators get Hamlib's
+  vast coverage (and the USB-CDC class) when they want breadth, and CardSat's tight,
+  hardware-proven native control (notably the IC-821 single-pin path) when they want the
+  exact tested behavior. Neither audience is forced onto the other's trade-offs.
+- **A graceful migration and a safety net.** The native paths that are already proven keep
+  working unchanged; Hamlib is available for everything else. If a Hamlib mapping for some
+  rig's sat mode misbehaves, the operator can fall back to the built-in driver (or vice
+  versa) without waiting on a release. This also de-risks the port: you don't have to get
+  the Hamlib sat-mode mapping perfect for every rig before shipping.
+- **Lets the hard part be incremental.** The genuinely new work — mapping CardSat's
+  satellite convention onto each Hamlib model — can be done rig-by-rig, with the native
+  driver as the always-available baseline meanwhile.
+- **Future-proof.** New radios can arrive via Hamlib immediately; radios that need
+  CardSat-specific tricks can still get a bespoke backend. The project isn't boxed into
+  either philosophy.
+
+**Cons**
+- **Most code and the largest test matrix.** You maintain (and at least smoke-test) two
+  radio paths on Linux, plus the selection UI. Bugs can be reported against either path,
+  and "which backend were you using?" becomes a standing support question.
+- **More configuration surface for the user.** The radio settings screen must now express
+  not just "which radio" but "which driver," with Hamlib's model id / port / serial params
+  appearing only in the Hamlib branch. This is the UI work `THINGS_TO_VERIFY.md`-style
+  caveats warn about — it has to be clear, or it confuses.
+- **Two ways to do the same thing** can be a documentation and explanation burden; the
+  manual must guide operators on when to pick which.
+- **The independent path still carries its verification debt** — choosing "both" doesn't
+  retire the host-tested-only backends; it just stops them from being the *only* option.
+
+### Recommendation and rationale
+
+For the Zero port, **Option 3 (ship both, default to Hamlib, keep native as a selectable
+fallback)** is the strongest fit, for three reasons specific to CardSat:
+
+1. **CardSat has exactly one hardware-proven backend (IC-821 single-pin) and it is
+   genuinely bespoke.** Throwing that away to go Hamlib-only discards proven, tested
+   behavior; an independent-only build can't reach the USB-CDC rigs without a mountain of
+   new verification. Only "both" preserves the proven path *and* gains the breadth.
+2. **The cost of "both" is mostly UI, not protocol** — both implementations already exist
+   behind the `Rig` interface, so the marginal work is the selection screen and the
+   per-rig Hamlib sat-mode mapping, which you'd need for any Hamlib adoption anyway.
+3. **It de-risks the port's single hardest unknown** — the CardSat-convention-to-Hamlib
+   mapping — by keeping the native driver as an always-working baseline while that mapping
+   is confirmed rig by rig on the air.
+
+A reasonable **phasing**: bring Hamlib up first (it unlocks the most radios fastest and is
+the long-term default), keep the already-ported native backends compiled in as the
+fallback, and expose the per-radio selector once both are working. If engineering time is
+tight, Hamlib-first with the native paths following is acceptable — but designing the
+`Rig` selection with *two axes* (profile × implementation) from the start costs little and
+avoids a later refactor.
+
+> The Cardputer Zero scope document (`docs/design/CARDPUTER_ZERO_PORT_SCOPE.md`, §8.1)
+> describes the mechanics of wiring Hamlib in on the Zero specifically (collapsing the rig
+> factory, supervising a local `rigctld`, the settings changes). Read it alongside this
+> analysis: this section is the *why/which*, that section is the *how* on the Zero.
 
 ---
 

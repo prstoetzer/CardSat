@@ -30,8 +30,8 @@ modules first.
 - [Prediction core](#prediction-core): `predict.{h,cpp}`, `satdb.{h,cpp}`, `location.{h,cpp}`
 - [Radio (CAT) layer](#radio-cat-layer): `rig.{h,cpp}`, `radio_profiles.h`, `civ.{h,cpp}`, `yaesu.{h,cpp}`, `kenwood.{h,cpp}`, `icomnet.{h,cpp}`
 - [Rotator layer](#rotator-layer): `rotator.{h,cpp}`
-- [Connectivity & data](#connectivity--data): `net.{h,cpp}`
-- [Optional peripherals](#optional-peripherals): `lora.{h,cpp}`, `voicememo.{h,cpp}`, `irbeacon.{h,cpp}`
+- [Connectivity & data](#connectivity--data): `net.{h,cpp}`, `lotw.{h,cpp}`, `lotw_subdiv.h`
+- [Optional peripherals](#optional-peripherals): `lora.{h,cpp}`, `voicememo.{h,cpp}`, `irbeacon.{h,cpp}`, `notes.{h,cpp}`
 - [Application layer](#application-layer): `app.{h,cpp}`
 - [Cross-cutting data flows](#cross-cutting-data-flows)
 
@@ -196,6 +196,11 @@ in `pollGps()` is platform-specific.
 
 ## Radio (CAT) layer
 
+> For an exhaustive prose walkthrough of the CAT wire protocols (CI-V framing, Yaesu 5-byte,
+> Kenwood ASCII, Icom LAN, rigctl), every rotator backend, **and** the full Doppler tuning model
+> and One True Rule loop, see **`docs/guides/CAT_ROTATOR_DOPPLER.md`**. This section is the
+> file-by-file index; that document is the subsystem reference.
+
 ### `rig.{h,cpp}` (172 + 142 lines) — Tier B
 
 **The CAT abstraction.** `class Rig` (rig.h) is a pure-virtual interface that hides every
@@ -319,6 +324,52 @@ an MCU) and hand the downloaded text to `satdb`'s parser. The data-source URLs a
 
 ---
 
+### `lotw.{h,cpp}` (70 + 400 lines) — Tier C
+
+**LoTW (Logbook of the World) direct upload.** Builds a cryptographically-signed `.tq8` from
+logged satellite QSOs and uploads it to ARRL's self-authenticating LoTW web service. **Requires
+a microSD card:** the user's callsign-certificate private key + cert live there as PEM files
+(`/CardSat/lotw_key.pem`, `/CardSat/lotw_cert.pem`), and the staged `.tq8` is written there
+(`/CardSat/lotw_upload.tq8`) before upload.
+- `buildTq8(qsos, n, station, keyPass, err, *gzippedBytes)` — build + sign the `.tq8`; returns
+  false (and sets `err`) on any failure (missing card/key, parse, sign, gzip).
+- `signData(qso, station)` — the **normalized SIGNDATA** for one QSO, in exact developer-tq8
+  field order with **no trailing spaces** (public so it can be unit-checked).
+- `credentialPresent()` — are the credential PEM files on the card?
+- `LotwStation` carries the station fields LoTW needs beyond per-QSO data (DXCC, grid, CQ/ITU
+  zones, US state/county, non-US primary/secondary subdivision codes + field names, IOTA).
+  `LotwResult` reports signed/accepted/dupe counts + a message.
+
+The load-bearing subtlety: the **outer ADIF record uses spaced fields** (`<NAME:len>val `) while
+**SIGNDATA and structural tags are tight** (no trailing space) — LoTW's signature won't verify
+otherwise. Signing is `mbedtls_pk_sign(SHA1)` (RSA-PKCS1v15-over-SHA1), gzip CRC via ROM
+`miniz` (`mz_crc32`, no allocation). The byte format, SIGNDATA order, and signature were
+validated host-side against ARRL's developer-tq8 spec and OpenSSL's verifier — see
+`docs/proto/lotw/` and `docs/design/LOTW_TQ8_FORMAT.md`. This is an **upload** feature, not
+enrollment: first-time certificate issuance is gated by ARRL (TQSL + a mailed postcard) and
+can't happen on-device; the user exports their existing credential to the card once. The
+gzip step is also the one place the firmware deliberately frees the display sprite for a
+contiguous heap block (see `WEB_CONTROL_SCOPE.md` §3.2).
+
+**Porting note:** Tier C for the mbedTLS/miniz dependency, but the byte-format logic is
+portable; on Linux, OpenSSL + zlib are the natural substitutes and the host-verification
+harness in `docs/proto/lotw/` already exercises that path.
+
+### `lotw_subdiv.h` (2201 lines, header-only) — data table
+
+**Auto-generated DXCC + administrative-subdivision tables** for the LoTW station-location UI,
+extracted from `tqsl-2.8.6 config.xml`. Flash-resident `const` tables (the ESP32-S3 maps
+`const` to flash — zero heap cost). The model follows LoTW's `dependsOn` chain: **DXCC →
+primary** (state/province/oblast/prefecture/…) **→ secondary** (US county, or Japanese
+city/gun/ku); IOTA is free-form. The `DXCC_LIST[]` is ordered so entities **with** a primary
+subdivision come first (alphabetical), then all remaining current entities — so the picker can
+surface subdivision-bearing entities first. `SubdivEntry{code,name}` and
+`DxccEntry{id,name,primaryField,secondaryField}` are the row types. **Do not hand-edit**;
+regenerate from `config.xml` if LoTW updates its enums. (This is the single largest source
+file and is consumed by the LoTW settings screens in `app.cpp`.)
+
+---
+
 ## Optional peripherals
 
 These are gated and can be omitted entirely; removing a module means deleting its calls from
@@ -344,9 +395,34 @@ An IR-LED pass beacon: a 38 kHz carrier flashed in per-event counts (T-60/T-30/T
 TCA/LOS, from the `IR_N_*` table in `config.h`). Pure timing over one GPIO; trivial to keep,
 re-target, or cut.
 
+### `notes.{h,cpp}` (39 + 148 lines) — Tier B
+
+**Plain-text note storage.** Notes are `.txt` files under `/CardSat/notes/` on the active
+filesystem (LittleFS **or** SD — so notes work even with no card). This module is *just the
+file I/O*; the browser + editor UI lives in `app.cpp`. The `Notes` namespace:
+- `ensureDir()` — create `/CardSat/notes` if absent.
+- `list(out[][32], times, max, nameCap)` — enumerate note base names (no dir, no `.txt`),
+  **newest-first by mtime**, with parallel last-write times.
+- `read(base, dst, maxBytes)` / `write(base, text)` / `remove(base)` / `exists(base)` — the
+  obvious per-note operations (base name only — no path, no extension).
+- `sanitizeName(name, cap)` — in-place clean of a user-entered name: keep `[A-Za-z0-9 _-]`,
+  collapse the rest to `_`, trim, cap length; false if the result is empty.
+
+**Porting note:** Tier B — pure filesystem; reimplement against your platform's FS (it already
+goes through `Store::fs()`, so on most ports it follows `storage` for free).
+
 ---
 
 ## Application layer
+
+> The analysis and visualization screens are documented in technical detail across two
+> companion guides: **`docs/guides/ORBITAL_VIEWS.md`** (3D globe, OSCARLOCATOR/EQX,
+> illumination, 10-day progression, mutual finder, DX Doppler) and
+> **`docs/guides/ANALYSIS_VIEWS.md`** (pass detail/polar, visible-pass list, multi-sat
+> schedule, Sun/Moon tracking, sky sources, transits, simulation, sat-to-sat, footprint
+> coverage, space/surface weather, AMSAT status). The logging and QSO services (the log,
+> CloudLog, LoTW, callsign lookup, voice memos, notes) are in
+> **`docs/guides/LOGGING_AND_QSO.md`**.
 
 ### `app.h` (858 lines) — Tier D
 

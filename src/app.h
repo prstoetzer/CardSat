@@ -19,7 +19,8 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
+  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -400,6 +401,39 @@ private:
   uint32_t gStepMs = 0;             // last formation step (millis)
   uint32_t gFrameMs = 0;            // last frame advance
 
+  // --- Games menu + additional mini-games. All fixed-size .bss, no heap. The
+  // games share gScore/gState/gLevel/gFrameMs above where useful; each adds only
+  // a few scalars. Sound + tilt are gated on cfg.gameSound / cfg.gameTilt.
+  int      gamesSel = 0;            // Games-menu cursor
+  // Doppler Lock: hold a marker on a drifting target (sim of transponder tuning).
+  float    gdlTarget = 0, gdlCursor = 0, gdlVel = 0;   // 0..1 positions
+  float    gdlPhase = 0;           // drift oscillator phase
+  uint32_t gdlInMs = 0, gdlLastMs = 0;                 // time-in-band accum, last frame
+  // Catch the Pass: key up when the sat crosses the elevation window.
+  float    gpAz = 0, gpEl = 0, gpT = 0;                // arc parameter
+  uint8_t  gpPhase = 0;            // 0 rising to window, 1 in window, 2 leaving
+  int      gpMisses = 0;
+  uint32_t gpArcMs = 0;
+  // Rotor Runner: slew a crosshair (tilt/keys) to keep a moving sat centred.
+  float    grSatX = 0, grSatY = 0, grSatVX = 0, grSatVY = 0;   // sat pos/vel (px)
+  float    grCurX = 0, grCurY = 0;                     // crosshair pos (px)
+  uint32_t grOnMs = 0, grLastMs = 0;
+  // Morse Meteors: clear falling letters by keying their Morse.
+  static const int GMOR_MAX = 5;
+  int8_t   gmLetter[GMOR_MAX];     // -1 = empty slot, else 0..25 (A..Z)
+  float    gmY[GMOR_MAX];          // fall position (px)
+  int      gmX[GMOR_MAX];
+  char     gmType[10];             // typed Morse buffer for the targeted letter
+  uint8_t  gmTypeN = 0;
+  uint32_t gmSpawnMs = 0, gmDotMs = 0;   // last spawn, last key-down (for dot/dash timing)
+  // Grid Chase: pick the correct Maidenhead grid from options against a timer.
+  char     ggGrid[8];              // the shown grid
+  char     ggOpt[4][8];            // 4 option strings
+  uint8_t  ggCorrect = 0;          // which option is right
+  uint8_t  ggSel = 0;              // cursor
+  int      ggStreak = 0;
+  uint32_t ggDeadline = 0;         // answer-by (millis)
+
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
   uint8_t  stateBits[7];            // 1 bit per entity (STATE_N <= 56)
@@ -533,6 +567,7 @@ private:
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
   Screen   trackReturn = SCR_PASSES; // where the Track screen's back key returns to
   Screen   passesReturn = SCR_SATLIST; // where the Passes screen's back key returns to
+  Screen   lotwReturn = SCR_LOG; // where the LoTW upload screen's back key returns to
   uint32_t trackedNorad = 0;     // NORAD that radio/rotator tracking is engaged for;
                                  // if the active sat changes away from this while
                                  // tracking runs off-screen, the loop stops tracking
@@ -695,6 +730,7 @@ private:
   static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
   static void catMonTrampoline(const char* dir, const uint8_t* b, size_t n);  // CatTraceFn target
   static int  s_fetchDepth;                    // >0 while any outbound fetch is active
+  static bool s_spkWasOnForFetch;              // speaker was enabled when a fetch began (restore after)
   static bool netFetchActive();                // service*() skip rebuild while true
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
   void webdSendStatusJson();                   // GET /api/status
@@ -930,6 +966,7 @@ private:
   bool txDbDelArm = false;        // two-press delete confirmation (manual TX)
   void drawQrz();     void keyQrz(char c, bool enter, bool back);
   bool qrzLookup(const String& call, String& err);  // returns true on success
+  void fillGridsQrz();     // backfill missing QSO grids via QRZ (capped, streamed)
   String qrzSessionKey;            // cached QRZ XML session key (empty = need login)
   String qrzCall;                  // last looked-up callsign
   String qrzName, qrzAddr, qrzGrid, qrzCountry, qrzClass;  // parsed result fields
@@ -938,6 +975,10 @@ private:
   // ---- LoTW upload screen (SCR_LOTW) ----
   void drawLotw();    void keyLotw(char c, bool enter, bool back);
   void doLotwUpload(const String& keyPass);  // build .tq8 + POST + mark uploaded
+  int  countUnuploadedLotw();                // QSOs in the log still needing LoTW upload
+  int  countUnuploadedCloudlog();            // QSOs still needing Cloudlog upload (bit 0x2)
+  void continueLotwBatch(const String& keyPass, bool resend = false);  // cache passphrase in RTC + reboot for next batch
+  void scrubLotwBatchState();                // clear the RTC-held batch state + passphrase
   void lotwEnter();                          // count pending QSOs + open screen
   void lotwRebootUpload();                   // write marker + reboot, re-prompt + upload on fresh boot
   void resumeLotwIfPending();                // setup(): if marker set, re-prompt passphrase + upload
@@ -980,13 +1021,14 @@ private:
   void drawCloudlog();   void keyCloudlog(char c, bool enter, bool back);
   void cloudlogEnter();                     // count pending QSOs + open screen
   void doCloudlogUpload();                  // build ADIF + JSON POST + mark uploaded
-  void cloudlogRebootUpload();              // write marker + reboot, then upload on fresh boot
+  void cloudlogRebootUpload(bool resend = false, int cursor = 0);  // write marker + reboot, then upload on fresh boot
   void resumeCloudlogIfPending();           // setup(): if marker set, upload in a clean boot
   int  clPending = 0;              // QSOs not yet sent to Cloudlog (bit 0x2 unset)
   int  clTotal = 0;                // total sat QSOs in the log (for re-send mode)
   String clStatus;                 // last result/error line shown on the screen
   bool clBusy = false;             // an upload is in progress (suppress re-entry)
   bool clResend = false;           // include QSOs already sent to Cloudlog (opt-in)
+  int  clResendSkip = 0;           // resend batching: QSOs already sent this run (cursor)
   bool clRebootPrompt = false;     // upload hit a -1 connect; asking to reboot-and-retry
   // ---- Upcoming activations feed (SCR_HAMSAT, from hams.at) ----
   struct Activation {
@@ -1071,6 +1113,18 @@ private:
   void drawGame();      void keyGame(char c, bool enter, bool back);  // "Zap the Sats"
   void gameReset(bool full);   // (re)start: full=new game, else next wave
   void gameStep();             // advance one formation step + shots
+
+  // Games menu + the five mini-games. Each is draw + key + a reset; all fixed-size.
+  void drawGamesMenu(); void keyGamesMenu(char c, bool enter, bool back);
+  void sfx(uint16_t freq, uint16_t ms);        // gated game sound (cfg.gameSound)
+  bool gameTiltAxis(float& outLR);             // tilt left/right in [-1,1]; false if unavailable
+  void drawGDoppler();  void keyGDoppler(char c, bool enter, bool back);  void gDopplerReset();
+  void drawGPass();     void keyGPass(char c, bool enter, bool back);     void gPassReset();
+  void drawGRotor();    void keyGRotor(char c, bool enter, bool back);    void gRotorReset();
+  void drawGMorse();    void keyGMorse(char c, bool enter, bool back);    void gMorseReset();
+  void drawGGrid();     void keyGGrid(char c, bool enter, bool back);     void gGridReset();
+  float gdlLevelRate();        // Doppler Lock: level-scaled drift rate
+  void  ggNewRound();          // Grid Chase: build a fresh question
   void keyHelp(char c, bool enter, bool back);
 
   // CAT self-test: run the full sequence, render results, handle scrolling.

@@ -229,6 +229,10 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   under the exact LoTW field name and sigspec order, fully data-driven from the
   TrustedQSL config (340 DXCC entities, all primary lists, every US county and Japanese
   city). Sent QSOs are flagged (an `uploaded` column) so they're never uploaded twice.
+  **Large logs upload automatically in small batches** (6 QSOs each) with a quick reboot
+  between batches to keep each transfer under the ESP32's TCP send-buffer limit; the LoTW
+  key passphrase is remembered across the reboots so **you enter it once** for the whole run
+  (works for both un-uploaded-only and re-send modes).
   **Editing a logged QSO clears those flags** so the corrected record is re-sent on the next
   upload, and the Edit QSO screen exposes **LoTW** and **Cloudlog** rows you can toggle to
   override that (mark a QSO as already-uploaded after a cosmetic fix, or flip a flag directly).
@@ -239,7 +243,9 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   numeric station profile ID in Settings. Because a Cloudlog instance can itself forward
   QSOs on to LoTW, this is an alternative to the on-device LoTW upload — the two are
   tracked independently (separate flags) so a QSO sent to one isn't assumed sent to the
-  other. Supports re-sending already-uploaded QSOs. The API key is treated as a secret and
+  other. Supports re-sending already-uploaded QSOs. Large logs upload in **15-QSO batches**
+  (rebooting to continue if more remain, fully automatic since Cloudlog uses an API key
+  rather than a passphrase). The API key is treated as a secret and
   never written to the serial log. See [MANUAL.md → Cloudlog upload](../MANUAL.md).
 - **Voice memos.** Press **`v`** while tracking to record a quick voice note to the
   SD card **without interrupting Doppler control** — the filename is stamped with the

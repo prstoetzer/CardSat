@@ -90,9 +90,13 @@ bool Settings::load() {
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
+  spkVolume  = d["spkvol"] | (uint8_t)180;
   mapCenterLon = d["mapclon"] | (int16_t)0;
   if (mapCenterLon < -180) mapCenterLon = -180; if (mapCenterLon > 180) mapCenterLon = 180;
   tiltTune   = d["tilttune"] | false;
+  gameTilt   = d["gametilt"] | false;   // games: IMU tilt steering (ADV-only)
+  gameSound  = d["gamesnd"]  | false;   // games: sound effects
+  morseSwap  = d["morseswap"]| false;   // Morse Meteors: swap dot/dash keys
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
   rotEnable  = d["roten"]  | false;
@@ -190,8 +194,12 @@ bool Settings::save() {
   d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
   d["bright"]  = bright;
+  d["spkvol"]  = spkVolume;
   d["mapclon"] = mapCenterLon;
   d["tilttune"] = tiltTune;
+  d["gametilt"] = gameTilt;
+  d["gamesnd"]  = gameSound;
+  d["morseswap"]= morseSwap;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;

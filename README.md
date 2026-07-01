@@ -18,7 +18,18 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
-> **New in v0.9.40:** an **out-of-passband warning** — tuning a linear transponder's knob
+> **New in v0.9.42:** **large LoTW and Cloudlog uploads now work.** A full log is split
+> into small batches (6 QSOs for LoTW, 15 for Cloudlog), each uploaded in its own quick
+> reboot, so you enter your LoTW key passphrase **once** and the device finishes the whole
+> run on its own — for both "un-uploaded only" and "upload ALL" modes. This release also
+> fixes a subtle bug where **HTTPS could fail after playing a sound or voice memo** (audio
+> and TLS were competing for the same internal RAM), adds a persistent **speaker-volume
+> setting** with live feedback, adds a **QRZ grid-backfill** utility for the log, and
+> includes a small **games** menu. The deep debugging behind the upload and audio fixes is
+> written up in **[docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md](docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md)**.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.42.md)**.
+>
+> **In v0.9.40:** an **out-of-passband warning** — tuning a linear transponder's knob
 > past either edge of the passband now flashes a warning while CardSat pulls you back —
 > plus **received LoRa messages wrap** to a second line instead of being cut off. Logging
 > gains a fix: **editing a QSO re-arms its upload** (the corrected record is re-sent to LoTW

@@ -14,12 +14,14 @@ struct WifiAp {
 class Net {
 public:
   bool connect(const String& ssid, const String& pass, uint32_t timeoutMs = 15000);
+  String lastSsid_, lastPass_;   // remembered by connect() so hardResetWifi() can re-begin explicitly
   int  scanWifi(WifiAp* out, int maxAps);   // scan nearby APs (blocking); count or -1
   bool connected();
   void syncTimeNtp();                       // sets system clock via NTP (UTC)
 
   // GET a URL over HTTPS into `out`. Returns false on HTTP/transport error.
   bool httpsGet(const String& url, String& out, size_t maxBytes = 200000);
+  void logConnectProbe(const String& url);   // diagnostic: raw TLS connect + errno on GET failure
 
   // GET a URL over HTTPS straight into a LittleFS file (no large RAM buffer).
   // Essential for the GP file: a ~75 KB body can't be held as one contiguous

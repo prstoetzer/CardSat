@@ -66,7 +66,7 @@ public:
   // it's safe on the no-PSRAM heap. Returns false (and sets lastError) on a bad
   // file or speaker failure. cancelKey is called each block; if it returns true,
   // playback stops early.
-  bool playMemo(const char* file, bool (*cancelPoll)());
+  bool playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume = 200);
 
 private:
   State    _state   = IDLE;

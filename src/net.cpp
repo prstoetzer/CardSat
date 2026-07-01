@@ -10,6 +10,8 @@
 #include "storage.h"
 #include <time.h>
 #include <esp_heap_caps.h>   // heap_caps_get_largest_free_block(): contiguous block,
+#include <fcntl.h>           // fcntl(F_GETFD) for the socket-FD-count diagnostic
+#include <lwip/sockets.h>    // LWIP_SOCKET_OFFSET / CONFIG_LWIP_MAX_SOCKETS
                              // which is what the TLS handshake actually needs
 
 // TLS-session hook (see net.h). Null by default; the app installs it at startup.
@@ -92,15 +94,29 @@ uint32_t Net::WIFI_CYCLE_MIN_GAP_MS = 30000; // don't cycle more than once per 3
 // reconnect with the credentials WiFi already holds. This is the reliable cure
 // once fds wedge and connect() starts returning -1.
 bool Net::hardResetWifi() {
-  Serial.println("[net] hard WiFi reset (flushing socket pool)");
-  WiFi.disconnect(true);                 // true => also turn the radio off briefly
-  delay(200);
+  Serial.println("[net] hard WiFi reset (full radio re-init)");
+  // Fully re-initialise the radio rather than reconnect() the old association. On
+  // this part, after the PHY has been powered down (here, or by the charge-screen
+  // WIFI_OFF), a bare reconnect() can reassociate (IP/RSSI look fine) yet leave the
+  // stack in a degraded state where every outbound connect() returns -1 -- the
+  // ~10 KB WiFi working buffer isn't re-claimed (visible as the largest free block
+  // sitting ~10 KB too HIGH, e.g. 31.7 KB instead of ~21.5 KB, with connects then
+  // failing). A clean OFF -> STA -> begin() cycle forces that buffer to be
+  // re-allocated. See docs/design/HEAP_WIFI_CYCLE.md.
+  size_t blkBefore = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  WiFi.disconnect(true);                 // disconnect + radio off (keep stored config)
+  WiFi.mode(WIFI_OFF);
+  delay(250);
   WiFi.mode(WIFI_STA);
-  WiFi.reconnect();                      // reuse the last good credentials
+  if (lastSsid_.length()) WiFi.begin(lastSsid_.c_str(), lastPass_.c_str());
+  else                    WiFi.begin();   // fall back to NVS-stored credentials
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(150);
   bool ok = (WiFi.status() == WL_CONNECTED);
-  Serial.printf("[net] hard reset %s\n", ok ? "recovered" : "still down");
+  size_t blkAfter = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[net] hard reset %s (largest block %u -> %u, mode %d)\n",
+                ok ? "recovered" : "still down",
+                (unsigned)blkBefore, (unsigned)blkAfter, (int)WiFi.getMode());
   if (ok) connFails = 0;
   return ok;
 }
@@ -142,7 +158,9 @@ bool Net::connect(const String& ssid, const String& pass, uint32_t timeoutMs) {
   WiFi.begin(ssid.c_str(), pass.c_str());
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) delay(150);
-  return WiFi.status() == WL_CONNECTED;
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  if (ok) { lastSsid_ = ssid; lastPass_ = pass; }   // remember for hardResetWifi()
+  return ok;
 }
 
 bool Net::connected() { return WiFi.status() == WL_CONNECTED; }
@@ -189,6 +207,39 @@ void Net::syncTimeNtp() {
   for (int i = 0; i < 40 && !getLocalTime(&ti, 250); ++i) { /* wait */ }
 }
 
+// Diagnostic for a connect-level GET failure. HTTPClient reports only a generic code;
+// this probes a raw TLS connect to the same host and logs the underlying result +
+// mbedTLS/socket error string. A socket/allocation errno here (connects failing while
+// heap is fine) points at LWIP socket-pool / TIME_WAIT exhaustion; a TLS/memory error
+// points at the handshake. Cheap, only runs on failure.
+void Net::logConnectProbe(const String& url) {
+  // Lightweight connect-failure diagnostic. mbedTLS reports "SSL - Memory allocation
+  // failed" both on true OOM and when the LWIP socket layer is exhausted (no FD/PCB to
+  // bind), which look identical in the error string. Count live socket FDs so a field
+  // log distinguishes the two. (An earlier version also ran a second raw TLS connect to
+  // surface the errno; that was removed for release -- it doubled the connect cost on
+  // every failure and the FD count plus lastErr is enough to triage.)
+  #ifndef LWIP_SOCKET_OFFSET
+  #define LWIP_SOCKET_OFFSET 54
+  #endif
+  #ifndef CONFIG_LWIP_MAX_SOCKETS
+  #define CONFIG_LWIP_MAX_SOCKETS 16
+  #endif
+  int openFds = 0;
+  for (int fd = LWIP_SOCKET_OFFSET; fd < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; ++fd) {
+    if (fcntl(fd, F_GETFD) != -1) openFds++;
+  }
+  Serial.printf("[net] connect failed; socket FDs open: %d / %d\n",
+                openFds, (int)CONFIG_LWIP_MAX_SOCKETS);
+}
+
+// GET the URL into a String (single attempt). NOTE: deliberately NOT wrapped in a
+// connect-retry loop. A retry was tried (0.9.42) on the theory that QRZ hit the same
+// handshake knife-edge the file fetches survive via httpsGetToFileRetry -- but on-device
+// logs showed QRZ failing all attempts every time, so retrying never recovered it and
+// only churned the LWIP socket pool faster (rapid connect/close leaves PCBs in TIME_WAIT
+// that a WiFi radio reset doesn't flush), which contributed to a whole-stack connect()
+// wedge after a session. Kept single-shot; the caller handles a failed GET.
 bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = "";
   if (!connected()) { lastErr = "no WiFi"; return false; }
@@ -219,6 +270,16 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // AMSAT may 301/302
   http.useHTTP10(true);   // avoid chunked-encoding edge cases for static files
 
+  // Proactively defragment before the handshake. This GET path (QRZ lookups, and
+  // via httpsGetToFile the bulk fetches) always uses TLS, which needs ~32 KB of
+  // CONTIGUOUS heap; when the largest free block sits right at the sprite-pinned
+  // ~31.7 KB the cold connect() fails with -1 (observed: QRZ lookups failing
+  // repeatedly). reclaimHeapForTls() waits for async socket/TLS buffers to return
+  // and coalesce (and, as a last resort, cycles WiFi) to lift the largest block.
+  // Unlike the POST paths this does NOT hard-abort on a low block -- the caller
+  // handles a failed GET, and some fetches can still squeak through.
+  reclaimHeapForTls();
+
   if (!http.begin(client, url)) { lastErr = "begin failed"; return false; }
   http.addHeader("Accept", "*/*");
 
@@ -230,6 +291,7 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
                          : HTTPClient::errorToString(code);
     Serial.printf("[net] GET failed: code=%d (%s)\n", code, lastErr.c_str());
     http.end();
+    if (code <= 0) logConnectProbe(url);   // expose the real errno on a connect failure
     return false;
   }
 
@@ -328,6 +390,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
                          : HTTPClient::errorToString(code);
     Serial.printf("[net] GET failed: code=%d (%s)\n", code, lastErr.c_str());
     http.end();
+    if (code <= 0) logConnectProbe(url);   // expose the real errno on a connect failure
     return false;
   }
 
@@ -555,14 +618,24 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   reqHead += "Connection: close\r\n\r\n";
   reqHead += head;                       // multipart part-header goes out with the request headers
 
-  // write() helper semantics: treat 0 as "TX window full, retry", not "dead".
+  // write() helper semantics: 0 means "TCP send buffer full, must drain". The ESP32
+  // lwip default TCP_SND_BUF is ~5744 bytes; a body larger than that (LoTW's ~9 KB)
+  // fills it, write() returns 0, and we must let it drain. On a full buffer we flush()
+  // to push the queued segments out so the peer can ACK and reopen the window; without
+  // that push the queued data can sit untransmitted and the socket eventually
+  // half-closes. Do NOT abort on a transient connected()==false; rely on the write
+  // result plus the no-progress timeout. (See docs/design/LOTW_UPLOAD_SIZE_WORKAROUNDS.md;
+  // large uploads are additionally split into sub-TCP_SND_BUF batches, one per reboot.)
   auto writeAll = [&](const uint8_t* p, size_t n) -> bool {
     size_t off = 0; uint32_t lastProgress = millis();
     while (off < n) {
-      if (!client.connected()) return false;
-      size_t w = client.write(p + off, n - off);
-      if (w > 0) { off += w; lastProgress = millis(); }
-      else { delay(15); yield(); if (millis() - lastProgress > 30000) return false; }
+      int w = client.write(p + off, n - off);
+      if (w > 0) { off += (size_t)w; lastProgress = millis(); }
+      else {
+        client.flush();                 // push queued segments so the peer can ACK/reopen the window
+        delay(10); yield();
+        if (millis() - lastProgress > 30000) return false;
+      }
     }
     return true;
   };
@@ -576,7 +649,7 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
     while (streamed < flen) {
       size_t want = flen - streamed; if (want > sizeof(chunk)) want = sizeof(chunk);
       size_t got = f.read(chunk, want);
-      if (got == 0) break;                // short read -> stop; length check below fails
+      if (got == 0) break;                // short read from SD -> stop; length check below fails
       if (!writeAll(chunk, got)) { ok = false; break; }
       streamed += got;
     }

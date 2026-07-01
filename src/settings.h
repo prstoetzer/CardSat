@@ -150,7 +150,11 @@ struct Settings {
                                  // 0-degree-centered view, else recenter on QTH
   // Display / power
   uint8_t  bright     = 180;    // active screen brightness (10..255)
+  uint8_t  spkVolume  = 180;    // speaker volume (0..255): AOS alarm, game sound, memo playback
   bool     tiltTune   = false;  // accelerometer (tilt) passband tuning, ADV-only
+  bool     gameTilt   = false;  // use IMU tilt for left/right in games, ADV-only
+  bool     gameSound  = false;  // sound effects in games (speaker tone)
+  bool     morseSwap  = false;  // Morse Meteors: swap F/H so H=dot, F=dash
   uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)
   int32_t  calDlHz = 0;

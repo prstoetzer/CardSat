@@ -84,7 +84,27 @@
 #include <SPI.h>
 #include <SD.h>
 #include <esp_sleep.h>
-#include <esp_heap_caps.h>   // heap_caps_get_largest_free_block(): contiguous block,
+#include <esp_heap_caps.h>
+#include <esp_system.h>  // esp_reset_reason() for validating RTC-held batch state
+// LoTW multi-batch upload state, persisted in RTC RAM across the DELIBERATE
+// ESP.restart() we issue between batches. Rationale: a full log's .tq8 body can
+// exceed the ESP32 lwip TCP_SND_BUF (~5744 B) send ceiling, which stalls the upload
+// mid-body (see docs/design/LOTW_UPLOAD_SIZE_WORKAROUNDS.md). We therefore upload in
+// small size-bounded batches; but multiple TLS handshakes can't run in one session on
+// this no-PSRAM part (post-handshake fragmentation collapses the contiguous block), so
+// each batch runs in its own pristine boot -- exactly like the "cache all transponders"
+// feature. RTC RAM survives ESP.restart() (NOT power loss), so the key passphrase is
+// entered ONCE and carried across the automatic reboots. It is scrubbed the moment the
+// run finishes or aborts. (Security: the passphrase lives in RTC RAM only for the brief
+// duration of a multi-batch run and never touches flash/SD.)
+RTC_NOINIT_ATTR static bool  g_lotwBatchActive;      // a multi-batch run is in progress
+RTC_NOINIT_ATTR static bool  g_lotwBatchResend;      // include already-uploaded QSOs
+RTC_NOINIT_ATTR static uint32_t g_lotwBatchMagic;    // validity guard for the RTC block
+RTC_NOINIT_ATTR static char  g_lotwBatchPass[64];    // key passphrase, carried across reboots
+RTC_NOINIT_ATTR static uint16_t g_lotwResendSkip;    // resend mode: QSOs already sent this run (cursor)
+static const uint32_t LOTW_BATCH_MAGIC = 0x1073B47C; // "LoTW BATCh"
+#include <fcntl.h>
+#include <lwip/sockets.h>   // heap_caps_get_largest_free_block(): contiguous block,
                              // which is what the TLS handshake actually needs
 #include <time.h>
 #include <string.h>
@@ -157,6 +177,17 @@ static constexpr double C_LIGHT = 299792458.0;
 // .tq8 payload authenticates itself (no login). URL kept here so it can be
 // updated without touching code if ARRL moves the endpoint again.
 #define LOTW_UPLOAD_URL    "https://lotw.arrl.org/lotw/upload"
+// Max QSOs per LoTW upload batch. Chosen so the compressed .tq8 body stays well under
+// the ESP32 lwip TCP_SND_BUF send ceiling (~5744 B; ~650 B/QSO => 6 QSOs ~= 4.1 KB).
+// Larger uploads are split into multiple size-bounded batches, one per reboot.
+#define LOTW_BATCH_QSOS    6
+// Max QSOs per Cloudlog upload batch. Cloudlog's ADIF body is ~275 B/QSO, so 15 QSOs
+// (~4.1 KB) stays under the SAFE_UPLOAD_BODY / TCP_SND_BUF ceiling with margin.
+#define CL_BATCH_QSOS      15
+// Safe request-body size for a single POST on this platform, below the TCP_SND_BUF
+// send ceiling (with margin for multipart headers/tail). POSTs larger than this stall
+// mid-body on-device and must be batched. Applies to LoTW and Cloudlog uploads.
+#define SAFE_UPLOAD_BODY   5000
 // hams.at upcoming satellite activations (Atom feed of scheduled rove/activations).
 #define HAMSAT_FEED_URL    "https://hams.at/feeds/upcoming_alerts"
 #define FILE_HAMSAT  "/CardSat/hamsat.dat"   // cached parsed activations (binary, survives reboot)
@@ -238,7 +269,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.41";
+static constexpr const char* FW_VERSION = "0.9.42";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1507,12 +1538,14 @@ struct WifiAp {
 class Net {
 public:
   bool connect(const String& ssid, const String& pass, uint32_t timeoutMs = 15000);
+  String lastSsid_, lastPass_;   // remembered by connect() so hardResetWifi() can re-begin explicitly
   int  scanWifi(WifiAp* out, int maxAps);   // scan nearby APs (blocking); count or -1
   bool connected();
   void syncTimeNtp();                       // sets system clock via NTP (UTC)
 
   // GET a URL over HTTPS into `out`. Returns false on HTTP/transport error.
   bool httpsGet(const String& url, String& out, size_t maxBytes = 200000);
+  void logConnectProbe(const String& url);   // diagnostic: raw TLS connect + errno on GET failure
 
   // GET a URL over HTTPS straight into a LittleFS file (no large RAM buffer).
   // Essential for the GP file: a ~75 KB body can't be held as one contiguous
@@ -1921,7 +1954,11 @@ struct Settings {
                                  // 0-degree-centered view, else recenter on QTH
   // Display / power
   uint8_t  bright     = 180;    // active screen brightness (10..255)
+  uint8_t  spkVolume  = 180;    // speaker volume (0..255): AOS alarm, game sound, memo playback
   bool     tiltTune   = false;  // accelerometer (tilt) passband tuning, ADV-only
+  bool     gameTilt   = false;  // use IMU tilt for left/right in games, ADV-only
+  bool     gameSound  = false;  // sound effects in games (speaker tone)
+  bool     morseSwap  = false;  // Morse Meteors: swap F/H so H=dot, F=dash
   uint16_t dimSecs    = 120;    // blank the backlight after this idle time (s); 0 = never
   // Calibration (persisted oscillator offsets, Hz)
   int32_t  calDlHz = 0;
@@ -2007,7 +2044,8 @@ enum Screen : uint8_t {
   SCR_TRACK, SCR_POLAR, SCR_LOCATION, SCR_UPDATE, SCR_SETTINGS, SCR_EDIT,
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
-  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST
+  SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
+  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -4414,7 +4452,7 @@ public:
   };
   static int  listMemos(MemoEntry* out, int max);
   static bool deleteMemo(const char* file);
-  bool playMemo(const char* file, bool (*cancelPoll)());
+  bool playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume = 200);
 
 private:
   State    _state   = IDLE;
@@ -4780,6 +4818,40 @@ private:
   uint32_t gStepMs = 0;             // last formation step (millis)
   uint32_t gFrameMs = 0;            // last frame advance
 
+  // --- Games menu + additional mini-games. All fixed-size .bss, no heap. The
+  // games share gScore/gState/gLevel/gFrameMs above where useful; each adds only
+  // a few scalars. Sound + tilt are gated on cfg.gameSound / cfg.gameTilt.
+  int      gamesSel = 0;            // Games-menu cursor
+  // Doppler Lock: hold a marker on a drifting target (sim of transponder tuning).
+  float    gdlTarget = 0, gdlCursor = 0, gdlVel = 0;   // 0..1 positions
+  float    gdlPhase = 0;           // drift oscillator phase
+  uint32_t gdlInMs = 0, gdlLastMs = 0;                 // time-in-band accum, last frame
+  // Catch the Pass: key up when the sat crosses the elevation window.
+  float    gpAz = 0, gpEl = 0, gpT = 0;                // arc parameter
+  uint8_t  gpPhase = 0;            // 0 rising to window, 1 in window, 2 leaving
+  int      gpMisses = 0;
+  uint32_t gpArcMs = 0;
+  // Rotor Runner: slew a crosshair (tilt/keys) to keep a moving sat centred.
+  float    grSatX = 0, grSatY = 0, grSatVX = 0, grSatVY = 0;   // sat pos/vel (px)
+  float    grCurX = 0, grCurY = 0;                     // crosshair pos (px)
+  uint32_t grOnMs = 0, grLastMs = 0;
+  // Morse Meteors: clear falling letters by keying their Morse.
+  static const int GMOR_MAX = 5;
+  int8_t   gmLetter[GMOR_MAX];     // -1 = empty slot, else 0..25 (A..Z)
+  float    gmY[GMOR_MAX];          // fall position (px)
+  int      gmX[GMOR_MAX];
+  char     gmType[10];             // typed Morse buffer for the targeted letter
+  uint8_t  gmTypeN = 0;
+  uint32_t gmSpawnMs = 0, gmDotMs = 0;   // last spawn, last key-down (for dot/dash timing)
+  // Grid Chase: pick the correct Maidenhead grid from options against a timer.
+  char     ggGrid[8];              // the shown grid
+  char     ggOpt[4][8];            // 4 option strings
+  uint8_t  ggCorrect = 0;          // which option is right
+  uint8_t  ggSel = 0;              // cursor
+  int      ggStreak = 0;
+  uint32_t ggDeadline = 0;         // answer-by (millis)
+
+
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
   uint8_t  stateBits[7];            // 1 bit per entity (STATE_N <= 56)
@@ -4913,6 +4985,7 @@ private:
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
   Screen   trackReturn = SCR_PASSES; // where the Track screen's back key returns to
   Screen   passesReturn = SCR_SATLIST; // where the Passes screen's back key returns to
+  Screen   lotwReturn = SCR_LOG; // where the LoTW upload screen's back key returns to
   uint32_t trackedNorad = 0;     // NORAD that radio/rotator tracking is engaged for;
                                  // if the active sat changes away from this while
                                  // tracking runs off-screen, the loop stops tracking
@@ -5075,6 +5148,7 @@ private:
   static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
   static void catMonTrampoline(const char* dir, const uint8_t* b, size_t n);  // CatTraceFn target
   static int  s_fetchDepth;                    // >0 while any outbound fetch is active
+  static bool s_spkWasOnForFetch;              // speaker was enabled when a fetch began (restore after)
   static bool netFetchActive();                // service*() skip rebuild while true
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
   void webdSendStatusJson();                   // GET /api/status
@@ -5306,6 +5380,7 @@ private:
   bool txDbDelArm = false;        // two-press delete confirmation (manual TX)
   void drawQrz();     void keyQrz(char c, bool enter, bool back);
   bool qrzLookup(const String& call, String& err);  // returns true on success
+  void fillGridsQrz();     // backfill missing QSO grids via QRZ (capped, streamed)
   String qrzSessionKey;            // cached QRZ XML session key (empty = need login)
   String qrzCall;                  // last looked-up callsign
   String qrzName, qrzAddr, qrzGrid, qrzCountry, qrzClass;  // parsed result fields
@@ -5314,6 +5389,10 @@ private:
   // ---- LoTW upload screen (SCR_LOTW) ----
   void drawLotw();    void keyLotw(char c, bool enter, bool back);
   void doLotwUpload(const String& keyPass);  // build .tq8 + POST + mark uploaded
+  int  countUnuploadedLotw();                // QSOs in the log still needing LoTW upload
+  int  countUnuploadedCloudlog();            // QSOs still needing Cloudlog upload (bit 0x2)
+  void continueLotwBatch(const String& keyPass, bool resend = false);  // cache passphrase in RTC + reboot for next batch
+  void scrubLotwBatchState();                // clear the RTC-held batch state + passphrase
   void lotwEnter();                          // count pending QSOs + open screen
   void lotwRebootUpload();                   // write marker + reboot, re-prompt + upload on fresh boot
   void resumeLotwIfPending();                // setup(): if marker set, re-prompt passphrase + upload
@@ -5356,13 +5435,14 @@ private:
   void drawCloudlog();   void keyCloudlog(char c, bool enter, bool back);
   void cloudlogEnter();                     // count pending QSOs + open screen
   void doCloudlogUpload();                  // build ADIF + JSON POST + mark uploaded
-  void cloudlogRebootUpload();              // write marker + reboot, then upload on fresh boot
+  void cloudlogRebootUpload(bool resend = false, int cursor = 0);  // write marker + reboot, then upload on fresh boot
   void resumeCloudlogIfPending();           // setup(): if marker set, upload in a clean boot
   int  clPending = 0;              // QSOs not yet sent to Cloudlog (bit 0x2 unset)
   int  clTotal = 0;                // total sat QSOs in the log (for re-send mode)
   String clStatus;                 // last result/error line shown on the screen
   bool clBusy = false;             // an upload is in progress (suppress re-entry)
   bool clResend = false;           // include QSOs already sent to Cloudlog (opt-in)
+  int  clResendSkip = 0;           // resend batching: QSOs already sent this run (cursor)
   bool clRebootPrompt = false;     // upload hit a -1 connect; asking to reboot-and-retry
   // ---- Upcoming activations feed (SCR_HAMSAT, from hams.at) ----
   struct Activation {
@@ -5447,6 +5527,19 @@ private:
   void drawGame();      void keyGame(char c, bool enter, bool back);  // "Zap the Sats"
   void gameReset(bool full);   // (re)start: full=new game, else next wave
   void gameStep();             // advance one formation step + shots
+
+  // Games menu + the five mini-games. Each is draw + key + a reset; all fixed-size.
+  void drawGamesMenu(); void keyGamesMenu(char c, bool enter, bool back);
+  void sfx(uint16_t freq, uint16_t ms);        // gated game sound (cfg.gameSound)
+  bool gameTiltAxis(float& outLR);             // tilt left/right in [-1,1]; false if unavailable
+  void drawGDoppler();  void keyGDoppler(char c, bool enter, bool back);  void gDopplerReset();
+  void drawGPass();     void keyGPass(char c, bool enter, bool back);     void gPassReset();
+  void drawGRotor();    void keyGRotor(char c, bool enter, bool back);    void gRotorReset();
+  void drawGMorse();    void keyGMorse(char c, bool enter, bool back);    void gMorseReset();
+  void drawGGrid();     void keyGGrid(char c, bool enter, bool back);     void gGridReset();
+  float gdlLevelRate();        // Doppler Lock: level-scaled drift rate
+  void  ggNewRound();          // Grid Chase: build a fresh question
+
 
   // CAT self-test: run the full sequence, render results, handle scrolling.
   void runCatTest();
@@ -7998,7 +8091,7 @@ bool VoiceMemo::deleteMemo(const char* file) {
   return Store::fs().remove(path);
 }
 
-bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)()) {
+bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume) {
   _err = "";
   if (_state == RECORDING) { _err = "busy recording"; return false; }
   if (!Store::onSD()) { _err = "SD card required"; return false; }
@@ -8025,7 +8118,7 @@ bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)()) {
   if (M5.Mic.isEnabled()) M5.Mic.end();
   bool spkWasOn = M5Cardputer.Speaker.isEnabled();
   if (!spkWasOn) M5Cardputer.Speaker.begin();
-  M5Cardputer.Speaker.setVolume(200);
+  M5Cardputer.Speaker.setVolume(volume);
 
   // Stream blocks: read PCM from SD into a small buffer, hand to playRaw, wait
   // for it to drain (polling the cancel hook), repeat. No whole-clip buffer.
@@ -9242,15 +9335,29 @@ uint32_t Net::WIFI_CYCLE_MIN_GAP_MS = 30000; // don't cycle more than once per 3
 // reconnect with the credentials WiFi already holds. This is the reliable cure
 // once fds wedge and connect() starts returning -1.
 bool Net::hardResetWifi() {
-  Serial.println("[net] hard WiFi reset (flushing socket pool)");
-  WiFi.disconnect(true);                 // true => also turn the radio off briefly
-  delay(200);
+  Serial.println("[net] hard WiFi reset (full radio re-init)");
+  // Fully re-initialise the radio rather than reconnect() the old association. On
+  // this part, after the PHY has been powered down (here, or by the charge-screen
+  // WIFI_OFF), a bare reconnect() can reassociate (IP/RSSI look fine) yet leave the
+  // stack in a degraded state where every outbound connect() returns -1 -- the
+  // ~10 KB WiFi working buffer isn't re-claimed (visible as the largest free block
+  // sitting ~10 KB too HIGH, e.g. 31.7 KB instead of ~21.5 KB, with connects then
+  // failing). A clean OFF -> STA -> begin() cycle forces that buffer to be
+  // re-allocated. See docs/design/HEAP_WIFI_CYCLE.md.
+  size_t blkBefore = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  WiFi.disconnect(true);                 // disconnect + radio off (keep stored config)
+  WiFi.mode(WIFI_OFF);
+  delay(250);
   WiFi.mode(WIFI_STA);
-  WiFi.reconnect();                      // reuse the last good credentials
+  if (lastSsid_.length()) WiFi.begin(lastSsid_.c_str(), lastPass_.c_str());
+  else                    WiFi.begin();   // fall back to NVS-stored credentials
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(150);
   bool ok = (WiFi.status() == WL_CONNECTED);
-  Serial.printf("[net] hard reset %s\n", ok ? "recovered" : "still down");
+  size_t blkAfter = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[net] hard reset %s (largest block %u -> %u, mode %d)\n",
+                ok ? "recovered" : "still down",
+                (unsigned)blkBefore, (unsigned)blkAfter, (int)WiFi.getMode());
   if (ok) connFails = 0;
   return ok;
 }
@@ -9294,7 +9401,9 @@ bool Net::connect(const String& ssid, const String& pass, uint32_t timeoutMs) {
   WiFi.begin(ssid.c_str(), pass.c_str());
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) delay(150);
-  return WiFi.status() == WL_CONNECTED;
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  if (ok) { lastSsid_ = ssid; lastPass_ = pass; }   // remember for hardResetWifi()
+  return ok;
 }
 
 bool Net::connected() { return WiFi.status() == WL_CONNECTED; }
@@ -9341,6 +9450,39 @@ void Net::syncTimeNtp() {
   for (int i = 0; i < 40 && !getLocalTime(&ti, 250); ++i) { /* wait */ }
 }
 
+// Diagnostic for a connect-level GET failure. HTTPClient reports only a generic code;
+// this probes a raw TLS connect to the same host and logs the underlying result +
+// mbedTLS/socket error string. A socket/allocation errno here (connects failing while
+// heap is fine) points at LWIP socket-pool / TIME_WAIT exhaustion; a TLS/memory error
+// points at the handshake. Cheap, only runs on failure.
+void Net::logConnectProbe(const String& url) {
+  // Lightweight connect-failure diagnostic. mbedTLS reports "SSL - Memory allocation
+  // failed" both on true OOM and when the LWIP socket layer is exhausted (no FD/PCB to
+  // bind), which look identical in the error string. Count live socket FDs so a field
+  // log distinguishes the two. (An earlier version also ran a second raw TLS connect to
+  // surface the errno; that was removed for release -- it doubled the connect cost on
+  // every failure and the FD count plus lastErr is enough to triage.)
+  #ifndef LWIP_SOCKET_OFFSET
+  #define LWIP_SOCKET_OFFSET 54
+  #endif
+  #ifndef CONFIG_LWIP_MAX_SOCKETS
+  #define CONFIG_LWIP_MAX_SOCKETS 16
+  #endif
+  int openFds = 0;
+  for (int fd = LWIP_SOCKET_OFFSET; fd < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; ++fd) {
+    if (fcntl(fd, F_GETFD) != -1) openFds++;
+  }
+  Serial.printf("[net] connect failed; socket FDs open: %d / %d\n",
+                openFds, (int)CONFIG_LWIP_MAX_SOCKETS);
+}
+
+// GET the URL into a String (single attempt). NOTE: deliberately NOT wrapped in a
+// connect-retry loop. A retry was tried (0.9.42) on the theory that QRZ hit the same
+// handshake knife-edge the file fetches survive via httpsGetToFileRetry -- but on-device
+// logs showed QRZ failing all attempts every time, so retrying never recovered it and
+// only churned the LWIP socket pool faster (rapid connect/close leaves PCBs in TIME_WAIT
+// that a WiFi radio reset doesn't flush), which contributed to a whole-stack connect()
+// wedge after a session. Kept single-shot; the caller handles a failed GET.
 bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = "";
   if (!connected()) { lastErr = "no WiFi"; return false; }
@@ -9371,6 +9513,16 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // AMSAT may 301/302
   http.useHTTP10(true);   // avoid chunked-encoding edge cases for static files
 
+  // Proactively defragment before the handshake. This GET path (QRZ lookups, and
+  // via httpsGetToFile the bulk fetches) always uses TLS, which needs ~32 KB of
+  // CONTIGUOUS heap; when the largest free block sits right at the sprite-pinned
+  // ~31.7 KB the cold connect() fails with -1 (observed: QRZ lookups failing
+  // repeatedly). reclaimHeapForTls() waits for async socket/TLS buffers to return
+  // and coalesce (and, as a last resort, cycles WiFi) to lift the largest block.
+  // Unlike the POST paths this does NOT hard-abort on a low block -- the caller
+  // handles a failed GET, and some fetches can still squeak through.
+  reclaimHeapForTls();
+
   if (!http.begin(client, url)) { lastErr = "begin failed"; return false; }
   http.addHeader("Accept", "*/*");
 
@@ -9382,6 +9534,7 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
                          : HTTPClient::errorToString(code);
     Serial.printf("[net] GET failed: code=%d (%s)\n", code, lastErr.c_str());
     http.end();
+    if (code <= 0) logConnectProbe(url);   // expose the real errno on a connect failure
     return false;
   }
 
@@ -9480,6 +9633,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
                          : HTTPClient::errorToString(code);
     Serial.printf("[net] GET failed: code=%d (%s)\n", code, lastErr.c_str());
     http.end();
+    if (code <= 0) logConnectProbe(url);   // expose the real errno on a connect failure
     return false;
   }
 
@@ -9707,14 +9861,24 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   reqHead += "Connection: close\r\n\r\n";
   reqHead += head;                       // multipart part-header goes out with the request headers
 
-  // write() helper semantics: treat 0 as "TX window full, retry", not "dead".
+  // write() helper semantics: 0 means "TCP send buffer full, must drain". The ESP32
+  // lwip default TCP_SND_BUF is ~5744 bytes; a body larger than that (LoTW's ~9 KB)
+  // fills it, write() returns 0, and we must let it drain. On a full buffer we flush()
+  // to push the queued segments out so the peer can ACK and reopen the window; without
+  // that push the queued data can sit untransmitted and the socket eventually
+  // half-closes. Do NOT abort on a transient connected()==false; rely on the write
+  // result plus the no-progress timeout. (See docs/design/LOTW_UPLOAD_SIZE_WORKAROUNDS.md;
+  // large uploads are additionally split into sub-TCP_SND_BUF batches, one per reboot.)
   auto writeAll = [&](const uint8_t* p, size_t n) -> bool {
     size_t off = 0; uint32_t lastProgress = millis();
     while (off < n) {
-      if (!client.connected()) return false;
-      size_t w = client.write(p + off, n - off);
-      if (w > 0) { off += w; lastProgress = millis(); }
-      else { delay(15); yield(); if (millis() - lastProgress > 30000) return false; }
+      int w = client.write(p + off, n - off);
+      if (w > 0) { off += (size_t)w; lastProgress = millis(); }
+      else {
+        client.flush();                 // push queued segments so the peer can ACK/reopen the window
+        delay(10); yield();
+        if (millis() - lastProgress > 30000) return false;
+      }
     }
     return true;
   };
@@ -9728,7 +9892,7 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
     while (streamed < flen) {
       size_t want = flen - streamed; if (want > sizeof(chunk)) want = sizeof(chunk);
       size_t got = f.read(chunk, want);
-      if (got == 0) break;                // short read -> stop; length check below fails
+      if (got == 0) break;                // short read from SD -> stop; length check below fails
       if (!writeAll(chunk, got)) { ok = false; break; }
       streamed += got;
     }
@@ -10649,9 +10813,13 @@ bool Settings::load() {
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
+  spkVolume  = d["spkvol"] | (uint8_t)180;
   mapCenterLon = d["mapclon"] | (int16_t)0;
   if (mapCenterLon < -180) mapCenterLon = -180; if (mapCenterLon > 180) mapCenterLon = 180;
   tiltTune   = d["tilttune"] | false;
+  gameTilt   = d["gametilt"] | false;   // games: IMU tilt steering (ADV-only)
+  gameSound  = d["gamesnd"]  | false;   // games: sound effects
+  morseSwap  = d["morseswap"]| false;   // Morse Meteors: swap dot/dash keys
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
   rotEnable  = d["roten"]  | false;
@@ -10749,8 +10917,12 @@ bool Settings::save() {
   d["wxunits"] = wxUnits;
   d["dimsecs"] = dimSecs;
   d["bright"]  = bright;
+  d["spkvol"]  = spkVolume;
   d["mapclon"] = mapCenterLon;
   d["tilttune"] = tiltTune;
+  d["gametilt"] = gameTilt;
+  d["gamesnd"]  = gameSound;
+  d["morseswap"]= morseSwap;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
@@ -10911,6 +11083,15 @@ static bool copyFile(const char* from, const char* to) {
 
 void App::setup() {
   s_self = this;
+  // The LoTW batch state lives in RTC RAM, which survives ESP.restart() but is GARBAGE
+  // after a cold power-on/brownout. Trust it only on a software/deep-sleep reset; on any
+  // other reset reason, scrub it so stale bits can't trigger a spurious upload or a
+  // passphrase left in RAM. (esp_reset_reason() is valid this early.)
+  {
+    esp_reset_reason_t rr = esp_reset_reason();
+    bool rtcTrustworthy = (rr == ESP_RST_SW || rr == ESP_RST_DEEPSLEEP);
+    if (!rtcTrustworthy || g_lotwBatchMagic != LOTW_BATCH_MAGIC) scrubLotwBatchState();
+  }
   Net::onTlsBusy = &App::tlsBusyTrampoline;   // free LAN sockets around every fetch
   auto m5cfg = M5.config();
   m5cfg.internal_mic = true;        // wire the ADV ES8311 mic-enable path (voice memo)
@@ -11002,7 +11183,7 @@ void App::setup() {
     }
   }
 
-  M5Cardputer.Speaker.setVolume(180);   // AOS alarm
+  M5Cardputer.Speaker.setVolume(cfg.spkVolume);   // AOS alarm / game sound (user setting)
   irBeacon.begin();                     // IR pass-alert beacon (idle until an alert)
   if (cfg.loraEnable) loraStart();      // LoRa messaging radio (no-op without RadioLib)
   if (timeIsSet() && favN) buildSchedule();
@@ -13958,6 +14139,7 @@ void App::tickCanvasRestore() {
 // loop runs between fetches, giving the outbound TLS connects maximum headroom.
 App* App::s_self = nullptr;
 int  App::s_fetchDepth = 0;
+bool App::s_spkWasOnForFetch = false;
 void App::tlsBusyTrampoline(bool busy) {
   if (!s_self) return;
   // NOTE: this does NOT free the drawing sprite. General fetches (GP, weather,
@@ -13968,9 +14150,26 @@ void App::tlsBusyTrampoline(bool busy) {
   // The listeners stay suspended while s_fetchDepth > 0 (the service*() functions
   // gate on netFetchActive()) and rebuild themselves once it returns to 0.
   if (busy) {
-    if (s_fetchDepth++ == 0) s_self->suspendNetServers();
+    if (s_fetchDepth++ == 0) {
+      s_self->suspendNetServers();
+      // Release the audio I2S DMA buffer for the duration of the fetch. The speaker/
+      // mic I2S driver allocates its DMA buffer from the INTERNAL, DMA-capable SRAM
+      // pool -- the SAME scarce pool mbedTLS draws its ~16 KB handshake buffers from
+      // (NOT the general 8-bit heap the "largest block" log measures). Diagnosed on
+      // device: after any audio use (game sound, or a voice memo, which leaves the
+      // speaker begin()'d), the internal pool no longer had room for the TLS buffer and
+      // every HTTPS connect failed with "SSL - Memory allocation failed" while the
+      // general block still read 31732. end() hands that DMA RAM back; we re-begin the
+      // speaker once the fetch is done. (No-op if the speaker was already off.)
+      s_spkWasOnForFetch = M5Cardputer.Speaker.isEnabled();
+      if (s_spkWasOnForFetch) { M5Cardputer.Speaker.stop(); M5Cardputer.Speaker.end(); }
+    }
   } else if (s_fetchDepth > 0) {
-    --s_fetchDepth;
+    if (--s_fetchDepth == 0 && s_spkWasOnForFetch) {
+      M5Cardputer.Speaker.begin();               // restore audio after the fetch
+      M5Cardputer.Speaker.setVolume(s_self->cfg.spkVolume);
+      s_spkWasOnForFetch = false;
+    }
   }
 }
 bool App::netFetchActive() { return s_fetchDepth > 0; }
@@ -14934,6 +15133,14 @@ void App::loop() {
   // drawGame() advances the formation/shots itself from millis().
   if (screen == SCR_GAME && gState == 1 && ms - lastDrawMs > 40) { lastDrawMs = ms; draw(); }
 
+  // The other action mini-games animate the same way (each draw*() advances its
+  // own state from millis()); redraw while playing (gState==1). Grid Chase is not
+  // frame-animated (it's a timed multiple-choice), so it isn't listed here.
+  if ((screen == SCR_GDOPPLER || screen == SCR_GPASS || screen == SCR_GROTOR ||
+       screen == SCR_GMORSE) && gState == 1 && ms - lastDrawMs > 40) { lastDrawMs = ms; draw(); }
+  // Grid Chase still needs a periodic redraw to tick its countdown timer down.
+  if (screen == SCR_GGRID && gState == 1 && ms - lastDrawMs > 200) { lastDrawMs = ms; draw(); }
+
   // Charge / Sleep screen: while awake (just woken), refresh battery once a
   // second, then auto-blank ~5 s after the wake to return to the dark idle.
   if (screen == SCR_CHARGE && chargeWoke) {
@@ -15080,6 +15287,12 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_OVERHEAD: keyOverhead(c, enter, back); break;
     case SCR_SKEDENTRY:keySkedEntry(c, enter, back); break;
     case SCR_GAME:     keyGame(c, enter, back); break;
+    case SCR_GAMES:    keyGamesMenu(c, enter, back); break;
+    case SCR_GDOPPLER: keyGDoppler(c, enter, back); break;
+    case SCR_GPASS:    keyGPass(c, enter, back); break;
+    case SCR_GROTOR:   keyGRotor(c, enter, back); break;
+    case SCR_GMORSE:   keyGMorse(c, enter, back); break;
+    case SCR_GGRID:    keyGGrid(c, enter, back); break;
     case SCR_SKYGLANCE:keySkyGlance(c, enter, back); break;
     case SCR_AWARDS:   keyAwards(c, enter, back); break;
     case SCR_AWARDSAT: keyAwardSat(c, enter, back); break;
@@ -15302,7 +15515,7 @@ void App::keyMemos(char c, bool enter, bool back) {
   if (enter && memoN > 0 && memoSel < memoN) {
     setStatus("Playing... (any key stops)");
     draw();                              // show the status before we block
-    bool ok = memo.playMemo(memos[memoSel].file, &memoPlaybackCancel);
+    bool ok = memo.playMemo(memos[memoSel].file, &memoPlaybackCancel, cfg.spkVolume);
     setStatus(ok ? "Playback done" : (String("Play: ") + memo.lastError()));
   }
   lastDrawMs = 0;
@@ -16633,7 +16846,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,49,25,43,69,70,71,72,73,78,74,75,76};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,82,49,77,79,81,25,43,69,70,71,72,73,78,74,75,76};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -16776,9 +16989,24 @@ void App::keySettings(char c, bool enter, bool back) {
                  if (v > 255) v = 255; cfg.bright = (uint8_t)v;
                  M5Cardputer.Display.setBrightness(cfg.bright);   // live preview
                  cfg.save(); } break;
+      case 82: { long v = (long)cfg.spkVolume + dir*24; if (v < 0) v = 0;
+                 if (v > 255) v = 255; cfg.spkVolume = (uint8_t)v;
+                 cfg.save();
+                 // Live feedback: apply the new volume and play a short blip so the
+                 // user hears the level as they adjust (silent if set to 0).
+                 M5Cardputer.Speaker.stop();
+                 M5Cardputer.Speaker.setVolume(cfg.spkVolume);
+                 if (cfg.spkVolume > 0) M5Cardputer.Speaker.tone(1200, 70); } break;
       case 49: if (!imuReady) setStatus("No IMU on this board");
                else { cfg.tiltTune = !cfg.tiltTune; cfg.save();
                       tiltAccum = 0; lastTiltMs = millis(); } break;
+      case 77: if (!imuReady) setStatus("No IMU on this board");
+               else { cfg.gameTilt = !cfg.gameTilt; cfg.save(); } break;
+      case 79: cfg.gameSound = !cfg.gameSound; cfg.save();
+               if (cfg.gameSound) { M5Cardputer.Speaker.stop();
+                                    M5Cardputer.Speaker.tone(1500, 60); }  // confirm blip
+               break;
+      case 81: cfg.morseSwap = !cfg.morseSwap; cfg.save(); break;
     }
   };
   if (isLeft(c))  adj(-1);
@@ -16909,6 +17137,7 @@ static Screen editHome(int t) {
   if (t >= 310) return SCR_SATLIST;     // manual GP entry
   if (t >= 300) return SCR_LOCATION;    // manual time
   if (t == 216) return SCR_QRZ;         // QRZ callsign prompt
+  if (t == 230) return SCR_LOTW;        // LoTW key password prompt (cancel -> LoTW screen)
   if (t == 104) return SCR_GLOBE;       // DX grid entered from the globe
   if (t >= 200) return SCR_SETTINGS;    // radio / WiFi
   if (t >= 100) return SCR_LOCATION;    // location fields
@@ -17481,7 +17710,7 @@ void App::drawAbout() {
 
 void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'l') { licScroll = 0; screen = SCR_LICENSE; lastDrawMs = 0; return; }
-  if (c == 'z') { gState = 0; screen = SCR_GAME; lastDrawMs = 0; return; }   // "Zap the Sats"
+  if (c == 'z') { gamesSel = 0; screen = SCR_GAMES; lastDrawMs = 0; return; }   // Games menu
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
 
@@ -18191,8 +18420,8 @@ void App::drawLog() {
   // LoTW, so they're alternatives). The list scrolls since it no longer fits at once.
   const char* items[] = { "New QSO entry", "View / edit log", "Export to ADIF",
                           "Sign & upload to LoTW", "Upload to Cloudlog",
-                          "Voice Memos", "Notes", "Awards" };
-  const int N = 8;
+                          "Voice Memos", "Notes", "Awards", "Fill grids (QRZ)" };
+  const int N = 9;
   const int VIS = 6;                              // rows visible at once (leaves room
                                                   // for the count line + footer)
   int top = 0;
@@ -18218,20 +18447,21 @@ void App::drawLog() {
 
 void App::keyLog(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
-  const int N = 8;
+  const int N = 9;
   if (isUp(c))   logMenuSel = (logMenuSel + N - 1) % N;
   if (isDown(c)) logMenuSel = (logMenuSel + 1) % N;
   if (enter) {
     if (logMenuSel == 0) beginQso();
     else if (logMenuSel == 1) { loadLog(); screen = SCR_LOGLIST; }
     else if (logMenuSel == 2) beginAdifExport();
-    else if (logMenuSel == 3) { lotwEnter(); }
+    else if (logMenuSel == 3) { lotwReturn = SCR_LOG; lotwEnter(); }
     else if (logMenuSel == 4) { cloudlogEnter(); }
     else if (logMenuSel == 5) { buildMemoList(); memoSel = 0; memoScroll = 0; memoConfirmDel = false;
            screen = SCR_MEMOS; lastDrawMs = 0; }
     else if (logMenuSel == 6) { notesEnter(); }
-    else { setStatus("Scanning log..."); draw(); buildAwards();
+    else if (logMenuSel == 7) { setStatus("Scanning log..."); draw(); buildAwards();
            status = ""; screen = SCR_AWARDS; lastDrawMs = 0; }   // Awards (clear the scan banner)
+    else if (logMenuSel == 8) { fillGridsQrz(); }
   }
 }
 
@@ -18311,7 +18541,7 @@ void App::keyLotw(char c, bool enter, bool back) {
     }
     return;   // ignore other keys while the prompt is up
   }
-  if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { screen = lotwReturn; lastDrawMs = 0; return; }
   if (lotwBusy) return;
   // 'a' toggles re-send mode: include QSOs already marked uploaded. Useful when a
   // previous upload didn't actually post (e.g. a format LoTW didn't accept) and the
@@ -18321,6 +18551,9 @@ void App::keyLotw(char c, bool enter, bool back) {
   }
   int toSend = lotwResend ? lotwTotal : lotwPending;
   if (c == 'u' && Store::ready() && Lotw::credentialPresent() && toSend > 0) {
+    // Fresh user-initiated upload: clear any stale batch state so a new run starts clean
+    // (the resend cursor especially must begin at 0).
+    scrubLotwBatchState();
     // Prompt for the key password (blank if the key is unencrypted).
     editTarget = 230; editTitle = "Key password (blank=none)";
     editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; return;
@@ -18626,10 +18859,14 @@ void App::doLotwUpload(const String& keyPass) {
   // (user opted in) include QSOs already marked uploaded too. Capped to keep the
   // uncompressed .tq8 text (~600 B/QSO) within a safe heap budget on the no-PSRAM
   // S3; any remainder is sent on the next upload (un-uploaded ones stay un-flagged).
-  const int CAP = 50;
+  // Cap this batch at a size-safe QSO count so the compressed .tq8 body stays under the
+  // TCP_SND_BUF send ceiling. Any remaining un-uploaded QSOs are picked up by the next
+  // batch (which runs in a fresh boot -- see the RTC batch state and continueLotwBatch).
+  const int CAP = LOTW_BATCH_QSOS;
   PendingQso* batch = (PendingQso*)malloc(sizeof(PendingQso) * CAP);
   if (!batch) { lotwStatus = "Out of memory"; lotwBusy = false; return; }
   int n = 0;
+  int skipRemaining = lotwResend ? (int)g_lotwResendSkip : 0;  // resend: skip already-sent batches
   if (Store::fs().exists(FILE_LOG)) {
     File f = Store::fs().open(FILE_LOG, "r");
     if (f) {
@@ -18637,8 +18874,10 @@ void App::doLotwUpload(const String& keyPass) {
         String l = f.readStringUntil('\n'); l.trim();
         if (!l.length() || l.startsWith("utc,")) continue;
         PendingQso q;
-        if (parseQsoCsv(l, q) && q.call[0] && (lotwResend || !(q.uploaded & 1)))
+        if (parseQsoCsv(l, q) && q.call[0] && (lotwResend || !(q.uploaded & 1))) {
+          if (skipRemaining > 0) { skipRemaining--; continue; }  // already sent in an earlier batch
           batch[n++] = q;
+        }
       }
       f.close();
     }
@@ -18727,10 +18966,20 @@ void App::doLotwUpload(const String& keyPass) {
   if (accepted > 0) {
     if (lotwResend) {
       // Re-send mode: the QSOs were already flagged uploaded; nothing new to flag.
-      // Drop back to normal mode and report.
       lotwLastSent = accepted;
       lotwStatus = "Re-sent " + String(n) + ", queued " + String(accepted);
-      lotwResend = false;
+      // Advance the resend cursor by the QSOs sent this batch. If more remain beyond the
+      // cursor, continue in a fresh boot (carrying the cursor + passphrase in RTC).
+      int sentSoFar = (int)g_lotwResendSkip + n;
+      int remainAfter = lotwTotal - sentSoFar;   // resend covers ALL logged QSOs
+      Serial.printf("[lotw] resend batch n=%d (cap=%d), sent=%d/%d, remaining=%d\n",
+                    n, CAP, sentSoFar, lotwTotal, remainAfter);
+      if (remainAfter > 0) {
+        g_lotwResendSkip = (uint16_t)sentSoFar;
+        continueLotwBatch(keyPass, true);   // resend=true; caches cursor+pass, reboots
+        return;
+      }
+      lotwResend = false;   // whole resend run complete
     } else {
       // Flag the n QSOs we actually put in the .tq8 -- whether LoTW counted them as
       // newly accepted or as duplicates, they've reached LoTW and must not be re-sent.
@@ -18740,12 +18989,84 @@ void App::doLotwUpload(const String& keyPass) {
       // determined server-side afterward (check your LoTW account).
       lotwStatus = "Queued " + String(accepted) + " at LoTW";
       lotwPending -= marked; if (lotwPending < 0) lotwPending = 0;
+      // More un-uploaded QSOs than this batch could hold? Continue in a fresh boot: the
+      // .tq8 body must stay under the send ceiling AND a second TLS handshake can't run
+      // in this session, so we reboot per batch, carrying the passphrase in RTC RAM.
+      int remainAfter = countUnuploadedLotw();
+      Serial.printf("[lotw] batch marked=%d (cap=%d), remaining un-uploaded=%d\n",
+                    marked, CAP, remainAfter);
+      if (remainAfter > 0) {
+        continueLotwBatch(keyPass, false);   // normal mode; caches passphrase in RTC + reboots
+        return;
+      }
     }
   } else {
     lotwStatus = "Server rejected upload";
   }
   lotwBusy = false; lastDrawMs = 0;
+  draw();   // repaint with the final result: SCR_LOTW is static, so the loop won't
+            // auto-refresh it; without this it stays on "Uploading..." until a keypress.
 }
+
+// Count QSOs in the log that still need LoTW upload (uploaded bit0 clear). Streams the
+// log; no whole-file buffer. Used to decide whether another batch reboot is needed.
+int App::countUnuploadedLotw() {
+  int n = 0;
+  if (!Store::fs().exists(FILE_LOG)) return 0;
+  File f = Store::fs().open(FILE_LOG, "r");
+  if (!f) return 0;
+  while (f.available()) {
+    String l = f.readStringUntil('\n'); l.trim();
+    if (!l.length() || l.startsWith("utc,")) continue;
+    PendingQso q;
+    if (parseQsoCsv(l, q) && q.call[0] && !(q.uploaded & 1)) n++;
+  }
+  f.close();
+  return n;
+}
+
+// Count QSOs still needing Cloudlog upload (uploaded bit1 / mask 0x2 clear).
+int App::countUnuploadedCloudlog() {
+  int n = 0;
+  if (!Store::fs().exists(FILE_LOG)) return 0;
+  File f = Store::fs().open(FILE_LOG, "r");
+  if (!f) return 0;
+  while (f.available()) {
+    String l = f.readStringUntil('\n'); l.trim();
+    if (!l.length() || l.startsWith("utc,")) continue;
+    PendingQso q;
+    if (parseQsoCsv(l, q) && q.call[0] && !(q.uploaded & 0x2)) n++;
+  }
+  f.close();
+  return n;
+}
+
+// Scrub the RTC-held batch state (including the passphrase). Called when a multi-batch
+// run finishes or aborts, so the passphrase never lingers in RTC RAM longer than needed.
+void App::scrubLotwBatchState() {
+  g_lotwBatchActive = false;
+  g_lotwBatchResend = false;
+  g_lotwBatchMagic  = 0;
+  g_lotwResendSkip  = 0;
+  memset(g_lotwBatchPass, 0, sizeof(g_lotwBatchPass));
+}
+
+// Continue a multi-batch LoTW upload after this batch: stash the passphrase + flags in
+// RTC RAM (survives the deliberate restart, not power loss) and reboot. The fresh boot's
+// resumeLotwIfPending() sees the active flag and runs the next batch WITHOUT re-prompting.
+void App::continueLotwBatch(const String& keyPass, bool resend) {
+  g_lotwBatchActive = true;
+  g_lotwBatchResend = resend;
+  g_lotwBatchMagic  = LOTW_BATCH_MAGIC;
+  strncpy(g_lotwBatchPass, keyPass.c_str(), sizeof(g_lotwBatchPass) - 1);
+  g_lotwBatchPass[sizeof(g_lotwBatchPass) - 1] = 0;
+  int remain = resend ? (lotwTotal - (int)g_lotwResendSkip) : countUnuploadedLotw();
+  Serial.printf("[lotw] batch done; %d QSOs remain, rebooting to continue\n", remain);
+  lotwStatus = "Batch sent; " + String(remain) + " left, rebooting...";
+  lastDrawMs = 0; draw(); delay(1200);
+  ESP.restart();
+}
+
 
 // Reboot-then-upload for LoTW, mirroring the Cloudlog path but WITHOUT persisting the
 // key passphrase: the passphrase is never stored, so we only drop a one-shot marker and
@@ -18765,6 +19086,33 @@ void App::lotwRebootUpload() {
 // and re-prompt for the key passphrase (editTarget 230) -- entering it runs the upload
 // in this clean-heap boot. The passphrase is re-entered, never stored.
 void App::resumeLotwIfPending() {
+  // Multi-batch continuation: if the RTC batch state is valid and active, this is one of
+  // the automatic reboots partway through a large upload. Run the next batch directly
+  // with the passphrase carried in RTC RAM -- no marker file, no re-prompt.
+  if (g_lotwBatchMagic == LOTW_BATCH_MAGIC && g_lotwBatchActive) {
+    String pass = String(g_lotwBatchPass);
+    bool resend = g_lotwBatchResend;
+    Serial.printf("[lotw] continuing batched upload (fresh boot, cached passphrase, %s)\n",
+                  resend ? "resend" : "normal");
+    lotwEnter(); screen = SCR_LOTW; lastDrawMs = 0; draw();
+    if (!net.connected() && !connectWifiCfg()) {
+      lotwStatus = "WiFi failed (batch upload)"; scrubLotwBatchState(); lastDrawMs = 0; draw(); return;
+    }
+    // Work remains if: normal mode has un-uploaded QSOs, or resend mode hasn't yet sent
+    // all logged QSOs (cursor < total).
+    int remaining = resend ? (lotwTotal - (int)g_lotwResendSkip) : countUnuploadedLotw();
+    if (Store::ready() && Lotw::credentialPresent() && remaining > 0) {
+      lotwResend = resend;
+      doLotwUpload(pass);          // uploads the next batch; may itself reboot for the one after
+      // If doLotwUpload returned without rebooting, the run is complete -> scrub the state.
+      scrubLotwBatchState();
+    } else {
+      scrubLotwBatchState();
+      lotwStatus = "LoTW upload complete"; lastDrawMs = 0; draw();
+    }
+    return;
+  }
+
   if (!Store::fs().exists(FILE_LOTW_RESUME)) return;
   Store::fs().remove(FILE_LOTW_RESUME);        // one-shot: consume before doing anything
   Serial.println("[lotw] resuming upload in fresh boot");
@@ -19008,7 +19356,7 @@ void App::keyCloudlog(char c, bool enter, bool back) {
   // If we're asking whether to reboot-and-upload (after a -1 connect), this keypress
   // answers that prompt and nothing else: ENTER confirms the reboot, ` cancels.
   if (clRebootPrompt) {
-    if (enter) { clRebootPrompt = false; cloudlogRebootUpload(); return; }
+    if (enter) { clRebootPrompt = false; cloudlogRebootUpload(clResend, clResendSkip); return; }
     if (isBack(c, back)) {
       clRebootPrompt = false;
       clStatus = "Upload cancelled - QSOs still pending";
@@ -19021,7 +19369,7 @@ void App::keyCloudlog(char c, bool enter, bool back) {
   if (c == 'a' && clTotal > 0) { clResend = !clResend; clStatus = ""; lastDrawMs = 0; return; }
   int toSend = clResend ? clTotal : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
-  if (c == 'u' && haveCfg && toSend > 0) { doCloudlogUpload(); }
+  if (c == 'u' && haveCfg && toSend > 0) { clResendSkip = 0; doCloudlogUpload(); }
 }
 
 // Build an ADIF batch from the pending (or all, in re-send mode) QSOs, POST it to the
@@ -19062,12 +19410,15 @@ void App::doCloudlogUpload() {
     if (Store::fs().exists(FILE_LOG)) {
       File f = Store::fs().open(FILE_LOG, "r");
       if (f) {
+        int skipRem = clResend ? clResendSkip : 0;   // resend: skip already-sent batches
         while (f.available()) {
+          if (n >= CL_BATCH_QSOS) break;   // size-bound the body; remainder goes next batch
           String l = f.readStringUntil('\n'); l.trim();
           if (!l.length() || l.startsWith("utc,")) continue;
           PendingQso q;
           if (!parseQsoCsv(l, q) || !q.call[0]) continue;
           if (!(clResend || !(q.uploaded & 0x2))) continue;
+          if (skipRem > 0) { skipRem--; continue; }   // already sent in an earlier batch
           time_t tt = (time_t)q.utc; struct tm* g = gmtime(&tt);
           char d[9] = "", tm6[7] = "";
           if (g) { strftime(d, sizeof(d), "%Y%m%d", g); strftime(tm6, sizeof(tm6), "%H%M%S", g); }
@@ -19135,9 +19486,34 @@ void App::doCloudlogUpload() {
       int marked = markLogUploaded(n, 0x2);
       clPending -= marked; if (clPending < 0) clPending = 0;
       clStatus = "Uploaded " + String(n) + ", imported " + String(imported);
+      // More un-uploaded QSOs than this size-bounded batch could hold? Continue in a
+      // fresh boot (one handshake per session on this no-PSRAM part). Cloudlog needs no
+      // passphrase, so the existing one-shot reboot marker is enough. Gate on "any
+      // remaining" rather than "marked >= CAP": a batch that flags fewer than CAP (e.g.
+      // a QSO already partly flagged) must still continue if work remains.
+      int clRemain = countUnuploadedCloudlog();
+      Serial.printf("[cloudlog] batch marked=%d (cap=%d), remaining un-uploaded=%d\n",
+                    marked, CL_BATCH_QSOS, clRemain);
+      if (clRemain > 0) {
+        clStatus = "Batch done; " + String(clRemain) + " left, rebooting...";
+        lastDrawMs = 0; draw(); delay(1200);
+        cloudlogRebootUpload();   // sets marker + restarts; does not return
+        return;
+      }
     } else {
       clStatus = "Re-sent " + String(n) + ", imported " + String(imported);
-      clResend = false;
+      // Advance the resend cursor; continue in a fresh boot if more logged QSOs remain.
+      int sentSoFar = clResendSkip + n;
+      int remainAfter = clTotal - sentSoFar;   // resend covers ALL logged QSOs
+      Serial.printf("[cloudlog] resend batch n=%d (cap=%d), sent=%d/%d, remaining=%d\n",
+                    n, CL_BATCH_QSOS, sentSoFar, clTotal, remainAfter);
+      if (remainAfter > 0) {
+        clStatus = "Batch done; " + String(remainAfter) + " left, rebooting...";
+        lastDrawMs = 0; draw(); delay(1200);
+        cloudlogRebootUpload(true, sentSoFar);   // carry resend flag + cursor; reboots
+        return;
+      }
+      clResend = false; clResendSkip = 0;   // whole resend run complete
     }
   } else {
     String reason = jsonField(resp, "reason");
@@ -19154,9 +19530,9 @@ void App::doCloudlogUpload() {
 // one-shot marker and restarts; resumeCloudlogIfPending() in setup() then performs the
 // upload before anything else touches the network, and drops the user back here with
 // the result. The marker is cleared the instant it's read, so a failure can't loop.
-void App::cloudlogRebootUpload() {
+void App::cloudlogRebootUpload(bool resend, int cursor) {
   File f = Store::fs().open(FILE_CL_RESUME, "w");
-  if (f) { f.println("1"); f.close(); }
+  if (f) { f.printf("%d %d\n", resend ? 1 : 0, cursor); f.close(); }  // resend flag + resend cursor
   Serial.println("[cloudlog] reboot-to-upload requested; restarting");
   setStatus("Rebooting to upload...", 2000);
   draw(); delay(1500);
@@ -19169,6 +19545,13 @@ void App::cloudlogRebootUpload() {
 // before the GP/AMSAT/weather fetches consume socket/heap headroom.
 void App::resumeCloudlogIfPending() {
   if (!Store::fs().exists(FILE_CL_RESUME)) return;
+  // Read the marker (resend flag + resend cursor) BEFORE removing it (one-shot).
+  int rf = 0, cur = 0;
+  { File f = Store::fs().open(FILE_CL_RESUME, "r");
+    if (f) { String l = f.readStringUntil('\n'); f.close();
+             int sp = l.indexOf(' ');
+             if (sp >= 0) { rf = l.substring(0, sp).toInt(); cur = l.substring(sp + 1).toInt(); }
+             else rf = l.toInt(); } }
   Store::fs().remove(FILE_CL_RESUME);          // one-shot: consume before doing anything
   Serial.println("[cloudlog] resuming upload in fresh boot");
   cloudlogEnter();                             // counts pending + sets screen = SCR_CLOUDLOG
@@ -19176,10 +19559,12 @@ void App::resumeCloudlogIfPending() {
   if (!net.connected() && !connectWifiCfg()) {
     clStatus = "WiFi failed (upload after reboot)"; lastDrawMs = 0; draw(); return;
   }
-  int toSend = clResend ? clTotal : clPending;
+  clResend = (rf != 0);
+  clResendSkip = cur;                          // resend cursor for this continued run
+  int toSend = clResend ? (clTotal - cur) : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
   if (haveCfg && toSend > 0) doCloudlogUpload();   // ends with its own draw()
-  else { clStatus = "Nothing to upload"; lastDrawMs = 0; draw(); }
+  else { clResendSkip = 0; clStatus = "Nothing to upload"; lastDrawMs = 0; draw(); }
 }
 
 void App::drawLogEntry() {
@@ -19499,6 +19884,12 @@ void App::draw() {
     case SCR_OVERHEAD: drawOverhead(); break;
     case SCR_SKEDENTRY:drawSkedEntry(); break;
     case SCR_GAME:     drawGame(); break;
+    case SCR_GAMES:    drawGamesMenu(); break;
+    case SCR_GDOPPLER: drawGDoppler(); break;
+    case SCR_GPASS:    drawGPass(); break;
+    case SCR_GROTOR:   drawGRotor(); break;
+    case SCR_GMORSE:   drawGMorse(); break;
+    case SCR_GGRID:    drawGGrid(); break;
     case SCR_SKYGLANCE:drawSkyGlance(); break;
     case SCR_AWARDS:   drawAwards(); break;
     case SCR_AWARDSAT: drawAwardSat(); break;
@@ -21350,7 +21741,8 @@ void App::gameStep() {
   // Did they reach the gun line? That's a life lost (and a reset of the wave pos).
   int blockBottom = gInvTop + (GAME_ROWS - 1) * GAME_CELLH + GAME_INVH;
   if (blockBottom >= GAME_BOT - 8) {
-    if (--gLives <= 0) { gState = 3; return; }   // game over
+    if (--gLives <= 0) { gState = 3; sfx(200, 300); return; }   // game over
+    sfx(400, 150);                              // life lost
     // Reset formation position but keep remaining invaders.
     gInvLeft = 6; gInvTop = GAME_TOP + 6; gInvDir = 1;
   }
@@ -21377,7 +21769,8 @@ void App::drawGame() {
               gShotY[s] >= iy      && gShotY[s] <= iy + GAME_INVH) {
             gInvAlive[i] = 0; gShotY[s] = -1;
             gScore += 10 * gLevel; gInvAliveN--;
-            if (gInvAliveN <= 0) { gState = 2; }   // wave cleared
+            sfx(900, 10);
+            if (gInvAliveN <= 0) { gState = 2; sfx(1800, 120); }   // wave cleared
             break;
           }
         }
@@ -21386,6 +21779,13 @@ void App::drawGame() {
     int stepEvery = 220 - gLevel * 20 - (GAME_INV - gInvAliveN) * 8;
     if (stepEvery < 50) stepEvery = 50;
     if (ms - gStepMs >= (uint32_t)stepEvery) { gStepMs = ms; gameStep(); }
+
+    // Optional tilt steering: roll left/right moves the gun a few px per frame.
+    float lr;
+    if (gameTiltAxis(lr)) {
+      gGunX += (int)(lr * 7);
+      if (gGunX < 8) gGunX = 8; if (gGunX > 232) gGunX = 232;
+    }
   }
 
   header("Zap the Sats");
@@ -21404,7 +21804,7 @@ void App::drawGame() {
     canvas.setTextColor(CL_CYAN, CL_BLACK);
     canvas.setCursor(36, 50); canvas.print("ZAP THE SATS");
     canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(14, 70); canvas.print(", / .  move    SPACE fire");
+    canvas.setCursor(14, 70); canvas.print("T / U  move    SPACE fire");
     canvas.setCursor(40, 84); canvas.print("ENTER to start");
     gameDrawGun(canvas, 120);
     footer("ENTER start   ` back");
@@ -21453,14 +21853,566 @@ void App::keyGame(char c, bool enter, bool back) {
     return;
   }
 
-  // Playing.
-  if (isLeft(c))  { gGunX -= 8; if (gGunX < 8)   gGunX = 8;   lastDrawMs = 0; return; }
-  if (isRight(c)) { gGunX += 8; if (gGunX > 232) gGunX = 232; lastDrawMs = 0; return; }
+  // Playing. Ergonomic two-hand keys: T = left, U = right (one under each hand;
+  // chosen over F/H because 'h' is the global Help key). SPACE = fire. Legacy
+  // , . / kept as aliases. Tilt (if enabled + ADV) also steers, per frame in drawGame().
+  if (isLeft(c) || c == 't' || c == 'T')  { gGunX -= 8; if (gGunX < 8)   gGunX = 8;   lastDrawMs = 0; return; }
+  if (isRight(c) || c == 'u' || c == 'U') { gGunX += 8; if (gGunX > 232) gGunX = 232; lastDrawMs = 0; return; }
   if (c == ' ') {                             // fire: use a free shot slot
     for (int s = 0; s < GAME_SHOTS; ++s) {
-      if (gShotY[s] < 0) { gShotX[s] = gGunX; gShotY[s] = GAME_BOT - 22; break; }
+      if (gShotY[s] < 0) { gShotX[s] = gGunX; gShotY[s] = GAME_BOT - 22; sfx(1600, 8); break; }
     }
     lastDrawMs = 0; return;
+  }
+}
+// ===========================================================================
+//  Shared game helpers + Games menu + five satellite-themed mini-games.
+//  Every game keeps ALL state in fixed .bss members (declared in app.h): no
+//  heap, no String in the loop, sprites drawn with canvas primitives. Sound is
+//  gated on cfg.gameSound; tilt steering on cfg.gameTilt + imuReady (ADV-only,
+//  with keyboard fallback everywhere). See docs/design/GAMES_AND_QRZ_GRID_SCOPE.md.
+// ===========================================================================
+
+// Gated sound effect: a short speaker tone, only if the user enabled game sound.
+// tone() is fire-and-forget (the speaker task plays it), so it does not block the
+// ~25 fps game loop.
+void App::sfx(uint16_t freq, uint16_t ms) {
+  if (!cfg.gameSound) return;
+  // Play the tone. tone() lazily allocates the speaker's I2S DMA buffer on first use;
+  // that's fine here because game sound and network fetches never overlap (both are
+  // modal/user-driven), and the fetch trampoline releases the speaker buffer before any
+  // TLS handshake regardless. Stop any prior tone so rapid game effects don't overlap.
+  M5Cardputer.Speaker.stop();
+  M5Cardputer.Speaker.tone(freq, ms);
+}
+
+// Tilt left/right signal in [-1, +1] (negative = roll left). Returns false when
+// tilt isn't usable (disabled, or no IMU), so callers fall back to keys. Reuses
+// the accel convention from serviceTiltTune(): roll about the long axis moves one
+// horizontal component through +/-1 g; a light LPF + dead-zone keeps a hand-held
+// device from creeping.
+bool App::gameTiltAxis(float& outLR) {
+  if (!cfg.gameTilt || !imuReady) return false;
+  float ax = 0, ay = 0, az = 0;
+  if (!M5.Imu.getAccel(&ax, &ay, &az)) return false;
+  static float filt = 0;
+  filt += 0.35f * (ax - filt);
+  const float DEAD = 0.10f, FULL = 0.55f;
+  float mag = fabsf(filt);
+  if (mag <= DEAD) { outLR = 0; return true; }
+  float norm = (mag - DEAD) / (FULL - DEAD); if (norm > 1) norm = 1;
+  // Negate so the on-screen motion follows the physical roll direction (bench
+  // testing showed the raw ax sign moves opposite the tilt on this board).
+  outLR = (filt < 0 ? norm : -norm);
+  return true;
+}
+
+// --- Games menu ------------------------------------------------------------
+static const char* const GAMES_NAMES[] = {
+  "Zap the Sats", "Doppler Lock", "Catch the Pass", "Rotor Runner",
+  "Morse Meteors", "Grid Chase"
+};
+static const int GAMES_N = 6;
+
+void App::drawGamesMenu() {
+  header("Games");
+  canvas.setTextSize(1);
+  for (int i = 0; i < GAMES_N; ++i) {
+    int y = 22 + i * 15;
+    bool sel = (i == gamesSel);
+    if (sel) canvas.fillRect(2, y - 2, 236, 13, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(10, y); canvas.print(GAMES_NAMES[i]);
+  }
+  footer("UP/DN pick  ENTER play  ` back");
+}
+
+void App::keyGamesMenu(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--gamesSel < 0) gamesSel = GAMES_N - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++gamesSel >= GAMES_N) gamesSel = 0; lastDrawMs = 0; return; }
+  if (enter) {
+    switch (gamesSel) {
+      case 0: gState = 0; screen = SCR_GAME;     break;   // Zap (its own attract via gState 0)
+      case 1: gDopplerReset(); screen = SCR_GDOPPLER; break;
+      case 2: gPassReset();    screen = SCR_GPASS;    break;
+      case 3: gRotorReset();   screen = SCR_GROTOR;   break;
+      case 4: gMorseReset();   screen = SCR_GMORSE;   break;
+      case 5: gGridReset();    screen = SCR_GGRID;    break;
+    }
+    lastDrawMs = 0;
+  }
+}
+
+// ===========================================================================
+//  G1. Doppler Lock -- hold your marker on a frequency that drifts along a
+//  Doppler-like S-curve, as if tuning a linear transponder through a pass.
+//  Left/right (keys A/L or , /) or tilt nudge the cursor; score accrues while
+//  the cursor stays within the "passband" around the target.
+// ===========================================================================
+void App::gDopplerReset() {
+  gScore = 0; gLevel = 1; gLives = 3;
+  gdlCursor = 0.5f; gdlVel = 0; gdlPhase = 0; gdlTarget = 0.5f;
+  gdlInMs = 0; gdlLastMs = millis();
+  gState = 1;
+}
+
+void App::drawGDoppler() {
+  uint32_t ms = millis();
+  if (gState == 1) {
+    float dt = (ms - gdlLastMs) / 1000.0f; if (dt > 0.15f) dt = 0.15f; gdlLastMs = ms;
+    // Target drifts on a sine (Doppler curve); speed rises with level.
+    gdlPhase += dt * (0.5f + gdlLevelRate());
+    gdlTarget = 0.5f + 0.42f * sinf(gdlPhase);
+    // Cursor: apply tilt or momentum from keys, with light damping.
+    float lr;
+    if (gameTiltAxis(lr)) gdlVel = lr * 0.9f;
+    gdlCursor += gdlVel * dt;
+    gdlVel *= 0.90f;                                   // damping so key taps ease off
+    if (gdlCursor < 0) { gdlCursor = 0; gdlVel = 0; }
+    if (gdlCursor > 1) { gdlCursor = 1; gdlVel = 0; }
+    // Scoring: in-band if within the passband half-width (narrows with level).
+    float halfBW = 0.09f - gLevel * 0.006f; if (halfBW < 0.035f) halfBW = 0.035f;
+    bool inBand = fabsf(gdlCursor - gdlTarget) <= halfBW;
+    if (inBand) { gdlInMs += (uint32_t)(dt * 1000); gScore += 1;
+                  if ((gScore % 300) == 0 && gLevel < 9) { gLevel++; sfx(1500, 40); } }
+    // Level up by time-in-band milestones handled via score above.
+  }
+
+  header("Doppler Lock");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.printf("Score %d", gScore);
+  canvas.setCursor(180, 18); canvas.printf("Lvl %d", gLevel);
+
+  if (gState != 1) {
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(30, 44); canvas.print(gState == 0 ? "DOPPLER LOCK" : "TIME'S UP");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(8, 64);  canvas.print("Keep signal on the drifting");
+    canvas.setCursor(8, 76);  canvas.print("bird. A / L or tilt to tune.");
+    canvas.setCursor(50, 92); canvas.printf("Score %d", gScore);
+    footer("ENTER play   ` back");
+    return;
+  }
+
+  // The band: a horizontal tuning dial across the screen.
+  int x0 = 16, x1 = 224, yb = 78;
+  canvas.drawFastHLine(x0, yb, x1 - x0, CL_DGREY);
+  // Passband window around the target.
+  float halfBW = 0.09f - gLevel * 0.006f; if (halfBW < 0.035f) halfBW = 0.035f;
+  int tw0 = x0 + (int)((gdlTarget - halfBW) * (x1 - x0));
+  int tw1 = x0 + (int)((gdlTarget + halfBW) * (x1 - x0));
+  if (tw0 < x0) tw0 = x0; if (tw1 > x1) tw1 = x1;
+  canvas.fillRect(tw0, yb - 12, tw1 - tw0, 24, CL_DGREEN);
+  // Target centre (the bird's signal).
+  int tx = x0 + (int)(gdlTarget * (x1 - x0));
+  canvas.drawFastVLine(tx, yb - 16, 32, CL_GREEN);
+  // Cursor (your signal).
+  int cx = x0 + (int)(gdlCursor * (x1 - x0));
+  bool inBand = fabsf(gdlCursor - gdlTarget) <= halfBW;
+  canvas.fillTriangle(cx, yb - 18, cx - 5, yb - 26, cx + 5, yb - 26, inBand ? CL_CYAN : CL_RED);
+  canvas.drawFastVLine(cx, yb - 18, 36, inBand ? CL_CYAN : CL_RED);
+  // A little "signal meter" when locked.
+  canvas.setTextColor(inBand ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setCursor(96, 108); canvas.print(inBand ? "* LOCK *" : "  ...  ");
+  footer("A / L tune   ` back");
+}
+
+// Level-scaled drift rate (rad/s add-on). Kept as a helper so the speed curve is
+// in one place.
+float App::gdlLevelRate() { return 0.15f * gLevel; }
+
+void App::keyGDoppler(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_GAMES; gamesSel = 1; lastDrawMs = 0; return; }
+  if (gState != 1) { if (enter) { gDopplerReset(); lastDrawMs = 0; } return; }
+  if (isLeft(c)  || c == 'a' || c == 'A') { gdlVel -= 0.5f; lastDrawMs = 0; return; }
+  if (isRight(c) || c == 'l' || c == 'L') { gdlVel += 0.5f; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  G2. Catch the Pass -- a satellite arcs across a sky dome; press SPACE while
+//  it is above the elevation window (the "workable" part of the pass) to log a
+//  QSO. Mistime it and you miss. Windows get tighter as the score climbs.
+// ===========================================================================
+void App::gPassReset() {
+  gScore = 0; gLevel = 1; gpMisses = 0;
+  gpT = 0; gpPhase = 0; gpArcMs = millis();
+  gState = 1;
+}
+
+void App::drawGPass() {
+  uint32_t ms = millis();
+  if (gState == 1) {
+    float dt = (ms - gpArcMs) / 1000.0f; if (dt > 0.15f) dt = 0.15f; gpArcMs = ms;
+    // Arc parameter 0..1 across the sky; speed rises with level.
+    gpT += dt * (0.18f + 0.03f * gLevel);
+    if (gpT >= 1.0f) {                       // sat set without a QSO -> a miss
+      gpT = 0; if (++gpMisses >= 5) { gState = 3; sfx(200, 300); }
+      else sfx(350, 120);
+    }
+  }
+
+  header("Catch the Pass");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.printf("QSOs %d", gScore);
+  canvas.setCursor(150, 18); canvas.printf("Miss %d/5", gpMisses);
+
+  if (gState != 1) {
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(28, 44); canvas.print(gState == 0 ? "CATCH THE PASS" : "GAME OVER");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(8, 64);  canvas.print("Key up (SPACE) as the bird");
+    canvas.setCursor(8, 76);  canvas.print("crosses the green window.");
+    canvas.setCursor(50, 92); canvas.printf("QSOs %d", gScore);
+    footer("ENTER play   ` back");
+    return;
+  }
+
+  // Sky dome: a half-circle horizon (plotted as points, no drawCircleHelper
+  // dependency) with an elevation window band.
+  int cx = 120, cy = 120, R = 92;
+  for (float a = 0; a <= 3.14159f; a += 0.05f) {
+    int px = cx + (int)(R * cosf(a));
+    int py = cy - (int)(R * sinf(a));
+    canvas.drawPixel(px, py, CL_DGREY);
+  }
+  canvas.drawFastHLine(cx - R, cy, 2 * R, CL_DGREY);
+  // Elevation window: an arc segment near the top (the workable elevation band).
+  // Represent the window as a parameter range [w0,w1] along the arc.
+  float w0 = 0.42f, w1 = 0.58f;
+  float halfW = 0.08f - gLevel * 0.006f; if (halfW < 0.03f) halfW = 0.03f;
+  w0 = 0.5f - halfW; w1 = 0.5f + halfW;
+  // Draw the window as a thick arc chunk by plotting points.
+  for (float t = w0; t <= w1; t += 0.01f) {
+    float ang = 3.14159f * (1.0f - t);                    // pi..0 left-to-right
+    int px = cx + (int)(R * cosf(ang));
+    int py = cy - (int)(R * sinf(ang));
+    canvas.fillCircle(px, py, 2, CL_DGREEN);
+  }
+  // The satellite along the arc.
+  float ang = 3.14159f * (1.0f - gpT);
+  int sx = cx + (int)(R * cosf(ang));
+  int sy = cy - (int)(R * sinf(ang));
+  bool inWin = (gpT >= w0 && gpT <= w1);
+  gameDrawSat(canvas, sx - 11, sy - 6, 0);
+  if (inWin) { canvas.drawCircle(sx, sy, 10, CL_GREEN); }
+  // Ground station at the centre baseline.
+  gameDrawGun(canvas, cx);
+  canvas.setTextColor(inWin ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setCursor(86, 30); canvas.print(inWin ? "WORKABLE" : "        ");
+  footer("SPACE key up   ` back");
+}
+
+void App::keyGPass(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_GAMES; gamesSel = 2; lastDrawMs = 0; return; }
+  if (gState != 1) { if (enter) { gPassReset(); lastDrawMs = 0; } return; }
+  if (c == ' ') {
+    float halfW = 0.08f - gLevel * 0.006f; if (halfW < 0.03f) halfW = 0.03f;
+    bool inWin = (gpT >= 0.5f - halfW && gpT <= 0.5f + halfW);
+    if (inWin) { gScore++; sfx(1400, 40); if ((gScore % 5) == 0 && gLevel < 9) { gLevel++; sfx(1800, 80); }
+                 gpT = 0; }                              // logged -> next bird
+    else { if (++gpMisses >= 5) { gState = 3; sfx(200, 300); } else sfx(300, 100); }
+    lastDrawMs = 0; return;
+  }
+}
+
+// ===========================================================================
+//  G3. Rotor Runner -- a satellite drifts around the sky; slew your antenna
+//  crosshair (tilt pitch+roll, or arrow keys) to keep it centred on the bird.
+//  Score accrues while the crosshair is on target. A genuine two-axis IMU game.
+// ===========================================================================
+void App::gRotorReset() {
+  gScore = 0; gLevel = 1; gLives = 3;
+  grSatX = 120; grSatY = 74; grCurX = 120; grCurY = 74;
+  grSatVX = 22; grSatVY = 14; grOnMs = 0; grLastMs = millis();
+  gState = 1;
+}
+
+void App::drawGRotor() {
+  uint32_t ms = millis();
+  const int X0 = 12, X1 = 228, Y0 = 24, Y1 = 124;
+  if (gState == 1) {
+    float dt = (ms - grLastMs) / 1000.0f; if (dt > 0.15f) dt = 0.15f; grLastMs = ms;
+    // Bird wanders, bouncing off the field edges; speed scales with level.
+    float sp = 1.0f + 0.15f * gLevel;
+    grSatX += grSatVX * dt * sp; grSatY += grSatVY * dt * sp;
+    if (grSatX < X0) { grSatX = X0; grSatVX = fabsf(grSatVX); }
+    if (grSatX > X1) { grSatX = X1; grSatVX = -fabsf(grSatVX); }
+    if (grSatY < Y0) { grSatY = Y0; grSatVY = fabsf(grSatVY); }
+    if (grSatY > Y1) { grSatY = Y1; grSatVY = -fabsf(grSatVY); }
+    // Occasionally jink so it isn't perfectly predictable.
+    if ((esp_random() & 0x3F) == 0) { grSatVX += ((int)(esp_random() % 21) - 10); grSatVY += ((int)(esp_random() % 21) - 10); }
+    // Crosshair: tilt (pitch on ay, roll on ax) if available, else keys move it.
+    float ax = 0, ay = 0, az = 0;
+    if (cfg.gameTilt && imuReady && M5.Imu.getAccel(&ax, &ay, &az)) {
+      // Roll (ax) steers X to match physical tilt; pitch (ay) steers Y. Y is
+      // NOT negated (bench: inverting both made up/down feel backwards).
+      grCurX -= ax * 160 * dt;
+      grCurY += ay * 160 * dt;
+    }
+    if (grCurX < X0) grCurX = X0; if (grCurX > X1) grCurX = X1;
+    if (grCurY < Y0) grCurY = Y0; if (grCurY > Y1) grCurY = Y1;
+    // On-target test.
+    float dx = grCurX - grSatX, dy = grCurY - grSatY;
+    float dist = sqrtf(dx * dx + dy * dy);
+    bool on = dist < 14;
+    if (on) { grOnMs += (uint32_t)(dt * 1000); gScore += 1;
+              if ((gScore % 250) == 0 && gLevel < 9) { gLevel++; sfx(1600, 50); } }
+  }
+
+  header("Rotor Runner");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.printf("Score %d", gScore);
+  canvas.setCursor(180, 18); canvas.printf("Lvl %d", gLevel);
+
+  if (gState != 1) {
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(34, 44); canvas.print(gState == 0 ? "ROTOR RUNNER" : "DONE");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(8, 64);  canvas.print("Keep the crosshair on the");
+    canvas.setCursor(8, 76);  canvas.print("bird. Tilt or arrow keys.");
+    canvas.setCursor(50, 92); canvas.printf("Score %d", gScore);
+    footer("ENTER play   ` back");
+    return;
+  }
+
+  float dx = grCurX - grSatX, dy = grCurY - grSatY;
+  bool on = sqrtf(dx * dx + dy * dy) < 14;
+  gameDrawSat(canvas, (int)grSatX - 11, (int)grSatY - 6, 1);
+  // Crosshair.
+  uint8_t cc = on ? CL_GREEN : CL_ORANGE;
+  canvas.drawCircle((int)grCurX, (int)grCurY, 12, cc);
+  canvas.drawFastHLine((int)grCurX - 16, (int)grCurY, 32, cc);
+  canvas.drawFastVLine((int)grCurX, (int)grCurY - 16, 32, cc);
+  footer(cfg.gameTilt ? "tilt to track   ` back" : "arrows track   ` back");
+}
+
+void App::keyGRotor(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_GAMES; gamesSel = 3; lastDrawMs = 0; return; }
+  if (gState != 1) { if (enter) { gRotorReset(); lastDrawMs = 0; } return; }
+  // Keyboard fallback / assist (works alongside tilt).
+  const float STEP = 10;
+  if (isLeft(c)  || c == 'a' || c == 'A') { grCurX -= STEP; lastDrawMs = 0; }
+  if (isRight(c) || c == 'l' || c == 'L') { grCurX += STEP; lastDrawMs = 0; }
+  if (isUp(c))   { grCurY -= STEP; lastDrawMs = 0; }
+  if (isDown(c)) { grCurY += STEP; lastDrawMs = 0; }
+}
+
+// ===========================================================================
+//  G4. Morse Meteors -- letters fall; clear each by keying its Morse code.
+//  Key with two keys: '.' (or ',') = dot, '/' (or SPACE) = dash. The buffer is
+//  matched against the lowest letter's code; a correct full code clears it.
+//  A small const Morse table lives in flash. Ties into CW satellite operating.
+// ===========================================================================
+static const char* const MORSE_TBL[26] = {
+  ".-","-...","-.-.","-..",".","..-.","--.","....","..",".---",  // A-J
+  "-.-",".-..","--","-.","---",".--.","--.-",".-.","...","-",     // K-T
+  "..-","...-",".--","-..-","-.--","--.."                         // U-Z
+};
+
+void App::gMorseReset() {
+  gScore = 0; gLevel = 1; gLives = 3;
+  for (int i = 0; i < GMOR_MAX; ++i) { gmLetter[i] = -1; gmY[i] = 0; gmX[i] = 0; }
+  gmTypeN = 0; gmType[0] = 0; gmSpawnMs = millis();
+  gState = 1;
+}
+
+void App::drawGMorse() {
+  uint32_t ms = millis();
+  if (gState == 1) {
+    // Spawn cadence: faster with level. Use a spawn timer rather than dt here.
+    static uint32_t lastSpawn = 0;
+    uint32_t spawnEvery = 2600 - gLevel * 150; if (spawnEvery < 900) spawnEvery = 900;
+    if (ms - lastSpawn > spawnEvery) {
+      lastSpawn = ms;
+      for (int i = 0; i < GMOR_MAX; ++i) if (gmLetter[i] < 0) {
+        gmLetter[i] = (int8_t)(esp_random() % 26);
+        gmX[i] = 20 + (int)(esp_random() % 200);
+        gmY[i] = 22;
+        break;
+      }
+    }
+    // Fall. Speed scales with level.
+    float fall = (12.0f + gLevel * 2.0f);                 // px/sec
+    static uint32_t lastFall = 0; if (lastFall == 0) lastFall = ms;
+    float fdt = (ms - lastFall) / 1000.0f; if (fdt > 0.15f) fdt = 0.15f; lastFall = ms;
+    for (int i = 0; i < GMOR_MAX; ++i) {
+      if (gmLetter[i] < 0) continue;
+      gmY[i] += fall * fdt;
+      if (gmY[i] >= 118) {                                // hit the ground -> life lost
+        gmLetter[i] = -1; gmTypeN = 0; gmType[0] = 0;
+        if (--gLives <= 0) { gState = 3; sfx(200, 300); }
+        else sfx(350, 150);
+      }
+    }
+  }
+
+  header("Morse Meteors");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.printf("Score %d", gScore);
+  { char lv[8]; int n = gLives < 0 ? 0 : (gLives > 5 ? 5 : gLives);
+    for (int i = 0; i < n; ++i) lv[i] = 'A'; lv[n] = 0;
+    canvas.setTextColor(CL_ORANGE, CL_BLACK); canvas.setCursor(206, 18); canvas.print(lv); }
+
+  if (gState != 1) {
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(30, 40); canvas.print(gState == 0 ? "MORSE METEORS" : "GAME OVER");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, 58); canvas.printf("%c = dot   %c = dash",
+                     cfg.morseSwap ? 'U' : 'T', cfg.morseSwap ? 'T' : 'U');
+    canvas.setCursor(6, 72); canvas.print("Key the lowest letter's code.");
+    canvas.setCursor(50, 90); canvas.printf("Score %d", gScore);
+    footer("ENTER play   ` back");
+    return;
+  }
+
+  // Falling letters.
+  int lowest = -1; float lowY = -1;
+  for (int i = 0; i < GMOR_MAX; ++i) {
+    if (gmLetter[i] < 0) continue;
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(gmX[i], (int)gmY[i]);
+    canvas.printf("%c", 'A' + gmLetter[i]);
+    // Also show that letter's Morse dimly under it.
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(gmX[i] - 6, (int)gmY[i] + 10); canvas.print(MORSE_TBL[gmLetter[i]]);
+    if (gmY[i] > lowY) { lowY = gmY[i]; lowest = i; }
+  }
+  // Ground line + typed buffer.
+  canvas.drawFastHLine(0, 120, 240, CL_DGREY);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, 124); canvas.printf("Key: %s", gmType);
+  if (lowest >= 0) {
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.setCursor(150, 124); canvas.printf("-> %c", 'A' + gmLetter[lowest]);
+  }
+  footer(cfg.morseSwap ? "U dot  T dash   ` back" : "T dot  U dash   ` back");
+}
+
+void App::keyGMorse(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_GAMES; gamesSel = 4; lastDrawMs = 0; return; }
+  if (gState != 1) { if (enter) { gMorseReset(); lastDrawMs = 0; } return; }
+  // T = dot, U = dash by default; cfg.morseSwap flips them for the other convention.
+  // (T/U chosen over F/H because 'h' is the global Help key.) Legacy . , (dot) and
+  // / SPACE (dash) still work regardless of the swap.
+  bool tDot = !cfg.morseSwap;                       // which of T/U is the dot
+  bool dot  = (c == '.' || c == ',') || (tDot  ? (c == 't' || c == 'T') : (c == 'u' || c == 'U'));
+  bool dash = (c == '/' || c == ' ') || (tDot  ? (c == 'u' || c == 'U') : (c == 't' || c == 'T'));
+  if (!dot && !dash) return;
+  if (gmTypeN < sizeof(gmType) - 1) { gmType[gmTypeN++] = dot ? '.' : '-'; gmType[gmTypeN] = 0; }
+  // Real CW sidetone: same pitch for both, dash is 3x the dot length.
+  sfx(700, dot ? 60 : 180);
+  // Find the lowest letter and test the buffer against its code.
+  int lowest = -1; float lowY = -1;
+  for (int i = 0; i < GMOR_MAX; ++i) { if (gmLetter[i] < 0) continue; if (gmY[i] > lowY) { lowY = gmY[i]; lowest = i; } }
+  if (lowest < 0) { gmTypeN = 0; gmType[0] = 0; lastDrawMs = 0; return; }
+  const char* code = MORSE_TBL[gmLetter[lowest]];
+  if (strcmp(gmType, code) == 0) {                        // cleared!
+    gmLetter[lowest] = -1; gmTypeN = 0; gmType[0] = 0;
+    gScore += 10; sfx(1200, 90);
+    if ((gScore % 100) == 0 && gLevel < 9) { gLevel++; sfx(1600, 120); }
+  } else if (strncmp(gmType, code, gmTypeN) != 0) {       // wrong prefix -> reset buffer
+    gmTypeN = 0; gmType[0] = 0; sfx(300, 60);
+  }
+  lastDrawMs = 0;
+}
+
+// ===========================================================================
+//  G5. Grid Chase -- a Maidenhead grid is shown; pick the correct location
+//  description... actually pick the correct GRID for a shown lat/lon hint from
+//  four options, against a countdown. A grid-square trainer. Not frame-animated;
+//  a periodic redraw ticks the timer.
+// ===========================================================================
+void App::gGridReset() {
+  gScore = 0; ggStreak = 0;
+  gState = 1;
+  ggNewRound();
+}
+
+// Build a fresh round: pick a random real-ish grid as the answer, plus 3 distractors.
+void App::ggNewRound() {
+  // Random lat/lon on land-ish latitudes, convert to a grid via the real routine.
+  auto randGrid = [&](char* out) {
+    double lat = ((int)(esp_random() % 14000) - 7000) / 100.0;   // -70..+70
+    double lon = ((int)(esp_random() % 36000) - 18000) / 100.0;  // -180..+180
+    String g = Location::toGrid(lat, lon);
+    strncpy(out, g.c_str(), 7); out[7] = 0;
+  };
+  randGrid(ggGrid);
+  ggCorrect = (uint8_t)(esp_random() % 4);
+  for (int i = 0; i < 4; ++i) {
+    if (i == ggCorrect) { strncpy(ggOpt[i], ggGrid, 7); ggOpt[i][7] = 0; }
+    else { char g[8]; do { randGrid(g); } while (strcmp(g, ggGrid) == 0); strncpy(ggOpt[i], g, 7); ggOpt[i][7] = 0; }
+  }
+  ggSel = 0;
+  ggDeadline = millis() + 8000;                           // 8 s to answer
+}
+
+void App::drawGGrid() {
+  uint32_t ms = millis();
+  if (gState == 1 && ms > ggDeadline) {                   // timed out -> streak resets, next
+    ggStreak = 0; sfx(300, 150); ggNewRound();
+  }
+
+  header("Grid Chase");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.printf("Score %d", gScore);
+  canvas.setCursor(150, 18); canvas.printf("Streak %d", ggStreak);
+
+  if (gState != 1) {
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(48, 44); canvas.print("GRID CHASE");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, 64);  canvas.print("Match the grid to the map dot.");
+    canvas.setCursor(50, 82); canvas.printf("Score %d", gScore);
+    footer("ENTER play   ` back");
+    return;
+  }
+
+  // Draw a tiny world rectangle with the target grid's location as a dot.
+  int mx = 130, my = 30, mw = 100, mh = 50;
+  canvas.drawRect(mx, my, mw, mh, CL_DGREY);
+  canvas.drawFastVLine(mx + mw / 2, my, mh, CL_DGREY);    // prime meridian
+  canvas.drawFastHLine(mx, my + mh / 2, mw, CL_DGREY);    // equator
+  double dlat, dlon;
+  if (Location::gridToLatLon(ggGrid, dlat, dlon)) {
+    int px = mx + (int)((dlon + 180.0) / 360.0 * mw);
+    int py = my + (int)((90.0 - dlat) / 180.0 * mh);
+    canvas.fillCircle(px, py, 3, CL_RED);
+  }
+  // Countdown bar.
+  long remain = (long)ggDeadline - (long)ms; if (remain < 0) remain = 0;
+  int bw = (int)(remain * 116 / 8000);
+  canvas.drawRect(6, 80, 118, 7, CL_DGREY);
+  canvas.fillRect(6, 80, bw, 7, remain < 2500 ? CL_RED : CL_DGREEN);
+
+  // Four options. Start higher and keep 9px rows so option 4 clears the footer.
+  for (int i = 0; i < 4; ++i) {
+    int y = 92 + i * 9;
+    bool sel = (i == ggSel);
+    if (sel) canvas.fillRect(4, y - 1, 116, 9, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(10, y); canvas.printf("%d. %s", i + 1, ggOpt[i]);
+  }
+  footer("UP/DN  ENTER pick  ` back");
+}
+
+void App::keyGGrid(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_GAMES; gamesSel = 5; lastDrawMs = 0; return; }
+  if (gState != 1) { if (enter) { gGridReset(); lastDrawMs = 0; } return; }
+  if (isUp(c))   { if (ggSel == 0) ggSel = 3; else ggSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++ggSel > 3) ggSel = 0; lastDrawMs = 0; return; }
+  if (c >= '1' && c <= '4') { ggSel = c - '1'; enter = true; }
+  if (enter) {
+    if (ggSel == ggCorrect) { gScore += 10; ggStreak++; sfx(1600, 60);
+                              if (ggStreak % 5 == 0) sfx(2000, 100); }
+    else { ggStreak = 0; sfx(300, 150); }
+    ggNewRound(); lastDrawMs = 0;
   }
 }
 
@@ -24075,6 +25027,123 @@ bool App::qrzLookup(const String& call, String& err) {
   qrzCall    = qrzTag(body, "call"); if (qrzCall.length() == 0) qrzCall = call;
   qrzCall.toUpperCase();
   return true;
+}
+
+// Backfill missing grids for logged QSOs using the QRZ XML interface. Heap-safe by
+// design (see docs/design/GAMES_AND_QRZ_GRID_SCOPE.md): the log is streamed line by
+// line to a .tmp and renamed over the original (the same safe-rewrite pattern as
+// markLogUploaded), so the whole log is never in RAM -- only one PendingQso at a time.
+// Each lookup is the existing capped qrzLookup() (8-16 KB response in one reused
+// String), and the QRZ session key is cached so N lookups share one login. To bound
+// the number of back-to-back TLS handshakes (each has the ~32 KB-contiguous exposure
+// documented in STREAMING_TLS.md), a run processes at most FILL_CAP grid-less QSOs;
+// re-run to continue. A single lookup failing (bad call, timeout, cold-handshake miss)
+// just skips that QSO -- the run keeps going rather than aborting.
+void App::fillGridsQrz() {
+  clBusy = true; lastDrawMs = 0;
+  screen = SCR_LOG;                                  // stay on the Log screen for status
+  if (cfg.qrzUser[0] == 0 || cfg.qrzPass[0] == 0) {
+    setStatus("Set QRZ user/pass in Settings first"); clBusy = false; lastDrawMs = 0; draw(); return;
+  }
+  if (!net.connected()) {
+    setStatus("Connecting WiFi..."); draw();
+    if (!connectWifiCfg()) { setStatus("WiFi failed"); clBusy = false; lastDrawMs = 0; draw(); return; }
+  }
+  if (!Store::fs().exists(FILE_LOG)) { setStatus("No log yet"); clBusy = false; lastDrawMs = 0; draw(); return; }
+
+  const int FILL_CAP = 20;                           // max lookups per run (bounds handshakes)
+  // IMPORTANT: the QRZ lookups (TLS) must run with NO log/temp files open. Two open VFS
+  // file handles hold ~4-5 KB of buffers EACH on this port; with both open, free heap
+  // fell from ~69 KB to ~59 KB and mbedTLS could no longer place its second ~16 KB
+  // content buffer -- every QRZ connect failed with "SSL - Memory allocation failed"
+  // while the largest block still read 31732 and sockets were 0/16. So we split the job:
+  //   pass 1  -- open log read-only, collect up to FILL_CAP distinct missing callsigns,
+  //              then CLOSE the file;
+  //   lookups -- resolve those callsigns to grids with NO files open (full heap for TLS);
+  //   pass 2  -- open log + temp, stream-rewrite filling grids from the resolved table,
+  //              with NO TLS in flight (both-files-open is fine here).
+  static char wantCall[FILL_CAP][14];
+  static char gotGrid[FILL_CAP][10];
+  int nWant = 0, missing = 0;
+
+  // --- pass 1: scan for distinct callsigns missing a grid (file closed at the end) ---
+  {
+    File in = Store::fs().open(FILE_LOG, "r");
+    if (!in) { setStatus("Log open failed"); clBusy = false; lastDrawMs = 0; draw(); return; }
+    while (in.available()) {
+      String t = in.readStringUntil('\n'); t.trim();
+      if (!t.length() || t.startsWith("utc,")) continue;
+      PendingQso q;
+      if (!parseQsoCsv(t, q)) continue;
+      if (q.grid[0] != 0 || q.call[0] == 0) continue;   // already has a grid / no call
+      missing++;
+      // distinct-callsign check (case-insensitive) against what we've already queued
+      bool seen = false;
+      for (int i = 0; i < nWant; ++i) if (strcasecmp(wantCall[i], q.call) == 0) { seen = true; break; }
+      if (!seen && nWant < FILL_CAP) {
+        strncpy(wantCall[nWant], q.call, 13); wantCall[nWant][13] = 0;
+        gotGrid[nWant][0] = 0;
+        nWant++;
+      }
+    }
+    in.close();
+  }
+
+  if (nWant == 0) {
+    setStatus(missing ? "No lookups needed" : "All QSOs already have grids");
+    clBusy = false; lastDrawMs = 0; draw(); return;
+  }
+
+  // --- lookups: resolve each distinct callsign to a grid, NO files open ---
+  int filled = 0, tried = 0;
+  for (int i = 0; i < nWant; ++i) {
+    setStatus(String("QRZ ") + wantCall[i] + " (" + String(i + 1) + "/" +
+              String(nWant) + ")..."); draw();
+    String err;
+    bool ok = qrzLookup(wantCall[i], err);            // sets qrzGrid on success; reuses session key
+    tried++;
+    if (ok && qrzGrid.length() >= 4) {
+      strncpy(gotGrid[i], qrzGrid.c_str(), 9); gotGrid[i][9] = 0;
+    }
+  }
+
+  // --- pass 2: stream-rewrite the log, filling grids from the resolved table (no TLS) ---
+  String tmp = String(FILE_LOG) + ".gfill";
+  File in = Store::fs().open(FILE_LOG, "r");
+  File out = Store::fs().open(tmp.c_str(), "w");
+  if (!in || !out) {
+    if (in) in.close(); if (out) out.close();
+    setStatus("Rewrite failed"); clBusy = false; lastDrawMs = 0; draw(); return;
+  }
+  while (in.available()) {
+    String t = in.readStringUntil('\n'); t.trim();
+    if (!t.length()) continue;
+    if (t.startsWith("utc,")) { out.println(t); continue; }
+    PendingQso q;
+    if (!parseQsoCsv(t, q)) { out.println(t); continue; }
+    if (q.grid[0] == 0 && q.call[0] != 0) {
+      for (int i = 0; i < nWant; ++i) {
+        if (gotGrid[i][0] && strcasecmp(wantCall[i], q.call) == 0) {
+          strncpy(q.grid, gotGrid[i], sizeof(q.grid) - 1); q.grid[sizeof(q.grid) - 1] = 0;
+          filled++;
+          break;
+        }
+      }
+    }
+    writeQsoCsv(out, q);
+  }
+  in.close(); out.close();
+
+  // Swap the rewritten log in only if we actually opened/wrote it fully.
+  Store::fs().remove(FILE_LOG);
+  Store::fs().rename(tmp.c_str(), FILE_LOG);
+
+  String msg;
+  if (filled == 0)         msg = "No grids found (tried " + String(tried) + ")";
+  else                     msg = "Filled " + String(filled) + " of " + String(missing) + " grid(s)";
+  if (missing > nWant)     msg += "; re-run for more";
+  setStatus(msg);
+  clBusy = false; lastDrawMs = 0; draw();
 }
 
 void App::drawQrz() {
@@ -26904,7 +27973,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 80;          // must exceed the highest rows[] index used below
+  const int N = 83;          // must exceed the highest rows[] index used below
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -27013,8 +28082,13 @@ void App::drawSettings() {
                      : String(cfg.doppLeadMs) + " ms");
   rows[47] = String("Rot az lookahead: ") + (cfg.rotAzLookSec == 0 ? String("off")                     : String(cfg.rotAzLookSec) + " s");
   rows[48] = String("Brightness: ") + String((int)((cfg.bright * 100 + 127) / 255)) + "%";
+  rows[82] = String("Volume: ") + String((int)((cfg.spkVolume * 100 + 127) / 255)) + "%";
   rows[49] = String("Tilt tuning: ") + (!imuReady ? String("n/a (no IMU)")
                                                    : (cfg.tiltTune ? String("on") : String("off")));
+  rows[77] = String("Game tilt: ") + (!imuReady ? String("n/a (no IMU)")
+                                                : (cfg.gameTilt ? String("on") : String("off")));
+  rows[79] = String("Game sound: ") + (cfg.gameSound ? String("on") : String("off"));
+  rows[81] = String("Morse keys: ") + (cfg.morseSwap ? String("U dot / T dash") : String("T dot / U dash"));
   rows[62] = String("Run CAT self-test");
   { const char* pm = (cfg.civPinMode == 1) ? "1-pin G2" : (cfg.civPinMode == 2) ? "1-pin G1" : "TX/RX (G2/G1)";
     rows[63] = String("CI-V wiring: ") + pm; }

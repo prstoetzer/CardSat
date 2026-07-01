@@ -351,7 +351,7 @@ bool VoiceMemo::deleteMemo(const char* file) {
   return Store::fs().remove(path);
 }
 
-bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)()) {
+bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume) {
   _err = "";
   if (_state == RECORDING) { _err = "busy recording"; return false; }
   if (!Store::onSD()) { _err = "SD card required"; return false; }
@@ -378,7 +378,7 @@ bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)()) {
   if (M5.Mic.isEnabled()) M5.Mic.end();
   bool spkWasOn = M5Cardputer.Speaker.isEnabled();
   if (!spkWasOn) M5Cardputer.Speaker.begin();
-  M5Cardputer.Speaker.setVolume(200);
+  M5Cardputer.Speaker.setVolume(volume);
 
   // Stream blocks: read PCM from SD into a small buffer, hand to playRaw, wait
   // for it to drain (polling the cancel hook), repeat. No whole-clip buffer.

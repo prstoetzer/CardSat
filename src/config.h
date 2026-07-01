@@ -27,6 +27,17 @@ static constexpr double C_LIGHT = 299792458.0;
 // .tq8 payload authenticates itself (no login). URL kept here so it can be
 // updated without touching code if ARRL moves the endpoint again.
 #define LOTW_UPLOAD_URL    "https://lotw.arrl.org/lotw/upload"
+// Max QSOs per LoTW upload batch. Chosen so the compressed .tq8 body stays well under
+// the ESP32 lwip TCP_SND_BUF send ceiling (~5744 B; ~650 B/QSO => 6 QSOs ~= 4.1 KB).
+// Larger uploads are split into multiple size-bounded batches, one per reboot.
+#define LOTW_BATCH_QSOS    6
+// Max QSOs per Cloudlog upload batch. Cloudlog's ADIF body is ~275 B/QSO, so 15 QSOs
+// (~4.1 KB) stays under the SAFE_UPLOAD_BODY / TCP_SND_BUF ceiling with margin.
+#define CL_BATCH_QSOS      15
+// Safe request-body size for a single POST on this platform, below the TCP_SND_BUF
+// send ceiling (with margin for multipart headers/tail). POSTs larger than this stall
+// mid-body on-device and must be batched. Applies to LoTW and Cloudlog uploads.
+#define SAFE_UPLOAD_BODY   5000
 // hams.at upcoming satellite activations (Atom feed of scheduled rove/activations).
 #define HAMSAT_FEED_URL    "https://hams.at/feeds/upcoming_alerts"
 #define FILE_HAMSAT  "/CardSat/hamsat.dat"   // cached parsed activations (binary, survives reboot)
@@ -108,7 +119,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.41";
+static constexpr const char* FW_VERSION = "0.9.42";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.

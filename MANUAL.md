@@ -634,14 +634,23 @@ been uploaded yet. Press **`u`** to sign and send; if your key is password-prote
 you'll be asked for the password (leave it blank if you exported with `-nodes`).
 CardSat signs each pending QSO, posts the `.tq8`, shows how many were accepted, and
 flags those QSOs so they're never sent twice. (LoTW rejects duplicate uploads, and
-CardSat tracks what it has sent in a new `uploaded` column in `qso_log.csv`.) Large
-backlogs are sent in batches of up to 50 per upload; just run it again for the rest.
+CardSat tracks what it has sent in a new `uploaded` column in `qso_log.csv`.)
 
-As with the Cloudlog upload, if the connection itself is refused (the rare
-post-long-session memory-fragmentation case), CardSat offers to **reboot and upload** —
-**ENTER** to reboot and finish from a clean start, **`` ` ``** to cancel. Because the
-LoTW key password is never stored on the device, CardSat re-prompts for it after the
-reboot before signing.
+**Large uploads are automatic.** A full log is uploaded in **batches of 6 QSOs**, each
+small enough to clear a fixed limit in the ESP32's network stack (a larger single upload
+would stall part-way through — see
+[docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md](design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md)).
+When more QSOs remain after a batch, CardSat **reboots and continues on its own**, and it
+**remembers your key password across the reboots so you only enter it once** for the whole
+run. The upload screen shows the progress ("Batch sent; N left, rebooting…"). This works
+for both **`u` upload (un-uploaded only)** and **upload ALL** (re-send) — a 14-QSO upload,
+for instance, goes up as 6 + 6 + 2 across three quick reboots and stops by itself. Your
+key password is held only in volatile memory during the run and is erased when it
+finishes or fails; it is never written to the card or flash.
+
+If a connection is refused outright (the rare post-long-session memory-fragmentation
+case), CardSat also offers to **reboot and upload** — **ENTER** to reboot and finish from
+a clean start, **`` ` ``** to cancel.
 
 The satellite `SAT_NAME` translation described above applies here too — the same
 `/CardSat/lotw_sats.csv` map is used, so make sure each bird you've worked has a
@@ -684,6 +693,11 @@ uploaded — for instance after fixing a setting — press `a` to toggle re-send
 rejects the upload it shows the reason (a wrong key, insufficient key rights, or a
 station-ID/callsign mismatch are the usual causes). Your API key is treated as a secret and
 is never written to the serial log.
+
+**Large uploads are batched automatically**, the same way as LoTW: Cloudlog uploads in
+**15-QSO batches** (Cloudlog's records are smaller than a signed `.tq8`), and CardSat
+reboots to continue if more remain. Cloudlog authenticates with your API key rather than a
+passphrase, so the continuation is fully automatic — nothing to re-enter.
 
 If instead the upload can't even **connect** (a rare "connection refused" that can occur
 after a long operating session has fragmented memory), CardSat offers a failsafe: it asks
@@ -1694,6 +1708,7 @@ on-screen key reference. The notable rows:
 | Dopp lead | `,`/`/` the predictive-lead cap, 0–100 ms in 5 ms steps (default 50 ms; `0` = off). On fast overhead passes CardSat can compute Doppler slightly ahead to mask CAT latency, tapering the lead to zero near closest approach. Raise it if your rig's CI-V is slow; set `0` to disable |
 | Screen sleep | `,`/`/` cycle off / 30 s / 1 min / 2 min / 5 min — blanks the backlight after that idle time |
 | Brightness | `,`/`/` adjust the active screen brightness in ~6% steps; previews live. Under *Station / display* |
+| Volume | `,`/`/` adjust the speaker volume, 0–100% in ~9% steps; plays a short blip at the new level as you adjust so you can hear it. Applies to the AOS alarm, game sounds, and voice-memo playback. Saved and restored across reboots. Under *Station / display* |
 | Tilt tuning | `,`/`/` or ENTER toggle **accelerometer passband tuning** on/off. Shown as **n/a (no IMU)** on boards without one (only the Cardputer **ADV** has the sensor). When on, roll the device left/right in TUNE mode on a linear bird to move through the passband. Under *Station / display* |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
 | LoTW DXCC / CQ zone / ITU zone / primary / secondary / IOTA | A chained set of pickers for the **LoTW upload** station location. **DXCC** opens a full entity list (subdivision-bearing entities grouped at the top, marked `>`; type to filter). **CQ/ITU zone** are typed. **Primary** (labelled state/province/oblast/prefecture/kunta per your DXCC) opens a gated picker — required for US/AK/HI, **(n/a)** for entities without one. **Secondary** is county (US) or city/gun/ku (Japan), gated by the primary; **(n/a)** elsewhere. **IOTA** (e.g. `NA-005`) is optional for any entity. Inside a picker: `;`/`.` move, ENTER selects, typing filters, `` ` `` clears/back. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |

@@ -1646,6 +1646,64 @@ own build flags; you should not need to.
 > the modular `src/` folder instead** (use the PlatformIO build): there `lora.cpp` is
 > its own small translation unit and the literal-range problem does not arise.
 
+### LoRa RX / hex monitor (Messages → `g`)
+
+A general-purpose tool to receive and inspect **any** LoRa signal on the Cap LoRa
+(SX1262) — not just satellites, and with no network or satellite data involved.
+Useful for checking whether a LoRa transmitter is on the air, what a beacon's
+bytes look like, and for peaking reception by ear. Press **`g`** on the Messages
+screen to open it (LoRa must be enabled in Settings; it works even with no
+messages in the log).
+
+It takes over the shared radio while open, so CardSat messaging is paused until
+you leave — the two share one SX1262 and one channel.
+
+**Config screen.** Set the full SX1262 receive parameter set, then press **ENTER**
+to start receiving:
+
+- **Freq** — carrier. Press **ENTER** on this row to type the frequency directly
+  in **MHz** (e.g. `433.775`) on a numeric entry screen. For fine tuning, `,`//`
+  nudge it by the current step and **`s`** cycles the step size (1 kHz → 10 kHz →
+  100 kHz → 1 MHz). (ENTER on any other row starts receiving.)
+- **SF** — spreading factor 7–12.
+- **Bandwidth** — the full SX1262 LoRa ladder: 7.8, 10.4, 15.6, 20.8, 31.25, 41.7,
+  62.5, 125, 250, 500 kHz.
+- **Coding** — coding rate 4/5–4/8.
+- **Sync** — sync word (0x00–0xFF; **0x12** is the LoRa "private" default, **0x34**
+  the public/LoRaWAN value).
+- **Preamble** — preamble length in symbols (4–64).
+- **CRC** — whether a payload CRC is expected (on/off).
+
+All of these are **saved and restored** across reboots, and are kept separate from
+the LoRa Messages parameters, so tuning the monitor never changes your messaging
+setup.
+
+**Monitor screen.** A classic hexdump of received frames that **updates
+automatically as frames arrive** (it is not keypress-driven). Under the standard
+title bar, a status line shows the live frequency, SF, BW, CR, a **PAUSE / RX /
+`--`** state indicator, and a packet counter. Each frame is shown **16 bytes per
+row: a line of hex with the ASCII characters directly beneath it** (non-printable
+bytes shown as `.`), with a byte offset at the left. The newest frame is shown;
+`;`/`.` scroll back and forth through the last dozen frames.
+
+On a busy channel, press **`p`** to **pause** the display so you can read a frame
+in detail: the radio keeps receiving into the buffer while paused (a `+N new`
+indicator counts what arrived), and the frozen frame stays put until you press
+**`p`** again to resume. You can also **tune live** without going back: `,`//`
+nudge the frequency by the current step, **`f`** cycles the step, and **`s`** /
+**`b`** / **`c`** cycle SF / BW / CR — each change re-applies to the radio
+immediately, so you can sweep parameters until frames appear when you don't know a
+signal's exact settings. **`x`** clears the buffer. **`` ` ``** (backtick) or
+**ESC** returns to the config screen (the radio keeps running); pressing it again
+on the config screen leaves the mode and restores messaging.
+
+> **Receive-only.** This is a monitor — it never transmits. As with all RF
+> features, use an antenna appropriate to the band you tune (e.g. a 70 cm antenna
+> for 433 MHz); the Cap LoRa's SX1262 has no band-pass filter, so any frequency
+> the chip supports works with the right antenna. Frames are stored up to 64 bytes
+> for display; a longer on-air frame is shown truncated (its true length is still
+> reported). LoRa modulation only — FSK/GFSK signals are not received.
+
 ### Update
 
 - `k` or **ENTER** — update GP data from your configured source and sync the clock

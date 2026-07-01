@@ -71,6 +71,14 @@ public:
   // band or SF). Cheap; returns false if the radio isn't up.
   bool setRadio(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm);
 
+  // Full RX reconfiguration for receiving arbitrary LoRa signals (used by the
+  // LoRa RX / hex monitor): carrier, SF, bandwidth, coding-rate denominator
+  // (cr: 5..8 => 4/5..4/8), sync word, preamble length, and CRC on/off. Unlike
+  // setRadio() these are a received signal's parameters, not CardSat messaging's.
+  // Leaves the radio in continuous receive. Same shared-SPI/SD discipline as setRadio().
+  bool setRadioRx(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, uint8_t cr,
+                  uint8_t syncWord, uint16_t preamble, bool crcOn);
+
   // Transmit a raw payload (already framed by the caller). Blocks for the LoRa
   // air time (seconds at SF12!). Returns true if the chip reported TX done.
   bool sendRaw(const uint8_t* data, size_t len);

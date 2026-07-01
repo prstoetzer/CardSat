@@ -3725,7 +3725,12 @@ void App::loop() {
     serviceWebd();            // mobile web control page (opt-in, over the WiFi LAN)
     memo.poll();              // voice memo: append one block if recording (SD only)
     irBeacon.service();       // IR pass-alert beacon: advance any queued flashes
+#if CARDSAT_HAS_LORARX
+    if (lorarx.active()) lorarx.service();   // RX monitor owns the radio while active
+    else loraPoll();          // LoRa messaging: drain any received frame (no-op if off)
+#else
     loraPoll();               // LoRa messaging: drain any received frame (no-op if off)
+#endif
   }
   // If the socket-recovery path exhausted its hard resets, surface a reboot
   // prompt once (don't reboot silently). The user decides; the flag is cleared
@@ -4039,6 +4044,12 @@ void App::loop() {
     if (banner) { if (ms - lastDrawMs > 300) { lastDrawMs = ms; draw(); } }
     else if (status.length()) { status = ""; lastDrawMs = ms; draw(); }  // expired: clear + repaint once
   }
+#if CARDSAT_HAS_LORARX
+  // The LoRa RX monitor must update as frames arrive (not only on keypress).
+  // Repaint on a brisk cadence while it's active so the RX indicator, packet
+  // counter, and newest-frame hexdump stay live.
+  if (screen == SCR_LORARX && ms - lastDrawMs > 200) { lastDrawMs = ms; draw(); }
+#endif
 
   // While an AOS alarm is flashing or counting down, animate on any screen.
   long dt = (nextAos && timeIsSet()) ? (long)(nextAos - nowUtc()) : 999999;
@@ -4187,6 +4198,9 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_SATSAT:   keySatSat(c, enter, back); break;
     case SCR_TRANSIT:  keyTransit(c, enter, back); break;
     case SCR_MESSAGES: keyMessages(c, enter, back); break;
+#if CARDSAT_HAS_LORARX
+    case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
+#endif
     case SCR_LOG:      keyLog(c, enter, back); break;
     case SCR_LOTW:     keyLotw(c, enter, back); break;
     case SCR_CLOUDLOG: keyCloudlog(c, enter, back); break;
@@ -6061,6 +6075,9 @@ static Screen editHome(int t) {
   if (t >= 300) return SCR_LOCATION;    // manual time
   if (t == 216) return SCR_QRZ;         // QRZ callsign prompt
   if (t == 230) return SCR_LOTW;        // LoTW key password prompt (cancel -> LoTW screen)
+#if CARDSAT_HAS_LORARX
+  if (t == 240) return SCR_LORARX;      // LoRa RX monitor: frequency-in-MHz entry
+#endif
   if (t == 104) return SCR_GLOBE;       // DX grid entered from the globe
   if (t >= 200) return SCR_SETTINGS;    // radio / WiFi
   if (t >= 100) return SCR_LOCATION;    // location fields
@@ -6141,6 +6158,13 @@ void App::keyEdit(char c, bool enter, bool back) {
         if (qrzLookup(call, err)) { qrzHaveResult = true; setStatus(""); }
         else { qrzHaveResult = false; setStatus("QRZ: " + err); }
         return; }
+
+#if CARDSAT_HAS_LORARX
+      case 240:                                     // LoRa RX monitor: freq in MHz
+        lorarx.setFreqMHz(editBuf);
+        screen = SCR_LORARX; lastDrawMs = 0;
+        return;
+#endif
 
       case 230: {                                   // LoTW key password -> upload
         String pass = editBuf;
@@ -8402,6 +8426,9 @@ void App::draw() {
     case SCR_SATSAT:   drawSatSat(); break;
     case SCR_TRANSIT:  drawTransit(); break;
     case SCR_MESSAGES: drawMessages(); break;
+#if CARDSAT_HAS_LORARX
+    case SCR_LORARX:   lorarx.draw(canvas, this); break;
+#endif
     case SCR_LOG:      drawLog(); break;
     case SCR_LOTW:     drawLotw(); break;
     case SCR_CLOUDLOG: drawCloudlog(); break;
@@ -13126,7 +13153,14 @@ void App::drawMessages() {
     int idx = (msgHead - msgCount + i + MSG_MAX * 2) % MSG_MAX;
     order[on++] = idx;
   }
-  if (on == 0) { footer("n write   ;/. scroll   ` back"); return; }
+  if (on == 0) {
+#if CARDSAT_HAS_LORARX
+    footer("n write   m LoRa-RX   ` back");
+#else
+    footer("n write   ;/. scroll   ` back");
+#endif
+    return;
+  }
   // Row count for a message: 1, or 2 if the text overflows the first line.
   auto rowsFor = [&](const LoraMsg& m) -> int {
     int prefixCh = (m.mine ? 1 : 0) + (int)strlen(m.mine ? "me" : m.from) + 1; // ">"/"" + name + ":"
@@ -13175,7 +13209,11 @@ void App::drawMessages() {
     }
   }
 
+#if CARDSAT_HAS_LORARX
+  footer("n write   ;/. scroll   m LoRa-RX   ` back");
+#else
   footer("n write   ;/. scroll   ` back");
+#endif
 }
 
 void App::keyMessages(char c, bool enter, bool back) {
@@ -13186,6 +13224,14 @@ void App::keyMessages(char c, bool enter, bool back) {
     if (c == 'r') { loraStart(); lastDrawMs = 0; }
     return;
   }
+#if CARDSAT_HAS_LORARX
+  // 'm' opens the general LoRa RX / hex Monitor (radio is up here). It takes over
+  // the shared radio; receive-only, no satellite infrastructure.
+  if (c == 'm') {
+    if (lorarx.enter(this)) { screen = SCR_LORARX; lastDrawMs = 0; }
+    return;
+  }
+#endif
   if (c == 'n') {                          // compose a new message (reuse SCR_EDIT)
     editTarget = 700; editTitle = "Message"; editBuf = ""; screen = SCR_EDIT; return;
   }
@@ -16759,8 +16805,24 @@ void App::drawEdit() {
   canvas.setTextSize(1);
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 30); canvas.print(editTitle);
-  canvas.drawRect(6, 46, 228, 18, CL_WHITE);
+
+  // Single fixed-height field. Long input scrolls HORIZONTALLY so the cursor (end
+  // of the text) stays visible, rather than wrapping to extra lines. ~37 chars fit
+  // between the box insets at the size-1 font; when the text is longer, show the
+  // last VIS_CH characters and a leading marker so it's clear more is off to the left.
+  const int BOX_X = 6, BOX_Y = 46, BOX_W = 228, BOX_H = 18;
+  const int VIS_CH = 37;
+  canvas.drawRect(BOX_X, BOX_Y, BOX_W, BOX_H, CL_WHITE);
   canvas.setTextColor(CL_WHITE, CL_BLACK);
-  canvas.setCursor(10, 51); canvas.print(editBuf + "_");
+  String s = editBuf + "_";                 // trailing cursor
+  String shown;
+  if ((int)s.length() <= VIS_CH) {
+    shown = s;
+  } else {
+    shown = s.substring(s.length() - VIS_CH); // scroll: keep the tail (cursor) in view
+    shown.setCharAt(0, '<');                  // marker: text continues off-screen left
+  }
+  canvas.setCursor(BOX_X + 4, BOX_Y + 5);
+  canvas.print(shown);
   footer("type  DEL bksp  ENT ok  ` cancel");
 }

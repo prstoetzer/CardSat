@@ -158,7 +158,9 @@ BACK = [
   "Free-form text notes (.txt in /CardSat/notes/, newest-first w/ date/time). Browser: <b>ENTER</b> open &middot; <b>n</b> new &middot; <b>d</b>+ENTER del. "
   "Editor (commands use <b>Fn</b> so <b>;</b><b>.</b><b>,</b><b>/</b> type): type freely, ENTER=newline, DEL=backspace &middot; <b>Fn+,</b>/<b>Fn+/</b> cursor L/R &middot; <b>Fn+;</b>/<b>Fn+.</b> up/down &middot; <b>Fn+s</b> save &middot; <b>`</b> exit (auto-saves)"),
  ("LORA MESSAGES (Home &rarr; Messages)",
-  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll &middot; <b>r</b> retry &middot; <b>`</b> back. <b>Rx always on</b>: new msgs show an envelope+count badge in the header on any screen, plus a banner (opt-in beep) &mdash; set <b>Msg notify</b> (off/banner/banner+beep) in Settings. Needs RadioLib build. Untested HW"),
+  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll &middot; <b>r</b> retry &middot; <b>m</b> LoRa RX/hex monitor &middot; <b>`</b> back. <b>Rx always on</b>: new msgs show an envelope+count badge in the header on any screen, plus a banner (opt-in beep) &mdash; set <b>Msg notify</b> (off/banner/banner+beep) in Settings. Needs RadioLib build. Untested HW"),
+ ("LORA RX / HEX MONITOR (Messages &rarr; m)",
+  "Receive/inspect <b>any</b> LoRa signal (not just sats). Config: set freq (type in <b>MHz</b>), SF, BW, CR, sync, preamble, CRC &mdash; saved across reboots. <b>ENTER</b> starts RX. Monitor: live hexdump+ASCII, RSSI/SNR, <b>p</b> pause (read a frame on a busy channel) &middot; <b>;</b>/<b>.</b> scroll &middot; <b>s</b>/<b>b</b>/<b>c</b>/<b>f</b> tune SF/BW/CR/step &middot; <b>,</b>/<b>/</b> freq &middot; <b>`</b> esc. Rx-only. Untested HW"),
  ("UPDATE",
   "<b>k</b>/<b>ENTER</b> GP+clock+AMSAT+space-wx+weather &middot; <b>f</b> fast (GP+AMSAT+favs' TX) &middot; "
   "<b>a</b> cache all TX (auto-reboots) &middot; <b>w</b> WiFi only"),
@@ -232,7 +234,7 @@ def measure(sections, fs):
     return doc.page
 
 
-def best_fs(sections, hi=9.5, lo=4.0):
+def best_fs(sections, hi=9.5, lo=3.5):
     fs = hi
     while fs >= lo:
         if measure(sections, fs) <= 1:

@@ -215,6 +215,16 @@ struct Settings {
   uint32_t loraBwHz    = 125000;    // bandwidth in Hz (125 kHz standard)
   int8_t   loraTxDbm   = 20;        // TX power dBm (<=22 on SX1262)
   uint8_t  msgNotify   = 1;         // LoRa msg alert: 0=off, 1=banner, 2=banner+beep
+  // --- LoRa RX monitor (lorarx) config: a general SX1262 receive tool, kept
+  //     separate from the messaging LoRa params above so tuning it doesn't disturb
+  //     CardSat messaging. Persisted across reboots. (Feature-guarded elsewhere.)
+  uint32_t lrxFreqKHz  = 433775;    // monitor carrier kHz (433.775 LoRa-APRS default)
+  uint8_t  lrxSf       = 12;        // spreading factor 7..12
+  uint32_t lrxBwHz     = 125000;    // bandwidth Hz (7800..500000, SX1262 LoRa set)
+  uint8_t  lrxCr       = 5;         // coding-rate denominator 5..8 (=> 4/5..4/8)
+  uint8_t  lrxSync     = 0x12;      // sync word (0x12 private / 0x34 public LoRaWAN)
+  uint16_t lrxPreamble = 8;         // preamble length (symbols)
+  uint8_t  lrxCrc      = 1;         // payload CRC expected: 0=off, 1=on
   void loraApplyRegion(uint8_t region);   // seed freq/BW from a region preset
 
   // Set by load(): true only when the config file was genuinely absent (real

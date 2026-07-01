@@ -113,6 +113,32 @@ bool LoraRadio::setRadio(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txD
   return ok;
 }
 
+// Full RX reconfiguration for the LoRa RX / hex monitor (receive arbitrary LoRa
+// signals). Same shared-SPI/SD discipline as setRadio() (deselect SD, run the
+// SX1262 burst, remount SD).
+bool LoraRadio::setRadioRx(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, uint8_t cr,
+                           uint8_t syncWord, uint16_t preamble, bool crcOn) {
+  if (!g_radio) return false;
+  pinMode(SD_CS_PIN_SHARED, OUTPUT);  digitalWrite(SD_CS_PIN_SHARED, HIGH);
+  float freqMHz = (float)freqKHz / 1000.0f;
+  float bwKHz   = (float)bwHz / 1000.0f;
+  if (cr < 5) cr = 5; if (cr > 8) cr = 8;
+  bool ok = true;
+  if (g_radio->setFrequency(freqMHz)         != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setSpreadingFactor(sf)  != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setBandwidth(bwKHz)     != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setCodingRate(cr)       != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setSyncWord(syncWord)   != RADIOLIB_ERR_NONE) ok = false;
+  if (ok && g_radio->setPreambleLength(preamble) != RADIOLIB_ERR_NONE) ok = false;
+  if (ok) {
+    // CRC: many satellites transmit with LoRa CRC; some disable it. Match the sat.
+    g_radio->setCRC(crcOn ? 1 : 0);
+    g_radio->startReceive();               // back to continuous listen
+  }
+  Store::remount();
+  return ok;
+}
+
 bool LoraRadio::sendRaw(const uint8_t* data, size_t len) {
   if (!_ready || !g_radio) return false;
   pinMode(SD_CS_PIN_SHARED, OUTPUT);  digitalWrite(SD_CS_PIN_SHARED, HIGH);

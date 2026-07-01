@@ -25,7 +25,10 @@ transit prediction, sun/eclipse status, and more.
 > fixes a subtle bug where **HTTPS could fail after playing a sound or voice memo** (audio
 > and TLS were competing for the same internal RAM), adds a persistent **speaker-volume
 > setting** with live feedback, adds a **QRZ grid-backfill** utility for the log, and
-> includes a small **games** menu. The deep debugging behind the upload and audio fixes is
+> includes a small **games** menu, and adds a general-purpose **LoRa RX / hex monitor**
+> (press `m` on the Messages screen) for receiving and inspecting any LoRa signal — set
+> the full SX1262 parameters, watch frames as a live hexdump, pause, and tune to peak a
+> signal. The deep debugging behind the upload and audio fixes is
 > written up in **[docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md](docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md)**.
 > See the **[release notes](docs/releases/RELEASE_NOTES_0.9.42.md)**.
 >

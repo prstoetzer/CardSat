@@ -133,6 +133,13 @@ bool Settings::load() {
   loraSf     = d["lorasf"] | (uint8_t)12;
   loraBwHz   = d["lorabw"] | (uint32_t)125000;
   loraTxDbm  = d["loratx"] | (int8_t)20;
+  lrxFreqKHz = d["lrxfk"]  | (uint32_t)433775;
+  lrxSf      = d["lrxsf"]  | (uint8_t)12;
+  lrxBwHz    = d["lrxbw"]  | (uint32_t)125000;
+  lrxCr      = d["lrxcr"]  | (uint8_t)5;
+  lrxSync    = d["lrxsw"]  | (uint8_t)0x12;
+  lrxPreamble= d["lrxpre"] | (uint16_t)8;
+  lrxCrc     = d["lrxcrc"] | (uint8_t)1;
   msgNotify  = d["msgntfy"] | (uint8_t)1;
   if (msgNotify > 2) msgNotify = 1;
   if (rotdPort == 0) rotdPort = 4533;
@@ -210,6 +217,8 @@ bool Settings::save() {
   d["weben"]=webEnable; d["webport"]=webPort;
   d["loraen"]=loraEnable; d["lorargn"]=loraRegion; d["lorafk"]=loraFreqKHz; d["lorasf"]=loraSf;
   d["lorabw"]=loraBwHz; d["loratx"]=loraTxDbm;
+  d["lrxfk"]=lrxFreqKHz; d["lrxsf"]=lrxSf; d["lrxbw"]=lrxBwHz; d["lrxcr"]=lrxCr;
+  d["lrxsw"]=lrxSync; d["lrxpre"]=lrxPreamble; d["lrxcrc"]=lrxCrc;
   d["msgntfy"]=msgNotify;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;

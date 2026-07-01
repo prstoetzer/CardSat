@@ -72,6 +72,26 @@ in `docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md`.
   About screen. They are written to use **zero heap** (fixed state, no per-frame
   allocation) so they don't affect the memory available for tracking and uploads.
 
+## LoRa RX / hex monitor
+
+- **A general-purpose LoRa receiver and hex monitor**, reached with **`m`** from the
+  Messages screen. It receives and inspects **any** LoRa signal on the Cap LoRa (SX1262)
+  — not just satellites — and involves no network or satellite data. Useful for checking
+  whether a LoRa transmitter is on the air, seeing a beacon's bytes, and peaking
+  reception.
+- **Config screen:** set the full SX1262 receive parameter set — frequency (typed
+  directly in **MHz**, or nudged with a selectable 1k/10k/100k/1M step), spreading factor
+  7–12, the full SX1262 bandwidth ladder (7.8–500 kHz), coding rate 4/5–4/8, sync word,
+  preamble length, and CRC on/off. All parameters are **saved and restored** across
+  reboots, kept separate from the LoRa messaging settings.
+- **Monitor screen:** a classic hexdump that **updates live as frames arrive** — 16 bytes
+  per row with the ASCII characters beneath, RSSI/SNR/length per frame, and a packet
+  counter. Scroll back through recent frames; **pause** (`p`) to read a frame on a busy
+  channel while the radio keeps receiving; and **tune live** (frequency, SF, BW, CR)
+  without leaving the screen to peak an unknown signal.
+- Receive-only, LoRa-only. The feature is self-contained and holds no memory when
+  inactive.
+
 ## Under the hood
 
 - The debug instrumentation added while diagnosing the upload and audio issues has been

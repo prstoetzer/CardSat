@@ -13,6 +13,7 @@
 #include "voicememo.h"
 #include "irbeacon.h"
 #include "lora.h"
+#include "lorarx.h"   // general LoRa RX / hex monitor (feature-guarded)
 
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
@@ -20,7 +21,7 @@ enum Screen : uint8_t {
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
-  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID
+  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -63,6 +64,10 @@ public:
   void setup();
   void loop();
 
+#if CARDSAT_HAS_LORARX
+  friend class LoraRxMon;   // the RX monitor reads cfg/lora and calls loraStart via this
+#endif
+
 private:
   // subsystems
   Settings  cfg;
@@ -75,6 +80,9 @@ private:
   VoiceMemo memo;            // SD-card voice memo recorder ('v' on Track family)
   IrBeacon  irBeacon;        // IR pass-alert beacon (distinct flash count per event)
   LoraRadio lora;            // SX1262 LoRa radio for CardSat-to-CardSat messaging
+#if CARDSAT_HAS_LORARX
+  LoraRxMon    lorarx;          // general LoRa RX / hex monitor (own state; see lorarx.h)
+#endif
   void toggleMemo();         // start/stop a memo; shared by the Track-family keys
   void drawMemoIndicator();  // red REC badge overlay while a memo is recording
 

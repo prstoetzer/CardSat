@@ -257,9 +257,12 @@ download GP elements — see [§7](#7-first-time-setup).)
 
 ### Build from source — Arduino IDE (single file)
 
-1. Install libraries: **M5Cardputer**, **ArduinoJson** (v7), **TinyGPSPlus** from
-   the Library Manager, and the Hopperpop **Sgp4** library via *Sketch → Include
-   Library → Add .ZIP Library* (from <https://github.com/Hopperpop/Sgp4-Library>).
+1. Install libraries: **M5Cardputer**, **ArduinoJson** (v7), **TinyGPSPlus**,
+   **RadioLib** (by Jan Gromes), and **ESP_SSLClient** (by Mobizt) from the Library
+   Manager, and the Hopperpop **Sgp4** library via *Sketch → Include Library → Add .ZIP
+   Library* (from <https://github.com/Hopperpop/Sgp4-Library>). **ESP_SSLClient is
+   required** — all HTTPS runs on its BearSSL stack and the build will not compile without
+   it.
 2. Open `CardSat.ino`. Under **Tools**, set:
    - **Board:** ESP32S3 Dev Module (or M5StampS3)
    - **Flash Size:** 8MB
@@ -1610,6 +1613,44 @@ one line wraps onto a second, indented line so nothing is cut off. The top line 
 the current frequency, SF, bandwidth and your callsign. History holds the most recent
 24 messages (a fixed ring — no SD card needed, lost on reboot).
 
+**Selecting a message.** Scroll with `;`/`.` to move the selection through the list. The
+**newest message always sits on the bottom line** (chat style — older messages scroll up
+off the top), and the selected message is highlighted. When a message is selected, **ENTER
+acts on it** (see the next section); if it contains no actionable content, ENTER simply
+reports that.
+
+**Actionable messages (position, satellite, sked).** A message is still plain text on the
+air — the wire format is unchanged, so this interoperates with any other CardSat — but
+CardSat recognises three markers anywhere in a message's text and turns a selected message
+into an action with **ENTER**:
+
+- **`@lat,lon`** (e.g. `@38.8542,-77.0417`) — a **position**. ENTER opens a **bearing
+  compass**: a north-up dial with an arrow to the sender, plus the great-circle
+  **distance and bearing** and the message's age. The Cardputer ADV has no magnetometer,
+  so this is a *computed bearing* (degrees from true north) for you to orient by, not a
+  live magnetic compass.
+- **`#SAT`** (e.g. `#SO-50`) — a **satellite**. ENTER opens a **satellite detail** screen
+  with the NORAD ID and the **next pass** for your location.
+- **`!SAT YYYY-MM-DD HH:MM`** (e.g. `!AO-91 2026-07-04 18:30`) — a **schedule proposal**.
+  ENTER opens the **sked editor pre-filled** with the satellite, date and start time (and
+  the sender's callsign), so you can review and save it.
+
+When the selected message carries one of these, a **yellow hint** on the line above the
+footer shows exactly what ENTER will open.
+
+**Sending an actionable message.** Three keys on the Messages screen compose and send
+these markers for the **currently selected satellite** (from the Satellites screen) and
+**your own location**:
+
+- **`p`** — send your **position** as `@lat,lon` (from your set location or GPS).
+- **`s`** — send the current **satellite** as `#name`.
+- **`k`** — propose a **sked**: you're prompted for a date, then a time, and CardSat sends
+  `!SAT date time`. The date field is pre-filled with today (UTC) as a starting point.
+
+These compose from your own state, so they work even on an empty message list. The other
+station simply receives the text; if they're running CardSat, their copy decodes it the
+same way yours does.
+
 **Settings.** In Settings → Network/data: **LoRa msg** on/off (turning it on
 brings the radio up); **LoRa region** (US 33cm / EU 70cm / JP 430 — selecting one
 seeds a legal default frequency + 125 kHz bandwidth for that band); **LoRa freq**
@@ -1646,12 +1687,12 @@ own build flags; you should not need to.
 > the modular `src/` folder instead** (use the PlatformIO build): there `lora.cpp` is
 > its own small translation unit and the literal-range problem does not arise.
 
-### LoRa RX / hex monitor (Messages → `g`)
+### LoRa RX / hex monitor (Messages → `m`)
 
 A general-purpose tool to receive and inspect **any** LoRa signal on the Cap LoRa
 (SX1262) — not just satellites, and with no network or satellite data involved.
 Useful for checking whether a LoRa transmitter is on the air, what a beacon's
-bytes look like, and for peaking reception by ear. Press **`g`** on the Messages
+bytes look like, and for peaking reception by ear. Press **`m`** on the Messages
 screen to open it (LoRa must be enabled in Settings; it works even with no
 messages in the log).
 
@@ -2277,6 +2318,29 @@ the banner clears. Each row shows the **date, callsign, satellite and grid**. Mo
 `;`/`.`, press **ENTER** on a row for the full detail — **start and end times (UTC), mode,
 frequency, and the activator's comment** — and `` ` `` to go back to the list. Press
 **`r`** at any time to refresh.
+
+**Do I actually have a footprint? (0.9.43)** When you open an activation's detail, CardSat
+checks whether the listed satellite is really above the horizon at the same time as *both*
+you and the activator — a genuine mutual window. Because hams.at keplerian data can lag,
+the check searches **±30 minutes around the listed start** and reports the co-visibility
+window it finds, so a pass that has drifted since the alert was posted is still caught. The
+detail screen shows a **footprint note**: the mutual window's start–end and duration in
+green if one exists, "No footprint near listed time" in yellow if not, or a short reason
+("set clock first", "no activator grid", "sat not in your list") when it can't be computed.
+The activator's comment is often longer than the screen; scroll it in place with `;`/`.`.
+Press **`a`** to set a SKED reminder (T-60/30/10 beeps and a flash), and — when a footprint
+exists — **`w`** to open the **mutual-window screen**.
+
+The **mutual-window screen** draws a small **polar plot** of the pass: the satellite's track
+as seen from **you** (cyan, "M") and from the **DX** (orange, "D") across the window, with
+the **date, AOS, LOS, duration and peak elevation for each station** beside it. From there,
+**`d`** opens a **DX Doppler table tailored to this activation**: CardSat reads the
+activation's frequency (from the freq field, then the comment) and, if it matches one of the
+satellite's real **two-way** transponders, pre-selects that transponder and locks the DX dial
+to the listed frequency as a **fixed downlink or uplink** (whichever leg the number falls in).
+If no usable frequency is found, it opens the normal DX Doppler table instead. The existing
+DX Doppler (reached from the **Mutual** schedule) is unchanged; the activation path is a
+separate, pre-seeded view.
 
 The feed is fetched over HTTPS from `https://hams.at/feeds/upcoming_alerts`, parsed (up to
 30 activations), and **cached to flash** so the last-known roster survives a reboot and
@@ -3558,15 +3622,31 @@ listed below.
 - **Reached from** — Home → Activations.
 - **Shows** — a scrollable list of upcoming activations (date, callsign, satellite,
   grid); entries you've entered yourself are marked with a leading **`*`** and shown
-  in cyan. ENTER opens a detail view with start/end times (UTC), mode, frequency and
-  the activator's comment.
+  in cyan. ENTER opens a detail view with start/end times (UTC), mode, frequency,
+  the activator's comment (scrollable), and a **footprint note** — whether the
+  satellite is co-visible with the activator near the listed time (±30 min).
 - **Keys** — `;`/`.` move; **ENTER** open the selected activation's detail; `r`
   refresh the feed; **`n`** add your own activation/sked (works offline — see below);
   **`e`** edit the selected entry if it's one of your own (feed entries are
-  read-only); in the detail view, **`a`** sets a **sked reminder** for that
-  activation (it beeps a T-60/30/10 countdown and flashes "SKED!" at the start time,
-  independently of the favorites AOS alarm); when a sked is set, **`c`** on the list
-  clears it; `` ` `` back (from detail, `` ` `` returns to the list).
+  read-only); in the detail view, `;`/`.` scroll the comment, **`a`** sets a **sked
+  reminder** (T-60/30/10 countdown beeps and a flash at the start, independent of the
+  favorites AOS alarm), and **`w`** opens the **mutual-window screen** when a
+  footprint exists; when a sked is set, **`c`** on the list clears it; `` ` `` back.
+
+### Activation mutual window and tailored DX Doppler
+
+- **Purpose** — for an activation with a footprint, show the co-visibility pass and
+  give a DX Doppler view pre-set to the activation's frequency; detail in
+  [§13 → Upcoming activations](#upcoming-activations-activations).
+- **Reached from** — `w` on an activation's detail (mutual window) → `d` (DX Doppler).
+- **Shows** — a small polar plot of the pass (satellite track from your site in cyan
+  and from the DX site in orange) with the date, AOS, LOS, duration and peak
+  elevation for each station; the DX Doppler table then lists RX/TX dial frequencies
+  for both stations across the window, with the transponder and fixed downlink/uplink
+  pre-selected from the activation's frequency when it matches a two-way transponder.
+- **Keys** — mutual window: **`d`** DX Doppler, `` ` `` back to the detail. DX Doppler:
+  the same controls as the main DX Doppler table (`t` transponder, `m` mode, `a`
+  anchor, `;`/`.` scroll), `` ` `` back to the mutual window.
 
 ### New / Edit sked (manual activation entry)
 

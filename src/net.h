@@ -3,6 +3,29 @@
 //  net.h  -  WiFi + HTTPS downloads (AMSAT GP, SatNOGS transponders)
 // ===========================================================================
 #include <Arduino.h>
+#include <WiFiClient.h>
+// 0.9.43: HTTPS now uses ESP_SSLClient (BearSSL) layered on a plain WiFiClient,
+// instead of the core's WiFiClientSecure (mbedTLS). mbedTLS's handshake buffers are
+// a fixed ~32 KB contiguous block that this no-PSRAM part can't reliably provide
+// (the display sprite pins the largest block just under it), which made HTTPS to
+// larger-cert hosts fail with "SSL - Memory allocation failed". ESP_SSLClient lets us
+// set the RX/TX buffer sizes explicitly (setBufferSizes), so the handshake fits the
+// contiguous block that IS available -- no sprite-freeing hacks required.
+#include <ESP_SSLClient.h>
+
+// TLS buffer sizes for ESP_SSLClient (bytes). CRITICAL: BearSSL's RX buffer must hold
+// a FULL TLS record (up to 16 KB) for any server that doesn't support MFLN -- which is
+// nearly all public servers. A smaller RX truncates or fails the read: 4096 made NOAA
+// return an empty response and hams.at deliver only a partial body. So RX is sized for a
+// full record. TX does NOT limit upload size (BearSSL fragments a large write() across
+// multiple TLS records automatically) -- it only sets the per-record payload. 512 is
+// proven on device: LoTW/Cloudlog uploads streamed with zeroWrites=0 (no send-window
+// stalls) and an effective write size of ~1024. This ~16 KB RX + 512 TX + ~6 KB BearSSL
+// stack (~23 KB) is still under mbedTLS's ~32 KB contiguous demand -- and the single
+// largest allocation (16 KB RX) fits the block that mbedTLS's 32 KB couldn't. Full-duplex
+// (separate RX/TX), matching our request-then-response HTTP pattern.
+#define SSL_RX_BUF 16384
+#define SSL_TX_BUF 512
 
 // One access point returned by a WiFi scan.
 struct WifiAp {
@@ -22,6 +45,7 @@ public:
   // GET a URL over HTTPS into `out`. Returns false on HTTP/transport error.
   bool httpsGet(const String& url, String& out, size_t maxBytes = 200000);
   void logConnectProbe(const String& url);   // diagnostic: raw TLS connect + errno on GET failure
+  void pcbCounts(int& active, int& timeWait); // diagnostic: LWIP TCP PCB list sizes
 
   // GET a URL over HTTPS straight into a LittleFS file (no large RAM buffer).
   // Essential for the GP file: a ~75 KB body can't be held as one contiguous

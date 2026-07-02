@@ -21,7 +21,9 @@ enum Screen : uint8_t {
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
-  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX
+  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
+  SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
+  SCR_LORACOMPASS, SCR_LORASAT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -57,6 +59,17 @@ struct PendingQso {
   char     grid[10];
   char     notes[40];
   uint8_t  uploaded;              // bit0: sent to LoTW (CSV col 13, absent => 0)
+};
+
+// Result of decoding the sigils in a received LoRa message's text (see decodeMsg in
+// app.cpp): an @position, a #satellite, and/or a !sked proposal. Declared here (not in
+// app.cpp) so that in the single-file Arduino build the type is defined before the
+// auto-generated prototype for decodeMsg() -- a free function returning this struct,
+// which otherwise triggers "'MsgDecode' does not name a type".
+struct MsgDecode {
+  bool   hasPos = false;  double lat = 0, lon = 0;
+  bool   hasSat = false;  char   sat[12] = {0};
+  bool   hasSked = false; char   skedSat[12] = {0}, skedDate[11] = {0}, skedTime[6] = {0};
 };
 
 class App {
@@ -176,6 +189,38 @@ private:
   MutualWindow mutual[MUTUAL_MAX];
   int      mutualN = 0;
   int      mutualSel = 0;
+
+  // ---- Activation footprint + shared mutual-window detail (SCR_ACTMUTUAL,
+  //      SCR_MUTUALDETAIL) and tailored DX Doppler (SCR_ACTDOPP). New in 0.9.43.
+  //      The activation flow (from SCR_HAMSAT detail) checks whether the listed
+  //      satellite is actually co-visible with the activator near the listed time
+  //      (+/-30 min, since hams.at keps can lag), shows the window on a polar plot,
+  //      and opens a DX Doppler pre-seeded from the activation's freq/comment.
+  static const int ACTMU_PTS = 40;      // az/el samples across a mutual window (polar arc)
+  float    actMuAzMe[ACTMU_PTS];        // sat az/el as seen from MY site
+  float    actMuElMe[ACTMU_PTS];
+  float    actMuAzDx[ACTMU_PTS];        // sat az/el as seen from the DX site
+  float    actMuElDx[ACTMU_PTS];
+  // Detail-screen (SCR_HAMSAT) footprint state, computed on ENTER into detail.
+  int8_t   actFpState = 0;              // 0 not computed, 1 have window, 2 none, 3 can't (grid/sat/clock)
+  MutualWindow actFpWin;               // the mutual window found near the listed time
+  double   actDxLat = 0, actDxLon = 0;  // activator's grid -> lat/lon
+  int      actCommentScroll = 0;        // comment scroll offset (lines) on the detail screen
+  // Parse result for the tailored DX Doppler (from freq field, then comment).
+  int      actTxIdx = -1;               // matched transponder index (into activeTx[]) or -1
+  int      actFixMode = 0;              // 0 none/default, 1 fixed DX downlink, 2 fixed DX uplink
+  uint32_t actFixHz = 0;                // the parsed frequency in Hz (for display)
+  // Which mutual-detail screen we're on decides the onward DX-Doppler target.
+  bool     mdFromActivation = false;    // true: SCR_ACTMUTUAL (-> SCR_ACTDOPP); false: SCR_MUTUALDETAIL (-> SCR_DXDOPP)
+
+  int  activationFootprint();           // run the +/-30-min search; fills actFpWin; returns actFpState
+  void buildMutualArcs(const MutualWindow& w);   // sample both stations' az/el into actMu*[]
+  void drawMutualDetailBody(const MutualWindow& w);  // shared polar-plot + AOS/LOS/el layout
+  void drawActMutual();  void keyActMutual(char c, bool enter, bool back);
+  void drawMutualDetail(); void keyMutualDetail(char c, bool enter, bool back);
+  void openActMutual();  // from SCR_HAMSAT detail: seed + enter SCR_ACTMUTUAL
+  void drawActDopp();    void keyActDopp(char c, bool enter, bool back);
+  void dxdStepAnchorToHz(uint32_t targetHz);  // park anchored dial on a specific freq (activation)
 
   // 10-day pass overview (InstantTrack-style), cached on entry
   PassPredict visPasses[VIS_PASS_MAX];
@@ -380,13 +425,33 @@ private:
   void loraSendCurrent(const char* text);   // frame + transmit a typed message
   void drawMessages();
   void keyMessages(char c, bool enter, bool back);
+  // LoRa decoded-action screens (reached by ENTER on a message row whose text
+  // carries an @position, #satellite, or !sked sigil -- see decodeMsg()).
+  int      msgSel = 0;            // selected row in the Messages list (0 = newest)
+  double   lcLat = 0, lcLon = 0;  // decoded peer position for the compass screen
+  char     lcFrom[16] = {0};      // peer callsign for the compass screen
+  uint32_t lcMsgMs = 0;          // millis() of the source message (age display)
+  char     lsSat[12] = {0};       // decoded satellite name for the sat-detail screen
+  void drawLoraCompass();         // north-up bearing plot to a decoded peer position
+  void keyLoraCompass(char c, bool enter, bool back);
+  void drawLoraSat();             // detail for a satellite named in a received message
+  void keyLoraSat(char c, bool enter, bool back);
+  void openDecodedAction(int orderIdx);   // ENTER on a message row: act on its sigils
+  void beginSkedSend();                    // start the date->time prompt for a !sked send
+  char ssSat[12] = {0};                    // sked-send: sat name captured at start
+  char ssDate[11] = {0};                   // sked-send: date captured from the first prompt
   void buildOscarArc();              // sample the current/next pass ground track
   // Sun / Moon tracking screen (off main menu)
   bool     smOut = false;           // rotator engaged on the Sun/Moon screen
   int      smSel = 0;               // 0 = Sun, 1 = Moon
   bool     smGraphic = true;        // Sun/Moon screen: graphic sky-dome vs data list
-  // Workable grid squares (4-char Maidenhead) under the footprint
-  uint8_t  gridBits[4050];          // 1 bit per 4-char grid (32400 total, ~4 KB)
+  // Workable grid squares (4-char Maidenhead) under the footprint.
+  // Allocated lazily (see ensureGridBits) rather than living in .bss: this ~4 KB
+  // is only needed by the awards/grid-map screens, and keeping it out of the static
+  // image raises the largest contiguous heap block that the TLS handshake needs.
+  static const size_t GRID_BITS_LEN = 4050;   // 1 bit per 4-char grid (32400 total)
+  uint8_t* gridBits = nullptr;      // lazily malloc'd; nullptr = not yet allocated
+  bool     ensureGridBits();        // allocate+zero on first use; false if OOM
   int      gridN = 0;               // grids in footprint (set bits)
   int      gridScroll = 0;
   bool     gridLive = false;        // true = live now (from Track), false = pass union
@@ -687,6 +752,9 @@ private:
   String      webdBuf;            // request-assembly buffer (request line + headers)
   String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
+  uint32_t lastNetCycleMs = 0;    // millis() when the last update cycle STARTED (0 = never);
+                                  // gates back-to-back cycles so TIME_WAIT PCBs can drain
+  bool netCooldownOk();           // true if a new update cycle may start; else sets a "wait Ns" status
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     keyFn = false;         // Fn modifier state for the current keypress
                                   // (read by the notes editor for cursor moves)
@@ -731,6 +799,8 @@ private:
   void freeCanvasForTls();                     // free ~64 KB sprite for mbedTLS handshake
   void restoreCanvasAfterTls();
   void tickCanvasRestore();                    // loop-driven retry if restore alloc failed
+  bool tryRecreateCanvas();                    // one sprite re-create attempt (shared by the two above)
+  uint32_t lastCanvasRetryMs = 0;              // throttle for the loop-driven re-create retry
   bool canvasFreed = false;                    // true while the sprite is freed for a fetch
                                                // (free their sockets) before a
                                                // blocking download; they auto-rebuild
@@ -985,7 +1055,6 @@ private:
   void doLotwUpload(const String& keyPass);  // build .tq8 + POST + mark uploaded
   int  countUnuploadedLotw();                // QSOs in the log still needing LoTW upload
   int  countUnuploadedCloudlog();            // QSOs still needing Cloudlog upload (bit 0x2)
-  void continueLotwBatch(const String& keyPass, bool resend = false);  // cache passphrase in RTC + reboot for next batch
   void scrubLotwBatchState();                // clear the RTC-held batch state + passphrase
   void lotwEnter();                          // count pending QSOs + open screen
   void lotwRebootUpload();                   // write marker + reboot, re-prompt + upload on fresh boot
@@ -998,6 +1067,10 @@ private:
   String lotwStatus;               // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
   bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
+  bool   lotwMoreBatches = false;  // set by a batch that has QSOs left; the top-level caller
+                                   // loops on it so batches run iteratively, NOT recursively
+                                   // (recursion stacked a full TLS+signing frame per batch
+                                   //  and overflowed the loopTask stack on the 3rd batch)
   bool   lotwRebootPrompt = false; // upload hit a -1 connect; asking to reboot-and-retry
   // ---- Unified LoTW location picker (SCR_LOTWSUB) ----
   // One context-aware list picker drives the whole DXCC -> primary -> secondary chain.
@@ -1036,6 +1109,9 @@ private:
   String clStatus;                 // last result/error line shown on the screen
   bool clBusy = false;             // an upload is in progress (suppress re-entry)
   bool clResend = false;           // include QSOs already sent to Cloudlog (opt-in)
+  bool clMoreBatches = false;      // set by a batch with QSOs left; the top-level caller loops
+                                   // on it so batches run iteratively, not recursively (same
+                                   // stack-overflow risk as the LoTW path)
   int  clResendSkip = 0;           // resend batching: QSOs already sent this run (cursor)
   bool clRebootPrompt = false;     // upload hit a -1 connect; asking to reboot-and-retry
   // ---- Upcoming activations feed (SCR_HAMSAT, from hams.at) ----
@@ -1052,6 +1128,9 @@ private:
   };
   static const int HAMSAT_MAX = 20;   // cap kept modest: the array lives in .bss
   Activation hamsatList[HAMSAT_MAX];
+  // Parse an activation's freq/comment into a fixed DX downlink/uplink on a
+  // matching two-way transponder (declared here, after Activation is defined).
+  bool parseActivationFreq(const Activation& a);
   int    hamsatN = 0;              // parsed activations
   int    hamsatSel = 0;           // list cursor
   int    hamsatScroll = 0;        // list scroll offset
@@ -1152,7 +1231,6 @@ private:
   void drawCharge();
   void keyCharge(char c, bool enter, bool back);
   int  batteryPercent();        // voltage-curve % (more accurate than raw level)
-  void heapDefragViaReconnect();// drop WiFi/TLS to coalesce the heap on demand
   bool     chargeWoke = false;  // true briefly after a keypress wakes the screen
   uint32_t chargeWokeMs = 0;    // when the wake happened (auto-blank after a few s)
   // Append one result line: echo to Serial and store for the on-screen list.

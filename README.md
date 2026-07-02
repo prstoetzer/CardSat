@@ -18,6 +18,22 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.43:** a big **network reliability** release. All HTTPS moved from mbedTLS
+> to **BearSSL** (`ESP_SSLClient`), which fixed the residual "first download works, the
+> next fails" problem on the no-PSRAM Cardputer — the device now runs **91 back-to-back
+> TLS handshakes in one session with zero failures**. As a direct result, the operations
+> that used to **reboot between batches** no longer do: **"cache all transponders"** runs
+> in one session, and **LoTW/Cloudlog uploads** continue **in-session** (no more
+> reboot-and-re-enter-your-passphrase). **LoRa messages also became actionable** — a
+> message carrying `@lat,lon`, `#SAT`, or `!SAT date time` opens a bearing compass, a
+> satellite detail, or a pre-filled sked, with matching **`p`/`s`/`k`** send keys on the
+> Messages screen. This release also carries the **Activations footprint** feature
+> (co-visibility check, mutual-pass polar plot, tailored DX Doppler). **Building from
+> source now requires the `ESP_SSLClient` library (by Mobizt)** — see
+> [docs/BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md). The full debugging story is in
+> **[docs/design/NETWORK_TLS_MIGRATION_POSTMORTEM.md](docs/design/NETWORK_TLS_MIGRATION_POSTMORTEM.md)**.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.43.md)**.
+
 > **New in v0.9.42:** **large LoTW and Cloudlog uploads now work.** A full log is split
 > into small batches (6 QSOs for LoTW, 15 for Cloudlog), each uploaded in its own quick
 > reboot, so you enter your LoTW key passphrase **once** and the device finishes the whole

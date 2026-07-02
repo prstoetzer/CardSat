@@ -34,10 +34,12 @@ The reference environment this guide is verified against:
 | ArduinoJson | **7.x** (7.4.3) |
 | TinyGPSPlus | 1.0.3 |
 | Hopperpop SGP4 (`Sgp4.h`) | 1.0.x |
-| RadioLib (optional, LoRa only) | 7.7.1 |
+| RadioLib | 7.7.1 |
+| ESP_SSLClient (by Mobizt) | 2.x |
 
-Newer point releases generally work. The two that matter most are the **ESP32 core
-3.2.x or 3.3.x** and **ArduinoJson v7** (v6 will not compile).
+Newer point releases generally work. The three that matter most are the **ESP32 core
+3.2.x or 3.3.x**, **ArduinoJson v7** (v6 will not compile), and **ESP_SSLClient** —
+without the last one the HTTPS code (all downloads and uploads) will not compile.
 
 ---
 
@@ -89,6 +91,7 @@ offers to install dependencies, accept.
 | **M5Cardputer** | `M5Cardputer` | Pulls in **M5Unified** and **M5GFX** as dependencies — accept them. |
 | **ArduinoJson** | `ArduinoJson` | **Must be v7.** Do not install v6. |
 | **TinyGPSPlus** | `TinyGPSPlus` | By Mikal Hart. Used for the optional external GPS. |
+| **ESP_SSLClient** | `ESP_SSLClient` | **By Mobizt. Required.** All HTTPS (downloads + LoTW/Cloudlog uploads) runs on its BearSSL stack; the build will not compile without it. |
 
 When you install M5Cardputer, the IDE should automatically offer **M5Unified** and
 **M5GFX**. If it does not, install those two by name as well — CardSat needs all three.

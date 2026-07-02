@@ -68,8 +68,28 @@
 #include <M5Cardputer.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
-#include <WiFiClientSecure.h>
+#include <WiFiClient.h>
+// 0.9.43: HTTPS uses ESP_SSLClient (BearSSL) on a plain WiFiClient instead of the core's
+// WiFiClientSecure (mbedTLS), whose fixed ~32 KB contiguous handshake buffers this
+// no-PSRAM part can't reliably provide (see net.h). ESP_SSLClient lets us size the
+// RX/TX buffers so the handshake fits the available block -- no sprite-freeing hacks.
+#include <ESP_SSLClient.h>
 #include <HTTPClient.h>
+#include <limits.h>   // LONG_MAX (chunked-transfer sentinel in httpsGetToFile)
+
+// TLS buffer sizes for ESP_SSLClient (bytes). CRITICAL: BearSSL's RX buffer must hold
+// a FULL TLS record (up to 16 KB) for any server that doesn't support MFLN -- which is
+// nearly all public servers. A smaller RX truncates or fails the read: 4096 made NOAA
+// return an empty response and hams.at deliver only a partial body. So RX is sized for a
+// full record. TX does NOT limit upload size (BearSSL fragments a large write() across
+// multiple TLS records automatically) -- it only sets the per-record payload. 512 is
+// proven on device: LoTW/Cloudlog uploads streamed with zeroWrites=0 (no send-window
+// stalls) and an effective write size of ~1024. This ~16 KB RX + 512 TX + ~6 KB BearSSL
+// stack (~23 KB) is still under mbedTLS's ~32 KB contiguous demand -- and the single
+// largest allocation (16 KB RX) fits the block that mbedTLS's 32 KB couldn't. Full-duplex
+// (separate RX/TX), matching our request-then-response HTTP pattern.
+#define SSL_RX_BUF 16384
+#define SSL_TX_BUF 512
 #include <HardwareSerial.h>
 #include <driver/gpio.h>
 #include <driver/uart.h>
@@ -104,8 +124,17 @@ RTC_NOINIT_ATTR static char  g_lotwBatchPass[64];    // key passphrase, carried 
 RTC_NOINIT_ATTR static uint16_t g_lotwResendSkip;    // resend mode: QSOs already sent this run (cursor)
 static const uint32_t LOTW_BATCH_MAGIC = 0x1073B47C; // "LoTW BATCh"
 #include <fcntl.h>
-#include <lwip/sockets.h>   // heap_caps_get_largest_free_block(): contiguous block,
-                             // which is what the TLS handshake actually needs
+#include <lwip/sockets.h>    // LWIP_SOCKET_OFFSET / CONFIG_LWIP_MAX_SOCKETS
+// TCP PCB-pool diagnostic (socket exhaustion shows here, not in the fd table). The
+// PCB-list globals live in LWIP's private header, which the Arduino core may or may
+// not put on the include path -- gate on its presence so the build never breaks.
+#if defined(__has_include)
+#  if __has_include(<lwip/priv/tcp_priv.h>)
+#    include <lwip/tcp.h>
+#    include <lwip/priv/tcp_priv.h>
+#    define CARDSAT_HAVE_TCP_PCBS 1
+#  endif
+#endif
 #include <time.h>
 #include <string.h>
 #include <sys/time.h>
@@ -120,6 +149,21 @@ static const uint32_t LOTW_BATCH_MAGIC = 0x1073B47C; // "LoTW BATCh"
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/version.h>   // MBEDTLS_VERSION_MAJOR for the SHA-1 API guard
 #include <miniz.h>
+
+// ---------------------------------------------------------------------------
+// MsgDecode: result of decoding the @position / #satellite / !sked sigils in a
+// received LoRa message (see decodeMsg() further down). Defined HERE, right after the
+// includes and before any function, because the Arduino single-file build auto-inserts
+// a prototype for decodeMsg() (a free function returning this struct) just above the
+// first function definition; the struct must already be visible at that point or the
+// build fails with "'MsgDecode' does not name a type". (In the src/ tree this lives in
+// app.h; the monolithic .ino needs it at the very top.)
+// ---------------------------------------------------------------------------
+struct MsgDecode {
+  bool   hasPos = false;  double lat = 0, lon = 0;
+  bool   hasSat = false;  char   sat[12] = {0};
+  bool   hasSked = false; char   skedSat[12] = {0}, skedDate[11] = {0}, skedTime[6] = {0};
+};
 
 
 
@@ -199,7 +243,14 @@ static constexpr double C_LIGHT = 299792458.0;
 #define FILE_TX_RESUME     "/CardSat/tx_resume.txt"
 #define FILE_CL_RESUME     "/CardSat/cl_resume.txt"  // Cloudlog upload-after-reboot marker
 #define FILE_LOTW_RESUME   "/CardSat/lotw_resume.txt" // LoTW upload-after-reboot marker
-#define TX_CACHE_BATCH     12                       // sats cached per boot
+#define TX_CACHE_BATCH     12                       // sats cached per boot (reboot-per-batch mode)
+// Cooldown between full network update cycles. The LWIP TCP PCB pool is small (16)
+// and a closed socket sits in TIME_WAIT for ~2xMSL (~120s) before the PCB frees; an
+// update cycle opens ~6 sockets, so re-running it back-to-back (e.g. hammering the
+// button when a fetch fails) can pile TIME_WAIT PCBs faster than they drain and wedge
+// every further connect with "connection refused". A normal update is run once or
+// twice, so gating repeats to this window lets the pool drain instead of saturating.
+#define NET_COOLDOWN_MS    90000UL                   // min gap between update cycles (~TIME_WAIT window)
 
 // ---------------------------------------------------------------------------
 //  Serial / UART wiring
@@ -269,7 +320,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.42";
+static constexpr const char* FW_VERSION = "0.9.43";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1535,6 +1586,7 @@ struct WifiAp {
   bool    enc;      // true = secured (needs a password)
 };
 
+
 class Net {
 public:
   bool connect(const String& ssid, const String& pass, uint32_t timeoutMs = 15000);
@@ -1546,6 +1598,7 @@ public:
   // GET a URL over HTTPS into `out`. Returns false on HTTP/transport error.
   bool httpsGet(const String& url, String& out, size_t maxBytes = 200000);
   void logConnectProbe(const String& url);   // diagnostic: raw TLS connect + errno on GET failure
+  void pcbCounts(int& active, int& timeWait); // diagnostic: LWIP TCP PCB list sizes
 
   // GET a URL over HTTPS straight into a LittleFS file (no large RAM buffer).
   // Essential for the GP file: a ~75 KB body can't be held as one contiguous
@@ -2055,7 +2108,9 @@ enum Screen : uint8_t {
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
-  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX
+  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
+  SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
+  SCR_LORACOMPASS, SCR_LORASAT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -4699,6 +4754,38 @@ private:
   int      mutualN = 0;
   int      mutualSel = 0;
 
+  // ---- Activation footprint + shared mutual-window detail (SCR_ACTMUTUAL,
+  //      SCR_MUTUALDETAIL) and tailored DX Doppler (SCR_ACTDOPP). New in 0.9.43.
+  //      The activation flow (from SCR_HAMSAT detail) checks whether the listed
+  //      satellite is actually co-visible with the activator near the listed time
+  //      (+/-30 min, since hams.at keps can lag), shows the window on a polar plot,
+  //      and opens a DX Doppler pre-seeded from the activation's freq/comment.
+  static const int ACTMU_PTS = 40;      // az/el samples across a mutual window (polar arc)
+  float    actMuAzMe[ACTMU_PTS];        // sat az/el as seen from MY site
+  float    actMuElMe[ACTMU_PTS];
+  float    actMuAzDx[ACTMU_PTS];        // sat az/el as seen from the DX site
+  float    actMuElDx[ACTMU_PTS];
+  // Detail-screen (SCR_HAMSAT) footprint state, computed on ENTER into detail.
+  int8_t   actFpState = 0;              // 0 not computed, 1 have window, 2 none, 3 can't (grid/sat/clock)
+  MutualWindow actFpWin;               // the mutual window found near the listed time
+  double   actDxLat = 0, actDxLon = 0;  // activator's grid -> lat/lon
+  int      actCommentScroll = 0;        // comment scroll offset (lines) on the detail screen
+  // Parse result for the tailored DX Doppler (from freq field, then comment).
+  int      actTxIdx = -1;               // matched transponder index (into activeTx[]) or -1
+  int      actFixMode = 0;              // 0 none/default, 1 fixed DX downlink, 2 fixed DX uplink
+  uint32_t actFixHz = 0;                // the parsed frequency in Hz (for display)
+  // Which mutual-detail screen we're on decides the onward DX-Doppler target.
+  bool     mdFromActivation = false;    // true: SCR_ACTMUTUAL (-> SCR_ACTDOPP); false: SCR_MUTUALDETAIL (-> SCR_DXDOPP)
+
+  int  activationFootprint();           // run the +/-30-min search; fills actFpWin; returns actFpState
+  void buildMutualArcs(const MutualWindow& w);   // sample both stations' az/el into actMu*[]
+  void drawMutualDetailBody(const MutualWindow& w);  // shared polar-plot + AOS/LOS/el layout
+  void drawActMutual();  void keyActMutual(char c, bool enter, bool back);
+  void drawMutualDetail(); void keyMutualDetail(char c, bool enter, bool back);
+  void openActMutual();  // from SCR_HAMSAT detail: seed + enter SCR_ACTMUTUAL
+  void drawActDopp();    void keyActDopp(char c, bool enter, bool back);
+  void dxdStepAnchorToHz(uint32_t targetHz);  // park anchored dial on a specific freq (activation)
+
   // 10-day pass overview (InstantTrack-style), cached on entry
   PassPredict visPasses[VIS_PASS_MAX];
   int      visN = 0;
@@ -4844,6 +4931,7 @@ private:
   void      satsatStartJob();        // begin/refresh the incremental search
   void      satsatJobTick();         // advance the job a little; called from loop()
   void      satsatAbortJob();        // free buffers + stop (on leaving the screen)
+
   // ---- Sun/Moon transit finder (SCR_TRANSIT) ------------------------------
   // Scans the next ~48 h for times the active satellite passes close to the Sun
   // or Moon as seen from the observer. Incremental (a chunk per loop tick) so it
@@ -4875,7 +4963,6 @@ private:
   void       keyTransit(char c, bool enter, bool back);
   // angular separation (deg) between two az/el points
   static float angSepDeg(double az1, double el1, double az2, double el2);
-
   void drawSatSat();
   void keySatSat(char c, bool enter, bool back);
   // LoRa text messaging (SCR_MESSAGES): broadcast group chat between CardSats on
@@ -4902,13 +4989,33 @@ private:
   void loraSendCurrent(const char* text);   // frame + transmit a typed message
   void drawMessages();
   void keyMessages(char c, bool enter, bool back);
+  // LoRa decoded-action screens (reached by ENTER on a message row whose text
+  // carries an @position, #satellite, or !sked sigil -- see decodeMsg()).
+  int      msgSel = 0;            // selected row in the Messages list (0 = newest)
+  double   lcLat = 0, lcLon = 0;  // decoded peer position for the compass screen
+  char     lcFrom[16] = {0};      // peer callsign for the compass screen
+  uint32_t lcMsgMs = 0;          // millis() of the source message (age display)
+  char     lsSat[12] = {0};       // decoded satellite name for the sat-detail screen
+  void drawLoraCompass();         // north-up bearing plot to a decoded peer position
+  void keyLoraCompass(char c, bool enter, bool back);
+  void drawLoraSat();             // detail for a satellite named in a received message
+  void keyLoraSat(char c, bool enter, bool back);
+  void openDecodedAction(int orderIdx);   // ENTER on a message row: act on its sigils
+  void beginSkedSend();                    // start the date->time prompt for a !sked send
+  char ssSat[12] = {0};                    // sked-send: sat name captured at start
+  char ssDate[11] = {0};                   // sked-send: date captured from the first prompt
   void buildOscarArc();              // sample the current/next pass ground track
   // Sun / Moon tracking screen (off main menu)
   bool     smOut = false;           // rotator engaged on the Sun/Moon screen
   int      smSel = 0;               // 0 = Sun, 1 = Moon
   bool     smGraphic = true;        // Sun/Moon screen: graphic sky-dome vs data list
-  // Workable grid squares (4-char Maidenhead) under the footprint
-  uint8_t  gridBits[4050];          // 1 bit per 4-char grid (32400 total, ~4 KB)
+  // Workable grid squares (4-char Maidenhead) under the footprint.
+  // Allocated lazily (see ensureGridBits) rather than living in .bss: this ~4 KB
+  // is only needed by the awards/grid-map screens, and keeping it out of the static
+  // image raises the largest contiguous heap block that the TLS handshake needs.
+  static const size_t GRID_BITS_LEN = 4050;   // 1 bit per 4-char grid (32400 total)
+  uint8_t* gridBits = nullptr;      // lazily malloc'd; nullptr = not yet allocated
+  bool     ensureGridBits();        // allocate+zero on first use; false if OOM
   int      gridN = 0;               // grids in footprint (set bits)
   int      gridScroll = 0;
   bool     gridLive = false;        // true = live now (from Track), false = pass union
@@ -4963,7 +5070,6 @@ private:
   uint8_t  ggSel = 0;              // cursor
   int      ggStreak = 0;
   uint32_t ggDeadline = 0;         // answer-by (millis)
-
 
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
@@ -5207,9 +5313,12 @@ private:
   // drives the radio/rotator. One client at a time, serviced cooperatively.
   WiFiServer* webd = nullptr;
   WiFiClient  webdCli;            // single connected client
-  String      webdBuf;           // request-assembly buffer (request line + headers)
+  String      webdBuf;            // request-assembly buffer (request line + headers)
   String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
+  uint32_t lastNetCycleMs = 0;    // millis() when the last update cycle STARTED (0 = never);
+                                  // gates back-to-back cycles so TIME_WAIT PCBs can drain
+  bool netCooldownOk();           // true if a new update cycle may start; else sets a "wait Ns" status
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     keyFn = false;         // Fn modifier state for the current keypress
                                   // (read by the notes editor for cursor moves)
@@ -5254,6 +5363,8 @@ private:
   void freeCanvasForTls();                     // free ~64 KB sprite for mbedTLS handshake
   void restoreCanvasAfterTls();
   void tickCanvasRestore();                    // loop-driven retry if restore alloc failed
+  bool tryRecreateCanvas();                    // one sprite re-create attempt (shared by the two above)
+  uint32_t lastCanvasRetryMs = 0;              // throttle for the loop-driven re-create retry
   bool canvasFreed = false;                    // true while the sprite is freed for a fetch
                                                // (free their sockets) before a
                                                // blocking download; they auto-rebuild
@@ -5314,6 +5425,10 @@ private:
   // a real set, read the accepted freq back and remember THAT, so the rig's
   // tuning-step rounding can't later masquerade as an operator knob move. Pass
   // readback=false in modes where we don't follow the knob (saves a round-trip).
+  // Returns true if it actually wrote the dial (the caller uses this to briefly
+  // defer the uplink write so the SUB read + downlink settle first -- the
+  // OscarWatch "defer uplink after a dial move" rule, important on slow single-
+  // wire Main/Sub rigs like the IC-821).
   bool driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
     uint32_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
     if (lastRxSet && d < threshHz) return false;         // within deadband: already there
@@ -5504,7 +5619,6 @@ private:
   void doLotwUpload(const String& keyPass);  // build .tq8 + POST + mark uploaded
   int  countUnuploadedLotw();                // QSOs in the log still needing LoTW upload
   int  countUnuploadedCloudlog();            // QSOs still needing Cloudlog upload (bit 0x2)
-  void continueLotwBatch(const String& keyPass, bool resend = false);  // cache passphrase in RTC + reboot for next batch
   void scrubLotwBatchState();                // clear the RTC-held batch state + passphrase
   void lotwEnter();                          // count pending QSOs + open screen
   void lotwRebootUpload();                   // write marker + reboot, re-prompt + upload on fresh boot
@@ -5517,6 +5631,10 @@ private:
   String lotwStatus;               // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
   bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
+  bool   lotwMoreBatches = false;  // set by a batch that has QSOs left; the top-level caller
+                                   // loops on it so batches run iteratively, NOT recursively
+                                   // (recursion stacked a full TLS+signing frame per batch
+                                   //  and overflowed the loopTask stack on the 3rd batch)
   bool   lotwRebootPrompt = false; // upload hit a -1 connect; asking to reboot-and-retry
   // ---- Unified LoTW location picker (SCR_LOTWSUB) ----
   // One context-aware list picker drives the whole DXCC -> primary -> secondary chain.
@@ -5555,6 +5673,9 @@ private:
   String clStatus;                 // last result/error line shown on the screen
   bool clBusy = false;             // an upload is in progress (suppress re-entry)
   bool clResend = false;           // include QSOs already sent to Cloudlog (opt-in)
+  bool clMoreBatches = false;      // set by a batch with QSOs left; the top-level caller loops
+                                   // on it so batches run iteratively, not recursively (same
+                                   // stack-overflow risk as the LoTW path)
   int  clResendSkip = 0;           // resend batching: QSOs already sent this run (cursor)
   bool clRebootPrompt = false;     // upload hit a -1 connect; asking to reboot-and-retry
   // ---- Upcoming activations feed (SCR_HAMSAT, from hams.at) ----
@@ -5571,6 +5692,9 @@ private:
   };
   static const int HAMSAT_MAX = 20;   // cap kept modest: the array lives in .bss
   Activation hamsatList[HAMSAT_MAX];
+  // Parse an activation's freq/comment into a fixed DX downlink/uplink on a
+  // matching two-way transponder (declared here, after Activation is defined).
+  bool parseActivationFreq(const Activation& a);
   int    hamsatN = 0;              // parsed activations
   int    hamsatSel = 0;           // list cursor
   int    hamsatScroll = 0;        // list scroll offset
@@ -5627,7 +5751,7 @@ private:
   void drawWorldMap(); void keyWorldMap(char c, bool enter, bool back);
   void drawRotMan(); void keyRotMan(char c, bool enter, bool back);
   void drawGps(); void keyGps(char c, bool enter, bool back);
-  void drawHelp(); void keyHelp(char c, bool enter, bool back);
+  void drawHelp();
   void drawGlossary();  void keyGlossary(char c, bool enter, bool back);
   void drawUserGuide(); void keyUserGuide(char c, bool enter, bool back);
   void drawLicense();   void keyLicense(char c, bool enter, bool back);
@@ -5652,7 +5776,7 @@ private:
   void drawGGrid();     void keyGGrid(char c, bool enter, bool back);     void gGridReset();
   float gdlLevelRate();        // Doppler Lock: level-scaled drift rate
   void  ggNewRound();          // Grid Chase: build a fresh question
-
+  void keyHelp(char c, bool enter, bool back);
 
   // CAT self-test: run the full sequence, render results, handle scrolling.
   void runCatTest();
@@ -5671,7 +5795,6 @@ private:
   void drawCharge();
   void keyCharge(char c, bool enter, bool back);
   int  batteryPercent();        // voltage-curve % (more accurate than raw level)
-  void heapDefragViaReconnect();// drop WiFi/TLS to coalesce the heap on demand
   bool     chargeWoke = false;  // true briefly after a keypress wakes the screen
   uint32_t chargeWokeMs = 0;    // when the wake happened (auto-blank after a few s)
   // Append one result line: echo to Serial and store for the on-screen list.
@@ -9608,9 +9731,30 @@ void Net::logConnectProbe(const String& url) {
   for (int fd = LWIP_SOCKET_OFFSET; fd < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; ++fd) {
     if (fcntl(fd, F_GETFD) != -1) openFds++;
   }
+  // The fd table can look clean (0/16) while the LWIP TCP PCB pool underneath is
+  // exhausted -- sockets in TIME_WAIT hold a tcp_pcb without holding an fd. Count
+  // the active + TIME_WAIT PCBs so a field log distinguishes true socket-pool
+  // exhaustion (connects refused while heap is fine) from a heap/handshake problem.
+#if CARDSAT_HAVE_TCP_PCBS
+  int nActive = 0, nTw = 0;
+  pcbCounts(nActive, nTw);
+  Serial.printf("[net] connect failed; socket FDs open: %d / %d; TCP PCBs active=%d time_wait=%d\n",
+                openFds, (int)CONFIG_LWIP_MAX_SOCKETS, nActive, nTw);
+#else
   Serial.printf("[net] connect failed; socket FDs open: %d / %d\n",
                 openFds, (int)CONFIG_LWIP_MAX_SOCKETS);
+#endif
 }
+
+void Net::pcbCounts(int& active, int& timeWait) {
+  active = 0; timeWait = 0;
+#if CARDSAT_HAVE_TCP_PCBS
+  for (struct tcp_pcb* p = tcp_active_pcbs; p != nullptr; p = p->next) active++;
+  for (struct tcp_pcb* p = tcp_tw_pcbs;     p != nullptr; p = p->next) timeWait++;
+#endif
+}
+
+
 
 // GET the URL into a String (single attempt). NOTE: deliberately NOT wrapped in a
 // connect-retry loop. A retry was tried (0.9.42) on the theory that QRZ hit the same
@@ -9631,93 +9775,123 @@ bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                 WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
-  WiFiClientSecure client;
-  // Force an explicit client.stop() on EVERY exit path (including early returns
-  // and mid-read timeouts). Relying on the destructor alone leaves a socket that
-  // stalled mid-stream lingering in the LWIP pool on this core; after enough such
-  // leaks every subsequent connect() returns -1. stop() closes the fd at once.
-  struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
-  // Certificate validation disabled for simplicity (public GP data). For a
-  // security-sensitive deployment, pin the CA root instead of setInsecure().
-  client.setInsecure();
+  // ESP_SSLClient is a generic Client, not the NetworkClient HTTPClient needs, so we
+  // hand-roll the GET over the raw TLS client (see httpsGetToFile). Single hop: this
+  // path serves QRZ (no redirects) and the deprecated fetchGp; the real GP catalog uses
+  // httpsGetToFile (which follows one redirect).
+  bool https = url.startsWith("https:");
+  int sspos = url.indexOf("://"); int st = (sspos >= 0) ? sspos + 3 : 0;
+  int slash = url.indexOf('/', st);
+  String hostPort = (slash >= 0) ? url.substring(st, slash) : url.substring(st);
+  String reqPath  = (slash >= 0) ? url.substring(slash) : "/";
+  int port = https ? 443 : 80;
+  int colon = hostPort.indexOf(':');
+  String host;
+  if (colon >= 0) { host = hostPort.substring(0, colon); port = hostPort.substring(colon + 1).toInt(); }
+  else host = hostPort;
+
+  WiFiClient transport;          // plain TCP transport under the TLS layer
+  ESP_SSLClient client;          // BearSSL TLS with app-sized buffers (see SSL_RX_BUF)
+  struct ClientStop { ESP_SSLClient& c; ~ClientStop() { c.stop(); } } _cstop{client};
+  client.setClient(&transport);  // MUST precede connect; transport must outlive client
+  client.setInsecure();          // no cert verification (public GP/QRZ data)
+  client.setBufferSizes(SSL_RX_BUF, SSL_TX_BUF);
   client.setTimeout(15000);
 
-  HTTPClient http;
-  http.setUserAgent("CardSat-Cardputer/1.0");
-  http.setConnectTimeout(15000);
-  http.setTimeout(15000);
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // AMSAT may 301/302
-  http.useHTTP10(true);   // avoid chunked-encoding edge cases for static files
-
-  // Proactively defragment before the handshake. This GET path (QRZ lookups, and
-  // via httpsGetToFile the bulk fetches) always uses TLS, which needs ~32 KB of
-  // CONTIGUOUS heap; when the largest free block sits right at the sprite-pinned
-  // ~31.7 KB the cold connect() fails with -1 (observed: QRZ lookups failing
-  // repeatedly). reclaimHeapForTls() waits for async socket/TLS buffers to return
-  // and coalesce (and, as a last resort, cycles WiFi) to lift the largest block.
-  // Unlike the POST paths this does NOT hard-abort on a low block -- the caller
-  // handles a failed GET, and some fetches can still squeak through.
-  reclaimHeapForTls();
-
-  if (!http.begin(client, url)) { lastErr = "begin failed"; return false; }
-  http.addHeader("Accept", "*/*");
-
-  int code = http.GET();
-  lastCode = code;
-  noteConnResult(code);   // track consecutive connect failures; auto-recover the pool
-  if (code != HTTP_CODE_OK) {
-    lastErr = (code > 0) ? ("HTTP " + String(code))
-                         : HTTPClient::errorToString(code);
-    Serial.printf("[net] GET failed: code=%d (%s)\n", code, lastErr.c_str());
-    http.end();
-    if (code <= 0) logConnectProbe(url);   // expose the real errno on a connect failure
+  uint32_t t0 = millis();
+  if (!client.connect(host.c_str(), port)) {
+    lastCode = -1; lastErr = "connect failed"; noteConnResult(-1);
+    Serial.printf("[net] GET connect failed in %ums\n", (unsigned)(millis() - t0));
     return false;
   }
 
-  int len = http.getSize();          // -1 if server didn't send Content-Length
-  out = "";
-  if (len > 0) out.reserve(min((size_t)len + 16, maxBytes));  // avoid realloc churn
+  String req;
+  req.reserve(reqPath.length() + host.length() + 96);
+  req  = "GET " + reqPath + " HTTP/1.1\r\n";
+  req += "Host: " + host + "\r\n";
+  req += "User-Agent: CardSat-Cardputer/1.0\r\n";
+  req += "Accept: */*\r\n";
+  req += "Connection: close\r\n\r\n";
+  client.print(req);
+  client.flush();
 
-  WiFiClient* stream = http.getStreamPtr();
+  // Status line.
+  uint32_t rdStart = millis();
+  while (!client.available() && millis() - rdStart < 15000) delay(10);
+  String statusLine = client.available() ? client.readStringUntil('\n') : String("");
+  int code = 0;
+  { int sp = statusLine.indexOf(' ');
+    if (sp >= 0) code = statusLine.substring(sp + 1, sp + 4).toInt(); }
+  if (statusLine.length() == 0) {
+    lastCode = 0; lastErr = "no response from server"; noteConnResult(0);
+    return false;
+  }
+  lastCode = code;
+  noteConnResult(code);
+  if (code != 200) {
+    lastErr = "HTTP " + String(code);
+    Serial.printf("[net] GET failed: code=%d\n", code);
+    return false;
+  }
+
+  // Headers: capture Content-Length and chunked flag.
+  int len = -1; bool chunked = false;
+  uint32_t hdrStart = millis();
+  while (millis() - hdrStart < 15000) {
+    if (!client.available()) { if (!client.connected()) break; delay(5); continue; }
+    String h = client.readStringUntil('\n');
+    if (h == "\r" || h.length() == 0) break;
+    String hl = h; hl.toLowerCase();
+    if (hl.startsWith("content-length:")) len = h.substring(15).toInt();
+    else if (hl.startsWith("transfer-encoding:") && hl.indexOf("chunked") >= 0) chunked = true;
+  }
+
+  out = "";
+  if (len > 0) out.reserve(min((size_t)len + 16, maxBytes));
+
   uint8_t buf[512];
   size_t total = 0;
   uint32_t lastRx = millis();
-  // Read until the declared length arrives, or (no Content-Length) until the
-  // stream has been idle long enough to be sure the transfer is done. We must
-  // NOT stop the instant connected()/available() momentarily go false: with TLS
-  // the socket can report no data between records mid-stream, which previously
-  // truncated large bodies (the GP file) to whatever had arrived so far -- the
-  // amount varying run to run with network timing.
-  while (total < maxBytes) {
-    size_t avail = stream->available();
+  long chunkRemain = chunked ? -1 : (len > 0 ? len : LONG_MAX);
+  bool done = false;
+  while (total < maxBytes && !done) {
+    if (chunked && chunkRemain <= 0) {
+      if (!client.available()) {
+        if (!client.connected()) break;
+        if (millis() - lastRx > 10000) break;
+        delay(5); continue;
+      }
+      String szLine = client.readStringUntil('\n'); szLine.trim();
+      if (szLine.length() == 0) continue;
+      long csz = strtol(szLine.c_str(), nullptr, 16);
+      if (csz <= 0) { done = true; break; }
+      chunkRemain = csz; lastRx = millis();
+    }
+    size_t avail = client.available();
     if (avail) {
-      int r = stream->readBytes(buf, min(avail, sizeof(buf)));
+      size_t want = sizeof(buf);
+      if ((long)want > chunkRemain) want = (size_t)chunkRemain;
+      int r = client.readBytes(buf, min(avail, want));
       if (r <= 0) break;
       out.concat((const char*)buf, r);
       total += r;
+      if (chunked || len > 0) chunkRemain -= r;
       lastRx = millis();
-      if (len > 0 && total >= (size_t)len) break;     // whole body received
+      if (!chunked && len > 0 && total >= (size_t)len) { done = true; break; }
     } else {
-      if (len > 0 && total >= (size_t)len) break;
-      // Only treat a closed connection as end-of-body when the length is UNKNOWN.
-      // With a declared Content-Length we keep waiting (up to the stall timeout)
-      // so a momentary TLS burst gap on a weak link can't truncate the body.
-      if (len <= 0 && !http.connected() && !stream->available() &&
-          millis() - lastRx > 500)
-        break;
-      if (millis() - lastRx > 10000) break;           // idle/stall timeout
+      if (!chunked && len > 0 && total >= (size_t)len) { done = true; break; }
+      if (len <= 0 && !chunked && !client.connected() && !client.available() &&
+          millis() - lastRx > 500) break;
+      if (millis() - lastRx > 10000) break;
       delay(5);
     }
   }
-  http.end();
 
   Serial.printf("[net] received %u bytes (declared %d), heap now %u (largest %u)\n",
                 (unsigned)total, len, (unsigned)ESP.getFreeHeap(),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   if (out.length() == 0) { lastErr = "empty body"; return false; }
-  // Declared length but got less -> truncated; report failure so callers/retries
-  // don't parse a partial body.
-  if (len > 0 && total < (size_t)len) {
+  if (!chunked && len > 0 && total < (size_t)len) {
     lastErr = "short read " + String((unsigned)total) + "/" + String(len);
     return false;
   }
@@ -9729,8 +9903,8 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   lastCode = 0; lastErr = "";
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
-  TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
-  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
+  TlsBusyGuard _tls;   // suspend the app's LAN listeners for this session
+  if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
 
   Serial.printf("[net] GET %s -> %s\n", redactUrl(url).c_str(), path);
   Serial.printf("[net] heap before TLS: %u (largest block %u), IP %s, RSSI %d\n",
@@ -9744,99 +9918,166 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   // allowance so that slow-but-healthy negotiation isn't aborted as a timeout.
   uint32_t connectMs = (firstByteMs > 15000) ? firstByteMs : 15000;
 
-  WiFiClientSecure client;
-  // Force client.stop() on every exit (see httpsGet) -- closes the socket fd
-  // immediately so a stalled/timed-out transfer doesn't leak it from the pool.
-  struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
-  client.setInsecure();
-  client.setTimeout(connectMs);
+  // ESP_SSLClient (BearSSL) is a generic Arduino Client, NOT the ESP32 core's
+  // NetworkClient that HTTPClient::begin() requires -- so we can't use HTTPClient here.
+  // Instead we hand-roll the GET over the raw TLS client, exactly like the POST paths
+  // (and the library's own examples). Supports one redirect hop (AMSAT GP may 301/302).
+  String curUrl = url;
+  for (int hop = 0; hop < 2; ++hop) {
+    // Parse scheme/host/path/port.
+    bool https = curUrl.startsWith("https:");
+    int sspos = curUrl.indexOf("://"); int st = (sspos >= 0) ? sspos + 3 : 0;
+    int slash = curUrl.indexOf('/', st);
+    String hostPort = (slash >= 0) ? curUrl.substring(st, slash) : curUrl.substring(st);
+    String reqPath  = (slash >= 0) ? curUrl.substring(slash) : "/";
+    int port = https ? 443 : 80;
+    int colon = hostPort.indexOf(':');
+    String host;
+    if (colon >= 0) { host = hostPort.substring(0, colon); port = hostPort.substring(colon + 1).toInt(); }
+    else host = hostPort;
 
-  HTTPClient http;
-  http.setUserAgent("CardSat-Cardputer/1.0");
-  http.setConnectTimeout(connectMs);
-  http.setTimeout(connectMs);
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.useHTTP10(true);
+    WiFiClient transport;          // plain TCP transport under the TLS layer
+    ESP_SSLClient client;          // BearSSL TLS with app-sized buffers (see SSL_RX_BUF)
+    struct ClientStop { ESP_SSLClient& c; ~ClientStop() { c.stop(); } } _cstop{client};
+    client.setClient(&transport);  // MUST precede connect; transport must outlive client
+    client.setInsecure();          // no cert verification (public data)
+    client.setBufferSizes(SSL_RX_BUF, SSL_TX_BUF);   // small handshake buffers fit the block
+    client.setTimeout(connectMs);
 
-  if (!http.begin(client, url)) { lastErr = "begin failed"; return false; }
-  http.addHeader("Accept", "*/*");
-
-  int code = http.GET();
-  lastCode = code;
-  noteConnResult(code);   // track consecutive connect failures; auto-recover the pool
-  if (code != HTTP_CODE_OK) {
-    lastErr = (code > 0) ? ("HTTP " + String(code))
-                         : HTTPClient::errorToString(code);
-    Serial.printf("[net] GET failed: code=%d (%s)\n", code, lastErr.c_str());
-    http.end();
-    if (code <= 0) logConnectProbe(url);   // expose the real errno on a connect failure
-    return false;
-  }
-
-  File f = Store::fs().open(path, "w");
-  if (!f) {
-    lastErr = Store::ready() ? "fs open failed" : "no filesystem (SPIFFS/SD)";
-    http.end(); return false;
-  }
-
-  int len = http.getSize();          // -1 if server didn't send Content-Length
-  WiFiClient* stream = http.getStreamPtr();
-  uint8_t buf[512];
-  size_t total = 0;
-  uint32_t lastRx = millis();
-  bool writeErr = false;
-  // The grace window before the FIRST byte can be longer than the mid-stream
-  // stall window (for slow-first-response hosts); once any byte arrives we use
-  // the normal 10s stall timeout for the rest of the body.
-  const uint32_t STALL_MS = 10000;
-  uint32_t firstWindow = (firstByteMs > STALL_MS) ? firstByteMs : STALL_MS;
-  // Stream straight to flash: each chunk is written and freed, so no large
-  // contiguous RAM buffer is ever needed (which is what truncated the String
-  // version). Terminate on declared length / idle timeout, not on a transient
-  // connected()/available() lull.
-  while (total < maxBytes) {
-    size_t avail = stream->available();
-    if (avail) {
-      int r = stream->readBytes(buf, min(avail, sizeof(buf)));
-      if (r <= 0) break;
-      if (f.write(buf, r) != (size_t)r) { writeErr = true; break; }  // flash full?
-      total += r;
-      lastRx = millis();
-      if (len > 0 && total >= (size_t)len) break;
-    } else {
-      if (len > 0 && total >= (size_t)len) break;
-      // Only treat a closed connection as end-of-body when the length is UNKNOWN
-      // (chunked / no Content-Length). When the server declared a length and we
-      // haven't reached it, a momentary connected()==false with no available
-      // bytes is just a TLS burst gap on a weak link -- keep waiting up to the
-      // stall window instead of declaring a truncated download complete.
-      if (len <= 0 && !http.connected() && !stream->available() &&
-          millis() - lastRx > 500)
-        break;
-      // Use the longer first-byte window until the first byte lands, then the
-      // normal mid-stream stall timeout.
-      uint32_t window = (total == 0) ? firstWindow : STALL_MS;
-      if (millis() - lastRx > window) break;
-      delay(5);
+    uint32_t t0 = millis();
+    if (!client.connect(host.c_str(), port)) {
+      lastCode = -1; lastErr = "connect failed";
+      noteConnResult(-1);
+      Serial.printf("[net] GET connect failed in %ums (host=%s)\n",
+                    (unsigned)(millis() - t0), host.c_str());
+      return false;
     }
-  }
-  f.close();
-  http.end();
-  if (written) *written = total;
 
-  Serial.printf("[net] streamed %u bytes to %s (declared %d), heap now %u (largest %u)\n",
-                (unsigned)total, path, len, (unsigned)ESP.getFreeHeap(),
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-  if (writeErr)    { lastErr = "fs write failed"; return false; }
-  if (total == 0)  { lastErr = "empty body"; return false; }
-  // If the server told us how big the body is and we got less, the transfer was
-  // cut short (a stall timeout or a dropped TLS burst). Report failure so the
-  // retry wrapper re-attempts rather than parsing a truncated file.
-  if (len > 0 && total < (size_t)len) {
-    lastErr = "short read " + String((unsigned)total) + "/" + String(len);
-    return false;
+    // Send the request as one blob (single TLS record -> fast, avoids mod_reqtimeout).
+    String req;
+    req.reserve(reqPath.length() + host.length() + 96);
+    req  = "GET " + reqPath + " HTTP/1.1\r\n";
+    req += "Host: " + host + "\r\n";
+    req += "User-Agent: CardSat-Cardputer/1.0\r\n";
+    req += "Accept: */*\r\n";
+    req += "Connection: close\r\n\r\n";
+    client.print(req);
+    client.flush();
+
+    // Read + parse the status line.
+    uint32_t rdStart = millis();
+    while (!client.available() && client.connected() && millis() - rdStart < connectMs) delay(10);
+    String statusLine = client.available() ? client.readStringUntil('\n') : String("");
+    int code = 0;
+    { int sp = statusLine.indexOf(' ');
+      if (sp >= 0) code = statusLine.substring(sp + 1, sp + 4).toInt(); }
+    if (statusLine.length() == 0) {
+      lastCode = 0; lastErr = "no response from server"; noteConnResult(0);
+      Serial.println("[net] GET: no response (empty status)");
+      return false;
+    }
+
+    // Read headers: capture Content-Length, chunked flag, and Location (for redirects).
+    int len = -1; bool chunked = false; String location = "";
+    uint32_t hdrStart = millis();
+    while (millis() - hdrStart < 15000) {
+      if (!client.available()) { if (!client.connected()) break; delay(5); continue; }
+      String h = client.readStringUntil('\n');
+      if (h == "\r" || h.length() == 0) break;   // end of headers
+      String hl = h; hl.toLowerCase();
+      if (hl.startsWith("content-length:")) len = h.substring(15).toInt();
+      else if (hl.startsWith("transfer-encoding:") && hl.indexOf("chunked") >= 0) chunked = true;
+      else if (hl.startsWith("location:")) { location = h.substring(9); location.trim(); }
+    }
+
+    // Follow a single redirect.
+    if ((code == 301 || code == 302 || code == 307 || code == 308) && location.length() && hop == 0) {
+      Serial.printf("[net] GET %d -> redirect to %s\n", code, redactUrl(location).c_str());
+      // Relative Location -> rebuild against current host.
+      if (location.startsWith("/")) curUrl = String(https ? "https://" : "http://") + host + location;
+      else curUrl = location;
+      continue;   // _cstop closes this connection; loop reconnects to the new URL
+    }
+
+    lastCode = code;
+    noteConnResult(code);
+    if (code != 200) {
+      lastErr = "HTTP " + String(code);
+      Serial.printf("[net] GET failed: code=%d\n", code);
+      return false;
+    }
+
+    File f = Store::fs().open(path, "w");
+    if (!f) { lastErr = Store::ready() ? "fs open failed" : "no filesystem"; return false; }
+
+    // Stream the body straight to flash. Chunked responses are dechunked inline; with a
+    // Content-Length we stop at len; otherwise we stop on close/idle. Each chunk is
+    // written and freed so no large contiguous RAM buffer is ever needed.
+    uint8_t buf[512];
+    size_t total = 0;
+    uint32_t lastRx = millis();
+    bool writeErr = false, done = false;
+    const uint32_t STALL_MS = 10000;
+    uint32_t firstWindow = (firstByteMs > STALL_MS) ? firstByteMs : STALL_MS;
+
+    // Chunked decode state: bytes remaining in the current chunk (-1 = need size line).
+    long chunkRemain = chunked ? -1 : (len > 0 ? len : LONG_MAX);
+
+    while (total < maxBytes && !done) {
+      if (chunked && chunkRemain <= 0) {
+        // Need the next chunk-size line.
+        if (!client.available()) {
+          if (!client.connected()) break;
+          if (millis() - lastRx > (total == 0 ? firstWindow : STALL_MS)) break;
+          delay(5); continue;
+        }
+        String szLine = client.readStringUntil('\n');
+        szLine.trim();
+        if (szLine.length() == 0) { continue; }          // trailing CRLF between chunks
+        long csz = strtol(szLine.c_str(), nullptr, 16);  // hex chunk size
+        if (csz <= 0) { done = true; break; }            // last chunk (0) -> done
+        chunkRemain = csz;
+        lastRx = millis();
+      }
+      size_t avail = client.available();
+      if (avail) {
+        size_t want = sizeof(buf);
+        if ((long)want > chunkRemain) want = (size_t)chunkRemain;
+        int r = client.readBytes(buf, min(avail, want));
+        if (r <= 0) break;
+        if (f.write(buf, r) != (size_t)r) { writeErr = true; break; }
+        total += r;
+        if (chunked || len > 0) chunkRemain -= r;
+        lastRx = millis();
+        if (!chunked && len > 0 && total >= (size_t)len) { done = true; break; }
+        if (chunked && chunkRemain <= 0) { /* consume trailing CRLF next loop */ }
+      } else {
+        if (!chunked && len > 0 && total >= (size_t)len) { done = true; break; }
+        // With unknown length, a real close ends the body; with a declared length keep
+        // waiting through weak-link TLS gaps until the stall window elapses.
+        if (len <= 0 && !chunked && !client.connected() && !client.available() &&
+            millis() - lastRx > 500) break;
+
+      }
+    }
+    f.close();
+    if (written) *written = total;
+
+    Serial.printf("[net] streamed %u bytes to %s (declared %d), heap now %u (largest %u)\n",
+                  (unsigned)total, path, len, (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    if (writeErr)   { lastErr = "fs write failed"; return false; }
+    if (total == 0) { lastErr = "empty body"; return false; }
+    if (!chunked && len > 0 && total < (size_t)len) {
+      lastErr = "short read " + String((unsigned)total) + "/" + String(len);
+      return false;
+    }
+    return true;   // success on this hop
   }
-  return true;
+  // Fell out of the redirect loop without a definitive result (e.g. a redirect with
+  // no Location, or a second redirect we don't follow).
+  lastErr = "too many redirects";
+  return false;
 }
 
 bool Net::httpsGetToFileRetry(const String& url, const char* path,
@@ -9848,6 +10089,17 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
     if (httpsGetToFile(url, path, maxBytes, written, firstByteMs)) return true;
     // A "low flash" failure won't fix itself on retry -- bail immediately.
     if (lastErr == "low flash") return false;
+    // A connect-LEVEL failure (code <= 0, e.g. "connection refused") is a socket-
+    // pool / TIME_WAIT problem, not a mid-stream stall. Rapid retries only pile
+    // more PCBs into the pool and make it worse (and the heap machinery can't fix
+    // a socket refusal), so bail out immediately and let the caller move on --
+    // the pool drains on its own far faster when we STOP hammering it. Only a
+    // genuine short read (code > 0 but truncated body) is worth another attempt.
+    if (lastCode <= 0) {
+      Serial.printf("[net] attempt %d/%d failed (%s); connect-level, not retrying\n",
+                    i + 1, attempts, lastErr.c_str());
+      return false;
+    }
     Serial.printf("[net] attempt %d/%d failed (%s); retrying\n",
                   i + 1, attempts, lastErr.c_str());
     delay(400 * (i + 1));   // simple linear backoff
@@ -9941,24 +10193,18 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                 WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
-  WiFiClientSecure client;
-  struct ClientStop { WiFiClientSecure& c; ~ClientStop() { c.stop(); } } _cstop{client};
+  WiFiClient transport;          // TCP transport under the TLS layer
+  ESP_SSLClient client;          // BearSSL TLS with app-sized buffers
+  struct ClientStop { ESP_SSLClient& c; ~ClientStop() { c.stop(); } } _cstop{client};
+  client.setClient(&transport);  // MUST precede connect; transport must outlive client
   client.setInsecure();
+  client.setBufferSizes(SSL_RX_BUF, SSL_TX_BUF);
   client.setTimeout(20000);
-
-  // Defragment if needed, then bail before a handshake we can't complete (see the note
-  // in httpsPostJson). No body buffer allocated yet, so nothing to free on this abort.
-  if (reclaimHeapForTls() < TLS_MIN_BLOCK) {
-    lastCode = HEAP_ABORT_CODE;        // negative: lets callers offer reboot-to-clean-heap
-    lastErr = "low memory; try again";
-    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
-    return false;
-  }
 
   // --- Manual request (same approach that fixed the Cloudlog POST) --------------
   // HTTPClient::POST was failing here exactly as it did on the JSON path (-1 /
   // connection refused / 408), so send the request by hand over the TLS client we
-  // control. Parse host/path/port from the URL, THEN handshake with max free heap.
+  // control. Parse host/path/port from the URL, THEN handshake.
   String hostPart, pathPart; int port = 443;
   {
     int s = url.indexOf("://"); int st = (s >= 0) ? s + 3 : 0;
@@ -9973,9 +10219,7 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   uint32_t t0 = millis();
   if (!client.connect(hostPart.c_str(), port)) {
     lastCode = -1; lastErr = "connect failed";
-    char eb[128] = {0}; client.lastError(eb, sizeof(eb));
-    Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
-                  (unsigned)(millis() - t0), eb[0] ? eb : "(none)");
+    Serial.printf("[net] POST connect failed in %ums\n", (unsigned)(millis() - t0));
     return false;
   }
   Serial.printf("[net] POST TLS connected in %ums; streaming request\n", (unsigned)(millis() - t0));
@@ -10005,12 +10249,20 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   // half-closes. Do NOT abort on a transient connected()==false; rely on the write
   // result plus the no-progress timeout. (See docs/design/LOTW_UPLOAD_SIZE_WORKAROUNDS.md;
   // large uploads are additionally split into sub-TCP_SND_BUF batches, one per reboot.)
+  // Diagnostic C (0.9.43 ESP_SSLClient eval): measure the effective TCP send behavior so
+  // we can tell whether the ~5744B TCP_SND_BUF ceiling that historically stalled large
+  // LoTW bodies still applies under BearSSL. maxWrite = largest single write() accepted;
+  // zeroWrites = times the TX window was full (had to flush+retry). If a large body now
+  // streams with few zeroWrites, the ceiling is no longer a practical limit and the
+  // batch/reboot machinery can be relaxed; if it stalls, the ceiling persists below TLS.
+  size_t dbgMaxWrite = 0; uint32_t dbgZeroWrites = 0;
   auto writeAll = [&](const uint8_t* p, size_t n) -> bool {
     size_t off = 0; uint32_t lastProgress = millis();
     while (off < n) {
       int w = client.write(p + off, n - off);
-      if (w > 0) { off += (size_t)w; lastProgress = millis(); }
+      if (w > 0) { off += (size_t)w; lastProgress = millis(); if ((size_t)w > dbgMaxWrite) dbgMaxWrite = (size_t)w; }
       else {
+        dbgZeroWrites++;
         client.flush();                 // push queued segments so the peer can ACK/reopen the window
         delay(10); yield();
         if (millis() - lastProgress > 30000) return false;
@@ -10036,8 +10288,9 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   }
   if (ok) ok = writeAll((const uint8_t*)tail.c_str(), tail.length());
   client.flush();
-  Serial.printf("[net] streamed %u/%u file bytes (+headers/tail), ok=%d\n",
-                (unsigned)streamed, (unsigned)flen, ok ? 1 : 0);
+  Serial.printf("[net] streamed %u/%u file bytes (+headers/tail), ok=%d  [TX maxWrite=%u zeroWrites=%u]\n",
+                (unsigned)streamed, (unsigned)flen, ok ? 1 : 0,
+                (unsigned)dbgMaxWrite, (unsigned)dbgZeroWrites);
   if (!ok || streamed != flen) { lastCode = 0; lastErr = "body stream incomplete"; return false; }
 
   // Read the response (connection-tolerant: poll available(), ignore transient close).
@@ -10105,6 +10358,10 @@ size_t Net::reclaimHeapForTls() {
   // path (credential reuse, 12 s bounded reconnect, connFails reset on success).
   // TO DISABLE: set Net::TLS_WIFI_CYCLE = false. (docs/design/HEAP_WIFI_CYCLE.md)
   if (TLS_WIFI_CYCLE && !wifiCycleIneffective && largest < TLS_MIN_BLOCK &&
+      connFails == 0 &&                         // not during a connect-refusal streak:
+                                                 // that is a socket-pool problem, and
+                                                 // cycling WiFi for it is pure cost (it
+                                                 // only ever measures block unchanged).
       WiFi.status() == WL_CONNECTED &&
       (lastWifiCycleMs == 0 || millis() - lastWifiCycleMs > WIFI_CYCLE_MIN_GAP_MS)) {
     Serial.printf("[net] proactive WiFi-cycle defrag (largest %u < %u)\n",
@@ -10157,21 +10414,16 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
                 WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
   const bool isHttps = url.startsWith("https:");
-  WiFiClientSecure tls;
-  WiFiClient plain;
-  struct StopAll { WiFiClientSecure& t; WiFiClient& p; bool s;
+  WiFiClient transport;          // TCP transport for the TLS layer (https)
+  ESP_SSLClient tls;             // BearSSL TLS with app-sized buffers
+  WiFiClient plain;              // used directly for plain http
+  struct StopAll { ESP_SSLClient& t; WiFiClient& p; bool s;
                    ~StopAll() { if (s) t.stop(); else p.stop(); } } _stop{tls, plain, isHttps};
-  if (isHttps) { tls.setInsecure(); tls.setTimeout(20000); }
-
-  // Defragment if needed, then refuse to start a handshake we can't complete: a doomed
-  // connect() fails with -1 and fragments the heap further (the cascade the user hit
-  // after a mistyped URL led to repeated failures). Bailing here with a clear message
-  // keeps the heap intact so a retry can succeed. (Plain HTTP needs no big TLS block.)
-  if (isHttps && reclaimHeapForTls() < TLS_MIN_BLOCK) {
-    lastCode = HEAP_ABORT_CODE;        // negative: lets callers offer reboot-to-clean-heap
-    lastErr = "low memory; try again";
-    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
-    return false;
+  if (isHttps) {
+    tls.setClient(&transport);   // MUST precede connect; transport must outlive tls
+    tls.setInsecure();
+    tls.setBufferSizes(SSL_RX_BUF, SSL_TX_BUF);
+    tls.setTimeout(20000);
   }
 
   // --- 0.9.41: MANUAL request instead of HTTPClient::POST -----------------------
@@ -10192,15 +10444,11 @@ bool Net::httpsPostJson(const String& url, const String& body, String& response,
     else hostPart = hostPort;
   }
 
-  logHeapDetail("pre-POST-connect");   // full heap shape right before the handshake
-
   Client* cli = isHttps ? (Client*)&tls : (Client*)&plain;
   uint32_t t0 = millis();
   if (!cli->connect(hostPart.c_str(), port)) {
     lastCode = -1; lastErr = "connect failed";
-    if (isHttps) { char eb[128] = {0}; tls.lastError(eb, sizeof(eb));
-      Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
-                    (unsigned)(millis() - t0), eb[0] ? eb : "(none)"); }
+    Serial.printf("[net] POST connect failed in %ums\n", (unsigned)(millis() - t0));
     return false;
   }
   Serial.printf("[net] POST TLS connected in %ums; sending request\n", (unsigned)(millis() - t0));
@@ -10320,18 +10568,13 @@ bool Net::httpsPostJsonFile(const String& url, const char* bodyFilePath, String&
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                 WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
 
-  WiFiClientSecure tls;
-  struct StopT { WiFiClientSecure& t; ~StopT() { t.stop(); } } _stop{tls};
+  WiFiClient transport;          // TCP transport under the TLS layer
+  ESP_SSLClient tls;             // BearSSL TLS with app-sized buffers
+  struct StopT { ESP_SSLClient& t; ~StopT() { t.stop(); } } _stop{tls};
+  tls.setClient(&transport);     // MUST precede connect; transport must outlive tls
   tls.setInsecure();
+  tls.setBufferSizes(SSL_RX_BUF, SSL_TX_BUF);
   tls.setTimeout(20000);
-
-  // Refuse a handshake we can't complete; bailing keeps the heap intact for a retry.
-  if (reclaimHeapForTls() < TLS_MIN_BLOCK) {
-    lastCode = HEAP_ABORT_CODE;
-    lastErr = "low memory; try again";
-    Serial.println("[net] aborting TLS POST: insufficient contiguous heap");
-    return false;
-  }
 
   // Parse host/path/port.
   String hostPart, pathPart; int port = 443;
@@ -10348,9 +10591,7 @@ bool Net::httpsPostJsonFile(const String& url, const char* bodyFilePath, String&
   uint32_t t0 = millis();
   if (!tls.connect(hostPart.c_str(), port)) {
     lastCode = -1; lastErr = "connect failed";
-    char eb[128] = {0}; tls.lastError(eb, sizeof(eb));
-    Serial.printf("[net] POST connect failed in %ums; TLS lastError: %s\n",
-                  (unsigned)(millis() - t0), eb[0] ? eb : "(none)");
+    Serial.printf("[net] POST connect failed in %ums\n", (unsigned)(millis() - t0));
     return false;
   }
   Serial.printf("[net] POST TLS connected in %ums; streaming request\n", (unsigned)(millis() - t0));
@@ -12046,6 +12287,15 @@ String App::gpSourceLabel() {
   return "Custom";
 }
 
+// Returns true if a new network update cycle may start now. If a cycle ran within
+// NET_COOLDOWN_MS, it refuses and shows a "wait Ns" status instead -- this keeps a
+// button-mash of failed updates from stacking TIME_WAIT PCBs and wedging the pool
+// (see NET_COOLDOWN_MS). The first call after boot always passes (lastNetCycleMs==0).
+bool App::netCooldownOk() {
+  lastNetCycleMs = millis();   // stamp the START of this cycle (informational)
+  return true;
+}
+
 void App::doUpdateGp() {
   setStatus("WiFi..."); draw();
   if (!net.connected() && !connectWifiCfg()) {
@@ -12763,34 +13013,72 @@ void App::drawHamsat() {
   }
 
   if (hamsatDetail) {
-    // Detail view of the selected activation.
+    // Detail view of the selected activation: compact facts, a footprint note
+    // (co-visibility with the activator near the listed time), and the full
+    // comment in a scrollable region at the bottom.
     const Activation& a = hamsatList[hamsatSel];
-    canvas.setTextColor(CL_WHITE, CL_BLACK);
     int y = 20;
-    canvas.setCursor(6, y); y += 12;
-    canvas.printf("%s  %s", a.call[0] ? a.call : "?", a.sat[0] ? a.sat : "?");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, y); y += 11;
+    canvas.printf("%.13s  %.11s", a.call[0] ? a.call : "?", a.sat[0] ? a.sat : "?");
     canvas.setTextColor(CL_CYAN, CL_BLACK);
-    canvas.setCursor(6, y); y += 12;
+    canvas.setCursor(6, y); y += 11;
     canvas.printf("%s  grid %s", a.date, a.grid[0] ? a.grid : "-");
     canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(6, y); y += 12;
-    canvas.printf("UTC %s - %s", a.start[0] ? a.start : "?", a.end[0] ? a.end : "?");
-    canvas.setCursor(6, y); y += 12;
-    canvas.printf("Mode %s", a.mode[0] ? a.mode : "-");
-    canvas.setCursor(6, y); y += 12;
+    canvas.setCursor(6, y); y += 11;
+    canvas.printf("UTC %s-%s  %s", a.start[0] ? a.start : "?", a.end[0] ? a.end : "?",
+                  a.mode[0] ? a.mode : "");
+    canvas.setCursor(6, y); y += 11;
     { String f = a.freq[0] ? String(a.freq) : String("(see comment)");
       if (f.length() > 32) f = f.substring(0, 32);
       canvas.printf("Freq %s", f.c_str()); }
-    if (a.comment[0]) {
-      canvas.setTextColor(CL_GREY, CL_BLACK);
-      // wrap the comment across up to two lines
-      String c = a.comment;
-      canvas.setCursor(6, y); y += 10;
-      canvas.print(c.length() > 38 ? c.substring(0, 38) : c);
-      if (c.length() > 38) { canvas.setCursor(6, y);
-        canvas.print(c.length() > 76 ? c.substring(38, 76) : c.substring(38)); }
+
+    // Footprint note (computed on entry into the detail view).
+    canvas.setCursor(6, y); y += 12;
+    switch (actFpState) {
+      case 1: {
+        canvas.setTextColor(CL_GREEN, CL_BLACK);
+        long dur = (long)(actFpWin.end - actFpWin.start);
+        canvas.printf("Footprint %s-%s (%ldm)", fmtHM(actFpWin.start).c_str(),
+                      fmtHM(actFpWin.end).c_str(), dur/60);
+        break; }
+      case 2:
+        canvas.setTextColor(CL_YELLOW, CL_BLACK);
+        canvas.print("No footprint near listed time");
+        break;
+      default:
+        canvas.setTextColor(CL_GREY, CL_BLACK);
+        canvas.print(!timeIsSet() ? "Footprint: set clock first"
+                   : !a.grid[0]   ? "Footprint: no activator grid"
+                                  : "Footprint: sat not in your list");
+        break;
     }
-    footer("a set sked reminder   ` back");
+
+    // Comment region: wrap to ~38-char lines and show a 3-line window that
+    // scrolls with ;/. when the comment is long.
+    if (a.comment[0]) {
+      const int CW = 38, VIS = 3;
+      String c = a.comment;
+      int total = ((int)c.length() + CW - 1) / CW;
+      if (total < 1) total = 1;
+      if (actCommentScroll > total - 1) actCommentScroll = (total > 0 ? total - 1 : 0);
+      if (actCommentScroll < 0) actCommentScroll = 0;
+      canvas.setTextColor(CL_GREY, CL_BLACK);
+      int cy = y;
+      for (int ln = 0; ln < VIS && (actCommentScroll + ln) < total; ++ln) {
+        int from = (actCommentScroll + ln) * CW;
+        int len = (int)c.length() - from; if (len > CW) len = CW;
+        canvas.setCursor(6, cy); cy += 10;
+        canvas.print(c.substring(from, from + len));
+      }
+      if (total > VIS) {   // scroll indicator
+        canvas.setTextColor(CL_DGREY, CL_BLACK);
+        canvas.setCursor(212, y); canvas.printf("%d/%d", actCommentScroll + 1, total);
+      }
+    }
+
+    footer(actFpState == 1 ? "w window  a sked  ;/. cmt  `"
+                           : "a sked  ;/. comment   ` back");
     return;
   }
 
@@ -12829,6 +13117,12 @@ void App::keyHamsat(char c, bool enter, bool back) {
       else setStatus("No usable date/time");
       lastDrawMs = 0; return;
     }
+    if (c == 'w' && actFpState == 1) {                // open the mutual-window detail
+      openActMutual();
+      return;
+    }
+    if (isUp(c))   { if (actCommentScroll > 0) actCommentScroll--; lastDrawMs = 0; return; }
+    if (isDown(c)) { actCommentScroll++; lastDrawMs = 0; return; }   // clamped in draw
     if (isBack(c, back) || enter) { hamsatDetail = false; lastDrawMs = 0; }
     return;
   }
@@ -12849,7 +13143,13 @@ void App::keyHamsat(char c, bool enter, bool back) {
   }
   if (isUp(c))   { hamsatSel = (hamsatSel + hamsatN - 1) % hamsatN; lastDrawMs = 0; }
   if (isDown(c)) { hamsatSel = (hamsatSel + 1) % hamsatN; lastDrawMs = 0; }
-  if (enter) { hamsatDetail = true; lastDrawMs = 0; }
+  if (enter) {
+    hamsatDetail = true; actCommentScroll = 0;
+    setStatus("Checking footprint..."); draw();      // the +/-30-min search can take a moment
+    activationFootprint();                            // fills actFpState / actFpWin
+    setStatus("");
+    lastDrawMs = 0;
+  }
 }
 
 namespace Notes {
@@ -13551,59 +13851,37 @@ int App::cacheTxBatch(int start) {
 void App::doCacheAllTransponders() {
   int n = db.count();
   if (n == 0) { setStatus("No sats. Update GP first."); return; }
-  txResumeWrite(0, n);                  // mark a fresh run pending from index 0
-  Serial.printf("[tx] starting batched cache of %d sats, rebooting\n", n);
-  setStatus("Caching transponders - rebooting...", 2000);
-  draw(); delay(1500);
-  ESP.restart();
+  Serial.printf("[tx] caching %d sats (single session)\n", n);
+  // Release the LAN listener sockets for the duration (as the fetch paths' TlsBusyGuard
+  // does per-fetch, but hold it across the whole run so nothing rebuilds between sats).
+  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
+  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
+  int done = 0, failed = 0;
+  for (int i = 0; i < n; ++i) {
+    SatEntry& s = db.at(i);
+    setStatus("TX " + String(i+1) + "/" + String(n) + ": " + s.name); draw();
+    String url = String(SATNOGS_TX_URL) + String((unsigned long)s.norad);
+    bool ok = net.httpsGetToFileRetry(url, SatDb::txCachePath(s.norad).c_str(), 200000, nullptr, 3);
+    if (ok) done++;
+    else {
+      failed++;
+      Serial.printf("[tx] fetch failed at %d/%d (norad %lu)\n",
+                    i+1, n, (unsigned long)s.norad);
+    }
+    delay(40);   // be gentle on the API
+  }
+  Serial.printf("[tx] cache done: %d ok, %d failed, of %d\n", done, failed, n);
+  setStatus(failed == 0 ? ("Cached all " + String(done) + " transponders")
+                        : (String(done) + " cached, " + String(failed) + " failed"), 4000);
 }
 
 // Called at the end of setup(): if a cache run is pending (marker present),
 // continue the next batch and reboot, until every sat is cached.
 void App::resumeCacheIfPending() {
-  int stall = 0;
-  int start = txResumeRead(&stall);
-  if (start < 0) return;                 // nothing pending
-  int n = db.count();
-  if (n == 0) { txResumeWrite(n, n); return; }   // no sats -> clear stale marker
-  if (start >= n) { txResumeWrite(n, n); return; }
-
-  // A run is in progress: show the Update menu (not Home) on every resume boot
-  // so the user sees where the caching lives and the progress status sits there.
-  screen = SCR_UPDATE; lastDrawMs = 0; draw();
-
-  if (!net.connected() && !connectWifiCfg()) {
-    // Can't make progress without WiFi; leave the marker so a later boot retries.
-    setStatus("Cache paused: no WiFi", 2500);
-    return;
+  if (Store::fs().exists(FILE_TX_RESUME)) {
+    Store::fs().remove(FILE_TX_RESUME);
+    Serial.println("[tx] cleared stale batch-resume marker (single-session cache now)");
   }
-  int next = cacheTxBatch(start);
-
-  // Guard against an infinite reboot loop: if a batch makes zero progress (the
-  // very first sat failed all retries even in this fresh boot), count the stall.
-  // After 2 such boots, skip that one stubborn sat so the run can continue.
-  if (next == start) {
-    if (stall + 1 >= 2) {
-      Serial.printf("[tx] sat index %d stuck after retries; skipping it\n", start);
-      next = start + 1;
-      stall = 0;
-    } else {
-      stall++;
-    }
-  } else {
-    stall = 0;
-  }
-
-  txResumeWrite(next, n, stall);
-  if (next >= n) {
-    Serial.printf("[tx] cache complete: %d satellites\n", n);
-    setStatus("Cached all " + String(n) + " transponders", 3000);
-    return;
-  }
-  Serial.printf("[tx] batch done to %d/%d, rebooting to continue\n", next, n);
-  setStatus("Caching " + String(next) + "/" + String(n) + " - rebooting...", 2000);
-  draw(); delay(1500);
-  ESP.restart();
 }
 
 // ---- Per-satellite calibration (LittleFS text store: "norad dl ul" lines) ---
@@ -14593,18 +14871,23 @@ void App::suspendNetServers() {
 // fit the contiguous block that exists with the sprite resident. Retained as call
 // sites / for the loop tick in case a future path needs them.
 void App::freeCanvasForTls() {
-  // Intentionally a no-op: the sprite is kept resident. Freeing it to gain a contiguous
-  // block for the TLS handshake proved unrecoverable -- mbedTLS fragments the freed
-  // region so the 32 KB sprite can't be re-created afterward (screen froze). Instead the
-  // baseline static RAM was trimmed (LOG_VIEW_MAX) so the sprite-resident largest block
-  // clears the handshake's ~32 KB need (as it did before the 0.9.40/0.9.41 features grew
-  // .bss). Retained as a call site in case a future path needs it.
+  // No-op: with ESP_SSLClient's small TLS buffers (see SSL_RX_BUF), the handshake fits
+  // the contiguous block available with the sprite RESIDENT, so we never free it. This
+  // was previously an experiment that freed the ~32 KB sprite for the handshake, but the
+  // freed hole didn't reliably merge into a usable 32 KB block and the re-create could
+  // fail (screen froze). Kept as a call site in case a future path needs it.
 }
 void App::restoreCanvasAfterTls() {
-  // No-op: the sprite is never freed (see freeCanvasForTls).
+  // No-op (see freeCanvasForTls): the sprite is never freed.
+}
+// One re-create attempt. Returns true on success. Shared by restoreCanvasAfterTls()
+// (immediate) and tickCanvasRestore() (deferred, on the loop tick).
+bool App::tryRecreateCanvas() {
+  // No-op (see freeCanvasForTls): the sprite is never freed. Always "succeeds".
+  return true;
 }
 void App::tickCanvasRestore() {
-  // No-op: retained for the loop call site (the sprite is never freed).
+  // No-op (see freeCanvasForTls): nothing to restore since the sprite stays resident.
 }
 
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
@@ -14629,6 +14912,7 @@ void App::tlsBusyTrampoline(bool busy) {
   if (busy) {
     if (s_fetchDepth++ == 0) {
       s_self->suspendNetServers();
+      s_self->freeCanvasForTls();   // free the ~32KB sprite -> larger contiguous block for the handshake
       // Release the audio I2S DMA buffer for the duration of the fetch. The speaker/
       // mic I2S driver allocates its DMA buffer from the INTERNAL, DMA-capable SRAM
       // pool -- the SAME scarce pool mbedTLS draws its ~16 KB handshake buffers from
@@ -14642,10 +14926,13 @@ void App::tlsBusyTrampoline(bool busy) {
       if (s_spkWasOnForFetch) { M5Cardputer.Speaker.stop(); M5Cardputer.Speaker.end(); }
     }
   } else if (s_fetchDepth > 0) {
-    if (--s_fetchDepth == 0 && s_spkWasOnForFetch) {
-      M5Cardputer.Speaker.begin();               // restore audio after the fetch
-      M5Cardputer.Speaker.setVolume(s_self->cfg.spkVolume);
-      s_spkWasOnForFetch = false;
+    if (--s_fetchDepth == 0) {
+      if (s_spkWasOnForFetch) {
+        M5Cardputer.Speaker.begin();               // restore audio after the fetch
+        M5Cardputer.Speaker.setVolume(s_self->cfg.spkVolume);
+        s_spkWasOnForFetch = false;
+      }
+      s_self->restoreCanvasAfterTls();  // re-create the sprite now the handshake is done
     }
   }
 }
@@ -15589,11 +15876,12 @@ void App::loop() {
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
-  } else if (screen == SCR_WEATHER || screen == SCR_SPACEWX || screen == SCR_HAMSAT) {
-    // These are otherwise static (repaint on keypress only). The fetch flow leaves a
-    // transient result banner ("... updated/failed") on the bottom status bar; repaint
-    // while it's visible, then once more right after it times out so the cleared bar is
-    // painted exactly once -- after which this branch goes quiet again.
+  } else if (screen == SCR_WEATHER || screen == SCR_SPACEWX || screen == SCR_HAMSAT ||
+             screen == SCR_MESSAGES) {
+    // These are otherwise static (repaint on keypress only). A transient result banner
+    // ("... updated/failed", or "Sent" on the Messages screen) sits on the bottom status
+    // bar; repaint while it's visible, then once more right after it times out so the
+    // cleared bar is painted exactly once -- after which this branch goes quiet again.
     bool banner = status.length() && millis() < statusUntil;
     if (banner) { if (ms - lastDrawMs > 300) { lastDrawMs = ms; draw(); } }
     else if (status.length()) { status = ""; lastDrawMs = ms; draw(); }  // expired: clear + repaint once
@@ -15747,11 +16035,16 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_OSCAR:    keyOscar(c, enter, back); break;
     case SCR_GLOBE:    keyGlobe(c, enter, back); break;
     case SCR_DXDOPP:   keyDxDopp(c, enter, back); break;
+    case SCR_ACTMUTUAL:    keyActMutual(c, enter, back); break;
+    case SCR_ACTDOPP:      keyActDopp(c, enter, back); break;
+    case SCR_MUTUALDETAIL: keyMutualDetail(c, enter, back); break;
     case SCR_SKYMAP:   keySkyMap(c, enter, back); break;
     case SCR_GPSPOS:   keyGpsPos(c, enter, back); break;
     case SCR_SATSAT:   keySatSat(c, enter, back); break;
     case SCR_TRANSIT:  keyTransit(c, enter, back); break;
     case SCR_MESSAGES: keyMessages(c, enter, back); break;
+    case SCR_LORACOMPASS: keyLoraCompass(c, enter, back); break;
+    case SCR_LORASAT:  keyLoraSat(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
 #endif
@@ -16733,7 +17026,7 @@ void App::drawMutual() {
     canvas.printf("%s %ld:%02ld %3.0f %3.0f", fmtMDHM(m.start).c_str(),
                   secs/60, secs%60, m.myMaxEl, m.dxMaxEl);
   }
-  footer(";/. select  d Doppler  ` back");
+  footer(";/. select  ENT detail  d Doppler  ` back");
 }
 
 void App::keyMutual(char c, bool enter, bool back) {
@@ -16741,7 +17034,14 @@ void App::keyMutual(char c, bool enter, bool back) {
   if (mutualN) {
     if (isUp(c))   mutualSel = (mutualSel + mutualN - 1) % mutualN;
     if (isDown(c)) mutualSel = (mutualSel + 1) % mutualN;
-    if (c == 'd' || enter) {                 // Doppler table for this window
+    if (enter) {                             // open the polar-plot detail for this window
+      if (!activeSat()) { setStatus("No satellite"); return; }
+      mdFromActivation = false;
+      buildMutualArcs(mutual[mutualSel]);
+      screen = SCR_MUTUALDETAIL; lastDrawMs = 0;
+      return;
+    }
+    if (c == 'd') {                          // Doppler table for this window (direct)
       if (!activeSat()) { setStatus("No satellite"); return; }
       dxdWin = mutualSel; dxdRow = 0;
       dxdCenterPassband();                   // start at the centre of a linear passband
@@ -16749,7 +17049,311 @@ void App::keyMutual(char c, bool enter, bool back) {
       return;
     }
   }
-  if (enter) { screen = SCR_PASSES; return; }
+}
+
+// ===========================================================================
+//  Activation footprint + shared mutual-window detail (0.9.43)
+// ===========================================================================
+
+// Resolve a satellite name (as listed by hams.at) to a DB index, or -1.
+static int dbIndexByName(SatDb& db, const char* name) {
+  if (!name || !name[0]) return -1;
+  for (int i = 0; i < db.count(); ++i)
+    if (strcasecmp(db.at(i).name, name) == 0) return i;
+  // Loose match: ignore case and any trailing junk after a space (e.g. "AO-91 ").
+  for (int i = 0; i < db.count(); ++i)
+    if (strncasecmp(db.at(i).name, name, strlen(db.at(i).name)) == 0) return i;
+  return -1;
+}
+
+// Scan a text field for the first token that reads as a VHF/UHF frequency in MHz
+// (e.g. "145.950", "435.180") or bare kHz, returning it in Hz (0 = none found).
+// Only decimals that look like a real ham-sat frequency are accepted so stray
+// numbers ("73", "2024", "59") don't match.
+static uint32_t scanFreqHz(const char* text) {
+  if (!text) return 0;
+  const char* p = text;
+  while (*p) {
+    if ((*p >= '0' && *p <= '9')) {
+      // Parse a number with optional single '.'; measure integer-part digits.
+      const char* start = p;
+      int intDigits = 0; bool dot = false; int fracDigits = 0;
+      char buf[16]; int bi = 0;
+      while (*p && bi < 15 && ((*p >= '0' && *p <= '9') || (*p == '.' && !dot))) {
+        if (*p == '.') dot = true;
+        else if (!dot) intDigits++;
+        else fracDigits++;
+        buf[bi++] = *p++;
+      }
+      buf[bi] = 0;
+      double val = atof(buf);
+      uint32_t hz = 0;
+      if (dot && intDigits >= 2 && intDigits <= 4) {
+        // MHz value (e.g. 145.950 or 1268.300)
+        hz = (uint32_t)llround(val * 1e6);
+      } else if (!dot && intDigits >= 6 && intDigits <= 9) {
+        // bare Hz (e.g. 145950000) or kHz? treat 6-9 digits as Hz if plausible band
+        hz = (uint32_t)strtoul(buf, nullptr, 10);
+      }
+      // Accept only if inside the amateur satellite VHF/UHF/L bands (broad gates).
+      if ((hz >= 28000000UL  && hz <= 30000000UL)  ||   // 10 m
+          (hz >= 144000000UL && hz <= 148000000UL) ||   // 2 m
+          (hz >= 220000000UL && hz <= 226000000UL) ||   // 1.25 m
+          (hz >= 430000000UL && hz <= 440000000UL) ||   // 70 cm
+          (hz >= 1240000000UL&& hz <= 1300000000UL))     // 23 cm
+        return hz;
+      (void)fracDigits; (void)start;
+    } else {
+      p++;
+    }
+  }
+  return 0;
+}
+
+// From an activation's freq field (then comment), find a frequency and match it
+// to one of the ACTIVE satellite's TWO-WAY transponders (both uplink & downlink
+// present). If it lands in a transponder's downlink range -> fixed DX downlink;
+// in its uplink range -> fixed DX uplink. Sets actTxIdx/actFixMode/actFixHz.
+// Returns true on a successful match, false to fall back to the default table.
+bool App::parseActivationFreq(const Activation& a) {
+  actTxIdx = -1; actFixMode = 0; actFixHz = 0;
+  if (activeTxCount == 0) return false;
+  uint32_t hz = scanFreqHz(a.freq);
+  if (!hz) hz = scanFreqHz(a.comment);
+  if (!hz) return false;
+
+  const uint32_t TOL = 20000;   // +/-20 kHz tolerance for single-channel matches
+  for (int i = 0; i < activeTxCount; ++i) {
+    const Transponder& t = activeTx[i];
+    bool twoWay = (t.downlink != 0 && t.uplink != 0);
+    if (!twoWay) continue;
+    // Downlink leg
+    uint32_t dLo = t.downlink, dHi = t.downlinkHigh ? t.downlinkHigh : t.downlink;
+    if (dHi < dLo) { uint32_t tmp = dLo; dLo = dHi; dHi = tmp; }
+    if (hz >= (dLo > TOL ? dLo - TOL : 0) && hz <= dHi + TOL) {
+      actTxIdx = i; actFixMode = 1; actFixHz = hz; return true;
+    }
+    // Uplink leg
+    uint32_t uLo = t.uplink, uHi = t.uplinkHigh ? t.uplinkHigh : t.uplink;
+    if (uHi < uLo) { uint32_t tmp = uLo; uLo = uHi; uHi = tmp; }
+    if (hz >= (uLo > TOL ? uLo - TOL : 0) && hz <= uHi + TOL) {
+      actTxIdx = i; actFixMode = 2; actFixHz = hz; return true;
+    }
+  }
+  return false;
+}
+
+// Run the +/-30-min mutual-window search for the selected activation. Fills
+// actFpWin with the window nearest the listed start, sets actDxLat/Lon, and
+// returns actFpState: 1 = have window, 2 = none near listed time, 3 = can't
+// (no grid / sat not in DB / clock unset).
+int App::activationFootprint() {
+  actFpState = 3; actCommentScroll = 0;
+  const Activation& a = hamsatList[hamsatSel];
+  if (!timeIsSet()) return actFpState;                 // 3: need the clock
+  if (!a.grid[0]) return actFpState;                   // 3: no activator grid
+  if (!Location::gridToLatLon(String(a.grid), actDxLat, actDxLon)) return actFpState;
+  int si = dbIndexByName(db, a.sat);
+  if (si < 0) return actFpState;                       // 3: satellite not in DB
+
+  // Listed start as a UTC epoch.
+  if (strlen(a.date) < 10 || !a.start[0]) return actFpState;
+  struct tm tmv; memset(&tmv, 0, sizeof(tmv));
+  int Y=0,Mo=0,D=0,h=0,m=0,sec=0;
+  if (sscanf(a.date, "%d-%d-%d", &Y,&Mo,&D) != 3) return actFpState;
+  if (sscanf(a.start, "%d:%d:%d", &h,&m,&sec) < 2) return actFpState;
+  tmv.tm_year=Y-1900; tmv.tm_mon=Mo-1; tmv.tm_mday=D; tmv.tm_hour=h; tmv.tm_min=m; tmv.tm_sec=sec;
+  time_t listed = mktime(&tmv);
+  if (listed <= 0) return actFpState;
+
+  // Search from 30 min before the listed start; accept the first co-visibility
+  // window whose start is within +/-30 min of the listed time.
+  SatEntry& s = db.at(si);
+  Observer dx; dx.lat = actDxLat; dx.lon = actDxLon; dx.altM = 0; dx.valid = true;
+  pred.setSite(loc.obs()); pred.setSat(s);
+  MutualWindow tmp[MUTUAL_MAX];
+  int n = pred.mutualWindows(listed - 1800, dx, 0.0f, tmp, MUTUAL_MAX);
+  actFpState = 2;                                      // assume none until found
+  for (int i = 0; i < n; ++i) {
+    long delta = (long)(tmp[i].start - listed);
+    if (delta >= -1800 && delta <= 1800) { actFpWin = tmp[i]; actFpState = 1; break; }
+    if (tmp[i].start > listed + 1800) break;          // past the window; stop
+  }
+  // Restore predictor to my active sat so the rest of the UI is unaffected.
+  if (activeSat()) { pred.setSite(loc.obs()); pred.setSat(*activeSat()); }
+  return actFpState;
+}
+
+// Sample the satellite's az/el as seen from BOTH my site and the DX site across a
+// mutual window, into the actMu*[] arrays, for the polar plot.
+void App::buildMutualArcs(const MutualWindow& w) {
+  for (int i = 0; i < ACTMU_PTS; ++i) {
+    actMuAzMe[i] = actMuElMe[i] = actMuAzDx[i] = actMuElDx[i] = -1;
+  }
+  SatEntry* s = activeSat();
+  // The activation flow may be for a sat that isn't the active one; prefer the
+  // activation's sat if we resolved it, else the active sat.
+  SatEntry* use = s;
+  if (mdFromActivation) {
+    int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+    if (si >= 0) use = &db.at(si);
+  }
+  if (!use) return;
+  double span = (double)(w.end - w.start); if (span < 1) span = 1;
+  Observer dxObs; dxObs.lat = (mdFromActivation ? actDxLat : dxLat);
+  dxObs.lon = (mdFromActivation ? actDxLon : dxLon); dxObs.altM = 0; dxObs.valid = true;
+  pred.setSat(*use);
+  for (int i = 0; i < ACTMU_PTS; ++i) {
+    time_t t = w.start + (time_t)llround(span * i / (double)(ACTMU_PTS - 1));
+    double az, el;
+    pred.setSite(loc.obs()); if (pred.azelAt(t, az, el)) { actMuAzMe[i]=(float)az; actMuElMe[i]=(float)el; }
+    pred.setSite(dxObs);     if (pred.azelAt(t, az, el)) { actMuAzDx[i]=(float)az; actMuElDx[i]=(float)el; }
+  }
+  // restore
+  pred.setSite(loc.obs());
+  if (s) pred.setSat(*s);
+}
+
+// A color-parameterized polar arc (the shared helper drawPolarArc is hard-wired
+// to one color; here me and DX need distinct colors on the same grid).
+static void polarArcColored(M5Canvas& cv, int cx, int cy, int R,
+                            const float* az, const float* el, int n,
+                            uint8_t color, char tag, uint8_t tagColor) {
+  int prevx=-1, prevy=-1, firstI=-1, lastI=-1;
+  auto XY=[&](int i,int&x,int&y){ double e=el[i]; if(e>90)e=90;
+    double rr=R*(90.0-e)/90.0, a=az[i]*(M_PI/180.0);
+    x=cx+(int)lround(rr*sin(a)); y=cy-(int)lround(rr*cos(a)); };
+  for (int i=0;i<n;++i){ if(el[i]<0){prevx=-1;continue;} int px,py;XY(i,px,py);
+    if(prevx>=0) cv.drawLine(prevx,prevy,px,py,color); prevx=px;prevy=py;
+    if(firstI<0)firstI=i; lastI=i; }
+  if (firstI<0) return;
+  int lx,ly; XY(lastI,lx,ly);
+  cv.fillCircle(lx,ly,2,color);
+  cv.setTextColor(tagColor, CL_BLACK); cv.setCursor(lx+3, ly-3); cv.print(tag);
+}
+
+// Shared render: the polar plot (me + DX arcs) plus the AOS/LOS/max-el/duration
+// text. Used by both SCR_ACTMUTUAL and SCR_MUTUALDETAIL.
+void App::drawMutualDetailBody(const MutualWindow& w) {
+  const int cx = 60, cy = 74, R = 46;
+  drawPolarGrid(cx, cy, R);
+  // me = cyan, dx = orange
+  polarArcColored(canvas, cx, cy, R, actMuAzMe, actMuElMe, ACTMU_PTS, CL_CYAN,   'M', CL_CYAN);
+  polarArcColored(canvas, cx, cy, R, actMuAzDx, actMuElDx, ACTMU_PTS, CL_ORANGE, 'D', CL_ORANGE);
+
+  // Right-hand text column.
+  int rx = 120;
+  long dur = (long)(w.end - w.start);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(rx, 20); canvas.printf("%s", fmtMDHM(w.start).c_str());
+  canvas.setTextColor(CL_GREEN, CL_BLACK);
+  canvas.setCursor(rx, 33); canvas.printf("AOS %s", fmtHM(w.start).c_str());
+  canvas.setTextColor(CL_ORANGE, CL_BLACK);
+  canvas.setCursor(rx, 46); canvas.printf("LOS %s", fmtHM(w.end).c_str());
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(rx, 59); canvas.printf("Dur %ld:%02ld", dur/60, dur%60);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(rx, 74); canvas.printf("me  el %.0f", w.myMaxEl);
+  canvas.setTextColor(CL_ORANGE, CL_BLACK);
+  canvas.setCursor(rx, 87); canvas.printf("DX  el %.0f", w.dxMaxEl);
+}
+
+// ---- Activation mutual-window detail screen (SCR_ACTMUTUAL) ----------------
+// Same body as SCR_MUTUALDETAIL, but 'd' opens the TAILORED DX Doppler seeded
+// from the activation's freq/comment parse.
+void App::drawActMutual() {
+  const Activation& a = hamsatList[hamsatSel];
+  header(a.sat[0] ? (String(a.sat) + " window") : String("Mutual window"));
+  canvas.setTextSize(1);
+  drawMutualDetailBody(actFpWin);
+  // Parse THIS activation's frequency here so the note reflects the current row
+  // (actFixMode is otherwise left over from a previous DX-Doppler entry). Only
+  // shows when a real frequency matched one of the sat's two-way transponders.
+  bool matched = parseActivationFreq(a);
+  if (matched && actFixMode != 0) {
+    // Right-hand column, continuing under the pass-detail rows (which end at y=87).
+    int rx = 120;
+    canvas.setTextColor(CL_DGREEN, CL_BLACK);
+    canvas.setCursor(rx, 102); canvas.printf("%s DX", actFixMode == 1 ? "fix DL" : "fix UL");
+    canvas.setCursor(rx, 113); canvas.printf("%.3f MHz", actFixHz / 1e6);
+  }
+  footer("d DX Doppler   ` back");
+}
+
+void App::keyActMutual(char c, bool enter, bool back) {
+  if (isBack(c, back)) { hamsatDetail = true; screen = SCR_HAMSAT; lastDrawMs = 0; return; }
+  if (c == 'd' || enter) {
+    // Seed the shared DX-Doppler state for the ACTIVATION's satellite + window,
+    // then open the tailored screen. This reuses the existing table/doppler code
+    // with the activation's data (the normal DX-Doppler entry path is untouched).
+    int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+    if (si >= 0) { satSel = si; ensureTransponders(db.at(si)); }   // make it the active sat
+    // Install the single found window as mutual[0] and point the table at it.
+    mutual[0] = actFpWin; mutualN = 1; dxdWin = 0; dxdRow = 0;
+    dxLat = actDxLat; dxLon = actDxLon;
+    // Apply the parse: matched transponder + fixed downlink/uplink, else default.
+    if (parseActivationFreq(hamsatList[hamsatSel]) && actTxIdx >= 0) {
+      curTx = actTxIdx;
+      dxdMode = actFixMode;                 // 1 = fixed DL, 2 = fixed UL
+      dxdAnchor = (actFixMode == 1) ? 2 : 3;// 2 = dx-RX (downlink), 3 = dx-TX (uplink)
+      dxdCenterPassband();
+      dxdStepAnchorToHz(actFixHz);          // park the anchored dial on the listed freq
+    } else {
+      dxdMode = 0; dxdAnchor = 0; curTx = (curTx < activeTxCount ? curTx : 0);
+      dxdCenterPassband();
+    }
+    screen = SCR_ACTDOPP; lastDrawMs = 0;
+    return;
+  }
+}
+
+// ---- Shared mutual-window detail from the existing finder (SCR_MUTUALDETAIL) -
+// Same body; 'd' opens the EXISTING DX Doppler (SCR_DXDOPP), untouched.
+void App::drawMutualDetail() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " window") : String("Mutual window"));
+  canvas.setTextSize(1);
+  drawMutualDetailBody(mutual[mutualSel]);
+  footer("d DX Doppler   ` back");
+}
+
+void App::keyMutualDetail(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_MUTUAL; lastDrawMs = 0; return; }
+  if (c == 'd' || enter) {
+    if (!activeSat()) { setStatus("No satellite"); return; }
+    dxdWin = mutualSel; dxdRow = 0;
+    dxdCenterPassband();
+    screen = SCR_DXDOPP; lastDrawMs = 0;    // the existing DX Doppler
+    return;
+  }
+}
+
+// From the SCR_HAMSAT detail screen: build the polar arcs and open the tailored
+// mutual-window detail. Assumes actFpState == 1 (a window was found).
+void App::openActMutual() {
+  mdFromActivation = true;
+  // Make the activation's satellite active and load ITS transponders, so the
+  // frequency note on this screen (and the DX-Doppler seeding on 'd') match the
+  // right bird rather than whatever sat happened to be selected.
+  int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+  if (si >= 0) { satSel = si; ensureTransponders(db.at(si)); }
+  buildMutualArcs(actFpWin);
+  screen = SCR_ACTMUTUAL; lastDrawMs = 0;
+}
+
+// Tailored DX Doppler (SCR_ACTDOPP): reuse the existing table renderer with the
+// seeded activation state, but keep it a distinct screen so 'back' returns to the
+// activation window and the existing DX-Doppler screen is left untouched.
+void App::drawActDopp() {
+  drawDxDopp();   // renders from the shared state we seeded in keyActMutual
+}
+
+void App::keyActDopp(char c, bool enter, bool back) {
+  if (isBack(c, back)) { mdFromActivation = true; screen = SCR_ACTMUTUAL; lastDrawMs = 0; return; }
+  // Reuse the full DX-Doppler control set, but suppress its back (handled above).
+  if (!isBack(c, back)) keyDxDopp(c, enter, back);
+  // keyDxDopp's own back target is SCR_MUTUAL; guard so it can't leak through.
+  if (screen == SCR_MUTUAL) { screen = SCR_ACTMUTUAL; lastDrawMs = 0; }
 }
 
 // ===========================================================================
@@ -16827,6 +17431,29 @@ void App::dxdStepAnchorDial(int dir) {
          : (dxdAnchor == 2) ? dRx : dTx;
   }
   setStatus(String(DXD_ANCHOR_NAME[dxdAnchor]) + " " + String((double)tgt / 1e6, 3) + " MHz");
+}
+
+void App::dxdStepAnchorToHz(uint32_t targetHz) {
+  if (activeTxCount == 0 || mutualN == 0 || targetHz == 0) return;
+  Transponder& tp = activeTx[curTx];
+  if (!tp.isLinear || tp.bandwidth() == 0) return;     // FM/single-channel: nothing to converge
+  time_t tRef = mutual[dxdWin].start;
+  uint32_t mRx, mTx, dRx, dTx;
+  int32_t  bw = (int32_t)tp.bandwidth();
+  bool anchorIsTx = (dxdAnchor == 1 || dxdAnchor == 3);
+  for (int pass = 0; pass < 6; ++pass) {
+    dxDoppFreqs(tRef, mRx, mTx, dRx, dTx);
+    uint32_t dial = (dxdAnchor == 0) ? mRx : (dxdAnchor == 1) ? mTx
+                  : (dxdAnchor == 2) ? dRx : dTx;
+    if (dial == 0) return;
+    int32_t diff = (int32_t)((int64_t)targetHz - (int64_t)dial);
+    if (diff > -2 && diff < 2) break;
+    int32_t step = (anchorIsTx && tp.invert) ? -diff : diff;
+    int32_t want = dxdPbOff + step;
+    if (want < 0) want = 0; if (want > bw) want = bw;
+    if (want == dxdPbOff) break;
+    dxdPbOff = want;
+  }
 }
 
 // Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
@@ -17315,13 +17942,14 @@ void App::keyLocation(char c, bool enter, bool back) {
 void App::keyUpdate(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
   if (c == 'k' || enter) {
+    if (!netCooldownOk()) return;               // gate button-mashed repeats (pool drain)
     doUpdateGp();
     // Piggyback an activations refresh on the full update: WiFi is already up if
     // the GP fetch succeeded, so this is cheap and keeps the hams.at list current.
     if (net.connected()) { String s = status; fetchHamsat(); setStatus(s); }
   }
-  if (c == 'f') { doFastUpdate(); }             // GP + favorites' transponders only
-  if (c == 'a') { doCacheAllTransponders(); }   // cache all TX for offline use
+  if (c == 'f') { if (netCooldownOk()) doFastUpdate(); }  // GP + favorites' transponders only
+  if (c == 'a') { if (netCooldownOk()) doCacheAllTransponders(); }  // cache all TX for offline use
   if (c == 'w') {
     setStatus(connectWifiCfg() ? "WiFi connected" : "WiFi failed");
   }
@@ -17615,6 +18243,7 @@ void App::keySettings(char c, bool enter, bool back) {
 
 static Screen editHome(int t) {
   if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
+  if (t == 704 || t == 705) return SCR_MESSAGES;  // LoRa sked-send date/time prompts (cancel)
   if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
   if (t == 729) return SCR_GRID;        // workable-grids prefix filter (cancel)
   if (t >= 720) return SCR_SKEDENTRY;   // manual activation/sked entry fields (cancel)
@@ -17723,7 +18352,16 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 230: {                                   // LoTW key password -> upload
         String pass = editBuf;
         screen = SCR_LOTW; lastDrawMs = 0;
-        doLotwUpload(pass);
+        // Iterate batches here, at ONE stack depth, rather than letting each batch
+        // recurse into the next (which stacked a full TLS+signing frame per batch and
+        // overflowed the stack on the 3rd). doLotwUpload sets lotwMoreBatches when QSOs
+        // remain; loop until it's clear. A hard cap guards against any accounting bug
+        // that fails to make progress (each batch sends up to LOTW_BATCH_QSOS).
+        int guard = 0;
+        do {
+          lotwMoreBatches = false;
+          doLotwUpload(pass);
+        } while (lotwMoreBatches && ++guard < 1000);
         return; }
 
       case 710: {                                   // note name -> create/open editor
@@ -18031,6 +18669,29 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 700: {
         String t = editBuf;
         if (t.length()) loraSendCurrent(t.c_str());
+        screen = SCR_MESSAGES; lastDrawMs = 0; return;
+      }
+      // ---- LoRa sked-send: date entered -> validate, then prompt for time ----
+      case 704: {
+        String dstr = editBuf; dstr.trim();
+        if (dstr.length() != 10 || dstr[4] != '-' || dstr[7] != '-') {
+          setStatus("Date must be YYYY-MM-DD", 2500);
+          editTarget = 704; editTitle = "Sked date (YYYY-MM-DD)"; screen = SCR_EDIT; return;
+        }
+        strncpy(ssDate, dstr.c_str(), sizeof(ssDate) - 1); ssDate[sizeof(ssDate) - 1] = 0;
+        editBuf = "";                              // now prompt for the time
+        editTarget = 705; editTitle = "Sked time (HH:MM UTC)"; screen = SCR_EDIT; return;
+      }
+      // ---- LoRa sked-send: time entered -> compose "!SAT date time" and transmit ----
+      case 705: {
+        String tstr = editBuf; tstr.trim();
+        if (tstr.length() != 5 || tstr[2] != ':') {
+          setStatus("Time must be HH:MM", 2500);
+          editTarget = 705; editTitle = "Sked time (HH:MM UTC)"; screen = SCR_EDIT; return;
+        }
+        char msg[MSG_TEXT_MAX + 1];
+        snprintf(msg, sizeof(msg), "!%s %s %s", ssSat, ssDate, tstr.c_str());
+        loraSendCurrent(msg);
         screen = SCR_MESSAGES; lastDrawMs = 0; return;
       }
       // ---- LoRa frequency (MHz) ----
@@ -19476,8 +20137,11 @@ void App::doLotwUpload(const String& keyPass) {
       Serial.printf("[lotw] resend batch n=%d (cap=%d), sent=%d/%d, remaining=%d\n",
                     n, CAP, sentSoFar, lotwTotal, remainAfter);
       if (remainAfter > 0) {
-        g_lotwResendSkip = (uint16_t)sentSoFar;
-        continueLotwBatch(keyPass, true);   // resend=true; caches cursor+pass, reboots
+        g_lotwResendSkip = (uint16_t)sentSoFar;   // advance the cursor for the next batch
+        lotwResend = true;
+        lotwStatus = "Batch sent; " + String(remainAfter) + " left...";
+        lotwMoreBatches = true;   // top-level loop re-invokes doLotwUpload (no recursion)
+        lotwBusy = false; lastDrawMs = 0; draw();
         return;
       }
       lotwResend = false;   // whole resend run complete
@@ -19497,7 +20161,10 @@ void App::doLotwUpload(const String& keyPass) {
       Serial.printf("[lotw] batch marked=%d (cap=%d), remaining un-uploaded=%d\n",
                     marked, CAP, remainAfter);
       if (remainAfter > 0) {
-        continueLotwBatch(keyPass, false);   // normal mode; caches passphrase in RTC + reboots
+        lotwResend = false;
+        lotwStatus = "Batch sent; " + String(remainAfter) + " left...";
+        lotwMoreBatches = true;   // top-level loop re-invokes doLotwUpload (no recursion)
+        lotwBusy = false; lastDrawMs = 0; draw();
         return;
       }
     }
@@ -19552,21 +20219,10 @@ void App::scrubLotwBatchState() {
   memset(g_lotwBatchPass, 0, sizeof(g_lotwBatchPass));
 }
 
-// Continue a multi-batch LoTW upload after this batch: stash the passphrase + flags in
-// RTC RAM (survives the deliberate restart, not power loss) and reboot. The fresh boot's
-// resumeLotwIfPending() sees the active flag and runs the next batch WITHOUT re-prompting.
-void App::continueLotwBatch(const String& keyPass, bool resend) {
-  g_lotwBatchActive = true;
-  g_lotwBatchResend = resend;
-  g_lotwBatchMagic  = LOTW_BATCH_MAGIC;
-  strncpy(g_lotwBatchPass, keyPass.c_str(), sizeof(g_lotwBatchPass) - 1);
-  g_lotwBatchPass[sizeof(g_lotwBatchPass) - 1] = 0;
-  int remain = resend ? (lotwTotal - (int)g_lotwResendSkip) : countUnuploadedLotw();
-  Serial.printf("[lotw] batch done; %d QSOs remain, rebooting to continue\n", remain);
-  lotwStatus = "Batch sent; " + String(remain) + " left, rebooting...";
-  lastDrawMs = 0; draw(); delay(1200);
-  ESP.restart();
-}
+// (The former continueLotwBatch() is gone: multi-batch LoTW uploads are now driven by an
+// iterative loop at the case-230 call site, which re-invokes doLotwUpload at a constant
+// stack depth. The old recursive version stacked a full TLS+signing frame per batch and
+// overflowed the loopTask stack on the 3rd batch of a 14-QSO resend.)
 
 
 // Reboot-then-upload for LoTW, mirroring the Cloudlog path but WITHOUT persisting the
@@ -19587,31 +20243,13 @@ void App::lotwRebootUpload() {
 // and re-prompt for the key passphrase (editTarget 230) -- entering it runs the upload
 // in this clean-heap boot. The passphrase is re-entered, never stored.
 void App::resumeLotwIfPending() {
-  // Multi-batch continuation: if the RTC batch state is valid and active, this is one of
-  // the automatic reboots partway through a large upload. Run the next batch directly
-  // with the passphrase carried in RTC RAM -- no marker file, no re-prompt.
+  // Multi-batch LoTW uploads now continue in the SAME session (see continueLotwBatch),
+  // so the old RTC-carried batch-continuation across reboots is retired. Scrub any RTC
+  // batch state that an OLDER firmware (or garbage RTC after a flash) might present, so
+  // it can never spuriously trigger an upload here.
   if (g_lotwBatchMagic == LOTW_BATCH_MAGIC && g_lotwBatchActive) {
-    String pass = String(g_lotwBatchPass);
-    bool resend = g_lotwBatchResend;
-    Serial.printf("[lotw] continuing batched upload (fresh boot, cached passphrase, %s)\n",
-                  resend ? "resend" : "normal");
-    lotwEnter(); screen = SCR_LOTW; lastDrawMs = 0; draw();
-    if (!net.connected() && !connectWifiCfg()) {
-      lotwStatus = "WiFi failed (batch upload)"; scrubLotwBatchState(); lastDrawMs = 0; draw(); return;
-    }
-    // Work remains if: normal mode has un-uploaded QSOs, or resend mode hasn't yet sent
-    // all logged QSOs (cursor < total).
-    int remaining = resend ? (lotwTotal - (int)g_lotwResendSkip) : countUnuploadedLotw();
-    if (Store::ready() && Lotw::credentialPresent() && remaining > 0) {
-      lotwResend = resend;
-      doLotwUpload(pass);          // uploads the next batch; may itself reboot for the one after
-      // If doLotwUpload returned without rebooting, the run is complete -> scrub the state.
-      scrubLotwBatchState();
-    } else {
-      scrubLotwBatchState();
-      lotwStatus = "LoTW upload complete"; lastDrawMs = 0; draw();
-    }
-    return;
+    Serial.println("[lotw] clearing stale RTC batch state (in-session batching now)");
+    scrubLotwBatchState();
   }
 
   if (!Store::fs().exists(FILE_LOTW_RESUME)) return;
@@ -19870,7 +20508,11 @@ void App::keyCloudlog(char c, bool enter, bool back) {
   if (c == 'a' && clTotal > 0) { clResend = !clResend; clStatus = ""; lastDrawMs = 0; return; }
   int toSend = clResend ? clTotal : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
-  if (c == 'u' && haveCfg && toSend > 0) { clResendSkip = 0; doCloudlogUpload(); }
+  if (c == 'u' && haveCfg && toSend > 0) {
+    clResendSkip = 0;
+    int guard = 0;
+    do { clMoreBatches = false; doCloudlogUpload(); } while (clMoreBatches && ++guard < 1000);
+  }
 }
 
 // Build an ADIF batch from the pending (or all, in re-send mode) QSOs, POST it to the
@@ -19996,9 +20638,11 @@ void App::doCloudlogUpload() {
       Serial.printf("[cloudlog] batch marked=%d (cap=%d), remaining un-uploaded=%d\n",
                     marked, CL_BATCH_QSOS, clRemain);
       if (clRemain > 0) {
-        clStatus = "Batch done; " + String(clRemain) + " left, rebooting...";
-        lastDrawMs = 0; draw(); delay(1200);
-        cloudlogRebootUpload();   // sets marker + restarts; does not return
+        // Continue iteratively (top-level loop re-invokes), NOT recursively -- the same
+        // per-batch TLS frame that overflowed the stack on the LoTW path applies here.
+        clStatus = "Batch done; " + String(clRemain) + " left...";
+        clMoreBatches = true;
+        clBusy = false; lastDrawMs = 0; draw();
         return;
       }
     } else {
@@ -20009,9 +20653,10 @@ void App::doCloudlogUpload() {
       Serial.printf("[cloudlog] resend batch n=%d (cap=%d), sent=%d/%d, remaining=%d\n",
                     n, CL_BATCH_QSOS, sentSoFar, clTotal, remainAfter);
       if (remainAfter > 0) {
-        clStatus = "Batch done; " + String(remainAfter) + " left, rebooting...";
-        lastDrawMs = 0; draw(); delay(1200);
-        cloudlogRebootUpload(true, sentSoFar);   // carry resend flag + cursor; reboots
+        clResendSkip = sentSoFar;   // advance the resend cursor for the next batch
+        clStatus = "Batch done; " + String(remainAfter) + " left...";
+        clMoreBatches = true;
+        clBusy = false; lastDrawMs = 0; draw();
         return;
       }
       clResend = false; clResendSkip = 0;   // whole resend run complete
@@ -20064,7 +20709,10 @@ void App::resumeCloudlogIfPending() {
   clResendSkip = cur;                          // resend cursor for this continued run
   int toSend = clResend ? (clTotal - cur) : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
-  if (haveCfg && toSend > 0) doCloudlogUpload();   // ends with its own draw()
+  if (haveCfg && toSend > 0) {
+    int guard = 0;
+    do { clMoreBatches = false; doCloudlogUpload(); } while (clMoreBatches && ++guard < 1000);
+  }
   else { clResendSkip = 0; clStatus = "Nothing to upload"; lastDrawMs = 0; draw(); }
 }
 
@@ -20357,11 +21005,16 @@ void App::draw() {
     case SCR_OSCAR:    drawOscar(); break;
     case SCR_GLOBE:    drawGlobe(); break;
     case SCR_DXDOPP:   drawDxDopp(); break;
+    case SCR_ACTMUTUAL:    drawActMutual(); break;
+    case SCR_ACTDOPP:      drawActDopp(); break;
+    case SCR_MUTUALDETAIL: drawMutualDetail(); break;
     case SCR_SKYMAP:   drawSkyMap(); break;
     case SCR_GPSPOS:   drawGpsPos(); break;
     case SCR_SATSAT:   drawSatSat(); break;
     case SCR_TRANSIT:  drawTransit(); break;
     case SCR_MESSAGES: drawMessages(); break;
+    case SCR_LORACOMPASS: drawLoraCompass(); break;
+    case SCR_LORASAT:  drawLoraSat(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
 #endif
@@ -21058,7 +21711,6 @@ void App::drawHelp() {
     "CHARGE / SLEEP",
     " low-power: screen off,",
     " any key shows battery,",
-    " H  heap reset (TLS fix),",
     " ESC  back to menu",
   };
   const int total = (int)(sizeof(H) / sizeof(H[0]));
@@ -23239,16 +23891,6 @@ int App::batteryPercent() {
 // frees and coalesces those transient allocations. net.hardResetWifi() already
 // does the disconnect(true)+reconnect+pool-flush dance; we just call it here and
 // report the before/after largest contiguous block.
-void App::heapDefragViaReconnect() {
-  size_t before = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (net.connected()) net.hardResetWifi();          // drop + reconnect, flush pool
-  size_t after  = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  Serial.printf("[HEAP] defrag: largest block %u -> %u bytes (free heap %u)\n",
-                (unsigned)before, (unsigned)after, (unsigned)ESP.getFreeHeap());
-  setStatus(String("Heap block ") + (unsigned)(before/1024) + "K -> " +
-            (unsigned)(after/1024) + "K");
-}
-
 // Enter charge mode: stop the radio/rotator output (no tracking while parked),
 // blank the backlight, and mark the screen asleep. We deliberately do NOT enter
 // deep sleep so any key wakes instantly and WiFi can stay up for a heap reset.
@@ -23307,7 +23949,7 @@ void App::drawCharge() {
                 canvas.setCursor(150, 96); canvas.printf("%d.%02d V", mv/1000, (mv%1000)/10); }
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 112); canvas.print("ENT redraw  H heap-reset");
+  canvas.setCursor(6, 112); canvas.print("ENT redraw");
   canvas.setCursor(6, 122); canvas.print("ESC exit to menu");
   canvas.pushSprite(0, 0);
 }
@@ -23320,16 +23962,6 @@ void App::keyCharge(char c, bool enter, bool back) {
     M5Cardputer.Display.setBrightness(cfg.bright);
     screenAsleep = false; chargeWoke = false;
     homeSel = 17; screen = SCR_HOME; lastDrawMs = 0;
-    return;
-  }
-  // 'h' triggers an on-demand heap de-frag (WiFi/TLS reset) for long sessions.
-  // (Needs WiFi + full speed; bring them back first since the park powered them down.)
-  if (c == 'h' || c == 'H') {
-    setCpuFrequencyMhz(240);
-    M5Cardputer.Display.setBrightness(cfg.bright);
-    chargeWoke = true; chargeWokeMs = millis();
-    heapDefragViaReconnect();
-    lastDrawMs = 0;
     return;
   }
   // Any other key wakes the screen to show status for a few seconds.
@@ -24973,6 +25605,86 @@ static const uint8_t LORA_MSG_VER   = 0x01;
 static const int     LORA_FROM_LEN  = 14;
 static const int     LORA_TEXT_MAX  = 48;
 
+// --- Great-circle distance + initial bearing between two lat/lon points ------
+// Distance in km (haversine), bearing in degrees from true north (0..360).
+// Used by the LoRa position-exchange compass. Small and self-contained; no
+// dependency on the SGP4 predictor (this is ground-to-ground, not orbital).
+static void greatCircle(double lat1, double lon1, double lat2, double lon2,
+                        double& distKm, double& bearingDeg) {
+  const double D2R = 0.017453292519943295, RE = 6371.0088;  // mean Earth radius km
+  double p1 = lat1 * D2R, p2 = lat2 * D2R;
+  double dp = (lat2 - lat1) * D2R, dl = (lon2 - lon1) * D2R;
+  double a = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2);
+  distKm = 2.0 * RE * atan2(sqrt(a), sqrt(1.0 - a));
+  double y = sin(dl) * cos(p2);
+  double x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl);
+  double b = atan2(y, x) / D2R;
+  bearingDeg = fmod(b + 360.0, 360.0);
+}
+
+// --- Decode actionable tokens out of a received message's text ---------------
+// The LoRa frame is unchanged (see below); we simply scan the free-text payload
+// for three human-readable sigils an operator (or a send trigger) may include:
+//   @lat,lon                 -> a position       (compass / distance+bearing)
+//   #SAT                     -> a satellite name (opens sat detail)
+//   !SAT YYYY-MM-DD HH:MM    -> a sked proposal  (pre-fills the sked editor)
+// A single message may carry any combination. Parsing is deterministic on the
+// sigils, so ordinary words/numbers/frequencies never false-trigger.
+// (struct MsgDecode is declared in app.h -- see the note there re: the Arduino build.)
+
+// Copy a token (up to dstMax-1 chars) from src until a delimiter; returns chars copied.
+static int copyToken(const char* src, char* dst, int dstMax, const char* delims) {
+  int n = 0;
+  while (src[n] && !strchr(delims, src[n]) && n < dstMax - 1) { dst[n] = src[n]; n++; }
+  dst[n] = 0;
+  return n;
+}
+
+static MsgDecode decodeMsg(const char* text) {
+  MsgDecode d;
+  if (!text) return d;
+
+  // @lat,lon  -- signed decimals separated by a comma.
+  const char* at = strchr(text, '@');
+  if (at) {
+    char* endp = nullptr;
+    double la = strtod(at + 1, &endp);
+    if (endp && *endp == ',') {
+      char* endp2 = nullptr;
+      double lo = strtod(endp + 1, &endp2);
+      if (endp2 != endp + 1 && la >= -90.0 && la <= 90.0 && lo >= -180.0 && lo <= 180.0) {
+        d.hasPos = true; d.lat = la; d.lon = lo;
+      }
+    }
+  }
+
+  // #SAT  -- satellite token up to a space (or end).
+  const char* hash = strchr(text, '#');
+  if (hash && hash[1] && hash[1] != ' ') {
+    copyToken(hash + 1, d.sat, sizeof(d.sat), " @#!,\t");
+    if (d.sat[0]) d.hasSat = true;
+  }
+
+  // !SAT YYYY-MM-DD HH:MM  -- sked proposal: sat, then date, then time.
+  const char* bang = strchr(text, '!');
+  if (bang && bang[1] && bang[1] != ' ') {
+    const char* p = bang + 1;
+    int sn = copyToken(p, d.skedSat, sizeof(d.skedSat), " \t");
+    p += sn; while (*p == ' ') p++;
+    // date YYYY-MM-DD (exactly 10 chars, digits + dashes)
+    if (strlen(p) >= 10 && p[4] == '-' && p[7] == '-') {
+      memcpy(d.skedDate, p, 10); d.skedDate[10] = 0;
+      p += 10; while (*p == ' ') p++;
+      // time HH:MM (5 chars)
+      if (strlen(p) >= 5 && p[2] == ':') {
+        memcpy(d.skedTime, p, 5); d.skedTime[5] = 0;
+        if (d.skedSat[0]) d.hasSked = true;
+      }
+    }
+  }
+  return d;
+}
+
 void App::msgPush(const char* from, const char* text, bool mine, int rssi, int snr) {
   LoraMsg& m = msgRing[msgHead];
   strncpy(m.from, from ? from : "", sizeof(m.from) - 1); m.from[sizeof(m.from)-1] = 0;
@@ -25045,6 +25757,183 @@ void App::loraSendCurrent(const char* text) {
   setStatus(ok ? "Sent" : "TX failed");
 }
 
+// North-up bearing plot to a decoded peer position (SCR_LORACOMPASS). This is a
+// BEARING display, not a live magnetometer compass: the Cardputer ADV has no
+// magnetometer, so the rose is fixed with true North at the top and the peer is
+// drawn at its great-circle bearing. The operator reads the bearing in degrees and
+// orients using their own means. Distance + message age are shown so a stale
+// position (the peer may have moved) is obvious.
+void App::drawLoraCompass() {
+  header("Peer bearing");
+  const Observer& o = loc.obs();
+  if (!o.valid) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("No local position.");
+    canvas.setCursor(6, 74); canvas.print("Set location or get a GPS fix.");
+    footer("` back");
+    return;
+  }
+  double distKm, brg;
+  greatCircle(o.lat, o.lon, lcLat, lcLon, distKm, brg);
+
+  // Compass rose: fixed, North up. cx/cy centre, R radius.
+  const int cx = 70, cy = 78, R = 42;
+  canvas.drawCircle(cx, cy, R, CL_DGREY);
+  canvas.drawCircle(cx, cy, 2, CL_GREY);
+  // Cardinal ticks + labels (N up, E right, S down, W left).
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(cx - 3, cy - R - 9); canvas.print("N");
+  canvas.setCursor(cx + R + 3, cy - 3);  canvas.print("E");
+  canvas.setCursor(cx - 3, cy + R + 2);  canvas.print("S");
+  canvas.setCursor(cx - R - 8, cy - 3);  canvas.print("W");
+
+  // Peer marker: screen angle where 0deg = up (North), increasing clockwise.
+  const double D2R = 0.017453292519943295;
+  double a = brg * D2R;
+  int px = cx + (int)lroundf((float)(sin(a) * (R - 4)));
+  int py = cy - (int)lroundf((float)(cos(a) * (R - 4)));
+  canvas.drawLine(cx, cy, px, py, CL_ORANGE);
+  canvas.fillCircle(px, py, 3, CL_ORANGE);
+
+  // Text column (right of the rose).
+  int rx = 128;
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(rx, 34); canvas.printf("%s", lcFrom[0] ? lcFrom : "peer");
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(rx, 50); canvas.printf("Brg %03d", (int)lroundf((float)brg));
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  if (distKm < 10.0)      { canvas.setCursor(rx, 64); canvas.printf("%.2f km", distKm); }
+  else if (distKm < 1000) { canvas.setCursor(rx, 64); canvas.printf("%.1f km", distKm); }
+  else                    { canvas.setCursor(rx, 64); canvas.printf("%.0f km", distKm); }
+  // Message age (staleness cue).
+  uint32_t ageMs = millis() - lcMsgMs;
+  uint32_t ageMin = ageMs / 60000;
+  canvas.setTextColor(ageMin >= 10 ? CL_ORANGE : CL_GREY, CL_BLACK);
+  canvas.setCursor(rx, 80);
+  if (ageMin < 1)        canvas.print("just now");
+  else if (ageMin < 60)  canvas.printf("%lum ago", (unsigned long)ageMin);
+  else                   canvas.printf("%luh ago", (unsigned long)(ageMin / 60));
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(rx, 96); canvas.printf("@%.3f", lcLat);
+  canvas.setCursor(rx, 106); canvas.printf(" %.3f", lcLon);
+
+  footer("` back");
+}
+void App::keyLoraCompass(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_MESSAGES; lastDrawMs = 0; }
+}
+
+// Detail for a satellite named in a received #SAT message (SCR_LORASAT). Resolves
+// the name against the local DB and, if found, shows identity + the next pass
+// computed for the current observer. If the sat isn't in the DB, says so (the
+// receiver may not have that bird cached).
+void App::drawLoraSat() {
+  header("Sat (from msg)");
+  int si = dbIndexByName(db, lsSat);
+  if (si < 0) {
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, 46); canvas.printf("'%s'", lsSat);
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 64); canvas.print("Not in your satellite list.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 78); canvas.print("Update GP, then try again.");
+    footer("` back");
+    return;
+  }
+  SatEntry& s = db.at(si);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, 34); canvas.printf("%s", s.name);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 48); canvas.printf("NORAD %lu", (unsigned long)s.norad);
+  if (s.intlDes[0]) { canvas.setCursor(120, 48); canvas.printf("%s", s.intlDes); }
+
+  // Next pass for the current observer.
+  const Observer& o = loc.obs();
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  if (!o.valid || !timeIsSet()) {
+    canvas.setCursor(6, 68); canvas.print("Next pass: need location + time");
+  } else {
+    pred.setSite(o);
+    if (!pred.setSat(s)) {
+      canvas.setCursor(6, 68); canvas.print("Orbit data unavailable.");
+    } else {
+      PassPredict pp;
+      if (pred.predictPasses(nowUtc(), cfg.minPassEl, &pp, 1) >= 1) {
+        char buf[32]; struct tm g;
+        time_t aos = pp.aos; gmtime_r(&aos, &g);
+        strftime(buf, sizeof(buf), "%m-%d %H:%M", &g);
+        canvas.setCursor(6, 68); canvas.printf("Next AOS %s UTC", buf);
+        canvas.setCursor(6, 82); canvas.printf("Max el %.0f  dur %ldm",
+                                               pp.maxEl, (long)((pp.los - pp.aos) / 60));
+      } else {
+        canvas.setCursor(6, 68); canvas.print("No pass in the search window.");
+      }
+    }
+  }
+  footer("s select as active   ` back");
+}
+void App::keyLoraSat(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_MESSAGES; lastDrawMs = 0; return; }
+  if (c == 's') {                          // adopt this sat as the active selection
+    int si = dbIndexByName(db, lsSat);
+    if (si >= 0) { satSel = si; setStatus(String("Active: ") + db.at(si).name, 2000); }
+  }
+}
+
+// Start a sked-proposal send: capture the current satellite, then prompt for a date
+// and (on completion) a time, composing "!SAT date time" and transmitting. Reuses the
+// SCR_EDIT text-entry system with two chained targets (702 date -> 703 time).
+void App::beginSkedSend() {
+  SatEntry* a = activeSat();
+  if (!a) { setStatus("No satellite selected", 2000); return; }
+  strncpy(ssSat, a->name, sizeof(ssSat) - 1); ssSat[sizeof(ssSat) - 1] = 0;
+  ssDate[0] = 0;
+  // Prefill the date field with today (UTC) as a convenient starting point.
+  editBuf = "";
+  if (timeIsSet()) {
+    time_t now = nowUtc(); struct tm g; gmtime_r(&now, &g);
+    char d[11]; strftime(d, sizeof(d), "%Y-%m-%d", &g); editBuf = d;
+  }
+  editTarget = 704; editTitle = "Sked date (YYYY-MM-DD)"; screen = SCR_EDIT;
+}
+
+// ENTER on a message row: decode its text and open the matching screen. Priority
+// when a message carries more than one sigil: sked > position > satellite (a sked
+// proposal is the most time-sensitive and actionable).
+void App::openDecodedAction(int orderIdx) {
+  if (orderIdx < 0 || orderIdx >= msgCount) return;
+  int idx = (msgHead - msgCount + orderIdx + MSG_MAX * 2) % MSG_MAX;
+  const LoraMsg& m = msgRing[idx];
+  MsgDecode d = decodeMsg(m.text);
+
+  if (d.hasSked) {
+    // Pre-fill a sked draft from the proposal and drop into the sked editor.
+    beginSkedEntry(-1);                    // fresh draft (sets defaults + own call)
+    strncpy(skedDraft.sat,  d.skedSat,  sizeof(skedDraft.sat)  - 1);
+    strncpy(skedDraft.date, d.skedDate, sizeof(skedDraft.date) - 1);
+    // start time HH:MM -> HH:MM:00
+    snprintf(skedDraft.start, sizeof(skedDraft.start), "%s:00", d.skedTime);
+    if (m.from[0]) { strncpy(skedDraft.call, m.from, sizeof(skedDraft.call) - 1); }
+    setStatus("Sked from message - review & save", 2500);
+    return;                                // beginSkedEntry already set screen
+  }
+  if (d.hasPos) {
+    lcLat = d.lat; lcLon = d.lon; lcMsgMs = m.tMs;
+    strncpy(lcFrom, m.from[0] ? m.from : "peer", sizeof(lcFrom) - 1);
+    lcFrom[sizeof(lcFrom) - 1] = 0;
+    screen = SCR_LORACOMPASS; lastDrawMs = 0;
+    return;
+  }
+  if (d.hasSat) {
+    strncpy(lsSat, d.sat, sizeof(lsSat) - 1); lsSat[sizeof(lsSat) - 1] = 0;
+    screen = SCR_LORASAT; lastDrawMs = 0;
+    return;
+  }
+  setStatus("No @position / #sat / !sked here", 2000);
+}
+
 void App::drawMessages() {
   header("Messages");
   msgUnread = 0;            // viewing the list clears the unread badge
@@ -25081,7 +25970,10 @@ void App::drawMessages() {
   // back from newest). Each message is one or two rows -- a message whose text
   // doesn't fit on the first line (after the "who:" prefix) wraps the remainder
   // onto a second, full-width line rather than being truncated.
-  const int ROWS = 9, rowY0 = 31, rowH = 10;   // ROWS = vertical line slots available
+  const int ROWS = 8, rowY0 = 31, rowH = 10;   // ROWS must match the drawable height below
+                                               // (rowY0 + ROWS*rowH <= yMax); if they disagree,
+                                               // the window includes rows the render loop clips
+                                               // and messages vanish as you scroll.
   const int LINE_CH = 39;                       // chars per line at size-1 font (240px)
   // Build a display order: oldest..newest indices.
   int order[MSG_MAX]; int on = 0;
@@ -25090,10 +25982,15 @@ void App::drawMessages() {
     order[on++] = idx;
   }
   if (on == 0) {
+    // No messages yet -- still expose the send keys (they compose from your own
+    // position / selected satellite, so they work with an empty list).
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("No messages yet.");
+    canvas.setCursor(6, 74); canvas.print("p=pos  s=sat  k=sked  n=write");
 #if CARDSAT_HAS_LORARX
-    footer("n write   m LoRa-RX   ` back");
+    footer("p/s/k send  n write  m RX  ` bk");
 #else
-    footer("n write   ;/. scroll   ` back");
+    footer("p/s/k send   n write   ` back");
 #endif
     return;
   }
@@ -25119,41 +26016,71 @@ void App::drawMessages() {
     if (used + h > ROWS) break;                   // next message wouldn't fully fit
     used += h; top = r;
   }
-  int y = rowY0;
-  for (int r = top; r <= bottom && y < 120; ++r) {
+  // Bottom-anchor the list (chat style): the newest visible message always sits on the
+  // last drawable line, just above the hint; any empty space appears at the TOP. We start
+  // drawing at yMax minus the exact height the visible messages occupy (`used` rows). When
+  // the window is full this equals rowY0 (whole area used); when only a few messages exist
+  // it starts lower, so the newest never floats up into the middle of the screen.
+  const int yMax = rowY0 + ROWS * rowH;         // == 111; below this: hint (112), footer (127)
+  int y = yMax - used * rowH;                    // top of the first (oldest visible) row
+  if (y < rowY0) y = rowY0;                       // clamp (shouldn't trigger: used <= ROWS)
+  for (int r = top; r <= bottom && y < yMax; ++r) {
     LoraMsg& m = msgRing[order[r]];
+    bool selected = (r == bottom);                // bottom-anchored row is the selection
     const char* who = m.mine ? "me" : m.from;
     int prefixCh = (m.mine ? 1 : 0) + (int)strlen(who) + 1;
     int firstMax = LINE_CH - prefixCh - 1;        // text chars that fit on line 1
     if (firstMax < 1) firstMax = 1;
     int len = (int)strlen(m.text);
+    int rowLines = (len > firstMax) ? 2 : 1;
+    // Highlight the selected message with a subtle background bar spanning its lines,
+    // so scrolling moves a visible cursor rather than blanking anything.
+    if (selected) canvas.fillRect(0, y - 1, 240, rowH * rowLines, CL_DGREY);
+    uint8_t nameCol = m.mine ? CL_CYAN : CL_GREEN;
+    uint8_t textCol = CL_WHITE;
     // Line 1: "who:" prefix + the first slice of text.
-    canvas.setTextColor(m.mine ? CL_CYAN : CL_GREEN, CL_BLACK);
+    canvas.setTextColor(nameCol, selected ? CL_DGREY : CL_BLACK);
     canvas.setCursor(2, y);
     canvas.printf("%s%s:", m.mine ? ">" : "", who);
-    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setTextColor(textCol, selected ? CL_DGREY : CL_BLACK);
     canvas.printf(" %.*s", firstMax, m.text);
     y += rowH;
     // Line 2 (only if the text overflowed line 1): the remainder, full width,
     // indented two chars so it reads as a continuation of the message above.
-    if (len > firstMax && y < 120) {
+    if (len > firstMax && y < yMax) {
       int contMax = LINE_CH - 2;                  // continuation line width (2-char indent)
-      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setTextColor(textCol, selected ? CL_DGREY : CL_BLACK);
       canvas.setCursor(2, y);
       canvas.printf("  %.*s", contMax, m.text + firstMax);
       y += rowH;
     }
   }
 
+  // Decoded-action hint for the SELECTED (bottom-anchored) message: if its text
+  // carries an @position / #sat / !sked sigil, show what ENTER will open. Placed at
+  // y=112, above the footer (y=127) and below the message area (yMax=108) so nothing
+  // overlaps.
+  int selIdx = (msgCount > 0) ? (msgCount - 1 - msgScroll) : -1;
+  if (selIdx >= 0) {
+    int ri = (msgHead - msgCount + selIdx + MSG_MAX * 2) % MSG_MAX;
+    MsgDecode d = decodeMsg(msgRing[ri].text);
+    if (d.hasSked || d.hasPos || d.hasSat) {
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.setCursor(2, 112);
+      if (d.hasSked)      canvas.printf("ENT: sked %s %s %s", d.skedSat, d.skedDate, d.skedTime);
+      else if (d.hasPos)  canvas.printf("ENT: bearing to @%.3f,%.3f", d.lat, d.lon);
+      else                canvas.printf("ENT: satellite %s", d.sat);
+    }
+  }
+
 #if CARDSAT_HAS_LORARX
-  footer("n write   ;/. scroll   m LoRa-RX   ` back");
+  footer("n msg  p/s/k  ENT open  m RX  ` bk");
 #else
-  footer("n write   ;/. scroll   ` back");
+  footer("n msg  p/s/k send  ENT open  ` back");
 #endif
 }
 
 void App::keyMessages(char c, bool enter, bool back) {
-  (void)enter;
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (!cfg.loraEnable) return;
   if ((!loraStarted || !lora.ready())) {
@@ -25171,9 +26098,39 @@ void App::keyMessages(char c, bool enter, bool back) {
   if (c == 'n') {                          // compose a new message (reuse SCR_EDIT)
     editTarget = 700; editTitle = "Message"; editBuf = ""; screen = SCR_EDIT; return;
   }
+  // Send triggers -- compose a sigil message for the CURRENT satellite / my position
+  // and transmit via the normal path (the frame format is unchanged; these just build
+  // recognizable text that a receiver's decodeMsg() picks up).
+  if (c == 'p') {                          // @lat,lon  -- my position
+    const Observer& o = loc.obs();
+    if (!o.valid) { setStatus("No position (set location/GPS)", 2500); return; }
+    char msg[MSG_TEXT_MAX + 1];
+    snprintf(msg, sizeof(msg), "@%.4f,%.4f", o.lat, o.lon);
+    loraSendCurrent(msg); lastDrawMs = 0; return;
+  }
+  if (c == 's') {                          // #SAT  -- current satellite
+    SatEntry* a = activeSat();
+    if (!a) { setStatus("No satellite selected", 2000); return; }
+    char msg[MSG_TEXT_MAX + 1];
+    snprintf(msg, sizeof(msg), "#%s", a->name);
+    loraSendCurrent(msg); lastDrawMs = 0; return;
+  }
+  if (c == 'k') {                          // !SAT date time  -- sked proposal (prompts)
+    SatEntry* a = activeSat();
+    if (!a) { setStatus("No satellite selected", 2000); return; }
+    beginSkedSend();                       // dedicated date -> time prompt, then auto-send
+    return;
+  }
+  // ENTER acts on the SELECTED message (the bottom-anchored one; scroll to choose):
+  // decode its @position / #sat / !sked and open the matching screen.
+  if (enter) {
+    int sel = (msgCount > 0) ? (msgCount - 1 - msgScroll) : -1;
+    if (sel >= 0) openDecodedAction(sel);
+    return;
+  }
   // Scroll counts back from the newest; you can scroll until the oldest message
   // is the bottom item. (Row heights vary with wrapping, so the render derives
-  // the visible window from this bottom anchor.)
+  // the visible window from this bottom anchor.) The bottom message is "selected".
   int maxScroll = (msgCount > 0) ? msgCount - 1 : 0;
   if (isUp(c))   { if (msgScroll < maxScroll) msgScroll++; lastDrawMs = 0; }
   if (isDown(c)) { if (msgScroll > 0) msgScroll--; lastDrawMs = 0; }
@@ -25784,13 +26741,14 @@ void App::addFootprintGrids(double subLat, double subLon, double altKm) {
       double c = lo + 1.0;                                 // grid centre longitude
       if (A + B * cos((c - subLon) * D2R) < coslam) continue;   // outside footprint
       int idx = gridIdx(clat, c);
-      gridBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+      if (gridBits) gridBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
     }
   }
 }
 
 void App::buildGrids(time_t a, time_t b) {
-  memset(gridBits, 0, sizeof(gridBits));
+  if (!ensureGridBits()) { gridN = 0; return; }
+  memset(gridBits, 0, GRID_BITS_LEN);
   SatEntry* s = activeSat();
   if (!s || !timeIsSet()) { gridN = 0; return; }
   pred.setSite(loc.obs()); pred.setSat(*s);
@@ -25802,8 +26760,9 @@ void App::buildGrids(time_t a, time_t b) {
     addFootprintGrids(L.subLat, L.subLon, L.satAltKm);
   }
   int cnt = 0;                                             // popcount the bitset
-  for (size_t i = 0; i < sizeof(gridBits); ++i)
-    for (uint8_t v = gridBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
+  if (gridBits)
+    for (size_t i = 0; i < GRID_BITS_LEN; ++i)
+      for (uint8_t v = gridBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
   gridN = cnt;
 }
 
@@ -25829,7 +26788,7 @@ void App::drawGrid() {
   if (filt) {
     int m = 0;
     for (int idx = 0; idx < 32400; ++idx) {
-      if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
+      if (!gridBits || !(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
       char g[5]; gridStr(idx, g);
       if (gridMatchPrefix(g, gridFilter)) ++m;
     }
@@ -25861,7 +26820,7 @@ void App::drawGrid() {
   }
   int seen = 0, drawn = 0;                          // walk set bits in sorted order
   for (int idx = 0; idx < 32400 && drawn < PER; ++idx) {
-    if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
+    if (!gridBits || !(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
     char g[5]; gridStr(idx, g);
     if (filt && !gridMatchPrefix(g, gridFilter)) continue;   // filtered out
     if (seen++ < gridScroll) continue;
@@ -26649,12 +27608,23 @@ static int gridBitIndex(const char* g) {
 }
 
 // Stream the log once and tally everything for the all-sats view.
+// Lazily allocate the ~4 KB grid bitmap on first use (kept out of .bss to preserve
+// the large contiguous heap block the TLS handshake needs). Zeroes on (re)alloc.
+// Returns false if the allocation fails, in which case callers treat it as "no grids".
+bool App::ensureGridBits() {
+  if (!gridBits) {
+    gridBits = (uint8_t*)malloc(GRID_BITS_LEN);
+    if (!gridBits) { Serial.println("[grids] gridBits alloc failed"); return false; }
+  }
+  return true;
+}
+
 void App::buildAwards() {
   awQsoTotal = 0; awGridN = awStateN = awDxccN = 0; awSatN = 0;
   for (int i = 0; i < AW_BANDS; ++i) awBandQso[i] = 0;
   awSel = 0; awScroll = 0; awSatSel = -1;
   awBuiltMs = millis();
-  memset(gridBits, 0, sizeof(gridBits));
+  if (ensureGridBits()) memset(gridBits, 0, GRID_BITS_LEN);
   memset(stateBits, 0, sizeof(stateBits));
   memset(dxccBits, 0, sizeof(dxccBits));
 
@@ -26694,14 +27664,14 @@ void App::buildAwards() {
       if (Location::gridToLatLon(q.grid, glat, glon)) {
         // Grid bit: encode the 4-char field/square with no String allocation.
         int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
-        if (gi >= 0) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+        if (gi >= 0 && gridBits) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
         awardStateAt(glon, glat, stateBits);
         awardDxccAt(glon, glat, dxccBits);
       }
     }
   }
   f.close();
-  awGridN  = popcountBits(gridBits, sizeof(gridBits));
+  awGridN  = (gridBits ? popcountBits(gridBits, GRID_BITS_LEN) : 0);
   awStateN = popcountBits(stateBits, sizeof(stateBits));
   awDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
   awBitsSat = -1;                       // bitsets now hold the all-sats totals
@@ -26854,7 +27824,7 @@ void App::drawAwardList() {
   int seen = 0, drawn = 0;
   if (awListKind == 0) {                       // grids: 32400-bit bitset
     for (int idx = 0; idx < 32400 && drawn < PER; ++idx) {
-      if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
+      if (!gridBits || !(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
       if (seen++ < awListScroll) continue;
       char g[5]; gridStr(idx, g);
       canvas.setTextColor(CL_WHITE, CL_BLACK);
@@ -26909,7 +27879,7 @@ void App::keyAwardList(char c, bool enter, bool back) {
 void App::awardsForSat(const char* satName) {
   awSatGridN = awSatStateN = awSatDxccN = 0;
   for (int i = 0; i < AW_BANDS; ++i) awSatBandQso[i] = 0;
-  memset(gridBits, 0, sizeof(gridBits));
+  if (ensureGridBits()) memset(gridBits, 0, GRID_BITS_LEN);
   memset(stateBits, 0, sizeof(stateBits));
   memset(dxccBits, 0, sizeof(dxccBits));
   if (!Store::fs().exists(FILE_LOG)) return;
@@ -26932,14 +27902,14 @@ void App::awardsForSat(const char* satName) {
       double glat, glon;
       if (Location::gridToLatLon(q.grid, glat, glon)) {
         int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
-        if (gi >= 0) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+        if (gi >= 0 && gridBits) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
         awardStateAt(glon, glat, stateBits);
         awardDxccAt(glon, glat, dxccBits);
       }
     }
   }
   f.close();
-  awSatGridN  = popcountBits(gridBits, sizeof(gridBits));
+  awSatGridN  = (gridBits ? popcountBits(gridBits, GRID_BITS_LEN) : 0);
   awSatStateN = popcountBits(stateBits, sizeof(stateBits));
   awSatDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
 }

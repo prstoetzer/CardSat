@@ -272,10 +272,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   M5Stack **Cap LoRa (SX1262)**: every unit on the same frequency/SF/bandwidth sees
   every message, for a club net or SOTA/portable group. Selectable frequency
   (150–960 MHz; the SX1262 is unfiltered), spreading factor (7–12, default 12) and
-  bandwidth; fixed-size message ring (no SD, no heap growth). Built into the standard
-  binaries (requires the **RadioLib** library at build time). ✅ Hardware-verified —
-  two-way messaging confirmed against a LilyGo T-LoRa unit running the companion CardSat
-  Pager firmware; mind your band's bandwidth rules. See [MANUAL.md](../MANUAL.md).
+  bandwidth; fixed-size message ring (no SD, no heap growth). **Actionable messages:** a
+  message carrying `@lat,lon`, `#SAT`, or `!SAT date time` (plain text, so fully
+  interoperable) decodes on ENTER into a **bearing compass** to the sender, a **satellite
+  detail** with next pass, or a **pre-filled sked** — with `p`/`s`/`k` keys to send those
+  for the current satellite and your location. Built into the standard binaries (requires
+  the **RadioLib** library at build time). ✅ Hardware-verified — two-way messaging
+  confirmed against a LilyGo T-LoRa unit running the companion CardSat Pager firmware;
+  mind your band's bandwidth rules. See [MANUAL.md](../MANUAL.md).
 - **Auto-refresh, power management, and diagnostics.** If WiFi is configured,
   CardSat connects and NTP-syncs at boot and **auto-refreshes GP when the cached
   elements are over a week old**; a **fast update** (`f` on the Update screen) refreshes

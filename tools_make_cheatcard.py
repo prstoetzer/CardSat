@@ -60,8 +60,8 @@ FRONT = [
  ("OSCARLOCATOR (Sats &rarr; k)",
   "Live azimuthal-equidistant plot: sub-point, footprint, QTH range ring + full ground track (AOS/LOS). "
   "<b>m</b> toggle polar (default, auto N/S, flips at equator) / QTH-centred &middot; <b>`</b> back"),
- ("DX DOPPLER TABLE (Mutual &rarr; d)",
-  "RX/TX dial freqs for BOTH stations every 30s across a mutual window. Two lines/step: me (green) + DX (cyan). "
+ ("DX DOPPLER TABLE (Mutual &rarr; ENTER &rarr; d)",
+  "RX/TX dial freqs for BOTH stations every 30s across a mutual window. Two lines/step: me (green) + DX (cyan). From the Mutual list, <b>ENTER</b> opens a polar detail (me+DX arcs, AOS/LOS/el) then <b>d</b> the table (or <b>d</b> straight from the list). "
   "<b>t</b> cycle transponder &middot; <b>m</b> mode: true rule / fixed DL / fixed UL &middot; <b>a</b> anchor dial (me/DX RX/TX) &middot; <b>,</b>/<b>/</b> in fixed mode step anchored dial to round 1 kHz (else passband 1 kHz) &middot; header shows pb +/- from center &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("NEXT PASSES (favs)",
   "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>t</b> sky-at-a-glance timeline (bars by elev) &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
@@ -120,7 +120,7 @@ BACK = [
   "Callsign lookup via QRZ.com XML (needs QRZ XML subscription + user/pass in "
   "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
  ("ACTIVATIONS (menu)",
-  "Upcoming sat activations scheduled on hams.at (roves, grid/special ops). List: date, call, sat, grid (* = your own entry). <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail (UTC times, mode, freq, comment) &middot; <b>n</b> add your own sked (offline OK), <b>e</b> edit a * entry &middot; in detail <b>a</b> sets a SKED reminder (T-60/30/10 beeps + flash at start, separate from AOS alarm); <b>c</b> on list clears it &middot; <b>r</b> refresh &middot; <b>`</b> back. Cached to card &mdash; last list shows offline; WiFi to refresh"),
+  "Upcoming sat activations on hams.at (roves, grid/special ops). List: date, call, sat, grid (* = your own entry). <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail &middot; <b>n</b> add your own sked (offline OK), <b>e</b> edit a * entry &middot; <b>r</b> refresh &middot; <b>`</b> back. Detail: UTC/mode/freq + <b>footprint note</b> (checks co-visibility with the activator +/-30 min of listed time), <b>;</b>/<b>.</b> scroll the full comment, <b>a</b> SKED reminder (T-60/30/10 beeps+flash), <b>w</b> mutual-window screen if a footprint exists. Mutual window: small polar plot (me + DX arcs), Date/AOS/LOS/dur + peak el each; <b>d</b> DX Doppler pre-set to the transponder &amp; fixed DL/UL parsed from the freq/comment (default table if none). Cached to card &mdash; last list shows offline; WiFi to refresh"),
  ("OVERHEAD NOW (menu)",
   "Snapshot of every catalog sat above the horizon right now, sorted by elevation, with az + rise compass dir (high=green, low=yellow) + count up/scanned. <b>r</b> rescan (this instant) &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("TRANSPONDER DB (Sats &rarr; t)",
@@ -143,7 +143,7 @@ BACK = [
   "yellow=sunlit cyan=eclipse &middot; <b>`</b> back"),
  ("SCHEDULES",
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
-  "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll"),
+  "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll, <b>ENTER</b> polar detail, <b>d</b> Doppler"),
  ("LOG",
   "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes / awards &middot; <b>Awards</b>: QSO/grid/state/DXCC totals (states+DXCC derived from grid), <b>g</b>/<b>s</b>/<b>d</b> scrollable worked lists, <b>ENTER</b> per-sat &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
@@ -158,7 +158,7 @@ BACK = [
   "Free-form text notes (.txt in /CardSat/notes/, newest-first w/ date/time). Browser: <b>ENTER</b> open &middot; <b>n</b> new &middot; <b>d</b>+ENTER del. "
   "Editor (commands use <b>Fn</b> so <b>;</b><b>.</b><b>,</b><b>/</b> type): type freely, ENTER=newline, DEL=backspace &middot; <b>Fn+,</b>/<b>Fn+/</b> cursor L/R &middot; <b>Fn+;</b>/<b>Fn+.</b> up/down &middot; <b>Fn+s</b> save &middot; <b>`</b> exit (auto-saves)"),
  ("LORA MESSAGES (Home &rarr; Messages)",
-  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll &middot; <b>r</b> retry &middot; <b>m</b> LoRa RX/hex monitor &middot; <b>`</b> back. <b>Rx always on</b>: new msgs show an envelope+count badge in the header on any screen, plus a banner (opt-in beep) &mdash; set <b>Msg notify</b> (off/banner/banner+beep) in Settings. Needs RadioLib build. Untested HW"),
+  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll+select (newest on bottom) &middot; <b>r</b> retry &middot; <b>m</b> LoRa RX/hex monitor &middot; <b>`</b> back. <b>Actionable msgs</b> (plain text, interop): a msg with <b>@lat,lon</b> / <b>#SAT</b> / <b>!SAT date time</b> &rarr; <b>ENTER</b> opens bearing compass / sat detail / pre-filled sked. Send for the current sat &amp; your location: <b>p</b> position &middot; <b>s</b> satellite &middot; <b>k</b> sked (date&rarr;time). <b>Rx always on</b>: new msgs show an envelope+count badge in the header on any screen, plus a banner (opt-in beep) &mdash; set <b>Msg notify</b> (off/banner/banner+beep) in Settings. Needs RadioLib build."),
  ("LORA RX / HEX MONITOR (Messages &rarr; m)",
   "Receive/inspect <b>any</b> LoRa signal (not just sats). Config: set freq (type in <b>MHz</b>), SF, BW, CR, sync, preamble, CRC &mdash; saved across reboots. <b>ENTER</b> starts RX. Monitor: live hexdump+ASCII, RSSI/SNR, <b>p</b> pause (read a frame on a busy channel) &middot; <b>;</b>/<b>.</b> scroll &middot; <b>s</b>/<b>b</b>/<b>c</b>/<b>f</b> tune SF/BW/CR/step &middot; <b>,</b>/<b>/</b> freq &middot; <b>`</b> esc. Rx-only. Untested HW"),
  ("UPDATE",

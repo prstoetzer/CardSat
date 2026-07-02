@@ -645,6 +645,19 @@ String App::gpSourceLabel() {
   return "Custom";
 }
 
+// Formerly gated network cycles behind a 90 s "cooling down" window to keep a
+// button-mash of failed updates from stacking TIME_WAIT PCBs and wedging the LWIP
+// socket pool. That pool-exhaustion failure mode was a mis-diagnosis: after the
+// migration to ESP_SSLClient (BearSSL) the device runs 91 back-to-back TLS handshakes
+// in a single session with zero failures (verified on-device), so there is nothing to
+// cool down from. The gate now always allows the action; kept as a no-op so the three
+// call sites (Update / f / a) don't need to change. lastNetCycleMs is still stamped in
+// case a future rate-limit wants it.
+bool App::netCooldownOk() {
+  lastNetCycleMs = millis();   // stamp the START of this cycle (informational)
+  return true;
+}
+
 void App::doUpdateGp() {
   setStatus("WiFi..."); draw();
   if (!net.connected() && !connectWifiCfg()) {
@@ -1361,34 +1374,72 @@ void App::drawHamsat() {
   }
 
   if (hamsatDetail) {
-    // Detail view of the selected activation.
+    // Detail view of the selected activation: compact facts, a footprint note
+    // (co-visibility with the activator near the listed time), and the full
+    // comment in a scrollable region at the bottom.
     const Activation& a = hamsatList[hamsatSel];
-    canvas.setTextColor(CL_WHITE, CL_BLACK);
     int y = 20;
-    canvas.setCursor(6, y); y += 12;
-    canvas.printf("%s  %s", a.call[0] ? a.call : "?", a.sat[0] ? a.sat : "?");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, y); y += 11;
+    canvas.printf("%.13s  %.11s", a.call[0] ? a.call : "?", a.sat[0] ? a.sat : "?");
     canvas.setTextColor(CL_CYAN, CL_BLACK);
-    canvas.setCursor(6, y); y += 12;
+    canvas.setCursor(6, y); y += 11;
     canvas.printf("%s  grid %s", a.date, a.grid[0] ? a.grid : "-");
     canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(6, y); y += 12;
-    canvas.printf("UTC %s - %s", a.start[0] ? a.start : "?", a.end[0] ? a.end : "?");
-    canvas.setCursor(6, y); y += 12;
-    canvas.printf("Mode %s", a.mode[0] ? a.mode : "-");
-    canvas.setCursor(6, y); y += 12;
+    canvas.setCursor(6, y); y += 11;
+    canvas.printf("UTC %s-%s  %s", a.start[0] ? a.start : "?", a.end[0] ? a.end : "?",
+                  a.mode[0] ? a.mode : "");
+    canvas.setCursor(6, y); y += 11;
     { String f = a.freq[0] ? String(a.freq) : String("(see comment)");
       if (f.length() > 32) f = f.substring(0, 32);
       canvas.printf("Freq %s", f.c_str()); }
-    if (a.comment[0]) {
-      canvas.setTextColor(CL_GREY, CL_BLACK);
-      // wrap the comment across up to two lines
-      String c = a.comment;
-      canvas.setCursor(6, y); y += 10;
-      canvas.print(c.length() > 38 ? c.substring(0, 38) : c);
-      if (c.length() > 38) { canvas.setCursor(6, y);
-        canvas.print(c.length() > 76 ? c.substring(38, 76) : c.substring(38)); }
+
+    // Footprint note (computed on entry into the detail view).
+    canvas.setCursor(6, y); y += 12;
+    switch (actFpState) {
+      case 1: {
+        canvas.setTextColor(CL_GREEN, CL_BLACK);
+        long dur = (long)(actFpWin.end - actFpWin.start);
+        canvas.printf("Footprint %s-%s (%ldm)", fmtHM(actFpWin.start).c_str(),
+                      fmtHM(actFpWin.end).c_str(), dur/60);
+        break; }
+      case 2:
+        canvas.setTextColor(CL_YELLOW, CL_BLACK);
+        canvas.print("No footprint near listed time");
+        break;
+      default:
+        canvas.setTextColor(CL_GREY, CL_BLACK);
+        canvas.print(!timeIsSet() ? "Footprint: set clock first"
+                   : !a.grid[0]   ? "Footprint: no activator grid"
+                                  : "Footprint: sat not in your list");
+        break;
     }
-    footer("a set sked reminder   ` back");
+
+    // Comment region: wrap to ~38-char lines and show a 3-line window that
+    // scrolls with ;/. when the comment is long.
+    if (a.comment[0]) {
+      const int CW = 38, VIS = 3;
+      String c = a.comment;
+      int total = ((int)c.length() + CW - 1) / CW;
+      if (total < 1) total = 1;
+      if (actCommentScroll > total - 1) actCommentScroll = (total > 0 ? total - 1 : 0);
+      if (actCommentScroll < 0) actCommentScroll = 0;
+      canvas.setTextColor(CL_GREY, CL_BLACK);
+      int cy = y;
+      for (int ln = 0; ln < VIS && (actCommentScroll + ln) < total; ++ln) {
+        int from = (actCommentScroll + ln) * CW;
+        int len = (int)c.length() - from; if (len > CW) len = CW;
+        canvas.setCursor(6, cy); cy += 10;
+        canvas.print(c.substring(from, from + len));
+      }
+      if (total > VIS) {   // scroll indicator
+        canvas.setTextColor(CL_DGREY, CL_BLACK);
+        canvas.setCursor(212, y); canvas.printf("%d/%d", actCommentScroll + 1, total);
+      }
+    }
+
+    footer(actFpState == 1 ? "w window  a sked  ;/. cmt  `"
+                           : "a sked  ;/. comment   ` back");
     return;
   }
 
@@ -1427,6 +1478,12 @@ void App::keyHamsat(char c, bool enter, bool back) {
       else setStatus("No usable date/time");
       lastDrawMs = 0; return;
     }
+    if (c == 'w' && actFpState == 1) {                // open the mutual-window detail
+      openActMutual();
+      return;
+    }
+    if (isUp(c))   { if (actCommentScroll > 0) actCommentScroll--; lastDrawMs = 0; return; }
+    if (isDown(c)) { actCommentScroll++; lastDrawMs = 0; return; }   // clamped in draw
     if (isBack(c, back) || enter) { hamsatDetail = false; lastDrawMs = 0; }
     return;
   }
@@ -1447,7 +1504,13 @@ void App::keyHamsat(char c, bool enter, bool back) {
   }
   if (isUp(c))   { hamsatSel = (hamsatSel + hamsatN - 1) % hamsatN; lastDrawMs = 0; }
   if (isDown(c)) { hamsatSel = (hamsatSel + 1) % hamsatN; lastDrawMs = 0; }
-  if (enter) { hamsatDetail = true; lastDrawMs = 0; }
+  if (enter) {
+    hamsatDetail = true; actCommentScroll = 0;
+    setStatus("Checking footprint..."); draw();      // the +/-30-min search can take a moment
+    activationFootprint();                            // fills actFpState / actFpWin
+    setStatus("");
+    lastDrawMs = 0;
+  }
 }
 
 // ===================== Notes: browser + full-screen text editor ============
@@ -1992,68 +2055,49 @@ int App::cacheTxBatch(int start) {
   return end;
 }
 
-// User-triggered "cache all": don't cache inline here -- this boot has already
-// spent socket-pool slots on the GP download + AMSAT fetch, which is exactly why
-// the first batch used to hit the -1 wall a few sats in. Instead, set the resume
-// marker to 0 and reboot, so EVERY batch (including the first) runs in a pristine
-// boot. resumeCacheIfPending() in setup() then does the actual work, batch by
-// batch, rebooting between each until all sats are cached.
+// User-triggered "cache all": fetch every satellite's transponder data in this one
+// session. This used to reboot between batches because mbedTLS couldn't run many TLS
+// handshakes per boot (the largest contiguous block collapsed and connect() hit a -1
+// "wall" a few sats in). After the migration to ESP_SSLClient (BearSSL), the device
+// completes all 91 handshakes back-to-back in a single session with zero failures
+// (verified on-device), so the reboot-per-batch machinery is gone. The per-sat retry
+// wrapper (3 attempts) absorbs the occasional transient miss.
 void App::doCacheAllTransponders() {
   int n = db.count();
   if (n == 0) { setStatus("No sats. Update GP first."); return; }
-  txResumeWrite(0, n);                  // mark a fresh run pending from index 0
-  Serial.printf("[tx] starting batched cache of %d sats, rebooting\n", n);
-  setStatus("Caching transponders - rebooting...", 2000);
-  draw(); delay(1500);
-  ESP.restart();
+  Serial.printf("[tx] caching %d sats (single session)\n", n);
+  // Release the LAN listener sockets for the duration (as the fetch paths' TlsBusyGuard
+  // does per-fetch, but hold it across the whole run so nothing rebuilds between sats).
+  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
+  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
+  int done = 0, failed = 0;
+  for (int i = 0; i < n; ++i) {
+    SatEntry& s = db.at(i);
+    setStatus("TX " + String(i+1) + "/" + String(n) + ": " + s.name); draw();
+    String url = String(SATNOGS_TX_URL) + String((unsigned long)s.norad);
+    bool ok = net.httpsGetToFileRetry(url, SatDb::txCachePath(s.norad).c_str(), 200000, nullptr, 3);
+    if (ok) done++;
+    else {
+      failed++;
+      Serial.printf("[tx] fetch failed at %d/%d (norad %lu)\n",
+                    i+1, n, (unsigned long)s.norad);
+    }
+    delay(40);   // be gentle on the API
+  }
+  Serial.printf("[tx] cache done: %d ok, %d failed, of %d\n", done, failed, n);
+  setStatus(failed == 0 ? ("Cached all " + String(done) + " transponders")
+                        : (String(done) + " cached, " + String(failed) + " failed"), 4000);
 }
 
-// Called at the end of setup(): if a cache run is pending (marker present),
-// continue the next batch and reboot, until every sat is cached.
+// Called at the end of setup(). The transponder cache is now single-session (see
+// doCacheAllTransponders), so there is no batch-resume to continue. This remains only
+// to clear a stale resume marker that an OLDER (reboot-per-batch) firmware may have
+// left on disk -- otherwise that file would sit there forever. No reboot, no fetching.
 void App::resumeCacheIfPending() {
-  int stall = 0;
-  int start = txResumeRead(&stall);
-  if (start < 0) return;                 // nothing pending
-  int n = db.count();
-  if (n == 0) { txResumeWrite(n, n); return; }   // no sats -> clear stale marker
-  if (start >= n) { txResumeWrite(n, n); return; }
-
-  // A run is in progress: show the Update menu (not Home) on every resume boot
-  // so the user sees where the caching lives and the progress status sits there.
-  screen = SCR_UPDATE; lastDrawMs = 0; draw();
-
-  if (!net.connected() && !connectWifiCfg()) {
-    // Can't make progress without WiFi; leave the marker so a later boot retries.
-    setStatus("Cache paused: no WiFi", 2500);
-    return;
+  if (Store::fs().exists(FILE_TX_RESUME)) {
+    Store::fs().remove(FILE_TX_RESUME);
+    Serial.println("[tx] cleared stale batch-resume marker (single-session cache now)");
   }
-  int next = cacheTxBatch(start);
-
-  // Guard against an infinite reboot loop: if a batch makes zero progress (the
-  // very first sat failed all retries even in this fresh boot), count the stall.
-  // After 2 such boots, skip that one stubborn sat so the run can continue.
-  if (next == start) {
-    if (stall + 1 >= 2) {
-      Serial.printf("[tx] sat index %d stuck after retries; skipping it\n", start);
-      next = start + 1;
-      stall = 0;
-    } else {
-      stall++;
-    }
-  } else {
-    stall = 0;
-  }
-
-  txResumeWrite(next, n, stall);
-  if (next >= n) {
-    Serial.printf("[tx] cache complete: %d satellites\n", n);
-    setStatus("Cached all " + String(n) + " transponders", 3000);
-    return;
-  }
-  Serial.printf("[tx] batch done to %d/%d, rebooting to continue\n", next, n);
-  setStatus("Caching " + String(next) + "/" + String(n) + " - rebooting...", 2000);
-  draw(); delay(1500);
-  ESP.restart();
 }
 
 // ---- Per-satellite calibration (LittleFS text store: "norad dl ul" lines) ---
@@ -3041,18 +3085,21 @@ void App::suspendNetServers() {
 // fit the contiguous block that exists with the sprite resident. Retained as call
 // sites / for the loop tick in case a future path needs them.
 void App::freeCanvasForTls() {
-  // Intentionally a no-op: the sprite is kept resident. Freeing it to gain a contiguous
-  // block for the TLS handshake proved unrecoverable -- mbedTLS fragments the freed
-  // region so the 32 KB sprite can't be re-created afterward (screen froze). Instead the
-  // baseline static RAM was trimmed (LOG_VIEW_MAX) so the sprite-resident largest block
-  // clears the handshake's ~32 KB need (as it did before the 0.9.40/0.9.41 features grew
-  // .bss). Retained as a call site in case a future path needs it.
+  // No-op: with ESP_SSLClient's small TLS buffers (see SSL_RX_BUF), the handshake fits
+  // the contiguous block available with the sprite RESIDENT, so we never free it. This
+  // was previously an experiment that freed the ~32 KB sprite for the handshake, but the
+  // freed hole didn't reliably merge into a usable 32 KB block and the re-create could
+  // fail (screen froze). Kept as a call site in case a future path needs it.
 }
 void App::restoreCanvasAfterTls() {
-  // No-op: the sprite is never freed (see freeCanvasForTls).
+  // No-op (see freeCanvasForTls): the sprite is never freed.
+}
+bool App::tryRecreateCanvas() {
+  // No-op (see freeCanvasForTls): the sprite is never freed. Always "succeeds".
+  return true;
 }
 void App::tickCanvasRestore() {
-  // No-op: retained for the loop call site (the sprite is never freed).
+  // No-op (see freeCanvasForTls): nothing to restore since the sprite stays resident.
 }
 
 // Static glue so the UI-agnostic Net layer can free our listener sockets around
@@ -3077,6 +3124,7 @@ void App::tlsBusyTrampoline(bool busy) {
   if (busy) {
     if (s_fetchDepth++ == 0) {
       s_self->suspendNetServers();
+      s_self->freeCanvasForTls();   // free the ~32KB sprite -> larger contiguous block for the handshake
       // Release the audio I2S DMA buffer for the duration of the fetch. The speaker/
       // mic I2S driver allocates its DMA buffer from the INTERNAL, DMA-capable SRAM
       // pool -- the SAME scarce pool mbedTLS draws its ~16 KB handshake buffers from
@@ -3090,10 +3138,13 @@ void App::tlsBusyTrampoline(bool busy) {
       if (s_spkWasOnForFetch) { M5Cardputer.Speaker.stop(); M5Cardputer.Speaker.end(); }
     }
   } else if (s_fetchDepth > 0) {
-    if (--s_fetchDepth == 0 && s_spkWasOnForFetch) {
-      M5Cardputer.Speaker.begin();               // restore audio after the fetch
-      M5Cardputer.Speaker.setVolume(s_self->cfg.spkVolume);
-      s_spkWasOnForFetch = false;
+    if (--s_fetchDepth == 0) {
+      if (s_spkWasOnForFetch) {
+        M5Cardputer.Speaker.begin();               // restore audio after the fetch
+        M5Cardputer.Speaker.setVolume(s_self->cfg.spkVolume);
+        s_spkWasOnForFetch = false;
+      }
+      s_self->restoreCanvasAfterTls();  // re-create the sprite now the handshake is done
     }
   }
 }
@@ -4035,11 +4086,12 @@ void App::loop() {
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
-  } else if (screen == SCR_WEATHER || screen == SCR_SPACEWX || screen == SCR_HAMSAT) {
-    // These are otherwise static (repaint on keypress only). The fetch flow leaves a
-    // transient result banner ("... updated/failed") on the bottom status bar; repaint
-    // while it's visible, then once more right after it times out so the cleared bar is
-    // painted exactly once -- after which this branch goes quiet again.
+  } else if (screen == SCR_WEATHER || screen == SCR_SPACEWX || screen == SCR_HAMSAT ||
+             screen == SCR_MESSAGES) {
+    // These are otherwise static (repaint on keypress only). A transient result banner
+    // ("... updated/failed", or "Sent" on the Messages screen) sits on the bottom status
+    // bar; repaint while it's visible, then once more right after it times out so the
+    // cleared bar is painted exactly once -- after which this branch goes quiet again.
     bool banner = status.length() && millis() < statusUntil;
     if (banner) { if (ms - lastDrawMs > 300) { lastDrawMs = ms; draw(); } }
     else if (status.length()) { status = ""; lastDrawMs = ms; draw(); }  // expired: clear + repaint once
@@ -4193,11 +4245,16 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_OSCAR:    keyOscar(c, enter, back); break;
     case SCR_GLOBE:    keyGlobe(c, enter, back); break;
     case SCR_DXDOPP:   keyDxDopp(c, enter, back); break;
+    case SCR_ACTMUTUAL:    keyActMutual(c, enter, back); break;
+    case SCR_ACTDOPP:      keyActDopp(c, enter, back); break;
+    case SCR_MUTUALDETAIL: keyMutualDetail(c, enter, back); break;
     case SCR_SKYMAP:   keySkyMap(c, enter, back); break;
     case SCR_GPSPOS:   keyGpsPos(c, enter, back); break;
     case SCR_SATSAT:   keySatSat(c, enter, back); break;
     case SCR_TRANSIT:  keyTransit(c, enter, back); break;
     case SCR_MESSAGES: keyMessages(c, enter, back); break;
+    case SCR_LORACOMPASS: keyLoraCompass(c, enter, back); break;
+    case SCR_LORASAT:  keyLoraSat(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
 #endif
@@ -5178,7 +5235,7 @@ void App::drawMutual() {
     canvas.printf("%s %ld:%02ld %3.0f %3.0f", fmtMDHM(m.start).c_str(),
                   secs/60, secs%60, m.myMaxEl, m.dxMaxEl);
   }
-  footer(";/. select  d Doppler  ` back");
+  footer(";/. select  ENT detail  d Doppler  ` back");
 }
 
 void App::keyMutual(char c, bool enter, bool back) {
@@ -5186,7 +5243,14 @@ void App::keyMutual(char c, bool enter, bool back) {
   if (mutualN) {
     if (isUp(c))   mutualSel = (mutualSel + mutualN - 1) % mutualN;
     if (isDown(c)) mutualSel = (mutualSel + 1) % mutualN;
-    if (c == 'd' || enter) {                 // Doppler table for this window
+    if (enter) {                             // open the polar-plot detail for this window
+      if (!activeSat()) { setStatus("No satellite"); return; }
+      mdFromActivation = false;
+      buildMutualArcs(mutual[mutualSel]);
+      screen = SCR_MUTUALDETAIL; lastDrawMs = 0;
+      return;
+    }
+    if (c == 'd') {                          // Doppler table for this window (direct)
       if (!activeSat()) { setStatus("No satellite"); return; }
       dxdWin = mutualSel; dxdRow = 0;
       dxdCenterPassband();                   // start at the centre of a linear passband
@@ -5194,8 +5258,314 @@ void App::keyMutual(char c, bool enter, bool back) {
       return;
     }
   }
-  if (enter) { screen = SCR_PASSES; return; }
 }
+
+// ===========================================================================
+//  Activation footprint + shared mutual-window detail (0.9.43)
+// ===========================================================================
+
+// Resolve a satellite name (as listed by hams.at) to a DB index, or -1.
+static int dbIndexByName(SatDb& db, const char* name) {
+  if (!name || !name[0]) return -1;
+  for (int i = 0; i < db.count(); ++i)
+    if (strcasecmp(db.at(i).name, name) == 0) return i;
+  // Loose match: ignore case and any trailing junk after a space (e.g. "AO-91 ").
+  for (int i = 0; i < db.count(); ++i)
+    if (strncasecmp(db.at(i).name, name, strlen(db.at(i).name)) == 0) return i;
+  return -1;
+}
+
+// Scan a text field for the first token that reads as a VHF/UHF frequency in MHz
+// (e.g. "145.950", "435.180") or bare kHz, returning it in Hz (0 = none found).
+// Only decimals that look like a real ham-sat frequency are accepted so stray
+// numbers ("73", "2024", "59") don't match.
+static uint32_t scanFreqHz(const char* text) {
+  if (!text) return 0;
+  const char* p = text;
+  while (*p) {
+    if ((*p >= '0' && *p <= '9')) {
+      // Parse a number with optional single '.'; measure integer-part digits.
+      const char* start = p;
+      int intDigits = 0; bool dot = false; int fracDigits = 0;
+      char buf[16]; int bi = 0;
+      while (*p && bi < 15 && ((*p >= '0' && *p <= '9') || (*p == '.' && !dot))) {
+        if (*p == '.') dot = true;
+        else if (!dot) intDigits++;
+        else fracDigits++;
+        buf[bi++] = *p++;
+      }
+      buf[bi] = 0;
+      double val = atof(buf);
+      uint32_t hz = 0;
+      if (dot && intDigits >= 2 && intDigits <= 4) {
+        // MHz value (e.g. 145.950 or 1268.300)
+        hz = (uint32_t)llround(val * 1e6);
+      } else if (!dot && intDigits >= 6 && intDigits <= 9) {
+        // bare Hz (e.g. 145950000) or kHz? treat 6-9 digits as Hz if plausible band
+        hz = (uint32_t)strtoul(buf, nullptr, 10);
+      }
+      // Accept only if inside the amateur satellite VHF/UHF/L bands (broad gates).
+      if ((hz >= 28000000UL  && hz <= 30000000UL)  ||   // 10 m
+          (hz >= 144000000UL && hz <= 148000000UL) ||   // 2 m
+          (hz >= 220000000UL && hz <= 226000000UL) ||   // 1.25 m
+          (hz >= 430000000UL && hz <= 440000000UL) ||   // 70 cm
+          (hz >= 1240000000UL&& hz <= 1300000000UL))     // 23 cm
+        return hz;
+      (void)fracDigits; (void)start;
+    } else {
+      p++;
+    }
+  }
+  return 0;
+}
+
+// From an activation's freq field (then comment), find a frequency and match it
+// to one of the ACTIVE satellite's TWO-WAY transponders (both uplink & downlink
+// present). If it lands in a transponder's downlink range -> fixed DX downlink;
+// in its uplink range -> fixed DX uplink. Sets actTxIdx/actFixMode/actFixHz.
+// Returns true on a successful match, false to fall back to the default table.
+bool App::parseActivationFreq(const Activation& a) {
+  actTxIdx = -1; actFixMode = 0; actFixHz = 0;
+  if (activeTxCount == 0) return false;
+  uint32_t hz = scanFreqHz(a.freq);
+  if (!hz) hz = scanFreqHz(a.comment);
+  if (!hz) return false;
+
+  const uint32_t TOL = 20000;   // +/-20 kHz tolerance for single-channel matches
+  for (int i = 0; i < activeTxCount; ++i) {
+    const Transponder& t = activeTx[i];
+    bool twoWay = (t.downlink != 0 && t.uplink != 0);
+    if (!twoWay) continue;
+    // Downlink leg
+    uint32_t dLo = t.downlink, dHi = t.downlinkHigh ? t.downlinkHigh : t.downlink;
+    if (dHi < dLo) { uint32_t tmp = dLo; dLo = dHi; dHi = tmp; }
+    if (hz >= (dLo > TOL ? dLo - TOL : 0) && hz <= dHi + TOL) {
+      actTxIdx = i; actFixMode = 1; actFixHz = hz; return true;
+    }
+    // Uplink leg
+    uint32_t uLo = t.uplink, uHi = t.uplinkHigh ? t.uplinkHigh : t.uplink;
+    if (uHi < uLo) { uint32_t tmp = uLo; uLo = uHi; uHi = tmp; }
+    if (hz >= (uLo > TOL ? uLo - TOL : 0) && hz <= uHi + TOL) {
+      actTxIdx = i; actFixMode = 2; actFixHz = hz; return true;
+    }
+  }
+  return false;
+}
+
+// Run the +/-30-min mutual-window search for the selected activation. Fills
+// actFpWin with the window nearest the listed start, sets actDxLat/Lon, and
+// returns actFpState: 1 = have window, 2 = none near listed time, 3 = can't
+// (no grid / sat not in DB / clock unset).
+int App::activationFootprint() {
+  actFpState = 3; actCommentScroll = 0;
+  const Activation& a = hamsatList[hamsatSel];
+  if (!timeIsSet()) return actFpState;                 // 3: need the clock
+  if (!a.grid[0]) return actFpState;                   // 3: no activator grid
+  if (!Location::gridToLatLon(String(a.grid), actDxLat, actDxLon)) return actFpState;
+  int si = dbIndexByName(db, a.sat);
+  if (si < 0) return actFpState;                       // 3: satellite not in DB
+
+  // Listed start as a UTC epoch.
+  if (strlen(a.date) < 10 || !a.start[0]) return actFpState;
+  struct tm tmv; memset(&tmv, 0, sizeof(tmv));
+  int Y=0,Mo=0,D=0,h=0,m=0,sec=0;
+  if (sscanf(a.date, "%d-%d-%d", &Y,&Mo,&D) != 3) return actFpState;
+  if (sscanf(a.start, "%d:%d:%d", &h,&m,&sec) < 2) return actFpState;
+  tmv.tm_year=Y-1900; tmv.tm_mon=Mo-1; tmv.tm_mday=D; tmv.tm_hour=h; tmv.tm_min=m; tmv.tm_sec=sec;
+  time_t listed = mktime(&tmv);
+  if (listed <= 0) return actFpState;
+
+  // Search from 30 min before the listed start; accept the first co-visibility
+  // window whose start is within +/-30 min of the listed time.
+  SatEntry& s = db.at(si);
+  Observer dx; dx.lat = actDxLat; dx.lon = actDxLon; dx.altM = 0; dx.valid = true;
+  pred.setSite(loc.obs()); pred.setSat(s);
+  MutualWindow tmp[MUTUAL_MAX];
+  int n = pred.mutualWindows(listed - 1800, dx, 0.0f, tmp, MUTUAL_MAX);
+  actFpState = 2;                                      // assume none until found
+  for (int i = 0; i < n; ++i) {
+    long delta = (long)(tmp[i].start - listed);
+    if (delta >= -1800 && delta <= 1800) { actFpWin = tmp[i]; actFpState = 1; break; }
+    if (tmp[i].start > listed + 1800) break;          // past the window; stop
+  }
+  // Restore predictor to my active sat so the rest of the UI is unaffected.
+  if (activeSat()) { pred.setSite(loc.obs()); pred.setSat(*activeSat()); }
+  return actFpState;
+}
+
+// Sample the satellite's az/el as seen from BOTH my site and the DX site across a
+// mutual window, into the actMu*[] arrays, for the polar plot.
+void App::buildMutualArcs(const MutualWindow& w) {
+  for (int i = 0; i < ACTMU_PTS; ++i) {
+    actMuAzMe[i] = actMuElMe[i] = actMuAzDx[i] = actMuElDx[i] = -1;
+  }
+  SatEntry* s = activeSat();
+  // The activation flow may be for a sat that isn't the active one; prefer the
+  // activation's sat if we resolved it, else the active sat.
+  SatEntry* use = s;
+  if (mdFromActivation) {
+    int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+    if (si >= 0) use = &db.at(si);
+  }
+  if (!use) return;
+  double span = (double)(w.end - w.start); if (span < 1) span = 1;
+  Observer dxObs; dxObs.lat = (mdFromActivation ? actDxLat : dxLat);
+  dxObs.lon = (mdFromActivation ? actDxLon : dxLon); dxObs.altM = 0; dxObs.valid = true;
+  pred.setSat(*use);
+  for (int i = 0; i < ACTMU_PTS; ++i) {
+    time_t t = w.start + (time_t)llround(span * i / (double)(ACTMU_PTS - 1));
+    double az, el;
+    pred.setSite(loc.obs()); if (pred.azelAt(t, az, el)) { actMuAzMe[i]=(float)az; actMuElMe[i]=(float)el; }
+    pred.setSite(dxObs);     if (pred.azelAt(t, az, el)) { actMuAzDx[i]=(float)az; actMuElDx[i]=(float)el; }
+  }
+  // restore
+  pred.setSite(loc.obs());
+  if (s) pred.setSat(*s);
+}
+
+// A color-parameterized polar arc (the shared helper drawPolarArc is hard-wired
+// to one color; here me and DX need distinct colors on the same grid).
+static void polarArcColored(M5Canvas& cv, int cx, int cy, int R,
+                            const float* az, const float* el, int n,
+                            uint8_t color, char tag, uint8_t tagColor) {
+  int prevx=-1, prevy=-1, firstI=-1, lastI=-1;
+  auto XY=[&](int i,int&x,int&y){ double e=el[i]; if(e>90)e=90;
+    double rr=R*(90.0-e)/90.0, a=az[i]*(M_PI/180.0);
+    x=cx+(int)lround(rr*sin(a)); y=cy-(int)lround(rr*cos(a)); };
+  for (int i=0;i<n;++i){ if(el[i]<0){prevx=-1;continue;} int px,py;XY(i,px,py);
+    if(prevx>=0) cv.drawLine(prevx,prevy,px,py,color); prevx=px;prevy=py;
+    if(firstI<0)firstI=i; lastI=i; }
+  if (firstI<0) return;
+  int lx,ly; XY(lastI,lx,ly);
+  cv.fillCircle(lx,ly,2,color);
+  cv.setTextColor(tagColor, CL_BLACK); cv.setCursor(lx+3, ly-3); cv.print(tag);
+}
+
+// Shared render: the polar plot (me + DX arcs) plus the AOS/LOS/max-el/duration
+// text. Used by both SCR_ACTMUTUAL and SCR_MUTUALDETAIL.
+void App::drawMutualDetailBody(const MutualWindow& w) {
+  const int cx = 60, cy = 74, R = 46;
+  drawPolarGrid(cx, cy, R);
+  // me = cyan, dx = orange
+  polarArcColored(canvas, cx, cy, R, actMuAzMe, actMuElMe, ACTMU_PTS, CL_CYAN,   'M', CL_CYAN);
+  polarArcColored(canvas, cx, cy, R, actMuAzDx, actMuElDx, ACTMU_PTS, CL_ORANGE, 'D', CL_ORANGE);
+
+  // Right-hand text column.
+  int rx = 120;
+  long dur = (long)(w.end - w.start);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(rx, 20); canvas.printf("%s", fmtMDHM(w.start).c_str());
+  canvas.setTextColor(CL_GREEN, CL_BLACK);
+  canvas.setCursor(rx, 33); canvas.printf("AOS %s", fmtHM(w.start).c_str());
+  canvas.setTextColor(CL_ORANGE, CL_BLACK);
+  canvas.setCursor(rx, 46); canvas.printf("LOS %s", fmtHM(w.end).c_str());
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(rx, 59); canvas.printf("Dur %ld:%02ld", dur/60, dur%60);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(rx, 74); canvas.printf("me  el %.0f", w.myMaxEl);
+  canvas.setTextColor(CL_ORANGE, CL_BLACK);
+  canvas.setCursor(rx, 87); canvas.printf("DX  el %.0f", w.dxMaxEl);
+}
+
+// ---- Activation mutual-window detail screen (SCR_ACTMUTUAL) ----------------
+// Same body as SCR_MUTUALDETAIL, but 'd' opens the TAILORED DX Doppler seeded
+// from the activation's freq/comment parse.
+void App::drawActMutual() {
+  const Activation& a = hamsatList[hamsatSel];
+  header(a.sat[0] ? (String(a.sat) + " window") : String("Mutual window"));
+  canvas.setTextSize(1);
+  drawMutualDetailBody(actFpWin);
+  // Parse THIS activation's frequency here so the note reflects the current row
+  // (actFixMode is otherwise left over from a previous DX-Doppler entry). Only
+  // shows when a real frequency matched one of the sat's two-way transponders.
+  bool matched = parseActivationFreq(a);
+  if (matched && actFixMode != 0) {
+    // Right-hand column, continuing under the pass-detail rows (which end at y=87).
+    int rx = 120;
+    canvas.setTextColor(CL_DGREEN, CL_BLACK);
+    canvas.setCursor(rx, 102); canvas.printf("%s DX", actFixMode == 1 ? "fix DL" : "fix UL");
+    canvas.setCursor(rx, 113); canvas.printf("%.3f MHz", actFixHz / 1e6);
+  }
+  footer("d DX Doppler   ` back");
+}
+
+void App::keyActMutual(char c, bool enter, bool back) {
+  if (isBack(c, back)) { hamsatDetail = true; screen = SCR_HAMSAT; lastDrawMs = 0; return; }
+  if (c == 'd' || enter) {
+    // Seed the shared DX-Doppler state for the ACTIVATION's satellite + window,
+    // then open the tailored screen. This reuses the existing table/doppler code
+    // with the activation's data (the normal DX-Doppler entry path is untouched).
+    int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+    if (si >= 0) { satSel = si; ensureTransponders(db.at(si)); }   // make it the active sat
+    // Install the single found window as mutual[0] and point the table at it.
+    mutual[0] = actFpWin; mutualN = 1; dxdWin = 0; dxdRow = 0;
+    dxLat = actDxLat; dxLon = actDxLon;
+    // Apply the parse: matched transponder + fixed downlink/uplink, else default.
+    if (parseActivationFreq(hamsatList[hamsatSel]) && actTxIdx >= 0) {
+      curTx = actTxIdx;
+      dxdMode = actFixMode;                 // 1 = fixed DL, 2 = fixed UL
+      dxdAnchor = (actFixMode == 1) ? 2 : 3;// 2 = dx-RX (downlink), 3 = dx-TX (uplink)
+      dxdCenterPassband();
+      dxdStepAnchorToHz(actFixHz);          // park the anchored dial on the listed freq
+    } else {
+      dxdMode = 0; dxdAnchor = 0; curTx = (curTx < activeTxCount ? curTx : 0);
+      dxdCenterPassband();
+    }
+    screen = SCR_ACTDOPP; lastDrawMs = 0;
+    return;
+  }
+}
+
+// ---- Shared mutual-window detail from the existing finder (SCR_MUTUALDETAIL) -
+// Same body; 'd' opens the EXISTING DX Doppler (SCR_DXDOPP), untouched.
+void App::drawMutualDetail() {
+  SatEntry* s = activeSat();
+  header(s ? (String(s->name) + " window") : String("Mutual window"));
+  canvas.setTextSize(1);
+  drawMutualDetailBody(mutual[mutualSel]);
+  footer("d DX Doppler   ` back");
+}
+
+void App::keyMutualDetail(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_MUTUAL; lastDrawMs = 0; return; }
+  if (c == 'd' || enter) {
+    if (!activeSat()) { setStatus("No satellite"); return; }
+    dxdWin = mutualSel; dxdRow = 0;
+    dxdCenterPassband();
+    screen = SCR_DXDOPP; lastDrawMs = 0;    // the existing DX Doppler
+    return;
+  }
+}
+
+// From the SCR_HAMSAT detail screen: build the polar arcs and open the tailored
+// mutual-window detail. Assumes actFpState == 1 (a window was found).
+void App::openActMutual() {
+  mdFromActivation = true;
+  // Make the activation's satellite active and load ITS transponders, so the
+  // frequency note on this screen (and the DX-Doppler seeding on 'd') match the
+  // right bird rather than whatever sat happened to be selected.
+  int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+  if (si >= 0) { satSel = si; ensureTransponders(db.at(si)); }
+  buildMutualArcs(actFpWin);
+  screen = SCR_ACTMUTUAL; lastDrawMs = 0;
+}
+
+// Tailored DX Doppler (SCR_ACTDOPP): reuse the existing table renderer with the
+// seeded activation state, but keep it a distinct screen so 'back' returns to the
+// activation window and the existing DX-Doppler screen is left untouched.
+void App::drawActDopp() {
+  drawDxDopp();   // renders from the shared state we seeded in keyActMutual
+}
+
+void App::keyActDopp(char c, bool enter, bool back) {
+  if (isBack(c, back)) { mdFromActivation = true; screen = SCR_ACTMUTUAL; lastDrawMs = 0; return; }
+  // Reuse the full DX-Doppler control set, but suppress its back (handled above).
+  if (!isBack(c, back)) keyDxDopp(c, enter, back);
+  // keyDxDopp's own back target is SCR_MUTUAL; guard so it can't leak through.
+  if (screen == SCR_MUTUAL) { screen = SCR_ACTMUTUAL; lastDrawMs = 0; }
+}
+
+
 
 // ===========================================================================
 //  DX Doppler table (SCR_DXDOPP)
@@ -5272,6 +5642,33 @@ void App::dxdStepAnchorDial(int dir) {
          : (dxdAnchor == 2) ? dRx : dTx;
   }
   setStatus(String(DXD_ANCHOR_NAME[dxdAnchor]) + " " + String((double)tgt / 1e6, 3) + " MHz");
+}
+
+// Park the anchored dial on a specific target frequency (Hz) rather than the next
+// round-kHz step. Used by the activation flow to lock the DX dial to the listed
+// frequency. For a linear transponder it converges dxdPbOff; single-channel
+// transponders have no passband to move, so the fixed dial is already exact.
+void App::dxdStepAnchorToHz(uint32_t targetHz) {
+  if (activeTxCount == 0 || mutualN == 0 || targetHz == 0) return;
+  Transponder& tp = activeTx[curTx];
+  if (!tp.isLinear || tp.bandwidth() == 0) return;     // FM/single-channel: nothing to converge
+  time_t tRef = mutual[dxdWin].start;
+  uint32_t mRx, mTx, dRx, dTx;
+  int32_t  bw = (int32_t)tp.bandwidth();
+  bool anchorIsTx = (dxdAnchor == 1 || dxdAnchor == 3);
+  for (int pass = 0; pass < 6; ++pass) {
+    dxDoppFreqs(tRef, mRx, mTx, dRx, dTx);
+    uint32_t dial = (dxdAnchor == 0) ? mRx : (dxdAnchor == 1) ? mTx
+                  : (dxdAnchor == 2) ? dRx : dTx;
+    if (dial == 0) return;
+    int32_t diff = (int32_t)((int64_t)targetHz - (int64_t)dial);
+    if (diff > -2 && diff < 2) break;
+    int32_t step = (anchorIsTx && tp.invert) ? -diff : diff;
+    int32_t want = dxdPbOff + step;
+    if (want < 0) want = 0; if (want > bw) want = bw;
+    if (want == dxdPbOff) break;
+    dxdPbOff = want;
+  }
 }
 
 // Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
@@ -5761,13 +6158,14 @@ void App::keyLocation(char c, bool enter, bool back) {
 void App::keyUpdate(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; return; }
   if (c == 'k' || enter) {
+    if (!netCooldownOk()) return;               // gate button-mashed repeats (pool drain)
     doUpdateGp();
     // Piggyback an activations refresh on the full update: WiFi is already up if
     // the GP fetch succeeded, so this is cheap and keeps the hams.at list current.
     if (net.connected()) { String s = status; fetchHamsat(); setStatus(s); }
   }
-  if (c == 'f') { doFastUpdate(); }             // GP + favorites' transponders only
-  if (c == 'a') { doCacheAllTransponders(); }   // cache all TX for offline use
+  if (c == 'f') { if (netCooldownOk()) doFastUpdate(); }  // GP + favorites' transponders only
+  if (c == 'a') { if (netCooldownOk()) doCacheAllTransponders(); }  // cache all TX for offline use
   if (c == 'w') {
     setStatus(connectWifiCfg() ? "WiFi connected" : "WiFi failed");
   }
@@ -6061,6 +6459,7 @@ void App::keySettings(char c, bool enter, bool back) {
 
 static Screen editHome(int t) {
   if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
+  if (t == 704 || t == 705) return SCR_MESSAGES;  // LoRa sked-send date/time prompts (cancel)
   if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
   if (t == 729) return SCR_GRID;        // workable-grids prefix filter (cancel)
   if (t >= 720) return SCR_SKEDENTRY;   // manual activation/sked entry fields (cancel)
@@ -6169,7 +6568,16 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 230: {                                   // LoTW key password -> upload
         String pass = editBuf;
         screen = SCR_LOTW; lastDrawMs = 0;
-        doLotwUpload(pass);
+        // Iterate batches here, at ONE stack depth, rather than letting each batch
+        // recurse into the next (which stacked a full TLS+signing frame per batch and
+        // overflowed the stack on the 3rd). doLotwUpload sets lotwMoreBatches when QSOs
+        // remain; loop until it's clear. A hard cap guards against any accounting bug
+        // that fails to make progress (each batch sends up to LOTW_BATCH_QSOS).
+        int guard = 0;
+        do {
+          lotwMoreBatches = false;
+          doLotwUpload(pass);
+        } while (lotwMoreBatches && ++guard < 1000);
         return; }
 
       case 710: {                                   // note name -> create/open editor
@@ -6477,6 +6885,29 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 700: {
         String t = editBuf;
         if (t.length()) loraSendCurrent(t.c_str());
+        screen = SCR_MESSAGES; lastDrawMs = 0; return;
+      }
+      // ---- LoRa sked-send: date entered -> validate, then prompt for time ----
+      case 704: {
+        String dstr = editBuf; dstr.trim();
+        if (dstr.length() != 10 || dstr[4] != '-' || dstr[7] != '-') {
+          setStatus("Date must be YYYY-MM-DD", 2500);
+          editTarget = 704; editTitle = "Sked date (YYYY-MM-DD)"; screen = SCR_EDIT; return;
+        }
+        strncpy(ssDate, dstr.c_str(), sizeof(ssDate) - 1); ssDate[sizeof(ssDate) - 1] = 0;
+        editBuf = "";                              // now prompt for the time
+        editTarget = 705; editTitle = "Sked time (HH:MM UTC)"; screen = SCR_EDIT; return;
+      }
+      // ---- LoRa sked-send: time entered -> compose "!SAT date time" and transmit ----
+      case 705: {
+        String tstr = editBuf; tstr.trim();
+        if (tstr.length() != 5 || tstr[2] != ':') {
+          setStatus("Time must be HH:MM", 2500);
+          editTarget = 705; editTitle = "Sked time (HH:MM UTC)"; screen = SCR_EDIT; return;
+        }
+        char msg[MSG_TEXT_MAX + 1];
+        snprintf(msg, sizeof(msg), "!%s %s %s", ssSat, ssDate, tstr.c_str());
+        loraSendCurrent(msg);
         screen = SCR_MESSAGES; lastDrawMs = 0; return;
       }
       // ---- LoRa frequency (MHz) ----
@@ -7538,8 +7969,11 @@ void App::doLotwUpload(const String& keyPass) {
       Serial.printf("[lotw] resend batch n=%d (cap=%d), sent=%d/%d, remaining=%d\n",
                     n, CAP, sentSoFar, lotwTotal, remainAfter);
       if (remainAfter > 0) {
-        g_lotwResendSkip = (uint16_t)sentSoFar;
-        continueLotwBatch(keyPass, true);   // resend=true; caches cursor+pass, reboots
+        g_lotwResendSkip = (uint16_t)sentSoFar;   // advance the cursor for the next batch
+        lotwResend = true;
+        lotwStatus = "Batch sent; " + String(remainAfter) + " left...";
+        lotwMoreBatches = true;   // top-level loop re-invokes doLotwUpload (no recursion)
+        lotwBusy = false; lastDrawMs = 0; draw();
         return;
       }
       lotwResend = false;   // whole resend run complete
@@ -7559,7 +7993,10 @@ void App::doLotwUpload(const String& keyPass) {
       Serial.printf("[lotw] batch marked=%d (cap=%d), remaining un-uploaded=%d\n",
                     marked, CAP, remainAfter);
       if (remainAfter > 0) {
-        continueLotwBatch(keyPass, false);   // normal mode; caches passphrase in RTC + reboots
+        lotwResend = false;
+        lotwStatus = "Batch sent; " + String(remainAfter) + " left...";
+        lotwMoreBatches = true;   // top-level loop re-invokes doLotwUpload (no recursion)
+        lotwBusy = false; lastDrawMs = 0; draw();
         return;
       }
     }
@@ -7619,18 +8056,20 @@ void App::scrubLotwBatchState() {
 // resumeLotwIfPending() sees the active flag and runs the next batch WITHOUT re-prompting.
 // resend=true carries the "upload ALL" mode across the reboot; the resend cursor
 // (g_lotwResendSkip) is set by the caller before calling this.
-void App::continueLotwBatch(const String& keyPass, bool resend) {
-  g_lotwBatchActive = true;
-  g_lotwBatchResend = resend;
-  g_lotwBatchMagic  = LOTW_BATCH_MAGIC;
-  strncpy(g_lotwBatchPass, keyPass.c_str(), sizeof(g_lotwBatchPass) - 1);
-  g_lotwBatchPass[sizeof(g_lotwBatchPass) - 1] = 0;
-  int remain = resend ? (lotwTotal - (int)g_lotwResendSkip) : countUnuploadedLotw();
-  Serial.printf("[lotw] batch done; %d QSOs remain, rebooting to continue\n", remain);
-  lotwStatus = "Batch sent; " + String(remain) + " left, rebooting...";
-  lastDrawMs = 0; draw(); delay(1200);
-  ESP.restart();
-}
+// Continue a multi-batch LoTW upload IN THE SAME SESSION. This used to cache the
+// passphrase in RTC RAM and ESP.restart() between batches, because (a) a second TLS
+// handshake couldn't run in one session under mbedTLS and (b) a large .tq8 could exceed
+// the TCP send ceiling. After the ESP_SSLClient (BearSSL) migration BOTH are resolved --
+// on-device the unit runs 91 back-to-back handshakes with zero failures, and uploads
+// stream with zeroWrites=0 -- so we simply send the next batch directly. Batching itself
+// is kept (each .tq8 holds <= LOTW_BATCH_QSOS QSOs) to bound the RAM used building the
+// file, not because of any per-session limit. Depth is one frame per batch; realistic
+// logs are a handful of batches, and the large per-batch allocations (the QSO array, the
+// staged .tq8) are freed before this re-invocation, so the frame cost is small.
+// (The former continueLotwBatch() is gone: multi-batch LoTW uploads are now driven by an
+// iterative loop at the case-230 call site, which re-invokes doLotwUpload at a constant
+// stack depth. The old recursive version stacked a full TLS+signing frame per batch and
+// overflowed the loopTask stack on the 3rd batch of a 14-QSO resend.)
 
 
 // Reboot-then-upload for LoTW, mirroring the Cloudlog path but WITHOUT persisting the
@@ -7651,31 +8090,13 @@ void App::lotwRebootUpload() {
 // and re-prompt for the key passphrase (editTarget 230) -- entering it runs the upload
 // in this clean-heap boot. The passphrase is re-entered, never stored.
 void App::resumeLotwIfPending() {
-  // Multi-batch continuation: if the RTC batch state is valid and active, this is one of
-  // the automatic reboots partway through a large upload. Run the next batch directly
-  // with the passphrase carried in RTC RAM -- no marker file, no re-prompt.
+  // Multi-batch LoTW uploads now continue in the SAME session (see continueLotwBatch),
+  // so the old RTC-carried batch-continuation across reboots is retired. Scrub any RTC
+  // batch state that an OLDER firmware (or garbage RTC after a flash) might present, so
+  // it can never spuriously trigger an upload here.
   if (g_lotwBatchMagic == LOTW_BATCH_MAGIC && g_lotwBatchActive) {
-    String pass = String(g_lotwBatchPass);
-    bool resend = g_lotwBatchResend;
-    Serial.printf("[lotw] continuing batched upload (fresh boot, cached passphrase, %s)\n",
-                  resend ? "resend" : "normal");
-    lotwEnter(); screen = SCR_LOTW; lastDrawMs = 0; draw();
-    if (!net.connected() && !connectWifiCfg()) {
-      lotwStatus = "WiFi failed (batch upload)"; scrubLotwBatchState(); lastDrawMs = 0; draw(); return;
-    }
-    // Work remains if: normal mode has un-uploaded QSOs, or resend mode hasn't yet sent
-    // all logged QSOs (cursor < total).
-    int remaining = resend ? (lotwTotal - (int)g_lotwResendSkip) : countUnuploadedLotw();
-    if (Store::ready() && Lotw::credentialPresent() && remaining > 0) {
-      lotwResend = resend;
-      doLotwUpload(pass);          // uploads the next batch; may itself reboot for the one after
-      // If doLotwUpload returned without rebooting, the run is complete -> scrub the state.
-      scrubLotwBatchState();
-    } else {
-      scrubLotwBatchState();
-      lotwStatus = "LoTW upload complete"; lastDrawMs = 0; draw();
-    }
-    return;
+    Serial.println("[lotw] clearing stale RTC batch state (in-session batching now)");
+    scrubLotwBatchState();
   }
 
   if (!Store::fs().exists(FILE_LOTW_RESUME)) return;
@@ -7934,7 +8355,11 @@ void App::keyCloudlog(char c, bool enter, bool back) {
   if (c == 'a' && clTotal > 0) { clResend = !clResend; clStatus = ""; lastDrawMs = 0; return; }
   int toSend = clResend ? clTotal : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
-  if (c == 'u' && haveCfg && toSend > 0) { clResendSkip = 0; doCloudlogUpload(); }
+  if (c == 'u' && haveCfg && toSend > 0) {
+    clResendSkip = 0;
+    int guard = 0;
+    do { clMoreBatches = false; doCloudlogUpload(); } while (clMoreBatches && ++guard < 1000);
+  }
 }
 
 // Build an ADIF batch from the pending (or all, in re-send mode) QSOs, POST it to the
@@ -8060,9 +8485,11 @@ void App::doCloudlogUpload() {
       Serial.printf("[cloudlog] batch marked=%d (cap=%d), remaining un-uploaded=%d\n",
                     marked, CL_BATCH_QSOS, clRemain);
       if (clRemain > 0) {
-        clStatus = "Batch done; " + String(clRemain) + " left, rebooting...";
-        lastDrawMs = 0; draw(); delay(1200);
-        cloudlogRebootUpload();   // sets marker + restarts; does not return
+        // Continue iteratively (top-level loop re-invokes), NOT recursively -- the same
+        // per-batch TLS frame that overflowed the stack on the LoTW path applies here.
+        clStatus = "Batch done; " + String(clRemain) + " left...";
+        clMoreBatches = true;
+        clBusy = false; lastDrawMs = 0; draw();
         return;
       }
     } else {
@@ -8073,9 +8500,10 @@ void App::doCloudlogUpload() {
       Serial.printf("[cloudlog] resend batch n=%d (cap=%d), sent=%d/%d, remaining=%d\n",
                     n, CL_BATCH_QSOS, sentSoFar, clTotal, remainAfter);
       if (remainAfter > 0) {
-        clStatus = "Batch done; " + String(remainAfter) + " left, rebooting...";
-        lastDrawMs = 0; draw(); delay(1200);
-        cloudlogRebootUpload(true, sentSoFar);   // carry resend flag + cursor; reboots
+        clResendSkip = sentSoFar;   // advance the resend cursor for the next batch
+        clStatus = "Batch done; " + String(remainAfter) + " left...";
+        clMoreBatches = true;
+        clBusy = false; lastDrawMs = 0; draw();
         return;
       }
       clResend = false; clResendSkip = 0;   // whole resend run complete
@@ -8128,7 +8556,10 @@ void App::resumeCloudlogIfPending() {
   clResendSkip = cur;                          // resend cursor for this continued run
   int toSend = clResend ? (clTotal - cur) : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
-  if (haveCfg && toSend > 0) doCloudlogUpload();   // ends with its own draw()
+  if (haveCfg && toSend > 0) {
+    int guard = 0;
+    do { clMoreBatches = false; doCloudlogUpload(); } while (clMoreBatches && ++guard < 1000);
+  }
   else { clResendSkip = 0; clStatus = "Nothing to upload"; lastDrawMs = 0; draw(); }
 }
 
@@ -8421,11 +8852,16 @@ void App::draw() {
     case SCR_OSCAR:    drawOscar(); break;
     case SCR_GLOBE:    drawGlobe(); break;
     case SCR_DXDOPP:   drawDxDopp(); break;
+    case SCR_ACTMUTUAL:    drawActMutual(); break;
+    case SCR_ACTDOPP:      drawActDopp(); break;
+    case SCR_MUTUALDETAIL: drawMutualDetail(); break;
     case SCR_SKYMAP:   drawSkyMap(); break;
     case SCR_GPSPOS:   drawGpsPos(); break;
     case SCR_SATSAT:   drawSatSat(); break;
     case SCR_TRANSIT:  drawTransit(); break;
     case SCR_MESSAGES: drawMessages(); break;
+    case SCR_LORACOMPASS: drawLoraCompass(); break;
+    case SCR_LORASAT:  drawLoraSat(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
 #endif
@@ -9122,7 +9558,6 @@ void App::drawHelp() {
     "CHARGE / SLEEP",
     " low-power: screen off,",
     " any key shows battery,",
-    " H  heap reset (TLS fix),",
     " ESC  back to menu",
   };
   const int total = (int)(sizeof(H) / sizeof(H[0]));
@@ -11303,16 +11738,6 @@ int App::batteryPercent() {
 // frees and coalesces those transient allocations. net.hardResetWifi() already
 // does the disconnect(true)+reconnect+pool-flush dance; we just call it here and
 // report the before/after largest contiguous block.
-void App::heapDefragViaReconnect() {
-  size_t before = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (net.connected()) net.hardResetWifi();          // drop + reconnect, flush pool
-  size_t after  = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  Serial.printf("[HEAP] defrag: largest block %u -> %u bytes (free heap %u)\n",
-                (unsigned)before, (unsigned)after, (unsigned)ESP.getFreeHeap());
-  setStatus(String("Heap block ") + (unsigned)(before/1024) + "K -> " +
-            (unsigned)(after/1024) + "K");
-}
-
 // Enter charge mode: stop the radio/rotator output (no tracking while parked),
 // blank the backlight, and mark the screen asleep. We deliberately do NOT enter
 // deep sleep so any key wakes instantly and WiFi can stay up for a heap reset.
@@ -11371,7 +11796,7 @@ void App::drawCharge() {
                 canvas.setCursor(150, 96); canvas.printf("%d.%02d V", mv/1000, (mv%1000)/10); }
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 112); canvas.print("ENT redraw  H heap-reset");
+  canvas.setCursor(6, 112); canvas.print("ENT redraw");
   canvas.setCursor(6, 122); canvas.print("ESC exit to menu");
   canvas.pushSprite(0, 0);
 }
@@ -11384,16 +11809,6 @@ void App::keyCharge(char c, bool enter, bool back) {
     M5Cardputer.Display.setBrightness(cfg.bright);
     screenAsleep = false; chargeWoke = false;
     homeSel = 17; screen = SCR_HOME; lastDrawMs = 0;
-    return;
-  }
-  // 'h' triggers an on-demand heap de-frag (WiFi/TLS reset) for long sessions.
-  // (Needs WiFi + full speed; bring them back first since the park powered them down.)
-  if (c == 'h' || c == 'H') {
-    setCpuFrequencyMhz(240);
-    M5Cardputer.Display.setBrightness(cfg.bright);
-    chargeWoke = true; chargeWokeMs = millis();
-    heapDefragViaReconnect();
-    lastDrawMs = 0;
     return;
   }
   // Any other key wakes the screen to show status for a few seconds.
@@ -13034,6 +13449,87 @@ void App::keySatSat(char c, bool enter, bool back) {
 
 static const uint8_t LORA_MSG_MAGIC = 0xC5;
 static const uint8_t LORA_MSG_VER   = 0x01;
+
+// --- Great-circle distance + initial bearing between two lat/lon points ------
+// Distance in km (haversine), bearing in degrees from true north (0..360).
+// Used by the LoRa position-exchange compass. Small and self-contained; no
+// dependency on the SGP4 predictor (this is ground-to-ground, not orbital).
+static void greatCircle(double lat1, double lon1, double lat2, double lon2,
+                        double& distKm, double& bearingDeg) {
+  const double D2R = 0.017453292519943295, RE = 6371.0088;  // mean Earth radius km
+  double p1 = lat1 * D2R, p2 = lat2 * D2R;
+  double dp = (lat2 - lat1) * D2R, dl = (lon2 - lon1) * D2R;
+  double a = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2);
+  distKm = 2.0 * RE * atan2(sqrt(a), sqrt(1.0 - a));
+  double y = sin(dl) * cos(p2);
+  double x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl);
+  double b = atan2(y, x) / D2R;
+  bearingDeg = fmod(b + 360.0, 360.0);
+}
+
+// --- Decode actionable tokens out of a received message's text ---------------
+// The LoRa frame is unchanged (see below); we simply scan the free-text payload
+// for three human-readable sigils an operator (or a send trigger) may include:
+//   @lat,lon                 -> a position       (compass / distance+bearing)
+//   #SAT                     -> a satellite name (opens sat detail)
+//   !SAT YYYY-MM-DD HH:MM    -> a sked proposal  (pre-fills the sked editor)
+// A single message may carry any combination. Parsing is deterministic on the
+// sigils, so ordinary words/numbers/frequencies never false-trigger.
+// (struct MsgDecode is declared in app.h -- see the note there re: the Arduino build.)
+
+// Copy a token (up to dstMax-1 chars) from src until a delimiter; returns chars copied.
+static int copyToken(const char* src, char* dst, int dstMax, const char* delims) {
+  int n = 0;
+  while (src[n] && !strchr(delims, src[n]) && n < dstMax - 1) { dst[n] = src[n]; n++; }
+  dst[n] = 0;
+  return n;
+}
+
+static MsgDecode decodeMsg(const char* text) {
+  MsgDecode d;
+  if (!text) return d;
+
+  // @lat,lon  -- signed decimals separated by a comma.
+  const char* at = strchr(text, '@');
+  if (at) {
+    char* endp = nullptr;
+    double la = strtod(at + 1, &endp);
+    if (endp && *endp == ',') {
+      char* endp2 = nullptr;
+      double lo = strtod(endp + 1, &endp2);
+      if (endp2 != endp + 1 && la >= -90.0 && la <= 90.0 && lo >= -180.0 && lo <= 180.0) {
+        d.hasPos = true; d.lat = la; d.lon = lo;
+      }
+    }
+  }
+
+  // #SAT  -- satellite token up to a space (or end).
+  const char* hash = strchr(text, '#');
+  if (hash && hash[1] && hash[1] != ' ') {
+    copyToken(hash + 1, d.sat, sizeof(d.sat), " @#!,\t");
+    if (d.sat[0]) d.hasSat = true;
+  }
+
+  // !SAT YYYY-MM-DD HH:MM  -- sked proposal: sat, then date, then time.
+  const char* bang = strchr(text, '!');
+  if (bang && bang[1] && bang[1] != ' ') {
+    const char* p = bang + 1;
+    int sn = copyToken(p, d.skedSat, sizeof(d.skedSat), " \t");
+    p += sn; while (*p == ' ') p++;
+    // date YYYY-MM-DD (exactly 10 chars, digits + dashes)
+    if (strlen(p) >= 10 && p[4] == '-' && p[7] == '-') {
+      memcpy(d.skedDate, p, 10); d.skedDate[10] = 0;
+      p += 10; while (*p == ' ') p++;
+      // time HH:MM (5 chars)
+      if (strlen(p) >= 5 && p[2] == ':') {
+        memcpy(d.skedTime, p, 5); d.skedTime[5] = 0;
+        if (d.skedSat[0]) d.hasSked = true;
+      }
+    }
+  }
+  return d;
+}
+
 static const int     LORA_FROM_LEN  = 14;
 static const int     LORA_TEXT_MAX  = 48;
 
@@ -13109,6 +13605,183 @@ void App::loraSendCurrent(const char* text) {
   setStatus(ok ? "Sent" : "TX failed");
 }
 
+// North-up bearing plot to a decoded peer position (SCR_LORACOMPASS). This is a
+// BEARING display, not a live magnetometer compass: the Cardputer ADV has no
+// magnetometer, so the rose is fixed with true North at the top and the peer is
+// drawn at its great-circle bearing. The operator reads the bearing in degrees and
+// orients using their own means. Distance + message age are shown so a stale
+// position (the peer may have moved) is obvious.
+void App::drawLoraCompass() {
+  header("Peer bearing");
+  const Observer& o = loc.obs();
+  if (!o.valid) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("No local position.");
+    canvas.setCursor(6, 74); canvas.print("Set location or get a GPS fix.");
+    footer("` back");
+    return;
+  }
+  double distKm, brg;
+  greatCircle(o.lat, o.lon, lcLat, lcLon, distKm, brg);
+
+  // Compass rose: fixed, North up. cx/cy centre, R radius.
+  const int cx = 70, cy = 78, R = 42;
+  canvas.drawCircle(cx, cy, R, CL_DGREY);
+  canvas.drawCircle(cx, cy, 2, CL_GREY);
+  // Cardinal ticks + labels (N up, E right, S down, W left).
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(cx - 3, cy - R - 9); canvas.print("N");
+  canvas.setCursor(cx + R + 3, cy - 3);  canvas.print("E");
+  canvas.setCursor(cx - 3, cy + R + 2);  canvas.print("S");
+  canvas.setCursor(cx - R - 8, cy - 3);  canvas.print("W");
+
+  // Peer marker: screen angle where 0deg = up (North), increasing clockwise.
+  const double D2R = 0.017453292519943295;
+  double a = brg * D2R;
+  int px = cx + (int)lroundf((float)(sin(a) * (R - 4)));
+  int py = cy - (int)lroundf((float)(cos(a) * (R - 4)));
+  canvas.drawLine(cx, cy, px, py, CL_ORANGE);
+  canvas.fillCircle(px, py, 3, CL_ORANGE);
+
+  // Text column (right of the rose).
+  int rx = 128;
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(rx, 34); canvas.printf("%s", lcFrom[0] ? lcFrom : "peer");
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(rx, 50); canvas.printf("Brg %03d", (int)lroundf((float)brg));
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  if (distKm < 10.0)      { canvas.setCursor(rx, 64); canvas.printf("%.2f km", distKm); }
+  else if (distKm < 1000) { canvas.setCursor(rx, 64); canvas.printf("%.1f km", distKm); }
+  else                    { canvas.setCursor(rx, 64); canvas.printf("%.0f km", distKm); }
+  // Message age (staleness cue).
+  uint32_t ageMs = millis() - lcMsgMs;
+  uint32_t ageMin = ageMs / 60000;
+  canvas.setTextColor(ageMin >= 10 ? CL_ORANGE : CL_GREY, CL_BLACK);
+  canvas.setCursor(rx, 80);
+  if (ageMin < 1)        canvas.print("just now");
+  else if (ageMin < 60)  canvas.printf("%lum ago", (unsigned long)ageMin);
+  else                   canvas.printf("%luh ago", (unsigned long)(ageMin / 60));
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(rx, 96); canvas.printf("@%.3f", lcLat);
+  canvas.setCursor(rx, 106); canvas.printf(" %.3f", lcLon);
+
+  footer("` back");
+}
+void App::keyLoraCompass(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_MESSAGES; lastDrawMs = 0; }
+}
+
+// Detail for a satellite named in a received #SAT message (SCR_LORASAT). Resolves
+// the name against the local DB and, if found, shows identity + the next pass
+// computed for the current observer. If the sat isn't in the DB, says so (the
+// receiver may not have that bird cached).
+void App::drawLoraSat() {
+  header("Sat (from msg)");
+  int si = dbIndexByName(db, lsSat);
+  if (si < 0) {
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, 46); canvas.printf("'%s'", lsSat);
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 64); canvas.print("Not in your satellite list.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 78); canvas.print("Update GP, then try again.");
+    footer("` back");
+    return;
+  }
+  SatEntry& s = db.at(si);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, 34); canvas.printf("%s", s.name);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 48); canvas.printf("NORAD %lu", (unsigned long)s.norad);
+  if (s.intlDes[0]) { canvas.setCursor(120, 48); canvas.printf("%s", s.intlDes); }
+
+  // Next pass for the current observer.
+  const Observer& o = loc.obs();
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  if (!o.valid || !timeIsSet()) {
+    canvas.setCursor(6, 68); canvas.print("Next pass: need location + time");
+  } else {
+    pred.setSite(o);
+    if (!pred.setSat(s)) {
+      canvas.setCursor(6, 68); canvas.print("Orbit data unavailable.");
+    } else {
+      PassPredict pp;
+      if (pred.predictPasses(nowUtc(), cfg.minPassEl, &pp, 1) >= 1) {
+        char buf[32]; struct tm g;
+        time_t aos = pp.aos; gmtime_r(&aos, &g);
+        strftime(buf, sizeof(buf), "%m-%d %H:%M", &g);
+        canvas.setCursor(6, 68); canvas.printf("Next AOS %s UTC", buf);
+        canvas.setCursor(6, 82); canvas.printf("Max el %.0f  dur %ldm",
+                                               pp.maxEl, (long)((pp.los - pp.aos) / 60));
+      } else {
+        canvas.setCursor(6, 68); canvas.print("No pass in the search window.");
+      }
+    }
+  }
+  footer("s select as active   ` back");
+}
+void App::keyLoraSat(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_MESSAGES; lastDrawMs = 0; return; }
+  if (c == 's') {                          // adopt this sat as the active selection
+    int si = dbIndexByName(db, lsSat);
+    if (si >= 0) { satSel = si; setStatus(String("Active: ") + db.at(si).name, 2000); }
+  }
+}
+
+// Start a sked-proposal send: capture the current satellite, then prompt for a date
+// and (on completion) a time, composing "!SAT date time" and transmitting. Reuses the
+// SCR_EDIT text-entry system with two chained targets (702 date -> 703 time).
+void App::beginSkedSend() {
+  SatEntry* a = activeSat();
+  if (!a) { setStatus("No satellite selected", 2000); return; }
+  strncpy(ssSat, a->name, sizeof(ssSat) - 1); ssSat[sizeof(ssSat) - 1] = 0;
+  ssDate[0] = 0;
+  // Prefill the date field with today (UTC) as a convenient starting point.
+  editBuf = "";
+  if (timeIsSet()) {
+    time_t now = nowUtc(); struct tm g; gmtime_r(&now, &g);
+    char d[11]; strftime(d, sizeof(d), "%Y-%m-%d", &g); editBuf = d;
+  }
+  editTarget = 704; editTitle = "Sked date (YYYY-MM-DD)"; screen = SCR_EDIT;
+}
+
+// ENTER on a message row: decode its text and open the matching screen. Priority
+// when a message carries more than one sigil: sked > position > satellite (a sked
+// proposal is the most time-sensitive and actionable).
+void App::openDecodedAction(int orderIdx) {
+  if (orderIdx < 0 || orderIdx >= msgCount) return;
+  int idx = (msgHead - msgCount + orderIdx + MSG_MAX * 2) % MSG_MAX;
+  const LoraMsg& m = msgRing[idx];
+  MsgDecode d = decodeMsg(m.text);
+
+  if (d.hasSked) {
+    // Pre-fill a sked draft from the proposal and drop into the sked editor.
+    beginSkedEntry(-1);                    // fresh draft (sets defaults + own call)
+    strncpy(skedDraft.sat,  d.skedSat,  sizeof(skedDraft.sat)  - 1);
+    strncpy(skedDraft.date, d.skedDate, sizeof(skedDraft.date) - 1);
+    // start time HH:MM -> HH:MM:00
+    snprintf(skedDraft.start, sizeof(skedDraft.start), "%s:00", d.skedTime);
+    if (m.from[0]) { strncpy(skedDraft.call, m.from, sizeof(skedDraft.call) - 1); }
+    setStatus("Sked from message - review & save", 2500);
+    return;                                // beginSkedEntry already set screen
+  }
+  if (d.hasPos) {
+    lcLat = d.lat; lcLon = d.lon; lcMsgMs = m.tMs;
+    strncpy(lcFrom, m.from[0] ? m.from : "peer", sizeof(lcFrom) - 1);
+    lcFrom[sizeof(lcFrom) - 1] = 0;
+    screen = SCR_LORACOMPASS; lastDrawMs = 0;
+    return;
+  }
+  if (d.hasSat) {
+    strncpy(lsSat, d.sat, sizeof(lsSat) - 1); lsSat[sizeof(lsSat) - 1] = 0;
+    screen = SCR_LORASAT; lastDrawMs = 0;
+    return;
+  }
+  setStatus("No @position / #sat / !sked here", 2000);
+}
+
 void App::drawMessages() {
   header("Messages");
   msgUnread = 0;            // viewing the list clears the unread badge
@@ -13145,7 +13818,10 @@ void App::drawMessages() {
   // back from newest). Each message is one or two rows -- a message whose text
   // doesn't fit on the first line (after the "who:" prefix) wraps the remainder
   // onto a second, full-width line rather than being truncated.
-  const int ROWS = 9, rowY0 = 31, rowH = 10;   // ROWS = vertical line slots available
+  const int ROWS = 8, rowY0 = 31, rowH = 10;   // ROWS must match the drawable height below
+                                               // (rowY0 + ROWS*rowH <= yMax); if they disagree,
+                                               // the window includes rows the render loop clips
+                                               // and messages vanish as you scroll.
   const int LINE_CH = 39;                       // chars per line at size-1 font (240px)
   // Build a display order: oldest..newest indices.
   int order[MSG_MAX]; int on = 0;
@@ -13154,10 +13830,15 @@ void App::drawMessages() {
     order[on++] = idx;
   }
   if (on == 0) {
+    // No messages yet -- still expose the send keys (they compose from your own
+    // position / selected satellite, so they work with an empty list).
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("No messages yet.");
+    canvas.setCursor(6, 74); canvas.print("p=pos  s=sat  k=sked  n=write");
 #if CARDSAT_HAS_LORARX
-    footer("n write   m LoRa-RX   ` back");
+    footer("p/s/k send  n write  m RX  ` bk");
 #else
-    footer("n write   ;/. scroll   ` back");
+    footer("p/s/k send   n write   ` back");
 #endif
     return;
   }
@@ -13183,41 +13864,71 @@ void App::drawMessages() {
     if (used + h > ROWS) break;                   // next message wouldn't fully fit
     used += h; top = r;
   }
-  int y = rowY0;
-  for (int r = top; r <= bottom && y < 120; ++r) {
+  // Bottom-anchor the list (chat style): the newest visible message always sits on the
+  // last drawable line, just above the hint; any empty space appears at the TOP. We start
+  // drawing at yMax minus the exact height the visible messages occupy (`used` rows). When
+  // the window is full this equals rowY0 (whole area used); when only a few messages exist
+  // it starts lower, so the newest never floats up into the middle of the screen.
+  const int yMax = rowY0 + ROWS * rowH;         // == 111; below this: hint (112), footer (127)
+  int y = yMax - used * rowH;                    // top of the first (oldest visible) row
+  if (y < rowY0) y = rowY0;                       // clamp (shouldn't trigger: used <= ROWS)
+  for (int r = top; r <= bottom && y < yMax; ++r) {
     LoraMsg& m = msgRing[order[r]];
+    bool selected = (r == bottom);                // bottom-anchored row is the selection
     const char* who = m.mine ? "me" : m.from;
     int prefixCh = (m.mine ? 1 : 0) + (int)strlen(who) + 1;
     int firstMax = LINE_CH - prefixCh - 1;        // text chars that fit on line 1
     if (firstMax < 1) firstMax = 1;
     int len = (int)strlen(m.text);
+    int rowLines = (len > firstMax) ? 2 : 1;
+    // Highlight the selected message with a subtle background bar spanning its lines,
+    // so scrolling moves a visible cursor rather than blanking anything.
+    if (selected) canvas.fillRect(0, y - 1, 240, rowH * rowLines, CL_DGREY);
+    uint8_t nameCol = m.mine ? CL_CYAN : CL_GREEN;
+    uint8_t textCol = CL_WHITE;
     // Line 1: "who:" prefix + the first slice of text.
-    canvas.setTextColor(m.mine ? CL_CYAN : CL_GREEN, CL_BLACK);
+    canvas.setTextColor(nameCol, selected ? CL_DGREY : CL_BLACK);
     canvas.setCursor(2, y);
     canvas.printf("%s%s:", m.mine ? ">" : "", who);
-    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setTextColor(textCol, selected ? CL_DGREY : CL_BLACK);
     canvas.printf(" %.*s", firstMax, m.text);
     y += rowH;
     // Line 2 (only if the text overflowed line 1): the remainder, full width,
     // indented two chars so it reads as a continuation of the message above.
-    if (len > firstMax && y < 120) {
+    if (len > firstMax && y < yMax) {
       int contMax = LINE_CH - 2;                  // continuation line width (2-char indent)
-      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setTextColor(textCol, selected ? CL_DGREY : CL_BLACK);
       canvas.setCursor(2, y);
       canvas.printf("  %.*s", contMax, m.text + firstMax);
       y += rowH;
     }
   }
 
+  // Decoded-action hint for the SELECTED (bottom-anchored) message: if its text
+  // carries an @position / #sat / !sked sigil, show what ENTER will open. Placed at
+  // y=112, above the footer (y=127) and below the message area (yMax=108) so nothing
+  // overlaps.
+  int selIdx = (msgCount > 0) ? (msgCount - 1 - msgScroll) : -1;
+  if (selIdx >= 0) {
+    int ri = (msgHead - msgCount + selIdx + MSG_MAX * 2) % MSG_MAX;
+    MsgDecode d = decodeMsg(msgRing[ri].text);
+    if (d.hasSked || d.hasPos || d.hasSat) {
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.setCursor(2, 112);
+      if (d.hasSked)      canvas.printf("ENT: sked %s %s %s", d.skedSat, d.skedDate, d.skedTime);
+      else if (d.hasPos)  canvas.printf("ENT: bearing to @%.3f,%.3f", d.lat, d.lon);
+      else                canvas.printf("ENT: satellite %s", d.sat);
+    }
+  }
+
 #if CARDSAT_HAS_LORARX
-  footer("n write   ;/. scroll   m LoRa-RX   ` back");
+  footer("n msg  p/s/k  ENT open  m RX  ` bk");
 #else
-  footer("n write   ;/. scroll   ` back");
+  footer("n msg  p/s/k send  ENT open  ` back");
 #endif
 }
 
 void App::keyMessages(char c, bool enter, bool back) {
-  (void)enter;
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (!cfg.loraEnable) return;
   if ((!loraStarted || !lora.ready())) {
@@ -13235,9 +13946,39 @@ void App::keyMessages(char c, bool enter, bool back) {
   if (c == 'n') {                          // compose a new message (reuse SCR_EDIT)
     editTarget = 700; editTitle = "Message"; editBuf = ""; screen = SCR_EDIT; return;
   }
+  // Send triggers -- compose a sigil message for the CURRENT satellite / my position
+  // and transmit via the normal path (the frame format is unchanged; these just build
+  // recognizable text that a receiver's decodeMsg() picks up).
+  if (c == 'p') {                          // @lat,lon  -- my position
+    const Observer& o = loc.obs();
+    if (!o.valid) { setStatus("No position (set location/GPS)", 2500); return; }
+    char msg[MSG_TEXT_MAX + 1];
+    snprintf(msg, sizeof(msg), "@%.4f,%.4f", o.lat, o.lon);
+    loraSendCurrent(msg); lastDrawMs = 0; return;
+  }
+  if (c == 's') {                          // #SAT  -- current satellite
+    SatEntry* a = activeSat();
+    if (!a) { setStatus("No satellite selected", 2000); return; }
+    char msg[MSG_TEXT_MAX + 1];
+    snprintf(msg, sizeof(msg), "#%s", a->name);
+    loraSendCurrent(msg); lastDrawMs = 0; return;
+  }
+  if (c == 'k') {                          // !SAT date time  -- sked proposal (prompts)
+    SatEntry* a = activeSat();
+    if (!a) { setStatus("No satellite selected", 2000); return; }
+    beginSkedSend();                       // dedicated date -> time prompt, then auto-send
+    return;
+  }
+  // ENTER acts on the SELECTED message (the bottom-anchored one; scroll to choose):
+  // decode its @position / #sat / !sked and open the matching screen.
+  if (enter) {
+    int sel = (msgCount > 0) ? (msgCount - 1 - msgScroll) : -1;
+    if (sel >= 0) openDecodedAction(sel);
+    return;
+  }
   // Scroll counts back from the newest; you can scroll until the oldest message
   // is the bottom item. (Row heights vary with wrapping, so the render derives
-  // the visible window from this bottom anchor.)
+  // the visible window from this bottom anchor.) The bottom message is "selected".
   int maxScroll = (msgCount > 0) ? msgCount - 1 : 0;
   if (isUp(c))   { if (msgScroll < maxScroll) msgScroll++; lastDrawMs = 0; }
   if (isDown(c)) { if (msgScroll > 0) msgScroll--; lastDrawMs = 0; }
@@ -13848,13 +14589,14 @@ void App::addFootprintGrids(double subLat, double subLon, double altKm) {
       double c = lo + 1.0;                                 // grid centre longitude
       if (A + B * cos((c - subLon) * D2R) < coslam) continue;   // outside footprint
       int idx = gridIdx(clat, c);
-      gridBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+      if (gridBits) gridBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
     }
   }
 }
 
 void App::buildGrids(time_t a, time_t b) {
-  memset(gridBits, 0, sizeof(gridBits));
+  if (!ensureGridBits()) { gridN = 0; return; }
+  memset(gridBits, 0, GRID_BITS_LEN);
   SatEntry* s = activeSat();
   if (!s || !timeIsSet()) { gridN = 0; return; }
   pred.setSite(loc.obs()); pred.setSat(*s);
@@ -13866,8 +14608,9 @@ void App::buildGrids(time_t a, time_t b) {
     addFootprintGrids(L.subLat, L.subLon, L.satAltKm);
   }
   int cnt = 0;                                             // popcount the bitset
-  for (size_t i = 0; i < sizeof(gridBits); ++i)
-    for (uint8_t v = gridBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
+  if (gridBits)
+    for (size_t i = 0; i < GRID_BITS_LEN; ++i)
+      for (uint8_t v = gridBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
   gridN = cnt;
 }
 
@@ -13893,7 +14636,7 @@ void App::drawGrid() {
   if (filt) {
     int m = 0;
     for (int idx = 0; idx < 32400; ++idx) {
-      if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
+      if (!gridBits || !(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
       char g[5]; gridStr(idx, g);
       if (gridMatchPrefix(g, gridFilter)) ++m;
     }
@@ -13925,7 +14668,7 @@ void App::drawGrid() {
   }
   int seen = 0, drawn = 0;                          // walk set bits in sorted order
   for (int idx = 0; idx < 32400 && drawn < PER; ++idx) {
-    if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
+    if (!gridBits || !(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
     char g[5]; gridStr(idx, g);
     if (filt && !gridMatchPrefix(g, gridFilter)) continue;   // filtered out
     if (seen++ < gridScroll) continue;
@@ -14713,12 +15456,23 @@ static int gridBitIndex(const char* g) {
 }
 
 // Stream the log once and tally everything for the all-sats view.
+// Lazily allocate the ~4 KB grid bitmap on first use (kept out of .bss to preserve
+// the large contiguous heap block the TLS handshake needs). Zeroes on (re)alloc.
+// Returns false if the allocation fails, in which case callers treat it as "no grids".
+bool App::ensureGridBits() {
+  if (!gridBits) {
+    gridBits = (uint8_t*)malloc(GRID_BITS_LEN);
+    if (!gridBits) { Serial.println("[grids] gridBits alloc failed"); return false; }
+  }
+  return true;
+}
+
 void App::buildAwards() {
   awQsoTotal = 0; awGridN = awStateN = awDxccN = 0; awSatN = 0;
   for (int i = 0; i < AW_BANDS; ++i) awBandQso[i] = 0;
   awSel = 0; awScroll = 0; awSatSel = -1;
   awBuiltMs = millis();
-  memset(gridBits, 0, sizeof(gridBits));
+  if (ensureGridBits()) memset(gridBits, 0, GRID_BITS_LEN);
   memset(stateBits, 0, sizeof(stateBits));
   memset(dxccBits, 0, sizeof(dxccBits));
 
@@ -14758,14 +15512,14 @@ void App::buildAwards() {
       if (Location::gridToLatLon(q.grid, glat, glon)) {
         // Grid bit: encode the 4-char field/square with no String allocation.
         int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
-        if (gi >= 0) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+        if (gi >= 0 && gridBits) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
         awardStateAt(glon, glat, stateBits);
         awardDxccAt(glon, glat, dxccBits);
       }
     }
   }
   f.close();
-  awGridN  = popcountBits(gridBits, sizeof(gridBits));
+  awGridN  = (gridBits ? popcountBits(gridBits, GRID_BITS_LEN) : 0);
   awStateN = popcountBits(stateBits, sizeof(stateBits));
   awDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
   awBitsSat = -1;                       // bitsets now hold the all-sats totals
@@ -14918,7 +15672,7 @@ void App::drawAwardList() {
   int seen = 0, drawn = 0;
   if (awListKind == 0) {                       // grids: 32400-bit bitset
     for (int idx = 0; idx < 32400 && drawn < PER; ++idx) {
-      if (!(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
+      if (!gridBits || !(gridBits[idx >> 3] & (1 << (idx & 7)))) continue;
       if (seen++ < awListScroll) continue;
       char g[5]; gridStr(idx, g);
       canvas.setTextColor(CL_WHITE, CL_BLACK);
@@ -14973,7 +15727,7 @@ void App::keyAwardList(char c, bool enter, bool back) {
 void App::awardsForSat(const char* satName) {
   awSatGridN = awSatStateN = awSatDxccN = 0;
   for (int i = 0; i < AW_BANDS; ++i) awSatBandQso[i] = 0;
-  memset(gridBits, 0, sizeof(gridBits));
+  if (ensureGridBits()) memset(gridBits, 0, GRID_BITS_LEN);
   memset(stateBits, 0, sizeof(stateBits));
   memset(dxccBits, 0, sizeof(dxccBits));
   if (!Store::fs().exists(FILE_LOG)) return;
@@ -14996,14 +15750,14 @@ void App::awardsForSat(const char* satName) {
       double glat, glon;
       if (Location::gridToLatLon(q.grid, glat, glon)) {
         int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
-        if (gi >= 0) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+        if (gi >= 0 && gridBits) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
         awardStateAt(glon, glat, stateBits);
         awardDxccAt(glon, glat, dxccBits);
       }
     }
   }
   f.close();
-  awSatGridN  = popcountBits(gridBits, sizeof(gridBits));
+  awSatGridN  = (gridBits ? popcountBits(gridBits, GRID_BITS_LEN) : 0);
   awSatStateN = popcountBits(stateBits, sizeof(stateBits));
   awSatDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
 }

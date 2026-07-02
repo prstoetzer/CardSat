@@ -49,7 +49,14 @@ static constexpr double C_LIGHT = 299792458.0;
 #define FILE_TX_RESUME     "/CardSat/tx_resume.txt"
 #define FILE_CL_RESUME     "/CardSat/cl_resume.txt"  // Cloudlog upload-after-reboot marker
 #define FILE_LOTW_RESUME   "/CardSat/lotw_resume.txt" // LoTW upload-after-reboot marker
-#define TX_CACHE_BATCH     12                       // sats cached per boot
+#define TX_CACHE_BATCH     12                       // sats cached per boot (reboot-per-batch mode)
+// Cooldown between full network update cycles. The LWIP TCP PCB pool is small (16)
+// and a closed socket sits in TIME_WAIT for ~2xMSL (~120s) before the PCB frees; an
+// update cycle opens ~6 sockets, so re-running it back-to-back (e.g. hammering the
+// button when a fetch fails) can pile TIME_WAIT PCBs faster than they drain and wedge
+// every further connect with "connection refused". A normal update is run once or
+// twice, so gating repeats to this window lets the pool drain instead of saturating.
+#define NET_COOLDOWN_MS    90000UL                   // min gap between update cycles (~TIME_WAIT window)
 
 // ---------------------------------------------------------------------------
 //  Serial / UART wiring
@@ -119,7 +126,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.42";
+static constexpr const char* FW_VERSION = "0.9.43";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.

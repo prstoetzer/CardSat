@@ -69,9 +69,12 @@ flashing is good practice.
 > scratch — installing the IDE, the ESP32 core, every library at a known-good
 > version, the board settings, and flashing. The summary below is the short version.
 
-Install **M5Cardputer**, **ArduinoJson** (v7), **TinyGPSPlus**, and **RadioLib**
-(by Jan Gromes) from Library Manager, and the Hopperpop **Sgp4** library via *Add
-.ZIP Library* (<https://github.com/Hopperpop/Sgp4-Library>). RadioLib is required:
+Install **M5Cardputer**, **ArduinoJson** (v7), **TinyGPSPlus**, **RadioLib**
+(by Jan Gromes), and **ESP_SSLClient** (by Mobizt) from Library Manager, and the
+Hopperpop **Sgp4** library via *Add .ZIP Library*
+(<https://github.com/Hopperpop/Sgp4-Library>). **ESP_SSLClient is required** — all
+HTTPS (GP/space-weather/hams.at downloads, LoTW and Cloudlog uploads) runs on its
+BearSSL stack, and the build will not compile without it. RadioLib is also required:
 LoRa is built into the standard binaries (`CARDSAT_HAS_LORA` defaults to `1`). Then
 under **Tools**:
 
@@ -96,6 +99,6 @@ pio device monitor      # 115200 baud log
 ```
 
 The `cardputer_adv` env (`board = m5stack-stamps3`) pins M5Cardputer,
-ArduinoJson, TinyGPSPlus, RadioLib, and the Hopperpop SGP4 library. If the
+ArduinoJson, TinyGPSPlus, RadioLib, ESP_SSLClient, and the Hopperpop SGP4 library. If the
 keyboard or display misbehave on the ADV (a very recent variant), switch to the
 git `master` of M5Cardputer/M5Unified in `lib_deps`.

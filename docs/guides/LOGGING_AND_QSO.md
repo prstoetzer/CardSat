@@ -106,8 +106,11 @@ bit set so they aren't re-sent.
   (the `-1` a churned heap can cause), not a server rejection — so CloudLog offers a **reboot to
   a clean heap** and retries after boot (`cloudlogRebootUpload` / `resumeCloudlogIfPending`,
   behind a confirmation since a reboot drops a live pass/CAT link). A **positive** code
-  (401/500…) is a real server response a reboot wouldn't fix, so it's just reported. This mirrors
-  the transponder-cache and LoTW reboot patterns.
+  (401/500…) is a real server response a reboot wouldn't fix, so it's just reported. LoTW has the
+  same user-confirmed recovery prompt. Note that this is a *failure recovery* only — as of
+  v0.9.43 the normal multi-batch path no longer reboots at all (uploads and the transponder
+  cache run entirely in one session on the BearSSL TLS stack; see the network TLS migration
+  postmortem). A reboot is offered solely when a connection genuinely fails.
 
 ---
 

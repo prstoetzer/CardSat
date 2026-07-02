@@ -229,10 +229,9 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   under the exact LoTW field name and sigspec order, fully data-driven from the
   TrustedQSL config (340 DXCC entities, all primary lists, every US county and Japanese
   city). Sent QSOs are flagged (an `uploaded` column) so they're never uploaded twice.
-  **Large logs upload automatically in small batches** (6 QSOs each) with a quick reboot
-  between batches to keep each transfer under the ESP32's TCP send-buffer limit; the LoTW
-  key passphrase is remembered across the reboots so **you enter it once** for the whole run
-  (works for both un-uploaded-only and re-send modes).
+  **Large logs upload automatically in small batches** (6 QSOs each, to keep each `.tq8`
+  small) — all **in a single session**, so you enter the LoTW key passphrase **once** for
+  the whole run (works for both un-uploaded-only and re-send modes).
   **Editing a logged QSO clears those flags** so the corrected record is re-sent on the next
   upload, and the Edit QSO screen exposes **LoTW** and **Cloudlog** rows you can toggle to
   override that (mark a QSO as already-uploaded after a cosmetic fix, or flip a flag directly).
@@ -243,8 +242,8 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   numeric station profile ID in Settings. Because a Cloudlog instance can itself forward
   QSOs on to LoTW, this is an alternative to the on-device LoTW upload — the two are
   tracked independently (separate flags) so a QSO sent to one isn't assumed sent to the
-  other. Supports re-sending already-uploaded QSOs. Large logs upload in **15-QSO batches**
-  (rebooting to continue if more remain, fully automatic since Cloudlog uses an API key
+  other. Supports re-sending already-uploaded QSOs. Large logs upload in **15-QSO batches**,
+  all in one session (fully automatic, since Cloudlog uses an API key
   rather than a passphrase). The API key is treated as a secret and
   never written to the serial log. See [MANUAL.md → Cloudlog upload](../MANUAL.md).
 - **Voice memos.** Press **`v`** while tracking to record a quick voice note to the
@@ -274,12 +273,18 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   (150–960 MHz; the SX1262 is unfiltered), spreading factor (7–12, default 12) and
   bandwidth; fixed-size message ring (no SD, no heap growth). **Actionable messages:** a
   message carrying `@lat,lon`, `#SAT`, or `!SAT date time` (plain text, so fully
-  interoperable) decodes on ENTER into a **bearing compass** to the sender, a **satellite
-  detail** with next pass, or a **pre-filled sked** — with `p`/`s`/`k` keys to send those
-  for the current satellite and your location. Built into the standard binaries (requires
-  the **RadioLib** library at build time). ✅ Hardware-verified — two-way messaging
-  confirmed against a LilyGo T-LoRa unit running the companion CardSat Pager firmware;
-  mind your band's bandwidth rules. See [MANUAL.md](../MANUAL.md).
+  interoperable) decodes on ENTER into a **bearing compass** to the sender (with distance,
+  bearing and Maidenhead grid), a **satellite detail** with next pass, or a **pre-filled
+  sked** — with `p`/`s`/`k` keys to send those for the current satellite and your location.
+  Satellite references carry the **NORAD catalog number** (`#name/norad`) so they resolve
+  even when two stations' databases use different display names (e.g. RS95S vs QMR-KWT2).
+  A **station roster** (`o` key) lists everyone heard reporting a position — callsign,
+  grid, distance/bearing, signal and age — and an optional **automatic position reply**
+  setting (off by default, loop-guarded) makes CardSats answer a position request with
+  their own. Built into the standard binaries (requires the **RadioLib** library at build
+  time). ✅ Hardware-verified — two-way messaging confirmed against a LilyGo T-LoRa unit
+  running the companion CardSat Pager firmware; mind your band's bandwidth rules. See
+  [MANUAL.md](../MANUAL.md).
 - **Auto-refresh, power management, and diagnostics.** If WiFi is configured,
   CardSat connects and NTP-syncs at boot and **auto-refreshes GP when the cached
   elements are over a week old**; a **fast update** (`f` on the Update screen) refreshes
@@ -289,6 +294,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   and an **About** screen reports version, storage, GP age, battery, and uptime, with a
   **License & credits** sub-screen (`l`) carrying the no-warranty and hardware disclaimers,
   data-source attributions, and a recommendation to support AMSAT.
+- **Six built-in mini-games** — reached with **`z`** from the About screen (Games menu),
+  something to do while waiting on a pass and mostly a light nod to real operating: **Zap
+  the Sats** (a Space-Invaders homage with satellite "invaders"), **Doppler Lock** (hold a
+  marker on a drifting Doppler S-curve), **Catch the Pass** (time a "QSO" as a bird crosses
+  the workable window), **Rotor Runner** (an IMU-tilt or arrow-key antenna-slewing game),
+  **Morse Meteors** (clear falling letters by keying their Morse, with a real CW sidetone),
+  and **Grid Chase** (a Maidenhead grid-square trainer). Game sounds follow the speaker
+  volume and can be turned off in Settings. See [MANUAL.md](../MANUAL.md).
 - **Fully offline** once GP + transponders are cached. CardSat stores everything in
   a **`/CardSat` folder on the microSD card** by default, falling back to internal
   **LittleFS** if no card is present.

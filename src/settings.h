@@ -215,6 +215,10 @@ struct Settings {
   uint32_t loraBwHz    = 125000;    // bandwidth in Hz (125 kHz standard)
   int8_t   loraTxDbm   = 20;        // TX power dBm (<=22 on SX1262)
   uint8_t  msgNotify   = 1;         // LoRa msg alert: 0=off, 1=banner, 2=banner+beep
+  bool     autoPosReply = false;    // auto-reply to a received @position with our own @lat,lon.
+                                    // OFF by default (opt-in: it broadcasts your location).
+                                    // Loop-guarded: max once per station per few minutes AND a
+                                    // global rate limit, so two auto-reply units can't ping-pong.
   // --- LoRa RX monitor (lorarx) config: a general SX1262 receive tool, kept
   //     separate from the messaging LoRa params above so tuning it doesn't disturb
   //     CardSat messaging. Persisted across reboots. (Feature-guarded elsewhere.)

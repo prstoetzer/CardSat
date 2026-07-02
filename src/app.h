@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -68,8 +68,9 @@ struct PendingQso {
 // which otherwise triggers "'MsgDecode' does not name a type".
 struct MsgDecode {
   bool   hasPos = false;  double lat = 0, lon = 0;
-  bool   hasSat = false;  char   sat[12] = {0};
+  bool   hasSat = false;  char   sat[12] = {0};   uint32_t norad = 0;      // #NAME/NORAD (norad 0 = none)
   bool   hasSked = false; char   skedSat[12] = {0}, skedDate[11] = {0}, skedTime[6] = {0};
+                          uint32_t skedNorad = 0;  // !NAME/NORAD date time (norad 0 = none)
 };
 
 class App {
@@ -432,13 +433,39 @@ private:
   char     lcFrom[16] = {0};      // peer callsign for the compass screen
   uint32_t lcMsgMs = 0;          // millis() of the source message (age display)
   char     lsSat[12] = {0};       // decoded satellite name for the sat-detail screen
+  uint32_t lsNorad = 0;           // decoded satellite NORAD for the sat-detail screen (0 = none)
   void drawLoraCompass();         // north-up bearing plot to a decoded peer position
   void keyLoraCompass(char c, bool enter, bool back);
   void drawLoraSat();             // detail for a satellite named in a received message
   void keyLoraSat(char c, bool enter, bool back);
+
+  // Station roster (SCR_LORAROSTER): every station heard sending an @position is tracked
+  // here so the operator can see who's in range and where. Positions are decoded from the
+  // ordinary @lat,lon messages (no new frame type); the grid is computed locally. A fixed
+  // array keyed by callsign, newest-heard first when drawn.
+  struct RosterEntry {
+    char     call[14];            // sender callsign
+    double   lat, lon;            // last reported position
+    int16_t  rssi;                // last RSSI (dBm)
+    int8_t   snr;                 // last SNR (dB)
+    uint32_t heardMs;             // millis() of last position heard
+    uint32_t autoRepliedMs;       // millis() we last auto-replied to THIS station (0 = never)
+  };
+  static const int ROSTER_MAX = 16;
+  RosterEntry rosterList[ROSTER_MAX];
+  int      rosterCount = 0;
+  int      rosterSel = 0;         // selected row (for the compass shortcut)
+  uint32_t lastAutoReplyMs = 0;   // millis() of our last auto-reply (global rate limit)
+  void rosterUpsert(const char* call, double lat, double lon, int rssi, int snr);  // record a heard position
+  int  rosterIndexByCall(const char* call);   // -1 if not present
+  void maybeAutoReplyPosition(const char* toCall);  // send our @pos if enabled + loop-guards pass
+  void drawLoraRoster();
+  void keyLoraRoster(char c, bool enter, bool back);
+  void sendMyPosition();          // broadcast our @lat,lon (the 'p' key / presence ping)
   void openDecodedAction(int orderIdx);   // ENTER on a message row: act on its sigils
   void beginSkedSend();                    // start the date->time prompt for a !sked send
   char ssSat[12] = {0};                    // sked-send: sat name captured at start
+  uint32_t ssNorad = 0;                    // sked-send: sat NORAD captured at start (0 = none)
   char ssDate[11] = {0};                   // sked-send: date captured from the first prompt
   void buildOscarArc();              // sample the current/next pass ground track
   // Sun / Moon tracking screen (off main menu)
@@ -808,7 +835,6 @@ private:
   static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
   static void catMonTrampoline(const char* dir, const uint8_t* b, size_t n);  // CatTraceFn target
   static int  s_fetchDepth;                    // >0 while any outbound fetch is active
-  static bool s_spkWasOnForFetch;              // speaker was enabled when a fetch began (restore after)
   static bool netFetchActive();                // service*() skip rebuild while true
   void webdHandleRequest(const String& reqLine);  // route one HTTP request
   void webdSendStatusJson();                   // GET /api/status

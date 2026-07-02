@@ -643,17 +643,20 @@ CardSat tracks what it has sent in a new `uploaded` column in `qso_log.csv`.)
 small enough to clear a fixed limit in the ESP32's network stack (a larger single upload
 would stall part-way through — see
 [docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md](design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md)).
-When more QSOs remain after a batch, CardSat **reboots and continues on its own**, and it
-**remembers your key password across the reboots so you only enter it once** for the whole
-run. The upload screen shows the progress ("Batch sent; N left, rebooting…"). This works
-for both **`u` upload (un-uploaded only)** and **upload ALL** (re-send) — a 14-QSO upload,
-for instance, goes up as 6 + 6 + 2 across three quick reboots and stops by itself. Your
-key password is held only in volatile memory during the run and is erased when it
-finishes or fails; it is never written to the card or flash.
+When more QSOs remain after a batch, CardSat **continues on its own in the same session**,
+and you **enter your key password only once** for the whole run. The upload screen shows the
+progress ("Batch sent; N left…"). This works for both **`u` upload (un-uploaded only)** and
+**upload ALL** (re-send) — a 14-QSO upload, for instance, goes up as 6 + 6 + 2 across three
+batches and stops by itself, with no interruption. The log is split into small batches only
+to keep each `.tq8` file small; earlier firmware rebooted between batches, but as of v0.9.43
+the whole run completes in one session on the BearSSL TLS stack. Your key password is held
+only in volatile memory during the run and is erased when it finishes or fails; it is never
+written to the card or flash.
 
-If a connection is refused outright (the rare post-long-session memory-fragmentation
-case), CardSat also offers to **reboot and upload** — **ENTER** to reboot and finish from
-a clean start, **`` ` ``** to cancel.
+If a connection is refused outright (rare now — a genuine transport failure, e.g. very weak
+WiFi), CardSat offers a **reboot-and-upload** recovery — **ENTER** to reboot and finish from
+a clean start, **`` ` ``** to cancel. This is a user-confirmed failsafe, not part of the
+normal flow.
 
 The satellite `SAT_NAME` translation described above applies here too — the same
 `/CardSat/lotw_sats.csv` map is used, so make sure each bird you've worked has a
@@ -698,15 +701,14 @@ station-ID/callsign mismatch are the usual causes). Your API key is treated as a
 is never written to the serial log.
 
 **Large uploads are batched automatically**, the same way as LoTW: Cloudlog uploads in
-**15-QSO batches** (Cloudlog's records are smaller than a signed `.tq8`), and CardSat
-reboots to continue if more remain. Cloudlog authenticates with your API key rather than a
-passphrase, so the continuation is fully automatic — nothing to re-enter.
+**15-QSO batches** (Cloudlog's records are smaller than a signed `.tq8`), all **in one
+session**. Cloudlog authenticates with your API key rather than a passphrase, so the
+continuation is fully automatic — nothing to re-enter.
 
-If instead the upload can't even **connect** (a rare "connection refused" that can occur
-after a long operating session has fragmented memory), CardSat offers a failsafe: it asks
-whether to **reboot and upload** — press **ENTER** to reboot and complete the upload from a
-clean start, or **`` ` ``** to cancel and leave the QSOs pending. A fresh boot reliably
-clears the condition. (This only appears for a true connection failure; a server rejection,
+If instead the upload can't even **connect** (rare now — a genuine transport failure such as
+very weak WiFi), CardSat offers a failsafe: it asks whether to **reboot and upload** — press
+**ENTER** to reboot and complete the upload from a clean start, or **`` ` ``** to cancel and
+leave the QSOs pending. (This only appears for a true connection failure; a server rejection,
 which a reboot wouldn't fix, is just reported.)
 
 ### Notes (free-form text editor)
@@ -1629,11 +1631,16 @@ into an action with **ENTER**:
   **distance and bearing** and the message's age. The Cardputer ADV has no magnetometer,
   so this is a *computed bearing* (degrees from true north) for you to orient by, not a
   live magnetic compass.
-- **`#SAT`** (e.g. `#SO-50`) — a **satellite**. ENTER opens a **satellite detail** screen
-  with the NORAD ID and the **next pass** for your location.
-- **`!SAT YYYY-MM-DD HH:MM`** (e.g. `!AO-91 2026-07-04 18:30`) — a **schedule proposal**.
-  ENTER opens the **sked editor pre-filled** with the satellite, date and start time (and
-  the sender's callsign), so you can review and save it.
+- **`#SAT`** (e.g. `#SO-50/27607`) — a **satellite**. ENTER opens a **satellite detail**
+  screen with the NORAD ID and the **next pass** for your location. CardSat appends the
+  satellite's **NORAD catalog number** after the name (`name/norad`) so the far end can
+  resolve the right bird even if its list uses a different display name — a satellite that
+  one station calls `RS95S` and another calls `QMR-KWT2` shares the same NORAD number, so
+  the reference still lands. A message with just a name (no `/norad`) still works by name.
+- **`!SAT YYYY-MM-DD HH:MM`** (e.g. `!AO-91/43017 2026-07-04 18:30`) — a **schedule
+  proposal**. ENTER opens the **sked editor pre-filled** with the satellite (resolved by
+  NORAD, so it maps to your name for it), date and start time (and the sender's callsign),
+  so you can review and save it.
 
 When the selected message carries one of these, a **yellow hint** on the line above the
 footer shows exactly what ENTER will open.
@@ -1651,13 +1658,35 @@ These compose from your own state, so they work even on an empty message list. T
 station simply receives the text; if they're running CardSat, their copy decodes it the
 same way yours does.
 
+**Station roster (`o` key).** Press **`o`** on the Messages screen to open the **roster** —
+a list of every station heard reporting a position, newest first. Each entry shows the
+**callsign**, its **Maidenhead grid**, the **distance and bearing** from your location (when
+you have a fix), the last **signal** (RSSI), and how long ago it was heard. Scroll with
+`;`/`.`, press **ENTER** to open the **bearing compass** to the selected station, or press
+**`p`** to send your own position (a presence ping) so others can add you to theirs. The
+roster is built from ordinary `@lat,lon` messages — no special packet — so pressing `p` on
+any CardSat both announces you and populates everyone else's roster; the grid is computed
+locally from the shared lat/lon, so the on-air format is unchanged. (The roster is held in
+memory and clears on reboot.)
+
+**Automatic position reply.** With **Auto position reply** on (Settings → Network/data,
+**off by default**), CardSat answers a received position report with its own `@lat,lon`
+automatically — handy for a net where everyone wants to see who's where without each
+operator pressing `p`. Because it broadcasts your location, it is opt-in. Two safeguards keep
+it well-behaved: a short random delay before replying (so simultaneous listeners don't all
+transmit at once), and loop guards — CardSat won't auto-reply to the same station more than
+once every few minutes, and never more than once every 30 seconds overall — so two
+auto-replying units can't ping-pong endlessly.
+
 **Settings.** In Settings → Network/data: **LoRa msg** on/off (turning it on
 brings the radio up); **LoRa region** (US 33cm / EU 70cm / JP 430 — selecting one
 seeds a legal default frequency + 125 kHz bandwidth for that band); **LoRa freq**
 (arrow-adjust in 100 kHz steps, or ENTER to type an exact MHz value, 150–960 MHz);
 **LoRa SF** (7–12; 12 = maximum range and sensitivity, the default; lower = faster
-but shorter range); **LoRa BW** (62.5 / 125 / 250 kHz); **LoRa TX pwr** (0–22 dBm).
-Both ends must use the same frequency, SF and BW to hear each other.
+but shorter range); **LoRa BW** (62.5 / 125 / 250 kHz); **LoRa TX pwr** (0–22 dBm);
+**Msg notify** (off / banner / banner+beep, described below); and **Auto position
+reply** (off / on, described above). Both ends must use the same frequency, SF and BW
+to hear each other.
 
 **Notifications.** CardSat listens for messages continuously in the background (the
 receiver is left on whenever LoRa is enabled), so a message can arrive while you're
@@ -1758,17 +1787,14 @@ on the config screen leaves the mode and restores messaging.
   that `k` also pulls. This is the quick way to bring your regularly-worked birds
   current without the longer full refresh — handy in the field. (If you haven't
   marked any favorites, it refreshes the currently active satellite instead.)
-- `a` — fetch and cache **all** transponders for offline use. This runs in small
-  batches across **automatic reboots**: CardSat caches a handful of satellites,
-  reboots to get a fresh network connection, and continues where it left off,
-  repeating until every satellite is done. Each reboot returns to the **Update**
-  screen showing the running count (e.g. "Caching 24/90"), and the run finishes
-  on "Cached all 90 transponders". The whole pass takes a few minutes and several
-  reboots — this is normal and lets the unit cache the full catalog reliably even
-  on a weak Wi-Fi link. A run resumes automatically if interrupted (e.g. by a
-  power cycle); to cancel a pending run, delete `/CardSat/tx_resume.txt` from the
-  card. Satellites with no transmitters in the SatNOGS database are cached as an
-  empty list, which is expected.
+- `a` — fetch and cache **all** transponders for offline use. As of v0.9.43 this runs
+  **in a single session** — no reboots. CardSat fetches every satellite's transponder
+  data in one pass, showing a running count on the Update screen (e.g. "TX 24/90: AO-91")
+  and finishing on "Cached all N transponders". The whole pass takes a few minutes on a
+  reasonable Wi-Fi link; a per-satellite retry absorbs the occasional transient miss.
+  (Earlier firmware split this across automatic reboots to work around a TLS memory limit;
+  the BearSSL migration removed that limit, so it now completes in one go.) Satellites with
+  no transmitters in the SatNOGS database are cached as an empty list, which is expected.
 - `w` — connect WiFi only (no download).
 - `` ` `` — back. Diagnostics print to the serial monitor at 115200.
 
@@ -1807,7 +1833,7 @@ on-screen key reference. The notable rows:
 | Dopp lead | `,`/`/` the predictive-lead cap, 0–100 ms in 5 ms steps (default 50 ms; `0` = off). On fast overhead passes CardSat can compute Doppler slightly ahead to mask CAT latency, tapering the lead to zero near closest approach. Raise it if your rig's CI-V is slow; set `0` to disable |
 | Screen sleep | `,`/`/` cycle off / 30 s / 1 min / 2 min / 5 min — blanks the backlight after that idle time |
 | Brightness | `,`/`/` adjust the active screen brightness in ~6% steps; previews live. Under *Station / display* |
-| Volume | `,`/`/` adjust the speaker volume, 0–100% in ~9% steps; plays a short blip at the new level as you adjust so you can hear it. Applies to the AOS alarm, game sounds, and voice-memo playback. Saved and restored across reboots. Under *Station / display* |
+| Volume | `,`/`/` adjust the speaker volume, 0–100% in ~9% steps; plays a short blip at the new level as you adjust so you can hear it. Applies to the AOS alarm, game sounds, and voice-memo playback, and audio plays uninterrupted while CardSat is on the network (a fetch or upload no longer pauses the speaker). Saved and restored across reboots. Under *Station / display* |
 | Tilt tuning | `,`/`/` or ENTER toggle **accelerometer passband tuning** on/off. Shown as **n/a (no IMU)** on boards without one (only the Cardputer **ADV** has the sensor). When on, roll the device left/right in TUNE mode on a linear bird to move through the passband. Under *Station / display* |
 | My callsign | ENTER → enter your station callsign (stored uppercase); used in the log and ADIF `STATION_CALLSIGN` |
 | LoTW DXCC / CQ zone / ITU zone / primary / secondary / IOTA | A chained set of pickers for the **LoTW upload** station location. **DXCC** opens a full entity list (subdivision-bearing entities grouped at the top, marked `>`; type to filter). **CQ/ITU zone** are typed. **Primary** (labelled state/province/oblast/prefecture/kunta per your DXCC) opens a gated picker — required for US/AK/HI, **(n/a)** for entities without one. **Secondary** is county (US) or city/gun/ku (Japan), gated by the primary; **(n/a)** elsewhere. **IOTA** (e.g. `NA-005`) is optional for any entity. Inside a picker: `;`/`.` move, ENTER selects, typing filters, `` ` `` clears/back. Under *Station / display*. See [§8 → LoTW upload](#logbook-of-the-world-lotw-direct-upload). |
@@ -2461,7 +2487,7 @@ CardSat is designed to operate with no network in the field:
 
 1. With WiFi, go to **Update** and press `k` (GP + clock) and then `a` (cache
    **all** transponders). Both are written to flash. The transponder cache runs
-   in batches across several automatic reboots and finishes on "Cached all N
+   in a single session and finishes on "Cached all N
    transponders" — let it run to completion before going offline.
 2. After that, everything — pass prediction, transponders, Doppler, the schedule —
    works with WiFi off. The clock keeps running (and survives deep sleep); use GPS
@@ -3991,22 +4017,43 @@ listed below.
 - **Reached from** — Home → About.
 - **Shows** — firmware version, IP address, free heap and other read-only
   diagnostics.
-- **Keys** — `l` opens **License & credits**; **`z`** launches **Zap the Sats**
-  (a small game — see below); `` ` `` back.
+- **Keys** — `l` opens **License & credits**; **`z`** opens the **Games menu**
+  (six satellite-themed mini-games — see below); `` ` `` back.
 
-### Zap the Sats (`z` from About)
+### Games menu (`z` from About)
 
-- **Purpose** — a tiny built-in game for when you're waiting on a pass: a
-  Space-Invaders homage where the "invaders" are satellites and your "gun" is a ham
-  operator holding an arrow antenna that fires signals upward.
-- **Reached from** — `z` on the About screen.
-- **Shows** — a formation of satellite sprites marching down the screen, your score,
-  level, and remaining lives; an attract screen on entry and a game-over / wave-cleared
-  screen between rounds.
-- **Keys** — `,` / `/` move the operator left/right; **space** fires; **ENTER** starts
-  a game (and advances to the next wave or retries after one ends); `` ` `` returns to
-  About. Clearing a whole wave advances the level (the sats march faster); letting the
-  formation reach you costs a life.
+Press **`z`** on the About screen to open a menu of six small games — something to do while
+waiting on a pass, most of them a light nod to real satellite operating. Use **`;`/`.`** (or
+up/down) to move through the list and **ENTER** to launch the highlighted game; **`` ` ``**
+returns to About. Several of the games can use the **IMU tilt** as well as the keyboard.
+Game sounds follow the speaker-volume setting and can be silenced with **Game sound: off**
+in Settings.
+
+**Zap the Sats** — a Space-Invaders homage where the "invaders" are satellites and your
+"gun" is a ham operator holding an arrow antenna that fires signals upward. `,`/`/` move
+left/right, **space** fires, **ENTER** starts a game (and advances a wave or retries after
+one ends). Clearing a wave speeds the formation up; letting it reach you costs a life.
+
+**Doppler Lock** — hold your marker on a frequency that drifts along a Doppler-like S-curve,
+as if tuning a linear transponder through a pass. Nudge left/right with `,`/`/` (or `a`/`l`,
+or tilt); your score accrues while the cursor stays within the passband around the target.
+
+**Catch the Pass** — a satellite arcs across a sky dome; press **space** while it's inside the
+workable elevation window to "log" a QSO. Mistime it and you miss; the windows get tighter as
+your score climbs. Five misses ends the game.
+
+**Rotor Runner** — a genuine two-axis game: a satellite drifts around the sky and you slew an
+antenna crosshair to keep it centred, either by **tilting** the Cardputer (pitch + roll) or
+with the **arrow keys** (`a`/`l` and up/down). Score accrues while you're on target.
+
+**Morse Meteors** — letters fall and you clear each by keying its Morse code. Key with two
+keys: **`t`** (or `.`/`,`) for a dot and **`u`** (or `/`/space) for a dash — a real CW
+sidetone sounds, with the dash three times the dot length. (T/U are used rather than F/H
+because `h` is the global Help key; the **Morse swap** setting flips which is dot/dash.)
+
+**Grid Chase** — a Maidenhead grid-square trainer: a location hint is shown and you pick the
+correct grid from four options against a countdown. Use `;`/`.` (or up/down) then **ENTER**,
+or press **`1`–`4`** to answer directly.
 
 ### License & credits
 

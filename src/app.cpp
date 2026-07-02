@@ -3111,40 +3111,32 @@ void App::tickCanvasRestore() {
 // loop runs between fetches, giving the outbound TLS connects maximum headroom.
 App* App::s_self = nullptr;
 int  App::s_fetchDepth = 0;
-bool App::s_spkWasOnForFetch = false;
 void App::tlsBusyTrampoline(bool busy) {
   if (!s_self) return;
-  // NOTE: this does NOT free the drawing sprite. General fetches (GP, weather,
-  // QRZ, hams.at) keep the sprite resident so the display never goes dark if a
-  // post-fetch restore can't reclaim the block. Only the LoTW upload frees the
-  // sprite, explicitly and locally (see doLotwUpload), because its gzip step needs
-  // a contiguous ~32 KB block that doesn't otherwise exist on this no-PSRAM part.
-  // The listeners stay suspended while s_fetchDepth > 0 (the service*() functions
-  // gate on netFetchActive()) and rebuild themselves once it returns to 0.
+  // On an outbound TLS session we suspend the LAN listeners (rigd/rotd) for the duration
+  // so they don't rebuild sockets mid-handshake; they stay down while s_fetchDepth > 0
+  // (the service*() functions gate on netFetchActive()) and come back once it hits 0.
+  //
+  // This does NOT free the drawing sprite -- BearSSL's buffers fit the contiguous block
+  // with the sprite resident, so the screen never goes dark (freeCanvasForTls() is a
+  // no-op; kept as a call site in case a future path needs it).
+  //
+  // It also no longer stops the speaker. Earlier firmware tore the I2S audio driver down
+  // around every fetch because the OLD mbedTLS stack drew its handshake buffers from the
+  // internal DMA-capable SRAM pool that audio also uses, so audio-on could starve a
+  // handshake. The BearSSL migration removed that: on-device, HTTPS fetches (downloads and
+  // LoTW/Cloudlog uploads) all succeed with the speaker enabled, and the internal DMA pool
+  // stays flat (~54 KB free) right through each handshake -- BearSSL simply doesn't draw
+  // from it. So audio now plays uninterrupted through fetches. (Verified v0.9.44 via the
+  // former TLS_AUDIO_DIAG instrumentation.)
   if (busy) {
     if (s_fetchDepth++ == 0) {
       s_self->suspendNetServers();
-      s_self->freeCanvasForTls();   // free the ~32KB sprite -> larger contiguous block for the handshake
-      // Release the audio I2S DMA buffer for the duration of the fetch. The speaker/
-      // mic I2S driver allocates its DMA buffer from the INTERNAL, DMA-capable SRAM
-      // pool -- the SAME scarce pool mbedTLS draws its ~16 KB handshake buffers from
-      // (NOT the general 8-bit heap the "largest block" log measures). Diagnosed on
-      // device: after any audio use (game sound, or a voice memo, which leaves the
-      // speaker begin()'d), the internal pool no longer had room for the TLS buffer and
-      // every HTTPS connect failed with "SSL - Memory allocation failed" while the
-      // general block still read 31732. end() hands that DMA RAM back; we re-begin the
-      // speaker once the fetch is done. (No-op if the speaker was already off.)
-      s_spkWasOnForFetch = M5Cardputer.Speaker.isEnabled();
-      if (s_spkWasOnForFetch) { M5Cardputer.Speaker.stop(); M5Cardputer.Speaker.end(); }
+      s_self->freeCanvasForTls();   // no-op now (sprite stays resident; see freeCanvasForTls)
     }
   } else if (s_fetchDepth > 0) {
     if (--s_fetchDepth == 0) {
-      if (s_spkWasOnForFetch) {
-        M5Cardputer.Speaker.begin();               // restore audio after the fetch
-        M5Cardputer.Speaker.setVolume(s_self->cfg.spkVolume);
-        s_spkWasOnForFetch = false;
-      }
-      s_self->restoreCanvasAfterTls();  // re-create the sprite now the handshake is done
+      s_self->restoreCanvasAfterTls();  // no-op now (sprite was never freed)
     }
   }
 }
@@ -4255,6 +4247,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_MESSAGES: keyMessages(c, enter, back); break;
     case SCR_LORACOMPASS: keyLoraCompass(c, enter, back); break;
     case SCR_LORASAT:  keyLoraSat(c, enter, back); break;
+    case SCR_LORAROSTER: keyLoraRoster(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
 #endif
@@ -5275,6 +5268,27 @@ static int dbIndexByName(SatDb& db, const char* name) {
   return -1;
 }
 
+// Look up a satellite by NORAD catalog number. The NORAD ID is invariant across every
+// station's database regardless of the display name it happens to use, so it is the
+// reliable key for cross-station references (a satellite may be "RS95S" in one DB and
+// "QMR-KWT2" in another, but the NORAD number is the same). Returns -1 if not present.
+static int dbIndexByNorad(SatDb& db, uint32_t norad) {
+  if (norad == 0) return -1;
+  for (int i = 0; i < db.count(); ++i)
+    if (db.at(i).norad == norad) return i;
+  return -1;
+}
+
+// Resolve a satellite reference that carries BOTH a name and (optionally) a NORAD number,
+// as decoded from a LoRa message. Prefer the NORAD number (name-agnostic); fall back to
+// the name only when there is no NORAD or the NORAD isn't in this DB. This is what makes
+// #SAT / !SAT references work between stations whose DBs name the same object differently.
+static int dbResolveSat(SatDb& db, const char* name, uint32_t norad) {
+  int i = dbIndexByNorad(db, norad);
+  if (i >= 0) return i;
+  return dbIndexByName(db, name);
+}
+
 // Scan a text field for the first token that reads as a VHF/UHF frequency in MHz
 // (e.g. "145.950", "435.180") or bare kHz, returning it in Hz (0 = none found).
 // Only decimals that look like a real ham-sat frequency are accepted so stray
@@ -6182,7 +6196,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,82,49,77,79,81,25,43,69,70,71,72,73,78,74,75,76};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,27,28,29};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,80,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
   (int)(sizeof(SET_RADIO)/sizeof(int)), (int)(sizeof(SET_ROTOR)/sizeof(int)),
@@ -6259,6 +6273,7 @@ void App::keySettings(char c, bool enter, bool back) {
                                                  cfg.loraBwHz, cfg.loraTxDbm); } break;
       case 61: { int v = ((int)cfg.msgNotify + dir + 3) % 3;
                  cfg.msgNotify = (uint8_t)v; cfg.save(); } break;
+      case 80: cfg.autoPosReply = !cfg.autoPosReply; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 8) % 8);
               cfg.save(); applyRotatorFromCfg(); break;
@@ -6390,6 +6405,8 @@ void App::keySettings(char c, bool enter, bool back) {
       case 61: { int v = ((int)cfg.msgNotify + 1) % 3; cfg.msgNotify = (uint8_t)v; cfg.save();
                  setStatus(v == 0 ? "Msg notify off" : v == 2 ? "Msg notify banner+beep"
                                                               : "Msg notify banner"); } break;
+      case 80: cfg.autoPosReply = !cfg.autoPosReply; cfg.save();
+               setStatus(cfg.autoPosReply ? "Auto position reply ON" : "Auto position reply off"); break;
       case 11: editTarget = 206; editTitle = "Net rotator port";
                editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
@@ -6906,7 +6923,10 @@ void App::keyEdit(char c, bool enter, bool back) {
           editTarget = 705; editTitle = "Sked time (HH:MM UTC)"; screen = SCR_EDIT; return;
         }
         char msg[MSG_TEXT_MAX + 1];
-        snprintf(msg, sizeof(msg), "!%s %s %s", ssSat, ssDate, tstr.c_str());
+        // Include the NORAD after the name (name/norad, no space) so the far end resolves
+        // the satellite by its invariant catalog number regardless of display name.
+        if (ssNorad) snprintf(msg, sizeof(msg), "!%s/%lu %s %s", ssSat, (unsigned long)ssNorad, ssDate, tstr.c_str());
+        else         snprintf(msg, sizeof(msg), "!%s %s %s", ssSat, ssDate, tstr.c_str());
         loraSendCurrent(msg);
         screen = SCR_MESSAGES; lastDrawMs = 0; return;
       }
@@ -8862,6 +8882,7 @@ void App::draw() {
     case SCR_MESSAGES: drawMessages(); break;
     case SCR_LORACOMPASS: drawLoraCompass(); break;
     case SCR_LORASAT:  drawLoraSat(); break;
+    case SCR_LORAROSTER: drawLoraRoster(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
 #endif
@@ -13503,18 +13524,28 @@ static MsgDecode decodeMsg(const char* text) {
     }
   }
 
-  // #SAT  -- satellite token up to a space (or end).
+  // #NAME/NORAD  -- satellite token up to a space (or end). The optional "/NORAD" suffix
+  // (a catalog number) is split off into d.norad so the receiver can resolve by the
+  // invariant NORAD id regardless of the display name in the message.
   const char* hash = strchr(text, '#');
   if (hash && hash[1] && hash[1] != ' ') {
-    copyToken(hash + 1, d.sat, sizeof(d.sat), " @#!,\t");
+    char tok[20];
+    copyToken(hash + 1, tok, sizeof(tok), " @#!,\t");
+    char* slash = strchr(tok, '/');
+    if (slash) { *slash = 0; d.norad = (uint32_t)strtoul(slash + 1, nullptr, 10); }
+    strncpy(d.sat, tok, sizeof(d.sat) - 1); d.sat[sizeof(d.sat) - 1] = 0;
     if (d.sat[0]) d.hasSat = true;
   }
 
-  // !SAT YYYY-MM-DD HH:MM  -- sked proposal: sat, then date, then time.
+  // !NAME/NORAD YYYY-MM-DD HH:MM  -- sked proposal: sat (opt. /NORAD), then date, then time.
   const char* bang = strchr(text, '!');
   if (bang && bang[1] && bang[1] != ' ') {
     const char* p = bang + 1;
-    int sn = copyToken(p, d.skedSat, sizeof(d.skedSat), " \t");
+    char tok[20];
+    int sn = copyToken(p, tok, sizeof(tok), " \t");
+    char* slash = strchr(tok, '/');
+    if (slash) { *slash = 0; d.skedNorad = (uint32_t)strtoul(slash + 1, nullptr, 10); }
+    strncpy(d.skedSat, tok, sizeof(d.skedSat) - 1); d.skedSat[sizeof(d.skedSat) - 1] = 0;
     p += sn; while (*p == ' ') p++;
     // date YYYY-MM-DD (exactly 10 chars, digits + dashes)
     if (strlen(p) >= 10 && p[4] == '-' && p[7] == '-') {
@@ -13568,10 +13599,24 @@ void App::loraPoll() {
 
   msgPush(from[0] ? from : "?", text, false, (int)lroundf(rssi), (int)lroundf(snr));
 
+  // If this message reports a position, record the sender in the station roster (keyed by
+  // callsign; the grid is derived locally from lat/lon). Then, if automatic position
+  // reporting is enabled, consider replying with our own position -- the loop-guards inside
+  // maybeAutoReplyPosition (global rate limit + per-station cooldown) keep two auto-reply
+  // units from ping-ponging. This runs only for genuinely received frames (loraPoll never
+  // sees our own echoes), so an auto-reply cannot trigger our own auto-reply.
+  {
+    MsgDecode d = decodeMsg(text);
+    if (d.hasPos && from[0]) {
+      rosterUpsert(from, d.lat, d.lon, (int)lroundf(rssi), (int)lroundf(snr));
+      maybeAutoReplyPosition(from);
+    }
+  }
+
   // Notify: track unread for the header badge, and (unless on the Messages screen
   // already, or in charge/sleep mode) raise a brief cross-screen banner and an
   // opt-in beep. cfg.msgNotify: 0=off, 1=banner, 2=banner+beep.
-  if (screen == SCR_MESSAGES) {
+  if (screen == SCR_MESSAGES || screen == SCR_LORAROSTER) {
     lastDrawMs = 0; draw();                          // visible already: refresh now
   } else {
     if (msgUnread < 0xFFFF) msgUnread++;
@@ -13661,9 +13706,11 @@ void App::drawLoraCompass() {
   if (ageMin < 1)        canvas.print("just now");
   else if (ageMin < 60)  canvas.printf("%lum ago", (unsigned long)ageMin);
   else                   canvas.printf("%luh ago", (unsigned long)(ageMin / 60));
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(rx, 92); canvas.printf("%s", Location::toGrid(lcLat, lcLon).c_str());
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(rx, 96); canvas.printf("@%.3f", lcLat);
-  canvas.setCursor(rx, 106); canvas.printf(" %.3f", lcLon);
+  canvas.setCursor(rx, 104); canvas.printf("@%.3f", lcLat);
+  canvas.setCursor(rx, 114); canvas.printf(" %.3f", lcLon);
 
   footer("` back");
 }
@@ -13672,16 +13719,18 @@ void App::keyLoraCompass(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_MESSAGES; lastDrawMs = 0; }
 }
 
-// Detail for a satellite named in a received #SAT message (SCR_LORASAT). Resolves
-// the name against the local DB and, if found, shows identity + the next pass
-// computed for the current observer. If the sat isn't in the DB, says so (the
-// receiver may not have that bird cached).
+// Detail for a satellite named in a received #NAME/NORAD message (SCR_LORASAT). Resolves
+// by NORAD first (name-agnostic), falling back to the name, and if found shows identity +
+// the next pass computed for the current observer. If the sat isn't in the DB, says so
+// (the receiver may not have that bird cached).
 void App::drawLoraSat() {
   header("Sat (from msg)");
-  int si = dbIndexByName(db, lsSat);
+  int si = dbResolveSat(db, lsSat, lsNorad);
   if (si < 0) {
     canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(6, 46); canvas.printf("'%s'", lsSat);
+    canvas.setCursor(6, 46);
+    if (lsNorad) canvas.printf("'%s' (NORAD %lu)", lsSat, (unsigned long)lsNorad);
+    else         canvas.printf("'%s'", lsSat);
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 64); canvas.print("Not in your satellite list.");
     canvas.setTextColor(CL_GREY, CL_BLACK);
@@ -13692,6 +13741,11 @@ void App::drawLoraSat() {
   SatEntry& s = db.at(si);
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 34); canvas.printf("%s", s.name);
+  // If the sender's display name differs from ours (resolved via NORAD), show theirs too.
+  if (lsSat[0] && strcasecmp(lsSat, s.name) != 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 20); canvas.printf("sent as: %s", lsSat);
+  }
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(6, 48); canvas.printf("NORAD %lu", (unsigned long)s.norad);
   if (s.intlDes[0]) { canvas.setCursor(120, 48); canvas.printf("%s", s.intlDes); }
@@ -13725,8 +13779,175 @@ void App::keyLoraSat(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_MESSAGES; lastDrawMs = 0; return; }
   if (c == 's') {                          // adopt this sat as the active selection
-    int si = dbIndexByName(db, lsSat);
+    int si = dbResolveSat(db, lsSat, lsNorad);
     if (si >= 0) { satSel = si; setStatus(String("Active: ") + db.at(si).name, 2000); }
+  }
+}
+
+// ---- Station roster (who's on the LoRa channel, and where) --------------------------
+
+// Broadcast our own @lat,lon. This is both the "p" key on Messages and the presence ping;
+// the text is exactly the existing @lat,lon format so any receiver's decodeMsg() picks it
+// up and adds us to their roster. No new frame type.
+void App::sendMyPosition() {
+  const Observer& o = loc.obs();
+  if (!o.valid) { setStatus("No position (set location/GPS)", 2500); return; }
+  char msg[MSG_TEXT_MAX + 1];
+  snprintf(msg, sizeof(msg), "@%.4f,%.4f", o.lat, o.lon);
+  loraSendCurrent(msg);
+}
+
+int App::rosterIndexByCall(const char* call) {
+  if (!call || !call[0]) return -1;
+  for (int i = 0; i < rosterCount; ++i)
+    if (strcasecmp(rosterList[i].call, call) == 0) return i;
+  return -1;
+}
+
+// Record (or update) a station we heard reporting a position. Keyed by callsign: an
+// existing station's position/signal/time are refreshed; a new one is appended, evicting
+// the oldest-heard entry when the array is full. autoRepliedMs is preserved across updates
+// so the per-station auto-reply cooldown survives repeated position reports.
+void App::rosterUpsert(const char* call, double lat, double lon, int rssi, int snr) {
+  if (!call || !call[0]) return;
+  int i = rosterIndexByCall(call);
+  if (i < 0) {
+    if (rosterCount < ROSTER_MAX) {
+      i = rosterCount++;
+    } else {
+      // Evict the least-recently-heard entry.
+      int oldest = 0;
+      for (int k = 1; k < rosterCount; ++k)
+        if (rosterList[k].heardMs < rosterList[oldest].heardMs) oldest = k;
+      i = oldest;
+    }
+    memset(&rosterList[i], 0, sizeof(RosterEntry));
+    strncpy(rosterList[i].call, call, sizeof(rosterList[i].call) - 1);
+    rosterList[i].call[sizeof(rosterList[i].call) - 1] = 0;
+  }
+  rosterList[i].lat = lat; rosterList[i].lon = lon;
+  rosterList[i].rssi = (int16_t)rssi; rosterList[i].snr = (int8_t)snr;
+  rosterList[i].heardMs = millis();
+}
+
+// Auto-reply with our own position when someone else reports theirs -- but only if the
+// setting is on AND both loop-guards pass:
+//   * global rate limit: at most one auto-reply every AUTO_REPLY_MIN_GAP_MS, so a busy
+//     channel can't turn into a reply storm; and
+//   * per-station cooldown: don't auto-reply to the same station more than once every
+//     AUTO_REPLY_PER_STA_MS, so two auto-reply units can't ping-pong endlessly.
+// A short randomized delay before sending avoids everyone answering in the same instant
+// (which would collide on the shared channel).
+void App::maybeAutoReplyPosition(const char* toCall) {
+  if (!cfg.autoPosReply) return;
+  const Observer& o = loc.obs();
+  if (!o.valid) return;                         // nothing to report
+  if (!toCall || !toCall[0]) return;
+
+  const uint32_t AUTO_REPLY_MIN_GAP_MS = 30000;    // >= 30 s between any two auto-replies
+  const uint32_t AUTO_REPLY_PER_STA_MS = 300000;   // >= 5 min per individual station
+  uint32_t now = millis();
+
+  if (lastAutoReplyMs != 0 && (now - lastAutoReplyMs) < AUTO_REPLY_MIN_GAP_MS) return;
+  int i = rosterIndexByCall(toCall);
+  if (i >= 0 && rosterList[i].autoRepliedMs != 0 &&
+      (now - rosterList[i].autoRepliedMs) < AUTO_REPLY_PER_STA_MS) return;
+
+  // Randomized settle (120-600 ms) so simultaneous listeners don't all key up together.
+  delay(120 + (int)(esp_random() % 480));
+  sendMyPosition();
+  lastAutoReplyMs = millis();
+  if (i >= 0) rosterList[i].autoRepliedMs = lastAutoReplyMs;
+}
+
+// Roster screen: every station heard reporting a position, newest first, with grid,
+// distance + bearing from us (when we have our own fix), signal, and age. ENTER opens the
+// bearing compass to the selected station.
+void App::drawLoraRoster() {
+  header("Stations heard");
+  if (rosterCount == 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 58); canvas.print("No stations heard yet.");
+    canvas.setCursor(6, 72); canvas.print("Positions appear here when a");
+    canvas.setCursor(6, 82); canvas.print("CardSat sends @lat,lon (p key).");
+    footer("p ping   ` back");
+    return;
+  }
+  // Draw newest-heard first. Build an index order by heardMs descending.
+  int order[ROSTER_MAX];
+  for (int i = 0; i < rosterCount; ++i) order[i] = i;
+  for (int a = 0; a < rosterCount - 1; ++a)
+    for (int b = a + 1; b < rosterCount; ++b)
+      if (rosterList[order[b]].heardMs > rosterList[order[a]].heardMs) {
+        int t = order[a]; order[a] = order[b]; order[b] = t;
+      }
+  if (rosterSel < 0) rosterSel = 0;
+  if (rosterSel >= rosterCount) rosterSel = rosterCount - 1;
+
+  const Observer& o = loc.obs();
+  const int rowY0 = 20, rowH = 22, ROWS = 5;
+  int shown = rosterCount < ROWS ? rosterCount : ROWS;
+  // Keep the selection visible (simple top window).
+  int top = 0;
+  if (rosterSel >= ROWS) top = rosterSel - ROWS + 1;
+  for (int r = 0; r < shown; ++r) {
+    int oi = top + r; if (oi >= rosterCount) break;
+    RosterEntry& e = rosterList[order[oi]];
+    int y = rowY0 + r * rowH;
+    bool sel = (oi == rosterSel);
+    if (sel) canvas.fillRect(0, y - 1, 240, rowH, CL_DGREY);
+    uint8_t bg = sel ? CL_DGREY : CL_BLACK;
+    // Line 1: callsign + grid + age.
+    canvas.setTextColor(CL_GREEN, bg);
+    canvas.setCursor(2, y); canvas.printf("%s", e.call);
+    canvas.setTextColor(CL_CYAN, bg);
+    canvas.setCursor(92, y); canvas.printf("%s", Location::toGrid(e.lat, e.lon).c_str());
+    uint32_t ageMin = (millis() - e.heardMs) / 60000;
+    canvas.setTextColor(ageMin >= 10 ? CL_ORANGE : CL_GREY, bg);
+    canvas.setCursor(176, y);
+    if (ageMin < 1)       canvas.print("now");
+    else if (ageMin < 60) canvas.printf("%lum", (unsigned long)ageMin);
+    else                  canvas.printf("%luh", (unsigned long)(ageMin / 60));
+    // Line 2: distance + bearing (if we have a fix) and signal.
+    canvas.setTextColor(CL_WHITE, bg);
+    canvas.setCursor(2, y + 10);
+    if (o.valid) {
+      double distKm, brg;
+      greatCircle(o.lat, o.lon, e.lat, e.lon, distKm, brg);
+      if (distKm < 10.0)      canvas.printf("%.1fkm %03d", distKm, (int)lroundf((float)brg));
+      else if (distKm < 1000) canvas.printf("%.0fkm %03d", distKm, (int)lroundf((float)brg));
+      else                    canvas.printf("%.0fkm %03d", distKm, (int)lroundf((float)brg));
+    } else {
+      canvas.printf("@%.3f,%.3f", e.lat, e.lon);
+    }
+    canvas.setTextColor(CL_GREY, bg);
+    canvas.setCursor(140, y + 10); canvas.printf("%ddBm", (int)e.rssi);
+  }
+  footer(";/. sel  ENT compass  p ping  ` bk");
+}
+
+void App::keyLoraRoster(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_MESSAGES; lastDrawMs = 0; return; }
+  if (rosterCount == 0) {
+    if (c == 'p') { sendMyPosition(); }
+    return;
+  }
+  if (c == ';') { if (rosterSel > 0) rosterSel--; lastDrawMs = 0; return; }        // up
+  if (c == '.') { if (rosterSel < rosterCount - 1) rosterSel++; lastDrawMs = 0; return; } // down
+  if (c == 'p') { sendMyPosition(); return; }
+  if (enter) {
+    // Open the bearing compass to the selected station.
+    int order[ROSTER_MAX];
+    for (int i = 0; i < rosterCount; ++i) order[i] = i;
+    for (int a = 0; a < rosterCount - 1; ++a)
+      for (int b = a + 1; b < rosterCount; ++b)
+        if (rosterList[order[b]].heardMs > rosterList[order[a]].heardMs) {
+          int t = order[a]; order[a] = order[b]; order[b] = t;
+        }
+    RosterEntry& e = rosterList[order[rosterSel]];
+    lcLat = e.lat; lcLon = e.lon; lcMsgMs = e.heardMs;
+    strncpy(lcFrom, e.call, sizeof(lcFrom) - 1); lcFrom[sizeof(lcFrom) - 1] = 0;
+    screen = SCR_LORACOMPASS; lastDrawMs = 0;
   }
 }
 
@@ -13737,6 +13958,7 @@ void App::beginSkedSend() {
   SatEntry* a = activeSat();
   if (!a) { setStatus("No satellite selected", 2000); return; }
   strncpy(ssSat, a->name, sizeof(ssSat) - 1); ssSat[sizeof(ssSat) - 1] = 0;
+  ssNorad = a->norad;                          // carry the NORAD through the prompts
   ssDate[0] = 0;
   // Prefill the date field with today (UTC) as a convenient starting point.
   editBuf = "";
@@ -13757,14 +13979,25 @@ void App::openDecodedAction(int orderIdx) {
   MsgDecode d = decodeMsg(m.text);
 
   if (d.hasSked) {
-    // Pre-fill a sked draft from the proposal and drop into the sked editor.
+    // Pre-fill a sked draft from the proposal and drop into the sked editor. Resolve the
+    // satellite by NORAD first (name-agnostic) and store THIS station's name for it, so a
+    // proposal that used a different display name still lands on the right bird. Fall back
+    // to the name from the message when we can't resolve the NORAD locally.
     beginSkedEntry(-1);                    // fresh draft (sets defaults + own call)
-    strncpy(skedDraft.sat,  d.skedSat,  sizeof(skedDraft.sat)  - 1);
+    int si = dbResolveSat(db, d.skedSat, d.skedNorad);
+    const char* localName = (si >= 0) ? db.at(si).name : d.skedSat;
+    strncpy(skedDraft.sat,  localName,  sizeof(skedDraft.sat)  - 1);
+    skedDraft.sat[sizeof(skedDraft.sat) - 1] = 0;
     strncpy(skedDraft.date, d.skedDate, sizeof(skedDraft.date) - 1);
+    skedDraft.date[sizeof(skedDraft.date) - 1] = 0;
     // start time HH:MM -> HH:MM:00
     snprintf(skedDraft.start, sizeof(skedDraft.start), "%s:00", d.skedTime);
-    if (m.from[0]) { strncpy(skedDraft.call, m.from, sizeof(skedDraft.call) - 1); }
-    setStatus("Sked from message - review & save", 2500);
+    if (m.from[0]) {
+      strncpy(skedDraft.call, m.from, sizeof(skedDraft.call) - 1);
+      skedDraft.call[sizeof(skedDraft.call) - 1] = 0;
+    }
+    setStatus(si >= 0 ? "Sked from message - review & save"
+                      : "Sked: sat not in your list - review", 2500);
     return;                                // beginSkedEntry already set screen
   }
   if (d.hasPos) {
@@ -13776,6 +14009,7 @@ void App::openDecodedAction(int orderIdx) {
   }
   if (d.hasSat) {
     strncpy(lsSat, d.sat, sizeof(lsSat) - 1); lsSat[sizeof(lsSat) - 1] = 0;
+    lsNorad = d.norad;                     // carry the NORAD for name-agnostic resolution
     screen = SCR_LORASAT; lastDrawMs = 0;
     return;
   }
@@ -13836,9 +14070,9 @@ void App::drawMessages() {
     canvas.setCursor(6, 60); canvas.print("No messages yet.");
     canvas.setCursor(6, 74); canvas.print("p=pos  s=sat  k=sked  n=write");
 #if CARDSAT_HAS_LORARX
-    footer("p/s/k send  n write  m RX  ` bk");
+    footer("p/s/k send  o who  m RX  ` bk");
 #else
-    footer("p/s/k send   n write   ` back");
+    footer("p/s/k send  n write  o who  ` bk");
 #endif
     return;
   }
@@ -13922,9 +14156,9 @@ void App::drawMessages() {
   }
 
 #if CARDSAT_HAS_LORARX
-  footer("n msg  p/s/k  ENT open  m RX  ` bk");
+  footer("p/s/k  ENT open  o who  m RX  ` bk");
 #else
-  footer("n msg  p/s/k send  ENT open  ` back");
+  footer("p/s/k  ENT open  o who  ` back");
 #endif
 }
 
@@ -13949,18 +14183,23 @@ void App::keyMessages(char c, bool enter, bool back) {
   // Send triggers -- compose a sigil message for the CURRENT satellite / my position
   // and transmit via the normal path (the frame format is unchanged; these just build
   // recognizable text that a receiver's decodeMsg() picks up).
-  if (c == 'p') {                          // @lat,lon  -- my position
-    const Observer& o = loc.obs();
-    if (!o.valid) { setStatus("No position (set location/GPS)", 2500); return; }
-    char msg[MSG_TEXT_MAX + 1];
-    snprintf(msg, sizeof(msg), "@%.4f,%.4f", o.lat, o.lon);
-    loraSendCurrent(msg); lastDrawMs = 0; return;
+  if (c == 'p') {                          // @lat,lon  -- my position (also a presence ping)
+    sendMyPosition();
+    lastDrawMs = 0; return;
   }
-  if (c == 's') {                          // #SAT  -- current satellite
+  if (c == 'o') {                          // open the station roster (who's on / where)
+    rosterSel = 0; screen = SCR_LORAROSTER; lastDrawMs = 0; return;
+  }
+  if (c == 's') {                          // #NAME/NORAD  -- current satellite
     SatEntry* a = activeSat();
     if (!a) { setStatus("No satellite selected", 2000); return; }
     char msg[MSG_TEXT_MAX + 1];
-    snprintf(msg, sizeof(msg), "#%s", a->name);
+    // Include the NORAD catalog number after the name so the far end can resolve the
+    // satellite even if its database uses a different display name (e.g. RS95S vs
+    // QMR-KWT2). The name stays first so it remains human-readable and older receivers
+    // still see it. Omit "/0" if the NORAD is unknown.
+    if (a->norad) snprintf(msg, sizeof(msg), "#%s/%lu", a->name, (unsigned long)a->norad);
+    else          snprintf(msg, sizeof(msg), "#%s", a->name);
     loraSendCurrent(msg); lastDrawMs = 0; return;
   }
   if (c == 'k') {                          // !SAT date time  -- sked proposal (prompts)
@@ -17346,6 +17585,7 @@ void App::drawSettings() {
     rows[60] = String("LoRa region: ") + rg; }
   { const char* mn = (cfg.msgNotify == 0) ? "off" : (cfg.msgNotify == 2) ? "banner+beep" : "banner";
     rows[61] = String("Msg notify: ") + mn; }
+  rows[80] = String("Auto position reply: ") + (cfg.autoPosReply ? "on" : "off");
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
   rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
                      : cfg.rotType == ROT_NET ? "rotctl (net)"

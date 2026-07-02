@@ -18,6 +18,17 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.44:** the LoRa messaging features grew a **station roster** — press **`o`**
+> on the Messages screen to see everyone heard reporting a position, with callsign, grid,
+> distance/bearing, signal and age, and **ENTER** to open a bearing compass to any of them.
+> Press **`p`** to broadcast your own position (a presence ping); an optional
+> **automatic position reply** setting (off by default, loop-guarded) makes CardSats answer
+> a position request on their own. Satellite references in `#SAT`/`!SAT` messages now carry
+> the **NORAD catalog number** so they resolve even when two stations' databases use
+> different names for the same bird (e.g. RS95S vs QMR-KWT2), and the bearing compass now
+> shows the peer's **Maidenhead grid**. The `@lat,lon` on-air format is unchanged. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.44.md)**.
+
 > **New in v0.9.43:** a big **network reliability** release. All HTTPS moved from mbedTLS
 > to **BearSSL** (`ESP_SSLClient`), which fixed the residual "first download works, the
 > next fails" problem on the no-PSRAM Cardputer — the device now runs **91 back-to-back

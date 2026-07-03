@@ -71,6 +71,8 @@ struct SatEntry {
   uint16_t elsetNum = 0;      // ELEMENT_SET_NO
   bool     txLoaded = false;  // have we fetched transponders this session?
   uint8_t  amsatStatus = 0;   // AMSAT: 0 none, 1 heard, 2 not heard, 3 telemetry only
+  uint32_t amsatHeardEpoch = 0; // UTC epoch of the winning report's latest_reported_time (0 = none)
+  uint8_t  amsatReports = 0;  // report_count of the winning row (how many stations reported)
 };
 
 class SatDb {

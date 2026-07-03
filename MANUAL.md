@@ -839,6 +839,22 @@ page](https://www.amsat.org/status/) and are refreshed whenever you run
 designator, so it works for AMSAT-named birds; satellites loaded from CelesTrak
 categories usually won't match and simply show no mark.
 
+**"Recently" is a setting.** The status window defaults to the last **24 hours** and
+can be changed to **3, 6, 12, 24, 48, or 72 h** in *Settings → AMSAT status window*
+(re-run Update to re-fetch with the new window). A shorter window is a sharper "is it
+workable right now" signal; a longer one catches rarely-reported birds.
+
+**AMSAT status screen.** For a full view of what's on the air, open the dedicated
+**AMSAT status** screen — press **`s`** from the Satellites list, or pick **AMSAT
+status** from the main menu. It lists every bird with a report in the window, **sorted
+most-active-and-most-recent first**, and for each shows the status word (colored),
+**how long ago** the most recent report came in (e.g. "45m", "3h", "2d" — for heard,
+telemetry, *and* not-heard alike, since "not heard 1h ago" tells you someone tried
+recently), and how many stations reported. **ENTER** adopts a bird as the active
+satellite and jumps to Track; **`u`** re-fetches in place; **`` ` ``** goes back. (The
+"N ago" ages need the clock set; the feed buckets to about half-hour resolution, so
+they're coarse beyond the first hour.)
+
 Each row may also show a small **down-arrow** to the left of the activity mark — a
 **decay flag** for orbits that are dropping. It's coloured by severity: **yellow**
 (watch), **orange** (decaying), or **red** (reentry imminent), derived from the
@@ -2119,6 +2135,18 @@ without watching the screen. All of these sounds are governed by this one settin
 turning the AOS alarm off silences the AOS, TCA and LOS cues together. A small
 orange countdown banner appears on any screen within the last minute.
 
+**AOS lead alert** (Settings → *AOS lead alert*, **off** by default; **2 / 5 / 10 /
+15 min**): an earlier "get ready" cue, a distinct rising three-tone chirp and a
+screen flash, sounded that many minutes *before* AOS — enough lead time to get to the
+radio and point an antenna. It's separate from and in addition to the final
+60/30/10/0-second countdown above, and (like the countdown) it's gated by the AOS
+alarm toggle.
+
+**Next favorite pass on Home.** The home screen shows a persistent line for the
+soonest upcoming favorite pass — the satellite and a live AOS countdown (or **IN
+PASS** while one is up) — so "what's next and when" is answered without opening
+Passes. It reflects the same pass the alarm is tracking.
+
 **IR pass beacon** (toggle in Settings → Station → *IR pass beacon*, off by
 default): when enabled, every pass-alert event *also* emits a burst of flashes from
 the Cardputer's **built-in IR LED** (GPIO 44), with a **distinct flash count per
@@ -2998,11 +3026,11 @@ to WiFi, the **Web control** row shows the address to open — for example
   in the header lights up whenever the device's radio and/or rotator are tracking —
   mirroring the on-device header tag — so you can tell from your phone that the rig
   may be transmitting even after you've left the device's Track screen.
-- **Live sky plot** — a polar plot (N up, elevation as distance from the rim) with
-  a moving dot showing the satellite's current azimuth/elevation. While the
-  satellite is **below the horizon**, the plot instead draws the **next pass as an
-  arc** (its azimuth/elevation track), so you can see where it will rise and set;
-  the live dot takes over the moment it comes up.
+- **Live sky plot** — a polar plot (N up, elevation as distance from the rim) that
+  **always draws the pass arc with a direction-of-travel arrowhead** and an AOS
+  marker: while the satellite is up it shows the **current** pass path with the live
+  position dot overlaid; between passes it shows the **next** pass path so you can see
+  where it will rise and set. The green dot appears the moment the bird comes up.
 - **Adaptive refresh** — the page polls **faster during a pass** (sub-second, so the
   fast-moving Doppler frequencies stay current) and **slows down between passes** to
   save battery and network traffic, backing off automatically if the connection
@@ -3010,24 +3038,29 @@ to WiFi, the **Web control** row shows the address to open — for example
 - **Live readout** — downlink (RX) and uplink (TX) frequencies, azimuth/elevation,
   and the current tune mode. Beside the RX label a small **±N.NN kHz** figure shows
   how much **Doppler shift** is being applied right now. **Tap either frequency to
-  copy it** to the clipboard (handy for setting a second radio by hand).
+  copy it** to the clipboard (handy for setting a second radio by hand). Below the
+  mode, an **AMSAT activity line** shows the current bird's live status when it has
+  been reported — e.g. **"AMSAT: Heard 3h ago · 5 rpt"**, colored green (heard),
+  yellow (telemetry), or red (not heard).
 - **Transponder selection** — a drop-down lists the active satellite's
   transponders by name and mode; choosing one selects it on the device (the same
   selection the `t` key cycles), so you can pick the FM channel or the linear
   passband from your phone.
-- **Radio & rotator control** — buttons tune the passband down/up, step to the next
-  transponder, cycle the Doppler tune mode, recenter the passband, toggle CAL, and
-  switch **radio** and **rotator** output on/off. These do exactly what the
-  corresponding keys do on the Track screen — the web page drives the same
-  controls, it doesn't second-guess them. Rapid taps are debounced so a burst can't
-  queue up stale commands.
-- **Direct calibration entry** — type an exact **RX cal** or **TX cal** offset in
-  Hz and tap **Set** to apply it (the value is saved per-satellite, the same as the
-  on-device calibration); **Zero cal** clears both. For a linear bird the current
-  passband position and bandwidth are shown. The displayed RX/TX dials are always
-  computed live from the transponder plus Doppler plus this calibration, so the
-  calibration is the operator-settable correction rather than a free-typed absolute
-  frequency.
+- **Radio & rotator control** — the **tuning cluster** nudges the passband down/up
+  with a **visible, tappable step** (100 Hz / 1 kHz / 5 kHz — the same step the `s`
+  key cycles), plus **Center** and **TX→**. Buttons also switch **radio** and
+  **rotator** output on/off. These do exactly what the corresponding keys do on the
+  Track screen — the web page drives the same controls, it doesn't second-guess them.
+  Rapid taps are debounced so a burst can't queue up stale commands.
+- **Fast calibration pad** — the centerpiece for correcting drift **during a pass**:
+  **RX cal** and **TX cal** each get big one-tap **−/+** buttons with a **tappable
+  step** (10 / 100 / 1000 Hz) and a live readout, so you can net onto a signal without
+  a keyboard. **Zero cal** clears both in one tap. An **Exact…** toggle reveals the
+  type-an-exact-value-in-Hz path when you want a precise number. Calibration is saved
+  per-satellite, the same as on the device; for a linear bird the current passband
+  position and bandwidth are shown. The RX/TX dials are always computed live from the
+  transponder plus Doppler plus this calibration, so calibration is the operator-settable
+  correction rather than a free-typed absolute frequency.
 - **Manual (no-radio) tuning** — tap **Manual** to switch the control card to the
   hand-tuning calculator. It shows the **HOLD** leg (the frequency to park your own
   radio on) and the **TUNE** leg (the Doppler-corrected frequency to follow),

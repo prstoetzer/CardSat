@@ -18,6 +18,23 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.45:** a release focused on **working a pass**. The **web control panel** is
+> reworked for speed — a **fast calibration pad** (big one-tap RX/TX cal nudges with a tappable
+> step, no typing), a **tuning cluster** with a visible step, an **in-pass** header and frame,
+> and a **polar plot that always shows the pass arc** (current pass in-pass, next pass otherwise)
+> with a **direction-of-travel** arrow; the tracked satellite is always in the picker. **AMSAT
+> live status** is surfaced properly: **"heard N ago"** recency for every reported bird (Heard,
+> Telemetry, and Not-heard alike), a **configurable status window** (3/6/12/24/48/72 h, default
+> 24 — was a fixed 72), and a **dedicated AMSAT status screen** (sorted most-active-first, reached
+> with **`s`** from the sat list or the **AMSAT status** menu item). A new **AOS lead-time alert**
+> (off/2/5/10/15 min) warns you *before* AOS, and the **home screen** now shows the next favorite
+> pass with a live countdown. Plus two fixes — **DX Doppler** no longer keeps an activation's
+> transponders when you compute a mutual pass on another bird, and **`#SAT`** now parses satellite
+> names that contain spaces (e.g. `#ISS (ZARYA)/25544`) — and a **settings-persistence audit** that
+> fixed three settings (including 0.9.44's auto-position-reply) that weren't surviving a reboot.
+> The on-air formats are unchanged. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.45.md)**.
+
 > **New in v0.9.44:** the LoRa messaging features grew a **station roster** — press **`o`**
 > on the Messages screen to see everyone heard reporting a position, with callsign, grid,
 > distance/bearing, signal and age, and **ENTER** to open a bearing compass to any of them.

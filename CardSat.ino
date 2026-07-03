@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.44";
+static constexpr const char* FW_VERSION = "0.9.45";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -415,7 +415,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_FAVS_BAK "/CardSat/favs.bak"      // backup copy of favs.txt
 #define FILE_AMSTAT   "/CardSat/amstat.json"   // cached AMSAT OSCAR status summary
 #define AMSAT_STATUS_URL  "https://www.amsat.org/status/api/v1/summary.php?hours="
-#define AMSAT_STATUS_HOURS 72                    // "recently" window for status reports
+// AMSAT status window is now a user setting (cfg.amsatWindowH, default 24 h); see settings.h.
 #define FILE_SPACEWX  "/CardSat/spacewx.txt"    // cached space weather: "f107 ap epoch"
 #define FILE_SPACEWX_TMP "/CardSat/spacewx.tmp"  // scratch for streamed NOAA JSON (low heap)
 #define FILE_DL_TMP      "/CardSat/dl.tmp"        // shared scratch for streamed downloads (one at a time)
@@ -1451,6 +1451,8 @@ struct SatEntry {
   uint16_t elsetNum = 0;      // ELEMENT_SET_NO
   bool     txLoaded = false;  // have we fetched transponders this session?
   uint8_t  amsatStatus = 0;   // AMSAT: 0 none, 1 heard, 2 not heard, 3 telemetry only
+  uint32_t amsatHeardEpoch = 0; // UTC epoch of the winning report's latest_reported_time (0 = none)
+  uint8_t  amsatReports = 0;  // report_count of the winning row (how many stations reported)
 };
 
 class SatDb {
@@ -1999,6 +2001,8 @@ struct Settings {
   int8_t   visSunElMax = -6;      // observer-darkness gate: Sun below this (deg). -6 civil, -12 naut, -18 astro
   float    visMinEl    = 10.0f;   // min peak elevation to call a pass visible
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
+  uint8_t  aosLeadMin = 0;      // extra "get ready" alert this many minutes before AOS (0 = off)
+  uint8_t  amsatWindowH = 24;   // AMSAT status "recently heard" window (hours): 3/6/12/24/48/72
   bool     irBeacon   = false;  // also flash the IR LED on each pass alert
                                 // (distinct flash count per event; user-built RX)
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
@@ -2115,7 +2119,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -5030,6 +5034,17 @@ private:
   void drawLoraRoster();
   void keyLoraRoster(char c, bool enter, bool back);
   void sendMyPosition();          // broadcast our @lat,lon (the 'p' key / presence ping)
+
+  // AMSAT status screen (SCR_AMSATSTAT): a live view of every satellite with an AMSAT
+  // activity report in the current window, sorted status-then-recency. Built into a small
+  // index array (into the catalog) on entry; ENTER selects a sat as active.
+  static const int AMSTAT_MAX = 64;
+  int      amStatIdx[AMSTAT_MAX];   // catalog indices with a report, sorted for display
+  int      amStatN = 0;
+  int      amStatSel = 0, amStatScroll = 0;
+  void buildAmsatStatusView();      // populate + sort amStatIdx from db
+  void drawAmsatStatus();
+  void keyAmsatStatus(char c, bool enter, bool back);
   void openDecodedAction(int orderIdx);   // ENTER on a message row: act on its sigils
   void beginSkedSend();                    // start the date->time prompt for a !sked send
   char ssSat[12] = {0};                    // sked-send: sat name captured at start
@@ -9011,8 +9026,28 @@ static inline int amsatPrio(uint8_t s) { return s == 1 ? 3 : s == 3 ? 2 : s == 2
 // Set each catalog entry's amsatStatus from a cached summary.php response:
 // 1 = Heard / Crew Active, 3 = Telemetry Only, 2 = Not Heard, 0 = no reports.
 // The highest-precedence report value seen for a satellite wins.
+// Parse an AMSAT "latest_reported_time" of the fixed form "YYYY-MM-DDTHH:MM:SSZ"
+// into a Unix UTC epoch. Returns 0 on any malformed input. Uses a direct days-from-
+// civil calculation (no timegm/mktime, which pull in timezone state) so it is cheap
+// and self-contained for the per-object parse loop.
+static uint32_t amsatIsoToEpoch(const char* s) {
+  if (!s || !s[0]) return 0;
+  int Y, Mo, D, H, Mi, Se;
+  if (sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &Mo, &D, &H, &Mi, &Se) != 6) return 0;
+  if (Y < 1970 || Mo < 1 || Mo > 12 || D < 1 || D > 31) return 0;
+  // days_from_civil (Howard Hinnant's algorithm), epoch = 1970-01-01.
+  int y = Y - (Mo <= 2 ? 1 : 0);
+  int era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (unsigned)((153 * (Mo + (Mo > 2 ? -3 : 9)) + 2) / 5 + D - 1);
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = (long)era * 146097 + (long)doe - 719468;
+  long secs = days * 86400L + H * 3600L + Mi * 60L + Se;
+  return (secs > 0) ? (uint32_t)secs : 0;
+}
+
 void SatDb::applyAmsatStatusFile(const char* path) {
-  for (int i = 0; i < _n; ++i) _sats[i].amsatStatus = 0;
+  for (int i = 0; i < _n; ++i) { _sats[i].amsatStatus = 0; _sats[i].amsatHeardEpoch = 0; _sats[i].amsatReports = 0; }
   if (_n <= 0) return;
   File f = Store::fs().open(path, "r");
   if (!f) return;
@@ -9082,14 +9117,25 @@ void SatDb::applyAmsatStatusFile(const char* path) {
           const char* nm  = one["name"]  | "";
           const char* rep = one["report"] | "";
           long cnt = one["report_count"] | 0;
+          const char* lrt = one["latest_reported_time"] | "";
           if (nm[0] && cnt > 0) {
             uint8_t st = !strcmp(rep, "Not Heard")      ? 2
                        : !strcmp(rep, "Telemetry Only") ? 3
                                                         : 1;
+            uint32_t ep = amsatIsoToEpoch(lrt);
             char sb[16]; amsatBase(nm, sb, 16);
             for (int i = 0; i < _n; ++i) {
               if (strcmp(sb, cb[i]) != 0) continue;
-              if (amsatPrio(st) > amsatPrio(_sats[i].amsatStatus)) _sats[i].amsatStatus = st;
+              int pNew = amsatPrio(st), pCur = amsatPrio(_sats[i].amsatStatus);
+              // A row wins if it has higher status precedence, or ties precedence but is
+              // more recent -- so the shown status, age and count all come from that row.
+              bool win = (pNew > pCur) ||
+                         (pNew == pCur && ep && ep > _sats[i].amsatHeardEpoch);
+              if (win) {
+                _sats[i].amsatStatus = st;
+                _sats[i].amsatHeardEpoch = ep;
+                _sats[i].amsatReports = (cnt > 255) ? 255 : (uint8_t)cnt;
+              }
             }
           }
         }
@@ -11604,6 +11650,15 @@ bool Settings::load() {
   lrxCrc     = d["lrxcrc"] | (uint8_t)1;
   msgNotify  = d["msgntfy"] | (uint8_t)1;
   if (msgNotify > 2) msgNotify = 1;
+  autoPosReply = d["autopos"] | false;
+  aosLeadMin = d["aoslead"] | (uint8_t)0;
+  { const uint8_t ok[] = {0,2,5,10,15}; bool v = false;
+    for (uint8_t x : ok) if (aosLeadMin == x) v = true;
+    if (!v) aosLeadMin = 0; }                 // snap a stray value back to a valid step
+  amsatWindowH = d["amsatwin"] | (uint8_t)24;
+  { const uint8_t ok[] = {3,6,12,24,48,72}; bool v = false;
+    for (uint8_t x : ok) if (amsatWindowH == x) v = true;
+    if (!v) amsatWindowH = 24; }
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
 #ifdef CARDSAT_CFG_DEBUG
@@ -11682,6 +11737,9 @@ bool Settings::save() {
   d["lrxfk"]=lrxFreqKHz; d["lrxsf"]=lrxSf; d["lrxbw"]=lrxBwHz; d["lrxcr"]=lrxCr;
   d["lrxsw"]=lrxSync; d["lrxpre"]=lrxPreamble; d["lrxcrc"]=lrxCrc;
   d["msgntfy"]=msgNotify;
+  d["autopos"]=autoPosReply;
+  d["aoslead"]=aosLeadMin;
+  d["amsatwin"]=amsatWindowH;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
   size_t wrote = serializeJson(d, f);
@@ -11807,6 +11865,27 @@ static uint16_t ageColor(double d) {
   if (d < 14) return CL_GREEN;      // fresh
   if (d < 28) return CL_YELLOW;     // getting old
   return CL_RED;                    // stale -- predictions will drift
+}
+
+// Format how long ago an AMSAT report came in, from its epoch, into a compact string
+// ("45m", "3h", "2d"). Empty when there's no timestamp or the clock isn't set (we don't
+// invent an age). Coarse beyond the first hour -- the feed buckets to ~30 min, so implying
+// minute precision on an "N hours ago" value would be false.
+static String amsatHeardAgo(uint32_t epoch) {
+  if (!epoch || !timeIsSet()) return String("");
+  long now = (long)time(nullptr);
+  long dt = now - (long)epoch;
+  if (dt < 0) dt = 0;
+  if (dt < 3600)      return String((int)(dt / 60)) + "m";
+  if (dt < 172800)    return String((int)(dt / 3600)) + "h";   // < 48 h -> hours
+  return String((int)(dt / 86400)) + "d";
+}
+// Word + color for an AMSAT status code (1 heard, 3 telemetry, 2 not heard).
+static const char* amsatWord(uint8_t st) {
+  return st == 1 ? "Heard" : st == 3 ? "Telemetry" : st == 2 ? "Not heard" : "";
+}
+static uint16_t amsatColor(uint8_t st) {
+  return st == 1 ? CL_GREEN : st == 3 ? CL_YELLOW : st == 2 ? CL_RED : CL_GREY;
 }
 
 // --- speaker beep (AOS alarm) ---------------------------------------------
@@ -12497,7 +12576,7 @@ static float scanFileNum(const char* path, const char* key,
 
 void App::fetchAmsatStatus() {
   if (!net.connected()) return;
-  String url = String(AMSAT_STATUS_URL) + AMSAT_STATUS_HOURS;
+  String url = String(AMSAT_STATUS_URL) + (int)cfg.amsatWindowH;
   setStatus("AMSAT status..."); draw();
   if (net.httpsGetToFileRetry(url, FILE_AMSTAT, 200000, nullptr, 3))
     db.applyAmsatStatusFile(FILE_AMSTAT);
@@ -14288,6 +14367,20 @@ void App::serviceAosAlarm() {
   if (nextAos == 0) return;
   if (alarmAos != nextAos) { alarmAos = nextAos; alarmMarks = 0; }  // new target
   long dt = (long)(nextAos - now);
+  // "Get ready" lead alert: a distinct rising two-tone chirp at AOS - leadMinutes, so the
+  // operator has time to get to the radio and point an antenna before the imminent
+  // countdown starts. Uses bit 0x10 so it fires once per pass. Only when set (>0) and far
+  // enough out that it doesn't overlap the 60 s countdown.
+  if (cfg.aosLeadMin > 0) {
+    long leadS = (long)cfg.aosLeadMin * 60;
+    if (leadS > 60 && dt <= leadS && !(alarmMarks & 16)) {
+      alarmMarks |= 16;
+      beep(1000, 120); delay(80); beep(1400, 120); delay(80); beep(1800, 160);
+      aosFlashUntil = millis() + 5000;
+      strncpy(aosFlashName, nextAosName, sizeof(aosFlashName) - 1);
+      aosFlashName[sizeof(aosFlashName) - 1] = 0;
+    }
+  }
   if (dt <= 60 && !(alarmMarks & 1)) { alarmMarks |= 1; beep(1500, 80);
     if (cfg.irBeacon) irBeacon.flash(IR_N_T60); }
   if (dt <= 30 && !(alarmMarks & 2)) { alarmMarks |= 2; beep(1500, 80);
@@ -14636,15 +14729,18 @@ static const char WEB_PAGE[] PROGMEM = R"HTMLPAGE(<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CardSat</title>
 <style>
-:root{--bg:#0b0e13;--fg:#e6edf3;--mut:#8b96a5;--grn:#39d353;--org:#f0883e;--cy:#4ad;--pan:#161b22;--bd:#2a313c;--acc:#316dca}
+:root{--bg:#0b0e13;--fg:#e6edf3;--mut:#8b96a5;--grn:#39d353;--org:#f0883e;--cy:#4ad;--pan:#161b22;--bd:#2a313c;--acc:#316dca;--red:#e5534b}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 header{padding:10px 14px;background:var(--pan);border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px}
-header b{font-size:18px}.tag{margin-left:auto;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums}.tag.pass{color:var(--grn);font-weight:600}
+header b{font-size:18px}.tag{margin-left:auto;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums}.tag.pass{color:var(--grn);font-weight:600}.tag.off{color:var(--org)}
 main{padding:12px;max-width:980px;margin:0 auto}
 .cols{display:grid;grid-template-columns:1fr;gap:12px}
 @media(min-width:760px){.cols{grid-template-columns:1fr 1fr;align-items:start}.span2{grid-column:1/-1}}
-.card{background:var(--pan);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:0}
-.freq{font-variant-numeric:tabular-nums;font-size:clamp(26px,7vw,34px);font-weight:700;letter-spacing:.5px}
+.card{background:var(--pan);border:1px solid var(--bd);border-radius:12px;padding:12px}
+/* In-pass emphasis: the whole page gets a subtle green frame + the live card lifts */
+body.inpass{--acc:#39d353}
+body.inpass .live{border-color:rgba(57,211,83,.55);box-shadow:0 0 0 1px rgba(57,211,83,.25),0 6px 24px -12px rgba(57,211,83,.4)}
+.freq{font-variant-numeric:tabular-nums;font-size:clamp(26px,7vw,34px);font-weight:700;letter-spacing:.5px;line-height:1.1}
 .rx{color:var(--grn)}.tx{color:var(--org)}.lab{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.4px}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row>*{flex:1}
 select,button,input{font:inherit;color:var(--fg);background:#1d242e;border:1px solid var(--bd);border-radius:10px;padding:12px;min-height:48px}
@@ -14656,9 +14752,8 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;b
 .tools{display:flex;gap:8px;flex-wrap:wrap}.flt{flex:0 0 auto;width:auto;min-width:120px}
 .skywrap{display:flex;justify-content:center;padding:4px 0}svg{max-width:100%;height:auto}
 .hint{font-size:12px;color:var(--mut);margin-top:6px}
-.fld{display:flex;gap:8px;align-items:center;margin-top:8px}.fld label{flex:0 0 auto;width:84px;color:var(--mut);font-size:13px}.fld input{flex:1}.fld button{flex:0 0 auto;min-width:64px}
 .pillrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.sm{min-width:auto;min-height:auto;padding:8px 12px}
-.dop{font-size:12px;color:var(--cy);font-variant-numeric:tabular-nums;margin-left:8px}
+.dop{font-size:13px;color:var(--cy);font-variant-numeric:tabular-nums;margin-left:8px;font-weight:600}
 .copyable{cursor:pointer}.copyable:active{opacity:.6}.copied{color:var(--grn) !important}
 .vis{color:var(--org);font-weight:700}
 tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{background:#1d2b22}
@@ -14667,9 +14762,20 @@ tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{backgroun
 .tlbar{position:relative;flex:1;height:14px;background:#0d1117;border:1px solid #222a35;border-radius:4px;overflow:hidden}
 .tlseg{position:absolute;top:1px;height:10px;border-radius:2px;background:var(--acc)}
 .tlseg.v{background:var(--org)}.tlnow{position:absolute;top:0;width:2px;height:14px;background:#fff;opacity:.7}
-.tag.off{color:var(--org)}
 .trk{font-size:11px;font-weight:700;padding:2px 7px;border-radius:6px;letter-spacing:.5px}
 .trk.on{background:rgba(57,211,83,.18);color:var(--grn);border:1px solid rgba(57,211,83,.5)}
+/* Tuning + calibration clusters: big obvious nudge buttons for mid-pass use */
+.cluster{margin-top:12px}.cluster h4{margin:0 0 6px;font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px;font-weight:600;display:flex;align-items:center;gap:8px}
+.stepbtn{margin-left:auto;font-size:12px;font-weight:700;padding:4px 10px;min-height:0;border-radius:8px;background:#0d1117;border:1px solid var(--bd);color:var(--cy)}
+.nudge{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;align-items:center}
+.nudge .k{grid-column:span 1;font-size:11px;color:var(--mut);text-align:center;font-weight:700;letter-spacing:.5px}
+.nudge button{font-size:18px;font-weight:700;padding:14px 4px;font-variant-numeric:tabular-nums}
+.nudge button.dn{color:var(--cy)}.nudge button.up{color:var(--grn)}
+.valrow{display:flex;justify-content:space-between;align-items:baseline;margin:4px 0 2px;font-size:13px}
+.valrow .v{font-variant-numeric:tabular-nums;font-weight:700}
+.rxv{color:var(--grn)}.txv{color:var(--org)}
+.fld{display:flex;gap:8px;align-items:center;margin-top:8px}.fld label{flex:0 0 auto;width:84px;color:var(--mut);font-size:13px}.fld input{flex:1}.fld button{flex:0 0 auto;min-width:64px}
+.arrowhead{fill:var(--grn)}
 </style></head><body>
 <header><b>CardSat</b><span class="tag" id="tag">connecting...</span><span id="trk" class="trk"></span></header>
 <main>
@@ -14679,13 +14785,14 @@ tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{backgroun
 <button id="fav" class="flt" title="favourite">&#9734;</button>
 <button id="go" class="flt">Track</button></div></div>
 <div class="cols">
-<div class="card">
+<div class="card live">
 <div class="lab">Downlink (RX) <span class="dop" id="dop"></span></div><div class="freq rx copyable" id="rx" title="tap to copy">--.-----</div>
 <div class="lab" style="margin-top:8px">Uplink (TX)</div><div class="freq tx copyable" id="tx" title="tap to copy">--.-----</div>
 <div class="row" style="margin-top:10px">
 <div class="az lab">Az <span id="az" style="color:var(--fg)">--</span>&deg;</div>
 <div class="az lab">El <span id="el" style="color:var(--fg)">--</span>&deg;</div>
 <div class="lab">Mode <span id="mode" style="color:var(--fg)">--</span></div></div>
+<div class="lab" id="amsat" style="margin-top:6px"></div>
 <div class="skywrap"><svg id="sky" viewBox="0 0 220 220" width="220" height="220" role="img" aria-label="sky plot">
 <circle cx="110" cy="110" r="100" fill="#0d1117" stroke="#2a313c"/>
 <circle cx="110" cy="110" r="66" fill="none" stroke="#222a35"/>
@@ -14695,7 +14802,9 @@ tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{backgroun
 <text x="110" y="206" fill="#8b96a5" font-size="11" text-anchor="middle">S</text>
 <text x="200" y="114" fill="#8b96a5" font-size="11" text-anchor="middle">E</text>
 <text x="20" y="114" fill="#8b96a5" font-size="11" text-anchor="middle">W</text>
-<polyline id="arc" fill="none" stroke="#316dca" stroke-width="2" opacity=".7" points=""/>
+<polyline id="arc" fill="none" stroke="#316dca" stroke-width="2" opacity=".8" points=""/>
+<polygon id="ahead" class="arrowhead" points="" style="display:none"/>
+<circle id="aosdot" r="4" fill="#4ad" stroke="#0b0e13" stroke-width="1.5" style="display:none"/>
 <circle id="dot" cx="110" cy="110" r="6" fill="#39d353" stroke="#0b0e13" stroke-width="2" style="display:none"/>
 </svg></div>
 <div class="hint" id="aos">&mdash;</div></div>
@@ -14705,16 +14814,31 @@ tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{backgroun
 <div id="radCtl">
 <div class="lab">Transponder</div>
 <select id="tpsel" style="width:100%;margin-top:4px"></select>
-<div class="grid" style="margin-top:10px">
-<button data-k=",">Tune -</button><button data-k="/">Tune +</button>
-<button data-k="t">TX&#x2192;</button><button data-k="d">Mode</button>
-<button id="brad" data-k="r">Radio</button><button id="brot" data-k="o">Rotator</button>
-<button data-k="m">CAL</button><button data-k="x">Center</button></div>
-<div class="lab" style="margin-top:12px">Direct calibration (Hz)</div>
-<div class="fld"><label for="caldl">RX cal</label><input id="caldl" type="number" inputmode="numeric" step="100" placeholder="0"><button id="setdl">Set</button></div>
-<div class="fld"><label for="calul">TX cal</label><input id="calul" type="number" inputmode="numeric" step="100" placeholder="0"><button id="setul">Set</button></div>
-<div class="hint" id="pbline"></div>
-<div class="pillrow"><button id="calzero" class="flt sm">Zero cal</button></div></div>
+<!-- Tuning cluster: passband nudge with a visible, tappable step -->
+<div class="cluster"><h4>Tune passband <button id="tstep" class="stepbtn">1 kHz</button></h4>
+<div class="nudge">
+<button class="dn" data-k="," title="tune down">&minus;</button>
+<button class="up" data-k="/" title="tune up">+</button>
+<button data-k="x" title="recenter passband" style="color:var(--fg)">Center</button>
+<button data-k="t" title="swap active leg" style="color:var(--fg)">TX&#x2192;</button>
+</div>
+<div class="hint" id="pbline"></div></div>
+<!-- Fast calibration: one-tap RX/TX nudges, no typing, for mid-pass netting -->
+<div class="cluster"><h4>Calibrate <button id="cstep" class="stepbtn">10 Hz</button></h4>
+<div class="valrow"><span class="lab">RX cal</span><span class="v rxv" id="caldlv">0 Hz</span></div>
+<div class="nudge" style="grid-template-columns:1fr 1fr">
+<button class="dn" id="dlminus">&minus;</button><button class="up" id="dlplus">+</button></div>
+<div class="valrow" style="margin-top:8px"><span class="lab">TX cal</span><span class="v txv" id="calulv">0 Hz</span></div>
+<div class="nudge" style="grid-template-columns:1fr 1fr">
+<button class="dn" id="ulminus">&minus;</button><button class="up" id="ulplus">+</button></div>
+<div class="pillrow"><button id="calzero" class="flt sm">Zero cal</button>
+<button id="caladv" class="flt sm" title="type exact Hz">Exact&hellip;</button></div>
+<div id="caladvbox" style="display:none">
+<div class="fld"><label for="caldl">RX Hz</label><input id="caldl" type="number" inputmode="numeric" step="10" placeholder="0"><button id="setdl">Set</button></div>
+<div class="fld"><label for="calul">TX Hz</label><input id="calul" type="number" inputmode="numeric" step="10" placeholder="0"><button id="setul">Set</button></div></div>
+</div>
+<div class="pillrow"><button id="brad" data-k="r" class="flt sm">Radio out</button><button id="brot" data-k="o" class="flt sm">Rotator out</button></div>
+</div>
 <div id="manCtl" style="display:none">
 <div class="lab" id="mhl">HOLD</div><div class="freq" id="hold" style="color:#fff">--.-----</div>
 <div class="lab" id="mtl" style="margin-top:8px">TUNE &#x2192;</div><div class="freq" id="mtune" style="color:var(--cy)">--.-----</div>
@@ -14731,9 +14855,9 @@ tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{backgroun
 </div></main>
 <script>
 var lastSat=0,mode='rad',passList=[],lastTxKey='';
-var selPass=-1,notifyAt=0,notifyName='',pollMs=1500,failN=0,inPass=false;
+var selPass=-1,notifyAt=0,notifyName='',inPass=false;
+var tstep=1000,cstep=10,caldl=0,calul=0;
 function j(u,o){return fetch(u,o).then(r=>r.json())}
-/* Browser AOS notification for a tapped pass (client-only; needs permission). */
 function scheduleNotify(p){if(!p)return;
  if('Notification'in window&&Notification.permission==='default'){Notification.requestPermission()}
  notifyAt=p.aos;notifyName=(window._satname||'satellite');
@@ -14742,14 +14866,19 @@ function fireNotifyIfDue(){if(!notifyAt)return;var now=Date.now()/1000;
  if(now>=notifyAt-1){var msg=notifyName+' AOS now';
   if('Notification'in window&&Notification.permission==='granted'){try{new Notification('CardSat',{body:msg})}catch(e){}}
   notifyAt=0;}}
-/* Tap a frequency to copy it. */
 function copyFreq(id){var t=gid(id).textContent.replace(/[^0-9.]/g,'');if(!t)return;
  var done=function(){gid(id).classList.add('copied');setTimeout(()=>gid(id).classList.remove('copied'),700)};
  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,()=>{})}else{
   var ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch(e){}document.body.removeChild(ta)}}
-/* Debounce rapid control taps so we don't queue a burst of /api/cmd posts. */
 var _busy=false;
 function sendCmd(u){if(_busy)return;_busy=true;j(u,{method:'POST'}).then(s=>{_busy=false;tick()}).catch(e=>{_busy=false})}
+/* Calibration nudge: read current cal, add delta, POST absolute Hz. Optimistic UI. */
+function calNudge(which,delta){var cur=(which=='dl')?caldl:calul;var v=cur+delta;
+ if(v<-100000)v=-100000;if(v>100000)v=100000;
+ if(which=='dl'){caldl=v;gid('caldlv').textContent=fmtHz(v)}else{calul=v;gid('calulv').textContent=fmtHz(v)}
+ j('/api/cal?'+which+'='+v,{method:'POST'}).then(tick).catch(e=>{})}
+function fmtHz(v){return(v>0?'+':'')+v+' Hz'}
+function fmtStep(hz){return hz>=1000?(hz/1000)+' kHz':hz+' Hz'}
 function pad(n){return(n<10?'0':'')+n}
 function hhmm(t){var d=new Date(t*1000);return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+'Z'}
 function dur(s){return Math.round(s/60)+'m'}
@@ -14774,12 +14903,37 @@ if(o.outlookN)h+=orow('Outlook',o.outlookN+' passes, '+o.outlookHi+' >30\u00b0')
 t.innerHTML=h;
 })}
 function aedom(az,el){var r=100*(90-Math.max(0,el))/90,a=az*Math.PI/180;return[110+r*Math.sin(a),110-r*Math.cos(a)]}
-function drawArc(arc){var el=gid('arc');if(!arc||!arc.length){el.setAttribute('points','');return;}var pts=arc.filter(p=>p[1]>=0).map(p=>{var c=aedom(p[0],p[1]);return c[0].toFixed(1)+','+c[1].toFixed(1)}).join(' ');el.setAttribute('points',pts);}
+/* Draw the pass arc (AOS->LOS order), a start dot at AOS, and an arrowhead partway
+   along showing the direction of travel. Used both in-pass and out-of-pass. */
+function drawArc(arc){var el=gid('arc'),ah=gid('ahead'),ad=gid('aosdot');
+ var pos=(arc||[]).filter(p=>p[1]>=-1);
+ if(pos.length<2){el.setAttribute('points','');ah.style.display='none';ad.style.display='none';return}
+ var pts=pos.map(p=>{var c=aedom(p[0],Math.max(0,p[1]));return c[0].toFixed(1)+','+c[1].toFixed(1)});
+ el.setAttribute('points',pts.join(' '));
+ /* AOS marker = first point */
+ var a0=aedom(pos[0][0],Math.max(0,pos[0][1]));ad.setAttribute('cx',a0[0].toFixed(1));ad.setAttribute('cy',a0[1].toFixed(1));ad.style.display='';
+ /* arrowhead at ~60% along the path, pointing from prev->this */
+ var mi=Math.max(1,Math.round(pos.length*0.6));
+ var pB=aedom(pos[mi][0],Math.max(0,pos[mi][1])),pA=aedom(pos[mi-1][0],Math.max(0,pos[mi-1][1]));
+ var dx=pB[0]-pA[0],dy=pB[1]-pA[1],L=Math.hypot(dx,dy)||1;dx/=L;dy/=L;
+ var nx=-dy,ny=dx,sz=7,bk=4;
+ var tipx=pB[0],tipy=pB[1];
+ var x1=(tipx-dx*sz+nx*bk).toFixed(1),y1=(tipy-dy*sz+ny*bk).toFixed(1);
+ var x2=(tipx-dx*sz-nx*bk).toFixed(1),y2=(tipy-dy*sz-ny*bk).toFixed(1);
+ ah.setAttribute('points',tipx.toFixed(1)+','+tipy.toFixed(1)+' '+x1+','+y1+' '+x2+','+y2);ah.style.display='';}
 function loadSats(){j('/api/sats').then(a=>{window._sats=a;renderSats('')})}
+/* Ensure the currently-tracked sat is always an option, even if it isn't in the
+   favorites/catalog slice /api/sats returned. */
+function ensureCurrentOption(norad,name){if(!norad)return;var s=gid('sat');
+ for(var i=0;i<s.options.length;i++){if(+s.options[i].value==norad)return}
+ var o=document.createElement('option');o.value=norad;o.dataset.fav=0;o.dataset.inj=1;
+ o.textContent=(name||('NORAD '+norad));s.insertBefore(o,s.firstChild);}
 function renderSats(q){var s=gid('sat');var cur=s.value;s.innerHTML='';
 (window._sats||[]).filter(x=>!q||x.name.toLowerCase().indexOf(q)>=0).forEach(x=>{
 var o=document.createElement('option');o.value=x.n;o.dataset.fav=x.fav?1:0;
-o.textContent=x.name+(x.fav?' \u2605':'');if(x.n==cur)o.selected=true;s.appendChild(o)});reflectFav()}
+o.textContent=x.name+(x.fav?' \u2605':'');if(x.n==cur)o.selected=true;s.appendChild(o)});
+ if(window._satnorad){ensureCurrentOption(window._satnorad,window._satname);if(!cur&&!q)gid('sat').value=window._satnorad}
+ reflectFav()}
 function reflectFav(){var s=gid('sat');var o=s.options[s.selectedIndex];gid('fav').innerHTML=(o&&o.dataset.fav=='1')?'\u2605':'\u2606'}
 function loadTx(){j('/api/tx').then(o=>{var s=gid('tpsel');s.innerHTML='';
 o.list.forEach(x=>{var op=document.createElement('option');op.value=x.i;
@@ -14793,9 +14947,9 @@ t.innerHTML=h;
 t.querySelectorAll('tr.pclk').forEach(r=>{r.onclick=function(){var i=+this.dataset.i;selPass=(selPass==i?-1:i);
  if(selPass>=0)scheduleNotify(a[selPass]);
  passes();}});
+/* draw the arc now (updated each poll too, but this refreshes on sat change) */
+if(gid('dot').style.display==='none')drawArc(window._arc||[]);
 renderTl();})}
-/* Horizontal timeline of the next passes over ~the span they cover. Visible
-   passes are orange; a white tick marks "now". Tap a bar to select that pass. */
 function renderTl(){var el=gid('tl');var a=passList;if(!a||!a.length){el.innerHTML='';return}
 var now=Date.now()/1000;var t0=Math.min(now,a[0].aos);var t1=a[a.length-1].los;var span=Math.max(1,t1-t0);
 var bars='';a.forEach((p,i)=>{var x=100*(p.aos-t0)/span;var w=Math.max(1.2,100*(p.los-p.aos)/span);
@@ -14805,35 +14959,48 @@ el.innerHTML='<div class="tlrow"><span>'+hhmm(t0)+'</span><div class="tlbar">'+b
 el.querySelectorAll('.tlseg').forEach(s=>{s.onclick=function(){var i=+this.dataset.i;selPass=(selPass==i?-1:i);
  if(selPass>=0)scheduleNotify(passList[selPass]);passes()}})}
 function updCountdown(){var tag=gid('tag'),aos=gid('aos'),now=Date.now()/1000;fireNotifyIfDue();
-if(!passList.length){inPass=false;return}
-var p=passList[0];inPass=(now>=p.aos&&now<=p.los);
+if(!passList.length){setInPass(false);return}
+var p=passList[0];setInPass(now>=p.aos&&now<=p.los);
 if(inPass){tag.textContent='IN PASS \u2014 LOS in '+ms(p.los-now);tag.classList.add('pass');if(selPass<0)aos.textContent='Max el '+p.el+'\u00b0 at '+hhmm(p.tca)}
 else if(now<p.aos){tag.classList.remove('pass');if(selPass<0)aos.textContent='Next AOS in '+ms(p.aos-now)+' ('+hhmm(p.aos)+', max '+p.el+'\u00b0)'}
 else{if(selPass<0)aos.textContent='\u2014'}}
-function tick(){j('/api/status').then(s=>{window._satname=s.name;failN=0;gid('tag').classList.remove('off');
+function setInPass(v){if(v===inPass)return;inPass=v;document.body.classList.toggle('inpass',v)}
+function tick(){j('/api/status').then(s=>{window._satname=s.name;window._satnorad=s.norad;failN=0;gid('tag').classList.remove('off');
 gid('tag').classList.contains('pass')||(gid('tag').textContent=s.name||'no sat');
 gid('rx').textContent=s.rx;gid('tx').textContent=s.tx;
 gid('az').textContent=Math.round(s.az);gid('el').textContent=Math.round(s.el);
 gid('mode').textContent=s.mode;
-/* Doppler shift applied right now (signed kHz) */
+/* AMSAT activity: word + recency, colored by status (green heard / yellow tlm / red not-heard) */
+(function(){var el=gid('amsat');var st=s.amsat|0;
+ if(!st){el.textContent='';return}
+ var word=st==1?'Heard':st==3?'Telemetry':'Not heard';
+ var col=st==1?'var(--grn)':st==3?'#e8c000':'var(--red)';
+ var ago='';if(typeof s.amsatAgo=='number'&&s.amsatAgo>=0){var a=s.amsatAgo;
+  ago=a<3600?(Math.floor(a/60)+'m'):a<172800?(Math.floor(a/3600)+'h'):(Math.floor(a/86400)+'d');ago=' '+ago+' ago'}
+ var rpt=(s.amsatRpt|0)>0?(' \u00b7 '+s.amsatRpt+' rpt'):'';
+ el.innerHTML='AMSAT: <span style="color:'+col+';font-weight:600">'+word+ago+'</span>'+rpt})();
 var dp=gid('dop');if(s.radio&&typeof s.dop=='number'&&s.dop!=0){var k=s.dop/1000;dp.textContent=(k>=0?'+':'')+k.toFixed(2)+' kHz';}else{dp.textContent=''}
-/* background tracking indicator (mirrors the device header RAD/ROT/R+R tag) */
 var trk=gid('trk');if(s.radio||s.rot){trk.className='trk on';trk.textContent=(s.radio&&s.rot)?'R+R':(s.radio?'RAD':'ROT')}else{trk.className='trk';trk.textContent=''}
 gid('brad').classList.toggle('on',s.radio);gid('brot').classList.toggle('on',s.rot);
 gid('hold').textContent=s.hold;gid('mtune').textContent=s.tune;
 gid('mhl').textContent=s.fixup?'HOLD uplink (park TX here)':'HOLD downlink (park RX here)';
 gid('mtl').textContent=s.fixup?'TUNE \u2192 downlink (follow)':'TUNE \u2192 uplink (follow)';
-/* sky dot + next-pass arc */
-var dot=gid('dot');if(s.el>=0){var p=aedom(s.az,s.el);dot.setAttribute('cx',p[0].toFixed(1));dot.setAttribute('cy',p[1].toFixed(1));dot.style.display='';gid('arc').setAttribute('points','')}else{dot.style.display='none';drawArc(window._arc||[])}
-/* cal placeholders */
-if(document.activeElement!=gid('caldl'))gid('caldl').placeholder=s.caldl;
-if(document.activeElement!=gid('calul'))gid('calul').placeholder=s.calul;
+/* live step sizes */
+if(typeof s.tstep=='number'){tstep=s.tstep;gid('tstep').textContent=fmtStep(s.tstep)}
+if(typeof s.cstep=='number'){cstep=s.cstep;gid('cstep').textContent=fmtStep(s.cstep)}
+/* cal values (don't clobber if the exact field is focused) */
+if(typeof s.caldl=='number'){caldl=s.caldl;gid('caldlv').textContent=fmtHz(s.caldl);if(document.activeElement!=gid('caldl'))gid('caldl').placeholder=s.caldl}
+if(typeof s.calul=='number'){calul=s.calul;gid('calulv').textContent=fmtHz(s.calul);if(document.activeElement!=gid('calul'))gid('calul').placeholder=s.calul}
+/* sky: ALWAYS draw the pass arc + direction; overlay the live dot when in pass */
+var dot=gid('dot');drawArc(window._arc||[]);
+if(s.el>=0){var p=aedom(s.az,s.el);dot.setAttribute('cx',p[0].toFixed(1));dot.setAttribute('cy',p[1].toFixed(1));dot.style.display=''}else{dot.style.display='none'}
 gid('pbline').textContent=s.lin?('Linear passband: '+Math.round(s.pbOff/1000)+' / '+Math.round(s.pbBw/1000)+' kHz'):'';
-/* transponder dropdown sync */
 var key=s.norad+':'+s.txn;if(key!=lastTxKey){lastTxKey=key;loadTx()}else{var ts=gid('tpsel');if(ts.value!=s.txi&&s.txi>=0)ts.value=s.txi}
-if(s.norad&&s.norad!=lastSat){lastSat=s.norad;selPass=-1;notifyAt=0;passes()}
+if(s.norad&&s.norad!=lastSat){lastSat=s.norad;selPass=-1;notifyAt=0;ensureCurrentOption(s.norad,s.name);passes()}
+if(s.norad&&!gid('sat').value)gid('sat').value=s.norad;
 updCountdown();
 }).catch(e=>{failN++;gid('tag').textContent=failN>1?'reconnecting...':'offline';gid('tag').classList.add('off');gid('tag').classList.remove('pass')})}
+var failN=0;
 gid('go').onclick=function(){var n=gid('sat').value;j('/api/select?norad='+n,{method:'POST'}).then(()=>{lastSat=0;lastTxKey='';tick()})}
 gid('search').oninput=function(){renderSats(this.value.toLowerCase())}
 gid('sat').onchange=reflectFav;
@@ -14841,20 +15008,26 @@ gid('fav').onclick=function(){var s=gid('sat'),o=s.options[s.selectedIndex];if(!
 j('/api/fav?norad='+o.value,{method:'POST'}).then(r=>{o.dataset.fav=r.fav?1:0;
 o.textContent=o.textContent.replace(/ \u2605$/,'')+(r.fav?' \u2605':'');reflectFav()})}
 gid('tpsel').onchange=function(){j('/api/tx?i='+this.value,{method:'POST'}).then(tick)}
+/* tuning + cal cluster bindings */
+gid('tstep').onclick=function(){sendCmd('/api/cmd?k=s')}
+gid('cstep').onclick=function(){cstep=(cstep==10)?100:(cstep==100?1000:10);gid('cstep').textContent=fmtStep(cstep)}
+gid('dlminus').onclick=function(){calNudge('dl',-cstep)}
+gid('dlplus').onclick=function(){calNudge('dl',cstep)}
+gid('ulminus').onclick=function(){calNudge('ul',-cstep)}
+gid('ulplus').onclick=function(){calNudge('ul',cstep)}
+gid('calzero').onclick=function(){caldl=0;calul=0;j('/api/cal?dl=0&ul=0',{method:'POST'}).then(tick)}
+gid('caladv').onclick=function(){var b=gid('caladvbox');b.style.display=(b.style.display=='none')?'':'none'}
 gid('setdl').onclick=function(){var v=gid('caldl').value;if(v==='')return;j('/api/cal?dl='+parseInt(v,10),{method:'POST'}).then(()=>{gid('caldl').value='';tick()})}
 gid('setul').onclick=function(){var v=gid('calul').value;if(v==='')return;j('/api/cal?ul='+parseInt(v,10),{method:'POST'}).then(()=>{gid('calul').value='';tick()})}
-gid('calzero').onclick=function(){j('/api/cal?dl=0&ul=0',{method:'POST'}).then(tick)}
 gid('mRadio').onclick=function(){setMode('rad')}
 gid('mMan').onclick=function(){setMode('man')}
 gid('mOrb').onclick=function(){setMode('orb')}
 gid('rx').onclick=function(){copyFreq('rx')};gid('tx').onclick=function(){copyFreq('tx')};
 document.querySelectorAll('button[data-k]').forEach(b=>{b.onclick=function(){sendCmd('/api/cmd?k='+encodeURIComponent(b.dataset.k))}})
 document.querySelectorAll('button[data-m]').forEach(b=>{b.onclick=function(){sendCmd('/api/cmd?man=1&k='+encodeURIComponent(b.dataset.m))}})
-/* Adaptive polling: fast during a pass, slow when idle, back off on errors.
-   Self-scheduling (not a fixed setInterval) so the cadence can change. */
 function nextPoll(){var d=inPass?750:1500;
- if(failN>0)d=Math.min(8000,1500*Math.pow(2,failN));      /* exponential backoff while offline */
- else if(!inPass&&passList.length){var dt=passList[0].aos-Date.now()/1000;if(dt>180)d=4000}/* far from AOS: relax */
+ if(failN>0)d=Math.min(8000,1500*Math.pow(2,failN));
+ else if(!inPass&&passList.length){var dt=passList[0].aos-Date.now()/1000;if(dt>180)d=4000}
  return d}
 function loop(){tick();setTimeout(loop,nextPoll())}
 loadSats();loop();setInterval(updCountdown,1000);
@@ -15165,6 +15338,14 @@ void App::webdSendStatusJson() {
   String j = "{";
   j += "\"name\":\""; j += jsonEsc(s ? s->name : ""); j += "\",";
   j += "\"norad\":"; j += (s ? s->norad : 0); j += ",";
+  // AMSAT activity for the current sat: status code (0 none/1 heard/3 telemetry/2 not-heard)
+  // and how many seconds ago the winning report came in (-1 if none/clock unset).
+  { uint8_t st = s ? s->amsatStatus : 0;
+    long ago = -1;
+    if (s && s->amsatHeardEpoch && timeIsSet()) { ago = (long)time(nullptr) - (long)s->amsatHeardEpoch; if (ago < 0) ago = 0; }
+    j += "\"amsat\":"; j += (int)st; j += ",";
+    j += "\"amsatAgo\":"; j += ago; j += ",";
+    j += "\"amsatRpt\":"; j += (s ? (int)s->amsatReports : 0); j += ","; }
   j += "\"rx\":\""; j += (activeTxCount > 0 ? fmtMHz(rx) : String("--.-----")); j += "\",";
   j += "\"tx\":\""; j += ((activeTxCount > 0 && ulOp) ? fmtMHz(tx) : String("--.-----")); j += "\",";
   // Downlink Doppler shift actually applied right now (Hz, signed): the corrected
@@ -15197,7 +15378,11 @@ void App::webdSendStatusJson() {
   j += "\"caldl\":"; j += (long)calDl; j += ",";
   j += "\"calul\":"; j += (long)calUl; j += ",";
   j += "\"hold\":\""; j += (holdHz ? fmtMHz(holdHz) : String("--.-----")); j += "\",";
-  j += "\"tune\":\""; j += (tuneHz ? fmtMHz(tuneHz) : String("--.-----")); j += "\"";
+  j += "\"tune\":\""; j += (tuneHz ? fmtMHz(tuneHz) : String("--.-----")); j += "\",";
+  // Live step sizes (Hz) so the web UI can show the current tuning/cal increment
+  // and cycle it (the 's' cmd toggles tuneStep in Track, calStep is the cal nudge).
+  j += "\"tstep\":"; j += (long)tuneStep; j += ",";
+  j += "\"cstep\":"; j += (long)calStep;
   j += "}";
   webdCli.print(j);
 }
@@ -16068,6 +16253,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_LORACOMPASS: keyLoraCompass(c, enter, back); break;
     case SCR_LORASAT:  keyLoraSat(c, enter, back); break;
     case SCR_LORAROSTER: keyLoraRoster(c, enter, back); break;
+    case SCR_AMSATSTAT: keyAmsatStatus(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
 #endif
@@ -16131,7 +16317,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 18;
+  const int N = 19;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -16169,15 +16355,16 @@ void App::keyHome(char c, bool enter, bool back) {
       case 6: spaceWxEnter(); break;  // space weather (NOAA SWPC)
       case 7: weatherEnter(); break;  // local terrestrial weather (open-meteo)
       case 8: hamsatEnter(); break;   // upcoming activations (hams.at)
-      case 9: ovhValid = false; ovhScroll = 0; screen = SCR_OVERHEAD; lastDrawMs = 0; break;  // what's overhead now
-      case 10: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
-      case 11: screen = SCR_LOCATION; break;
-      case 12: screen = SCR_UPDATE; break;
-      case 13: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
-      case 14: logMenuSel = 0; screen = SCR_LOG; break;
-      case 15: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
-      case 16: screen = SCR_ABOUT; break;
-      case 17: enterChargeMode(); screen = SCR_CHARGE; break;
+      case 9: buildAmsatStatusView(); amStatSel = 0; amStatScroll = 0; screen = SCR_AMSATSTAT; lastDrawMs = 0; break;
+      case 10: ovhValid = false; ovhScroll = 0; screen = SCR_OVERHEAD; lastDrawMs = 0; break;  // what's overhead now
+      case 11: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+      case 12: screen = SCR_LOCATION; break;
+      case 13: screen = SCR_UPDATE; break;
+      case 14: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
+      case 15: logMenuSel = 0; screen = SCR_LOG; break;
+      case 16: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
+      case 17: screen = SCR_ABOUT; break;
+      case 18: enterChargeMode(); screen = SCR_CHARGE; break;
     }
   }
 }
@@ -16533,6 +16720,10 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   if (c == 'v') { favOnly = !favOnly; buildSatView();
                   setStatus(favOnly ? "Favorites only" : "All satellites"); return; }
+  if (c == 's') {                              // AMSAT activity status window
+    buildAmsatStatusView(); amStatSel = 0; amStatScroll = 0;
+    screen = SCR_AMSATSTAT; lastDrawMs = 0; return;
+  }
   int n = viewN;
   if (n == 0) return;
   if (isUp(c)   && viewSel > 0)     { viewSel--; satDelArm = false; }
@@ -17005,6 +17196,14 @@ void App::computeMutual(const String& grid) {
   if (!timeIsSet()) { setStatus("Set the clock first"); screen = SCR_PASSES; return; }
   SatEntry* s = activeSat();
   if (!s) { setStatus("No satellite"); screen = SCR_PASSES; return; }
+
+  // This is the Passes-screen mutual flow, NOT an activation. Clear the activation flag so
+  // the shared mutual/DX-Doppler code uses the active satellite (and my/DX sites) rather
+  // than an activation's, and reload THIS satellite's transponders into activeTx -- viewing
+  // an activation earlier may have left a different sat's transponders loaded, which would
+  // otherwise show up in the DX Doppler table for this pass.
+  mdFromActivation = false;
+  ensureTransponders(*s);
 
   String g = grid; g.trim(); g.toUpperCase();
   strncpy(dxGrid, g.c_str(), sizeof(dxGrid) - 1); dxGrid[sizeof(dxGrid)-1] = 0;
@@ -18015,7 +18214,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,54,48,82,49,77,79,81,25,43,69,70,71,72,73,78,74,75,76};
+static const int SET_STN[]   = {26,3,66,67,68,40,7,84,54,48,82,49,77,79,81,25,43,69,70,71,72,73,78,74,75,76,83};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,80,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -18066,6 +18265,16 @@ void App::keySettings(char c, bool enter, bool back) {
       case 40: cfg.solarAct = (uint8_t)((cfg.solarAct + dir + 4) % 4); cfg.save(); break;
       case 43: cfg.wxUnits = (uint8_t)((cfg.wxUnits + dir + 3) % 3); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
+      case 83: {   // AMSAT status window: 3/6/12/24/48/72 h
+        static const uint8_t W[] = {3,6,12,24,48,72}; int n = 6, i = 0;
+        for (int k = 0; k < n; ++k) if (W[k] == cfg.amsatWindowH) { i = k; break; }
+        i = (i + (dir > 0 ? 1 : n - 1)) % n; cfg.amsatWindowH = W[i]; cfg.save();
+      } break;
+      case 84: {   // AOS lead alert: off/2/5/10/15 min
+        static const uint8_t L[] = {0,2,5,10,15}; int n = 5, i = 0;
+        for (int k = 0; k < n; ++k) if (L[k] == cfg.aosLeadMin) { i = k; break; }
+        i = (i + (dir > 0 ? 1 : n - 1)) % n; cfg.aosLeadMin = L[i]; cfg.save();
+      } break;
       case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
       case 55: cfg.loraEnable = !cfg.loraEnable; cfg.save();
                if (cfg.loraEnable) loraStart(); break;
@@ -18093,6 +18302,7 @@ void App::keySettings(char c, bool enter, bool back) {
                                                  cfg.loraBwHz, cfg.loraTxDbm); } break;
       case 61: { int v = ((int)cfg.msgNotify + dir + 3) % 3;
                  cfg.msgNotify = (uint8_t)v; cfg.save(); } break;
+      case 80: cfg.autoPosReply = !cfg.autoPosReply; cfg.save(); break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 8) % 8);
               cfg.save(); applyRotatorFromCfg(); break;
@@ -18198,7 +18408,21 @@ void App::keySettings(char c, bool enter, bool back) {
               break;
       case 62: runCatTest(); break;
       case 64: enterCatMon(); break;   // open the CAT serial terminal/monitor
-      case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
+      case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save();
+              setStatus(cfg.aosAlarm ? "AOS alarm on" : "AOS alarm off"); break;
+      case 83: {   // AMSAT status window (cycle forward on ENTER)
+        static const uint8_t W[] = {3,6,12,24,48,72}; int n = 6, i = 0;
+        for (int k = 0; k < n; ++k) if (W[k] == cfg.amsatWindowH) { i = k; break; }
+        cfg.amsatWindowH = W[(i + 1) % n]; cfg.save();
+        setStatus(String("AMSAT window: ") + (int)cfg.amsatWindowH + " h - re-fetch to apply", 2500);
+      } break;
+      case 84: {   // AOS lead alert (cycle forward on ENTER)
+        static const uint8_t L[] = {0,2,5,10,15}; int n = 5, i = 0;
+        for (int k = 0; k < n; ++k) if (L[k] == cfg.aosLeadMin) { i = k; break; }
+        cfg.aosLeadMin = L[(i + 1) % n]; cfg.save();
+        setStatus(cfg.aosLeadMin ? (String("AOS lead alert: ") + (int)cfg.aosLeadMin + " min")
+                                 : String("AOS lead alert off"));
+      } break;
       case 54: cfg.irBeacon = !cfg.irBeacon; cfg.save(); break;
       case 55: cfg.loraEnable = !cfg.loraEnable; cfg.save();
                if (cfg.loraEnable) loraStart(); break;
@@ -18224,6 +18448,8 @@ void App::keySettings(char c, bool enter, bool back) {
       case 61: { int v = ((int)cfg.msgNotify + 1) % 3; cfg.msgNotify = (uint8_t)v; cfg.save();
                  setStatus(v == 0 ? "Msg notify off" : v == 2 ? "Msg notify banner+beep"
                                                               : "Msg notify banner"); } break;
+      case 80: cfg.autoPosReply = !cfg.autoPosReply; cfg.save();
+               setStatus(cfg.autoPosReply ? "Auto position reply ON" : "Auto position reply off"); break;
       case 11: editTarget = 206; editTitle = "Net rotator port";
                editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
@@ -21069,6 +21295,7 @@ void App::draw() {
     case SCR_LORACOMPASS: drawLoraCompass(); break;
     case SCR_LORASAT:  drawLoraSat(); break;
     case SCR_LORAROSTER: drawLoraRoster(); break;
+    case SCR_AMSATSTAT: drawAmsatStatus(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
 #endif
@@ -25694,6 +25921,85 @@ static int copyToken(const char* src, char* dst, int dstMax, const char* delims)
   return n;
 }
 
+// Parse a "NAME[/NORAD]" satellite reference from the front of `src`, where NAME may
+// itself contain spaces AND slashes (real catalog names do: "ISS (ZARYA)",
+// "CSS/Tiangong (TIANHE)"). The NORAD, when present, is the LAST slash-delimited field
+// and is all digits; everything before that last slash is the name. If there is no
+// trailing "/<digits>" field, the whole reference is the name and norad is 0.
+//
+// `stopAtSpace` controls where the reference ends:
+//   * #SAT messages are just "#NAME/NORAD" with nothing after, so the reference runs to
+//     end-of-string or the next sigil (stopAtSpace = false) -- this is what lets a spaced
+//     name survive.
+//   * !SAT messages are "!NAME/NORAD <date> <time>", so the name scan stops at the first
+//     space (stopAtSpace = true); a "/<digits>" NORAD field, if present before that space,
+//     is still split off.
+// Returns the number of chars consumed from `src` (so a caller can resume parsing after).
+static int parseSatRef(const char* src, char* nameOut, int nameMax,
+                       uint32_t& noradOut, bool stopAtSpace) {
+  noradOut = 0;
+  // Special case for !SAT (stopAtSpace): a name may contain spaces, which normally collide
+  // with the space that separates the name from the date. But if the reference carries a
+  // "/<digits>" NORAD field, that field unambiguously marks the end of the name -- so scan
+  // for "/<digits>" bounded by a following space (or end) FIRST, and if found, take the
+  // name as everything before that slash and resume parsing after the NORAD.
+  if (stopAtSpace) {
+    // Scan the whole reference for a "/<digits>" field bounded by a following space or end.
+    // Spaces *within* the name come before that field, so we do NOT stop at the first space
+    // here -- but we stop the scan at a date-like token ("NNNN-") so a bare, space-separated
+    // name ("SO-50 2026-07-04 ...") isn't mis-scanned into the date.
+    for (int i = 0; src[i]; ++i) {
+      char c = src[i];
+      if (c == '@' || c == '#' || c == '!' || c == '\t') break;
+      // A YYYY- date token (4 digits + dash) marks the start of the date field: stop.
+      if (c >= '0' && c <= '9' && src[i+1] >= '0' && src[i+1] <= '9' &&
+          src[i+2] >= '0' && src[i+2] <= '9' && src[i+3] >= '0' && src[i+3] <= '9' &&
+          src[i+4] == '-') break;
+      if (c == '/') {
+        int j = i + 1;
+        while (src[j] >= '0' && src[j] <= '9') j++;
+        if (j > i + 1 && (src[j] == ' ' || src[j] == 0)) {   // "/<digits>" then space/end
+          noradOut = (uint32_t)strtoul(src + i + 1, nullptr, 10);
+          int n = 0;
+          for (int k = 0; k < i && n < nameMax - 1; ++k) nameOut[n++] = src[k];
+          nameOut[n] = 0;
+          while (n > 0 && nameOut[n - 1] == ' ') nameOut[--n] = 0;
+          return j;   // consumed up to end of the NORAD field
+        }
+      }
+    }
+  }
+  // Determine the extent of the whole reference token.
+  int end = 0;
+  while (src[end]) {
+    char c = src[end];
+    if (c == '\t') break;
+    if (c == '@' || c == '#' || c == '!') break;           // another sigil ends it
+    if (stopAtSpace && c == ' ') break;                    // space ends the !SAT name field
+    end++;
+  }
+  // Look for a trailing "/<digits>" within [0, end): the LAST slash whose tail (up to end)
+  // is all digits is the NORAD.
+  int nameEnd = end;
+  for (int i = end - 1; i >= 0; --i) {
+    if (src[i] == '/') {
+      bool allDigits = (i + 1 < end);
+      for (int j = i + 1; j < end && allDigits; ++j)
+        if (src[j] < '0' || src[j] > '9') allDigits = false;
+      if (allDigits) { noradOut = (uint32_t)strtoul(src + i + 1, nullptr, 10); nameEnd = i; }
+      break;   // only consider the last slash
+    }
+  }
+  int n = 0;
+  for (int i = 0; i < nameEnd && n < nameMax - 1; ++i) nameOut[n++] = src[i];
+  nameOut[n] = 0;
+  // Trim trailing spaces from the name (harmless for #SAT, tidy for both).
+  while (n > 0 && nameOut[n - 1] == ' ') nameOut[--n] = 0;
+  return end;
+}
+
+
+
 static MsgDecode decodeMsg(const char* text) {
   MsgDecode d;
   if (!text) return d;
@@ -25717,11 +26023,8 @@ static MsgDecode decodeMsg(const char* text) {
   // invariant NORAD id regardless of the display name in the message.
   const char* hash = strchr(text, '#');
   if (hash && hash[1] && hash[1] != ' ') {
-    char tok[20];
-    copyToken(hash + 1, tok, sizeof(tok), " @#!,\t");
-    char* slash = strchr(tok, '/');
-    if (slash) { *slash = 0; d.norad = (uint32_t)strtoul(slash + 1, nullptr, 10); }
-    strncpy(d.sat, tok, sizeof(d.sat) - 1); d.sat[sizeof(d.sat) - 1] = 0;
+    // Name may contain spaces/slashes; the trailing "/<digits>" (if any) is the NORAD.
+    parseSatRef(hash + 1, d.sat, sizeof(d.sat), d.norad, /*stopAtSpace=*/false);
     if (d.sat[0]) d.hasSat = true;
   }
 
@@ -25729,11 +26032,9 @@ static MsgDecode decodeMsg(const char* text) {
   const char* bang = strchr(text, '!');
   if (bang && bang[1] && bang[1] != ' ') {
     const char* p = bang + 1;
-    char tok[20];
-    int sn = copyToken(p, tok, sizeof(tok), " \t");
-    char* slash = strchr(tok, '/');
-    if (slash) { *slash = 0; d.skedNorad = (uint32_t)strtoul(slash + 1, nullptr, 10); }
-    strncpy(d.skedSat, tok, sizeof(d.skedSat) - 1); d.skedSat[sizeof(d.skedSat) - 1] = 0;
+    // The sked name field ends at the first space (the date follows); a "/<digits>" NORAD
+    // before that space is still captured.
+    int sn = parseSatRef(p, d.skedSat, sizeof(d.skedSat), d.skedNorad, /*stopAtSpace=*/true);
     p += sn; while (*p == ' ') p++;
     // date YYYY-MM-DD (exactly 10 chars, digits + dashes)
     if (strlen(p) >= 10 && p[4] == '-' && p[7] == '-') {
@@ -26133,6 +26434,100 @@ void App::keyLoraRoster(char c, bool enter, bool back) {
     lcLat = e.lat; lcLon = e.lon; lcMsgMs = e.heardMs;
     strncpy(lcFrom, e.call, sizeof(lcFrom) - 1); lcFrom[sizeof(lcFrom) - 1] = 0;
     screen = SCR_LORACOMPASS; lastDrawMs = 0;
+  }
+}
+
+// ---- AMSAT status screen ------------------------------------------------------------
+
+// Build the display list: every catalog sat that has an AMSAT report (amsatStatus != 0),
+// sorted by status precedence (Heard > Telemetry > Not heard) then most-recent report
+// first. Capped at AMSTAT_MAX rows.
+void App::buildAmsatStatusView() {
+  amStatN = 0;
+  for (int i = 0; i < db.count() && amStatN < AMSTAT_MAX; ++i)
+    if (db.at(i).amsatStatus != 0) amStatIdx[amStatN++] = i;
+  // Insertion sort (small N): higher amsatPrio first; tie -> newer amsatHeardEpoch first.
+  auto prio = [](uint8_t s){ return s == 1 ? 3 : s == 3 ? 2 : s == 2 ? 1 : 0; };
+  for (int a = 1; a < amStatN; ++a) {
+    int key = amStatIdx[a]; int b = a - 1;
+    while (b >= 0) {
+      SatEntry& sb = db.at(amStatIdx[b]); SatEntry& sk = db.at(key);
+      bool after = (prio(sb.amsatStatus) > prio(sk.amsatStatus)) ||
+                   (prio(sb.amsatStatus) == prio(sk.amsatStatus) &&
+                    sb.amsatHeardEpoch >= sk.amsatHeardEpoch);
+      if (after) break;
+      amStatIdx[b + 1] = amStatIdx[b]; b--;
+    }
+    amStatIdx[b + 1] = key;
+  }
+  if (amStatSel >= amStatN) amStatSel = amStatN > 0 ? amStatN - 1 : 0;
+  if (amStatScroll > amStatSel) amStatScroll = amStatSel;
+}
+
+void App::drawAmsatStatus() {
+  header(String("AMSAT status \xB7 ") + (int)cfg.amsatWindowH + "h");
+  canvas.setTextSize(1);
+  if (amStatN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 42); canvas.print("No AMSAT reports in window.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("Run Update to fetch status,");
+    canvas.setCursor(6, 68); canvas.print("or widen the window in Settings.");
+    footer("u update   ` back");
+    return;
+  }
+  // Column header.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 20);  canvas.print("SATELLITE");
+  canvas.setCursor(120, 20); canvas.print("STATUS");
+  canvas.setCursor(196, 20); canvas.print("AGO");
+  const int rows = 9;
+  if (amStatSel < amStatScroll) amStatScroll = amStatSel;
+  if (amStatSel >= amStatScroll + rows) amStatScroll = amStatSel - rows + 1;
+  for (int r = 0; r < rows && (amStatScroll + r) < amStatN; ++r) {
+    int vi = amStatScroll + r; SatEntry& s = db.at(amStatIdx[vi]);
+    int y = 32 + r * 10;
+    bool sel = (vi == amStatSel);
+    if (sel) { canvas.fillRect(0, y - 1, 240, 10, CL_SELBG); }
+    uint16_t base = sel ? CL_BLACK : CL_WHITE;
+    canvas.setTextColor(base, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(4, y); canvas.printf("%-19.19s", s.name);
+    // Status word in its color (or black when the row is selected, for contrast).
+    canvas.setTextColor(sel ? CL_BLACK : amsatColor(s.amsatStatus), sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(120, y); canvas.printf("%-10s", amsatWord(s.amsatStatus));
+    // Recency + report count.
+    canvas.setTextColor(base, sel ? CL_SELBG : CL_BLACK);
+    String ago = amsatHeardAgo(s.amsatHeardEpoch);
+    canvas.setCursor(196, y); canvas.printf("%-4s", ago.length() ? ago.c_str() : "-");
+    if (s.amsatReports) { canvas.setCursor(224, y); canvas.printf("%d", (int)s.amsatReports); }
+  }
+  footer("ENT track  u update  ` back");
+}
+
+void App::keyAmsatStatus(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (amStatN == 0) {
+    if (c == 'u') {
+      if (net.connected()) { fetchAmsatStatus(); buildAmsatStatusView(); setStatus("AMSAT status updated", 1500); }
+      else setStatus("No WiFi - connect in Settings", 2000);
+      lastDrawMs = 0;
+    }
+    return;
+  }
+  if (isUp(c)   && amStatSel > 0)            { amStatSel--; lastDrawMs = 0; return; }
+  if (isDown(c) && amStatSel < amStatN - 1)  { amStatSel++; lastDrawMs = 0; return; }
+  if (c == '{') { amStatSel = max(0, amStatSel - 9); lastDrawMs = 0; return; }
+  if (c == '}') { amStatSel = min(amStatN - 1, amStatSel + 9); lastDrawMs = 0; return; }
+  if (c == 'u') {
+    if (net.connected()) { fetchAmsatStatus(); buildAmsatStatusView(); setStatus("AMSAT status updated", 1500); }
+    else setStatus("No WiFi - connect in Settings", 2000);
+    lastDrawMs = 0; return;
+  }
+  if (enter) {                                // adopt the selected sat as active + track
+    int idx = amStatIdx[amStatSel];
+    satSel = idx; ensureTransponders(db.at(idx));
+    setStatus(String("Active: ") + db.at(idx).name, 1500);
+    screen = SCR_TRACK; lastDrawMs = 0;
   }
 }
 
@@ -28278,10 +28673,10 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "Overhead now", "QRZ Lookup", "Location", "Update",
+                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "AMSAT status", "Overhead now", "QRZ Lookup", "Location", "Update",
                           "Settings", "Log", "Messages", "About", "Charge / Sleep" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
-  static_assert(sizeof(items) / sizeof(items[0]) == 18,
+  static_assert(sizeof(items) / sizeof(items[0]) == 19,
                 "Home menu item count must match keyHome's N");
   const int VIS = 9;
   if (homeSel < homeScroll)           homeScroll = homeSel;
@@ -28299,6 +28694,26 @@ void App::drawHome() {
   canvas.setTextColor(CL_GREY, CL_BLACK);
   if (homeScroll > 0)       { canvas.setCursor(232, 18);  canvas.print("^"); }
   if (homeScroll + VIS < N) { canvas.setCursor(232, 106); canvas.print("v"); }
+  // Next favorite pass: a persistent "what's next and when" line above the footer, so the
+  // home screen answers it without opening Passes. Shows the sat and a live AOS countdown
+  // (or "IN PASS" while one is up). Drawn only when the alarm scheduler has a target.
+  if (nextAos != 0 && timeIsSet()) {
+    time_t now = nowUtc();
+    long dt = (long)(nextAos - now);
+    String nm = nextAosName;
+    if (nm.length() > 12) nm = nm.substring(0, 11) + "~";
+    canvas.setCursor(6, 116);
+    if (dt <= 0) {                            // AOS passed but still the current target
+      canvas.setTextColor(CL_GREEN, CL_BLACK);
+      canvas.printf("* %s  IN PASS", nm.c_str());
+    } else {
+      bool soon = dt <= 600;                  // within 10 min -> highlight
+      canvas.setTextColor(soon ? CL_GREEN : CL_GREY, CL_BLACK);
+      long m = dt / 60, s2 = dt % 60;
+      if (m >= 60) canvas.printf("Next: %s in %ldh%02ldm", nm.c_str(), m / 60, m % 60);
+      else         canvas.printf("Next: %s in %ld:%02ld", nm.c_str(), m, s2);
+    }
+  }
   footer("; / . move  ENT");
   // Selected satellite: bottom-right of the footer row, truncated to fit and kept
   // clear of the key hint on the left.
@@ -28407,8 +28822,8 @@ void App::drawSatList() {
     }
   }
   bool selManual = (viewN > 0 && viewSel < viewN && db.isManualGp(db.at(view[viewSel]).norad));
-  if (selManual) footer("ENT pass o orb t tx x del h=help `bk");
-  else           footer("ENT pass o orb t tx f fav h=help `bk");
+  if (selManual) footer("ENT pass o orb t tx s status x del `bk");
+  else           footer("ENT pass o orb t tx s status f fav `bk");
 }
 
 void App::drawPasses() {
@@ -29738,7 +30153,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 83;          // must exceed the highest rows[] index used below
+  const int N = 85;          // must exceed the highest rows[] index used below (currently 84)
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -29759,6 +30174,8 @@ void App::drawSettings() {
                 ? String(" (") + WiFi.localIP().toString() + ")" : String(""));
   rows[53] = String("Web port: ") + String(cfg.webPort);
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
+  rows[84] = String("AOS lead alert: ") + (cfg.aosLeadMin ? (String((int)cfg.aosLeadMin) + " min") : String("off"));
+  rows[83] = String("AMSAT status window: ") + (int)cfg.amsatWindowH + " h";
   rows[54] = String("IR pass beacon: ") + (cfg.irBeacon ? "on" : "off");
   rows[55] = String("LoRa msg: ") + (cfg.loraEnable ? "on" : "off");
   rows[56] = String("LoRa freq: ") + String(cfg.loraFreqKHz / 1000.0, 3) + " MHz";

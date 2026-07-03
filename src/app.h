@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -462,6 +462,17 @@ private:
   void drawLoraRoster();
   void keyLoraRoster(char c, bool enter, bool back);
   void sendMyPosition();          // broadcast our @lat,lon (the 'p' key / presence ping)
+
+  // AMSAT status screen (SCR_AMSATSTAT): a live view of every satellite with an AMSAT
+  // activity report in the current window, sorted status-then-recency. Built into a small
+  // index array (into the catalog) on entry; ENTER selects a sat as active.
+  static const int AMSTAT_MAX = 64;
+  int      amStatIdx[AMSTAT_MAX];   // catalog indices with a report, sorted for display
+  int      amStatN = 0;
+  int      amStatSel = 0, amStatScroll = 0;
+  void buildAmsatStatusView();      // populate + sort amStatIdx from db
+  void drawAmsatStatus();
+  void keyAmsatStatus(char c, bool enter, bool back);
   void openDecodedAction(int orderIdx);   // ENTER on a message row: act on its sigils
   void beginSkedSend();                    // start the date->time prompt for a !sked send
   char ssSat[12] = {0};                    // sked-send: sat name captured at start

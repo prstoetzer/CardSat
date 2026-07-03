@@ -39,7 +39,16 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **Next Passes** — one schedule across *all* your favorites, soonest AOS first,
   with a **Sky-at-a-glance timeline** view (`t`): a horizontal time axis with one row
   per favorite and pass bars coloured by peak elevation (green ≥30°, yellow below).
-- **AOS alarm** — countdown beeps + a screen flash before a favorite rises.
+- **AOS alarm** — countdown beeps + a screen flash before a favorite rises. An
+  optional **AOS lead alert** (off / 2 / 5 / 10 / 15 min) adds an earlier "get ready"
+  chirp minutes ahead of AOS, and the **home screen** shows the next favorite pass with
+  a live countdown.
+- **AMSAT live status** — each bird's recent on-air status (heard / telemetry / not
+  heard) from the AMSAT OSCAR Status feed, with **"heard N ago" recency** for all three
+  states, a **configurable window** (3/6/12/24/48/72 h, default 24), and a **dedicated
+  AMSAT status screen** (sorted most-active-first; `s` from the sat list or the main
+  menu) that lists every reported bird with its status, recency, and report count, and
+  lets you adopt one as the active satellite with ENTER.
 - **Deep-sleep until the next pass** — park the unit between passes for big
   battery savings; it wakes ~60 s before AOS.
 - **Jump to beacon** — one key (`n`) on the Track and large-font readout screens
@@ -109,6 +118,15 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   WSJT-X, a logger) drives the wired/LAN radio through CardSat, and/or a
   **rotctld server** so a PC drives the wired GS-232 rotator through CardSat —
   both over TCP on the LAN.
+- **Mobile web control panel** — CardSat serves a phone/laptop-friendly page over
+  your WiFi (Settings -> Web control) laid out for **working a pass**: a **fast
+  calibration pad** (big one-tap RX/TX cal nudges with a tappable 10/100/1000 Hz step,
+  no keyboard), a **tuning cluster** with a visible passband step, live RX/TX with the
+  applied **Doppler shift**, an **AMSAT activity** line, an **in-pass** header and frame,
+  transponder and satellite pickers (the tracked bird is always present), favourite
+  toggling, and a **polar plot that always shows the pass arc** — current pass in-pass,
+  next pass otherwise — with a **direction-of-travel arrow**. A Manual card mirrors the
+  hand-tuning calculator, and an Orbit card shows the analysis numbers.
 - **rigctl network radio.** Drive a radio attached to a remote **Hamlib rigctld**
   server over WiFi (Settings -> CAT type -> rigctl) — Doppler both legs via split.
 - **World map with coastline** — recognisable continents with **all favourites'**

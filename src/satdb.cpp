@@ -7,6 +7,7 @@
 #include <ArduinoJson.h>
 #include <math.h>
 #include <time.h>
+#include <cstdio>
 
 bool SatDb::begin() {
   return Store::begin();
@@ -336,8 +337,28 @@ static inline int amsatPrio(uint8_t s) { return s == 1 ? 3 : s == 3 ? 2 : s == 2
 // Set each catalog entry's amsatStatus from a cached summary.php response:
 // 1 = Heard / Crew Active, 3 = Telemetry Only, 2 = Not Heard, 0 = no reports.
 // The highest-precedence report value seen for a satellite wins.
+// Parse an AMSAT "latest_reported_time" of the fixed form "YYYY-MM-DDTHH:MM:SSZ"
+// into a Unix UTC epoch. Returns 0 on any malformed input. Uses a direct days-from-
+// civil calculation (no timegm/mktime, which pull in timezone state) so it is cheap
+// and self-contained for the per-object parse loop.
+static uint32_t amsatIsoToEpoch(const char* s) {
+  if (!s || !s[0]) return 0;
+  int Y, Mo, D, H, Mi, Se;
+  if (sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &Mo, &D, &H, &Mi, &Se) != 6) return 0;
+  if (Y < 1970 || Mo < 1 || Mo > 12 || D < 1 || D > 31) return 0;
+  // days_from_civil (Howard Hinnant's algorithm), epoch = 1970-01-01.
+  int y = Y - (Mo <= 2 ? 1 : 0);
+  int era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (unsigned)((153 * (Mo + (Mo > 2 ? -3 : 9)) + 2) / 5 + D - 1);
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = (long)era * 146097 + (long)doe - 719468;
+  long secs = days * 86400L + H * 3600L + Mi * 60L + Se;
+  return (secs > 0) ? (uint32_t)secs : 0;
+}
+
 void SatDb::applyAmsatStatusFile(const char* path) {
-  for (int i = 0; i < _n; ++i) _sats[i].amsatStatus = 0;
+  for (int i = 0; i < _n; ++i) { _sats[i].amsatStatus = 0; _sats[i].amsatHeardEpoch = 0; _sats[i].amsatReports = 0; }
   if (_n <= 0) return;
   File f = Store::fs().open(path, "r");
   if (!f) return;
@@ -407,14 +428,25 @@ void SatDb::applyAmsatStatusFile(const char* path) {
           const char* nm  = one["name"]  | "";
           const char* rep = one["report"] | "";
           long cnt = one["report_count"] | 0;
+          const char* lrt = one["latest_reported_time"] | "";
           if (nm[0] && cnt > 0) {
             uint8_t st = !strcmp(rep, "Not Heard")      ? 2
                        : !strcmp(rep, "Telemetry Only") ? 3
                                                         : 1;
+            uint32_t ep = amsatIsoToEpoch(lrt);
             char sb[16]; amsatBase(nm, sb, 16);
             for (int i = 0; i < _n; ++i) {
               if (strcmp(sb, cb[i]) != 0) continue;
-              if (amsatPrio(st) > amsatPrio(_sats[i].amsatStatus)) _sats[i].amsatStatus = st;
+              int pNew = amsatPrio(st), pCur = amsatPrio(_sats[i].amsatStatus);
+              // A row wins if it has higher status precedence, or ties precedence but is
+              // more recent -- so the shown status, age and count all come from that row.
+              bool win = (pNew > pCur) ||
+                         (pNew == pCur && ep && ep > _sats[i].amsatHeardEpoch);
+              if (win) {
+                _sats[i].amsatStatus = st;
+                _sats[i].amsatHeardEpoch = ep;
+                _sats[i].amsatReports = (cnt > 255) ? 255 : (uint8_t)cnt;
+              }
             }
           }
         }

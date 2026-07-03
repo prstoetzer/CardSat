@@ -142,6 +142,15 @@ bool Settings::load() {
   lrxCrc     = d["lrxcrc"] | (uint8_t)1;
   msgNotify  = d["msgntfy"] | (uint8_t)1;
   if (msgNotify > 2) msgNotify = 1;
+  autoPosReply = d["autopos"] | false;
+  aosLeadMin = d["aoslead"] | (uint8_t)0;
+  { const uint8_t ok[] = {0,2,5,10,15}; bool v = false;
+    for (uint8_t x : ok) if (aosLeadMin == x) v = true;
+    if (!v) aosLeadMin = 0; }                 // snap a stray value back to a valid step
+  amsatWindowH = d["amsatwin"] | (uint8_t)24;
+  { const uint8_t ok[] = {3,6,12,24,48,72}; bool v = false;
+    for (uint8_t x : ok) if (amsatWindowH == x) v = true;
+    if (!v) amsatWindowH = 24; }
   if (rotdPort == 0) rotdPort = 4533;
   if (radioModel >= RIG_COUNT) radioModel = RIG_IC9700;
 #ifdef CARDSAT_CFG_DEBUG
@@ -220,6 +229,9 @@ bool Settings::save() {
   d["lrxfk"]=lrxFreqKHz; d["lrxsf"]=lrxSf; d["lrxbw"]=lrxBwHz; d["lrxcr"]=lrxCr;
   d["lrxsw"]=lrxSync; d["lrxpre"]=lrxPreamble; d["lrxcrc"]=lrxCrc;
   d["msgntfy"]=msgNotify;
+  d["autopos"]=autoPosReply;
+  d["aoslead"]=aosLeadMin;
+  d["amsatwin"]=amsatWindowH;
   File f = Store::fs().open(FILE_CFG, "w");
   if (!f) return false;
   size_t wrote = serializeJson(d, f);

@@ -141,6 +141,8 @@ struct Settings {
   int8_t   visSunElMax = -6;      // observer-darkness gate: Sun below this (deg). -6 civil, -12 naut, -18 astro
   float    visMinEl    = 10.0f;   // min peak elevation to call a pass visible
   bool     aosAlarm   = true;   // beep + flash before a favorite's AOS
+  uint8_t  aosLeadMin = 0;      // extra "get ready" alert this many minutes before AOS (0 = off)
+  uint8_t  amsatWindowH = 24;   // AMSAT status "recently heard" window (hours): 3/6/12/24/48/72
   bool     irBeacon   = false;  // also flash the IR LED on each pass alert
                                 // (distinct flash count per event; user-built RX)
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)

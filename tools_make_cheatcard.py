@@ -39,10 +39,10 @@ FRONT = [
   "<b>;</b> up &middot; <b>.</b> down &middot; <b>,</b> <b>/</b> left/right &middot; "
   "<b>ENTER</b> select &middot; <b>`</b>/<b>DEL</b> back &middot; "
   "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help "
-  "(Help links: <b>g</b> glossary+math &middot; <b>m</b> user guide &middot; <b>s</b> sat history &middot; <b>t</b> tech help &middot; <b>l</b> learn theory)"),
+  "(Help links: <b>g</b> glossary+math &middot; <b>m</b> user guide &middot; <b>s</b> sat history &middot; <b>t</b> tech help &middot; <b>l</b> learn theory &middot; <b>f</b> band plan)"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "World Map, Sun/Moon, Space Wx, Weather, Activations, Overhead now, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
+  "World Map, Sun/Moon, Space Wx, Weather, Activations, Overhead now, Grid dist/bearing, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; <b>x</b> del manual sat &middot; "
   "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
@@ -98,20 +98,29 @@ FRONT = [
  ("POLAR / PASS DETAIL",
   "Pass detail: <b>p</b> polar of this pass. Polar: <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; "
   "<b>p</b>/<b>ENTER</b>/<b>`</b> back"),
-]
-
-BACK = [
  ("SUN / MOON",
   "Graphic sky-dome (Sun/Moon glyphs by az/el) &middot; <b>g</b> graphic/list &middot; "
   "<b>;</b>/<b>.</b> pick Sun/Moon &middot; <b>o</b> rotor track on/off &middot; "
-  "<b>s</b> sky sources &middot; <b>x</b> stop &middot; <b>`</b> back"),
+  "<b>s</b> sky sources &middot; <b>t</b> transits &middot; <b>e</b> EME &middot; <b>x</b> stop &middot; <b>`</b> back"),
 
  ("SKY SOURCES (Sun/Moon &rarr; s)",
   "Planets (cyan dots) + strong radio sources (orange +): Cas A, Cyg A, galactic centre, Crab, Virgo A, on a sky dome. "
   "Antenna-pointing / RF reference. <b>;</b>/<b>.</b> select &middot; <b>`</b> back"),
+ ("EME / MOONBOUNCE (Sun/Moon &rarr; e)",
+  "Self-echo Doppler per band (50/144/432/1296/10368, topocentric) &middot; range + rate &middot; path degradation vs perigee &middot; "
+  "galactic sky-noise flag &middot; <b>m</b> mutual-Moon window vs DX grid &middot; <b>o</b> rotor track Moon &middot; <b>`</b> back"),
+ ("GRID DIST/BEARING (menu)",
+  "Enter Maidenhead grid &rarr; great-circle distance + beam heading (short/long path, km/mi). "
+  "<b>g</b> grid &middot; <b>q</b> QRZ&rarr;grid lookup (seeds calc) &middot; <b>o</b> point rotor at bearing &middot; <b>`</b> back"),
+]
+
+BACK = [
  ("SPACE WX (menu)",
   "Solar 10.7cm flux + planetary Kp + A index + aurora likelihood (from Kp), labelled "
-  "&amp; colour-coded, with HF/sat operating outlook &amp; data age &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
+  "&amp; colour-coded, with HF/sat operating outlook &amp; data age &middot; <b>p</b> HF/6m propagation &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
+ ("HF/6m PROPAGATION (Space Wx &rarr; p)",
+  "Turns solar flux + Kp into band guidance: HF conditions (10/15/20m open/marg/shut), geomagnetic effect, "
+  "auroral-VHF likelihood (6m/2m, beam N), D-layer absorption. Rule-of-thumb &middot; <b>r</b> refresh &middot; <b>`</b> back"),
  ("WEATHER (menu)",
   "Current conditions + multi-day forecast for your site (Open-Meteo). "
   "Refreshes on entry (WiFi) &amp; with Update. Units in Settings &middot; "
@@ -119,6 +128,9 @@ BACK = [
  ("QRZ LOOKUP (menu)",
   "Callsign lookup via QRZ.com XML (needs QRZ XML subscription + user/pass in "
   "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
+ ("BAND PLAN (Help &rarr; f)",
+  "Worldwide amateur band reference LF&rarr;light: HF with ITU R1/R2/R3 splits, VHF/UHF/microwave EME+calling freqs, "
+  "satellite subbands, IARU designators (H/T/V/U/L/S/C/X/K), sat modes incl QO-100. <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("ACTIVATIONS (menu)",
   "Upcoming sat activations on hams.at (roves, grid/special ops). List: date, call, sat, grid (* = your own entry). <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail &middot; <b>n</b> add your own sked (offline OK), <b>e</b> edit a * entry &middot; <b>r</b> refresh &middot; <b>`</b> back. Detail: UTC/mode/freq + <b>footprint note</b> (checks co-visibility with the activator +/-30 min of listed time), <b>;</b>/<b>.</b> scroll the full comment, <b>a</b> SKED reminder (T-60/30/10 beeps+flash), <b>w</b> mutual-window screen if a footprint exists. Mutual window: small polar plot (me + DX arcs), Date/AOS/LOS/dur + peak el each; <b>d</b> DX Doppler pre-set to the transponder &amp; fixed DL/UL parsed from the freq/comment (default table if none). Cached to card &mdash; last list shows offline; WiFi to refresh"),
  ("OVERHEAD NOW (menu)",
@@ -127,8 +139,8 @@ BACK = [
   "Sat's transponder/beacon entries, two lines each: <b>D</b>=downlink+mode line, "
   "<b>U</b>=uplink+tone/inv line. <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
-  "<b>,</b>/<b>/</b> 9 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
-  "Pass outlook / Orbit position &middot; <b>r</b> recompute &middot; Doppler <b>f</b> sets beacon freq"),
+  "<b>,</b>/<b>/</b> 10 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
+  "Pass outlook / Orbit position / Phys (velocity + launch date/age) &middot; <b>r</b> recompute &middot; Doppler <b>f</b> sets beacon freq"),
  ("SIMULATION",
   "<b>,</b>/<b>/</b> step time &middot; <b>;</b>/<b>.</b> step size &middot; "
   "<b>m</b> world-map view (sub-point + footprint) &middot; "

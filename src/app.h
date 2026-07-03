@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -326,10 +326,12 @@ private:
   int32_t   dxdPbOff  = 0;            // passband operating offset (Hz up from downlink low)
   int       dxdRow    = 0;            // scroll position (top visible 30 s step)
   int       dxdWin    = 0;            // which mutual window index this table is for
+  uint32_t  dxdAnchorHz = 0;         // fixed-mode target dial freq (Hz); re-applied on transponder change (0 = none)
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
   void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
   void dxdStepAnchorDial(int dir);   // step the anchored dial by 1 kHz (fixed modes)
+  void dxdReanchorToStored();        // re-apply dxdAnchorHz to the current transponder after a change
   void dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
                    uint32_t& dxRx, uint32_t& dxTx);  // core per-step calculator
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
@@ -1073,6 +1075,49 @@ private:
   void buildEqx();   void drawEqx();   void keyEqx(char c, bool enter, bool back);
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
+
+  // EME (moonbounce) screen (SCR_EME), reached from the Sun/Moon screen. Live lunar
+  // Doppler per band, topocentric range + range-rate, path degradation, and a coarse
+  // sky-noise flag; a sub-view finds the mutual-Moon window against a DX grid.
+  bool     emeRotOut = false;       // rotator engaged pointing at the Moon from EME screen
+  static const int EME_MUT_MAX = 32;
+  struct EmeWin { time_t aos; time_t los; };
+  EmeWin   emeMut[EME_MUT_MAX];     // mutual-Moon (common-window) list
+  char     emeMutGrid[10] = {0};    // DX grid the mutual list was computed for
+  int      emeMutN = 0, emeMutSel = 0, emeMutScroll = 0;  // mutual-Moon window list
+  bool     emeMutShown = false;     // showing the mutual-window sub-view
+  void drawEme(); void keyEme(char c, bool enter, bool back);
+  void emeComputeMutual(const String& grid);   // fill the mutual-Moon window list
+
+  // Grid distance/bearing calculator (SCR_GRIDCALC), a main-menu tool. Enter a
+  // Maidenhead grid -> great-circle distance + beam heading from your QTH, with an
+  // option to point the rotator at that bearing. Seedable from SCR_QRZGRID (a separate
+  // QRZ-lookup screen that leaves the existing QRZ screen untouched).
+  char     gcGrid[10] = {0};        // the entered/seeded target grid
+  bool     gcHaveResult = false;
+  double   gcDistKm = 0, gcBearing = 0;
+  bool     gcRotOut = false;        // rotator pointed at the grid bearing
+  void drawGridCalc(); void keyGridCalc(char c, bool enter, bool back);
+  void gcCompute();                 // recompute distance/bearing from gcGrid + QTH
+
+  // Separate QRZ-lookup-to-grid screen (SCR_QRZGRID): looks up a callsign's grid and
+  // seeds the grid calculator. Independent of the existing SCR_QRZ screen.
+  char     qgCall[12] = {0};
+  String   qgGrid, qgName, qgStatus;
+  bool     qgHave = false;
+  void drawQrzGrid(); void keyQrzGrid(char c, bool enter, bool back);
+  void qrzGridLookup();             // resolve qgCall -> grid via qrzLookup(), fill qg* fields
+
+  // Frequency/allocation reference (SCR_BANDPLAN): a scrollable worldwide amateur
+  // band reference, LF to light, with ITU-region differences, VHF/UHF/microwave and
+  // EME calling frequencies, and satellite subbands + band designators.
+  int      bpScroll = 0;
+  void drawBandPlan(); void keyBandPlan(char c, bool enter, bool back);
+
+  // HF/6m propagation guidance (SCR_PROP), off the Space Wx screen. Translates the
+  // F10.7 solar flux and Kp index (already fetched for Space Wx) into rule-of-thumb
+  // band-opening, geomagnetic, aurora, and absorption guidance. No new data source.
+  void drawProp(); void keyProp(char c, bool enter, bool back);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
   void drawWeather(); void keyWeather(char c, bool enter, bool back);
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);

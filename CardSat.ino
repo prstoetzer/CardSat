@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.45";
+static constexpr const char* FW_VERSION = "0.9.46";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -2119,7 +2119,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -4898,10 +4898,12 @@ private:
   int32_t   dxdPbOff  = 0;            // passband operating offset (Hz up from downlink low)
   int       dxdRow    = 0;            // scroll position (top visible 30 s step)
   int       dxdWin    = 0;            // which mutual window index this table is for
+  uint32_t  dxdAnchorHz = 0;         // fixed-mode target dial freq (Hz); re-applied on transponder change (0 = none)
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
   void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
   void dxdStepAnchorDial(int dir);   // step the anchored dial by 1 kHz (fixed modes)
+  void dxdReanchorToStored();        // re-apply dxdAnchorHz to the current transponder after a change
   void dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
                    uint32_t& dxRx, uint32_t& dxTx);  // core per-step calculator
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
@@ -5645,6 +5647,49 @@ private:
   void buildEqx();   void drawEqx();   void keyEqx(char c, bool enter, bool back);
   void drawSim();    void keySim(char c, bool enter, bool back);
   void drawSunMoon(); void keySunMoon(char c, bool enter, bool back);
+
+  // EME (moonbounce) screen (SCR_EME), reached from the Sun/Moon screen. Live lunar
+  // Doppler per band, topocentric range + range-rate, path degradation, and a coarse
+  // sky-noise flag; a sub-view finds the mutual-Moon window against a DX grid.
+  bool     emeRotOut = false;       // rotator engaged pointing at the Moon from EME screen
+  static const int EME_MUT_MAX = 32;
+  struct EmeWin { time_t aos; time_t los; };
+  EmeWin   emeMut[EME_MUT_MAX];     // mutual-Moon (common-window) list
+  char     emeMutGrid[10] = {0};    // DX grid the mutual list was computed for
+  int      emeMutN = 0, emeMutSel = 0, emeMutScroll = 0;  // mutual-Moon window list
+  bool     emeMutShown = false;     // showing the mutual-window sub-view
+  void drawEme(); void keyEme(char c, bool enter, bool back);
+  void emeComputeMutual(const String& grid);   // fill the mutual-Moon window list
+
+  // Grid distance/bearing calculator (SCR_GRIDCALC), a main-menu tool. Enter a
+  // Maidenhead grid -> great-circle distance + beam heading from your QTH, with an
+  // option to point the rotator at that bearing. Seedable from SCR_QRZGRID (a separate
+  // QRZ-lookup screen that leaves the existing QRZ screen untouched).
+  char     gcGrid[10] = {0};        // the entered/seeded target grid
+  bool     gcHaveResult = false;
+  double   gcDistKm = 0, gcBearing = 0;
+  bool     gcRotOut = false;        // rotator pointed at the grid bearing
+  void drawGridCalc(); void keyGridCalc(char c, bool enter, bool back);
+  void gcCompute();                 // recompute distance/bearing from gcGrid + QTH
+
+  // Separate QRZ-lookup-to-grid screen (SCR_QRZGRID): looks up a callsign's grid and
+  // seeds the grid calculator. Independent of the existing SCR_QRZ screen.
+  char     qgCall[12] = {0};
+  String   qgGrid, qgName, qgStatus;
+  bool     qgHave = false;
+  void drawQrzGrid(); void keyQrzGrid(char c, bool enter, bool back);
+  void qrzGridLookup();             // resolve qgCall -> grid via qrzLookup(), fill qg* fields
+
+  // Frequency/allocation reference (SCR_BANDPLAN): a scrollable worldwide amateur
+  // band reference, LF to light, with ITU-region differences, VHF/UHF/microwave and
+  // EME calling frequencies, and satellite subbands + band designators.
+  int      bpScroll = 0;
+  void drawBandPlan(); void keyBandPlan(char c, bool enter, bool back);
+
+  // HF/6m propagation guidance (SCR_PROP), off the Space Wx screen. Translates the
+  // F10.7 solar flux and Kp index (already fetched for Space Wx) into rule-of-thumb
+  // band-opening, geomagnetic, aurora, and absorption guidance. No new data source.
+  void drawProp(); void keyProp(char c, bool enter, bool back);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
   void drawWeather(); void keyWeather(char c, bool enter, bool back);
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);
@@ -14899,6 +14944,9 @@ h+=orow('Sunlit',o.sunlit?'yes':'eclipse');h+=orow('Beta',o.beta+'\u00b0');
 h+=orow('Node drift',o.nodeDrift+'\u00b0/day'+(o.sunSync?' (sun-sync)':''));
 h+=orow('Mean/True anom',o.meanAnom+'\u00b0 / '+o.trueAnom+'\u00b0');
 h+=orow('To peri/apo',Math.round(o.toPeri/60)+'/'+Math.round(o.toApo/60)+' min');
+h+=orow('Velocity',(o.vel!=null?o.vel:'--')+' km/s');
+if(o.launchYear)h+=orow('Launched',o.launchYear+(o.cospar?' ('+o.cospar+')':'')+' \u2014 '+(new Date().getFullYear()-o.launchYear)+' yr');
+else if(o.cospar)h+=orow('Cospar',o.cospar);
 if(o.outlookN)h+=orow('Outlook',o.outlookN+' passes, '+o.outlookHi+' >30\u00b0');
 t.innerHTML=h;
 })}
@@ -15570,6 +15618,23 @@ void App::webdSendOrbitJson() {
   j += ",\"argLat\":"; j += num(u,1); j += ",\"toPeri\":"; j += (long)toPeri;
   j += ",\"toApo\":"; j += (long)toApo; j += ",\"argp\":"; j += num(s->argp,1);
   j += ",\"raan\":"; j += num(s->raan,1);
+  // page 9 (Phys): instantaneous orbital speed (vis-viva) + launch year/age from
+  // the COSPAR designator. nu (true anomaly) and a are already computed above.
+  { const double MU2 = 398600.4418;
+    double eO = s->ecc, pO = a * (1.0 - eO * eO);
+    double rO = (1.0 + eO * cos(nu * D2R) != 0) ? pO / (1.0 + eO * cos(nu * D2R)) : a;
+    double vN = (a > 0 && rO > 0) ? sqrt(MU2 * (2.0 / rO - 1.0 / a)) : 0.0;
+    double vA = (a > 0) ? sqrt(MU2 * (2.0 / (a * (1 + eO)) - 1.0 / a)) : 0.0;
+    double vP = (a > 0) ? sqrt(MU2 * (2.0 / (a * (1 - eO)) - 1.0 / a)) : 0.0;
+    j += ",\"vel\":"; j += num(vN,3); j += ",\"vApo\":"; j += num(vA,2); j += ",\"vPeri\":"; j += num(vP,2);
+    int ly = 0;
+    if (s->intlDes[0] && strlen(s->intlDes) >= 5 && s->intlDes[4] == '-'
+        && isdigit((unsigned char)s->intlDes[0]) && isdigit((unsigned char)s->intlDes[1])
+        && isdigit((unsigned char)s->intlDes[2]) && isdigit((unsigned char)s->intlDes[3]))
+      ly = (s->intlDes[0]-'0')*1000 + (s->intlDes[1]-'0')*100 + (s->intlDes[2]-'0')*10 + (s->intlDes[3]-'0');
+    j += ",\"launchYear\":"; j += (ly >= 1957 ? ly : 0);
+    j += ",\"cospar\":\""; j += s->intlDes; j += "\"";
+  }
   webdCli.print(j);
 
   // page 3: ground track -- sub-points over the next ~2 orbits (downsampled).
@@ -15704,6 +15769,93 @@ static void skyObjAzEl(time_t t, double obsLatDeg, double obsLonDeg, bool moon,
   double A = acos(cosA);
   if (sin(ha) > 0) A = TWO_PI_ - A;
   azOut = A * R2D; elOut = alt * R2D;
+}
+
+// ---------------------------------------------------------------------------
+//  EME support: the Moon's geocentric equatorial rectangular position (km) and,
+//  from it, the TOPOCENTRIC range and range-rate for a ground observer -- the
+//  quantities lunar (self-echo) Doppler is computed from. Uses the same Schlyter
+//  series as skyObjAzEl() for the position; the range-rate is what matters for
+//  Doppler, and it is DOMINATED by the observer's own rotation velocity projected
+//  onto the Earth->Moon line (up to a few hundred m/s, vs ~30 m/s geocentric), so
+//  a geocentric-only figure would be wrong by thousands of Hz at microwave. The
+//  observer term is captured by differencing the full topocentric range.
+// ---------------------------------------------------------------------------
+static void moonGeoEqKm(time_t t, double& x, double& y, double& z) {
+  const double D2R = 0.017453292519943295;
+  double dS = ((double)t - 946598400.0) / 86400.0;
+  double N = (125.1228 - 0.0529538083 * dS) * D2R;
+  double inc = 5.1454 * D2R;
+  double w = (318.0634 + 0.1643573223 * dS) * D2R;
+  double aa = 60.2666, ee = 0.054900;
+  double M = (115.3654 + 13.0649929509 * dS) * D2R;
+  double E = M + ee * sin(M) * (1 + ee * cos(M));
+  for (int k = 0; k < 5; ++k) E -= (E - ee * sin(E) - M) / (1 - ee * cos(E));
+  double xv = aa * (cos(E) - ee), yv = aa * sqrt(1 - ee * ee) * sin(E);
+  double v = atan2(yv, xv), r = sqrt(xv * xv + yv * yv);
+  double xh = r * (cos(N) * cos(v + w) - sin(N) * sin(v + w) * cos(inc));
+  double yh = r * (sin(N) * cos(v + w) + cos(N) * sin(v + w) * cos(inc));
+  double zh = r * (sin(v + w) * sin(inc));
+  double lon = atan2(yh, xh), lat = atan2(zh, sqrt(xh * xh + yh * yh));
+  double Ms = (356.0470 + 0.9856002585 * dS) * D2R;
+  double ws = (282.9404 + 4.70935e-5 * dS) * D2R;
+  double Ls = ws + Ms, Lm = N + w + M, Dm = Lm - Ls, F = Lm - N;
+  lon += (-1.274 * sin(M - 2*Dm) + 0.658 * sin(2*Dm) - 0.186 * sin(Ms)
+          - 0.059 * sin(2*M - 2*Dm) - 0.057 * sin(M - 2*Dm + Ms)
+          + 0.053 * sin(M + 2*Dm) + 0.046 * sin(2*Dm - Ms) + 0.041 * sin(M - Ms)
+          - 0.035 * sin(Dm) - 0.031 * sin(M + Ms) - 0.015 * sin(2*F - 2*Dm)
+          + 0.011 * sin(M - 4*Dm)) * D2R;
+  lat += (-0.173 * sin(F - 2*Dm) - 0.055 * sin(M - F - 2*Dm)
+          - 0.046 * sin(M + F - 2*Dm) + 0.033 * sin(F + 2*Dm)
+          + 0.017 * sin(2*M + F)) * D2R;
+  r += (-0.58 * cos(M - 2*Dm) - 0.46 * cos(2*Dm));
+  const double ecl = 23.4393 * D2R, RE = 6378.137;
+  double xg = r * cos(lon) * cos(lat), yg = r * sin(lon) * cos(lat), zg = r * sin(lat);
+  x = xg * RE;                                         // equatorial geocentric, km
+  y = (yg * cos(ecl) - zg * sin(ecl)) * RE;
+  z = (yg * sin(ecl) + zg * cos(ecl)) * RE;
+}
+
+// Observer's geocentric equatorial position (km) from lat/lon and GMST.
+static void observerGeoEqKm(time_t t, double latDeg, double lonDeg,
+                            double& x, double& y, double& z) {
+  const double D2R = 0.017453292519943295, RE = 6378.137;
+  double d = ((double)t - 946728000.0) / 86400.0;
+  double gmst = fmod(280.46061837 + 360.98564736629 * d, 360.0); if (gmst < 0) gmst += 360.0;
+  double lst = (gmst + lonDeg) * D2R, latR = latDeg * D2R;
+  x = RE * cos(latR) * cos(lst);
+  y = RE * cos(latR) * sin(lst);
+  z = RE * sin(latR);
+}
+
+// Topocentric Earth-Moon range (km) and range-rate (m/s) for an observer. Range-rate
+// is a central difference of the range over +/-1 s (numerically stable to well under
+// 0.1 m/s; validated across step sizes). Positive range-rate = Moon receding.
+static void moonTopoRangeRate(time_t t, double latDeg, double lonDeg,
+                              double& rangeKm, double& rangeRateMs) {
+  auto rng = [&](time_t tt)->double {
+    double mx, my, mz, ox, oy, oz;
+    moonGeoEqKm(tt, mx, my, mz);
+    observerGeoEqKm(tt, latDeg, lonDeg, ox, oy, oz);
+    double dx = mx - ox, dy = my - oy, dz = mz - oz;
+    return sqrt(dx*dx + dy*dy + dz*dz);
+  };
+  double r0 = rng(t), rm = rng(t - 1), rp = rng(t + 1);
+  rangeKm = r0;
+  rangeRateMs = (rp - rm) / 2.0 * 1000.0;              // km/s -> m/s
+}
+
+// The Moon's galactic latitude (deg) at time t -- for a coarse EME sky-noise flag.
+// Near the galactic plane (|b| small) the 144 MHz sky background is hot, degrading
+// weak-signal reception; high |b| is cold sky. Uses geocentric RA/Dec (topocentric
+// parallax shifts this by << 1 deg, negligible for a coarse plane/warm/cold flag).
+static double moonGalacticLatDeg(time_t t) {
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232;
+  double x, y, z; moonGeoEqKm(t, x, y, z);
+  double ra = atan2(y, x), dec = atan2(z, sqrt(x*x + y*y));
+  const double raGP = 192.85948 * D2R, decGP = 27.12825 * D2R;
+  double b = asin(sin(dec) * sin(decGP) + cos(dec) * cos(decGP) * cos(ra - raGP));
+  return b * R2D;
 }
 
 // Compute the mode-aware, TCA-adaptive CAT write deadband and the TCA-tapered
@@ -16070,6 +16222,28 @@ void App::loop() {
         }
       }
     }
+    // EME rotator pointing: same logic as Sun/Moon but always the Moon; set only while
+    // the EME screen has pointing engaged (emeRotOut).
+    if (emeRotOut && rot && rot->ready() && ms - lastRotMs > 1000) {
+      lastRotMs = ms;
+      Observer o = loc.obs();
+      if (o.valid && timeIsSet()) {
+        double az, el; skyObjAzEl(nowUtc(), o.lat, o.lon, true, az, el);
+        if (el < 0.0) {
+          if (!rotParked) { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+                            rotParked = true; lastAzCmd = lastElCmd = -999.0f; }
+        } else {
+          float a = (float)az + cfg.rotAzOff, e = (float)el + cfg.rotElOff;
+          while (a >= 360.0f) a -= 360.0f; while (a < 0.0f) a += 360.0f;
+          if (e < 0) e = 0; if (e > 90) e = 90;
+          if (lastAzCmd < -500.0f ||
+              fabsf(a - lastAzCmd) >= (float)cfg.rotDeadband ||
+              fabsf(e - lastElCmd) >= (float)cfg.rotDeadband) {
+            rotPoint(a, e); lastAzCmd = a; lastElCmd = e; rotParked = false;
+          }
+        }
+      }
+    }
   // Redraw cadence is still screen-dependent (the radio/rotator service above is
   // not): refresh the live screens periodically; static ones redraw on keypress.
   if (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUALBIG || screen == SCR_POLAR || screen == SCR_WORLDMAP ||
@@ -16254,6 +16428,11 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_LORASAT:  keyLoraSat(c, enter, back); break;
     case SCR_LORAROSTER: keyLoraRoster(c, enter, back); break;
     case SCR_AMSATSTAT: keyAmsatStatus(c, enter, back); break;
+    case SCR_EME: keyEme(c, enter, back); break;
+    case SCR_GRIDCALC: keyGridCalc(c, enter, back); break;
+    case SCR_QRZGRID: keyQrzGrid(c, enter, back); break;
+    case SCR_BANDPLAN: keyBandPlan(c, enter, back); break;
+    case SCR_PROP: keyProp(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
 #endif
@@ -16317,7 +16496,7 @@ static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
 void App::keyHome(char c, bool enter, bool back) {
-  const int N = 19;
+  const int N = 20;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
   if (enter) {
@@ -16357,14 +16536,15 @@ void App::keyHome(char c, bool enter, bool back) {
       case 8: hamsatEnter(); break;   // upcoming activations (hams.at)
       case 9: buildAmsatStatusView(); amStatSel = 0; amStatScroll = 0; screen = SCR_AMSATSTAT; lastDrawMs = 0; break;
       case 10: ovhValid = false; ovhScroll = 0; screen = SCR_OVERHEAD; lastDrawMs = 0; break;  // what's overhead now
-      case 11: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
-      case 12: screen = SCR_LOCATION; break;
-      case 13: screen = SCR_UPDATE; break;
-      case 14: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
-      case 15: logMenuSel = 0; screen = SCR_LOG; break;
-      case 16: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
-      case 17: screen = SCR_ABOUT; break;
-      case 18: enterChargeMode(); screen = SCR_CHARGE; break;
+      case 11: gcRotOut = false; screen = SCR_GRIDCALC; lastDrawMs = 0; break;   // grid distance/bearing
+      case 12: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+      case 13: screen = SCR_LOCATION; break;
+      case 14: screen = SCR_UPDATE; break;
+      case 15: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
+      case 16: logMenuSel = 0; screen = SCR_LOG; break;
+      case 17: msgScroll = 0; screen = SCR_MESSAGES; lastDrawMs = 0; break;
+      case 18: screen = SCR_ABOUT; break;
+      case 19: enterChargeMode(); screen = SCR_CHARGE; break;
     }
   }
 }
@@ -17545,10 +17725,11 @@ void App::keyActMutual(char c, bool enter, bool back) {
       curTx = actTxIdx;
       dxdMode = actFixMode;                 // 1 = fixed DL, 2 = fixed UL
       dxdAnchor = (actFixMode == 1) ? 2 : 3;// 2 = dx-RX (downlink), 3 = dx-TX (uplink)
+      dxdAnchorHz = actFixHz;               // remember it so a transponder cycle can re-apply it
       dxdCenterPassband();
       dxdStepAnchorToHz(actFixHz);          // park the anchored dial on the listed freq
     } else {
-      dxdMode = 0; dxdAnchor = 0; curTx = (curTx < activeTxCount ? curTx : 0);
+      dxdMode = 0; dxdAnchor = 0; dxdAnchorHz = 0; curTx = (curTx < activeTxCount ? curTx : 0);
       dxdCenterPassband();
     }
     screen = SCR_ACTDOPP; lastDrawMs = 0;
@@ -17705,6 +17886,33 @@ void App::dxdStepAnchorToHz(uint32_t targetHz) {
   }
 }
 
+// Re-apply the stored anchor frequency (dxdAnchorHz, e.g. seeded from an activation)
+// to the CURRENT transponder after a transponder change. If the frequency falls in the
+// current transponder's downlink leg -> fixed DL; in its uplink leg -> fixed UL; then
+// converge the dial onto it. If it fits neither leg (this transponder isn't the one the
+// frequency belongs to), leave fixed mode off with the passband centered so the operator
+// can keep cycling. Does nothing when no anchor frequency is stored.
+void App::dxdReanchorToStored() {
+  if (dxdAnchorHz == 0 || activeTxCount == 0) return;
+  const Transponder& tp = activeTx[curTx];
+  const uint32_t TOL = 20000;
+  uint32_t hz = dxdAnchorHz;
+  // Downlink leg
+  uint32_t dLo = tp.downlink, dHi = tp.downlinkHigh ? tp.downlinkHigh : tp.downlink;
+  if (dHi < dLo) { uint32_t t = dLo; dLo = dHi; dHi = t; }
+  bool inDl = tp.downlink && hz >= (dLo > TOL ? dLo - TOL : 0) && hz <= dHi + TOL;
+  // Uplink leg
+  uint32_t uLo = tp.uplink, uHi = tp.uplinkHigh ? tp.uplinkHigh : tp.uplink;
+  if (uHi < uLo) { uint32_t t = uLo; uLo = uHi; uHi = t; }
+  bool inUl = tp.uplink && hz >= (uLo > TOL ? uLo - TOL : 0) && hz <= uHi + TOL;
+  if (inDl)      { dxdMode = 1; dxdAnchor = 2; }        // fixed DX downlink
+  else if (inUl) { dxdMode = 2; dxdAnchor = 3; }        // fixed DX uplink
+  else { dxdMode = 0; dxdAnchor = 0; return; }          // not this transponder's frequency
+  dxdCenterPassband();
+  dxdStepAnchorToHz(hz);
+}
+
+// Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
 // Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
 void App::dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
                       uint32_t& dxRx, uint32_t& dxTx) {
@@ -17864,9 +18072,16 @@ void App::keyDxDopp(char c, bool enter, bool back) {
   int nSteps = (int)(span / 30) + 1;
   Transponder& tp = activeTx[curTx];
 
-  if (c == 'm') { dxdMode = (dxdMode + 1) % 3; lastDrawMs = 0; return; }
+  if (c == 'm') { dxdMode = (dxdMode + 1) % 3; dxdAnchorHz = 0; lastDrawMs = 0; return; }
   if (c == 't') {                                  // cycle the selected transponder
-    if (activeTxCount > 0) { curTx = (curTx + 1) % activeTxCount; dxdCenterPassband(); }
+    if (activeTxCount > 0) {
+      curTx = (curTx + 1) % activeTxCount;
+      dxdCenterPassband();
+      // If a fixed frequency was seeded (e.g. from an activation), don't lose it on a
+      // transponder change: re-apply it to the new transponder when the frequency falls
+      // in one of its legs. Otherwise the passband just re-centers (above).
+      dxdReanchorToStored();
+    }
     lastDrawMs = 0; return;
   }
   if (c == 'a') { dxdAnchor = (dxdAnchor + 1) % 4; lastDrawMs = 0; return; }
@@ -18751,6 +18966,29 @@ void App::keyEdit(char c, bool enter, bool back) {
       // ---- mutual co-visibility vs a DX grid ----
       case 330: computeMutual(editBuf); return;
 
+      // ---- EME mutual-Moon window vs a DX grid ----
+      case 360: {
+        editBuf.trim(); editBuf.toUpperCase();
+        strncpy(emeMutGrid, editBuf.c_str(), sizeof(emeMutGrid) - 1); emeMutGrid[sizeof(emeMutGrid) - 1] = 0;
+        emeComputeMutual(String(emeMutGrid)); emeMutShown = true;
+        screen = SCR_EME; lastDrawMs = 0; return;
+      }
+
+      // ---- grid distance/bearing calculator: the target grid ----
+      case 350: {
+        editBuf.trim(); editBuf.toUpperCase();
+        strncpy(gcGrid, editBuf.c_str(), sizeof(gcGrid) - 1); gcGrid[sizeof(gcGrid) - 1] = 0;
+        gcCompute(); screen = SCR_GRIDCALC; lastDrawMs = 0; return;
+      }
+
+      // ---- QRZ-to-grid lookup: the callsign ----
+      case 351: {
+        editBuf.trim(); editBuf.toUpperCase();
+        strncpy(qgCall, editBuf.c_str(), sizeof(qgCall) - 1); qgCall[sizeof(qgCall) - 1] = 0;
+        screen = SCR_QRZGRID; qgHave = false; qgStatus = "Looking up..."; lastDrawMs = 0;
+        qrzGridLookup(); return;
+      }
+
       // ---- per-satellite CTCSS tone override ----
       case 340: {
         SatEntry* s = activeSat();
@@ -19005,9 +19243,15 @@ void App::keyEdit(char c, bool enter, bool back) {
     return;
   }
   if (c >= 32 && c < 127) {
+    // Grid-square and callsign fields uppercase-by-default as you type (shift gives
+    // lowercase). Every editTarget here is a Maidenhead grid or an amateur callsign;
+    // they also uppercase on commit, so this only aligns the on-screen typing with the
+    // stored result. Keep this list in sync when adding a grid/callsign entry field.
     if (editTarget == 103 || editTarget == 104 || editTarget == 204 || editTarget == 216 ||
         editTarget == 330 || editTarget == 228 ||
-        editTarget == 500 || editTarget == 503 || editTarget == 600) {
+        editTarget == 500 || editTarget == 503 || editTarget == 600 ||
+        editTarget == 350 || editTarget == 351 || editTarget == 360 ||
+        editTarget == 721 || editTarget == 723 || editTarget == 729) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
     }
@@ -21296,6 +21540,11 @@ void App::draw() {
     case SCR_LORASAT:  drawLoraSat(); break;
     case SCR_LORAROSTER: drawLoraRoster(); break;
     case SCR_AMSATSTAT: drawAmsatStatus(); break;
+    case SCR_EME: drawEme(); break;
+    case SCR_GRIDCALC: drawGridCalc(); break;
+    case SCR_QRZGRID: drawQrzGrid(); break;
+    case SCR_BANDPLAN: drawBandPlan(); break;
+    case SCR_PROP: drawProp(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
 #endif
@@ -21500,6 +21749,10 @@ static inline int mapLonToX(double lon, double centerLon, int MX, int MW) {
 // Sub-solar point (defined later, near the globe code) -- forward declaration so
 // the flat world map can shade its night hemisphere with the same solar model.
 static void subSolarPoint(time_t t, double& slat, double& slon);
+// Great-circle distance/bearing (defined later) -- forward-declared so the EME and
+// grid-calculator screens above can use it before its definition.
+static void greatCircle(double lat1, double lon1, double lat2, double lon2,
+                        double& distKm, double& bearingDeg);
 
 void App::drawWorldMap() {
   header("World Map");
@@ -21810,6 +22063,7 @@ void App::drawHelp() {
     " s  ham satellite history",
     " t  tech help (antennas etc)",
     " l  learn (radio+orbit theory)",
+    " f  frequencies / band plan",
     " b  screenshot to SD",
     " ;/.  up/down",
     " ,//  left/right",
@@ -22015,6 +22269,7 @@ void App::keyHelp(char c, bool enter, bool back) {
   if (c == 's') { satHistScroll = 0; screen = SCR_SATHIST; lastDrawMs = 0; return; }
   if (c == 't') { techScroll = 0; screen = SCR_TECHHELP; lastDrawMs = 0; return; }
   if (c == 'l') { learnScroll = 0; screen = SCR_LEARN; lastDrawMs = 0; return; }
+  if (c == 'f') { bpScroll = 0; screen = SCR_BANDPLAN; lastDrawMs = 0; return; }  // frequencies / band plan
   if (isUp(c))   { helpScroll--; lastDrawMs = 0; }
   if (isDown(c)) { helpScroll++; lastDrawMs = 0; }
   if (isBack(c, back)) { screen = helpReturn; lastDrawMs = 0; return; }
@@ -24529,9 +24784,9 @@ void App::buildOrbit(bool quiet) {
 void App::drawOrbit() {
   SatEntry* s = activeSat();
   static const char* PG[] = { "Info", "Live", "Pass", "Track", "Doppler", "Nodal",
-                              "Sun/B", "Outlook", "OrbPos" };
+                              "Sun/B", "Outlook", "OrbPos", "Phys" };
   { String h = (s ? String(s->name) : String("Orbit")) + " " + PG[orbitPage] +
-               " " + String(orbitPage + 1) + "/9";
+               " " + String(orbitPage + 1) + "/10";
     header(h); }
   canvas.setTextSize(1);
   if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
@@ -24845,6 +25100,56 @@ void App::drawOrbit() {
     return;
   }
 
+  if (orbitPage == 9) {                              // ---------- Physical / identity ----------
+    const double D2R = 0.017453292519943295;
+    // Instantaneous orbital speed via vis-viva: v = sqrt(mu*(2/r - 1/a)). The
+    // geocentric radius r is from the current true anomaly (r = a(1-e^2)/(1+e*cos v)),
+    // advanced from the epoch mean anomaly -- so the speed is live and correctly higher
+    // near perigee, lower near apogee.
+    double e = s->ecc;
+    double maNow = fmod(s->ma + 360.0 * mm * (now ? (now - s->epochUnix) : 0) / 86400.0, 360.0);
+    if (maNow < 0) maNow += 360.0;
+    double M = maNow * D2R;
+    double nu = M + (2*e - 0.25*e*e*e) * sin(M) + 1.25*e*e * sin(2*M)
+                  + (13.0/12.0)*e*e*e * sin(3*M);       // true anomaly (rad)
+    double pOrb = a * (1.0 - e * e);
+    double r = (1.0 + e * cos(nu) != 0) ? pOrb / (1.0 + e * cos(nu)) : a;
+    double vNow = (a > 0 && r > 0) ? sqrt(MU * (2.0 / r - 1.0 / a)) : 0.0;
+    double vApo = (a > 0) ? sqrt(MU * (2.0 / (a * (1 + e)) - 1.0 / a)) : 0.0;
+    double vPer = (a > 0) ? sqrt(MU * (2.0 / (a * (1 - e)) - 1.0 / a)) : 0.0;
+    row("Velocity",  (now ? String(vNow, 3) : String("--")) + " km/s");
+    row("V apo/peri", String(vApo, 2) + " / " + String(vPer, 2) + " km/s");
+
+    // Launch year + satellite age from the COSPAR International Designator
+    // "YYYY-NNNP" (the catalog stores the 4-digit-year form). The first four chars
+    // are the launch year; chars 5-7 (after the dash) are the launch number of that
+    // year. Age is now - Jan 1 of the launch year (year-granular; the designator has
+    // no launch day). Falls back to "--" if the field isn't the expected form.
+    int lyear = 0, lnum = 0;
+    if (s->intlDes[0] && strlen(s->intlDes) >= 5 && s->intlDes[4] == '-'
+        && isdigit((unsigned char)s->intlDes[0]) && isdigit((unsigned char)s->intlDes[1])
+        && isdigit((unsigned char)s->intlDes[2]) && isdigit((unsigned char)s->intlDes[3])) {
+      lyear = (s->intlDes[0]-'0')*1000 + (s->intlDes[1]-'0')*100
+            + (s->intlDes[2]-'0')*10 + (s->intlDes[3]-'0');
+      lnum = atoi(s->intlDes + 5);
+    }
+    if (lyear >= 1957) {
+      row("Launched", String(lyear) + (lnum ? (" (#" + String(lnum) + ")") : String("")));
+      if (now) {
+        struct tm ly; memset(&ly, 0, sizeof(ly));
+        ly.tm_year = lyear - 1900; ly.tm_mday = 1;    // Jan 1 of the launch year
+        double ageY = (now - mktime(&ly)) / 31557600.0;   // Julian years
+        row("In orbit", String(ageY, 1) + " yr");
+      }
+      row("Cospar", String(s->intlDes));
+    } else {
+      row("Launched", "--");
+      if (s->intlDes[0]) row("Cospar", String(s->intlDes));
+    }
+    footer(",// page  ` bk");
+    return;
+  }
+
   // orbitPage == 4                                  // ---------- Doppler curve ----------
   {
     const int PX = 30, PY = 20, PW = 204, PH = 90;
@@ -24885,8 +25190,8 @@ void App::drawOrbit() {
 void App::keyOrbit(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
-  if (isRight(c)) { if (++orbitPage > 8) orbitPage = 0; lastDrawMs = 0; return; }
-  if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 8; lastDrawMs = 0; return; }
+  if (isRight(c)) { if (++orbitPage > 9) orbitPage = 0; lastDrawMs = 0; return; }
+  if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 9; lastDrawMs = 0; return; }
   if (c == 'r')   { buildOrbit(); lastDrawMs = 0; return; }
   if (c == 'f' && orbitPage == 4) {                   // edit Doppler-page beacon freq
     editTarget = 210; editTitle = "Beacon freq (MHz)";
@@ -25253,6 +25558,405 @@ void App::keySunMoon(char c, bool enter, bool back) {
   if (c == 'x') { if (rot) rot->stop(); smOut = false; lastDrawMs = 0; return; }
   if (c == 's') { skySel = 0; screen = SCR_SKYMAP; lastDrawMs = 0; return; }  // sky plot
   if (c == 't') { screen = SCR_TRANSIT; transitStartJob(); lastDrawMs = 0; return; }  // Sun/Moon transits
+  if (c == 'e') { emeMutShown = false; screen = SCR_EME; lastDrawMs = 0; return; }     // EME / moonbounce
+}
+
+// ---- EME (moonbounce) screen ---------------------------------------------------------
+// Live lunar Doppler for the ham bands, topocentric range + range-rate, path degradation
+// vs perigee, and a coarse sky-noise flag from the Moon's galactic latitude. Reachable
+// from the Sun/Moon screen with 'e'. A sub-view ('m') finds the mutual-Moon window against
+// a DX grid (when the Moon is above the horizon for both stations).
+
+// Fill the mutual-Moon window list: scan forward and record spans where the Moon is up
+// (el > 0) for BOTH our QTH and the DX grid -- the EME common window.
+void App::emeComputeMutual(const String& grid) {
+  emeMutN = 0; emeMutSel = 0; emeMutScroll = 0;
+  Observer o = loc.obs();
+  double dlat, dlon;
+  if (!Location::gridToLatLon(grid, dlat, dlon)) { setStatus("Bad grid"); return; }
+  if (!o.valid || !timeIsSet()) { setStatus("Need QTH + clock"); return; }
+  time_t now = nowUtc();
+  const int STEP = 300;                 // 5-min scan step over the next 14 days
+  const time_t END = now + (time_t)14 * 86400;
+  bool inWin = false; time_t winStart = 0;
+  auto bothUp = [&](time_t t)->bool {
+    double az1, el1, az2, el2;
+    skyObjAzEl(t, o.lat, o.lon, true, az1, el1);
+    skyObjAzEl(t, dlat, dlon, true, az2, el2);
+    return el1 > 0 && el2 > 0;
+  };
+  for (time_t t = now; t < END && emeMutN < EME_MUT_MAX; t += STEP) {
+    bool up = bothUp(t);
+    if (up && !inWin) { inWin = true; winStart = t; }
+    else if (!up && inWin) {
+      inWin = false;
+      emeMut[emeMutN].aos = winStart; emeMut[emeMutN].los = t; emeMutN++;
+    }
+  }
+  if (inWin && emeMutN < EME_MUT_MAX) { emeMut[emeMutN].aos = winStart; emeMut[emeMutN].los = END; emeMutN++; }
+  strncpy(emeMutGrid, grid.c_str(), sizeof(emeMutGrid) - 1); emeMutGrid[sizeof(emeMutGrid) - 1] = 0;
+  if (emeMutN == 0) setStatus("No common Moon window in 14 d");
+}
+
+void App::drawEme() {
+  header("EME / Moonbounce");
+  canvas.setTextSize(1);
+  Observer o = loc.obs();
+  if (!o.valid || !timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print(!o.valid ? "Set your location first." : "Clock not set (NTP/GPS).");
+    footer("` back");
+    return;
+  }
+  time_t now = nowUtc();
+
+  if (emeMutShown) {                     // ---- mutual-Moon window sub-view ----
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 20); canvas.printf("Common Moon window vs %s", emeMutGrid);
+    if (emeMutN == 0) {
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.setCursor(6, 40); canvas.print("No common window in 14 days.");
+      footer("g grid  ` back");
+      return;
+    }
+    const int rows = 8;
+    if (emeMutSel < emeMutScroll) emeMutScroll = emeMutSel;
+    if (emeMutSel >= emeMutScroll + rows) emeMutScroll = emeMutSel - rows + 1;
+    for (int r = 0; r < rows && (emeMutScroll + r) < emeMutN; ++r) {
+      int vi = emeMutScroll + r; int y = 32 + r * 11;
+      bool sel = (vi == emeMutSel);
+      if (sel) canvas.fillRect(0, y - 1, 240, 11, CL_SELBG);
+      canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+      time_t a = emeMut[vi].aos, l = emeMut[vi].los;
+      long durMin = (long)(l - a) / 60;
+      struct tm tmv; gmtime_r(&a, &tmv);
+      canvas.setCursor(4, y);
+      canvas.printf("%02d-%02d %02d:%02dZ  %ldh%02ldm", tmv.tm_mon + 1, tmv.tm_mday,
+                    tmv.tm_hour, tmv.tm_min, durMin / 60, durMin % 60);
+    }
+    footer("g grid  ` back");
+    return;
+  }
+
+  // ---- main EME data view ----
+  double az, el; skyObjAzEl(now, o.lat, o.lon, true, az, el);
+  double rangeKm, rrMs; moonTopoRangeRate(now, o.lat, o.lon, rangeKm, rrMs);
+  double galLat = moonGalacticLatDeg(now);
+
+  // Moon az/el + up/down
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 20); canvas.print("Moon");
+  canvas.setTextColor(el > 0 ? CL_GREEN : CL_ORANGE, CL_BLACK);
+  canvas.setCursor(40, 20); canvas.printf("Az %.1f  El %.1f  %s", az, el, el > 0 ? "UP" : "down");
+
+  // Range + range-rate
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 32); canvas.print("Range");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(46, 32); canvas.printf("%.0f km   rate %+.0f m/s", rangeKm, rrMs);
+
+  // Path degradation vs perigee (40*log10(r/rp)); note near perigee/apogee.
+  const double RP = 356500.0, RA = 406700.0;
+  double degdB = 40.0 * log10(rangeKm / RP);
+  const char* pa = (rangeKm < RP + 8000) ? " (near perigee)"
+                 : (rangeKm > RA - 8000) ? " (near apogee)" : "";
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 44); canvas.print("Degrad");
+  canvas.setTextColor(degdB < 1.0 ? CL_GREEN : (degdB < 1.8 ? CL_YELLOW : CL_ORANGE), CL_BLACK);
+  canvas.setCursor(46, 44); canvas.printf("%.2f dB%s", degdB, pa);
+
+  // Sky-noise flag from |galactic latitude|.
+  double b = fabs(galLat);
+  const char* sky = (b < 10) ? "HOT (galactic plane)" : (b < 25) ? "warm" : "cold sky";
+  uint16_t skyc = (b < 10) ? CL_RED : (b < 25) ? CL_YELLOW : CL_GREEN;
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 56); canvas.print("Sky");
+  canvas.setTextColor(skyc, CL_BLACK); canvas.setCursor(46, 56); canvas.printf("%s (b %+.0f)", sky, galLat);
+
+  // Per-band lunar Doppler (round trip): shift = -2*f*rr/c. Rows are pitched to keep
+  // all five bands (through the 10 GHz row) clear of the footer at y=127.
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 70); canvas.print("Self-echo Doppler:");
+  struct { const char* n; double mhz; } bands[] = {
+    {"50", 50.0}, {"144", 144.0}, {"432", 432.0}, {"1296", 1296.0}, {"10G", 10368.0}
+  };
+  const double C = 299792458.0;
+  for (int i = 0; i < 5; ++i) {
+    int y = 80 + i * 9;
+    double dop = -2.0 * bands[i].mhz * 1e6 * rrMs / C;
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(8, y); canvas.printf("%-5s MHz", bands[i].n);
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(88, y);
+    if (fabs(dop) >= 1000) canvas.printf("%+.2f kHz", dop / 1000.0);
+    else                   canvas.printf("%+.0f Hz", dop);
+  }
+
+  footer(emeRotOut ? "o STOP rot  m mutual  ` back" : "o point Moon  m mutual  ` back");
+}
+
+void App::keyEme(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) {
+    if (emeMutShown) { emeMutShown = false; lastDrawMs = 0; return; }   // sub-view -> main
+    if (emeRotOut && rot) rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+    emeRotOut = false; screen = SCR_SUNMOON; lastDrawMs = 0; return;
+  }
+  if (emeMutShown) {
+    if (isUp(c)   && emeMutSel > 0)            { emeMutSel--; lastDrawMs = 0; return; }
+    if (isDown(c) && emeMutSel < emeMutN - 1)  { emeMutSel++; lastDrawMs = 0; return; }
+    if (c == 'g') { editTarget = 360; editTitle = "DX grid (EME)"; editBuf = emeMutGrid; screen = SCR_EDIT; return; }
+    return;
+  }
+  if (c == 'o') {                        // point the rotator at the Moon (el included)
+    if (!rot || !rot->ready()) { setStatus("Rotator not ready"); return; }
+    emeRotOut = !emeRotOut;
+    if (emeRotOut) { rotOut = false; smOut = false; setStatus("Pointing at Moon"); }
+    else { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); setStatus("Rotator OFF (parked)"); }
+    lastDrawMs = 0; return;
+  }
+  if (c == 'x') { if (rot) rot->stop(); emeRotOut = false; lastDrawMs = 0; return; }
+  if (c == 'm') {                        // mutual-Moon window vs a DX grid
+    if (emeMutGrid[0]) { emeComputeMutual(String(emeMutGrid)); emeMutShown = (emeMutN >= 0); lastDrawMs = 0; }
+    else { editTarget = 360; editTitle = "DX grid (EME)"; editBuf = ""; screen = SCR_EDIT; }
+    return;
+  }
+}
+
+// ---- Grid distance/bearing calculator (SCR_GRIDCALC) ---------------------------------
+// A main-menu tool: enter a Maidenhead grid, get great-circle distance + beam heading
+// from your QTH, and optionally point the rotator at that bearing (terrestrial: el 0).
+
+void App::gcCompute() {
+  gcHaveResult = false;
+  Observer o = loc.obs();
+  if (!o.valid) { setStatus("Set your location first"); return; }
+  double dlat, dlon;
+  if (!gcGrid[0] || !Location::gridToLatLon(String(gcGrid), dlat, dlon)) { setStatus("Bad grid"); return; }
+  greatCircle(o.lat, o.lon, dlat, dlon, gcDistKm, gcBearing);
+  gcHaveResult = true;
+}
+
+void App::drawGridCalc() {
+  header("Grid dist / bearing");
+  canvas.setTextSize(1);
+  Observer o = loc.obs();
+  if (!o.valid) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("Set your location first.");
+    footer("` back");
+    return;
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 22); canvas.print("Your QTH");
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(64, 22);
+  { String mg = Location::toGrid(o.lat, o.lon); canvas.print(mg); }
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 36); canvas.print("Target");
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(64, 36);
+  canvas.print(gcGrid[0] ? gcGrid : "(none - press g)");
+
+  if (gcHaveResult) {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 58); canvas.print("Distance");
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(72, 58);
+    canvas.printf("%.0f km  (%.0f mi)", gcDistKm, gcDistKm * 0.621371);
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 72); canvas.print("Heading");
+    canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(72, 72);
+    canvas.printf("%.0f deg", gcBearing);
+    // long-path
+    double lp = gcBearing + 180.0; if (lp >= 360) lp -= 360;
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 86); canvas.print("Long path");
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(72, 86);
+    canvas.printf("%.0f deg  (%.0f km)", lp, 40075.0 - gcDistKm);
+    if (gcRotOut) { canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(4, 104);
+                    canvas.printf("Rotator -> %.0f deg", gcBearing); }
+  } else {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 62);
+    canvas.print("Press g to enter a grid,");
+    canvas.setCursor(6, 74); canvas.print("or q to look up a callsign.");
+  }
+  footer(gcRotOut ? "g grid q qrz o STOP rot `bk" : "g grid q qrz o point rot `bk");
+}
+
+void App::keyGridCalc(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) {
+    if (gcRotOut && rot) rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+    gcRotOut = false; screen = SCR_HOME; lastDrawMs = 0; return;
+  }
+  if (c == 'g') { editTarget = 350; editTitle = "Target grid"; editBuf = gcGrid; screen = SCR_EDIT; return; }
+  if (c == 'q') { editTarget = 351; editTitle = "Callsign"; editBuf = ""; screen = SCR_EDIT; return; }
+  if (c == 'o') {                        // point rotator at the bearing (terrestrial: el 0)
+    if (!gcHaveResult) { setStatus("Compute a bearing first"); return; }
+    if (!rot || !rot->ready()) { setStatus("Rotator not ready"); return; }
+    gcRotOut = !gcRotOut;
+    if (gcRotOut) { rotOut = false; smOut = false; emeRotOut = false;
+                    float a = (float)gcBearing + cfg.rotAzOff; while (a >= 360) a -= 360; while (a < 0) a += 360;
+                    rotPoint(a, 0.0f); setStatus("Rotator pointed at grid"); }
+    else { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); setStatus("Rotator OFF (parked)"); }
+    lastDrawMs = 0; return;
+  }
+  if (c == 'x') { if (rot) rot->stop(); gcRotOut = false; lastDrawMs = 0; return; }
+}
+
+// ---- QRZ-to-grid lookup (SCR_QRZGRID) ------------------------------------------------
+// A separate QRZ-lookup screen that only resolves a callsign to its grid and seeds the
+// grid calculator. Kept independent of the main SCR_QRZ screen, which is untouched. Reuses
+// the existing qrzLookup() session/fetch (which sets the qrzGrid member).
+
+void App::qrzGridLookup() {
+  if (!net.connected()) { qgStatus = "No WiFi - connect in Settings"; qgHave = false; return; }
+  if (strlen(cfg.qrzUser) == 0 || strlen(cfg.qrzPass) == 0) {
+    qgStatus = "Set QRZ login in Settings"; qgHave = false; return;
+  }
+  String err;
+  if (qrzLookup(String(qgCall), err)) {
+    qgGrid = qrzGrid; qgName = qrzName;              // qrzName/qrzGrid set by qrzLookup()
+    if (qgGrid.length() >= 4) { qgHave = true; qgStatus = ""; }
+    else { qgHave = false; qgStatus = "No grid for that call"; }
+  } else {
+    qgHave = false; qgStatus = err.length() ? err : "Lookup failed";
+  }
+}
+
+void App::drawQrzGrid() {
+  header("QRZ -> grid");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 24); canvas.print("Callsign");
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(72, 24);
+  canvas.print(qgCall[0] ? qgCall : "(press c)");
+  if (qgHave) {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 44); canvas.print("Name");
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(72, 44); canvas.print(qgName.substring(0, 26));
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 58); canvas.print("Grid");
+    canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(72, 58); canvas.print(qgGrid);
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 80);
+    canvas.print("ENTER: use this grid in the");
+    canvas.setCursor(6, 92); canvas.print("distance/bearing calculator.");
+    footer("ENTER use grid  c call  ` back");
+  } else {
+    canvas.setTextColor(qgStatus.startsWith("No ") || qgStatus.length() ? CL_YELLOW : CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print(qgStatus.length() ? qgStatus : "Press c to enter a callsign.");
+    footer("c call  ` back");
+  }
+}
+
+void App::keyQrzGrid(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_GRIDCALC; lastDrawMs = 0; return; }
+  if (c == 'c') { editTarget = 351; editTitle = "Callsign"; editBuf = qgCall; screen = SCR_EDIT; return; }
+  if (enter && qgHave) {                  // seed the grid calculator with this grid
+    strncpy(gcGrid, qgGrid.c_str(), sizeof(gcGrid) - 1); gcGrid[sizeof(gcGrid) - 1] = 0;
+    gcCompute(); screen = SCR_GRIDCALC; lastDrawMs = 0; return;
+  }
+}
+
+// ---- Frequency / allocation reference (SCR_BANDPLAN) ---------------------------------
+// A scrollable worldwide amateur band reference, LF to light. Section headers and rows
+// live in one PROGMEM-ish table; each line is either a header (prefixed '#') or a data
+// row "band|range|notes". ITU-region differences are called out inline (R1 EU/Africa,
+// R2 Americas, R3 Asia-Pacific). Includes HF, the VHF/UHF/microwave bands with EME and
+// calling frequencies, the satellite subbands, and the IARU band designators.
+static const char* const BANDPLAN[] = {
+  "#LF / MF",
+  "2200 m|135.7-137.8 kHz|LF; worldwide, tiny allocation",
+  "630 m|472-479 kHz|MF; secondary, low power",
+  "#HF (ITU regions differ)",
+  "160 m|1.8-2.0 MHz|R1 1.810-2.000, R2 1.800-2.000, R3 varies",
+  "80 m|3.5-4.0 MHz|R1 3.5-3.8, R2 3.5-4.0, R3 3.5-3.9",
+  "60 m|5.3-5.4 MHz|Channelised/limited; varies by country",
+  "40 m|7.0-7.3 MHz|R1/R3 7.0-7.2, R2 7.0-7.3",
+  "30 m|10.1-10.15 MHz|WARC; CW/data, no phone",
+  "20 m|14.0-14.35 MHz|Worldwide; primary DX band",
+  "17 m|18.068-18.168 MHz|WARC",
+  "15 m|21.0-21.45 MHz|Worldwide",
+  "12 m|24.89-24.99 MHz|WARC",
+  "10 m|28.0-29.7 MHz|Worldwide; FM >29.5, sats 29.3-29.51",
+  "#VHF",
+  "6 m|50-54 MHz|R1 50-52 (some 50-51), R2/R3 50-54",
+  "  6m calling|50.313 FT8, 50.110 DX SSB, 50.090 CW|",
+  "4 m|70.0-70.5 MHz|R1 only, some countries; none in R2/R3",
+  "2 m|144-148 MHz|R1 144-146, R2/R3 144-148",
+  "  2m calling|144.200 SSB, 144.174 FT8|",
+  "  2m EME|144.100-144.160 CW, 144.115-144.140 JT65/Q65|",
+  "  2m sat|145.8-146.0 satellite subband|",
+  "#UHF",
+  "1.25 m|222-225 MHz|R2 only (219-220 data)",
+  "70 cm|430-440 MHz|R1 430-440, R2 420-450, R3 430-440",
+  "  70cm calling|432.100 SSB/CW, 432.174 FT8|",
+  "  70cm EME|432.000-432.070 CW, 432.065 JT65|",
+  "  70cm sat|435-438 satellite subband|",
+  "33 cm|902-928 MHz|R2 only",
+  "23 cm|1240-1300 MHz|1296 weak-signal; sat 1260-1270 uplink",
+  "  23cm EME|1296.000 CW, 1296.065 JT65/Q65|",
+  "#Microwave (SHF/EHF)",
+  "13 cm|2300-2450 MHz|Segments vary; 2304/2320/2400 WS",
+  "  13cm sat|2400-2450 (QO-100 NB 2400.25 up)|",
+  "9 cm|3300-3500 MHz|Regional; 3400 common",
+  "5 cm|5650-5925 MHz|5760 WS; sat 5830-5850 down",
+  "3 cm|10.0-10.5 GHz|10368 WS/EME; 10.489 QO-100 down",
+  "1.2 cm|24.0-24.25 GHz|24192 WS/EME",
+  "6 mm|47.0-47.2 GHz|",
+  "4 mm|75.5-81.0 GHz|",
+  "2.5 mm|119.98-120.02 GHz|",
+  "2 mm|142-149 GHz|",
+  "1 mm|241-250 GHz|",
+  "sub-mm/light|>275 GHz, IR, optical|Experimental; laser/optical DX",
+  "#Satellite band designators (IARU)",
+  "H / 15m|21 MHz|",
+  "T / 10m|29 MHz|",
+  "V / 2m|145 MHz|",
+  "U / 70cm|435 MHz|",
+  "L / 23cm|1260 MHz (uplink)|",
+  "S / 13cm|2400 MHz|",
+  "S2|3.4 GHz|",
+  "C / 5cm|5840 MHz|",
+  "X / 3cm|10.45 GHz|",
+  "K / 1.2cm|24 GHz|",
+  "#Common sat modes (up/down)",
+  "Mode V/U (B)|145 up / 435 down|Most LEO linear/FM",
+  "Mode U/V (A)|435 up / 145 down|",
+  "Mode L/U|1260 up / 435 down|",
+  "Mode U/S|435 up / 2400 down|",
+  "QO-100 NB|2400.25 up / 10489.75 down|GEO, EU/Africa/Asia",
+};
+
+void App::drawBandPlan() {
+  header("Band plan / frequencies");
+  canvas.setTextSize(1);
+  const int N = (int)(sizeof(BANDPLAN) / sizeof(BANDPLAN[0]));
+  const int rows = 10;
+  if (bpScroll < 0) bpScroll = 0;
+  if (bpScroll > N - rows) bpScroll = (N > rows) ? N - rows : 0;
+  for (int r = 0; r < rows && (bpScroll + r) < N; ++r) {
+    int i = bpScroll + r, y = 20 + r * 11;
+    const char* s = BANDPLAN[i];
+    if (s[0] == '#') {                    // section header
+      canvas.setTextColor(CL_ORANGE, CL_BLACK);
+      canvas.setCursor(4, y); canvas.print(s + 1);
+    } else {
+      // "band|range|notes" -> band (cyan) + range (white); notes shown when the
+      // band field is short enough to leave room.
+      const char* p1 = strchr(s, '|');
+      const char* p2 = p1 ? strchr(p1 + 1, '|') : nullptr;
+      char band[22] = {0}, range[40] = {0};
+      if (p1) { int n = (int)(p1 - s); if (n > 21) n = 21; memcpy(band, s, n); }
+      if (p1 && p2) { int n = (int)(p2 - p1 - 1); if (n > 39) n = 39; memcpy(range, p1 + 1, n); }
+      else if (p1)  { strncpy(range, p1 + 1, 39); }
+      bool indent = (band[0] == ' ');
+      canvas.setTextColor(indent ? CL_GREY : CL_CYAN, CL_BLACK);
+      canvas.setCursor(indent ? 8 : 4, y); canvas.print(band);
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(96, y); canvas.print(range);
+    }
+  }
+  // scroll arrows
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (bpScroll > 0)          { canvas.setCursor(232, 20);  canvas.print("^"); }
+  if (bpScroll + rows < N)   { canvas.setCursor(232, 119); canvas.print("v"); }
+  footer("; / . scroll  ` back");
+}
+
+void App::keyBandPlan(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_HELP; lastDrawMs = 0; return; }
+  const int N = (int)(sizeof(BANDPLAN) / sizeof(BANDPLAN[0]));
+  if (isUp(c))   { bpScroll--; lastDrawMs = 0; }
+  if (isDown(c)) { bpScroll++; lastDrawMs = 0; }
+  if (c == '{')  { bpScroll -= 10; lastDrawMs = 0; }
+  if (c == '}')  { bpScroll += 10; lastDrawMs = 0; }
+  if (bpScroll < 0) bpScroll = 0;
+  if (bpScroll > N - 1) bpScroll = N - 1;
 }
 
 // ===========================================================================
@@ -26896,13 +27600,100 @@ void App::drawSpaceWx() {
                : (String(ageH / 24) + "d old");
     canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
   }
-  footer("r refresh  ` back");
+  footer("p propagation  r refresh  ` back");
 }
 
 void App::keySpaceWx(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (c == 'r') { spaceWxEnter(); return; }   // same show-cache + fetch + result flow
+  if (c == 'p') { screen = SCR_PROP; lastDrawMs = 0; return; }   // HF/6m propagation guidance
+}
+
+// ===========================================================================
+//  HF / 6m propagation guidance (SCR_PROP), reached with 'p' from Space Wx.
+//  Translates the F10.7 solar flux and Kp index (already fetched for Space Wx)
+//  into rule-of-thumb band-opening, geomagnetic, aurora, and D-layer absorption
+//  guidance. These are CLIMATOLOGICAL heuristics, not a real-time propagation
+//  model -- the screen says so -- but they turn two raw indices into the kind of
+//  "what's likely open" read an HF/6m/VHF operator wants. No new data source.
+// ===========================================================================
+void App::drawProp() {
+  header("HF / 6m propagation");
+  canvas.setTextSize(1);
+  float sfi = spaceF107, kp = spaceKp;
+  if (sfi <= 0 && kp < 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("No space-wx data yet.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 58); canvas.print("Update GP or fetch on the");
+    canvas.setCursor(6, 70); canvas.print("Space Wx screen (WiFi).");
+    footer("` back");
+    return;
+  }
+  int y = 20; const int LH = 9;
+  auto row = [&](const char* k, const String& v, uint16_t vc) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, y);  canvas.print(k);
+    canvas.setTextColor(vc, CL_BLACK);       canvas.setCursor(78, y); canvas.print(v);
+    y += LH;
+  };
+
+  // The two indices, up top.
+  row("Solar flux", (sfi > 0 ? String(sfi, 0) + " sfu" : String("--")),
+      sfi >= 120 ? CL_GREEN : (sfi >= 90 ? CL_WHITE : (sfi >= 70 ? CL_YELLOW : CL_ORANGE)));
+  row("Kp index", (kp >= 0 ? String(kp, 1) : String("--")),
+      kp < 0 ? CL_GREY : (kp < 4 ? CL_GREEN : (kp < 5 ? CL_WHITE : (kp < 7 ? CL_YELLOW : CL_RED))));
+
+  // HF band summary from solar flux (higher flux -> higher MUF -> high bands open).
+  if (sfi > 0) {
+    const char* hf; uint16_t hc;
+    if      (sfi >= 150) { hf = "10/12/15m wide open (day)"; hc = CL_GREEN; }
+    else if (sfi >= 120) { hf = "10/15m likely open (day)";  hc = CL_GREEN; }
+    else if (sfi >= 90)  { hf = "15/17/20m workable";        hc = CL_WHITE; }
+    else if (sfi >= 70)  { hf = "20/40m mainstay";           hc = CL_YELLOW; }
+    else                 { hf = "40/80m only, highs weak";   hc = CL_ORANGE; }
+    row("HF bands", hf, hc);
+    // Per-band daytime openings (rough MUF tendency).
+    auto st = [](float f, float openT, float margT) {
+      return (f >= openT) ? "open" : (f >= margT ? "marg" : "shut"); };
+    row("10/15/20m", String(st(sfi,120,100)) + " / " + st(sfi,100,85) + " / " + st(sfi,75,60),
+        CL_WHITE);
+  }
+
+  // Geomagnetic effect on HF from Kp.
+  if (kp >= 0) {
+    const char* g; uint16_t gc;
+    if      (kp >= 7) { g = "severe storm, HF badly hit"; gc = CL_RED; }
+    else if (kp >= 5) { g = "storm, HF degraded";         gc = CL_ORANGE; }
+    else if (kp >= 4) { g = "unsettled, some fading";     gc = CL_YELLOW; }
+    else              { g = "quiet, stable HF";           gc = CL_GREEN; }
+    row("Geomag", g, gc);
+    // Aurora / VHF -- the 6m/2m and EME crowd.
+    const char* au; uint16_t ac;
+    if      (kp >= 6) { au = "likely: 6m/2m, beam N"; ac = CL_GREEN; }
+    else if (kp >= 5) { au = "possible, watch 6m";    ac = CL_YELLOW; }
+    else              { au = "unlikely";              ac = CL_GREY; }
+    row("Aurora VHF", au, ac);
+    // Daytime D-layer absorption on the low bands (worse with disturbed field).
+    row("Absorption", String(kp >= 5 ? "high" : (kp >= 4 ? "moderate" : "low")) + " (LF/80/40 day)",
+        kp >= 5 ? CL_ORANGE : (kp >= 4 ? CL_YELLOW : CL_GREEN));
+  }
+
+  // Honest disclaimer: these are heuristics + a reminder that 6m Es is seasonal.
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(2, 116); canvas.print("rule-of-thumb; 6m Es is seasonal");
+  footer("r refresh  ` back");
+}
+
+void App::keyProp(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_SPACEWX; lastDrawMs = 0; return; }
+  if (c == 'r') {                          // refetch the indices without leaving this screen
+    if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
+    setStatus("Updating Space Wx..."); draw();
+    fetchSpaceWeather();
+    lastDrawMs = 0; return;
+  }
 }
 
 // ===========================================================================
@@ -28673,10 +29464,10 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 void App::drawHome() {
   header("CardSat");
   static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "AMSAT status", "Overhead now", "QRZ Lookup", "Location", "Update",
+                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "AMSAT status", "Overhead now", "Grid dist/bearing", "QRZ Lookup", "Location", "Update",
                           "Settings", "Log", "Messages", "About", "Charge / Sleep" };
   const int N = (int)(sizeof(items) / sizeof(items[0]));
-  static_assert(sizeof(items) / sizeof(items[0]) == 19,
+  static_assert(sizeof(items) / sizeof(items[0]) == 20,
                 "Home menu item count must match keyHome's N");
   const int VIS = 9;
   if (homeSel < homeScroll)           homeScroll = homeSel;

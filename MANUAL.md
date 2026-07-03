@@ -444,8 +444,8 @@ still be transmitting. Stop with `r` (radio) or `o` (rotator) — see
 ### Home
 
 A menu: **Satellites · Next Passes (all favs) · Passes (sel) · Track (sel) ·
-World Map · Sun / Moon · Space Wx · Weather · Activations · Overhead now · QRZ Lookup · Location ·
-Update · Settings · Log · Messages · About / diagnostics · Charge / Sleep.** The
+World Map · Sun / Moon · Space Wx · Weather · Activations · Overhead now · Grid dist/bearing ·
+QRZ Lookup · Location · Update · Settings · Log · Messages · About / diagnostics · Charge / Sleep.** The
 currently selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
 
 ### About
@@ -866,7 +866,7 @@ precise reentry prediction; for that, consult CelesTrak or Space-Track.
 
 ### Orbital analysis (`o`)
 
-Opened with `o` from **Satellites**. Nine pages, paged with `,`/`/`, `r` to
+Opened with `o` from **Satellites**. Ten pages, paged with `,`/`/`, `r` to
 recompute, `` ` `` to leave.
 
 #### Theory of operation — how these numbers are produced
@@ -1021,6 +1021,13 @@ The pages:
   north/south part of the orbit it is. For eccentric orbits the perigee/apogee
   timing shows when the bird is moving slowest and sitting highest — i.e. when the
   longest-dwell passes occur.
+- **Phys** — physical and identity data. The satellite's **instantaneous orbital
+  velocity** (from the vis-viva equation, so it is correctly faster near perigee and
+  slower near apogee), with the apogee/perigee velocity spread; and the **launch year,
+  launch number, and time in orbit**, derived from the COSPAR International Designator
+  (e.g. `1974-089B` → launched 1974). The launch figure is year-granular — the
+  designator carries no launch day — but it's a nice bit of context when you're working
+  a decades-old satellite.
 
 ### Next Passes (schedule)
 
@@ -2272,6 +2279,41 @@ Because the ground path of a transit is only a few kilometres wide, this is a
 elements matter for the centre-line. **Never observe a solar transit without proper
 solar filtering on your eyes and optics.**
 
+#### EME / moonbounce (`e`)
+
+Press **`e`** on the Sun/Moon screen for the **EME (Earth-Moon-Earth) screen** — the
+numbers a moonbounce operator needs to find their own echo and judge whether the Moon
+is workable. It reads live from your location and clock:
+
+- **Self-echo Doppler** for **50 / 144 / 432 / 1296 / 10368 MHz** — the total round-trip
+  frequency shift on your own signal returning off the Moon. This is dominated not by
+  the Moon's orbital motion but by **your own station's rotation** as the Earth turns, so
+  CardSat computes it **topocentrically** (your position *and* velocity projected onto the
+  Earth–Moon line). The figure is small at 50 MHz but swings to a few kHz at 1296 and tens
+  of kHz at 10 GHz across a Moon pass — which is exactly the offset you tune out to hear
+  your echo. A geocentric-only number would be wrong by thousands of Hz at microwave.
+- **Range and range-rate** — the current Earth–Moon distance and how fast it is changing
+  (the quantity the Doppler is derived from).
+- **Path degradation** — the extra path loss relative to perigee (roughly +2 dB at
+  apogee, from the inverse-fourth-power round-trip law), with a **near perigee** / **near
+  apogee** note. Perigee is the easiest Moon; apogee the hardest.
+- **Sky-noise flag** — a coarse **cold sky / warm / HOT** indicator from the Moon's
+  galactic latitude. Near the galactic plane the 144 MHz sky-background temperature is
+  high, degrading weak-signal reception; well away from it the sky is cold and quiet.
+- **Mutual-Moon window** — press **`m`** and enter a DX station's grid to scan the next
+  two weeks for the spans when the Moon is **above the horizon for both stations at once**
+  — the common EME window in which a QSO is geometrically possible. Press **`g`** in that
+  view to change the grid.
+- **Rotator** — press **`o`** to aim a connected rotator at the Moon and track it (the
+  same one-master-at-a-time rule as Sun/Moon tracking); **`x`** stops. **`` ` ``** returns
+  to the Sun/Moon screen.
+
+The Moon position uses the same low-precision series as the Sun/Moon screen (arc-minute
+class, far finer than any amateur beamwidth); the Doppler figures are intended as an
+operating aid — "where is my echo, roughly, and which way is it moving" — rather than a
+sub-Hz prediction. Cross-check against a dedicated EME calculator (MoonSked, the ARRL EME
+tool) for your grid when precision matters.
+
 ### Space weather
 
 **Space Wx** on the main menu summarises the indices that matter most for
@@ -2296,6 +2338,27 @@ This is a planning cue, not a forecast: the flux and Kp are observed values, and
 the outlook text is a simple heuristic reading of them, not a calibrated
 propagation prediction. A high Kp (storm) is the main thing to watch — it warns of
 auroral flutter on VHF and disturbed high-latitude HF.
+
+#### HF / 6m propagation guide (`p`)
+
+Press **`p`** on the Space Wx screen for a **propagation guide** that turns the same
+two indices — the 10.7 cm solar flux and the Kp index — into band-by-band operating
+guidance, for the operator who works HF and 6 m as well as the birds:
+
+- **HF band conditions** from the solar flux: a summary (which bands are open in
+  daylight) and a quick **10 / 15 / 20 m** open / marginal / shut read. Higher flux
+  raises the maximum usable frequency, so the high bands open as the flux climbs.
+- **Geomagnetic effect** from Kp: quiet / unsettled / storm, and what that means for HF
+  (a storm degrades paths and can black out polar routes).
+- **Auroral VHF** likelihood: a high Kp is the trigger for **6 m / 2 m auroral**
+  propagation, so the screen flags when it's possible and reminds you to beam toward the
+  pole.
+- **D-layer absorption** on the low bands (worse when the field is disturbed).
+
+Press **`r`** to refetch the indices without leaving the screen; **`` ` ``** returns to
+Space Wx. As on the Space Wx screen itself, these are **climatological rules of thumb,
+not a real-time model** — the screen says as much — and **6 m sporadic-E**, the dominant
+summer opening, is *seasonal* and is not predicted by these indices.
 
 ### Weather
 
@@ -2356,6 +2419,26 @@ The screen handles the obvious cases plainly:
 Your QRZ password is stored on the device the same way the WiFi and radio-LAN
 passwords are; it is shown masked in Settings. CardSat talks to QRZ over HTTPS.
 
+### Grid distance & bearing (Grid dist/bearing)
+
+**Grid dist/bearing** on the main menu (just before QRZ Lookup) is a great-circle
+calculator for terrestrial VHF/UHF work — tropo, contests, or just aiming a beam at a
+known grid. Press **`g`** and enter a **Maidenhead grid**; CardSat shows the
+**distance** (km and miles) and the **beam heading** from your station, both **short
+path and long path**.
+
+- Press **`o`** to **point a connected rotator** at the computed bearing. This is a
+  terrestrial heading, so the elevation is set to 0.
+- Press **`q`** to **look up a callsign's grid**: this opens a small **QRZ → grid**
+  screen (separate from the main QRZ Lookup, which is untouched). Enter a callsign; on
+  **ENTER** it seeds the calculator with that operator's grid so you get distance and
+  bearing to them directly.
+
+Your own grid comes from your set location, so set that first (Location screen, or a
+grid via *Settings*). `` ` `` returns to the main menu.
+
+
+
 ### Upcoming activations (Activations)
 
 **Activations** on the main menu shows the **upcoming satellite activations** that
@@ -2392,6 +2475,9 @@ the **date, AOS, LOS, duration and peak elevation for each station** beside it. 
 activation's frequency (from the freq field, then the comment) and, if it matches one of the
 satellite's real **two-way** transponders, pre-selects that transponder and locks the DX dial
 to the listed frequency as a **fixed downlink or uplink** (whichever leg the number falls in).
+On a bird with **more than one transponder** (AO-7, for example), the listed frequency is
+**remembered and re-applied as you cycle transponders** with `t` — it stays locked onto
+whichever transponder it belongs to and is not lost by stepping through the others.
 If no usable frequency is found, it opens the normal DX Doppler table instead. The existing
 DX Doppler (reached from the **Mutual** schedule) is unchanged; the activation path is a
 separate, pre-seeded view.
@@ -3991,7 +4077,8 @@ listed below.
 - **Shows** — per-screen key summaries.
 - **Keys** — `;`/`.` scroll; `g` opens the **Glossary & math**; `m` opens the
   **User guide**; `s` opens the **Ham satellite history**; `t` opens the **Tech
-  help** guide; `l` opens the **Learn** (radio + orbit theory) screen; `` ` `` back.
+  help** guide; `l` opens the **Learn** (radio + orbit theory) screen; `f` opens the
+  **band plan / frequency reference**; `` ` `` back.
 
 ### Glossary & math
 
@@ -4001,6 +4088,19 @@ listed below.
   downlink/uplink correction).
 - **Reached from** — `g` on the Help screen.
 - **Keys** — `;`/`.` scroll; `` ` `` back to Help.
+
+### Band plan / frequency reference
+
+- **Purpose** — a scrollable **worldwide amateur band reference**, from **LF to
+  light**. Covers the HF bands with their **ITU Region 1 / 2 / 3** differences, the
+  VHF/UHF/microwave bands with **calling and EME frequencies**, the **satellite
+  subbands**, the IARU **band designators** (H/T/V/U/L/S/C/X/K), and common satellite
+  modes including **QO-100**. A quick on-device answer to "where does this band start"
+  and "what's the calling frequency," with no radio or network needed.
+- **Reached from** — `f` on the Help screen.
+- **Keys** — `;`/`.` scroll a line; `` ` `` back to Help.
+- **Note** — band edges and especially the microwave/regional segments vary by country
+  within each ITU region; treat this as a quick reference, not a licence document.
 
 ### User guide
 

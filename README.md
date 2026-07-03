@@ -18,6 +18,23 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.46:** a release for the **VHF / UHF / microwave and EME** operator. A complete
+> **EME (moonbounce)** screen (press **`e`** from Sun/Moon) shows **self-echo Doppler** per band
+> (50/144/432/1296/10368 MHz, computed topocentrically — the figure swings kHz at 1296 and tens of
+> kHz at 10 GHz), topocentric **range/rate**, **path degradation** vs perigee, a galactic **sky-noise**
+> flag, a **mutual-Moon window** finder against a DX grid, and rotator Moon-tracking. A **grid-square
+> distance & bearing** calculator (main menu, before QRZ) gives great-circle range and beam heading
+> short/long path, can **point the rotator**, and seeds from a separate **QRZ → grid** lookup. A
+> worldwide **band-plan reference** (off Help, press **`f`**) runs LF→light with ITU-region splits,
+> EME/calling frequencies, satellite subbands, and IARU designators. A new orbital **"Phys"** page
+> (and the web UI) adds **orbital velocity** and **launch date/age** from the COSPAR designator. A new
+> **HF/6m propagation** guide (off Space Wx, press **`p`**) turns the solar-flux and Kp data CardSat
+> already fetches into band-condition, geomagnetic, **auroral-VHF**, and absorption guidance. Plus a
+> **DX-Doppler fix** so an activation's frequency stays locked to the right transponder on
+> multi-transponder birds (AO-7), and a consistency pass so **all grid/callsign fields capitalize**
+> as you type. The on-air formats are unchanged. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.46.md)**.
+
 > **New in v0.9.45:** a release focused on **working a pass**. The **web control panel** is
 > reworked for speed — a **fast calibration pad** (big one-tap RX/TX cal nudges with a tappable
 > step, no typing), a **tuning cluster** with a visible step, an **in-pass** header and frame,

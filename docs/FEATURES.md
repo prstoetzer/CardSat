@@ -88,6 +88,14 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   true-rule, fixed-downlink, or fixed-uplink mode, with a selectable passband
   operating point — for manually tuning a coordinated contact through a short
   window.
+- **Grid distance & bearing** — a great-circle calculator (main menu) for
+  terrestrial VHF/UHF: enter a Maidenhead grid for the **distance and beam heading**
+  (short and long path, km and miles), **point the rotator** at the bearing, or **look
+  up a callsign's grid** via a separate QRZ→grid screen that seeds the calculator.
+- **Band-plan reference** — a scrollable worldwide amateur band reference (off Help),
+  **LF to light**: HF with **ITU Region 1/2/3** splits, VHF/UHF/microwave with
+  **EME/calling** frequencies, **satellite subbands**, IARU **band designators**, and
+  common sat modes including QO-100.
 - **10-day pass overview** — InstantTrack-style visibility chart (rows = days,
   24 h timelines) for the selected satellite, off the Passes screen (`v`); `;`/`.` page through
   successive 10-day chunks (forward indefinitely).
@@ -164,11 +172,23 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   the planets and the strongest cosmic radio sources (Cas A, Cyg A, the galactic
   centre, the Crab, Virgo A) on the same dome — for antenna pointing and as an
   RF-source reference.
+- **EME / moonbounce** — a dedicated EME screen (`e` from Sun/Moon) with **self-echo
+  Doppler** per band (50/144/432/1296/10368 MHz), computed **topocentrically** so it
+  reflects the dominant observer-rotation term (kHz at 1296, tens of kHz at 10 GHz);
+  live **topocentric range and range-rate**; **path degradation** vs perigee with a
+  perigee/apogee note; a coarse galactic **sky-noise** flag; a **mutual-Moon window**
+  finder against a DX grid (common windows over the next two weeks); and **rotator
+  Moon-tracking**.
 - **Space weather** — a **Space Wx** screen (main menu) shows the solar **10.7 cm
   flux**, planetary **Kp**, and running **A index** from NOAA SWPC, each colour-coded
   with a plain-language HF/satellite operating outlook and an **aurora-likelihood**
   line derived from Kp (unlikely / possible / likely, with latitude); cached for
   offline viewing and refreshed with each elements update.
+- **HF / 6m propagation guide** — a propagation screen (`p` from Space Wx) that turns
+  the solar-flux and Kp data into band guidance: **HF band conditions** (which bands
+  are open in daylight, a 10/15/20 m read), the **geomagnetic** effect on HF, an
+  **auroral-VHF** likelihood (6 m / 2 m, with beam direction), and **D-layer
+  absorption** — rule-of-thumb, from data already fetched, no new source.
 - **What's overhead now** — an **Overhead now** screen (main menu) scans the whole
   loaded catalog for every satellite **above the horizon at this instant** and lists
   them sorted by elevation, with azimuth and rise compass direction (high passes in

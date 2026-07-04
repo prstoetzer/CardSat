@@ -4,10 +4,10 @@ Recommended settings for each supported transceiver, and a clear breakdown of
 **what CardSat can control over CAT vs. what you must set up by hand on the
 radio.** Values come from the firmware's `RADIOS[]` profile table and the radios'
 own CAT/CI-V command tables, cross-checked against Hamlib, OscarWatch, SatPC32,
-and Gpredict behaviour.
+and Gpredict behavior.
 
 > **Tested coverage.** The author operates an **IC-821** and has verified its
-> behaviour on real hardware. The other radios are documented from their command
+> behavior on real hardware. The other radios are documented from their command
 > tables and from how Hamlib / OscarWatch / SatPC32 / Gpredict drive them, but
 > have **not** all been bench-tested with CardSat. Corrections from users with
 > other rigs are very welcome — please open an issue with a serial trace.
@@ -129,7 +129,7 @@ outside 2 m/70 cm/23 cm the assignment is skipped and you set that band manually
 ### FT-847 (Yaesu CAT)
 CAT satellite mode (via split/SAT), Main/Sub SAT VFOs, Doppler, and uplink CTCSS.
 CardSat reads the SAT-RX (downlink) VFO explicitly to avoid the documented Hamlib
-"defaults to MAIN VFO" behaviour (#1286). Recommended 57600 baud. Band pair is
+"defaults to MAIN VFO" behavior (#1286). Recommended 57600 baud. Band pair is
 still set up on the radio.
 
 ### FT-736R (Yaesu CAT)

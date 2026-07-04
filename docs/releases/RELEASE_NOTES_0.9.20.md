@@ -4,7 +4,7 @@ Hardening for the network layer's socket-failure recovery, plus the Easycomm and
 SPID rotator backends.
 
 > **Hardware status.** Host-verified (tokenizer-balanced; the recovery logic, the
-> rotator wire-formats, and the new fetch-suspend behaviour checked off-device and
+> rotator wire-formats, and the new fetch-suspend behavior checked off-device and
 > compiled with mocks) but not run on a device this release. The rotator protocols
 > especially want confirmation against a physical controller.
 
@@ -66,7 +66,7 @@ but the mic/SD interaction wants confirmation on real hardware before you rely o
 ## Notes
 
 - All host-verified only. The socket-recovery hardening, the listener-suspend
-  behaviour, and the rotator wire formats were checked off-device (balance + g++
+  behavior, and the rotator wire formats were checked off-device (balance + g++
   semantic compiles + round-trip tests for the SPID frame encode/decode), but
   on-device confirmation is still needed — especially the rotator protocols against
   real hardware and the reboot prompt against an actually-wedged socket pool.

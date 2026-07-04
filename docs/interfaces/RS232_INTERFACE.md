@@ -9,7 +9,7 @@ GPIOs) and the cabling. Icom radios use **CI‑V**, which is different — see
 
 > ## ⚠️ UNTESTED — BUILD AND USE AT YOUR OWN RISK
 > **This interface has not been verified against a physical radio.** It is a paper
-> design from the radios' published CAT behaviour and the CardSat wiring. RS‑232
+> design from the radios' published CAT behavior and the CardSat wiring. RS‑232
 > carries voltages that will **destroy** the Cardputer's GPIO if mis‑wired.
 > **Proceed entirely at your own risk. The author accepts no liability for any
 > damage to your radio, your Cardputer, or anything else arising from following this

@@ -68,12 +68,12 @@ the two Grove rows differ only in baud, to match whatever receiver you plug in.
 CardSat drives an az/el rotator through one of two interchangeable backends,
 chosen in **Settings → Rot type**. Only one is active at a time, and the pointing
 logic — alignment offsets, deadband, flip mode, park-on-LOS — is shared, so
-switching transports doesn't change behaviour. Enable the rotator in Settings and
+switching transports doesn't change behavior. Enable the rotator in Settings and
 press **`o`** on the Track screen to start/stop pointing; it parks at the
 configured azimuth on LOS. With **Rot pre-point** set (default 2 min), it also
 slews to the next pass's rise bearing that far before AOS, so a slow rotator is
 already aimed when the satellite appears. **Rot az range** matches your rotator's
-azimuth travel — `0..360`, `-180..+180` (centred on North, like Gpredict), or
+azimuth travel — `0..360`, `-180..+180` (centered on North, like Gpredict), or
 `0..450` (90° overlap, so a pass crossing North runs into the overlap instead of
 unwinding a full turn). **Rot el range** picks `90` or `180`°; at 180° a high pass
 **flips over the top** rather than swinging azimuth 180° at culmination.

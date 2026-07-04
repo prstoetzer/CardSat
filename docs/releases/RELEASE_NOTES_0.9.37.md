@@ -16,7 +16,7 @@ county), confirmed working in v0.9.36, is unchanged.
     Reef) are grouped at the **top** and marked with a `>`; the rest follow
     alphabetically. A **typeahead filter** narrows the list as you type — the fast way
     through 340 entities.
-  - **Primary** is gated by the DXCC and labelled with the real term for that entity —
+  - **Primary** is gated by the DXCC and labeled with the real term for that entity —
     *state* (US), *province* (Canada/China), *oblast* (Russia), *prefecture* (Japan),
     *state* (Australia), *kunta* (Finland). Entities without a subdivision show *(n/a)*.
   - **Secondary** is gated by the primary: US **county** (pick the state first) or

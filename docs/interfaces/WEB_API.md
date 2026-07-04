@@ -117,7 +117,7 @@ Response object fields:
 | `tune` | string MHz | Manual calculator: the **tuned** leg frequency (Doppler-corrected) |
 
 ### `GET /api/sats`
-The selectable-satellite list. **Favourites first**; if no favourites are marked, falls back to
+The selectable-satellite list. **Favorites first**; if no favorites are marked, falls back to
 the catalog. Capped at **60** entries.
 
 Returns a JSON **array** of:
@@ -126,7 +126,7 @@ Returns a JSON **array** of:
 |---|---|---|
 | `n` | number | NORAD id |
 | `name` | string | Satellite name |
-| `fav` | bool | Whether it's marked a favourite |
+| `fav` | bool | Whether it's marked a favorite |
 
 ```json
 [{"n":43017,"name":"AO-91","fav":true},{"n":7530,"name":"AO-7","fav":true}]
@@ -222,7 +222,7 @@ Select a satellite by NORAD id and make it active (mirrors picking it on-device)
 `{"ok":true}` if the satellite was found and selected, else `{"ok":false}`.
 
 ### `POST /api/fav?norad=<id>`
-Toggle a satellite's favourite flag. Returns `{"ok":true,"fav":true|false}` with the new state
+Toggle a satellite's favorite flag. Returns `{"ok":true,"fav":true|false}` with the new state
 (`ok:false` if no/invalid id).
 
 ### `POST /api/tx?i=<index>`
@@ -264,7 +264,7 @@ Assuming the device is at `192.168.1.42:80`:
 # Live status (poll this for a dashboard)
 curl http://192.168.1.42/api/status
 
-# Satellite list (favourites first)
+# Satellite list (favorites first)
 curl http://192.168.1.42/api/sats
 
 # Upcoming passes + next-pass arc for the active satellite
@@ -289,7 +289,7 @@ curl -X POST "http://192.168.1.42/api/cmd?k=t"
 # Set downlink calibration to +1200 Hz, leave uplink unchanged
 curl -X POST "http://192.168.1.42/api/cal?dl=1200"
 
-# Toggle a favourite
+# Toggle a favorite
 curl -X POST "http://192.168.1.42/api/fav?norad=43017"
 ```
 
@@ -335,12 +335,12 @@ the API directly. Options, in order of simplicity:
 |---|---|---|---|
 | `/` | GET | — | HTML control page |
 | `/api/status` | GET | — | Live snapshot (see §3) |
-| `/api/sats` | GET | — | Satellite list (favourites first, ≤60) |
+| `/api/sats` | GET | — | Satellite list (favorites first, ≤60) |
 | `/api/passes` | GET | — | Upcoming passes + next-pass arc |
 | `/api/orbit` | GET | — | Full orbital data set |
 | `/api/tx` | GET | — | Transponder list |
 | `/api/select` | POST | `norad=<id>` | `{"ok":…}` — select satellite |
-| `/api/fav` | POST | `norad=<id>` | `{"ok":…,"fav":…}` — toggle favourite |
+| `/api/fav` | POST | `norad=<id>` | `{"ok":…,"fav":…}` — toggle favorite |
 | `/api/tx` | POST | `i=<index>` | `{"ok":…}` — select transponder |
 | `/api/cal` | POST | `dl=<Hz>&ul=<Hz>` | `{"ok":true}` — set calibration (±100 kHz) |
 | `/api/cmd` | POST | `k=<key>[&man=1]` | `{"ok":true}` — inject a whitelisted live key |

@@ -22,7 +22,7 @@ screens; the changes are under the hood and are documented as individually rever
 - **Awards screens no longer churn the heap.** The awards tally previously allocated a
   throwaway `String` per QSO while scanning the log (to upper-case the grid square),
   which fragmented the heap on long logs — the likely cause of the "less free memory the
-  more I use it" behaviour. The grid is now decoded directly from its fixed character
+  more I use it" behavior. The grid is now decoded directly from its fixed character
   buffer with **zero allocation**, and opening an all-satellites worked-list no longer
   re-streams the whole log when the totals are already in memory. Same results, much less
   heap traffic.
@@ -31,7 +31,7 @@ screens; the changes are under the hood and are documented as individually rever
   tone override, or note; removing a manual sked) now trim in place, and a note lookup
   copies its text straight from the line buffer instead of building a substring. These run
   only on explicit user actions (not in the hot loop, which was already allocation-free), so
-  the benefit is small, but each removes a real per-line allocation with no behaviour change.
+  the benefit is small, but each removes a real per-line allocation with no behavior change.
 - **Proactive WiFi-cycle before a handshake (last resort).** If the existing passive
   coalesce-wait still leaves the largest free block below the TLS threshold, CardSat now
   does **one** WiFi disconnect/reconnect (reusing the existing socket-pool recovery) to

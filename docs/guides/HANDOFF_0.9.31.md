@@ -102,7 +102,7 @@ flashed):**
 3. **Decay / reentry watch.** Reuses the existing King-Hele `estimateDecayDays()`.
    New helpers `perigeeAltKm(s)` and `decayLevelFor(s)` (app.cpp ~L6844) classify
    0 none / 1 watch / 2 soon / 3 imminent from perigee (<400/<300/<200 km) and
-   lifetime (<730/<180/<30 d). Shown as a coloured **down-triangle** on the satellite
+   lifetime (<730/<180/<30 d). Shown as a colored **down-triangle** on the satellite
    list (yellow/orange/red) and a **Perigee** line on the orbit screen. **No precise
    reentry claims** — order-of-magnitude only; points to CelesTrak/Space-Track.
 

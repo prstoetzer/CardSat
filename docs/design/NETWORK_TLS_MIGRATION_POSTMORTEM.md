@@ -34,7 +34,7 @@ session would succeed, and a later one — often the very next — would fail** 
 - `code=-1` ("connection refused" as surfaced to the app), or
 - `MBEDTLS_ERR_SSL_ALLOC_FAILED` / `SSL - Memory allocation failed`
 
-…while, as in every previous instalment of this saga:
+…while, as in every previous installment of this saga:
 
 - WiFi stayed associated (IP held, RSSI normal),
 - `ESP.getFreeHeap()` looked healthy, and
@@ -90,7 +90,7 @@ argument.
    there was no monotonic downward leak. The block was being *transiently* consumed and
    released cleanly.
 
-4. **Server-side / redirect behaviour.** Theory: one endpoint (AMSAT GP with its
+4. **Server-side / redirect behavior.** Theory: one endpoint (AMSAT GP with its
    redirect hop) behaved differently. *Disproven:* the failure reproduced across
    unrelated endpoints (NOAA, hams.at, open-meteo) and was independent of which server
    went first.

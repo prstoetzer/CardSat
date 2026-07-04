@@ -25,7 +25,7 @@ format (with a migration for sources saved by older builds).
   Station / display. Weather data by Open-Meteo.com (CC BY 4.0).
 - **QRZ callsign lookup (off the Home menu).** A new "QRZ Lookup" screen looks up a
   callsign in the **QRZ.com** database over its XML data service and shows the
-  operator's name, mailing address, country, grid square and licence class. It
+  operator's name, mailing address, country, grid square and license class. It
   needs a **QRZ XML-data subscription**: enter your QRZ username and password in
   *Settings → Network / data* (password stored masked, like the other
   credentials). The screen handles the edge cases plainly — no WiFi says so, no
@@ -39,8 +39,8 @@ format (with a migration for sources saved by older builds).
   silences every pass sound.
 - **Space Weather screen (off the Home menu).** A new "Space Wx" entry shows the
   solar **10.7 cm flux** and the planetary **Kp index** (fetched from NOAA SWPC
-  with GP updates, or on demand with `r`), each labelled (quiet/storm, low/high)
-  and colour-coded, with a plain-language operating outlook for HF and satellite
+  with GP updates, or on demand with `r`), each labeled (quiet/storm, low/high)
+  and color-coded, with a plain-language operating outlook for HF and satellite
   conditions and a data-freshness note.
 - **Transponder browser (off Satellites, key `t`).** A new screen lists every
   transponder/beacon entry the on-device catalog holds for the selected satellite
@@ -60,7 +60,7 @@ format (with a migration for sources saved by older builds).
   by which the satellite sits inside Earth's umbral shadow cone, computed as
   Earth's angular radius seen from the satellite minus the satellite's angular
   distance from the anti-solar axis. Positive means eclipsed (deeper = more
-  positive, peaking at Earth's angular radius when dead-centre in shadow);
+  positive, peaking at Earth's angular radius when dead-center in shadow);
   negative is a sunlight clearance margin. It appears live on the **Live** page
   beside the sunlit/eclipse flag, and as a **peak eclipse depth** on the **Next
   pass** page when the bird transits shadow during the pass. The value reuses the
@@ -90,7 +90,7 @@ format (with a migration for sources saved by older builds).
   Update screen has long fetched the AMSAT activity marks and (more recently) the
   space-weather data alongside the GP elements; the screen now says so, with the
   GP line reading "update GP (source)" and a note that the same action also
-  refreshes AMSAT status and space weather. No behaviour change — just an honest
+  refreshes AMSAT status and space weather. No behavior change — just an honest
   label.
 
 - **10-day overview now fills every day.** The chart cached at most 64 passes,

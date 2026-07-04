@@ -1,4 +1,4 @@
-# Heap optimisation: float orbital elements (0.9.41)
+# Heap optimization: float orbital elements (0.9.41)
 
 This note documents the `double` → `float` change to most of `SatEntry`'s mean
 orbital elements, why it is safe, exactly how much it saves, and **how to revert it**
@@ -71,7 +71,7 @@ edits:
 
 1. In `src/satdb.h`, change the eight `float` element lines back to `double`
    (`incl`, `ecc`, `raan`, `argp`, `ma`, `bstar`, `ndot`, `nddot`). The
-   `BEGIN/END 0.9.41 float-elements optimisation` comment markers bracket them.
+   `BEGIN/END 0.9.41 float-elements optimization` comment markers bracket them.
 2. Mirror the identical change into the inlined `SatEntry` declaration in
    `CardSat.ino`.
 3. Rebuild. No call-site changes, no data-migration: existing `gp.json` caches

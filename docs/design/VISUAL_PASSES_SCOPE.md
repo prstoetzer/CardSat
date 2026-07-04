@@ -67,7 +67,7 @@ So the only genuinely new computation is (a) sampling sunlit + sunEl across a pa
 
 ---
 
-## 4. Proposed behaviour
+## 4. Proposed behavior
 
 ### 4.1 Per-pass visibility flag
 When building the schedule (and in `SCR_PASSDETAIL`), sample the pass at a few points
@@ -81,7 +81,7 @@ peak elevation over the gate. Store one bool (and optionally the brightest magni
 per scheduled pass.
 
 ### 4.2 Surfacing it
-- **Pass list / schedule:** a small star/eye glyph (and/or a different row colour) on
+- **Pass list / schedule:** a small star/eye glyph (and/or a different row color) on
   visible passes. Optional filter key to show **visible-only**.
 - **Pass detail:** a line like `Visible: yes — sunlit, Sun −9°, max el 62°, ~ -2.4 mag`,
   or `Visible: no (daylight)` / `(satellite in shadow)` / `(too low)` so the *reason* is
@@ -130,7 +130,7 @@ Persisted in `settings.cpp` alongside the existing pass/alarm settings.
 
 - Flares/glints (Iridium-style) — needs attitude/panel geometry CardSat doesn't have.
 - A full magnitude catalog for every object (no data source on-device).
-- Atmospheric-extinction modelling beyond the simple elevation gate.
+- Atmospheric-extinction modeling beyond the simple elevation gate.
 
 ---
 

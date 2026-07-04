@@ -31,7 +31,7 @@ el**. Turns the schedule into a "what can I go outside and watch tonight" tool.
 
 ## Decay / reentry watch flags
 
-The satellite list now shows a small coloured **down-arrow** on decaying orbits —
+The satellite list now shows a small colored **down-arrow** on decaying orbits —
 yellow (watch), orange (decaying), red (reentry imminent) — derived from perigee
 altitude and the lifetime estimate, and the Orbital-analysis screen gained a
 **Perigee** line with the level. An at-a-glance cue to work a bird before it's gone,
@@ -98,23 +98,23 @@ and receives the full CI-V exchange over one shared open-drain GPIO. Select it i
 simplest option. The **CAT serial monitor** (*Settings -> Radio -> CAT serial monitor*)
 shows live raw CI-V/Yaesu/Kenwood traffic as hex with raw-hex send for diagnostics.
 
-## DX Doppler: 1 kHz dial stepping + passband shown from centre
+## DX Doppler: 1 kHz dial stepping + passband shown from center
 
 Two changes to the **DX Doppler table** for linear transponders:
 
 - **Step the anchored dial to round 1 kHz.** In a fixed mode, the `,`/`/` keys now
   move the **anchored dial** to the next **round 1 kHz** (grid-aligned to passband
-  centre), so you park your fixed RX or TX on a clean number — 145.949, 145.950,
+  center), so you park your fixed RX or TX on a clean number — 145.949, 145.950,
   145.951 MHz, never 145.9502. Cycle the anchor (`a`) to the dial you care about,
   then step. CardSat nudges the passband so the dial lands exactly on the kHz
   (converging to within a Hz, accounting for the Doppler dial/passband ratio) and
   recomputes the rest of the table around it. In true-rule mode `,`/`/` keep the
   plain 1 kHz passband nudge. (The old 5 kHz `<`/`>` shift and the short-lived `s`
   snap key are removed in favour of this.)
-- **Passband shown relative to centre.** The header displays the operating point as
-  a signed offset from the **centre of the passband's downlink** — `ctr`, `+7.5k`,
+- **Passband shown relative to center.** The header displays the operating point as
+  a signed offset from the **center of the passband's downlink** — `ctr`, `+7.5k`,
   `-12.5k` — instead of an absolute up-from-bottom figure, so it's obvious how far
-  off-centre you're working.
+  off-center you're working.
 
 ## Sat-to-sat: pick the second satellite before searching
 
@@ -305,10 +305,10 @@ clears. The `/api/passes` response now also includes an `arc` array for this.
   pause knob-follow while transmitting) and the band-select model are documented;
   rigs that don't support the status poll are detected and it is dropped.
 
-- **DX Doppler starts at the centre of the linear passband.** The Doppler table
+- **DX Doppler starts at the center of the linear passband.** The Doppler table
   now opens with the operating point in the middle of the selected linear
-  transponder's passband (and re-centres when you switch transponders with `t`),
-  matching how the on-device tracker centres a linear bird, instead of starting at
+  transponder's passband (and re-centers when you switch transponders with `t`),
+  matching how the on-device tracker centers a linear bird, instead of starting at
   the low edge. FM and single-channel transponders are unaffected.
 
 ## Mobile web control improvements
@@ -319,7 +319,7 @@ The web control page (Settings → Network/data → Web control) gained:
   azimuth/elevation;
 - an **in-pass indicator and AOS countdown** in the header ("IN PASS — LOS in
   m:ss" / "Next AOS in m:ss");
-- **transponder selection** from a labelled drop-down (mirrors the `t` key);
+- **transponder selection** from a labeled drop-down (mirrors the `t` key);
 - **direct calibration entry** — type exact RX/TX offsets in Hz and Set/Zero them
   (saved per-satellite);
 - a **filter box** to narrow a long satellite list;
@@ -334,7 +334,7 @@ local network with no authentication — use it only on trusted networks.
 
 ## Changes
 
-- **OSCARLOCATOR opens in polar view** by default (press `m` for the QTH-centred
+- **OSCARLOCATOR opens in polar view** by default (press `m` for the QTH-centered
   view); the polar sheet auto-selects N/S and flips at the equator.
 - **Sat-to-sat finder shows a "Calculating windows…" status** while it searches,
   instead of appearing to pause during the computation.
@@ -344,7 +344,7 @@ local network with no authentication — use it only on trusted networks.
   431.000 MHz — all at 125 kHz. The default region is now **US (906.875 MHz)**
   instead of 433.775 MHz. You can still set any carrier 150–960 MHz by hand; the
   region just provides a sensible, in-band starting point. You remain responsible
-  for operating within your licence and local rules.
+  for operating within your license and local rules.
 
 ## Fixes from device testing
 
@@ -362,7 +362,7 @@ local network with no authentication — use it only on trusted networks.
   read against the clearer layout.
 - **OSCARLOCATOR and Sky-sources plots clear the header.** The polar/azimuthal
   discs and their compass labels were drawn far enough up that the disc top and the
-  "N" label overlapped the title bar. The OSCARLOCATOR disc is now centred lower,
+  "N" label overlapped the title bar. The OSCARLOCATOR disc is now centered lower,
   and the shared polar-grid compass labels sit just inside the disc edge.
 - **LoRa Messages status bar clears the header.** The frequency / SF / bandwidth
   line was flush against the title bar; it (and the divider and message list) now
@@ -414,15 +414,15 @@ A live **azimuthal-equidistant** plotting board — the classic OSCARLOCATOR —
 shows the satellite's sub-point and footprint on the Earth in real time. It's the
 graphical companion to the tabular **EQX table** (`e`).
 
-- Two projection modes, toggled with **`m`**: a **QTH-centred** view (your station
-  at the centre, with the satellite at its true bearing and great-circle distance)
-  and a **polar** view (a pole at the centre). In polar mode CardSat picks the
+- Two projection modes, toggled with **`m`**: a **QTH-centered** view (your station
+  at the center, with the satellite at its true bearing and great-circle distance)
+  and a **polar** view (a pole at the center). In polar mode CardSat picks the
   North or South sheet automatically and **flips between them live** as the bird
   crosses the equator, so the satellite always stays on the visible chart.
 - Draws a coarse coastline, a lat/lon graticule, the satellite marker (yellow when
   sunlit, cyan in eclipse), and the satellite's **ground footprint**.
 - A dashed amber **QTH range ring** marks the footprint radius at the satellite's
-  mean altitude, centred on your station — when the sub-point reaches inside it,
+  mean altitude, centered on your station — when the sub-point reaches inside it,
   you have a workable pass.
 - The **full ground-track arc** (one orbit's worth of sub-points) is drawn across
   the disc in blue, like a real OSCARLOCATOR; green/orange markers show where the
@@ -475,14 +475,14 @@ Built for short windows and manual tuning of coordinated DX contacts.
 
 A secondary plot off the **Sun / Moon** screen (**`s`**) showing the classical
 **planets** and the strongest **cosmic radio sources** on a sky dome (zenith
-centre, North up, elevation = radius) — for antenna pointing and as an RF-source
+center, North up, elevation = radius) — for antenna pointing and as an RF-source
 reference.
 
 - Planets **Mercury, Venus, Mars, Jupiter, Saturn** are computed live (cyan dots);
-  fixed radio sources **Cassiopeia A, Cygnus A, the galactic centre (Sgr A\*), the
+  fixed radio sources **Cassiopeia A, Cygnus A, the galactic center (Sgr A\*), the
   Crab nebula (Tau A), and Virgo A (M87)** are drawn as orange crosses, plus a few
   bright stars for orientation.
-- Objects below the horizon sit just outside the rim in grey so their bearing is
+- Objects below the horizon sit just outside the rim in gray so their bearing is
   still readable. **`;`/`.`** step through the objects; the readout gives the
   selected object's az/el, above/below-horizon status, and type.
 
@@ -492,13 +492,13 @@ any amateur antenna beamwidth.
 ## New: 3D Globe (Satellites → `3`)
 
 An orthographic 3-D wireframe Earth that **auto-follows the selected satellite**,
-rotating so its sub-point stays centred. Only the near hemisphere is drawn, so the
+rotating so its sub-point stays centered. Only the near hemisphere is drawn, so the
 far side of the Earth is hidden behind the curve.
 
 - Graticule and coastline (clipped at the limb), a yellow **day/night terminator**,
   and your QTH as a white cross.
-- **All favourites** plotted as dim-green dots; the **selected satellite** centred
-  and larger (sunlit/eclipse colour) with its **ground footprint** drawn around it
+- **All favorites** plotted as dim-green dots; the **selected satellite** centered
+  and larger (sunlit/eclipse color) with its **ground footprint** drawn around it
   (the footprint wraps around the limb naturally as the bird nears the horizon).
 - A blue **ground-track trail** — a full orbit of the selected satellite's
   sub-points projected onto the globe.

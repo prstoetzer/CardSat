@@ -357,8 +357,149 @@ static uint32_t amsatIsoToEpoch(const char* s) {
   return (secs > 0) ? (uint32_t)secs : 0;
 }
 
+// ---------------------------------------------------------------------------
+//  AMSAT catalog name map. catalog.php lists every satellite the status system
+//  tracks as "BASE_[MODE]" (AO-7_[U/v], ISS_[FM], IO-117 with no tag, ...).
+//  Each entry is matched to a catalog satellite with a tolerant, ordered match:
+//    1. the base equals a parenthesised designator in the GP name
+//       ("OSCAR 7 (AO-7)" <- "AO-7") -- the case the legacy prefix match missed;
+//    2. the whole normalized names are equal;
+//    3. the base appears as a delimited token inside the GP name
+//       ("ISS (ZARYA)" <- "ISS");
+//    4. the legacy amsatBase prefix match (kept as the safety net).
+//  Normalization uppercases and treats every non-alphanumeric as a space.
+// ---------------------------------------------------------------------------
+static void amsNorm(const char* in, char* out, int outsz) {
+  int k = 0; bool sp = true;
+  for (int i = 0; in[i] && k < outsz - 2; ++i) {
+    char ch = in[i];
+    if (ch >= 'a' && ch <= 'z') ch -= 32;
+    bool an = (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-';
+    if (an) { out[k++] = ch; sp = false; }
+    else if (!sp) { out[k++] = ' '; sp = true; }
+  }
+  while (k > 0 && out[k - 1] == ' ') --k;
+  out[k] = 0;
+}
+
+// Does padded " haystackNorm " contain " needleNorm " as a delimited token run?
+static bool amsTokenIn(const char* hayNorm, const char* needleNorm) {
+  if (!needleNorm[0]) return false;
+  char hay[72]; snprintf(hay, sizeof(hay), " %s ", hayNorm);
+  char nee[40]; snprintf(nee, sizeof(nee), " %s ", needleNorm);
+  return strstr(hay, nee) != nullptr;
+}
+
+// Known designator aliases with no lexical bridge between the AMSAT status
+// catalog and common GP sources (same bird, two unrelated names). Tried as a
+// final step when the four lexical steps miss. Left = status-API base name;
+// right = the GP-side name to try instead, matched with the same tolerant
+// normalization so "LILACSAT-2", "LILACSAT 2", or "LILACSAT-2 (CAS-3H)" all hit.
+static const struct { const char* status; const char* gp; } AMS_ALIASES[] = {
+  { "CAS-3H", "LILACSAT-2" },   // proven gap vs the AMSAT daily bulletin
+  { "IO-117", "GREENCUBE"  },   // GreenCube; bulletin may carry either name
+  { "LO-19",  "LUSAT"      },   // historic name in most GP sources
+};
+
+void SatDb::applyAmsatCatalogFile(const char* path) {
+  _amsMapN = 0;
+  File f = LittleFS.open(path, "r");
+  if (!f) return;
+  // Names are the only field we need; every record carries exactly one
+  // "name":"..." key (the links values are plain URL strings). Scan the stream
+  // for that pattern -- no DOM, nothing large held in RAM.
+  char nb[16]; int st = 0; char nameBuf[AMS_NAME_LEN]; int nk = 0;
+  const char* pat = "\"name\":\"";
+  int pp = 0;
+  // Pre-normalize catalog names once.
+  char (*norm)[40] = (char(*)[40])malloc((size_t)_n * 40);
+  if (!norm) { f.close(); return; }
+  for (int i = 0; i < _n; ++i) amsNorm(_sats[i].name, norm[i], 40);
+  char (*base)[20] = (char(*)[20])malloc((size_t)_n * 20);
+  if (!base) { free(norm); f.close(); return; }
+  for (int i = 0; i < _n; ++i) amsatBase(_sats[i].name, base[i], 20);
+  (void)nb; (void)st;
+  while (f.available()) {
+    char ch = (char)f.read();
+    if (pp < (int)strlen(pat)) {
+      pp = (ch == pat[pp]) ? pp + 1 : (ch == pat[0] ? 1 : 0);
+      if (pp == (int)strlen(pat)) nk = 0;
+      continue;
+    }
+    if (ch == '"') {                       // end of the name value
+      pp = 0;
+      nameBuf[nk] = 0;
+      if (nk == 0 || _amsMapN >= AMS_MAP_MAX) continue;
+      bool dup = false;                    // the live catalog has a duplicate row
+      for (int m = 0; m < _amsMapN; ++m)
+        if (strcmp(_amsMap[m].name, nameBuf) == 0) { dup = true; break; }
+      if (dup) continue;
+      // base = everything before the last "_[" (whole name if untagged)
+      char bb[AMS_NAME_LEN]; strncpy(bb, nameBuf, sizeof(bb)); bb[sizeof(bb) - 1] = 0;
+      for (int q = (int)strlen(bb) - 1; q > 0; --q)
+        if (bb[q] == '[' && bb[q - 1] == '_') { bb[q - 1] = 0; break; }
+      char bn[40]; amsNorm(bb, bn, sizeof(bn));
+      char ab[20]; amsatBase(bb, ab, sizeof(ab));
+      int hit = -1;
+      // 1. parenthesised designator equality
+      for (int i = 0; i < _n && hit < 0; ++i) {
+        const char* p = strchr(_sats[i].name, '(');
+        while (p && hit < 0) {
+          const char* e = strchr(p, ')');
+          if (!e) break;
+          char tok[24]; int L = (int)(e - p - 1); if (L > 23) L = 23;
+          memcpy(tok, p + 1, L); tok[L] = 0;
+          char tn[40]; amsNorm(tok, tn, sizeof(tn));
+          if (tn[0] && strcmp(tn, bn) == 0) hit = i;
+          p = strchr(e, '(');
+        }
+      }
+      // 2. whole-name equality
+      for (int i = 0; i < _n && hit < 0; ++i)
+        if (strcmp(norm[i], bn) == 0) hit = i;
+      // 3. delimited-token containment
+      for (int i = 0; i < _n && hit < 0; ++i)
+        if (amsTokenIn(norm[i], bn)) hit = i;
+      // 4. legacy prefix base
+      for (int i = 0; i < _n && hit < 0; ++i)
+        if (base[i][0] && strcmp(base[i], ab) == 0) hit = i;
+      // 5. known alias table (designators with no lexical bridge)
+      for (size_t al = 0; al < sizeof(AMS_ALIASES) / sizeof(AMS_ALIASES[0]) && hit < 0; ++al) {
+        if (strcasecmp(bb, AMS_ALIASES[al].status) != 0) continue;
+        char an[40]; amsNorm(AMS_ALIASES[al].gp, an, sizeof(an));
+        for (int i = 0; i < _n && hit < 0; ++i)
+          if (strcmp(norm[i], an) == 0 || amsTokenIn(norm[i], an)) hit = i;
+      }
+      if (hit >= 0) {
+        _amsMap[_amsMapN].sat = (int16_t)hit;
+        strncpy(_amsMap[_amsMapN].name, nameBuf, AMS_NAME_LEN - 1);
+        _amsMap[_amsMapN].name[AMS_NAME_LEN - 1] = 0;
+        _amsMapN++;
+      }
+      continue;
+    }
+    if (nk < AMS_NAME_LEN - 1) nameBuf[nk++] = ch;   // overlong names truncate
+  }
+  free(base); free(norm);
+  f.close();
+  Serial.printf("[amsat] catalog map: %d entries\n", _amsMapN);
+}
+
+int SatDb::amsFindByName(const char* apiName) const {
+  for (int m = 0; m < _amsMapN; ++m)
+    if (strcmp(_amsMap[m].name, apiName) == 0) return _amsMap[m].sat;
+  return -1;
+}
+
+int SatDb::amsNamesFor(int satIdx, const char* out[], int maxN) const {
+  int k = 0;
+  for (int m = 0; m < _amsMapN && k < maxN; ++m)
+    if (_amsMap[m].sat == satIdx) out[k++] = _amsMap[m].name;
+  return k;
+}
+
 void SatDb::applyAmsatStatusFile(const char* path) {
-  for (int i = 0; i < _n; ++i) { _sats[i].amsatStatus = 0; _sats[i].amsatHeardEpoch = 0; _sats[i].amsatReports = 0; }
+  for (int i = 0; i < _n; ++i) { _sats[i].amsatStatus = 0; _sats[i].amsatHeardEpoch = 0; _sats[i].amsatReports = 0; _sats[i].amsatName[0] = 0; }
   if (_n <= 0) return;
   File f = Store::fs().open(path, "r");
   if (!f) return;
@@ -435,8 +576,9 @@ void SatDb::applyAmsatStatusFile(const char* path) {
                                                         : 1;
             uint32_t ep = amsatIsoToEpoch(lrt);
             char sb[16]; amsatBase(nm, sb, 16);
+            int mapped = amsFindByName(nm);   // exact API-name hit via the catalog map
             for (int i = 0; i < _n; ++i) {
-              if (strcmp(sb, cb[i]) != 0) continue;
+              if (mapped >= 0 ? (i != mapped) : (strcmp(sb, cb[i]) != 0)) continue;
               int pNew = amsatPrio(st), pCur = amsatPrio(_sats[i].amsatStatus);
               // A row wins if it has higher status precedence, or ties precedence but is
               // more recent -- so the shown status, age and count all come from that row.
@@ -446,6 +588,8 @@ void SatDb::applyAmsatStatusFile(const char* path) {
                 _sats[i].amsatStatus = st;
                 _sats[i].amsatHeardEpoch = ep;
                 _sats[i].amsatReports = (cnt > 255) ? 255 : (uint8_t)cnt;
+                strncpy(_sats[i].amsatName, nm, sizeof(_sats[i].amsatName) - 1);
+                _sats[i].amsatName[sizeof(_sats[i].amsatName) - 1] = 0;
               }
             }
           }

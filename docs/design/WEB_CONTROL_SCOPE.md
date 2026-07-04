@@ -28,7 +28,7 @@ stack, gated behind a `webEnable` setting on `cfg.webPort`:
 - **A read API**: `/api/status`, `/api/sats`, `/api/passes`, `/api/orbit`, `/api/tx` — live
   state, the satellite list, upcoming passes, the ground track, transponder list.
 - **A control API, but deliberately narrow**: `POST /api/select` (pick a satellite by NORAD),
-  `/api/fav` (toggle favourite), `/api/tx` (pick a transponder), `/api/cal` (set RX/TX
+  `/api/fav` (toggle favorite), `/api/tx` (pick a transponder), `/api/cal` (set RX/TX
   calibration in Hz, clamped), and **`/api/cmd?k=`** — which **injects a single key code into
   the existing `char` state machine**. Crucially, `/api/cmd` accepts only a **whitelist of
   live Track/Manual controls** (`, / t d r o m x s y`, plus a few Manual-context keys) and the

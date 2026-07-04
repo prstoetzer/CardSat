@@ -16,7 +16,7 @@ The web UI is a **purpose-built remote for the Track workflow**, not a general
 interface. Its backend (`webdHandleRequest`) exposes a fixed set of JSON endpoints:
 
 - **Read**: `/api/status`, `/api/sats`, `/api/passes`, `/api/orbit`, `/api/tx`
-- **Act**: `/api/select` (pick sat), `/api/fav` (toggle favourite), `/api/tx` POST
+- **Act**: `/api/select` (pick sat), `/api/fav` (toggle favorite), `/api/tx` POST
   (pick transponder), `/api/cal` (set calibration Hz), `/api/cmd` (a **whitelisted**
   set of Track/Manual keys)
 
@@ -161,7 +161,7 @@ headless for the *common session*, without touching the physical unit:
    the section/row model that `drawSettings` already has internally — this is the
    single highest-value screen to expose, since "I can't change a setting without the
    device in hand" is the sharpest headless limitation.
-4. **Satellites list** (select/favourite — largely already there) and **Passes /
+4. **Satellites list** (select/favorite — largely already there) and **Passes /
    Next Passes**.
 5. A **on-demand screen snapshot** (one Option-A frame) as the universal fallback so
    *nothing* is truly unreachable, even before it has a native representation.

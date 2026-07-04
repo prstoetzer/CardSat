@@ -26,7 +26,7 @@ satellite, its ground track, and the day/night terminator drawn on it. `drawGlob
 `globeProject()`; reached with `3` from the Satellites screen.
 
 **The projection** (`globeProject`, the core math): a lat/lon is converted to a unit vector,
-then rotated about the X axis by the **view latitude** so the chosen view centre maps to the
+then rotated about the X axis by the **view latitude** so the chosen view center maps to the
 point facing the viewer:
 
 ```
@@ -40,7 +40,7 @@ screen = (cx + x·R, cy − yr·R)
 ```
 
 The `zr < 0` test is the **far-side cull** — anything on the hemisphere facing away is simply
-not drawn, which is what makes it read as a solid globe (radius `R = 56 px`, centre `(70,70)`).
+not drawn, which is what makes it read as a solid globe (radius `R = 56 px`, center `(70,70)`).
 
 **What's layered onto the disc**, each clipped at the limb:
 - **Graticule** — meridians and parallels every 30°, drawn as short 10° segments (front side
@@ -54,27 +54,27 @@ not drawn, which is what makes it read as a solid globe (radius `R = 56 px`, cen
   (`subSolarPoint(now)`): the set of points exactly one quarter-turn from the Sun's nadir.
 - **The satellite marker** and its sub-point.
 
-**Auto-follow:** when `globeFollow` is on, the view centre tracks the satellite's sub-point each
-frame so the bird stays centred; otherwise the view latitude/longitude are operator-controlled.
+**Auto-follow:** when `globeFollow` is on, the view center tracks the satellite's sub-point each
+frame so the bird stays centered; otherwise the view latitude/longitude are operator-controlled.
 
 ---
 
 ## 2. OSCARLOCATOR (`SCR_OSCAR` + `SCR_EQX`)
 
 A modern take on the classic **OSCARLOCATOR** plastic-wheel azimuthal map: an azimuthal-equidistant
-plot centred on your station (or a pole), with the orbit ground track laid over it, plus an
+plot centered on your station (or a pole), with the orbit ground track laid over it, plus an
 **equator-crossings (EQX) table**. `drawOscar()` / `buildOscarArc()` / `buildEqx()`; reached with
 `k` (locator) and `e` (EQX table) from Satellites.
 
 **Two modes** (`m` toggles `oscarMode`):
-- **QTH mode** — centred on your latitude/longitude; the plotted radius `rmax` extends to
+- **QTH mode** — centered on your latitude/longitude; the plotted radius `rmax` extends to
   `|lat| + 25°`, clamped to `[50°, 80°]`, so the useful range around your station fills the
   disc.
 - **Polar mode** — a full hemisphere (`rmax = 90°`); the N or S sheet is auto-selected from the
   satellite's current sub-point hemisphere so the bird stays on the visible sheet.
 
 **The ground-track arc** (`buildOscarArc`): the orbit is sampled across **one full period**
-(`1440/meanMotion` minutes), **centred on now** — half an orbit back, half forward
+(`1440/meanMotion` minutes), **centered on now** — half an orbit back, half forward
 (`OSCAR_ARC_PTS` samples) — so the satellite marker sits in the middle of the drawn track. The
 arc is cached (`oscarArcEnd` marks when it scrolls off and needs a rebuild). AOS/LOS markers for
 the current/next pass are found with `predictPasses()` and placed on the track.
@@ -126,9 +126,9 @@ floor across the whole span into `visPasses[]`.
 **The chart** (`drawVis`): each day is a row; the bar area is **196 px wide = 24 h**, with
 06/12/18 h gridlines behind. For each pass, the AOS→LOS interval is **clipped to that day's
 midnight-to-midnight window** and drawn as a horizontal bar at the correct time-of-day position.
-A pass spanning midnight appears as bars on both day-rows. **Bar colour encodes max elevation:**
+A pass spanning midnight appears as bars on both day-rows. **Bar color encodes max elevation:**
 
-| Max elevation | Colour |
+| Max elevation | Color |
 |---|---|
 | < 15° | dark green (marginal) |
 | 15–40° | green (good) |
@@ -195,7 +195,7 @@ then three modes (`t` cycles `dxdMode`):
 
 **The display:** for each 30 s step, **two lines** — "me" (green) then "DX" (cyan) — each with
 RX and TX in MHz, the time printed once per step. On a linear transponder the passband offset
-(`±k` from centre) is adjustable (`,`/`/` dial by 1 kHz). The result is a two-column "tune to
+(`±k` from center) is adjustable (`,`/`/` dial by 1 kHz). The result is a two-column "tune to
 this" table both operators can follow through the pass.
 
 ---

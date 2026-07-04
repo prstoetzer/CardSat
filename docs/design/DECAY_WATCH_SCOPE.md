@@ -70,7 +70,7 @@ CardSat also already has the constants/util to convert mean motion → semi-majo
 
 ---
 
-## 5. Proposed behaviour
+## 5. Proposed behavior
 
 ### 5.1 Per-satellite decay classification
 Compute, per satellite (cheap, from elements already loaded):
@@ -79,7 +79,7 @@ Compute, per satellite (cheap, from elements already loaded):
 - optional `lifetimeBucket` ∈ {years, months, weeks, days} from the `ndot` projection.
 
 ### 5.2 Surfacing it
-- **Satellite list:** a small down-arrow/⚠ glyph (and/or colour) on decaying birds, with
+- **Satellite list:** a small down-arrow/⚠ glyph (and/or color) on decaying birds, with
   the level. Optional sort/filter "decaying first".
 - **Orbit/elements screen (`SCR_ORBIT`):** add a line —
   `Perigee 248 km · decaying (ndot+) · est. weeks–months` — with an explicit
@@ -90,7 +90,7 @@ Compute, per satellite (cheap, from elements already loaded):
 
 ### 5.3 Element-age guard
 If `epochUnix` is old (e.g. > 7–14 days), decay estimates degrade fast near the end of
-life. Show the element age and grey/caveat the estimate when stale, and lean on the
+life. Show the element age and gray/caveat the estimate when stale, and lean on the
 Update screen to refresh.
 
 ---

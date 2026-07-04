@@ -52,7 +52,7 @@ in km and miles. Useful for terrestrial VHF/UHF/tropo/contest work, not just sat
 A scrollable **worldwide amateur band reference**, off the **Help** screen (press **`f`** —
 "frequencies"). It runs **LF to light**: the HF bands with their ITU Region 1 / 2 / 3
 differences, the VHF/UHF/microwave bands with **calling and EME frequencies**, the **satellite
-subbands**, the IARU **band designators** (H/T/V/U/L/S/C/X/K), and common satellite modes
+subbands**, the IARU **band designators** (H/A/V/U/L/S/C/X/K), and common satellite modes
 including QO-100. A quick on-device answer to "where does this band start" and "what's the
 calling frequency."
 

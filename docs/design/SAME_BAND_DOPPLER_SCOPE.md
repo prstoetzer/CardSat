@@ -118,7 +118,7 @@ Hamlib supplies the primitives, not the policy: `set_freq` / `get_freq`,
 
 OscarWatch focuses on cross-band full-duplex transponder work and the per-rig
 MAIN/SUB/tone setup CardSat already mirrors. It contributes the **deadband and
-defer-after-dial-move** behaviours CardSat already uses, but does not add a
+defer-after-dial-move** behaviors CardSat already uses, but does not add a
 distinct same-band half-duplex mode beyond the PTT-awareness principle.
 
 ### 2.5 Synthesis
@@ -250,7 +250,7 @@ untested banner.
   full-duplex. This is inherent to same-band, not a CardSat bug, but it limits how
   well the One-True-Rule knob-follow can work (no live downlink to read while TX).
 - **Wrong-entry transmit.** If `TM_SIMPLEX` is engaged on a downlink-only entry
-  (beacon) or a cross-band bird, behaviour is undefined. Mitigation: only allow
+  (beacon) or a cross-band bird, behavior is undefined. Mitigation: only allow
   the mode for two-way, same-freq/same-band candidates; refuse otherwise.
 - **Interaction with existing sat-mode-off logic.** Same-band must keep the rig
   *out* of satellite mode; the engage path already forces sat mode off for

@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_TOOLFORM
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -583,6 +583,10 @@ private:
   int      wxHumidNow     = -1;     // current relative humidity (%, -1 = none)
   int      wxCodeNow      = -1;     // current WMO weather code (-1 = none)
   int      wxDayCount     = 0;      // number of forecast days parsed (0..WX_FORECAST_DAYS)
+  // Hourly cloud cover (next 48 h) from the same Open-Meteo fetch, for judging
+  // visible passes and transits. Base is the unix hour of sample 0; -1/-0 = none.
+  uint8_t  wxCloud[48]; time_t wxCloudBase = 0; uint8_t wxCloudN = 0;
+  int cloudAtUnix(time_t t);   // percent 0-100, or -1 outside the window
   int      wxDayCode[WX_FORECAST_DAYS] = {0};   // per-day WMO weather code
   float    wxDayHi[WX_FORECAST_DAYS]   = {0};   // per-day high temp
   float    wxDayLo[WX_FORECAST_DAYS]   = {0};   // per-day low temp
@@ -1118,6 +1122,116 @@ private:
   // F10.7 solar flux and Kp index (already fetched for Space Wx) into rule-of-thumb
   // band-opening, geomagnetic, aurora, and absorption guidance. No new data source.
   void drawProp(); void keyProp(char c, bool enter, bool back);
+
+  // Previous space-weather sample (for trend deltas on the propagation screen).
+  // Shifted from the current values when a fresh fetch lands >= 6 h newer; persisted
+  // in the space-wx cache so trends survive a reboot. -1/0 = no prior sample.
+  float    spacePrevF107 = -1;
+  float    spacePrevKp   = -1;
+  time_t   spacePrevEpoch = 0;
+
+  // Station-readiness checklist (SCR_READY), off About: green/red rows for clock,
+  // grid, GP data/age, WiFi, radio, rotator, SD, callsign, favorites, battery.
+  void drawReady(); void keyReady(char c, bool enter, bool back);
+
+  // Post-LOS handoff on Track: when the tracked bird drops below the horizon a
+  // banner offers the next favorite pass (from serviceAosAlarm's nextAos) and 'q'
+  // arms deep-sleep-until-pass. trkPrevEl carries the previous tick's elevation.
+  Screen dxdReturn = SCR_MUTUAL;   // where DX Doppler backs to (Mutual or Mutual detail)
+  uint32_t losPromptUntil = 0;
+  float    trkPrevEl = -999;
+
+  // Low-battery note on the AOS lead alert (-1 = none this pass).
+  int      aosFlashBatt = -1;
+
+  // EME 30-day planning view (SCR_EMEPLAN): per-day Moon declination and path
+  // degradation, computed once on entry at 12:00 UTC each day.
+  void drawEmePlan(); void keyEmePlan(char c, bool enter, bool back);
+
+  // Per-satellite AMSAT report detail (SCR_AMSRPT), 'g' from the AMSAT status
+  // screen: recent individual reports (callsign, grid, age, status) for the
+  // selected bird, fetched on demand from reports.php, plus a distinct-grid
+  // count -- a footprint-activity read the summary count can't give.
+  struct AmsRpt { char call[12]; char grid[8]; uint8_t st; time_t t; };
+  AmsRpt   amsRpt[24];
+  int      amsRptN = 0; int amsRptScroll = 0; int amsRptGrids = 0;
+  char     amsRptFor[14] = "";
+  void fetchAmsatReports(const char* apiName);
+  void drawAmsRpt(); void keyAmsRpt(char c, bool enter, bool back);
+
+  // AMSAT status reporting. postAmsatReport() POSTs {name, report, callsign,
+  // grid_square, reported_at} to reports.php (server-side dedup: same sat +
+  // call + hour + 15-min period replaces). Track's one-key path arms on the
+  // first press and sends "Heard" on the second within the window; ambiguous
+  // multi-mode birds (AO-7_[U/v] vs _[V/a]) open the picker instead, which is
+  // also the deliberate full-status path from the AMSAT status screen.
+  void fetchAmsatCatalog();                       // GET catalog.php -> map (cached)
+  bool postAmsatReport(const char* apiName, const char* status);
+  const char* amsPickNameFor(int satIdx, bool& ambiguous);  // mode-aware choice
+  uint32_t rptArmUntil = 0;                       // Track confirm-tap window
+  char     rptArmName[28] = "";
+  const char* pickName[6]; int pickN = 0, pickSel = 0, pickStat = 0, pickNameSel = 0;
+  int      pickSatIdx = -1;
+  Screen   pickReturn = SCR_AMSATSTAT;
+  void drawAmsRpick(); void keyAmsRpick(char c, bool enter, bool back);
+
+  // ---- Tools hub (off About, key 't') --------------------------------------
+  // A menu of ham-radio bench tools: an infix scientific calculator plus a set
+  // of live-recalc forms (coax loss, antenna dimensions, RF unit conversions,
+  // station math). All computation is local -- these work offline.
+  int toolsSel = 0;
+  void drawTools(); void keyTools(char c, bool enter, bool back);
+
+  // Infix scientific calculator (SCR_CALC): type an expression, ENTER evaluates.
+  // Supports + - * / ^ (), unary -, and sin/cos/tan/asin/acos/atan/log/ln/sqrt/
+  // exp/abs plus pi and e; trig in degrees. Result carries into the next entry
+  // as "Ans".
+  String calcBuf, calcResult; bool calcErr = false; double calcAns = 0;
+  void drawCalc(); void keyCalc(char c, bool enter, bool back);
+  double calcEval(const char* s, bool& ok);
+
+  // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
+  // hex / dec / bin / oct, with bitwise ops (AND OR XOR NOT << >>) and +-*/ via a
+  // pending-operation model. Handy for CI-V byte math and bitmask work. Entry base
+  // is selectable; digits are validated against it.
+  uint64_t pcalcVal = 0;       // current (accumulator) value
+  uint64_t pcalcAcc = 0;       // stashed operand while an operation is pending
+  int   pcalcBase = 16;        // entry/edit base: 16, 10, 8, or 2
+  int   pcalcWidth = 32;       // display width in bits: 8, 16, 32, 64
+  char  pcalcPend = 0;         // pending op: & | ^ + - * / < > (0 = none)
+  bool  pcalcFresh = true;     // next digit starts a new value (post-op / post-equals)
+  void  drawPCalc(); void keyPCalc(char c, bool enter, bool back);
+
+  // Tools UX state: menu scroll, calculator tape (scrolling history), and the
+  // output-area scroll for multi-element antenna forms.
+  int toolsScroll = 0;
+  static const int CALC_TAPE = 12;
+  String calcTape[CALC_TAPE]; int calcTapeN = 0;  // ring of past "expr" / "= result" lines
+  int calcScroll = 0;                             // 0 = pinned to newest
+  int tfOutScroll = 0;                            // form output scroll (yagi/quad element lists)
+
+  // Live-recalc form engine (SCR_TOOLFORM). Each tool is a set of labeled numeric
+  // fields plus computed output lines; editing a field recomputes instantly.
+  // toolId selects which tool; the form arrays are filled by toolFormInit().
+  static const int TF_MAXF = 6;
+  int   toolId = 0;                       // which tool (see the TOOL_* ids)
+  int   tfSel = 0, tfN = 0;               // selected field, field count
+  char  tfLabel[TF_MAXF][18];
+  char  tfUnit[TF_MAXF][8];
+  double tfVal[TF_MAXF];
+  int   tfChoice[TF_MAXF];                // for pick-list fields (-1 = numeric)
+  int   tfChoiceN[TF_MAXF];               // number of choices if a pick field
+  bool  tfEditing; String tfEditBuf;      // in-place numeric entry
+  void  toolFormInit(int id);
+  void  drawToolForm(); void keyToolForm(char c, bool enter, bool back);
+  const char* tfChoiceLabel(int field, int idx);
+  float    emePlanDec[30]; float emePlanDeg[30];
+  time_t   emePlanT0 = 0;
+  int      emePlanN = 0; int emePlanScroll = 0;
+
+  // One-key QSO capture: a voice memo started from an operating screen also
+  // appends a log stub (time/sat/mode/freqs, callsign empty) to fill in later.
+  void logCreateStub(const char* memoPath);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
   void drawWeather(); void keyWeather(char c, bool enter, bool back);
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);

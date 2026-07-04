@@ -30,7 +30,7 @@ reached from the Passes list.
   times, max elevation, AOS/LOS azimuths, duration, and (where relevant) optical-visibility and
   sunlit fraction. The single-pass companion to the passes list.
 - **Pass polar** (`SCR_PASSPOLAR`) — the **sky track** of one upcoming pass drawn on a polar
-  plot (N up, elevation as distance from the rim, zenith at centre): the azimuth/elevation curve
+  plot (N up, elevation as distance from the rim, zenith at center): the azimuth/elevation curve
   the satellite will trace from AOS to LOS, sampled across the pass. Lets you see where to point
   before it rises.
 - **Polar** (`SCR_POLAR`) — the **live** polar plot for the active satellite: a moving dot at the
@@ -39,7 +39,7 @@ reached from the Passes list.
   now" sky view.
 
 All three use the same polar projection: a point at azimuth `az`, elevation `el` maps to
-`(cx + r·sin az, cy − r·cos az)` with `r = R·(90 − el)/90`, so the zenith is the centre and the
+`(cx + r·sin az, cy − r·cos az)` with `r = R·(90 − el)/90`, so the zenith is the center and the
 horizon is the rim.
 
 ---
@@ -65,13 +65,13 @@ make a visible streak across your sky.
 
 ## 3. Multi-sat schedule (`SCR_SCHEDULE`)
 
-The **next pass for each of your favourite satellites**, merged into one chronological list —
+The **next pass for each of your favorite satellites**, merged into one chronological list —
 the "what's coming up across everything I care about" view. `drawSchedule()`; reached from the
 Passes area.
 
-It iterates your favourites, predicts each one's next pass, and presents them sorted by AOS, so
-you see the soonest pass across your whole favourites set rather than one satellite at a time
-(needs at least one favourite marked — otherwise it says so). The complement to the single-sat
+It iterates your favorites, predicts each one's next pass, and presents them sorted by AOS, so
+you see the soonest pass across your whole favorites set rather than one satellite at a time
+(needs at least one favorite marked — otherwise it says so). The complement to the single-sat
 10-day chart: that one is depth on one bird, this is breadth across many.
 
 ---
@@ -82,7 +82,7 @@ Live **azimuth/elevation of the Sun and Moon** for your location, with a sky dom
 control. `drawSunMoon()`; reached from the main menu.
 
 **The computation** (`skyObjAzEl`): the Sun's and Moon's positions are computed astronomically
-for your lat/lon and the current time. The display is a **sky dome** — zenith at centre, N up,
+for your lat/lon and the current time. The display is a **sky dome** — zenith at center, N up,
 elevation as radius — with both bodies plotted; a body below the horizon is shown faintly just
 outside the rim so its azimuth is still readable. The Moon's illuminated phase is shown.
 
@@ -99,8 +99,8 @@ A **celestial sky plot** of the classical planets and the strongest cosmic radio
 same sky dome as Sun/Moon. `drawSkyMap()` / `keySkyMap()`; reached with `s` from Sun/Moon.
 
 **What's plotted:** the five naked-eye **planets** (Mercury, Venus, Mars, Jupiter, Saturn,
-computed live, drawn as cyan dots) and a catalogue of fixed **radio sources** (drawn as orange
-crosses) — Cassiopeia A (the brightest galactic source), Cygnus A, the galactic centre (Sgr A\*),
+computed live, drawn as cyan dots) and a catalog of fixed **radio sources** (drawn as orange
+crosses) — Cassiopeia A (the brightest galactic source), Cygnus A, the galactic center (Sgr A\*),
 the Crab Nebula (Taurus A), and others — at their current az/el for your site. Selecting an
 object shows its details (az/el, above/below horizon, type). This is the reference for **an
 antenna pointing/gain check against a known strong source**, or simply knowing what's overhead.
@@ -172,7 +172,7 @@ states, or DXCC entities the satellite can currently reach (or will reach during
 or the live Track screen.
 
 **The footprint geometry** (`addFootprintGrids`): the satellite's radio footprint is a spherical
-cap centred on its sub-point. The cap's half-angle λ satisfies
+cap centered on its sub-point. The cap's half-angle λ satisfies
 
 ```
 cos λ = Re / (Re + altitude)        (Re = 6371 km)

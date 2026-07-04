@@ -38,7 +38,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   FT-847 / TS-2000.
 - **Next Passes** — one schedule across *all* your favorites, soonest AOS first,
   with a **Sky-at-a-glance timeline** view (`t`): a horizontal time axis with one row
-  per favorite and pass bars coloured by peak elevation (green ≥30°, yellow below).
+  per favorite and pass bars colored by peak elevation (green ≥30°, yellow below).
 - **AOS alarm** — countdown beeps + a screen flash before a favorite rises. An
   optional **AOS lead alert** (off / 2 / 5 / 10 / 15 min) adds an earlier "get ready"
   chirp minutes ahead of AOS, and the **home screen** shows the next favorite pass with
@@ -66,15 +66,15 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **OSCARLOCATOR live view** — a live azimuthal-equidistant plotting board (`k` on
   the Satellites screen) showing the satellite's **sub-point and footprint on the
   Earth** in real time, the graphical companion to the EQX table. It also plots a
-  **QTH range ring** (footprint radius at mean altitude, centred on you) and the
+  **QTH range ring** (footprint radius at mean altitude, centered on you) and the
   **full ground-track arc** (a whole orbit across the disc) with AOS/LOS markers. Toggle (`m`) between a
-  **QTH-centred** view (your station at centre, true bearing/distance) and a
+  **QTH-centered** view (your station at center, true bearing/distance) and a
   **polar** view that auto-selects the North or South sheet and **flips live as the
   bird crosses the equator**.
 - **3D globe** — an orthographic wireframe Earth (`3` on the Satellites screen) that
-  **auto-follows the selected satellite**, rotating to keep its sub-point centred.
+  **auto-follows the selected satellite**, rotating to keep its sub-point centered.
   Shows a graticule, coastline, a **day/night terminator**, your QTH, **all
-  favourites** as dots, the selected bird's **ground footprint** and a blue
+  favorites** as dots, the selected bird's **ground footprint** and a blue
   **ground-track trail** (a full orbit) — all on the near hemisphere, with the far
   side hidden behind the curve. Enter a **second (DX) location** by Maidenhead grid
   (`g`) to overlay its footprint; where it meets the satellite footprint is the
@@ -131,13 +131,13 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   calibration pad** (big one-tap RX/TX cal nudges with a tappable 10/100/1000 Hz step,
   no keyboard), a **tuning cluster** with a visible passband step, live RX/TX with the
   applied **Doppler shift**, an **AMSAT activity** line, an **in-pass** header and frame,
-  transponder and satellite pickers (the tracked bird is always present), favourite
+  transponder and satellite pickers (the tracked bird is always present), favorite
   toggling, and a **polar plot that always shows the pass arc** — current pass in-pass,
   next pass otherwise — with a **direction-of-travel arrow**. A Manual card mirrors the
   hand-tuning calculator, and an Orbit card shows the analysis numbers.
 - **rigctl network radio.** Drive a radio attached to a remote **Hamlib rigctld**
   server over WiFi (Settings -> CAT type -> rigctl) — Doppler both legs via split.
-- **World map with coastline** — recognisable continents with **all favourites'**
+- **World map with coastline** — recognisable continents with **all favorites'**
   footprints at once; `f` highlights one bird at a time, and **`c` recenters the map
   on your own location** so your QTH sits in the middle.
 - **Time-step simulation** — off the Satellites list (`s`), step a satellite
@@ -145,7 +145,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   lighting; `m` switches to a world-map view that walks the sub-point and
   footprint across the map as you step.
 - **GPS sky plot** — fix data plus a polar plot of the GNSS satellites in view
-  (az/el, coloured by signal), off the Location screen.
+  (az/el, colored by signal), off the Location screen.
 - **Live GPS position** — off the Location screen (`v`), a full-precision readout
   for rovers and portable ops: latitude/longitude in **degrees-minutes-seconds**
   (to 0.001″) and decimal, altitude, **Maidenhead grid** (updates live as you
@@ -170,25 +170,54 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   data list) that can drive the rotator to track either, for sun-noise / Moon
   (EME) aiming and antenna calibration. A secondary **Sky sources** plot (`s`) adds
   the planets and the strongest cosmic radio sources (Cas A, Cyg A, the galactic
-  centre, the Crab, Virgo A) on the same dome — for antenna pointing and as an
+  center, the Crab, Virgo A) on the same dome — for antenna pointing and as an
   RF-source reference.
 - **EME / moonbounce** — a dedicated EME screen (`e` from Sun/Moon) with **self-echo
   Doppler** per band (50/144/432/1296/10368 MHz), computed **topocentrically** so it
   reflects the dominant observer-rotation term (kHz at 1296, tens of kHz at 10 GHz);
   live **topocentric range and range-rate**; **path degradation** vs perigee with a
   perigee/apogee note; a coarse galactic **sky-noise** flag; a **mutual-Moon window**
-  finder against a DX grid (common windows over the next two weeks); and **rotator
-  Moon-tracking**.
+  finder against a DX grid (common windows over the next two weeks); a red **Sun-proximity
+  flag** when the Sun sits within ~10° of the Moon (solar noise in the beam); a
+  **30-day planner** (per-day declination + degradation with good-day stars); and
+  **rotator Moon-tracking**.
 - **Space weather** — a **Space Wx** screen (main menu) shows the solar **10.7 cm
-  flux**, planetary **Kp**, and running **A index** from NOAA SWPC, each colour-coded
+  flux**, planetary **Kp**, and running **A index** from NOAA SWPC, each color-coded
   with a plain-language HF/satellite operating outlook and an **aurora-likelihood**
-  line derived from Kp (unlikely / possible / likely, with latitude); cached for
-  offline viewing and refreshed with each elements update.
+  line derived from Kp (unlikely / possible / likely, with latitude), plus
+  **rise/fall trend deltas** against the previous sample; cached for offline viewing
+  and refreshed with each elements update.
 - **HF / 6m propagation guide** — a propagation screen (`p` from Space Wx) that turns
   the solar-flux and Kp data into band guidance: **HF band conditions** (which bands
   are open in daylight, a 10/15/20 m read), the **geomagnetic** effect on HF, an
   **auroral-VHF** likelihood (6 m / 2 m, with beam direction), and **D-layer
-  absorption** — rule-of-thumb, from data already fetched, no new source.
+  absorption** — rule-of-thumb, from data already fetched, no new source. Each index
+  carries a **trend delta** vs the previous sample ("142 sfu +5"), persisted across
+  reboots.
+- **One-key AMSAT status reporting** — `i`×2 on Track posts **Heard** to
+  amsat.org for the bird being worked, **mode-aware** via a fetched catalog name
+  map (`AO-7_[U/v]` vs `_[V/a]` chosen from the active transponder's bands); a
+  full picker (`p` on AMSAT status) covers Telemetry / Not Heard / Crew. Public,
+  under your callsign + grid, with the server's own duplicate protection.
+- **AMSAT per-report detail** — from the AMSAT status list, `g` fetches the selected
+  bird's **individual reports** (callsign, grid, age, status) with a **distinct-grid
+  count** — who heard it and from where, not just how many.
+- **Cloud-aware visible passes & transits** — the weather fetch also pulls **hourly
+  cloud cover (48 h)**; the visible-pass list and the Sun/Moon transit finder append a
+  color-coded **cloud %** at pass/transit time — the actual go/no-go for optical work.
+- **Station readiness** — a one-screen green/red checklist (About → `r`): clock,
+  location, GP data and age, WiFi, radio/rotator configuration, SD card, callsign,
+  battery — first-hour onboarding and a pre-pass field check.
+- **Operating-flow polish** — the Home menu **jumps by first letter**; at **LOS** the
+  Track screen announces the next favorite pass and `q` deep-sleeps until it; the AOS
+  **get-ready alert warns on a low battery** (≤30%); and a **voice memo drops a log
+  stub** (time/sat/mode/freqs, callsign blank) to finish after the pass.
+- **UI refinements (0.9.47)** — the Home menu is a **two-column grid** (all twenty
+  destinations visible at once, band separators, first-letter jump); **Settings** is
+  reorganized into **six categories** (Radio/CAT, Rotator, Passes & alerts,
+  Display & sound, Station & logging, Network & data) with `{`/`}` paging; and the
+  orbital **Phys page lists launch siblings by name** (every cataloged object from the
+  same launch) plus the element-set number.
 - **What's overhead now** — an **Overhead now** screen (main menu) scans the whole
   loaded catalog for every satellite **above the horizon at this instant** and lists
   them sorted by elevation, with azimuth and rise compass direction (high passes in
@@ -199,7 +228,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   (free, no key): temperature, sky, wind and humidity now, then per-day high/low and
   precipitation chance. Units selectable (°F·mph / °C·km·h / °C·m·s); cached offline.
 - **QRZ.com callsign lookup** — a **QRZ Lookup** screen (main menu) resolves a
-  callsign to name, location, grid and licence class over the QRZ XML API (needs a
+  callsign to name, location, grid and license class over the QRZ XML API (needs a
   QRZ XML-data subscription and WiFi) — handy for working a station you've just
   contacted.
 - **Upcoming activations feed** — an **Activations** screen (main menu) downloads the
@@ -231,7 +260,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without
   interrupting Doppler control** — or add one **after the fact** from the Log menu,
-  picking the satellite (which defaults the frequencies to the transponder centre /
+  picking the satellite (which defaults the frequencies to the transponder center /
   nominal) and editing the **date, time, satellite and frequencies** as needed. The
   same fields are editable when you review past entries; **export ADIF** on demand for
   LoTW/eQSL or your main logger.
@@ -259,7 +288,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   entity: pick your **DXCC** from the full list (the entities that have subdivisions are
   grouped at the top, and a typeahead filters the list), then a **primary** subdivision
   gated by that DXCC (US state, Canadian province, Russian oblast, Japanese prefecture,
-  Chinese province, Australian state, Finnish kunta — the row is labelled with the right
+  Chinese province, Australian state, Finnish kunta — the row is labeled with the right
   term and shows *(n/a)* for entities without one), then a **secondary** gated by the
   primary (US **county** or Japanese **city/gun/ku**), plus a free-text **IOTA** field.
   No more separate US-vs-international entry — the US is just "United States → state →
@@ -347,3 +376,9 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   `/CardSat/Screenshots/` on the SD card (handy for documentation).
 - **Favorites**, **manual GP / transponder / time entry**, per-satellite
   **calibration**, and a **factory reset**.
+
+- **Tools hub** (About -> `t`) — offline bench tools: an infix **scientific
+  calculator**, a **programmer's calculator** (hex/dec/bin/oct + bitwise ops), (degree trig, `Ans`) plus live-recalc forms for **coax loss/power**,
+  **dipole / vertical / yagi / quad** antenna dimensions, **RF unit** conversions,
+  **SWR / return loss**, **free-space path loss**, and a **unit converter**. All math
+  is local and works with no network.

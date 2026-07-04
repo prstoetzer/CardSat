@@ -473,7 +473,7 @@ and "Hamlib" (enter a Hamlib model id + device/port). `makeRig()` already switch
 profile; it gains one more axis — *which implementation* — rather than a new app.
 
 **Pros**
-- **Best of both, and the cons of each are largely cancelled.** Operators get Hamlib's
+- **Best of both, and the cons of each are largely canceled.** Operators get Hamlib's
   vast coverage (and the USB-CDC class) when they want breadth, and CardSat's tight,
   hardware-proven native control (notably the IC-821 single-pin path) when they want the
   exact tested behavior. Neither audience is forced onto the other's trade-offs.

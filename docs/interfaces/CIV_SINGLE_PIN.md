@@ -9,7 +9,7 @@ number of signal wires to the radio.
 > bidirectional CI-V — frequency reads and ACKs — over one shared open-drain wire).
 > That said, the normal separate **TX/RX** path is still the simplest, most robust
 > option and is recommended for a dependable station. Single-pin depends on correct
-> open-drain behaviour and an external pull-up, and on proper 5 V / 3.3 V level
+> open-drain behavior and an external pull-up, and on proper 5 V / 3.3 V level
 > interfacing to the radio. **Verify the wiring with a meter before connecting a
 > radio — wrong wiring can damage a GPIO.**
 

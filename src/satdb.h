@@ -73,6 +73,7 @@ struct SatEntry {
   uint8_t  amsatStatus = 0;   // AMSAT: 0 none, 1 heard, 2 not heard, 3 telemetry only
   uint32_t amsatHeardEpoch = 0; // UTC epoch of the winning report's latest_reported_time (0 = none)
   uint8_t  amsatReports = 0;  // report_count of the winning row (how many stations reported)
+  char     amsatName[28] = ""; // the AMSAT API name of the matched status row (for reports.php)
 };
 
 class SatDb {
@@ -91,6 +92,17 @@ public:
   bool removeManualGp(uint32_t norad);         // delete a hand-entered sat from FILE_MGP
   bool loadGpFromFs();                         // reload cached GP JSON at boot
   void applyAmsatStatusFile(const char* path); // set amsatStatus from a cached summary.php
+
+  // AMSAT catalog name map: every entry of the status API's catalog.php, matched
+  // to a catalog satellite. One sat can carry several entries (AO-7_[U/v] and
+  // AO-7_[V/a]); the map is what makes reports and submissions mode-aware.
+  static const int AMS_MAP_MAX = 96;
+  static const int AMS_NAME_LEN = 28;
+  struct AmsMapEnt { int16_t sat; char name[AMS_NAME_LEN]; };
+  void applyAmsatCatalogFile(const char* path);   // (re)build the map from cached catalog.php
+  int  amsFindByName(const char* apiName) const;  // exact API-name -> sat index, or -1
+  int  amsNamesFor(int satIdx, const char* out[], int maxN) const; // this sat's API names
+  int  amsMapCount() const { return _amsMapN; }
   int  loadGpFromFile(const char* path);       // stream-parse a GP file (low RAM)
   bool saveGpJson(const String& json);         // cache the downloaded blob
 
@@ -121,6 +133,8 @@ public:
   static float knownCtcssHz(uint32_t norad);
 
 private:
+  AmsMapEnt _amsMap[AMS_MAP_MAX];
+  int      _amsMapN = 0;
   SatEntry _sats[MAX_SATS];
   int      _n = 0;
 };

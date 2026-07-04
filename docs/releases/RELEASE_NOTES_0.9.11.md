@@ -40,7 +40,7 @@ six per row, alphabetically, with the same cyan workable-count line and `;`/`.` 
 
 Membership uses a point-in-polygon test against **bundled simplified** state
 boundaries (~0.1°/11 km, about 1.8 KB of data). At footprint scale this is
-plenty; a footprint grazing a state line may briefly list both neighbours, which
+plenty; a footprint grazing a state line may briefly list both neighbors, which
 is correct (both are workable). AK, HI and DC are included.
 
 ### Workable DXCC (`e`)

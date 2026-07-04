@@ -23,14 +23,14 @@ frequency formatting on every band.
 - **Passband tuning works from the big view.** All the in-place Track controls are
   available without leaving it — `,`/`/` tune, `s`/`x` step/recenter, `m` TUNE/CAL,
   `d` cycle mode, `t` next transponder, `r`/`o` radio/rotator, `y` tilt, `l` log.
-  This is done by delegating to the Track key handler, so behaviour (including the
+  This is done by delegating to the Track key handler, so behavior (including the
   FULL/DL knob-driven guard) is identical and lives in one place.
 
 ## Large-font Manual calculator (`z` from Manual)
 
 The no-radio **Manual** frequency calculator gains its own large-font view, opened
 with **`z`**. It shows the **HOLD** and **TUNE** legs in big digits with the fixed
-and derived legs labelled, using the same round-trip Doppler maths as the normal
+and derived legs labeled, using the same round-trip Doppler maths as the normal
 Manual screen. The in-place keys (`u` swap leg, `m` CAL, `,`/`/` tune, `s`/`x`,
 `t`) work there too; `z` or `` ` `` returns to the standard Manual view.
 
@@ -49,8 +49,8 @@ or tablet can drive it without touching the keypad. Enable it under *Settings �
 Network / data → Web control*; the row then shows the URL to open (e.g.
 `http://192.168.1.42`). From the page you can:
 
-- **select a satellite** from your favourites and start tracking it, or add/remove
-  the chosen satellite from favourites with the **★** button beside the selector,
+- **select a satellite** from your favorites and start tracking it, or add/remove
+  the chosen satellite from favorites with the **★** button beside the selector,
 - **see upcoming pass times** (AOS, peak/closest-approach time, max elevation,
   duration, az) for the active satellite,
 - **control the radio and rotator** — tune the passband, step the transponder,
@@ -89,7 +89,7 @@ under Network / data). If the primary network can't be joined, CardSat
 automatically falls back to the second one. This is aimed at field use: keep your
 home router as the primary and a **phone hotspot** or portable travel router as the
 second, and the device connects to whichever is in range. Leave it blank to keep
-the previous single-network behaviour. The fallback applies everywhere CardSat
+the previous single-network behavior. The fallback applies everywhere CardSat
 connects — boot, GP updates, and on-demand fetches.
 
 ## Tidier frequency readouts on any band

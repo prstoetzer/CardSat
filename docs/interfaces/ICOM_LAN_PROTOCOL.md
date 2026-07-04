@@ -145,7 +145,7 @@ counter.
 **CI-V data receive:** accept when `len>=22 && r[16]==0xc1 && r[0]-0x15==r[17]`; the CI-V frame
 is `r[21:]`. Reorder by header seq before decoding.
 
-**CI-V semantics (ask–answer, serialised):** one outstanding query at a time. The radio first
+**CI-V semantics (ask–answer, serialized):** one outstanding query at a time. The radio first
 **echoes** the sent frame (to/from IDs as-sent), then sends the **response** (IDs swapped),
 ending in `0xFD`. Plain ACK = `0xFB`, NAK = `0xFA`. A second query before the first answers
 usually NAKs — so the backend queues CI-V and waits for echo+response (or a timeout).

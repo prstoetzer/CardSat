@@ -1,4 +1,4 @@
-# Heap optimisation: proactive WiFi-cycle defrag (0.9.41)
+# Heap optimization: proactive WiFi-cycle defrag (0.9.41)
 
 This note documents the last-resort WiFi disconnect/reconnect that
 `Net::reclaimHeapForTls()` can perform before an mbedTLS handshake, why it exists,
@@ -67,7 +67,7 @@ Set the master toggle off:
 Net::TLS_WIFI_CYCLE = false;   // in net.cpp, or at runtime before fetches
 ```
 
-With it `false`, `reclaimHeapForTls()` reverts to exactly the prior behaviour:
+With it `false`, `reclaimHeapForTls()` reverts to exactly the prior behavior:
 passive coalesce-wait only, then decline if still short. The gating members
 (`WIFI_CYCLE_MIN_GAP_MS`, `lastWifiCycleMs`) become inert. No other code depends on
 the cycle, so this is a clean revert. The `BEGIN/END 0.9.41 proactive WiFi-cycle`

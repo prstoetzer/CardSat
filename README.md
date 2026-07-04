@@ -18,6 +18,19 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.47:** a release for the **operator in the field**. **Report a bird's status
+> to amsat.org with two keypresses** (`i`×2 on Track) — **mode-aware**, so working AO-7's
+> U/v passband reports `AO-7_[U/v]`, with a full picker (`p` on AMSAT status) for all four
+> statuses and a **who-heard-it** view (`g`: callsigns + grids). A **Tools hub** (About →
+> `t`): scientific + programmer's calculators, coax loss, dipole/vertical/yagi/quad
+> dimensions, RF units, SWR, path loss. An **offline pass** makes every cached source safe
+> against mid-transfer drops. Plus cloud cover on visible passes, launch siblings by name,
+> space-weather trend deltas, a station-readiness checklist, a two-column home menu, an EME
+> 30-day planner, six-category settings, and the line's largest fix set — much of it found
+> on real hardware.
+>
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.47.md)**.
+
 > **New in v0.9.46:** a release for the **VHF / UHF / microwave and EME** operator. A complete
 > **EME (moonbounce)** screen (press **`e`** from Sun/Moon) shows **self-echo Doppler** per band
 > (50/144/432/1296/10368 MHz, computed topocentrically — the figure swings kHz at 1296 and tens of

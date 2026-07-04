@@ -126,7 +126,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.46";
+static constexpr const char* FW_VERSION = "0.9.47";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -219,7 +219,11 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_CFG_BAK  "/CardSat/config.bak"    // backup copy of config.json
 #define FILE_FAVS_BAK "/CardSat/favs.bak"      // backup copy of favs.txt
 #define FILE_AMSTAT   "/CardSat/amstat.json"   // cached AMSAT OSCAR status summary
+#define FILE_AMSCAT   "/CardSat/amscat.json"   // cached AMSAT status-API catalog (name map)
 #define AMSAT_STATUS_URL  "https://www.amsat.org/status/api/v1/summary.php?hours="
+#define AMSAT_REPORTS_URL "https://www.amsat.org/status/api/v1/reports.php?name="
+#define AMSAT_CATALOG_URL "https://www.amsat.org/status/api/v1/catalog.php"
+#define AMSAT_REPORT_POST "https://www.amsat.org/status/api/v1/reports.php"
 // AMSAT status window is now a user setting (cfg.amsatWindowH, default 24 h); see settings.h.
 #define FILE_SPACEWX  "/CardSat/spacewx.txt"    // cached space weather: "f107 ap epoch"
 #define FILE_SPACEWX_TMP "/CardSat/spacewx.tmp"  // scratch for streamed NOAA JSON (low heap)

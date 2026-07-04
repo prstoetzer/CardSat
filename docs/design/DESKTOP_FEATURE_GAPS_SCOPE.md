@@ -137,7 +137,7 @@ the ones that genuinely need a different platform.
 - **(G) External data push.** CardSat already speaks rotctld/rigctl *as a client*; the
   inverse — a small server that *emits* live az/el/Doppler/sat over the existing WiFi
   stack (a UDP broadcast or a one-line HTTP/JSON endpoint, à la the GPredict rigctld
-  AOS/LOS signalling) — lets loggers and other tools consume CardSat as a tracking
+  AOS/LOS signaling) — lets loggers and other tools consume CardSat as a tracking
   source the way they consume SatPC32's DDE. Low heap, no new hardware, and it slots
   next to the already-scoped `WEB_CONTROL_SCOPE.md`. **High value for low cost.**
 - **(H) Voice AOS/LOS announcements.** CardSat already has audio (beeps, the sked/AOS

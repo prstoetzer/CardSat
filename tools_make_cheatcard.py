@@ -37,7 +37,7 @@ XS        = [LM + i * (col_w + GUT) for i in range(NCOL)]
 FRONT = [
  ("GLOBAL",
   "<b>;</b> up &middot; <b>.</b> down &middot; <b>,</b> <b>/</b> left/right &middot; "
-  "<b>ENTER</b> select &middot; <b>`</b>/<b>DEL</b> back &middot; "
+  "<b>ENTER</b> select &middot; <b>`</b>/<b>DEL</b> back &middot; Home: 2-col grid, letter jumps, <b>,</b>/<b>/</b> hop columns &middot; "
   "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help "
   "(Help links: <b>g</b> glossary+math &middot; <b>m</b> user guide &middot; <b>s</b> sat history &middot; <b>t</b> tech help &middot; <b>l</b> learn theory &middot; <b>f</b> band plan)"),
  ("HOME",
@@ -74,7 +74,7 @@ FRONT = [
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
   "<b>c</b> CTCSS &middot; <b>N</b> sat note &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>a</b> point-here arrow &middot; <b>z</b> big readout &middot; "
   "<b>y</b> tilt on/off (ADV) &middot; "
-  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>ENTER</b> save cal"),
+  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>i</b>&times;2 report Heard (AMSAT) &middot; <b>ENTER</b> save cal"),
  ("BIG READOUT (z from Track)",
   "Big RX/TX + az/el + tune mode (follows Track). Radio+rotator keep tracking &middot; "
   "<b>,</b>/<b>/</b> tune &middot; <b>s</b>/<b>x</b> step/ctr &middot; <b>m</b>/<b>d</b> mode &middot; "
@@ -108,7 +108,7 @@ FRONT = [
   "Antenna-pointing / RF reference. <b>;</b>/<b>.</b> select &middot; <b>`</b> back"),
  ("EME / MOONBOUNCE (Sun/Moon &rarr; e)",
   "Self-echo Doppler per band (50/144/432/1296/10368, topocentric) &middot; range + rate &middot; path degradation vs perigee &middot; "
-  "galactic sky-noise flag &middot; <b>m</b> mutual-Moon window vs DX grid &middot; <b>o</b> rotor track Moon &middot; <b>`</b> back"),
+  "galactic sky-noise flag &middot; SUN flag &lt;10&deg; &middot; <b>m</b> mutual window &middot; <b>p</b> 30-day plan &middot; <b>o</b> rotor track Moon &middot; <b>`</b> back"),
  ("GRID DIST/BEARING (menu)",
   "Enter Maidenhead grid &rarr; great-circle distance + beam heading (short/long path, km/mi). "
   "<b>g</b> grid &middot; <b>q</b> QRZ&rarr;grid lookup (seeds calc) &middot; <b>o</b> point rotor at bearing &middot; <b>`</b> back"),
@@ -130,7 +130,7 @@ BACK = [
   "Settings &rarr; Network). <b>ENTER</b> type call &rarr; name/addr/grid/class. WiFi req'd &middot; <b>`</b> back"),
  ("BAND PLAN (Help &rarr; f)",
   "Worldwide amateur band reference LF&rarr;light: HF with ITU R1/R2/R3 splits, VHF/UHF/microwave EME+calling freqs, "
-  "satellite subbands, IARU designators (H/T/V/U/L/S/C/X/K), sat modes incl QO-100. <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
+  "satellite subbands, IARU designators (H/A/V/U/L/S/C/X/K), sat modes incl QO-100. <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("ACTIVATIONS (menu)",
   "Upcoming sat activations on hams.at (roves, grid/special ops). List: date, call, sat, grid (* = your own entry). <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> detail &middot; <b>n</b> add your own sked (offline OK), <b>e</b> edit a * entry &middot; <b>r</b> refresh &middot; <b>`</b> back. Detail: UTC/mode/freq + <b>footprint note</b> (checks co-visibility with the activator +/-30 min of listed time), <b>;</b>/<b>.</b> scroll the full comment, <b>a</b> SKED reminder (T-60/30/10 beeps+flash), <b>w</b> mutual-window screen if a footprint exists. Mutual window: small polar plot (me + DX arcs), Date/AOS/LOS/dur + peak el each; <b>d</b> DX Doppler pre-set to the transponder &amp; fixed DL/UL parsed from the freq/comment (default table if none). Cached to card &mdash; last list shows offline; WiFi to refresh"),
  ("OVERHEAD NOW (menu)",
@@ -191,7 +191,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT) &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch) &mdash; Zap the Sats, Doppler Lock, Catch the Pass, Rotor Runner (tilt/keys), Morse Meteors (<b>t</b> dot <b>u</b> dash), Grid Chase."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b>: sci + programmer calculators, coax loss, dipole/vertical/yagi/quad dims, RF units, SWR, path loss &middot; <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT) &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch) &mdash; Zap the Sats, Doppler Lock, Catch the Pass, Rotor Runner (tilt/keys), Morse Meteors (<b>t</b> dot <b>u</b> dash), Grid Chase."),
 ]
 
 

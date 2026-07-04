@@ -10,7 +10,7 @@ Sun/Moon) and a striking demonstration of orbital geometry.
 ## 1. The need
 
 A satellite transit of the Sun or Moon is one of the most dramatic things a ground
-observer can capture, but the viewing path is only a few kilometres wide and the event
+observer can capture, but the viewing path is only a few kilometers wide and the event
 lasts under a second, so you need a precise local prediction. CardSat already computes
 satellite look angles and Sun/Moon positions for the same instant and location — so it
 is unusually well-placed to answer "when, from here, does this bird cross the Sun or
@@ -29,7 +29,7 @@ Moon?" Nothing on-device does this today.
   0.52° is adequate for a "transit possible" alert).
 - **Observer location** already available (GPS or configured QTH).
 
-So the core test — angular separation between the satellite and the Sun/Moon centre vs.
+So the core test — angular separation between the satellite and the Sun/Moon center vs.
 the body's angular radius — is computable entirely from primitives already present.
 
 ---
@@ -55,15 +55,15 @@ for the operator's exact QTH/GPS, and note that moving a few km changes the resu
 
 - **Transit-Finder (ISS-Transit-Finder), CalSky (defunct), Heavens-Above:** same
   geometry — satellite ephemeris vs. solar/lunar ephemeris, angular-separation test,
-  refined to sub-second, reported with the **centre-line distance** because the path is
+  refined to sub-second, reported with the **center-line distance** because the path is
   ~few km wide. They search a date range and a small area around the observer.
-- **Key realism:** these tools report transits for a *point* and emphasise how quickly
+- **Key realism:** these tools report transits for a *point* and emphasize how quickly
   the geometry changes with observer position. CardSat should do the same: predict for
   *here*, label the minimum separation, and be honest that it's a point prediction.
 
 ---
 
-## 5. Proposed behaviour
+## 5. Proposed behavior
 
 ### 5.1 New "Transits" view (off Sun/Moon or the satellite menu)
 For the selected satellite, list upcoming Sun and Moon transits/close conjunctions in
@@ -76,7 +76,7 @@ Each entry: body (Sun/Moon), date/time to the second (local + UTC), minimum sepa
 
 ### 5.2 Optional
 - A **countdown + alarm** to the next transit (reuse the AOS-alarm mechanism).
-- "All favourites" mode: scan every favourite for transits in the window — a "any bird
+- "All favorites" mode: scan every favorite for transits in the window — a "any bird
   crossing the Sun/Moon soon?" board.
 - Sun-safety note in the UI: **never observe a solar transit without proper solar
   filtering.**
@@ -108,7 +108,7 @@ Each entry: body (Sun/Moon), date/time to the second (local + UTC), minimum sepa
 
 ## 8. Out of scope
 
-- Mapping the ground centreline / "drive X km north to centre it" (needs a map + path
+- Mapping the ground centreline / "drive X km north to center it" (needs a map + path
   solve; the existing world map could host this later).
 - Planetary transits (Mercury/Venus across the Sun) — astronomical, not satellite.
 - Sub-second camera-trigger output.
@@ -120,7 +120,7 @@ Each entry: body (Sun/Moon), date/time to the second (local + UTC), minimum sepa
 - Host: take a published ISS solar-transit prediction (Transit-Finder) for a known
   site/date, feed the same TLE/site, and confirm the transit time matches to within a
   second or two and the separation is sub-disc.
-- Confirm a horizon-blocked body yields no transit, and a grazing case is labelled
+- Confirm a horizon-blocked body yields no transit, and a grazing case is labeled
   grazing.
 - On-device: run the scan for the ISS and confirm it completes incrementally without
   tripping the watchdog.

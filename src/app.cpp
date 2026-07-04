@@ -266,6 +266,7 @@ void App::setup() {
   if (Store::fs().exists(FILE_DL_TMP))      Store::fs().remove(FILE_DL_TMP);
   loadFavs();
   buildSatView();
+  db.applyAmsatCatalogFile(FILE_AMSCAT);  // rebuild the AMSAT name map from cache
   db.applyAmsatStatusFile(FILE_AMSTAT);   // restore cached AMSAT activity marks
 
   // Auto-refresh: if we're online with a valid clock and even the freshest cached
@@ -487,8 +488,10 @@ void App::toggleMemo() {
     setStatus("Memo saved");
   } else {
     SatEntry* s = activeSat();
-    if (memo.start(s ? s->name : nullptr))
-      setStatus("Recording memo...");
+    if (memo.start(s ? s->name : nullptr)) {
+      logCreateStub(memo.path());                  // one-key QSO capture (stub to finish later)
+      setStatus("Recording memo... (+log stub)");
+    }
     else
       setStatus(String("Memo: ") + memo.lastError());   // e.g. "SD card required"
   }
@@ -573,6 +576,7 @@ bool App::ensureTransponders(SatEntry& s) {
 // Recenter the passband tuning to mid-band and choose a sensible default
 // track-screen mode for the currently selected transponder.
 void App::onTransponderChanged() {
+  trkPrevEl = -999; losPromptUntil = 0;   // new bird: no stale LOS crossing
   tuneMode = TM_HOLD; lastRxSet = 0; lastUlHz = 0;   // start each channel holding both legs
   cwMode = false;                                    // CW override never persists across channels
   if (activeTxCount <= 0) { pbOffset = 0; trackMode = 1; return; }
@@ -699,6 +703,7 @@ void App::doUpdateGp() {
   Serial.printf("[gp] parsed %d satellites\n", n);
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
   buildSatView();
+  fetchAmsatCatalog();                 // refresh the AMSAT name map first
   fetchAmsatStatus();                  // tag active/not-heard from AMSAT status
                                        // (needs the loaded catalog)
   fetchSpaceWeather();                 // F10.7 flux + Kp/A from NOAA SWPC
@@ -732,6 +737,7 @@ void App::doFastUpdate() {
   Serial.printf("[fast] parsed %d satellites\n", n);
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
   buildSatView();
+  fetchAmsatCatalog();                 // name map first, so matching is exact
   fetchAmsatStatus();                  // AMSAT activity marks are a single bulk
                                        // summary fetch, so refresh them too (tags
                                        // the whole catalog in one call); space
@@ -852,11 +858,35 @@ void App::fetchAmsatStatus() {
   if (!net.connected()) return;
   String url = String(AMSAT_STATUS_URL) + (int)cfg.amsatWindowH;
   setStatus("AMSAT status..."); draw();
-  if (net.httpsGetToFileRetry(url, FILE_AMSTAT, 200000, nullptr, 3))
+  // Stage to the scratch file and only swap it over the live cache on success, so a
+  // mid-transfer drop in the field leaves the previous good cache (and the offline
+  // status marks) intact instead of truncating them.
+  if (net.httpsGetToFileRetry(url, FILE_DL_TMP, 200000, nullptr, 3)) {
+    Store::fs().remove(FILE_AMSTAT);
+    Store::fs().rename(FILE_DL_TMP, FILE_AMSTAT);
     db.applyAmsatStatusFile(FILE_AMSTAT);
-  else
-    Serial.printf("[amsat] status fetch failed: %s\n", net.lastErr.c_str());
+  } else {
+    Store::fs().remove(FILE_DL_TMP);                 // drop any partial scratch
+    Serial.printf("[amsat] status fetch failed (cache kept): %s\n", net.lastErr.c_str());
+  }
+  status = "";                       // clear the "AMSAT status..." banner (caller repaints)
 }
+
+// Fetch the status API's satellite catalog (name list) and rebuild the name
+// map. Cached to flash so the map also rebuilds offline at boot; refreshed
+// alongside each GP update, since new birds appear there first.
+void App::fetchAmsatCatalog() {
+  if (!net.connected()) return;
+  if (net.httpsGetToFileRetry(AMSAT_CATALOG_URL, FILE_DL_TMP, 120000, nullptr, 2)) {
+    Store::fs().remove(FILE_AMSCAT);
+    Store::fs().rename(FILE_DL_TMP, FILE_AMSCAT);    // atomic swap; keeps the map usable offline
+    db.applyAmsatCatalogFile(FILE_AMSCAT);
+  } else {
+    Store::fs().remove(FILE_DL_TMP);                 // failed fetch keeps the previous good map
+    Serial.printf("[amsat] catalog fetch failed (cache kept): %s\n", net.lastErr.c_str());
+  }
+}
+
 
 // Fetch the latest NOAA SWPC 10.7 cm solar radio flux and cache it. Best-effort
 // and non-fatal: a failure leaves the previous value (and the manual Decay-solar
@@ -882,10 +912,15 @@ void App::fetchSpaceWeather() {
     float flux = scanFileNum(FILE_DL_TMP, "\"flux\"", /*wantLast=*/false, 50.0f, 400.0f);
     Store::fs().remove(FILE_DL_TMP);
     if (!isnan(flux) && flux > 0) {
+      // Trend memory: if the sample being replaced is >= 6 h old, it becomes the
+      // "previous" sample (paired with the Kp that was current alongside it), so
+      // the propagation screen can show rising/falling deltas across fetches and
+      // reboots. The cache file itself is written once at the end of this fetch.
+      if (spaceWxEpoch > 0 && spaceF107 > 0 && nowUtc() - spaceWxEpoch >= 6 * 3600) {
+        spacePrevF107 = spaceF107; spacePrevKp = spaceKp; spacePrevEpoch = spaceWxEpoch;
+      }
       spaceF107 = flux;
       spaceWxEpoch = nowUtc();
-      File w = Store::fs().open(FILE_SPACEWX, "w");
-      if (w) { w.printf("%.1f %ld\n", spaceF107, (long)spaceWxEpoch); w.close(); }
     } else {
       Serial.println("[wx] flux fetched but no in-range value parsed");
     }
@@ -912,6 +947,14 @@ void App::fetchSpaceWeather() {
     Serial.printf("[wx] Kp fetch failed: code=%d %s\n", net.lastCode, net.lastErr.c_str());
   }
   if (spaceWxEpoch == 0 && (spaceKp >= 0 || spaceF107 > 0)) spaceWxEpoch = nowUtc();
+
+  // Persist the space-wx cache: current flux / epoch / Kp plus the previous sample
+  // (trend). Older firmwares wrote only "flux epoch"; the loader accepts both.
+  if (spaceF107 > 0) {
+    File w = Store::fs().open(FILE_SPACEWX, "w");
+    if (w) { w.printf("%.1f %ld %.1f %.1f %ld %.1f\n", spaceF107, (long)spaceWxEpoch,
+                      spaceKp, spacePrevF107, (long)spacePrevEpoch, spacePrevKp); w.close(); }
+  }
 }
 
 // Restore the cached F10.7 at boot so the decay estimate is informed offline.
@@ -919,11 +962,18 @@ void App::loadSpaceWeather() {
   File f = LittleFS.open(FILE_SPACEWX, "r");
   if (!f) return;
   String line = f.readStringUntil('\n'); f.close();
-  float v = (float)atof(line.c_str());
-  if (v > 50.0f && v < 400.0f) {
+  // "flux epoch [kp prevFlux prevEpoch prevKp]" -- the bracketed trend fields were
+  // added later; a two-field line from an older firmware still loads fine.
+  float v = 0, kp = -1, pf = -1, pk = -1; long ep = 0, pep = 0;
+  int got = sscanf(line.c_str(), "%f %ld %f %f %ld %f", &v, &ep, &kp, &pf, &pep, &pk);
+  if (got >= 1 && v > 50.0f && v < 400.0f) {
     spaceF107 = v;
-    int sp = line.indexOf(' ');
-    if (sp >= 0) spaceWxEpoch = (time_t)atol(line.c_str() + sp + 1);
+    if (got >= 2) spaceWxEpoch = (time_t)ep;
+    if (got >= 3 && kp >= 0 && kp <= 9) spaceKp = kp;
+    if (got >= 6 && pf > 50.0f && pf < 400.0f && pep > 0) {
+      spacePrevF107 = pf; spacePrevEpoch = (time_t)pep;
+      if (pk >= 0 && pk <= 9) spacePrevKp = pk;
+    }
   }
 }
 
@@ -1849,6 +1899,7 @@ void App::fetchWeather() {
              + "&longitude=" + String(o.lon, 4)
              + "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m"
              + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+             + "&hourly=cloud_cover&forecast_hours=48"
              + "&timezone=auto&forecast_days=" + String(WX_FORECAST_DAYS)
              + "&temperature_unit=" + tu + "&wind_speed_unit=" + wu;
 
@@ -1949,6 +2000,49 @@ void App::fetchWeather() {
   wxEpoch = nowUtc();
   wxCachedUnits = cfg.wxUnits;
 
+  // --- hourly cloud cover (next 48 h), for pass/transit planning ---------------
+  // hourly.time[0] is local ISO ("YYYY-MM-DDTHH:MM", timezone=auto); the response's
+  // top-level utc_offset_seconds converts it to unix UTC. Values land in wxCloud[]
+  // as whole percent; anything malformed just leaves wxCloudN = 0 (feature off).
+  wxCloudN = 0; wxCloudBase = 0;
+  {
+    long offS = 0;
+    int oi = body.indexOf("\"utc_offset_seconds\"");
+    if (oi >= 0) { int c1 = body.indexOf(':', oi);
+                   offS = body.substring(c1 + 1, c1 + 12).toInt(); }
+    int hAt = body.indexOf("\"hourly\"");
+    if (hAt >= 0) {
+      int ti = body.indexOf("\"time\"", hAt);
+      int q1 = (ti >= 0) ? body.indexOf('"', body.indexOf('[', ti)) : -1;
+      int q2 = (q1 >= 0) ? body.indexOf('"', q1 + 1) : -1;
+      int Y, Mo, D, H, Mi;
+      if (q2 > q1 && sscanf(body.substring(q1 + 1, q2).c_str(),
+                            "%d-%d-%dT%d:%d", &Y, &Mo, &D, &H, &Mi) == 5) {
+        // days_from_civil (Hinnant), epoch 1970-01-01 -- same math the GP parser uses.
+        int y2 = Y - (Mo <= 2); int era = (y2 >= 0 ? y2 : y2 - 399) / 400;
+        unsigned yoe = (unsigned)(y2 - era * 400);
+        unsigned doy = (153u * (unsigned)(Mo + (Mo > 2 ? -3 : 9)) + 2) / 5 + (unsigned)D - 1;
+        unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        long days = (long)era * 146097 + (long)doe - 719468;
+        wxCloudBase = (time_t)days * 86400 + (long)H * 3600 + (long)Mi * 60 - offS;
+      }
+      int ci = body.indexOf("\"cloud_cover\"", hAt);
+      if (wxCloudBase && ci >= 0) {
+        int lb = body.indexOf('[', ci), rb = (lb >= 0) ? body.indexOf(']', lb) : -1;
+        if (rb > lb) {
+          int pos = lb + 1, k = 0;
+          while (pos < rb && k < 48) {
+            int comma = body.indexOf(',', pos); if (comma < 0 || comma > rb) comma = rb;
+            int v = body.substring(pos, comma).toInt();
+            wxCloud[k++] = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
+            pos = comma + 1;
+          }
+          wxCloudN = (uint8_t)k;
+        }
+      }
+    }
+  }
+
   // Persist a compact cache: header line then one line per day.
   File w = LittleFS.open(FILE_WEATHER, "w");
   if (w) {
@@ -1957,6 +2051,11 @@ void App::fetchWeather() {
     for (int i = 0; i < wxDayCount; ++i)
       w.printf("%ld %d %.1f %.1f %d\n", wxDayEpoch[i], wxDayCode[i],
                wxDayHi[i], wxDayLo[i], wxDayPop[i]);
+    if (wxCloudN) {                       // optional trailing cloud line ("C base n v..")
+      w.printf("C %ld %d", (long)wxCloudBase, (int)wxCloudN);
+      for (int i = 0; i < wxCloudN; ++i) w.printf(" %d", (int)wxCloud[i]);
+      w.print("\n");
+    }
     w.close();
   }
 }
@@ -1984,8 +2083,31 @@ bool App::loadWeatherCache() {
       wxDayCount++;
     }
   }
+  // Optional trailing cloud line (added later; caches without it load fine).
+  wxCloudN = 0; wxCloudBase = 0;
+  { String ln = f.readStringUntil('\n');
+    if (ln.startsWith("C ")) {
+      long cb = 0; int cn = 0, consumed = 0;
+      if (sscanf(ln.c_str(), "C %ld %d%n", &cb, &cn, &consumed) == 2 && cb > 0) {
+        if (cn > 48) cn = 48;
+        const char* p = ln.c_str() + consumed; int k = 0;
+        while (k < cn && *p) { int v = (int)strtol(p, (char**)&p, 10);
+                               wxCloud[k++] = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v)); }
+        if (k == cn) { wxCloudBase = (time_t)cb; wxCloudN = (uint8_t)cn; }
+      }
+    }
+  }
   f.close();
   return true;
+}
+
+// Cloud cover at a unix time, from the cached hourly series. -1 = outside the
+// fetched 48 h window (or no data) -- callers simply omit the readout then.
+int App::cloudAtUnix(time_t t) {
+  if (!wxCloudN || !wxCloudBase) return -1;
+  long idx = (long)(t - wxCloudBase) / 3600;
+  if (idx < 0 || idx >= (long)wxCloudN) return -1;
+  return (int)wxCloud[idx];
 }
 
 // Atmospheric-density scale for the decay point estimate. In AUTO mode, derive a
@@ -2493,7 +2615,7 @@ void App::serviceAosAlarm() {
     }
   }
   if (nextAos == 0) return;
-  if (alarmAos != nextAos) { alarmAos = nextAos; alarmMarks = 0; }  // new target
+  if (alarmAos != nextAos) { alarmAos = nextAos; alarmMarks = 0; aosFlashBatt = -1; }  // new target
   long dt = (long)(nextAos - now);
   // "Get ready" lead alert: a distinct rising two-tone chirp at AOS - leadMinutes, so the
   // operator has time to get to the radio and point an antenna before the imminent
@@ -2507,6 +2629,11 @@ void App::serviceAosAlarm() {
       aosFlashUntil = millis() + 5000;
       strncpy(aosFlashName, nextAosName, sizeof(aosFlashName) - 1);
       aosFlashName[sizeof(aosFlashName) - 1] = 0;
+      // Low-battery note: if the pack is at/below 30%% at get-ready time, say so on
+      // the flash (and nudge with a low tone) so the pass isn't lost to a dead cell.
+      { int lvl = M5.Power.getBatteryLevel();
+        aosFlashBatt = (lvl >= 0 && lvl <= 30) ? lvl : -1;
+        if (aosFlashBatt >= 0) { delay(120); beep(500, 250); } }
     }
   }
   if (dt <= 60 && !(alarmMarks & 1)) { alarmMarks |= 1; beep(1500, 80);
@@ -3028,6 +3155,8 @@ h+=orow('To peri/apo',Math.round(o.toPeri/60)+'/'+Math.round(o.toApo/60)+' min')
 h+=orow('Velocity',(o.vel!=null?o.vel:'--')+' km/s');
 if(o.launchYear)h+=orow('Launched',o.launchYear+(o.cospar?' ('+o.cospar+')':'')+' \u2014 '+(new Date().getFullYear()-o.launchYear)+' yr');
 else if(o.cospar)h+=orow('Cospar',o.cospar);
+if(o.elset)h+=orow('Elset','#'+o.elset);
+if(o.sibs!=null)h+=orow('Launch sibs',o.sibs?o.sibs+' in catalog':'none');
 if(o.outlookN)h+=orow('Outlook',o.outlookN+' passes, '+o.outlookHi+' >30\u00b0');
 t.innerHTML=h;
 })}
@@ -3701,7 +3830,7 @@ void App::webdSendOrbitJson() {
   // the COSPAR designator. nu (true anomaly) and a are already computed above.
   { const double MU2 = 398600.4418;
     double eO = s->ecc, pO = a * (1.0 - eO * eO);
-    double rO = (1.0 + eO * cos(nu * D2R) != 0) ? pO / (1.0 + eO * cos(nu * D2R)) : a;
+    double rO = (1.0 + eO * cos(nu) != 0) ? pO / (1.0 + eO * cos(nu)) : a;   // nu is radians here
     double vN = (a > 0 && rO > 0) ? sqrt(MU2 * (2.0 / rO - 1.0 / a)) : 0.0;
     double vA = (a > 0) ? sqrt(MU2 * (2.0 / (a * (1 + eO)) - 1.0 / a)) : 0.0;
     double vP = (a > 0) ? sqrt(MU2 * (2.0 / (a * (1 - eO)) - 1.0 / a)) : 0.0;
@@ -3713,6 +3842,14 @@ void App::webdSendOrbitJson() {
       ly = (s->intlDes[0]-'0')*1000 + (s->intlDes[1]-'0')*100 + (s->intlDes[2]-'0')*10 + (s->intlDes[3]-'0');
     j += ",\"launchYear\":"; j += (ly >= 1957 ? ly : 0);
     j += ",\"cospar\":\""; j += s->intlDes; j += "\"";
+    j += ",\"elset\":"; j += (int)s->elsetNum;
+    int sibs = 0;
+    if (s->intlDes[0])
+      for (int i2 = 0; i2 < db.count(); ++i2) {
+        const SatEntry& t2 = db.at(i2);
+        if (&t2 != s && t2.intlDes[0] && strncmp(t2.intlDes, s->intlDes, 8) == 0) sibs++;
+      }
+    j += ",\"sibs\":"; j += sibs;
   }
   webdCli.print(j);
 
@@ -4510,6 +4647,14 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_QRZGRID: keyQrzGrid(c, enter, back); break;
     case SCR_BANDPLAN: keyBandPlan(c, enter, back); break;
     case SCR_PROP: keyProp(c, enter, back); break;
+    case SCR_READY: keyReady(c, enter, back); break;
+    case SCR_EMEPLAN: keyEmePlan(c, enter, back); break;
+    case SCR_AMSRPT: keyAmsRpt(c, enter, back); break;
+    case SCR_AMSRPICK: keyAmsRpick(c, enter, back); break;
+    case SCR_TOOLS: keyTools(c, enter, back); break;
+    case SCR_CALC: keyCalc(c, enter, back); break;
+    case SCR_PCALC: keyPCalc(c, enter, back); break;
+    case SCR_TOOLFORM: keyToolForm(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
 #endif
@@ -4572,10 +4717,25 @@ static bool isRight(char c) { return c == '/'; }
 static bool isBack(char c, bool del) { return c == '`' || del; }
 
 // ---------------------------------------------------------------------------
+// Forward declaration; the definition sits just above drawHome() further down.
+extern const char* const HOME_ITEMS[];
+
 void App::keyHome(char c, bool enter, bool back) {
   const int N = 20;
   if (isUp(c))   homeSel = (homeSel + N - 1) % N;
   if (isDown(c)) homeSel = (homeSel + 1) % N;
+  if (isLeft(c) || isRight(c)) homeSel = (homeSel + 10) % N;   // hop columns
+  // First-letter jump: a letter moves the highlight to the next menu item starting
+  // with it (case-insensitive, wraps; repeated presses cycle matches, e.g. S for
+  // Satellites / Sun / Space Wx / Settings). Letters are otherwise unused here.
+  if (c >= 'a' && c <= 'z') {
+    for (int k = 1; k <= N; ++k) {
+      int i = (homeSel + k) % N;
+      char f = HOME_ITEMS[i][0];
+      if (f >= 'A' && f <= 'Z') f += 32;
+      if (f == c) { homeSel = i; lastDrawMs = 0; return; }
+    }
+  }
   if (enter) {
     switch (homeSel) {
       case 0: buildSatView(); screen = SCR_SATLIST; break;
@@ -5128,6 +5288,30 @@ void App::keyPassDetail(char c, bool enter, bool back) {
 }
 
 void App::keyTrack(char c, bool enter, bool back) {
+  if (c == 'q' && millis() < losPromptUntil) {   // post-LOS handoff: sleep to next pass
+    losPromptUntil = 0; sleepUntilNextPass(); return;
+  }
+  if (c == 'i') {                                // "I heard it": one-key AMSAT report
+    SatEntry* s2 = activeSat();
+    if (!s2) return;
+    int idx = satSel;
+    if (millis() < rptArmUntil && rptArmName[0]) {           // second tap: send
+      rptArmUntil = 0;
+      postAmsatReport(rptArmName, "Heard");
+      return;
+    }
+    bool amb = false;
+    const char* nm = amsPickNameFor(idx, amb);
+    if (amb) {                                   // multi-mode, no clear fit: picker
+      pickSatIdx = idx; pickNameSel = 0; pickSel = 0; pickStat = 0;
+      pickReturn = SCR_TRACK; screen = SCR_AMSRPICK; lastDrawMs = 0; return;
+    }
+    if (!nm) { setStatus("No AMSAT catalog name for this sat"); return; }
+    strncpy(rptArmName, nm, sizeof(rptArmName) - 1); rptArmName[sizeof(rptArmName) - 1] = 0;
+    rptArmUntil = millis() + 3500;
+    setStatus(String("Report ") + nm + " Heard? press i again", 3500);
+    return;
+  }
   if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
   if (c == 'a') { screen = SCR_ARROW; lastDrawMs = 0; return; }  // point-here arrow (radio/rotor keep running)
   if (isBack(c, back)) {
@@ -5290,7 +5474,7 @@ void App::keyTrack(char c, bool enter, bool back) {
         rotOut = !rotOut;
         if (rotOut) {
           { SatEntry* ts = activeSat(); trackedNorad = ts ? ts->norad : 0; }  // lock tracking to this bird
-          smOut = false;                       // sat tracking takes the rotator
+          smOut = false; emeRotOut = false; gcRotOut = false;  // sat tracking takes the rotator
           lastRotMs = 0; lastAzCmd = lastElCmd = -999.0f;
           lastUnwrappedAz = -999.0f; rotParked = false; rotFlipUntil = 0;
           setStatus("Rotator ON");
@@ -5521,8 +5705,9 @@ void App::keyMutual(char c, bool enter, bool back) {
     }
     if (c == 'd') {                          // Doppler table for this window (direct)
       if (!activeSat()) { setStatus("No satellite"); return; }
-      dxdWin = mutualSel; dxdRow = 0;
+      dxdWin = mutualSel; dxdRow = 0; dxdAnchorHz = 0;   // no activation anchor on this path
       dxdCenterPassband();                   // start at the centre of a linear passband
+      dxdReturn = SCR_MUTUAL;
       screen = SCR_DXDOPP; lastDrawMs = 0;
       return;
     }
@@ -5821,8 +6006,9 @@ void App::keyMutualDetail(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_MUTUAL; lastDrawMs = 0; return; }
   if (c == 'd' || enter) {
     if (!activeSat()) { setStatus("No satellite"); return; }
-    dxdWin = mutualSel; dxdRow = 0;
+    dxdWin = mutualSel; dxdRow = 0; dxdAnchorHz = 0;     // no activation anchor on this path
     dxdCenterPassband();
+    dxdReturn = SCR_MUTUALDETAIL;           // back returns to the detail view
     screen = SCR_DXDOPP; lastDrawMs = 0;    // the existing DX Doppler
     return;
   }
@@ -6140,7 +6326,7 @@ void App::drawDxDopp() {
 }
 
 void App::keyDxDopp(char c, bool enter, bool back) {
-  if (isBack(c, back)) { screen = SCR_MUTUAL; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { screen = dxdReturn; lastDrawMs = 0; return; }
   if (mutualN == 0 || activeTxCount == 0) return;
   MutualWindow& w = mutual[dxdWin];
   time_t span = w.end - w.start; if (span < 0) span = 0;
@@ -6331,6 +6517,16 @@ void App::drawVisList() {
     canvas.printf("%s  %2ldm %3.0f %-3s",
                   fmtMDHM(p.aos).c_str(), mins, p.maxEl,
                   windDirName((int)(p.azAos + 0.5f)));
+    // Mid-pass cloud cover from the weather fetch: the go/no-go a visible pass
+    // actually hinges on. Severity-colored; omitted outside the 48 h window.
+    int cld = cloudAtUnix(p.aos + (p.los - p.aos) / 2);
+    if (cld >= 0) {
+      uint16_t bg = (i == vlSel) ? CL_SELBG : CL_BLACK;
+      uint16_t fg = (i == vlSel) ? CL_BLACK
+                  : (cld < 30 ? CL_GREEN : (cld < 70 ? CL_WHITE : CL_ORANGE));
+      canvas.setTextColor(fg, bg);
+      canvas.setCursor(200, y); canvas.printf("%3d%%c", cld);
+    }
   }
   footer("ENT detail  r recomp  ` back");
 }
@@ -6497,20 +6693,25 @@ void App::keyUpdate(char c, bool enter, bool back) {
 
 // Settings are grouped into categories for a two-level menu. The per-row value
 // logic in adj()/ENTER stays keyed by absolute row index; these tables only map
-// a category + cursor position to that absolute index. Every row 0..47 appears
-// in exactly one category.
-static const int SET_CAT_N = 4;
+// a category + cursor position to that absolute index. Every populated row index
+// appears in exactly one category -- reorganizing is purely a table edit.
+static const int SET_CAT_N = 6;
 static const char* const SET_CAT_NAME[SET_CAT_N] = {
-  "Radio / CAT", "Rotator", "Station / display", "Network / data"
+  "Radio / CAT", "Rotator", "Passes / alerts", "Display / sound",
+  "Station / logging", "Network / data"
 };
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_STN[]   = {26,3,66,67,68,40,7,84,54,48,82,49,77,79,81,25,43,69,70,71,72,73,78,74,75,76,83};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,60,55,56,57,58,59,61,80,27,28,29};
-static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_STN, SET_NET };
+static const int SET_PASS[]  = {3,66,67,68,40,7,84,54,61};
+static const int SET_DISP[]  = {48,82,25,43,49,77,79,81};
+static const int SET_LOG[]   = {26,69,70,71,72,73,78,74,75,76};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,55,60,56,57,58,59,80,83,27,28,29};
+static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
+                                                    SET_DISP, SET_LOG, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
   (int)(sizeof(SET_RADIO)/sizeof(int)), (int)(sizeof(SET_ROTOR)/sizeof(int)),
-  (int)(sizeof(SET_STN)/sizeof(int)),   (int)(sizeof(SET_NET)/sizeof(int))
+  (int)(sizeof(SET_PASS)/sizeof(int)),  (int)(sizeof(SET_DISP)/sizeof(int)),
+  (int)(sizeof(SET_LOG)/sizeof(int)),   (int)(sizeof(SET_NET)/sizeof(int))
 };
 
 void App::keySettings(char c, bool enter, bool back) {
@@ -6531,6 +6732,8 @@ void App::keySettings(char c, bool enter, bool back) {
                          setSel = setCat; setCat = -1; return; }   // back to category list
   if (isUp(c))   setSel = (setSel + len - 1) % len;
   if (isDown(c)) setSel = (setSel + 1) % len;
+  if (c == '{')  { setSel -= 9; if (setSel < 0) setSel = 0; }          // page up
+  if (c == '}')  { setSel += 9; if (setSel > len - 1) setSel = len - 1; }  // page down
   const int sel = SET_CAT_ROWS[setCat][setSel];                   // absolute row index
   if (c == 's' && sel == 4) { startWifiScan(); return; }          // scan from the SSID row
 
@@ -7062,7 +7265,8 @@ void App::keyEdit(char c, bool enter, bool back) {
         editBuf.trim(); editBuf.toUpperCase();
         strncpy(qgCall, editBuf.c_str(), sizeof(qgCall) - 1); qgCall[sizeof(qgCall) - 1] = 0;
         screen = SCR_QRZGRID; qgHave = false; qgStatus = "Looking up..."; lastDrawMs = 0;
-        qrzGridLookup(); return;
+        draw();                               // show the screen before the blocking lookup
+        qrzGridLookup(); lastDrawMs = 0; return;
       }
 
       // ---- per-satellite CTCSS tone override ----
@@ -7466,12 +7670,14 @@ void App::drawAbout() {
              (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
     line(String(b));
   }
-  footer("l license/credits  z game  ` back");
+  footer("r ready  t tools  l license  z game  ` back");
 }
 
 void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'l') { licScroll = 0; screen = SCR_LICENSE; lastDrawMs = 0; return; }
   if (c == 'z') { gamesSel = 0; screen = SCR_GAMES; lastDrawMs = 0; return; }   // Games menu
+  if (c == 'r') { screen = SCR_READY; lastDrawMs = 0; return; }                 // station readiness
+  if (c == 't') { toolsSel = 0; screen = SCR_TOOLS; lastDrawMs = 0; return; }    // Tools hub
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
 
@@ -7637,6 +7843,33 @@ bool App::saveQso() {
   f.close();
   return true;
 }
+
+// One-key QSO capture: called when a voice memo starts from an operating screen.
+// Appends a log stub -- time, my call/grid, satellite, mode, the live frequencies,
+// callsign left blank, and a note naming the memo file -- so the contact can be
+// finished after LOS instead of typed mid-pass. Uses a snapshot so an in-progress
+// Log-entry edit is never clobbered. Delete unwanted stubs from Log > list (x x).
+void App::logCreateStub(const char* memoPath) {
+  if (!timeIsSet()) return;                       // a stub without a timestamp helps nobody
+  PendingQso saved = qso;
+  memset(&qso, 0, sizeof(qso));
+  strncpy(qso.rstS, "59", sizeof(qso.rstS) - 1);
+  strncpy(qso.rstR, "59", sizeof(qso.rstR) - 1);
+  qso.utc = (uint32_t)nowUtc();
+  String mg = loc.toGrid(loc.obs().lat, loc.obs().lon);
+  strncpy(qso.myGrid, mg.c_str(), sizeof(qso.myGrid) - 1);
+  strncpy(qso.myCall, cfg.myCall, sizeof(qso.myCall) - 1);
+  seedQsoSatDefaults();                            // sat + mode + freqs, if a sat is active
+  String note = "voice memo";
+  if (memoPath && memoPath[0]) {
+    const char* b = strrchr(memoPath, '/');
+    note += String(" ") + (b ? b + 1 : memoPath);
+  }
+  strncpy(qso.notes, note.c_str(), sizeof(qso.notes) - 1);
+  saveQso();
+  qso = saved;
+}
+
 
 int App::qsoCount() {
   if (!Store::fs().exists(FILE_LOG)) return 0;
@@ -9252,6 +9485,14 @@ void App::draw() {
     case SCR_QRZGRID: drawQrzGrid(); break;
     case SCR_BANDPLAN: drawBandPlan(); break;
     case SCR_PROP: drawProp(); break;
+    case SCR_READY: drawReady(); break;
+    case SCR_EMEPLAN: drawEmePlan(); break;
+    case SCR_AMSRPT: drawAmsRpt(); break;
+    case SCR_AMSRPICK: drawAmsRpick(); break;
+    case SCR_TOOLS: drawTools(); break;
+    case SCR_CALC: drawCalc(); break;
+    case SCR_PCALC: drawPCalc(); break;
+    case SCR_TOOLFORM: drawToolForm(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
 #endif
@@ -9321,6 +9562,8 @@ void App::draw() {
     canvas.setTextColor(CL_WHITE, on ? CL_RED : CL_BLACK);
     canvas.setTextSize(2); canvas.setCursor(34, 52); canvas.print("AOS!");
     canvas.setTextSize(1); canvas.setCursor(34, 74); canvas.printf("%.22s", aosFlashName);
+    if (aosFlashBatt >= 0) { canvas.setTextColor(CL_YELLOW, on ? CL_RED : CL_BLACK);
+      canvas.setCursor(140, 74); canvas.printf("BATT %d%%", aosFlashBatt); }
   } else if (cfg.aosAlarm && dt >= 0 && dt <= 60) {
     canvas.fillRect(0, 16, 240, 11, CL_ORANGE);
     canvas.setTextColor(CL_BLACK, CL_ORANGE);
@@ -11237,7 +11480,7 @@ void App::drawGame() {
     canvas.drawPixel(gShotX[s], gShotY[s], CL_WHITE);
   }
   gameDrawGun(canvas, gGunX);
-  footer(", / . move  SPACE fire  ` back");
+  footer("T/U move  SPACE fire  ` back");
 }
 
 void App::keyGame(char c, bool enter, bool back) {
@@ -12826,6 +13069,7 @@ void App::drawOrbit() {
     double vPer = (a > 0) ? sqrt(MU * (2.0 / (a * (1 - e)) - 1.0 / a)) : 0.0;
     row("Velocity",  (now ? String(vNow, 3) : String("--")) + " km/s");
     row("V apo/peri", String(vApo, 2) + " / " + String(vPer, 2) + " km/s");
+    row("Elset", "#" + String(s->elsetNum));
 
     // Launch year + satellite age from the COSPAR International Designator
     // "YYYY-NNNP" (the catalog stores the 4-digit-year form). The first four chars
@@ -12849,6 +13093,45 @@ void App::drawOrbit() {
         row("In orbit", String(ageY, 1) + " yr");
       }
       row("Cospar", String(s->intlDes));
+      // Launch siblings: other cataloged objects sharing the COSPAR YYYY-NNN
+      // prefix (same launch). AO-7 rode up with three companions, for example.
+      // Show the count, then the names themselves wrapped across lines (that is
+      // the useful part -- *which* birds shared the ride, not just how many).
+      int sibs = 0;
+      String sibList;
+      for (int i2 = 0; i2 < db.count(); ++i2) {
+        const SatEntry& t2 = db.at(i2);
+        if (&t2 != s && t2.intlDes[0] && strncmp(t2.intlDes, s->intlDes, 8) == 0) {
+          sibs++;
+          if (sibList.length()) sibList += ", ";
+          sibList += t2.name;
+        }
+      }
+      row("Launch sibs", sibs ? String(sibs) + " in catalog" : String("none in catalog"));
+      // Wrap the name list under the count, ~38 chars/line, stopping before the
+      // footer (y >= 112) so a big launch batch can never overrun it.
+      if (sibs) {
+        y += 4;                                      // small gap so the names read as a distinct block
+        const int WRAP = 38;
+        int pos = 0, L = sibList.length();
+        while (pos < L && y <= 110) {
+          int take = L - pos;
+          if (take > WRAP) {                         // break at the last comma that fits
+            take = WRAP;
+            int br = sibList.lastIndexOf(',', pos + WRAP);
+            if (br > pos) take = br - pos + 1;        // include the comma
+          }
+          String seg = sibList.substring(pos, pos + take);
+          seg.trim();
+          canvas.setTextColor(CL_CYAN, CL_BLACK);
+          canvas.setCursor(10, y); canvas.print(seg);
+          y += LH; pos += take;
+        }
+        if (pos < L) {                               // ran out of room: show it was clipped
+          canvas.setTextColor(CL_GREY, CL_BLACK);
+          canvas.setCursor(10, y); canvas.print("...");
+        }
+      }
     } else {
       row("Launched", "--");
       if (s->intlDes[0]) row("Cospar", String(s->intlDes));
@@ -13257,7 +13540,7 @@ void App::keySunMoon(char c, bool enter, bool back) {
   if (c == 'o') {
     if (!rot || !rot->ready()) { setStatus("Rotator not ready"); return; }
     smOut = !smOut; lastAzCmd = lastElCmd = -999.0f;
-    if (smOut) { rotOut = false;             // Sun/Moon takes the rotator
+    if (smOut) { rotOut = false; emeRotOut = false; gcRotOut = false;  // Sun/Moon takes the rotator
                  setStatus(smSel ? "Tracking Moon" : "Tracking Sun"); }
     else { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); setStatus("Rotator OFF (parked)"); }
     lastDrawMs = 0; return;
@@ -13349,11 +13632,21 @@ void App::drawEme() {
   double az, el; skyObjAzEl(now, o.lat, o.lon, true, az, el);
   double rangeKm, rrMs; moonTopoRangeRate(now, o.lat, o.lon, rangeKm, rrMs);
   double galLat = moonGalacticLatDeg(now);
+  // Sun proximity: within ~10 deg of the Moon the Sun sits in the beam and its
+  // noise buries weak echoes. Angular separation from the two az/el vectors.
+  const double D2R_ = 0.017453292519943295;
+  double saz, sel_; skyObjAzEl(now, o.lat, o.lon, false, saz, sel_);
+  double sunSep = acos(sin(el * D2R_) * sin(sel_ * D2R_)
+                     + cos(el * D2R_) * cos(sel_ * D2R_) * cos((az - saz) * D2R_)) / D2R_;
 
   // Moon az/el + up/down
   canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 20); canvas.print("Moon");
   canvas.setTextColor(el > 0 ? CL_GREEN : CL_ORANGE, CL_BLACK);
   canvas.setCursor(40, 20); canvas.printf("Az %.1f  El %.1f  %s", az, el, el > 0 ? "UP" : "down");
+  if (el > 0 && sunSep < 10.0) {
+    canvas.setTextColor(CL_RED, CL_BLACK); canvas.setCursor(186, 20);
+    canvas.printf("SUN %.0fdeg", sunSep);
+  }
 
   // Range + range-rate
   canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 32); canvas.print("Range");
@@ -13392,7 +13685,7 @@ void App::drawEme() {
     else                   canvas.printf("%+.0f Hz", dop);
   }
 
-  footer(emeRotOut ? "o STOP rot  m mutual  ` back" : "o point Moon  m mutual  ` back");
+  footer(emeRotOut ? "o STOP rot  m mutual  p plan  ` back" : "o point Moon  m mutual  p plan  ` back");
 }
 
 void App::keyEme(char c, bool enter, bool back) {
@@ -13408,16 +13701,31 @@ void App::keyEme(char c, bool enter, bool back) {
     if (c == 'g') { editTarget = 360; editTitle = "DX grid (EME)"; editBuf = emeMutGrid; screen = SCR_EDIT; return; }
     return;
   }
+  if (c == 'p') {                        // 30-day EME planning view
+    time_t now2 = timeIsSet() ? nowUtc() : 0;
+    if (!now2) { setStatus("Clock not set"); return; }
+    emePlanT0 = now2 - (now2 % 86400) + 12 * 3600;   // 12:00 UTC today, then daily
+    const double D2Rp = 0.017453292519943295;
+    for (int d = 0; d < 30; ++d) {
+      time_t tt = emePlanT0 + (time_t)d * 86400;
+      double x, y, z; moonGeoEqKm(tt, x, y, z);
+      double r = sqrt(x * x + y * y + z * z);
+      emePlanDec[d] = (float)(atan2(z, sqrt(x * x + y * y)) / D2Rp);
+      emePlanDeg[d] = (float)(40.0 * log10(r / 356500.0));
+    }
+    emePlanN = 30; emePlanScroll = 0;
+    screen = SCR_EMEPLAN; lastDrawMs = 0; return;
+  }
   if (c == 'o') {                        // point the rotator at the Moon (el included)
     if (!rot || !rot->ready()) { setStatus("Rotator not ready"); return; }
     emeRotOut = !emeRotOut;
-    if (emeRotOut) { rotOut = false; smOut = false; setStatus("Pointing at Moon"); }
+    if (emeRotOut) { rotOut = false; smOut = false; gcRotOut = false; setStatus("Pointing at Moon"); }
     else { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); setStatus("Rotator OFF (parked)"); }
     lastDrawMs = 0; return;
   }
   if (c == 'x') { if (rot) rot->stop(); emeRotOut = false; lastDrawMs = 0; return; }
   if (c == 'm') {                        // mutual-Moon window vs a DX grid
-    if (emeMutGrid[0]) { emeComputeMutual(String(emeMutGrid)); emeMutShown = (emeMutN >= 0); lastDrawMs = 0; }
+    if (emeMutGrid[0]) { emeComputeMutual(String(emeMutGrid)); emeMutShown = true; lastDrawMs = 0; }
     else { editTarget = 360; editTitle = "DX grid (EME)"; editBuf = ""; screen = SCR_EDIT; }
     return;
   }
@@ -13594,14 +13902,14 @@ static const char* const BANDPLAN[] = {
   "3 cm|10.0-10.5 GHz|10368 WS/EME; 10.489 QO-100 down",
   "1.2 cm|24.0-24.25 GHz|24192 WS/EME",
   "6 mm|47.0-47.2 GHz|",
-  "4 mm|75.5-81.0 GHz|",
-  "2.5 mm|119.98-120.02 GHz|",
-  "2 mm|142-149 GHz|",
+  "4 mm|76-81 GHz|",
+  "2.5 mm|122.25-123 GHz|",
+  "2 mm|134-141 GHz|",
   "1 mm|241-250 GHz|",
   "sub-mm/light|>275 GHz, IR, optical|Experimental; laser/optical DX",
   "#Satellite band designators (IARU)",
   "H / 15m|21 MHz|",
-  "T / 10m|29 MHz|",
+  "A / 10m|29 MHz|",
   "V / 2m|145 MHz|",
   "U / 70cm|435 MHz|",
   "L / 23cm|1260 MHz (uplink)|",
@@ -13611,8 +13919,8 @@ static const char* const BANDPLAN[] = {
   "X / 3cm|10.45 GHz|",
   "K / 1.2cm|24 GHz|",
   "#Common sat modes (up/down)",
-  "Mode V/U (B)|145 up / 435 down|Most LEO linear/FM",
-  "Mode U/V (A)|435 up / 145 down|",
+  "Mode V/U (J)|145 up / 435 down|Most LEO linear/FM",
+  "Mode U/V (B)|435 up / 145 down|AO-7 Mode B etc.",
   "Mode L/U|1260 up / 435 down|",
   "Mode U/S|435 up / 2400 down|",
   "QO-100 NB|2400.25 up / 10489.75 down|GEO, EU/Africa/Asia",
@@ -14149,6 +14457,16 @@ void App::drawTransit() {
                   h.body == 1 ? "Moon" : "Sun",
                   when.c_str(), h.sepDeg, 0xF8 /* deg */, h.bodyEl,
                   h.central ? "TRANSIT" : "near");
+    // Cloud cover at transit time: a solar transit is a photo op only under a
+    // clear sky, and the 48 h cloud window matches the transit search window.
+    int cld = cloudAtUnix(h.t);
+    if (cld >= 0) {
+      uint16_t bg = (i == transitSel) ? CL_SELBG : CL_BLACK;
+      uint16_t fg = (i == transitSel) ? CL_BLACK
+                  : (cld < 30 ? CL_GREEN : (cld < 70 ? CL_WHITE : CL_ORANGE));
+      canvas.setTextColor(fg, bg);
+      canvas.setCursor(210, y); canvas.printf("%3d%%", cld);
+    }
   }
   footer("r rescan  ` back  (Sun: use a filter!)");
 }
@@ -14911,7 +15229,7 @@ void App::drawAmsatStatus() {
     canvas.setCursor(196, y); canvas.printf("%-4s", ago.length() ? ago.c_str() : "-");
     if (s.amsatReports) { canvas.setCursor(224, y); canvas.printf("%d", (int)s.amsatReports); }
   }
-  footer("ENT track  u update  ` back");
+  footer("g who-heard  p report  u update  ` back");
 }
 
 void App::keyAmsatStatus(char c, bool enter, bool back) {
@@ -14928,6 +15246,19 @@ void App::keyAmsatStatus(char c, bool enter, bool back) {
   if (isDown(c) && amStatSel < amStatN - 1)  { amStatSel++; lastDrawMs = 0; return; }
   if (c == '{') { amStatSel = max(0, amStatSel - 9); lastDrawMs = 0; return; }
   if (c == '}') { amStatSel = min(amStatN - 1, amStatSel + 9); lastDrawMs = 0; return; }
+  if (c == 'p' && amStatN > 0) {              // post a status report (full picker)
+    int idx = amStatIdx[amStatSel];
+    bool amb = false;
+    (void)amsPickNameFor(idx, amb);           // fills pickName/pickN (any count)
+    pickSatIdx = idx; pickNameSel = 0; pickSel = 0; pickStat = 0;
+    pickReturn = SCR_AMSATSTAT; screen = SCR_AMSRPICK; lastDrawMs = 0; return;
+  }
+  if (c == 'g' && amStatN > 0) {              // per-report detail (callsigns + grids)
+    SatEntry& gs = db.at(amStatIdx[amStatSel]);
+    if (!gs.amsatName[0]) { setStatus("No AMSAT name match"); return; }
+    fetchAmsatReports(gs.amsatName);
+    screen = SCR_AMSRPT; amsRptScroll = 0; lastDrawMs = 0; return;
+  }
   if (c == 'u') {
     if (net.connected()) { fetchAmsatStatus(); buildAmsatStatusView(); setStatus("AMSAT status updated", 1500); }
     else setStatus("No WiFi - connect in Settings", 2000);
@@ -14940,6 +15271,889 @@ void App::keyAmsatStatus(char c, bool enter, bool back) {
     screen = SCR_TRACK; lastDrawMs = 0;
   }
 }
+
+// ===========================================================================
+//  AMSAT per-report detail (SCR_AMSRPT), 'g' from the AMSAT status screen.
+//  Fetches the selected satellite's individual reports (reports.php) on demand
+//  and lists callsign / grid / age / status, headed by a distinct-grid count --
+//  "7 reports from 5 grids" is a footprint-activity read the summary can't give.
+//  The payload is small (limit=24, ~4 KB); it is streamed to the shared temp
+//  file, read back, scanned, and the file deleted -- the same heap-safe pattern
+//  as the other fetches on this no-PSRAM part.
+// ===========================================================================
+
+// "YYYY-MM-DDTHH:MM:SSZ" (UTC, per the API) -> unix. 0 on parse failure.
+// Same days_from_civil math as the GP and weather parsers.
+static time_t isoZToUnix(const char* iso) {
+  int Y, Mo, D, H, Mi, Se;
+  if (!iso || sscanf(iso, "%d-%d-%dT%d:%d:%d", &Y, &Mo, &D, &H, &Mi, &Se) != 6) return 0;
+  int y2 = Y - (Mo <= 2); int era = (y2 >= 0 ? y2 : y2 - 399) / 400;
+  unsigned yoe = (unsigned)(y2 - era * 400);
+  unsigned doy = (153u * (unsigned)(Mo + (Mo > 2 ? -3 : 9)) + 2) / 5 + (unsigned)D - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = (long)era * 146097 + (long)doe - 719468;
+  return (time_t)days * 86400 + (long)H * 3600 + (long)Mi * 60 + Se;
+}
+
+void App::fetchAmsatReports(const char* apiName) {
+  amsRptN = 0; amsRptGrids = 0;
+  strncpy(amsRptFor, apiName, sizeof(amsRptFor) - 1); amsRptFor[sizeof(amsRptFor) - 1] = 0;
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); return; }
+  String nm;                                       // percent-encode the API name
+  for (const char* p = apiName; *p; ++p) {         // ([ ] / space _ etc. all appear)
+    char ch = *p;
+    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+        (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == '_' || ch == '~') nm += ch;
+    else { char eb[4]; snprintf(eb, sizeof(eb), "%%%02X", (unsigned char)ch); nm += eb; }
+  }
+  String url = String(AMSAT_REPORTS_URL) + nm
+             + "&hours=" + String((int)cfg.amsatWindowH) + "&limit=24";
+  setStatus("AMSAT reports..."); draw();
+  if (!net.httpsGetToFileRetry(url, FILE_DL_TMP, 60000, nullptr, 2)) {
+    setStatus("Report fetch failed"); return;
+  }
+  status = "";                       // clear the "AMSAT reports..." banner before the list
+  File f = Store::fs().open(FILE_DL_TMP, "r");
+  if (!f) return;
+  String bd; bd.reserve(f.size() + 8);
+  while (f.available()) bd += (char)f.read();
+  f.close(); Store::fs().remove(FILE_DL_TMP);
+
+  int da = bd.indexOf("\"data\"");
+  int as2 = (da >= 0) ? bd.indexOf('[', da) : -1;
+  int pos = as2;
+  // Walk flat {..} records. The array ends when the first non-space character after
+  // a record's closing brace is ']'. We must NOT stop on the first ']' in the buffer,
+  // because every mode-tagged name ("AO-91_[FM]") contains one inside a string.
+  while (amsRptN < 24 && pos >= 0) {
+    int ob = bd.indexOf('{', pos); if (ob < 0) break;
+    int cb2 = bd.indexOf('}', ob); if (cb2 < 0) break;
+    String one = bd.substring(ob, cb2 + 1);
+    auto fld = [&](const char* k) -> String {
+      int i2 = one.indexOf(String("\"") + k + "\"");
+      if (i2 < 0) return String();
+      int c1 = one.indexOf(':', i2); int q1 = one.indexOf('"', c1); int q2 = one.indexOf('"', q1 + 1);
+      if (q1 < 0 || q2 < 0) return String();
+      return one.substring(q1 + 1, q2);
+    };
+    String cs = fld("callsign"), gr = fld("grid_square"), rp = fld("report"), ra = fld("reported_time");
+    if (cs.length()) {
+      AmsRpt& r = amsRpt[amsRptN];
+      strncpy(r.call, cs.c_str(), sizeof(r.call) - 1); r.call[sizeof(r.call) - 1] = 0;
+      strncpy(r.grid, gr.c_str(), sizeof(r.grid) - 1); r.grid[sizeof(r.grid) - 1] = 0;
+      r.st = rp.startsWith("Heard") ? 1 : rp.startsWith("Not") ? 2
+           : rp.startsWith("Tele")  ? 3 : rp.startsWith("Crew") ? 4 : 0;
+      r.t = isoZToUnix(ra.c_str());
+      amsRptN++;
+    }
+    pos = cb2 + 1;
+    int nb = bd.indexOf('{', pos), nbk = bd.indexOf(']', pos);   // next record vs array end
+    if (nbk >= 0 && (nb < 0 || nbk < nb)) break;                 // ']' comes first -> done
+  }
+  // Distinct grids (full-string compare over <= 24 entries; blanks don't count).
+  for (int i2 = 0; i2 < amsRptN; ++i2) {
+    if (!amsRpt[i2].grid[0]) continue;
+    bool seen = false;
+    for (int j2 = 0; j2 < i2; ++j2)
+      if (strcmp(amsRpt[j2].grid, amsRpt[i2].grid) == 0) { seen = true; break; }
+    if (!seen) amsRptGrids++;
+  }
+}
+
+void App::drawAmsRpt() {
+  header(String(amsRptFor) + " reports");
+  canvas.setTextSize(1);
+  if (amsRptN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("No reports in the window");
+    canvas.setCursor(6, 62); canvas.printf("(%d h) or fetch failed.", (int)cfg.amsatWindowH);
+    footer("r refetch  ` back");
+    return;
+  }
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(4, 18);
+  canvas.printf("%d reports, %d grids, last %d h", amsRptN, amsRptGrids, (int)cfg.amsatWindowH);
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 29);
+  canvas.print("CALL       GRID    AGE  STATUS");
+  const int rows = 8;
+  if (amsRptScroll > amsRptN - rows) amsRptScroll = amsRptN - rows;
+  if (amsRptScroll < 0) amsRptScroll = 0;
+  time_t nowU = timeIsSet() ? nowUtc() : 0;
+  for (int vi = 0; vi < rows && amsRptScroll + vi < amsRptN; ++vi) {
+    AmsRpt& r = amsRpt[amsRptScroll + vi];
+    int y = 40 + vi * 10;
+    String age = "--";
+    if (nowU && r.t) {
+      long m = (long)(nowU - r.t) / 60;
+      age = (m < 60) ? String(m) + "m" : (m < 2880 ? String(m / 60) + "h" : String(m / 1440) + "d");
+    }
+    const char* w = r.st == 1 ? "Heard" : r.st == 2 ? "Not heard"
+                  : r.st == 3 ? "Telemetry" : r.st == 4 ? "Crew" : "?";
+    uint16_t fc = r.st == 1 ? CL_GREEN : r.st == 3 ? CL_CYAN
+                : r.st == 4 ? CL_GREEN : r.st == 2 ? CL_ORANGE : CL_WHITE;
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y);
+    canvas.printf("%-10.10s %-6.6s %4s ", r.call, r.grid[0] ? r.grid : "--", age.c_str());
+    canvas.setTextColor(fc, CL_BLACK); canvas.print(w);
+  }
+  footer(";/. scroll  r refetch  ` back");
+}
+
+void App::keyAmsRpt(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_AMSATSTAT; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--amsRptScroll < 0) amsRptScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { ++amsRptScroll; lastDrawMs = 0; return; }
+  if (c == '{')  { amsRptScroll -= 8; if (amsRptScroll < 0) amsRptScroll = 0; lastDrawMs = 0; return; }
+  if (c == '}')  { amsRptScroll += 8; lastDrawMs = 0; return; }
+  if (c == 'r' && amsRptFor[0]) { fetchAmsatReports(amsRptFor); lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  AMSAT status reporting (POST reports.php). The catalog map makes it
+//  mode-aware: AO-7 is two API entries (AO-7_[U/v], AO-7_[V/a]) and the report
+//  should land on the one matching the transponder actually being worked.
+// ===========================================================================
+static const char* AMS_STATUSES[4] = { "Heard", "Telemetry Only", "Not Heard", "Crew Active" };
+
+// IARU-style band letter for a frequency, matching the tags the AMSAT catalog
+// uses in mode pairs like [U/v] (uppercase uplink / lowercase downlink).
+static char amsBandLetter(double mhz) {
+  if (mhz >= 21.0   && mhz < 21.5)   return 'H';
+  if (mhz >= 24.0   && mhz < 30.0)   return 'A';
+  if (mhz >= 144.0  && mhz < 148.0)  return 'V';
+  if (mhz >= 420.0  && mhz < 460.0)  return 'U';
+  if (mhz >= 1240.0 && mhz < 1300.0) return 'L';
+  if (mhz >= 2300.0 && mhz < 2460.0) return 'S';
+  if (mhz >= 5600.0 && mhz < 5860.0) return 'C';
+  if (mhz >= 10000.0 && mhz < 10500.0) return 'X';
+  if (mhz >= 24000.0 && mhz < 24300.0) return 'K';
+  return 0;
+}
+
+// Does the [tag] of an API name fit the given transponder? Pair tags ("U/v")
+// match on band letters; FM / TLM / Digi match on the transponder's character.
+// SSTV / DATV / Crew / Music / SSDV and other event tags never auto-match --
+// those are deliberate reports and go through the picker.
+static bool amsTagFits(const char* apiName, const Transponder& tx) {
+  const char* lb = strrchr(apiName, '[');
+  if (!lb) return true;                              // untagged (IO-117): fits
+  char tag[16]; int L = 0;
+  for (const char* p = lb + 1; *p && *p != ']' && L < 15; ++p) tag[L++] = *p;
+  tag[L] = 0;
+  bool beacon = (tx.uplink == 0 && tx.downlink != 0);
+  if (L == 3 && tag[1] == '/') {                     // band pair "U/v"
+    char up = toupper(tag[0]), dn = toupper(tag[2]);
+    if (beacon) return false;
+    return up == amsBandLetter(tx.uplink / 1e6) && dn == amsBandLetter(tx.downlink / 1e6);
+  }
+  if (strcasecmp(tag, "FM") == 0)
+    return !beacon && strstr(tx.mode, "FM") != nullptr;
+  if (strcasecmp(tag, "TLM") == 0 || strcasecmp(tag, "BCN") == 0)
+    return beacon;
+  { char tu[16]; int q = 0;                          // uppercase copy (no strcasestr dep)
+    for (const char* p = tag; *p && q < 15; ++p) tu[q++] = (char)toupper((unsigned char)*p);
+    tu[q] = 0;
+    if (strstr(tu, "DIGI"))
+      return strstr(tx.mode, "DATA") || strstr(tx.mode, "PKT") ||
+             strstr(tx.mode, "APRS") || strstr(tx.mode, "DIGI");
+  }
+  return false;
+}
+
+// Choose the API name for a satellite from its mapped names, using the active
+// transponder to disambiguate multi-mode birds. Returns null when the sat has
+// no mapped name at all; sets 'ambiguous' when a human should pick.
+const char* App::amsPickNameFor(int satIdx, bool& ambiguous) {
+  ambiguous = false;
+  pickN = db.amsNamesFor(satIdx, pickName, 6);
+  if (pickN == 0) {
+    SatEntry& s2 = db.at(satIdx);
+    if (s2.amsatName[0]) { pickName[0] = s2.amsatName; pickN = 1; return pickName[0]; }
+    return nullptr;
+  }
+  if (pickN == 1) return pickName[0];
+  if (activeSat() == &db.at(satIdx) && activeTxCount > 0) {
+    int fit = -1, fits = 0;
+    for (int i = 0; i < pickN; ++i)
+      if (amsTagFits(pickName[i], activeTx[curTx])) { fit = i; fits++; }
+    if (fits == 1) return pickName[fit];
+  }
+  ambiguous = true;
+  return nullptr;
+}
+
+bool App::postAmsatReport(const char* apiName, const char* status) {
+  if (!cfg.myCall[0]) { setStatus("Set your callsign first (Settings)"); return false; }
+  if (!timeIsSet())   { setStatus("Clock not set (NTP/GPS)"); return false; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); return false; }
+  time_t nowU = nowUtc(); struct tm tmv; gmtime_r(&nowU, &tmv);
+  char ts[24];
+  snprintf(ts, sizeof(ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+           tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+           tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+  const Observer& o = loc.obs();
+  String grid = (o.lat != 0.0 || o.lon != 0.0) ? loc.toGrid(o.lat, o.lon) : String("");
+  String bodyS = String("{\"name\":\"") + apiName + "\",\"report\":\"" + status +
+                 "\",\"callsign\":\"" + cfg.myCall + "\"" +
+                 (grid.length() ? String(",\"grid_square\":\"") + grid + "\"" : String("")) +
+                 ",\"reported_at\":\"" + ts + "\"}";
+  setStatus(String("Reporting ") + apiName + "..."); draw();
+  String resp;
+  bool ok = net.httpsPostJson(AMSAT_REPORT_POST, bodyS, resp);
+  if (ok) {
+    setStatus(String(status) + " reported: " + apiName, 3000);
+  } else {
+    String why = net.lastErr.length() ? net.lastErr : resp.substring(0, 40);
+    setStatus(String("Report failed: ") + why, 4000);
+  }
+  return ok;
+}
+
+// ---------------------------------------------------------------------------
+//  Report picker (SCR_AMSRPICK): the deliberate path. Two rows -- the API name
+//  (mode) and the status value -- ,/. cycles the highlighted row, ENTER sends.
+//  Reached from the AMSAT status screen ('p'), or from Track when the one-key
+//  path cannot resolve the mode by itself.
+// ---------------------------------------------------------------------------
+void App::drawAmsRpick() {
+  header("Report satellite status");
+  canvas.setTextSize(1);
+  if (pickN == 0 || pickSatIdx < 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("No AMSAT catalog name for");
+    canvas.setCursor(6, 62); canvas.print("this satellite.");
+    footer("` back");
+    return;
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 22); canvas.printf("Sat: %.28s", db.at(pickSatIdx).name);
+  auto row2 = [&](int r, const char* k, const String& v) {
+    int y = 44 + r * 16;
+    bool sel = (pickSel == r);
+    if (sel) canvas.fillRect(0, y - 3, 240, 14, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(4, y); canvas.print(k);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(70, y); canvas.print(v);
+  };
+  String nm = String(pickName[pickNameSel]);
+  if (pickN > 1) nm += " (" + String(pickNameSel + 1) + "/" + String(pickN) + ")";
+  row2(0, "As", nm);
+  row2(1, "Status", AMS_STATUSES[pickStat]);
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, 96); canvas.print("Public report to amsat.org as");
+  canvas.setCursor(4, 106); canvas.printf("%s. Same hour+period replaces.", cfg.myCall[0] ? cfg.myCall : "(no call!)");
+  footer(",// change  ;/. row  ENTER send  ` back");
+}
+
+void App::keyAmsRpick(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = pickReturn; lastDrawMs = 0; return; }
+  if (pickN == 0) return;
+  if (isUp(c) || isDown(c)) { pickSel ^= 1; lastDrawMs = 0; return; }
+  if (isLeft(c) || isRight(c)) {
+    int d = isRight(c) ? 1 : -1;
+    if (pickSel == 0) pickNameSel = (pickNameSel + pickN + d) % pickN;
+    else              pickStat    = (pickStat + 4 + d) % 4;
+    lastDrawMs = 0; return;
+  }
+  if (enter) {
+    if (postAmsatReport(pickName[pickNameSel], AMS_STATUSES[pickStat]))
+      { screen = pickReturn; lastDrawMs = 0; }
+    return;
+  }
+}
+
+// ===========================================================================
+//  TOOLS HUB (SCR_TOOLS, reached with 't' from About). A set of offline
+//  ham-radio bench tools: an infix scientific calculator and several
+//  live-recalc forms. All math is local -- no network needed.
+// ===========================================================================
+
+// Tool ids for the live-recalc form engine.
+enum { TOOL_COAX = 0, TOOL_DIPOLE, TOOL_VERTICAL, TOOL_YAGI, TOOL_QUAD,
+       TOOL_RFCONV, TOOL_SWR, TOOL_FSPL, TOOL_UNITS, TOOL__N };
+
+static const char* const TOOLS_NAMES[] = {
+  "Scientific calculator",
+  "Programmer calc (hex/bin)",
+  "Coax loss / power",
+  "Dipole length",
+  "Vertical / ground plane",
+  "Yagi elements",
+  "Quad (full-wave loop)",
+  "RF units (dBm/W/V)",
+  "SWR / return loss",
+  "Free-space path loss",
+  "Unit converter",
+};
+static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
+
+void App::drawTools() {
+  header("Tools");
+  canvas.setTextSize(1);
+  const int LH = 9, VIS = 11;                    // 11 rows fit (y 20..110); list scrolls beyond
+  if (toolsSel < toolsScroll) toolsScroll = toolsSel;
+  if (toolsSel >= toolsScroll + VIS) toolsScroll = toolsSel - VIS + 1;
+  for (int r = 0; r < VIS; ++r) {
+    int i = toolsScroll + r;
+    if (i >= TOOLS_N) break;
+    int y = 20 + r * LH;
+    bool sel = (i == toolsSel);
+    if (sel) canvas.fillRect(2, y - 2, 236, 9, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(8, y); canvas.print(TOOLS_NAMES[i]);
+  }
+  if (toolsScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 20);  canvas.print("^"); }
+  if (toolsScroll + VIS < TOOLS_N)     { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 110); canvas.print("v"); }
+  footer(";/. pick  ENTER open  ` back");
+}
+
+void App::keyTools(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--toolsSel < 0) toolsSel = TOOLS_N - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++toolsSel >= TOOLS_N) toolsSel = 0; lastDrawMs = 0; return; }
+  if (enter) {
+    if (toolsSel == 0) {                       // scientific calculator
+      calcBuf = ""; calcResult = ""; calcErr = false;
+      screen = SCR_CALC;
+    } else if (toolsSel == 1) {                // programmer's calculator
+      screen = SCR_PCALC;
+    } else {                                   // one of the live-recalc forms
+      toolFormInit(toolsSel - 2);              // form ids are toolsSel-2 (two calcs precede)
+      screen = SCR_TOOLFORM;
+    }
+    lastDrawMs = 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Infix scientific calculator. Recursive-descent parser over a C string:
+//    expr   := term (('+'|'-') term)*
+//    term   := power (('*'|'/') power)*
+//    power  := unary ('^' power)?           (right-assoc)
+//    unary  := ('-'|'+') unary | atom
+//    atom   := number | 'pi' | 'e' | 'Ans' | func '(' expr ')' | '(' expr ')'
+//  Trig is in DEGREES (what a ham wants for beam headings). On any parse error
+//  ok=false. This is a leaf computation -- no allocations beyond the input.
+// ---------------------------------------------------------------------------
+namespace {
+  struct CalcP {
+    const char* p; bool ok; double ans;
+    void ws() { while (*p == ' ') ++p; }
+    bool word(const char* w) {                 // match a keyword, case-sensitive
+      const char* q = p; while (*w && *q == *w) { ++q; ++w; }
+      if (*w) return false;
+      if ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z')) return false; // longer ident
+      p = q; return true;
+    }
+    double expr() {
+      double v = term();
+      for (;;) { ws();
+        if (*p == '+') { ++p; v += term(); }
+        else if (*p == '-') { ++p; v -= term(); }
+        else break;
+      }
+      return v;
+    }
+    double term() {
+      double v = power();
+      for (;;) { ws();
+        if (*p == '*') { ++p; v *= power(); }
+        else if (*p == '/') { ++p; double d = power(); if (d == 0) ok = false; else v /= d; }
+        else break;
+      }
+      return v;
+    }
+    double power() {
+      double v = unary(); ws();
+      if (*p == '^') { ++p; v = pow(v, power()); }
+      return v;
+    }
+    double unary() { ws();
+      if (*p == '-') { ++p; return -unary(); }
+      if (*p == '+') { ++p; return unary(); }
+      return atom();
+    }
+    double callFn(double (*f)(double), double scale) {  // scale for deg->rad on trig
+      ws(); if (*p != '(') { ok = false; return 0; }
+      ++p; double a = expr(); ws();
+      if (*p == ')') ++p; else ok = false;
+      return f(a * scale);
+    }
+    double atom() { ws();
+      const double D2R = 0.017453292519943295, R2D = 57.29577951308232;
+      if (*p == '(') { ++p; double v = expr(); ws(); if (*p == ')') ++p; else ok = false; return v; }
+      if (word("pi"))  return 3.14159265358979323846;
+      if (word("e"))   return 2.71828182845904523536;
+      if (word("Ans")) return ans;
+      if (word("sin"))  return callFn(::sin,  D2R);
+      if (word("cos"))  return callFn(::cos,  D2R);
+      if (word("tan"))  return callFn(::tan,  D2R);
+      if (word("asin")) { double r = callFn(::asin, 1.0); return r * R2D; }
+      if (word("acos")) { double r = callFn(::acos, 1.0); return r * R2D; }
+      if (word("atan")) { double r = callFn(::atan, 1.0); return r * R2D; }
+      if (word("sqrt")) return callFn(::sqrt, 1.0);
+      if (word("ln"))   return callFn(::log,  1.0);
+      if (word("log"))  return callFn(::log10, 1.0);
+      if (word("exp"))  return callFn(::exp,  1.0);
+      if (word("abs"))  return callFn(::fabs, 1.0);
+      // number
+      char* endp = nullptr; double v = strtod(p, &endp);
+      if (endp == p) { ok = false; return 0; }
+      p = endp; return v;
+    }
+  };
+}
+
+double App::calcEval(const char* s, bool& ok) {
+  CalcP c; c.p = s; c.ok = true; c.ans = calcAns;
+  double v = c.expr(); c.ws();
+  if (*c.p != 0) c.ok = false;                 // trailing junk
+  if (!isfinite(v)) c.ok = false;
+  ok = c.ok; return v;
+}
+
+void App::drawCalc() {
+  header("Calculator");
+  canvas.setTextSize(1);
+  // Scrolling tape: the last entries and their results, bottom-anchored above the
+  // entry line. ;/. scroll back through history; new input snaps back to newest.
+  const int TAPE_Y0 = 22, TAPE_ROWS = 6, LH = 9;
+  int total = calcTapeN;
+  int newestShown = total - calcScroll;                      // exclusive upper index
+  int first = newestShown - TAPE_ROWS; if (first < 0) first = 0;
+  int y = TAPE_Y0 + (TAPE_ROWS - (newestShown - first)) * LH; // bottom-anchor
+  for (int i = first; i < newestShown; ++i) {
+    const String& ln = calcTape[i % CALC_TAPE];
+    canvas.setTextColor(ln.startsWith("=") ? CL_CYAN : CL_GREY, CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(ln.length() > 38 ? ln.substring(0, 38) : ln);
+    y += LH;
+  }
+  if (calcScroll > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, TAPE_Y0); canvas.print("^"); }
+  canvas.drawFastHLine(4, 74, 232, CL_MGREY);
+  // Entry line
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(4, 79);
+  String shown = String("> ") + calcBuf + "_";
+  if (shown.length() > 40) shown = shown.substring(shown.length() - 40);
+  canvas.print(shown);
+  canvas.drawFastHLine(4, 90, 232, CL_MGREY);
+  // Function hints, kept just above the footer
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, 96);  canvas.print("fns: sin cos tan asin acos atan (deg)");
+  canvas.setCursor(4, 106); canvas.print("     sqrt ln log exp abs ^ pi e Ans");
+  footer("type  ENTER =  [ ] scroll  ` back");
+}
+
+void App::keyCalc(char c, bool enter, bool back) {
+  // Only the backtick exits. The DEL key is delivered via the 'back' flag (ks.del),
+  // so it must be treated as backspace here -- NOT routed through isBack(), which
+  // would exit. (This mirrors keyEdit's handling of text entry.)
+  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  // Tape scroll uses [ ] -- the arrow keys ; and . are expression characters
+  // ('.' is the decimal point), so they must reach the entry buffer.
+  if (c == '[') { if (calcScroll < calcTapeN - 1) calcScroll++; lastDrawMs = 0; return; }
+  if (c == ']') { if (calcScroll > 0) calcScroll--;             lastDrawMs = 0; return; }
+  auto tapePush = [&](const String& ln) {
+    calcTape[calcTapeN % CALC_TAPE] = ln;
+    if (calcTapeN < CALC_TAPE) calcTapeN++;
+    else {                                        // ring full: shift window (simple rotate)
+      for (int i = 0; i < CALC_TAPE - 1; ++i) calcTape[i] = calcTape[i + 1];
+      calcTape[CALC_TAPE - 1] = ln;
+    }
+  };
+  if (enter) {
+    if (calcBuf.length()) {
+      bool ok; double v = calcEval(calcBuf.c_str(), ok);
+      tapePush(calcBuf);
+      if (ok) { calcAns = v;
+                char b[24]; dtostrf(v, 0, 6, b);
+                String r(b); while (r.indexOf('.') >= 0 && (r.endsWith("0") || r.endsWith("."))) r.remove(r.length() - 1);
+                tapePush(String("= ") + r); }
+      else      tapePush("= error");
+      calcBuf = ""; calcScroll = 0;               // traditional: clear entry, snap to newest
+    }
+    lastDrawMs = 0; return;
+  }
+  if (back || c == 8 || c == 127) {             // DEL (delivered via 'back') only edits
+    if (calcBuf.length()) calcBuf.remove(calcBuf.length() - 1);
+    lastDrawMs = 0; return;
+  }
+  if (c >= 32 && c < 127) { calcBuf += c; calcScroll = 0; lastDrawMs = 0; }
+}
+
+// ---------------------------------------------------------------------------
+//  Programmer's calculator (SCR_PCALC). A 64-bit accumulator shown at once in
+//  hex / dec / bin / oct, with a selectable display width (8/16/32/64) that
+//  masks the value. Digit keys enter in the current base; the operation keys
+//  apply +-*/ and the bitwise AND OR XOR and shifts via a classic pending-op
+//  model (like a four-function calculator). 'n' = bitwise NOT, 'm' = negate.
+// ---------------------------------------------------------------------------
+namespace {
+  uint64_t pcMask(int width) {
+    return (width >= 64) ? ~0ULL : ((1ULL << width) - 1ULL);
+  }
+  // Format 'v' in the given base into 'out', grouped for readability. Binary and
+  // hex are zero-padded to the display width; dec/oct are plain.
+  String pcFmt(uint64_t v, int base, int width) {
+    v &= pcMask(width);
+    if (base == 10) { char b[24]; snprintf(b, sizeof(b), "%llu", (unsigned long long)v); return String(b); }
+    if (base == 8)  { char b[24]; snprintf(b, sizeof(b), "%llo", (unsigned long long)v); return String(b); }
+    const char* dig = "0123456789ABCDEF";
+    if (base == 16) {
+      int nyb = width / 4; String s;
+      for (int i = nyb - 1; i >= 0; --i) { s += dig[(v >> (i * 4)) & 0xF]; if (i && i % 4 == 0) s += ' '; }
+      return s;
+    }
+    // binary: group in nibbles
+    String s;
+    for (int i = width - 1; i >= 0; --i) { s += char('0' + ((v >> i) & 1)); if (i && i % 4 == 0) s += ' '; }
+    return s;
+  }
+  // Digit value for a char in a given base, or -1 if not a valid digit there.
+  int pcDigit(char c, int base) {
+    int d = -1;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    return (d >= 0 && d < base) ? d : -1;
+  }
+}
+
+void App::drawPCalc() {
+  header("Programmer calc");
+  canvas.setTextSize(1);
+  uint64_t v = pcalcVal & pcMask(pcalcWidth);
+  // The four bases, stacked. The active entry base is highlighted.
+  struct { const char* tag; int base; } rows[] = { {"HEX", 16}, {"DEC", 10}, {"BIN", 2}, {"OCT", 8} };
+  int y = 22;
+  for (int i = 0; i < 4; ++i) {
+    bool act = (rows[i].base == pcalcBase);
+    canvas.setTextColor(act ? CL_CYAN : CL_GREY, CL_BLACK);
+    canvas.setCursor(4, y); canvas.print(rows[i].tag);
+    canvas.setTextColor(act ? CL_WHITE : CL_GREY, CL_BLACK);
+    String s = pcFmt(v, rows[i].base, pcalcWidth);
+    if (rows[i].base == 2 && s.length() > 34) {          // binary can be wide: show two lines for 64-bit
+      canvas.setCursor(34, y); canvas.print(s.substring(0, s.length() / 2));
+      y += 9; canvas.setCursor(34, y); canvas.print(s.substring(s.length() / 2));
+    } else {
+      canvas.setCursor(34, y); canvas.print(s);
+    }
+    y += 10;
+  }
+  y += 2;
+  canvas.drawFastHLine(4, y - 2, 232, CL_MGREY);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, y);
+  canvas.printf("base %d  width %d  %s", pcalcBase, pcalcWidth, pcalcPend ? "op:" : "");
+  if (pcalcPend) { canvas.setTextColor(CL_ORANGE, CL_BLACK); canvas.setCursor(150, y);
+                   char op[2] = { pcalcPend, 0 }; canvas.print(op); }
+  y += 11;
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, y);      canvas.print(";/. base  w:width  & | ^  n:NOT m:neg");
+  canvas.setCursor(4, y + 9);  canvas.print("<:<<  >:>>  + - * /  = ENTER  x:clr");
+  footer("digits + ops  ;/. base  ` back");
+}
+
+void App::keyPCalc(char c, bool enter, bool back) {
+  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
+  uint64_t mask = pcMask(pcalcWidth);
+
+  auto applyPending = [&]() {                    // fold acc <op> val -> val
+    if (!pcalcPend) return;
+    uint64_t a = pcalcAcc, b = pcalcVal;
+    uint64_t r = b;
+    switch (pcalcPend) {
+      case '&': r = a & b; break;
+      case '|': r = a | b; break;
+      case '^': r = a ^ b; break;
+      case '+': r = a + b; break;
+      case '-': r = a - b; break;
+      case '*': r = a * b; break;
+      case '/': r = b ? (a / b) : 0; break;
+      case '<': r = a << (b & 63); break;
+      case '>': r = a >> (b & 63); break;
+    }
+    pcalcVal = r & mask; pcalcPend = 0;
+  };
+  auto setOp = [&](char op) {
+    applyPending();                              // chain: fold any prior op first
+    pcalcAcc = pcalcVal; pcalcPend = op; pcalcFresh = true;
+  };
+
+  // Base: up/down arrows move the highlighted base row (hex -> dec -> bin -> oct).
+  // 'b' and 'C' can't be used -- they are hex digits. 'x' clears (not a hex digit).
+  static const int PC_BASES[4] = { 16, 10, 2, 8 };   // row order on screen
+  if (isUp(c) || isDown(c)) {
+    int cur = 0; for (int i = 0; i < 4; ++i) if (PC_BASES[i] == pcalcBase) cur = i;
+    cur = (cur + (isDown(c) ? 1 : 3)) % 4;
+    pcalcBase = PC_BASES[cur]; lastDrawMs = 0; return;
+  }
+  if (c == 'w') { pcalcWidth = (pcalcWidth == 8) ? 16 : (pcalcWidth == 16) ? 32 : (pcalcWidth == 32) ? 64 : 8;
+                  pcalcVal &= pcMask(pcalcWidth); lastDrawMs = 0; return; }
+  if (c == 'x') { pcalcVal = 0; pcalcAcc = 0; pcalcPend = 0; pcalcFresh = true; lastDrawMs = 0; return; }
+
+  // unary ops
+  if (c == 'n') { pcalcVal = (~pcalcVal) & mask; pcalcFresh = true; lastDrawMs = 0; return; }  // NOT
+  if (c == 'm') { pcalcVal = ((uint64_t)(-(int64_t)pcalcVal)) & mask; pcalcFresh = true; lastDrawMs = 0; return; } // negate
+
+  // binary ops (pending)
+  if (c == '&' || c == '|' || c == '^' || c == '+' || c == '-' || c == '*' || c == '/') { setOp(c); lastDrawMs = 0; return; }
+  if (c == '<') { setOp('<'); lastDrawMs = 0; return; }
+  if (c == '>') { setOp('>'); lastDrawMs = 0; return; }
+
+  if (enter || c == '=') { applyPending(); pcalcFresh = true; lastDrawMs = 0; return; }
+
+  if (back || c == 8 || c == 127) {              // DEL (via 'back'): drop the low digit
+    pcalcVal /= (uint64_t)pcalcBase; pcalcVal &= mask; lastDrawMs = 0; return;
+  }
+
+  // digit entry in the current base
+  int d = pcDigit(c, pcalcBase);
+  if (d >= 0) {
+    if (pcalcFresh) { pcalcVal = 0; pcalcFresh = false; }
+    pcalcVal = (pcalcVal * (uint64_t)pcalcBase + (uint64_t)d) & mask;
+    lastDrawMs = 0;
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+//  Live-recalc form engine. toolFormInit() sets up the fields for a tool; the
+//  draw routine computes and shows the outputs every frame from tfVal[]; keys
+//  move between fields and edit values in place (numeric) or cycle choices
+//  (pick-list fields, e.g. the coax type).
+// ---------------------------------------------------------------------------
+
+// Coax cable table: name + k where matched loss(dB/100ft) = k * sqrt(f_MHz).
+namespace {
+  struct Coax { const char* name; double k; };
+  const Coax COAX_TBL[] = {
+    { "RG-58",    0.3724 }, { "RG-8X",    0.2483 }, { "RG-213",   0.1655 },
+    { "LMR-240",  0.2400 }, { "LMR-400",  0.1241 }, { "LMR-600",  0.0828 },
+    { "RG-174",   0.6621 }, { "Hardline1/2", 0.0703 },
+  };
+  const int COAX_N = (int)(sizeof(COAX_TBL) / sizeof(COAX_TBL[0]));
+}
+
+const char* App::tfChoiceLabel(int field, int idx) {
+  if (toolId == TOOL_COAX && field == 0) {
+    if (idx >= 0 && idx < COAX_N) return COAX_TBL[idx].name;
+  }
+  return "?";
+}
+
+void App::toolFormInit(int id) {
+  toolId = id; tfSel = 0; tfEditing = false; tfEditBuf = ""; tfOutScroll = 0;
+  for (int i = 0; i < TF_MAXF; ++i) { tfChoice[i] = -1; tfChoiceN[i] = 0; tfUnit[i][0] = 0; }
+  auto FLD = [&](int i, const char* lab, const char* unit, double v) {
+    strncpy(tfLabel[i], lab, sizeof(tfLabel[i]) - 1); tfLabel[i][sizeof(tfLabel[i]) - 1] = 0;
+    strncpy(tfUnit[i], unit, sizeof(tfUnit[i]) - 1);   tfUnit[i][sizeof(tfUnit[i]) - 1] = 0;
+    tfVal[i] = v;
+  };
+  switch (id) {
+    case TOOL_COAX:
+      tfN = 4;
+      FLD(0, "Cable", "", 4);            tfChoice[0] = 4; tfChoiceN[0] = COAX_N;  // default LMR-400
+      FLD(1, "Freq", "MHz", 146.0);
+      FLD(2, "Length", "ft", 50.0);
+      FLD(3, "SWR at load", ":1", 1.5);
+      break;
+    case TOOL_DIPOLE:
+      tfN = 1; FLD(0, "Freq", "MHz", 14.2); break;
+    case TOOL_VERTICAL:
+      tfN = 1; FLD(0, "Freq", "MHz", 146.0); break;
+    case TOOL_YAGI:
+      tfN = 2; FLD(0, "Freq", "MHz", 144.2); FLD(1, "Elements", "", 3); break;
+    case TOOL_QUAD:
+      tfN = 2; FLD(0, "Freq", "MHz", 50.1);  FLD(1, "Elements", "", 2); break;
+    case TOOL_RFCONV:
+      tfN = 1; FLD(0, "Power", "W", 100.0); break;
+    case TOOL_SWR:
+      tfN = 1; FLD(0, "SWR", ":1", 2.0); break;
+    case TOOL_FSPL:
+      tfN = 2; FLD(0, "Distance", "km", 1000.0); FLD(1, "Freq", "MHz", 145.0); break;
+    case TOOL_UNITS:
+      tfN = 1; FLD(0, "Value", "", 100.0); break;
+  }
+}
+
+// Render one output line helper is inline in drawToolForm via a local lambda.
+void App::drawToolForm() {
+  header(TOOLS_NAMES[toolId + 2]);           // +2: indices 0,1 are the two calculators
+  canvas.setTextSize(1);
+  int y = 20; const int LH = 11;
+  // --- input fields ---
+  for (int i = 0; i < tfN; ++i) {
+    bool sel = (i == tfSel);
+    if (sel) canvas.fillRect(2, y - 2, 236, 11, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(tfLabel[i]);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    String vs;
+    if (tfChoice[i] >= 0)            vs = tfChoiceLabel(i, tfChoice[i]);
+    else if (sel && tfEditing)       vs = tfEditBuf + "_";
+    else {
+      char b[20]; dtostrf(tfVal[i], 0, 3, b);
+      String r(b); while (r.indexOf('.') >= 0 && (r.endsWith("0") || r.endsWith("."))) r.remove(r.length() - 1);
+      vs = r;
+    }
+    canvas.setCursor(120, y); canvas.print(vs);
+    if (tfUnit[i][0]) { canvas.setCursor(120 + (int)vs.length() * 6 + 4, y); canvas.print(tfUnit[i]); }
+    y += LH;
+  }
+  y += 3;
+  canvas.drawFastHLine(4, y - 2, 232, CL_MGREY);
+  // --- computed outputs (per tool) ---
+  // Output lines honor tfOutScroll (skip the first N) and clip above the footer;
+  // "more" arrows show when the list extends past either edge.
+  int skip = tfOutScroll; bool moreBelow = false; int outTop = y;
+  auto out = [&](const String& k, const String& v, uint16_t col) {
+    if (skip > 0) { --skip; return; }
+    if (y > 112) { moreBelow = true; return; }
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(6, y);   canvas.print(k);
+    canvas.setTextColor(col, CL_BLACK);      canvas.setCursor(120, y); canvas.print(v);
+    y += 10;
+  };
+  auto ftin = [](double ft) -> String {       // pretty length: ft + in
+    long inch = lroundl(ft * 12.0);
+    return String(inch / 12) + "ft " + String(inch % 12) + "in";
+  };
+  const double C_FTMHZ = 983.571;              // speed of light, ft*MHz (for reference)
+  switch (toolId) {
+    case TOOL_COAX: {
+      double k = COAX_TBL[tfChoice[0] >= 0 ? tfChoice[0] : 0].k;
+      double f = tfVal[1], len = tfVal[2], swr = tfVal[3];
+      double ml = k * sqrt(f) * len / 100.0;   // matched loss, dB
+      double g = (swr > 1) ? (swr - 1) / (swr + 1) : 0.0;
+      double a = pow(10.0, ml / 10.0);
+      double num = a * a - g * g, den = a * (1 - g * g);
+      double tot = (den > 0 && num > 0) ? 10.0 * log10(num / den) : ml;
+      out("Matched loss", String(ml, 2) + " dB", CL_WHITE);
+      out("Loss at SWR", String(tot, 2) + " dB", swr > 2 ? CL_ORANGE : CL_WHITE);
+      out("Power out %", String(pow(10.0, -tot / 10.0) * 100.0, 1) + " %", CL_CYAN);
+      out("100W in ->", String(100.0 * pow(10.0, -tot / 10.0), 1) + " W", CL_CYAN);
+      break;
+    }
+    case TOOL_DIPOLE: {
+      double f = tfVal[0]; double L = 468.0 / f;      // ft, half-wave with end effect
+      out("Total length", ftin(L), CL_CYAN);
+      out("Each leg", ftin(L / 2), CL_WHITE);
+      out("Metric", String(L * 0.3048, 3) + " m", CL_WHITE);
+      break;
+    }
+    case TOOL_VERTICAL: {
+      double f = tfVal[0]; double L = 234.0 / f;       // quarter wave
+      out("1/4-wave", ftin(L), CL_CYAN);
+      out("Radials (4)", ftin(L * 1.02), CL_WHITE);    // slightly longer
+      out("Metric", String(L * 0.3048, 3) + " m", CL_WHITE);
+      break;
+    }
+    case TOOL_YAGI: {
+      double f = tfVal[0]; double dr = 468.0 / f;      // driven ~ dipole
+      int n = (int)lround(tfVal[1]); if (n < 2) n = 2; if (n > 12) n = 12;
+      out("Driven elem", ftin(dr), CL_CYAN);
+      out("Reflector", ftin(dr * 1.05), CL_WHITE);     // ~5% longer
+      // Directors: ~5% shorter than driven, each subsequent ~1% shorter again.
+      // Starting dimensions -- real lengths depend on boom and element diameter.
+      for (int d2 = 1; d2 <= n - 2; ++d2)
+        out(String("Director ") + d2, ftin(dr * (0.95 - 0.01 * (d2 - 1))), CL_WHITE);
+      out("Spacing 0.2wl", ftin(0.2 * C_FTMHZ / f), CL_GREY);
+      break;
+    }
+    case TOOL_QUAD: {
+      double f = tfVal[0]; double loop = 1005.0 / f;   // full-wave loop, ft
+      int n = (int)lround(tfVal[1]); if (n < 2) n = 2; if (n > 8) n = 8;
+      out("Driven loop", ftin(loop), CL_CYAN);
+      out("  each side", ftin(loop / 4), CL_WHITE);
+      out("Refl loop", ftin(1030.0 / f), CL_WHITE);    // ~2.5% larger
+      for (int d2 = 1; d2 <= n - 2; ++d2)
+        out(String("Dir ") + d2 + " loop", ftin(975.0 / f), CL_WHITE);  // ~3% smaller
+      break;
+    }
+    case TOOL_RFCONV: {
+      double w = tfVal[0]; if (w <= 0) w = 1e-6;
+      double dbm = 10.0 * log10(w) + 30.0;
+      double vrms = sqrt(w * 50.0);                    // into 50 ohm
+      out("dBm", String(dbm, 2) + " dBm", CL_CYAN);
+      out("dBW", String(dbm - 30.0, 2) + " dBW", CL_WHITE);
+      out("Vrms @50ohm", String(vrms, 2) + " V", CL_WHITE);
+      out("Vpp @50ohm", String(vrms * 2.828, 2) + " V", CL_GREY);
+      break;
+    }
+    case TOOL_SWR: {
+      double s = tfVal[0]; if (s < 1) s = 1;
+      double g = (s - 1) / (s + 1);
+      double rl = (g > 0) ? -20.0 * log10(g) : 99.0;
+      double refl = g * g * 100.0;
+      out("Return loss", String(rl, 2) + " dB", CL_WHITE);
+      out("Refl coeff", String(g, 4), CL_WHITE);
+      out("Power refl", String(refl, 1) + " %", refl > 11 ? CL_ORANGE : CL_CYAN);
+      out("Mismatch", String(-10.0 * log10(1 - g * g), 3) + " dB", CL_GREY);
+      break;
+    }
+    case TOOL_FSPL: {
+      double d = tfVal[0], f = tfVal[1];
+      if (d > 0 && f > 0) {
+        double fspl = 20.0 * log10(d) + 20.0 * log10(f) + 32.44;
+        out("Path loss", String(fspl, 1) + " dB", CL_CYAN);
+        out("At 1W EIRP", String(-fspl + 30.0, 1) + " dBm", CL_WHITE);
+      }
+      break;
+    }
+    case TOOL_UNITS: {
+      double v = tfVal[0];
+      out("ft -> m", String(v * 0.3048, 3), CL_WHITE);
+      out("m -> ft", String(v / 0.3048, 3), CL_WHITE);
+      out("C -> F", String(v * 9.0 / 5.0 + 32.0, 2), CL_CYAN);
+      out("F -> C", String((v - 32.0) * 5.0 / 9.0, 2), CL_CYAN);
+      out("mi -> km", String(v * 1.609344, 3), CL_GREY);
+      break;
+    }
+  }
+  if (tfOutScroll > 0)  { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, outTop); canvas.print("^"); }
+  if (moreBelow)        { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 108);    canvas.print("v"); }
+  if (!moreBelow && skip > 0 && tfOutScroll > 0) tfOutScroll -= skip;   // over-scrolled: pull back
+  if (tfChoice[tfSel] >= 0) footer(",// change  ;/. field  ` back");
+  else if (toolId == TOOL_YAGI || toolId == TOOL_QUAD)
+                            footer("type val  ;/. field  ,// scroll  ` back");
+  else                      footer("type value  ;/. field  ` back");
+}
+
+void App::keyToolForm(char c, bool enter, bool back) {
+  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
+  // (DEL arrives via 'back' and is handled below as backspace on the edit buffer.)
+  // field navigation
+  if (!tfEditing && (isUp(c)))   { if (--tfSel < 0) tfSel = tfN - 1; lastDrawMs = 0; return; }
+  if (!tfEditing && (isDown(c))) { if (++tfSel >= tfN) tfSel = 0;    lastDrawMs = 0; return; }
+  // pick-list field: ,// cycles choices; on numeric forms ,// scrolls the output list
+  if (tfChoice[tfSel] >= 0) {
+    if (c == ',' || c == '/') {
+      int d = (c == '/') ? 1 : -1;
+      tfChoice[tfSel] = (tfChoice[tfSel] + tfChoiceN[tfSel] + d) % tfChoiceN[tfSel];
+      lastDrawMs = 0;
+    }
+    return;
+  }
+  if (c == '/') { tfOutScroll++;                      lastDrawMs = 0; return; }
+  if (c == ',') { if (tfOutScroll > 0) tfOutScroll--; lastDrawMs = 0; return; }
+  // numeric field: type digits to edit in place; ENTER or field-move commits
+  if (back || c == 8 || c == 127) {            // DEL (via 'back'): backspace the edit buffer
+    if (tfEditing && tfEditBuf.length()) tfEditBuf.remove(tfEditBuf.length() - 1);
+    lastDrawMs = 0; return;                     // never exits -- backtick is the way out
+  }
+  if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
+    if (!tfEditing) { tfEditing = true; tfEditBuf = ""; }
+    tfEditBuf += c; lastDrawMs = 0; return;
+  }
+  if (enter) {
+    if (tfEditing) { tfVal[tfSel] = tfEditBuf.toFloat(); tfEditing = false; tfEditBuf = ""; }
+    lastDrawMs = 0; return;
+  }
+}
+
+
+
+
 
 // Start a sked-proposal send: capture the current satellite, then prompt for a date
 // and (on completion) a time, composing "!SAT date time" and transmitting. Reuses the
@@ -15344,10 +16558,21 @@ void App::drawProp() {
     y += LH;
   };
 
-  // The two indices, up top.
-  row("Solar flux", (sfi > 0 ? String(sfi, 0) + " sfu" : String("--")),
+  // The two indices, up top, with a delta vs the previous sample when one exists
+  // (e.g. "142 sfu +5" = rising flux). Deltas below 1 sfu / 0.3 Kp are noise-hidden.
+  String fx = (sfi > 0 ? String(sfi, 0) + " sfu" : String("--"));
+  if (sfi > 0 && spacePrevEpoch > 0 && spacePrevF107 > 0) {
+    int d = (int)lround(sfi - spacePrevF107);
+    if (d >= 1 || d <= -1) fx += " " + String(d >= 0 ? "+" : "") + String(d);
+  }
+  row("Solar flux", fx,
       sfi >= 120 ? CL_GREEN : (sfi >= 90 ? CL_WHITE : (sfi >= 70 ? CL_YELLOW : CL_ORANGE)));
-  row("Kp index", (kp >= 0 ? String(kp, 1) : String("--")),
+  String kx = (kp >= 0 ? String(kp, 1) : String("--"));
+  if (kp >= 0 && spacePrevEpoch > 0 && spacePrevKp >= 0) {
+    float d = kp - spacePrevKp;
+    if (d >= 0.3f || d <= -0.3f) kx += " " + String(d >= 0 ? "+" : "") + String(d, 1);
+  }
+  row("Kp index", kx,
       kp < 0 ? CL_GREY : (kp < 4 ? CL_GREEN : (kp < 5 ? CL_WHITE : (kp < 7 ? CL_YELLOW : CL_RED))));
 
   // HF band summary from solar flux (higher flux -> higher MUF -> high bands open).
@@ -15401,6 +16626,111 @@ void App::keyProp(char c, bool enter, bool back) {
     lastDrawMs = 0; return;
   }
 }
+
+// ===========================================================================
+//  Station readiness (SCR_READY), reached with 'r' from About: one glanceable
+//  green/red checklist of the state a working pass depends on -- clock, location,
+//  GP data and age, WiFi, radio and rotator config, SD card, callsign, battery.
+//  Doubles as first-hour onboarding and a pre-pass field check. Read-only.
+// ===========================================================================
+void App::drawReady() {
+  header("Station readiness");
+  canvas.setTextSize(1);
+  int y = 20; const int LH = 10;
+  auto row = [&](const char* k, const String& v, uint16_t vc) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, y);  canvas.print(k);
+    canvas.setTextColor(vc, CL_BLACK);       canvas.setCursor(86, y); canvas.print(v);
+    y += LH;
+  };
+  // Clock
+  row("Clock", timeIsSet() ? "UTC set" : "NOT SET (GPS/NTP)", timeIsSet() ? CL_GREEN : CL_RED);
+  // Location
+  bool locOk = (cfg.lat != 0.0 || cfg.lon != 0.0);
+  row("Location", locOk ? (String(cfg.lat, 2) + ", " + String(cfg.lon, 2)) : String("NOT SET"),
+      locOk ? CL_GREEN : CL_RED);
+  // GP data + newest element age
+  int nSat = db.count();
+  if (nSat > 0 && timeIsSet()) {
+    double newest = 0;
+    for (int i2 = 0; i2 < nSat; ++i2) if (db.at(i2).epochUnix > newest) newest = db.at(i2).epochUnix;
+    double ageD = (nowUtc() - newest) / 86400.0;
+    row("GP data", String(nSat) + " sats, " + String(ageD, 1) + "d old",
+        ageD < 3 ? CL_GREEN : (ageD < 14 ? CL_YELLOW : CL_ORANGE));
+  } else {
+    row("GP data", nSat > 0 ? String(nSat) + " sats" : String("NONE - run Update"),
+        nSat > 0 ? CL_YELLOW : CL_RED);
+  }
+  // WiFi
+  row("WiFi", cfg.ssid[0] ? (net.connected() ? String(cfg.ssid) + " (up)" : String(cfg.ssid))
+                          : String("NOT SET"),
+      cfg.ssid[0] ? (net.connected() ? CL_GREEN : CL_WHITE) : CL_YELLOW);
+  // Radio + rotator (informational: both defaults are valid configurations)
+  row("Radio CAT", cfg.catType == CAT_WIRED ? "CI-V wired" : "network (LAN)", CL_WHITE);
+  row("Rotator", cfg.rotType == ROT_GS232 ? "GS-232" : "other/rotctld", CL_WHITE);
+  // SD (voice memos)
+  row("SD card", Store::onSD() ? "present" : "none (memos off)",
+      Store::onSD() ? CL_GREEN : CL_GREY);
+  // Callsign
+  row("Callsign", cfg.myCall[0] ? String(cfg.myCall) : String("NOT SET"),
+      cfg.myCall[0] ? CL_GREEN : CL_YELLOW);
+  // Battery
+  int lvl = M5.Power.getBatteryLevel();
+  row("Battery", lvl >= 0 ? String(lvl) + "%" : String("--"),
+      lvl < 0 ? CL_GREY : (lvl > 40 ? CL_GREEN : (lvl > 20 ? CL_YELLOW : CL_RED)));
+  footer("` back");
+}
+
+void App::keyReady(char c, bool enter, bool back) {
+  (void)c; (void)enter;
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  EME 30-day planner (SCR_EMEPLAN), 'p' from the EME screen. One row per day:
+//  the Moon's declination at 12:00 UTC and the path degradation vs perigee.
+//  A star marks the classic northern-hemisphere "good EME day" heuristic --
+//  high declination (long, high Moon tracks) AND a near-perigee Moon (low path
+//  loss). Southern-hemisphere operators want negative declination instead; the
+//  raw numbers are shown so either reading works.
+// ===========================================================================
+void App::drawEmePlan() {
+  header("EME 30-day plan");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.print("Date   Dec     Degr    (12:00 UTC)");
+  const int rows = 9, LH = 10;
+  if (emePlanScroll > emePlanN - rows) emePlanScroll = emePlanN - rows;
+  if (emePlanScroll < 0) emePlanScroll = 0;
+  for (int vi = 0; vi < rows && emePlanScroll + vi < emePlanN; ++vi) {
+    int d = emePlanScroll + vi;
+    time_t tt = emePlanT0 + (time_t)d * 86400;
+    struct tm tmv; gmtime_r(&tt, &tmv);
+    bool good = (emePlanDec[d] >= 18.0f && emePlanDeg[d] <= 1.0f);
+    int y = 30 + vi * LH;
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y);
+    canvas.printf("%02d-%02d", tmv.tm_mon + 1, tmv.tm_mday);
+    canvas.setTextColor(emePlanDec[d] >= 18 ? CL_GREEN
+                       : (emePlanDec[d] <= -18 ? CL_CYAN : CL_WHITE), CL_BLACK);
+    canvas.setCursor(46, y); canvas.printf("%+5.1f", emePlanDec[d]);
+    canvas.setTextColor(emePlanDeg[d] <= 1.0f ? CL_GREEN
+                       : (emePlanDeg[d] <= 1.7f ? CL_WHITE : CL_ORANGE), CL_BLACK);
+    canvas.setCursor(96, y); canvas.printf("%4.1f dB", emePlanDeg[d]);
+    if (good) { canvas.setTextColor(CL_GREEN, CL_BLACK);
+                canvas.setCursor(156, y); canvas.print("* good (NH)"); }
+  }
+  footer(";/. scroll  ` back");
+}
+
+void App::keyEmePlan(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_EME; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--emePlanScroll < 0) emePlanScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { ++emePlanScroll; lastDrawMs = 0; return; }
+  if (c == '{')  { emePlanScroll -= 9; if (emePlanScroll < 0) emePlanScroll = 0; lastDrawMs = 0; return; }
+  if (c == '}')  { emePlanScroll += 9; lastDrawMs = 0; return; }
+}
+
+
 
 // ===========================================================================
 //  Terrestrial weather screen (off Space Wx, key 'w'). Shows current conditions
@@ -17167,30 +18497,39 @@ void App::keyGpSrc(char c, bool enter, bool back) {
   }
 }
 
+// Home-menu items, file-scope so keyHome's first-letter jump can search them too.
+const char* const HOME_ITEMS[] = { "Satellites", "Next Passes (favs)", "Passes (sel)",
+                        "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "AMSAT status", "Overhead now", "Grid dist/bearing", "QRZ Lookup", "Location", "Update",
+                        "Settings", "Log", "Messages", "About", "Charge / Sleep" };
+static_assert(sizeof(HOME_ITEMS) / sizeof(HOME_ITEMS[0]) == 20,
+              "Home menu item count must match keyHome's N");
+
 void App::drawHome() {
   header("CardSat");
-  static const char* items[] = { "Satellites", "Next Passes (all favs)", "Passes (sel)",
-                          "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "AMSAT status", "Overhead now", "Grid dist/bearing", "QRZ Lookup", "Location", "Update",
-                          "Settings", "Log", "Messages", "About", "Charge / Sleep" };
-  const int N = (int)(sizeof(items) / sizeof(items[0]));
-  static_assert(sizeof(items) / sizeof(items[0]) == 20,
-                "Home menu item count must match keyHome's N");
-  const int VIS = 9;
-  if (homeSel < homeScroll)           homeScroll = homeSel;
-  if (homeSel > homeScroll + VIS - 1) homeScroll = homeSel - VIS + 1;
-  if (homeScroll < 0) homeScroll = 0;
-  if (homeScroll > N - VIS) homeScroll = (N > VIS) ? N - VIS : 0;
+  const char* const* items = HOME_ITEMS;
+  const int N = 20;
+  // Two-column grid: all twenty destinations visible at once (10 rows x 2 columns,
+  // column-major so the curated band order flows down col 1 then col 2). Thin rules
+  // mark the band boundaries. No scrolling; the ^/v hints are retired.
   canvas.setTextSize(1);
-  for (int r = 0; r < VIS && (homeScroll + r) < N; ++r) {
-    int i = homeScroll + r, y = 18 + r * 11;
-    if (i == homeSel) { canvas.fillRect(0, y - 2, 240, 11, CL_SELBG);
+  for (int i = 0; i < N; ++i) {
+    int col = i / 10, r = i % 10;
+    int x = col * 120, y = 19 + r * 9;                 // start below the 16 px header; 9 px pitch fits 10 rows
+    if (i == homeSel) { canvas.fillRect(x, y - 2, 120, 9, CL_SELBG);
                         canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(6, y); canvas.print(items[i]);
+    canvas.setCursor(x + 4, y); canvas.print(items[i]);
   }
-  canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (homeScroll > 0)       { canvas.setCursor(232, 18);  canvas.print("^"); }
-  if (homeScroll + VIS < N) { canvas.setCursor(232, 106); canvas.print("v"); }
+  // Band separators sit in the mid-gap just below a row (y + 7 of a 9 px cell): past
+  // that row's descenders and ~2 px above the next row's text, so they never clip
+  // either. Row-9 boundaries are skipped -- no row below them on-screen, and it keeps
+  // clear space above the next-pass line.
+  static const int SEP[] = {3, 7, 10, 12, 15, 17};
+  for (int k = 0; k < 6; ++k) {
+    int i = SEP[k]; if (i % 10 == 9) continue;         // boundary at a column break
+    int col = i / 10, y = 19 + (i % 10) * 9 + 7;
+    canvas.drawFastHLine(col * 120 + 4, y, 112, CL_MGREY);
+  }
   // Next favorite pass: a persistent "what's next and when" line above the footer, so the
   // home screen answers it without opening Passes. Shows the sat and a live AOS countdown
   // (or "IN PASS" while one is up). Drawn only when the alarm scheduler has a target.
@@ -17436,12 +18775,24 @@ void App::drawPassDetail() {
 }
 
 void App::drawTrack() {
+  // (post-LOS handoff detection lives just after the LiveLook below)
   SatEntry* s = activeSat();
   header(s ? String(s->name) + (satNote[0] ? " *" : "") : String("Track"));
   canvas.setTextSize(1);
   if (!s) { footer("` back"); return; }
 
   LiveLook L = timeIsSet() ? pred.look(nowUtc()) : LiveLook();
+  // Post-LOS handoff: on the el >=0 -> <0 crossing, announce the next favorite
+  // pass (serviceAosAlarm keeps nextAos/nextAosName current) and open a 60 s
+  // window in which 'q' arms deep-sleep-until-pass. trkPrevEl resets on sat change.
+  if (timeIsSet()) {
+    if (trkPrevEl >= 0 && L.el < 0 && nextAos && nextAos > nowUtc()) {
+      long mins = (long)((nextAos - nowUtc() + 59) / 60);
+      losPromptUntil = millis() + 60000;
+      setStatus(String("LOS. Next ") + nextAosName + " in " + String(mins) + "m - q sleeps");
+    }
+    trkPrevEl = L.el;
+  }
 
   // Az / El / range / range-rate
   canvas.setTextColor(L.visible ? CL_GREEN : CL_GREY, CL_BLACK);
@@ -18664,7 +20015,7 @@ void App::drawSettings() {
   rows[68] = String("Visible min el: ") + String((int)cfg.visMinEl) + " deg";
   rows[4]  = String("WiFi SSID: ") + cfg.ssid;
   rows[5]  = String("WiFi pass: ") + String(strlen(cfg.pass) ? "******" : "(none)");
-  rows[6]  = String("Save & test WiFi");
+  rows[6]  = String("Save & test WiFi (1/2)");
   rows[50] = String("WiFi 2 SSID: ") + String(strlen(cfg.ssid2) ? cfg.ssid2 : "(none)");
   rows[51] = String("WiFi 2 pass: ") + String(strlen(cfg.pass2) ? "******" : "(none)");
   rows[52] = String("Web control: ") + (cfg.webEnable ? "on" : "off")
@@ -18812,7 +20163,7 @@ void App::drawSettings() {
       if (v == setSel) { canvas.fillRect(0, y-1, 240, 11, CL_SELBG);
                          canvas.setTextColor(CL_BLACK, CL_SELBG); }
       else               canvas.setTextColor(CL_WHITE, CL_BLACK);
-      canvas.setCursor(4, y); canvas.print(String(SET_CAT_NAME[v]) + "  >");
+      canvas.setCursor(4, y); canvas.print(String(SET_CAT_NAME[v]) + " (" + String(SET_CAT_LEN[v]) + ")  >");
     }
     footer("; / . move   ENT open   ` back");
     return;

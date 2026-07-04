@@ -8,7 +8,7 @@ rotator backend (`ROT_YAESU`).
 
 > ## ⚠️ UNTESTED — BUILD AND USE AT YOUR OWN RISK
 > **None of this has been verified against a physical rotator.** It is a paper
-> design derived from the controller's published behaviour and the CardSat
+> design derived from the controller's published behavior and the CardSat
 > firmware. You are connecting low‑voltage electronics to a mains‑powered
 > controller that drives heavy motors. Mistakes can destroy the ADC, the Cardputer,
 > or the rotator controller, drive an antenna into its mechanical stops, or worse.

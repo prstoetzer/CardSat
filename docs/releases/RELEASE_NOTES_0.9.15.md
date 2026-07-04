@@ -81,7 +81,7 @@ the device under **Settings**, persisted across reboots:
   a slow-CI-V rig, or disable it entirely.
 - **Rot az lookahead** (default 3 s; `0` = off) — the 450° azimuth lookahead
   horizon (Rotator category). Tune to your rotator's slew speed, or turn it off to
-  use the previous reactive-only overlap behaviour.
+  use the previous reactive-only overlap behavior.
 
 ---
 

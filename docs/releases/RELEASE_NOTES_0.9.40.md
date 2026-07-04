@@ -146,11 +146,11 @@ so edited QSOs are re-uploaded, and a guide to using your own hand-curated GP da
   entity. The QSO, grid and satellite counts are exact.
 - **Sky-at-a-glance timeline (Next Passes → `t`).** A horizontal timeline of the next
   few hours for all favorites: time runs left to right with a "now" marker, one row per
-  favorite, and a bar per pass coloured by peak elevation (green ≥ 30°, yellow below,
+  favorite, and a bar per pass colored by peak elevation (green ≥ 30°, yellow below,
   matching the Overhead-now convention; a white tick marks an optically visible pass).
   The fastest way to see which birds are coming up and where they overlap.
 - **Day/night shading on the world map.** The world map now shades the night
-  hemisphere a dim grey, computed live from the sub-solar point, so you can see at a
+  hemisphere a dim gray, computed live from the sub-solar point, so you can see at a
   glance which footprints — and which part of your own sky — are in darkness.
 - **ADIF import (`tools/adif2csv.py`).** A new converter turns a standard ADIF export
   into CardSat's on-device CSV, keeping only satellite QSOs (`PROP_MODE = SAT`) and only

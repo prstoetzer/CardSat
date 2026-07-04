@@ -45,7 +45,7 @@ Add a small tri-state mode override carried on the Track/Big screens:
 enum LinModeOverride : uint8_t { LMO_AUTO = 0, LMO_CW };   // (room to grow: LMO_DATA…)
 ```
 
-- `LMO_AUTO` → today's behaviour (LSB/USB SSB policy).
+- `LMO_AUTO` → today's behavior (LSB/USB SSB policy).
 - `LMO_CW` → set **CW on both legs** for a linear bird.
 
 `applyTransponderModes()` consults the override:

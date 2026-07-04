@@ -60,7 +60,7 @@ already handled, so the patterns exist):
 ### 2.3 Settings
 Add to the LoRa settings group:
 - **Msg notify:** Off / Banner / Banner+Beep (default Banner).
-- Respect existing global mute/quiet behaviours if any.
+- Respect existing global mute/quiet behaviors if any.
 
 ### 2.4 "Open messages" affordance
 Optionally, a global key (e.g. on the home/track screens) jumps straight to

@@ -63,18 +63,56 @@ bool LoraRadio::begin(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm)
   }
   if (!g_radio) return false;
 
-  // Share the already-running SPI bus on the SD pins rather than letting RadioLib
-  // re-init SPI with its own defaults (which would reconfigure the bus the SD
-  // driver relies on). SPI.begin() with the same pins is idempotent/safe here.
+  // ---- Presence probe (do this BEFORE touching the shared SPI bus) --------
+  // The SX1262 and the microSD card share one SPI bus. If no Cap LoRa module is
+  // attached, letting RadioLib run still claims/reconfigures that bus, and on the
+  // ESP32 the SD driver cannot reliably be restored afterwards -- so the card
+  // becomes unwritable (settings, logs and caches silently stop persisting).
+  // Rather than try to recover the bus after the fact, detect an absent module
+  // up front and skip LoRa entirely, leaving the working SD bus untouched.
+  //
+  // Probe: pull BUSY (GPIO6) down, then pulse RST low->high. A PRESENT SX1262
+  // drives BUSY HIGH the moment reset is released and holds it through its
+  // power-on calibration (~1 ms) before settling LOW (ready). An ABSENT module
+  // leaves the pulled-down pin reading LOW throughout. We poll in a tight loop
+  // starting the instant reset is released so we cannot miss the calibration
+  // pulse (missing it would false-negative a real module and wrongly disable
+  // LoRa), and we accept presence if BUSY is ever seen HIGH within the window.
+  pinMode(LORA_PIN_BUSY, INPUT_PULLDOWN);
+  pinMode(LORA_PIN_RST, OUTPUT);
+  digitalWrite(LORA_PIN_RST, LOW);  delay(2);
+  digitalWrite(LORA_PIN_RST, HIGH);         // release reset; poll immediately
+  bool present = false;
+  for (int i = 0; i < 2000; ++i) {          // ~20 ms window, tight (~10us/iter)
+    if (digitalRead(LORA_PIN_BUSY) == HIGH) { present = true; break; }
+    delayMicroseconds(10);
+  }
+  if (!present) {
+    // No module -> do NOT disturb the SPI bus or the SD card. LoRa stays
+    // unavailable; every LoRa call is already a safe no-op when !_ready.
+    Serial.println("[lora] no Cap LoRa detected (BUSY low after reset) - skipping, SD bus left intact");
+    return false;
+  }
+
+  // Module present: now it is safe to share the SPI bus on the SD pins rather
+  // than letting RadioLib re-init SPI with its own defaults.
   SPI.begin(LORA_PIN_SCK, LORA_PIN_MISO, LORA_PIN_MOSI, LORA_PIN_NSS);
 
   int st = g_radio->begin();                // uses the shared SPI bus
-  if (st != RADIOLIB_ERR_NONE) { digitalWrite(SD_CS_PIN_SHARED, HIGH); return false; }
+  if (st != RADIOLIB_ERR_NONE) {
+    // The radio isn't present/answering (e.g. no Cap LoRa attached). RadioLib's
+    // begin() has already reconfigured the shared SPI bus, so we MUST restore the
+    // SD card's bus config before returning -- otherwise every later SD access
+    // fails on units running from the card. (The success path below remounts too.)
+    digitalWrite(SD_CS_PIN_SHARED, HIGH);
+    Store::remount();
+    return false;
+  }
 
   // Configure the RF antenna switch direction via the expander on first use.
   rfSwitchRx();
 
-  if (!setRadio(freqKHz, sf, bwHz, txDbm)) { digitalWrite(SD_CS_PIN_SHARED, HIGH); return false; }
+  if (!setRadio(freqKHz, sf, bwHz, txDbm)) { digitalWrite(SD_CS_PIN_SHARED, HIGH); Store::remount(); return false; }
 
   g_radio->setDio1Action(loraIsr);
   _ready = true;

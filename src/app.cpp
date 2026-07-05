@@ -5189,7 +5189,8 @@ void App::keySatList(char c, bool enter, bool back) {
   if (c == 'o' && viewN > 0) {                     // open the orbital analysis screen
     orbitPage = 0; buildOrbit(); screen = SCR_ORBIT; lastDrawMs = 0; return;
   }
-  if (c == 's' && viewN > 0) {                     // open the simulation screen
+  if (c == 'y' && viewN > 0) {                     // open the simulation screen (was 's';
+    // 's' is AMSAT status -- see the guard above. 'y' keeps sim reachable here.)
     simTime = timeIsSet() ? nowUtc() : 0; screen = SCR_SIM; lastDrawMs = 0; return;
   }
   if (c == 't' && viewN > 0) {                      // browse the transponder database
@@ -10061,7 +10062,7 @@ void App::drawHelp() {
     "SATELLITES",
     " ENT  toggle favorite",
     " o  orbital analysis",
-    " s  simulation (time)",
+    " y  simulation (time)",
     " e  EQX table",
     " k  OSCARLOCATOR view",
     " 2  sat-to-sat windows",

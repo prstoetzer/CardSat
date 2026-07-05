@@ -45,7 +45,7 @@ FRONT = [
   "World Map, Sun/Moon, Space Wx, Weather, Activations, Overhead now, Grid dist/bearing, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; <b>x</b> del manual sat &middot; "
-  "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>s</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
+  "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>y</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
   "right edge: dot = AMSAT heard, square = telemetry, ring = not heard"),
  ("SAT-TO-SAT (Sats &rarr; 2)",
   "Windows when selected sat + a 2nd fav are BOTH above your horizon (start, dur, peak el each). <b>n</b> next sat &middot; <b>r</b> recompute &middot; <b>`</b> back"),

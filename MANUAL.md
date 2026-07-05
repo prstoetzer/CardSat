@@ -459,6 +459,8 @@ ENTER returns home.
 
 ### Charge / Sleep
 
+![Charge / Sleep](docs/img/charge-sleep.jpg)
+
 The last item on the home menu is a minimal low-power mode for charging or
 parking the device. Selecting it **blanks the backlight and stops radio/rotator
 output**, and goes further to cut power: it **powers the WiFi radio fully off**
@@ -743,6 +745,8 @@ Notes are limited to 4 KB each, which is several pages of text — ample for ope
 notes.
 
 ### Awards (Log → Awards)
+
+![Awards](docs/img/awards.jpg)
 
 **Awards** on the **Log** menu summarises what you've worked, read straight from
 `/CardSat/qso_log.csv`. The top of the screen shows the **all-satellites totals**:
@@ -1081,6 +1085,8 @@ elevation gate (see Settings → Visible passes).
   from the Home menu).
 
 ### Visible-pass list (`V` from Passes)
+
+![Visible-pass list](docs/img/visible-passes.jpg)
 
 A scrollable list of every **optically-visible** pass for the selected satellite
 over the next 10 days — filtered to passes where the satellite is **sunlit**, your
@@ -1475,6 +1481,8 @@ screen stays responsive (the back key works throughout) and always finishes.
 
 ### Voice memo (`v`, SD card required)
 
+![Voice memo recording](docs/img/voice-memo-recording.jpg)
+
 Press `v` on the **Track**, **Manual**, **large-font readout** (Track or Manual),
 or **Polar** screen to record a short spoken note — for example "worked W1ABC, good
 signal" during a pass — without leaving the screen. A red **REC** badge with a
@@ -1610,6 +1618,8 @@ the number of satellites used, and the HDOP. The grid recomputes live as you mov
 so you can watch it flip as you cross a grid boundary. `` ` `` returns to Location.
 
 ### LoRa Messages (Home → Messages)
+
+![Messages](docs/img/messages.jpg)
 
 CardSat-to-CardSat **text messaging** over LoRa, using the M5Stack **Cap LoRa
 (SX1262)** module. It is a **broadcast group chat**: every CardSat tuned to the
@@ -1749,6 +1759,8 @@ own build flags; you should not need to.
 > its own small translation unit and the literal-range problem does not arise.
 
 ### LoRa RX / hex monitor (Messages → `m`)
+
+![LoRa RX monitor](docs/img/lora-rx-monitor.jpg)
 
 A general-purpose tool to receive and inspect **any** LoRa signal on the Cap LoRa
 (SX1262) — not just satellites, and with no network or satellite data involved.
@@ -2455,6 +2467,8 @@ Your QRZ password is stored on the device the same way the WiFi and radio-LAN
 passwords are; it is shown masked in Settings. CardSat talks to QRZ over HTTPS.
 
 ### Grid distance & bearing (Grid dist/bearing)
+
+![Grid distance](docs/img/grid-distance.jpg)
 
 **Grid dist/bearing** on the main menu (just before QRZ Lookup) is a great-circle
 calculator for terrestrial VHF/UHF work — tropo, contests, or just aiming a beam at a
@@ -3412,7 +3426,7 @@ listed below.
   telemetry only, ring = not heard, nothing = no reports. Favorites are flagged.
 - **Keys** — `;`/`.` move (`{`/`}` page); `f` toggle favorite; `v` show
   favorites only; `n` add a new satellite by hand; `x` delete a manual satellite;
-  `o` open **Orbital analysis**; `s` open **Simulation**; `t` open the
+  `o` open **Orbital analysis**; `y` open **Simulation**; `t` open the
   **Transponder database**; `e` open the **EQX table**; `k` open the
   **OSCARLOCATOR** view; `2` open the **sat-to-sat visibility finder**; `3` open
   the **3D Globe**; `d` open the **10-day pass overview**; `i` open the
@@ -3586,6 +3600,8 @@ listed below.
   scroll the time steps; `` ` `` back to the mutual list.
 
 ### Sat-to-sat visibility
+
+![Sat-to-sat visibility](docs/img/satsat.jpg)
 
 - **Purpose** — the windows when the selected satellite and a second satellite are
   both above your horizon at once, over the next few days; detail in
@@ -3778,6 +3794,8 @@ listed below.
 
 ### Sky sources
 
+![Sky sources](docs/img/sky-source.jpg)
+
 - **Purpose** — the planets and the strongest cosmic radio sources on a sky dome,
   for antenna pointing and as an RF-source reference; detail in
   [§13 → Sky sources](#sky-sources-s).
@@ -3788,6 +3806,8 @@ listed below.
 - **Keys** — `;`/`.` select an object; `` ` `` back to Sun / Moon.
 
 ### EME / moonbounce
+
+![EME / Moon](docs/img/eme-moon.jpg)
 
 - **Purpose** — the moonbounce numbers: self-echo Doppler per band, topocentric
   range/rate, path degradation vs perigee, a galactic sky-noise flag, and a
@@ -3803,6 +3823,8 @@ listed below.
   ~10° of the Sun.
 
 ### EME 30-day plan
+
+![EME 30-day plan](docs/img/eme-30day.jpg)
 
 - **Purpose** — pick the good EME days: per-day Moon declination (12:00 UTC) and
   path degradation for the next 30 days, with a star on high-declination,
@@ -3878,6 +3900,8 @@ listed below.
 
 ### AMSAT status
 
+![AMSAT status](docs/img/amsat-status.jpg)
+
 - **Purpose** — every bird with a recent AMSAT live-status report, sorted
   most-active-and-most-recent first; detail in [§14 → AMSAT status](#gp-age-indicator).
 - **Reached from** — Satellites → `s`, or the **AMSAT status** main-menu item.
@@ -3888,6 +3912,8 @@ listed below.
   **report this bird's status** (below); `u` re-fetch in place; `` ` `` back.
 
 ### AMSAT reports (per satellite)
+
+![AMSAT who-heard](docs/img/amsat-who-heard.jpg)
 
 - **Purpose** — the selected satellite's **individual status reports**: who heard
   it, from which grid, how long ago, and what they reported — headed by a
@@ -3920,6 +3946,8 @@ listed below.
   update and is cached for offline boots).
 
 ### Activations
+
+![Activations](docs/img/activations.jpg)
 
 - **Purpose** — list the upcoming satellite activations scheduled on hams.at (roves,
   grid activations, special operations); detail in
@@ -3972,6 +4000,8 @@ listed below.
 
 ### Overhead now
 
+![Overhead now](docs/img/overhead-now.jpg)
+
 - **Purpose** — a snapshot of every satellite in the loaded catalog that is **above
   the horizon right now**, sorted by elevation — a quick "what can I work / see this
   moment" glance.
@@ -4021,6 +4051,8 @@ listed below.
   hardware path.
 
 ### GPS sky plot
+
+![GPS position](docs/img/gps-position.jpg)
 
 ![GPS sky plot](docs/img/gps-sky.jpg)
 
@@ -4191,6 +4223,8 @@ listed below.
 
 ### Notes (browser)
 
+![Notes](docs/img/notes.jpg)
+
 - **Purpose** — browse, open, create and delete the plain-text notes stored under
   `/CardSat/notes/`. Full description in [§8 → Notes](#notes-free-form-text-editor).
 - **Reached from** — Log menu → Notes.
@@ -4252,6 +4286,34 @@ listed below.
 - **Keys** — `` ` `` back to About.
 
 ### Tools
+
+![Tools menu](docs/img/tools.jpg)
+
+![Scientific calculator](docs/img/tools-calculator-sci.jpg)
+
+![Programmer calculator](docs/img/tools-calculator-programmer.jpg)
+
+![Character lookup](docs/img/tools-char-lookup.jpg)
+
+![DXCC entity lookup](docs/img/tools-dxcc-lookup.jpg)
+
+![CQ zones](docs/img/tools-cq-zones.jpg)
+
+![ITU zones](docs/img/tools-itu-zones.jpg)
+
+![Link budget](docs/img/tools-link-budget.jpg)
+
+![Coax loss / power](docs/img/tools-coax-loss.jpg)
+
+![Yagi elements](docs/img/tools-yagi.jpg)
+
+![RF exposure (MPE)](docs/img/tools-rf-exposure.jpg)
+
+![Battery runtime](docs/img/tools-battery-runtime.jpg)
+
+![Orbit lifetime (debris)](docs/img/tools-orbit-lifetime.jpg)
+
+![Cross-section area](docs/img/tools-cross-section.jpg)
 
 - **Purpose** — a set of offline ham-radio bench tools, all computed locally (no
   network needed): an infix **scientific calculator** and live-recalc forms for
@@ -4408,6 +4470,8 @@ listed below.
 
 ### Games menu (`z` from About)
 
+![Games menu](docs/img/games.jpg)
+
 Press **`z`** on the About screen to open a menu of six small games — something to do while
 waiting on a pass, most of them a light nod to real satellite operating. Use **`;`/`.`** (or
 up/down) to move through the list and **ENTER** to launch the highlighted game; **`` ` ``**
@@ -4443,6 +4507,8 @@ or press **`1`–`4`** to answer directly.
 
 ### License & credits
 
+![License & credits](docs/img/license.jpg)
+
 - **Purpose** — license pointer and no-warranty/hardware disclaimer, credit for the
   outside data sources (Celestrak/SpaceTrack, NOAA SWPC, Open-Meteo, hams.at,
   SatNOGS/AMSAT), acknowledgements, and a recommendation to support AMSAT.
@@ -4472,7 +4538,7 @@ or press **`1`–`4`** to answer directly.
 
 | Screen | Keys |
 |---|---|
-| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `k` OSCARLOCATOR · `3` 3D globe · `2` sat-to-sat visibility · `o` orbital analysis · `s` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports · colored down-arrow = decaying orbit (yellow watch / orange decaying / red imminent) |
+| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `k` OSCARLOCATOR · `3` 3D globe · `2` sat-to-sat visibility · `o` orbital analysis · `y` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports · colored down-arrow = decaying orbit (yellow watch / orange decaying / red imminent) |
 | **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / Pass outlook / Orbit position / Phys) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Live: az/el/range/Doppler, mean anomaly/phase, sunlit/eclipse + **eclipse depth** (deg; >0 = in shadow) · Next pass: slant ranges + path delay + peak eclipse depth · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · Pass outlook: 7-day pass count/>30° count/longest/avg gap + the best upcoming pass (elevation, when, duration) · Orbit position: mean/true anomaly, argument of latitude, time to perigee/apogee, RAAN, rev number · Phys: orbital velocity now + apo/peri spread, launch year/number + years in orbit (from the COSPAR ID) · `r` recompute · `` ` `` back |
 | **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |

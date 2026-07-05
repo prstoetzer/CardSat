@@ -59,14 +59,24 @@ bool remount() {
   // Re-assert the SD pins and re-run SD.begin() to restore the card's bus config.
   // LittleFS is on internal flash and never needs this.
   if (!g_sd) return g_ready;
+  // Tear the SPI bus fully down and rebuild it on the SD pins. This is the key
+  // step: after RadioLib (LoRa SX1262) has run, the ESP32 SPI bus is already
+  // initialized, and a bare SPI.begin() is a no-op that leaves the bus in
+  // RadioLib's clock/mode -- so SD.begin() alone cannot recover the card. SPI.end()
+  // forces the next SPI.begin() to genuinely re-initialize the bus, exactly as it
+  // is at a fresh boot (which is why boot works but the old remount did not). This
+  // matters whether the LoRa module answered or not: an absent Cap LoRa still leaves
+  // RadioLib's begin() having claimed the bus.
   SD.end();
+  SPI.end();
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
   bool ok = SD.begin(SD_CS_PIN, SPI, SD_FREQ_HZ);
   if (!ok) ok = SD.begin(SD_CS_PIN, SPI, 1000000);   // retry slower
   g_ready = ok; g_sd = ok; g_fs = ok ? (fs::FS*)&SD : (fs::FS*)&LittleFS;
-#ifdef CARDSAT_CFG_DEBUG
-  Serial.printf("[fs] remount SD -> %s\n", ok ? "ok" : "FAILED");
-#endif
+  // Always report: a failed remount here is exactly the bug that silently drops
+  // cfg/log/cache writes (e.g. GPS setting won't persist) on SD units when the
+  // LoRa bus handoff didn't restore the card. Visible on the serial console.
+  if (!ok) Serial.println("[fs] remount SD -> FAILED (SD writes will not persist)");
   return ok;
 }
 

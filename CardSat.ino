@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.48";
+static constexpr const char* FW_VERSION = "0.9.49";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -6846,14 +6846,24 @@ bool remount() {
   // Re-assert the SD pins and re-run SD.begin() to restore the card's bus config.
   // LittleFS is on internal flash and never needs this.
   if (!g_sd) return g_ready;
+  // Tear the SPI bus fully down and rebuild it on the SD pins. This is the key
+  // step: after RadioLib (LoRa SX1262) has run, the ESP32 SPI bus is already
+  // initialized, and a bare SPI.begin() is a no-op that leaves the bus in
+  // RadioLib's clock/mode -- so SD.begin() alone cannot recover the card. SPI.end()
+  // forces the next SPI.begin() to genuinely re-initialize the bus, exactly as it
+  // is at a fresh boot (which is why boot works but the old remount did not). This
+  // matters whether the LoRa module answered or not: an absent Cap LoRa still leaves
+  // RadioLib's begin() having claimed the bus.
   SD.end();
+  SPI.end();
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
   bool ok = SD.begin(SD_CS_PIN, SPI, SD_FREQ_HZ);
   if (!ok) ok = SD.begin(SD_CS_PIN, SPI, 1000000);   // retry slower
   g_ready = ok; g_sd = ok; g_fs = ok ? (fs::FS*)&SD : (fs::FS*)&LittleFS;
-#ifdef CARDSAT_CFG_DEBUG
-  Serial.printf("[fs] remount SD -> %s\n", ok ? "ok" : "FAILED");
-#endif
+  // Always report: a failed remount here is exactly the bug that silently drops
+  // cfg/log/cache writes (e.g. GPS setting won't persist) on SD units when the
+  // LoRa bus handoff didn't restore the card. Visible on the serial console.
+  if (!ok) Serial.println("[fs] remount SD -> FAILED (SD writes will not persist)");
   return ok;
 }
 
@@ -9470,18 +9480,56 @@ bool LoraRadio::begin(uint32_t freqKHz, uint8_t sf, uint32_t bwHz, int8_t txDbm)
   }
   if (!g_radio) return false;
 
-  // Share the already-running SPI bus on the SD pins rather than letting RadioLib
-  // re-init SPI with its own defaults (which would reconfigure the bus the SD
-  // driver relies on). SPI.begin() with the same pins is idempotent/safe here.
+  // ---- Presence probe (do this BEFORE touching the shared SPI bus) --------
+  // The SX1262 and the microSD card share one SPI bus. If no Cap LoRa module is
+  // attached, letting RadioLib run still claims/reconfigures that bus, and on the
+  // ESP32 the SD driver cannot reliably be restored afterwards -- so the card
+  // becomes unwritable (settings, logs and caches silently stop persisting).
+  // Rather than try to recover the bus after the fact, detect an absent module
+  // up front and skip LoRa entirely, leaving the working SD bus untouched.
+  //
+  // Probe: pull BUSY (GPIO6) down, then pulse RST low->high. A PRESENT SX1262
+  // drives BUSY HIGH the moment reset is released and holds it through its
+  // power-on calibration (~1 ms) before settling LOW (ready). An ABSENT module
+  // leaves the pulled-down pin reading LOW throughout. We poll in a tight loop
+  // starting the instant reset is released so we cannot miss the calibration
+  // pulse (missing it would false-negative a real module and wrongly disable
+  // LoRa), and we accept presence if BUSY is ever seen HIGH within the window.
+  pinMode(LORA_PIN_BUSY, INPUT_PULLDOWN);
+  pinMode(LORA_PIN_RST, OUTPUT);
+  digitalWrite(LORA_PIN_RST, LOW);  delay(2);
+  digitalWrite(LORA_PIN_RST, HIGH);         // release reset; poll immediately
+  bool present = false;
+  for (int i = 0; i < 2000; ++i) {          // ~20 ms window, tight (~10us/iter)
+    if (digitalRead(LORA_PIN_BUSY) == HIGH) { present = true; break; }
+    delayMicroseconds(10);
+  }
+  if (!present) {
+    // No module -> do NOT disturb the SPI bus or the SD card. LoRa stays
+    // unavailable; every LoRa call is already a safe no-op when !_ready.
+    Serial.println("[lora] no Cap LoRa detected (BUSY low after reset) - skipping, SD bus left intact");
+    return false;
+  }
+
+  // Module present: now it is safe to share the SPI bus on the SD pins rather
+  // than letting RadioLib re-init SPI with its own defaults.
   SPI.begin(LORA_PIN_SCK, LORA_PIN_MISO, LORA_PIN_MOSI, LORA_PIN_NSS);
 
   int st = g_radio->begin();                // uses the shared SPI bus
-  if (st != RADIOLIB_ERR_NONE) { digitalWrite(SD_CS_PIN_SHARED, HIGH); return false; }
+  if (st != RADIOLIB_ERR_NONE) {
+    // The radio isn't present/answering (e.g. no Cap LoRa attached). RadioLib's
+    // begin() has already reconfigured the shared SPI bus, so we MUST restore the
+    // SD card's bus config before returning -- otherwise every later SD access
+    // fails on units running from the card. (The success path below remounts too.)
+    digitalWrite(SD_CS_PIN_SHARED, HIGH);
+    Store::remount();
+    return false;
+  }
 
   // Configure the RF antenna switch direction via the expander on first use.
   rfSwitchRx();
 
-  if (!setRadio(freqKHz, sf, bwHz, txDbm)) { digitalWrite(SD_CS_PIN_SHARED, HIGH); return false; }
+  if (!setRadio(freqKHz, sf, bwHz, txDbm)) { digitalWrite(SD_CS_PIN_SHARED, HIGH); Store::remount(); return false; }
 
   g_radio->setDio1Action(loraIsr);
   _ready = true;
@@ -18121,7 +18169,8 @@ void App::keySatList(char c, bool enter, bool back) {
   if (c == 'o' && viewN > 0) {                     // open the orbital analysis screen
     orbitPage = 0; buildOrbit(); screen = SCR_ORBIT; lastDrawMs = 0; return;
   }
-  if (c == 's' && viewN > 0) {                     // open the simulation screen
+  if (c == 'y' && viewN > 0) {                     // open the simulation screen (was 's';
+    // 's' is AMSAT status -- see the guard above. 'y' keeps sim reachable here.)
     simTime = timeIsSet() ? nowUtc() : 0; screen = SCR_SIM; lastDrawMs = 0; return;
   }
   if (c == 't' && viewN > 0) {                      // browse the transponder database
@@ -23361,7 +23410,7 @@ void App::drawHelp() {
     "SATELLITES",
     " ENT  toggle favorite",
     " o  orbital analysis",
-    " s  simulation (time)",
+    " y  simulation (time)",
     " e  EQX table",
     " k  OSCARLOCATOR view",
     " 2  sat-to-sat windows",

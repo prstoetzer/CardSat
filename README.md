@@ -18,6 +18,14 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.49:** fixes a field-reported bug where, on SD-card units with LoRa
+> messaging enabled but **no Cap LoRa attached**, settings (notably the GPS source), logs
+> and caches silently stopped persisting — CardSat now detects an absent module and leaves
+> the SD bus untouched. Also resolves a Satellites-screen key conflict (**Simulation moved
+> to `y`**; `s` is AMSAT status), and refreshes the screenshot set throughout the docs.
+>
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.49.md)**.
+
 > **New in v0.9.48:** cached **weather and space weather now survive reboots** on
 > SD-equipped units (a filesystem bug that lost field data is fixed). The **Tools** hub
 > (About → `t`) grows to **twenty tools**: scientific + programmer calculators, character
@@ -247,6 +255,16 @@ A few of CardSat's screens (240×135 native captures). The full set is in the
 <td align="center"><img src="docs/img/space-wx.jpg" width="240"><br><b>Space Wx</b> — solar flux, Kp, operating outlook</td>
 <td align="center"><img src="docs/img/illumination.jpg" width="240"><br><b>Illumination</b> — sunlit/eclipse over the orbit</td>
 <td align="center"><img src="docs/img/home.jpg" width="240"><br><b>Home</b> — every screen is one hop away</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/img/tools.jpg" width="240"><br><b>Tools</b> — 20 offline bench &amp; mission tools</td>
+<td align="center"><img src="docs/img/tools-link-budget.jpg" width="240"><br><b>Link budget</b> — EIRP, path loss, SNR, margin</td>
+<td align="center"><img src="docs/img/tools-orbit-lifetime.jpg" width="240"><br><b>Orbit lifetime</b> — drag decay vs disposal rules</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/img/eme-moon.jpg" width="240"><br><b>EME / Moon</b> — moonbounce geometry &amp; degradation</td>
+<td align="center"><img src="docs/img/amsat-status.jpg" width="240"><br><b>AMSAT status</b> — who's been heard, and report it</td>
+<td align="center"><img src="docs/img/awards.jpg" width="240"><br><b>Awards</b> — grids, states, DXCC worked via satellite</td>
 </tr>
 </table>
 

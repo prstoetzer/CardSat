@@ -403,7 +403,7 @@ static const struct { const char* status; const char* gp; } AMS_ALIASES[] = {
 
 void SatDb::applyAmsatCatalogFile(const char* path) {
   _amsMapN = 0;
-  File f = LittleFS.open(path, "r");
+  File f = Store::fs().open(path, "r");    // Store::fs(): SD-equipped units never mount LittleFS
   if (!f) return;
   // Names are the only field we need; every record carries exactly one
   // "name":"..." key (the links values are plain URL strings). Scan the stream

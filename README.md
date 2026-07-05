@@ -18,6 +18,18 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.48:** cached **weather and space weather now survive reboots** on
+> SD-equipped units (a filesystem bug that lost field data is fixed). The **Tools** hub
+> (About → `t`) grows to **twenty tools**: scientific + programmer calculators, character
+> lookup, a full RF/antenna workbench, three offline reference databases (**DXCC** — 402
+> entities, **CQ/WAZ** and **ITU** zones, cross-linked), and mission-planning calculators
+> — **link budget**, **RF exposure (MPE)**, **battery runtime**, **orbital lifetime /
+> debris**, and **cross-section drag area** (the last two feed each other for a CubeSat
+> design-to-disposal workflow). Plus modulation and satellite-telemetry sections in Learn,
+> and a toggleable world-map night shade.
+>
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.48.md)**.
+
 > **New in v0.9.47:** a release for the **operator in the field**. **Report a bird's status
 > to amsat.org with two keypresses** (`i`×2 on Track) — **mode-aware**, so working AO-7's
 > U/v passband reports `AO-7_[U/v]`, with a full picker (`p` on AMSAT status) for all four

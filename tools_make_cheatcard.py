@@ -191,7 +191,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b>: sci + programmer calculators, coax loss, dipole/vertical/yagi/quad dims, RF units, SWR, path loss &middot; <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT) &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch) &mdash; Zap the Sats, Doppler Lock, Catch the Pass, Rotor Runner (tilt/keys), Morse Meteors (<b>t</b> dot <b>u</b> dash), Grid Chase."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (20): calculators, DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, RF exposure, orbit lifetime &middot; <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT) &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch) &mdash; Zap the Sats, Doppler Lock, Catch the Pass, Rotor Runner (tilt/keys), Morse Meteors (<b>t</b> dot <b>u</b> dash), Grid Chase."),
 ]
 
 

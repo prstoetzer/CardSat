@@ -4224,7 +4224,8 @@ listed below.
   you can see at a glance which footprints (and which part of your own sky) are in
   darkness. The shaded region is computed from the sub-solar point and updates live.
 - **Keys** — `f` cycle which favorite is highlighted; **`c` recenter the map on
-  your QTH** (press again to return to the classic 0°-centered view); `` ` `` back.
+  your QTH** (press again to return to the classic 0°-centered view); **`n` toggle the
+  night-hemisphere shading** on/off (remembered across reboots); `` ` `` back.
 - **Recentering** — by default the map is centered on 0° longitude. Press `c` to
   center it on your station's longitude instead, so your QTH sits in the middle and
   the world wraps around it; this is remembered across reboots. Only the longitude
@@ -4273,12 +4274,63 @@ listed below.
   plus `+ - * /`, all via a pending-operation model (`=`/ENTER applies). **`x`
   clears** and DEL drops the low digit (DEL never exits) — `b` and `c` are hex digits, so they can't
   double as commands. Useful for CI-V byte math and bitmasks.
+- **Char lookup** — enter a byte in **hex, dec, bin or oct** (`,`/`/` cycle the entry
+  base, digits type in it, `;`/`.` browse ±1) and see everything it represents at once:
+  the **ASCII** character or control-code name, its **Morse** pattern, the **Baudot /
+  ITA2** letters- and figures-shift meaning for 5-bit values (US-TTY, as used on RTTY),
+  and the **BCD** reading (CI-V frequency bytes are BCD). Typing any non-hex letter
+  (g–z) looks that character up directly; `x` zeroes, DEL drops the low digit.
+- **DXCC entity lookup** — type a **prefix, partial name, or entity code** and matching
+  DXCC entities list live; ENTER opens a detail card with the **entity code, primary
+  prefix, continent, ITU and CQ zones, name**, status flags (deleted / third-party
+  traffic OK) and any **ARRL footnotes**. The table (current + deleted entities) is
+  embedded from the ARRL DXCC list and works entirely offline; deleted entities are
+  dimmed. `;`/`.` pick, DEL edits the query, `` ` `` back.
+- **CQ zones (WAZ)** — all **40 CQ zones** with their names; ENTER opens a detail card
+  with the full prefix/region definition (scroll with `;`/`.` if it runs long). From a
+  **DXCC entity's** detail card, press **`z`** to jump straight to that entity's CQ-zone
+  definition. Embedded from the CQ WAZ list, fully offline.
+- **ITU zones** — the **ITU zone** list (numbers 1–75, 78, 90 — ITU numbering isn't
+  contiguous), each with its prefix/region definition; ENTER opens a scrollable detail
+  card. From a DXCC entity's detail card, **`i`** jumps to that entity's ITU-zone
+  definition (`z` jumps to the CQ zone). Embedded from the RSGB ITU zones list, offline.
+- **Link budget** — the full chain, live-recalc: **TX power → feedline → antenna →
+  free-space path (+ extra losses) → RX antenna → feedline → receiver noise floor →
+  SNR → margin**. Twelve inputs scroll in a window (`;`/`.` move, type to edit); a
+  **Mode** row (`,`/`/`) presets bandwidth + required SNR together (CW 500 Hz, SSB, FM,
+  1k2/9k6 packet, FT8, JT65/Q65, or Custom). Pinned outputs show EIRP, FSPL, RX power,
+  noise floor (−174 dBm/Hz + 10·log BW + NF), SNR, an **S-meter estimate** (IARU S9 =
+  −93 dBm above 30 MHz, −73 below, 6 dB/S-unit), and the **margin**, color-coded:
+  green ≥ 6 dB (solid), orange 0–6 (thin), red < 0 (no copy).
 - **Forms** — `;`/`.` move between fields; type digits to edit a value (ENTER or
   moving off the field commits it); on a pick-list field (e.g. the coax type) `,`/`/`
   cycle the choices; results recompute instantly. **Yagi and quad take an element
   count** (up to 12 / 8) and list every element; `,`/`/` scroll the output when the
   list runs past the screen. The Tools menu itself scrolls when it grows past eleven
   entries. `` ` `` back.
+- **RF exposure (MPE)** — enter frequency, power, duty cycle and antenna gain; shows the
+  FCC OET-65 **Maximum Permissible Exposure** limits (controlled and uncontrolled, by
+  band) and the estimated **compliance distances** in meters, plus average power and a
+  with-ground-reflection worst case. A far-field estimate for planning — not a substitute
+  for a full station RF-exposure evaluation.
+- **Battery runtime** — enter capacity (Ah), RX and TX current draw, TX duty cycle and
+  the usable fraction of capacity; shows the duty-weighted **average current** and the
+  estimated **runtime** (decimal hours and h:m). Handy for sizing a field battery.
+- **Orbit lifetime (debris)** — for CubeSat builders assessing post-mission disposal:
+  enter circular-orbit altitude, mass, cross-sectional area and drag coefficient; shows
+  the **ballistic coefficient** and an estimated **orbital lifetime** (drag decay through
+  an exponential-atmosphere model), with pass/fail against the **25-year** and newer
+  **5-year** debris-mitigation guidelines. This is an order-of-magnitude estimate at
+  nominal solar activity (real lifetime swings several-fold over the solar cycle) — a
+  planning figure, **not** a compliance determination. Use **NASA DAS** for that.
+- **Cross-section area** — the satellite's projected (drag) area. Pick a **CubeSat form
+  factor** (`,`/`/` — 0.5U through 16U) to fill the body dimensions, or choose **Custom**
+  and enter any body **X/Y/Z** (cm); add **deployable panel area** (m²) if fitted. Shows
+  the **end-on** (minimum) and **broadside** faces, the **maximum projected** area at any
+  orientation (√(ab²+bc²+ca²)), and the **tumbling average** ((ab+bc+ca)/2 by Cauchy's
+  theorem; a flat panel contributes half its area). The tumbling average is the
+  drag-relevant figure — it's shown as **"→ debris Area"** to drop straight into the
+  Orbit-lifetime tool.
 
 ### Glossary & math
 

@@ -256,7 +256,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   (`s`), a **Tech help** guide (`t`, portable antennas with the Arrow Yagi as the top pick,
   feedline/pointing/operating tips, and getting the interfaces and logging working), and a
   **Learn** screen (`l`, in-depth radio and orbital theory and how amateur satellites work
-  internally).
+  internally, plus modulation types for HF/VHF-UHF/satellite/EME and a satellite-telemetry explainer).
 - **QSO logging + ADIF.** Press `l` while tracking to log a contact (UTC, satellite,
   up/downlink, mode, your grid + theirs, RST, notes) to a CSV on the card **without
   interrupting Doppler control** — or add one **after the fact** from the Log menu,
@@ -378,7 +378,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   **calibration**, and a **factory reset**.
 
 - **Tools hub** (About -> `t`) — offline bench tools: an infix **scientific
-  calculator**, a **programmer's calculator** (hex/dec/bin/oct + bitwise ops), (degree trig, `Ans`) plus live-recalc forms for **coax loss/power**,
+  calculator**, a **programmer's calculator** (hex/dec/bin/oct + bitwise ops), a **char lookup** (any base → ASCII + Morse + Baudot/ITA2 + BCD), a **DXCC entity lookup** (prefix/name/code → zones, continent, notes; 402 entities, offline), a **CQ (WAZ) zone reference** (all 40 zones with definitions, cross-linked from DXCC), an **ITU zone reference** (cross-linked from DXCC), a full **link-budget calculator** (EIRP/FSPL/noise-floor/SNR/margin with mode presets and an S-meter estimate), an **RF-exposure (MPE) calculator** (FCC OET-65 limits + compliance distances), a **battery-runtime** estimator, an **orbital-lifetime / debris** estimator (drag decay vs the 25-yr/5-yr disposal guidelines), a **cross-section (drag area)** calculator (CubeSat presets + deployable panels, feeding the debris tool), (degree trig, `Ans`) plus live-recalc forms for **coax loss/power**,
   **dipole / vertical / yagi / quad** antenna dimensions, **RF unit** conversions,
   **SWR / return loss**, **free-space path loss**, and a **unit converter**. All math
   is local and works with no network.

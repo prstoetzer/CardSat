@@ -7,7 +7,10 @@
 #include <LittleFS.h>
 #include "storage.h"
 #include "lotw.h"        // LoTW .tq8 build + upload (SD-required)
-#include "lotw_subdiv.h" // LoTW intl administrative-subdivision tables (flash const)
+#include "lotw_subdiv.h"
+#include "dxcc_lookup.h" // DXCC entity lookup table (generated from ARRL list)
+#include "cqzones.h"      // CQ WAZ zone definitions (generated from cqww.com)
+#include "ituzones.h"     // ITU zone definitions (generated from RSGB list)
 #include "notes.h"       // plain-text note browser + editor storage
 #include <time.h>
 #include <sys/time.h>
@@ -258,7 +261,10 @@ void App::setup() {
   else setStatus("No GP data yet. Use Update.");
   db.loadManualGpFile();    // merge any hand-entered satellites
   loadSpaceWeather();       // restore cached F10.7 for the decay estimate
-  loadWeatherCache();       // restore cached terrestrial weather for offline view
+  bool wxOk = loadWeatherCache();   // restore cached terrestrial weather for offline view
+  Serial.printf("[boot] caches: wx=%s spacewx=%s (fs=%s)\n",
+                wxOk ? "ok" : "none", (spaceF107 > 0) ? "ok" : "none",
+                Store::onSD() ? "SD" : "LittleFS");
   // Remove any leftover streaming scratch files (from older builds, or a fetch
   // interrupted by reset) so they don't waste space on the small filesystem.
   if (Store::fs().exists(FILE_SPACEWX_TMP)) Store::fs().remove(FILE_SPACEWX_TMP);
@@ -959,7 +965,7 @@ void App::fetchSpaceWeather() {
 
 // Restore the cached F10.7 at boot so the decay estimate is informed offline.
 void App::loadSpaceWeather() {
-  File f = LittleFS.open(FILE_SPACEWX, "r");
+  File f = Store::fs().open(FILE_SPACEWX, "r");   // Store::fs(), NOT raw LittleFS: on an SD-equipped unit LittleFS is never mounted
   if (!f) return;
   String line = f.readStringUntil('\n'); f.close();
   // "flux epoch [kp prevFlux prevEpoch prevKp]" -- the bracketed trend fields were
@@ -2044,7 +2050,7 @@ void App::fetchWeather() {
   }
 
   // Persist a compact cache: header line then one line per day.
-  File w = LittleFS.open(FILE_WEATHER, "w");
+  File w = Store::fs().open(FILE_WEATHER, "w");   // Store::fs() (see loadSpaceWeather note)
   if (w) {
     w.printf("%d %ld %.1f %d %d %.1f %d %d\n", (int)wxCachedUnits, (long)wxEpoch,
              wxTempNow, wxHumidNow, wxCodeNow, wxWindNow, wxWindDirNow, wxDayCount);
@@ -2062,7 +2068,7 @@ void App::fetchWeather() {
 
 // Restore cached weather at boot so the screen has data offline.
 bool App::loadWeatherCache() {
-  File f = LittleFS.open(FILE_WEATHER, "r");
+  File f = Store::fs().open(FILE_WEATHER, "r");   // Store::fs() (see loadSpaceWeather note)
   if (!f) return false;
   String hdr = f.readStringUntil('\n');
   if (hdr.length() == 0) { f.close(); return false; }
@@ -4654,6 +4660,14 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_TOOLS: keyTools(c, enter, back); break;
     case SCR_CALC: keyCalc(c, enter, back); break;
     case SCR_PCALC: keyPCalc(c, enter, back); break;
+    case SCR_CHARLK: keyCharLk(c, enter, back); break;
+    case SCR_DXLK: keyDxLk(c, enter, back); break;
+    case SCR_DXLKD: keyDxLkDetail(c, enter, back); break;
+    case SCR_CQZ: keyCqz(c, enter, back); break;
+    case SCR_CQZD: keyCqzDetail(c, enter, back); break;
+    case SCR_ITUZ: keyItuz(c, enter, back); break;
+    case SCR_ITUZD: keyItuzDetail(c, enter, back); break;
+    case SCR_LINKB: keyLinkB(c, enter, back); break;
     case SCR_TOOLFORM: keyToolForm(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
@@ -9492,6 +9506,14 @@ void App::draw() {
     case SCR_TOOLS: drawTools(); break;
     case SCR_CALC: drawCalc(); break;
     case SCR_PCALC: drawPCalc(); break;
+    case SCR_CHARLK: drawCharLk(); break;
+    case SCR_DXLK: drawDxLk(); break;
+    case SCR_DXLKD: drawDxLkDetail(); break;
+    case SCR_CQZ: drawCqz(); break;
+    case SCR_CQZD: drawCqzDetail(); break;
+    case SCR_ITUZ: drawItuz(); break;
+    case SCR_ITUZD: drawItuzDetail(); break;
+    case SCR_LINKB: drawLinkB(); break;
     case SCR_TOOLFORM: drawToolForm(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
@@ -9718,7 +9740,9 @@ void App::drawWorldMap() {
   // For each column we solve for the terminator latitude and fill the night side;
   // near the poles one whole column can be all day or all night (polar day/night),
   // which the per-pixel test handles naturally. Stepped 2 px for speed.
-  if (timeIsSet()) {
+  // Toggleable ('n'): some prefer the uncluttered map, and the shading costs a
+  // little draw time on each refresh.
+  if (cfg.mapNightShade && timeIsSet()) {
     double slat, slon; subSolarPoint(nowUtc(), slat, slon);
     const double D2R = 0.017453292519943295;
     double sS = sin(slat * D2R), cS = cos(slat * D2R);
@@ -9844,8 +9868,8 @@ void App::drawWorldMap() {
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(2, MY + 1); canvas.printf("%d favs", shown);
-  footer(cfg.mapCenterLon != 0 ? "` bk  f hi  c=ctr 0   yel/cyn sun/ecl"
-                               : "` bk  f hi  c=ctr QTH yel/cyn sun/ecl");
+  footer(cfg.mapCenterLon != 0 ? "` bk  f hi  c=ctr0   n night  sun/ecl"
+                               : "` bk  f hi  c=ctrQTH n night  sun/ecl");
 }
 
 void App::keyWorldMap(char c, bool enter, bool back) {
@@ -9859,6 +9883,11 @@ void App::keyWorldMap(char c, bool enter, bool back) {
     Observer o = loc.obs();
     if (cfg.mapCenterLon != 0) cfg.mapCenterLon = 0;        // back to 0-centered
     else if (o.valid)          cfg.mapCenterLon = (int16_t)lround(o.lon);  // center on QTH
+    cfg.save();
+    lastDrawMs = 0;
+  }
+  if (c == 'n') {                             // toggle the night-hemisphere shading
+    cfg.mapNightShade = !cfg.mapNightShade;
     cfg.save();
     lastDrawMs = 0;
   }
@@ -10012,7 +10041,8 @@ void App::drawHelp() {
     " m  user guide",
     " s  ham satellite history",
     " t  tech help (antennas etc)",
-    " l  learn (radio+orbit theory)",
+    " l  learn (radio+orbit theory,",
+    "    modulation, telemetry)",
     " f  frequencies / band plan",
     " b  screenshot to SD",
     " ;/.  up/down",
@@ -11069,6 +11099,109 @@ void App::drawLearn() {
     " The physics is over a century",
     " old; the fun is brand new every",
     " pass. 73!",
+    "MODULATION: HOW SIGNALS CARRY",
+    " Modulation is how you put voice",
+    " or data onto a radio carrier.",
+    " The mode you pick trades off",
+    " bandwidth, power efficiency, and",
+    " how well it survives noise and",
+    " Doppler.",
+    "HF MODES (3-30 MHz)",
+    " CW (on/off keyed Morse): the",
+    " narrowest, most power-efficient",
+    " mode - a few Hz of copy under",
+    " the noise. SSB (single sideband,",
+    " USB/LSB): voice in ~2.4 kHz, the",
+    " HF workhorse. AM: older, wider",
+    " (~6 kHz), carrier + two",
+    " sidebands. Digital: RTTY (FSK),",
+    " PSK31 (phase shift, ~60 Hz),",
+    " and FT8/FT4 (weak-signal, decodes",
+    " ~20-25 dB below the noise) now",
+    " dominate the data segments.",
+    "VHF/UHF MODES (50 MHz+)",
+    " FM: wide (~12-16 kHz) but capture",
+    " effect gives clean full-quieting",
+    " audio - the repeater and simplex",
+    " standard. SSB/CW: used for weak-",
+    " signal work, meteor scatter, and",
+    " tropo on the low ends of each",
+    " band. Digital voice: D-STAR,",
+    " C4FM/Fusion, DMR - voice sampled,",
+    " compressed (AMBE/vocoder), then",
+    " sent as digital symbols.",
+    "SATELLITE MODES",
+    " Linear transponders relay a whole",
+    " slice of band, so you work them",
+    " in SSB or CW (efficient, many",
+    " users at once, and you can hear",
+    " your own downlink). FM birds use",
+    " a single 5 kHz channel - one QSO",
+    " at a time, easy with an HT.",
+    " Digital birds carry packet (AX.25",
+    " AFSK/GMSK) or store-and-forward",
+    " data. Mode letters (U/v, V/u...)",
+    " name the uplink/downlink bands.",
+    "EME (MOONBOUNCE)",
+    " The Moon is a weak, noisy, moving",
+    " reflector ~2.5 s round trip away.",
+    " Path loss is enormous, so EME",
+    " lives on the most efficient modes:",
+    " CW by ear for big stations, and",
+    " JT65 / Q65 (weak-signal digital,",
+    " long slow tones with strong error",
+    " coding) to pull signals tens of",
+    " dB out of the noise. Libration",
+    " smears the echo, so narrow, slow,",
+    " coded modes win.",
+    "SATELLITE TELEMETRY",
+    " Telemetry is the beacon a bird",
+    " sends about itself: battery",
+    " voltage, currents, temperatures,",
+    " spin, mode, and computer status.",
+    " It rides a separate beacon or is",
+    " interleaved with the transponder,",
+    " and ground stations decode and",
+    " report it - collectively acting",
+    " as a distributed health monitor.",
+    "HOW IT WORKS",
+    " Onboard sensors feed an analog-to-",
+    " digital converter; the flight",
+    " computer frames the values with",
+    " IDs and a checksum, then keys the",
+    " beacon transmitter. On the ground",
+    " you demodulate, check the frame,",
+    " and software converts raw counts",
+    " back to volts and degrees using",
+    " known calibration curves.",
+    "MODES OVER THE YEARS",
+    " Early birds (OSCAR 1, 1961) sent",
+    " the simplest telemetry possible:",
+    " a CW beacon whose keying speed",
+    " tracked temperature - copy it by",
+    " ear. Next came Morse and then",
+    " RTTY telemetry with numeric",
+    " channels sent as tones.",
+    " The 1980s-90s standardized on",
+    " AFSK/FSK packet radio (AX.25,",
+    " 1200 bps Bell 202, later 9600 bps",
+    " G3RUH GMSK) - the same packet",
+    " your TNC decodes on 145.825.",
+    " Modern satellites use BPSK/FSK",
+    " with strong forward error",
+    " correction; many CubeSats send",
+    " highly-coded BPSK telemetry that",
+    " tools like FoxTelem or SatNOGS",
+    " decode, log, and upload to a",
+    " shared database automatically.",
+    "WHY IT MATTERS",
+    " Telemetry is how operators and",
+    " control teams know a bird is",
+    " healthy, which transponder is on,",
+    " and when a battery or eclipse",
+    " season is stressing it. Reporting",
+    " what you decode genuinely helps",
+    " keep the birds flying. 73!",
   };
   const int total = (int)(sizeof(L) / sizeof(L[0]));
   const int rows = 9;
@@ -15570,11 +15703,17 @@ void App::keyAmsRpick(char c, bool enter, bool back) {
 
 // Tool ids for the live-recalc form engine.
 enum { TOOL_COAX = 0, TOOL_DIPOLE, TOOL_VERTICAL, TOOL_YAGI, TOOL_QUAD,
-       TOOL_RFCONV, TOOL_SWR, TOOL_FSPL, TOOL_UNITS, TOOL__N };
+       TOOL_RFCONV, TOOL_SWR, TOOL_FSPL, TOOL_UNITS, TOOL_RFEXP, TOOL_BATT,
+       TOOL_DEBRIS, TOOL_XAREA, TOOL__N };
 
 static const char* const TOOLS_NAMES[] = {
   "Scientific calculator",
   "Programmer calc (hex/bin)",
+  "Char lookup (ASCII/RTTY)",
+  "DXCC entity lookup",
+  "CQ zones (WAZ)",
+  "ITU zones",
+  "Link budget",
   "Coax loss / power",
   "Dipole length",
   "Vertical / ground plane",
@@ -15584,6 +15723,10 @@ static const char* const TOOLS_NAMES[] = {
   "SWR / return loss",
   "Free-space path loss",
   "Unit converter",
+  "RF exposure (MPE)",
+  "Battery runtime",
+  "Orbit lifetime (debris)",
+  "Cross-section area",
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
@@ -15617,8 +15760,18 @@ void App::keyTools(char c, bool enter, bool back) {
       screen = SCR_CALC;
     } else if (toolsSel == 1) {                // programmer's calculator
       screen = SCR_PCALC;
+    } else if (toolsSel == 2) {                // character / raw-value lookup
+      screen = SCR_CHARLK;
+    } else if (toolsSel == 3) {                // DXCC entity lookup
+      dxQuery = ""; dxRunFilter(); screen = SCR_DXLK;
+    } else if (toolsSel == 4) {                // CQ (WAZ) zone reference
+      cqzSel = 0; cqzScroll = 0; screen = SCR_CQZ;
+    } else if (toolsSel == 5) {                // ITU zone reference
+      ituSel = 0; ituScroll = 0; screen = SCR_ITUZ;
+    } else if (toolsSel == 6) {                // link budget calculator
+      lbInit(); screen = SCR_LINKB;
     } else {                                   // one of the live-recalc forms
-      toolFormInit(toolsSel - 2);              // form ids are toolsSel-2 (two calcs precede)
+      toolFormInit(toolsSel - 7);              // form ids are toolsSel-7 (seven tools precede)
       screen = SCR_TOOLFORM;
     }
     lastDrawMs = 0;
@@ -15916,6 +16069,596 @@ void App::keyPCalc(char c, bool enter, bool back) {
   }
 }
 
+// ---------------------------------------------------------------------------
+//  Character / raw-value lookup (SCR_CHARLK). Enter a byte in hex, dec, bin or
+//  oct and see everything it represents at once: the ASCII character (control
+//  codes by name), its Morse pattern, the Baudot/ITA2 (US-TTY) letters- and
+//  figures-shift meaning for 5-bit values, and the BCD reading (CI-V frequency
+//  bytes are BCD). ;/. browse +-1, ,// cycle the entry base, digits type in
+//  the current base, a non-hex letter (g-z) looks that character up directly.
+// ---------------------------------------------------------------------------
+namespace {
+  const char* const ASCII_NAME[33] = {
+    "NUL","SOH","STX","ETX","EOT","ENQ","ACK","BEL","BS","TAB","LF","VT","FF",
+    "CR","SO","SI","DLE","DC1","DC2","DC3","DC4","NAK","SYN","ETB","CAN","EM",
+    "SUB","ESC","FS","GS","RS","US","SP" };
+  // ITA2 / US-TTY, 5-bit codes 0..31: letters shift and figures shift.
+  const char* const ITA2_LTRS[32] = {
+    "NUL","E","LF","A","SP","S","I","U","CR","D","R","J","N","F","C","K",
+    "T","Z","L","W","H","Y","P","Q","O","B","G","FIGS","M","X","V","LTRS" };
+  const char* const ITA2_FIGS[32] = {
+    "NUL","3","LF","-","SP","BEL","8","7","CR","$","4","'",",","!",":","(",
+    "5","\"",")","2","#","6","0","1","9","?","&","FIGS",".","/",";","LTRS" };
+  // Morse for digits (letters come from the game's MORSE_TBL).
+  const char* const MORSE_DIG[10] = {
+    "-----",".----","..---","...--","....-",".....","-....","--...","---..","----." };
+
+  String clkBaseFmt(uint8_t v, int base) {
+    char b[12];
+    if (base == 10)      snprintf(b, sizeof(b), "%u", v);
+    else if (base == 8)  snprintf(b, sizeof(b), "%o", v);
+    else if (base == 16) snprintf(b, sizeof(b), "%02X", v);
+    else { int k = 0; for (int i = 7; i >= 0; --i) b[k++] = char('0' + ((v >> i) & 1)); b[k] = 0; }
+    return String(b);
+  }
+}
+
+void App::drawCharLk() {
+  header("Char lookup");
+  canvas.setTextSize(1);
+  uint8_t v = clkVal;
+  // The value in all four bases; the active entry base is highlighted.
+  struct { const char* tag; int base; } B[4] = { {"HEX",16},{"DEC",10},{"BIN",2},{"OCT",8} };
+  int x = 4;
+  for (int i = 0; i < 4; ++i) {
+    bool act = (B[i].base == clkBase);
+    canvas.setTextColor(act ? CL_CYAN : CL_GREY, CL_BLACK);
+    canvas.setCursor(x, 20); canvas.print(B[i].tag);
+    canvas.setTextColor(act ? CL_WHITE : CL_GREY, CL_BLACK);
+    String s = clkBaseFmt(v, B[i].base);
+    canvas.setCursor(x, 30); canvas.print(s);
+    x += (i == 1) ? 66 : 52;                       // extra room after DEC for BIN's 8 digits
+  }
+  canvas.drawFastHLine(4, 42, 232, CL_MGREY);
+  // The character itself, large, plus its ASCII name.
+  canvas.setTextSize(2);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(8, 50);
+  if (v > 32 && v < 127)      { char cs[2] = { (char)v, 0 }; canvas.print(cs); }
+  else if (v == 32)             canvas.print("_");
+  else                          canvas.print("*");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(40, 54);
+  if (v <= 32)       canvas.printf("ASCII %s (control)", ASCII_NAME[v]);
+  else if (v < 127)  canvas.printf("ASCII '%c'", (char)v);
+  else if (v == 127) canvas.print("ASCII DEL (control)");
+  else               canvas.print("extended (no ASCII)");
+  int y = 72;
+  auto row = [&](const char* k, const String& val, uint16_t col) {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y); canvas.print(k);
+    canvas.setTextColor(col, CL_BLACK);     canvas.setCursor(70, y); canvas.print(val);
+    y += 10;
+  };
+  // Morse (letters from the game's table, digits from ours).
+  String mo = "--";
+  if (v >= 'A' && v <= 'Z')      mo = MORSE_TBL[v - 'A'];
+  else if (v >= 'a' && v <= 'z') mo = MORSE_TBL[v - 'a'];
+  else if (v >= '0' && v <= '9') mo = MORSE_DIG[v - '0'];
+  row("Morse", mo, CL_WHITE);
+  // Baudot / ITA2 (5-bit values only).
+  if (v < 32) row("Baudot", String(ITA2_LTRS[v]) + " / " + ITA2_FIGS[v] + "  (LTRS/FIGS, US-TTY)", CL_WHITE);
+  else        row("Baudot", "-- (5-bit: 0-31)", CL_GREY);
+  // BCD reading (both nibbles must be decimal digits).
+  int hi = (v >> 4) & 0xF, lo = v & 0xF;
+  row("BCD", (hi <= 9 && lo <= 9) ? String(hi) + String(lo) : String("-- (nibble > 9)"),
+      (hi <= 9 && lo <= 9) ? CL_CYAN : CL_GREY);
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, y + 2); canvas.print("g-z: look a character up directly");
+  footer(";/. +-1  ,// base  digits enter  ` back");
+}
+
+void App::keyCharLk(char c, bool enter, bool back) {
+  (void)enter;
+  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
+  if (isUp(c))   { clkVal--; clkFresh = true; lastDrawMs = 0; return; }   // browse
+  if (isDown(c)) { clkVal++; clkFresh = true; lastDrawMs = 0; return; }
+  if (c == ',' || c == '/') {                    // cycle entry base
+    static const int ORDER[4] = { 16, 10, 2, 8 };
+    int cur = 0; for (int i = 0; i < 4; ++i) if (ORDER[i] == clkBase) cur = i;
+    clkBase = ORDER[(cur + (c == '/' ? 1 : 3)) % 4];
+    lastDrawMs = 0; return;
+  }
+  if (back) {                                     // DEL: drop the low digit (edit-only)
+    clkVal = (uint8_t)(clkVal / clkBase); lastDrawMs = 0; return;
+  }
+  if (c == 'x') { clkVal = 0; clkFresh = true; lastDrawMs = 0; return; }
+  // digit in the current base?
+  int d = -1;
+  if (c >= '0' && c <= '9') d = c - '0';
+  else if (clkBase == 16 && c >= 'a' && c <= 'f') d = c - 'a' + 10;
+  else if (clkBase == 16 && c >= 'A' && c <= 'F') d = c - 'A' + 10;
+  if (d >= 0 && d < clkBase) {
+    if (clkFresh) { clkVal = 0; clkFresh = false; }
+    clkVal = (uint8_t)((clkVal * clkBase + d) & 0xFF);
+    lastDrawMs = 0; return;
+  }
+  // any other letter: direct character lookup (the typed character itself)
+  if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+    clkVal = (uint8_t)c; clkFresh = true; lastDrawMs = 0; return;
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  DXCC entity lookup (SCR_DXLK search + SCR_DXLKD detail). Type a prefix, a
+//  partial name, or an entity code; matches list live. ENTER opens a detail
+//  card. Data is the embedded DXCC_LK[] table (dxcc_lookup.h), generated from
+//  the ARRL DXCC list, so it works entirely offline.
+// ---------------------------------------------------------------------------
+
+// Case-insensitive "does hay contain needle" (needle already upper-cased).
+static bool dxContainsCI(const char* hay, const char* needleUpper) {
+  if (!*needleUpper) return true;
+  for (const char* h = hay; *h; ++h) {
+    const char* a = h; const char* b = needleUpper;
+    while (*a && *b) {
+      char ca = *a; if (ca >= 'a' && ca <= 'z') ca -= 32;
+      if (ca != *b) break;
+      ++a; ++b;
+    }
+    if (!*b) return true;
+  }
+  return false;
+}
+
+// Does any comma/space-separated prefix token in 'field' start with 'needleUpper'?
+static bool dxPrefixStarts(const char* field, const char* needleUpper) {
+  if (!*needleUpper) return false;
+  const char* p = field;
+  while (*p) {
+    while (*p == ',' || *p == ' ') ++p;          // token start
+    const char* b = needleUpper; const char* a = p;
+    bool ok = true;
+    while (*b) {
+      char ca = *a; if (ca >= 'a' && ca <= 'z') ca -= 32;
+      if (ca != *b) { ok = false; break; }
+      ++a; ++b;
+    }
+    if (ok) return true;
+    while (*p && *p != ',' && *p != ' ') ++p;     // skip to next token
+  }
+  return false;
+}
+
+void App::dxRunFilter() {
+  dxMatchN = 0; dxSel = 0; dxScroll = 0;
+  const int CAP = (int)(sizeof(dxMatch) / sizeof(dxMatch[0]));
+  // Upper-case copy of the query for case-insensitive matching.
+  char q[24]; int qi = 0;
+  for (int i = 0; i < (int)dxQuery.length() && qi < 23; ++i) {
+    char c = dxQuery[i]; if (c >= 'a' && c <= 'z') c -= 32; q[qi++] = c;
+  }
+  q[qi] = 0;
+  bool numeric = (qi > 0);
+  for (int i = 0; i < qi; ++i) if (q[i] < '0' || q[i] > '9') { numeric = false; break; }
+  for (int i = 0; i < DXCC_LK_N && dxMatchN < CAP; ++i) {
+    const DxccLk& e = DXCC_LK[i];
+    bool hit = false;
+    if (qi == 0) hit = true;
+    else if (numeric) {
+      hit = (atoi(q) == e.code);                  // numeric code match (001 == 1 == 1)
+    } else {
+      hit = dxPrefixStarts(e.prefix, q) || dxContainsCI(e.name, q);
+    }
+    if (hit) dxMatch[dxMatchN++] = i;
+  }
+}
+
+void App::drawDxLk() {
+  header("DXCC lookup");
+  canvas.setTextSize(1);
+  // Query line
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 20); canvas.print("Prefix / name / code:");
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(4, 31); canvas.print("> "); canvas.print(dxQuery); canvas.print("_");
+  canvas.drawFastHLine(4, 42, 232, CL_MGREY);
+  // Match list
+  const int LH = 10, VIS = 7, Y0 = 46;
+  if (dxSel < dxScroll) dxScroll = dxSel;
+  if (dxSel >= dxScroll + VIS) dxScroll = dxSel - VIS + 1;
+  if (dxMatchN == 0) {
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    canvas.setCursor(8, Y0 + 4); canvas.print(dxQuery.length() ? "no match" : "type to search 402 entities");
+  }
+  for (int r = 0; r < VIS; ++r) {
+    int m = dxScroll + r; if (m >= dxMatchN) break;
+    const DxccLk& e = DXCC_LK[dxMatch[m]];
+    int y = Y0 + r * LH; bool sel = (m == dxSel);
+    if (sel) canvas.fillRect(2, y - 1, 236, 10, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : (e.deleted ? CL_MGREY : CL_WHITE), sel ? CL_SELBG : CL_BLACK);
+    char line[44];
+    snprintf(line, sizeof(line), "%-11.11s %3d %.20s", e.prefix[0] ? e.prefix : "-", e.code, e.name);
+    canvas.setCursor(6, y); canvas.print(line);
+  }
+  if (dxScroll > 0)                { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, Y0);            canvas.print("^"); }
+  if (dxScroll + VIS < dxMatchN)   { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, Y0 + 6 * LH);  canvas.print("v"); }
+  char ft[42];
+  snprintf(ft, sizeof(ft), "%d match  ENTER open  ;/. pick  ` back", dxMatchN);
+  footer(ft);
+}
+
+void App::keyDxLk(char c, bool enter, bool back) {
+  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (dxSel > 0) dxSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (dxSel < dxMatchN - 1) dxSel++; lastDrawMs = 0; return; }
+  if (enter) {
+    if (dxMatchN > 0) { dxDetail = dxMatch[dxSel]; screen = SCR_DXLKD; lastDrawMs = 0; }
+    return;
+  }
+  if (back) {                                    // DEL edits the query
+    if (dxQuery.length()) { dxQuery.remove(dxQuery.length() - 1); dxRunFilter(); }
+    lastDrawMs = 0; return;
+  }
+  // printable query characters (letters, digits, punctuation used in prefixes)
+  if (c > 32 && c < 127) { if (dxQuery.length() < 20) { dxQuery += c; dxRunFilter(); } lastDrawMs = 0; }
+}
+
+void App::drawDxLkDetail() {
+  const DxccLk& e = DXCC_LK[dxDetail];
+  header("DXCC entity");
+  canvas.setTextSize(1);
+  int y = 20;
+  auto field = [&](const char* k, const String& v, uint16_t col) {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y);  canvas.print(k);
+    canvas.setTextColor(col, CL_BLACK);     canvas.setCursor(78, y); canvas.print(v);
+    y += 11;
+  };
+  // name, wrapped to two lines if needed
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  String nm = e.name;
+  canvas.setCursor(6, y);
+  canvas.print(nm.length() > 38 ? nm.substring(0, 38) : nm);
+  y += 10;
+  if (nm.length() > 38) { canvas.setCursor(6, y); canvas.print(nm.substring(38)); y += 10; }
+  y += 2;
+  field("Code", String(e.code), CL_WHITE);
+  field("Prefix", e.prefix[0] ? String(e.prefix) : String("(see notes)"), CL_WHITE);
+  field("Continent", e.cont, CL_WHITE);
+  field("ITU zone", e.itu, CL_WHITE);
+  field("CQ zone", e.cq, CL_WHITE);
+  String flags;
+  if (e.deleted)    flags += "DELETED  ";
+  if (e.thirdParty) flags += "3rd-party OK";
+  if (flags.length()) field("Status", flags, e.deleted ? CL_ORANGE : CL_GREEN);
+  // footnotes
+  if (e.note1 >= 0 && e.note1 < DXCC_NOTES_N) {
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    String n1 = DXCC_NOTES[e.note1];
+    canvas.setCursor(6, y); canvas.print("note: "); 
+    canvas.print(n1.length() > 33 ? n1.substring(0, 33) : n1); y += 9;
+    if (n1.length() > 33) { canvas.setCursor(6, y); canvas.print("  "); canvas.print(n1.substring(33, 71)); y += 9; }
+  }
+  if (e.note2 >= 0 && e.note2 < DXCC_NOTES_N && y < 116) {
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    String n2 = DXCC_NOTES[e.note2];
+    canvas.setCursor(6, y); canvas.print("note: ");
+    canvas.print(n2.length() > 33 ? n2.substring(0, 33) : n2); y += 9;
+  }
+  footer("z CQ-def  i ITU-def  ` back");
+}
+
+void App::keyDxLkDetail(char c, bool enter, bool back) {
+  (void)enter;
+  if (c == '`' || back) { screen = SCR_DXLK; lastDrawMs = 0; return; }
+  if (c == 'z') {                               // jump to this entity's CQ zone definition
+    int zn = atoi(DXCC_LK[dxDetail].cq);        // leading number of the CQ field (e.g. "03-05" -> 3)
+    if (zn >= 1 && zn <= 40) { openCqZone(zn, SCR_DXLKD); lastDrawMs = 0; }
+    return;
+  }
+  if (c == 'i') {                               // jump to this entity's ITU zone definition
+    int zn = atoi(DXCC_LK[dxDetail].itu);       // leading number of the ITU field
+    if (zn >= 1 && zn <= 90) { openItuZone(zn, SCR_DXLKD); lastDrawMs = 0; }
+    return;
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  CQ (WAZ) zone reference (SCR_CQZ list + SCR_CQZD detail). All 40 zones with
+//  their names; the detail view shows the full prefix/region text, scrolled if
+//  it runs long. Reachable from the Tools hub, and jumped-to from a DXCC
+//  entity's CQ zone (cqzReturn remembers where to go back to). Data is the
+//  embedded CQ_ZONES[] table (cqzones.h), generated from the CQ WAZ list.
+// ---------------------------------------------------------------------------
+
+// Open the detail card for a given zone number (1..40); 'ret' is the screen to
+// return to. Used by the list and by the DXCC detail card's jump.
+void App::openCqZone(int zoneNum, int ret) {
+  int idx = 0;
+  for (int i = 0; i < CQ_ZONES_N; ++i) if (CQ_ZONES[i].n == zoneNum) { idx = i; break; }
+  cqzDetail = idx; cqzDScroll = 0; cqzReturn = ret; screen = SCR_CQZD;
+}
+
+void App::drawCqz() {
+  header("CQ zones (WAZ)");
+  canvas.setTextSize(1);
+  const int LH = 13, VIS = 8, Y0 = 20;
+  if (cqzSel < cqzScroll) cqzScroll = cqzSel;
+  if (cqzSel >= cqzScroll + VIS) cqzScroll = cqzSel - VIS + 1;
+  for (int r = 0; r < VIS; ++r) {
+    int i = cqzScroll + r; if (i >= CQ_ZONES_N) break;
+    int y = Y0 + r * LH; bool sel = (i == cqzSel);
+    if (sel) canvas.fillRect(2, y - 1, 236, 13, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_CYAN, sel ? CL_SELBG : CL_BLACK);
+    char num[6]; snprintf(num, sizeof(num), "%2d", CQ_ZONES[i].n);
+    canvas.setCursor(6, y + 3); canvas.print(num);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    String nm = CQ_ZONES[i].name;
+    canvas.setCursor(30, y + 3); canvas.print(nm.length() > 34 ? nm.substring(0, 34) : nm);
+  }
+  if (cqzScroll > 0)                { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, Y0);           canvas.print("^"); }
+  if (cqzScroll + VIS < CQ_ZONES_N) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, Y0 + 7 * LH); canvas.print("v"); }
+  footer("ENTER detail  ;/. pick  ` back");
+}
+
+void App::keyCqz(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (cqzSel > 0) cqzSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (cqzSel < CQ_ZONES_N - 1) cqzSel++; lastDrawMs = 0; return; }
+  if (enter) { openCqZone(CQ_ZONES[cqzSel].n, SCR_CQZ); lastDrawMs = 0; return; }
+}
+
+void App::drawCqzDetail() {
+  const CqZone& z = CQ_ZONES[cqzDetail];
+  char h[24]; snprintf(h, sizeof(h), "CQ zone %d", z.n);
+  header(h);
+  canvas.setTextSize(1);
+  // Zone name (wrapped to two lines if needed).
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  String nm = z.name; int y = 20;
+  canvas.setCursor(6, y); canvas.print(nm.length() > 38 ? nm.substring(0, 38) : nm); y += 10;
+  if (nm.length() > 38) { canvas.setCursor(6, y); canvas.print(nm.substring(38)); y += 10; }
+  canvas.drawFastHLine(4, y + 1, 232, CL_MGREY); y += 6;
+  // Detail text, word-wrapped to ~39 chars/line, scrollable with ;/.
+  String d = z.detail;
+  const int WRAP = 39, LINES = 7;
+  int line = 0, shown = 0, pos = 0, L = d.length();
+  while (pos < L && shown < LINES) {
+    int end = pos + WRAP;
+    if (end >= L) end = L;
+    else { int sp = end; while (sp > pos && d[sp] != ' ') sp--; if (sp > pos) end = sp; }
+    if (line >= cqzDScroll) {
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(6, y); canvas.print(d.substring(pos, end)); y += 10; shown++;
+    }
+    line++; pos = end; while (pos < L && d[pos] == ' ') pos++;
+  }
+  bool more = (pos < L);
+  if (cqzDScroll > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 32); canvas.print("^"); }
+  if (more)           { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 108); canvas.print("v"); }
+  footer(more || cqzDScroll ? ";/. scroll  ` back" : "` back");
+}
+
+void App::keyCqzDetail(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = (cqzReturn == SCR_DXLKD) ? SCR_DXLKD : SCR_CQZ; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (cqzDScroll > 0) cqzDScroll--; lastDrawMs = 0; return; }
+  if (isDown(c)) { cqzDScroll++; lastDrawMs = 0; return; }   // draw clamps by simply showing fewer lines
+}
+
+// ---------------------------------------------------------------------------
+//  ITU zone reference (SCR_ITUZ list + SCR_ITUZD detail). ITU zones have no
+//  descriptive names, just a number and a prefix/region definition, and the
+//  numbering is not contiguous (this list is 1-75, 78, 90). Reachable from the
+//  Tools hub and jumped-to from a DXCC entity's ITU zone. Data is the embedded
+//  ITU_ZONES[] table (ituzones.h), generated from the RSGB ITU zones list.
+// ---------------------------------------------------------------------------
+
+void App::openItuZone(int zoneNum, int ret) {
+  int idx = -1;
+  for (int i = 0; i < ITU_ZONES_N; ++i) if (ITU_ZONES[i].n == zoneNum) { idx = i; break; }
+  if (idx < 0) return;                           // not a listed zone -- no jump
+  ituDetail = idx; ituDScroll = 0; ituReturn = ret; screen = SCR_ITUZD;
+}
+
+void App::drawItuz() {
+  header("ITU zones");
+  canvas.setTextSize(1);
+  const int LH = 11, VIS = 9, Y0 = 20;
+  if (ituSel < ituScroll) ituScroll = ituSel;
+  if (ituSel >= ituScroll + VIS) ituScroll = ituSel - VIS + 1;
+  for (int r = 0; r < VIS; ++r) {
+    int i = ituScroll + r; if (i >= ITU_ZONES_N) break;
+    int y = Y0 + r * LH; bool sel = (i == ituSel);
+    if (sel) canvas.fillRect(2, y - 1, 236, 11, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_CYAN, sel ? CL_SELBG : CL_BLACK);
+    char num[6]; snprintf(num, sizeof(num), "%2d", ITU_ZONES[i].n);
+    canvas.setCursor(6, y + 2); canvas.print(num);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    String d = ITU_ZONES[i].detail;
+    canvas.setCursor(30, y + 2); canvas.print(d.length() > 34 ? d.substring(0, 34) : d);
+  }
+  if (ituScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, Y0);           canvas.print("^"); }
+  if (ituScroll + VIS < ITU_ZONES_N) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, Y0 + 8 * LH); canvas.print("v"); }
+  footer("ENTER detail  ;/. pick  ` back");
+}
+
+void App::keyItuz(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (ituSel > 0) ituSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (ituSel < ITU_ZONES_N - 1) ituSel++; lastDrawMs = 0; return; }
+  if (enter) { openItuZone(ITU_ZONES[ituSel].n, SCR_ITUZ); lastDrawMs = 0; return; }
+}
+
+void App::drawItuzDetail() {
+  const ItuZone& z = ITU_ZONES[ituDetail];
+  char h[24]; snprintf(h, sizeof(h), "ITU zone %d", z.n);
+  header(h);
+  canvas.setTextSize(1);
+  int y = 22;
+  String d = z.detail;
+  const int WRAP = 39, LINES = 9;
+  int line = 0, shown = 0, pos = 0, L = d.length();
+  while (pos < L && shown < LINES) {
+    int end = pos + WRAP;
+    if (end >= L) end = L;
+    else { int sp = end; while (sp > pos && d[sp] != ' ') sp--; if (sp > pos) end = sp; }
+    if (line >= ituDScroll) {
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(6, y); canvas.print(d.substring(pos, end)); y += 10; shown++;
+    }
+    line++; pos = end; while (pos < L && d[pos] == ' ') pos++;
+  }
+  bool more = (pos < L);
+  if (ituDScroll > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 22);  canvas.print("^"); }
+  if (more)           { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 108); canvas.print("v"); }
+  footer(more || ituDScroll ? ";/. scroll  ` back" : "` back");
+}
+
+void App::keyItuzDetail(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = (ituReturn == SCR_DXLKD) ? SCR_DXLKD : SCR_ITUZ; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (ituDScroll > 0) ituDScroll--; lastDrawMs = 0; return; }
+  if (isDown(c)) { ituDScroll++; lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  Link budget calculator (SCR_LINKB). Computes the full chain:
+//    EIRP = Ptx(dBm) - TX line loss + TX antenna gain
+//    Prx  = EIRP - FSPL - extra losses + RX antenna gain - RX line loss
+//    N    = -174 dBm/Hz + 10*log10(BW) + NF        (kTB at 290 K + noise figure)
+//    SNR  = Prx - N ; margin = SNR - required SNR for the mode
+//  Twelve inputs scroll in a window; the key outputs stay pinned below and
+//  recompute live. Row 0 is a mode preset that sets bandwidth + required SNR
+//  as a pair (both stay editable afterwards). An S-meter estimate uses the
+//  IARU convention: S9 = -93 dBm above 30 MHz (-73 dBm below), 6 dB per S-unit.
+// ---------------------------------------------------------------------------
+namespace {
+  struct LbMode { const char* name; double bwHz; double reqSnr; };
+  // Required SNR is defined IN the listed bandwidth. Sensible planning figures:
+  // ear-copy CW in a 500 Hz filter, comfortable SSB, FM threshold-plus, packet
+  // through an FM channel, and the WSJT modes' decode thresholds referenced to
+  // their conventional 2.5 kHz passband.
+  const LbMode LB_MODES[] = {
+    { "CW (500Hz)",   500.0,    6.0 },
+    { "SSB",          2400.0,  10.0 },
+    { "FM voice",     15000.0, 12.0 },
+    { "AFSK 1k2",     15000.0, 13.0 },
+    { "GMSK 9k6",     20000.0, 13.0 },
+    { "FT8",          2500.0, -20.0 },
+    { "JT65/Q65",     2500.0, -24.0 },
+    { "Custom",       0.0,      0.0 },   // leaves BW / req-SNR untouched
+  };
+  const int LB_MODES_N = (int)(sizeof(LB_MODES) / sizeof(LB_MODES[0]));
+  const char* const LB_LABEL[12] = {
+    "Mode", "Freq MHz", "Dist km", "TX pwr W", "TX line dB", "TX ant dBi",
+    "Extra loss", "RX ant dBi", "RX line dB", "RX NF dB", "BW Hz", "Req SNR dB" };
+}
+
+void App::lbInit() {
+  lbSel = 1; lbScroll = 0; lbEditing = false; lbEditBuf = "";
+  lbVal[0] = 0;                 // (unused -- mode row shows LB_MODES[lbMode].name)
+  lbVal[1] = 435.0;             // freq MHz
+  lbVal[2] = 1000.0;            // distance km (typical LEO slant range)
+  lbVal[3] = 25.0;              // TX power W
+  lbVal[4] = 1.5;               // TX line loss dB
+  lbVal[5] = 12.0;              // TX antenna gain dBi
+  lbVal[6] = 2.0;               // extra losses dB (polarization + pointing + atm)
+  lbVal[7] = 0.0;               // RX antenna gain dBi
+  lbVal[8] = 0.0;               // RX line loss dB
+  lbVal[9] = 3.0;               // RX noise figure dB
+  lbMode = 1;                   // SSB
+  lbVal[10] = LB_MODES[lbMode].bwHz;
+  lbVal[11] = LB_MODES[lbMode].reqSnr;
+}
+
+void App::drawLinkB() {
+  header("Link budget");
+  canvas.setTextSize(1);
+  // --- input window: 5 rows over the 12 ---
+  const int VIS = 5, LH = 11, Y0 = 20;
+  if (lbSel < lbScroll) lbScroll = lbSel;
+  if (lbSel >= lbScroll + VIS) lbScroll = lbSel - VIS + 1;
+  for (int r = 0; r < VIS; ++r) {
+    int i = lbScroll + r; if (i >= LB_NF) break;
+    int y = Y0 + r * LH; bool sel = (i == lbSel);
+    if (sel) canvas.fillRect(2, y - 2, 236, 11, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(LB_LABEL[i]);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    String vs;
+    if (i == 0)                        vs = LB_MODES[lbMode].name;
+    else if (sel && lbEditing)         vs = lbEditBuf + "_";
+    else {
+      char b[20]; dtostrf(lbVal[i], 0, (i == 10) ? 0 : 1, b);   // BW as integer Hz
+      String r2(b); while (r2.indexOf('.') >= 0 && (r2.endsWith("0") || r2.endsWith("."))) r2.remove(r2.length() - 1);
+      vs = r2;
+    }
+    canvas.setCursor(130, y); canvas.print(vs);
+  }
+  if (lbScroll > 0)             { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, Y0);            canvas.print("^"); }
+  if (lbScroll + VIS < LB_NF)   { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, Y0 + 4 * LH);  canvas.print("v"); }
+  canvas.drawFastHLine(4, 77, 232, CL_MGREY);
+  // --- live outputs, pinned ---
+  double ptxDbm = 10.0 * log10(lbVal[3] * 1000.0);
+  double eirp = ptxDbm - lbVal[4] + lbVal[5];
+  double fspl = 32.44 + 20.0 * log10(lbVal[2]) + 20.0 * log10(lbVal[1]);
+  double prx  = eirp - fspl - lbVal[6] + lbVal[7] - lbVal[8];
+  double nflr = -174.0 + 10.0 * log10(lbVal[10] > 0 ? lbVal[10] : 1) + lbVal[9];
+  double snr  = prx - nflr;
+  double marg = snr - lbVal[11];
+  // S-meter estimate (IARU): S9 = -93 dBm >=30 MHz, -73 below; 6 dB per S-unit.
+  double s9 = (lbVal[1] >= 30.0) ? -93.0 : -73.0;
+  String smet;
+  if (prx >= s9) { char b[12]; snprintf(b, sizeof(b), "S9+%.0f", prx - s9); smet = b; }
+  else { int s = (int)lround(9.0 + (prx - s9) / 6.0); if (s < 0) s = 0; smet = "S" + String(s); }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 82);  canvas.printf("EIRP %.1f dBm   FSPL %.1f dB", eirp, fspl);
+  canvas.setCursor(6, 92);  canvas.printf("RX %.1f dBm   N %.1f dBm", prx, nflr);
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(6, 102); canvas.printf("SNR %.1f dB   ~%s", snr, smet.c_str());
+  uint16_t mc = (marg >= 6.0) ? CL_GREEN : (marg >= 0.0) ? CL_ORANGE : CL_RED;
+  canvas.setTextColor(mc, CL_BLACK);
+  canvas.setCursor(6, 112); canvas.printf("MARGIN %+.1f dB %s", marg,
+      (marg >= 6) ? "(solid)" : (marg >= 0) ? "(thin)" : "(no copy)");
+  if (lbSel == 0) footer(",// mode  ;/. field  ` back");
+  else            footer("type value  ;/. field  ` back");
+}
+
+void App::keyLinkB(char c, bool enter, bool back) {
+  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
+  auto commit = [&]() {
+    if (lbEditing) { lbVal[lbSel] = lbEditBuf.toFloat(); lbEditing = false; lbEditBuf = ""; }
+  };
+  if (isUp(c))   { commit(); if (--lbSel < 0) lbSel = LB_NF - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { commit(); if (++lbSel >= LB_NF) lbSel = 0;    lastDrawMs = 0; return; }
+  if (lbSel == 0) {                              // mode preset row
+    if (c == ',' || c == '/') {
+      lbMode = (lbMode + (c == '/' ? 1 : LB_MODES_N - 1)) % LB_MODES_N;
+      if (LB_MODES[lbMode].bwHz > 0) {           // Custom leaves the fields alone
+        lbVal[10] = LB_MODES[lbMode].bwHz;
+        lbVal[11] = LB_MODES[lbMode].reqSnr;
+      }
+      lastDrawMs = 0;
+    }
+    return;
+  }
+  if (back || c == 8 || c == 127) {              // DEL: edit-only backspace
+    if (lbEditing && lbEditBuf.length()) lbEditBuf.remove(lbEditBuf.length() - 1);
+    lastDrawMs = 0; return;
+  }
+  if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
+    if (!lbEditing) { lbEditing = true; lbEditBuf = ""; }
+    lbEditBuf += c; lastDrawMs = 0; return;
+  }
+  if (enter) { commit(); lastDrawMs = 0; return; }
+}
+
+
+
+
+
+
 
 // ---------------------------------------------------------------------------
 //  Live-recalc form engine. toolFormInit() sets up the fields for a tool; the
@@ -15933,11 +16676,90 @@ namespace {
     { "RG-174",   0.6621 }, { "Hardline1/2", 0.0703 },
   };
   const int COAX_N = (int)(sizeof(COAX_TBL) / sizeof(COAX_TBL[0]));
+
+  // Standard CubeSat form factors: name + nominal body dimensions X,Y,Z in cm.
+  // "Custom" leaves the dimension fields alone so any satellite can be entered.
+  struct XsecPreset { const char* name; double x, y, z; };
+  const XsecPreset XSEC_PRESET[] = {
+    { "1U",     10, 10, 10 }, { "2U",     10, 10, 20 }, { "3U",   10, 10, 30 },
+    { "6U",     10, 20, 30 }, { "12U",    20, 20, 30 }, { "16U",  20, 20, 40 },
+    { "0.5U",   10, 10, 5  }, { "Custom", 0,  0,  0  },
+  };
+  const int XSEC_PRESET_N = (int)(sizeof(XSEC_PRESET) / sizeof(XSEC_PRESET[0]));
+
+  // FCC OET-65 Maximum Permissible Exposure limits (mW/cm^2) by frequency (MHz).
+  double mpeUncontrolled(double f) {         // general population / uncontrolled
+    if (f < 1.34) return 100.0;
+    if (f < 30)   return 180.0 / (f * f);
+    if (f < 300)  return 0.2;
+    if (f < 1500) return f / 1500.0;
+    return 1.0;
+  }
+  double mpeControlled(double f) {           // occupational / controlled
+    if (f < 3.0)  return 100.0;
+    if (f < 30)   return 900.0 / (f * f);
+    if (f < 300)  return 1.0;
+    if (f < 1500) return f / 300.0;
+    return 5.0;
+  }
+  // OET-65 far-field compliance-distance estimate (cm):
+  //   S = P_mW*G/(4*pi*d^2)  ->  d = sqrt(P_mW*G/(4*pi*S))
+  double mpeDistCm(double P_w, double G_dbi, double duty, double S_limit) {
+    if (S_limit <= 0) return 0;
+    double P_mw = P_w * 1000.0 * (duty / 100.0);
+    double G = pow(10.0, G_dbi / 10.0);
+    return sqrt(P_mw * G / (4.0 * 3.14159265358979323846 * S_limit));
+  }
+
+  // Vallado exponential-atmosphere model: base altitude (km), nominal density
+  // (kg/m^3) at that base, and scale height (km). Used for a rough orbital-
+  // lifetime (debris) estimate. "Nominal" ~ mean solar activity; real lifetime
+  // swings several-fold over the solar cycle, so this is an order-of-magnitude
+  // planning figure, NOT a compliance determination (use NASA DAS for that).
+  struct AtmBand { double h0, rho0, H; };
+  const AtmBand ATM[] = {
+    {150, 2.070e-9, 22.523}, {180, 5.464e-10, 29.740}, {200, 2.789e-10, 37.105},
+    {250, 7.248e-11, 45.546}, {300, 2.418e-11, 53.628}, {350, 9.518e-12, 53.298},
+    {400, 3.725e-12, 58.515}, {450, 1.585e-12, 60.828}, {500, 6.967e-13, 63.822},
+    {600, 1.454e-13, 71.835}, {700, 3.614e-14, 88.667}, {800, 1.170e-14, 124.64},
+    {900, 5.245e-15, 181.05}, {1000, 3.019e-15, 268.00},
+  };
+  const int ATM_N = (int)(sizeof(ATM) / sizeof(ATM[0]));
+  const AtmBand& atmBand(double h_km) {
+    int idx = 0;
+    for (int i = 0; i < ATM_N; ++i) { if (h_km >= ATM[i].h0) idx = i; else break; }
+    return ATM[idx];
+  }
+  double atmDensity(double h_km) {
+    const AtmBand& b = atmBand(h_km);
+    return b.rho0 * exp(-(h_km - b.h0) / b.H);
+  }
+  // Orbital lifetime (years) for a near-circular orbit decaying via drag, by
+  // summing the time to descend through each 2 km slice from the start altitude
+  // down to ~150 km. da/dt = -B*rho*sqrt(mu*a); B = Cd*A/m.
+  double orbitLifetimeYr(double h_km, double mass, double area, double cd) {
+    const double MU = 3.986004418e14, RE = 6378137.0;
+    double B = cd * area / mass;
+    if (B <= 0 || h_km <= 150.0) return 0;
+    double t = 0, h = h_km;
+    while (h > 150.0) {
+      double h_lo = h - 2.0; if (h_lo < 150.0) h_lo = 150.0;
+      double r_mid = RE + ((h + h_lo) / 2.0) * 1000.0;
+      double H = atmBand(h).H * 1000.0;
+      double dt = (1.0 / (B * sqrt(MU * r_mid))) * H * (1.0 / atmDensity(h) - 1.0 / atmDensity(h_lo));
+      if (dt > 0) t += dt;
+      h = h_lo;
+    }
+    return t / (365.25 * 86400.0);
+  }
 }
 
 const char* App::tfChoiceLabel(int field, int idx) {
   if (toolId == TOOL_COAX && field == 0) {
     if (idx >= 0 && idx < COAX_N) return COAX_TBL[idx].name;
+  }
+  if (toolId == TOOL_XAREA && field == 0) {
+    if (idx >= 0 && idx < XSEC_PRESET_N) return XSEC_PRESET[idx].name;
   }
   return "?";
 }
@@ -15974,12 +16796,27 @@ void App::toolFormInit(int id) {
       tfN = 2; FLD(0, "Distance", "km", 1000.0); FLD(1, "Freq", "MHz", 145.0); break;
     case TOOL_UNITS:
       tfN = 1; FLD(0, "Value", "", 100.0); break;
+    case TOOL_RFEXP:
+      tfN = 4; FLD(0, "Freq", "MHz", 146.0); FLD(1, "Power", "W", 100.0);
+      FLD(2, "Duty", "%", 100.0); FLD(3, "Ant gain", "dBi", 2.15); break;
+    case TOOL_BATT:
+      tfN = 5; FLD(0, "Capacity", "Ah", 20.0); FLD(1, "RX draw", "A", 0.5);
+      FLD(2, "TX draw", "A", 8.0); FLD(3, "TX duty", "%", 30.0);
+      FLD(4, "Usable", "%", 80.0); break;
+    case TOOL_DEBRIS:
+      tfN = 4; FLD(0, "Altitude", "km", 550.0); FLD(1, "Mass", "kg", 4.0);
+      FLD(2, "Area", "m2", 0.03); FLD(3, "Drag Cd", "", 2.2); break;
+    case TOOL_XAREA:
+      tfN = 5;
+      FLD(0, "Form factor", "", 2); tfChoice[0] = 2; tfChoiceN[0] = XSEC_PRESET_N; // default 3U
+      FLD(1, "Body X", "cm", 10.0); FLD(2, "Body Y", "cm", 10.0);
+      FLD(3, "Body Z", "cm", 30.0); FLD(4, "Panel area", "m2", 0.0); break;
   }
 }
 
 // Render one output line helper is inline in drawToolForm via a local lambda.
 void App::drawToolForm() {
-  header(TOOLS_NAMES[toolId + 2]);           // +2: indices 0,1 are the two calculators
+  header(TOOLS_NAMES[toolId + 7]);           // +7: calc, pcalc, char-lookup, DXCC, CQ, ITU, link-budget precede
   canvas.setTextSize(1);
   int y = 20; const int LH = 11;
   // --- input fields ---
@@ -16109,12 +16946,84 @@ void App::drawToolForm() {
       out("mi -> km", String(v * 1.609344, 3), CL_GREY);
       break;
     }
+    case TOOL_RFEXP: {
+      // FCC RF-exposure MPE limits and estimated compliance distances. This is a
+      // far-field estimate (OET-65); it is guidance, not a substitute for a full
+      // station evaluation. Distances shown in meters; ground reflections can
+      // increase real exposure (worst case ~2x distance).
+      double f = tfVal[0], p = tfVal[1], duty = tfVal[2], g = tfVal[3];
+      double mu = mpeUncontrolled(f), mc = mpeControlled(f);
+      double du = mpeDistCm(p, g, duty, mu) / 100.0;
+      double dc = mpeDistCm(p, g, duty, mc) / 100.0;
+      out("Unctrl MPE", String(mu, 3) + " mW/cm2", CL_GREY);
+      out("  distance", String(du, 2) + " m", CL_CYAN);
+      out("Ctrl MPE", String(mc, 3) + " mW/cm2", CL_GREY);
+      out("  distance", String(dc, 2) + " m", CL_WHITE);
+      out("Avg power", String(p * duty / 100.0, 1) + " W", CL_GREY);
+      out("+reflect x2", String(du * 2.0, 2) + " m unc", CL_ORANGE);
+      break;
+    }
+    case TOOL_BATT: {
+      // Battery runtime from an average current draw (RX/TX weighted by duty),
+      // limited to the usable fraction of capacity.
+      double cap = tfVal[0], rx = tfVal[1], tx = tfVal[2], duty = tfVal[3], use = tfVal[4];
+      double avg = rx * (1.0 - duty / 100.0) + tx * (duty / 100.0);
+      double rt = (avg > 0) ? (cap * (use / 100.0) / avg) : 0.0;
+      int hh = (int)rt, mm = (int)((rt - hh) * 60.0 + 0.5);
+      if (mm == 60) { hh++; mm = 0; }
+      out("Avg current", String(avg, 2) + " A", CL_WHITE);
+      out("Usable cap", String(cap * use / 100.0, 1) + " Ah", CL_GREY);
+      out("Runtime", String(rt, 2) + " h", CL_CYAN);
+      out("  = ", String(hh) + "h " + String(mm) + "m", CL_CYAN);
+      out("Energy", String(avg * rt, 1) + " Ah used", CL_GREY);
+      break;
+    }
+    case TOOL_DEBRIS: {
+      // Rough orbital-lifetime / debris-mitigation estimate. NOT a compliance
+      // tool -- NASA DAS is authoritative; this is an order-of-magnitude figure.
+      double alt = tfVal[0], mass = tfVal[1], area = tfVal[2], cd = tfVal[3];
+      double bc = (cd * area > 0) ? mass / (cd * area) : 0;
+      double yr = orbitLifetimeYr(alt, mass, area, cd);
+      out("Ballistic", String(bc, 1) + " kg/m2", CL_GREY);
+      if (yr < 1.0)   out("Lifetime", String(yr * 365.25, 0) + " days", CL_CYAN);
+      else            out("Lifetime", String(yr, 1) + " years", CL_CYAN);
+      out("25-yr rule", yr <= 25.0 ? "OK" : "EXCEEDS", yr <= 25.0 ? CL_GREEN : CL_RED);
+      out("5-yr (new)", yr <= 5.0 ? "OK" : "EXCEEDS", yr <= 5.0 ? CL_GREEN : CL_ORANGE);
+      out("nominal Sun", "+-several x", CL_MGREY);
+      out("est only", "use NASA DAS", CL_MGREY);
+      break;
+    }
+    case TOOL_XAREA: {
+      // Cross-sectional (projected) area of a rectangular body, plus optional
+      // deployable panel area. Body dims are cm; areas shown in m^2.
+      //   face products: ab, bc, ca (m^2)
+      //   end-on (min) and broadside (max) faces
+      //   max projected at any angle = sqrt(ab^2+bc^2+ca^2)  (Cauchy-Schwarz)
+      //   tumbling average = (ab+bc+ca)/2                    (Cauchy's theorem)
+      //   a flat panel of area P tumbling-averages to P/2 (two-sided plate)
+      double a = tfVal[1] / 100.0, b = tfVal[2] / 100.0, c = tfVal[3] / 100.0;
+      double panel = tfVal[4];                    // already m^2
+      double ab = a * b, bc = b * c, ca = c * a;
+      double minf = ab; if (bc < minf) minf = bc; if (ca < minf) minf = ca;
+      double maxf = ab; if (bc > maxf) maxf = bc; if (ca > maxf) maxf = ca;
+      double maxproj = sqrt(ab * ab + bc * bc + ca * ca);
+      double tumble = (ab + bc + ca) / 2.0;
+      out("End-on min", String(minf, 4) + " m2", CL_WHITE);
+      out("Broadside", String(maxf + panel, 4) + " m2", CL_WHITE);
+      out("Max any ang", String(maxproj + panel, 4) + " m2", CL_GREY);
+      out("Tumbling avg", String(tumble + panel / 2.0, 4) + " m2", CL_CYAN);
+      if (panel > 0) out("  (panels)", "+" + String(panel, 3) + " bc/2 tum", CL_MGREY);
+      out("-> debris Area", String(tumble + panel / 2.0, 4), CL_ORANGE);
+      break;
+    }
   }
   if (tfOutScroll > 0)  { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, outTop); canvas.print("^"); }
   if (moreBelow)        { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 108);    canvas.print("v"); }
   if (!moreBelow && skip > 0 && tfOutScroll > 0) tfOutScroll -= skip;   // over-scrolled: pull back
   if (tfChoice[tfSel] >= 0) footer(",// change  ;/. field  ` back");
-  else if (toolId == TOOL_YAGI || toolId == TOOL_QUAD)
+  else if (toolId == TOOL_YAGI || toolId == TOOL_QUAD ||
+           toolId == TOOL_RFEXP || toolId == TOOL_BATT || toolId == TOOL_DEBRIS ||
+           toolId == TOOL_XAREA)
                             footer("type val  ;/. field  ,// scroll  ` back");
   else                      footer("type value  ;/. field  ` back");
 }
@@ -16130,6 +17039,12 @@ void App::keyToolForm(char c, bool enter, bool back) {
     if (c == ',' || c == '/') {
       int d = (c == '/') ? 1 : -1;
       tfChoice[tfSel] = (tfChoice[tfSel] + tfChoiceN[tfSel] + d) % tfChoiceN[tfSel];
+      // Satellite cross-section: selecting a CubeSat preset fills the body
+      // dimensions (X/Y/Z), which then stay editable. "Custom" leaves them alone.
+      if (toolId == TOOL_XAREA && tfSel == 0) {
+        const XsecPreset& p = XSEC_PRESET[tfChoice[0]];
+        if (p.x > 0) { tfVal[1] = p.x; tfVal[2] = p.y; tfVal[3] = p.z; }
+      }
       lastDrawMs = 0;
     }
     return;

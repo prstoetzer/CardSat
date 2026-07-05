@@ -150,6 +150,7 @@ struct Settings {
   uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
   int16_t  mapCenterLon = 0;     // world-map center longitude (deg); 0 = classic
                                  // 0-degree-centered view, else recenter on QTH
+  bool     mapNightShade = true; // shade the night hemisphere on the world map
   // Display / power
   uint8_t  bright     = 180;    // active screen brightness (10..255)
   uint8_t  spkVolume  = 180;    // speaker volume (0..255): AOS alarm, game sound, memo playback

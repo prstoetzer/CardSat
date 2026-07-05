@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_TOOLFORM
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1201,6 +1201,63 @@ private:
   char  pcalcPend = 0;         // pending op: & | ^ + - * / < > (0 = none)
   bool  pcalcFresh = true;     // next digit starts a new value (post-op / post-equals)
   void  drawPCalc(); void keyPCalc(char c, bool enter, bool back);
+
+  // Character / raw-value lookup (SCR_CHARLK): one value shown at once in all four
+  // bases plus what it *is* -- ASCII char + control name, Morse, Baudot/ITA2 (US-TTY,
+  // both shifts), and the BCD reading (CI-V encodes frequencies as BCD). ;/. browse
+  // +-1, ,// cycle the entry base, digits enter in that base, g-z looks a character
+  // up directly.
+  uint8_t clkVal = 65;         // current value ('A')
+  int     clkBase = 16;        // entry base
+  bool    clkFresh = true;
+  void drawCharLk(); void keyCharLk(char c, bool enter, bool back);
+
+  // DXCC entity lookup (SCR_DXLK search, SCR_DXLKD detail). Type a prefix, partial
+  // name, or entity code; matches are listed live. ENTER opens a detail card with the
+  // code, prefix, continent, ITU/CQ zones, name, flags, and any ARRL footnotes. Data
+  // is an embedded table generated from the ARRL DXCC list (dxcc_lookup.h).
+  String dxQuery;
+  int dxSel = 0, dxScroll = 0;      // selection + scroll within the filtered list
+  int dxMatch[32]; int dxMatchN = 0; // indices into DXCC_LK of current matches (capped)
+  int dxDetail = 0;                  // DXCC_LK index shown on the detail card
+  void dxRunFilter();
+  void drawDxLk(); void keyDxLk(char c, bool enter, bool back);
+  void drawDxLkDetail(); void keyDxLkDetail(char c, bool enter, bool back);
+
+  // CQ (WAZ) zone reference (SCR_CQZ list, SCR_CQZD detail). All 40 zones with their
+  // names; the detail view shows the full prefix/region text. Reachable from the Tools
+  // hub and jumped-to from a DXCC entity's CQ zone. Embedded from the CQ WAZ list.
+  int cqzSel = 0, cqzScroll = 0;
+  int cqzDetail = 0;
+  int cqzDScroll = 0;
+  int cqzReturn = 0;
+  void openCqZone(int zoneNum, int ret);
+  void drawCqz(); void keyCqz(char c, bool enter, bool back);
+  void drawCqzDetail(); void keyCqzDetail(char c, bool enter, bool back);
+
+  // ITU zone reference (SCR_ITUZ list, SCR_ITUZD detail). ITU zones have no names --
+  // just number + prefix/region text. Same shape as the CQ-zone tool; jumped-to from a
+  // DXCC entity's ITU zone. Embedded from the RSGB ITU zones list.
+  int ituSel = 0, ituScroll = 0;
+  int ituDetail = 0;
+  int ituDScroll = 0;
+  int ituReturn = 0;
+  void openItuZone(int zoneNum, int ret);
+  void drawItuz(); void keyItuz(char c, bool enter, bool back);
+  void drawItuzDetail(); void keyItuzDetail(char c, bool enter, bool back);
+
+  // Link budget calculator (SCR_LINKB). The full chain: TX power -> feedline ->
+  // antenna -> free-space path (+ extra losses) -> RX antenna -> feedline -> receiver
+  // noise floor -> SNR -> margin against the selected mode's requirement. Twelve
+  // inputs in a scrolling list with the key outputs pinned below, all live-recalc.
+  // A mode preset row sets bandwidth + required SNR together.
+  static const int LB_NF = 12;         // number of input rows (row 0 = mode preset)
+  double lbVal[LB_NF];
+  int  lbSel = 1, lbScroll = 0;        // start on Freq (row 1)
+  int  lbMode = 2;                     // preset index (default SSB)
+  bool lbEditing = false; String lbEditBuf;
+  void lbInit();
+  void drawLinkB(); void keyLinkB(char c, bool enter, bool back);
 
   // Tools UX state: menu scroll, calculator tape (scrolling history), and the
   // output-area scroll for multi-element antenna forms.

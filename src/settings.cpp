@@ -92,6 +92,7 @@ bool Settings::load() {
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
   spkVolume  = d["spkvol"] | (uint8_t)180;
   mapCenterLon = d["mapclon"] | (int16_t)0;
+  mapNightShade = d["mapnight"] | true;
   if (mapCenterLon < -180) mapCenterLon = -180; if (mapCenterLon > 180) mapCenterLon = 180;
   tiltTune   = d["tilttune"] | false;
   gameTilt   = d["gametilt"] | false;   // games: IMU tilt steering (ADV-only)
@@ -212,6 +213,7 @@ bool Settings::save() {
   d["bright"]  = bright;
   d["spkvol"]  = spkVolume;
   d["mapclon"] = mapCenterLon;
+  d["mapnight"] = mapNightShade;
   d["tilttune"] = tiltTune;
   d["gametilt"] = gameTilt;
   d["gamesnd"]  = gameSound;

@@ -25,12 +25,44 @@ struct Transponder {
   char     mode[12] = {0};   // e.g. "FM", "USB", "DATA"
   bool     invert   = false; // inverting linear transponder
   bool     isLinear = false; // true => has a tunable passband (do passband tracking)
+  bool     active   = true;  // SatNOGS status==active / alive==true (false => decommissioned/off)
   float    toneHz   = 0.0f;  // required FM uplink CTCSS/PL tone (0 = none)
 
   // Downlink passband width in Hz (0 for single-channel / FM).
   uint32_t bandwidth() const {
     return (downlinkHigh > downlink) ? (downlinkHigh - downlink) : 0;
   }
+
+  // Two-way: has both an uplink and a downlink (transponder/transceiver), so it can
+  // actually be worked -- as opposed to a one-way beacon/telemetry-only downlink.
+  bool isTwoWay() const { return uplink != 0 && downlink != 0; }
+
+  // True if a frequency (Hz) falls in an amateur-satellite allocation. Used to sort
+  // non-amateur transmitters (e.g. Soyuz VHF, S-band TT&C) to the end of the list.
+  // Note: downlink/uplink are uint32 Hz, so they top out at ~4.29 GHz; the higher
+  // amateur microwave bands (5/3 cm) cannot be represented in these fields and are
+  // therefore not tested here (no bird CardSat tunes reports them in this field).
+  static bool freqIsAmateur(uint32_t hz) {
+    if (hz == 0) return false;
+    struct Band { uint32_t lo, hi; };
+    static const Band AB[] = {
+      {  28000000u,   29700000u},   // 10 m (HF sat downlinks ~29.3-29.5)
+      { 144000000u,  148000000u},   // 2 m
+      { 220000000u,  225000000u},   // 1.25 m
+      { 420000000u,  450000000u},   // 70 cm
+      { 902000000u,  928000000u},   // 33 cm
+      {1240000000u, 1300000000u},   // 23 cm
+      {2300000000u, 2450000000u},   // 13 cm
+      {3300000000u, 3500000000u},   // 9 cm
+    };
+    for (const Band& b : AB) if (hz >= b.lo && hz <= b.hi) return true;
+    return false;
+  }
+
+  // A transmitter is "amateur" if either leg is in an amateur allocation. SatNOGS's
+  // own `service` field is unreliable here (often "Unknown" for clearly-amateur
+  // transponders), so we judge by frequency.
+  bool isAmateur() const { return freqIsAmateur(downlink) || freqIsAmateur(uplink); }
 };
 
 // One satellite's GP mean elements (the SGP4 inputs) plus identity.

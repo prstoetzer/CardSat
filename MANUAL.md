@@ -486,8 +486,7 @@ even though total free heap still looks healthy. The reset restores full speed,
 reconnects WiFi/TLS to free and coalesce those transient allocations, and reports
 the before/after largest contiguous block.
 
-As of 0.9.41 this manual reset is rarely needed: CardSat now does the same
-coalescing **automatically** just before a handshake that would otherwise fail (it
+This manual reset is rarely needed: CardSat does the same coalescing **automatically** just before a handshake that would otherwise fail (it
 briefly cycles WiFi to return the fragmented buffers, then proceeds or declines
 gracefully), and the firmware keeps more contiguous heap free in the first place.
 The `H` key remains as a manual override.
@@ -1831,8 +1830,8 @@ on the config screen leaves the mode and restores messaging.
   that `k` also pulls. This is the quick way to bring your regularly-worked birds
   current without the longer full refresh — handy in the field. (If you haven't
   marked any favorites, it refreshes the currently active satellite instead.)
-- `a` — fetch and cache **all** transponders for offline use. As of v0.9.43 this runs
-  **in a single session** — no reboots. CardSat fetches every satellite's transponder
+- `a` — fetch and cache **all** transponders for offline use. This runs **in a single
+  session** — no reboots. CardSat fetches every satellite's transponder
   data in one pass, showing a running count on the Update screen (e.g. "TX 24/90: AO-91")
   and finishing on "Cached all N transponders". The whole pass takes a few minutes on a
   reasonable Wi-Fi link; a per-satellite retry absorbs the occasional transient miss.
@@ -2438,7 +2437,11 @@ beacon entry the on-device catalog holds for the selected satellite (sourced fro
 SatNOGS with the transponder cache). Each entry is shown as a short block: its
 description, the **downlink** (a range for linear transponders) with mode, and the
 **uplink** with any CTCSS tone and inverting/linear flags. `;`/`.` scrolls through
-the list. It's a quick offline reference for a bird's frequencies and modes — handy
+the list. Entries are **ordered by usefulness**: two-way transponders first, then
+amateur-band before non-amateur (so any out-of-band TT&C or telemetry downlinks fall
+to the end), active before inactive. Transmitters SatNOGS marks **inactive** are
+**dimmed and tagged "(off)"** so you can tell at a glance which are no longer believed
+operational. It's a quick offline reference for a bird's frequencies and modes — handy
 for checking what a satellite carries without a radio connected. If nothing shows,
 the transponders haven't been cached yet; run **Update** with WiFi on.
 
@@ -3455,7 +3458,13 @@ listed below.
   [§8 → Orbital analysis](#orbital-analysis-o).
 - **Reached from** — Satellites → `o`.
 - **Shows** — one page at a time: Info, Live, Next pass, Ground track, Doppler,
-  Nodal, Sun / Beta, Pass outlook, Orbit position.
+  Nodal, Sun / Beta, Pass outlook, Orbit position, Physical, and **Explore**. The
+  **Explore** page is a sandbox: it seeds apogee, perigee and inclination from the
+  tracked satellite, then lets you edit them (`;`/`.` pick a row, type a value, `x`
+  reseeds) and watch the derived characteristics recompute live — period, revs/day,
+  eccentricity, apogee/perigee velocity, footprint radius, longest possible pass, nodal
+  drift, and whether the orbit is sun-synchronous. It never alters the real elements, and
+  all quantities stay metric (km, km/s, min).
 - **Keys** — `,`/`/` flip pages; `r` recompute; on the **Doppler** page `f` sets
   the beacon frequency; `` ` `` leaves.
 
@@ -4326,8 +4335,17 @@ listed below.
   **scrolling tape** above the entry line (`[`/`]` scroll back through history —
   the arrow keys `;` and `.` stay available as expression characters, `.` being the
   decimal point). Supports `+ - * / ^ ()`, `pi`, `e`, the previous result as `Ans`,
-  and sin cos tan asin acos atan sqrt ln log exp abs, with trig in **degrees**. The
-  function hints stay pinned just above the footer. DEL backspaces (and only
+  and sin cos tan asin acos atan sqrt ln log exp abs, with trig in **degrees**. It
+  also carries **amateur-radio helpers** (press `'` for the second hint page): the
+  functions `dbm(W)` and `w(dBm)` for power, `db(ratio)` and `undb(dB)`, `wl(MHz)` for
+  wavelength in metres and `fq(m)` for the reverse, `sinh/cosh/tanh`, `floor/ceil/round`,
+  and the constants `c` (speed of light m/s), `kB` (Boltzmann), `Re` (Earth radius km),
+  `mu` (Earth GM) and `g0`. So `wl(146)` gives the 2 m wavelength, `dbm(100)` gives
+  50 dBm, `db(2)` gives 3.01 dB. The function hints stay pinned just above the footer;
+  `'` toggles between the general and ham pages. You can also type **metric-prefix
+  suffixes** on numbers (`100k`, `2.2n`, `47p`, `146M` -- case matters, `M`=mega vs
+  `m`=milli), and press **`\`** to toggle **engineering-notation** output (results shown
+  as a mantissa with a metric prefix, e.g. `4.7 k`). DEL backspaces (and only
   backspaces — it never exits); `` ` `` returns.
 - **Programmer calc** — a 64-bit value shown at once in **hex / dec / bin / oct**.
   Type digits in the current entry base; **`;`/`.` (up/down) move the highlighted
@@ -4341,7 +4359,10 @@ listed below.
   the **ASCII** character or control-code name, its **Morse** pattern, the **Baudot /
   ITA2** letters- and figures-shift meaning for 5-bit values (US-TTY, as used on RTTY),
   and the **BCD** reading (CI-V frequency bytes are BCD). Typing any non-hex letter
-  (g–z) looks that character up directly; `x` zeroes, DEL drops the low digit.
+  (g–z) looks that character up directly; `x` zeroes, DEL drops the low digit. Press
+  **`=`** for a **browsable full table** — printable ASCII 32–126 with each
+  character's decimal value, Morse, and Baudot code (with L/F letters/figures-shift tag),
+  `;`/`.` to scroll; `=` returns to the single-character view.
 - **DXCC entity lookup** — type a **prefix, partial name, or entity code** and matching
   DXCC entities list live; ENTER opens a detail card with the **entity code, primary
   prefix, continent, ITU and CQ zones, name**, status flags (deleted / third-party
@@ -4363,7 +4384,10 @@ listed below.
   1k2/9k6 packet, FT8, JT65/Q65, or Custom). Pinned outputs show EIRP, FSPL, RX power,
   noise floor (−174 dBm/Hz + 10·log BW + NF), SNR, an **S-meter estimate** (IARU S9 =
   −93 dBm above 30 MHz, −73 below, 6 dB/S-unit), and the **margin**, color-coded:
-  green ≥ 6 dB (solid), orange 0–6 (thin), red < 0 (no copy).
+  green ≥ 6 dB (solid), orange 0–6 (thin), red < 0 (no copy). When a satellite is being
+  tracked, the **Distance** field opens pre-filled from its **live slant range** (marked
+  "(live)") and the frequency from the selected transponder downlink; press **`p`** to
+  re-sync after the satellite moves. Editing Distance by hand drops the "(live)" tag.
 - **Forms** — `;`/`.` move between fields; type digits to edit a value (ENTER or
   moving off the field commits it); on a pick-list field (e.g. the coax type) `,`/`/`
   cycle the choices; results recompute instantly. **Yagi and quad take an element
@@ -4379,7 +4403,8 @@ listed below.
   the usable fraction of capacity; shows the duty-weighted **average current** and the
   estimated **runtime** (decimal hours and h:m). Handy for sizing a field battery.
 - **Orbit lifetime (debris)** — for CubeSat builders assessing post-mission disposal:
-  enter circular-orbit altitude, mass, cross-sectional area and drag coefficient; shows
+  enter altitude (use **perigee** altitude for an elliptical orbit), mass, cross-sectional
+  area and drag coefficient; shows
   the **ballistic coefficient** and an estimated **orbital lifetime** (drag decay through
   an exponential-atmosphere model), with pass/fail against the **25-year** and newer
   **5-year** debris-mitigation guidelines. This is an order-of-magnitude estimate at
@@ -4393,6 +4418,41 @@ listed below.
   theorem; a flat panel contributes half its area). The tumbling average is the
   drag-relevant figure — it's shown as **"→ debris Area"** to drop straight into the
   Orbit-lifetime tool.
+
+- **Phasing line / stub** — physical cable length for a wanted **electrical** length,
+  the tool a satellite-antenna builder needs for circularly-polarized arrays (turnstiles,
+  eggbeaters, crossed Yagis) and matching stubs. Pick the **coax type** (its velocity
+  factor is applied), enter the **frequency**, and choose a **fraction** (¼/½/⅜/¾/1 λ).
+  Shows the length in ft+in and metres (honors the antenna-units setting) plus the
+  free-space wavelength. **Verify a cut line on an analyzer** before trusting it — real
+  velocity factors vary between cable batches.
+- **Wavelength / frequency** — free-space λ = c/f with the common ¼/½/⅝-wave cut lengths,
+  in both unit systems.
+- **Attenuator pad** — resistor values for a **pi** and a **T** resistive pad at a target
+  attenuation and system impedance (default 50 Ω), plus the power ratio.
+- **dB chain sum** — add a short chain of gains (+) and losses (−) in dB; shows the net
+  dB, the linear power and voltage ratios, and the result on 100 W in.
+- **Operating references** — a quick-reference card (no radio needed): common **Q-codes**,
+  the **ITU phonetic alphabet**, and the **RST** system. `,`/`/` switch tab.
+- **CTCSS tone reference** — the standard EIA 38-tone list, with the FM satellites' known
+  uplink tones called out (ISS/SO-50/AO-91/92 = 67.0 Hz; SO-50 arms with 74.4 Hz).
+- **Radio math reference** — a scrolling cheat sheet distilled from the ARRL *Radio
+  Mathematics* supplement: the decibel table (×2 = +3 dB, etc.), AC voltage factors
+  (Vrms = 0.707 × Vpeak), metric prefixes, useful constants, and the reactance /
+  resonance / SWR / time-constant formulas. `;`/`.` scroll.
+- **Complex / polar** — rectangular *a* + j*b* to polar (magnitude and angle) and the
+  reciprocal 1/Z, for impedance and phasor work.
+- **Reactance & resonance** — enter frequency, L and C; shows **Xl**, **Xc**, the net
+  reactance, and the **LC resonant frequency**.
+- **RC/RL time constant** — enter R and C; shows **τ = RC**, the 1/3/5-τ charge
+  percentages (63 / 95 / 99 %), and the corresponding cutoff frequency.
+
+The Tools menu supports a **first-letter jump** (press a letter to hop to the next tool
+starting with it) and **remembers the last tool** you used. Form tools **remember their
+field values** between sessions (your coax, power, gains stay put); press **`x`** in a form
+tool to reset it to defaults. The **antenna-lengths units** (ft/in or metres) are set in
+**Settings → Display / sound**. Note that orbital distances, altitudes and satellite sizes
+are always shown in metric regardless of that setting.
 
 ### Glossary & math
 
@@ -4456,7 +4516,15 @@ listed below.
 - **Reached from** — `l` on the Help screen.
 - **Keys** — `;`/`.` scroll; `` ` `` back to Help.
 
-### About
+### Orbit animations
+
+- **Purpose** — an animated explainer of the orbit archetypes. Each shows a satellite
+  tracing its orbit to scale around a drawn Earth (correctly fast at perigee, slow at
+  apogee) with a fading trail, plus its altitude, inclination, period, and what the orbit
+  is used for. Covers LEO, polar / sun-synchronous, MEO, GEO, Molniya / HEO, and the
+  amateur MEO case (GreenCube-like).
+- **Reached from** — `o` on the Help screen.
+- **Keys** — `,`/`/` cycle orbit type; `` ` `` back to Help.
 
 ![About](docs/img/about.jpg)
 
@@ -4568,7 +4636,7 @@ or press **`1`–`4`** to answer directly.
 | **World map** | `f` cycle highlighted favorite · `c` recenter on QTH / 0° (sun terminator drawn automatically) · `` ` `` back |
 | **Rotator (manual)** | `,`/`/` az · `;`/`.` el · `s` step · `x` stop · *(Yaesu direct only)* `1`/`2`/`3`/`4` capture ADC at az 0 / az full / el 0 / el full · `` ` `` back |
 | **Home menu** | `;`/`.` move · ENTER open · any letter jumps to the next matching item (repeat cycles) |
-| **Help** | `;`/`.` scroll · `g` glossary · `m` guide · `s` sat history · `t` tech help · `l` learn · `f` band plan / frequencies · `` ` `` back |
+| **Help** | `;`/`.` scroll · `g` glossary · `m` guide · `s` sat history · `t` tech help · `l` learn · `o` orbit animations · `f` band plan / frequencies · `` ` `` back |
 | **Update** | `k`/ENTER GP (+clock/AMSAT/space-wx/weather) · `f` fast (GP + AMSAT + fav TX) · `a` cache all TX · `w` WiFi only |
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
 | **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |

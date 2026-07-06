@@ -18,6 +18,15 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.50:** AMSAT status reports now let you **pick the transponder/mode** for
+> multi-mode birds (e.g. AO-7 U/V vs V/A) — fixing a bug that locked reporting to one mode.
+> A satellite's transponder list is **ordered by usefulness** (two-way first, amateur-band
+> before non-amateur, active before inactive) with decommissioned entries **dimmed and
+> marked "(off)"**, and the **Link budget** tool pre-fills distance from the tracked
+> satellite's **live slant range**.
+>
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.50.md)**.
+
 > **New in v0.9.49:** fixes a field-reported bug where, on SD-card units with LoRa
 > messaging enabled but **no Cap LoRa attached**, settings (notably the GPS source), logs
 > and caches silently stopped persisting — CardSat now detects an absent module and leaves

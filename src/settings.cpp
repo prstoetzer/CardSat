@@ -88,6 +88,7 @@ bool Settings::load() {
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
+  antUnits   = d["antunits"] | (uint8_t)0; if (antUnits > 1) antUnits = 0;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
   spkVolume  = d["spkvol"] | (uint8_t)180;
@@ -209,6 +210,7 @@ bool Settings::save() {
   d["beacon"] = beaconMHz;
   d["solar"] = solarAct;
   d["wxunits"] = wxUnits;
+  d["antunits"] = antUnits;
   d["dimsecs"] = dimSecs;
   d["bright"]  = bright;
   d["spkvol"]  = spkVolume;

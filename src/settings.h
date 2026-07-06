@@ -148,6 +148,10 @@ struct Settings {
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
   uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
+  uint8_t  antUnits   = 0;           // antenna/feedline length units in Tools: 0=imperial(ft+in) 1=metric
+                                     // NOTE: applies ONLY to antenna/feedline dimensions a ham cuts by
+                                     // hand. Orbital distances, altitudes and satellite sizes are ALWAYS
+                                     // metric regardless of this setting.
   int16_t  mapCenterLon = 0;     // world-map center longitude (deg); 0 = classic
                                  // 0-degree-centered view, else recenter on QTH
   bool     mapNightShade = true; // shade the night hemisphere on the world map

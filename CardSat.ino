@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.49";
+static constexpr const char* FW_VERSION = "0.9.50";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -407,6 +407,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_TXCACHE "/CardSat/tx_%lu.json"   // %lu = norad id
 #define FILE_CALIB   "/CardSat/calib.txt"     // per-sat calibration: "norad dl ul" lines
 #define FILE_TONES   "/CardSat/tones.txt"     // per-sat CTCSS override: "norad tenths" lines
+#define FILE_TOOLDEF "/CardSat/tooldef.txt"   // per-form-tool saved field values (one line per tool id)
 #define FILE_NOTES   "/CardSat/notes.txt"     // per-sat operating notes: "norad<TAB>text" lines
 #define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
 #define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
@@ -1409,12 +1410,44 @@ struct Transponder {
   char     mode[12] = {0};   // e.g. "FM", "USB", "DATA"
   bool     invert   = false; // inverting linear transponder
   bool     isLinear = false; // true => has a tunable passband (do passband tracking)
+  bool     active   = true;  // SatNOGS status==active / alive==true (false => decommissioned/off)
   float    toneHz   = 0.0f;  // required FM uplink CTCSS/PL tone (0 = none)
 
   // Downlink passband width in Hz (0 for single-channel / FM).
   uint32_t bandwidth() const {
     return (downlinkHigh > downlink) ? (downlinkHigh - downlink) : 0;
   }
+
+  // Two-way: has both an uplink and a downlink (transponder/transceiver), so it can
+  // actually be worked -- as opposed to a one-way beacon/telemetry-only downlink.
+  bool isTwoWay() const { return uplink != 0 && downlink != 0; }
+
+  // True if a frequency (Hz) falls in an amateur-satellite allocation. Used to sort
+  // non-amateur transmitters (e.g. Soyuz VHF, S-band TT&C) to the end of the list.
+  // Note: downlink/uplink are uint32 Hz, so they top out at ~4.29 GHz; the higher
+  // amateur microwave bands (5/3 cm) cannot be represented in these fields and are
+  // therefore not tested here (no bird CardSat tunes reports them in this field).
+  static bool freqIsAmateur(uint32_t hz) {
+    if (hz == 0) return false;
+    struct Band { uint32_t lo, hi; };
+    static const Band AB[] = {
+      {  28000000u,   29700000u},   // 10 m (HF sat downlinks ~29.3-29.5)
+      { 144000000u,  148000000u},   // 2 m
+      { 220000000u,  225000000u},   // 1.25 m
+      { 420000000u,  450000000u},   // 70 cm
+      { 902000000u,  928000000u},   // 33 cm
+      {1240000000u, 1300000000u},   // 23 cm
+      {2300000000u, 2450000000u},   // 13 cm
+      {3300000000u, 3500000000u},   // 9 cm
+    };
+    for (const Band& b : AB) if (hz >= b.lo && hz <= b.hi) return true;
+    return false;
+  }
+
+  // A transmitter is "amateur" if either leg is in an amateur allocation. SatNOGS's
+  // own `service` field is unreliable here (often "Unknown" for clearly-amateur
+  // transponders), so we judge by frequency.
+  bool isAmateur() const { return freqIsAmateur(downlink) || freqIsAmateur(uplink); }
 };
 
 // One satellite's GP mean elements (the SGP4 inputs) plus identity.
@@ -2026,6 +2059,10 @@ struct Settings {
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
   uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
+  uint8_t  antUnits   = 0;           // antenna/feedline length units in Tools: 0=imperial(ft+in) 1=metric
+                                     // NOTE: applies ONLY to antenna/feedline dimensions a ham cuts by
+                                     // hand. Orbital distances, altitudes and satellite sizes are ALWAYS
+                                     // metric regardless of this setting.
   int16_t  mapCenterLon = 0;     // world-map center longitude (deg); 0 = classic
                                  // 0-degree-centered view, else recenter on QTH
   bool     mapNightShade = true; // shade the night hemisphere on the world map
@@ -2138,7 +2175,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -5522,6 +5559,16 @@ private:
   int      illumDayOff    = 0;      // illumination raster start offset from today, in DAYS (>=0)
   // Orbital analysis screen (off Satellites), multi-page
   int      orbitPage = 0;
+  // Orbit explorer (Orbit page 10): a teaching/planning sandbox. Editable apogee,
+  // perigee (km altitude) and inclination, pre-filled from the active satellite, that
+  // recompute derived characteristics without touching the real element set.
+  bool     oxInit = false;      // have we seeded from the active sat this visit?
+  double   oxApo = 800.0;       // apogee altitude, km
+  double   oxPeri = 600.0;      // perigee altitude, km
+  double   oxIncl = 51.6;       // inclination, deg
+  int      oxSel = 0;           // 0=apogee 1=perigee 2=incl
+  bool     oxEditing = false; String oxEditBuf;
+  void oxSeedFromSat();
   double   orbAscLon = 0;           // sub-longitude of next ascending node (deg)
   time_t   orbAscT   = 0;           // time of next ascending node (UTC)
   bool     orbHasPass = false;
@@ -6478,7 +6525,10 @@ private:
   uint8_t clkVal = 65;         // current value ('A')
   int     clkBase = 16;        // entry base
   bool    clkFresh = true;
+  bool    clkTableMode = false; // false = single-char detail, true = browsable full table
+  int     clkTableScroll = 0;   // first row shown in table mode
   void drawCharLk(); void keyCharLk(char c, bool enter, bool back);
+  void drawCharLkTable();   // browsable full ASCII/Morse/Baudot table mode
 
   // DXCC entity lookup (SCR_DXLK search, SCR_DXLKD detail). Type a prefix, partial
   // name, or entity code; matches are listed live. ENTER opens a detail card with the
@@ -6524,8 +6574,39 @@ private:
   int  lbSel = 1, lbScroll = 0;        // start on Freq (row 1)
   int  lbMode = 2;                     // preset index (default SSB)
   bool lbEditing = false; String lbEditBuf;
+  bool lbSynced = false;               // distance/freq pre-filled from the tracked sat
   void lbInit();
+  void lbSyncFromSat();
   void drawLinkB(); void keyLinkB(char c, bool enter, bool back);
+
+  // Operating references (SCR_OPREF): Q-codes, ITU phonetics, RST -- tabbed static text.
+  int oprefTab = 0;      // 0=Q-codes 1=phonetics 2=RST
+  int oprefScroll = 0;
+  void drawOpref(); void keyOpref(char c, bool enter, bool back);
+  // CTCSS tone reference (SCR_CTCSS): standard EIA tone list + known satellite tones.
+  int ctcssScroll = 0;
+  void drawCtcss(); void keyCtcss(char c, bool enter, bool back);
+  // Radio math reference (SCR_MATHREF): a scrolling cheat sheet distilled from the ARRL
+  // Radio Mathematics supplement -- dB table, AC RMS/peak factors, constants, formulas.
+  int mathRefScroll = 0;
+  void drawMathRef(); void keyMathRef(char c, bool enter, bool back);
+  // Orbit-type animation (SCR_ORBITZOO): an animated Learn explainer cycling orbit
+  // archetypes (LEO/MEO/GEO/Molniya/sun-sync/polar). Renders into the existing sprite;
+  // the satellite dot advances by true anomaly each frame with a short fixed-size fading
+  // trail. NO per-frame allocation -- the trail is a static ring buffer.
+  int   ozType = 0;             // current orbit archetype index
+  float ozPhase = 0.0f;         // mean-anomaly phase (rad), advanced each frame
+  static const int OZ_TRAIL = 24;
+  int16_t ozTrailX[OZ_TRAIL] = {0};
+  int16_t ozTrailY[OZ_TRAIL] = {0};
+  int   ozTrailHead = 0;        // ring buffer write index
+  int   ozTrailCount = 0;
+  void drawOrbitZoo(); void keyOrbitZoo(char c, bool enter, bool back);
+  // Per-form-tool value persistence (FILE_TOOLDEF): remember a tool's field values
+  // across sessions so station-specific inputs (coax, power, gains) aren't re-typed.
+  void toolDefSave(int id);
+  bool toolDefLoad(int id);
+  bool tfDefOnly = false;    // when true, toolFormInit skips loading saved values (x-reset)
 
   // Tools UX state: menu scroll, calculator tape (scrolling history), and the
   // output-area scroll for multi-element antenna forms.
@@ -6533,6 +6614,8 @@ private:
   static const int CALC_TAPE = 12;
   String calcTape[CALC_TAPE]; int calcTapeN = 0;  // ring of past "expr" / "= result" lines
   int calcScroll = 0;                             // 0 = pinned to newest
+  bool calcHintPage2 = false;                     // ' toggles the function-hint page
+  bool calcEngNota = false;                        // = toggles engineering-notation output
   int tfOutScroll = 0;                            // form output scroll (yagi/quad element lists)
 
   // Live-recalc form engine (SCR_TOOLFORM). Each tool is a set of labeled numeric
@@ -10058,8 +10141,20 @@ void SatDb::applyAmsatCatalogFile(const char* path) {
   // "name":"..." key (the links values are plain URL strings). Scan the stream
   // for that pattern -- no DOM, nothing large held in RAM.
   char nb[16]; int st = 0; char nameBuf[AMS_NAME_LEN]; int nk = 0;
-  const char* pat = "\"name\":\"";
-  int pp = 0;
+  // Whitespace-tolerant scan for the "name" string value. The AMSAT catalog API
+  // pretty-prints its JSON as  "name": "AO-7_[V/a]"  -- note the spaces around the
+  // colon. An earlier fixed-byte match on "name":" (no spaces) matched NOTHING on
+  // the live payload, leaving the map empty (so multi-mode birds like AO-7 offered
+  // only a single mode to report). This little state machine accepts optional
+  // whitespace after the key and after the colon, then captures the quoted value:
+  //   MS_KEY  : matching the literal   "name"
+  //   MS_COLON: seen the key; skipping spaces, expecting ':'
+  //   MS_PRE  : seen ':';   skipping spaces, expecting the opening '"'
+  //   MS_CAP  : inside the value, capturing until the closing '"'
+  enum { MS_KEY = 0, MS_COLON, MS_PRE, MS_CAP };
+  const char* key = "\"name\"";
+  int ks2 = 0;                             // index within key while in MS_KEY
+  int ms = MS_KEY;
   // Pre-normalize catalog names once.
   char (*norm)[40] = (char(*)[40])malloc((size_t)_n * 40);
   if (!norm) { f.close(); return; }
@@ -10070,13 +10165,26 @@ void SatDb::applyAmsatCatalogFile(const char* path) {
   (void)nb; (void)st;
   while (f.available()) {
     char ch = (char)f.read();
-    if (pp < (int)strlen(pat)) {
-      pp = (ch == pat[pp]) ? pp + 1 : (ch == pat[0] ? 1 : 0);
-      if (pp == (int)strlen(pat)) nk = 0;
+    if (ms != MS_CAP) {
+      switch (ms) {
+        case MS_KEY:                        // matching the literal "name"
+          if (ch == key[ks2]) { if (++ks2 == (int)strlen(key)) { ms = MS_COLON; } }
+          else ks2 = (ch == key[0]) ? 1 : 0;
+          break;
+        case MS_COLON:                      // skip spaces, expect ':'
+          if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') break;
+          if (ch == ':') ms = MS_PRE; else { ms = MS_KEY; ks2 = (ch == key[0]) ? 1 : 0; }
+          break;
+        case MS_PRE:                        // skip spaces, expect opening '"'
+          if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') break;
+          if (ch == '"') { ms = MS_CAP; nk = 0; }
+          else { ms = MS_KEY; ks2 = (ch == key[0]) ? 1 : 0; }
+          break;
+      }
       continue;
     }
     if (ch == '"') {                       // end of the name value
-      pp = 0;
+      ms = MS_KEY; ks2 = 0;
       nameBuf[nk] = 0;
       if (nk == 0 || _amsMapN >= AMS_MAP_MAX) continue;
       bool dup = false;                    // the live catalog has a duplicate row
@@ -10465,8 +10573,16 @@ static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
     bool typeLinear = (strcmp(ty, "Transponder") == 0);
     t.isLinear = (t.uplink != 0) && (t.downlinkHigh > t.downlink) &&
                  (typeLinear || (t.downlinkHigh - t.downlink) >= 5000u);
+    // Activity: SatNOGS marks a transmitter status=="active" and alive==true when it
+    // is believed operational. Either signal counts as active; default active when the
+    // fields are absent (older caches) so we never hide a usable transponder.
+    const char* st = o["status"] | "active";
+    bool aliveField = o["alive"] | true;
+    t.active = aliveField && (strcmp(st, "inactive") != 0);
     n++;
   }
+  // NOTE: ordering by usefulness is done once in the app layer (prioritizeTransponders),
+  // after manual transponders are appended, so the whole list is ranked together.
   return n;
 }
 
@@ -12700,6 +12816,7 @@ bool Settings::load() {
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
+  antUnits   = d["antunits"] | (uint8_t)0; if (antUnits > 1) antUnits = 0;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
   spkVolume  = d["spkvol"] | (uint8_t)180;
@@ -12821,6 +12938,7 @@ bool Settings::save() {
   d["beacon"] = beaconMHz;
   d["solar"] = solarAct;
   d["wxunits"] = wxUnits;
+  d["antunits"] = antUnits;
   d["dimsecs"] = dimSecs;
   d["bright"]  = bright;
   d["spkvol"]  = spkVolume;
@@ -13371,17 +13489,30 @@ SatEntry* App::activeSat() {
 // list, preserving the relative order within each group. SatNOGS lists beacons
 // and telemetry downlinks too (the ISS has ~49 entries), so this puts the
 // workable repeaters/transponders first on the Track screen. Stable, in place.
-static void prioritizeTwoWay(Transponder* tx, int n) {
-  int dst = 0;
-  for (int i = 0; i < n; ++i) {
-    if (tx[i].uplink && tx[i].downlink) {
-      if (i != dst) {                            // rotate tx[dst..i] right by one
-        Transponder t = tx[i];
-        for (int j = i; j > dst; --j) tx[j] = tx[j - 1];
-        tx[dst] = t;
-      }
-      dst++;
-    }
+// Order a satellite's transponder list by usefulness, high to low, so the operator
+// lands on the most workable entry first. Chosen so BOTH goals hold exactly:
+//   1. two-way (uplink+downlink) before one-way beacons  -- two-way preferred
+//   2. amateur-band before non-amateur                   -- non-amateur appears last
+//   3. active before inactive/decommissioned
+//   4. linear transponders before single-channel (minor nudge)
+// Amateur outranks active on purpose: an inactive amateur transponder still sorts
+// above an active non-amateur TT&C/telemetry downlink, so every out-of-band
+// transmitter (Soyuz VHF, S-band, etc.) sinks strictly to the end. Runs over the
+// COMPLETE list (SatNOGS + manual). Stable insertion sort; n is small.
+static int txRank(const Transponder& t) {
+  int r = 0;
+  if (t.isTwoWay())  r += 8;
+  if (t.isAmateur()) r += 4;
+  if (t.active)      r += 2;
+  if (t.isLinear)    r += 1;
+  return r;
+}
+static void prioritizeTransponders(Transponder* tx, int n) {
+  for (int i = 1; i < n; ++i) {
+    Transponder key = tx[i];
+    int kr = txRank(key), j = i - 1;
+    while (j >= 0 && txRank(tx[j]) < kr) { tx[j + 1] = tx[j]; --j; }
+    tx[j + 1] = key;
   }
 }
 
@@ -13401,8 +13532,8 @@ bool App::ensureTransponders(SatEntry& s) {
   if (activeTxCount < MAX_TX_PER_SAT)
     activeTxCount += loadManualTx(s.norad, activeTx + activeTxCount,
                                   MAX_TX_PER_SAT - activeTxCount);
-  // 3b) bring two-way transponders to the front so they're easy to reach
-  prioritizeTwoWay(activeTx, activeTxCount);
+  // 3b) rank the complete list (two-way > amateur > active > linear) so the best entry is first
+  prioritizeTransponders(activeTx, activeTxCount);
   // 4) tag FM uplinks with the effective PL/CTCSS tone: the user's per-satellite
   //    override if one is set, otherwise the built-in table (SatNOGS has none).
   retagTones(s.norad);
@@ -17453,6 +17584,8 @@ void App::loop() {
       (screen == SCR_SATSAT && !satsatComputed) || screen == SCR_CATMON || screen == SCR_ARROW ||
       (screen == SCR_TRANSIT && transitJobPhase != 0)) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
+  } else if (screen == SCR_ORBITZOO) {
+    if (ms - lastDrawMs > 66) { lastDrawMs = ms; draw(); }   // ~15 fps orbit animation
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
@@ -17647,6 +17780,10 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_ITUZ: keyItuz(c, enter, back); break;
     case SCR_ITUZD: keyItuzDetail(c, enter, back); break;
     case SCR_LINKB: keyLinkB(c, enter, back); break;
+    case SCR_OPREF: keyOpref(c, enter, back); break;
+    case SCR_CTCSS: keyCtcss(c, enter, back); break;
+    case SCR_ORBITZOO: keyOrbitZoo(c, enter, back); break;
+    case SCR_MATHREF: keyMathRef(c, enter, back); break;
     case SCR_TOOLFORM: keyToolForm(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
@@ -18167,7 +18304,7 @@ void App::keySatList(char c, bool enter, bool back) {
   if (viewSel > satScroll + 9)  satScroll = viewSel - 9;
   if (viewN > 0) satSel = view[viewSel];
   if (c == 'o' && viewN > 0) {                     // open the orbital analysis screen
-    orbitPage = 0; buildOrbit(); screen = SCR_ORBIT; lastDrawMs = 0; return;
+    orbitPage = 0; oxInit = false; buildOrbit(); screen = SCR_ORBIT; lastDrawMs = 0; return;
   }
   if (c == 'y' && viewN > 0) {                     // open the simulation screen (was 's';
     // 's' is AMSAT status -- see the guard above. 'y' keeps sim reachable here.)
@@ -18304,7 +18441,8 @@ void App::keyTrack(char c, bool enter, bool back) {
     if (!nm) { setStatus("No AMSAT catalog name for this sat"); return; }
     strncpy(rptArmName, nm, sizeof(rptArmName) - 1); rptArmName[sizeof(rptArmName) - 1] = 0;
     rptArmUntil = millis() + 3500;
-    setStatus(String("Report ") + nm + " Heard? press i again", 3500);
+    char pretty[40];   // AMSAT names are <28 chars; the prettify transform never grows the string
+    setStatus(String("Report ") + amsPretty(nm, pretty, sizeof(pretty)) + " Heard? press i again", 3500);
     return;
   }
   if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
@@ -19698,7 +19836,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
 static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_PASS[]  = {3,66,67,68,40,7,84,54,61};
-static const int SET_DISP[]  = {48,82,25,43,49,77,79,81};
+static const int SET_DISP[]  = {48,82,25,43,85,49,77,79,81};
 static const int SET_LOG[]   = {26,69,70,71,72,73,78,74,75,76};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,55,60,56,57,58,59,80,83,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
@@ -19753,6 +19891,7 @@ void App::keySettings(char c, bool enter, bool back) {
       case 68: cfg.visMinEl = constrain(cfg.visMinEl + dir, 0, 40); cfg.save(); break;
       case 40: cfg.solarAct = (uint8_t)((cfg.solarAct + dir + 4) % 4); cfg.save(); break;
       case 43: cfg.wxUnits = (uint8_t)((cfg.wxUnits + dir + 3) % 3); cfg.save(); break;
+      case 85: cfg.antUnits = (uint8_t)(cfg.antUnits ? 0 : 1); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 83: {   // AMSAT status window: 3/6/12/24/48/72 h
         static const uint8_t W[] = {3,6,12,24,48,72}; int n = 6, i = 0;
@@ -20657,7 +20796,8 @@ void App::drawAbout() {
     if ((int)M5.Power.isCharging() == 1) s += " (charging)";  // 1=charging; ignore "unknown" (2)
     line(s);
   }
-  line(String("Free heap: ") + String(ESP.getFreeHeap() / 1024) + " KB");
+  line(String("Free heap: ") + String(ESP.getFreeHeap() / 1024) + " KB (max blk " +
+       String(ESP.getMaxAllocHeap() / 1024) + "K)");
   {
     uint32_t up = millis() / 1000;
     char b[28];
@@ -20672,7 +20812,7 @@ void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'l') { licScroll = 0; screen = SCR_LICENSE; lastDrawMs = 0; return; }
   if (c == 'z') { gamesSel = 0; screen = SCR_GAMES; lastDrawMs = 0; return; }   // Games menu
   if (c == 'r') { screen = SCR_READY; lastDrawMs = 0; return; }                 // station readiness
-  if (c == 't') { toolsSel = 0; screen = SCR_TOOLS; lastDrawMs = 0; return; }    // Tools hub
+  if (c == 't') { screen = SCR_TOOLS; lastDrawMs = 0; return; }    // Tools hub (keeps last selection)
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
 
@@ -22863,6 +23003,10 @@ void App::draw() {
     case SCR_ITUZ: drawItuz(); break;
     case SCR_ITUZD: drawItuzDetail(); break;
     case SCR_LINKB: drawLinkB(); break;
+    case SCR_OPREF: drawOpref(); break;
+    case SCR_CTCSS: drawCtcss(); break;
+    case SCR_ORBITZOO: drawOrbitZoo(); break;
+    case SCR_MATHREF: drawMathRef(); break;
     case SCR_TOOLFORM: drawToolForm(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
@@ -23392,6 +23536,7 @@ void App::drawHelp() {
     " t  tech help (antennas etc)",
     " l  learn (radio+orbit theory,",
     "    modulation, telemetry)",
+    " o  orbit animations (types)",
     " f  frequencies / band plan",
     " b  screenshot to SD",
     " ;/.  up/down",
@@ -23572,6 +23717,24 @@ void App::drawHelp() {
     "ABOUT",
     " build, IP, free heap,",
     " diagnostics",
+    " r  station readiness check",
+    " t  Tools hub (26 tools)",
+    " z  games menu",
+    " l  license & credits",
+    "TOOLS (About > t)",
+    " letter  jump to next tool",
+    "         starting with it",
+    " ENT  open  `  back",
+    " form tools remember your",
+    " values between sessions;",
+    " x  reset tool to defaults",
+    " pick-lists: ,// cycle",
+    " Link budget: p  sync dist/",
+    "  freq from tracked sat",
+    " Char lookup: shift+T full",
+    "  ASCII/Morse/Baudot table",
+    " Antenna lengths ft/m:",
+    "  Settings > Display",
     "CHARGE / SLEEP",
     " low-power: screen off,",
     " any key shows battery,",
@@ -23598,6 +23761,8 @@ void App::keyHelp(char c, bool enter, bool back) {
   if (c == 's') { satHistScroll = 0; screen = SCR_SATHIST; lastDrawMs = 0; return; }
   if (c == 't') { techScroll = 0; screen = SCR_TECHHELP; lastDrawMs = 0; return; }
   if (c == 'l') { learnScroll = 0; screen = SCR_LEARN; lastDrawMs = 0; return; }
+  if (c == 'o') { ozType = 0; ozPhase = 0; ozTrailCount = 0; ozTrailHead = 0;    // orbit animations
+                  screen = SCR_ORBITZOO; lastDrawMs = 0; return; }
   if (c == 'f') { bpScroll = 0; screen = SCR_BANDPLAN; lastDrawMs = 0; return; }  // frequencies / band plan
   if (isUp(c))   { helpScroll--; lastDrawMs = 0; }
   if (isDown(c)) { helpScroll++; lastDrawMs = 0; }
@@ -23970,6 +24135,29 @@ void App::drawSatHistory() {
     " The ISS also carries ham gear",
     " (ARISS), with school contacts,",
     " an FM repeater and packet.",
+    "THE 2020s",
+    " The FM birds became daily",
+    " workhorses - SO-50 (launched",
+    " 2002) still going, joined by",
+    " AMSAT's Fox-series AO-91, plus",
+    " a wave of linear-transponder",
+    " CubeSats from many countries",
+    " keeping SSB/CW alive in LEO.",
+    " The landmark: GreenCube",
+    " (IO-117), launched 2022 into",
+    " MEO near 5800 km - far above",
+    " normal LEO. Its digipeater's",
+    " huge footprint lets stations",
+    " thousands of km apart connect,",
+    " including transatlantic",
+    " contacts - reach not seen",
+    " since the Phase 3 era.",
+    " ARISS remains the gateway",
+    " drug: school contacts, SSTV",
+    " events and the V/U FM repeater",
+    " on the ISS introduce more",
+    " newcomers to satellites than",
+    " anything else flying.",
     "HOW THEY WORK",
     " A LINEAR transponder relays a",
     " whole band of signals at once,",
@@ -24085,6 +24273,15 @@ void App::drawTechHelp() {
     " sat's changing polarization.",
     " A quick twist often recovers a",
     " fading signal instantly.",
+    " Serious sat antennas sidestep",
+    " the problem with CIRCULAR",
+    " polarization: two crossed",
+    " elements fed 90 deg apart via",
+    " a phasing line (see Tools >",
+    " Phasing line / stub). CP loses",
+    " ~3 dB to a linear antenna but",
+    " never suffers the deep",
+    " cross-polarization fades.",
     "FEEDLINE TIPS",
     " Keep coax SHORT on UHF - 70 cm",
     " loss adds up fast. A few metres",
@@ -24361,6 +24558,31 @@ void App::drawLearn() {
     " hand antenna sees the signal",
     " spin and fade, so twisting the",
     " antenna recovers it.",
+    "COAX & VELOCITY FACTOR",
+    " Radio waves travel SLOWER in",
+    " coax than in air - typically",
+    " 66-88% of c, the cable's",
+    " VELOCITY FACTOR (VF). So a",
+    " cable's ELECTRICAL length is",
+    " longer than its physical one:",
+    " a quarter-wave line of RG-58",
+    " (VF 0.66) is cut to only 66%",
+    " of a free-space quarter wave.",
+    " Why it matters: matching stubs",
+    " and PHASING HARNESSES are cut",
+    " by electrical length. Feed two",
+    " crossed dipoles or Yagis with",
+    " lines differing by 1/4 wave",
+    " (90 deg) and the pair radiates",
+    " CIRCULAR polarization - which",
+    " is why satellite antennas like",
+    " turnstiles and eggbeaters have",
+    " those extra cable loops. Get",
+    " the VF wrong and the phase is",
+    " wrong: always cut long, trim,",
+    " and verify on an analyzer.",
+    " (Tools > Phasing line does the",
+    " arithmetic for common cables.)",
     "DOPPLER, PHYSICALLY",
     " A moving source bunches the",
     " waves ahead of it and stretches",
@@ -26216,9 +26438,9 @@ void App::buildOrbit(bool quiet) {
 void App::drawOrbit() {
   SatEntry* s = activeSat();
   static const char* PG[] = { "Info", "Live", "Pass", "Track", "Doppler", "Nodal",
-                              "Sun/B", "Outlook", "OrbPos", "Phys" };
+                              "Sun/B", "Outlook", "OrbPos", "Phys", "Explore" };
   { String h = (s ? String(s->name) : String("Orbit")) + " " + PG[orbitPage] +
-               " " + String(orbitPage + 1) + "/10";
+               " " + String(orbitPage + 1) + "/11";
     header(h); }
   canvas.setTextSize(1);
   if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
@@ -26622,7 +26844,68 @@ void App::drawOrbit() {
     return;
   }
 
-  // orbitPage == 4                                  // ---------- Doppler curve ----------
+  if (orbitPage == 10) {                             // ---------- Orbit explorer ----------
+    // A teaching/planning sandbox: edit apogee, perigee (km altitude) and inclination,
+    // and watch the derived orbital characteristics recompute -- WITHOUT touching the
+    // real satellite's elements. Seeded once from the active sat on entry. All orbital
+    // quantities stay metric (km, km/s, min) -- these are never antenna dimensions.
+    if (!oxInit) { oxSeedFromSat(); oxInit = true; }
+    const double D2R = 0.017453292519943295;
+    double rApo = RE + oxApo, rPeri = RE + oxPeri;         // geocentric radii, km
+    if (rPeri > rApo) { double t = rApo; rApo = rPeri; rPeri = t; }  // keep apo >= peri
+    double aa = 0.5 * (rApo + rPeri);                      // semi-major axis, km
+    double ee = (aa > 0) ? (rApo - rPeri) / (rApo + rPeri) : 0;
+    double nn = (aa > 0) ? sqrt(MU / (aa * aa * aa)) : 0;  // mean motion, rad/s
+    double perMin = (nn > 0) ? (TWO_PI_ / nn) / 60.0 : 0;
+    double revday = (perMin > 0) ? 1440.0 / perMin : 0;
+    double vApo = (aa > 0) ? sqrt(MU * (2.0 / rApo - 1.0 / aa)) : 0;
+    double vPeri = (aa > 0) ? sqrt(MU * (2.0 / rPeri - 1.0 / aa)) : 0;
+    // Footprint half-angle & ground radius at apogee (max coverage)
+    double lamApo = (rApo > RE) ? acos(RE / rApo) : 0;
+    double fpRadKm = lamApo * RE;                          // surface radius of footprint
+    // Longest possible pass (overhead, at apogee): 2*lambda / angular rate at apogee
+    double wApo = (rApo > 0) ? (sqrt(MU * aa * (1 - ee * ee)) / (rApo * rApo)) : 0;
+    double maxPass = (wApo > 0) ? (2.0 * lamApo / wApo) / 60.0 : 0;
+    // J2 nodal regression (deg/day) and sun-sync check
+    double J2 = 0.00108262998905, DPD = 57.29577951308232 * 86400.0;
+    double pp = aa * (1 - ee * ee);
+    double ReP2 = (pp > 0) ? (RE / pp) * (RE / pp) : 0;
+    double Odot = -1.5 * nn * J2 * ReP2 * cos(oxIncl * D2R) * DPD;
+
+    // editable rows
+    const char* labels[3] = { "Apogee alt", "Perigee alt", "Inclination" };
+    const char* units[3]  = { " km", " km", " deg" };
+    double vals[3] = { oxApo, oxPeri, oxIncl };
+    int yy = 18; const int LHx = 9;
+    for (int i = 0; i < 3; ++i) {
+      bool sel = (i == oxSel);
+      canvas.setTextColor(sel ? CL_GREEN : CL_GREY, CL_BLACK);
+      canvas.setCursor(2, yy); canvas.print((sel ? ">" : " ") + String(labels[i]));
+      String vs = (sel && oxEditing) ? (oxEditBuf + "_") : (String(vals[i], (i == 2) ? 1 : 0) + units[i]);
+      canvas.setTextColor(sel ? CL_GREEN : CL_WHITE, CL_BLACK);
+      canvas.setCursor(98, yy); canvas.print(vs);
+      yy += LHx;
+    }
+    canvas.drawFastHLine(2, yy, 236, CL_MGREY); yy += 3;
+    auto orow = [&](const char* k, const String& v, uint16_t c) {
+      canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, yy);  canvas.print(k);
+      canvas.setTextColor(c, CL_BLACK);        canvas.setCursor(110, yy); canvas.print(v);
+      yy += LHx;
+    };
+    orow("Period",    String(perMin, 1) + " min", CL_CYAN);
+    orow("Revs/day",  String(revday, 3), CL_WHITE);
+    orow("Eccentric", String(ee, 4), CL_WHITE);
+    orow("V apo/peri", String(vApo, 2) + "/" + String(vPeri, 2) + " km/s", CL_WHITE);
+    orow("Footprint",  String(fpRadKm, 0) + " km r", CL_WHITE);
+    orow("Max pass",   String(maxPass, 1) + " min", CL_CYAN);
+    orow("Node drift", String(Odot, 3) + " /day", CL_WHITE);
+    orow("Sun-sync",   (fabs(Odot - 0.98565) < 0.05) ? "yes" : "no",
+         (fabs(Odot - 0.98565) < 0.05) ? CL_GREEN : CL_GREY);
+    footer(";/. row  type edit  x reseed  ,// page  ` bk");
+    return;
+  }
+
+
   {
     const int PX = 30, PY = 20, PW = 204, PH = 90;
     canvas.drawRect(PX - 1, PY - 1, PW + 2, PH + 2, CL_MGREY);
@@ -26659,11 +26942,60 @@ void App::drawOrbit() {
   }
 }
 
+// Seed the orbit-explorer sandbox from the active satellite's real elements (apogee &
+// perigee altitude, inclination), so the explorer opens on a familiar orbit. Falls back
+// to an ISS-like default when nothing is tracked.
+void App::oxSeedFromSat() {
+  SatEntry* s = activeSat();
+  // These physical constants are function-local throughout app.cpp (there is no
+  // file-scope MU/RE/TWO_PI_), so define them here too. TWO_PI_ has a trailing
+  // underscore deliberately -- the bare name TWO_PI is an Arduino/ESP32 macro.
+  const double MU = 398600.4418, RE = 6378.137, TWO_PI_ = 6.283185307179586;
+  if (s && s->meanMotion > 0) {
+    double n = s->meanMotion * TWO_PI_ / 86400.0;      // rad/s
+    double a = pow(MU / (n * n), 1.0 / 3.0);           // km
+    oxApo  = a * (1 + s->ecc) - RE;
+    oxPeri = a * (1 - s->ecc) - RE;
+    oxIncl = s->incl;
+  } else {
+    oxApo = 420.0; oxPeri = 410.0; oxIncl = 51.6;      // ISS-ish default
+  }
+}
+
 void App::keyOrbit(char c, bool enter, bool back) {
-  (void)enter;
   if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
-  if (isRight(c)) { if (++orbitPage > 9) orbitPage = 0; lastDrawMs = 0; return; }
-  if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 9; lastDrawMs = 0; return; }
+
+  // Orbit explorer (page 10): row select + in-place numeric edit. Handled before the
+  // generic page nav so digit entry doesn't page-flip. Left/right still change page.
+  if (orbitPage == 10) {
+    auto commit = [&]() {
+      if (!oxEditing) return;
+      double v = oxEditBuf.toFloat();
+      if (oxSel == 0) oxApo = v;
+      else if (oxSel == 1) oxPeri = v;
+      else { oxIncl = constrain(v, 0.0, 180.0); }
+      oxEditing = false; oxEditBuf = "";
+    };
+    if (isLeft(c))  { commit(); orbitPage = 9;  lastDrawMs = 0; return; }
+    if (isRight(c)) { commit(); orbitPage = 0;  lastDrawMs = 0; return; }
+    if (isUp(c))    { commit(); if (--oxSel < 0) oxSel = 2; lastDrawMs = 0; return; }
+    if (isDown(c))  { commit(); if (++oxSel > 2) oxSel = 0; lastDrawMs = 0; return; }
+    if (c == 'x')   { oxSeedFromSat(); oxEditing = false; oxEditBuf = ""; lastDrawMs = 0; return; }
+    if (back || c == 8 || c == 127) {                 // DEL: backspace edit buffer
+      if (oxEditing && oxEditBuf.length()) oxEditBuf.remove(oxEditBuf.length() - 1);
+      lastDrawMs = 0; return;
+    }
+    if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
+      if (!oxEditing) { oxEditing = true; oxEditBuf = ""; }
+      oxEditBuf += c; lastDrawMs = 0; return;
+    }
+    if (enter) { commit(); lastDrawMs = 0; return; }
+    return;
+  }
+
+  (void)enter;
+  if (isRight(c)) { if (++orbitPage > 10) orbitPage = 0; lastDrawMs = 0; return; }
+  if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 10; lastDrawMs = 0; return; }
   if (c == 'r')   { buildOrbit(); lastDrawMs = 0; return; }
   if (c == 'f' && orbitPage == 4) {                   // edit Doppler-page beacon freq
     editTarget = 210; editTitle = "Beacon freq (MHz)";
@@ -28945,6 +29277,22 @@ static bool amsTagFits(const char* apiName, const Transponder& tx) {
 // Choose the API name for a satellite from its mapped names, using the active
 // transponder to disambiguate multi-mode birds. Returns null when the sat has
 // no mapped name at all; sets 'ambiguous' when a human should pick.
+// Prettify an AMSAT catalog API name for display only. The API uses an
+// underscore form ("AO-7_[V/a]"); the catalog's own display_name is exactly this
+// name with "_[" -> " [" and any remaining "_" -> space (verified across the full
+// catalog). We keep the raw name for the POST and for amsTagFits(); only the shown
+// text is prettified. Writes into caller-supplied buf and returns it.
+static const char* amsPretty(const char* raw, char* buf, size_t bufN) {
+  size_t j = 0;
+  for (size_t i = 0; raw[i] && j + 1 < bufN; ++i) {
+    if (raw[i] == '_' && raw[i + 1] == '[') { buf[j++] = ' '; }   // "_[" -> " ["
+    else if (raw[i] == '_')                 { buf[j++] = ' '; }   // stray "_" -> space
+    else                                    { buf[j++] = raw[i]; }
+  }
+  buf[j] = 0;
+  return buf;
+}
+
 const char* App::amsPickNameFor(int satIdx, bool& ambiguous) {
   ambiguous = false;
   pickN = db.amsNamesFor(satIdx, pickName, 6);
@@ -29018,7 +29366,8 @@ void App::drawAmsRpick() {
     canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
     canvas.setCursor(70, y); canvas.print(v);
   };
-  String nm = String(pickName[pickNameSel]);
+  char pretty[40];   // AMSAT names are <28 chars; the prettify transform never grows the string
+  String nm = String(amsPretty(pickName[pickNameSel], pretty, sizeof(pretty)));
   if (pickN > 1) nm += " (" + String(pickNameSel + 1) + "/" + String(pickN) + ")";
   row2(0, "As", nm);
   row2(1, "Status", AMS_STATUSES[pickStat]);
@@ -29054,7 +29403,8 @@ void App::keyAmsRpick(char c, bool enter, bool back) {
 // Tool ids for the live-recalc form engine.
 enum { TOOL_COAX = 0, TOOL_DIPOLE, TOOL_VERTICAL, TOOL_YAGI, TOOL_QUAD,
        TOOL_RFCONV, TOOL_SWR, TOOL_FSPL, TOOL_UNITS, TOOL_RFEXP, TOOL_BATT,
-       TOOL_DEBRIS, TOOL_XAREA, TOOL__N };
+       TOOL_DEBRIS, TOOL_XAREA, TOOL_PHASE, TOOL_WAVELEN, TOOL_ATTEN,
+       TOOL_DBCHAIN, TOOL_COMPLEX, TOOL_REACT, TOOL_TIMECONST, TOOL__N };
 
 static const char* const TOOLS_NAMES[] = {
   "Scientific calculator",
@@ -29064,6 +29414,9 @@ static const char* const TOOLS_NAMES[] = {
   "CQ zones (WAZ)",
   "ITU zones",
   "Link budget",
+  "Operating references",
+  "CTCSS tone reference",
+  "Radio math reference",
   "Coax loss / power",
   "Dipole length",
   "Vertical / ground plane",
@@ -29077,8 +29430,29 @@ static const char* const TOOLS_NAMES[] = {
   "Battery runtime",
   "Orbit lifetime (debris)",
   "Cross-section area",
+  "Phasing line / stub",
+  "Wavelength / frequency",
+  "Attenuator pad",
+  "dB chain sum",
+  "Complex / polar",
+  "Reactance & resonance",
+  "RC/RL time constant",
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
+
+// The first ten Tools menu entries are standalone screens (sci calc, programmer calc,
+// char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
+// reference, radio-math reference); everything after them is a numeric "form" tool whose
+// form-id is (menu index - TOOLS_FIRST_FORM). Keeping this as one named constant means
+// the two places that convert between menu index and form id stay in step.
+static const int TOOLS_FIRST_FORM = 10;
+
+// Compile-time guard: the number of form-based tools in the menu (everything after the
+// standalone ones) must exactly match the size of the form enum (TOOL_COAX..TOOL__N).
+// If a tool is added to TOOLS_NAMES without updating the enum (or vice versa), or the
+// standalone/form split moves, this fails the build instead of mis-indexing at runtime.
+static_assert(TOOLS_N - TOOLS_FIRST_FORM == TOOL__N,
+              "TOOLS_FIRST_FORM / TOOLS_NAMES / TOOL_* enum are out of step");
 
 void App::drawTools() {
   header("Tools");
@@ -29104,6 +29478,18 @@ void App::keyTools(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
   if (isUp(c))   { if (--toolsSel < 0) toolsSel = TOOLS_N - 1; lastDrawMs = 0; return; }
   if (isDown(c)) { if (++toolsSel >= TOOLS_N) toolsSel = 0; lastDrawMs = 0; return; }
+  // First-letter jump: a letter moves the highlight to the next tool whose name starts
+  // with it (wrapping), mirroring the Home menu. Handy on a 20+ entry scrolling list.
+  if (c >= 'a' && c <= 'z') {
+    char want = (char)(c - 'a' + 'A');
+    for (int k = 1; k <= TOOLS_N; ++k) {
+      int idx = (toolsSel + k) % TOOLS_N;
+      char f = TOOLS_NAMES[idx][0];
+      if (f >= 'a' && f <= 'z') f = (char)(f - 'a' + 'A');
+      if (f == want) { toolsSel = idx; lastDrawMs = 0; return; }
+    }
+    return;
+  }
   if (enter) {
     if (toolsSel == 0) {                       // scientific calculator
       calcBuf = ""; calcResult = ""; calcErr = false;
@@ -29120,8 +29506,14 @@ void App::keyTools(char c, bool enter, bool back) {
       ituSel = 0; ituScroll = 0; screen = SCR_ITUZ;
     } else if (toolsSel == 6) {                // link budget calculator
       lbInit(); screen = SCR_LINKB;
+    } else if (toolsSel == 7) {                // operating references (Q/phonetics/RST)
+      oprefTab = 0; oprefScroll = 0; screen = SCR_OPREF;
+    } else if (toolsSel == 8) {                // CTCSS tone reference
+      ctcssScroll = 0; screen = SCR_CTCSS;
+    } else if (toolsSel == 9) {                // radio math reference (cheat sheet)
+      mathRefScroll = 0; screen = SCR_MATHREF;
     } else {                                   // one of the live-recalc forms
-      toolFormInit(toolsSel - 7);              // form ids are toolsSel-7 (seven tools precede)
+      toolFormInit(toolsSel - TOOLS_FIRST_FORM);   // form id = menu index - (standalone tools that precede)
       screen = SCR_TOOLFORM;
     }
     lastDrawMs = 0;
@@ -29188,6 +29580,16 @@ namespace {
       if (word("pi"))  return 3.14159265358979323846;
       if (word("e"))   return 2.71828182845904523536;
       if (word("Ans")) return ans;
+      // --- amateur-radio / satellite constants ---
+      if (word("c"))   return 299792458.0;              // speed of light, m/s
+      if (word("kB"))  return 1.380649e-23;             // Boltzmann, J/K
+      if (word("Re"))  return 6378.137;                 // Earth equatorial radius, km
+      if (word("mu"))  return 398600.4418;              // Earth GM, km^3/s^2
+      if (word("g0"))  return 9.80665;                  // standard gravity, m/s^2
+      // --- trig (degrees for the circular ones, as above) ---
+      if (word("sinh")) return callFn(::sinh, 1.0);
+      if (word("cosh")) return callFn(::cosh, 1.0);
+      if (word("tanh")) return callFn(::tanh, 1.0);
       if (word("sin"))  return callFn(::sin,  D2R);
       if (word("cos"))  return callFn(::cos,  D2R);
       if (word("tan"))  return callFn(::tan,  D2R);
@@ -29199,12 +29601,68 @@ namespace {
       if (word("log"))  return callFn(::log10, 1.0);
       if (word("exp"))  return callFn(::exp,  1.0);
       if (word("abs"))  return callFn(::fabs, 1.0);
+      if (word("floor")) return callFn(::floor, 1.0);
+      if (word("ceil"))  return callFn(::ceil,  1.0);
+      if (word("round")) return callFn(::round, 1.0);
+      // --- amateur-radio / satellite helper functions (single-argument) ---
+      // Power/ratio in dB, watts<->dBm, and frequency(MHz)->wavelength(m).
+      if (word("dbm"))   return callFn([](double w){ return 10.0*log10(w) + 30.0; }, 1.0); // W -> dBm
+      if (word("w"))     return callFn([](double dbm){ return pow(10.0,(dbm-30.0)/10.0); }, 1.0); // dBm -> W
+      if (word("db"))    return callFn([](double r){ return 10.0*log10(r); }, 1.0);   // power ratio -> dB
+      if (word("undb"))  return callFn([](double d){ return pow(10.0, d/10.0); }, 1.0); // dB -> power ratio
+      if (word("wl"))    return callFn([](double mhz){ return (mhz>0)?299.792458/mhz:0.0; }, 1.0); // MHz -> m
+      if (word("fq"))    return callFn([](double m){ return (m>0)?299.792458/m:0.0; }, 1.0); // m -> MHz
       // number
       char* endp = nullptr; double v = strtod(p, &endp);
       if (endp == p) { ok = false; return 0; }
-      p = endp; return v;
+      p = endp;
+      // Optional metric-prefix suffix on a numeric literal (e.g. 100k, 2.2n, 47p, 146M).
+      // Case matters: M = mega, m = milli -- as the ARRL supplement stresses. Only applied
+      // when the suffix is immediately followed by a non-identifier char, so it never eats
+      // the start of a function name (e.g. the 'm' of "mu" or the 'k' of a future keyword).
+      {
+        char sfx = *p;
+        char nxt = *(p + 1);
+        bool nextIdent = (nxt >= 'a' && nxt <= 'z') || (nxt >= 'A' && nxt <= 'Z');
+        double mult = 0.0;
+        switch (sfx) {
+          case 'p': mult = 1e-12; break;
+          case 'n': mult = 1e-9;  break;
+          case 'u': mult = 1e-6;  break;
+          case 'm': mult = 1e-3;  break;
+          case 'k': mult = 1e3;   break;
+          case 'M': mult = 1e6;   break;
+          case 'G': mult = 1e9;   break;
+          case 'T': mult = 1e12;  break;
+          default: break;
+        }
+        if (mult != 0.0 && !nextIdent) { v *= mult; ++p; }
+      }
+      return v;
     }
   };
+}
+
+// Format a value in engineering notation: mantissa (1..999.999) times a metric-prefix
+// suffix whose exponent is a multiple of 3 (p n u m [none] k M G T). Used by the
+// calculator's eng-notation display mode. Falls back to plain formatting outside the
+// prefix range or for zero. Pure string work -- no allocation beyond the returned String.
+static String calcEngFormat(double v) {
+  if (v == 0.0 || !isfinite(v)) { char b[24]; dtostrf(v, 0, 6, b); return String(b); }
+  bool neg = v < 0; double a = neg ? -v : v;
+  int exp3 = 0;
+  while (a >= 1000.0 && exp3 < 12) { a /= 1000.0; exp3 += 3; }
+  while (a < 1.0    && exp3 > -12) { a *= 1000.0; exp3 -= 3; }
+  const char* pfx;
+  switch (exp3) {
+    case -12: pfx = "p"; break; case -9: pfx = "n"; break; case -6: pfx = "u"; break;
+    case -3:  pfx = "m"; break; case 0:  pfx = "";  break; case 3:  pfx = "k"; break;
+    case 6:   pfx = "M"; break; case 9:  pfx = "G"; break; case 12: pfx = "T"; break;
+    default:  pfx = "?"; break;
+  }
+  char b[24]; dtostrf(a, 0, 4, b);
+  String m(b); while (m.indexOf('.') >= 0 && (m.endsWith("0") || m.endsWith("."))) m.remove(m.length() - 1);
+  return (neg ? String("-") : String("")) + m + (pfx[0] ? (String(" ") + pfx) : String(""));
 }
 
 double App::calcEval(const char* s, bool& ok) {
@@ -29240,11 +29698,17 @@ void App::drawCalc() {
   if (shown.length() > 40) shown = shown.substring(shown.length() - 40);
   canvas.print(shown);
   canvas.drawFastHLine(4, 90, 232, CL_MGREY);
-  // Function hints, kept just above the footer
+  // Function hints, kept just above the footer. Toggle pages with the ' key.
   canvas.setTextColor(CL_MGREY, CL_BLACK);
-  canvas.setCursor(4, 96);  canvas.print("fns: sin cos tan asin acos atan (deg)");
-  canvas.setCursor(4, 106); canvas.print("     sqrt ln log exp abs ^ pi e Ans");
-  footer("type  ENTER =  [ ] scroll  ` back");
+  if (!calcHintPage2) {
+    canvas.setCursor(4, 96);  canvas.print("fns: sin cos tan a- sinh- sqrt ln");
+    canvas.setCursor(4, 106); canvas.print("log exp abs floor ceil ^ pi e Ans");
+  } else {
+    canvas.setCursor(4, 96);  canvas.print("ham: dbm() w() db() undb() wl() fq()");
+    canvas.setCursor(4, 106); canvas.print("const: c kB Re mu g0  suffix p n u m k M G");
+  }
+  if (calcEngNota) { canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(210, 96); canvas.print("ENG"); }
+  footer("' fns  \\ eng  [ ] scroll  ` back");
 }
 
 void App::keyCalc(char c, bool enter, bool back) {
@@ -29252,6 +29716,8 @@ void App::keyCalc(char c, bool enter, bool back) {
   // so it must be treated as backspace here -- NOT routed through isBack(), which
   // would exit. (This mirrors keyEdit's handling of text entry.)
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == '\'') { calcHintPage2 = !calcHintPage2; lastDrawMs = 0; return; }   // toggle fn-hint page
+  if (c == '\\') { calcEngNota = !calcEngNota; lastDrawMs = 0; return; }        // toggle eng-notation output
   // Tape scroll uses [ ] -- the arrow keys ; and . are expression characters
   // ('.' is the decimal point), so they must reach the entry buffer.
   if (c == '[') { if (calcScroll < calcTapeN - 1) calcScroll++; lastDrawMs = 0; return; }
@@ -29269,8 +29735,10 @@ void App::keyCalc(char c, bool enter, bool back) {
       bool ok; double v = calcEval(calcBuf.c_str(), ok);
       tapePush(calcBuf);
       if (ok) { calcAns = v;
-                char b[24]; dtostrf(v, 0, 6, b);
-                String r(b); while (r.indexOf('.') >= 0 && (r.endsWith("0") || r.endsWith("."))) r.remove(r.length() - 1);
+                String r;
+                if (calcEngNota) r = calcEngFormat(v);
+                else { char b[24]; dtostrf(v, 0, 6, b);
+                       r = String(b); while (r.indexOf('.') >= 0 && (r.endsWith("0") || r.endsWith("."))) r.remove(r.length() - 1); }
                 tapePush(String("= ") + r); }
       else      tapePush("= error");
       calcBuf = ""; calcScroll = 0;               // traditional: clear entry, snap to newest
@@ -29455,6 +29923,7 @@ namespace {
 void App::drawCharLk() {
   header("Char lookup");
   canvas.setTextSize(1);
+  if (clkTableMode) { drawCharLkTable(); return; }
   uint8_t v = clkVal;
   // The value in all four bases; the active entry base is highlighted.
   struct { const char* tag; int base; } B[4] = { {"HEX",16},{"DEC",10},{"BIN",2},{"OCT",8} };
@@ -29495,21 +29964,95 @@ void App::drawCharLk() {
   else if (v >= 'a' && v <= 'z') mo = MORSE_TBL[v - 'a'];
   else if (v >= '0' && v <= '9') mo = MORSE_DIG[v - '0'];
   row("Morse", mo, CL_WHITE);
-  // Baudot / ITA2 (5-bit values only).
-  if (v < 32) row("Baudot", String(ITA2_LTRS[v]) + " / " + ITA2_FIGS[v] + "  (LTRS/FIGS, US-TTY)", CL_WHITE);
-  else        row("Baudot", "-- (5-bit: 0-31)", CL_GREY);
+  // Baudot / ITA2 (5-bit values only). Figures shown are the US-TTY assignment; the
+  // few positions where CCITT No.2 (international) differs are annotated inline.
+  if (v < 32) {
+    const char* ccitt = nullptr;
+    switch (v) {
+      case 5:  ccitt = "WRU";  break;   // US 'BEL' -> CCITT WRU (who-are-you)
+      case 9:  ccitt = "BEL";  break;   // US '$'   -> CCITT BEL
+      case 13: ccitt = "nat";  break;   // US '!'   -> national/undefined
+      case 17: ccitt = "nat";  break;   // US '"'   -> national/undefined
+      case 20: ccitt = "nat";  break;   // US '#'   -> national/undefined
+      case 26: ccitt = "nat";  break;   // US '&'   -> national/undefined
+    }
+    String bl = String(ITA2_LTRS[v]) + " / " + ITA2_FIGS[v] + "  (LTRS/FIGS US-TTY)";
+    row("Baudot", bl, CL_WHITE);
+    if (ccitt) row("  CCITT fig", ccitt, CL_MGREY);
+  } else {
+    row("Baudot", "-- (5-bit: 0-31)", CL_GREY);
+  }
   // BCD reading (both nibbles must be decimal digits).
   int hi = (v >> 4) & 0xF, lo = v & 0xF;
   row("BCD", (hi <= 9 && lo <= 9) ? String(hi) + String(lo) : String("-- (nibble > 9)"),
       (hi <= 9 && lo <= 9) ? CL_CYAN : CL_GREY);
   canvas.setTextColor(CL_MGREY, CL_BLACK);
-  canvas.setCursor(4, y + 2); canvas.print("g-z: look a character up directly");
+  canvas.setCursor(4, y + 2); canvas.print("g-z look up  |  = full table");
   footer(";/. +-1  ,// base  digits enter  ` back");
+}
+
+// Browsable full-table view: printable ASCII 32..126 as a scrolling list, each row
+// showing the character, its decimal value, Morse, and Baudot (ITA2 letters shift).
+// A quick reference for CW/RTTY without stepping one code at a time.
+void App::drawCharLkTable() {
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, 20); canvas.print("chr dec  Morse       Baudot(L/F)");
+  canvas.drawFastHLine(4, 30, 232, CL_MGREY);
+  const int FIRST = 32, LAST = 126, TOTAL = LAST - FIRST + 1;
+  const int rows = 8;
+  if (clkTableScroll < 0) clkTableScroll = 0;
+  if (clkTableScroll > TOTAL - rows) clkTableScroll = (TOTAL > rows) ? TOTAL - rows : 0;
+  int y = 34;
+  for (int r = 0; r < rows && clkTableScroll + r < TOTAL; ++r) {
+    int v = FIRST + clkTableScroll + r;
+    // Morse
+    String mo = "";
+    if (v >= 'A' && v <= 'Z')      mo = MORSE_TBL[v - 'A'];
+    else if (v >= 'a' && v <= 'z') mo = MORSE_TBL[v - 'a'];
+    else if (v >= '0' && v <= '9') mo = MORSE_DIG[v - '0'];
+    // Baudot (ITA2): find this character in the letters- or figures-shift table and
+    // show its 5-bit code, tagged L (letters shift) or F (figures shift). Baudot is an
+    // uppercase-only code, so fold lowercase letters to their uppercase entry.
+    String bd = "-";
+    char up = (v >= 'a' && v <= 'z') ? (char)(v - 'a' + 'A') : (char)v;
+    char cs[2] = { up, 0 };
+    for (int i = 0; i < 32; ++i) {
+      if ((up >= 'A' && up <= 'Z') && String(ITA2_LTRS[i]) == String(cs)) {
+        char b[10]; snprintf(b, sizeof(b), "%02d L", i); bd = b; break;
+      }
+    }
+    if (bd == "-") {
+      for (int i = 0; i < 32; ++i) {
+        if (String(ITA2_FIGS[i]) == String(cs)) {
+          char b[10]; snprintf(b, sizeof(b), "%02d F", i); bd = b; break;
+        }
+      }
+    }
+    char cch = (v > 32 && v < 127) ? (char)v : ' ';
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(8, y);
+    { char b[6]; snprintf(b, sizeof(b), "%c", cch); canvas.print(b); }
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(30, y);
+    { char b[6]; snprintf(b, sizeof(b), "%3d", v); canvas.print(b); }
+    canvas.setTextColor(CL_CYAN, CL_BLACK);  canvas.setCursor(64, y);  canvas.print(mo.length() ? mo : String("-"));
+    canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(170, y); canvas.print(bd);
+    y += 11;
+  }
+  if (clkTableScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 34);  canvas.print("^"); }
+  if (clkTableScroll + rows < TOTAL)      { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 118); canvas.print("v"); }
+  footer(";/. scroll  = single view  ` back");
 }
 
 void App::keyCharLk(char c, bool enter, bool back) {
   (void)enter;
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
+  if (c == '=') {                                // toggle full-table view
+    clkTableMode = !clkTableMode; lastDrawMs = 0; return;
+  }
+  if (clkTableMode) {                            // table mode: scroll only
+    if (isUp(c))   { clkTableScroll--; lastDrawMs = 0; return; }
+    if (isDown(c)) { clkTableScroll++; lastDrawMs = 0; return; }
+    return;
+  }
   if (isUp(c))   { clkVal--; clkFresh = true; lastDrawMs = 0; return; }   // browse
   if (isDown(c)) { clkVal++; clkFresh = true; lastDrawMs = 0; return; }
   if (c == ',' || c == '/') {                    // cycle entry base
@@ -29904,7 +30447,7 @@ void App::lbInit() {
   lbSel = 1; lbScroll = 0; lbEditing = false; lbEditBuf = "";
   lbVal[0] = 0;                 // (unused -- mode row shows LB_MODES[lbMode].name)
   lbVal[1] = 435.0;             // freq MHz
-  lbVal[2] = 1000.0;            // distance km (typical LEO slant range)
+  lbVal[2] = 1000.0;            // distance km (typical LEO slant range; may be overridden below)
   lbVal[3] = 25.0;              // TX power W
   lbVal[4] = 1.5;               // TX line loss dB
   lbVal[5] = 12.0;              // TX antenna gain dBi
@@ -29915,6 +30458,21 @@ void App::lbInit() {
   lbMode = 1;                   // SSB
   lbVal[10] = LB_MODES[lbMode].bwHz;
   lbVal[11] = LB_MODES[lbMode].reqSnr;
+  lbSynced = false;
+  lbSyncFromSat();              // if a satellite is tracked, pre-fill distance (+ freq)
+}
+
+void App::lbSyncFromSat() {
+  SatEntry* s = activeSat();
+  if (!s) return;
+  pred.setSite(loc.obs()); pred.setSat(*s);
+  LiveLook L = pred.look(nowUtc());
+  if (L.rangeKm <= 0) return;
+  lbVal[2] = L.rangeKm;                        // live slant range (km)
+  // If a transponder is selected, use its downlink for the frequency (MHz).
+  if (activeTxCount > 0 && curTx < activeTxCount && activeTx[curTx].downlink > 0)
+    lbVal[1] = activeTx[curTx].downlink / 1.0e6;
+  lbSynced = true;
 }
 
 void App::drawLinkB() {
@@ -29938,6 +30496,7 @@ void App::drawLinkB() {
       char b[20]; dtostrf(lbVal[i], 0, (i == 10) ? 0 : 1, b);   // BW as integer Hz
       String r2(b); while (r2.indexOf('.') >= 0 && (r2.endsWith("0") || r2.endsWith("."))) r2.remove(r2.length() - 1);
       vs = r2;
+      if (i == 2 && lbSynced) vs += " (live)";                  // distance from tracked sat
     }
     canvas.setCursor(130, y); canvas.print(vs);
   }
@@ -29967,13 +30526,16 @@ void App::drawLinkB() {
   canvas.setCursor(6, 112); canvas.printf("MARGIN %+.1f dB %s", marg,
       (marg >= 6) ? "(solid)" : (marg >= 0) ? "(thin)" : "(no copy)");
   if (lbSel == 0) footer(",// mode  ;/. field  ` back");
-  else            footer("type value  ;/. field  ` back");
+  else            footer("type val  ;/. field  p sync-sat  ` back");
 }
 
 void App::keyLinkB(char c, bool enter, bool back) {
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
   auto commit = [&]() {
-    if (lbEditing) { lbVal[lbSel] = lbEditBuf.toFloat(); lbEditing = false; lbEditBuf = ""; }
+    if (lbEditing) {
+      lbVal[lbSel] = lbEditBuf.toFloat(); lbEditing = false; lbEditBuf = "";
+      if (lbSel == 2) lbSynced = false;   // manual distance edit -> no longer "live"
+    }
   };
   if (isUp(c))   { commit(); if (--lbSel < 0) lbSel = LB_NF - 1; lastDrawMs = 0; return; }
   if (isDown(c)) { commit(); if (++lbSel >= LB_NF) lbSel = 0;    lastDrawMs = 0; return; }
@@ -29992,12 +30554,382 @@ void App::keyLinkB(char c, bool enter, bool back) {
     if (lbEditing && lbEditBuf.length()) lbEditBuf.remove(lbEditBuf.length() - 1);
     lastDrawMs = 0; return;
   }
+  if (c == 'p') {                               // re-sync distance/freq from tracked sat
+    commit(); lbSyncFromSat(); lastDrawMs = 0; return;
+  }
   if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
     if (!lbEditing) { lbEditing = true; lbEditBuf = ""; }
     lbEditBuf += c; lastDrawMs = 0; return;
   }
   if (enter) { commit(); lastDrawMs = 0; return; }
 }
+
+// ---------------------------------------------------------------------------
+//  Operating references (SCR_OPREF): three tabbed static references -- common
+//  Q-codes, the ITU phonetic alphabet, and the RST system. Static PROGMEM-style
+//  text; `,`/`/` (or the tab key) switch tab, `;`/`.` scroll.
+// ---------------------------------------------------------------------------
+namespace {
+  // Each line "CODE|meaning". Satellite/AMSAT-relevant Q-codes emphasized.
+  const char* const QCODES[] = {
+    "QRZ|Who is calling me?",
+    "QRM|Interference (man-made)",
+    "QRN|Static / natural noise",
+    "QRO|Increase power",
+    "QRP|Decrease power / low power",
+    "QRT|Stop sending / going off air",
+    "QRV|Ready to receive",
+    "QRX|Wait / stand by",
+    "QSB|Signal fading",
+    "QSL|Acknowledge receipt / confirm",
+    "QSO|A contact / conversation",
+    "QSY|Change frequency",
+    "QTH|My location",
+    "QRL|Is this frequency in use?",
+    "QRG|Your exact frequency",
+    "QRQ|Send faster",
+    "QRS|Send slower",
+    "QRU|I have nothing for you",
+    "QRA|Name of my station",
+    "QTR|Correct time",
+  };
+  const int QCODES_N = (int)(sizeof(QCODES) / sizeof(QCODES[0]));
+  const char* const PHONETIC[] = {
+    "A Alfa", "B Bravo", "C Charlie", "D Delta", "E Echo", "F Foxtrot",
+    "G Golf", "H Hotel", "I India", "J Juliett", "K Kilo", "L Lima",
+    "M Mike", "N November", "O Oscar", "P Papa", "Q Quebec", "R Romeo",
+    "S Sierra", "T Tango", "U Uniform", "V Victor", "W Whiskey",
+    "X X-ray", "Y Yankee", "Z Zulu",
+  };
+  const int PHONETIC_N = (int)(sizeof(PHONETIC) / sizeof(PHONETIC[0]));
+  const char* const RSTTBL[] = {
+    "#RST = Readability Strength Tone",
+    "READABILITY (1-5)",
+    "1 Unreadable",
+    "2 Barely, occasional words",
+    "3 Readable with difficulty",
+    "4 Readable, little difficulty",
+    "5 Perfectly readable",
+    "STRENGTH (1-9)",
+    "1 Faint, barely perceptible",
+    "5 Fairly good",
+    "9 Extremely strong",
+    "TONE (1-9, CW only)",
+    "1 Extremely rough",
+    "5 Slightly modulated note",
+    "9 Perfect tone, no ripple",
+    "#Note: satellite SSB reports are",
+    "#RS only (e.g. 5x9); add S-units",
+    "#by ear -- Doppler smears tone.",
+  };
+  const int RSTTBL_N = (int)(sizeof(RSTTBL) / sizeof(RSTTBL[0]));
+}
+
+void App::drawOpref() {
+  header("Operating references");
+  canvas.setTextSize(1);
+  const char* tabs[3] = { "Q-codes", "Phonetics", "RST" };
+  // tab bar
+  for (int t = 0; t < 3; ++t) {
+    canvas.setTextColor(t == oprefTab ? CL_GREEN : CL_GREY, CL_BLACK);
+    canvas.setCursor(6 + t * 78, 20); canvas.print(tabs[t]);
+  }
+  int y0 = 32, LH = 10, rows = 9, y = y0;
+  if (oprefTab == 0) {
+    if (oprefScroll > QCODES_N - rows) oprefScroll = (QCODES_N > rows) ? QCODES_N - rows : 0;
+    if (oprefScroll < 0) oprefScroll = 0;
+    for (int r = 0; r < rows && oprefScroll + r < QCODES_N; ++r) {
+      const char* s = QCODES[oprefScroll + r];
+      const char* bar = strchr(s, '|');
+      char code[6] = {0}; int n = bar ? (int)(bar - s) : 0; if (n > 5) n = 5;
+      memcpy(code, s, n);
+      canvas.setTextColor(CL_CYAN, CL_BLACK);  canvas.setCursor(6, y);  canvas.print(code);
+      canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(52, y); canvas.print(bar ? bar + 1 : s);
+      y += LH;
+    }
+  } else if (oprefTab == 1) {
+    // phonetics in two columns
+    for (int r = 0; r < 9; ++r) {
+      int li = r, ri = r + 9;
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      if (li < PHONETIC_N) { canvas.setCursor(10, y); canvas.print(PHONETIC[li]); }
+      if (ri < PHONETIC_N) { canvas.setCursor(90, y); canvas.print(PHONETIC[ri]); }
+      // third column for X/Y/Z
+      int ti = r + 18;
+      if (ti < PHONETIC_N) { canvas.setCursor(170, y); canvas.print(PHONETIC[ti]); }
+      y += LH;
+    }
+  } else {
+    if (oprefScroll > RSTTBL_N - rows) oprefScroll = (RSTTBL_N > rows) ? RSTTBL_N - rows : 0;
+    if (oprefScroll < 0) oprefScroll = 0;
+    for (int r = 0; r < rows && oprefScroll + r < RSTTBL_N; ++r) {
+      const char* s = RSTTBL[oprefScroll + r];
+      if (s[0] == '#') { canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(6, y); canvas.print(s + 1); }
+      else if (s[0] >= 'A' && s[0] <= 'Z' && !(s[1] >= 'a' && s[1] <= 'z')) {
+        canvas.setTextColor(CL_ORANGE, CL_BLACK); canvas.setCursor(6, y); canvas.print(s);
+      } else { canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(10, y); canvas.print(s); }
+      y += LH;
+    }
+  }
+  footer(",// tab  ;/. scroll  ` back");
+}
+
+void App::keyOpref(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == ',') { oprefTab = (oprefTab + 2) % 3; oprefScroll = 0; lastDrawMs = 0; return; }
+  if (c == '/') { oprefTab = (oprefTab + 1) % 3; oprefScroll = 0; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--oprefScroll < 0) oprefScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { ++oprefScroll; lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  CTCSS tone reference (SCR_CTCSS): the standard EIA 38-tone list, with the FM
+//  satellites' known uplink tones surfaced from knownCtcssHz() at the top.
+// ---------------------------------------------------------------------------
+namespace {
+  const float CTCSS_TONES[] = {
+    67.0f,  71.9f,  74.4f,  77.0f,  79.7f,  82.5f,  85.4f,  88.5f,  91.5f,  94.8f,
+    97.4f, 100.0f, 103.5f, 107.2f, 110.9f, 114.8f, 118.8f, 123.0f, 127.3f, 131.8f,
+   136.5f, 141.3f, 146.2f, 151.4f, 156.7f, 162.2f, 167.9f, 173.8f, 179.9f, 186.2f,
+   192.8f, 203.5f, 210.7f, 218.1f, 225.7f, 233.6f, 241.8f, 250.3f,
+  };
+  const int CTCSS_TONES_N = (int)(sizeof(CTCSS_TONES) / sizeof(CTCSS_TONES[0]));
+}
+
+void App::drawCtcss() {
+  header("CTCSS tone reference");
+  canvas.setTextSize(1);
+  int y = 20, LH = 10;
+  canvas.setTextColor(CL_ORANGE, CL_BLACK); canvas.setCursor(6, y);
+  canvas.print("FM sats need a PL tone on uplink"); y += LH;
+  canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(6, y);
+  canvas.print("ISS/SO-50/AO-91/92: 67.0 (SO-50"); y += LH;
+  canvas.setCursor(6, y); canvas.print("arms w/ 74.4). Standard EIA list:"); y += LH + 2;
+  // tone grid: 6 columns
+  const int COLS = 6, startRow = ctcssScroll;
+  int shown = 0;
+  for (int r = 0; r < 5; ++r) {
+    for (int col = 0; col < COLS; ++col) {
+      int idx = (startRow + r) * COLS + col;
+      if (idx >= CTCSS_TONES_N) continue;
+      canvas.setTextColor(CL_CYAN, CL_BLACK);
+      canvas.setCursor(6 + col * 39, y + r * LH);
+      char b[8]; snprintf(b, sizeof(b), "%.1f", CTCSS_TONES[idx]);
+      canvas.print(b); shown++;
+    }
+  }
+  footer(";/. scroll  ` back");
+}
+
+void App::keyCtcss(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--ctcssScroll < 0) ctcssScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { if ((ctcssScroll + 5) * 6 < CTCSS_TONES_N) ++ctcssScroll; lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  Radio math reference (SCR_MATHREF): a scrolling cheat sheet distilled from the
+//  ARRL Handbook "Radio Mathematics" supplement -- the decibel table, AC voltage
+//  factors, useful constants, and the formulas hams reach for. Static PROGMEM-style
+//  text, same idiom as the operating-references / CTCSS screens (~zero heap).
+//  A leading '#' marks a section header; '~' marks a dim note line.
+// ---------------------------------------------------------------------------
+namespace {
+  const char* const MATHREF[] = {
+    "#DECIBELS  dB = 10 log(P/P0)",
+    " x2 power = +3 dB   x0.5 = -3",
+    " x4 = +6    x10 = +10   x100=+20",
+    " +1 dB ~ x1.26   +6 dB ~ x4",
+    " dBm: 0=1mW 30=1W 50=100W 60=1kW",
+    " voltage: dB = 20 log(V/V0)",
+    "#AC VOLTAGE (sine)",
+    " Vrms = 0.707 x Vpeak",
+    " Vpeak = 1.414 x Vrms",
+    " Vpk-pk = 2 x Vpeak",
+    " Vavg = 0.637 x Vpeak",
+    " P(rms) into R = Vrms^2 / R",
+    " PEP: peak-envelope power",
+    "#PREFIXES (x10^n)",
+    " p=-12 n=-9 u=-6 m=-3",
+    " k=+3 M=+6 G=+9 T=+12",
+    "#CONSTANTS",
+    " c = 3.00e8 m/s (speed of light)",
+    " wavelength(m) = 300 / f(MHz)",
+    " 1/4 wave(ft) = 234 / f(MHz)",
+    " k(Boltzmann)=1.38e-23 J/K",
+    " Earth R=6378 km  GM=398600",
+    "#REACTANCE & RESONANCE",
+    " Xc = 1/(2 pi f C)",
+    " Xl = 2 pi f L",
+    " f0 = 1/(2 pi sqrt(L C))",
+    " Q = f0 / bandwidth",
+    "#IMPEDANCE / SWR",
+    " Z = sqrt(R^2 + X^2)",
+    " SWR = (1+|G|)/(1-|G|)",
+    " |G| = (SWR-1)/(SWR+1)",
+    " return loss(dB) = -20 log|G|",
+    "#TIME CONSTANT",
+    " tau = R C  (or L/R)",
+    " 1t=63% 2t=86% 3t=95%",
+    " 4t=98% 5t=99% (charged)",
+    "#OHM / POWER",
+    " V=IR   P=VI=I^2 R=V^2/R",
+    "~from ARRL Radio Mathematics",
+  };
+  const int MATHREF_N = (int)(sizeof(MATHREF) / sizeof(MATHREF[0]));
+}
+
+void App::drawMathRef() {
+  header("Radio math reference");
+  canvas.setTextSize(1);
+  const int rows = 11, LH = 9;
+  if (mathRefScroll < 0) mathRefScroll = 0;
+  if (mathRefScroll > MATHREF_N - rows) mathRefScroll = (MATHREF_N > rows) ? MATHREF_N - rows : 0;
+  int y = 20;
+  for (int r = 0; r < rows && mathRefScroll + r < MATHREF_N; ++r) {
+    const char* s = MATHREF[mathRefScroll + r];
+    if (s[0] == '#') { canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(4, y); canvas.print(s + 1); }
+    else if (s[0] == '~') { canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, y); canvas.print(s + 1); }
+    else { canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y); canvas.print(s); }
+    y += LH;
+  }
+  if (mathRefScroll > 0)                { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 20);  canvas.print("^"); }
+  if (mathRefScroll + rows < MATHREF_N) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 112); canvas.print("v"); }
+  footer(";/. scroll  ` back");
+}
+
+void App::keyMathRef(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--mathRefScroll < 0) mathRefScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { ++mathRefScroll; lastDrawMs = 0; return; }
+}
+
+
+// ---------------------------------------------------------------------------
+//  Orbit-type animation (SCR_ORBITZOO): an animated Learn explainer. Each frame
+//  advances a satellite dot along the archetype's ellipse (drawn to scale against
+//  an Earth circle) with a short fading trail, plus a caption on what defines the
+//  orbit and what it is used for. Heap discipline: NO allocation in this path --
+//  the trail is a fixed static ring buffer, positions computed on the fly, no
+//  String churn (fixed char buffers only).
+// ---------------------------------------------------------------------------
+namespace {
+  struct OrbitArch {
+    const char* name;
+    float periKm, apoKm;    // altitudes (km) -- shape drives the ellipse
+    int   inclDeg;
+    const char* use;
+  };
+  const OrbitArch OZ_ARCH[] = {
+    { "LEO",         500,   500, 51, "ISS, most CubeSats, weather" },
+    { "Polar/SSO",   700,   700, 98, "imaging, sun-synchronous" },
+    { "MEO",       20200, 20200, 55, "GPS/GNSS navigation" },
+    { "GEO",       35786, 35786,  0, "TV, weather, comms (fixed)" },
+    { "Molniya/HEO", 500, 39900, 63, "high-lat comms, long dwell" },
+    { "GreenCube",  5900,  5900, 71, "amateur MEO digipeater" },
+  };
+  const int OZ_ARCH_N = (int)(sizeof(OZ_ARCH) / sizeof(OZ_ARCH[0]));
+}
+
+void App::drawOrbitZoo() {
+  header("Orbit types");
+  canvas.setTextSize(1);
+  const double RE = 6378.137, MU = 398600.4418, TWO_PI_ = 6.283185307179586;
+  const OrbitArch& o = OZ_ARCH[ozType];
+  double rPeri = RE + o.periKm, rApo = RE + o.apoKm;
+  double aa = 0.5 * (rApo + rPeri);
+  double ee = (aa > 0) ? (rApo - rPeri) / (rApo + rPeri) : 0;
+
+  // --- layout: Earth centered in a drawing box on the left; captions on the right ---
+  const int cx = 78, cy = 74;                 // Earth center on screen
+  const int boxMaxR = 52;                     // largest on-screen radius we allow
+  double scale = boxMaxR / rApo;              // km -> px so apogee fits the box
+  int earthR = (int)(RE * scale + 0.5); if (earthR < 4) earthR = 4;
+
+  // Earth
+  canvas.fillCircle(cx, cy, earthR, CL_DGREEN);
+  canvas.drawCircle(cx, cy, earthR, CL_GREEN);
+
+  // Orbit ellipse: focus at Earth center. Semi-major a, semi-minor b=a*sqrt(1-e^2).
+  // Ellipse center is offset from the focus by c = a*e along the major axis.
+  double b = aa * sqrt(1.0 - ee * ee);
+  double cOff = aa * ee;                       // focus offset
+  // draw the ellipse path as a faint guide
+  int px = 0, py = 0; bool have = false;
+  for (int d = 0; d <= 360; d += 6) {
+    double th = d * 0.017453292519943295;
+    double ox = (aa * cos(th) - cOff) * scale;     // x along major axis (px)
+    double oy = (b * sin(th)) * scale;             // y along minor axis (px)
+    int sx = cx + (int)ox, sy = cy - (int)oy;
+    if (have) canvas.drawLine(px, py, sx, sy, CL_MGREY);
+    px = sx; py = sy; have = true;
+  }
+
+  // Satellite position: advance true anomaly from the phase. Use the eccentric-anomaly
+  // relation so speed looks right (fast at perigee). Convert mean phase -> eccentric E.
+  double M = fmod(ozPhase, TWO_PI_);
+  double E = M;
+  for (int it = 0; it < 6; ++it) E = M + ee * sin(E);   // Kepler iteration
+  double satx = (aa * cos(E) - cOff) * scale;
+  double saty = (b * sin(E)) * scale;
+  int ssx = cx + (int)satx, ssy = cy - (int)saty;
+
+  // push into the fixed-size trail ring buffer (no allocation)
+  ozTrailX[ozTrailHead] = ssx; ozTrailY[ozTrailHead] = ssy;
+  ozTrailHead = (ozTrailHead + 1) % OZ_TRAIL;
+  if (ozTrailCount < OZ_TRAIL) ozTrailCount++;
+  // draw fading trail (oldest dim -> newest bright)
+  for (int i = 0; i < ozTrailCount; ++i) {
+    int idx = (ozTrailHead - 1 - i + OZ_TRAIL * 2) % OZ_TRAIL;
+    uint16_t col = (i < 4) ? CL_CYAN : (i < 10) ? CL_GREY : CL_MGREY;
+    canvas.fillCircle(ozTrailX[idx], ozTrailY[idx], (i < 3) ? 2 : 1, col);
+  }
+  canvas.fillCircle(ssx, ssy, 2, CL_YELLOW);
+
+  // advance phase for next frame; rate scaled so all orbits animate at a watchable
+  // pace regardless of real period (this is an explainer, not a live clock)
+  ozPhase += 0.13f;
+  if (ozPhase > TWO_PI_) ozPhase -= TWO_PI_;
+
+  // --- captions on the right ---
+  int rx = 140, y = 20;
+  canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(rx, y); canvas.print(o.name); y += 11;
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  { char b2[24];
+    if (o.periKm == o.apoKm) { snprintf(b2, sizeof(b2), "%d km circ", (int)o.periKm); }
+    else                     { snprintf(b2, sizeof(b2), "%d x %d km", (int)o.periKm, (int)o.apoKm); }
+    canvas.setCursor(rx, y); canvas.print(b2); y += 10; }
+  { char b2[16]; snprintf(b2, sizeof(b2), "incl %d deg", o.inclDeg);
+    canvas.setCursor(rx, y); canvas.print(b2); y += 10; }
+  { double n = sqrt(MU / (aa * aa * aa)); double perMin = (TWO_PI_ / n) / 60.0;
+    char b2[16];
+    if (perMin < 600) snprintf(b2, sizeof(b2), "%d min", (int)(perMin + 0.5));
+    else              snprintf(b2, sizeof(b2), "%.1f h", perMin / 60.0);
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(rx, y); canvas.print(b2); y += 12; }
+  // use-case, wrapped to ~14 chars/line
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  { const char* u = o.use; char line[16]; int li = 0;
+    for (const char* p = u; ; ++p) {
+      if (*p == 0 || (li >= 14 && *p == ' ')) {
+        line[li] = 0; canvas.setCursor(rx, y); canvas.print(line); y += 9; li = 0;
+        if (*p == 0) break;
+      } else if (li < 15) line[li++] = *p;
+    }
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(rx, 120);
+  { char b2[10]; snprintf(b2, sizeof(b2), "%d/%d", ozType + 1, OZ_ARCH_N); canvas.print(b2); }
+  footer(",// orbit type  ` back");
+}
+
+void App::keyOrbitZoo(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_HELP; helpReturn = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (c == ',' || isLeft(c))  { if (--ozType < 0) ozType = OZ_ARCH_N - 1;
+                                ozPhase = 0; ozTrailCount = 0; ozTrailHead = 0; lastDrawMs = 0; return; }
+  if (c == '/' || isRight(c)) { if (++ozType >= OZ_ARCH_N) ozType = 0;
+                                ozPhase = 0; ozTrailCount = 0; ozTrailHead = 0; lastDrawMs = 0; return; }
+}
+
+
 
 // ---------------------------------------------------------------------------
 //  Live-recalc form engine. toolFormInit() sets up the fields for a tool; the
@@ -30008,11 +30940,11 @@ void App::keyLinkB(char c, bool enter, bool back) {
 
 // Coax cable table: name + k where matched loss(dB/100ft) = k * sqrt(f_MHz).
 namespace {
-  struct Coax { const char* name; double k; };
+  struct Coax { const char* name; double k; double vf; };   // k=loss const, vf=velocity factor
   const Coax COAX_TBL[] = {
-    { "RG-58",    0.3724 }, { "RG-8X",    0.2483 }, { "RG-213",   0.1655 },
-    { "LMR-240",  0.2400 }, { "LMR-400",  0.1241 }, { "LMR-600",  0.0828 },
-    { "RG-174",   0.6621 }, { "Hardline1/2", 0.0703 },
+    { "RG-58",    0.3724, 0.66 }, { "RG-8X",    0.2483, 0.82 }, { "RG-213",   0.1655, 0.66 },
+    { "LMR-240",  0.2400, 0.84 }, { "LMR-400",  0.1241, 0.85 }, { "LMR-600",  0.0828, 0.87 },
+    { "RG-174",   0.6621, 0.66 }, { "Hardline1/2", 0.0703, 0.88 },
   };
   const int COAX_N = (int)(sizeof(COAX_TBL) / sizeof(COAX_TBL[0]));
 
@@ -30025,6 +30957,25 @@ namespace {
     { "0.5U",   10, 10, 5  }, { "Custom", 0,  0,  0  },
   };
   const int XSEC_PRESET_N = (int)(sizeof(XSEC_PRESET) / sizeof(XSEC_PRESET[0]));
+
+  // Phasing-line / stub length presets: a label and the fraction of one wavelength.
+  // Custom (frac < 0) lets the user read the full wavelength and scale by hand.
+  struct PhaseFrac { const char* name; double frac; };
+  const PhaseFrac PHASE_FRAC[] = {
+    { "1/4 wave", 0.25 }, { "1/2 wave", 0.5 }, { "3/8 wave", 0.375 },
+    { "3/4 wave", 0.75 }, { "1 wave", 1.0 },
+  };
+  const int PHASE_FRAC_N = (int)(sizeof(PHASE_FRAC) / sizeof(PHASE_FRAC[0]));
+
+  // RF-exposure duty-cycle presets by operating mode. Typical average-to-peak power
+  // ratios: FM/digital modes key continuously (100%), SSB voice ~20%, CW ~40%, and
+  // FT8/FT4 transmit for half a slot (~50%). "Custom 100%" keeps the worst case.
+  struct DutyPreset { const char* name; double duty; };
+  const DutyPreset RFDUTY[] = {
+    { "FM/digital 100%", 100.0 }, { "SSB voice 20%", 20.0 },
+    { "CW 40%", 40.0 }, { "FT8/FT4 50%", 50.0 }, { "Full/custom 100%", 100.0 },
+  };
+  const int RFDUTY_N = (int)(sizeof(RFDUTY) / sizeof(RFDUTY[0]));
 
   // FCC OET-65 Maximum Permissible Exposure limits (mW/cm^2) by frequency (MHz).
   double mpeUncontrolled(double f) {         // general population / uncontrolled
@@ -30100,6 +31051,15 @@ const char* App::tfChoiceLabel(int field, int idx) {
   if (toolId == TOOL_XAREA && field == 0) {
     if (idx >= 0 && idx < XSEC_PRESET_N) return XSEC_PRESET[idx].name;
   }
+  if (toolId == TOOL_PHASE && field == 2) {
+    if (idx >= 0 && idx < PHASE_FRAC_N) return PHASE_FRAC[idx].name;
+  }
+  if (toolId == TOOL_PHASE && field == 0) {
+    if (idx >= 0 && idx < COAX_N) return COAX_TBL[idx].name;
+  }
+  if (toolId == TOOL_RFEXP && field == 2) {
+    if (idx >= 0 && idx < RFDUTY_N) return RFDUTY[idx].name;
+  }
   return "?";
 }
 
@@ -30137,25 +31097,119 @@ void App::toolFormInit(int id) {
       tfN = 1; FLD(0, "Value", "", 100.0); break;
     case TOOL_RFEXP:
       tfN = 4; FLD(0, "Freq", "MHz", 146.0); FLD(1, "Power", "W", 100.0);
-      FLD(2, "Duty", "%", 100.0); FLD(3, "Ant gain", "dBi", 2.15); break;
+      FLD(2, "Mode duty", "", 0); tfChoice[2] = 0; tfChoiceN[2] = RFDUTY_N;   // default FM 100%
+      FLD(3, "Ant gain", "dBi", 2.15); break;
     case TOOL_BATT:
       tfN = 5; FLD(0, "Capacity", "Ah", 20.0); FLD(1, "RX draw", "A", 0.5);
       FLD(2, "TX draw", "A", 8.0); FLD(3, "TX duty", "%", 30.0);
       FLD(4, "Usable", "%", 80.0); break;
     case TOOL_DEBRIS:
-      tfN = 4; FLD(0, "Altitude", "km", 550.0); FLD(1, "Mass", "kg", 4.0);
+      tfN = 4; FLD(0, "Alt(perigee)", "km", 550.0); FLD(1, "Mass", "kg", 4.0);
       FLD(2, "Area", "m2", 0.03); FLD(3, "Drag Cd", "", 2.2); break;
     case TOOL_XAREA:
       tfN = 5;
       FLD(0, "Form factor", "", 2); tfChoice[0] = 2; tfChoiceN[0] = XSEC_PRESET_N; // default 3U
       FLD(1, "Body X", "cm", 10.0); FLD(2, "Body Y", "cm", 10.0);
       FLD(3, "Body Z", "cm", 30.0); FLD(4, "Panel area", "m2", 0.0); break;
+    case TOOL_PHASE:
+      // Phasing line / matching stub. Coax type (with velocity factor), frequency, and
+      // the electrical length wanted as a fraction of a wavelength.
+      tfN = 3;
+      FLD(0, "Cable", "", 4); tfChoice[0] = 4; tfChoiceN[0] = COAX_N;   // default LMR-400
+      FLD(1, "Freq", "MHz", 146.0);
+      FLD(2, "Length", "", 0); tfChoice[2] = 0; tfChoiceN[2] = PHASE_FRAC_N; // default 1/4 wave
+      break;
+    case TOOL_WAVELEN:
+      tfN = 1; FLD(0, "Freq", "MHz", 146.0); break;
+    case TOOL_ATTEN:
+      // Resistive attenuator pad at a system impedance (pi and T topologies).
+      tfN = 2; FLD(0, "Atten", "dB", 6.0); FLD(1, "Z0", "ohm", 50.0); break;
+    case TOOL_DBCHAIN:
+      // Quick gain/loss chain sum: up to four stages in dB (+gain, -loss).
+      tfN = 4; FLD(0, "Stage 1", "dB", 0.0); FLD(1, "Stage 2", "dB", 0.0);
+      FLD(2, "Stage 3", "dB", 0.0); FLD(3, "Stage 4", "dB", 0.0); break;
+    case TOOL_COMPLEX:
+      // Rectangular a + jb -> polar (magnitude, angle) and back. Impedance/phasor work.
+      tfN = 2; FLD(0, "Real a", "", 50.0); FLD(1, "Imag b (j)", "", 25.0); break;
+    case TOOL_REACT:
+      // Reactance & resonance: enter frequency, L and C; shows Xl, Xc and resonant f.
+      tfN = 3; FLD(0, "Freq", "MHz", 7.0); FLD(1, "Induct L", "uH", 10.0);
+      FLD(2, "Cap C", "pF", 100.0); break;
+    case TOOL_TIMECONST:
+      // RC / RL time constant and the charge/discharge percentages at 1..5 tau.
+      tfN = 2; FLD(0, "Resist R", "ohm", 1000.0); FLD(1, "Cap C", "uF", 1.0); break;
   }
+  toolDefLoad(id);        // overlay any values remembered from a previous session (unless resetting)
 }
+
+// Persist a form tool's current field values to FILE_TOOLDEF. One line per tool id:
+//   "id n v0 v1 ... c0 c1 ..."  (n = field count, values then choice indices).
+// Uses Store::fs() (never raw LittleFS) like every data file. Small and rewritten
+// whole each save -- there are at most TOOL__N short lines.
+void App::toolDefSave(int id) {
+  // read existing lines, replace/append this tool's line, write back
+  String out;
+  File in = Store::fs().open(FILE_TOOLDEF, "r");
+  if (in) {
+    while (in.available()) {
+      String ln = in.readStringUntil('\n');
+      if (ln.length() == 0) continue;
+      int sp = ln.indexOf(' ');
+      int lid = (sp > 0) ? ln.substring(0, sp).toInt() : -1;
+      if (lid != id) { out += ln; out += '\n'; }   // keep other tools' lines
+    }
+    in.close();
+  }
+  String line = String(id) + " " + String(tfN);
+  for (int i = 0; i < tfN; ++i) line += " " + String(tfVal[i], 6);
+  for (int i = 0; i < tfN; ++i) line += " " + String(tfChoice[i]);
+  out += line; out += '\n';
+  File f = Store::fs().open(FILE_TOOLDEF, "w");
+  if (!f) return;
+  f.print(out); f.close();
+}
+
+// Load remembered values for a tool over the defaults just set by toolFormInit.
+// Returns true if a saved line was found and applied.
+bool App::toolDefLoad(int id) {
+  if (tfDefOnly) return false;               // x-reset: keep factory defaults, ignore saved
+  File f = Store::fs().open(FILE_TOOLDEF, "r");
+  if (!f) return false;
+  bool applied = false;
+  while (f.available()) {
+    String ln = f.readStringUntil('\n');
+    if (ln.length() == 0) continue;
+    // tokenize on spaces
+    int lid = ln.toInt();
+    if (lid != id) continue;
+    // parse: id n v0..v(n-1) c0..c(n-1)
+    int pos = ln.indexOf(' '); if (pos < 0) break;
+    auto nextTok = [&](int& p) -> String {
+      while (p < (int)ln.length() && ln[p] == ' ') p++;
+      int s = p;
+      while (p < (int)ln.length() && ln[p] != ' ') p++;
+      return ln.substring(s, p);
+    };
+    int p = pos;
+    int n = nextTok(p).toInt();
+    if (n != tfN) break;                       // field layout changed -> ignore stale line
+    for (int i = 0; i < n; ++i) tfVal[i] = nextTok(p).toFloat();
+    for (int i = 0; i < n; ++i) {
+      int cv = nextTok(p).toInt();
+      // only restore a choice if this field is actually a pick-list (bounds-checked)
+      if (tfChoice[i] >= 0 && cv >= 0 && cv < tfChoiceN[i]) tfChoice[i] = cv;
+    }
+    applied = true;
+    break;
+  }
+  f.close();
+  return applied;
+}
+
 
 // Render one output line helper is inline in drawToolForm via a local lambda.
 void App::drawToolForm() {
-  header(TOOLS_NAMES[toolId + 7]);           // +7: calc, pcalc, char-lookup, DXCC, CQ, ITU, link-budget precede
+  header(TOOLS_NAMES[toolId + TOOLS_FIRST_FORM]);   // menu index = form id + standalone tools that precede
   canvas.setTextSize(1);
   int y = 20; const int LH = 11;
   // --- input fields ---
@@ -30194,6 +31248,14 @@ void App::drawToolForm() {
     long inch = lroundl(ft * 12.0);
     return String(inch / 12) + "ft " + String(inch % 12) + "in";
   };
+  // Antenna/feedline length formatted per the user's antenna-units setting. Imperial
+  // shows ft+in; metric shows meters. Input is feet (the antenna tools compute in ft).
+  // This ONLY governs antenna/feedline dimensions -- orbital and satellite quantities
+  // stay metric elsewhere regardless.
+  auto antLen = [&](double ft) -> String {
+    if (cfg.antUnits == 1) return String(ft * 0.3048, 3) + " m";
+    return ftin(ft);
+  };
   const double C_FTMHZ = 983.571;              // speed of light, ft*MHz (for reference)
   switch (toolId) {
     case TOOL_COAX: {
@@ -30212,38 +31274,36 @@ void App::drawToolForm() {
     }
     case TOOL_DIPOLE: {
       double f = tfVal[0]; double L = 468.0 / f;      // ft, half-wave with end effect
-      out("Total length", ftin(L), CL_CYAN);
-      out("Each leg", ftin(L / 2), CL_WHITE);
-      out("Metric", String(L * 0.3048, 3) + " m", CL_WHITE);
+      out("Total length", antLen(L), CL_CYAN);
+      out("Each leg", antLen(L / 2), CL_WHITE);
       break;
     }
     case TOOL_VERTICAL: {
       double f = tfVal[0]; double L = 234.0 / f;       // quarter wave
-      out("1/4-wave", ftin(L), CL_CYAN);
-      out("Radials (4)", ftin(L * 1.02), CL_WHITE);    // slightly longer
-      out("Metric", String(L * 0.3048, 3) + " m", CL_WHITE);
+      out("1/4-wave", antLen(L), CL_CYAN);
+      out("Radials (4)", antLen(L * 1.02), CL_WHITE);    // slightly longer
       break;
     }
     case TOOL_YAGI: {
       double f = tfVal[0]; double dr = 468.0 / f;      // driven ~ dipole
       int n = (int)lround(tfVal[1]); if (n < 2) n = 2; if (n > 12) n = 12;
-      out("Driven elem", ftin(dr), CL_CYAN);
-      out("Reflector", ftin(dr * 1.05), CL_WHITE);     // ~5% longer
+      out("Driven elem", antLen(dr), CL_CYAN);
+      out("Reflector", antLen(dr * 1.05), CL_WHITE);     // ~5% longer
       // Directors: ~5% shorter than driven, each subsequent ~1% shorter again.
       // Starting dimensions -- real lengths depend on boom and element diameter.
       for (int d2 = 1; d2 <= n - 2; ++d2)
-        out(String("Director ") + d2, ftin(dr * (0.95 - 0.01 * (d2 - 1))), CL_WHITE);
-      out("Spacing 0.2wl", ftin(0.2 * C_FTMHZ / f), CL_GREY);
+        out(String("Director ") + d2, antLen(dr * (0.95 - 0.01 * (d2 - 1))), CL_WHITE);
+      out("Spacing 0.2wl", antLen(0.2 * C_FTMHZ / f), CL_GREY);
       break;
     }
     case TOOL_QUAD: {
       double f = tfVal[0]; double loop = 1005.0 / f;   // full-wave loop, ft
       int n = (int)lround(tfVal[1]); if (n < 2) n = 2; if (n > 8) n = 8;
-      out("Driven loop", ftin(loop), CL_CYAN);
-      out("  each side", ftin(loop / 4), CL_WHITE);
-      out("Refl loop", ftin(1030.0 / f), CL_WHITE);    // ~2.5% larger
+      out("Driven loop", antLen(loop), CL_CYAN);
+      out("  each side", antLen(loop / 4), CL_WHITE);
+      out("Refl loop", antLen(1030.0 / f), CL_WHITE);    // ~2.5% larger
       for (int d2 = 1; d2 <= n - 2; ++d2)
-        out(String("Dir ") + d2 + " loop", ftin(975.0 / f), CL_WHITE);  // ~3% smaller
+        out(String("Dir ") + d2 + " loop", antLen(975.0 / f), CL_WHITE);  // ~3% smaller
       break;
     }
     case TOOL_RFCONV: {
@@ -30280,8 +31340,12 @@ void App::drawToolForm() {
       double v = tfVal[0];
       out("ft -> m", String(v * 0.3048, 3), CL_WHITE);
       out("m -> ft", String(v / 0.3048, 3), CL_WHITE);
+      out("in -> cm", String(v * 2.54, 3), CL_WHITE);
+      out("cm -> in", String(v / 2.54, 3), CL_WHITE);
       out("C -> F", String(v * 9.0 / 5.0 + 32.0, 2), CL_CYAN);
       out("F -> C", String((v - 32.0) * 5.0 / 9.0, 2), CL_CYAN);
+      out("kg -> lb", String(v * 2.2046226, 3), CL_ORANGE);
+      out("lb -> kg", String(v / 2.2046226, 3), CL_ORANGE);
       out("mi -> km", String(v * 1.609344, 3), CL_GREY);
       break;
     }
@@ -30290,7 +31354,9 @@ void App::drawToolForm() {
       // far-field estimate (OET-65); it is guidance, not a substitute for a full
       // station evaluation. Distances shown in meters; ground reflections can
       // increase real exposure (worst case ~2x distance).
-      double f = tfVal[0], p = tfVal[1], duty = tfVal[2], g = tfVal[3];
+      double f = tfVal[0], p = tfVal[1], g = tfVal[3];
+      int di = (tfChoice[2] >= 0) ? tfChoice[2] : 0;
+      double duty = RFDUTY[di].duty;
       double mu = mpeUncontrolled(f), mc = mpeControlled(f);
       double du = mpeDistCm(p, g, duty, mu) / 100.0;
       double dc = mpeDistCm(p, g, duty, mc) / 100.0;
@@ -30300,6 +31366,7 @@ void App::drawToolForm() {
       out("  distance", String(dc, 2) + " m", CL_WHITE);
       out("Avg power", String(p * duty / 100.0, 1) + " W", CL_GREY);
       out("+reflect x2", String(du * 2.0, 2) + " m unc", CL_ORANGE);
+      out("estimate", "not a station eval", CL_MGREY);
       break;
     }
     case TOOL_BATT: {
@@ -30329,6 +31396,7 @@ void App::drawToolForm() {
       out("25-yr rule", yr <= 25.0 ? "OK" : "EXCEEDS", yr <= 25.0 ? CL_GREEN : CL_RED);
       out("5-yr (new)", yr <= 5.0 ? "OK" : "EXCEEDS", yr <= 5.0 ? CL_GREEN : CL_ORANGE);
       out("nominal Sun", "+-several x", CL_MGREY);
+      out("elliptical?", "use perigee alt", CL_MGREY);
       out("est only", "use NASA DAS", CL_MGREY);
       break;
     }
@@ -30355,6 +31423,117 @@ void App::drawToolForm() {
       out("-> debris Area", String(tumble + panel / 2.0, 4), CL_ORANGE);
       break;
     }
+    case TOOL_PHASE: {
+      // Phasing line / matching stub: physical length for a wanted electrical length,
+      // accounting for the cable's velocity factor. This is an antenna/feedline
+      // dimension, so both ft+in and metric are shown (a length a ham cuts by hand).
+      int ci = (tfChoice[0] >= 0) ? tfChoice[0] : 4;
+      double vf = COAX_TBL[ci].vf;
+      double f = tfVal[1];
+      int    fi = (tfChoice[2] >= 0) ? tfChoice[2] : 0;
+      double frac = PHASE_FRAC[fi].frac;
+      double lambda_m = (f > 0) ? 299.792458 / f : 0;        // free-space wavelength (m)
+      double phys_m   = lambda_m * frac * vf;                 // physical length in cable (m)
+      double phys_ft  = phys_m / 0.3048;
+      out("VF", String(vf, 2) + " (" + String(COAX_TBL[ci].name) + ")", CL_GREY);
+      out("Wavelength", String(lambda_m, 3) + " m free-sp", CL_GREY);
+      out("Length", antLen(phys_ft), CL_CYAN);
+      out("  metric", String(phys_m, 3) + " m", CL_WHITE);
+      out("  = cm", String(phys_m * 100.0, 1) + " cm", CL_GREY);
+      out("cut & check", "verify on analyzer", CL_MGREY);
+      break;
+    }
+    case TOOL_WAVELEN: {
+      // Wavelength / frequency: free-space lambda and the common cut lengths. Antenna
+      // dimensions -> both unit systems. (Reverse freq<-length is a mental /: lambda=c/f.)
+      double f = tfVal[0];
+      double lambda_m = (f > 0) ? 299.792458 / f : 0;
+      double q = lambda_m / 4.0, h = lambda_m / 2.0, fe = lambda_m * 0.625;
+      out("Wavelength", String(lambda_m, 3) + " m", CL_CYAN);
+      out("  = ft", ftin(lambda_m / 0.3048), CL_GREY);
+      out("1/4 wave", String(q, 3) + " m / " + ftin(q / 0.3048), CL_WHITE);
+      out("1/2 wave", String(h, 3) + " m / " + ftin(h / 0.3048), CL_WHITE);
+      out("5/8 wave", String(fe, 3) + " m / " + ftin(fe / 0.3048), CL_GREY);
+      break;
+    }
+    case TOOL_ATTEN: {
+      // Resistive attenuator pad (pi and T) at a system impedance. Standard formulas
+      // from the voltage ratio K = 10^(dB/20).
+      double dB = tfVal[0], z0 = tfVal[1];
+      double K = pow(10.0, dB / 20.0);
+      if (K <= 1.0 || z0 <= 0) { out("Atten", "need >0 dB", CL_ORANGE); break; }
+      // Pi network: R1 (shunt, each side), R2 (series)
+      double piSh = z0 * (K + 1.0) / (K - 1.0);
+      double piSe = z0 * (K * K - 1.0) / (2.0 * K);
+      // T network: R1 (series, each side), R2 (shunt)
+      double tSe = z0 * (K - 1.0) / (K + 1.0);
+      double tSh = z0 * (2.0 * K) / (K * K - 1.0);
+      out("Pi shunt", String(piSh, 1) + " ohm x2", CL_CYAN);
+      out("Pi series", String(piSe, 1) + " ohm", CL_CYAN);
+      out("T series", String(tSe, 1) + " ohm x2", CL_WHITE);
+      out("T shunt", String(tSh, 1) + " ohm", CL_WHITE);
+      out("power ratio", String(pow(10.0, dB / 10.0), 1) + ":1", CL_GREY);
+      break;
+    }
+    case TOOL_DBCHAIN: {
+      // Sum a short chain of gains(+)/losses(-) in dB and show the linear ratios.
+      double sum = tfVal[0] + tfVal[1] + tfVal[2] + tfVal[3];
+      out("Net gain", String(sum, 2) + " dB", CL_CYAN);
+      out("Power ratio", String(pow(10.0, sum / 10.0), 4) + " x", CL_WHITE);
+      out("Voltage x", String(pow(10.0, sum / 20.0), 4) + " x", CL_GREY);
+      if (sum >= 0) out("100W in ->", String(100.0 * pow(10.0, sum / 10.0), 1) + " W", CL_GREY);
+      else          out("100W in ->", String(100.0 * pow(10.0, sum / 10.0), 2) + " W", CL_GREY);
+      break;
+    }
+    case TOOL_COMPLEX: {
+      // Rectangular <-> polar. a + jb -> magnitude r and angle theta (deg); also show
+      // the reciprocal 1/Z (handy for parallel/admittance work). Impedance math.
+      double a = tfVal[0], bb = tfVal[1];
+      double r = sqrt(a * a + bb * bb);
+      double th = atan2(bb, a) * 57.29577951308232;
+      out("Magnitude", String(r, 3), CL_CYAN);
+      out("Angle", String(th, 2) + " deg", CL_CYAN);
+      out("Rect", String(a, 2) + (bb >= 0 ? " + j" : " - j") + String(fabs(bb), 2), CL_WHITE);
+      // reciprocal 1/(a+jb) = (a - jb)/(a^2+b^2)
+      double d = a * a + bb * bb;
+      if (d > 0) {
+        double ra = a / d, rb = -bb / d;
+        out("1/Z", String(ra, 5) + (rb >= 0 ? " + j" : " - j") + String(fabs(rb), 5), CL_GREY);
+      } else out("1/Z", "undef (0)", CL_GREY);
+      break;
+    }
+    case TOOL_REACT: {
+      // Reactance of L and C at the given frequency, and the LC resonant frequency.
+      double f = tfVal[0] * 1e6;             // MHz -> Hz
+      double L = tfVal[1] * 1e-6;            // uH -> H
+      double C = tfVal[2] * 1e-12;           // pF -> F
+      double w = 2.0 * M_PI * f;
+      double Xl = w * L;
+      double Xc = (w > 0 && C > 0) ? 1.0 / (w * C) : 0;
+      out("Xl", String(Xl, 1) + " ohm", CL_CYAN);
+      out("Xc", String(Xc, 1) + " ohm", CL_CYAN);
+      out("X net", String(Xl - Xc, 1) + " ohm", CL_WHITE);
+      if (L > 0 && C > 0) {
+        double f0 = 1.0 / (2.0 * M_PI * sqrt(L * C));   // Hz
+        out("Resonance", (f0 >= 1e6 ? String(f0 / 1e6, 3) + " MHz" : String(f0 / 1e3, 1) + " kHz"), CL_ORANGE);
+      } else out("Resonance", "need L & C", CL_GREY);
+      break;
+    }
+    case TOOL_TIMECONST: {
+      // RC time constant and the standard 1..5 tau charge percentages. (For RL, enter
+      // L/R as the R,C pair is RC-shaped; a note points that out.)
+      double R = tfVal[0], C = tfVal[1] * 1e-6;   // uF -> F
+      double tau = R * C;                          // seconds
+      String ts = (tau >= 1.0) ? (String(tau, 3) + " s")
+                 : (tau >= 1e-3) ? (String(tau * 1e3, 3) + " ms")
+                 : (String(tau * 1e6, 1) + " us");
+      out("tau (RC)", ts, CL_CYAN);
+      out("1 tau", "63% charged", CL_WHITE);
+      out("3 tau", "95% charged", CL_WHITE);
+      out("5 tau ~", "99% (settled)", CL_GREY);
+      out("cutoff f", (tau > 0 ? String(1.0 / (2.0 * M_PI * tau), 1) + " Hz" : String("--")), CL_ORANGE);
+      break;
+    }
   }
   if (tfOutScroll > 0)  { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, outTop); canvas.print("^"); }
   if (moreBelow)        { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 108);    canvas.print("v"); }
@@ -30362,13 +31541,18 @@ void App::drawToolForm() {
   if (tfChoice[tfSel] >= 0) footer(",// change  ;/. field  ` back");
   else if (toolId == TOOL_YAGI || toolId == TOOL_QUAD ||
            toolId == TOOL_RFEXP || toolId == TOOL_BATT || toolId == TOOL_DEBRIS ||
+           toolId == TOOL_PHASE || toolId == TOOL_ATTEN || toolId == TOOL_UNITS ||
            toolId == TOOL_XAREA)
-                            footer("type val  ;/. field  ,// scroll  ` back");
-  else                      footer("type value  ;/. field  ` back");
+                            footer("type val  ;/. fld  ,// scroll  x reset  ` bk");
+  else                      footer("type value  ;/. field  x reset  ` back");
 }
 
 void App::keyToolForm(char c, bool enter, bool back) {
-  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
+  if (c == '`') { toolDefSave(toolId); screen = SCR_TOOLS; lastDrawMs = 0; return; }   // save & exit
+  if (!tfEditing && c == 'x') {              // reset this tool to factory defaults
+    int id = toolId; tfDefOnly = true; toolFormInit(id); tfDefOnly = false;
+    lastDrawMs = 0; return;
+  }
   // (DEL arrives via 'back' and is handled below as backspace on the edit buffer.)
   // field navigation
   if (!tfEditing && (isUp(c)))   { if (--tfSel < 0) tfSel = tfN - 1; lastDrawMs = 0; return; }
@@ -31103,10 +32287,14 @@ void App::drawTxDb() {
     const Transponder& t = activeTx[e];
     bool manual = (strncmp(t.desc, "manual", 6) == 0);
     bool sel = (e == txDbSel);
-    // line 1: index + description, in cyan (selected entry marked with '>')
-    canvas.setTextColor(sel ? CL_GREEN : CL_CYAN, CL_BLACK); canvas.setCursor(4, y);
+    // line 1: index + description. Selected entry is green with a '>'; inactive
+    // (SatNOGS-decommissioned) entries are dimmed grey and flagged so the operator
+    // can tell at a glance which transponders are no longer believed operational.
+    uint16_t descCol = sel ? CL_GREEN : (t.active ? CL_CYAN : CL_GREY);
+    canvas.setTextColor(descCol, CL_BLACK); canvas.setCursor(4, y);
     { String d = (sel ? ">" : " ") + String(e + 1) + ". " + String(t.desc);
       if (manual) d += " *";
+      if (!t.active) d += " (off)";
       if (d.length() > 38) d = d.substring(0, 37) + "~";
       canvas.print(d); }
     y += LH;
@@ -34249,7 +35437,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 85;          // must exceed the highest rows[] index used below (currently 84)
+  const int N = 86;          // must exceed the highest rows[] index used below (currently 85)
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -34355,6 +35543,7 @@ void App::drawSettings() {
   rows[42] = String("QRZ pass: ") + String(strlen(cfg.qrzPass) ? "******" : "(none)");
   rows[43] = String("Weather units: ") + (cfg.wxUnits == WX_IMPERIAL ? "F, mph"
                      : cfg.wxUnits == WX_METRIC_MS ? "C, m/s" : "C, km/h");
+  rows[85] = String("Antenna lengths: ") + (cfg.antUnits == 1 ? "metric (m)" : "imperial (ft/in)");
   rows[44] = String("Dopp FM band: ") + String(cfg.doppThreshFmHz) + " Hz";
   rows[45] = String("Dopp linear band: ") + String(cfg.doppThreshLinHz) + " Hz";
   rows[46] = String("Dopp lead: ") + (cfg.doppLeadMs == 0 ? String("off")

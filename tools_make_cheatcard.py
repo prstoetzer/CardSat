@@ -137,7 +137,7 @@ BACK = [
   "Snapshot of every catalog sat above the horizon right now, sorted by elevation, with az + rise compass dir (high=green, low=yellow) + count up/scanned. <b>r</b> rescan (this instant) &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("TRANSPONDER DB (Sats &rarr; t)",
   "Sat's transponder/beacon entries, two lines each: <b>D</b>=downlink+mode line, "
-  "<b>U</b>=uplink+tone/inv line. <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
+  "<b>U</b>=uplink+tone/inv line. Ordered two-way &gt; amateur &gt; active; inactive dimmed &amp; <b>(off)</b>. <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
   "<b>,</b>/<b>/</b> 10 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
   "Pass outlook / Orbit position / Phys (velocity + launch date/age) &middot; <b>r</b> recompute &middot; Doppler <b>f</b> sets beacon freq"),
@@ -191,7 +191,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (20): calculators, DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, RF exposure, orbit lifetime &middot; <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT) &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch) &mdash; Zap the Sats, Doppler Lock, Catch the Pass, Rotor Runner (tilt/keys), Morse Meteors (<b>t</b> dot <b>u</b> dash), Grid Chase."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (26): calculators, DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, Q-codes/phonetics/RST, CTCSS &middot; <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT) &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch) &mdash; Zap the Sats, Doppler Lock, Catch the Pass, Rotor Runner (tilt/keys), Morse Meteors (<b>t</b> dot <b>u</b> dash), Grid Chase."),
 ]
 
 

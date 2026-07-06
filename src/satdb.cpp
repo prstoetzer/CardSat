@@ -409,8 +409,20 @@ void SatDb::applyAmsatCatalogFile(const char* path) {
   // "name":"..." key (the links values are plain URL strings). Scan the stream
   // for that pattern -- no DOM, nothing large held in RAM.
   char nb[16]; int st = 0; char nameBuf[AMS_NAME_LEN]; int nk = 0;
-  const char* pat = "\"name\":\"";
-  int pp = 0;
+  // Whitespace-tolerant scan for the "name" string value. The AMSAT catalog API
+  // pretty-prints its JSON as  "name": "AO-7_[V/a]"  -- note the spaces around the
+  // colon. An earlier fixed-byte match on "name":" (no spaces) matched NOTHING on
+  // the live payload, leaving the map empty (so multi-mode birds like AO-7 offered
+  // only a single mode to report). This little state machine accepts optional
+  // whitespace after the key and after the colon, then captures the quoted value:
+  //   MS_KEY  : matching the literal   "name"
+  //   MS_COLON: seen the key; skipping spaces, expecting ':'
+  //   MS_PRE  : seen ':';   skipping spaces, expecting the opening '"'
+  //   MS_CAP  : inside the value, capturing until the closing '"'
+  enum { MS_KEY = 0, MS_COLON, MS_PRE, MS_CAP };
+  const char* key = "\"name\"";
+  int ks2 = 0;                             // index within key while in MS_KEY
+  int ms = MS_KEY;
   // Pre-normalize catalog names once.
   char (*norm)[40] = (char(*)[40])malloc((size_t)_n * 40);
   if (!norm) { f.close(); return; }
@@ -421,13 +433,26 @@ void SatDb::applyAmsatCatalogFile(const char* path) {
   (void)nb; (void)st;
   while (f.available()) {
     char ch = (char)f.read();
-    if (pp < (int)strlen(pat)) {
-      pp = (ch == pat[pp]) ? pp + 1 : (ch == pat[0] ? 1 : 0);
-      if (pp == (int)strlen(pat)) nk = 0;
+    if (ms != MS_CAP) {
+      switch (ms) {
+        case MS_KEY:                        // matching the literal "name"
+          if (ch == key[ks2]) { if (++ks2 == (int)strlen(key)) { ms = MS_COLON; } }
+          else ks2 = (ch == key[0]) ? 1 : 0;
+          break;
+        case MS_COLON:                      // skip spaces, expect ':'
+          if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') break;
+          if (ch == ':') ms = MS_PRE; else { ms = MS_KEY; ks2 = (ch == key[0]) ? 1 : 0; }
+          break;
+        case MS_PRE:                        // skip spaces, expect opening '"'
+          if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') break;
+          if (ch == '"') { ms = MS_CAP; nk = 0; }
+          else { ms = MS_KEY; ks2 = (ch == key[0]) ? 1 : 0; }
+          break;
+      }
       continue;
     }
     if (ch == '"') {                       // end of the name value
-      pp = 0;
+      ms = MS_KEY; ks2 = 0;
       nameBuf[nk] = 0;
       if (nk == 0 || _amsMapN >= AMS_MAP_MAX) continue;
       bool dup = false;                    // the live catalog has a duplicate row
@@ -816,8 +841,16 @@ static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
     bool typeLinear = (strcmp(ty, "Transponder") == 0);
     t.isLinear = (t.uplink != 0) && (t.downlinkHigh > t.downlink) &&
                  (typeLinear || (t.downlinkHigh - t.downlink) >= 5000u);
+    // Activity: SatNOGS marks a transmitter status=="active" and alive==true when it
+    // is believed operational. Either signal counts as active; default active when the
+    // fields are absent (older caches) so we never hide a usable transponder.
+    const char* st = o["status"] | "active";
+    bool aliveField = o["alive"] | true;
+    t.active = aliveField && (strcmp(st, "inactive") != 0);
     n++;
   }
+  // NOTE: ordering by usefulness is done once in the app layer (prioritizeTransponders),
+  // after manual transponders are appended, so the whole list is ranked together.
   return n;
 }
 

@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -254,6 +254,16 @@ private:
   int      illumDayOff    = 0;      // illumination raster start offset from today, in DAYS (>=0)
   // Orbital analysis screen (off Satellites), multi-page
   int      orbitPage = 0;
+  // Orbit explorer (Orbit page 10): a teaching/planning sandbox. Editable apogee,
+  // perigee (km altitude) and inclination, pre-filled from the active satellite, that
+  // recompute derived characteristics without touching the real element set.
+  bool     oxInit = false;      // have we seeded from the active sat this visit?
+  double   oxApo = 800.0;       // apogee altitude, km
+  double   oxPeri = 600.0;      // perigee altitude, km
+  double   oxIncl = 51.6;       // inclination, deg
+  int      oxSel = 0;           // 0=apogee 1=perigee 2=incl
+  bool     oxEditing = false; String oxEditBuf;
+  void oxSeedFromSat();
   double   orbAscLon = 0;           // sub-longitude of next ascending node (deg)
   time_t   orbAscT   = 0;           // time of next ascending node (UTC)
   bool     orbHasPass = false;
@@ -1210,7 +1220,10 @@ private:
   uint8_t clkVal = 65;         // current value ('A')
   int     clkBase = 16;        // entry base
   bool    clkFresh = true;
+  bool    clkTableMode = false; // false = single-char detail, true = browsable full table
+  int     clkTableScroll = 0;   // first row shown in table mode
   void drawCharLk(); void keyCharLk(char c, bool enter, bool back);
+  void drawCharLkTable();   // browsable full ASCII/Morse/Baudot table mode
 
   // DXCC entity lookup (SCR_DXLK search, SCR_DXLKD detail). Type a prefix, partial
   // name, or entity code; matches are listed live. ENTER opens a detail card with the
@@ -1256,8 +1269,39 @@ private:
   int  lbSel = 1, lbScroll = 0;        // start on Freq (row 1)
   int  lbMode = 2;                     // preset index (default SSB)
   bool lbEditing = false; String lbEditBuf;
+  bool lbSynced = false;               // distance/freq pre-filled from the tracked sat
   void lbInit();
+  void lbSyncFromSat();
   void drawLinkB(); void keyLinkB(char c, bool enter, bool back);
+
+  // Operating references (SCR_OPREF): Q-codes, ITU phonetics, RST -- tabbed static text.
+  int oprefTab = 0;      // 0=Q-codes 1=phonetics 2=RST
+  int oprefScroll = 0;
+  void drawOpref(); void keyOpref(char c, bool enter, bool back);
+  // CTCSS tone reference (SCR_CTCSS): standard EIA tone list + known satellite tones.
+  int ctcssScroll = 0;
+  void drawCtcss(); void keyCtcss(char c, bool enter, bool back);
+  // Radio math reference (SCR_MATHREF): a scrolling cheat sheet distilled from the ARRL
+  // Radio Mathematics supplement -- dB table, AC RMS/peak factors, constants, formulas.
+  int mathRefScroll = 0;
+  void drawMathRef(); void keyMathRef(char c, bool enter, bool back);
+  // Orbit-type animation (SCR_ORBITZOO): an animated Learn explainer cycling orbit
+  // archetypes (LEO/MEO/GEO/Molniya/sun-sync/polar). Renders into the existing sprite;
+  // the satellite dot advances by true anomaly each frame with a short fixed-size fading
+  // trail. NO per-frame allocation -- the trail is a static ring buffer.
+  int   ozType = 0;             // current orbit archetype index
+  float ozPhase = 0.0f;         // mean-anomaly phase (rad), advanced each frame
+  static const int OZ_TRAIL = 24;
+  int16_t ozTrailX[OZ_TRAIL] = {0};
+  int16_t ozTrailY[OZ_TRAIL] = {0};
+  int   ozTrailHead = 0;        // ring buffer write index
+  int   ozTrailCount = 0;
+  void drawOrbitZoo(); void keyOrbitZoo(char c, bool enter, bool back);
+  // Per-form-tool value persistence (FILE_TOOLDEF): remember a tool's field values
+  // across sessions so station-specific inputs (coax, power, gains) aren't re-typed.
+  void toolDefSave(int id);
+  bool toolDefLoad(int id);
+  bool tfDefOnly = false;    // when true, toolFormInit skips loading saved values (x-reset)
 
   // Tools UX state: menu scroll, calculator tape (scrolling history), and the
   // output-area scroll for multi-element antenna forms.
@@ -1265,6 +1309,8 @@ private:
   static const int CALC_TAPE = 12;
   String calcTape[CALC_TAPE]; int calcTapeN = 0;  // ring of past "expr" / "= result" lines
   int calcScroll = 0;                             // 0 = pinned to newest
+  bool calcHintPage2 = false;                     // ' toggles the function-hint page
+  bool calcEngNota = false;                        // = toggles engineering-notation output
   int tfOutScroll = 0;                            // form output scroll (yagi/quad element lists)
 
   // Live-recalc form engine (SCR_TOOLFORM). Each tool is a set of labeled numeric

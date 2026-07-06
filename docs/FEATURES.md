@@ -212,6 +212,35 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   Track screen announces the next favorite pass and `q` deep-sleeps until it; the AOS
   **get-ready alert warns on a low battery** (≤30%); and a **voice memo drops a log
   stub** (time/sat/mode/freqs, callsign blank) to finish after the pass.
+- **Radio-math tools (from the ARRL Radio Mathematics supplement)** — the calculator now
+  accepts **metric-prefix suffixes** on numbers (100k, 2.2n, 146M) and has an
+  **engineering-notation** display mode; a new **Radio math reference** cheat-sheet screen
+  (dB table, AC voltage factors, constants, formulas) sits with the other Tools references;
+  and three new form tools cover **complex/polar** impedance, **reactance & resonance**
+  (Xl/Xc/f0), and **RC/RL time constants**.
+- **Orbit explorer & animations** — the Orbital-analysis pager gains an **Explore**
+  sandbox page: seed apogee/perigee/inclination from the tracked bird, edit them, and
+  watch period, velocity, footprint, longest pass, nodal drift and sun-sync status
+  recompute live (never altering the real elements). A new **Orbit animations** screen
+  (Help -> o) shows each orbit archetype -- LEO, polar/SSO, MEO, GEO, Molniya/HEO,
+  amateur-MEO -- as an animated to-scale ellipse with a moving satellite and caption.
+  The **scientific calculator** gains amateur-radio helpers: dbm()/w(), db()/undb(),
+  wl()/fq() (wavelength), hyperbolic + rounding functions, and constants c/kB/Re/mu/g0.
+- **Tools hub expansion** — the Tools menu now carries **26 tools**, adding a **phasing
+  line / stub** calculator (electrical length for CP satellite antennas & matching stubs,
+  velocity-factor aware), **wavelength/frequency**, **attenuator pad** (pi/T), **dB chain
+  sum**, an **operating-references** card (Q-codes / phonetics / RST) and a **CTCSS tone
+  reference**. Form tools now **remember their values** between sessions (`x` resets),
+  the menu has **first-letter jump** + last-tool memory, and antenna/feedline lengths can
+  be shown in **metric or imperial** (Settings -> Display) -- orbital and satellite
+  dimensions stay metric always. RF-exposure gained per-mode duty presets.
+- **Transponder list & reporting (0.9.50)** — a satellite's transponders are now ordered
+  by usefulness: **two-way transponders first**, amateur-band before non-amateur (so
+  out-of-band TT&C/telemetry downlinks sink to the end), active before inactive.
+  Decommissioned transmitters are **dimmed and marked "(off)"** in the database view.
+  AMSAT status reports let you **pick the mode/transponder** (e.g. AO-7 U/V vs V/A), shown
+  with readable names. The **Link budget** tool pre-fills distance from the tracked
+  satellite's **live slant range** (`p` to re-sync).
 - **UI refinements (0.9.47)** — the Home menu is a **two-column grid** (all twenty
   destinations visible at once, band separators, first-letter jump); **Settings** is
   reorganized into **six categories** (Radio/CAT, Rotator, Passes & alerts,

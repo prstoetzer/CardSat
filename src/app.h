@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -436,6 +436,49 @@ private:
   void loraStart();               // apply cfg, bring the radio up
   void loraPoll();                // drain RX into the ring (call from loop)
   void loraSendCurrent(const char* text);   // frame + transmit a typed message
+  // ---- LoRa object transfer (Feature 3, GP elements only for now) ----
+  // A second frame type (magic 0xC6, distinct from the 0xC5 text frames) carries a larger
+  // object split across small chunks: [0]=0xC6 [1]=VER [2]=OBJTYPE [3]=XFERID [4]=SEQ
+  // [5]=COUNT [6..]=payload. OBJTYPE 1 = a GP element set, serialized as a pipe-delimited
+  // text body with a trailing CRC16. Send is jobbed one frame per loop tick; receive
+  // reassembles ONE object at a time (no PSRAM to hold several) and, on a complete CRC-valid
+  // transfer, prompts before importing into GP data via db.addGp(). No ARQ: a missing chunk
+  // fails the transfer and the sender must re-broadcast. UNTESTED on hardware.
+  static const uint8_t LORA_OBJ_MAGIC = 0xC6;
+  static const uint8_t LORA_OBJ_VER   = 0x01;
+  static const uint8_t LORA_OBJ_GP    = 1;    // OBJTYPE: GP element set
+  static const int LORA_OBJ_HDR       = 6;    // magic,ver,type,xferid,seq,count
+  static const int LORA_OBJ_CHUNK     = 48;   // payload bytes per chunk (frame <= 54B, < RX buf)
+  static const int LORA_OBJ_MAXCHUNKS = 8;    // a GP object is ~3 chunks; cap the reassembly
+  static const int LORA_OBJ_MAXLEN    = LORA_OBJ_CHUNK * LORA_OBJ_MAXCHUNKS;  // 384 bytes
+  // outbound send job (one frame per loop tick)
+  bool     loraObjTxActive = false;
+  uint8_t  loraObjTxBuf[LORA_OBJ_MAXLEN];     // serialized object being sent
+  int      loraObjTxLen = 0;                  // total bytes
+  int      loraObjTxCount = 0;                // total chunks
+  int      loraObjTxSeq = 0;                  // next chunk to send
+  uint8_t  loraObjTxId = 0;                   // this transfer's XFERID
+  uint8_t  loraObjTxType = 0;                 // OBJTYPE of the outbound object
+  uint32_t loraObjTxLastMs = 0;               // last-frame time (inter-frame gap)
+  // inbound reassembly (one object at a time)
+  bool     loraObjRxActive = false;
+  uint8_t  loraObjRxBuf[LORA_OBJ_MAXLEN];     // reassembly buffer
+  uint8_t  loraObjRxId = 0;                   // XFERID being reassembled
+  uint8_t  loraObjRxType = 0;                 // OBJTYPE being reassembled
+  int      loraObjRxCount = 0;                // total chunks expected
+  uint16_t loraObjRxGot = 0;                  // bitmap of received chunks (<=8 -> uint16 ok)
+  int      loraObjRxLen = 0;                  // highest byte offset written + 1
+  uint32_t loraObjRxLastMs = 0;               // last-chunk time (for timeout)
+  char     loraObjRxFrom[16] = {0};           // sender callsign (from the object body)
+  // pending GP import awaiting the user's confirm (SCR_GPIMPORT)
+  SatEntry loraImportSat;                     // the reassembled, parsed element set
+  char     loraImportFrom[16] = {0};          // who sent it
+  bool     loraImportPending = false;
+  void loraObjSendGp(const SatEntry& s);      // start a jobbed GP-element broadcast
+  void loraObjTxTick();                        // send the next chunk (called from loop)
+  void loraObjRxFrame(const uint8_t* buf, int n, int rssi, int snr);  // handle one object frame
+  bool loraParseGpBody(const char* body, SatEntry& out, char* fromOut, int fromCap);
+  void drawGpImport(); void keyGpImport(char c, bool enter, bool back);
   void drawMessages();
   void keyMessages(char c, bool enter, bool back);
   // LoRa decoded-action screens (reached by ENTER on a message row whose text
@@ -612,6 +655,63 @@ private:
   SchedEntry sched[SCHED_MAX];
   int        schedN = 0, schedSel = 0;
   uint32_t   lastSchedMs = 0;          // throttle background rebuilds
+  // Rove planner (SCR_PLANNER): a from-a-hypothetical-place/time pass survey. Enter a
+  // grid, date, time and +/- window; for every favorite it lists each pass with AOS/LOS/
+  // max-el and the number of workable US states and DXCC entities during that pass.
+  // Fixed-size .bss result array -- no heap. The workable counts are footprint-based
+  // (property of the satellite, independent of the entered site); the entered site only
+  // affects AOS/LOS/max-el pass geometry. Compute is jobbed to stay responsive.
+  struct PlanRow {
+    uint32_t norad = 0;
+    time_t   aos = 0, los = 0;
+    float    maxEl = 0;
+    uint8_t  states = 0;      // workable US states during the pass
+    uint16_t dxcc = 0;        // workable DXCC entities during the pass
+    uint16_t grids = 0;       // workable 4-char grids during the pass
+  };
+  static const int PLAN_MAX = 28;      // passes listed across all favorites in the window
+  PlanRow  planRow[PLAN_MAX];
+  int      planN = 0, planSel = 0, planScroll = 0;
+  bool     planComputed = false;
+  bool     planJobRunning = false;     // survey in progress (pumped from loop())
+  int      planJobFav = 0;             // favorite index the jobbed build is up to
+  double   planLat = 0, planLon = 0;   // entered site (from grid)
+  char     planGrid[8] = "";
+  time_t   planCenter = 0;             // entered date/time (unix UTC)
+  int      planWindowH = 3;            // +/- hours
+  Observer planObs;                    // entered-site observer for pass prediction
+  void buildPlanner();                 // jobbed survey step
+  void planSeedDefaults();             // fill grid/time from current site & clock
+  void drawPlanner(); void keyPlanner(char c, bool enter, bool back);
+  void drawPlanDetail(); void keyPlanDetail(char c, bool enter, bool back);
+  String exportRovePlan();             // write the survey to a formatted .txt; returns path
+  // planner input form: which field is being edited
+  int      planField = 0;              // 0=grid 1=date 2=time 3=window 4=[compute]
+  int      planDetailIdx = 0;          // which PlanRow the detail screen is showing
+  void planDetailFrom(int idx);
+  // ---- Saved rove-plan browser (SCR_ROVELIST) + read-only viewer (SCR_ROVEVIEW) ----
+  // Lists the .txt files exportRovePlan() writes under /CardSat/RovePlans and shows one,
+  // read-only, in a scrolling viewer. The viewer holds a BOUNDED slice of the file in RAM
+  // (ROVEVIEW_MAX) so a large plan can't exhaust the no-PSRAM heap; over the cap it shows a
+  // truncation note and points the user at the web download for the whole file.
+  static const int ROVE_LIST_MAX  = 40;    // saved plans listed in the browser
+  static const int ROVE_NAME_MAX  = 40;    // base filename length (no dir; keeps ".txt")
+  static const int ROVEVIEW_MAX   = 3000;  // max bytes of a plan held in the viewer (heap-bounded)
+  char     roveList[ROVE_LIST_MAX][ROVE_NAME_MAX]; // base names (with ".txt")
+  time_t   roveTime[ROVE_LIST_MAX];        // each plan's last-write time (0 if unknown)
+  uint32_t roveSize[ROVE_LIST_MAX];        // each plan's size in bytes
+  int      roveListN = 0;                  // plans found
+  int      roveSel = 0;                    // browser cursor
+  int      roveScroll = 0;                 // browser scroll offset
+  bool     roveConfirmDel = false;         // two-step delete confirmation
+  String   roveViewBuf;                    // bounded contents of the viewed plan
+  String   roveViewName;                   // base name of the viewed plan
+  bool     roveViewTrunc = false;          // true if the file exceeded ROVEVIEW_MAX
+  int      roveViewTop = 0;                // top wrapped-row shown in the viewer
+  void buildRoveList();                    // enumerate /CardSat/RovePlans newest-first
+  void roveViewLoad(int idx);              // load roveList[idx] (bounded) into roveViewBuf
+  void drawRoveList();  void keyRoveList(char c, bool enter, bool back);
+  void drawRoveView();  void keyRoveView(char c, bool enter, bool back);
   // "Sky at a glance": a horizontal timeline of upcoming passes for all favorites
   // over the next SKY_HOURS. One row per favorite that has a pass in the window;
   // each bar is one pass, coloured by peak elevation. Fixed-size (.bss), no heap.
@@ -871,6 +971,10 @@ private:
   void webdSendTxJson();                        // GET /api/tx (transponder list + current)
   bool webdSelectSat(uint32_t norad);          // POST /api/select
   void webdSendPage();                         // GET / (the mobile HTML page)
+  // ---- Web file transfer (download + listing only; no upload) ----
+  void webdSendFilesPage();                    // GET /files (the file-browser HTML page)
+  void webdSendFileList(const String& path);   // GET /api/files?dir=... (JSON dir listing)
+  void webdSendFile(const String& path);       // GET /api/file?path=... (stream a download)
   void applyRotatorFromCfg();
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
@@ -1285,6 +1389,23 @@ private:
   // Radio Mathematics supplement -- dB table, AC RMS/peak factors, constants, formulas.
   int mathRefScroll = 0;
   void drawMathRef(); void keyMathRef(char c, bool enter, bool back);
+  // State-vector -> GP-element fitter (SCR_GPFIT). Enter an epoch and a TEME state vector
+  // (r km, v km/s); a differential-correction fit against CardSat's own SGP4 recovers the
+  // GP mean elements, which can be saved as a manual satellite. Heap-flat: a few 6-vectors
+  // and a 6x6 Jacobian on the stack. Input MUST be TEME (no on-device frame transform);
+  // B*=0 (a single state carries no drag info). See STATEVEC_TO_GP_SCOPING.md.
+  double gpfEpoch = 0;                 // entered epoch (unix UTC)
+  double gpfR[3] = {0,0,0};            // TEME position, km
+  double gpfV[3] = {0,0,0};            // TEME velocity, km/s
+  int    gpfFrame = 0;                 // 0 = TEME input, 1 = J2000 (transformed to TEME)
+  int    gpfField = 0;                 // 0=epoch 1..3=r 4..6=v 7=[solve]
+  bool   gpfSolved = false;
+  bool   gpfConverged = false;
+  double gpfResidM = 0;                // final position residual, metres
+  SatEntry gpfResult;                  // fitted GP elements
+  void gpfInit();
+  bool gpfSolve();                     // returns true on convergence; fills gpfResult
+  void drawGpFit(); void keyGpFit(char c, bool enter, bool back);
   // Orbit-type animation (SCR_ORBITZOO): an animated Learn explainer cycling orbit
   // archetypes (LEO/MEO/GEO/Molniya/sun-sync/polar). Renders into the existing sprite;
   // the satellite dot advances by true anomaly each frame with a short fixed-size fading
@@ -1474,12 +1595,15 @@ private:
   void noteEditNew();              // start a blank new note
   void noteEditOpen(const char* base); // open an existing note in the editor
   void buildGrids(time_t a, time_t b);
+  int  countWorkableGrids(SatEntry& s, time_t a, time_t b);    // rove planner (explicit sat)
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);
   void buildStates(time_t a, time_t b);
+  int  countWorkableStates(SatEntry& s, time_t a, time_t b);   // rove planner (explicit sat)
   void addFootprintStates(double subLat, double subLon, double altKm);
   void drawStates();  void keyStates(char c, bool enter, bool back);
   void buildDxcc(time_t a, time_t b);
+  int  countWorkableDxcc(SatEntry& s, time_t a, time_t b);     // rove planner (explicit sat)
   void addFootprintDxcc(double subLat, double subLon, double altKm);
   void drawDxcc();    void keyDxcc(char c, bool enter, bool back);
   void drawGpSrc();   void keyGpSrc(char c, bool enter, bool back);

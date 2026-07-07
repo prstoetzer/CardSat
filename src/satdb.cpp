@@ -789,15 +789,24 @@ bool SatDb::gpToTle(const SatEntry& s, char l1[72], char l2[72]) {
   l1[68] = '0' + tleChecksum(l1);
 
   // --- line 2 ---
+  // Guard every fixed-width field so a transient out-of-range element (e.g. a wild
+  // Gauss-Newton iterate in the state-vector fitter) can never overflow its TLE column and
+  // corrupt the line -- a malformed TLE can put SGP4's init/propagator into a spin. Angles
+  // are wrapped into [0,360); mean-motion is clamped to the 2-digit field; non-finite -> 0.
+  auto fin  = [](double x){ return (x == x && x - x == 0.0) ? x : 0.0; };   // NaN/Inf -> 0
+  auto wrap = [&](double a){ a = fin(a); a = fmod(a, 360.0); if (a < 0) a += 360.0; return a; };
+  double inclW = wrap((double)s.incl), raanW = wrap((double)s.raan);
+  double argpW = wrap((double)s.argp), maW = wrap((double)s.ma);
+  double mmW   = fin(s.meanMotion); if (mmW < 0.0) mmW = 0.0; if (mmW > 99.99999999) mmW = 99.99999999;
   char buf[16];
   l2[0] = '2'; putAt(l2, 3, cat);
-  snprintf(buf, sizeof(buf), "%8.4f", s.incl); putAt(l2, 9,  buf);
-  snprintf(buf, sizeof(buf), "%8.4f", s.raan); putAt(l2, 18, buf);
-  long e7 = llround(s.ecc * 1e7); if (e7 < 0) e7 = 0; if (e7 > 9999999L) e7 = 9999999L;
+  snprintf(buf, sizeof(buf), "%8.4f", inclW); putAt(l2, 9,  buf);
+  snprintf(buf, sizeof(buf), "%8.4f", raanW); putAt(l2, 18, buf);
+  long e7 = llround((double)s.ecc * 1e7); if (e7 < 0) e7 = 0; if (e7 > 9999999L) e7 = 9999999L;
   snprintf(buf, sizeof(buf), "%07ld", e7);     putAt(l2, 27, buf);
-  snprintf(buf, sizeof(buf), "%8.4f", s.argp); putAt(l2, 35, buf);
-  snprintf(buf, sizeof(buf), "%8.4f", s.ma);   putAt(l2, 44, buf);
-  snprintf(buf, sizeof(buf), "%11.8f", s.meanMotion); putAt(l2, 53, buf);
+  snprintf(buf, sizeof(buf), "%8.4f", argpW); putAt(l2, 35, buf);
+  snprintf(buf, sizeof(buf), "%8.4f", maW);   putAt(l2, 44, buf);
+  snprintf(buf, sizeof(buf), "%11.8f", mmW);  putAt(l2, 53, buf);
   snprintf(buf, sizeof(buf), "%5lu", (unsigned long)(s.revAtEpoch % 100000u));
   putAt(l2, 64, buf);
   l2[68] = '0' + tleChecksum(l2);

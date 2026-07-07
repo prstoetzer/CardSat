@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.50";
+static constexpr const char* FW_VERSION = "0.9.51";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1815,6 +1815,11 @@ public:
   // Point the propagator at a satellite (renders its GP elements for SGP4).
   bool setSat(SatEntry& s);
 
+  // Propagate an EXPLICIT satellite's GP elements to unix time `t` and return the
+  // raw TEME position (km) and velocity (km/s). This is the forward model used by the
+  // state-vector -> GP-element fitter. Returns false if the elements don't initialise.
+  bool temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]);
+
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
 
@@ -2175,7 +2180,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -5741,6 +5746,49 @@ private:
   void loraStart();               // apply cfg, bring the radio up
   void loraPoll();                // drain RX into the ring (call from loop)
   void loraSendCurrent(const char* text);   // frame + transmit a typed message
+  // ---- LoRa object transfer (Feature 3, GP elements only for now) ----
+  // A second frame type (magic 0xC6, distinct from the 0xC5 text frames) carries a larger
+  // object split across small chunks: [0]=0xC6 [1]=VER [2]=OBJTYPE [3]=XFERID [4]=SEQ
+  // [5]=COUNT [6..]=payload. OBJTYPE 1 = a GP element set, serialized as a pipe-delimited
+  // text body with a trailing CRC16. Send is jobbed one frame per loop tick; receive
+  // reassembles ONE object at a time (no PSRAM to hold several) and, on a complete CRC-valid
+  // transfer, prompts before importing into GP data via db.addGp(). No ARQ: a missing chunk
+  // fails the transfer and the sender must re-broadcast. UNTESTED on hardware.
+  static const uint8_t LORA_OBJ_MAGIC = 0xC6;
+  static const uint8_t LORA_OBJ_VER   = 0x01;
+  static const uint8_t LORA_OBJ_GP    = 1;    // OBJTYPE: GP element set
+  static const int LORA_OBJ_HDR       = 6;    // magic,ver,type,xferid,seq,count
+  static const int LORA_OBJ_CHUNK     = 48;   // payload bytes per chunk (frame <= 54B, < RX buf)
+  static const int LORA_OBJ_MAXCHUNKS = 8;    // a GP object is ~3 chunks; cap the reassembly
+  static const int LORA_OBJ_MAXLEN    = LORA_OBJ_CHUNK * LORA_OBJ_MAXCHUNKS;  // 384 bytes
+  // outbound send job (one frame per loop tick)
+  bool     loraObjTxActive = false;
+  uint8_t  loraObjTxBuf[LORA_OBJ_MAXLEN];     // serialized object being sent
+  int      loraObjTxLen = 0;                  // total bytes
+  int      loraObjTxCount = 0;                // total chunks
+  int      loraObjTxSeq = 0;                  // next chunk to send
+  uint8_t  loraObjTxId = 0;                   // this transfer's XFERID
+  uint8_t  loraObjTxType = 0;                 // OBJTYPE of the outbound object
+  uint32_t loraObjTxLastMs = 0;               // last-frame time (inter-frame gap)
+  // inbound reassembly (one object at a time)
+  bool     loraObjRxActive = false;
+  uint8_t  loraObjRxBuf[LORA_OBJ_MAXLEN];     // reassembly buffer
+  uint8_t  loraObjRxId = 0;                   // XFERID being reassembled
+  uint8_t  loraObjRxType = 0;                 // OBJTYPE being reassembled
+  int      loraObjRxCount = 0;                // total chunks expected
+  uint16_t loraObjRxGot = 0;                  // bitmap of received chunks (<=8 -> uint16 ok)
+  int      loraObjRxLen = 0;                  // highest byte offset written + 1
+  uint32_t loraObjRxLastMs = 0;               // last-chunk time (for timeout)
+  char     loraObjRxFrom[16] = {0};           // sender callsign (from the object body)
+  // pending GP import awaiting the user's confirm (SCR_GPIMPORT)
+  SatEntry loraImportSat;                     // the reassembled, parsed element set
+  char     loraImportFrom[16] = {0};          // who sent it
+  bool     loraImportPending = false;
+  void loraObjSendGp(const SatEntry& s);      // start a jobbed GP-element broadcast
+  void loraObjTxTick();                        // send the next chunk (called from loop)
+  void loraObjRxFrame(const uint8_t* buf, int n, int rssi, int snr);  // handle one object frame
+  bool loraParseGpBody(const char* body, SatEntry& out, char* fromOut, int fromCap);
+  void drawGpImport(); void keyGpImport(char c, bool enter, bool back);
   void drawMessages();
   void keyMessages(char c, bool enter, bool back);
   // LoRa decoded-action screens (reached by ENTER on a message row whose text
@@ -5917,6 +5965,63 @@ private:
   SchedEntry sched[SCHED_MAX];
   int        schedN = 0, schedSel = 0;
   uint32_t   lastSchedMs = 0;          // throttle background rebuilds
+  // Rove planner (SCR_PLANNER): a from-a-hypothetical-place/time pass survey. Enter a
+  // grid, date, time and +/- window; for every favorite it lists each pass with AOS/LOS/
+  // max-el and the number of workable US states and DXCC entities during that pass.
+  // Fixed-size .bss result array -- no heap. The workable counts are footprint-based
+  // (property of the satellite, independent of the entered site); the entered site only
+  // affects AOS/LOS/max-el pass geometry. Compute is jobbed to stay responsive.
+  struct PlanRow {
+    uint32_t norad = 0;
+    time_t   aos = 0, los = 0;
+    float    maxEl = 0;
+    uint8_t  states = 0;      // workable US states during the pass
+    uint16_t dxcc = 0;        // workable DXCC entities during the pass
+    uint16_t grids = 0;       // workable 4-char grids during the pass
+  };
+  static const int PLAN_MAX = 28;      // passes listed across all favorites in the window
+  PlanRow  planRow[PLAN_MAX];
+  int      planN = 0, planSel = 0, planScroll = 0;
+  bool     planComputed = false;
+  bool     planJobRunning = false;     // survey in progress (pumped from loop())
+  int      planJobFav = 0;             // favorite index the jobbed build is up to
+  double   planLat = 0, planLon = 0;   // entered site (from grid)
+  char     planGrid[8] = "";
+  time_t   planCenter = 0;             // entered date/time (unix UTC)
+  int      planWindowH = 3;            // +/- hours
+  Observer planObs;                    // entered-site observer for pass prediction
+  void buildPlanner();                 // jobbed survey step
+  void planSeedDefaults();             // fill grid/time from current site & clock
+  void drawPlanner(); void keyPlanner(char c, bool enter, bool back);
+  void drawPlanDetail(); void keyPlanDetail(char c, bool enter, bool back);
+  String exportRovePlan();             // write the survey to a formatted .txt; returns path
+  // planner input form: which field is being edited
+  int      planField = 0;              // 0=grid 1=date 2=time 3=window 4=[compute]
+  int      planDetailIdx = 0;          // which PlanRow the detail screen is showing
+  void planDetailFrom(int idx);
+  // ---- Saved rove-plan browser (SCR_ROVELIST) + read-only viewer (SCR_ROVEVIEW) ----
+  // Lists the .txt files exportRovePlan() writes under /CardSat/RovePlans and shows one,
+  // read-only, in a scrolling viewer. The viewer holds a BOUNDED slice of the file in RAM
+  // (ROVEVIEW_MAX) so a large plan can't exhaust the no-PSRAM heap; over the cap it shows a
+  // truncation note and points the user at the web download for the whole file.
+  static const int ROVE_LIST_MAX  = 40;    // saved plans listed in the browser
+  static const int ROVE_NAME_MAX  = 40;    // base filename length (no dir; keeps ".txt")
+  static const int ROVEVIEW_MAX   = 3000;  // max bytes of a plan held in the viewer (heap-bounded)
+  char     roveList[ROVE_LIST_MAX][ROVE_NAME_MAX]; // base names (with ".txt")
+  time_t   roveTime[ROVE_LIST_MAX];        // each plan's last-write time (0 if unknown)
+  uint32_t roveSize[ROVE_LIST_MAX];        // each plan's size in bytes
+  int      roveListN = 0;                  // plans found
+  int      roveSel = 0;                    // browser cursor
+  int      roveScroll = 0;                 // browser scroll offset
+  bool     roveConfirmDel = false;         // two-step delete confirmation
+  String   roveViewBuf;                    // bounded contents of the viewed plan
+  String   roveViewName;                   // base name of the viewed plan
+  bool     roveViewTrunc = false;          // true if the file exceeded ROVEVIEW_MAX
+  int      roveViewTop = 0;                // top wrapped-row shown in the viewer
+  void buildRoveList();                    // enumerate /CardSat/RovePlans newest-first
+  void roveViewLoad(int idx);              // load roveList[idx] (bounded) into roveViewBuf
+  void drawRoveList();  void keyRoveList(char c, bool enter, bool back);
+  void drawRoveView();  void keyRoveView(char c, bool enter, bool back);
   // "Sky at a glance": a horizontal timeline of upcoming passes for all favorites
   // over the next SKY_HOURS. One row per favorite that has a pass in the window;
   // each bar is one pass, coloured by peak elevation. Fixed-size (.bss), no heap.
@@ -6176,6 +6281,10 @@ private:
   void webdSendTxJson();                        // GET /api/tx (transponder list + current)
   bool webdSelectSat(uint32_t norad);          // POST /api/select
   void webdSendPage();                         // GET / (the mobile HTML page)
+  // ---- Web file transfer (download + listing only; no upload) ----
+  void webdSendFilesPage();                    // GET /files (the file-browser HTML page)
+  void webdSendFileList(const String& path);   // GET /api/files?dir=... (JSON dir listing)
+  void webdSendFile(const String& path);       // GET /api/file?path=... (stream a download)
   void applyRotatorFromCfg();
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
@@ -6590,6 +6699,23 @@ private:
   // Radio Mathematics supplement -- dB table, AC RMS/peak factors, constants, formulas.
   int mathRefScroll = 0;
   void drawMathRef(); void keyMathRef(char c, bool enter, bool back);
+  // State-vector -> GP-element fitter (SCR_GPFIT). Enter an epoch and a TEME state vector
+  // (r km, v km/s); a differential-correction fit against CardSat's own SGP4 recovers the
+  // GP mean elements, which can be saved as a manual satellite. Heap-flat: a few 6-vectors
+  // and a 6x6 Jacobian on the stack. Input MUST be TEME (no on-device frame transform);
+  // B*=0 (a single state carries no drag info). See STATEVEC_TO_GP_SCOPING.md.
+  double gpfEpoch = 0;                 // entered epoch (unix UTC)
+  double gpfR[3] = {0,0,0};            // TEME position, km
+  double gpfV[3] = {0,0,0};            // TEME velocity, km/s
+  int    gpfFrame = 0;                 // 0 = TEME input, 1 = J2000 (transformed to TEME)
+  int    gpfField = 0;                 // 0=epoch 1..3=r 4..6=v 7=[solve]
+  bool   gpfSolved = false;
+  bool   gpfConverged = false;
+  double gpfResidM = 0;                // final position residual, metres
+  SatEntry gpfResult;                  // fitted GP elements
+  void gpfInit();
+  bool gpfSolve();                     // returns true on convergence; fills gpfResult
+  void drawGpFit(); void keyGpFit(char c, bool enter, bool back);
   // Orbit-type animation (SCR_ORBITZOO): an animated Learn explainer cycling orbit
   // archetypes (LEO/MEO/GEO/Molniya/sun-sync/polar). Renders into the existing sprite;
   // the satellite dot advances by true anomaly each frame with a short fixed-size fading
@@ -6779,12 +6905,15 @@ private:
   void noteEditNew();              // start a blank new note
   void noteEditOpen(const char* base); // open an existing note in the editor
   void buildGrids(time_t a, time_t b);
+  int  countWorkableGrids(SatEntry& s, time_t a, time_t b);    // rove planner (explicit sat)
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);
   void buildStates(time_t a, time_t b);
+  int  countWorkableStates(SatEntry& s, time_t a, time_t b);   // rove planner (explicit sat)
   void addFootprintStates(double subLat, double subLon, double altKm);
   void drawStates();  void keyStates(char c, bool enter, bool back);
   void buildDxcc(time_t a, time_t b);
+  int  countWorkableDxcc(SatEntry& s, time_t a, time_t b);     // rove planner (explicit sat)
   void addFootprintDxcc(double subLat, double subLon, double altKm);
   void drawDxcc();    void keyDxcc(char c, bool enter, bool back);
   void drawGpSrc();   void keyGpSrc(char c, bool enter, bool back);
@@ -10521,15 +10650,24 @@ bool SatDb::gpToTle(const SatEntry& s, char l1[72], char l2[72]) {
   l1[68] = '0' + tleChecksum(l1);
 
   // --- line 2 ---
+  // Guard every fixed-width field so a transient out-of-range element (e.g. a wild
+  // Gauss-Newton iterate in the state-vector fitter) can never overflow its TLE column and
+  // corrupt the line -- a malformed TLE can put SGP4's init/propagator into a spin. Angles
+  // are wrapped into [0,360); mean-motion is clamped to the 2-digit field; non-finite -> 0.
+  auto fin  = [](double x){ return (x == x && x - x == 0.0) ? x : 0.0; };   // NaN/Inf -> 0
+  auto wrap = [&](double a){ a = fin(a); a = fmod(a, 360.0); if (a < 0) a += 360.0; return a; };
+  double inclW = wrap((double)s.incl), raanW = wrap((double)s.raan);
+  double argpW = wrap((double)s.argp), maW = wrap((double)s.ma);
+  double mmW   = fin(s.meanMotion); if (mmW < 0.0) mmW = 0.0; if (mmW > 99.99999999) mmW = 99.99999999;
   char buf[16];
   l2[0] = '2'; putAt(l2, 3, cat);
-  snprintf(buf, sizeof(buf), "%8.4f", s.incl); putAt(l2, 9,  buf);
-  snprintf(buf, sizeof(buf), "%8.4f", s.raan); putAt(l2, 18, buf);
-  long e7 = llround(s.ecc * 1e7); if (e7 < 0) e7 = 0; if (e7 > 9999999L) e7 = 9999999L;
+  snprintf(buf, sizeof(buf), "%8.4f", inclW); putAt(l2, 9,  buf);
+  snprintf(buf, sizeof(buf), "%8.4f", raanW); putAt(l2, 18, buf);
+  long e7 = llround((double)s.ecc * 1e7); if (e7 < 0) e7 = 0; if (e7 > 9999999L) e7 = 9999999L;
   snprintf(buf, sizeof(buf), "%07ld", e7);     putAt(l2, 27, buf);
-  snprintf(buf, sizeof(buf), "%8.4f", s.argp); putAt(l2, 35, buf);
-  snprintf(buf, sizeof(buf), "%8.4f", s.ma);   putAt(l2, 44, buf);
-  snprintf(buf, sizeof(buf), "%11.8f", s.meanMotion); putAt(l2, 53, buf);
+  snprintf(buf, sizeof(buf), "%8.4f", argpW); putAt(l2, 35, buf);
+  snprintf(buf, sizeof(buf), "%8.4f", maW);   putAt(l2, 44, buf);
+  snprintf(buf, sizeof(buf), "%11.8f", mmW);  putAt(l2, 53, buf);
   snprintf(buf, sizeof(buf), "%5lu", (unsigned long)(s.revAtEpoch % 100000u));
   putAt(l2, 64, buf);
   l2[68] = '0' + tleChecksum(l2);
@@ -12353,6 +12491,38 @@ bool Predictor::setSat(SatEntry& s) {
   return _haveSat;
 }
 
+// Forward model for the state-vector -> GP fitter: initialise SGP4 from a candidate
+// SatEntry's GP elements and propagate to `unixSec`, returning the TEME state. Uses a
+// LOCAL Sgp4 object so it never disturbs the live tracking propagator (_sat).
+bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]) {
+  char l1[72], l2[72];
+  if (!SatDb::gpToTle(s, l1, l2)) return false;
+  // Sgp4::init() short-circuits (returns without re-parsing) when line 1 is byte-identical to
+  // the previous call: `if (strcmp(longstr1, line1) == 0) return false;`. The fitter perturbs
+  // only LINE 2 elements (incl/ecc/raan/argp/ma/mm) with a fixed line 1, so every candidate
+  // shares the same line 1 -> init caches the FIRST candidate and every later evaluation returns
+  // its state unchanged -> a zero Jacobian and no convergence. Defeat the cache by varying a
+  // byte SGP4 ignores for propagation: the element-set-number field (cols 65-68 on line 1). We
+  // cycle it so consecutive calls never match, forcing a genuine twoline2rv() each time. The
+  // checksum (col 69) is recomputed so the line stays well-formed.
+  static uint16_t fitTick = 0;
+  { unsigned v4 = (unsigned)(fitTick++ % 9999) + 1;   // 1..9999, never the same twice in a row
+    char es[6]; snprintf(es, sizeof(es), "%4u", v4);
+    for (int i = 0; i < 4; ++i) l1[64 + i] = es[i];
+    int sum = 0;                                       // recompute the line-1 checksum (col 69)
+    for (int i = 0; i < 68; ++i) { char c = l1[i];
+      if (c >= '0' && c <= '9') sum += c - '0'; else if (c == '-') sum += 1; }
+    l1[68] = '0' + (sum % 10); }
+  Sgp4 fp;
+  if (!fp.init((char*)"FIT", l1, l2)) return false;     // now always re-parses (line 1 differs)
+  if (fp.satrec.error != 0) return false;
+  double tsince = (unixSec - s.epochUnix) / 60.0;       // minutes since element epoch
+  r[0] = r[1] = r[2] = v[0] = v[1] = v[2] = 0.0;
+  sgp4(wgs72, fp.satrec, tsince, r, v);                 // TEME position (km), velocity (km/s)
+  if (fp.satrec.error != 0) return false;
+  return true;
+}
+
 // Range rate from the SGP4 velocity vector at a fractional instant -- the
 // method Gpredict uses (sgp4sdp4 converts ECI position+velocity straight to
 // observer-centred range rate). Far cleaner near TCA than differencing slant
@@ -13084,8 +13254,14 @@ static double gpAgeDays(const SatEntry& s) {
   if (!timeIsSet() || s.epochUnix <= 0) return -1;
   return ((double)time(nullptr) - s.epochUnix) / 86400.0;
 }
+// True when the element set's epoch is in the future (e.g. a pre-launch state-vector fit,
+// whose epoch is the planned deployment time). Distinct from the -1 "unknown" sentinel:
+// here the clock IS set and the epoch IS known, it's just ahead of now.
+static bool gpEpochFuture(const SatEntry& s) {
+  return timeIsSet() && s.epochUnix > 0 && s.epochUnix > (double)time(nullptr);
+}
 static uint16_t ageColor(double d) {
-  if (d < 0)  return CL_GREY;       // unknown / clock not set
+  if (d < 0)  return CL_CYAN;       // future epoch (pre-launch) -- see gpEpochFuture()
   if (d < 14) return CL_GREEN;      // fresh
   if (d < 28) return CL_YELLOW;     // getting old
   return CL_RED;                    // stale -- predictions will drift
@@ -13230,9 +13406,14 @@ void App::setup() {
     double minAge = 1e9;
     for (int i = 0; i < db.count(); ++i) {
       double a = gpAgeDays(db.at(i));
+      // Skip future-epoch element sets (a < 0): a pre-launch state-vector fit has an
+      // epoch days/weeks ahead, so its "age" is negative. Counting it would make it the
+      // "freshest" set and wrongly suppress the refresh for the whole catalog even when
+      // the real, in-orbit satellites are stale. Future epochs never need refreshing.
+      if (a < 0) continue;
       if (a < minAge) minAge = a;
     }
-    if (minAge > GP_STALE_DAYS) {
+    if (minAge < 1e9 && minAge > GP_STALE_DAYS) {
       setStatus("Elements stale - refreshing GP...", 2500); draw();
       doUpdateGp();
     }
@@ -16142,7 +16323,7 @@ tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{backgroun
 .fld{display:flex;gap:8px;align-items:center;margin-top:8px}.fld label{flex:0 0 auto;width:84px;color:var(--mut);font-size:13px}.fld input{flex:1}.fld button{flex:0 0 auto;min-width:64px}
 .arrowhead{fill:var(--grn)}
 </style></head><body>
-<header><b>CardSat</b><span class="tag" id="tag">connecting...</span><span id="trk" class="trk"></span></header>
+<header><b>CardSat</b><span class="tag" id="tag">connecting...</span><span id="trk" class="trk"></span><a href="/files" style="color:#4ad;text-decoration:none;font-size:13px;margin-left:8px">Files</a></header>
 <main>
 <div class="card span2"><div class="tools">
 <input id="search" placeholder="filter..." style="flex:1;min-width:120px">
@@ -16549,6 +16730,21 @@ void App::webdHandleRequest(const String& reqLine) {
   String path   = reqLine.substring(sp1 + 1, sp2);
 
   if (path == "/" || path.startsWith("/index")) { webdSendPage(); return; }
+  if (path == "/files" || path.startsWith("/files?")) { webdSendFilesPage(); return; }
+  if (path.startsWith("/api/files")) {          // GET: JSON directory listing (download-only)
+    int q = path.indexOf("dir=");
+    String dir = (q >= 0) ? path.substring(q + 4) : String("");
+    int amp = dir.indexOf('&'); if (amp >= 0) dir = dir.substring(0, amp);
+    webdSendFileList(dir);
+    return;
+  }
+  if (path.startsWith("/api/file?") ) {          // GET: stream one file as a download
+    int q = path.indexOf("path=");
+    String fp = (q >= 0) ? path.substring(q + 5) : String("");
+    int amp = fp.indexOf('&'); if (amp >= 0) fp = fp.substring(0, amp);
+    webdSendFile(fp);
+    return;
+  }
   if (path.startsWith("/api/status")) { webdSendStatusJson(); return; }
   if (path.startsWith("/api/sats"))   { webdSendSatsJson();   return; }
   if (path.startsWith("/api/passes")) { webdSendPassesJson(); return; }
@@ -16660,6 +16856,189 @@ void App::webdSendPage() {
   const char* p = WEB_PAGE;
   char buf[128]; size_t i = 0;
   char c;
+  while ((c = pgm_read_byte(p++)) != 0) {
+    buf[i++] = c;
+    if (i == sizeof(buf)) { webdCli.write((const uint8_t*)buf, i); i = 0; }
+  }
+  if (i) webdCli.write((const uint8_t*)buf, i);
+}
+
+// ---------------------------------------------------------------------------
+//  Web file transfer -- DOWNLOAD + LISTING ONLY (no upload). A small "/files"
+//  page browses the filesystem and downloads files. All access is confined to
+//  the /CardSat tree with a traversal guard, because the LAN page is
+//  unauthenticated; there is no write path here at all.
+// ---------------------------------------------------------------------------
+
+// Percent-decode an HTTP query value in place (%20 -> space, %2F -> '/', '+' -> space).
+static String webPctDecode(const String& in) {
+  String out; out.reserve(in.length());
+  for (int i = 0; i < (int)in.length(); ++i) {
+    char c = in[i];
+    if (c == '+') { out += ' '; }
+    else if (c == '%' && i + 2 < (int)in.length()) {
+      auto hx = [](char h)->int { if (h >= '0' && h <= '9') return h - '0';
+                                  if (h >= 'a' && h <= 'f') return h - 'a' + 10;
+                                  if (h >= 'A' && h <= 'F') return h - 'A' + 10; return -1; };
+      int hi = hx(in[i+1]), lo = hx(in[i+2]);
+      if (hi >= 0 && lo >= 0) { out += (char)((hi << 4) | lo); i += 2; }
+      else out += c;
+    } else out += c;
+  }
+  return out;
+}
+
+// Resolve a client-supplied path to a SAFE absolute path under /CardSat, or "" if it
+// escapes the tree. Rules: decode, force a leading '/', root a bare/relative path under
+// /CardSat, reject any '..' segment, backslashes, NUL, and anything not under /CardSat.
+static String webSafePath(const String& raw) {
+  String p = webPctDecode(raw);
+  p.trim();
+  if (p.length() == 0) p = "/CardSat";
+  if (p.indexOf('\\') >= 0) return String();   // backslash not allowed
+  // (No NUL check: an Arduino String can't hold an embedded NUL, and indexOf('\0') would
+  // always match the terminator -- which previously rejected every path.)
+  if (p.indexOf("..") >= 0) return String();                 // no parent traversal
+  if (p[0] != '/') p = "/CardSat/" + p;                      // relative -> under /CardSat
+  if (p == "/CardSat") return p;
+  if (!p.startsWith("/CardSat/")) return String();           // must live under the tree
+  // collapse any accidental double slashes
+  while (p.indexOf("//") >= 0) p.replace("//", "/");
+  // strip a trailing slash (except the root)
+  while (p.length() > 8 && p.charAt(p.length() - 1) == '/') p.remove(p.length() - 1);
+  return p;
+}
+
+// GET /api/files?dir=<path> -- JSON listing of a directory under /CardSat.
+void App::webdSendFileList(const String& dirRaw) {
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
+                  "Connection:close\r\n\r\n"));
+  String dir = webSafePath(dirRaw);
+  if (!Store::ready() || dir.length() == 0) { webdCli.print(F("{\"ok\":false,\"dir\":\"\",\"items\":[]}")); return; }
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists(dir)) fsx.mkdir(dir);          // /CardSat may not be materialized yet
+  File d = fsx.open(dir);
+  // Some ESP32 FS cores won't open a bare "/CardSat" as a directory but will open
+  // "/CardSat/". Retry with a trailing slash before giving up.
+  if (!d) {
+    String alt = dir; if (!alt.endsWith("/")) alt += "/";
+    d = fsx.open(alt);
+  }
+  // Don't hard-gate on isDirectory(): some cores mis-report it for the data root but still
+  // enumerate its children. A valid handle is enough; if it's really a file, the walk below
+  // simply yields nothing and we return an empty (but ok) listing.
+  if (!d) {
+    webdCli.print(F("{\"ok\":false,\"dir\":\"")); webdCli.print(jsonEsc(dir.c_str()));
+    webdCli.print(F("\",\"items\":[]}")); return; }
+  String j = "{\"ok\":true,\"dir\":\""; j += jsonEsc(dir.c_str()); j += "\",\"items\":[";
+  bool any = false;
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+    const char* nm = f.name();
+    const char* slash = strrchr(nm, '/'); const char* bn = slash ? slash + 1 : nm;
+    if (any) j += ',';
+    j += "{\"name\":\""; j += jsonEsc(bn); j += "\",";
+    j += "\"dir\":"; j += (f.isDirectory() ? "true" : "false"); j += ",";
+    j += "\"size\":"; j += (uint32_t)f.size(); j += ",";
+    j += "\"mtime\":"; j += (uint32_t)f.getLastWrite(); j += "}";
+    any = true;
+    f.close();
+    // Flush incrementally so a big directory never builds a huge String in RAM.
+    if (j.length() > 700) { webdCli.print(j); j = ""; }
+  }
+  d.close();
+  j += "]}";
+  webdCli.print(j);
+}
+
+// GET /api/file?path=<p> -- stream one file under /CardSat as a download.
+void App::webdSendFile(const String& pathRaw) {
+  String p = webSafePath(pathRaw);
+  if (!Store::ready() || p.length() == 0) {
+    webdCli.print(F("HTTP/1.1 404 Not Found\r\nConnection:close\r\n\r\n")); return;
+  }
+  fs::FS& fsx = Store::fs();
+  File f = fsx.open(p, "r");
+  if (!f || f.isDirectory()) { if (f) f.close();
+    webdCli.print(F("HTTP/1.1 404 Not Found\r\nConnection:close\r\n\r\n")); return; }
+  uint32_t sz = (uint32_t)f.size();
+  const char* slash = strrchr(p.c_str(), '/');
+  const char* bn = slash ? slash + 1 : p.c_str();
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/octet-stream\r\n"));
+  webdCli.print(F("Content-Disposition:attachment; filename=\"")); webdCli.print(bn); webdCli.print(F("\"\r\n"));
+  webdCli.print(F("Content-Length:")); webdCli.print(sz); webdCli.print(F("\r\n"));
+  webdCli.print(F("Connection:close\r\n\r\n"));
+  // Stream in a small fixed buffer -- never copy the whole file into RAM.
+  uint8_t buf[256];
+  while (f.available()) {
+    int n = f.readBytes((char*)buf, sizeof(buf));
+    if (n <= 0) break;
+    webdCli.write(buf, n);
+  }
+  f.close();
+}
+
+// GET /files -- a tiny self-contained file-browser page (download-only). It fetches
+// /api/files for the current directory and renders a clickable list; folders navigate,
+// files download via /api/file. Kept in PROGMEM and streamed like the main page.
+static const char WEB_FILES_PAGE[] PROGMEM = R"HTMLFILE(<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CardSat files</title>
+<style>
+:root{--bg:#0b0e13;--fg:#e6edf3;--mut:#8b96a5;--pan:#161b22;--bd:#2a313c;--acc:#316dca}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:10px 14px;background:var(--pan);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px}
+header b{font-size:18px}a.home{margin-left:auto;color:var(--acc);text-decoration:none;font-size:14px}
+main{padding:12px;max-width:860px;margin:0 auto}
+.crumb{color:var(--mut);font-size:13px;margin-bottom:10px;word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{padding:8px 6px;border-bottom:1px solid var(--bd);text-align:left}
+th{color:var(--mut);font-weight:600}
+a.row{color:var(--fg);text-decoration:none}a.row:active{color:var(--acc)}
+.sz{color:var(--mut);text-align:right;white-space:nowrap}.dt{color:var(--mut);white-space:nowrap}
+.dir{color:var(--acc);font-weight:600}
+.err{color:#e5534b;padding:12px 0}
+.up{display:inline-block;margin-bottom:8px;color:var(--acc);text-decoration:none}
+</style></head><body>
+<header><b>CardSat files</b><a class="home" href="/">&larr; control</a></header>
+<main>
+<div id="crumb" class="crumb">/CardSat</div>
+<a id="up" class="up" href="#" style="display:none">&uarr; up a level</a>
+<table id="tbl"><tr><td class="mut">loading&hellip;</td></tr></table>
+</main>
+<script>
+var cur='/CardSat';
+function fmtSz(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB'}
+function fmtDt(t){if(!t)return '';var d=new Date(t*1000);function p(x){return(x<10?'0':'')+x}
+ return d.getUTCFullYear()+'-'+p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate())+' '+p(d.getUTCHours())+':'+p(d.getUTCMinutes())+'Z'}
+function parent(p){if(p==='/CardSat')return null;var i=p.lastIndexOf('/');var up=p.substring(0,i);return up.length<8?'/CardSat':up}
+function load(dir){cur=dir;document.getElementById('crumb').textContent=dir;
+ var up=parent(dir);var ua=document.getElementById('up');
+ if(up){ua.style.display='';ua.onclick=function(e){e.preventDefault();load(up)}}else{ua.style.display='none'}
+ fetch('/api/files?dir='+encodeURIComponent(dir)).then(r=>r.json()).then(d=>{
+  var t=document.getElementById('tbl');
+  if(!d.ok){t.innerHTML='<tr><td class="err">Cannot open '+dir+'</td></tr>';return}
+  var items=d.items||[];
+  items.sort(function(a,b){if(a.dir!=b.dir)return a.dir?-1:1;return a.name.localeCompare(b.name)});
+  if(!items.length){t.innerHTML='<tr><td class="mut">(empty)</td></tr>';return}
+  var h='<tr><th>Name</th><th class="sz">Size</th><th class="dt">Modified</th></tr>';
+  items.forEach(function(it){
+   var full=(dir==='/'?'':dir)+'/'+it.name;
+   if(it.dir){h+='<tr><td><a class="row dir" href="#" data-d="'+full+'">'+it.name+'/</a></td><td class="sz"></td><td class="dt">'+fmtDt(it.mtime)+'</td></tr>'}
+   else{h+='<tr><td><a class="row" href="/api/file?path='+encodeURIComponent(full)+'">'+it.name+'</a></td><td class="sz">'+fmtSz(it.size)+'</td><td class="dt">'+fmtDt(it.mtime)+'</td></tr>'}
+  });
+  t.innerHTML=h;
+  t.querySelectorAll('a.dir').forEach(function(a){a.onclick=function(e){e.preventDefault();load(a.dataset.d)}});
+ }).catch(function(e){document.getElementById('tbl').innerHTML='<tr><td class="err">offline</td></tr>'})}
+load('/CardSat');
+</script></body></html>
+)HTMLFILE";
+
+void App::webdSendFilesPage() {
+  webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:text/html; charset=utf-8\r\n"
+                  "Cache-Control:no-store\r\nConnection:close\r\n\r\n"));
+  const char* p = WEB_FILES_PAGE;
+  char buf[128]; size_t i = 0; char c;
   while ((c = pgm_read_byte(p++)) != 0) {
     buf[i++] = c;
     if (i == sizeof(buf)) { webdCli.write((const uint8_t*)buf, i); i = 0; }
@@ -17289,7 +17668,12 @@ void App::loop() {
   tickCanvasRestore();         // retry sprite realloc if a post-fetch restore failed
 
   if (satsatJobPhase != 0) satsatJobTick();   // advance the incremental sat-to-sat search
+  if (planJobRunning) {                        // pump the rove-planner survey (1 fav/loop)
+    buildPlanner();
+    if (planComputed) { planJobRunning = false; if (screen == SCR_PLANNER) draw(); }
+  }
   if (transitJobPhase != 0) transitJobTick(); // advance the Sun/Moon transit scan
+  if (loraObjTxActive) loraObjTxTick();       // pump an outbound LoRa object (1 chunk/tick)
 
   // Accelerometer (tilt) passband tuning -- opt-in, ADV-only, self-gated to the
   // Track/Big/Manual screens in TUNE mode. Keep the backlight awake while it's
@@ -17582,7 +17966,8 @@ void App::loop() {
       screen == SCR_GRID || screen == SCR_STATES || screen == SCR_DXCC ||
       (screen == SCR_MEMOS && memo.isRecording()) || screen == SCR_OSCAR || screen == SCR_GLOBE || screen == SCR_DXDOPP || screen == SCR_SKYMAP || screen == SCR_GPSPOS ||
       (screen == SCR_SATSAT && !satsatComputed) || screen == SCR_CATMON || screen == SCR_ARROW ||
-      (screen == SCR_TRANSIT && transitJobPhase != 0)) {
+      (screen == SCR_TRANSIT && transitJobPhase != 0) || (screen == SCR_PLANNER && planJobRunning) ||
+      loraObjTxActive) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_ORBITZOO) {
     if (ms - lastDrawMs > 66) { lastDrawMs = ms; draw(); }   // ~15 fps orbit animation
@@ -17590,7 +17975,7 @@ void App::loop() {
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
   } else if (screen == SCR_WEATHER || screen == SCR_SPACEWX || screen == SCR_HAMSAT ||
-             screen == SCR_MESSAGES) {
+             screen == SCR_MESSAGES || screen == SCR_SATLIST || screen == SCR_GPFIT) {
     // These are otherwise static (repaint on keypress only). A transient result banner
     // ("... updated/failed", or "Sent" on the Messages screen) sits on the bottom status
     // bar; repaint while it's visible, then once more right after it times out so the
@@ -17784,6 +18169,12 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_CTCSS: keyCtcss(c, enter, back); break;
     case SCR_ORBITZOO: keyOrbitZoo(c, enter, back); break;
     case SCR_MATHREF: keyMathRef(c, enter, back); break;
+    case SCR_PLANNER: keyPlanner(c, enter, back); break;
+    case SCR_PLANDETAIL: keyPlanDetail(c, enter, back); break;
+    case SCR_GPFIT: keyGpFit(c, enter, back); break;
+    case SCR_ROVELIST: keyRoveList(c, enter, back); break;
+    case SCR_ROVEVIEW: keyRoveView(c, enter, back); break;
+    case SCR_GPIMPORT: keyGpImport(c, enter, back); break;
     case SCR_TOOLFORM: keyToolForm(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
@@ -18093,6 +18484,8 @@ void App::keySchedule(char c, bool enter, bool back) {
   if (c == 'z') { sleepUntilNextPass(); return; }     // deep-sleep until AOS
   if (c == 'm') { mapReturn = SCR_SCHEDULE; screen = SCR_WORLDMAP; lastDrawMs = 0; return; }  // live world map
   if (c == 't') { buildSkyGlance(); screen = SCR_SKYGLANCE; lastDrawMs = 0; return; }            // sky-at-a-glance timeline
+  if (c == 'p') { planSeedDefaults(); planField = 0; planN = 0; planComputed = false;             // rove planner
+                  planJobFav = 0; planJobRunning = false; screen = SCR_PLANNER; lastDrawMs = 0; return; }
   if (enter && schedN > 0) {
     int idx = db.indexOfNorad(sched[schedSel].norad);
     if (idx >= 0) {
@@ -18253,6 +18646,292 @@ void App::keySkyGlance(char c, bool enter, bool back) {
   }
 }
 
+// ===========================================================================
+//  Rove planner (SCR_PLANNER / SCR_PLANDETAIL)
+//  From an entered grid + date/time +/- a window, survey passes for every favorite
+//  and show AOS/LOS/max-el plus the workable US-state and DXCC counts per pass.
+//  Reuses predictPasses() and the footprint counters; results in a fixed .bss array.
+//  Compute is jobbed (one favorite per build step) to keep the UI responsive.
+// ===========================================================================
+
+void App::planSeedDefaults() {
+  // Grid + time default to the current site and clock so the common case is one keypress.
+  if (loc.obs().valid) {
+    String g = Location::toGrid(loc.obs().lat, loc.obs().lon);
+    strncpy(planGrid, g.c_str(), sizeof(planGrid) - 1); planGrid[sizeof(planGrid) - 1] = 0;
+    planLat = loc.obs().lat; planLon = loc.obs().lon;
+  } else if (!planGrid[0]) {
+    strcpy(planGrid, "FM18"); planLat = 38.9; planLon = -77.0;   // fallback
+  }
+  planCenter = timeIsSet() ? nowUtc() : 0;
+  if (planWindowH < 1) planWindowH = 3;
+}
+
+void App::buildPlanner() {
+  // One jobbed step: process favorite planJobFav, append its passes in the window.
+  if (planJobFav == 0) { planN = 0; }                 // first step resets the list
+  if (!timeIsSet() && planCenter == 0) { planComputed = true; return; }
+  // resolve entered grid -> observer (site only affects pass geometry, not the counts)
+  double dlat, dlon;
+  if (Location::gridToLatLon(String(planGrid), dlat, dlon)) { planLat = dlat; planLon = dlon; }
+  planObs.lat = planLat; planObs.lon = planLon; planObs.altM = 0; planObs.valid = true;
+
+  time_t from = planCenter - (time_t)planWindowH * 3600;
+  time_t to   = planCenter + (time_t)planWindowH * 3600;
+
+  if (planJobFav >= favN) { planComputed = true; return; }   // done
+
+  int fi = planJobFav;
+  int dbIdx = db.indexOfNorad(favs[fi]);
+  if (dbIdx >= 0) {
+    SatEntry& s = db.at(dbIdx);
+    pred.setSite(planObs); pred.setSat(s);
+    PassPredict pp[6];
+    int np = pred.predictPasses(from, cfg.minPassEl, pp, 6, to);
+    for (int i = 0; i < np && planN < PLAN_MAX; ++i) {
+      if (pp[i].aos > to) break;                       // past the window
+      PlanRow& r = planRow[planN];
+      r.norad = s.norad; r.aos = pp[i].aos; r.los = pp[i].los; r.maxEl = pp[i].maxEl;
+      r.states = (uint8_t)countWorkableStates(s, pp[i].aos, pp[i].los);
+      r.dxcc   = (uint16_t)countWorkableDxcc(s, pp[i].aos, pp[i].los);
+      r.grids  = (uint16_t)countWorkableGrids(s, pp[i].aos, pp[i].los);
+      planN++;
+    }
+  }
+  planJobFav++;
+  if (planJobFav >= favN) {
+    planComputed = true;
+    // sort by AOS (simple insertion sort; PLAN_MAX is small)
+    for (int i = 1; i < planN; ++i) {
+      PlanRow key = planRow[i]; int j = i - 1;
+      while (j >= 0 && planRow[j].aos > key.aos) { planRow[j + 1] = planRow[j]; --j; }
+      planRow[j + 1] = key;
+    }
+    // Release the ~4 KB grid bitmap the per-pass grid count allocated: holding it after the
+    // survey fragments the no-PSRAM heap and can starve a later WiFi file download. It's
+    // lazily re-allocated by ensureGridBits() next time the live grid view needs it.
+    if (gridBits) { free(gridBits); gridBits = nullptr; }
+  }
+}
+
+void App::drawPlanner() {
+  header("Rove planner");
+  canvas.setTextSize(1);
+  // ----- input form (top) -----
+  char dbuf[16], tbuf[16];
+  if (planCenter) {
+    struct tm tmv; time_t c = planCenter; gmtime_r(&c, &tmv);
+    snprintf(dbuf, sizeof(dbuf), "%04d-%02d-%02d", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+    snprintf(tbuf, sizeof(tbuf), "%02d:%02dZ", tmv.tm_hour, tmv.tm_min);
+  } else { strcpy(dbuf, "--"); strcpy(tbuf, "--"); }
+  const char* labels[5] = { "Grid", "Date", "Time", "+/- hrs", "" };
+  char wbuf[8]; snprintf(wbuf, sizeof(wbuf), "%dh", planWindowH);
+  const char* vals[5] = { planGrid, dbuf, tbuf, wbuf, "" };
+  int fx = 4;
+  for (int i = 0; i < 4; ++i) {
+    bool sel = (planField == i);
+    canvas.setTextColor(sel ? CL_GREEN : CL_GREY, CL_BLACK);
+    canvas.setCursor(fx, 20); canvas.print(labels[i]);
+    canvas.setTextColor(sel ? CL_GREEN : CL_WHITE, CL_BLACK);
+    canvas.setCursor(fx, 30); canvas.print(vals[i]);
+    fx += (i == 0) ? 52 : (i == 1) ? 78 : 44;
+  }
+  // compute button
+  bool cbSel = (planField == 4);
+  canvas.setTextColor(cbSel ? CL_BLACK : CL_CYAN, cbSel ? CL_CYAN : CL_BLACK);
+  canvas.setCursor(200, 30); canvas.print(" GO ");
+  canvas.drawFastHLine(2, 40, 236, CL_MGREY);
+
+  // ----- results / progress -----
+  if (!planComputed && planJobFav > 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 78);
+    char pb[40]; snprintf(pb, sizeof(pb), "Surveying favorites %d/%d...", planJobFav, favN);
+    canvas.print(pb);
+    footer("computing...");
+    return;
+  }
+  if (planComputed && planN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 78);
+    canvas.print("No passes in the window.");
+    footer(";/. field  ENTER edit/GO  l saved  ` back");
+    return;
+  }
+  if (planN == 0) {                                   // fresh, not yet computed
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    canvas.setCursor(6, 60); canvas.print("Set grid/date/time, then GO.");
+    canvas.setCursor(6, 72); canvas.print("Lists passes for all favorites");
+    canvas.setCursor(6, 82); canvas.print("with workable states & DXCC.");
+    footer(";/. field  ENTER edit/GO  l saved  ` back");
+    return;
+  }
+  // column header
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  // Header labels placed at the same pixel columns the row printf produces
+  // ("%-8.8s %s  %2.0f  %2d %2d" from x=4, 6px/char: name@4 AOS@58 El@100 St@124 Dx@142).
+  canvas.setCursor(4,   48); canvas.print("sat");
+  canvas.setCursor(58,  48); canvas.print("AOS");
+  canvas.setCursor(100, 48); canvas.print("El");
+  canvas.setCursor(122, 48); canvas.print("St");
+  canvas.setCursor(140, 48); canvas.print("Dx");
+  const int rows = 7, LH = 10;
+  if (planSel < planScroll) planScroll = planSel;
+  if (planSel >= planScroll + rows) planScroll = planSel - rows + 1;
+  int y = 58;
+  for (int r = 0; r < rows && planScroll + r < planN; ++r) {
+    int i = planScroll + r;
+    PlanRow& pr = planRow[i];
+    bool sel = (i == planSel);
+    if (sel) { canvas.fillRect(2, y - 1, 236, LH, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else canvas.setTextColor(CL_WHITE, CL_BLACK);
+    int nmIdx = db.indexOfNorad(pr.norad);
+    const char* nm = (nmIdx >= 0) ? db.at(nmIdx).name : "?";
+    char aost[8]; struct tm tmv; time_t a = pr.aos; gmtime_r(&a, &tmv);
+    snprintf(aost, sizeof(aost), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+    char line[40];
+    snprintf(line, sizeof(line), "%-8.8s %s  %2.0f  %2d %2d",
+             nm, aost, pr.maxEl, pr.states, pr.dxcc);
+    canvas.setCursor(4, y); canvas.print(line);
+    y += LH;
+  }
+  if (planScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 58);  canvas.print("^"); }
+  if (planScroll + rows < planN)      { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 120); canvas.print("v"); }
+  footer(";/. row  ENT detail  w save  g form");
+}
+
+void App::keyPlanner(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_SCHEDULE; lastDrawMs = 0; return; }
+
+  // 'l' opens the saved-plan browser from either the form or the results (it doesn't
+  // collide with field editing -- letters aren't used to type into the numeric form).
+  if (c == 'l') { buildRoveList(); roveSel = 0; roveScroll = 0; roveConfirmDel = false;
+                  screen = SCR_ROVELIST; lastDrawMs = 0; return; }
+
+  // If a survey is in the results state, ;/. move the row selection and ENTER opens
+  // detail; 'g' returns focus to the form. Otherwise ;/. move between form fields.
+  bool inResults = (planComputed && planN > 0);
+
+  if (c == 'g') { planField = 0; planN = 0; planComputed = false; planJobFav = 0; planJobRunning = false; lastDrawMs = 0; return; }
+
+  if (inResults) {
+    if (isUp(c))   { if (--planSel < 0) planSel = planN - 1; lastDrawMs = 0; return; }
+    if (isDown(c)) { if (++planSel >= planN) planSel = 0; lastDrawMs = 0; return; }
+    if (enter)     { planDetailFrom(planSel); screen = SCR_PLANDETAIL; lastDrawMs = 0; return; }
+    if (c == 'w') {                                   // export the survey to a text file
+      setStatus("Writing rove plan..."); draw();
+      String path = exportRovePlan();
+      setStatus(path.length() ? (String("Saved ") + path) : "Export failed (no filesystem?)");
+      lastDrawMs = 0; return;
+    }
+    return;
+  }
+
+  // form navigation
+  if (isUp(c) || isLeft(c))  { if (--planField < 0) planField = 4; lastDrawMs = 0; return; }
+  if (isDown(c) || isRight(c)){ if (++planField > 4) planField = 0; lastDrawMs = 0; return; }
+
+  if (enter) {
+    if (planField == 4) {                             // GO: start the jobbed survey
+      if (!timeIsSet() && planCenter == 0) { setStatus("Set clock or time first"); return; }
+      planJobFav = 0; planN = 0; planComputed = false; planSel = 0; planScroll = 0;
+      planJobRunning = true;
+      lastDrawMs = 0; return;
+    }
+    // edit the selected field via the existing edit-field idiom
+    if (planField == 0) { editTarget = 370; editTitle = "Grid square"; editBuf = String(planGrid);
+                          screen = SCR_EDIT; lastDrawMs = 0; return; }
+    if (planField == 1) { editTarget = 371; editTitle = "Date YYYY-MM-DD";
+                          { char b[12]; struct tm tmv; time_t cc = planCenter ? planCenter : nowUtc(); gmtime_r(&cc,&tmv);
+                            snprintf(b,sizeof(b),"%04d-%02d-%02d",tmv.tm_year+1900,tmv.tm_mon+1,tmv.tm_mday); editBuf=b; }
+                          screen = SCR_EDIT; lastDrawMs = 0; return; }
+    if (planField == 2) { editTarget = 372; editTitle = "Time HH:MM (UTC)";
+                          { char b[8]; struct tm tmv; time_t cc = planCenter ? planCenter : nowUtc(); gmtime_r(&cc,&tmv);
+                            snprintf(b,sizeof(b),"%02d:%02d",tmv.tm_hour,tmv.tm_min); editBuf=b; }
+                          screen = SCR_EDIT; lastDrawMs = 0; return; }
+    if (planField == 3) { editTarget = 373; editTitle = "Window +/- hours"; editBuf = String(planWindowH);
+                          screen = SCR_EDIT; lastDrawMs = 0; return; }
+  }
+  // quick window bump with +/- keys
+  if (planField == 3) {
+    if (c == '=' || c == '+') { if (planWindowH < 24) planWindowH++; lastDrawMs = 0; return; }
+    if (c == '-')             { if (planWindowH > 1)  planWindowH--; lastDrawMs = 0; return; }
+  }
+}
+
+// Prepare the polar arc for a planner row's pass, from the ENTERED site and that row's
+// satellite (reusing the pdAz/pdEl arrays the pass-detail screen renders).
+void App::planDetailFrom(int idx) {
+  planDetailIdx = idx;
+  if (idx < 0 || idx >= planN) { pdValid = false; return; }
+  PlanRow& r = planRow[idx];
+  int dbIdx = db.indexOfNorad(r.norad);
+  if (dbIdx < 0) { pdValid = false; return; }
+  SatEntry& s = db.at(dbIdx);
+  planObs.lat = planLat; planObs.lon = planLon; planObs.altM = 0; planObs.valid = true;
+  pred.setSite(planObs); pred.setSat(s);
+  double span = (double)(r.los - r.aos); if (span < 1) span = 1;
+  for (int i = 0; i < PD_SAMPLES; ++i) {
+    time_t t = r.aos + (time_t)llround(span * i / (double)(PD_SAMPLES - 1));
+    LiveLook L = pred.look(t);
+    pdEl[i] = (float)L.el; pdAz[i] = (float)L.az; pdSunlit[i] = L.sunlit;
+  }
+  pdValid = true;
+}
+
+void App::drawPlanDetail() {
+  if (planDetailIdx < 0 || planDetailIdx >= planN) { screen = SCR_PLANNER; return; }
+  PlanRow& r = planRow[planDetailIdx];
+  int dbIdx = db.indexOfNorad(r.norad);
+  const char* nm = (dbIdx >= 0) ? db.at(dbIdx).name : "?";
+  header(String(nm) + " pass");
+  canvas.setTextSize(1);
+  // polar plot on the left
+  const int cx = 66, cy = 78, R = 52;
+  drawPolarGrid(cx, cy, R);
+  if (pdValid) drawPolarArc(cx, cy, R, pdAz, pdEl, PD_SAMPLES);
+  // facts on the right
+  char aost[8], lost[8]; struct tm ta, tl;
+  time_t a = r.aos, l = r.los; gmtime_r(&a, &ta); gmtime_r(&l, &tl);
+  snprintf(aost, sizeof(aost), "%02d:%02d", ta.tm_hour, ta.tm_min);
+  snprintf(lost, sizeof(lost), "%02d:%02d", tl.tm_hour, tl.tm_min);
+  int rx = 140, y = 22;
+  auto row = [&](const char* k, const String& v, uint16_t col) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(rx, y);  canvas.print(k);
+    canvas.setTextColor(col, CL_BLACK);      canvas.setCursor(rx + 44, y); canvas.print(v);
+    y += 12;
+  };
+  row("AOS", String(aost) + "Z", CL_WHITE);
+  row("LOS", String(lost) + "Z", CL_WHITE);
+  row("Max el", String(r.maxEl, 0) + " deg", CL_CYAN);
+  int mins = (int)((r.los - r.aos) / 60);
+  row("Length", String(mins) + " min", CL_WHITE);
+  y += 4;
+  row("States", String(r.states), CL_ORANGE);
+  row("DXCC", String(r.dxcc), CL_ORANGE);
+  row("Grids", String(r.grids), CL_ORANGE);
+  canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(rx, 118); canvas.print("workable in footprint");
+  footer("s states  d DXCC  g grids  ` back");
+}
+
+void App::keyPlanDetail(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_PLANNER; lastDrawMs = 0; return; }
+  // open the full workable lists for this pass's satellite + window
+  if (c == 's' || c == 'd' || c == 'g') {
+    PlanRow& r = planRow[planDetailIdx];
+    int dbIdx = db.indexOfNorad(r.norad);
+    if (dbIdx >= 0) {
+      satSel = dbIdx;
+      if (c == 's')      { buildStates(r.aos, r.los); stateScroll = 0; screen = SCR_STATES; }
+      else if (c == 'd') { buildDxcc(r.aos, r.los);   dxccScroll = 0; dxccLive = false; screen = SCR_DXCC; }
+      else               { setStatus("Computing pass grids..."); draw();
+                           gridLive = false; gridScroll = 0; buildGrids(r.aos, r.los);
+                           setStatus(""); screen = SCR_GRID; }
+      lastDrawMs = 0;
+    }
+    return;
+  }
+}
+
 void App::keySatList(char c, bool enter, bool back) {
   if (isBack(c, back)) {
     satDelArm = false;
@@ -18267,6 +18946,12 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   if (c == 'v') { favOnly = !favOnly; buildSatView();
                   setStatus(favOnly ? "Favorites only" : "All satellites"); return; }
+  if (c == 'L' && viewN > 0) {                  // share this satellite's GP elements over LoRa
+    if (!cfg.loraEnable || !lora.ready()) { setStatus("LoRa off: enable in Settings"); return; }
+    SatEntry* s = activeSat();
+    if (s) loraObjSendGp(*s);
+    return;
+  }
   if (c == 's') {                              // AMSAT activity status window
     buildAmsatStatusView(); amStatSel = 0; amStatScroll = 0;
     screen = SCR_AMSATSTAT; lastDrawMs = 0; return;
@@ -20155,6 +20840,8 @@ static Screen editHome(int t) {
   if (t == 260) return SCR_TRACK;       // per-satellite operating note
   if (t == 600) return SCR_LOG;         // LoTW SAT_NAME prompt (abort export)
   if (t >= 500) return SCR_LOGENTRY;    // QSO log field edit
+  if (t >= 380 && t <= 387) return SCR_GPFIT;     // state-vector -> GP fitter fields
+  if (t >= 370 && t <= 373) return SCR_PLANNER;   // rove planner form fields
   if (t == 340) return SCR_TRACK;       // CTCSS tone override
   if (t >= 400) return SCR_SETTINGS;    // reset confirmation
   if (t >= 320) return SCR_PASSES;      // manual transponder
@@ -20444,6 +21131,72 @@ void App::keyEdit(char c, bool enter, bool back) {
         screen = SCR_LOCATION; return;
       }
 
+      // ---- rove planner form fields (370-373) ----
+      case 370: {                                   // grid
+        String g = editBuf; g.trim(); g.toUpperCase();
+        double dlat, dlon;
+        if (Location::gridToLatLon(g, dlat, dlon)) {
+          strncpy(planGrid, g.c_str(), sizeof(planGrid)-1); planGrid[sizeof(planGrid)-1]=0;
+          planLat = dlat; planLon = dlon;
+        } else setStatus("Bad grid");
+        planComputed = false; planN = 0;
+        screen = SCR_PLANNER; return;
+      }
+      case 371: {                                   // date YYYY-MM-DD (keeps time-of-day)
+        int y2, mo, d;
+        if (sscanf(editBuf.c_str(), "%d-%d-%d", &y2, &mo, &d) == 3) {
+          struct tm tmv; time_t base = planCenter ? planCenter : nowUtc(); gmtime_r(&base, &tmv);
+          tmv.tm_year = y2 - 1900; tmv.tm_mon = mo - 1; tmv.tm_mday = d;
+          planCenter = mktime(&tmv);   // TZ=UTC0 -> UTC
+        } else setStatus("Use YYYY-MM-DD");
+        planComputed = false; planN = 0;
+        screen = SCR_PLANNER; return;
+      }
+      case 372: {                                   // time HH:MM (keeps date)
+        int hh, mm;
+        if (sscanf(editBuf.c_str(), "%d:%d", &hh, &mm) == 2) {
+          struct tm tmv; time_t base = planCenter ? planCenter : nowUtc(); gmtime_r(&base, &tmv);
+          tmv.tm_hour = hh; tmv.tm_min = mm; tmv.tm_sec = 0;
+          planCenter = mktime(&tmv);   // TZ=UTC0 -> UTC
+        } else setStatus("Use HH:MM");
+        planComputed = false; planN = 0;
+        screen = SCR_PLANNER; return;
+      }
+      case 373: {                                   // +/- window hours
+        int w = editBuf.toInt();
+        if (w < 1) w = 1; if (w > 24) w = 24;
+        planWindowH = w;
+        planComputed = false; planN = 0;
+        screen = SCR_PLANNER; return;
+      }
+
+      // ---- state-vector -> GP fitter fields (380-387) ----
+      case 380: {                                   // name -> save fitted sat as manual
+        String nm = editBuf; nm.trim();
+        if (nm.length() == 0) nm = "FIT-SAT";
+        strncpy(gpfResult.name, nm.c_str(), sizeof(gpfResult.name)-1);
+        gpfResult.name[sizeof(gpfResult.name)-1] = 0;
+        if (gpfResult.norad == 0) gpfResult.norad = 90000 + (millis() % 9000);  // placeholder
+        bool ok = db.addGp(gpfResult);
+        setStatus(ok ? (String("Saved ") + gpfResult.name) : "Save failed");
+        screen = SCR_GPFIT; lastDrawMs = 0; return;
+      }
+      case 381: {                                   // epoch
+        struct tm tmv; memset(&tmv, 0, sizeof(tmv));
+        if (sscanf(editBuf.c_str(), "%d-%d-%d %d:%d:%d",
+                   &tmv.tm_year,&tmv.tm_mon,&tmv.tm_mday,&tmv.tm_hour,&tmv.tm_min,&tmv.tm_sec) >= 5) {
+          tmv.tm_year -= 1900; tmv.tm_mon -= 1;
+          gpfEpoch = (double)mktime(&tmv);          // TZ=UTC0 -> UTC
+        } else setStatus("Use YYYY-MM-DD HH:MM:SS");
+        screen = SCR_GPFIT; return;
+      }
+      case 382: gpfR[0] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
+      case 383: gpfR[1] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
+      case 384: gpfR[2] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
+      case 385: gpfV[0] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
+      case 386: gpfV[1] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
+      case 387: gpfV[2] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
+
       // ---- manual GP entry: name then each orbital element ----
       case 310: strncpy(mtSat.name, editBuf.c_str(), sizeof(mtSat.name)-1);
                 mtSat.name[sizeof(mtSat.name)-1] = 0;
@@ -20665,6 +21418,7 @@ void App::keyEdit(char c, bool enter, bool back) {
         editTarget == 330 || editTarget == 228 ||
         editTarget == 500 || editTarget == 503 || editTarget == 600 ||
         editTarget == 350 || editTarget == 351 || editTarget == 360 ||
+        editTarget == 370 ||
         editTarget == 721 || editTarget == 723 || editTarget == 729) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
@@ -23007,6 +23761,12 @@ void App::draw() {
     case SCR_CTCSS: drawCtcss(); break;
     case SCR_ORBITZOO: drawOrbitZoo(); break;
     case SCR_MATHREF: drawMathRef(); break;
+    case SCR_PLANNER: drawPlanner(); break;
+    case SCR_PLANDETAIL: drawPlanDetail(); break;
+    case SCR_GPFIT: drawGpFit(); break;
+    case SCR_ROVELIST: drawRoveList(); break;
+    case SCR_ROVEVIEW: drawRoveView(); break;
+    case SCR_GPIMPORT: drawGpImport(); break;
     case SCR_TOOLFORM: drawToolForm(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
@@ -28615,6 +29375,12 @@ void App::loraPoll() {
   if (!lora.ready()) return;
   uint8_t buf[64]; size_t n = 0; float rssi = 0, snr = 0;
   if (!lora.poll(buf, sizeof(buf), n, rssi, snr)) return;
+  // Object-transfer frames (magic 0xC6) carry chunked objects (e.g. GP element sets);
+  // route them to the reassembler before the text-message path.
+  if (n >= 2 && buf[0] == LORA_OBJ_MAGIC) {
+    loraObjRxFrame(buf, (int)n, (int)lroundf(rssi), (int)lroundf(snr));
+    return;
+  }
   if (n < 2 || buf[0] != LORA_MSG_MAGIC || buf[1] != LORA_MSG_VER) return;  // not ours
 
   char from[LORA_FROM_LEN + 1]; char text[LORA_TEXT_MAX + 1];
@@ -28678,6 +29444,218 @@ void App::loraSendCurrent(const char* text) {
   msgPush("", shown, true, 0, 0);            // echo my own message into history
   setStatus(ok ? "Sent" : "TX failed");
 }
+
+// ===========================================================================
+//  LoRa object transfer -- GP elements only (Feature 3, stage 1). UNTESTED on hw.
+//  A second frame type (magic 0xC6) carries a larger object in small chunks so the
+//  frame stays under the 64-byte RX buffer loraPoll() uses. Send is jobbed one frame
+//  per loop tick; receive reassembles one object at a time and imports a GP element
+//  set via db.addGp() only after the user confirms.
+// ===========================================================================
+
+// CRC16-CCITT (poly 0x1021, init 0xFFFF) over a byte range. Small, no table -- used to
+// verify a reassembled object end-to-end (the LoRa PHY CRCs each packet, but an object
+// spanning chunks needs its own check so a garbled element set is never imported).
+static uint16_t loraCrc16(const uint8_t* d, int n) {
+  uint16_t crc = 0xFFFF;
+  for (int i = 0; i < n; ++i) {
+    crc ^= (uint16_t)d[i] << 8;
+    for (int b = 0; b < 8; ++b)
+      crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+  }
+  return crc;
+}
+
+// Serialize a GP element set into a pipe-delimited text body + trailing CRC16 (4 hex).
+// Layout: "GP1|CALL|NAME|NORAD|EPOCH|INCL|ECC|RAAN|ARGP|MA|MM|BSTAR|CRC"
+//   * CALL is the sender (provenance travels with the object).
+//   * NAME has any '|' stripped so it can't break the framing.
+//   * EPOCH is Unix seconds to ms; the angle/ecc/mm precisions match the GP field widths.
+// Returns the body length (0 on overflow).
+static int loraSerializeGp(const SatEntry& s, const char* call, char* out, int cap) {
+  char nm[26]; strncpy(nm, s.name, sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
+  for (char* p = nm; *p; ++p) if (*p == '|') *p = ' ';       // '|' is the delimiter
+  char cl[15]; strncpy(cl, (call && call[0]) ? call : "NOCALL", sizeof(cl) - 1); cl[sizeof(cl) - 1] = 0;
+  for (char* p = cl; *p; ++p) if (*p == '|') *p = '_';
+  int n = snprintf(out, cap,
+    "GP1|%s|%s|%lu|%.3f|%.4f|%.7f|%.4f|%.4f|%.4f|%.8f|%.4e",
+    cl, nm, (unsigned long)s.norad, s.epochUnix,
+    (double)s.incl, (double)s.ecc, (double)s.raan, (double)s.argp, (double)s.ma,
+    s.meanMotion, (double)s.bstar);
+  if (n <= 0 || n >= cap - 6) return 0;                       // leave room for "|XXXX"
+  uint16_t crc = loraCrc16((const uint8_t*)out, n);
+  int m = snprintf(out + n, cap - n, "|%04X", crc);
+  if (m <= 0) return 0;
+  return n + m;
+}
+
+// Parse a "GP1|..." body (CRC already stripped/verified by the caller path below) into a
+// SatEntry. Fills fromOut with the sender callsign. Returns false on a malformed body.
+bool App::loraParseGpBody(const char* body, SatEntry& out, char* fromOut, int fromCap) {
+  if (strncmp(body, "GP1|", 4) != 0) return false;
+  // tokenize on '|'
+  char tmp[LORA_OBJ_MAXLEN]; strncpy(tmp, body, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
+  char* fields[16]; int nf = 0;
+  for (char* p = strtok(tmp, "|"); p && nf < 16; p = strtok(nullptr, "|")) fields[nf++] = p;
+  if (nf < 12) return false;                                  // GP1,CALL,NAME,NORAD,7 elems,MM,BSTAR
+  // fields: [0]GP1 [1]CALL [2]NAME [3]NORAD [4]EPOCH [5]INCL [6]ECC [7]RAAN [8]ARGP [9]MA [10]MM [11]BSTAR
+  out = SatEntry();
+  strncpy(fromOut, fields[1], fromCap - 1); fromOut[fromCap - 1] = 0;
+  strncpy(out.name, fields[2], sizeof(out.name) - 1); out.name[sizeof(out.name) - 1] = 0;
+  out.norad      = strtoul(fields[3], nullptr, 10);
+  out.epochUnix  = atof(fields[4]);
+  out.incl       = atof(fields[5]);
+  out.ecc        = atof(fields[6]);
+  out.raan       = atof(fields[7]);
+  out.argp       = atof(fields[8]);
+  out.ma         = atof(fields[9]);
+  out.meanMotion = atof(fields[10]);
+  out.bstar      = atof(fields[11]);
+  return (out.norad != 0 && out.meanMotion > 0);
+}
+
+// Begin a jobbed broadcast of one GP element set. Serializes into loraObjTxBuf and arms the
+// per-tick sender; loraObjTxTick() emits one chunk per loop pass with a small gap.
+void App::loraObjSendGp(const SatEntry& s) {
+  if (!lora.ready()) { setStatus("LoRa radio not ready"); return; }
+  if (loraObjTxActive)   { setStatus("A transfer is already running"); return; }
+  char body[LORA_OBJ_MAXLEN];
+  int len = loraSerializeGp(s, cfg.myCall[0] ? cfg.myCall : "NOCALL", body, sizeof(body));
+  if (len <= 0) { setStatus("GP too large to send"); return; }
+  memcpy(loraObjTxBuf, body, len);
+  loraObjTxLen   = len;
+  loraObjTxCount = (len + LORA_OBJ_CHUNK - 1) / LORA_OBJ_CHUNK;
+  if (loraObjTxCount > LORA_OBJ_MAXCHUNKS) { setStatus("GP too large to send"); return; }
+  loraObjTxSeq   = 0;
+  loraObjTxId    = (uint8_t)(millis() ^ (s.norad & 0xFF) ^ 0xA5);   // pseudo-random id
+  loraObjTxType  = LORA_OBJ_GP;
+  loraObjTxLastMs = 0;
+  loraObjTxActive = true;
+  setStatus(String("Sending ") + s.name + " (" + loraObjTxCount + " frames)...", 4000);
+}
+
+// Emit the next outbound chunk, at most one per ~250 ms so we don't hog the half-duplex
+// radio or the cooperative loop. Called every loop tick while loraObjTxActive.
+void App::loraObjTxTick() {
+  if (!loraObjTxActive) return;
+  if (!lora.ready()) { loraObjTxActive = false; return; }
+  uint32_t ms = millis();
+  if (loraObjTxLastMs && ms - loraObjTxLastMs < 250) return;   // inter-frame gap
+  int off = loraObjTxSeq * LORA_OBJ_CHUNK;
+  int plen = loraObjTxLen - off; if (plen > LORA_OBJ_CHUNK) plen = LORA_OBJ_CHUNK;
+  uint8_t frame[LORA_OBJ_HDR + LORA_OBJ_CHUNK];
+  frame[0] = LORA_OBJ_MAGIC; frame[1] = LORA_OBJ_VER; frame[2] = loraObjTxType;
+  frame[3] = loraObjTxId; frame[4] = (uint8_t)loraObjTxSeq; frame[5] = (uint8_t)loraObjTxCount;
+  memcpy(frame + LORA_OBJ_HDR, loraObjTxBuf + off, plen);
+  lora.sendRaw(frame, LORA_OBJ_HDR + plen);
+  loraObjTxLastMs = ms;
+  loraObjTxSeq++;
+  if (loraObjTxSeq >= loraObjTxCount) {
+    loraObjTxActive = false;
+    setStatus("GP element set sent", 2500);
+    lastDrawMs = 0; draw();                 // paint the final status once (screen may be static)
+  }
+}
+
+// Handle one received object frame (magic already checked by loraPoll). Reassembles into
+// loraObjRxBuf; on the final chunk, verifies the CRC and (for a GP object) parses + arms the
+// import-confirm screen. One object at a time: a new XFERID resets the buffer.
+void App::loraObjRxFrame(const uint8_t* buf, int n, int rssi, int snr) {
+  (void)rssi; (void)snr;
+  if (n < LORA_OBJ_HDR + 1) return;
+  uint8_t ver = buf[1], type = buf[2], id = buf[3], seq = buf[4], count = buf[5];
+  if (ver != LORA_OBJ_VER) return;
+  if (count == 0 || count > LORA_OBJ_MAXCHUNKS) return;
+  if (seq >= count) return;
+  uint32_t ms = millis();
+  // Start (or restart) reassembly on a new id, or if the previous one went stale (>20 s).
+  bool stale = loraObjRxActive && (ms - loraObjRxLastMs > 20000);
+  if (!loraObjRxActive || id != loraObjRxId || stale) {
+    loraObjRxActive = true; loraObjRxId = id; loraObjRxType = type;
+    loraObjRxCount = count; loraObjRxGot = 0; loraObjRxLen = 0;
+    memset(loraObjRxBuf, 0, sizeof(loraObjRxBuf));
+  }
+  int plen = n - LORA_OBJ_HDR; if (plen > LORA_OBJ_CHUNK) plen = LORA_OBJ_CHUNK;
+  int off = seq * LORA_OBJ_CHUNK;
+  if (off + plen > LORA_OBJ_MAXLEN) return;                    // overflow guard
+  memcpy(loraObjRxBuf + off, buf + LORA_OBJ_HDR, plen);
+  loraObjRxGot |= (uint16_t)(1u << seq);
+  if (off + plen > loraObjRxLen) loraObjRxLen = off + plen;
+  loraObjRxLastMs = ms;
+  // All chunks in? (low `count` bits of the got-bitmap all set)
+  uint16_t full = (uint16_t)((1u << loraObjRxCount) - 1);
+  if ((loraObjRxGot & full) != full) return;                  // still waiting for chunks
+  loraObjRxActive = false;                                     // complete -- consume it
+  // Body is the reassembled bytes; split off the trailing "|XXXX" CRC and verify.
+  char body[LORA_OBJ_MAXLEN + 1];
+  int blen = loraObjRxLen; if (blen > LORA_OBJ_MAXLEN) blen = LORA_OBJ_MAXLEN;
+  memcpy(body, loraObjRxBuf, blen); body[blen] = 0;
+  char* bar = strrchr(body, '|');
+  if (!bar) { setStatus("LoRa object: malformed"); return; }
+  uint16_t rxCrc = (uint16_t)strtoul(bar + 1, nullptr, 16);
+  int bodyLen = (int)(bar - body);                            // CRC covers everything before '|XXXX'
+  if (loraCrc16((const uint8_t*)body, bodyLen) != rxCrc) {
+    setStatus("LoRa object: CRC fail (resend)"); return;
+  }
+  *bar = 0;                                                    // trim the CRC field for parsing
+  if (loraObjRxType == LORA_OBJ_GP) {
+    SatEntry st; char from[16] = {0};
+    if (loraParseGpBody(body, st, from, sizeof(from))) {
+      loraImportSat = st;
+      strncpy(loraImportFrom, from, sizeof(loraImportFrom) - 1);
+      loraImportFrom[sizeof(loraImportFrom) - 1] = 0;
+      loraImportPending = true;
+      screen = SCR_GPIMPORT; lastDrawMs = 0;                  // ask before importing
+    } else setStatus("LoRa GP: parse failed");
+  } else {
+    setStatus("LoRa object: unsupported type");               // notes/plans not in this stage
+  }
+}
+
+// Confirm-before-import screen for a received GP element set (SCR_GPIMPORT).
+void App::drawGpImport() {
+  header("Import satellite?");
+  canvas.setTextSize(1);
+  if (!loraImportPending) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("Nothing to import.");
+    footer("` back"); return;
+  }
+  SatEntry& s = loraImportSat;
+  int y = 24; const int dy = 12;
+  auto row = [&](const char* k, const String& v) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(6, y);  canvas.print(k);
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(70, y); canvas.print(v); y += dy;
+  };
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, y); canvas.printf("From %.20s", loraImportFrom); y += dy + 2;
+  row("Name",  String(s.name));
+  row("NORAD", String((unsigned long)s.norad));
+  row("Incl",  String((double)s.incl, 2) + " deg");
+  row("Ecc",   String((double)s.ecc, 6));
+  row("MM",    String(s.meanMotion, 5) + " r/d");
+  bool exists = (db.indexOfNorad(s.norad) >= 0);
+  canvas.setTextColor(exists ? CL_ORANGE : CL_GREEN, CL_BLACK);
+  canvas.setCursor(6, y); canvas.print(exists ? "Updates an existing satellite" : "Adds a new satellite");
+  footer("y import   n / ` cancel");
+}
+
+void App::keyGpImport(char c, bool enter, bool back) {
+  if (isBack(c, back) || c == 'n') {
+    loraImportPending = false;
+    screen = SCR_MESSAGES; lastDrawMs = 0; return;
+  }
+  if (c == 'y' || enter) {
+    if (loraImportPending) {
+      bool ok = db.addGp(loraImportSat);
+      if (ok) { buildSatView(); setStatus(String("Imported ") + loraImportSat.name); }
+      else    setStatus("Import failed (invalid elements)");
+      loraImportPending = false;
+    }
+    screen = SCR_MESSAGES; lastDrawMs = 0; return;
+  }
+}
+
 
 // North-up bearing plot to a decoded peer position (SCR_LORACOMPASS). This is a
 // BEARING display, not a live magnetometer compass: the Cardputer ADV has no
@@ -29417,6 +30395,7 @@ static const char* const TOOLS_NAMES[] = {
   "Operating references",
   "CTCSS tone reference",
   "Radio math reference",
+  "State vector -> GP",
   "Coax loss / power",
   "Dipole length",
   "Vertical / ground plane",
@@ -29440,12 +30419,12 @@ static const char* const TOOLS_NAMES[] = {
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
-// The first ten Tools menu entries are standalone screens (sci calc, programmer calc,
+// The first eleven Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
-// reference, radio-math reference); everything after them is a numeric "form" tool whose
-// form-id is (menu index - TOOLS_FIRST_FORM). Keeping this as one named constant means
-// the two places that convert between menu index and form id stay in step.
-static const int TOOLS_FIRST_FORM = 10;
+// reference, radio-math reference, state-vector->GP); everything after them is a numeric
+// "form" tool whose form-id is (menu index - TOOLS_FIRST_FORM). Keeping this as one named
+// constant means the two places that convert between menu index and form id stay in step.
+static const int TOOLS_FIRST_FORM = 11;
 
 // Compile-time guard: the number of form-based tools in the menu (everything after the
 // standalone ones) must exactly match the size of the form enum (TOOL_COAX..TOOL__N).
@@ -29512,6 +30491,8 @@ void App::keyTools(char c, bool enter, bool back) {
       ctcssScroll = 0; screen = SCR_CTCSS;
     } else if (toolsSel == 9) {                // radio math reference (cheat sheet)
       mathRefScroll = 0; screen = SCR_MATHREF;
+    } else if (toolsSel == 10) {               // state vector -> GP elements
+      gpfInit(); screen = SCR_GPFIT;
     } else {                                   // one of the live-recalc forms
       toolFormInit(toolsSel - TOOLS_FIRST_FORM);   // form id = menu index - (standalone tools that precede)
       screen = SCR_TOOLFORM;
@@ -30803,6 +31784,393 @@ void App::keyMathRef(char c, bool enter, bool back) {
   if (isUp(c))   { if (--mathRefScroll < 0) mathRefScroll = 0; lastDrawMs = 0; return; }
   if (isDown(c)) { ++mathRefScroll; lastDrawMs = 0; return; }
 }
+
+// ===========================================================================
+//  State-vector -> GP-element fitter (SCR_GPFIT)
+//  Given a TEME position/velocity at an epoch, recover the SGP4 *mean* (GP)
+//  elements by differential correction: iterate the mean elements until SGP4
+//  reproduces the target state. This is the correct method -- simply converting
+//  osculating elements and calling them a TLE gives multi-km errors because SGP4
+//  expects mean elements and re-adds its own periodics. Uses CardSat's own SGP4
+//  (via pred.temeStateAt) as the forward model. Heap-flat.
+//  Constraints (shown on-screen): input must be TEME; B*=0 (single state, no drag).
+// ===========================================================================
+
+void App::gpfInit() {
+  gpfEpoch = timeIsSet() ? nowUtc() : 0;
+  for (int i = 0; i < 3; ++i) { gpfR[i] = 0; gpfV[i] = 0; }
+  gpfField = 0; gpfFrame = 0; gpfSolved = false; gpfConverged = false; gpfResidM = 0;
+}
+
+namespace {
+  // Rotate a 3-vector by IAU76 precession + truncated IAU80 nutation to take a J2000
+  // (GCRF/ICRF, to ~1 m) vector into the TEME frame SGP4 uses, at the given epoch. Applied
+  // to both r and v (the precession/nutation frame rate is arcsec/day -- utterly negligible
+  // for velocity). Host-validated against astropy TEME<-GCRS: ~1.3 m over 2024-2030.
+  // TT ~= UTC here (the <=70 s difference moves precession by <1e-4 arcsec -- ignorable).
+  void j2000ToTeme(double epochUnix, double vin[3], double vout[3]) {
+    const double AS2R = 4.84813681109536e-6;         // arcsec -> rad
+    const double D2R  = 0.017453292519943295;
+    double jd = epochUnix / 86400.0 + 2440587.5;     // unix -> JD (UTC ~ TT here)
+    double T  = (jd - 2451545.0) / 36525.0;
+    // IAU76 precession angles
+    double zeta  = (2306.2181*T + 0.30188*T*T + 0.017998*T*T*T) * AS2R;
+    double zang  = (2306.2181*T + 1.09468*T*T + 0.018203*T*T*T) * AS2R;
+    double theta = (2004.3109*T - 0.42665*T*T - 0.041833*T*T*T) * AS2R;
+    // mean obliquity
+    double eps0 = (84381.448 - 46.8150*T - 0.00059*T*T + 0.001813*T*T*T) * AS2R;
+    // fundamental arguments (rad)
+    double rr = 360.0;
+    double l  = (134.96298139 + (1325*rr+198.8673981)*T + 0.0086972*T*T) * D2R;
+    double lp = (357.52772333 + (99*rr+359.0503400)*T - 0.0001603*T*T) * D2R;
+    double F  = (93.27191028  + (1342*rr+82.0175381)*T - 0.0036825*T*T) * D2R;
+    double D  = (297.85036306 + (1236*rr+307.1114800)*T - 0.0019142*T*T) * D2R;
+    double Om = (125.04452222 - (5*rr+134.1362608)*T + 0.0020708*T*T) * D2R;
+    // truncated IAU80 nutation (13 largest terms): {ml,mlp,mF,mD,mOm, psi, psiT, eps, epsT}
+    static const double NT[13][9] = {
+      { 0, 0, 0, 0, 1, -171996, -174.2,  92025,  8.9 },
+      { 0, 0, 2,-2, 2,  -13187,   -1.6,   5736, -3.1 },
+      { 0, 0, 2, 0, 2,   -2274,   -0.2,    977, -0.5 },
+      { 0, 0, 0, 0, 2,    2062,    0.2,   -895,  0.5 },
+      { 0, 1, 0, 0, 0,    1426,   -3.4,     54, -0.1 },
+      { 1, 0, 0, 0, 0,     712,    0.1,     -7,  0.0 },
+      { 0, 1, 2,-2, 2,    -517,    1.2,    224, -0.6 },
+      { 0, 0, 2, 0, 1,    -386,   -0.4,    200,  0.0 },
+      { 1, 0, 2, 0, 2,    -301,    0.0,    129, -0.1 },
+      { 0,-1, 2,-2, 2,     217,   -0.5,    -95,  0.3 },
+      { 1, 0, 0,-2, 0,    -158,    0.0,      0,  0.0 },
+      { 0, 0, 2,-2, 1,     129,    0.1,    -70,  0.0 },
+      {-1, 0, 2, 0, 2,     123,    0.0,    -53,  0.0 },
+    };
+    double dpsi = 0, deps = 0;
+    for (int i = 0; i < 13; ++i) {
+      double arg = NT[i][0]*l + NT[i][1]*lp + NT[i][2]*F + NT[i][3]*D + NT[i][4]*Om;
+      dpsi += (NT[i][5] + NT[i][6]*T) * sin(arg);
+      deps += (NT[i][7] + NT[i][8]*T) * cos(arg);
+    }
+    dpsi *= 0.0001 * AS2R; deps *= 0.0001 * AS2R;
+    double epsT = eps0 + deps;
+    double eqe  = dpsi * cos(eps0);
+    // Compose R = Rot3(eqe) * N * P, N = Rot1(-epsT) Rot3(-dpsi) Rot1(eps0),
+    // P = Rot3(-z) Rot2(theta) Rot3(-zeta). Build as elementary rotations applied to vin.
+    auto rot1 = [](double a, double v[3]) { double c=cos(a),s=sin(a),y=v[1],z=v[2]; v[1]=c*y+s*z; v[2]=-s*y+c*z; };
+    auto rot2 = [](double a, double v[3]) { double c=cos(a),s=sin(a),x=v[0],z=v[2]; v[0]=c*x-s*z; v[2]=s*x+c*z; };
+    auto rot3 = [](double a, double v[3]) { double c=cos(a),s=sin(a),x=v[0],y=v[1]; v[0]=c*x+s*y; v[1]=-s*x+c*y; };
+    double w[3] = { vin[0], vin[1], vin[2] };
+    // P: Rot3(-zeta), Rot2(theta), Rot3(-z)
+    rot3(-zeta, w); rot2(theta, w); rot3(-zang, w);
+    // N: Rot1(eps0), Rot3(-dpsi), Rot1(-epsT)
+    rot1(eps0, w); rot3(-dpsi, w); rot1(-epsT, w);
+    // Rot3(eqe)
+    rot3(eqe, w);
+    vout[0] = w[0]; vout[1] = w[1]; vout[2] = w[2];
+  }
+
+  // Osculating classical elements from a TEME state vector -- the fit's initial guess.
+  // Fills a SatEntry's GP fields (n in rev/day, angles in deg, e dimensionless).
+  void rv2coeSeed(const double r[3], const double v[3], double epochUnix, SatEntry& out) {
+    const double MU = 398600.4418;                 // km^3/s^2
+    double R = sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    double V2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    // specific angular momentum h = r x v
+    double h[3] = { r[1]*v[2]-r[2]*v[1], r[2]*v[0]-r[0]*v[2], r[0]*v[1]-r[1]*v[0] };
+    double hmag = sqrt(h[0]*h[0]+h[1]*h[1]+h[2]*h[2]);
+    // node vector n = k x h
+    double nod[3] = { -h[1], h[0], 0.0 };
+    double nmag = sqrt(nod[0]*nod[0]+nod[1]*nod[1]);
+    // eccentricity vector
+    double rv = r[0]*v[0]+r[1]*v[1]+r[2]*v[2];
+    double ev[3];
+    for (int i = 0; i < 3; ++i) ev[i] = ((V2 - MU/R)*r[i] - rv*v[i]) / MU;
+    double e = sqrt(ev[0]*ev[0]+ev[1]*ev[1]+ev[2]*ev[2]);
+    double energy = V2/2.0 - MU/R;
+    double a = -MU/(2.0*energy);                   // semi-major axis, km
+    double D2R = 0.017453292519943295, R2D = 57.29577951308232;
+    // acos domain guard: rounding can push an argument a hair past +/-1, and acos(1.0000001)
+    // is NaN -- which would poison the whole seed. Clamp every argument into [-1, 1].
+    auto ac = [](double x){ if (x > 1.0) x = 1.0; if (x < -1.0) x = -1.0; return acos(x); };
+    double incl = ac(h[2]/hmag) * R2D;
+    double raan = (nmag > 1e-9) ? ac(nod[0]/nmag) * R2D : 0.0;
+    if (nod[1] < 0) raan = 360.0 - raan;
+    double argp = 0.0;
+    if (nmag > 1e-9 && e > 1e-9) {
+      argp = ac((nod[0]*ev[0]+nod[1]*ev[1]+nod[2]*ev[2])/(nmag*e)) * R2D;
+      if (ev[2] < 0) argp = 360.0 - argp;
+    }
+    // true anomaly -> eccentric -> mean
+    double nu = 0.0;
+    if (e > 1e-9) {
+      nu = ac((ev[0]*r[0]+ev[1]*r[1]+ev[2]*r[2])/(e*R));
+      if (rv < 0) nu = 2*M_PI - nu;
+    } else {
+      nu = ac((nod[0]*r[0]+nod[1]*r[1])/(nmag*R));
+      if (r[2] < 0) nu = 2*M_PI - nu;
+    }
+    double E = atan2(sqrt(1-e*e)*sin(nu), e + cos(nu));
+    double M = E - e*sin(E);
+    double Mdeg = M * R2D; while (Mdeg < 0) Mdeg += 360.0; while (Mdeg >= 360) Mdeg -= 360.0;
+    double n_revday = (a > 0) ? sqrt(MU/(a*a*a)) * 86400.0 / (2.0*M_PI) : 0.0;
+    out = SatEntry();
+    out.epochUnix = epochUnix;
+    out.incl = (float)incl; out.raan = (float)raan; out.ecc = (float)e;
+    out.argp = (float)argp; out.ma = (float)Mdeg; out.meanMotion = n_revday;
+    out.bstar = 0; out.ndot = 0; out.nddot = 0;
+    (void)D2R;
+  }
+
+  // Solve a 6x6 linear system A x = b by Gaussian elimination with partial pivoting.
+  // Returns false if singular. A is row-major 6x6; x and b are length 6.
+  bool solve6(double A[6][6], double b[6], double x[6]) {
+    for (int col = 0; col < 6; ++col) {
+      int piv = col; double best = fabs(A[col][col]);
+      for (int r = col+1; r < 6; ++r) if (fabs(A[r][col]) > best) { best = fabs(A[r][col]); piv = r; }
+      if (best < 1e-18) return false;
+      if (piv != col) { for (int k = 0; k < 6; ++k) { double t=A[col][k]; A[col][k]=A[piv][k]; A[piv][k]=t; } double t=b[col]; b[col]=b[piv]; b[piv]=t; }
+      for (int r = col+1; r < 6; ++r) {
+        double f = A[r][col]/A[col][col];
+        for (int k = col; k < 6; ++k) A[r][k] -= f*A[col][k];
+        b[r] -= f*b[col];
+      }
+    }
+    for (int r = 5; r >= 0; --r) {
+      double s = b[r];
+      for (int k = r+1; k < 6; ++k) s -= A[r][k]*x[k];
+      x[r] = s / A[r][r];
+    }
+    return true;
+  }
+}
+
+// Pack/unpack a SatEntry's 6 solved mean elements to/from a parameter vector.
+// Order: [n(rev/day), e, i(deg), RAAN(deg), argp(deg), M(deg)].
+bool App::gpfSolve() {
+  // If the input is J2000/GCRF, rotate it into TEME first (SGP4's frame). TEME input is
+  // used as-is. The transform is applied to a working copy so the entered values are kept.
+  double R[3], V[3];
+  if (gpfFrame == 1) {
+    j2000ToTeme(gpfEpoch, gpfR, R);
+    j2000ToTeme(gpfEpoch, gpfV, V);
+  } else {
+    for (int i = 0; i < 3; ++i) { R[i] = gpfR[i]; V[i] = gpfV[i]; }
+  }
+  SatEntry cur;
+  rv2coeSeed(R, V, gpfEpoch, cur);
+  if (!(cur.meanMotion > 0) || cur.ecc < 0 || cur.ecc >= 1.0) { gpfConverged = false; return false; }
+
+  auto pack = [](const SatEntry& s, double p[6]) {
+    p[0]=s.meanMotion; p[1]=s.ecc; p[2]=s.incl; p[3]=s.raan; p[4]=s.argp; p[5]=s.ma;
+  };
+  auto unpack = [this](const double p[6], SatEntry& s) {
+    s.epochUnix = gpfEpoch;      // MUST carry the epoch: temeStateAt/gpToTle need it, else
+    s.meanMotion=p[0];           // tsince = gpfEpoch - 0 propagates ~decades and never converges
+    s.ecc=(float)fmin(fmax(p[1],0.0),0.999999);
+    s.incl=(float)p[2];
+    auto wrap=[](double a){ while(a<0)a+=360; while(a>=360)a-=360; return a; };
+    s.raan=(float)wrap(p[3]); s.argp=(float)wrap(p[4]); s.ma=(float)wrap(p[5]);
+  };
+
+  double p[6]; pack(cur, p);
+  double pBest[6]; for (int i=0;i<6;++i) pBest[i] = p[i];   // params at the lowest residual seen
+  double target[6] = { R[0],R[1],R[2], V[0],V[1],V[2] };
+  double bestResid = 1e30;
+  const int MAXIT = 12;
+
+  double lambda = 1e-3;                 // Levenberg-Marquardt damping (adaptive)
+
+  for (int it = 0; it < MAXIT; ++it) {
+    SatEntry s; unpack(p, s);
+    double r0[3], v0[3];
+    if (!pred.temeStateAt(s, gpfEpoch, r0, v0)) { gpfConverged = false; return false; }
+    double f0[6] = { r0[0],r0[1],r0[2], v0[0],v0[1],v0[2] };
+    double resid[6]; for (int i=0;i<6;++i) resid[i] = target[i]-f0[i];
+    double rr = sqrt(resid[0]*resid[0]+resid[1]*resid[1]+resid[2]*resid[2]);
+    if (rr < bestResid) { bestResid = rr; for (int i=0;i<6;++i) pBest[i] = p[i]; }
+    // Early-exit at the achievable floor. The forward model round-trips through a TLE, so the
+    // residual can't go below the TLE-quantization limit (tens of metres at LEO); 1 m is
+    // unreachable. Accept once we're within ~50 m -- that's a converged fit for this model.
+    if (rr < 0.05) { unpack(p, gpfResult); gpfResidM = rr*1000.0; gpfConverged = true;
+                     return true; } // <~50 m
+
+    // Numerical Jacobian J[6][6] = d(state)/d(param). Steps sit well above each TLE field's
+    // quantum (angles 1e-4 deg, ecc 1e-7, mm 1e-8) so gpToTle doesn't round base+perturbation
+    // into the same cell (which would zero the column). Uses a central difference for a cleaner
+    // derivative than a one-sided one near the quantization floor.
+    double J[6][6];
+    const double dp[6] = { 1e-6, 1e-5, 2e-3, 2e-3, 2e-3, 2e-3 };  // n, e, i, raan, argp, ma
+    for (int c = 0; c < 6; ++c) {
+      double pP[6], pM[6]; for (int i=0;i<6;++i) { pP[i]=p[i]; pM[i]=p[i]; }
+      pP[c] += dp[c]; pM[c] -= dp[c];
+      SatEntry sP, sM; unpack(pP, sP); unpack(pM, sM);
+      double rP[3], vP[3], rM[3], vM[3];
+      if (!pred.temeStateAt(sP, gpfEpoch, rP, vP) || !pred.temeStateAt(sM, gpfEpoch, rM, vM)) { gpfConverged = false; return false; }
+      double fP[6] = { rP[0],rP[1],rP[2], vP[0],vP[1],vP[2] };
+      double fM[6] = { rM[0],rM[1],rM[2], vM[0],vM[1],vM[2] };
+      for (int rI = 0; rI < 6; ++rI) J[rI][c] = (fP[rI]-fM[rI]) / (2.0*dp[c]);
+    }
+    // Normal equations: A = J^T J, g = J^T resid. Levenberg-Marquardt solves (A + lambda*diag(A))
+    // dX = g -- the lambda*diag term regularizes a rank-deficient Jacobian (circular/equatorial
+    // orbits, where argp/M or RAAN/argp are degenerate) AND damps overshoot on well-posed ones.
+    double A[6][6], g[6];
+    for (int a2=0;a2<6;++a2) {
+      g[a2]=0; for (int k=0;k<6;++k) g[a2]+=J[k][a2]*resid[k];
+      for (int b2=0;b2<6;++b2) { double sum=0; for (int k=0;k<6;++k) sum+=J[k][a2]*J[k][b2]; A[a2][b2]=sum; }
+    }
+    // Try LM steps, raising lambda until a step actually reduces the residual (or we give up).
+    bool improved = false;
+    for (int tries = 0; tries < 8 && !improved; ++tries) {
+      double Alm[6][6]; for (int a2=0;a2<6;++a2) for (int b2=0;b2<6;++b2) Alm[a2][b2]=A[a2][b2];
+      for (int d=0;d<6;++d) Alm[d][d] += lambda * (A[d][d] > 1e-30 ? A[d][d] : 1.0);
+      double gv[6]; for (int i=0;i<6;++i) gv[i]=g[i];
+      double dX[6];
+      if (!solve6(Alm, gv, dX)) { lambda *= 10.0; continue; }
+      double pn[6]; bool finite=true;
+      for (int i=0;i<6;++i) { pn[i]=p[i]+dX[i]; if (!(pn[i]==pn[i] && pn[i]-pn[i]==0.0)) finite=false; }
+      if (!finite) { lambda *= 10.0; continue; }
+      if (pn[1] < 0) pn[1]=0; if (pn[1] > 0.999999) pn[1]=0.999999; if (pn[0] < 0.1) pn[0]=0.1;
+      // Evaluate the trial point.
+      SatEntry st; unpack(pn, st); double rt[3], vt[3];
+      if (!pred.temeStateAt(st, gpfEpoch, rt, vt)) { lambda *= 10.0; continue; }
+      double dr0=target[0]-rt[0], dr1=target[1]-rt[1], dr2=target[2]-rt[2];
+      double rrn = sqrt(dr0*dr0+dr1*dr1+dr2*dr2);
+      if (rrn < rr) { for (int i=0;i<6;++i) p[i]=pn[i]; lambda = fmax(lambda/10.0, 1e-9); improved=true; }
+      else lambda *= 10.0;
+    }
+    if (!improved) break;             // no downhill step found -> converged or stuck; report best
+  }
+  // didn't hit the early-exit floor; report the BEST params we reached (near the floor the
+  // last iterate can bounce, so use the lowest-residual point, not wherever we stopped).
+  unpack(pBest, gpfResult); gpfResidM = bestResid*1000.0;
+  gpfConverged = (bestResid < 1.0);   // accept if within ~1 km
+  return gpfConverged;
+}
+
+void App::drawGpFit() {
+  header("State vector -> GP");
+  canvas.setTextSize(1);
+  if (!gpfSolved) {
+    // ---- input form ----
+    char eb[20];
+    if (gpfEpoch) { struct tm tmv; time_t c=(time_t)gpfEpoch; gmtime_r(&c,&tmv);
+      snprintf(eb,sizeof(eb),"%04d-%02d-%02d %02d:%02dZ", tmv.tm_year+1900,tmv.tm_mon+1,tmv.tm_mday,tmv.tm_hour,tmv.tm_min); }
+    else strcpy(eb,"--");
+    const char* lbl[7] = { "Epoch", "rx", "ry", "rz", "vx", "vy", "vz" };
+    double val[7] = { 0, gpfR[0],gpfR[1],gpfR[2], gpfV[0],gpfV[1],gpfV[2] };
+    int y = 20;
+    // epoch row
+    canvas.setTextColor(gpfField==0?CL_GREEN:CL_GREY, CL_BLACK); canvas.setCursor(4,y); canvas.print("Epoch");
+    canvas.setTextColor(gpfField==0?CL_GREEN:CL_WHITE, CL_BLACK); canvas.setCursor(70,y); canvas.print(eb);
+    y += 11;
+    // 6 vector components in two columns (r left, v right)
+    for (int i = 0; i < 3; ++i) {
+      // r component
+      bool selR = (gpfField == 1+i);
+      canvas.setTextColor(selR?CL_GREEN:CL_GREY, CL_BLACK); canvas.setCursor(4, y); canvas.print(lbl[1+i]);
+      canvas.setTextColor(selR?CL_GREEN:CL_WHITE, CL_BLACK); canvas.setCursor(28, y); canvas.print(String(val[1+i], 3));
+      // v component
+      bool selV = (gpfField == 4+i);
+      canvas.setTextColor(selV?CL_GREEN:CL_GREY, CL_BLACK); canvas.setCursor(128, y); canvas.print(lbl[4+i]);
+      canvas.setTextColor(selV?CL_GREEN:CL_WHITE, CL_BLACK); canvas.setCursor(150, y); canvas.print(String(val[4+i], 4));
+      y += 11;
+    }
+    canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, y+1);
+    canvas.print(gpfFrame==1 ? "r km (J2000)    v km/s (J2000)" : "r km (TEME)     v km/s (TEME)");
+    y += 11;
+    // frame selector (field 7)
+    bool selF = (gpfField == 7);
+    canvas.setTextColor(selF?CL_GREEN:CL_GREY, CL_BLACK); canvas.setCursor(4, y); canvas.print("Frame");
+    canvas.setTextColor(selF?CL_GREEN:CL_CYAN, CL_BLACK); canvas.setCursor(70, y);
+    canvas.print(gpfFrame == 1 ? "J2000 (->TEME)" : "TEME");
+    y += 11;
+    bool selGo = (gpfField == 8);
+    canvas.setTextColor(selGo?CL_BLACK:CL_CYAN, selGo?CL_CYAN:CL_BLACK);
+    canvas.setCursor(90, y); canvas.print(" SOLVE ");
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    canvas.setCursor(4, 118); canvas.print(gpfFrame==1 ? "J2000 rotated to TEME; B*=0" : "input must be TEME; B*=0");
+    footer(";/. field  ENTER edit  ,// frame  ` back");
+    return;
+  }
+  // ---- results ----
+  if (!gpfConverged) {
+    canvas.setTextColor(CL_RED, CL_BLACK); canvas.setCursor(6, 30); canvas.print("Did not converge.");
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, 44);
+    canvas.print("Best residual: " + String(gpfResidM/1000.0, 1) + " km");
+    canvas.setCursor(6, 58); canvas.print("Check frame is TEME and units");
+    canvas.setCursor(6, 68); canvas.print("(r km, v km/s).");
+    footer("g form  ` back");
+    return;
+  }
+  SatEntry& s = gpfResult;
+  auto row = [&](const char* k, const String& v, uint16_t col, int y) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(4, y);  canvas.print(k);
+    canvas.setTextColor(col, CL_BLACK);      canvas.setCursor(92, y); canvas.print(v);
+  };
+  canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(4, 19); canvas.print("GP mean elements:");
+  row("Mean motion", String(s.meanMotion, 6) + " r/d", CL_WHITE, 30);
+  row("Eccentricity", String(s.ecc, 7), CL_WHITE, 40);
+  row("Inclination", String(s.incl, 4) + " deg", CL_WHITE, 50);
+  row("RAAN", String(s.raan, 4) + " deg", CL_WHITE, 60);
+  row("Arg perigee", String(s.argp, 4) + " deg", CL_WHITE, 70);
+  row("Mean anomaly", String(s.ma, 4) + " deg", CL_WHITE, 80);
+  // derived sanity + residual
+  double MU=398600.4418, n=s.meanMotion*2.0*M_PI/86400.0;
+  double a=pow(MU/(n*n),1.0/3.0), RE=6378.137;
+  canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, 92);
+  canvas.print("apo " + String(a*(1+s.ecc)-RE,0) + " peri " + String(a*(1-s.ecc)-RE,0) + " km");
+  canvas.setTextColor(gpfResidM < 10 ? CL_GREEN : CL_ORANGE, CL_BLACK); canvas.setCursor(4, 102);
+  canvas.print("fit residual: " + String(gpfResidM, gpfResidM<1000?1:0) + " m  B*=0");
+  footer("s save  L share  g form  ` back");
+}
+
+void App::keyGpFit(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'g') { gpfSolved = false; lastDrawMs = 0; return; }        // back to the form
+
+  if (gpfSolved) {
+    if (c == 's' && gpfConverged) {                                   // save as manual sat
+      editTarget = 380; editTitle = "Satellite name"; editBuf = "";
+      screen = SCR_EDIT; lastDrawMs = 0; return;
+    }
+    if (c == 'L' && gpfConverged) {                                   // share elements over LoRa
+      if (!cfg.loraEnable || !lora.ready()) { setStatus("LoRa off: enable in Settings"); return; }
+      if (gpfResult.norad == 0) gpfResult.norad = 90000 + (millis() % 9000);  // placeholder id
+      if (!gpfResult.name[0]) strncpy(gpfResult.name, "FIT-SAT", sizeof(gpfResult.name) - 1);
+      loraObjSendGp(gpfResult);
+      return;
+    }
+    return;
+  }
+
+  // form: field navigation (0=epoch, 1-6=r/v, 7=frame, 8=solve)
+  if (isUp(c) || isLeft(c))  { if (--gpfField < 0) gpfField = 8; lastDrawMs = 0; return; }
+  if (isDown(c) || isRight(c)){ if (++gpfField > 8) gpfField = 0; lastDrawMs = 0; return; }
+
+  // frame toggle on field 7 (also via ,// arrows for convenience)
+  if (gpfField == 7 && (c == ',' || c == '/' || enter)) { gpfFrame ^= 1; lastDrawMs = 0; return; }
+
+  if (enter) {
+    if (gpfField == 8) {                                             // SOLVE
+      if (!gpfEpoch) { setStatus("Set epoch first"); return; }
+      setStatus("Solving..."); draw();
+      gpfSolve(); gpfSolved = true; lastDrawMs = 0; return;
+    }
+    if (gpfField == 0) {                                            // epoch
+      editTarget = 381; editTitle = "Epoch YYYY-MM-DD HH:MM:SS";
+      { char b[24]; struct tm tmv; time_t cc=gpfEpoch?(time_t)gpfEpoch:nowUtc(); gmtime_r(&cc,&tmv);
+        snprintf(b,sizeof(b),"%04d-%02d-%02d %02d:%02d:%02d",tmv.tm_year+1900,tmv.tm_mon+1,tmv.tm_mday,tmv.tm_hour,tmv.tm_min,tmv.tm_sec); editBuf=b; }
+      screen = SCR_EDIT; lastDrawMs = 0; return;
+    }
+    // r/v components: targets 382..387
+    int comp = gpfField - 1;                                        // 0..5
+    const char* fr = (gpfFrame == 1) ? "J2000" : "TEME";
+    editTarget = 382 + comp;
+    editTitle = (comp < 3) ? String("r") + "xyz"[comp] + " km " + fr
+                           : String("v") + "xyz"[comp-3] + " km/s " + fr;
+    double cur = (comp < 3) ? gpfR[comp] : gpfV[comp-3];
+    editBuf = String(cur, comp < 3 ? 3 : 5);
+    screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -32696,6 +34064,36 @@ void App::buildGrids(time_t a, time_t b) {
   gridN = cnt;
 }
 
+// Count workable 4-char grids for an EXPLICIT satellite over [a,b], for the rove planner.
+// Footprint-based (site-independent). Reuses the lazily-malloc'd grid bitset. It does NOT
+// preserve prior contents (unlike the states/DXCC helpers) -- every entry to the grids
+// screen rebuilds the bitset first (buildGrids on open, live refresh in drawGrid), so
+// there's nothing to protect and we avoid a fragile temp allocation on the no-PSRAM heap.
+// Leaves gridN consistent with the bitset it just filled.
+int App::countWorkableGrids(SatEntry& s, time_t a, time_t b) {
+  if (!ensureGridBits()) return 0;
+  memset(gridBits, 0, GRID_BITS_LEN);
+  pred.setSat(s);
+  int samples = (b > a) ? 1 + (int)((b - a) / 60) : 1;
+  if (samples > 90) samples = 90; if (samples < 1) samples = 1;
+  for (int k = 0; k < samples; ++k) {
+    time_t t = (samples > 1) ? a + (time_t)((double)(b - a) * k / (samples - 1)) : a;
+    LiveLook L = pred.look(t);
+    addFootprintGrids(L.subLat, L.subLon, L.satAltKm);
+  }
+  int cnt = 0;
+  for (size_t i = 0; i < GRID_BITS_LEN; ++i)
+    for (uint8_t v = gridBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
+  gridN = cnt;
+  // gridBits/gridN now hold THIS satellite's grids, not the live-view sat's. The ~4 KB
+  // bitset is too big to save/restore on the no-PSRAM heap (unlike the small state/DXCC
+  // scratch), so instead invalidate the live-grid cache: any subsequent SCR_GRID view
+  // rebuilds from scratch (drawGrid when gridLive, or buildGrids on a pass entry), so the
+  // stale union is never shown. gridLive is left as the caller set it.
+  gridBuiltMs = 0;
+  return cnt;
+}
+
 void App::drawGrid() {
   if (gridLive) {                                  // live: refresh every ~3 s (grids
     uint32_t ms = millis();                        // change slowly; SGP4 + dedup are
@@ -32954,6 +34352,30 @@ void App::buildStates(time_t a, time_t b) {
   for (size_t i = 0; i < sizeof(stateBits); ++i)
     for (uint8_t v = stateBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
   stateN = cnt;
+}
+
+// Count workable US states for an EXPLICIT satellite over [a,b], independent of the live
+// tracking state. Used by the rove planner. The footprint (sub-satellite track) is a
+// property of the satellite alone, so no observer site is needed for the count. Reuses
+// the shared stateBits scratch + addFootprintStates(); leaves stateN untouched by
+// restoring it, so the live Workable-states screen is unaffected.
+int App::countWorkableStates(SatEntry& s, time_t a, time_t b) {
+  int savedStateN = stateN;
+  uint8_t savedBits[sizeof(stateBits)]; memcpy(savedBits, stateBits, sizeof(stateBits));
+  memset(stateBits, 0, sizeof(stateBits));
+  pred.setSat(s);
+  int samples = (b > a) ? 1 + (int)((b - a) / 60) : 1;
+  if (samples > 90) samples = 90; if (samples < 1) samples = 1;
+  for (int k = 0; k < samples; ++k) {
+    time_t t = (samples > 1) ? a + (time_t)((double)(b - a) * k / (samples - 1)) : a;
+    LiveLook L = pred.look(t);
+    addFootprintStates(L.subLat, L.subLon, L.satAltKm);
+  }
+  int cnt = 0;
+  for (size_t i = 0; i < sizeof(stateBits); ++i)
+    for (uint8_t v = stateBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
+  memcpy(stateBits, savedBits, sizeof(stateBits)); stateN = savedStateN;   // restore
+  return cnt;
 }
 
 void App::drawStates() {
@@ -33227,6 +34649,293 @@ static void dxccCode(int idx, char* out) {
   out[k] = 0;
 }
 
+// Write the current rove-planner survey to a formatted text file on the active filesystem.
+// Header + one block per pass: pass details, the workable US-state list, the workable DXCC
+// list, and the *count* of workable grids (per the design: grids are counted, not listed).
+// The state/DXCC lists are recomputed per pass at export time (footprint enumeration) --
+// cleaner than storing 28 x (stateBits+dxccBits) in RAM, and export is a one-shot action.
+// Returns the written path (empty on failure).
+String App::exportRovePlan() {
+  if (!Store::ready() || planN == 0) return String();
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists("/CardSat")) fsx.mkdir("/CardSat");
+  if (!fsx.exists("/CardSat/RovePlans")) fsx.mkdir("/CardSat/RovePlans");
+  // timestamped filename from the plan center
+  char path[56]; struct tm tmv; time_t c = planCenter ? planCenter : nowUtc(); gmtime_r(&c, &tmv);
+  snprintf(path, sizeof(path), "/CardSat/RovePlans/rove_%04d%02d%02d_%02d%02d.txt",
+           tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+  File f = fsx.open(path, "w");
+  if (!f) return String();
+
+  // ---- header ----
+  f.println("CardSat rove plan");
+  f.println("=================");
+  char line[96];
+  snprintf(line, sizeof(line), "Grid   : %s", planGrid); f.println(line);
+  snprintf(line, sizeof(line), "Center : %04d-%02d-%02d %02d:%02dZ  (+/- %d h window)",
+           tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min, planWindowH);
+  f.println(line);
+  snprintf(line, sizeof(line), "Passes : %d across %d favorites", planN, favN); f.println(line);
+  f.println("Times UTC. Workable counts are footprint-based (property of the satellite).");
+  f.println("");
+
+  // ---- per-pass blocks ----
+  for (int i = 0; i < planN; ++i) {
+    PlanRow& r = planRow[i];
+    int dbIdx = db.indexOfNorad(r.norad);
+    const char* nm = (dbIdx >= 0) ? db.at(dbIdx).name : "?";
+    struct tm ta, tl; time_t a = r.aos, l = r.los; gmtime_r(&a, &ta); gmtime_r(&l, &tl);
+    int mins = (int)((r.los - r.aos) / 60);
+    f.println("-----------------------------------------------");
+    snprintf(line, sizeof(line), "%s  (NORAD %lu)", nm, (unsigned long)r.norad); f.println(line);
+    snprintf(line, sizeof(line), "  AOS %02d:%02dZ  LOS %02d:%02dZ  max el %.0f deg  %d min",
+             ta.tm_hour, ta.tm_min, tl.tm_hour, tl.tm_min, r.maxEl, mins); f.println(line);
+    snprintf(line, sizeof(line), "  Workable: %d states, %d DXCC, %d grids",
+             r.states, r.dxcc, r.grids); f.println(line);
+
+    if (dbIdx >= 0) {
+      SatEntry& s = db.at(dbIdx);
+      // states: recompute footprint bits, then enumerate codes
+      satSel = dbIdx; buildStates(r.aos, r.los);
+      f.print("  States: ");
+      { bool any=false; int col=0;
+        for (int idx = 0; idx < STATE_N; ++idx)
+          if (stateBits[idx>>3] & (1 << (idx&7))) {
+            char g[3]={STATE_CODE[idx*2],STATE_CODE[idx*2+1],0};
+            f.print(any?" ":""); f.print(g); any=true;
+            if (++col % 16 == 0) { f.println(""); f.print("          "); }
+          }
+        if (!any) f.print("(none)");
+      }
+      f.println("");
+      // DXCC: recompute, enumerate prefixes
+      buildDxcc(r.aos, r.los);
+      f.print("  DXCC  : ");
+      { bool any=false; int col=0;
+        for (int idx = 0; idx < DXCC_N; ++idx)
+          if (dxccBits[idx>>3] & (1 << (idx&7))) {
+            char code[8]; dxccCode(idx, code);
+            f.print(any?" ":""); f.print(code); any=true;
+            if (++col % 12 == 0) { f.println(""); f.print("          "); }
+          }
+        if (!any) f.print("(none)");
+      }
+      f.println("");
+      // grids: count only (per design -- not listed)
+      f.println("  Grids : (count only -- see workable count above)");
+    }
+    f.println("");
+  }
+  f.close();
+  return String(path);
+}
+
+// ===========================================================================
+//  Saved rove-plan browser (SCR_ROVELIST) + read-only viewer (SCR_ROVEVIEW)
+//  Lists the .txt reports exportRovePlan() writes under /CardSat/RovePlans and shows one
+//  in a scrolling, read-only viewer. Reuses the note text-wrapper for the viewer body.
+// ===========================================================================
+
+// Enumerate /CardSat/RovePlans/*.txt into roveList[], newest-first (by mtime; ties fall
+// back to name descending so the rove_YYYYMMDD_HHMM stamps still read newest-first).
+void App::buildRoveList() {
+  roveListN = 0;
+  if (!Store::ready()) return;
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists("/CardSat/RovePlans")) return;         // nothing saved yet
+  File dir = fsx.open("/CardSat/RovePlans");
+  if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return; }
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    if (f.isDirectory()) { f.close(); continue; }
+    const char* nm = f.name();
+    const char* slash = strrchr(nm, '/');
+    const char* bn = slash ? slash + 1 : nm;             // basename (some cores give a path)
+    size_t L = strlen(bn);
+    bool isTxt = L > 4 && strcasecmp(bn + L - 4, ".txt") == 0;
+    if (isTxt && roveListN < ROVE_LIST_MAX && L <= (size_t)(ROVE_NAME_MAX - 1)) {
+      memcpy(roveList[roveListN], bn, L); roveList[roveListN][L] = 0;
+      roveTime[roveListN] = f.getLastWrite();
+      roveSize[roveListN] = (uint32_t)f.size();
+      roveListN++;
+    }
+    f.close();
+  }
+  dir.close();
+  // Newest-first: mtime descending, then name descending (the timestamp filenames sort the
+  // same way, so no-mtime filesystems still order correctly). Small n -> insertion sort.
+  for (int i = 1; i < roveListN; ++i) {
+    char kn[ROVE_NAME_MAX]; strncpy(kn, roveList[i], ROVE_NAME_MAX);
+    time_t kt = roveTime[i]; uint32_t ks = roveSize[i];
+    int j = i - 1;
+    auto older = [&](int a){                             // true if row a sorts AFTER the key
+      if (roveTime[a] != kt) return roveTime[a] < kt;
+      return strcmp(roveList[a], kn) < 0;
+    };
+    while (j >= 0 && older(j)) {
+      strncpy(roveList[j+1], roveList[j], ROVE_NAME_MAX);
+      roveTime[j+1] = roveTime[j]; roveSize[j+1] = roveSize[j];
+      --j;
+    }
+    strncpy(roveList[j+1], kn, ROVE_NAME_MAX); roveTime[j+1] = kt; roveSize[j+1] = ks;
+  }
+  if (roveSel >= roveListN) roveSel = roveListN > 0 ? roveListN - 1 : 0;
+  if (roveScroll > roveSel) roveScroll = roveSel;
+}
+
+// Load roveList[idx] into roveViewBuf, capped at ROVEVIEW_MAX bytes so a large plan can't
+// exhaust the heap. Sets roveViewTrunc when the file is longer than the cap.
+void App::roveViewLoad(int idx) {
+  roveViewBuf = (const char*)nullptr;                     // release any prior buffer first
+  roveViewBuf = ""; roveViewTrunc = false; roveViewTop = 0;
+  if (idx < 0 || idx >= roveListN || !Store::ready()) return;
+  roveViewName = roveList[idx];
+  char path[64];
+  snprintf(path, sizeof(path), "/CardSat/RovePlans/%s", roveList[idx]);
+  File f = Store::fs().open(path, "r");
+  if (!f) { roveViewBuf = "(could not open file)"; return; }
+  // Reserve only what this file actually needs (capped), not the full cap every time -- most
+  // plans are well under the cap, so the peak contiguous grab (and the block dip) stays small.
+  int fsz = (int)f.size();
+  int need = (fsz < ROVEVIEW_MAX ? fsz : ROVEVIEW_MAX) + 1;
+  roveViewBuf.reserve(need);
+  int budget = ROVEVIEW_MAX;
+  while (f.available() && budget > 0) {
+    char chunk[128];
+    int want = budget < (int)sizeof(chunk) ? budget : (int)sizeof(chunk);
+    int got = f.readBytes(chunk, want);
+    if (got <= 0) break;
+    for (int i = 0; i < got; ++i) roveViewBuf += chunk[i];
+    budget -= got;
+  }
+  if (f.available()) roveViewTrunc = true;               // more remained past the cap
+  f.close();
+}
+
+void App::drawRoveList() {
+  header("Saved rove plans");
+  canvas.setTextSize(1);
+
+  if (roveConfirmDel && roveSel >= 0 && roveSel < roveListN) {
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.printf("Delete this plan?");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, 64); canvas.printf("%.30s", roveList[roveSel]);
+    footer("ENT delete   ` cancel");
+    return;
+  }
+  if (!Store::ready()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("No filesystem mounted.");
+    footer("` back"); return;
+  }
+  if (roveListN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("No saved rove plans.");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 58); canvas.print("Save one with 'w' on the planner.");
+    footer("r refresh  ` back");
+    return;
+  }
+
+  const int ROWS = 9;
+  if (roveSel < roveScroll)             roveScroll = roveSel;
+  if (roveSel > roveScroll + ROWS - 1)  roveScroll = roveSel - ROWS + 1;
+  if (roveScroll < 0) roveScroll = 0;
+  for (int r = 0; r < ROWS && (roveScroll + r) < roveListN; ++r) {
+    int idx = roveScroll + r, y = 20 + r * 11;
+    if (idx == roveSel) { canvas.fillRect(0, y - 2, 240, 11, CL_SELBG);
+                          canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else                  canvas.setTextColor(CL_WHITE, CL_BLACK);
+    // Name (strip the "rove_" prefix and ".txt" for a compact date-stamp read) + size.
+    const char* nm = roveList[idx];
+    char shown[24];
+    if (strncmp(nm, "rove_", 5) == 0) {
+      // rove_YYYYMMDD_HHMM.txt -> YYYY-MM-DD HH:MM
+      int Y,Mo,D,H,Mi;
+      if (sscanf(nm + 5, "%4d%2d%2d_%2d%2d", &Y,&Mo,&D,&H,&Mi) == 5)
+        snprintf(shown, sizeof(shown), "%04d-%02d-%02d %02d:%02d", Y,Mo,D,H,Mi);
+      else snprintf(shown, sizeof(shown), "%.22s", nm);
+    } else snprintf(shown, sizeof(shown), "%.22s", nm);
+    canvas.setCursor(4, y); canvas.print(shown);
+    if (idx != roveSel) canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(196, y);
+    if (roveSize[idx] < 1024) canvas.printf("%luB", (unsigned long)roveSize[idx]);
+    else                      canvas.printf("%luK", (unsigned long)(roveSize[idx] / 1024));
+  }
+  if (roveScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 20);  canvas.print("^"); }
+  if (roveScroll + ROWS < roveListN)  { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 108); canvas.print("v"); }
+  footer("ENT view  d del  r refr  ` back");
+}
+
+void App::keyRoveList(char c, bool enter, bool back) {
+  if (roveConfirmDel) {
+    if (enter) {
+      if (roveSel >= 0 && roveSel < roveListN && Store::ready()) {
+        char path[64]; snprintf(path, sizeof(path), "/CardSat/RovePlans/%s", roveList[roveSel]);
+        if (Store::fs().remove(path)) setStatus("Plan deleted");
+        else                          setStatus("Delete failed");
+        buildRoveList();
+      }
+      roveConfirmDel = false;
+    } else if (back || c == '`') { roveConfirmDel = false; }
+    lastDrawMs = 0; return;
+  }
+  if (isBack(c, back)) { roveViewBuf = (const char*)nullptr; screen = SCR_PLANNER; lastDrawMs = 0; return; }
+  if (c == 'r') { buildRoveList(); setStatus("Rescanned"); lastDrawMs = 0; return; }
+  if (roveListN == 0) return;
+  if (isUp(c))   { if (--roveSel < 0) roveSel = roveListN - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++roveSel >= roveListN) roveSel = 0; lastDrawMs = 0; return; }
+  if (c == 'd')  { roveConfirmDel = true; lastDrawMs = 0; return; }
+  if (enter)     { roveViewLoad(roveSel); screen = SCR_ROVEVIEW; lastDrawMs = 0; return; }
+}
+
+void App::drawRoveView() {
+  header(String("Plan: ") + (roveViewName.length() ? roveViewName : String("(plan)")));
+  canvas.setTextSize(1);
+  // Reuse the note wrapper to lay the bounded body out into display rows.
+  NoteVRow rows[256];
+  int nrows = noteWrap(roveViewBuf, rows, 256);
+  if (roveViewTop < 0) roveViewTop = 0;
+  if (nrows > 0 && roveViewTop > nrows - 1) roveViewTop = nrows - 1;
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  for (int v = 0; v < NOTE_ROWS && (roveViewTop + v) < nrows; ++v) {
+    int r = roveViewTop + v, y = 18 + v * 9;
+    int len = rows[r].end - rows[r].start;
+    for (int i = 0; i < len; ++i) {
+      canvas.setCursor(4 + i * 6, y); canvas.print(roveViewBuf[rows[r].start + i]);
+    }
+  }
+  // Scroll + truncation indicators.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  if (roveViewTop > 0)                 { canvas.setCursor(232, 18);  canvas.print("^"); }
+  if (roveViewTop + NOTE_ROWS < nrows) { canvas.setCursor(232, 110); canvas.print("v"); }
+  if (roveViewTrunc) {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(4, 118); canvas.print("(truncated -- download for full file)");
+    footer("");
+  } else {
+    footer(";/. scroll  { } page  ` back");
+  }
+}
+
+void App::keyRoveView(char c, bool enter, bool back) {
+  if (isBack(c, back)) {
+    // Actually RELEASE the ~3 KB view buffer on exit. Assigning an (l/r)value String only ever
+    // grows Arduino String capacity -- it never shrinks -- so the old idiom left the block held.
+    // Assigning a null const char* invokes operator=(const char*)'s invalidate() path, which
+    // frees the heap buffer. This is portable across Arduino String implementations.
+    roveViewBuf = (const char*)nullptr;
+    screen = SCR_ROVELIST; lastDrawMs = 0; return;
+  }
+  NoteVRow rows[256];
+  int nrows = noteWrap(roveViewBuf, rows, 256);
+  if (isUp(c))   { if (roveViewTop > 0) roveViewTop--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (roveViewTop < nrows - 1) roveViewTop++; lastDrawMs = 0; return; }
+  if (c == '{')  { roveViewTop -= NOTE_ROWS; if (roveViewTop < 0) roveViewTop = 0; lastDrawMs = 0; return; }
+  if (c == '}')  { roveViewTop += NOTE_ROWS; if (roveViewTop > nrows - 1) roveViewTop = nrows - 1;
+                   if (roveViewTop < 0) roveViewTop = 0; lastDrawMs = 0; return; }
+}
+
 // Great-circle distance (km) between two lat/lon points.
 static double dxccGcKm(double la1, double lo1, double la2, double lo2) {
   const double d2r = 0.017453292519943295, R = 6371.0;
@@ -33393,6 +35102,28 @@ void App::buildDxcc(time_t a, time_t b) {
   for (size_t i = 0; i < sizeof(dxccBits); ++i)
     for (uint8_t v = dxccBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
   dxccN = cnt;
+}
+
+// Count workable DXCC entities for an EXPLICIT satellite over [a,b], for the rove planner.
+// Footprint-based (site-independent). Reuses dxccBits scratch; restores dxccN/bits so the
+// live Workable-DXCC screen is unaffected.
+int App::countWorkableDxcc(SatEntry& s, time_t a, time_t b) {
+  int savedDxccN = dxccN;
+  uint8_t savedBits[sizeof(dxccBits)]; memcpy(savedBits, dxccBits, sizeof(dxccBits));
+  memset(dxccBits, 0, sizeof(dxccBits));
+  pred.setSat(s);
+  int samples = (b > a) ? 1 + (int)((b - a) / 60) : 1;
+  if (samples > 90) samples = 90; if (samples < 1) samples = 1;
+  for (int k = 0; k < samples; ++k) {
+    time_t t = (samples > 1) ? a + (time_t)((double)(b - a) * k / (samples - 1)) : a;
+    LiveLook L = pred.look(t);
+    addFootprintDxcc(L.subLat, L.subLon, L.satAltKm);
+  }
+  int cnt = 0;
+  for (size_t i = 0; i < sizeof(dxccBits); ++i)
+    for (uint8_t v = dxccBits[i]; v; v &= (uint8_t)(v - 1)) ++cnt;
+  memcpy(dxccBits, savedBits, sizeof(dxccBits)); dxccN = savedDxccN;   // restore
+  return cnt;
 }
 
 void App::drawDxcc() {
@@ -34045,7 +35776,7 @@ void App::drawSchedule() {
       canvas.setCursor(232, y); canvas.print("!");
     }
   }
-  footer("ENT trk m map t timeline `bk");
+  footer("ENT trk m map t timeln p plan `bk");
 }
 
 void App::drawSatList() {
@@ -34119,7 +35850,10 @@ void App::drawPasses() {
   canvas.setCursor(4, 18); canvas.print("AOS (UTC)    Dur El  LOS");
   if (s) {                                   // element-set age (staleness)
     double age = gpAgeDays(*s);
-    if (age >= 0) {
+    if (gpEpochFuture(*s)) {                  // pre-launch fit: epoch is ahead of now
+      canvas.setTextColor(CL_CYAN, CL_BLACK);
+      canvas.setCursor(186, 18); canvas.print("pre-lnch");
+    } else if (age >= 0) {
       canvas.setTextColor(ageColor(age), CL_BLACK);
       canvas.setCursor(186, 18); canvas.printf("GP%4.1fd", age);
     }
@@ -34235,7 +35969,9 @@ void App::drawTrack() {
   canvas.setCursor(4, 20);
   canvas.printf("Az %5.1f  El %5.1f%s", L.az, L.el, L.visible ? " *" : "");
   { double age = gpAgeDays(*s);              // element-set age (staleness)
-    if (age >= 0) { canvas.setTextColor(ageColor(age), CL_BLACK);
+    if (gpEpochFuture(*s)) { canvas.setTextColor(CL_CYAN, CL_BLACK);
+                    canvas.setCursor(186, 20); canvas.print("pre-lnch"); }
+    else if (age >= 0) { canvas.setTextColor(ageColor(age), CL_BLACK);
                     canvas.setCursor(186, 20); canvas.printf("GP%4.1fd", age); } }
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(4, 31);
@@ -34479,7 +36215,9 @@ void App::drawManual() {
   canvas.setCursor(4, 20);
   canvas.printf("Az %5.1f  El %5.1f%s", L.az, L.el, L.visible ? " *" : "");
   { double age = gpAgeDays(*s);
-    if (age >= 0) { canvas.setTextColor(ageColor(age), CL_BLACK);
+    if (gpEpochFuture(*s)) { canvas.setTextColor(CL_CYAN, CL_BLACK);
+                    canvas.setCursor(186, 20); canvas.print("pre-lnch"); }
+    else if (age >= 0) { canvas.setTextColor(ageColor(age), CL_BLACK);
                     canvas.setCursor(186, 20); canvas.printf("GP%4.1fd", age); } }
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(4, 31);

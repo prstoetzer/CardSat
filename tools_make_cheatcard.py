@@ -45,7 +45,7 @@ FRONT = [
   "World Map, Sun/Moon, Space Wx, Weather, Activations, Overhead now, Grid dist/bearing, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; <b>x</b> del manual sat &middot; "
-  "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>y</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>ENTER</b> passes &middot; "
+  "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>y</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>L</b> share GP over LoRa &middot; <b>ENTER</b> passes &middot; "
   "right edge: dot = AMSAT heard, square = telemetry, ring = not heard"),
  ("SAT-TO-SAT (Sats &rarr; 2)",
   "Windows when selected sat + a 2nd fav are BOTH above your horizon (start, dur, peak el each). <b>n</b> next sat &middot; <b>r</b> recompute &middot; <b>`</b> back"),
@@ -64,7 +64,9 @@ FRONT = [
   "RX/TX dial freqs for BOTH stations every 30s across a mutual window. Two lines/step: me (green) + DX (cyan). From the Mutual list, <b>ENTER</b> opens a polar detail (me+DX arcs, AOS/LOS/el) then <b>d</b> the table (or <b>d</b> straight from the list). "
   "<b>t</b> cycle transponder &middot; <b>m</b> mode: true rule / fixed DL / fixed UL &middot; <b>a</b> anchor dial (me/DX RX/TX) &middot; <b>,</b>/<b>/</b> in fixed mode step anchored dial to round 1 kHz (else passband 1 kHz) &middot; header shows pb +/- from center &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("NEXT PASSES (favs)",
-  "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>t</b> sky-at-a-glance timeline (bars by elev) &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
+  "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>t</b> sky-at-a-glance timeline (bars by elev) &middot; <b>p</b> rove planner &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
+ ("ROVE PLANNER (Next Passes &rarr; p)",
+  "Survey all favorites from a planned grid+time. Form: grid / date / time / +/- hrs / GO. Rows by AOS: sat / AOS / maxEl / states / DXCC. <b>ENTER</b> detail (arc + <b>s</b>/<b>d</b>/<b>g</b> state/DXCC/grid lists) &middot; <b>w</b> save txt &middot; <b>l</b> saved plans (<b>ENTER</b> view, <b>;</b>/<b>.</b> scroll, <b>d</b> del) &middot; <b>g</b> form"),
  ("PASSES (sel)",
   "<b>*</b> = optically visible. <b>;</b>/<b>.</b> select &middot; <b>d</b> detail &middot; <b>t</b>/<b>ENTER</b> track &middot; "
   "<b>n</b> add TX &middot; <b>r</b> recompute &middot; <b>x</b> mutual-DX &middot; "
@@ -170,7 +172,7 @@ BACK = [
   "Free-form text notes (.txt in /CardSat/notes/, newest-first w/ date/time). Browser: <b>ENTER</b> open &middot; <b>n</b> new &middot; <b>d</b>+ENTER del. "
   "Editor (commands use <b>Fn</b> so <b>;</b><b>.</b><b>,</b><b>/</b> type): type freely, ENTER=newline, DEL=backspace &middot; <b>Fn+,</b>/<b>Fn+/</b> cursor L/R &middot; <b>Fn+;</b>/<b>Fn+.</b> up/down &middot; <b>Fn+s</b> save &middot; <b>`</b> exit (auto-saves)"),
  ("LORA MESSAGES (Home &rarr; Messages)",
-  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll+select (newest on bottom) &middot; <b>o</b> station roster &middot; <b>r</b> retry &middot; <b>m</b> LoRa RX/hex monitor &middot; <b>`</b> back. <b>Actionable msgs</b> (plain text, interop): a msg with <b>@lat,lon</b> / <b>#SAT</b> / <b>!SAT date time</b> &rarr; <b>ENTER</b> opens bearing compass (dist/brg/grid) / sat detail / pre-filled sked; <b>#SAT</b> carries NORAD (<b>#name/norad</b>) so it resolves across differing names. Send for the current sat &amp; your location: <b>p</b> position (also a presence ping) &middot; <b>s</b> satellite &middot; <b>k</b> sked (date&rarr;time). <b>Roster</b> (<b>o</b>): who is heard, with grid + dist/brg + signal; ENTER=compass, <b>p</b>=ping. Opt-in <b>Auto position reply</b> setting answers others&rsquo; positions (loop-guarded). <b>Rx always on</b>: badge on any screen + banner (opt-in beep) &mdash; <b>Msg notify</b> in Settings. Needs RadioLib build."),
+  "CardSat-to-CardSat broadcast chat (Cap LoRa). Same freq/SF/BW = same group. Set <b>region</b> (US 33cm / EU 70cm / JP 430) in Settings for a legal default freq. <b>n</b> write/send &middot; <b>;</b>/<b>.</b> scroll+select (newest on bottom) &middot; <b>o</b> station roster &middot; <b>r</b> retry &middot; <b>m</b> LoRa RX/hex monitor &middot; <b>`</b> back. <b>Actionable msgs</b> (plain text, interop): a msg with <b>@lat,lon</b> / <b>#SAT</b> / <b>!SAT date time</b> &rarr; <b>ENTER</b> opens bearing compass (dist/brg/grid) / sat detail / pre-filled sked; <b>#SAT</b> carries NORAD (<b>#name/norad</b>) so it resolves across differing names. Send for the current sat &amp; your location: <b>p</b> position (also a presence ping) &middot; <b>s</b> satellite &middot; <b>k</b> sked (date&rarr;time). <b>Roster</b> (<b>o</b>): who is heard, with grid + dist/brg + signal; ENTER=compass, <b>p</b>=ping. Opt-in <b>Auto position reply</b> setting answers others&rsquo; positions (loop-guarded). <b>Rx always on</b>: badge + banner (opt-in beep, <b>Msg notify</b> in Settings). <b>Share GP elements</b>: a peer&rsquo;s <b>Sats &rarr; L</b> pops an <b>Import satellite?</b> prompt (sender/name/NORAD) &mdash; <b>y</b> add/update, <b>n</b> decline; checksum-verified, experimental. Needs RadioLib build."),
  ("LORA RX / HEX MONITOR (Messages &rarr; m)",
   "Receive/inspect <b>any</b> LoRa signal (not just sats). Config: set freq (type in <b>MHz</b>), SF, BW, CR, sync, preamble, CRC &mdash; saved across reboots. <b>ENTER</b> starts RX. Monitor: live hexdump+ASCII, RSSI/SNR, <b>p</b> pause (read a frame on a busy channel) &middot; <b>;</b>/<b>.</b> scroll &middot; <b>s</b>/<b>b</b>/<b>c</b>/<b>f</b> tune SF/BW/CR/step &middot; <b>,</b>/<b>/</b> freq &middot; <b>`</b> esc. Rx-only. Untested HW"),
  ("UPDATE",
@@ -187,11 +189,11 @@ BACK = [
  ("NETWORK SERVERS",
   "<b>rigctld</b> PC drives rig (VFOA=DL/B=UL) &middot; <b>rotctld</b> PC drives GS-232 &middot; "
   "<b>rigctl</b> drives remote rig &middot; <b>Web</b> opt-in mobile page (no auth, trusted LAN): live sky plot, "
-  "Doppler readout, tap-to-copy freqs, visible-pass list + AOS alerts, radio/rotator control"),
+  "Doppler readout, tap-to-copy freqs, visible-pass list + AOS alerts, radio/rotator control, <b>Files</b> = download-only /CardSat browser (no upload)"),
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (26): calculators, DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, Q-codes/phonetics/RST, CTCSS &middot; <b>l</b> License &amp; credits (disclaimers, data sources, support AMSAT) &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch) &mdash; Zap the Sats, Doppler Lock, Catch the Pass, Rotor Runner (tilt/keys), Morse Meteors (<b>t</b> dot <b>u</b> dash), Grid Chase."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (31): calculators, DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b> (fit mean elements from a launch state vector, TEME/J2000, save as sat), Q-codes/phonetics/RST, CTCSS &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
 ]
 
 
@@ -221,10 +223,10 @@ def header(canvas, doc):
 def _styles(body_fs):
     tf = body_fs + 0.7
     t = ParagraphStyle('t', fontName='Helvetica-Bold', fontSize=tf,
-                       leading=tf + 0.8, textColor=ACCENT_DK,
-                       spaceBefore=2.4, spaceAfter=0.6)
+                       leading=tf + 0.6, textColor=ACCENT_DK,
+                       spaceBefore=2.0, spaceAfter=0.5)
     b = ParagraphStyle('b', fontName='Helvetica', fontSize=body_fs,
-                       leading=body_fs + 1.1, spaceAfter=1.8, textColor=colors.black)
+                       leading=body_fs + 0.9, spaceAfter=1.5, textColor=colors.black)
     return t, b
 
 

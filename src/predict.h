@@ -40,6 +40,11 @@ public:
   // Point the propagator at a satellite (renders its GP elements for SGP4).
   bool setSat(SatEntry& s);
 
+  // Propagate an EXPLICIT satellite's GP elements to unix time `t` and return the
+  // raw TEME position (km) and velocity (km/s). This is the forward model used by the
+  // state-vector -> GP-element fitter. Returns false if the elements don't initialise.
+  bool temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]);
+
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
 

@@ -46,6 +46,38 @@ bool Predictor::setSat(SatEntry& s) {
   return _haveSat;
 }
 
+// Forward model for the state-vector -> GP fitter: initialise SGP4 from a candidate
+// SatEntry's GP elements and propagate to `unixSec`, returning the TEME state. Uses a
+// LOCAL Sgp4 object so it never disturbs the live tracking propagator (_sat).
+bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]) {
+  char l1[72], l2[72];
+  if (!SatDb::gpToTle(s, l1, l2)) return false;
+  // Sgp4::init() short-circuits (returns without re-parsing) when line 1 is byte-identical to
+  // the previous call: `if (strcmp(longstr1, line1) == 0) return false;`. The fitter perturbs
+  // only LINE 2 elements (incl/ecc/raan/argp/ma/mm) with a fixed line 1, so every candidate
+  // shares the same line 1 -> init caches the FIRST candidate and every later evaluation returns
+  // its state unchanged -> a zero Jacobian and no convergence. Defeat the cache by varying a
+  // byte SGP4 ignores for propagation: the element-set-number field (cols 65-68 on line 1). We
+  // cycle it so consecutive calls never match, forcing a genuine twoline2rv() each time. The
+  // checksum (col 69) is recomputed so the line stays well-formed.
+  static uint16_t fitTick = 0;
+  { unsigned v4 = (unsigned)(fitTick++ % 9999) + 1;   // 1..9999, never the same twice in a row
+    char es[6]; snprintf(es, sizeof(es), "%4u", v4);
+    for (int i = 0; i < 4; ++i) l1[64 + i] = es[i];
+    int sum = 0;                                       // recompute the line-1 checksum (col 69)
+    for (int i = 0; i < 68; ++i) { char c = l1[i];
+      if (c >= '0' && c <= '9') sum += c - '0'; else if (c == '-') sum += 1; }
+    l1[68] = '0' + (sum % 10); }
+  Sgp4 fp;
+  if (!fp.init((char*)"FIT", l1, l2)) return false;     // now always re-parses (line 1 differs)
+  if (fp.satrec.error != 0) return false;
+  double tsince = (unixSec - s.epochUnix) / 60.0;       // minutes since element epoch
+  r[0] = r[1] = r[2] = v[0] = v[1] = v[2] = 0.0;
+  sgp4(wgs72, fp.satrec, tsince, r, v);                 // TEME position (km), velocity (km/s)
+  if (fp.satrec.error != 0) return false;
+  return true;
+}
+
 // Range rate from the SGP4 velocity vector at a fractional instant -- the
 // method Gpredict uses (sgp4sdp4 converts ECI position+velocity straight to
 // observer-centred range rate). Far cleaner near TCA than differencing slant

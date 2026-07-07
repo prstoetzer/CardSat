@@ -1710,6 +1710,20 @@ any CardSat both announces you and populates everyone else's roster; the grid is
 locally from the shared lat/lon, so the on-air format is unchanged. (The roster is held in
 memory and clears on reboot.)
 
+**Sharing satellite elements over LoRa (`L` key).** From the **Satellites** screen, press
+**`L`** to broadcast the selected satellite's **GP orbital elements** to any nearby CardSat
+over LoRa — handy in the field for pushing a freshly-fitted set (e.g. a pre-launch state
+vector from the *State vector → GP* tool, which also offers `L` on its result screen) to a
+rove group without WiFi. The element set is split into a few small chunks with a checksum
+and sent one frame at a time; the on-air status shows the progress. On the receiving unit,
+CardSat reassembles the object, verifies the checksum, and shows an **"Import satellite?"**
+prompt with the sender, name, NORAD, and key elements — press **`y`** to add or update it in
+your GP data, or **`n`** to decline. Nothing is imported without your confirmation, and a
+corrupted transfer is rejected rather than accepted (ask the sender to resend). This rides
+on the **untested** LoRa path — treat it as experimental, and confirm any imported orbit
+against a known pass before relying on it. Requires LoRa enabled on both units on the same
+frequency/spreading-factor.
+
 **Automatic position reply.** With **Auto position reply** on (Settings → Network/data,
 **off by default**), CardSat answers a received position report with its own `@lat,lon`
 automatically — handy for a net where everyone wants to see who's where without each
@@ -3247,6 +3261,15 @@ The page is **responsive** — a single column on a phone, and a two-column layo
 a tablet or computer. It coexists with the rigctld/rotctld servers and the normal
 on-device UI; the device keeps tracking and you can use its keypad at the same time.
 
+**Files (download).** A **Files** link in the page header opens a simple file browser at
+`/files` for pulling files off the device without removing the SD card or rebooting into a
+Launcher. It lists the `/CardSat` tree — rove plans, screenshots, logs, notes, and the like
+— with sizes and modified times; click a folder to descend, click a file to download it.
+Access is confined to `/CardSat` (a path guard rejects anything outside that tree), and this
+is **download-only** — there is no upload path, so the page cannot write to or modify the
+device's filesystem. Like the rest of web control it's unauthenticated on the LAN, so the
+same trust caveat applies.
+
 > **Developers:** the page is backed by a small **HTTP + JSON API** (`/api/status`,
 > `/api/sats`, `/api/passes`, `/api/orbit`, `/api/tx`, and a few `POST` controls) that
 > a third-party client can call directly. It's fully documented — every endpoint,
@@ -3539,7 +3562,42 @@ listed below.
   with satellite, AOS time/countdown, max elevation and duration. Stale-element
   sats carry a red `!`.
 - **Keys** — `;`/`.` select; **ENTER** opens **Pass detail**; `m` opens the live
-  **World map**; `z` arms **deep sleep** until the next AOS; `` ` `` back.
+  **World map**; `t` the **sky-at-a-glance** timeline; `p` the **Rove planner**
+  (below); `z` arms **deep sleep** until the next AOS; `` ` `` back.
+
+### Rove planner
+
+- **Purpose** — a *from-a-hypothetical-place-and-time* pass survey. Enter a grid
+  square, date, time, and a **± window** (all passes within X hours of that time);
+  for **every favorite** it lists each pass with **AOS, LOS, max elevation**, and the
+  number of **workable US states and DXCC entities** during that pass — so a rover can
+  pick a spot and time and see, at a glance, which passes put the most grid/entity reach
+  under the footprint.
+- **Reached from** — Next Passes (favs) → `p`.
+- **Shows** — a small input form (grid / date / time / ± hours / **GO**), then a list of
+  passes across all favorites sorted by AOS, each row `name  AOS  maxEl  St Dx`
+  (workable-state and DXCC counts). The survey runs in the background with a progress
+  line so the unit stays responsive.
+- **Pass detail (ENTER on a row)** — the **polar plot** for that pass from the entered
+  site, with AOS/LOS/max-el/length and the workable-state, DXCC and grid counts; `s`, `d`
+  and `g` open the full workable **US-state**, **DXCC** and **grid** lists for that pass.
+- **Save to text file** — `w` on the results screen writes the whole survey to a formatted
+  `.txt` under `/CardSat/RovePlans/` on the active filesystem: a header (grid, centre time,
+  window, pass count) followed by one block per pass with the pass details, the list of
+  workable **states** and **DXCC** entities, and the **count** of workable grids (the grid
+  list itself is not written — only the number).
+- **Keys** — in the form: `;`/`.` move between fields, **ENTER** edits a field or starts
+  the survey on **GO**, `+`/`-` bump the window; in the results: `;`/`.` select a pass,
+  **ENTER** opens detail, `w` saves the text file, `g` returns to the form; `` ` `` back.
+- **Note** — the workable-entity counts are a property of the satellite's footprint over
+  the pass, so they don't depend on the entered site; the entered grid sets the AOS/LOS
+  and max-elevation geometry. All quantities are UTC.
+- **Saved plans (on-device viewer)** — press `l` on the planner to open a browser of the
+  `.txt` plans you've saved with `w`. It lists them newest-first with each plan's date-stamp
+  and size; `ENTER` opens a **read-only, scrolling viewer** (`;`/`.` scroll, `{`/`}` page),
+  `d` deletes (with a confirm), `r` rescans, `` ` `` back. The viewer holds a bounded slice
+  of the file in RAM, so a very large plan shows a *"(truncated — download for full file)"*
+  note; use the web **Files** page ([§18](#18-mobile-web-control)) to pull the whole file.
 
 ### Passes
 
@@ -4294,6 +4352,79 @@ listed below.
 - **Reached from** — About → `r`.
 - **Keys** — `` ` `` back to About.
 
+### Understanding state vectors
+
+Most of CardSat works from **GP mean elements** (the modern successor to the two-line element
+set, or TLE): a compact set of six orbital numbers — mean motion, eccentricity, inclination,
+right ascension of the ascending node, argument of perigee, and mean anomaly — plus a drag
+term, all referenced to an epoch. Those elements are what SGP4 propagates to predict where a
+satellite will be. But mean elements are not the only way to describe an orbit, and for a
+brand-new object you often won't have them yet. That's where a **state vector** comes in.
+
+**A state vector is the most direct possible description of an orbit: where the object is and
+how fast it's moving, right now.** It is just two 3-D vectors at a single instant (the epoch):
+
+- **Position** `(rx, ry, rz)` — the satellite's location, in kilometres, measured from the
+  centre of the Earth along three perpendicular axes.
+- **Velocity** `(vx, vy, vz)` — how fast it's moving along each of those axes, in kilometres
+  per second.
+
+Six numbers and a timestamp. Unlike mean elements, a state vector needs no orbital theory to
+interpret — it is the raw kinematic truth at that moment. Given a state vector and the laws of
+gravity, you can (in principle) compute the entire orbit forward and backward in time. In fact
+the two descriptions are interchangeable: a state vector and a set of orbital elements at the
+same epoch describe the *same* orbit, just in different coordinates — one Cartesian (x/y/z), the
+other in terms of the ellipse's shape and orientation.
+
+**Why the numbers look the way they do.** For a satellite in low Earth orbit, the position
+components are each a few thousand kilometres (the orbital radius is roughly 6,700–7,400 km, so
+the three components sum in quadrature to that), and the velocity components are each a few
+kilometres per second (orbital speed at that altitude is about 7.5 km/s). A component can be
+positive or negative depending on which side of each axis the satellite is on and which way it's
+heading. There's nothing to "read" from an individual number the way you'd read an inclination;
+the meaning is in the vectors as a whole.
+
+**Frames — the part that trips people up.** A state vector is only meaningful together with the
+**reference frame** its x/y/z axes are defined in. The same physical orbit produces *different*
+numbers in different frames, because the axes point in different directions. Two frames matter
+here:
+
+- **TEME** (True Equator, Mean Equinox) — the somewhat idiosyncratic inertial-ish frame that
+  SGP4 itself uses internally. If your source already gives TEME, CardSat uses it directly.
+- **J2000** (also called GCRF or, for our purposes, ICRF) — the standard modern inertial frame,
+  fixed to the stars at the J2000.0 epoch. Most launch providers and orbit-determination tools
+  publish in J2000/GCRF. CardSat rotates a J2000 state into TEME on-device (using IAU-76
+  precession and a truncated IAU-80 nutation model, accurate to about 1–2 metres) before fitting.
+
+Choosing the wrong frame is the single most common mistake: the fit will either fail to converge
+or produce elements that are subtly wrong, because the axes were misaligned by the small but real
+rotation between the two frames (tens of metres of position difference at LEO). If your source
+says "J2000", "GCRF", "ICRF", or "EME2000", pick **J2000**; if it says "TEME" or "true equator",
+pick **TEME**.
+
+**Where you get one.** Launch providers, deployment brokers, and rideshare integrators routinely
+distribute a state vector for a payload — often *before* launch, with an epoch days or weeks in
+the future — so operators can plan the first passes before the object has a NORAD catalogue
+number and public TLE. Orbit-determination software (from a radar or optical track) also outputs
+state vectors. Any of these can be typed into CardSat's **State vector → GP** tool.
+
+**Why CardSat fits rather than converts.** You might expect a state vector to convert *directly*
+into orbital elements — and mathematically it does, into what are called **osculating** elements
+(the instantaneous ellipse that exactly matches the position and velocity at that moment). The
+catch is that SGP4 does **not** expect osculating elements; it expects **mean** elements, which
+have the short-period gravitational wobbles deliberately averaged out. Feeding osculating
+elements straight into SGP4 produces errors of many kilometres, because SGP4 then re-adds
+perturbations that were already baked into the osculating values. So instead of a one-shot
+conversion, CardSat runs a small **differential-correction fit**: it starts from the osculating
+elements as a first guess, then repeatedly nudges the six mean elements and re-runs its own SGP4
+until the propagator reproduces your entered state vector to within the achievable precision
+(tens of metres, limited by the TLE number format). The result is a set of mean elements that
+behaves correctly in every other CardSat prediction. Because a single instant carries no
+information about atmospheric drag, the drag term `B*` is set to zero — which is fine for the
+first days but means the elements slowly drift; re-acquire real published elements once the
+object is catalogued. See **State vector → GP** under *Tools*, below, for the step-by-step
+operation.
+
 ### Tools
 
 ![Tools menu](docs/img/tools.jpg)
@@ -4446,6 +4577,27 @@ listed below.
   reactance, and the **LC resonant frequency**.
 - **RC/RL time constant** — enter R and C; shows **τ = RC**, the 1/3/5-τ charge
   percentages (63 / 95 / 99 %), and the corresponding cutoff frequency.
+- **State vector → GP** — compute **GP mean elements** from an orbital **state vector**
+  (position + velocity) as distributed by a launch provider, and optionally save the
+  result as a **manual satellite**. Rather than converting the state to osculating
+  elements (which SGP4 misinterprets, giving multi-km errors), it runs a
+  **differential-correction fit** that adjusts the mean elements until CardSat's own SGP4
+  reproduces the state. Enter an epoch (UTC) and `rx ry rz` (km) / `vx vy vz` (km/s), and
+  choose the input **frame**: **TEME** (used directly) or **J2000** (GCRF/ICRF — rotated
+  into TEME on-device via IAU-76 precession and a truncated IAU-80 nutation, accurate to
+  ~1–2 m). Output is the fitted mean motion, eccentricity, inclination, RAAN, argument of
+  perigee and mean anomaly, with derived apogee/perigee and the **fit residual**; `B*` is
+  set to 0 (a single state carries no drag information, so predictions degrade over days —
+  re-acquire real elements once the object is cataloged). `s` saves the elements as a
+  manual satellite.
+- **Pre-launch (future) epochs** — launch providers often distribute a state vector before
+  deployment, with an epoch days or weeks ahead of now. That is fully supported: the fit,
+  the saved manual satellite, and all pass/Doppler predictions work with a future epoch
+  (SGP4 propagates correctly on either side of the epoch). While the epoch is still ahead
+  of the clock the satellite's age reads **`pre-lnch`** (in cyan) instead of a "GP _n_ d"
+  age, and such a satellite never triggers the stale-element auto-refresh. Passes computed
+  before the epoch are the nominal pre-launch orbit; re-run predictions once the true
+  post-deployment elements are published.
 
 The Tools menu supports a **first-letter jump** (press a letter to hop to the next tool
 starting with it) and **remembers the last tool** you used. Form tools **remember their

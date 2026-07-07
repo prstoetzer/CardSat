@@ -218,6 +218,15 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   (dB table, AC voltage factors, constants, formulas) sits with the other Tools references;
   and three new form tools cover **complex/polar** impedance, **reactance & resonance**
   (Xl/Xc/f0), and **RC/RL time constants**.
+- **State vector -> GP** — a Tools calculator that recovers GP mean elements from a launch
+  provider's orbital state vector (TEME position + velocity) via a differential-correction
+  fit against CardSat's own SGP4, with optional save-as-manual-satellite. Accepts TEME or
+  J2000 input (on-device precession/nutation to TEME); B*=0.
+- **Rove planner** — a from-a-hypothetical-grid/time pass survey off Next Passes ():
+  enter a grid, date, time and +/- window and, for every favorite, see each pass with AOS/
+  LOS/max-el and the number of workable US states and DXCC entities during the pass; select
+  a pass for its polar plot and the full workable-state / DXCC lists. Reuses the existing
+  footprint counters and pass predictor; jobbed compute, fixed-size results (heap-flat).
 - **Orbit explorer & animations** — the Orbital-analysis pager gains an **Explore**
   sandbox page: seed apogee/perigee/inclination from the tracked bird, edit them, and
   watch period, velocity, footprint, longest pass, nodal drift and sun-sync status
@@ -226,14 +235,19 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   amateur-MEO -- as an animated to-scale ellipse with a moving satellite and caption.
   The **scientific calculator** gains amateur-radio helpers: dbm()/w(), db()/undb(),
   wl()/fq() (wavelength), hyperbolic + rounding functions, and constants c/kB/Re/mu/g0.
-- **Tools hub expansion** — the Tools menu now carries **26 tools**, adding a **phasing
+- **Tools hub expansion** — the Tools menu now carries **30 tools**, adding a **phasing
   line / stub** calculator (electrical length for CP satellite antennas & matching stubs,
   velocity-factor aware), **wavelength/frequency**, **attenuator pad** (pi/T), **dB chain
-  sum**, an **operating-references** card (Q-codes / phonetics / RST) and a **CTCSS tone
-  reference**. Form tools now **remember their values** between sessions (`x` resets),
-  the menu has **first-letter jump** + last-tool memory, and antenna/feedline lengths can
-  be shown in **metric or imperial** (Settings -> Display) -- orbital and satellite
-  dimensions stay metric always. RF-exposure gained per-mode duty presets.
+  sum**, an **operating-references** card (Q-codes / phonetics / RST), a **CTCSS tone
+  reference**, a **radio-math reference** cheat sheet (dB table, AC voltage factors,
+  constants, formulas), and three ARRL-supplement calculators — **complex / polar**
+  impedance, **reactance & resonance** (Xl/Xc/f0), and **RC/RL time constant**. Form tools
+  now **remember their values** between sessions (`x` resets), the menu has **first-letter
+  jump** + last-tool memory, and antenna/feedline lengths can be shown in **metric or
+  imperial** (Settings -> Display) -- orbital and satellite dimensions stay metric always.
+  RF-exposure gained per-mode duty presets, and the scientific calculator gained
+  amateur-radio helpers (dBm/W, dB, wavelength), metric-prefix input (`100k`, `2.2n`) and
+  an engineering-notation display mode.
 - **Transponder list & reporting (0.9.50)** — a satellite's transponders are now ordered
   by usefulness: **two-way transponders first**, amateur-band before non-amateur (so
   out-of-band TT&C/telemetry downlinks sink to the end), active before inactive.
@@ -406,8 +420,11 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **Favorites**, **manual GP / transponder / time entry**, per-satellite
   **calibration**, and a **factory reset**.
 
-- **Tools hub** (About -> `t`) — offline bench tools: an infix **scientific
-  calculator**, a **programmer's calculator** (hex/dec/bin/oct + bitwise ops), a **char lookup** (any base → ASCII + Morse + Baudot/ITA2 + BCD), a **DXCC entity lookup** (prefix/name/code → zones, continent, notes; 402 entities, offline), a **CQ (WAZ) zone reference** (all 40 zones with definitions, cross-linked from DXCC), an **ITU zone reference** (cross-linked from DXCC), a full **link-budget calculator** (EIRP/FSPL/noise-floor/SNR/margin with mode presets and an S-meter estimate), an **RF-exposure (MPE) calculator** (FCC OET-65 limits + compliance distances), a **battery-runtime** estimator, an **orbital-lifetime / debris** estimator (drag decay vs the 25-yr/5-yr disposal guidelines), a **cross-section (drag area)** calculator (CubeSat presets + deployable panels, feeding the debris tool), (degree trig, `Ans`) plus live-recalc forms for **coax loss/power**,
-  **dipole / vertical / yagi / quad** antenna dimensions, **RF unit** conversions,
-  **SWR / return loss**, **free-space path loss**, and a **unit converter**. All math
-  is local and works with no network.
+- **Tools hub** (About -> `t`) — 30 offline bench tools, covered in detail in the
+  *Tools* entries above: the scientific and programmer's calculators, character/DXCC/CQ/ITU
+  lookups and references, the link-budget / RF-exposure / battery / debris / cross-section
+  calculators, the antenna and feedline forms (coax, dipole, vertical, yagi, quad, phasing,
+  wavelength, attenuator, dB-chain), the ARRL radio-math tools (complex/polar, reactance &
+  resonance, RC/RL time constant, radio-math reference), and the operating-references and
+  CTCSS cards. All math is local and works with no network. (The DXCC *lookup* database
+  covers 340 entities; the workable-DXCC footprint reference uses the same 340-entity set.)

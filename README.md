@@ -18,6 +18,16 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.51:** a full **rove pass-planner** — from **Next Passes → `p`**, survey **all
+> your favorites** from any grid and time before you travel, with workable states/DXCC per pass,
+> a detail view, text export, and an on-device **saved-plan browser**. A new **State vector → GP**
+> tool (under Tools) **fits GP mean elements from a launch-provider state vector** (TEME or J2000),
+> so you can track a satellite — even a **pre-launch** payload with a future epoch — before it has
+> a published TLE. Plus **file download** from the web interface (a `/CardSat` browser),
+> **experimental sharing of GP elements over LoRa** between units, and a round of on-device fixes.
+>
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.51.md)**.
+
 > **New in v0.9.50:** AMSAT status reports now let you **pick the transponder/mode** for
 > multi-mode birds (e.g. AO-7 U/V vs V/A) — fixing a bug that locked reporting to one mode.
 > A satellite's transponder list is **ordered by usefulness** (two-way first, amateur-band

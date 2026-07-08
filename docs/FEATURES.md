@@ -227,6 +227,16 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   LOS/max-el and the number of workable US states and DXCC entities during the pass; select
   a pass for its polar plot and the full workable-state / DXCC lists. Reuses the existing
   footprint counters and pass predictor; jobbed compute, fixed-size results (heap-flat).
+- **Workable horizon** — off Next Passes (`w`): a ten-day **union** of every US state, DXCC
+  entity, and (on demand) grid that will *ever* be workable through any favorite. Jobbed
+  sweep with a live progress bar and growing counts; drill into the full states (`s`) and
+  DXCC (`d`) lists; save to `/CardSat/workable/`. Grids are off by default (memory) and
+  re-run on demand with `g`.
+- **Target search** — off Next Passes (`s`): pick one US state, DXCC entity, or grid and get
+  every pass over ten days where it's workable, **time-ordered across all favorites**, with
+  the per-pass workable window and max elevation. ENTER draws that pass's polar plot; `w`
+  saves to `/CardSat/search/`. Fixed-size result list (heap-flat); reports cleanly when a
+  target isn't reachable in the window.
 - **Orbit explorer & animations** — the Orbital-analysis pager gains an **Explore**
   sandbox page: seed apogee/perigee/inclination from the tracked bird, edit them, and
   watch period, velocity, footprint, longest pass, nodal drift and sun-sync status

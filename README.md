@@ -18,6 +18,18 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.52:** two complementary planning tools on **Next Passes**. **Workable horizon**
+> (`w`) sweeps the next ten days and builds the **union** of every US state, DXCC entity, and
+> (on demand) grid that will *ever* be workable through any favorite — the complete reach of your
+> station for the coming week and a half, at a glance. **Target search** (`s`) is the inverse:
+> pick one place — a state, DXCC entity, or grid — and get every pass over the next ten days where
+> it's workable, **time-ordered across your whole fleet**, with the workable window per pass and a
+> polar plot on **ENTER**. Under the hood, the footprint-coverage engine is **several times
+> faster** (identical results), and the speaker now **powers up only when making sound**, freeing
+> contiguous memory for LoTW/Cloudlog uploads on this no-PSRAM board.
+>
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.52.md)**.
+
 > **New in v0.9.51:** a full **rove pass-planner** — from **Next Passes → `p`**, survey **all
 > your favorites** from any grid and time before you travel, with workable states/DXCC per pass,
 > a detail view, text export, and an on-device **saved-plan browser**. A new **State vector → GP**
@@ -241,8 +253,9 @@ transit prediction, sun/eclipse status, and more.
   sideband, and **automatic PL/CTCSS** on FM uplinks.
 - **Prediction & planning** — an all-favorites **Next Passes** schedule, **pass-detail**
   and **polar** plots, the **OSCARLOCATOR** live azimuthal board, a **world map** with
-  footprints and terminator, **mutual-window** (sat-to-sat) search, and **orbital
-  analysis**.
+  footprints and terminator, **mutual-window** (sat-to-sat) search, a **rove pass-planner**,
+  a ten-day **Workable horizon** (union of all reachable states/DXCC/grids) and a
+  **Target search** (every pass a chosen place is workable), and **orbital analysis**.
 - **Observe the sky** — **visual-pass flags** (sunlit bird + dark sky), **Sun/Moon
   transit** prediction, **illumination/eclipse**, and **decay/reentry** watch flags.
 - **Operating aids** — **jump-to-beacon**, per-satellite **calibration** and

@@ -64,7 +64,11 @@ FRONT = [
   "RX/TX dial freqs for BOTH stations every 30s across a mutual window. Two lines/step: me (green) + DX (cyan). From the Mutual list, <b>ENTER</b> opens a polar detail (me+DX arcs, AOS/LOS/el) then <b>d</b> the table (or <b>d</b> straight from the list). "
   "<b>t</b> cycle transponder &middot; <b>m</b> mode: true rule / fixed DL / fixed UL &middot; <b>a</b> anchor dial (me/DX RX/TX) &middot; <b>,</b>/<b>/</b> in fixed mode step anchored dial to round 1 kHz (else passband 1 kHz) &middot; header shows pb +/- from center &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
  ("NEXT PASSES (favs)",
-  "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>t</b> sky-at-a-glance timeline (bars by elev) &middot; <b>p</b> rove planner &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
+  "<b>ENTER</b> track &middot; <b>m</b> world map &middot; <b>t</b> sky-at-a-glance timeline (bars by elev) &middot; <b>p</b> rove planner &middot; <b>w</b> workable horizon &middot; <b>s</b> target search &middot; <b>r</b> refresh &middot; <b>z</b> deep-sleep until AOS"),
+ ("WORKABLE HORIZON (Next Passes &rarr; w)",
+  "10-day union of everything workable across all favorites. <b>s</b> states list &middot; <b>d</b> DXCC list &middot; <b>g</b> re-run incl. grids (off by default) &middot; <b>w</b> save to /CardSat/workable/ &middot; <b>`</b> back"),
+ ("TARGET SEARCH (Next Passes &rarr; s)",
+  "Pick one state / DXCC / grid; lists every pass over 10 days where it's workable, time-ordered across all favs (sat / date / window / maxEl). <b>ENTER</b> polar of that pass &middot; <b>w</b> save to /CardSat/search/ &middot; <b>`</b> back"),
  ("ROVE PLANNER (Next Passes &rarr; p)",
   "Survey all favorites from a planned grid+time. Form: grid / date / time / +/- hrs / GO. Rows by AOS: sat / AOS / maxEl / states / DXCC. <b>ENTER</b> detail (arc + <b>s</b>/<b>d</b>/<b>g</b> state/DXCC/grid lists) &middot; <b>w</b> save txt &middot; <b>l</b> saved plans (<b>ENTER</b> view, <b>;</b>/<b>.</b> scroll, <b>d</b> del) &middot; <b>g</b> form"),
  ("PASSES (sel)",

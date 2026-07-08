@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.51";
+static constexpr const char* FW_VERSION = "0.9.52";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -2180,7 +2180,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -5999,6 +5999,87 @@ private:
   int      planField = 0;              // 0=grid 1=date 2=time 3=window 4=[compute]
   int      planDetailIdx = 0;          // which PlanRow the detail screen is showing
   void planDetailFrom(int idx);
+
+  // ---- Workable horizon (SCR_WORKHZN): 10-day "ever workable" union across favorites ----
+  // Sweeps every pass of the selected favorite(s) over HORIZON_DAYS and OR-accumulates which
+  // DXCC / US states / grids are workable at least once. Union bitsets are cheap: OR-ing a
+  // thousand passes costs the same RAM as one. Grids reuse the shared ~4 KB gridBits block,
+  // freed on done/cancel (heap discipline). Jobbed one PASS per loop() with a progress bar.
+  enum WhPhase { WH_IDLE, WH_COUNTING, WH_RUNNING, WH_DONE, WH_CANCEL };
+  static const int HORIZON_DAYS = 10;
+  // The union accumulator IS the shared stateBits / dxccBits / gridBits: zeroed once at start,
+  // then addFootprint* OR into them per sample with no clearing between passes. No extra bitset.
+  WhPhase  whPhase = WH_IDLE;
+  bool     whAllFavs = true;           // scope: all favorites vs the single selected sat
+  bool     whWantGrids = true;         // false = fast mode (states+DXCC only, no gridBits alloc)
+  uint32_t whSingleNorad = 0;          // when !whAllFavs
+  int      whFavCursor = 0;            // index into favs currently being swept
+  time_t   whLastAos = 0;              // AOS of the previous pass processed (non-progress guard)
+  time_t   whWinFrom = 0, whWinTo = 0; // per-favorite predictPasses paging cursor
+  static const int WH_SEG_MAX = 20;    // day-segment cache (one pass processed per tick)
+  PassPredict whSeg[WH_SEG_MAX];
+  int      whSegN = 0, whSegI = 0;
+  time_t   whHorizonEnd = 0;           // now + HORIZON_DAYS (fixed at start)
+  int      whPassesDone = 0, whPassesTotal = 0;   // progress-bar numerator / denominator
+  int      whStateN = 0, whDxccN = 0, whGridN = 0;// live popcounts
+  uint32_t whLastDrawMs = 0;
+  void whStart(bool allFavs, bool wantGrids, uint32_t singleNorad);  // seed + estimate passes
+  void whJobTick();                    // advance one pass of the sweep (pumped from loop())
+  void whNextFavorite();               // advance the pager to the next favorite (resets guard)
+  void whFinish();                     // popcounts + free gridBits
+  String whExport();                   // write the union to a .txt under /CardSat; returns path
+  void drawWorkHzn(); void keyWorkHzn(char c, bool enter, bool back);
+
+  // ---- Target search (SCR_TGTSEARCH pick / SCR_TGTHITS run+results) ----
+  // Inverse of the workable horizon: pick ONE target (US state / DXCC / grid) and find every
+  // pass on any favorite over HORIZON_DAYS during which it is workable. Keeps per-pass TIMING
+  // (a small .bss hit list), not a union. The membership test is one shared pointInFootprint()
+  // per sample against the target's representative point (bbox centre for state/DXCC polygons,
+  // the point coord for DXCC point-entities, the locator centre for grids) -- far cheaper than
+  // filling a bitset, so this search is snappier than the union sweep. Zero heap allocation.
+  enum TsPhase { TS_PICK, TS_RUNNING, TS_DONE, TS_CANCEL };
+  static const int TS_HIT_MAX = 40;
+  struct HitRow {
+    uint32_t norad;                    // favorite satellite
+    time_t   aos, los;                 // full pass window
+    time_t   inStart, inEnd;           // workable sub-window (target inside footprint)
+    uint8_t  maxElWhole;               // pass max elevation (context)
+  };
+  HitRow   tsHits[TS_HIT_MAX];         // .bss result list
+  int      tsHitN = 0;
+  TsPhase  tsPhase = TS_PICK;
+  uint8_t  tsKind = 0;                 // 0=state 1=dxcc 2=grid
+  int      tsPickSel = 0, tsPickScroll = 0;   // selection cursor in the pick list
+  char     tsFilter[8] = {0};          // type-to-filter prefix for the state/DXCC pick list
+  int      tsGeoIdx = -1;              // state index, or DXCC geometry index (0..DXCC_N-1)
+  double   tsLat = 0, tsLon = 0;       // resolved target representative point
+  char     tsGrid[8] = {0};            // grid text entry (kind=grid)
+  char     tsLabel[24] = {0};          // display label for the chosen target
+  // Chronological merge across ALL favorites: keep each favorite's NEXT upcoming pass in a slot,
+  // and each tick process the globally-earliest slot, then refill just that one. This yields hits
+  // in time order across the fleet, so the TS_HIT_MAX cap keeps the SOONEST passes (not the first
+  // favorite's). tsNextAos[i] == 0 means favorite i is exhausted.
+  static const int TS_FAV_MAX = 32;    // favorites merged (bounds .bss; far above realistic use)
+  PassPredict tsNextPass[TS_FAV_MAX];  // each favorite's next upcoming pass (valid if tsNextAos>0)
+  time_t   tsNextAos[TS_FAV_MAX];      // AOS of that pass, or 0 when the favorite is exhausted
+  time_t   tsCursor[TS_FAV_MAX];       // per-favorite paging cursor (search-from time)
+  time_t   tsLastAos[TS_FAV_MAX];      // AOS of last CONSUMED pass (skips the re-returned stale one)
+  int      tsFavCount = 0;             // number of valid favorites participating
+  time_t   tsHorizonEnd = 0;
+  int      tsPassesDone = 0, tsPassesTotal = 0;
+  int      tsHitSel = 0, tsHitScroll = 0;
+  Screen   tsReturn = SCR_SCHEDULE;    // where both target-search screens' back key returns to
+  uint32_t tsLastDrawMs = 0;
+  bool     tsResolveTarget();          // fill tsLat/tsLon/tsLabel from kind+selection; false=bad
+  bool     tsMatchFilter(const char* code); // true if code starts with tsFilter (case-insensitive)
+  int      tsFilteredGeoIdx(int matchPos);  // map the matchPos-th filtered entry -> geometry index
+  void     tsStart();                  // seed per-favorite cursors + estimate pass total
+  void     tsJobTick();                // process the globally-earliest next pass across favorites
+  void     tsFinish();                 // mark done, request a redraw (hits already time-ordered)
+  void     tsRefillFav(int fi);        // load favorite fi's next pass at/after its cursor
+  void     drawTgtSearch(); void keyTgtSearch(char c, bool enter, bool back);
+  void     drawTgtHits();   void keyTgtHits(char c, bool enter, bool back);
+  String   tsExport();                 // write the hit list to a .txt under /CardSat
   // ---- Saved rove-plan browser (SCR_ROVELIST) + read-only viewer (SCR_ROVEVIEW) ----
   // Lists the .txt files exportRovePlan() writes under /CardSat/RovePlans and shows one,
   // read-only, in a scrolling viewer. The viewer holds a BOUNDED slice of the file in RAM
@@ -6102,6 +6183,7 @@ private:
   uint32_t lastTiltMs = 0;        // last tilt-tune service time (rate integration)
   bool     manFixUp = false;      // Manual mode: false = fix downlink, true = fix uplink
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
+  Screen   wListReturn = SCR_PASSES; // non-live states/DXCC list back target (default: Passes)
   Screen   trackReturn = SCR_PASSES; // where the Track screen's back key returns to
   Screen   passesReturn = SCR_SATLIST; // where the Passes screen's back key returns to
   Screen   lotwReturn = SCR_LOG; // where the LoTW upload screen's back key returns to
@@ -6428,6 +6510,7 @@ private:
   void computePasses();                        // predict passes[] for the active sat
                                                // and fill passVis[] once (not per frame)
   void buildPolarPath();                       // sample current/next pass for the live polar
+  void buildPolarForPass(uint32_t norad, time_t aos, time_t los);  // polar arc for a specific pass
   void computeMutual(const String& grid);      // co-visibility windows vs a DX grid
   void drawPolarGrid(int cx, int cy, int R);   // shared polar rings + cardinal cross
   void drawPolarArc(int cx, int cy, int R, const float* az, const float* el, int n);
@@ -6905,6 +6988,17 @@ private:
   void noteEditNew();              // start a blank new note
   void noteEditOpen(const char* base); // open an existing note in the editor
   void buildGrids(time_t a, time_t b);
+  // Shared footprint-membership test (used by the workable-horizon sweep and target search):
+  // true if the point (lat,lon) lies within the ground footprint of a satellite whose sub-point
+  // is (subLat,subLon) at altitude altKm. Same spherical-cap geometry the addFootprint* fills use.
+  static bool pointInFootprint(double lat, double lon, double subLat, double subLon, double altKm);
+  // Per-sample bbox candidate scratch for the footprint fills (speeds up the union sweep + rove
+  // planner; results are identical -- only entities whose bbox can't overlap the footprint are
+  // skipped). Sized to the polygon-entity counts (161 DXCC polygons, 51 states).
+  static const int DXCC_CAND_MAX = 161;
+  static const int STATE_CAND_MAX = 51;
+  int16_t  dxccCand[DXCC_CAND_MAX];
+  int16_t  stateCand[STATE_CAND_MAX];
   int  countWorkableGrids(SatEntry& s, time_t a, time_t b);    // rove planner (explicit sat)
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);
@@ -6915,6 +7009,9 @@ private:
   void buildDxcc(time_t a, time_t b);
   int  countWorkableDxcc(SatEntry& s, time_t a, time_t b);     // rove planner (explicit sat)
   void addFootprintDxcc(double subLat, double subLon, double altKm);
+  // Combined states+DXCC footprint fill: one shared mesh walk instead of two (the workable-horizon
+  // sweep's hot path). Byte-identical to calling addFootprintStates then addFootprintDxcc.
+  void addFootprintStatesDxcc(double subLat, double subLon, double altKm);
   void drawDxcc();    void keyDxcc(char c, bool enter, bool back);
   void drawGpSrc();   void keyGpSrc(char c, bool enter, bool back);
   void drawWorldMap(); void keyWorldMap(char c, bool enter, bool back);
@@ -6936,7 +7033,19 @@ private:
 
   // Games menu + the five mini-games. Each is draw + key + a reset; all fixed-size.
   void drawGamesMenu(); void keyGamesMenu(char c, bool enter, bool back);
+  void beep(uint16_t freq, uint16_t ms);       // on-demand speaker beep (acquires + schedules release)
   void sfx(uint16_t freq, uint16_t ms);        // gated game sound (cfg.gameSound)
+  // On-demand speaker power. The M5 Speaker holds ~8 KB of I2S/DMA buffers while enabled; keeping
+  // it OFF except when audio is actually needed frees that block for TLS handshakes (LoTW uploads
+  // fail when the largest contiguous block gets too small). acquire() brings it up (idempotent);
+  // releaseAfter() schedules an end() once the deadline passes (so an alarm's tail still plays and
+  // we don't thrash begin/end -- each cycle pops). serviceAudioRelease() runs the deferred end().
+  void audioAcquire();                         // ensure speaker is up (begin + volume), cancel pending release
+  void audioReleaseAfter(uint32_t ms);         // schedule speaker end() after ms of no audio
+  void serviceAudioRelease();                  // loop hook: perform a due deferred end()
+  bool     audioUp = false;                    // is the speaker currently begun?
+  uint32_t audioReleaseAt = 0;                 // millis() deadline for a pending end() (0 = none)
+  bool     audioGameOwned = false;             // audio was acquired for a game session (release on exit)
   bool gameTiltAxis(float& outLR);             // tilt left/right in [-1,1]; false if unavailable
   void drawGDoppler();  void keyGDoppler(char c, bool enter, bool back);  void gDopplerReset();
   void drawGPass();     void keyGPass(char c, bool enter, bool back);     void gPassReset();
@@ -13289,8 +13398,15 @@ static uint16_t amsatColor(uint8_t st) {
 }
 
 // --- speaker beep (AOS alarm) ---------------------------------------------
-static void beep(uint16_t freq, uint16_t ms) {
+// Member (not a free function) so it can power the speaker on demand: bring the I2S buffers up
+// just for the beep, then schedule them back down a few seconds later. Without this, tone() would
+// lazily begin() the speaker mid-session and leave its ~8 KB resident, shrinking the contiguous
+// heap a TLS handshake needs. The 3 s tail covers multi-beep alarm sequences (with inter-beep
+// delays) without an audible begin/end pop between each beep.
+void App::beep(uint16_t freq, uint16_t ms) {
+  audioAcquire();
   M5Cardputer.Speaker.tone(freq, ms);
+  audioReleaseAfter(3000);
 }
 
 // ===========================================================================
@@ -13420,6 +13536,12 @@ void App::setup() {
   }
 
   M5Cardputer.Speaker.setVolume(cfg.spkVolume);   // AOS alarm / game sound (user setting)
+  // On-demand audio: keep the speaker OFF at boot so its ~8 KB I2S/DMA buffers aren't resident
+  // during normal operation (that block is what TLS handshakes need contiguous). audioAcquire()
+  // brings it up only around games, voice memos, and alarms; audioReleaseAfter() takes it back
+  // down. M5Cardputer.begin() may have started it, so end it now to establish the off baseline.
+  if (M5Cardputer.Speaker.isEnabled()) M5Cardputer.Speaker.end();
+  audioUp = false; audioReleaseAt = 0;
   irBeacon.begin();                     // IR pass-alert beacon (idle until an alert)
   if (cfg.loraEnable) loraStart();      // LoRa messaging radio (no-op without RadioLib)
   if (timeIsSet() && favN) buildSchedule();
@@ -13625,6 +13747,9 @@ void App::toggleMemo() {
   } else {
     SatEntry* s = activeSat();
     if (memo.start(s ? s->name : nullptr)) {
+      // memo.start() ends the speaker to claim the shared I2S for the mic; reflect that so our
+      // on-demand tracking doesn't think the speaker is still up.
+      audioUp = false; audioReleaseAt = 0;
       logCreateStub(memo.path());                  // one-key QSO capture (stub to finish later)
       setStatus("Recording memo... (+log stub)");
     }
@@ -17665,6 +17790,7 @@ void App::loop() {
   refreshScheduleIfNeeded();   // keep the all-favorites schedule fresh
   serviceAosAlarm();           // countdown beeps + flash before AOS
   serviceSkedAlarm();          // countdown beeps + flash before a user-set sked
+  serviceAudioRelease();       // take the speaker back down after an alarm's tail (on-demand audio)
   tickCanvasRestore();         // retry sprite realloc if a post-fetch restore failed
 
   if (satsatJobPhase != 0) satsatJobTick();   // advance the incremental sat-to-sat search
@@ -17674,6 +17800,14 @@ void App::loop() {
   }
   if (transitJobPhase != 0) transitJobTick(); // advance the Sun/Moon transit scan
   if (loraObjTxActive) loraObjTxTick();       // pump an outbound LoRa object (1 chunk/tick)
+  if (whPhase == WH_RUNNING) {                 // pump the workable-horizon sweep (1 pass/loop)
+    whJobTick();
+    if (whPhase != WH_RUNNING && screen == SCR_WORKHZN) { lastDrawMs = millis(); draw(); }  // paint Done
+  }
+  if (tsPhase == TS_RUNNING) {                 // pump the target search (1 pass/loop)
+    tsJobTick();
+    if (tsPhase != TS_RUNNING && screen == SCR_TGTHITS) { lastDrawMs = millis(); draw(); }   // paint Done
+  }
 
   // Accelerometer (tilt) passband tuning -- opt-in, ADV-only, self-gated to the
   // Track/Big/Manual screens in TUNE mode. Keep the backlight awake while it's
@@ -17967,6 +18101,8 @@ void App::loop() {
       (screen == SCR_MEMOS && memo.isRecording()) || screen == SCR_OSCAR || screen == SCR_GLOBE || screen == SCR_DXDOPP || screen == SCR_SKYMAP || screen == SCR_GPSPOS ||
       (screen == SCR_SATSAT && !satsatComputed) || screen == SCR_CATMON || screen == SCR_ARROW ||
       (screen == SCR_TRANSIT && transitJobPhase != 0) || (screen == SCR_PLANNER && planJobRunning) ||
+      (screen == SCR_WORKHZN && whPhase == WH_RUNNING) ||
+      (screen == SCR_TGTHITS && tsPhase == TS_RUNNING) ||
       loraObjTxActive) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_ORBITZOO) {
@@ -18175,6 +18311,9 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_ROVELIST: keyRoveList(c, enter, back); break;
     case SCR_ROVEVIEW: keyRoveView(c, enter, back); break;
     case SCR_GPIMPORT: keyGpImport(c, enter, back); break;
+    case SCR_WORKHZN: keyWorkHzn(c, enter, back); break;
+    case SCR_TGTSEARCH: keyTgtSearch(c, enter, back); break;
+    case SCR_TGTHITS: keyTgtHits(c, enter, back); break;
     case SCR_TOOLFORM: keyToolForm(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
@@ -18447,7 +18586,9 @@ void App::keyMemos(char c, bool enter, bool back) {
   if (enter && memoN > 0 && memoSel < memoN) {
     setStatus("Playing... (any key stops)");
     draw();                              // show the status before we block
+    audioAcquire();                      // power the speaker for playback (on-demand audio)
     bool ok = memo.playMemo(memos[memoSel].file, &memoPlaybackCancel, cfg.spkVolume);
+    audioReleaseAfter(500);              // take it back down shortly after playback ends
     setStatus(ok ? "Playback done" : (String("Play: ") + memo.lastError()));
   }
   lastDrawMs = 0;
@@ -18486,6 +18627,19 @@ void App::keySchedule(char c, bool enter, bool back) {
   if (c == 't') { buildSkyGlance(); screen = SCR_SKYGLANCE; lastDrawMs = 0; return; }            // sky-at-a-glance timeline
   if (c == 'p') { planSeedDefaults(); planField = 0; planN = 0; planComputed = false;             // rove planner
                   planJobFav = 0; planJobRunning = false; screen = SCR_PLANNER; lastDrawMs = 0; return; }
+  if (c == 'w') {                                    // workable horizon: 10-day "ever workable" union
+    if (favN == 0) { setStatus("No favorites"); return; }
+    if (!timeIsSet()) { setStatus("Set time first"); return; }
+    // Grids OFF by default: the grid union needs a 4 KB heap block whose alloc/free churn
+    // fragments the no-PSRAM heap. States+DXCC (the common use) need no heap at all. 'g' on the
+    // Done screen runs a grids-included pass on demand for anyone who wants the grid list.
+    whStart(true, false, 0);
+    screen = SCR_WORKHZN; lastDrawMs = 0; return;
+  }
+  if (c == 's') {                                    // target search: when is X workable?
+    tsPhase = TS_PICK; tsKind = 0; tsPickSel = 0; tsPickScroll = 0; tsFilter[0] = 0;
+    tsReturn = SCR_SCHEDULE; screen = SCR_TGTSEARCH; lastDrawMs = 0; return;
+  }
   if (enter && schedN > 0) {
     int idx = db.indexOfNorad(sched[schedSel].norad);
     if (idx >= 0) {
@@ -18713,6 +18867,186 @@ void App::buildPlanner() {
     if (gridBits) { free(gridBits); gridBits = nullptr; }
   }
 }
+
+// ---- Workable horizon: 10-day "ever workable" union across favorites ----------------------
+// The three member bitsets (stateBits/dxccBits/gridBits) ARE the union accumulator here: zeroed
+// once at start, then addFootprint* OR into them per sample with no clearing between passes.
+static int popcountBits(const uint8_t* bits, int nbytes);   // defined later (near the award list)
+
+
+void App::whStart(bool allFavs, bool wantGrids, uint32_t singleNorad) {
+  whAllFavs = allFavs; whWantGrids = wantGrids; whSingleNorad = singleNorad;
+  whFavCursor = 0; whPassesDone = 0; whPassesTotal = 0;
+  whSegN = 0; whSegI = 0;
+  whStateN = whDxccN = whGridN = 0;
+  memset(stateBits, 0, sizeof(stateBits));
+  memset(dxccBits, 0, sizeof(dxccBits));
+  time_t now = nowUtc();
+  whHorizonEnd = now + (time_t)HORIZON_DAYS * 86400;
+  if (whWantGrids && ensureGridBits()) { memset(gridBits, 0, GRID_BITS_LEN); gridBuiltMs = 0; }
+  else whWantGrids = false;                 // alloc failed or fast mode: states+DXCC only
+  // Progress-bar denominator: a CHEAP arithmetic estimate (no SGP4). A LEO favorite averages
+  // ~6 passes/day. Running predictPasses in a loop here blocked for minutes before the first
+  // repaint (no bar, watchdog starved, device unresponsive); the jobbed sweep self-corrects.
+  int favCount = 0;
+  for (int fi = 0; fi < favN; ++fi) {
+    if (!whAllFavs && favs[fi] != whSingleNorad) continue;
+    if (db.indexOfNorad(favs[fi]) >= 0) favCount++;
+  }
+  whPassesTotal = favCount * 6 * HORIZON_DAYS;
+  if (whPassesTotal < 1) whPassesTotal = 1;
+  // Prime the run cursor.
+  whFavCursor = 0; whWinFrom = now; whWinTo = whHorizonEnd;
+  whPhase = WH_RUNNING;
+}
+
+// One pass of footprint sampling OR'd into the union, jobbed one pass per loop().
+void App::whJobTick() {
+  if (whPhase != WH_RUNNING) return;
+  if (!timeIsSet()) { whFinish(); return; }
+  // Advance to the next favorite with a valid DB entry.
+  while (whFavCursor < favN) {
+    if (whAllFavs || favs[whFavCursor] == whSingleNorad) {
+      if (db.indexOfNorad(favs[whFavCursor]) >= 0) break;
+    }
+    whNextFavorite();
+    if (whFavCursor >= favN) break;
+  }
+  if (whFavCursor >= favN) { whFinish(); return; }
+
+  int dbIdx = db.indexOfNorad(favs[whFavCursor]);
+  SatEntry& s = db.at(dbIdx);
+  pred.setSite(loc.obs()); pred.setSat(s);
+
+  // Refill the day-segment cache when consumed, then process ONE cached pass per tick (see
+  // tsJobTick): a full day's worth of footprint sampling in one tick starved the watchdog.
+  if (whSegI >= whSegN) {
+    if (whWinFrom >= whWinTo) { whNextFavorite(); return; }
+    time_t segEnd = whWinFrom + 86400; if (segEnd > whWinTo) segEnd = whWinTo;
+    whSegN = pred.predictPasses(whWinFrom, cfg.minPassEl, whSeg, WH_SEG_MAX, segEnd);
+    whSegI = 0;
+    time_t lastLos = (whSegN > 0) ? whSeg[whSegN - 1].los : 0;
+    whWinFrom = (lastLos > whWinFrom) ? lastLos + 1 : segEnd;
+    if (whSegN <= 0) return;
+  }
+
+  PassPredict& p = whSeg[whSegI++];
+  if (p.aos <= whHorizonEnd) {
+    // 3-minute spacing: the sub-point moves ~1350 km between samples, well inside the ~2500 km
+    // footprint radius, so the swept ground track stays gap-free for a union while halving the
+    // mesh-walk count vs the earlier 2-minute spacing.
+    int samples = (p.los > p.aos) ? 1 + (int)((p.los - p.aos) / 180) : 1;
+    if (samples > 8) samples = 8; if (samples < 2) samples = 2;
+    for (int k = 0; k < samples; ++k) {
+      time_t t = (samples > 1) ? p.aos + (time_t)((double)(p.los - p.aos) * k / (samples - 1)) : p.aos;
+      LiveLook L = pred.look(t);
+      addFootprintStatesDxcc(L.subLat, L.subLon, L.satAltKm);   // one shared mesh walk for both
+      if (whWantGrids) addFootprintGrids(L.subLat, L.subLon, L.satAltKm);
+    }
+    whPassesDone++;
+  }
+  // Live popcounts for the progress readout.
+  whStateN = popcountBits(stateBits, sizeof(stateBits));
+  whDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
+  whGridN  = (whWantGrids && gridBits) ? popcountBits(gridBits, GRID_BITS_LEN) : 0;
+}
+
+void App::whNextFavorite() {
+  whFavCursor++;
+  whSegN = whSegI = 0;
+  if (whFavCursor < favN) { whWinFrom = nowUtc(); whWinTo = whHorizonEnd; whLastAos = 0; }
+}
+
+void App::whFinish() {
+  whStateN = popcountBits(stateBits, sizeof(stateBits));
+  whDxccN  = popcountBits(dxccBits, sizeof(dxccBits));
+  whGridN  = (whWantGrids && gridBits) ? popcountBits(gridBits, GRID_BITS_LEN) : 0;
+  // The states/DXCC drill-down screens (drawStates/drawDxcc) gate their list on stateN/dxccN, so
+  // publish the union counts there -- otherwise those screens show "none" despite stateBits/
+  // dxccBits holding the union (the on-screen bug: export was fine, the view was empty).
+  stateN = whStateN;
+  dxccN  = whDxccN;
+  whPassesDone = whPassesTotal;               // bar to 100%
+  whPhase = WH_DONE;
+  // Free the ~4 KB grid block: holding it fragments the no-PSRAM heap and can starve a later
+  // WiFi/TLS download. Counts are captured above, so the bitset isn't needed after this.
+  if (gridBits) { free(gridBits); gridBits = nullptr; gridBuiltMs = 0; }
+}
+
+void App::drawWorkHzn() {
+  header("Workable horizon");
+  int y = 24;
+  canvas.setTextColor(CL_WHITE);
+  char line[48];
+  snprintf(line, sizeof(line), "Next %d days  %s%s", HORIZON_DAYS,
+           whAllFavs ? "all favs" : "1 sat", whWantGrids ? "" : "  (no grids)");
+  canvas.setCursor(6, y); canvas.print(line); y += 14;
+
+  if (whPhase == WH_RUNNING || whPhase == WH_COUNTING) {
+    // Progress bar.
+    int pct = (whPassesTotal > 0) ? (int)(100L * whPassesDone / whPassesTotal) : 0;
+    if (pct > 100) pct = 100;
+    const int bx = 6, bw = 228, bh = 12;
+    canvas.drawRect(bx, y, bw, bh, CL_WHITE);
+    canvas.fillRect(bx + 1, y + 1, (bw - 2) * pct / 100, bh - 2, CL_GREEN);
+    y += bh + 6;
+    canvas.setTextColor(CL_CYAN);
+    snprintf(line, sizeof(line), "pass %d/%d  (%d%%)", whPassesDone, whPassesTotal, pct);
+    canvas.setCursor(6, y); canvas.print(line); y += 12;
+    canvas.setTextColor(CL_WHITE);
+    if (whWantGrids)
+      snprintf(line, sizeof(line), "states %d  dxcc %d  grids %d", whStateN, whDxccN, whGridN);
+    else
+      snprintf(line, sizeof(line), "states %d  dxcc %d", whStateN, whDxccN);
+    canvas.setCursor(6, y); canvas.print(line);
+    footer("` cancel");
+  } else if (whPhase == WH_DONE) {
+    canvas.setTextColor(CL_GREEN);
+    canvas.setCursor(6, y); canvas.print("Done."); y += 16;
+    canvas.setTextColor(CL_WHITE);
+    snprintf(line, sizeof(line), "DXCC   %d", whDxccN);
+    canvas.setCursor(12, y); canvas.print(line); y += 13;
+    snprintf(line, sizeof(line), "States %d", whStateN);
+    canvas.setCursor(12, y); canvas.print(line); y += 13;
+    if (whWantGrids) {
+      snprintf(line, sizeof(line), "Grids  %d", whGridN);
+      canvas.setCursor(12, y); canvas.print(line); y += 13;
+    }
+    footer("s states  d DXCC  g +grids  w save  ` bk");
+  } else {
+    canvas.setCursor(6, y); canvas.print("(idle)");
+    footer("` back");
+  }
+}
+
+void App::keyWorkHzn(char c, bool enter, bool back) {
+  (void)enter;
+  if (whPhase == WH_RUNNING || whPhase == WH_COUNTING) {
+    if (isBack(c, back)) {                     // cancel: free the grid block, return
+      if (gridBits) { free(gridBits); gridBits = nullptr; gridBuiltMs = 0; }
+      whPhase = WH_CANCEL; screen = SCR_SCHEDULE; lastDrawMs = 0;
+    }
+    return;                                     // ignore other keys while sweeping
+  }
+  if (isBack(c, back)) {                      // leaving the horizon flow: ensure the grid block is gone
+    if (gridBits) { free(gridBits); gridBits = nullptr; gridBuiltMs = 0; }
+    screen = SCR_SCHEDULE; lastDrawMs = 0; return;
+  }
+  if (whPhase != WH_DONE) return;
+  // Drill-down: show WHICH entities, reading the union we just built. The union still lives in
+  // stateBits/dxccBits; the grid union's bitset was freed on finish, so 'g' rebuilds is N/A --
+  // instead we keep the grid COUNT only and tell the user to use the export for the full list.
+  if (c == 's') { stateLive = false; stateScroll = 0; wListReturn = SCR_WORKHZN; screen = SCR_STATES; lastDrawMs = 0; return; }
+  if (c == 'd') { dxccLive  = false; dxccScroll = 0;  wListReturn = SCR_WORKHZN; screen = SCR_DXCC;   lastDrawMs = 0; return; }
+  if (c == 'g') {                                   // run a grids-included sweep on demand
+    if (whWantGrids && whPhase == WH_DONE) { setStatus("Grids already included"); return; }
+    whStart(true, true, 0);                         // re-sweep with grids (allocs the 4 KB block)
+    lastDrawMs = 0; return;
+  }
+  if (c == 'w') { String p = whExport(); setStatus(p.length() ? "Saved to /CardSat/workable" : "Save failed"); return; }
+}
+
+
 
 void App::drawPlanner() {
   header("Rove planner");
@@ -20686,17 +21020,19 @@ void App::keySettings(char c, bool enter, bool back) {
                  cfg.save();
                  // Live feedback: apply the new volume and play a short blip so the
                  // user hears the level as they adjust (silent if set to 0).
-                 M5Cardputer.Speaker.stop();
-                 M5Cardputer.Speaker.setVolume(cfg.spkVolume);
-                 if (cfg.spkVolume > 0) M5Cardputer.Speaker.tone(1200, 70); } break;
+                 if (cfg.spkVolume > 0) { audioAcquire(); M5Cardputer.Speaker.stop();
+                                          M5Cardputer.Speaker.setVolume(cfg.spkVolume);
+                                          M5Cardputer.Speaker.tone(1200, 70);
+                                          audioReleaseAfter(1500); } } break;
       case 49: if (!imuReady) setStatus("No IMU on this board");
                else { cfg.tiltTune = !cfg.tiltTune; cfg.save();
                       tiltAccum = 0; lastTiltMs = millis(); } break;
       case 77: if (!imuReady) setStatus("No IMU on this board");
                else { cfg.gameTilt = !cfg.gameTilt; cfg.save(); } break;
       case 79: cfg.gameSound = !cfg.gameSound; cfg.save();
-               if (cfg.gameSound) { M5Cardputer.Speaker.stop();
-                                    M5Cardputer.Speaker.tone(1500, 60); }  // confirm blip
+               if (cfg.gameSound) { audioAcquire(); M5Cardputer.Speaker.stop();
+                                    M5Cardputer.Speaker.tone(1500, 60);
+                                    audioReleaseAfter(1500); }  // confirm blip
                break;
       case 81: cfg.morseSwap = !cfg.morseSwap; cfg.save(); break;
     }
@@ -20842,6 +21178,7 @@ static Screen editHome(int t) {
   if (t >= 500) return SCR_LOGENTRY;    // QSO log field edit
   if (t >= 380 && t <= 387) return SCR_GPFIT;     // state-vector -> GP fitter fields
   if (t >= 370 && t <= 373) return SCR_PLANNER;   // rove planner form fields
+  if (t == 760) return SCR_TGTSEARCH;             // target-search grid field
   if (t == 340) return SCR_TRACK;       // CTCSS tone override
   if (t >= 400) return SCR_SETTINGS;    // reset confirmation
   if (t >= 320) return SCR_PASSES;      // manual transponder
@@ -20995,6 +21332,10 @@ void App::keyEdit(char c, bool enter, bool back) {
                   strncpy(skedDraft.grid, v.c_str(), sizeof(skedDraft.grid)-1);
                   skedDraft.grid[sizeof(skedDraft.grid)-1] = 0;
                   screen = SCR_SKEDENTRY; lastDrawMs = 0; return; }
+      case 760: { String v = editBuf; v.trim(); v.toUpperCase();     // target-search grid field
+                  strncpy(tsGrid, v.c_str(), sizeof(tsGrid)-1);
+                  tsGrid[sizeof(tsGrid)-1] = 0;
+                  screen = SCR_TGTSEARCH; lastDrawMs = 0; return; }
       case 724: { String v = editBuf; v.trim();
                   strncpy(skedDraft.start, v.c_str(), sizeof(skedDraft.start)-1);
                   skedDraft.start[sizeof(skedDraft.start)-1] = 0;
@@ -21419,7 +21760,7 @@ void App::keyEdit(char c, bool enter, bool back) {
         editTarget == 500 || editTarget == 503 || editTarget == 600 ||
         editTarget == 350 || editTarget == 351 || editTarget == 360 ||
         editTarget == 370 ||
-        editTarget == 721 || editTarget == 723 || editTarget == 729) {
+        editTarget == 721 || editTarget == 723 || editTarget == 729 || editTarget == 760) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
     }
@@ -23767,6 +24108,9 @@ void App::draw() {
     case SCR_ROVELIST: drawRoveList(); break;
     case SCR_ROVEVIEW: drawRoveView(); break;
     case SCR_GPIMPORT: drawGpImport(); break;
+    case SCR_WORKHZN: drawWorkHzn(); break;
+    case SCR_TGTSEARCH: drawTgtSearch(); break;
+    case SCR_TGTHITS: drawTgtHits(); break;
     case SCR_TOOLFORM: drawToolForm(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
@@ -25984,12 +26328,54 @@ void App::keyGame(char c, bool enter, bool back) {
 // ~25 fps game loop.
 void App::sfx(uint16_t freq, uint16_t ms) {
   if (!cfg.gameSound) return;
-  // Play the tone. tone() lazily allocates the speaker's I2S DMA buffer on first use;
-  // that's fine here because game sound and network fetches never overlap (both are
-  // modal/user-driven), and the fetch trampoline releases the speaker buffer before any
-  // TLS handshake regardless. Stop any prior tone so rapid game effects don't overlap.
+  // Games call audioAcquire() on entry and release on exit, so the speaker is normally already up
+  // here; acquire() is idempotent and just guarantees it. Stop any prior tone so rapid game
+  // effects don't overlap. No per-sfx release schedule -- the game-exit hook takes the speaker down.
+  audioAcquire();
   M5Cardputer.Speaker.stop();
   M5Cardputer.Speaker.tone(freq, ms);
+}
+
+void App::audioAcquire() {
+  audioReleaseAt = 0;                          // cancel any pending release
+  if (audioUp) return;
+  // Mic and speaker share the I2S peripheral; make sure the mic is down first.
+  if (M5.Mic.isEnabled()) M5.Mic.end();
+  M5Cardputer.Speaker.begin();
+  M5Cardputer.Speaker.setVolume(cfg.spkVolume);
+  audioUp = true;
+}
+
+void App::audioReleaseAfter(uint32_t ms) {
+  if (!audioUp) return;
+  uint32_t at = millis() + ms;
+  if (at == 0) at = 1;                         // 0 means "no pending release"
+  // Keep the later of any existing deadline so overlapping alarms don't cut each other short.
+  if (audioReleaseAt == 0 || (int32_t)(at - audioReleaseAt) > 0) audioReleaseAt = at;
+}
+
+void App::serviceAudioRelease() {
+  // Game-owned audio: release as soon as we're off every game screen, regardless of which exit
+  // path was taken (each game backs out differently -- Zap -> About, the rest -> Games menu). This
+  // is the reliable release point; hooking each game's back key individually missed cases.
+  if (audioGameOwned) {
+    bool onGame = (screen == SCR_GAME || screen == SCR_GAMES || screen == SCR_GDOPPLER ||
+                   screen == SCR_GPASS || screen == SCR_GROTOR || screen == SCR_GMORSE ||
+                   screen == SCR_GGRID);
+    if (!onGame) {
+      audioGameOwned = false;
+      if (audioUp) { M5Cardputer.Speaker.stop(); audioReleaseAt = millis(); }  // release now (below)
+    }
+  }
+  if (audioReleaseAt == 0 || !audioUp) return;
+  if ((int32_t)(millis() - audioReleaseAt) < 0) return;   // not due yet
+  if (M5Cardputer.Speaker.isPlaying()) {                  // don't cut a tone mid-play; retry next loop
+    audioReleaseAt = millis() + 100;
+    return;
+  }
+  M5Cardputer.Speaker.end();
+  audioUp = false;
+  audioReleaseAt = 0;
 }
 
 // Tilt left/right signal in [-1, +1] (negative = roll left). Returns false when
@@ -26038,6 +26424,7 @@ void App::keyGamesMenu(char c, bool enter, bool back) {
   if (isUp(c))   { if (--gamesSel < 0) gamesSel = GAMES_N - 1; lastDrawMs = 0; return; }
   if (isDown(c)) { if (++gamesSel >= GAMES_N) gamesSel = 0; lastDrawMs = 0; return; }
   if (enter) {
+    if (cfg.gameSound) { audioAcquire(); audioGameOwned = true; }   // power speaker for the session
     switch (gamesSel) {
       case 0: gState = 0; screen = SCR_GAME;     break;   // Zap (its own attract via gState 0)
       case 1: gDopplerReset(); screen = SCR_GDOPPLER; break;
@@ -34020,6 +34407,16 @@ static bool gridMatchPrefix(const char* g, const char* f) {
   return true;
 }
 
+bool App::pointInFootprint(double lat, double lon, double subLat, double subLon, double altKm) {
+  if (altKm < 1) return false;
+  const double D2R = 0.017453292519943295, Re = 6371.0;
+  double coslam = Re / (Re + altKm);
+  double la = lat * D2R, sla = sin(la), cla = cos(la);
+  double sSub = sin(subLat * D2R), cSub = cos(subLat * D2R);
+  double cossep = sla * sSub + cla * cSub * cos((lon - subLon) * D2R);
+  return cossep >= coslam;
+}
+
 void App::addFootprintGrids(double subLat, double subLon, double altKm) {
   const double D2R = 0.017453292519943295, R2D = 57.29577951308232, Re = 6371.0;
   if (altKm < 1) return;
@@ -34314,6 +34711,23 @@ void App::addFootprintStates(double subLat, double subLon, double altKm) {
   // against every state's bounding box before any ray-cast, and states already
   // found are skipped. The mesh step (1 deg) is fine vs the ~0.1 deg boundaries.
   int latLo = (int)floor(subLat - lamDeg), latHi = (int)ceil(subLat + lamDeg);
+  // Per-sample candidate pre-filter (see addFootprintDxcc): identical results, far fewer inner
+  // iterations. Only states whose bbox overlaps the footprint extent can contain an in-fp cell.
+  double clMinS = cos((double)((abs(latLo) > abs(latHi) ? latLo : latHi) + 0.5) * D2R);
+  if (clMinS < 0.15) clMinS = 0.15;
+  double lonHalfMaxS = lamDeg / clMinS + 2.0;
+  int16_t sLoMin = (int16_t)lround((subLon - lonHalfMaxS) * 10.0);
+  int16_t sLoMax = (int16_t)lround((subLon + lonHalfMaxS) * 10.0);
+  int16_t sLaMin = (int16_t)lround((subLat - lamDeg) * 10.0);
+  int16_t sLaMax = (int16_t)lround((subLat + lamDeg) * 10.0);
+  bool sLonWrap = (lonHalfMaxS >= 178.0) || (subLon - lonHalfMaxS < -180.0) || (subLon + lonHalfMaxS > 180.0);
+  int sCandN = 0;
+  for (int idx = 0; idx < STATE_N; ++idx) {
+    if (stateBits[idx >> 3] & (1 << (idx & 7))) continue;
+    if (STATEPOLY_LAMAX[idx] < sLaMin || STATEPOLY_LAMIN[idx] > sLaMax) continue;
+    if (!sLonWrap && (STATEPOLY_LOMAX[idx] < sLoMin || STATEPOLY_LOMIN[idx] > sLoMax)) continue;
+    if (sCandN < STATE_CAND_MAX) stateCand[sCandN++] = (int16_t)idx;
+  }
   for (int la = latLo; la <= latHi; ++la) {
     if (la < -90 || la >= 90) continue;
     double clatR = (la + 0.5) * D2R;
@@ -34325,7 +34739,8 @@ void App::addFootprintStates(double subLat, double subLon, double altKm) {
       double clon = lo + 0.5;
       if (A + B * cos((clon - subLon) * D2R) < coslam) continue;  // outside footprint
       int16_t qlo = (int16_t)lround(clon * 10.0), qla = (int16_t)lround((la + 0.5) * 10.0);
-      for (int idx = 0; idx < STATE_N; ++idx) {
+      for (int ci = 0; ci < sCandN; ++ci) {
+        int idx = stateCand[ci];
         if (stateBits[idx >> 3] & (1 << (idx & 7))) continue;        // already found
         if (qlo < STATEPOLY_LOMIN[idx] || qlo > STATEPOLY_LOMAX[idx] ||
             qla < STATEPOLY_LAMIN[idx] || qla > STATEPOLY_LAMAX[idx]) continue;  // bbox reject
@@ -34386,8 +34801,9 @@ void App::drawStates() {
     }
   }
   SatEntry* s = activeSat();
-  { String h = (s ? String(s->name) : String("States")) +
-               (stateLive ? " now" : " pass");
+  { String h;
+    if (!stateLive && wListReturn == SCR_WORKHZN) h = "Workable states";   // horizon union
+    else h = (s ? String(s->name) : String("States")) + (stateLive ? " now" : " pass");
     header(h); }
   canvas.setTextSize(1);
   if (stateN == 0) {
@@ -34422,7 +34838,7 @@ void App::drawStates() {
 
 void App::keyStates(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { screen = stateLive ? liveReturn : SCR_PASSES; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { screen = stateLive ? liveReturn : wListReturn; lastDrawMs = 0; return; }
   const int PER = 6 * 8;
   if (isDown(c)) { if (stateScroll + PER < stateN) stateScroll += 6; lastDrawMs = 0; return; }
   if (isUp(c))   { if (stateScroll >= 6) stateScroll -= 6; lastDrawMs = 0; return; }
@@ -34730,6 +35146,403 @@ String App::exportRovePlan() {
   return String(path);
 }
 
+String App::whExport() {
+  if (!Store::ready() || whPhase != WH_DONE) return String();
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists("/CardSat")) fsx.mkdir("/CardSat");
+  if (!fsx.exists("/CardSat/workable")) fsx.mkdir("/CardSat/workable");
+  char path[64]; struct tm tmv; time_t c = nowUtc(); gmtime_r(&c, &tmv);
+  snprintf(path, sizeof(path), "/CardSat/workable/workable_%04d%02d%02d_%02d%02d.txt",
+           tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+  File f = fsx.open(path, "w");
+  if (!f) return String();
+  char line[96];
+  f.println("CardSat workable horizon");
+  f.println("========================");
+  snprintf(line, sizeof(line), "Horizon: next %d days from %04d-%02d-%02d %02d:%02dZ",
+           HORIZON_DAYS, tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+  f.println(line);
+  snprintf(line, sizeof(line), "Sats   : %s", whAllFavs ? "all favorites" : "single satellite");
+  f.println(line);
+  snprintf(line, sizeof(line), "Totals : %d DXCC, %d states%s", whDxccN, whStateN,
+           whWantGrids ? "" : "  (grids not computed)");
+  f.println(line);
+  if (whWantGrids) { snprintf(line, sizeof(line), "         %d grids", whGridN); f.println(line); }
+  f.println("Footprint-based (a property of the satellites), times UTC.");
+  f.println("");
+  // States union
+  f.print("States: ");
+  { bool any=false; int col=0;
+    for (int idx = 0; idx < STATE_N; ++idx)
+      if (stateBits[idx>>3] & (1 << (idx&7))) {
+        char g[3]={STATE_CODE[idx*2],STATE_CODE[idx*2+1],0};
+        f.print(any?" ":""); f.print(g); any=true;
+        if (++col % 16 == 0) { f.println(""); f.print("        "); }
+      }
+    if (!any) f.print("(none)"); }
+  f.println("");
+  // DXCC union
+  f.print("DXCC  : ");
+  { bool any=false; int col=0;
+    for (int idx = 0; idx < DXCC_N; ++idx)
+      if (dxccBits[idx>>3] & (1 << (idx&7))) {
+        char code[8]; dxccCode(idx, code);
+        f.print(any?" ":""); f.print(code); any=true;
+        if (++col % 12 == 0) { f.println(""); f.print("        "); }
+      }
+    if (!any) f.print("(none)"); }
+  f.println("");
+  f.println("Grids : count only (the ~4 KB grid set is released after the sweep).");
+  f.close();
+  return String(path);
+}
+
+
+void App::tsRefillFav(int fi) {
+  // Load favorite fi's NEXT genuine pass into tsNextPass[fi]/tsNextAos[fi]. This must fetch a
+  // small BATCH, not a single pass: Hopperpop's nextpass(), re-seeded via initpredpoint() just
+  // after a pass, hands back that SAME pass (its AOS is before the cursor) -- with maxN=1 that
+  // stale pass is all we'd get, and we'd re-record it forever (the observed "40 hits on one
+  // pass" / "never stops" bug). Within ONE predictPasses call the cursor advances correctly, so
+  // the later batch entries are the real next passes; we take the first whose AOS is strictly
+  // after the last pass we already consumed for this favorite.
+  tsNextAos[fi] = 0;
+  if (tsCursor[fi] >= tsHorizonEnd) return;
+  int dbIdx = db.indexOfNorad(favs[fi]);
+  if (dbIdx < 0) return;
+  SatEntry& s = db.at(dbIdx);
+  pred.setSite(loc.obs());
+  if (!pred.setSat(s)) return;
+  PassPredict tmp[4];
+  int np = pred.predictPasses(tsCursor[fi], cfg.minPassEl, tmp, 4, tsHorizonEnd);
+  for (int i = 0; i < np; ++i) {
+    if (tmp[i].aos > tsHorizonEnd) break;
+    if (tmp[i].aos <= tsLastAos[fi]) continue;      // skip the re-returned stale pass
+    tsNextPass[fi] = tmp[i];
+    tsNextAos[fi]  = tmp[i].aos;
+    tsCursor[fi]   = tmp[i].los + 1;                // next refill starts past this pass
+    return;
+  }
+  // Nothing new before the horizon -> favorite exhausted (tsNextAos stays 0).
+}
+
+void App::tsStart() {
+  tsHitN = 0; tsPassesDone = 0; tsPassesTotal = 0;
+  tsHitSel = 0; tsHitScroll = 0;
+  time_t now = nowUtc();
+  tsHorizonEnd = now + (time_t)HORIZON_DAYS * 86400;
+  // Seed every favorite's cursor at 'now' and prime its first upcoming pass, so the merge below
+  // can pick the globally-earliest pass from tick one.
+  tsFavCount = 0;
+  int favCount = 0;
+  for (int fi = 0; fi < favN && fi < TS_FAV_MAX; ++fi) {
+    tsCursor[fi] = now; tsNextAos[fi] = 0; tsLastAos[fi] = 0;
+    if (db.indexOfNorad(favs[fi]) >= 0) { favCount++; tsRefillFav(fi); }
+  }
+  tsFavCount = (favN < TS_FAV_MAX) ? favN : TS_FAV_MAX;
+  // Cheap denominator estimate (~6 passes/day/favorite); the bar self-corrects.
+  tsPassesTotal = favCount * 6 * HORIZON_DAYS;
+  if (tsPassesTotal < 1) tsPassesTotal = 1;
+  tsPhase = TS_RUNNING;
+}
+
+void App::tsJobTick() {
+  if (tsPhase != TS_RUNNING) return;
+  if (!timeIsSet()) { tsFinish(); return; }
+  // Pick the favorite whose next upcoming pass is globally earliest (chronological merge).
+  int best = -1; time_t bestAos = 0;
+  for (int fi = 0; fi < tsFavCount; ++fi) {
+    if (tsNextAos[fi] == 0) continue;
+    if (best < 0 || tsNextAos[fi] < bestAos) { best = fi; bestAos = tsNextAos[fi]; }
+  }
+  if (best < 0) { tsFinish(); return; }        // all favorites exhausted -> done
+
+  int dbIdx = db.indexOfNorad(favs[best]);
+  SatEntry& s = db.at(dbIdx);
+  pred.setSite(loc.obs()); pred.setSat(s);
+  PassPredict p = tsNextPass[best];
+  if (p.aos <= tsHorizonEnd) {
+    // Coarse ~30 s sampling is enough for a ~2500 km footprint; cap keeps a tick cheap.
+    int samples = (p.los > p.aos) ? 1 + (int)((p.los - p.aos) / 30) : 1;
+    if (samples > 40) samples = 40; if (samples < 1) samples = 1;
+    time_t inStart = 0, inEnd = 0; bool inside = false;
+    for (int k = 0; k < samples; ++k) {
+      time_t t = (samples > 1) ? p.aos + (time_t)((double)(p.los - p.aos) * k / (samples - 1)) : p.aos;
+      LiveLook L = pred.look(t);
+      if (pointInFootprint(tsLat, tsLon, L.subLat, L.subLon, L.satAltKm)) {
+        if (!inside) { inStart = t; inside = true; }
+        inEnd = t;
+      }
+    }
+    if (inside && tsHitN < TS_HIT_MAX) {
+      HitRow& h = tsHits[tsHitN++];
+      h.norad = s.norad; h.aos = p.aos; h.los = p.los;
+      h.inStart = inStart; h.inEnd = inEnd;
+      h.maxElWhole = (uint8_t)(p.maxEl < 0 ? 0 : (p.maxEl > 90 ? 90 : p.maxEl));
+      if (tsHitN >= TS_HIT_MAX) { tsFinish(); return; }   // list full (soonest N): stop
+    }
+    tsPassesDone++;
+  }
+  // Record this pass as consumed (guards against the predictor re-returning it) and refill.
+  tsLastAos[best] = p.aos;
+  tsRefillFav(best);
+}
+
+void App::tsFinish() {
+  // Hits are already appended in global time order (the merge always takes the earliest pass), so
+  // no sort is needed. Mark done and force the results screen to repaint.
+  tsPhase = TS_DONE;
+  tsPassesDone = tsPassesTotal;
+  if (screen == SCR_TGTHITS) lastDrawMs = 0;
+}
+
+bool App::tsMatchFilter(const char* code) {
+  if (!tsFilter[0]) return true;
+  for (int i = 0; tsFilter[i]; ++i) {
+    char a = code[i], b = tsFilter[i];
+    if (a >= 'a' && a <= 'z') a -= 32;
+    if (b >= 'a' && b <= 'z') b -= 32;
+    if (a != b) return false;
+  }
+  return true;
+}
+
+int App::tsFilteredGeoIdx(int matchPos) {
+  int total = (tsKind == 0) ? STATE_N : DXCC_N;
+  int m = 0;
+  for (int idx = 0; idx < total; ++idx) {
+    char code[8];
+    if (tsKind == 0) { code[0]=STATE_CODE[idx*2]; code[1]=STATE_CODE[idx*2+1]; code[2]=0; }
+    else dxccCode(idx, code);
+    if (!tsMatchFilter(code)) continue;
+    if (m == matchPos) return idx;
+    m++;
+  }
+  return -1;
+}
+
+void App::drawTgtSearch() {
+  header("Find workable target");
+  const char* kinds[3] = { "State", "DXCC", "Grid" };
+  const int tabW = 58, tabX0 = 8, tabY = 20;
+  for (int i = 0; i < 3; ++i) {
+    int x = tabX0 + i * (tabW + 4);
+    if (i == tsKind) { canvas.fillRect(x, tabY, tabW, 13, CL_SELBG); canvas.setTextColor(CL_WHITE); }
+    else { canvas.drawRect(x, tabY, tabW, 13, CL_DGREY); canvas.setTextColor(CL_GREY); }
+    canvas.setCursor(x + 8, tabY + 3); canvas.print(kinds[i]);
+  }
+  int y = 40;
+  if (tsKind == 2) {                                   // grid: clean prompt, no dashes
+    canvas.setTextColor(CL_WHITE); canvas.setCursor(8, y); canvas.print("Grid square:");
+    canvas.setTextColor(CL_CYAN);  canvas.setCursor(90, y);
+    canvas.print(tsGrid[0] ? tsGrid : "(press ENTER to type)");
+    footer(",/ type  ENTER edit  g GO  ` back");
+    return;
+  }
+  // state / DXCC: optional first-letter filter + scrollable list
+  int total = (tsKind == 0) ? STATE_N : DXCC_N;
+  canvas.setTextColor(CL_WHITE); canvas.setCursor(8, y); canvas.print("Filter:");
+  canvas.setTextColor(tsFilter[0] ? CL_CYAN : CL_DGREY); canvas.setCursor(58, y);
+  canvas.print(tsFilter[0] ? tsFilter : "(type letters)");
+  y += 14;
+  // Build the filtered view: walk all entries, keep those whose code starts with tsFilter.
+  const int VIS = 5;
+  int shown = 0, matchCount = 0, selRow = -1;
+  // first count matches and clamp selection
+  for (int idx = 0; idx < total; ++idx) {
+    char code[8];
+    if (tsKind == 0) { code[0]=STATE_CODE[idx*2]; code[1]=STATE_CODE[idx*2+1]; code[2]=0; }
+    else dxccCode(idx, code);
+    if (!tsMatchFilter(code)) continue;
+    if (matchCount == tsPickSel) selRow = matchCount;
+    matchCount++;
+  }
+  if (tsPickSel >= matchCount) tsPickSel = matchCount > 0 ? matchCount - 1 : 0;
+  if (tsPickSel < tsPickScroll) tsPickScroll = tsPickSel;
+  if (tsPickSel >= tsPickScroll + VIS) tsPickScroll = tsPickSel - VIS + 1;
+  // draw the window
+  int mi = 0;
+  for (int idx = 0; idx < total && shown < VIS; ++idx) {
+    char code[8];
+    if (tsKind == 0) { code[0]=STATE_CODE[idx*2]; code[1]=STATE_CODE[idx*2+1]; code[2]=0; }
+    else dxccCode(idx, code);
+    if (!tsMatchFilter(code)) continue;
+    if (mi < tsPickScroll) { mi++; continue; }
+    int ly = y + shown * 11;
+    if (mi == tsPickSel) { canvas.fillRect(0, ly - 1, 240, 11, CL_SELBG); canvas.setTextColor(CL_WHITE); }
+    else canvas.setTextColor(CL_GREY);
+    canvas.setCursor(10, ly); canvas.print(code);
+    shown++; mi++;
+  }
+  if (matchCount == 0) { canvas.setTextColor(CL_ORANGE); canvas.setCursor(10, y); canvas.print("(no match)"); }
+  (void)selRow;
+  footer(",/ type  ;/. pick  A-Z filter  ENTER go");
+}
+
+void App::keyTgtSearch(char c, bool enter, bool back) {
+  if (isBack(c, back)) {
+    // On the state/DXCC list, DEL first trims the filter; only leave when the filter is empty.
+    if (back && tsKind != 2 && tsFilter[0]) {
+      tsFilter[strlen(tsFilter) - 1] = 0; tsPickSel = tsPickScroll = 0; lastDrawMs = 0; return;
+    }
+    screen = tsReturn; lastDrawMs = 0; return;
+  }
+  if (isLeft(c))  { if (tsKind > 0) tsKind--; tsFilter[0] = 0; tsPickSel = tsPickScroll = 0; lastDrawMs = 0; return; }
+  if (isRight(c)) { if (tsKind < 2) tsKind++; tsFilter[0] = 0; tsPickSel = tsPickScroll = 0; lastDrawMs = 0; return; }
+  if (tsKind == 2) {                                   // grid: ENTER opens the text editor, g GOes
+    if (enter) { editTarget = 760; editTitle = "Grid (Maidenhead)"; editBuf = tsGrid;
+                 screen = SCR_EDIT; lastDrawMs = 0; return; }
+    if (c == 'g') {                                    // GO (grid entered via the editor, so g is free here)
+      if (favN == 0) { setStatus("No favorites"); return; }
+      if (!timeIsSet()) { setStatus("Set time first"); return; }
+      if (!tsGrid[0]) { setStatus("Enter a grid first"); return; }
+      tsGeoIdx = 0;
+      if (!tsResolveTarget()) { setStatus("Bad grid"); return; }
+      tsStart(); screen = SCR_TGTHITS; lastDrawMs = 0; return;
+    }
+    return;                                            // grid mode: no filter/list keys
+  } else {
+    if (isUp(c))   { if (tsPickSel > 0) tsPickSel--; lastDrawMs = 0; return; }
+    if (isDown(c)) { tsPickSel++; lastDrawMs = 0; return; }   // draw clamps to match count
+    // A-Z / 0-9 / prefix punctuation types into the filter (not the nav keys ; . , /).
+    if (c > 32 && c < 127 && c != ';' && c != '.' && c != ',' && c != '/') {
+      int n = strlen(tsFilter);
+      if (n < (int)sizeof(tsFilter) - 1) {
+        char u = c; if (u >= 'a' && u <= 'z') u -= 32;
+        tsFilter[n] = u; tsFilter[n+1] = 0; tsPickSel = tsPickScroll = 0;
+      }
+      lastDrawMs = 0; return;
+    }
+  }
+  if (enter) {                                         // state/DXCC GO -- only on ENTER (letters filter)
+    if (favN == 0) { setStatus("No favorites"); return; }
+    if (!timeIsSet()) { setStatus("Set time first"); return; }
+    tsGeoIdx = tsFilteredGeoIdx(tsPickSel);            // map filtered position -> geometry index
+    if (tsGeoIdx < 0) { setStatus("No target selected"); return; }
+    if (!tsResolveTarget()) { setStatus("Bad target"); return; }
+    tsStart(); screen = SCR_TGTHITS; lastDrawMs = 0; return;
+  }
+}
+
+void App::drawTgtHits() {
+  char t[32]; snprintf(t, sizeof(t), "Workable: %s", tsLabel[0] ? tsLabel : "?");
+  header(t);
+  canvas.setTextColor(CL_WHITE);
+  char line[48];
+  if (tsPhase == TS_RUNNING) {
+    int pct = (tsPassesTotal > 0) ? (int)(100L * tsPassesDone / tsPassesTotal) : 0;
+    if (pct > 100) pct = 100;
+    const int bx = 6, bw = 228, bh = 12; int y = 26;
+    canvas.drawRect(bx, y, bw, bh, CL_WHITE);
+    canvas.fillRect(bx + 1, y + 1, (bw - 2) * pct / 100, bh - 2, CL_GREEN);
+    y += bh + 8;
+    canvas.setTextColor(CL_CYAN);
+    snprintf(line, sizeof(line), "pass %d/%d (%d%%)  hits %d", tsPassesDone, tsPassesTotal, pct, tsHitN);
+    canvas.setCursor(6, y); canvas.print(line);
+    footer("` cancel");
+    return;
+  }
+  if (tsHitN == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 40);
+    snprintf(line, sizeof(line), "No workable passes in %d days.", HORIZON_DAYS);
+    canvas.print(line);
+    footer("` back");
+    return;
+  }
+  // Column header, matching the Passes screen convention.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18); canvas.print("Sat        Date  Window(UTC)  El");
+  const int VIS = 7, ROW = 10; int y0 = 30;
+  if (tsHitSel < tsHitScroll) tsHitScroll = tsHitSel;
+  if (tsHitSel >= tsHitScroll + VIS) tsHitScroll = tsHitSel - VIS + 1;
+  for (int r = 0; r < VIS; ++r) {
+    int idx = tsHitScroll + r; if (idx >= tsHitN) break;
+    HitRow& h = tsHits[idx];
+    int dbIdx = db.indexOfNorad(h.norad);
+    const char* nm = (dbIdx >= 0) ? db.at(dbIdx).name : "?";
+    time_t a = h.inStart ? h.inStart : h.aos, e = h.inEnd ? h.inEnd : h.los;
+    int ly = y0 + r * ROW;
+    if (idx == tsHitSel) { canvas.fillRect(0, ly - 1, 240, ROW, CL_SELBG);
+                           canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, ly);
+    // Sat (8) | date+start "MM-DD HH:MM" | end "HH:MM" | max elev
+    canvas.printf("%-8.8s %s-%s %2d",
+                  nm, fmtMDHM(a).c_str(), fmtHM(e).c_str(), h.maxElWhole);
+  }
+  // Scroll hints
+  if (tsHitScroll > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 30); canvas.print("^"); }
+  if (tsHitScroll + VIS < tsHitN) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 30 + (VIS-1)*ROW); canvas.print("v"); }
+  char cnt[24]; snprintf(cnt, sizeof(cnt), "%d/%d", tsHitSel + 1, tsHitN);
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(198, 18); canvas.print(cnt);
+  footer("ENT polar  w save  ` back");
+}
+
+void App::keyTgtHits(char c, bool enter, bool back) {
+  if (tsPhase == TS_RUNNING) {
+    if (isBack(c, back)) { tsPhase = TS_CANCEL; screen = SCR_TGTSEARCH; lastDrawMs = 0; }
+    return;
+  }
+  if (isBack(c, back)) { screen = SCR_TGTSEARCH; lastDrawMs = 0; return; }
+  if (tsHitN == 0) return;
+  if (isUp(c))   { if (tsHitSel > 0) tsHitSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (tsHitSel < tsHitN - 1) tsHitSel++; lastDrawMs = 0; return; }
+  if (enter) {
+    HitRow& h = tsHits[tsHitSel];
+    int dbIdx = db.indexOfNorad(h.norad);
+    if (dbIdx >= 0) {
+      satSel = dbIdx;                                 // make it the active sat (header + rebuilds)
+      buildPolarForPass(h.norad, h.aos, h.los);       // arc for THIS pass (may be days ahead)
+      liveReturn = SCR_TGTHITS;                        // polar back returns to the results list
+      screen = SCR_POLAR; lastDrawMs = 0;
+    }
+    return;
+  }
+  if (c == 'w') { String p = tsExport(); setStatus(p.length() ? "Saved to /CardSat/search" : "Save failed"); return; }
+}
+
+String App::tsExport() {
+  if (!Store::ready() || tsPhase != TS_DONE) return String();
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists("/CardSat")) fsx.mkdir("/CardSat");
+  if (!fsx.exists("/CardSat/search")) fsx.mkdir("/CardSat/search");
+  char path[72]; struct tm tmv; time_t c = nowUtc(); gmtime_r(&c, &tmv);
+  // sanitise the label for the filename (grids/prefixes can contain '/')
+  char safe[24]; int si = 0;
+  for (int i = 0; tsLabel[i] && si < 20; ++i) {
+    char ch = tsLabel[i];
+    safe[si++] = (ch=='/'||ch==' ') ? '_' : ch;
+  }
+  safe[si] = 0;
+  snprintf(path, sizeof(path), "/CardSat/search/search_%s_%04d%02d%02d_%02d%02d.txt",
+           safe, tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+  File f = fsx.open(path, "w");
+  if (!f) return String();
+  char line[96];
+  f.println("CardSat target search");
+  f.println("=====================");
+  snprintf(line, sizeof(line), "Target : %s (%s)", tsLabel,
+           tsKind==0?"US state":tsKind==1?"DXCC":"grid"); f.println(line);
+  snprintf(line, sizeof(line), "Point  : %.2f, %.2f", tsLat, tsLon); f.println(line);
+  snprintf(line, sizeof(line), "Horizon: next %d days, %d favorites", HORIZON_DAYS, favN); f.println(line);
+  snprintf(line, sizeof(line), "Hits   : %d pass%s (times UTC)", tsHitN, tsHitN==1?"":"es"); f.println(line);
+  f.println("");
+  for (int i = 0; i < tsHitN; ++i) {
+    HitRow& h = tsHits[i];
+    int dbIdx = db.indexOfNorad(h.norad);
+    const char* nm = (dbIdx >= 0) ? db.at(dbIdx).name : "?";
+    struct tm ta, te; time_t a = h.inStart ? h.inStart : h.aos, e = h.inEnd ? h.inEnd : h.los;
+    gmtime_r(&a, &ta); gmtime_r(&e, &te);
+    snprintf(line, sizeof(line), "%-10.10s %04d-%02d-%02d  %02d:%02d-%02d:%02dZ  max el %d",
+             nm, ta.tm_year+1900, ta.tm_mon+1, ta.tm_mday,
+             ta.tm_hour, ta.tm_min, te.tm_hour, te.tm_min, h.maxElWhole);
+    f.println(line);
+  }
+  f.close();
+  return String(path);
+}
+
 // ===========================================================================
 //  Saved rove-plan browser (SCR_ROVELIST) + read-only viewer (SCR_ROVEVIEW)
 //  Lists the .txt reports exportRovePlan() writes under /CardSat/RovePlans and shows one
@@ -35015,6 +35828,34 @@ static const int16_t DXCCPOLY_LAMAX[] = {
   -224,
 };
 
+bool App::tsResolveTarget() {
+  tsLat = tsLon = 0; tsLabel[0] = 0;
+  if (tsKind == 0) {                                   // US state (index into STATE_CODE / poly)
+    if (tsGeoIdx < 0 || tsGeoIdx >= STATE_N) return false;
+    tsLon = (STATEPOLY_LOMIN[tsGeoIdx] + STATEPOLY_LOMAX[tsGeoIdx]) / 20.0;
+    tsLat = (STATEPOLY_LAMIN[tsGeoIdx] + STATEPOLY_LAMAX[tsGeoIdx]) / 20.0;
+    tsLabel[0] = STATE_CODE[tsGeoIdx*2]; tsLabel[1] = STATE_CODE[tsGeoIdx*2+1]; tsLabel[2] = 0;
+    return true;
+  } else if (tsKind == 1) {                            // DXCC (geometry index 0..DXCC_N-1)
+    if (tsGeoIdx < 0 || tsGeoIdx >= DXCC_N) return false;
+    if (tsGeoIdx < DXCCPOLY_N) {                       // polygon: bbox centre
+      tsLon = (DXCCPOLY_LOMIN[tsGeoIdx] + DXCCPOLY_LOMAX[tsGeoIdx]) / 20.0;
+      tsLat = (DXCCPOLY_LAMIN[tsGeoIdx] + DXCCPOLY_LAMAX[tsGeoIdx]) / 20.0;
+    } else {                                           // point entity: direct coord
+      int k = tsGeoIdx - DXCCPOLY_N;
+      tsLon = DXCCPT[k*2] / 10.0; tsLat = DXCCPT[k*2 + 1] / 10.0;
+    }
+    dxccCode(tsGeoIdx, tsLabel);
+    return true;
+  } else {                                             // grid
+    double dlat, dlon;
+    if (!Location::gridToLatLon(String(tsGrid), dlat, dlon)) return false;
+    tsLat = dlat; tsLon = dlon;
+    strncpy(tsLabel, tsGrid, sizeof(tsLabel)-1); tsLabel[sizeof(tsLabel)-1] = 0;
+    return true;
+  }
+}
+
 // Point-in-polygon for a single polygon starting at int16 offset s0 (no advance).
 static bool dxccPipAt(double lon, double lat, int s0) {
   bool inside = false;
@@ -35051,6 +35892,25 @@ void App::addFootprintDxcc(double subLat, double subLon, double altKm) {
   // Each mesh point is rejected against every entity's bounding box (cheap)
   // before any ray-cast, and entities already found are skipped outright. ---
   int latLo = (int)floor(subLat - lamDeg), latHi = (int)ceil(subLat + lamDeg);
+  // Pre-filter ONCE per sample: only polygons whose bbox overlaps the footprint's lat/lon extent
+  // can contain any in-footprint cell. Iterating just these candidates in the per-cell loop below
+  // (instead of all DXCCPOLY_N) is the main speed lever and does NOT change results -- it only
+  // skips polygons a cell could never fall inside. lonHalf is widest at the highest |lat| row.
+  double clMin = cos((double)((abs(latLo) > abs(latHi) ? latLo : latHi) + 0.5) * D2R);
+  if (clMin < 0.15) clMin = 0.15;
+  double lonHalfMax = lamDeg / clMin + 2.0;
+  int16_t qLoMin = (int16_t)lround((subLon - lonHalfMax) * 10.0);
+  int16_t qLoMax = (int16_t)lround((subLon + lonHalfMax) * 10.0);
+  int16_t qLaMin = (int16_t)lround((subLat - lamDeg) * 10.0);
+  int16_t qLaMax = (int16_t)lround((subLat + lamDeg) * 10.0);
+  bool lonWrap = (lonHalfMax >= 178.0) || (subLon - lonHalfMax < -180.0) || (subLon + lonHalfMax > 180.0);
+  int candN = 0;
+  for (int idx = 0; idx < DXCCPOLY_N; ++idx) {
+    if (dxccBits[idx >> 3] & (1 << (idx & 7))) continue;             // already found
+    if (DXCCPOLY_LAMAX[idx] < qLaMin || DXCCPOLY_LAMIN[idx] > qLaMax) continue;  // lat bbox miss
+    if (!lonWrap && (DXCCPOLY_LOMAX[idx] < qLoMin || DXCCPOLY_LOMIN[idx] > qLoMax)) continue;
+    if (candN < DXCC_CAND_MAX) dxccCand[candN++] = (int16_t)idx;
+  }
   for (int la = latLo; la <= latHi; ++la) {
     if (la < -90 || la >= 90) continue;
     double clatR = (la + 0.5) * D2R;
@@ -35063,7 +35923,8 @@ void App::addFootprintDxcc(double subLat, double subLon, double altKm) {
       while (clon < -180) clon += 360; while (clon >= 180) clon -= 360;
       if (A + B * cos((clon - subLon) * D2R) < coslam) continue;
       int16_t qlo = (int16_t)lround(clon * 10.0), qla = (int16_t)lround((la + 0.5) * 10.0);
-      for (int idx = 0; idx < DXCCPOLY_N; ++idx) {
+      for (int ci = 0; ci < candN; ++ci) {
+        int idx = dxccCand[ci];
         if (dxccBits[idx >> 3] & (1 << (idx & 7))) continue;          // already found
         if (qlo < DXCCPOLY_LOMIN[idx] || qlo > DXCCPOLY_LOMAX[idx] ||
             qla < DXCCPOLY_LAMIN[idx] || qla > DXCCPOLY_LAMAX[idx]) continue;  // bbox reject
@@ -35075,6 +35936,102 @@ void App::addFootprintDxcc(double subLat, double subLon, double altKm) {
   // --- point entities: within footprint radius + claim radius of sub-point ---
   double limit = fpKm + CLAIM_KM;
   double limDeg = limit / 100.0 + 2.0;        // conservative latitude pre-reject band
+  for (int k = 0; k < DXCCPT_N; ++k) {
+    int gi = DXCCPOLY_N + k;
+    if (dxccBits[gi >> 3] & (1 << (gi & 7))) continue;
+    double ela = DXCCPT[k*2 + 1] / 10.0;
+    if (fabs(ela - subLat) > limDeg) continue;
+    double elo = DXCCPT[k*2] / 10.0;
+    if (dxccGcKm(subLat, subLon, ela, elo) <= limit)
+      dxccBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+  }
+}
+
+void App::addFootprintStatesDxcc(double subLat, double subLon, double altKm) {
+  // One shared mesh traversal covering BOTH states and DXCC polygons -- the workable-horizon
+  // sweep called addFootprintStates then addFootprintDxcc, walking the identical footprint mesh
+  // twice. This does it once. Results are byte-identical: the state path uses the RAW (unwrapped)
+  // cell longitude exactly as addFootprintStates did, the DXCC path uses the wrapped longitude
+  // exactly as addFootprintDxcc did, and the DXCC point-entity tail is unchanged.
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232, Re = 6371.0;
+  if (altKm < 1) return;
+  double coslam = Re / (Re + altKm);
+  double lamDeg = acos(coslam) * R2D;
+  double fpKm   = Re * acos(coslam);
+  const double CLAIM_KM = 80.0;
+  double sinSub = sin(subLat * D2R), cosSub = cos(subLat * D2R);
+  int latLo = (int)floor(subLat - lamDeg), latHi = (int)ceil(subLat + lamDeg);
+
+  // Shared footprint lat/lon extent for the candidate pre-filters.
+  double clMin = cos((double)((abs(latLo) > abs(latHi) ? latLo : latHi) + 0.5) * D2R);
+  if (clMin < 0.15) clMin = 0.15;
+  double lonHalfMax = lamDeg / clMin + 2.0;
+  int16_t qLoMin = (int16_t)lround((subLon - lonHalfMax) * 10.0);
+  int16_t qLoMax = (int16_t)lround((subLon + lonHalfMax) * 10.0);
+  int16_t qLaMin = (int16_t)lround((subLat - lamDeg) * 10.0);
+  int16_t qLaMax = (int16_t)lround((subLat + lamDeg) * 10.0);
+  bool lonWrap = (lonHalfMax >= 178.0) || (subLon - lonHalfMax < -180.0) || (subLon + lonHalfMax > 180.0);
+
+  // State candidates.
+  int sCandN = 0;
+  for (int idx = 0; idx < STATE_N; ++idx) {
+    if (stateBits[idx >> 3] & (1 << (idx & 7))) continue;
+    if (STATEPOLY_LAMAX[idx] < qLaMin || STATEPOLY_LAMIN[idx] > qLaMax) continue;
+    if (!lonWrap && (STATEPOLY_LOMAX[idx] < qLoMin || STATEPOLY_LOMIN[idx] > qLoMax)) continue;
+    if (sCandN < STATE_CAND_MAX) stateCand[sCandN++] = (int16_t)idx;
+  }
+  // DXCC polygon candidates.
+  int candN = 0;
+  for (int idx = 0; idx < DXCCPOLY_N; ++idx) {
+    if (dxccBits[idx >> 3] & (1 << (idx & 7))) continue;
+    if (DXCCPOLY_LAMAX[idx] < qLaMin || DXCCPOLY_LAMIN[idx] > qLaMax) continue;
+    if (!lonWrap && (DXCCPOLY_LOMAX[idx] < qLoMin || DXCCPOLY_LOMIN[idx] > qLoMax)) continue;
+    if (candN < DXCC_CAND_MAX) dxccCand[candN++] = (int16_t)idx;
+  }
+
+  for (int la = latLo; la <= latHi; ++la) {
+    if (la < -90 || la >= 90) continue;
+    double clatR = (la + 0.5) * D2R;
+    double cl = cos(clatR); if (cl < 0.15) cl = 0.15;
+    double lonHalf = lamDeg / cl + 2.0;
+    int lonLo = (int)floor(subLon - lonHalf), lonHi = (int)ceil(subLon + lonHalf);
+    double A = sin(clatR) * sinSub, B = cos(clatR) * cosSub;
+    int16_t qla = (int16_t)lround((la + 0.5) * 10.0);
+    for (int lo = lonLo; lo <= lonHi; ++lo) {
+      double clonRaw = lo + 0.5;                    // states used the UNwrapped longitude
+      if (A + B * cos((clonRaw - subLon) * D2R) < coslam) continue;   // footprint test (wrap-agnostic)
+      // --- states (raw longitude, exactly as addFootprintStates) ---
+      if (sCandN) {
+        int16_t qloS = (int16_t)lround(clonRaw * 10.0);
+        for (int ci = 0; ci < sCandN; ++ci) {
+          int idx = stateCand[ci];
+          if (stateBits[idx >> 3] & (1 << (idx & 7))) continue;
+          if (qloS < STATEPOLY_LOMIN[idx] || qloS > STATEPOLY_LOMAX[idx] ||
+              qla  < STATEPOLY_LAMIN[idx] || qla  > STATEPOLY_LAMAX[idx]) continue;
+          if (statePipAt(clonRaw, la + 0.5, STATEPOLY_START[idx]))
+            stateBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+        }
+      }
+      // --- DXCC polygons (wrapped longitude, exactly as addFootprintDxcc) ---
+      if (candN) {
+        double clon = clonRaw;
+        while (clon < -180) clon += 360; while (clon >= 180) clon -= 360;
+        int16_t qlo = (int16_t)lround(clon * 10.0);
+        for (int ci = 0; ci < candN; ++ci) {
+          int idx = dxccCand[ci];
+          if (dxccBits[idx >> 3] & (1 << (idx & 7))) continue;
+          if (qlo < DXCCPOLY_LOMIN[idx] || qlo > DXCCPOLY_LOMAX[idx] ||
+              qla < DXCCPOLY_LAMIN[idx] || qla > DXCCPOLY_LAMAX[idx]) continue;
+          if (dxccPipAt(clon, la + 0.5, DXCCPOLY_START[idx]))
+            dxccBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+        }
+      }
+    }
+  }
+
+  // --- DXCC point entities (unchanged from addFootprintDxcc) ---
+  double limit = fpKm + CLAIM_KM;
+  double limDeg = limit / 100.0 + 2.0;
   for (int k = 0; k < DXCCPT_N; ++k) {
     int gi = DXCCPOLY_N + k;
     if (dxccBits[gi >> 3] & (1 << (gi & 7))) continue;
@@ -35134,8 +36091,9 @@ void App::drawDxcc() {
     }
   }
   SatEntry* s = activeSat();
-  { String h = (s ? String(s->name) : String("DXCC")) +
-               (dxccLive ? " now" : " pass");
+  { String h;
+    if (!dxccLive && wListReturn == SCR_WORKHZN) h = "Workable DXCC";      // horizon union
+    else h = (s ? String(s->name) : String("DXCC")) + (dxccLive ? " now" : " pass");
     header(h); }
   canvas.setTextSize(1);
   if (dxccN == 0) {
@@ -35170,7 +36128,7 @@ void App::drawDxcc() {
 
 void App::keyDxcc(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { screen = dxccLive ? liveReturn : SCR_PASSES; lastDrawMs = 0; return; }
+  if (isBack(c, back)) { screen = dxccLive ? liveReturn : wListReturn; lastDrawMs = 0; return; }
   const int PER = 5 * 8;
   if (isDown(c)) { if (dxccScroll + PER < dxccN) dxccScroll += 5; lastDrawMs = 0; return; }
   if (isUp(c))   { if (dxccScroll >= 5) dxccScroll -= 5; lastDrawMs = 0; return; }
@@ -35776,7 +36734,7 @@ void App::drawSchedule() {
       canvas.setCursor(232, y); canvas.print("!");
     }
   }
-  footer("ENT trk m map t timeln p plan `bk");
+  footer("ENT trk m map t tl p plan w/s find `bk");
 }
 
 void App::drawSatList() {
@@ -36516,6 +37474,26 @@ void App::buildPolarPath() {
     double az, el; pred.azelAt(t, az, el);
     polarAz[i] = (float)az; polarEl[i] = (float)el;
   }
+  polarPathValid = true;
+}
+
+void App::buildPolarForPass(uint32_t norad, time_t aos, time_t los) {
+  polarPathValid = false;
+  if (!timeIsSet()) return;
+  int dbIdx = db.indexOfNorad(norad);
+  if (dbIdx < 0) return;
+  pred.setSite(loc.obs());
+  if (!pred.setSat(db.at(dbIdx))) return;
+  polarPass.aos = aos; polarPass.los = los; polarPass.tca = (aos + los) / 2;
+  double span = (double)(los - aos); if (span < 1) span = 1;
+  float maxEl = 0;
+  for (int i = 0; i < POLAR_PTS; ++i) {
+    time_t t = aos + (time_t)llround(span * i / (double)(POLAR_PTS - 1));
+    double az, el; pred.azelAt(t, az, el);
+    polarAz[i] = (float)az; polarEl[i] = (float)el;
+    if (el > maxEl) maxEl = (float)el;
+  }
+  polarPass.maxEl = maxEl;
   polarPathValid = true;
 }
 

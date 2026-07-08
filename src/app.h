@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -689,6 +689,88 @@ private:
   int      planField = 0;              // 0=grid 1=date 2=time 3=window 4=[compute]
   int      planDetailIdx = 0;          // which PlanRow the detail screen is showing
   void planDetailFrom(int idx);
+
+  // ---- Workable horizon (SCR_WORKHZN): 10-day "ever workable" union across favorites ----
+  // Sweeps every pass of the selected favorite(s) over HORIZON_DAYS and OR-accumulates which
+  // DXCC / US states / grids are workable at least once. Union bitsets are cheap: OR-ing a
+  // thousand passes costs the same RAM as one. Grids reuse the shared ~4 KB gridBits block,
+  // freed on done/cancel (heap discipline). Jobbed one PASS per loop() with a progress bar.
+  enum WhPhase { WH_IDLE, WH_COUNTING, WH_RUNNING, WH_DONE, WH_CANCEL };
+  static const int HORIZON_DAYS = 10;
+  // The union accumulator IS the shared stateBits / dxccBits / gridBits: zeroed once at start,
+  // then addFootprint* OR into them per sample with no clearing between passes. No extra bitset.
+  WhPhase  whPhase = WH_IDLE;
+  bool     whAllFavs = true;           // scope: all favorites vs the single selected sat
+  bool     whWantGrids = true;         // false = fast mode (states+DXCC only, no gridBits alloc)
+  uint32_t whSingleNorad = 0;          // when !whAllFavs
+  int      whFavCursor = 0;            // index into favs currently being swept
+  time_t   whLastAos = 0;              // AOS of the previous pass processed (non-progress guard)
+  time_t   whWinFrom = 0, whWinTo = 0; // per-favorite predictPasses paging cursor
+  static const int WH_SEG_MAX = 20;    // day-segment cache (one pass processed per tick)
+  PassPredict whSeg[WH_SEG_MAX];
+  int      whSegN = 0, whSegI = 0;
+  time_t   whHorizonEnd = 0;           // now + HORIZON_DAYS (fixed at start)
+  int      whPassesDone = 0, whPassesTotal = 0;   // progress-bar numerator / denominator
+  int      whStateN = 0, whDxccN = 0, whGridN = 0;// live popcounts
+  uint32_t whLastDrawMs = 0;
+  void whStart(bool allFavs, bool wantGrids, uint32_t singleNorad);  // seed + estimate passes
+  void whJobTick();                    // advance one pass of the sweep (pumped from loop())
+  void whNextFavorite();               // advance the pager to the next favorite (resets guard)
+  void whFinish();                     // popcounts + free gridBits
+  String whExport();                   // write the union to a .txt under /CardSat; returns path
+  void drawWorkHzn(); void keyWorkHzn(char c, bool enter, bool back);
+
+  // ---- Target search (SCR_TGTSEARCH pick / SCR_TGTHITS run+results) ----
+  // Inverse of the workable horizon: pick ONE target (US state / DXCC / grid) and find every
+  // pass on any favorite over HORIZON_DAYS during which it is workable. Keeps per-pass TIMING
+  // (a small .bss hit list), not a union. The membership test is one shared pointInFootprint()
+  // per sample against the target's representative point (bbox centre for state/DXCC polygons,
+  // the point coord for DXCC point-entities, the locator centre for grids) -- far cheaper than
+  // filling a bitset, so this search is snappier than the union sweep. Zero heap allocation.
+  enum TsPhase { TS_PICK, TS_RUNNING, TS_DONE, TS_CANCEL };
+  static const int TS_HIT_MAX = 40;
+  struct HitRow {
+    uint32_t norad;                    // favorite satellite
+    time_t   aos, los;                 // full pass window
+    time_t   inStart, inEnd;           // workable sub-window (target inside footprint)
+    uint8_t  maxElWhole;               // pass max elevation (context)
+  };
+  HitRow   tsHits[TS_HIT_MAX];         // .bss result list
+  int      tsHitN = 0;
+  TsPhase  tsPhase = TS_PICK;
+  uint8_t  tsKind = 0;                 // 0=state 1=dxcc 2=grid
+  int      tsPickSel = 0, tsPickScroll = 0;   // selection cursor in the pick list
+  char     tsFilter[8] = {0};          // type-to-filter prefix for the state/DXCC pick list
+  int      tsGeoIdx = -1;              // state index, or DXCC geometry index (0..DXCC_N-1)
+  double   tsLat = 0, tsLon = 0;       // resolved target representative point
+  char     tsGrid[8] = {0};            // grid text entry (kind=grid)
+  char     tsLabel[24] = {0};          // display label for the chosen target
+  // Chronological merge across ALL favorites: keep each favorite's NEXT upcoming pass in a slot,
+  // and each tick process the globally-earliest slot, then refill just that one. This yields hits
+  // in time order across the fleet, so the TS_HIT_MAX cap keeps the SOONEST passes (not the first
+  // favorite's). tsNextAos[i] == 0 means favorite i is exhausted.
+  static const int TS_FAV_MAX = 32;    // favorites merged (bounds .bss; far above realistic use)
+  PassPredict tsNextPass[TS_FAV_MAX];  // each favorite's next upcoming pass (valid if tsNextAos>0)
+  time_t   tsNextAos[TS_FAV_MAX];      // AOS of that pass, or 0 when the favorite is exhausted
+  time_t   tsCursor[TS_FAV_MAX];       // per-favorite paging cursor (search-from time)
+  time_t   tsLastAos[TS_FAV_MAX];      // AOS of last CONSUMED pass (skips the re-returned stale one)
+  int      tsFavCount = 0;             // number of valid favorites participating
+  time_t   tsHorizonEnd = 0;
+  int      tsPassesDone = 0, tsPassesTotal = 0;
+  int      tsHitSel = 0, tsHitScroll = 0;
+  Screen   tsReturn = SCR_SCHEDULE;    // where both target-search screens' back key returns to
+  uint32_t tsLastDrawMs = 0;
+  bool     tsResolveTarget();          // fill tsLat/tsLon/tsLabel from kind+selection; false=bad
+  bool     tsMatchFilter(const char* code); // true if code starts with tsFilter (case-insensitive)
+  int      tsFilteredGeoIdx(int matchPos);  // map the matchPos-th filtered entry -> geometry index
+  void     tsStart();                  // seed per-favorite cursors + estimate pass total
+  void     tsJobTick();                // process the globally-earliest next pass across favorites
+  void     tsFinish();                 // mark done, request a redraw (hits already time-ordered)
+  void     tsRefillFav(int fi);        // load favorite fi's next pass at/after its cursor
+  void     drawTgtSearch(); void keyTgtSearch(char c, bool enter, bool back);
+  void     drawTgtHits();   void keyTgtHits(char c, bool enter, bool back);
+  String   tsExport();                 // write the hit list to a .txt under /CardSat
+
   // ---- Saved rove-plan browser (SCR_ROVELIST) + read-only viewer (SCR_ROVEVIEW) ----
   // Lists the .txt files exportRovePlan() writes under /CardSat/RovePlans and shows one,
   // read-only, in a scrolling viewer. The viewer holds a BOUNDED slice of the file in RAM
@@ -792,6 +874,7 @@ private:
   uint32_t lastTiltMs = 0;        // last tilt-tune service time (rate integration)
   bool     manFixUp = false;      // Manual mode: false = fix downlink, true = fix uplink
   Screen   liveReturn = SCR_TRACK; // polar/grid/log return here (Track or Manual)
+  Screen   wListReturn = SCR_PASSES; // non-live states/DXCC list back target (default: Passes)
   Screen   trackReturn = SCR_PASSES; // where the Track screen's back key returns to
   Screen   passesReturn = SCR_SATLIST; // where the Passes screen's back key returns to
   Screen   lotwReturn = SCR_LOG; // where the LoTW upload screen's back key returns to
@@ -1118,6 +1201,7 @@ private:
   void computePasses();                        // predict passes[] for the active sat
                                                // and fill passVis[] once (not per frame)
   void buildPolarPath();                       // sample current/next pass for the live polar
+  void buildPolarForPass(uint32_t norad, time_t aos, time_t los);  // polar arc for a specific pass
   void computeMutual(const String& grid);      // co-visibility windows vs a DX grid
   void drawPolarGrid(int cx, int cy, int R);   // shared polar rings + cardinal cross
   void drawPolarArc(int cx, int cy, int R, const float* az, const float* el, int n);
@@ -1595,6 +1679,17 @@ private:
   void noteEditNew();              // start a blank new note
   void noteEditOpen(const char* base); // open an existing note in the editor
   void buildGrids(time_t a, time_t b);
+  // Shared footprint-membership test (used by the workable-horizon sweep and target search):
+  // true if the point (lat,lon) lies within the ground footprint of a satellite whose sub-point
+  // is (subLat,subLon) at altitude altKm. Same spherical-cap geometry the addFootprint* fills use.
+  static bool pointInFootprint(double lat, double lon, double subLat, double subLon, double altKm);
+  // Per-sample bbox candidate scratch for the footprint fills (speeds up the union sweep + rove
+  // planner; results are identical -- only entities whose bbox can't overlap the footprint are
+  // skipped). Sized to the polygon-entity counts (161 DXCC polygons, 51 states).
+  static const int DXCC_CAND_MAX = 161;
+  static const int STATE_CAND_MAX = 51;
+  int16_t  dxccCand[DXCC_CAND_MAX];
+  int16_t  stateCand[STATE_CAND_MAX];
   int  countWorkableGrids(SatEntry& s, time_t a, time_t b);    // rove planner (explicit sat)
   void addFootprintGrids(double subLat, double subLon, double altKm);
   void drawGrid();    void keyGrid(char c, bool enter, bool back);
@@ -1605,6 +1700,9 @@ private:
   void buildDxcc(time_t a, time_t b);
   int  countWorkableDxcc(SatEntry& s, time_t a, time_t b);     // rove planner (explicit sat)
   void addFootprintDxcc(double subLat, double subLon, double altKm);
+  // Combined states+DXCC footprint fill: one shared mesh walk instead of two (the workable-horizon
+  // sweep's hot path). Byte-identical to calling addFootprintStates then addFootprintDxcc.
+  void addFootprintStatesDxcc(double subLat, double subLon, double altKm);
   void drawDxcc();    void keyDxcc(char c, bool enter, bool back);
   void drawGpSrc();   void keyGpSrc(char c, bool enter, bool back);
   void drawWorldMap(); void keyWorldMap(char c, bool enter, bool back);
@@ -1626,7 +1724,19 @@ private:
 
   // Games menu + the five mini-games. Each is draw + key + a reset; all fixed-size.
   void drawGamesMenu(); void keyGamesMenu(char c, bool enter, bool back);
+  void beep(uint16_t freq, uint16_t ms);       // on-demand speaker beep (acquires + schedules release)
   void sfx(uint16_t freq, uint16_t ms);        // gated game sound (cfg.gameSound)
+  // On-demand speaker power. The M5 Speaker holds ~8 KB of I2S/DMA buffers while enabled; keeping
+  // it OFF except when audio is actually needed frees that block for TLS handshakes (LoTW uploads
+  // fail when the largest contiguous block gets too small). acquire() brings it up (idempotent);
+  // releaseAfter() schedules an end() once the deadline passes (so an alarm's tail still plays and
+  // we don't thrash begin/end -- each cycle pops). serviceAudioRelease() runs the deferred end().
+  void audioAcquire();                         // ensure speaker is up (begin + volume), cancel pending release
+  void audioReleaseAfter(uint32_t ms);         // schedule speaker end() after ms of no audio
+  void serviceAudioRelease();                  // loop hook: perform a due deferred end()
+  bool     audioUp = false;                    // is the speaker currently begun?
+  uint32_t audioReleaseAt = 0;                 // millis() deadline for a pending end() (0 = none)
+  bool     audioGameOwned = false;             // audio was acquired for a game session (release on exit)
   bool gameTiltAxis(float& outLR);             // tilt left/right in [-1,1]; false if unavailable
   void drawGDoppler();  void keyGDoppler(char c, bool enter, bool back);  void gDopplerReset();
   void drawGPass();     void keyGPass(char c, bool enter, bool back);     void gPassReset();

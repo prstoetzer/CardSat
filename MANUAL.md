@@ -3563,7 +3563,8 @@ listed below.
   sats carry a red `!`.
 - **Keys** — `;`/`.` select; **ENTER** opens **Pass detail**; `m` opens the live
   **World map**; `t` the **sky-at-a-glance** timeline; `p` the **Rove planner**
-  (below); `z` arms **deep sleep** until the next AOS; `` ` `` back.
+  (below); `w` the **Workable horizon** and `s` the **Target search** (both below);
+  `z` arms **deep sleep** until the next AOS; `` ` `` back.
 
 ### Rove planner
 
@@ -3598,6 +3599,56 @@ listed below.
   `d` deletes (with a confirm), `r` rescans, `` ` `` back. The viewer holds a bounded slice
   of the file in RAM, so a very large plan shows a *"(truncated — download for full file)"*
   note; use the web **Files** page ([§18](#18-mobile-web-control)) to pull the whole file.
+
+### Workable horizon
+
+- **Purpose** — a ten-day *outward* view: over the coming ten days, which US states,
+  DXCC entities, and (optionally) grids will **ever** be workable through **any** of your
+  favorites? Where the Rove planner answers "what does a chosen place and time look like,"
+  the Workable horizon answers "over the whole coming week and a half, what is the complete
+  set of places I can reach from here."
+- **Reached from** — Next Passes (favs) → `w`.
+- **Shows** — a progress bar while the ten-day sweep runs (incrementally, one pass per
+  loop, so the unit stays responsive), with the running counts of workable **states** and
+  **DXCC** growing live as coverage accumulates. The result is the **union** across every
+  favorite and every pass — an entity counts as workable if it falls inside the footprint
+  during *any* pass while the satellite is above your horizon.
+- **Grids off by default** — the grid union needs a few kilobytes of working memory, which
+  on this board is better left free for other tasks (notably network uploads). States and
+  DXCC — the common case — use no extra memory. Press `g` on the results screen to re-run
+  the sweep **with grids included** on demand.
+- **Drill-down** — `s` opens the full **Workable states** list, `d` the full **Workable
+  DXCC** list (both drawn from the ten-day union, and titled to distinguish them from the
+  Rove planner's per-pass lists).
+- **Save to text file** — `w` writes the whole result under `/CardSat/workable/` on the
+  active filesystem.
+- **Keys** — `s` states list, `d` DXCC list, `g` re-run including grids, `w` save,
+  `` ` `` back.
+
+### Target search
+
+- **Purpose** — the *inward* counterpart to the Workable horizon: pick **one** place and
+  find every upcoming chance to work it. This is the direct rover / award-chaser question —
+  *I need this state (or DXCC entity, or grid) — when is my next shot?* — answered for the
+  next ten days across your whole fleet in a single screen.
+- **Reached from** — Next Passes (favs) → `s`.
+- **Pick a target** — a **US state**, a **DXCC entity**, or a **grid**. Grids are typed
+  into the on-screen editor; states and DXCC are chosen from a filterable list (type a
+  letter to narrow it).
+- **Shows** — every pass, across **all** favorites over the next ten days, where the chosen
+  target sits inside the footprint while the satellite is up for you — listed **in time
+  order across the whole fleet** (soonest first, satellites mixed together), each row
+  showing the satellite, the date, the **workable window** (the span of the pass during
+  which the target is actually in the footprint), and the maximum elevation. Up to 40 of
+  the soonest passes are kept. If the target simply can't be reached from your location in
+  the window — for instance a distant DXCC entity no single LEO footprint can cover
+  together with your QTH — the search completes and reports none, rather than leaving you
+  guessing.
+- **Polar plot** — press **ENTER** on any row to see that specific pass drawn as a polar
+  plot.
+- **Save to text file** — `w` writes the results under `/CardSat/search/`.
+- **Keys** — in the picker: type to filter, `;`/`.` select, **ENTER** choose; in the
+  results: `;`/`.` select, **ENTER** polar plot of that pass, `w` save, `` ` `` back.
 
 ### Passes
 

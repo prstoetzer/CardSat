@@ -18,6 +18,17 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.53:** a **memory & reliability** release. Fixes **LoTW/Cloudlog uploads failing
+> partway through a multi-batch session** on this no-PSRAM board, by reclaiming the contiguous
+> heap a TLS handshake needs — chiefly a **half-size display sprite** (4bpp/16-colour, ~16 KB
+> freed, colours identical), plus right-sized working buffers and on-demand audio. The unit now
+> idles with far more free memory and a rock-solid largest block; on-device, three back-to-back
+> LoTW batches upload with zero send stalls. Also adds **multi-file download** to the web Files
+> page (tick files, **Download selected**) — implemented client-side, so no extra memory on the
+> device.
+>
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.53.md)**.
+
 > **New in v0.9.52:** two complementary planning tools on **Next Passes**. **Workable horizon**
 > (`w`) sweeps the next ten days and builds the **union** of every US state, DXCC entity, and
 > (on demand) grid that will *ever* be workable through any favorite — the complete reach of your

@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.52";
+static constexpr const char* FW_VERSION = "0.9.53";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -385,6 +385,7 @@ static constexpr int   MUTUAL_HORIZON_DAYS = 10; // search co-visibility this ma
 static constexpr int   VIS_DAYS        = 10;   // InstantTrack-style overview horizon (days)
 static constexpr int   ORB_OUTLOOK_DAYS = 7;   // orbital-analysis pass-outlook window (days)
 static constexpr int   VIS_PASS_MAX    = 128;  // passes cached for the 10-day overview
+static constexpr int   VIS_DAY_MAX     = 32;   // passes in ONE day-window (scratch; a LEO does ~16/day)
                                                // (busy LEO ~10-12/day x 10 d; was 64,
                                                // which truncated the last day-rows)
 static constexpr int   ILLUM_DAYS      = 60;   // illumination raster columns (days)
@@ -11805,6 +11806,16 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
       int w = client.write(p + off, n - off);
       if (w > 0) { off += (size_t)w; lastProgress = millis(); if ((size_t)w > dbgMaxWrite) dbgMaxWrite = (size_t)w; }
       else {
+        // Log heap AT THE STALL (once) -- a zero write here means the TCP send window won't
+        // drain, and on this no-PSRAM part that is usually LWIP failing to allocate a send
+        // pbuf because contiguous heap is tight (the 16 KB BearSSL RX buffer is resident for
+        // the whole upload). "before TLS" heap doesn't show this; the stall-time figure does.
+        if (dbgZeroWrites == 0) {
+          Serial.printf("[net] TX stall: free %u largest %u (sent %u/%u)\n",
+                        (unsigned)ESP.getFreeHeap(),
+                        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                        (unsigned)off, (unsigned)n);
+        }
         dbgZeroWrites++;
         client.flush();                 // push queued segments so the peer can ACK/reopen the window
         delay(10); yield();
@@ -13446,12 +13457,24 @@ void App::setup() {
   imuReady = M5.Imu.isEnabled();
   Serial.begin(115200);             // diagnostics on the USB serial monitor
   M5Cardputer.Display.setRotation(1);
-  // 8bpp palette canvas: 32 KB sprite (vs 64 KB at 16bpp). The smaller footprint
-  // leaves ~85 KB free for the mbedTLS handshake with the sprite KEPT allocated,
-  // so we never delete/recreate it (the 16bpp 64 KB block never returns on IDF
-  // 5.4.x, which froze the screen). Colours come from CL_PALETTE via the index
-  // scheme (see the CL_* enum); createPalette installs them.
-  canvas.setColorDepth(8);
+  // 4bpp palette canvas: ~16 KB sprite (vs 32 KB at 8bpp, 64 KB at 16bpp). The
+  // smaller footprint lifts the largest contiguous free block so the BearSSL TLS
+  // handshake fits with the sprite KEPT allocated -- we never delete/recreate it
+  // (a freed sprite block does not reliably return on this M5GFX/IDF combo, which
+  // froze the screen). Colours come from CL_PALETTE via the index scheme (see the
+  // CL_* enum); createPalette installs them. Depth is set by CANVAS_DEPTH below.
+  // Display sprite colour depth. 4bpp = 16-colour palette sprite = ~16.2 KB
+  // (240x135/2), vs 32 KB at 8bpp. Our palette has 13 entries (CL_BLACK..CL_MGREY),
+  // well inside 4bpp's 16-colour limit, so every CL_* index and CL_PALETTE entry is
+  // used unchanged -- colours are byte-for-byte identical, only the per-pixel storage
+  // halves. Halving this resident block lifts the largest contiguous free region
+  // (the figure that gates TLS handshakes) by ~16 KB. To REVERT: set CANVAS_DEPTH
+  // back to 8 (nothing else needs to change). Do NOT delete/recreate the sprite at
+  // runtime -- a freed sprite block does not reliably return on this M5GFX/IDF combo
+  // (why freeCanvasForTls() is a no-op); a compile-time depth change is safe because
+  // the sprite is still created exactly once at boot.
+  static const int CANVAS_DEPTH = 4;   // 4 or 8 (see note above)
+  canvas.setColorDepth(CANVAS_DEPTH);
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
   canvas.createPalette(CL_PALETTE, CL_PALETTE_N);
   canvas.setTextWrap(false);
@@ -17124,11 +17147,17 @@ a.row{color:var(--fg);text-decoration:none}a.row:active{color:var(--acc)}
 .dir{color:var(--acc);font-weight:600}
 .err{color:#e5534b;padding:12px 0}
 .up{display:inline-block;margin-bottom:8px;color:var(--acc);text-decoration:none}
+.bar{display:flex;align-items:center;gap:10px;margin:8px 0}
+.bar button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:7px 12px;font-size:14px;cursor:pointer}
+.bar button:disabled{background:var(--bd);color:var(--mut);cursor:default}
+.bar .cnt{color:var(--mut);font-size:13px}
+td.ck{width:26px;text-align:center}input[type=checkbox]{width:16px;height:16px}
 </style></head><body>
 <header><b>CardSat files</b><a class="home" href="/">&larr; control</a></header>
 <main>
 <div id="crumb" class="crumb">/CardSat</div>
 <a id="up" class="up" href="#" style="display:none">&uarr; up a level</a>
+<div class="bar"><button id="dlsel" disabled>Download selected</button><span class="cnt" id="selcnt">0 selected</span></div>
 <table id="tbl"><tr><td class="mut">loading&hellip;</td></tr></table>
 </main>
 <script>
@@ -17137,6 +17166,24 @@ function fmtSz(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1
 function fmtDt(t){if(!t)return '';var d=new Date(t*1000);function p(x){return(x<10?'0':'')+x}
  return d.getUTCFullYear()+'-'+p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate())+' '+p(d.getUTCHours())+':'+p(d.getUTCMinutes())+'Z'}
 function parent(p){if(p==='/CardSat')return null;var i=p.lastIndexOf('/');var up=p.substring(0,i);return up.length<8?'/CardSat':up}
+// Download one file by navigating a hidden iframe to /api/file; the attachment
+// header makes the browser save it. Sequential (one at a time) so the ESP32 only
+// ever streams a single file per request -- no server-side batching or buffering.
+function dl1(url){return new Promise(function(res){
+ var f=document.createElement('iframe');f.style.display='none';f.src=url;
+ document.body.appendChild(f);
+ setTimeout(function(){f.remove();res()},900)})}
+function selected(){return Array.prototype.slice.call(
+ document.querySelectorAll('input.sel:checked')).map(function(c){return c.dataset.p})}
+function refreshCnt(){var n=selected().length;
+ document.getElementById('selcnt').textContent=n+' selected';
+ document.getElementById('dlsel').disabled=(n===0)}
+function downloadSelected(){var files=selected();if(!files.length)return;
+ var btn=document.getElementById('dlsel');btn.disabled=true;
+ var i=0;(function next(){
+  if(i>=files.length){btn.disabled=false;refreshCnt();return}
+  document.getElementById('selcnt').textContent='downloading '+(i+1)+'/'+files.length+'\u2026';
+  dl1('/api/file?path='+files[i++]).then(next)})()}
 function load(dir){cur=dir;document.getElementById('crumb').textContent=dir;
  var up=parent(dir);var ua=document.getElementById('up');
  if(up){ua.style.display='';ua.onclick=function(e){e.preventDefault();load(up)}}else{ua.style.display='none'}
@@ -17145,16 +17192,19 @@ function load(dir){cur=dir;document.getElementById('crumb').textContent=dir;
   if(!d.ok){t.innerHTML='<tr><td class="err">Cannot open '+dir+'</td></tr>';return}
   var items=d.items||[];
   items.sort(function(a,b){if(a.dir!=b.dir)return a.dir?-1:1;return a.name.localeCompare(b.name)});
-  if(!items.length){t.innerHTML='<tr><td class="mut">(empty)</td></tr>';return}
-  var h='<tr><th>Name</th><th class="sz">Size</th><th class="dt">Modified</th></tr>';
+  if(!items.length){t.innerHTML='<tr><td class="mut">(empty)</td></tr>';refreshCnt();return}
+  var h='<tr><th class="ck"></th><th>Name</th><th class="sz">Size</th><th class="dt">Modified</th></tr>';
   items.forEach(function(it){
    var full=(dir==='/'?'':dir)+'/'+it.name;
-   if(it.dir){h+='<tr><td><a class="row dir" href="#" data-d="'+full+'">'+it.name+'/</a></td><td class="sz"></td><td class="dt">'+fmtDt(it.mtime)+'</td></tr>'}
-   else{h+='<tr><td><a class="row" href="/api/file?path='+encodeURIComponent(full)+'">'+it.name+'</a></td><td class="sz">'+fmtSz(it.size)+'</td><td class="dt">'+fmtDt(it.mtime)+'</td></tr>'}
+   if(it.dir){h+='<tr><td class="ck"></td><td><a class="row dir" href="#" data-d="'+full+'">'+it.name+'/</a></td><td class="sz"></td><td class="dt">'+fmtDt(it.mtime)+'</td></tr>'}
+   else{h+='<tr><td class="ck"><input type="checkbox" class="sel" data-p="'+encodeURIComponent(full)+'"></td><td><a class="row" href="/api/file?path='+encodeURIComponent(full)+'">'+it.name+'</a></td><td class="sz">'+fmtSz(it.size)+'</td><td class="dt">'+fmtDt(it.mtime)+'</td></tr>'}
   });
   t.innerHTML=h;
   t.querySelectorAll('a.dir').forEach(function(a){a.onclick=function(e){e.preventDefault();load(a.dataset.d)}});
+  t.querySelectorAll('input.sel').forEach(function(c){c.onchange=refreshCnt});
+  refreshCnt();
  }).catch(function(e){document.getElementById('tbl').innerHTML='<tr><td class="err">offline</td></tr>'})}
+document.getElementById('dlsel').onclick=downloadSelected;
 load('/CardSat');
 </script></body></html>
 )HTMLFILE";
@@ -20612,11 +20662,13 @@ void App::buildVisList() {
   // the tail of the span for high-pass-rate LEO sats (~15 passes/day x 10 days
   // would exceed a single 128-pass batch). vlPasses[] holds only the VISIBLE
   // passes, which are far fewer, so its cap is rarely a constraint.
-  static PassPredict day[VIS_PASS_MAX];
+  // One day-window's passes only (segEnd = from + 86400); a LEO does ~16/day, so this is
+  // deliberately much smaller than the 10-day visPasses/vlPasses caps -- it's pure scratch.
+  static PassPredict day[VIS_DAY_MAX];
   time_t from = now;
   while (from < winEnd && vlN < VIS_PASS_MAX) {
     time_t segEnd = from + 86400; if (segEnd > winEnd) segEnd = winEnd;
-    int n = pred.predictPasses(from, cfg.minPassEl, day, VIS_PASS_MAX, segEnd);
+    int n = pred.predictPasses(from, cfg.minPassEl, day, VIS_DAY_MAX, segEnd);
     if (n <= 0) { from = segEnd; continue; }
     for (int i = 0; i < n && vlN < VIS_PASS_MAX; ++i) {
       bool vis = false;
@@ -23156,6 +23208,14 @@ void App::doLotwUpload(const String& keyPass) {
   bool posted = net.httpsPostMultipart(LOTW_UPLOAD_URL, "upfile",
                                        LOTW_TQ8_OUT, "cardsat.tq8",
                                        "application/octet-stream", resp);
+  // Heap AFTER the POST returns (its TLS client has been stop()'d and destroyed). Compare this
+  // to the "signing" line before the NEXT batch: if the largest block does not return to its
+  // pre-POST value across consecutive uploads, the BearSSL RX buffer alloc/free is ratcheting
+  // the heap down per connection (a persistent client would fix that). If it recovers cleanly,
+  // the stall is transient contiguity pressure, not a ratchet.
+  Serial.printf("[lotw] after POST: heap free %u, largest %u (posted=%d)\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (int)posted);
   if (!posted) {
     // Negative lastCode = transport/connect failure (the -1 a churned heap can cause),
     // not a server response -- a clean-boot reboot is the cure. Offer it (confirm first;

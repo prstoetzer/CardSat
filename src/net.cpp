@@ -771,6 +771,16 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
       int w = client.write(p + off, n - off);
       if (w > 0) { off += (size_t)w; lastProgress = millis(); if ((size_t)w > dbgMaxWrite) dbgMaxWrite = (size_t)w; }
       else {
+        // Log heap AT THE STALL (once) -- a zero write here means the TCP send window won't
+        // drain, and on this no-PSRAM part that is usually LWIP failing to allocate a send
+        // pbuf because contiguous heap is tight (the 16 KB BearSSL RX buffer is resident for
+        // the whole upload). "before TLS" heap doesn't show this; the stall-time figure does.
+        if (dbgZeroWrites == 0) {
+          Serial.printf("[net] TX stall: free %u largest %u (sent %u/%u)\n",
+                        (unsigned)ESP.getFreeHeap(),
+                        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                        (unsigned)off, (unsigned)n);
+        }
         dbgZeroWrites++;
         client.flush();                 // push queued segments so the peer can ACK/reopen the window
         delay(10); yield();

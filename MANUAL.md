@@ -3265,10 +3265,13 @@ on-device UI; the device keeps tracking and you can use its keypad at the same t
 `/files` for pulling files off the device without removing the SD card or rebooting into a
 Launcher. It lists the `/CardSat` tree — rove plans, screenshots, logs, notes, and the like
 — with sizes and modified times; click a folder to descend, click a file to download it.
-Access is confined to `/CardSat` (a path guard rejects anything outside that tree), and this
-is **download-only** — there is no upload path, so the page cannot write to or modify the
-device's filesystem. Like the rest of web control it's unauthenticated on the LAN, so the
-same trust caveat applies.
+To grab several at once, tick the checkbox beside each file and press **Download selected** —
+the browser saves them one after another (the device still streams a single file per request,
+so there's no extra memory cost on the unit; a browser may ask permission the first time it's
+handed multiple downloads). Access is confined to `/CardSat` (a path guard rejects anything
+outside that tree), and this is **download-only** — there is no upload path, so the page cannot
+write to or modify the device's filesystem. Like the rest of web control it's unauthenticated on
+the LAN, so the same trust caveat applies.
 
 > **Developers:** the page is backed by a small **HTTP + JSON API** (`/api/status`,
 > `/api/sats`, `/api/passes`, `/api/orbit`, `/api/tx`, and a few `POST` controls) that

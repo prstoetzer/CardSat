@@ -126,7 +126,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.52";
+static constexpr const char* FW_VERSION = "0.9.53";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -190,6 +190,7 @@ static constexpr int   MUTUAL_HORIZON_DAYS = 10; // search co-visibility this ma
 static constexpr int   VIS_DAYS        = 10;   // InstantTrack-style overview horizon (days)
 static constexpr int   ORB_OUTLOOK_DAYS = 7;   // orbital-analysis pass-outlook window (days)
 static constexpr int   VIS_PASS_MAX    = 128;  // passes cached for the 10-day overview
+static constexpr int   VIS_DAY_MAX     = 32;   // passes in ONE day-window (scratch; a LEO does ~16/day)
                                                // (busy LEO ~10-12/day x 10 d; was 64,
                                                // which truncated the last day-rows)
 static constexpr int   ILLUM_DAYS      = 60;   // illumination raster columns (days)

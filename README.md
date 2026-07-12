@@ -1,7 +1,8 @@
 # CardSat — Cardputer ADV satellite tracker + multi-radio CAT Doppler control
 
 A self-contained, offline-first amateur-radio satellite tracker for the
-**M5Stack Cardputer ADV** (ESP32-S3). It downloads GP (orbital element) data and
+**M5Stack Cardputer ADV** (ESP32-S3). It downloads GP (orbital element) data — from
+**AMSAT** by default, any **CelesTrak** group, or a custom URL — plus
 transponder data over WiFi, predicts passes with SGP4, and drives an Icom, Yaesu, or
 Kenwood radio over CAT with real-time Doppler correction — using the AMSAT
 **"One True Rule"** (constant frequency *at the satellite*), per-satellite
@@ -18,6 +19,18 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.54:** **big satellite lists, handled honestly — plus a serial console.** Choose a
+> large CelesTrak group and CardSat now loads your **favorites first**, fills the rest in file
+> order, and *says so* — "Loaded 150 of 812" — instead of silently keeping the first 150. GP
+> downloads are **preflighted** against free storage, so a multi-megabyte group can't fill an
+> internal-flash unit mid-write. A **read-only USB serial console** (115200: `help`, `heap`,
+> `sats`, `pass <sat>`…) joins for bench debugging, and Tools gains a **CubeSatSim C2C
+> reference** — the DTMF/APRS command crib for AMSAT's CubeSat Simulator. A new **Learn
+> corner** rounds it out: an animated **AMSAT Fox anatomy** (Help → `a`; every callout
+> verified against AMSAT's Fox documentation), a *Fox & CubeSats* primer, and a
+> **CubeSat Simulator** intro.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.54.md)**.
+
 > **New in v0.9.53:** a **memory & reliability** release. Fixes **LoTW/Cloudlog uploads failing
 > partway through a multi-batch session** on this no-PSRAM board, by reclaiming the contiguous
 > heap a TLS handshake needs — chiefly a **half-size display sprite** (4bpp/16-colour, ~16 KB
@@ -29,144 +42,15 @@ transit prediction, sun/eclipse status, and more.
 >
 > **[release notes](docs/releases/RELEASE_NOTES_0.9.53.md)**.
 
-> **New in v0.9.52:** two complementary planning tools on **Next Passes**. **Workable horizon**
-> (`w`) sweeps the next ten days and builds the **union** of every US state, DXCC entity, and
-> (on demand) grid that will *ever* be workable through any favorite — the complete reach of your
-> station for the coming week and a half, at a glance. **Target search** (`s`) is the inverse:
-> pick one place — a state, DXCC entity, or grid — and get every pass over the next ten days where
-> it's workable, **time-ordered across your whole fleet**, with the workable window per pass and a
-> polar plot on **ENTER**. Under the hood, the footprint-coverage engine is **several times
-> faster** (identical results), and the speaker now **powers up only when making sound**, freeing
-> contiguous memory for LoTW/Cloudlog uploads on this no-PSRAM board.
->
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.52.md)**.
-
-> **New in v0.9.51:** a full **rove pass-planner** — from **Next Passes → `p`**, survey **all
-> your favorites** from any grid and time before you travel, with workable states/DXCC per pass,
-> a detail view, text export, and an on-device **saved-plan browser**. A new **State vector → GP**
-> tool (under Tools) **fits GP mean elements from a launch-provider state vector** (TEME or J2000),
-> so you can track a satellite — even a **pre-launch** payload with a future epoch — before it has
-> a published TLE. Plus **file download** from the web interface (a `/CardSat` browser),
-> **experimental sharing of GP elements over LoRa** between units, and a round of on-device fixes.
->
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.51.md)**.
-
-> **New in v0.9.50:** AMSAT status reports now let you **pick the transponder/mode** for
-> multi-mode birds (e.g. AO-7 U/V vs V/A) — fixing a bug that locked reporting to one mode.
-> A satellite's transponder list is **ordered by usefulness** (two-way first, amateur-band
-> before non-amateur, active before inactive) with decommissioned entries **dimmed and
-> marked "(off)"**, and the **Link budget** tool pre-fills distance from the tracked
-> satellite's **live slant range**.
->
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.50.md)**.
-
-> **New in v0.9.49:** fixes a field-reported bug where, on SD-card units with LoRa
-> messaging enabled but **no Cap LoRa attached**, settings (notably the GPS source), logs
-> and caches silently stopped persisting — CardSat now detects an absent module and leaves
-> the SD bus untouched. Also resolves a Satellites-screen key conflict (**Simulation moved
-> to `y`**; `s` is AMSAT status), and refreshes the screenshot set throughout the docs.
->
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.49.md)**.
-
-> **New in v0.9.48:** cached **weather and space weather now survive reboots** on
-> SD-equipped units (a filesystem bug that lost field data is fixed). The **Tools** hub
-> (About → `t`) grows to **twenty tools**: scientific + programmer calculators, character
-> lookup, a full RF/antenna workbench, three offline reference databases (**DXCC** — 402
-> entities, **CQ/WAZ** and **ITU** zones, cross-linked), and mission-planning calculators
-> — **link budget**, **RF exposure (MPE)**, **battery runtime**, **orbital lifetime /
-> debris**, and **cross-section drag area** (the last two feed each other for a CubeSat
-> design-to-disposal workflow). Plus modulation and satellite-telemetry sections in Learn,
-> and a toggleable world-map night shade.
->
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.48.md)**.
-
-> **New in v0.9.47:** a release for the **operator in the field**. **Report a bird's status
-> to amsat.org with two keypresses** (`i`×2 on Track) — **mode-aware**, so working AO-7's
-> U/v passband reports `AO-7_[U/v]`, with a full picker (`p` on AMSAT status) for all four
-> statuses and a **who-heard-it** view (`g`: callsigns + grids). A **Tools hub** (About →
-> `t`): scientific + programmer's calculators, coax loss, dipole/vertical/yagi/quad
-> dimensions, RF units, SWR, path loss. An **offline pass** makes every cached source safe
-> against mid-transfer drops. Plus cloud cover on visible passes, launch siblings by name,
-> space-weather trend deltas, a station-readiness checklist, a two-column home menu, an EME
-> 30-day planner, six-category settings, and the line's largest fix set — much of it found
-> on real hardware.
->
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.47.md)**.
-
-> **New in v0.9.46:** a release for the **VHF / UHF / microwave and EME** operator. A complete
-> **EME (moonbounce)** screen (press **`e`** from Sun/Moon) shows **self-echo Doppler** per band
-> (50/144/432/1296/10368 MHz, computed topocentrically — the figure swings kHz at 1296 and tens of
-> kHz at 10 GHz), topocentric **range/rate**, **path degradation** vs perigee, a galactic **sky-noise**
-> flag, a **mutual-Moon window** finder against a DX grid, and rotator Moon-tracking. A **grid-square
-> distance & bearing** calculator (main menu, before QRZ) gives great-circle range and beam heading
-> short/long path, can **point the rotator**, and seeds from a separate **QRZ → grid** lookup. A
-> worldwide **band-plan reference** (off Help, press **`f`**) runs LF→light with ITU-region splits,
-> EME/calling frequencies, satellite subbands, and IARU designators. A new orbital **"Phys"** page
-> (and the web UI) adds **orbital velocity** and **launch date/age** from the COSPAR designator. A new
-> **HF/6m propagation** guide (off Space Wx, press **`p`**) turns the solar-flux and Kp data CardSat
-> already fetches into band-condition, geomagnetic, **auroral-VHF**, and absorption guidance. Plus a
-> **DX-Doppler fix** so an activation's frequency stays locked to the right transponder on
-> multi-transponder birds (AO-7), and a consistency pass so **all grid/callsign fields capitalize**
-> as you type. The on-air formats are unchanged. See the
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.46.md)**.
-
-> **New in v0.9.45:** a release focused on **working a pass**. The **web control panel** is
-> reworked for speed — a **fast calibration pad** (big one-tap RX/TX cal nudges with a tappable
-> step, no typing), a **tuning cluster** with a visible step, an **in-pass** header and frame,
-> and a **polar plot that always shows the pass arc** (current pass in-pass, next pass otherwise)
-> with a **direction-of-travel** arrow; the tracked satellite is always in the picker. **AMSAT
-> live status** is surfaced properly: **"heard N ago"** recency for every reported bird (Heard,
-> Telemetry, and Not-heard alike), a **configurable status window** (3/6/12/24/48/72 h, default
-> 24 — was a fixed 72), and a **dedicated AMSAT status screen** (sorted most-active-first, reached
-> with **`s`** from the sat list or the **AMSAT status** menu item). A new **AOS lead-time alert**
-> (off/2/5/10/15 min) warns you *before* AOS, and the **home screen** now shows the next favorite
-> pass with a live countdown. Plus two fixes — **DX Doppler** no longer keeps an activation's
-> transponders when you compute a mutual pass on another bird, and **`#SAT`** now parses satellite
-> names that contain spaces (e.g. `#ISS (ZARYA)/25544`) — and a **settings-persistence audit** that
-> fixed three settings (including 0.9.44's auto-position-reply) that weren't surviving a reboot.
-> The on-air formats are unchanged. See the
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.45.md)**.
-
-> **New in v0.9.44:** the LoRa messaging features grew a **station roster** — press **`o`**
-> on the Messages screen to see everyone heard reporting a position, with callsign, grid,
-> distance/bearing, signal and age, and **ENTER** to open a bearing compass to any of them.
-> Press **`p`** to broadcast your own position (a presence ping); an optional
-> **automatic position reply** setting (off by default, loop-guarded) makes CardSats answer
-> a position request on their own. Satellite references in `#SAT`/`!SAT` messages now carry
-> the **NORAD catalog number** so they resolve even when two stations' databases use
-> different names for the same bird (e.g. RS95S vs QMR-KWT2), and the bearing compass now
-> shows the peer's **Maidenhead grid**. The `@lat,lon` on-air format is unchanged. See the
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.44.md)**.
-
-> **New in v0.9.43:** a big **network reliability** release. All HTTPS moved from mbedTLS
-> to **BearSSL** (`ESP_SSLClient`), which fixed the residual "first download works, the
-> next fails" problem on the no-PSRAM Cardputer — the device now runs **91 back-to-back
-> TLS handshakes in one session with zero failures**. As a direct result, the operations
-> that used to **reboot between batches** no longer do: **"cache all transponders"** runs
-> in one session, and **LoTW/Cloudlog uploads** continue **in-session** (no more
-> reboot-and-re-enter-your-passphrase). **LoRa messages also became actionable** — a
-> message carrying `@lat,lon`, `#SAT`, or `!SAT date time` opens a bearing compass, a
-> satellite detail, or a pre-filled sked, with matching **`p`/`s`/`k`** send keys on the
-> Messages screen. This release also carries the **Activations footprint** feature
-> (co-visibility check, mutual-pass polar plot, tailored DX Doppler). **Building from
-> source now requires the `ESP_SSLClient` library (by Mobizt)** — see
-> [docs/BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md). The full debugging story is in
-> **[docs/design/NETWORK_TLS_MIGRATION_POSTMORTEM.md](docs/design/NETWORK_TLS_MIGRATION_POSTMORTEM.md)**.
-> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.43.md)**.
-
-> **New in v0.9.42:** **large LoTW and Cloudlog uploads now work.** A full log is split
-> into small batches (6 QSOs for LoTW, 15 for Cloudlog), each uploaded in its own quick
-> reboot, so you enter your LoTW key passphrase **once** and the device finishes the whole
-> run on its own — for both "un-uploaded only" and "upload ALL" modes. This release also
-> fixes a subtle bug where **HTTPS could fail after playing a sound or voice memo** (audio
-> and TLS were competing for the same internal RAM), adds a persistent **speaker-volume
-> setting** with live feedback, adds a **QRZ grid-backfill** utility for the log, and
-> includes a small **games** menu, and adds a general-purpose **LoRa RX / hex monitor**
-> (press `m` on the Messages screen) for receiving and inspecting any LoRa signal — set
-> the full SX1262 parameters, watch frames as a live hexdump, pause, and tune to peak a
-> signal. The deep debugging behind the upload and audio fixes is
-> written up in **[docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md](docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md)**.
-> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.42.md)**.
+> **Earlier releases** — one line each; full stories in [docs/releases/](docs/releases/):
+> **0.9.52** workable-horizon & target-search planners + the 130-page manual ·
+> **0.9.51** rove pass-planner + state-vector→GP tool · **0.9.50** mode-aware AMSAT status
+> reporting, ordered transponder lists · **0.9.49** SD-persistence fix (LoRa-absent units) ·
+> **0.9.48** Tools hub grows to twenty (calculators, DXCC/zone databases, mission-planning) ·
+> **0.9.47** two-keypress AMSAT status reporting, Tools hub debut · **0.9.46** VHF/UHF/microwave
+> & EME release · **0.9.45** web control panel for working a pass · **0.9.44** LoRa station
+> roster · **0.9.43** HTTPS moved to BearSSL (network reliability) · **0.9.42** large
+> LoTW/Cloudlog uploads via automatic batching.
 >
 > **In v0.9.40:** an **out-of-passband warning** — tuning a linear transponder's knob
 > past either edge of the passband now flashes a warning while CardSat pulls you back —
@@ -280,6 +164,10 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 
 ## Screenshots
 
+*(The captures below are from v0.9.49; the newer screens — rove planner, workable horizon,
+target search, and the Files page's multi-select — will be added in an upcoming screenshot
+refresh.)*
+
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#20-screen-by-screen-reference).
 
@@ -379,6 +267,8 @@ See **[MANUAL.md](MANUAL.md)** for the complete guide.
 | **[docs/guides/ARDUINO_SETUP.md](docs/guides/ARDUINO_SETUP.md)** | From-scratch Arduino IDE setup. |
 | **[docs/guides/PORTING.md](docs/guides/PORTING.md)** | Porting CardSat (or a subset) to other ESP32 boards or non-ESP32 platforms. |
 | **[docs/guides/CODE_REFERENCE.md](docs/guides/CODE_REFERENCE.md)** | File-by-file annotated code reference (interfaces, key functions, data flows). |
+| **[docs/guides/CODEBASE_OVERVIEW.md](docs/guides/CODEBASE_OVERVIEW.md)** | Plain-language tour of the codebase for non-developers (what each file does, key concepts). |
+| **[docs/DEVELOPMENT_METHOD.md](docs/DEVELOPMENT_METHOD.md)** | How CardSat was built (AI-assisted, hardware-verified) and why that fits the amateur-radio tradition. |
 | **[docs/design/](docs/design/)** | Design/scope notes for current and proposed features. |
 | **[docs/releases/](docs/releases/)** | Per-version release notes. |
 | **[CardSat_CheatCard_4x6.pdf](CardSat_CheatCard_4x6.pdf)** | Printable 4×6 key-reference card (front: operating, back: setup). |

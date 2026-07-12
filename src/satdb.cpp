@@ -306,6 +306,10 @@ bool SatDb::loadGpFromFs() {
   return loadGpFromFile(FILE_GP) > 0;
 }
 
+bool SatDb::loadGpFromFsPreferring(const uint32_t* favs, int favN) {
+  return loadGpFromFilePreferring(FILE_GP, favs, favN) > 0;
+}
+
 // ---------------------------------------------------------------------------
 //  AMSAT OSCAR status. Reduce a satellite name to a base designator for
 //  matching: take the part before a mode tag / space / bracket, upper-case it,
@@ -633,10 +637,14 @@ void SatDb::applyAmsatStatusFile(const char* path) {
 // small fixed buffer. Never loads the whole file into RAM, so it works for the
 // full ~75 KB amateur list on the no-PSRAM heap (where a single contiguous
 // String would fail). Object state carries across read-buffer boundaries.
-int SatDb::loadGpFromFile(const char* path) {
-  _n = 0;
+// Stream-scan a GP file, invoking accept(norad) to decide whether to keep each object, and
+// (if kept) storing it. Returns the number of objects SEEN; *loaded receives the number kept.
+// The whole-file streaming (256-byte reads, one object assembled at a time) means RAM use is
+// flat regardless of file size -- important for large CelesTrak groups.
+int SatDb::scanGpFile(const char* path, bool (*accept)(uint32_t, void*), void* ctx, int* loaded) {
+  int seen = 0;
   File f = Store::fs().open(path, "r");
-  if (!f) return 0;
+  if (!f) { if (loaded) *loaded = 0; return 0; }
 
   static const size_t OBJ_MAX = 1200;     // largest OMM object is ~800 bytes
   static char obj[OBJ_MAX];               // static: keep it off the stack
@@ -646,8 +654,8 @@ int SatDb::loadGpFromFile(const char* path) {
   bool inStr = false, esc = false, collecting = false, started = false;
 
   int avail;
-  while ((avail = f.read(rd, sizeof(rd))) > 0 && _n < MAX_SATS) {
-    for (int i = 0; i < avail && _n < MAX_SATS; ++i) {
+  while ((avail = f.read(rd, sizeof(rd))) > 0) {
+    for (int i = 0; i < avail; ++i) {
       char c = (char)rd[i];
       if (!started) { if (c == '[') started = true; continue; }
       if (!collecting) {                  // between objects: wait for '{'
@@ -670,9 +678,14 @@ int SatDb::loadGpFromFile(const char* path) {
             obj[oi] = 0;
             SatEntry tmp;
             if (parseGpObjectRaw(obj, oi, tmp)) {
-              int idx = indexOfNorad(tmp.norad);
-              if (idx < 0) { idx = _n; _n++; }
-              _sats[idx] = tmp;
+              seen++;
+              // accept() decides; a null accept means "take all until full".
+              bool take = accept ? accept(tmp.norad, ctx) : (_n < MAX_SATS);
+              if (take) {
+                int idx = indexOfNorad(tmp.norad);
+                if (idx < 0) { if (_n >= MAX_SATS) { oi = 0; continue; } idx = _n; _n++; }
+                _sats[idx] = tmp;
+              }
             }
           }
           oi = 0;
@@ -681,6 +694,38 @@ int SatDb::loadGpFromFile(const char* path) {
     }
   }
   f.close();
+  if (loaded) *loaded = _n;
+  return seen;
+}
+
+// Legacy entry point: first-MAX_SATS-in-file-order (no favorites priority). Kept for callers
+// that don't have a favorites set; still records seenCount() for truncation reporting.
+int SatDb::loadGpFromFile(const char* path) {
+  _n = 0;
+  _seen = scanGpFile(path, nullptr, nullptr, nullptr);
+  return _n;
+}
+
+// Favorites-first priority load. Two streaming passes over the (already-on-SD) file:
+//   pass 1 -- load only objects whose NORAD is in favs[] (guarantees favorites survive, even
+//             if they sit past the MAX_SATS-th object in a large group);
+//   pass 2 -- fill any remaining slots in file order, skipping already-loaded NORADs.
+// seenCount() is taken from pass 2 (it sees every object). Two passes ~= double parse time on
+// refresh; the file is tens of KB for AMSAT (negligible) and streaming keeps RAM flat for the
+// large CelesTrak groups where this matters most.
+int SatDb::loadGpFromFilePreferring(const char* path, const uint32_t* favs, int favN) {
+  _n = 0;
+  if (favs && favN > 0) {
+    struct FavCtx { const uint32_t* f; int n; } fc { favs, favN };
+    auto favAccept = [](uint32_t norad, void* ctx) -> bool {
+      FavCtx* c = (FavCtx*)ctx;
+      for (int i = 0; i < c->n; ++i) if (c->f[i] == norad) return true;
+      return false;
+    };
+    scanGpFile(path, favAccept, &fc, nullptr);   // pass 1: favorites only
+  }
+  // pass 2: fill remaining slots in file order (indexOfNorad skips ones already loaded).
+  _seen = scanGpFile(path, nullptr, nullptr, nullptr);
   return _n;
 }
 

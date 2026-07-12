@@ -328,12 +328,15 @@ CardSat uses the arrow legends printed on the Cardputer keys:
 | `` ` `` or **DEL** | back / cancel |
 | `{` `}` | page up / page down (lists) |
 | **Fn** + key | a modifier used by the Notes editor for cursor movement and save, so the `;` `.` `,` `/` keys stay typeable as punctuation (see [§8 → Notes](#notes-free-form-text-editor)) |
+| `h` | open **Help** (global; exceptions below) |
 | `b` | save a screenshot to the SD card (see §18) |
 
 Other letter keys are screen-specific actions and are shown in the **footer** at
-the bottom of each screen. When in doubt, read the footer. The one global
-exception is **`b`**, which saves a screenshot on any screen and is deliberately
-not shown in any footer.
+the bottom of each screen. When in doubt, read the footer. Two global exceptions
+are deliberately not shown in footers: **`h`** opens Help and **`b`** saves a
+screenshot. Both work on any screen *except* where letters are themselves input —
+the text editors, the Tools list's first-letter jump, and the DXCC / character
+lookups' type-to-search.
 
 ---
 
@@ -452,7 +455,12 @@ currently selected satellite is shown at the bottom right. `;`/`.` move, ENTER s
 
 Author credit (**Paul Stoetzer, N8HM**), firmware version and build date, storage
 backend (microSD or internal flash), GP catalog size and freshest element age,
-WiFi/IP, battery level, free heap, and uptime. Press **`l`** for a **License &
+WiFi/IP, battery level, free heap, and uptime. The heap line shows two numbers —
+total free memory and the **largest single free block** ("max blk"). On this
+no-PSRAM board the second is the one that matters for network uploads: a TLS
+connection needs one big *contiguous* chunk, not just scattered free bytes, so if
+uploads ever misbehave this is the number to glance at first. Both figures dip
+while features run and recover afterward; that's normal. Press **`l`** for a **License &
 credits** screen — license pointer, no-warranty and hardware disclaimers, credit
 for the outside data sources, and a recommendation to support AMSAT. `` ` `` or
 ENTER returns home.
@@ -808,7 +816,9 @@ MHz to Hz. Copy the resulting **`qso_log.csv`** onto the card at
 
 ### Satellites
 
-The catalog (up to 220 sats from the GP data, plus any you add manually).
+The catalog (up to 150 sats held from the GP data, plus any you add manually; if a
+source carries more than 150 — some CelesTrak groups do — your **favorites are loaded
+first**, the rest fill in file order, and the status line reports "Loaded X of Y").
 
 - `;`/`.` move, `{`/`}` jump 10 rows.
 - `f` — toggle **favorite** (favorites are marked with `*`).
@@ -1848,7 +1858,7 @@ on the config screen leaves the mode and restores messaging.
   session** — no reboots. CardSat fetches every satellite's transponder
   data in one pass, showing a running count on the Update screen (e.g. "TX 24/90: AO-91")
   and finishing on "Cached all N transponders". The whole pass takes a few minutes on a
-  reasonable Wi-Fi link; a per-satellite retry absorbs the occasional transient miss.
+  reasonable WiFi link; a per-satellite retry absorbs the occasional transient miss.
   (Earlier firmware split this across automatic reboots to work around a TLS memory limit;
   the BearSSL migration removed that limit, so it now completes in one go.) Satellites with
   no transmitters in the SatNOGS database are cached as an empty list, which is expected.
@@ -2579,9 +2589,24 @@ mean elements in whatever format" is **GP** (General Perturbations). CardSat dow
 but internally it renders each set back into a TLE line-pair — epoch encoded as
 `YYDDD.dddddddd`, B\* in TLE exponent notation, with the line checksums — and hands
 that to the SGP4 library, which still ingests elements the classic way. The element
-values are identical; only the wrapper changes. (Because they're the same numbers,
+values are identical; only the wrapper changes. This matters more than it once did:
+the 18th Space Defense Squadron has announced plans to retire the legacy TLE format
+in favor of OMM — the punch-card wrapper is finally being sunset after half a
+century — so CardSat's GP-native pipeline needs no change when the old format
+disappears. (Because they're the same numbers,
 a TLE can be mechanically decoded into the GP fields CardSat's manual entry asks
 for — that's what the bundled **`tools/tle2gp.py`** helper does; see [§8](#8-screen-map-and-navigation).)
+
+**Oversized sources.** CardSat holds up to 150 satellites in memory; several CelesTrak
+groups carry more (some far more). Since v0.9.54 an oversized source is handled
+honestly: satellites on your **favorites** list are loaded first — guaranteed, even if
+they sit past the 150th object in the file — the remaining slots fill in file order,
+and the truncation is *visible*: the status line reports "Loaded X of Y" and the boot
+log prints `[gp] parsed X of Y satellites (truncated; favorites kept)`. Downloads are
+also preflighted against free storage — a group too large for the active filesystem is
+refused with "file too big for storage" *before* writing, so it can't fill an
+internal-flash unit mid-write or disturb the previous good catalog. If you need a bird
+from deep in a big group, favorite it (Satellites → `f`) and refresh.
 
 **What SGP4 is.** SGP4 (Simplified General Perturbations 4) is the analytic propagator
 that NORAD/USSPACECOM elements are *fit to*. "Analytic" means it isn't numerically
@@ -3266,11 +3291,13 @@ on-device UI; the device keeps tracking and you can use its keypad at the same t
 Launcher. It lists the `/CardSat` tree — rove plans, screenshots, logs, notes, and the like
 — with sizes and modified times; click a folder to descend, click a file to download it.
 To grab several at once, tick the checkbox beside each file and press **Download selected** —
-the browser saves them one after another (the device still streams a single file per request,
-so there's no extra memory cost on the unit; a browser may ask permission the first time it's
-handed multiple downloads). Access is confined to `/CardSat` (a path guard rejects anything
-outside that tree), and this is **download-only** — there is no upload path, so the page cannot
-write to or modify the device's filesystem. Like the rest of web control it's unauthenticated on
+the browser saves them one after another. (The device still streams a single file per
+request, so multi-select adds no memory cost on the unit; a browser may ask permission the
+first time a page hands it several downloads.)
+
+Access is confined to `/CardSat` (a path guard rejects anything outside that tree), and the
+page is **download-only** — there is no upload path, so it cannot write to or modify the
+device's filesystem. Like the rest of web control it's unauthenticated on
 the LAN, so the same trust caveat applies.
 
 > **Developers:** the page is backed by a small **HTTP + JSON API** (`/api/status`,
@@ -3334,7 +3361,9 @@ partition scheme that includes a data region, e.g. **Huge APP (3MB No OTA/1MB SP
 
 ### Screenshots
 
-Press **`b`** on any screen to save a screenshot of exactly what's displayed. Images
+Press **`b`** on any screen (except the text editors, the Tools list, and the
+DXCC / character lookups, where letters are input) to save a screenshot of exactly
+what's displayed. Images
 are written to **`/CardSat/Screenshots/`** on the SD card as 24-bit BMP files named
 `shot_0001.bmp`, `shot_0002.bmp`, … (never overwritten). A short high beep confirms
 each capture; a low beep means there's no SD card to write to — screenshots require
@@ -3358,6 +3387,20 @@ GPS, or Location → `c` to enter UTC manually. Also confirm your location is se
 **No transponders on Track.** The satellite's transponders weren't cached. With
 WiFi, open the bird from Satellites (it fetches from SatNOGS), or use Update → `a`
 to cache everything. You can also add one manually (Passes → `n`).
+
+**"file too big for storage" on Update.** The chosen GP source is larger than the free
+space on the active filesystem (most likely a big CelesTrak group on an internal-flash
+unit, whose LittleFS partition is small). Nothing was written — the previous catalog is
+intact. Use a microSD card, or pick a smaller group.
+
+**Bench debugging over USB.** Connect a serial monitor at **115200 baud** and type
+`help`: a read-only console reports the firmware version (`ver`), free heap and largest
+block (`heap`), catalog counts including truncation (`sats`), favorites and the active
+bird (`fav`), the next pass (`next`), and WiFi state (`net`) — plus `time`, `gps`
+(fix, coordinates, grid), `bat`, `fs` (storage backend and free space), `up`time, and
+`pass <sat>` for the next pass of *any* catalog bird by name fragment or NORAD number.
+It only ever *reads* —
+no command changes device state — so it is safe to leave connected.
 
 **Radio doesn't respond / wrong VFO moves.** Check the **CAT baud** (and, for
 Icom, the **CI-V address**) in Settings match the radio. Open the serial monitor at
@@ -3568,6 +3611,14 @@ listed below.
   **World map**; `t` the **sky-at-a-glance** timeline; `p` the **Rove planner**
   (below); `w` the **Workable horizon** and `s` the **Target search** (both below);
   `z` arms **deep sleep** until the next AOS; `` ` `` back.
+
+Three planning tools hang off this screen, and they answer three different questions.
+The **Rove planner** (`p`) asks *"what would the schedule look like from a place and
+time I choose?"* — a what-if for a trip. The **Workable horizon** (`w`) looks
+*outward*: over the next ten days, what is the complete set of states, DXCC entities,
+and grids this station can ever reach? And **Target search** (`s`) looks *inward*:
+pick one place and find every chance to work it. All three share the same footprint
+engine underneath; they differ only in the direction of the question.
 
 ### Rove planner
 
@@ -4395,7 +4446,12 @@ listed below.
 - **Keys** — `;`/`.` scroll; `g` opens the **Glossary & math**; `m` opens the
   **User guide**; `s` opens the **Ham satellite history**; `t` opens the **Tech
   help** guide; `l` opens the **Learn** (radio + orbit theory) screen; `f` opens the
-  **band plan / frequency reference**; `` ` `` back.
+  **band plan / frequency reference**; `a` opens the **AMSAT Fox anatomy** — an
+  animated, labeled tour of a 1U Fox CubeSat (spin with `;`/`.`, pause with space,
+  cycle the callouts with `,`/`/`; facts sourced from AMSAT's Fox documentation;
+  `i` inside opens a short **Fox & CubeSats** primer); `c` opens a **CubeSat
+  Simulator** intro — AMSAT's desktop satellite for hands-on learning (kits at the
+  AMSAT Store; cubesatsim.com); `` ` `` back.
 
 ### Station readiness
 

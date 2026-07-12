@@ -86,14 +86,15 @@ int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt
 uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
                                         // just-closed socket leaves the LWIP pool
 // --- TLS_MIN_BLOCK: pre-handshake contiguous-heap gate -----------------------
-// mbedTLS needs ~32 KB contiguous for a handshake (16 KB RX + 16 KB TX). With the
-// drawing sprite resident the largest block is ~33 KB after the 0.9.41 static-RAM
-// trim (LOG_VIEW_MAX 60->48 reclaimed ~1.7 KB, restoring the pre-feature headroom),
-// so POSTs complete without freeing the sprite. This floor only gates the POST paths
+// Written for the mbedTLS era (~32 KB contiguous per handshake); since 0.9.43 the
+// transport is BearSSL, whose largest single allocation is the 16 KB RX buffer plus
+// LWIP send-path room -- comfortably under the resident largest block (~31.7 KB), and
+// 0.9.53's heap reclaim restored the coexistence margin that made multi-batch uploads
+// reliable. The floor below still stands as an OOM tripwire; it only gates the POST paths
 // (GETs don't call reclaim). 28000 sits below the resident block so real attempts
 // proceed, and above a genuinely-exhausted heap so the upload declines + offers a
 // reboot rather than failing mid-handshake with a bare -1.
-uint32_t Net::TLS_MIN_BLOCK  = 28000;   // below the ~33 KB resident block; catches real OOM
+uint32_t Net::TLS_MIN_BLOCK  = 28000;   // below the ~31.7 KB resident block; catches real OOM
 
 // --- 0.9.41 proactive WiFi-cycle defrag (see net.h / docs/design/HEAP_WIFI_CYCLE.md) ---
 // Set TLS_WIFI_CYCLE=false to revert to the passive-wait-only reclaim behaviour.
@@ -516,6 +517,21 @@ bool Net::httpsGetToFile(const String& url, const char* path,
       return false;
     }
 
+    // Preflight: if the server declared a Content-Length, make sure it will actually fit on
+    // the active filesystem before we start writing. On internal-flash-only units the LittleFS
+    // partition is small (~1 MB), and a large CelesTrak group ("Active", "Starlink") can be
+    // several MB -- without this check the write fills the partition and fails partway, possibly
+    // corrupting the previous good catalog. A generous 32 KB margin leaves room for other files.
+    // (freeBytes() reports a large value on SD, so this only bites the genuinely-too-big case.)
+    if (len > 0) {
+      size_t freeFs = Store::freeBytes();
+      if (freeFs > 0 && (size_t)len + 32768 > freeFs) {
+        lastErr = "file too big for storage (" + String(len / 1024) + "KB > "
+                  + String((int)(freeFs / 1024)) + "KB free)";
+        return false;
+      }
+    }
+
     File f = Store::fs().open(path, "w");
     if (!f) { lastErr = Store::ready() ? "fs open failed" : "no filesystem"; return false; }
 
@@ -670,8 +686,9 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
 
   // Probe the upload file's size WITHOUT reading it into RAM yet. The ~9 KB body
-  // buffer must NOT exist during the TLS handshake: mbedTLS needs ~32 KB contiguous,
-  // and on this no-PSRAM heap the largest free block sits right at ~31.7 KB. Holding
+  // buffer must NOT exist during the TLS handshake: the TLS stack needs a large
+  // contiguous block (mbedTLS-era ~32 KB; BearSSL's 16 KB RX buffer today), and on
+  // this no-PSRAM heap the largest free block sits right at ~31.7 KB. Holding
   // the body buffer during the handshake was tipping it over into "SSL - Memory
   // allocation failed" every time (the larger LoTW body is why LoTW failed where the
   // smaller Cloudlog body squeaked through). So: get the size, compute Content-Length,

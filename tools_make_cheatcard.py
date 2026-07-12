@@ -8,7 +8,7 @@ from reportlab.lib.styles import ParagraphStyle
 from pypdf import PdfReader
 import os, re
 
-OUT = "/home/claude/CardSat_CheatCard_4x6.pdf"
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CardSat_CheatCard_4x6.pdf")
 
 # Pull the firmware version from src/config.h so the card never goes stale.
 def _fw_version():

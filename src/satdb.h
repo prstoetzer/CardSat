@@ -75,7 +75,8 @@ struct SatEntry {
   // --- BEGIN 0.9.41 float-elements optimisation (REVERSIBLE) -------------------
   // These eight mean elements are stored as float instead of double to shrink the
   // resident SatEntry (~32 bytes/entry, ~4-5 KB across MAX_SATS) and so leave more
-  // contiguous heap for the mbedTLS handshake on this no-PSRAM part. This is SAFE
+  // contiguous heap for the TLS handshake on this no-PSRAM part (mbedTLS when this
+  // was written; BearSSL since 0.9.43 -- the contiguity motive is unchanged). This is SAFE
   // because the elements are never fed to SGP4 as raw numbers: gpToTle() formats
   // them into a fixed-width TLE text string (which SGP4 re-parses), and float's ~7
   // significant digits exceed every field's precision -- 4-decimal angles, 7-digit
@@ -112,6 +113,8 @@ class SatDb {
 public:
   bool begin();                  // mount LittleFS
   int  count() const { return _n; }
+  int  seenCount() const { return _seen; }     // total objects in the last-parsed file (>= count())
+  bool wasTruncated() const { return _seen > _n; }
   SatEntry& at(int i) { return _sats[i]; }
   int  indexOfNorad(uint32_t norad) const;
 
@@ -123,6 +126,7 @@ public:
   bool isManualGp(uint32_t norad);             // true if norad has a line in FILE_MGP
   bool removeManualGp(uint32_t norad);         // delete a hand-entered sat from FILE_MGP
   bool loadGpFromFs();                         // reload cached GP JSON at boot
+  bool loadGpFromFsPreferring(const uint32_t* favs, int favN);  // ...keeping favorites (see .cpp)
   void applyAmsatStatusFile(const char* path); // set amsatStatus from a cached summary.php
 
   // AMSAT catalog name map: every entry of the status API's catalog.php, matched
@@ -136,6 +140,10 @@ public:
   int  amsNamesFor(int satIdx, const char* out[], int maxN) const; // this sat's API names
   int  amsMapCount() const { return _amsMapN; }
   int  loadGpFromFile(const char* path);       // stream-parse a GP file (low RAM)
+  // Favorites-first priority load: guarantees every NORAD in favs[] is loaded even if it
+  // sits past the MAX_SATS-th object in the file, then fills remaining slots in file order.
+  // Also records seenCount() so the caller can report "loaded X of Y". favs may be null.
+  int  loadGpFromFilePreferring(const char* path, const uint32_t* favs, int favN);
   bool saveGpJson(const String& json);         // cache the downloaded blob
 
   // Reconstruct a TLE line-pair from a satellite's GP elements (69 chars each,
@@ -169,4 +177,8 @@ private:
   int      _amsMapN = 0;
   SatEntry _sats[MAX_SATS];
   int      _n = 0;
+  int      _seen = 0;         // total objects seen in the last parse (for truncation reporting)
+  // Shared streaming scanner behind loadGpFromFile / loadGpFromFilePreferring. accept(norad,ctx)
+  // returns true to keep an object; null accept means "take in file order until full".
+  int      scanGpFile(const char* path, bool (*accept)(uint32_t, void*), void* ctx, int* loaded);
 };

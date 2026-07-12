@@ -12,6 +12,23 @@ pass-detail / mutual-window screens, GPS (auto-refresh on fix / satellite-count
 change), the AOS alarm and speaker, deep sleep, the visual-pass / decay /
 Sun-Moon-transit / per-satellite-note features, and the offline GP/transponder caches.
 
+**v0.9.52–0.9.53 additions confirmed:** on-demand speaker power (audio buffers up only while
+sound plays, released after — including game exit via any path), the **4bpp display sprite**
+(colours verified unchanged on hardware), and the **multi-batch LoTW upload fix** — three
+back-to-back signed uploads with zero send stalls, confirmed via the on-device heap log
+(largest block recovering to its ceiling before every batch). The one 0.9.53 addition **not**
+yet exercised on hardware is multi-file download from a phone browser (the Files page's
+sequenced downloads; browser behavior varies by platform).
+
+**Added in 0.9.54, not yet on hardware:** favorites-first loading and the "Loaded X of
+Y" truncation status with an oversized CelesTrak group; the storage preflight refusal
+("file too big for storage") on an internal-flash unit; the USB serial console
+(115200: help / ver / heap / sats / fav / next / net); and the Tools → CubeSatSim C2C
+reference screen (render, scroll, backtick exit); and the Help → `a` AMSAT Fox
+anatomy animation (spin smoothness, callout cycling, leader tracking, Orbit-zoo
+regression on the shared 66 ms tick), plus its two companion text screens (`i`
+primer from the anatomy; Help `c` Simulator intro).
+
 **Single-pin CI-V is confirmed on an IC-821** — the full bidirectional CI-V exchange
 (frequency reads and ACKs) works over one shared open-drain GPIO, including **Doppler
 compensation and full radio-knob tuning**. See

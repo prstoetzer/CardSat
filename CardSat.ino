@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.53";
+static constexpr const char* FW_VERSION = "0.9.54";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1461,7 +1461,8 @@ struct SatEntry {
   // --- BEGIN 0.9.41 float-elements optimisation (REVERSIBLE) -------------------
   // These eight mean elements are stored as float instead of double to shrink the
   // resident SatEntry (~32 bytes/entry, ~4-5 KB across MAX_SATS) and so leave more
-  // contiguous heap for the mbedTLS handshake on this no-PSRAM part. This is SAFE
+  // contiguous heap for the TLS handshake on this no-PSRAM part (mbedTLS when this
+  // was written; BearSSL since 0.9.43 -- the contiguity motive is unchanged). This is SAFE
   // because the elements are never fed to SGP4 as raw numbers: gpToTle() formats
   // them into a fixed-width TLE text string (which SGP4 re-parses), and float's ~7
   // significant digits exceed every field's precision -- 4-decimal angles, 7-digit
@@ -1498,6 +1499,8 @@ class SatDb {
 public:
   bool begin();                  // mount LittleFS
   int  count() const { return _n; }
+  int  seenCount() const { return _seen; }     // total objects in the last-parsed file (>= count())
+  bool wasTruncated() const { return _seen > _n; }
   SatEntry& at(int i) { return _sats[i]; }
   int  indexOfNorad(uint32_t norad) const;
 
@@ -1509,6 +1512,7 @@ public:
   bool isManualGp(uint32_t norad);             // true if norad has a line in FILE_MGP
   bool removeManualGp(uint32_t norad);         // delete a hand-entered sat from FILE_MGP
   bool loadGpFromFs();                         // reload cached GP JSON at boot
+  bool loadGpFromFsPreferring(const uint32_t* favs, int favN);
   void applyAmsatStatusFile(const char* path); // set amsatStatus from a cached summary.php
 
   // AMSAT catalog name map: every entry of the status API's catalog.php, matched
@@ -1522,6 +1526,7 @@ public:
   int  amsNamesFor(int satIdx, const char* out[], int maxN) const; // this sat's API names
   int  amsMapCount() const { return _amsMapN; }
   int  loadGpFromFile(const char* path);       // stream-parse a GP file (low RAM)
+  int  loadGpFromFilePreferring(const char* path, const uint32_t* favs, int favN);
   bool saveGpJson(const String& json);         // cache the downloaded blob
 
   // Reconstruct a TLE line-pair from a satellite's GP elements (69 chars each,
@@ -1555,6 +1560,8 @@ private:
   int      _amsMapN = 0;
   SatEntry _sats[MAX_SATS];
   int      _n = 0;
+  int      _seen = 0;
+  int      scanGpFile(const char* path, bool (*accept)(uint32_t, void*), void* ctx, int* loaded);
 };
 
 
@@ -1743,7 +1750,7 @@ public:
   static int  RECOVER_AFTER;                    // failures before a hard reset (default 3)
   static int  REBOOT_AFTER;                     // failed hard resets before prompting reboot
   static uint32_t INTER_FETCH_MS;               // settle delay before each TLS session
-  static uint32_t TLS_MIN_BLOCK;                // min contiguous heap for an mbedTLS handshake
+  static uint32_t TLS_MIN_BLOCK;                // min contiguous heap to attempt a TLS POST (see net.cpp preamble)
 
   // --- 0.9.41 proactive WiFi-cycle defrag (REVERSIBLE via TLS_WIFI_CYCLE) -------
   // When the passive coalesce-wait in reclaimHeapForTls() still leaves the largest
@@ -2181,7 +2188,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -6343,7 +6350,7 @@ private:
   void rotdHandleLine(const String& line);     // parse + act on one rotctld command
   void serviceWebd();                          // pump the mobile web-control server
   void suspendNetServers();                    // tear down rigd/rotd/webd listeners
-  void freeCanvasForTls();                     // free ~64 KB sprite for mbedTLS handshake
+  void freeCanvasForTls();                     // no-op since the BearSSL migration (see body); sprite stays resident
   void restoreCanvasAfterTls();
   void tickCanvasRestore();                    // loop-driven retry if restore alloc failed
   bool tryRecreateCanvas();                    // one sprite re-create attempt (shared by the two above)
@@ -6776,6 +6783,27 @@ private:
   int oprefTab = 0;      // 0=Q-codes 1=phonetics 2=RST
   int oprefScroll = 0;
   void drawOpref(); void keyOpref(char c, bool enter, bool back);
+  // CubeSatSim command & control reference (SCR_CUBESIM): offline crib for commanding
+  // AMSAT's CubeSat Simulator (DTMF / APRS / carrier, plus config-script options).
+  void drawCubeSim();
+  void keyCubeSim(char c, bool enter, bool back);
+  int  cubesimScroll = 0;
+  // AMSAT Fox anatomy (SCR_FOXANAT): animated Learn explainer -- a rotating 1U
+  // wireframe with one doc-verified callout at a time (see drawFoxAnat).
+  void drawFoxAnat();
+  void keyFoxAnat(char c, bool enter, bool back);
+  float    foxTheta = 0.0f;      // spin angle (rad)
+  uint8_t  foxLabel = 0;         // current callout index
+  bool     foxSpin  = true;      // auto-rotate (space toggles)
+  uint32_t foxLblMs = 0;         // last label-advance time
+  // Companion Learn text screens: Fox/CubeSat primer (SCR_FOXTEXT, via `i` on the
+  // anatomy) and CubeSat Simulator intro (SCR_CSIMINFO, via `c` on Help).
+  void drawFoxText();
+  void keyFoxText(char c, bool enter, bool back);
+  int  foxTextScroll = 0;
+  void drawCsimInfo();
+  void keyCsimInfo(char c, bool enter, bool back);
+  int  csimInfoScroll = 0;
   // CTCSS tone reference (SCR_CTCSS): standard EIA tone list + known satellite tones.
   int ctcssScroll = 0;
   void drawCtcss(); void keyCtcss(char c, bool enter, bool back);
@@ -7044,6 +7072,14 @@ private:
   void audioAcquire();                         // ensure speaker is up (begin + volume), cancel pending release
   void audioReleaseAfter(uint32_t ms);         // schedule speaker end() after ms of no audio
   void serviceAudioRelease();                  // loop hook: perform a due deferred end()
+  // Read-only serial command console (USB). Polled once per loop; accepts a short line and
+  // prints status (heap, version, satellite count, next pass, upload state). Zero heap cost:
+  // the input line lives in a fixed buffer and nothing is dynamically allocated. Read-only by
+  // design -- it never changes device state, so it's safe to leave always-on.
+  void serviceSerialCli();
+  void runSerialCommand(const char* cmd);      // dispatch one completed command line
+  char     cliBuf[64] = {0};                   // serial input line accumulator
+  uint8_t  cliLen = 0;
   bool     audioUp = false;                    // is the speaker currently begun?
   uint32_t audioReleaseAt = 0;                 // millis() deadline for a pending end() (0 = none)
   bool     audioGameOwned = false;             // audio was acquired for a game session (release on exit)
@@ -10277,6 +10313,10 @@ bool SatDb::loadGpFromFs() {
   return loadGpFromFile(FILE_GP) > 0;
 }
 
+bool SatDb::loadGpFromFsPreferring(const uint32_t* favs, int favN) {
+  return loadGpFromFilePreferring(FILE_GP, favs, favN) > 0;
+}
+
 // ---------------------------------------------------------------------------
 //  AMSAT OSCAR status. Reduce a satellite name to a base designator for
 //  matching: take the part before a mode tag / space / bracket, upper-case it,
@@ -10604,10 +10644,14 @@ void SatDb::applyAmsatStatusFile(const char* path) {
 // small fixed buffer. Never loads the whole file into RAM, so it works for the
 // full ~75 KB amateur list on the no-PSRAM heap (where a single contiguous
 // String would fail). Object state carries across read-buffer boundaries.
-int SatDb::loadGpFromFile(const char* path) {
-  _n = 0;
+// Stream-scan a GP file, invoking accept(norad) to decide whether to keep each object, and
+// (if kept) storing it. Returns the number of objects SEEN; *loaded receives the number kept.
+// The whole-file streaming (256-byte reads, one object assembled at a time) means RAM use is
+// flat regardless of file size -- important for large CelesTrak groups.
+int SatDb::scanGpFile(const char* path, bool (*accept)(uint32_t, void*), void* ctx, int* loaded) {
+  int seen = 0;
   File f = Store::fs().open(path, "r");
-  if (!f) return 0;
+  if (!f) { if (loaded) *loaded = 0; return 0; }
 
   static const size_t OBJ_MAX = 1200;     // largest OMM object is ~800 bytes
   static char obj[OBJ_MAX];               // static: keep it off the stack
@@ -10617,8 +10661,8 @@ int SatDb::loadGpFromFile(const char* path) {
   bool inStr = false, esc = false, collecting = false, started = false;
 
   int avail;
-  while ((avail = f.read(rd, sizeof(rd))) > 0 && _n < MAX_SATS) {
-    for (int i = 0; i < avail && _n < MAX_SATS; ++i) {
+  while ((avail = f.read(rd, sizeof(rd))) > 0) {
+    for (int i = 0; i < avail; ++i) {
       char c = (char)rd[i];
       if (!started) { if (c == '[') started = true; continue; }
       if (!collecting) {                  // between objects: wait for '{'
@@ -10641,9 +10685,14 @@ int SatDb::loadGpFromFile(const char* path) {
             obj[oi] = 0;
             SatEntry tmp;
             if (parseGpObjectRaw(obj, oi, tmp)) {
-              int idx = indexOfNorad(tmp.norad);
-              if (idx < 0) { idx = _n; _n++; }
-              _sats[idx] = tmp;
+              seen++;
+              // accept() decides; a null accept means "take all until full".
+              bool take = accept ? accept(tmp.norad, ctx) : (_n < MAX_SATS);
+              if (take) {
+                int idx = indexOfNorad(tmp.norad);
+                if (idx < 0) { if (_n >= MAX_SATS) { oi = 0; continue; } idx = _n; _n++; }
+                _sats[idx] = tmp;
+              }
             }
           }
           oi = 0;
@@ -10652,6 +10701,38 @@ int SatDb::loadGpFromFile(const char* path) {
     }
   }
   f.close();
+  if (loaded) *loaded = _n;
+  return seen;
+}
+
+// Legacy entry point: first-MAX_SATS-in-file-order (no favorites priority). Kept for callers
+// that don't have a favorites set; still records seenCount() for truncation reporting.
+int SatDb::loadGpFromFile(const char* path) {
+  _n = 0;
+  _seen = scanGpFile(path, nullptr, nullptr, nullptr);
+  return _n;
+}
+
+// Favorites-first priority load. Two streaming passes over the (already-on-SD) file:
+//   pass 1 -- load only objects whose NORAD is in favs[] (guarantees favorites survive, even
+//             if they sit past the MAX_SATS-th object in a large group);
+//   pass 2 -- fill any remaining slots in file order, skipping already-loaded NORADs.
+// seenCount() is taken from pass 2 (it sees every object). Two passes ~= double parse time on
+// refresh; the file is tens of KB for AMSAT (negligible) and streaming keeps RAM flat for the
+// large CelesTrak groups where this matters most.
+int SatDb::loadGpFromFilePreferring(const char* path, const uint32_t* favs, int favN) {
+  _n = 0;
+  if (favs && favN > 0) {
+    struct FavCtx { const uint32_t* f; int n; } fc { favs, favN };
+    auto favAccept = [](uint32_t norad, void* ctx) -> bool {
+      FavCtx* c = (FavCtx*)ctx;
+      for (int i = 0; i < c->n; ++i) if (c->f[i] == norad) return true;
+      return false;
+    };
+    scanGpFile(path, favAccept, &fc, nullptr);   // pass 1: favorites only
+  }
+  // pass 2: fill remaining slots in file order (indexOfNorad skips ones already loaded).
+  _seen = scanGpFile(path, nullptr, nullptr, nullptr);
   return _n;
 }
 
@@ -11120,14 +11201,15 @@ int      Net::REBOOT_AFTER   = 3;       // failed hard resets in a row -> prompt
 uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session so a
                                         // just-closed socket leaves the LWIP pool
 // --- TLS_MIN_BLOCK: pre-handshake contiguous-heap gate -----------------------
-// mbedTLS needs ~32 KB contiguous for a handshake (16 KB RX + 16 KB TX). With the
-// drawing sprite resident the largest block is ~33 KB after the 0.9.41 static-RAM
-// trim (LOG_VIEW_MAX 60->48 reclaimed ~1.7 KB, restoring the pre-feature headroom),
-// so POSTs complete without freeing the sprite. This floor only gates the POST paths
+// Written for the mbedTLS era (~32 KB contiguous per handshake); since 0.9.43 the
+// transport is BearSSL, whose largest single allocation is the 16 KB RX buffer plus
+// LWIP send-path room -- comfortably under the resident largest block (~31.7 KB), and
+// 0.9.53's heap reclaim restored the coexistence margin that made multi-batch uploads
+// reliable. The floor below still stands as an OOM tripwire; it only gates the POST paths
 // (GETs don't call reclaim). 28000 sits below the resident block so real attempts
 // proceed, and above a genuinely-exhausted heap so the upload declines + offers a
 // reboot rather than failing mid-handshake with a bare -1.
-uint32_t Net::TLS_MIN_BLOCK  = 28000;   // below the ~33 KB resident block; catches real OOM
+uint32_t Net::TLS_MIN_BLOCK  = 28000;   // below the ~31.7 KB resident block; catches real OOM
 
 // --- 0.9.41 proactive WiFi-cycle defrag (see net.h / docs/design/HEAP_WIFI_CYCLE.md) ---
 // Set TLS_WIFI_CYCLE=false to revert to the passive-wait-only reclaim behaviour.
@@ -11551,6 +11633,21 @@ bool Net::httpsGetToFile(const String& url, const char* path,
       return false;
     }
 
+    // Preflight: if the server declared a Content-Length, make sure it will actually fit on
+    // the active filesystem before we start writing. On internal-flash-only units the LittleFS
+    // partition is small (~1 MB), and a large CelesTrak group ("Active", "Starlink") can be
+    // several MB -- without this check the write fills the partition and fails partway, possibly
+    // corrupting the previous good catalog. A generous 32 KB margin leaves room for other files.
+    // (freeBytes() reports a large value on SD, so this only bites the genuinely-too-big case.)
+    if (len > 0) {
+      size_t freeFs = Store::freeBytes();
+      if (freeFs > 0 && (size_t)len + 32768 > freeFs) {
+        lastErr = "file too big for storage (" + String(len / 1024) + "KB > "
+                  + String((int)(freeFs / 1024)) + "KB free)";
+        return false;
+      }
+    }
+
     File f = Store::fs().open(path, "w");
     if (!f) { lastErr = Store::ready() ? "fs open failed" : "no filesystem"; return false; }
 
@@ -11705,8 +11802,9 @@ bool Net::httpsPostMultipart(const String& url, const char* fieldName,
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
 
   // Probe the upload file's size WITHOUT reading it into RAM yet. The ~9 KB body
-  // buffer must NOT exist during the TLS handshake: mbedTLS needs ~32 KB contiguous,
-  // and on this no-PSRAM heap the largest free block sits right at ~31.7 KB. Holding
+  // buffer must NOT exist during the TLS handshake: the TLS stack needs a large
+  // contiguous block (mbedTLS-era ~32 KB; BearSSL's 16 KB RX buffer today), and on
+  // this no-PSRAM heap the largest free block sits right at ~31.7 KB. Holding
   // the body buffer during the handshake was tipping it over into "SSL - Memory
   // allocation failed" every time (the larger LoTW body is why LoTW failed where the
   // smaller Cloudlog body squeaked through). So: get the size, compute Content-Length,
@@ -13276,7 +13374,8 @@ bool Settings::save() {
 //  app.cpp  -  UI state machine, rendering, and real-time Doppler control
 // ===========================================================================
 
-// 8bpp palette indices. The display canvas is an 8bpp (palette) sprite -- on a
+// Palette indices. The display canvas is a palette sprite (4bpp since 0.9.53;
+// depth set by CANVAS_DEPTH in App::setup, colours unchanged) -- on a
 // palette sprite M5GFX/LGFX uses the value passed to fill/draw as a PALETTE
 // INDEX, not as a 16-bit colour (a 16-bit colour would be truncated to a bogus
 // index). So the CL_* names below are indices into CL_PALETTE[], and every
@@ -13520,8 +13619,13 @@ void App::setup() {
     }
   }
 
+  loadFavs();               // before the cached GP load, so favorites survive truncation offline
   // Try cached GP data so the unit is useful offline at boot.
-  if (db.loadGpFromFs()) setStatus("Loaded cached GP: " + String(db.count()));
+  if (db.loadGpFromFsPreferring(favs, favN)) {
+    setStatus(db.wasTruncated()
+              ? ("Cached GP: " + String(db.count()) + " of " + String(db.seenCount()))
+              : ("Loaded cached GP: " + String(db.count())));
+  }
   else setStatus("No GP data yet. Use Update.");
   db.loadManualGpFile();    // merge any hand-entered satellites
   loadSpaceWeather();       // restore cached F10.7 for the decay estimate
@@ -13534,7 +13638,6 @@ void App::setup() {
   if (Store::fs().exists(FILE_SPACEWX_TMP)) Store::fs().remove(FILE_SPACEWX_TMP);
   if (Store::fs().exists(FILE_WEATHER_TMP)) Store::fs().remove(FILE_WEATHER_TMP);
   if (Store::fs().exists(FILE_DL_TMP))      Store::fs().remove(FILE_DL_TMP);
-  loadFavs();
   buildSatView();
   db.applyAmsatCatalogFile(FILE_AMSCAT);  // rebuild the AMSAT name map from cache
   db.applyAmsatStatusFile(FILE_AMSTAT);   // restore cached AMSAT activity marks
@@ -13993,10 +14096,13 @@ void App::doUpdateGp() {
     Serial.printf("[gp] download failed: %s\n", net.lastErr.c_str());
     setStatus("GP DL failed: " + net.lastErr); return;
   }
-  int n = db.loadGpFromFile(FILE_GP);
+  int n = db.loadGpFromFilePreferring(FILE_GP, favs, favN);   // favorites survive truncation
   db.loadManualGpFile();               // re-merge hand-entered sats after replace
-  Serial.printf("[gp] parsed %d satellites\n", n);
+  Serial.printf("[gp] parsed %d of %d satellites%s\n", n, db.seenCount(),
+                db.wasTruncated() ? " (truncated; favorites kept)" : "");
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
+  if (db.wasTruncated())
+    setStatus("Loaded " + String(n) + " of " + String(db.seenCount()) + " (cap " + String(n) + ")");
   buildSatView();
   fetchAmsatCatalog();                 // refresh the AMSAT name map first
   fetchAmsatStatus();                  // tag active/not-heard from AMSAT status
@@ -14027,9 +14133,10 @@ void App::doFastUpdate() {
     Serial.printf("[fast] GP download failed: %s\n", net.lastErr.c_str());
     setStatus("GP DL failed: " + net.lastErr); return;
   }
-  int n = db.loadGpFromFile(FILE_GP);
+  int n = db.loadGpFromFilePreferring(FILE_GP, favs, favN);
   db.loadManualGpFile();
-  Serial.printf("[fast] parsed %d satellites\n", n);
+  Serial.printf("[fast] parsed %d of %d satellites%s\n", n, db.seenCount(),
+                db.wasTruncated() ? " (truncated; favorites kept)" : "");
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
   buildSatView();
   fetchAmsatCatalog();                 // name map first, so matching is exact
@@ -16752,9 +16859,9 @@ void App::suspendNetServers() {
 // free the sprite for the duration of an outbound fetch (the loop isn't drawing
 // during a blocking download) and recreate it afterwards. drawMemoIndicator and
 // the per-screen draws are skipped while it's gone via canvasFreed.
-// The 8bpp display sprite is only ~32 KB, so it stays allocated through every
-// TLS session: with it kept, ~85 KB of heap remains free, which is enough for
-// the mbedTLS handshake. We therefore never delete/recreate the sprite (the
+// The display sprite (~16 KB at 4bpp since 0.9.53; ~32 KB at 8bpp when this was
+// written) stays allocated through every TLS session -- BearSSL's 16 KB RX buffer
+// fits alongside it. We therefore never delete/recreate the sprite (the
 // 16bpp 64 KB block could not be reliably reallocated on IDF 5.4.x, which froze
 // the screen). These remain as no-ops so the trampoline call sites and the
 // canvasFreed contract stay intact; canvasFreed is never set, so draw() always
@@ -17841,6 +17948,7 @@ void App::loop() {
   serviceAosAlarm();           // countdown beeps + flash before AOS
   serviceSkedAlarm();          // countdown beeps + flash before a user-set sked
   serviceAudioRelease();       // take the speaker back down after an alarm's tail (on-demand audio)
+  serviceSerialCli();          // read-only USB serial console (help/heap/sats/next/...)
   tickCanvasRestore();         // retry sprite realloc if a post-fetch restore failed
 
   if (satsatJobPhase != 0) satsatJobTick();   // advance the incremental sat-to-sat search
@@ -18155,8 +18263,8 @@ void App::loop() {
       (screen == SCR_TGTHITS && tsPhase == TS_RUNNING) ||
       loraObjTxActive) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
-  } else if (screen == SCR_ORBITZOO) {
-    if (ms - lastDrawMs > 66) { lastDrawMs = ms; draw(); }   // ~15 fps orbit animation
+  } else if (screen == SCR_ORBITZOO || screen == SCR_FOXANAT) {
+    if (ms - lastDrawMs > 66) { lastDrawMs = ms; draw(); }   // ~15 fps Learn animations
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
@@ -18285,11 +18393,18 @@ void App::takeScreenshot() {
 }
 
 void App::handleKey(char c, bool enter, bool back) {
-  // Hidden screenshot hotkey: 'b' saves a BMP of the screen to the SD card.
-  // Skipped during text entry (SCR_EDIT/note editor) so it can still be typed.
-  if (c == 'b' && screen != SCR_EDIT && screen != SCR_NOTEEDIT) { takeScreenshot(); return; }
-  // Help is reachable with 'h' from anywhere except while typing.
-  if (c == 'h' && screen != SCR_EDIT && screen != SCR_NOTEEDIT && screen != SCR_HELP) {
+  // Bare-letter global hotkeys ('b' screenshot, 'h' help) must never steal a
+  // keystroke from a context that consumes letters. Beyond the two text editors,
+  // that means the Tools first-letter jump ('b' must reach the Battery tool) and
+  // the inline query entries of the DXCC and character lookups ("HB9" needs both
+  // its h and its b). Home's menu jump has no H/B items, so the globals keep
+  // working there; the CAT monitor's hex entry is already safe (it goes through
+  // the shared editor). One predicate keeps both hotkeys' exclusions in sync.
+  const bool lettersFree = (screen != SCR_EDIT && screen != SCR_NOTEEDIT &&
+                            screen != SCR_TOOLS && screen != SCR_DXLK &&
+                            screen != SCR_CHARLK);
+  if (c == 'b' && lettersFree) { takeScreenshot(); return; }
+  if (c == 'h' && lettersFree && screen != SCR_HELP) {
     helpReturn = screen; helpScroll = 0; screen = SCR_HELP; lastDrawMs = 0; return;
   }
   switch (screen) {
@@ -18353,6 +18468,10 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_LINKB: keyLinkB(c, enter, back); break;
     case SCR_OPREF: keyOpref(c, enter, back); break;
     case SCR_CTCSS: keyCtcss(c, enter, back); break;
+    case SCR_CUBESIM: keyCubeSim(c, enter, back); break;
+    case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
+    case SCR_FOXTEXT: keyFoxText(c, enter, back); break;
+    case SCR_CSIMINFO: keyCsimInfo(c, enter, back); break;
     case SCR_ORBITZOO: keyOrbitZoo(c, enter, back); break;
     case SCR_MATHREF: keyMathRef(c, enter, back); break;
     case SCR_PLANNER: keyPlanner(c, enter, back); break;
@@ -23213,6 +23332,8 @@ void App::doLotwUpload(const String& keyPass) {
   // pre-POST value across consecutive uploads, the BearSSL RX buffer alloc/free is ratcheting
   // the heap down per connection (a persistent client would fix that). If it recovers cleanly,
   // the stall is transient contiguity pressure, not a ratchet.
+  // 0.9.53 on-device result: it recovered to the identical value before every batch -- no
+  // ratchet. The log stays as a regression sentinel.
   Serial.printf("[lotw] after POST: heap free %u, largest %u (posted=%d)\n",
                 (unsigned)ESP.getFreeHeap(),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (int)posted);
@@ -24160,6 +24281,10 @@ void App::draw() {
     case SCR_LINKB: drawLinkB(); break;
     case SCR_OPREF: drawOpref(); break;
     case SCR_CTCSS: drawCtcss(); break;
+    case SCR_CUBESIM: drawCubeSim(); break;
+    case SCR_FOXANAT: drawFoxAnat(); break;
+    case SCR_FOXTEXT: drawFoxText(); break;
+    case SCR_CSIMINFO: drawCsimInfo(); break;
     case SCR_ORBITZOO: drawOrbitZoo(); break;
     case SCR_MATHREF: drawMathRef(); break;
     case SCR_PLANNER: drawPlanner(); break;
@@ -24694,6 +24819,10 @@ void App::drawHelp() {
     "GLOBAL",
     " `  back / home",
     " h  open this help",
+    " b  screenshot to SD",
+    " ;/.  up/down",
+    " ,//  left/right",
+    "HELP TOPICS (from this screen)",
     " g  glossary & math",
     " m  user guide",
     " s  ham satellite history",
@@ -24701,10 +24830,9 @@ void App::drawHelp() {
     " l  learn (radio+orbit theory,",
     "    modulation, telemetry)",
     " o  orbit animations (types)",
+    " a  AMSAT Fox anatomy",
+    " c  CubeSat Simulator intro",
     " f  frequencies / band plan",
-    " b  screenshot to SD",
-    " ;/.  up/down",
-    " ,//  left/right",
     "HOME",
     " ENT  open selected item",
     " (menu scrolls)",
@@ -24804,9 +24932,19 @@ void App::drawHelp() {
     " browse memos newest-first",
     " ENT play  n new standalone",
     " d delete  r refresh",
+    "WORKABLE HORIZON (Passes: w)",
+    " 10-day reach: states/DXCC/grids",
+    " ;/. scroll  ` back",
+    "TARGET SEARCH (Passes: s)",
+    " ,// type  ENT edit  g GO",
+    " results: ;/. scroll  ` back",
+    "ROVE PLANS (Passes: p)",
+    " ENT delete plan  ` back",
     "WORKABLE GRIDS",
     " grids under footprint",
     " ;/. {} scroll",
+    "CAT MONITOR",
+    " s  type + send raw hex frame",
     "LOCATION",
     " e/o/a edit lat/lon/alt",
     " g grid  p GPS  s source",
@@ -24927,6 +25065,9 @@ void App::keyHelp(char c, bool enter, bool back) {
   if (c == 'l') { learnScroll = 0; screen = SCR_LEARN; lastDrawMs = 0; return; }
   if (c == 'o') { ozType = 0; ozPhase = 0; ozTrailCount = 0; ozTrailHead = 0;    // orbit animations
                   screen = SCR_ORBITZOO; lastDrawMs = 0; return; }
+  if (c == 'a') { foxTheta = 0; foxLabel = 0; foxSpin = true; foxLblMs = millis(); // AMSAT Fox anatomy
+                  screen = SCR_FOXANAT; lastDrawMs = 0; return; }
+  if (c == 'c') { csimInfoScroll = 0; screen = SCR_CSIMINFO; lastDrawMs = 0; return; } // CubeSat Simulator intro
   if (c == 'f') { bpScroll = 0; screen = SCR_BANDPLAN; lastDrawMs = 0; return; }  // frequencies / band plan
   if (isUp(c))   { helpScroll--; lastDrawMs = 0; }
   if (isDown(c)) { helpScroll++; lastDrawMs = 0; }
@@ -26436,6 +26577,121 @@ void App::serviceAudioRelease() {
   M5Cardputer.Speaker.end();
   audioUp = false;
   audioReleaseAt = 0;
+}
+
+// --- Read-only serial command console (USB) --------------------------------
+// Polled once per loop. Accumulates a line, then dispatches it. Everything here only READS
+// device state and prints -- it never mutates anything -- so it's safe to leave always-on and
+// carries no heap cost (fixed cliBuf, no allocation). Handy for bench debugging over the same
+// USB cable used for flashing: `heap`, `sats`, `next`, etc.
+// Case-insensitive substring match (strcasestr is a GNU extension; avoid relying on it).
+static bool ciFind(const char* hay, const char* needle) {
+  if (!*needle) return true;
+  for (; *hay; ++hay) {
+    const char* h = hay; const char* n = needle;
+    while (*h && *n && tolower((unsigned char)*h) == tolower((unsigned char)*n)) { ++h; ++n; }
+    if (!*n) return true;
+  }
+  return false;
+}
+
+void App::serviceSerialCli() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') { cliBuf[cliLen] = 0; if (cliLen) runSerialCommand(cliBuf); cliLen = 0; }
+    else if (cliLen < sizeof(cliBuf) - 1) cliBuf[cliLen++] = c;
+    else cliLen = 0;                         // overlong line: drop it
+  }
+}
+
+void App::runSerialCommand(const char* cmd) {
+  auto is = [&](const char* s){ return strcasecmp(cmd, s) == 0; };
+  if (is("help") || is("?")) {
+    Serial.println(F("CardSat serial console (read-only):"));
+    Serial.println(F("  ver   firmware version + build date"));
+    Serial.println(F("  heap  free heap + largest contiguous block"));
+    Serial.println(F("  sats  catalog count (loaded/seen) + truncation"));
+    Serial.println(F("  fav   favorites count + active satellite"));
+    Serial.println(F("  next  next pass for the active satellite"));
+    Serial.println(F("  net   WiFi state, IP, RSSI"));
+    Serial.println(F("  time  current UTC + clock status"));
+    Serial.println(F("  gps   fix, sats, lat/lon, grid"));
+    Serial.println(F("  bat   battery percent"));
+    Serial.println(F("  fs    storage backend + free space"));
+    Serial.println(F("  up    uptime"));
+    Serial.println(F("  pass <sat>  next pass, any catalog sat"));
+  } else if (is("ver")) {
+    Serial.printf("CardSat v%s (built %s)\n", FW_VERSION, __DATE__);
+  } else if (is("heap")) {
+    Serial.printf("heap free %u, largest block %u\n",
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  } else if (is("sats")) {
+    Serial.printf("catalog: %d loaded", db.count());
+    if (db.seenCount() > db.count()) Serial.printf(" of %d seen (truncated; favorites kept)", db.seenCount());
+    Serial.println();
+  } else if (is("fav")) {
+    Serial.printf("favorites: %d\n", favN);
+    SatEntry* a = activeSat();
+    if (a) Serial.printf("active: %s (NORAD %lu)\n", a->name, (unsigned long)a->norad);
+    else   Serial.println(F("active: none"));
+  } else if (is("next")) {
+    SatEntry* a = activeSat();
+    if (!a) { Serial.println(F("no active satellite")); return; }
+    if (!timeIsSet()) { Serial.println(F("clock not set (update GP first)")); return; }
+    pred.setSite(loc.obs());
+    if (!pred.setSat(*a)) { Serial.println(F("cannot init that satellite")); return; }
+    PassPredict p;
+    if (pred.predictPasses(nowUtc(), cfg.minPassEl, &p, 1) < 1) { Serial.println(F("no pass found in window")); return; }
+    Serial.printf("next %s: AOS in %ld min, max el %d deg\n",
+                  a->name, (long)((p.aos - nowUtc()) / 60), (int)p.maxEl);
+  } else if (is("net")) {
+    Serial.printf("wifi %s, ip %s, rssi %d\n",
+                  net.connected() ? "up" : "down",
+                  net.connected() ? WiFi.localIP().toString().c_str() : "-",
+                  net.connected() ? WiFi.RSSI() : 0);
+  } else if (is("time")) {
+    if (!timeIsSet()) { Serial.println(F("clock not set (update GP or wait for GPS)")); return; }
+    time_t t = nowUtc(); struct tm tmv; gmtime_r(&t, &tmv);
+    Serial.printf("%04d-%02d-%02d %02d:%02d:%02dZ\n", tmv.tm_year + 1900, tmv.tm_mon + 1,
+                  tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+  } else if (is("gps")) {
+    const Observer& o = loc.obs();
+    Serial.printf("fix %s, sats %d, lat %.4f lon %.4f, grid %s\n",
+                  loc.gpsHasFix() ? "yes" : "no (saved/manual loc)", loc.gpsSats(),
+                  o.lat, o.lon, Location::toGrid(o.lat, o.lon).c_str());
+  } else if (is("bat")) {
+    int lvl = M5.Power.getBatteryLevel();
+    if (lvl < 0) Serial.println(F("battery: unknown"));
+    else Serial.printf("battery: %d%%\n", lvl);
+  } else if (is("fs")) {
+    Serial.printf("storage: %s, %u KB free\n", Store::onSD() ? "microSD" : "LittleFS",
+                  (unsigned)(Store::freeBytes() / 1024));
+  } else if (is("up")) {
+    unsigned long m = millis() / 60000UL;
+    Serial.printf("uptime: %luh %lum\n", m / 60, m % 60);
+  } else if (strncasecmp(cmd, "pass", 4) == 0) {
+    const char* q = cmd + 4; while (*q == ' ') ++q;
+    if (!*q) { Serial.println(F("usage: pass <name or NORAD>")); return; }
+    int idx = -1;
+    bool digits = true;
+    for (const char* p = q; *p; ++p) if (!isdigit((unsigned char)*p)) { digits = false; break; }
+    if (digits) idx = db.indexOfNorad((uint32_t)strtoul(q, nullptr, 10));
+    if (idx < 0) for (int i = 0; i < db.count(); ++i) if (ciFind(db.at(i).name, q)) { idx = i; break; }
+    if (idx < 0) { Serial.printf("no catalog match for '%s'\n", q); return; }
+    SatEntry& e = db.at(idx);
+    if (!timeIsSet()) { Serial.println(F("clock not set (update GP first)")); return; }
+    pred.setSite(loc.obs());
+    if (!pred.setSat(e)) { Serial.println(F("cannot init that satellite")); return; }
+    PassPredict p;
+    if (pred.predictPasses(nowUtc(), cfg.minPassEl, &p, 1) < 1) { Serial.println(F("no pass found in window")); return; }
+    Serial.printf("next %s (NORAD %lu): AOS in %ld min, max el %d deg, AOS az %d\n",
+                  e.name, (unsigned long)e.norad, (long)((p.aos - nowUtc()) / 60),
+                  (int)p.maxEl, (int)p.azAos);
+  } else {
+    Serial.printf("unknown: %s (try 'help')\n", cmd);
+  }
 }
 
 // Tilt left/right signal in [-1, +1] (negative = roll left). Returns false when
@@ -30843,6 +31099,7 @@ static const char* const TOOLS_NAMES[] = {
   "CTCSS tone reference",
   "Radio math reference",
   "State vector -> GP",
+  "CubeSatSim C2C ref",
   "Coax loss / power",
   "Dipole length",
   "Vertical / ground plane",
@@ -30866,12 +31123,12 @@ static const char* const TOOLS_NAMES[] = {
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
-// The first eleven Tools menu entries are standalone screens (sci calc, programmer calc,
+// The first twelve Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
-// reference, radio-math reference, state-vector->GP); everything after them is a numeric
+// reference, radio-math reference, state-vector->GP, CubeSatSim C2C ref); everything after them is a numeric
 // "form" tool whose form-id is (menu index - TOOLS_FIRST_FORM). Keeping this as one named
 // constant means the two places that convert between menu index and form id stay in step.
-static const int TOOLS_FIRST_FORM = 11;
+static const int TOOLS_FIRST_FORM = 12;
 
 // Compile-time guard: the number of form-based tools in the menu (everything after the
 // standalone ones) must exactly match the size of the form enum (TOOL_COAX..TOOL__N).
@@ -30940,6 +31197,8 @@ void App::keyTools(char c, bool enter, bool back) {
       mathRefScroll = 0; screen = SCR_MATHREF;
     } else if (toolsSel == 10) {               // state vector -> GP elements
       gpfInit(); screen = SCR_GPFIT;
+    } else if (toolsSel == 11) {               // CubeSatSim C2C reference
+      cubesimScroll = 0; screen = SCR_CUBESIM;
     } else {                                   // one of the live-recalc forms
       toolFormInit(toolsSel - TOOLS_FIRST_FORM);   // form id = menu index - (standalone tools that precede)
       screen = SCR_TOOLFORM;
@@ -32153,6 +32412,307 @@ void App::keyCtcss(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
   if (isUp(c))   { if (--ctcssScroll < 0) ctcssScroll = 0; lastDrawMs = 0; return; }
   if (isDown(c)) { if ((ctcssScroll + 5) * 6 < CTCSS_TONES_N) ++ctcssScroll; lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  CubeSatSim command & control reference (SCR_CUBESIM): how to command AMSAT's
+//  CubeSat Simulator over the air (DTMF / APRS / bare carrier) and the config
+//  script's key options. Offline reference only -- CardSat does not transmit
+//  these commands itself. Mode table verified against the CubeSatSim v2.x docs
+//  (cubesatsim.org Lite readme + the config script source), Jul 2026.
+// ---------------------------------------------------------------------------
+static const char* const CUBESIM_LINES[] = {
+  "Radio C2C (uplink FM on the C2C RX",
+  " freq, 435.000 MHz default):",
+  " DTMF: dial <mode #> then #",
+  " APRS: packet text  MODE=<letter>",
+  " Carrier: key up briefly -> mode",
+  "  steps +1, sim reboots; green",
+  "  LED blinks the new mode number",
+  "",
+  "Modes            #   letter",
+  " APRS / AFSK ... 1     a",
+  " FSK / DUV ..... 2     f",
+  " BPSK .......... 3     b",
+  " SSTV camera ... 4     s",
+  " CW beacon ..... 5     m",
+  " X-band rptr ... 6     e",
+  " FUNcube ....... 7     j",
+  "",
+  "Console (ssh pi@cubesatsim):",
+  " CubeSatSim/config -h  all opts",
+  "  -q N  squelch (8 = C2C RX off)",
+  "  -F    set TX/RX freq (420-450)",
+  "  -A    command ANOTHER sim (APRS)",
+  "  -o    telemetry beacon on/off",
+  "",
+  "Sim TX ~434.9 MHz FM.  Details:",
+  "github.com/alanbjohnston/CubeSatSim",
+  " wiki: Command and Control.",
+  "Table per v2.x docs -- check the",
+  " wiki for your firmware version.",
+};
+static const int CUBESIM_N = (int)(sizeof(CUBESIM_LINES) / sizeof(CUBESIM_LINES[0]));
+
+void App::drawCubeSim() {
+  header("CubeSatSim C2C");
+  canvas.setTextSize(1);
+  const int LH = 10, ROWS = 11;
+  for (int r = 0; r < ROWS; ++r) {
+    int idx = cubesimScroll + r;
+    if (idx >= CUBESIM_N) break;
+    const char* s = CUBESIM_LINES[idx];
+    bool head = (s[0] != ' ' && s[0] != 0);
+    canvas.setTextColor(head ? CL_ORANGE : CL_MGREY, CL_BLACK);
+    canvas.setCursor(6, 20 + r * LH);
+    canvas.print(s);
+  }
+  footer(";/. scroll  ` back");
+}
+
+void App::keyCubeSim(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--cubesimScroll < 0) cubesimScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (cubesimScroll + 11 < CUBESIM_N) ++cubesimScroll; lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  AMSAT Fox anatomy (SCR_FOXANAT): animated Learn explainer. A 1U CubeSat
+//  wireframe spins (~15 fps via the ORBITZOO tick) while one labeled callout at
+//  a time points into the rotating body. Facts verified against the AMSAT Fox
+//  Documentation PDF (amsat.org, Jun 2018 compendium), Jul 2026: deployable
+//  antennas are the ONLY deployables; fixed solar panels on all 6 sides;
+//  rechargeable battery for eclipse; permanent magnetic stabilization (overview
+//  list); all uplinks 70 cm (req 2.4.2) with 2 m downlink ~145.9 (ICD table);
+//  FM transponder (req 3.9); IHU is the hub of every subsystem ICD; 1U
+//  10x10x10 cm chassis; MEMS-gyro attitude-determination experiment payload.
+//  Heap discipline: NO allocation -- vertices computed per frame, fixed tables.
+// ---------------------------------------------------------------------------
+namespace {
+  struct FoxLbl { const char* t; const char* l1; const char* l2; const char* l3;
+                  float ax, ay, az; };            // leader anchor, body coords (units of s)
+  const FoxLbl FOX_LBL[] = {
+    { "Deployable",     "antennas: 70cm",  "RX + 2m TX (the", "only deployable)",  0.0f,  1.0f,  0.0f },
+    { "Solar panels",   "fixed cells on",  "all six sides",   "",                  0.0f,  0.0f,  1.0f },
+    { "Battery",        "rechargeable --", "runs the sat",    "through eclipse",  -0.3f, -0.3f,  0.0f },
+    { "IHU computer",   "Internal House-", "keeping Unit:",   "runs everything",   0.3f,  0.2f,  0.0f },
+    { "FM transponder", "70cm up, 2m dn",  "-- a repeater",   "in the sky",        0.0f, -0.4f,  0.3f },
+    { "Magnetic stab.", "permanent mag-",  "nets align it",   "w/ Earth field",   -0.4f,  0.5f, -0.2f },
+    { "Experiment bay", "student science", "e.g. MEMS-gyro",  "attitude expt",     0.4f, -0.4f, -0.3f },
+  };
+  const int FOX_LBL_N = (int)(sizeof(FOX_LBL) / sizeof(FOX_LBL[0]));
+}
+
+void App::drawFoxAnat() {
+  header("AMSAT Fox");
+  canvas.setTextSize(1);
+  if (foxSpin) { foxTheta += 0.030f; if (foxTheta > 6.2831853f) foxTheta -= 6.2831853f; }
+  if (millis() - foxLblMs > 4500) { foxLabel = (uint8_t)((foxLabel + 1) % FOX_LBL_N); foxLblMs = millis(); }
+  const float ph = 0.35f, s = 24.0f; const float cx = 84.0f, cy = 70.0f;
+  const float ct = cosf(foxTheta), st = sinf(foxTheta), cp = cosf(ph), sp = sinf(ph);
+  // body -> screen (orthographic, Y-spin then X-tilt); sz kept for painter order
+  auto PX = [&](float x, float y, float z, float& sx, float& sy, float& sz) {
+    float x1 = x * ct + z * st, z1 = -x * st + z * ct;
+    sx = cx + x1; sy = cy - (y * cp - z1 * sp); sz = y * sp + z1 * cp;
+  };
+  float vx[8], vy[8], vz[8]; int vi = 0;
+  for (int ix = -1; ix <= 1; ix += 2)
+    for (int iy = -1; iy <= 1; iy += 2)
+      for (int iz = -1; iz <= 1; iz += 2) { PX(ix * s, iy * s, iz * s, vx[vi], vy[vi], vz[vi]); ++vi; }
+  static const uint8_t F[6][4] = { {0,1,3,2}, {4,5,7,6}, {0,1,5,4}, {2,3,7,6}, {0,2,6,4}, {1,3,7,5} };
+  int ord[6] = { 0, 1, 2, 3, 4, 5 };            // painter: farthest face first
+  for (int a = 0; a < 6; ++a)
+    for (int b = a + 1; b < 6; ++b) {
+      float za = 0, zb = 0;
+      for (int k = 0; k < 4; ++k) { za += vz[F[ord[a]][k]]; zb += vz[F[ord[b]][k]]; }
+      if (zb < za) { int t = ord[a]; ord[a] = ord[b]; ord[b] = t; }
+    }
+  for (int f = 0; f < 6; ++f) {
+    const uint8_t* q = F[ord[f]];
+    bool front = (f >= 4);                       // two most camera-facing faces
+    uint8_t fill = front ? CL_DGREY : CL_BLACK;
+    canvas.fillTriangle((int)vx[q[0]], (int)vy[q[0]], (int)vx[q[1]], (int)vy[q[1]],
+                        (int)vx[q[2]], (int)vy[q[2]], fill);
+    canvas.fillTriangle((int)vx[q[0]], (int)vy[q[0]], (int)vx[q[2]], (int)vy[q[2]],
+                        (int)vx[q[3]], (int)vy[q[3]], fill);
+    for (int e = 0; e < 4; ++e) {                // face outline
+      int a2 = q[e], b2 = q[(e + 1) & 3];
+      canvas.drawLine((int)vx[a2], (int)vy[a2], (int)vx[b2], (int)vy[b2], CL_CYAN);
+    }
+    if (front) {                                 // solar-cell grid on facing panels
+      for (int gi = 1; gi <= 2; ++gi) {
+        float t = gi / 3.0f;
+        float x0 = vx[q[0]] + (vx[q[1]] - vx[q[0]]) * t, y0 = vy[q[0]] + (vy[q[1]] - vy[q[0]]) * t;
+        float x1 = vx[q[3]] + (vx[q[2]] - vx[q[3]]) * t, y1 = vy[q[3]] + (vy[q[2]] - vy[q[3]]) * t;
+        canvas.drawLine((int)x0, (int)y0, (int)x1, (int)y1, CL_BLUE);
+        float x2 = vx[q[0]] + (vx[q[3]] - vx[q[0]]) * t, y2 = vy[q[0]] + (vy[q[3]] - vy[q[0]]) * t;
+        float x3 = vx[q[1]] + (vx[q[2]] - vx[q[1]]) * t, y3 = vy[q[1]] + (vy[q[2]] - vy[q[1]]) * t;
+        canvas.drawLine((int)x2, (int)y2, (int)x3, (int)y3, CL_BLUE);
+      }
+    }
+  }
+  // Deployable whips (body-fixed, so they rotate with the cube): 2m TX + 70cm RX
+  float bx, by, bz, e1x, e1y, e1z, e2x, e2y, e2z;
+  PX(0, s, 0, bx, by, bz);
+  PX(1.4f * s, 2.3f * s, 0.15f * s, e1x, e1y, e1z);
+  PX(-0.7f * s, 2.5f * s, -0.1f * s, e2x, e2y, e2z);
+  canvas.drawLine((int)bx, (int)by, (int)e1x, (int)e1y, CL_YELLOW);
+  canvas.drawLine((int)bx, (int)by, (int)e2x, (int)e2y, CL_YELLOW);
+  // one callout at a time, leader tracking the rotating anchor
+  const FoxLbl& L = FOX_LBL[foxLabel];
+  float lx, ly, lz; PX(L.ax * s, L.ay * s, L.az * s, lx, ly, lz);
+  canvas.drawLine(141, 30, (int)lx, (int)ly, CL_ORANGE);
+  canvas.setTextColor(CL_ORANGE, CL_BLACK); canvas.setCursor(144, 26); canvas.print(L.t);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(144, 36); canvas.print(L.l1);
+  canvas.setCursor(144, 46); canvas.print(L.l2);
+  if (L.l3[0]) { canvas.setCursor(144, 56); canvas.print(L.l3); }
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, 112); canvas.print("1U CubeSat - 10 x 10 x 10 cm");
+  footer("spc spin  ,// label  i info  ` back");
+}
+
+void App::keyFoxAnat(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_HELP; helpReturn = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (c == ' ') { foxSpin = !foxSpin; lastDrawMs = 0; return; }
+  if (c == 'i') { foxTextScroll = 0; screen = SCR_FOXTEXT; lastDrawMs = 0; return; }
+  if (c == ',' || isLeft(c)) {
+    foxLabel = (uint8_t)((foxLabel + FOX_LBL_N - 1) % FOX_LBL_N); foxLblMs = millis(); lastDrawMs = 0; return; }
+  if (c == '/' || isRight(c) || enter) {
+    foxLabel = (uint8_t)((foxLabel + 1) % FOX_LBL_N); foxLblMs = millis(); lastDrawMs = 0; return; }
+  if (isUp(c))   { foxSpin = false; foxTheta -= 0.12f; lastDrawMs = 0; return; }
+  if (isDown(c)) { foxSpin = false; foxTheta += 0.12f; lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  Learn text screens: "AMSAT Fox & CubeSats" primer (SCR_FOXTEXT, `i` from the
+//  anatomy) and "CubeSat Simulator" intro (SCR_CSIMINFO, `c` from Help).
+//  Fox facts: AMSAT Fox Documentation PDF (amsat.org, Jun 2018) -- 1U 10x10x10,
+//  FM transponder + simple ground gear (mission stmt), 200 bps telemetry, fixed
+//  solar on all 6 sides, MEMS-gyro attitude experiment. Sim facts: cubesatsim.com
+//  (fetched Jul 2026) -- open-source, solar+battery, UHF telemetry, 3D-printed
+//  frame, Pi Zero 2 + Pi Pico on Main/Battery/Solar boards, AMSAT-sponsored,
+//  kits/PCBs at the AMSAT Store; telemetry mode list per the config script.
+// ---------------------------------------------------------------------------
+static const char* const FOXTEXT_LINES[] = {
+  "What is a CubeSat?",
+  " A tiny standardized satellite",
+  " built from 10 cm cubes (\"1U\").",
+  " Standard sizes and deployers",
+  " let students and small teams",
+  " fly as secondary payloads on",
+  " big launches -- space at a",
+  " classroom scale.",
+  "",
+  "AMSAT's Fox series",
+  " Fox is AMSAT's line of 1U",
+  " CubeSats: a complete working",
+  " satellite -- radios, computer,",
+  " power, antennas -- in one",
+  " 10 x 10 x 10 cm cube. (See",
+  " the anatomy screen: Help > a)",
+  "",
+  " Mission: keep FM satellite",
+  " contacts easy. Each Fox flies",
+  " an FM voice repeater you can",
+  " work with simple gear, plus",
+  " 200 bps telemetry hidden",
+  " under the voice audio.",
+  "",
+  " Fox birds also host student",
+  " experiments, like the MEMS-",
+  " gyro attitude sensor -- the",
+  " CubeSat as a teaching",
+  " platform in orbit.",
+  "",
+  "Hear one on your bench",
+  " The CubeSat Simulator sends",
+  " the same Fox-style telemetry",
+  " from your desk: Help > c.",
+};
+static const int FOXTEXT_LINES_N = (int)(sizeof(FOXTEXT_LINES) / sizeof(FOXTEXT_LINES[0]));
+
+static const char* const CSIM_LINES[] = {
+  "What it is",
+  " The AMSAT CubeSatSim: a fully",
+  " open-source, low-cost working",
+  " model of a satellite -- solar",
+  " panels, battery, UHF radio,",
+  " 3D-printed frame -- built for",
+  " STEM and ham education.",
+  "",
+  " Inside: a Raspberry Pi Zero 2",
+  " and a Pi Pico on three custom",
+  " boards (Main, Battery, Solar).",
+  "",
+  "What it does",
+  " Everything a real bird does,",
+  " on a desk: panels charge the",
+  " battery, sensors read the",
+  " spacecraft, and it beacons",
+  " real telemetry formats --",
+  " APRS, Fox-style DUV FSK,",
+  " BPSK, SSTV images, CW.",
+  "",
+  "Why it matters here",
+  " Power budgets, telemetry,",
+  " command & control -- hands-on",
+  " satellite systems, no launch",
+  " required. Command it over the",
+  " air: Tools > CubeSatSim C2C.",
+  "",
+  "Get one / build one",
+  " No-solder kits and bare PCBs",
+  " at the AMSAT Store; docs and",
+  " guides at cubesatsim.com.",
+};
+static const int CSIM_LINES_N = (int)(sizeof(CSIM_LINES) / sizeof(CSIM_LINES[0]));
+
+void App::drawFoxText() {
+  header("AMSAT Fox & CubeSats");
+  canvas.setTextSize(1);
+  const int LH = 10, ROWS = 11;
+  for (int r = 0; r < ROWS; ++r) {
+    int idx = foxTextScroll + r;
+    if (idx >= FOXTEXT_LINES_N) break;
+    const char* s = FOXTEXT_LINES[idx];
+    bool head = (s[0] != ' ' && s[0] != 0);
+    canvas.setTextColor(head ? CL_ORANGE : CL_MGREY, CL_BLACK);
+    canvas.setCursor(6, 20 + r * LH);
+    canvas.print(s);
+  }
+  footer(";/. scroll  ` back");
+}
+
+void App::keyFoxText(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_FOXANAT; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--foxTextScroll < 0) foxTextScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (foxTextScroll + 11 < FOXTEXT_LINES_N) ++foxTextScroll; lastDrawMs = 0; return; }
+}
+
+void App::drawCsimInfo() {
+  header("CubeSat Simulator");
+  canvas.setTextSize(1);
+  const int LH = 10, ROWS = 11;
+  for (int r = 0; r < ROWS; ++r) {
+    int idx = csimInfoScroll + r;
+    if (idx >= CSIM_LINES_N) break;
+    const char* s = CSIM_LINES[idx];
+    bool head = (s[0] != ' ' && s[0] != 0);
+    canvas.setTextColor(head ? CL_ORANGE : CL_MGREY, CL_BLACK);
+    canvas.setCursor(6, 20 + r * LH);
+    canvas.print(s);
+  }
+  footer(";/. scroll  ` back");
+}
+
+void App::keyCsimInfo(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_HELP; helpReturn = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--csimInfoScroll < 0) csimInfoScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (csimInfoScroll + 11 < CSIM_LINES_N) ++csimInfoScroll; lastDrawMs = 0; return; }
 }
 
 // ---------------------------------------------------------------------------

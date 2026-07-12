@@ -134,7 +134,7 @@ public:
   static int  RECOVER_AFTER;                    // failures before a hard reset (default 3)
   static int  REBOOT_AFTER;                     // failed hard resets before prompting reboot
   static uint32_t INTER_FETCH_MS;               // settle delay before each TLS session
-  static uint32_t TLS_MIN_BLOCK;                // min contiguous heap for an mbedTLS handshake
+  static uint32_t TLS_MIN_BLOCK;                // min contiguous heap to attempt a TLS POST (see net.cpp preamble)
 
   // --- 0.9.41 proactive WiFi-cycle defrag (REVERSIBLE via TLS_WIFI_CYCLE) -------
   // When the passive coalesce-wait in reclaimHeapForTls() still leaves the largest

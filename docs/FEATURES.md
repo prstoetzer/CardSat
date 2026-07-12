@@ -430,11 +430,29 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **Favorites**, **manual GP / transponder / time entry**, per-satellite
   **calibration**, and a **factory reset**.
 
-- **Tools hub** (About -> `t`) — 30 offline bench tools, covered in detail in the
+- **Tools hub** (About -> `t`) — 32 offline bench tools, covered in detail in the
   *Tools* entries above: the scientific and programmer's calculators, character/DXCC/CQ/ITU
   lookups and references, the link-budget / RF-exposure / battery / debris / cross-section
   calculators, the antenna and feedline forms (coax, dipole, vertical, yagi, quad, phasing,
   wavelength, attenuator, dB-chain), the ARRL radio-math tools (complex/polar, reactance &
   resonance, RC/RL time constant, radio-math reference), and the operating-references and
-  CTCSS cards. All math is local and works with no network. (The DXCC *lookup* database
+  CTCSS cards, plus the CubeSatSim C2C command crib (DTMF / APRS / carrier commands
+  for AMSAT's CubeSat Simulator, with the config-script options). All math is local and works with no network. (The DXCC *lookup* database
   covers 340 entities; the workable-DXCC footprint reference uses the same 340-entity set.)
+- **AMSAT Fox anatomy** (Help -> `a`) — an animated Learn explainer: a rotating 1U
+  Fox CubeSat with cycling labeled callouts (antennas, solar, battery, IHU, FM
+  transponder, magnetic stabilization, experiment bay), every label verified against
+  AMSAT's Fox documentation. Procedurally drawn — no bitmaps, zero heap. `i` inside
+  opens a **Fox & CubeSats** text primer (what CubeSats are, via AMSAT's series).
+- **CubeSat Simulator intro** (Help -> `c`) — what the AMSAT CubeSatSim is and why it
+  teaches satellite systems (open source, solar + battery, real telemetry formats;
+  kits at the AMSAT Store; cubesatsim.com), cross-linked to the Tools C2C reference.
+- **Favorites-first GP loading** — a source larger than the 150-sat catalog no longer
+  truncates silently: favorites are guaranteed loaded, the rest fill in file order, and
+  the status line / boot log report "Loaded X of Y (truncated; favorites kept)".
+- **Download preflight** — GP downloads are checked against free storage before any
+  byte is written; an oversized group is refused with "file too big for storage",
+  leaving the previous catalog untouched (protects internal-flash units).
+- **USB serial console** (115200) — a read-only bench console: `help`, `ver`, `heap`,
+  `sats`, `fav`, `next`, `net`, `time`, `gps`, `bat`, `fs`, `up`, and `pass <sat>`
+  (next pass for any catalog bird). Zero heap cost; never changes device state.

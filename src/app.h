@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1033,7 +1033,7 @@ private:
   void rotdHandleLine(const String& line);     // parse + act on one rotctld command
   void serviceWebd();                          // pump the mobile web-control server
   void suspendNetServers();                    // tear down rigd/rotd/webd listeners
-  void freeCanvasForTls();                     // free ~64 KB sprite for mbedTLS handshake
+  void freeCanvasForTls();                     // no-op since the BearSSL migration (see body); sprite stays resident
   void restoreCanvasAfterTls();
   void tickCanvasRestore();                    // loop-driven retry if restore alloc failed
   bool tryRecreateCanvas();                    // one sprite re-create attempt (shared by the two above)
@@ -1466,6 +1466,27 @@ private:
   int oprefTab = 0;      // 0=Q-codes 1=phonetics 2=RST
   int oprefScroll = 0;
   void drawOpref(); void keyOpref(char c, bool enter, bool back);
+  // CubeSatSim command & control reference (SCR_CUBESIM): offline crib for commanding
+  // AMSAT's CubeSat Simulator (DTMF / APRS / carrier, plus config-script options).
+  void drawCubeSim();
+  void keyCubeSim(char c, bool enter, bool back);
+  int  cubesimScroll = 0;
+  // AMSAT Fox anatomy (SCR_FOXANAT): animated Learn explainer -- a rotating 1U
+  // wireframe with one doc-verified callout at a time (see drawFoxAnat).
+  void drawFoxAnat();
+  void keyFoxAnat(char c, bool enter, bool back);
+  float    foxTheta = 0.0f;      // spin angle (rad)
+  uint8_t  foxLabel = 0;         // current callout index
+  bool     foxSpin  = true;      // auto-rotate (space toggles)
+  uint32_t foxLblMs = 0;         // last label-advance time
+  // Companion Learn text screens: Fox/CubeSat primer (SCR_FOXTEXT, via `i` on the
+  // anatomy) and CubeSat Simulator intro (SCR_CSIMINFO, via `c` on Help).
+  void drawFoxText();
+  void keyFoxText(char c, bool enter, bool back);
+  int  foxTextScroll = 0;
+  void drawCsimInfo();
+  void keyCsimInfo(char c, bool enter, bool back);
+  int  csimInfoScroll = 0;
   // CTCSS tone reference (SCR_CTCSS): standard EIA tone list + known satellite tones.
   int ctcssScroll = 0;
   void drawCtcss(); void keyCtcss(char c, bool enter, bool back);
@@ -1734,6 +1755,14 @@ private:
   void audioAcquire();                         // ensure speaker is up (begin + volume), cancel pending release
   void audioReleaseAfter(uint32_t ms);         // schedule speaker end() after ms of no audio
   void serviceAudioRelease();                  // loop hook: perform a due deferred end()
+  // Read-only serial command console (USB). Polled once per loop; accepts a short line and
+  // prints status (heap, version, satellite count, next pass, upload state). Zero heap cost:
+  // the input line lives in a fixed buffer and nothing is dynamically allocated. Read-only by
+  // design -- it never changes device state, so it's safe to leave always-on.
+  void serviceSerialCli();
+  void runSerialCommand(const char* cmd);      // dispatch one completed command line
+  char     cliBuf[64] = {0};                   // serial input line accumulator
+  uint8_t  cliLen = 0;
   bool     audioUp = false;                    // is the speaker currently begun?
   uint32_t audioReleaseAt = 0;                 // millis() deadline for a pending end() (0 = none)
   bool     audioGameOwned = false;             // audio was acquired for a game session (release on exit)

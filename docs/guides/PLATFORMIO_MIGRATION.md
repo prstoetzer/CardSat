@@ -1,14 +1,19 @@
 # CardSat — Scoping a Migration to PlatformIO (macOS)
 
-**Status:** Planning document. Nothing here has been built or verified on-device. It is a
-roadmap for evaluating a move off the Arduino IDE, written for someone who has never used
-PlatformIO. Treat every command as "to be tried," not "known-good on this project."
+**Status:** Planning document — and its original motivation is now **superseded**. Nothing here
+has been built or verified on-device; treat every command as "to be tried."
 
-**Why this exists:** the recurring Cloudlog/LoTW upload failures are caused by the mbedTLS
-TLS handshake needing ~32 KB of *contiguous* heap on a no-PSRAM ESP32-S3, while the drawing
-sprite leaves only ~31–33 KB contiguous. The Arduino IDE cannot shrink that requirement
-because it links a **precompiled** mbedTLS. The question this document answers: *can
-PlatformIO let us shrink the TLS buffers, and what would that migration actually involve?*
+**History of the motivation (kept for context):** this was written when HTTPS ran on the Arduino
+core's precompiled **mbedTLS**, whose ~32 KB contiguous handshake collided with the resident
+sprite. Two later releases resolved that without PlatformIO: **v0.9.43** moved all TLS transport
+to **BearSSL** (`ESP_SSLClient`, 16 KB RX buffer), and **v0.9.53** fixed the remaining
+multi-batch upload stalls by reclaiming heap (4bpp sprite, on-demand audio, buffer right-sizing)
+— confirmed on-device with clean back-to-back LoTW uploads.
+
+**What this migration is still good for:** sdkconfig-level tuning the Arduino IDE can't touch —
+raising `TCP_SND_BUF`, trimming WiFi buffer counts, reproducible builds. Optional, not a fix for
+a current failure. The paths below are kept as written; read their TLS-buffer rationale as
+historical.
 
 ---
 

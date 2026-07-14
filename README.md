@@ -19,6 +19,23 @@ transit prediction, sun/eclipse status, and more.
 > but not yet confirmed against that specific hardware — verify those on the air. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
 
+> **New in v0.9.55:** **CardSat prints — everything, three ways.** Turn any of **sixteen
+> reports** into paper on a network **ESC/POS** printer (TCP 9100; reference targets are Epson's
+> battery **TM-P20II Wi-Fi** and the 80 mm **GZM8022**), copy them out of the **USB serial console**
+> with no printer at all, or save an 80-column **/CardSat/Reports/*.txt** to the SD card — any combination.
+> Reports print **contextually** (`p` on the screen that shows the data — passes, mutual windows, DX
+> Doppler, EQX, target search, a pass's **ASCII sky-track** map, notes), with an **About → Print**
+> submenu listing them all. Two are made for outreach: a **Support AMSAT** page and an **operator
+> contact card** that explains ham radio and satellites to the public. **Paper width** is a setting
+> (58 mm / 80 mm / Font B). Streamed line-by-line — zero resident memory. Eight page-description
+> languages are supported, from ESC/POS receipt to **on-device PWG/URF raster** — so besides the
+> field receipt printer it targets, CardSat can also print to the driverless / **AirPrint** printers
+> that make up most home and club printers (believed to be a first among Cardputer projects).
+> Bluetooth isn't supported (the ESP32-S3 has no Bluetooth Classic). The full technical write-up is
+> in **[docs/design/PRINTING_IMPLEMENTATION.md](docs/design/PRINTING_IMPLEMENTATION.md)**; the design
+> story is in `docs/design/PRINTING_SCOPE.md`. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.55.md)**.
+
 > **New in v0.9.54:** **big satellite lists, handled honestly — plus a serial console.** Choose a
 > large CelesTrak group and CardSat now loads your **favorites first**, fills the rest in file
 > order, and *says so* — "Loaded 150 of 812" — instead of silently keeping the first 150. GP
@@ -31,18 +48,8 @@ transit prediction, sun/eclipse status, and more.
 > **CubeSat Simulator** intro.
 > See the **[release notes](docs/releases/RELEASE_NOTES_0.9.54.md)**.
 
-> **New in v0.9.53:** a **memory & reliability** release. Fixes **LoTW/Cloudlog uploads failing
-> partway through a multi-batch session** on this no-PSRAM board, by reclaiming the contiguous
-> heap a TLS handshake needs — chiefly a **half-size display sprite** (4bpp/16-colour, ~16 KB
-> freed, colours identical), plus right-sized working buffers and on-demand audio. The unit now
-> idles with far more free memory and a rock-solid largest block; on-device, three back-to-back
-> LoTW batches upload with zero send stalls. Also adds **multi-file download** to the web Files
-> page (tick files, **Download selected**) — implemented client-side, so no extra memory on the
-> device.
->
-> **[release notes](docs/releases/RELEASE_NOTES_0.9.53.md)**.
-
 > **Earlier releases** — one line each; full stories in [docs/releases/](docs/releases/):
+> **0.9.53** memory & reliability — LoTW/Cloudlog upload fixes, 4-bpp display, on-demand audio, multi-file web download ·
 > **0.9.52** workable-horizon & target-search planners + the 130-page manual ·
 > **0.9.51** rove pass-planner + state-vector→GP tool · **0.9.50** mode-aware AMSAT status
 > reporting, ordered transponder lists · **0.9.49** SD-persistence fix (LoRa-absent units) ·
@@ -263,7 +270,7 @@ See **[MANUAL.md](MANUAL.md)** for the complete guide.
 | **[docs/WIRING.md](docs/WIRING.md)** | CAT, GPS, and rotator wiring. |
 | **[docs/RADIOS.md](docs/RADIOS.md)** | Per-radio behavior: bands, sat mode, read-back. |
 | **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)** | What's confirmed on hardware vs still to test on the air. |
-| **[docs/interfaces/](docs/interfaces/)** | Electrical/protocol interface specs: CI-V, single-pin CI-V, Icom LAN, rotator, RS-232, radio settings chart. |
+| **[docs/interfaces/](docs/interfaces/)** | Electrical/protocol interface specs: CI-V, single-pin CI-V (+ level-shifter build guide), Icom LAN, rotator, RS-232, radio settings chart. |
 | **[docs/guides/ARDUINO_SETUP.md](docs/guides/ARDUINO_SETUP.md)** | From-scratch Arduino IDE setup. |
 | **[docs/guides/PORTING.md](docs/guides/PORTING.md)** | Porting CardSat (or a subset) to other ESP32 boards or non-ESP32 platforms. |
 | **[docs/guides/CODE_REFERENCE.md](docs/guides/CODE_REFERENCE.md)** | File-by-file annotated code reference (interfaces, key functions, data flows). |

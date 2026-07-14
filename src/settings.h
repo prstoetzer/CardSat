@@ -77,6 +77,8 @@ struct Settings {
   // Orbital data source (GP/OMM JSON). Editable in Settings.
   char     gpUrl[160] = AMSAT_GP_URL;
   char     myCall[14] = "";   // operator's own callsign (stored uppercase)
+  char     opName[32]  = "";  // operator's name (for the printable contact card)
+  char     opEmail[48] = "";  // operator's email (for the printable contact card)
   // LoTW station location (for the .tq8 tSTATION section). Grid + call come from
   // the existing location/myCall; these three are the LoTW-specific extras.
   char     lotwDxcc[6] = "";  // DXCC entity number (e.g. "291" = USA); "" => omit
@@ -94,6 +96,13 @@ struct Settings {
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password
+  char     printerHost[40] = "";   // ESC/POS receipt printer IP for TCP:9100 printing ("" = off)
+  uint16_t printerPort = 9100;     // raw ESC/POS port (JetDirect standard)
+  uint8_t  printerCols = 32;       // ESC/POS text columns: 32 (58mm), 42/48 (80mm), 64 (Font B)
+  uint8_t  printFormat = 0;        // network printer language: 0 ESC/POS 1 text 2 PCL 3 PostScript 4 ESC/P2 5 Star 6 ZPL
+  uint8_t  printTransport = 0;     // 0 = raw TCP 9100, 1 = IPP (HTTP POST :631)
+  bool     printToSerial = false;  // also echo reports to the USB serial console
+  bool     printToFile   = false;  // also write reports to /CardSat/Reports/*.txt (80-col)
   // Cloudlog/Wavelog upload (self-hosted online logbook). Uploading here also feeds
   // LoTW if the user has LoTW configured in Cloudlog, so it's an alternative to the
   // on-device LoTW upload rather than something to do in addition.

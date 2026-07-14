@@ -3341,6 +3341,127 @@ so keep them on a trusted LAN.
 
 ---
 
+## 18b. Printing to a receipt printer
+
+CardSat can print text reports to a **network thermal receipt printer** — the pocket
+battery kind — over WiFi. It speaks **ESC/POS over raw TCP port 9100**, which virtually
+every receipt printer supports; the reference target is an **Epson TM-P20II (Wi-Fi
+model)**. (Bluetooth printers are *not* supported: the ESP32-S3 has no Bluetooth
+Classic, and most cheap BT receipt printers are Classic-only. See
+[docs/design/PRINTING_SCOPE.md](docs/design/PRINTING_SCOPE.md).)
+
+**Setup.** Put the printer on the same WiFi, note its IP, and enter it in
+**Settings → Network / data → Printer IP** (port defaults to 9100). **Printer format**
+sets the page language to match your hardware: **ESC/POS (receipt)** (default — thermal
+receipt printers like the TM-P20II or GZM8022), **Plain text** (no control codes; the
+universal fallback most raw-9100 printers accept), **PCL (HP)** (HP LaserJet / OfficeJet
+and other office printers — a PJL-wrapped job with a fixed-pitch font and page-eject),
+**PostScript** (PostScript office printers — a Courier document with automatic page
+breaks), **ESC/P2 (Epson)** (Epson page / inkjet / dot-matrix printers), **Star Line**
+(networked Star thermal printers, TSP-series), **ZPL (Zebra label)** (network label
+printers — each report line becomes a positioned field on a label). Serial and file outputs
+are always plain text.
+
+> The ESC/POS, plain-text, PCL and PostScript paths are the primary targets; **ESC/P2,
+> Star Line and ZPL are provided but untested against real hardware** — verify on your
+> device before relying on them, and use the /CardSat/Reports file as a fallback.
+
+**Raster printing for driverless printers (AirPrint / IPP Everywhere / Mopria).** Most
+network printers sold today are "driverless" — they accept raster page images over IPP rather
+than a page-description language, and PWG Raster is the format the great majority of them
+support (it is *required* by the IPP Everywhere standard, and many AirPrint printers accept it
+too). CardSat can generate this on the device: select **Printer format → PWG raster
+(AirPrint)**, or **URF raster (AirPrint)** for the Apple-Raster variant that some AirPrint
+printers require instead. CardSat renders the report to a 300-DPI grayscale page one scanline
+at a time (~4 KB working memory, no full-page buffer) and streams it over IPP (port 631). Both
+encoders were validated byte-identical to the reference `ppm2pwg`/`ppm2pwg -f urf` tools and
+confirmed printing on a real AirPrint printer.
+
+*Which raster format?* Try **PWG raster** first — it reaches the most printers. If the printer
+accepts only Apple Raster, use **URF raster**. To find out what your printer supports, use
+**Test printer (probe formats)** in the printer settings: it asks the printer over IPP and
+shows which document formats it accepts (e.g. "PWG URF PDF JPEG"). If PWG or URF appears, the
+matching raster format will work. Raster is heavier than the text formats — prefer a text
+format (PCL/PostScript/ESC-POS) where the printer supports one; use raster when it is the only
+thing the printer accepts, which is the common case for home printers.
+
+**Suggested settings by printer type.** Set these under Settings → Network. When unsure on a
+network printer, run **Test printer** first to see what it accepts.
+
+| Printer type | Example | Printer format | Paper width | Transport |
+|---|---|---|---|---|
+| Pocket WiFi receipt (58 mm) | Epson TM-P20II | ESC/POS (receipt) | 58 mm (32 col) | Raw : 9100 |
+| Desktop WiFi receipt (80 mm) | GZM8022 | ESC/POS (receipt) | 80 mm (48 col) | Raw : 9100 |
+| HP office laser/inkjet | LaserJet, OfficeJet | PCL (HP) | 64 col | Raw : 9100 (or IPP) |
+| PostScript office printer | workgroup printers | PostScript | 64 col | Raw : 9100 (or IPP) |
+| AirPrint / IPP Everywhere home printer | most modern home printers | PWG raster | 64 col | IPP : 631 (auto) |
+| AirPrint printer, URF-only | some HP LaserJets | URF raster | 64 col | IPP : 631 (auto) |
+| Epson page/inkjet (raw) | ESC/P2 models | ESC/P2 (Epson) | 64 col | Raw : 9100 |
+| Star thermal (network) | TSP-series | Star Line | 80 mm (48 col) | Raw : 9100 |
+| Zebra label printer | ZPL models | ZPL (Zebra label) | 32–48 col | Raw : 9100 |
+| No printer | — | any | any | Serial / file only |
+
+The raster formats (PWG, URF) switch to IPP on port 631 automatically — you do not need to
+change the transport. Only set **Printer transport → IPP** by hand for a PCL/PostScript office
+printer that exposes IPP but not raw 9100.
+
+**Printer transport** chooses how the network job reaches the printer: **Raw (:9100)** —
+the JetDirect raw-socket path used by all the formats above (the default), or **IPP
+(:631)** — the Internet Printing Protocol, an HTTP job for office printers that expose IPP
+but not raw 9100. IPP carries your selected page language (use **PCL** or **PostScript**
+with it) as the document. **Important limitation:** IPP on CardSat sends PCL or PostScript;
+it does **not** rasterize. Many modern home/AirPrint printers are **raster-only** — they
+advertise only `image/urf` or `image/pwg-raster` and have no PCL/PostScript interpreter.
+Those printers will **accept an IPP job and then silently discard it** (your computer prints
+to them only because the computer rasterizes first). CardSat cannot drive a raster-only
+printer — there isn't enough RAM on the ESP32-S3 to render a full-page bitmap. For such a
+printer, use **Save to /CardSat/Reports** and print the .txt from a computer. To check what a printer
+supports, the `tools/ipp_probe.py` script queries it and sends test pages. **Printer paper**
+sets the width: **58 mm (32 col)**, **80 mm (42 col)**, **80 mm (48 col)**, or
+**Font B (64 col)** — every report reflows to match, and the wider paper adds columns
+where it helps (the day-sheet gains an LOS time and full-width names; the log puts each
+QSO on one line).
+
+**Three ways to receive a report — you don't need a printer.** Any report can go to any
+combination of three places, set in Settings → Network:
+- the **network printer** (Printer IP above),
+- the **USB serial console** (*Print to serial: on*) — the report prints in your serial
+  monitor, ready to copy and paste, so an operator with no printer still benefits,
+- a **text file** (*Save to /CardSat/Reports: on*) — an 80-column `.txt` under `/CardSat/Reports` on the
+  SD card, named per report (e.g. `passes-123456.txt`), to pull off later.
+
+If none of the three is enabled a print action says so; if the printer is unreachable but
+serial or file is on, the report still goes there and the status notes the printer failed.
+
+**Printing is contextual — print from the screen that shows the data.** Press **`p`** on
+the relevant screen: the **Passes** screen prints the day-sheet; **Mutual windows**, **DX
+Doppler**, **EQX**, and **Target search** each print their table; the **Notes** browser
+prints the highlighted note; the rove-plan viewer prints the plan you're reading. On the
+**schedule**, **`P`** prints every favorite's upcoming passes. On a pass's **polar
+(sky-track) screen**, **`P`** prints an ASCII sky map of that pass -- the satellite's arc
+across the sky in printer-safe characters (`+` zenith, `.` horizon, `*` track). In the note editor,
+**`Fn+p`** prints the note. On the **About** screen, **`p`** opens a **Print submenu** listing **every** report — the
+one place to reach the ones without a natural home screen (ticket, satellite card,
+Keplerian elements, QSO log, workable horizon) as well as all the others; ENTER prints the
+highlighted one and the list stays open. **`a`** and **`c`** on About remain direct
+shortcuts for the *Support AMSAT* page and your *operator contact card*. Over the USB serial console (115200), the
+`print` command does any report from a keyboard — `print passes|ticket|card|keps|log|rove|
+horizon|amsat|contact|mutual|dxdopp|eqx|allpass|target|note`.
+
+**The reports.** *Passes* — favorites' AOS/elevation/azimuth/duration for 24 h, one line
+each. *Ticket* — an outreach slip for the active satellite (rise time, direction, and the
+**selected transponder's** downlink/uplink — whichever you have chosen on Track — plus a
+friendly line) for demos and classrooms. *Card* — the active
+satellite's transponders (for a **linear** transponder the whole passband is shown,
+low–high, not just the bottom edge) plus its next three passes. *Keps* — the active satellite's
+Keplerian elements. *Log* — your recent QSOs as a paper backup. *Rove* — the plan being
+viewed (viewer `p`), or a fresh export of the current survey from the menu/console.
+*Horizon* — the workable-horizon union export. All
+times are **UTC**. Reports stream a line at a time, so printing costs the device almost
+no memory.
+
+---
+
 ## 19. Managing data and factory reset
 
 CardSat keeps all of its data in a **`/CardSat`** folder:
@@ -3393,14 +3514,33 @@ space on the active filesystem (most likely a big CelesTrak group on an internal
 unit, whose LittleFS partition is small). Nothing was written — the previous catalog is
 intact. Use a microSD card, or pick a smaller group.
 
+**Printer unreachable.** If a print action reports the printer can't be reached, check
+that the printer is powered, on the same WiFi, and that its IP in Settings → Network is
+current (DHCP can move it). "No print output on" means no sink is enabled.
+
+**Connects but nothing prints (office printers).** An HP or other office printer on port
+9100 speaks **PCL or PostScript**, not the ESC/POS receipt codes CardSat sends by default —
+so it receives the job and silently discards it. Set **Settings → Network → Printer format**
+to **PCL (HP)** or **PostScript** to match your printer (try PCL first for HP LaserJet /
+OfficeJet; PostScript for PostScript-capable models). **Plain text** is a safe universal
+fallback. If unsure, turn on **Save to /CardSat/Reports** and print the .txt from a computer instead.
+
+If the printer exposes **IPP but not raw 9100**, set **Printer transport → IPP (:631)** with
+format **PCL** or **PostScript**. But note: if the printer is **raster-only** (AirPrint-style,
+advertising only `image/urf`/`image/pwg-raster`), IPP will report the job as sent but nothing
+prints — CardSat can't rasterize on-device, so those printers aren't supported. Run
+`tools/ipp_probe.py <printer-ip>` to see which formats a printer accepts; if PCL and
+PostScript are absent, use the /CardSat/Reports file route.
+
 **Bench debugging over USB.** Connect a serial monitor at **115200 baud** and type
 `help`: a read-only console reports the firmware version (`ver`), free heap and largest
 block (`heap`), catalog counts including truncation (`sats`), favorites and the active
 bird (`fav`), the next pass (`next`), and WiFi state (`net`) — plus `time`, `gps`
 (fix, coordinates, grid), `bat`, `fs` (storage backend and free space), `up`time, and
 `pass <sat>` for the next pass of *any* catalog bird by name fragment or NORAD number.
-It only ever *reads* —
-no command changes device state — so it is safe to leave connected.
+It never changes *device* state —
+the `print` commands only transmit a report to your configured printer
+([§18b](#18b-printing-to-a-receipt-printer)) — so it is safe to leave connected.
 
 **Radio doesn't respond / wrong VFO moves.** Check the **CAT baud** (and, for
 Icom, the **CI-V address**) in Settings match the radio. Open the serial monitor at

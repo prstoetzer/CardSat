@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1487,6 +1487,15 @@ private:
   void drawCsimInfo();
   void keyCsimInfo(char c, bool enter, bool back);
   int  csimInfoScroll = 0;
+  // printPath, when set, overrides PR_ROVE's source file: the rove-plan viewer sets it
+  // so its `p` prints the plan being READ rather than a fresh survey export.
+  String printPath;
+  // Print submenu (SCR_PRINTABOUT, opened with `p` from About): a scrollable list of
+  // EVERY printable report, so reports without a natural home screen (ticket, card,
+  // keps, log, horizon) are reachable on-device, alongside the contextual `p` keys.
+  void drawPrintAbout();
+  void keyPrintAbout(char c, bool enter, bool back);
+  int  paSel = 0;
   // CTCSS tone reference (SCR_CTCSS): standard EIA tone list + known satellite tones.
   int ctcssScroll = 0;
   void drawCtcss(); void keyCtcss(char c, bool enter, bool back);
@@ -1755,14 +1764,41 @@ private:
   void audioAcquire();                         // ensure speaker is up (begin + volume), cancel pending release
   void audioReleaseAfter(uint32_t ms);         // schedule speaker end() after ms of no audio
   void serviceAudioRelease();                  // loop hook: perform a due deferred end()
-  // Read-only serial command console (USB). Polled once per loop; accepts a short line and
-  // prints status (heap, version, satellite count, next pass, upload state). Zero heap cost:
-  // the input line lives in a fixed buffer and nothing is dynamically allocated. Read-only by
-  // design -- it never changes device state, so it's safe to leave always-on.
+  // Serial command console (USB). Polled once per loop; accepts a short line and prints
+  // status (heap, version, satellite count, next pass, ...). Zero heap cost: the input line
+  // lives in a fixed buffer and nothing is dynamically allocated. It never changes DEVICE
+  // state -- the `print` commands only transmit a report to the configured TCP:9100 receipt
+  // printer -- so it's safe to leave always-on.
   void serviceSerialCli();
   void runSerialCommand(const char* cmd);      // dispatch one completed command line
   char     cliBuf[64] = {0};                   // serial input line accumulator
   uint8_t  cliLen = 0;
+  // ---- Receipt printing (TCP:9100 ESC/POS; see print.h + docs/design/PRINTING_SCOPE.md) ----
+  // Each report opens a Printer job, streams 32-col text, and closes -- no big buffer, transient
+  // socket only. printReport() is the shared entry (opens/closes + error status); the per-report
+  // builders assume an open job. Returns false (with setStatus) if the printer can't be reached.
+  enum PrintReport { PR_PASSES, PR_ROVE, PR_TICKET, PR_HORIZON, PR_SATCARD, PR_LOG, PR_KEPS,
+                     PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR };
+  static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
+  bool printReport(PrintReport which);
+  void printPasses();        // today's favorites day-sheet
+  void printTicket();        // outreach pass ticket for the active satellite
+  void printSatCard();       // active satellite: transponders + next passes
+  void printKeps();          // active satellite: Keplerian elements (nostalgia)
+  void printLog();           // recent QSOs (paper backup)
+  void printAmsatPitch();    // "support AMSAT" outreach page (About)
+  void printOpCard();        // operator contact card + ham/satellite explainer (About)
+  void printMutual();        // mutual-window (co-visibility) table + sky map
+  void printDxDopp();        // DX Doppler RX/TX table for the selected window
+  void printEqx();           // equator-crossing / descending-node table
+  void printAllPasses();     // every favorite's upcoming passes (the schedule)
+  void printTargetHits();    // target-search results
+  void printNote();          // the note currently open in the editor/viewer
+  void printPassPolar();     // ASCII polar sky sheet for the pass being viewed (pdAz/pdEl)
+  void printPolarAscii(const float* az, const float* el, int n, const char* mark);
+  bool printActiveHint();    // shared helper: "no active satellite" line, returns false if none
+  int  buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
+                      uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN);  // shared pass gather
   bool     audioUp = false;                    // is the speaker currently begun?
   uint32_t audioReleaseAt = 0;                 // millis() deadline for a pending end() (0 = none)
   bool     audioGameOwned = false;             // audio was acquired for a game session (release on exit)
@@ -1801,7 +1837,8 @@ private:
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);
-  void startWifiScan();
+  void startWifiScan(bool forSecond = false);   // scan APs; forSecond -> store into WiFi 2
+  bool     wifiScan2 = false;      // true while the scan targets the WiFi-2 slot
   void keyWifiScan(char c, bool enter, bool back);
   void keyAbout(char c, bool enter, bool back);
   void drawNetReboot(); void keyNetReboot(char c, bool enter, bool back);

@@ -101,6 +101,9 @@ These use a standard **DB‑9** serial COM port at RS‑232 levels:
   CAT **baud** (commonly 4800/57600 — set it the same in CardSat).
 - The **FT‑736R** uses an external CAT arrangement; consult its manual for the
   connector and levels, then apply the same RS‑232 ↔ 3.3 V translation.
+- **If your Yaesu's CAT proves to be TTL** (idles at +5 V, not negative), the
+  MAX3232 is unnecessary — a two-channel BSS138 module does it from Grove power
+  alone: see [TTL_CAT_LEVELSHIFTER.md](TTL_CAT_LEVELSHIFTER.md).
 - A swapped TX/RX won't damage anything (you just get no data) — but wrong **voltage
   levels** can, so confirm RS‑232 vs TTL before powering up.
 

@@ -74,7 +74,7 @@ FRONT = [
  ("PASSES (sel)",
   "<b>*</b> = optically visible. <b>;</b>/<b>.</b> select &middot; <b>d</b> detail &middot; <b>t</b>/<b>ENTER</b> track &middot; "
   "<b>n</b> add TX &middot; <b>r</b> recompute &middot; <b>x</b> mutual-DX &middot; "
-  "<b>v</b> 10-day chart &middot; <b>V</b> visible-pass list &middot; <b>i</b> illum &middot; <b>g</b> grids &middot; <b>w</b> US states &middot; <b>e</b> DXCC"),
+  "<b>v</b> 10-day chart &middot; <b>V</b> visible-pass list &middot; <b>i</b> illum &middot; <b>g</b> grids &middot; <b>w</b> US states &middot; <b>e</b> DXCC &middot; <b>p</b> print"),
  ("TRACK (sel)",
   "<b>`</b> exits to previous screen &amp; KEEPS radio/rotator tracking (green RAD/ROT/R+R in header); <b>r</b>/<b>o</b> to stop. "
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
@@ -197,7 +197,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (31): calculators, DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b> (fit mean elements from a launch state vector, TEME/J2000, save as sat), Q-codes/phonetics/RST, CTCSS &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (31): calculators, DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b> (fit mean elements from a launch state vector, TEME/J2000, save as sat), Q-codes/phonetics/RST, CTCSS &middot; <b>p</b> <b>Print</b>: 16 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
 ]
 
 

@@ -29,6 +29,12 @@ anatomy animation (spin smoothness, callout cycling, leader tracking, Orbit-zoo
 regression on the shared 66 ms tick), plus its two companion text screens (`i`
 primer from the anatomy; Help `c` Simulator intro).
 
+**Added in 0.9.55, not yet on hardware:** the entire TCP:9100 printing path — each of
+the seven reports against a real printer (or a host running `nc -l 9100`), the
+Settings → Network printer IP/port entry and persistence, the `p` Print menu on a
+satellite's Passes screen (and the rove viewer's `p`), the serial `print` commands, and the error paths (unreachable printer fails
+fast; blank IP reports "No printer set").
+
 **Single-pin CI-V is confirmed on an IC-821** — the full bidirectional CI-V exchange
 (frequency reads and ACKs) works over one shared open-drain GPIO, including **Doppler
 compensation and full radio-knob tuning**. See

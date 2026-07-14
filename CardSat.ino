@@ -321,7 +321,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.54";
+static constexpr const char* FW_VERSION = "0.9.55";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -2001,6 +2001,8 @@ struct Settings {
   // Orbital data source (GP/OMM JSON). Editable in Settings.
   char     gpUrl[160] = AMSAT_GP_URL;
   char     myCall[14] = "";   // operator's own callsign (stored uppercase)
+  char     opName[32]  = "";  // operator's name (for the printable contact card)
+  char     opEmail[48] = "";  // operator's email (for the printable contact card)
   // LoTW station location (for the .tq8 tSTATION section). Grid + call come from
   // the existing location/myCall; these three are the LoTW-specific extras.
   char     lotwDxcc[6] = "";  // DXCC entity number (e.g. "291" = USA); "" => omit
@@ -2018,6 +2020,13 @@ struct Settings {
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password
+  char     printerHost[40] = "";   // ESC/POS receipt printer IP for TCP:9100 printing ("" = off)
+  uint16_t printerPort = 9100;     // raw ESC/POS port (JetDirect standard)
+  uint8_t  printerCols = 32;       // ESC/POS text columns: 32 (58mm), 42/48 (80mm), 64 (Font B)
+  uint8_t  printFormat = 0;        // network printer language: 0 ESC/POS 1 text 2 PCL 3 PostScript 4 ESC/P2 5 Star 6 ZPL
+  uint8_t  printTransport = 0;     // 0 = raw TCP 9100, 1 = IPP (HTTP POST :631)
+  bool     printToSerial = false;  // also echo reports to the USB serial console
+  bool     printToFile   = false;  // also write reports to /CardSat/Reports/*.txt (80-col)
   // Cloudlog/Wavelog upload (self-hosted online logbook). Uploading here also feeds
   // LoTW if the user has LoTW configured in Cloudlog, so it's an alternative to the
   // on-device LoTW upload rather than something to do in addition.
@@ -2188,7 +2197,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -6804,6 +6813,15 @@ private:
   void drawCsimInfo();
   void keyCsimInfo(char c, bool enter, bool back);
   int  csimInfoScroll = 0;
+  // printPath, when set, overrides PR_ROVE's source file: the rove-plan viewer sets it
+  // so its `p` prints the plan being READ rather than a fresh survey export.
+  String printPath;
+  // Print submenu (SCR_PRINTABOUT, opened with `p` from About): a scrollable list of
+  // EVERY printable report, so reports without a natural home screen (ticket, card,
+  // keps, log, horizon) are reachable on-device, alongside the contextual `p` keys.
+  void drawPrintAbout();
+  void keyPrintAbout(char c, bool enter, bool back);
+  int  paSel = 0;
   // CTCSS tone reference (SCR_CTCSS): standard EIA tone list + known satellite tones.
   int ctcssScroll = 0;
   void drawCtcss(); void keyCtcss(char c, bool enter, bool back);
@@ -7072,14 +7090,41 @@ private:
   void audioAcquire();                         // ensure speaker is up (begin + volume), cancel pending release
   void audioReleaseAfter(uint32_t ms);         // schedule speaker end() after ms of no audio
   void serviceAudioRelease();                  // loop hook: perform a due deferred end()
-  // Read-only serial command console (USB). Polled once per loop; accepts a short line and
-  // prints status (heap, version, satellite count, next pass, upload state). Zero heap cost:
-  // the input line lives in a fixed buffer and nothing is dynamically allocated. Read-only by
-  // design -- it never changes device state, so it's safe to leave always-on.
+  // Serial command console (USB). Polled once per loop; accepts a short line and prints
+  // status (heap, version, satellite count, next pass, ...). Zero heap cost: the input line
+  // lives in a fixed buffer and nothing is dynamically allocated. It never changes DEVICE
+  // state -- the `print` commands only transmit a report to the configured TCP:9100 receipt
+  // printer -- so it's safe to leave always-on.
   void serviceSerialCli();
   void runSerialCommand(const char* cmd);      // dispatch one completed command line
   char     cliBuf[64] = {0};                   // serial input line accumulator
   uint8_t  cliLen = 0;
+  // ---- Receipt printing (TCP:9100 ESC/POS; see print.h + docs/design/PRINTING_SCOPE.md) ----
+  // Each report opens a Printer job, streams 32-col text, and closes -- no big buffer, transient
+  // socket only. printReport() is the shared entry (opens/closes + error status); the per-report
+  // builders assume an open job. Returns false (with setStatus) if the printer can't be reached.
+  enum PrintReport { PR_PASSES, PR_ROVE, PR_TICKET, PR_HORIZON, PR_SATCARD, PR_LOG, PR_KEPS,
+                     PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR };
+  static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
+  bool printReport(PrintReport which);
+  void printPasses();        // today's favorites day-sheet
+  void printTicket();        // outreach pass ticket for the active satellite
+  void printSatCard();       // active satellite: transponders + next passes
+  void printKeps();          // active satellite: Keplerian elements (nostalgia)
+  void printLog();           // recent QSOs (paper backup)
+  void printAmsatPitch();    // "support AMSAT" outreach page (About)
+  void printOpCard();        // operator contact card + ham/satellite explainer (About)
+  void printMutual();        // mutual-window (co-visibility) table + sky map
+  void printDxDopp();        // DX Doppler RX/TX table for the selected window
+  void printEqx();           // equator-crossing / descending-node table
+  void printAllPasses();     // every favorite's upcoming passes (the schedule)
+  void printTargetHits();    // target-search results
+  void printNote();          // the note currently open in the editor/viewer
+  void printPassPolar();     // ASCII polar sky sheet for the pass being viewed (pdAz/pdEl)
+  void printPolarAscii(const float* az, const float* el, int n, const char* mark);
+  bool printActiveHint();    // shared helper: "no active satellite" line, returns false if none
+  int  buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
+                      uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN);  // shared pass gather
   bool     audioUp = false;                    // is the speaker currently begun?
   uint32_t audioReleaseAt = 0;                 // millis() deadline for a pending end() (0 = none)
   bool     audioGameOwned = false;             // audio was acquired for a game session (release on exit)
@@ -7118,7 +7163,8 @@ private:
   void keyLocation(char c, bool enter, bool back);
   void keyUpdate(char c, bool enter, bool back);
   void keySettings(char c, bool enter, bool back);
-  void startWifiScan();
+  void startWifiScan(bool forSecond = false);   // scan APs; forSecond -> store into WiFi 2
+  bool     wifiScan2 = false;      // true while the scan targets the WiFi-2 slot
   void keyWifiScan(char c, bool enter, bool back);
   void keyAbout(char c, bool enter, bool back);
   void drawNetReboot(); void keyNetReboot(char c, bool enter, bool back);
@@ -7247,6 +7293,803 @@ bool formatInternal() {
 }
 
 } // namespace Store
+
+// ===========================================================================
+//  print.h / print.cpp  -  three-sink emitter, 8 languages incl. PWG raster
+// ===========================================================================
+// --- embedded bitmap font (font16x32.h) ---
+#define FONT_W 16
+#define FONT_H 32
+#define FONT_FIRST 32
+#define FONT_LAST 126
+static const uint16_t FONT16x32[95][32] = {
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // ' '
+  {0x0000,0x0000,0x0000,0x0000,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x0000,0x0000,0x0000,0x00e0,0x00e0,0x00e0,0x00e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '!'
+  {0x0000,0x0000,0x0000,0x0000,0x0618,0x0618,0x0618,0x0618,0x0618,0x0618,0x0618,0x0618,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '"'
+  {0x0000,0x0000,0x0000,0x0000,0x00c7,0x01c7,0x0186,0x0186,0x018e,0x038e,0x3fff,0x3fff,0x3fff,0x071c,0x0618,0x0618,0x0638,0xffff,0xffff,0xffff,0x0c30,0x1c70,0x1c60,0x1860,0x1860,0x38e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '#'
+  {0x0000,0x0000,0x0000,0x0000,0x0040,0x0040,0x0040,0x03f8,0x0ffe,0x0ffe,0x1e46,0x1c40,0x1840,0x1c40,0x1c40,0x0fc0,0x07f8,0x00fe,0x004f,0x0047,0x0043,0x0047,0x184f,0x1ffe,0x1ffc,0x07f8,0x0040,0x0040,0x0040,0x0040,0x0000,0x0000},  // '$'
+  {0x0000,0x0000,0x0000,0x0000,0x1e00,0x3f80,0x7180,0x60c0,0x60c0,0x60c0,0x7180,0x3f83,0x1e0f,0x003c,0x00f0,0x03c0,0x0f00,0x1c1e,0x707f,0x0063,0x00c1,0x00c0,0x00c1,0x0063,0x007f,0x001e,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '%'
+  {0x0000,0x0000,0x0000,0x0000,0x03e0,0x07f8,0x0ff8,0x0e08,0x1c00,0x0c00,0x0c00,0x0e00,0x0700,0x0f00,0x1f80,0x39c1,0x30e1,0x7071,0x6039,0x703d,0x701f,0x780f,0x3c1f,0x3fff,0x1ff3,0x07e1,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '&'
+  {0x0000,0x0000,0x0000,0x0000,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '''
+  {0x0000,0x0000,0x0000,0x0038,0x0030,0x0070,0x0060,0x00e0,0x00c0,0x01c0,0x01c0,0x01c0,0x0180,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0180,0x01c0,0x01c0,0x01c0,0x00c0,0x00e0,0x0060,0x0070,0x0030,0x0038,0x0000,0x0000},  // '('
+  {0x0000,0x0000,0x0000,0x0700,0x0300,0x0380,0x0180,0x01c0,0x00c0,0x00e0,0x00e0,0x00e0,0x0060,0x0070,0x0070,0x0070,0x0070,0x0070,0x0070,0x0070,0x0060,0x00e0,0x00e0,0x00e0,0x00c0,0x01c0,0x0180,0x0380,0x0300,0x0700,0x0000,0x0000},  // ')'
+  {0x0000,0x0000,0x0000,0x0000,0x00c0,0x00c0,0x00c0,0x10c2,0x1cce,0x07f8,0x01e0,0x01e0,0x07f8,0x1cce,0x10c2,0x00c0,0x00c0,0x00c0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '*'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x7fff,0x7fff,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '+'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01e0,0x01e0,0x01e0,0x01e0,0x01c0,0x01c0,0x0180,0x0380,0x0300,0x0000},  // ','
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x07f8,0x07f8,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '-'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01e0,0x01e0,0x01e0,0x01e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '.'
+  {0x0000,0x0000,0x0000,0x0000,0x0007,0x000e,0x000e,0x001c,0x001c,0x0038,0x0038,0x0030,0x0070,0x0060,0x00e0,0x00e0,0x01c0,0x01c0,0x0380,0x0380,0x0700,0x0700,0x0e00,0x0e00,0x0c00,0x1c00,0x1800,0x3800,0x3800,0x0000,0x0000,0x0000},  // '/'
+  {0x0000,0x0000,0x0000,0x0000,0x01f0,0x07f8,0x0ffc,0x1e1e,0x1c0e,0x1c0e,0x3807,0x3807,0x3807,0x3807,0x38c7,0x39e7,0x38c7,0x3807,0x3807,0x3807,0x1c0e,0x1c0e,0x1e1e,0x0ffc,0x07f8,0x03f0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '0'
+  {0x0000,0x0000,0x0000,0x0000,0x03e0,0x0fe0,0x0fe0,0x0c60,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0fff,0x0fff,0x0fff,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '1'
+  {0x0000,0x0000,0x0000,0x0000,0x0fe0,0x3ff8,0x3ffc,0x303e,0x000e,0x000e,0x000e,0x000e,0x000e,0x001c,0x001c,0x0038,0x0070,0x00e0,0x01c0,0x0380,0x0700,0x0e00,0x1c00,0x3fff,0x3fff,0x3fff,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '2'
+  {0x0000,0x0000,0x0000,0x0000,0x07e0,0x1ff8,0x1ffc,0x181e,0x000e,0x000e,0x000e,0x000e,0x001c,0x03f8,0x03f0,0x03fc,0x001e,0x000e,0x0007,0x0007,0x0007,0x000f,0x301e,0x3ffe,0x3ffc,0x0ff0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '3'
+  {0x0000,0x0000,0x0000,0x0000,0x003c,0x007c,0x007c,0x00dc,0x01dc,0x019c,0x031c,0x031c,0x061c,0x0e1c,0x0c1c,0x181c,0x181c,0x301c,0x3fff,0x3fff,0x3fff,0x001c,0x001c,0x001c,0x001c,0x001c,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '4'
+  {0x0000,0x0000,0x0000,0x0000,0x1ffc,0x1ffc,0x1ffc,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1fe0,0x1ff8,0x1ffc,0x103e,0x000e,0x000f,0x0007,0x0007,0x000f,0x000e,0x303e,0x3ffc,0x3ff8,0x0fe0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '5'
+  {0x0000,0x0000,0x0000,0x0000,0x01f8,0x07fe,0x0ffe,0x0f04,0x1e00,0x1c00,0x3800,0x3800,0x39f0,0x3bfc,0x3ffe,0x3e1e,0x3c0f,0x3807,0x3807,0x3807,0x1807,0x1c07,0x1e1e,0x0ffe,0x07fc,0x01f0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '6'
+  {0x0000,0x0000,0x0000,0x0000,0x3fff,0x3fff,0x3ffe,0x000e,0x000e,0x000c,0x001c,0x0018,0x0038,0x0038,0x0030,0x0070,0x0070,0x00e0,0x00e0,0x00c0,0x01c0,0x01c0,0x0380,0x0380,0x0780,0x0700,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '7'
+  {0x0000,0x0000,0x0000,0x0000,0x03f0,0x0ffc,0x1ffe,0x1e1e,0x1c0f,0x3807,0x1807,0x1c0e,0x1e1e,0x0ffc,0x03f0,0x0ffc,0x1e1e,0x3807,0x3807,0x3807,0x3807,0x3807,0x3e1f,0x1ffe,0x0ffc,0x03f0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '8'
+  {0x0000,0x0000,0x0000,0x0000,0x03e0,0x0ff8,0x1ffc,0x1e1e,0x380e,0x3806,0x3807,0x3807,0x3807,0x380f,0x1e1f,0x1fff,0x0ff7,0x03e7,0x0007,0x000f,0x000e,0x001e,0x083c,0x1ffc,0x1ff8,0x07e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '9'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01e0,0x01e0,0x01e0,0x01e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01e0,0x01e0,0x01e0,0x01e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // ':'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01e0,0x01e0,0x01e0,0x01e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01e0,0x01e0,0x01e0,0x01e0,0x01c0,0x01c0,0x0180,0x0380,0x0300,0x0000},  // ';'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0007,0x001f,0x00fe,0x03f0,0x1fc0,0x7e00,0x7800,0x7e00,0x1fc0,0x03f0,0x00fe,0x001f,0x0007,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '<'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x7fff,0x7fff,0x0000,0x0000,0x0000,0x7fff,0x7fff,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '='
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x6000,0x7800,0x7e00,0x1fc0,0x03f0,0x007e,0x001f,0x0007,0x001f,0x007e,0x03f0,0x1fc0,0x7e00,0x7800,0x6000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '>'
+  {0x0000,0x0000,0x0000,0x0000,0x03f0,0x0ffc,0x0ffc,0x0c1e,0x000e,0x000e,0x000e,0x000e,0x001c,0x0038,0x0070,0x00e0,0x01c0,0x01c0,0x01c0,0x01c0,0x0000,0x0000,0x01c0,0x01c0,0x01c0,0x01c0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '?'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01f8,0x07fe,0x0f07,0x1c03,0x3801,0x3001,0x707d,0x60ff,0x61c7,0x6183,0x6381,0xe301,0xe301,0xe301,0x6381,0x6183,0x61c7,0x60ff,0x307d,0x3800,0x1800,0x1e00,0x0f02,0x03fe,0x00fe,0x0000},  // '@'
+  {0x0000,0x0000,0x0000,0x0000,0x01e0,0x01e0,0x03f0,0x03f0,0x03b0,0x0330,0x0738,0x0738,0x0618,0x0e1c,0x0e1c,0x0e1c,0x1c0e,0x1c0e,0x1ffe,0x1fff,0x3fff,0x3807,0x3807,0x7003,0x7003,0x7003,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'A'
+  {0x0000,0x0000,0x0000,0x0000,0x3ff0,0x3ffc,0x3ffe,0x380e,0x3807,0x3807,0x3807,0x380f,0x381e,0x3ffc,0x3ff8,0x3ffe,0x380f,0x3807,0x3803,0x3803,0x3803,0x3807,0x380f,0x3fff,0x3ffe,0x3ff8,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'B'
+  {0x0000,0x0000,0x0000,0x0000,0x00f8,0x03fe,0x07ff,0x0f07,0x1e01,0x1c00,0x1c00,0x3800,0x3800,0x3800,0x3800,0x3800,0x3800,0x3800,0x3800,0x1c00,0x1c00,0x1e01,0x0f07,0x07ff,0x03fe,0x00f8,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'C'
+  {0x0000,0x0000,0x0000,0x0000,0x3fc0,0x3ff0,0x3ffc,0x383c,0x381e,0x380e,0x380f,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x380f,0x380e,0x381e,0x383c,0x3ffc,0x3ff0,0x3fc0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'D'
+  {0x0000,0x0000,0x0000,0x0000,0x1fff,0x1fff,0x1fff,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1ffe,0x1ffe,0x1ffe,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1fff,0x1fff,0x1fff,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'E'
+  {0x0000,0x0000,0x0000,0x0000,0x1fff,0x1fff,0x1fff,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1ffe,0x1ffe,0x1ffe,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'F'
+  {0x0000,0x0000,0x0000,0x0000,0x01f8,0x07fe,0x0ffe,0x1f06,0x1c00,0x3c00,0x3800,0x3800,0x3800,0x3800,0x383f,0x383f,0x383f,0x3807,0x3807,0x3807,0x3c07,0x1c07,0x1f07,0x0fff,0x07fe,0x01f8,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'G'
+  {0x0000,0x0000,0x0000,0x0000,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3fff,0x3fff,0x3fff,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'H'
+  {0x0000,0x0000,0x0000,0x0000,0x1ffe,0x1ffe,0x1ffe,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x1ffe,0x1ffe,0x1ffe,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'I'
+  {0x0000,0x0000,0x0000,0x0000,0x07fc,0x07fc,0x07fc,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x001c,0x3038,0x3ff8,0x3ff0,0x07c0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'J'
+  {0x0000,0x0000,0x0000,0x0000,0x3803,0x3807,0x380e,0x381c,0x3838,0x3870,0x38f0,0x39e0,0x3bc0,0x3fc0,0x3fc0,0x3ee0,0x3cf0,0x3870,0x3838,0x383c,0x381c,0x381e,0x380f,0x3807,0x3807,0x3803,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'K'
+  {0x0000,0x0000,0x0000,0x0000,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1fff,0x1fff,0x1fff,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'L'
+  {0x0000,0x0000,0x0000,0x0000,0x7807,0x7c0f,0x7c0f,0x7c0f,0x761b,0x761b,0x761b,0x7333,0x7333,0x7333,0x71e3,0x71e3,0x71e3,0x70c3,0x7003,0x7003,0x7003,0x7003,0x7003,0x7003,0x7003,0x7003,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'M'
+  {0x0000,0x0000,0x0000,0x0000,0x3c07,0x3c07,0x3e07,0x3e07,0x3f07,0x3b07,0x3b07,0x3b87,0x3987,0x39c7,0x38c7,0x38c7,0x38e7,0x3867,0x3877,0x3837,0x383f,0x383f,0x381f,0x381f,0x380f,0x380f,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'N'
+  {0x0000,0x0000,0x0000,0x0000,0x03f0,0x07f8,0x0ffc,0x1e1e,0x1c0e,0x3c07,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3c07,0x1c0e,0x1e1e,0x0ffc,0x07f8,0x03f0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'O'
+  {0x0000,0x0000,0x0000,0x0000,0x1ff8,0x1ffe,0x1fff,0x1c0f,0x1c07,0x1c07,0x1c03,0x1c07,0x1c07,0x1c0f,0x1fff,0x1ffe,0x1ff8,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'P'
+  {0x0000,0x0000,0x0000,0x0000,0x03f0,0x07f8,0x0ffc,0x1e1e,0x1c0e,0x3c07,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3c07,0x1c0e,0x1e1e,0x0ffc,0x07f8,0x03f8,0x003c,0x001c,0x000e,0x0004,0x0000,0x0000},  // 'Q'
+  {0x0000,0x0000,0x0000,0x0000,0x3ff0,0x3ff8,0x3ffc,0x381e,0x380e,0x380f,0x380f,0x380f,0x380e,0x381e,0x3ffc,0x3ff0,0x3ff8,0x383c,0x381c,0x380e,0x380e,0x3807,0x3807,0x3803,0x3803,0x3801,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'R'
+  {0x0000,0x0000,0x0000,0x0000,0x03f8,0x0ffe,0x1ffe,0x1e06,0x3800,0x3800,0x3800,0x3800,0x3c00,0x1f80,0x0ff8,0x03fc,0x003e,0x000f,0x0007,0x0007,0x0007,0x0007,0x301f,0x3ffe,0x3ffc,0x0ff0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'S'
+  {0x0000,0x0000,0x0000,0x0000,0x7fff,0x7fff,0x7fff,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'T'
+  {0x0000,0x0000,0x0000,0x0000,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x1c0f,0x1e1e,0x1ffe,0x0ffc,0x03f0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'U'
+  {0x0000,0x0000,0x0000,0x0000,0x7003,0x7003,0x3803,0x3807,0x3807,0x3807,0x1c0e,0x1c0e,0x1c0e,0x0c0c,0x0e1c,0x0e1c,0x0e1c,0x0618,0x0738,0x0738,0x0330,0x0330,0x03f0,0x01f0,0x01e0,0x01e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'V'
+  {0x0000,0x0000,0x0000,0x0000,0xe001,0xe001,0xe001,0x6001,0x6001,0x7001,0x71e3,0x71e3,0x71e3,0x71e3,0x31f3,0x3333,0x3333,0x3333,0x3b37,0x3f1f,0x3e1f,0x1e1e,0x1e1e,0x1e1e,0x1c0e,0x1c0e,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'W'
+  {0x0000,0x0000,0x0000,0x0000,0x3803,0x3807,0x1c07,0x1c0e,0x0e1c,0x071c,0x0738,0x03b8,0x03f0,0x01e0,0x01e0,0x01e0,0x03f0,0x03b8,0x0738,0x0e1c,0x0e1c,0x1c0e,0x3c07,0x3807,0x7003,0x7003,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'X'
+  {0x0000,0x0000,0x0000,0x0000,0x7003,0x7803,0x3807,0x1c0e,0x1c0e,0x0e1c,0x0e1c,0x0738,0x0738,0x03f0,0x01e0,0x01e0,0x00e0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'Y'
+  {0x0000,0x0000,0x0000,0x0000,0x1fff,0x1fff,0x1fff,0x0007,0x000e,0x000e,0x001c,0x0038,0x0038,0x0070,0x00e0,0x00c0,0x01c0,0x0380,0x0300,0x0700,0x0e00,0x0c00,0x1c00,0x3fff,0x3fff,0x3fff,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'Z'
+  {0x0000,0x0000,0x0000,0x01f8,0x01f8,0x01f8,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x01f8,0x01f8,0x01f8,0x0000,0x0000},  // '['
+  {0x0000,0x0000,0x0000,0x0000,0x3800,0x3800,0x1800,0x1c00,0x0c00,0x0e00,0x0e00,0x0700,0x0700,0x0380,0x0380,0x01c0,0x01c0,0x00e0,0x00e0,0x0060,0x0070,0x0030,0x0038,0x0038,0x001c,0x001c,0x000e,0x000e,0x0007,0x0000,0x0000,0x0000},  // '\'
+  {0x0000,0x0000,0x0000,0x07e0,0x07e0,0x07e0,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x07e0,0x07e0,0x07e0,0x0000,0x0000},  // ']'
+  {0x0000,0x0000,0x0000,0x0000,0x01e0,0x03f0,0x03f0,0x0738,0x0e1c,0x1c0e,0x3807,0x7003,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '^'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0xffff,0xffff},  // '_'
+  {0x0000,0x0000,0x0e00,0x0700,0x0380,0x0180,0x00c0,0x00e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '`'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x03f0,0x0ffc,0x1ffe,0x1c1e,0x100e,0x0006,0x03fe,0x0fff,0x1fff,0x3c07,0x3807,0x380f,0x3c1f,0x1ff7,0x1fe7,0x07c7,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'a'
+  {0x0000,0x0000,0x0000,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1cf0,0x1dfc,0x1ffe,0x1e0e,0x1c07,0x1c07,0x1c07,0x1c07,0x1c07,0x1c07,0x1c07,0x1c07,0x1e0e,0x1ffe,0x1dfc,0x1cf0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'b'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x00f8,0x03fe,0x07ff,0x0f07,0x1e00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1e00,0x0f07,0x07ff,0x03fe,0x00f8,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'c'
+  {0x0000,0x0000,0x0000,0x0006,0x0006,0x0006,0x0006,0x0006,0x0006,0x0006,0x03c6,0x0fe6,0x1ffe,0x1e1e,0x380e,0x380e,0x380e,0x3806,0x3806,0x380e,0x380e,0x380e,0x1e1e,0x1ffe,0x0fe6,0x03c6,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'd'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01f0,0x07fc,0x0ffe,0x1e0f,0x3807,0x3807,0x3fff,0x3fff,0x3fff,0x3800,0x3800,0x3c01,0x1e07,0x0fff,0x07fe,0x01f8,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'e'
+  {0x0000,0x0000,0x0000,0x003f,0x00ff,0x00ff,0x00e0,0x01c0,0x01c0,0x01c0,0x1fff,0x1fff,0x1fff,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x01c0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'f'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x03c6,0x0fe6,0x1ffe,0x1e1e,0x3c0e,0x380e,0x380e,0x3806,0x3806,0x380e,0x380e,0x3c0e,0x1e1e,0x1ffe,0x0fe6,0x03c6,0x000e,0x000e,0x081c,0x0ffc,0x0ff8,0x07e0},  // 'g'
+  {0x0000,0x0000,0x0000,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1cf8,0x1dfc,0x1ffe,0x1e1e,0x1c0e,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'h'
+  {0x0000,0x0000,0x0000,0x00e0,0x00e0,0x00e0,0x0000,0x0000,0x0000,0x0000,0x0fe0,0x0fe0,0x0fe0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x00e0,0x1fff,0x1fff,0x1fff,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'i'
+  {0x0000,0x0000,0x0000,0x0060,0x0060,0x0060,0x0000,0x0000,0x0000,0x0000,0x0fe0,0x0fe0,0x0fe0,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x00e0,0x00e0,0x1fe0,0x1fc0,0x1f80},  // 'j'
+  {0x0000,0x0000,0x0000,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c00,0x1c07,0x1c0e,0x1c1c,0x1c38,0x1c70,0x1de0,0x1fc0,0x1fe0,0x1e70,0x1c38,0x1c38,0x1c1c,0x1c0e,0x1c0f,0x1c07,0x1c03,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'k'
+  {0x0000,0x0000,0x0000,0x3f80,0x3f80,0x3f80,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x01c0,0x01c0,0x01fe,0x00fe,0x007e,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'l'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x371e,0x3f9f,0x3fff,0x39e3,0x30e3,0x30c3,0x30c3,0x30c3,0x30c3,0x30c3,0x30c3,0x30c3,0x30c3,0x30c3,0x30c3,0x30c3,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'm'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x1cf8,0x1dfc,0x1ffe,0x1e1e,0x1c0e,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'n'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x03f0,0x0ffc,0x1ffe,0x1e1e,0x3c0f,0x3807,0x3807,0x3807,0x3807,0x3807,0x3807,0x3c0f,0x1e1e,0x1ffe,0x0ffc,0x03f0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'o'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x18f0,0x19fc,0x1ffe,0x1e1e,0x1c07,0x1c07,0x1c07,0x1c07,0x1c07,0x1c07,0x1c07,0x1c07,0x1e0e,0x1ffe,0x19fc,0x18f0,0x1800,0x1800,0x1800,0x1800,0x1800,0x1800},  // 'p'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x03c6,0x0ff6,0x1ffe,0x1e1e,0x1c0e,0x380e,0x3806,0x3806,0x3806,0x3806,0x380e,0x3c0e,0x1e1e,0x1ffe,0x0ff6,0x03c6,0x0006,0x0006,0x0006,0x0006,0x0006,0x0006},  // 'q'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x071f,0x073f,0x077f,0x07e0,0x0780,0x0780,0x0700,0x0700,0x0700,0x0700,0x0700,0x0700,0x0700,0x0700,0x0700,0x0700,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'r'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x03f8,0x0ffc,0x0ffc,0x1e04,0x1c00,0x1c00,0x0f80,0x07f8,0x003c,0x000e,0x000e,0x100e,0x1c1e,0x1ffc,0x0ffc,0x03f0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 's'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0380,0x0380,0x0380,0x0380,0x0380,0x3ffe,0x3ffe,0x3ffe,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x01c0,0x01fe,0x01fe,0x007e,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 't'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c06,0x1c0e,0x1c0e,0x1e1e,0x0ff6,0x0fe6,0x03c6,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'u'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x3003,0x3807,0x3807,0x1c06,0x1c0e,0x1c0e,0x0e1c,0x0e1c,0x0618,0x0738,0x0738,0x0330,0x03f0,0x03f0,0x01e0,0x01e0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'v'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0xe001,0xe001,0x6001,0x6001,0x7003,0x70c3,0x31e3,0x31e3,0x39e3,0x3937,0x1b37,0x1b36,0x1e1e,0x1e1e,0x1e1e,0x0e1c,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'w'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x3807,0x1c0e,0x0e1c,0x0e1c,0x0738,0x03f0,0x01e0,0x01e0,0x01e0,0x03f0,0x0738,0x0738,0x0e1c,0x1c0e,0x3807,0x7807,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'x'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x3803,0x3807,0x1807,0x1c06,0x1c0e,0x0e0e,0x0e0c,0x061c,0x0718,0x0338,0x0338,0x03b0,0x01f0,0x01e0,0x00e0,0x00e0,0x01c0,0x01c0,0x0380,0x1f80,0x1f00,0x1e00},  // 'y'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x1ffe,0x1ffe,0x1ffe,0x000c,0x0018,0x0030,0x0070,0x00e0,0x00c0,0x0180,0x0300,0x0600,0x0c00,0x1ffe,0x1ffe,0x1ffe,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // 'z'
+  {0x0000,0x0000,0x0000,0x003e,0x007e,0x00fe,0x00e0,0x00e0,0x00e0,0x00c0,0x00c0,0x00c0,0x00c0,0x01c0,0x01c0,0x1f80,0x1f00,0x1f80,0x03c0,0x01c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00e0,0x00e0,0x00e0,0x00fe,0x007e,0x003e,0x0000},  // '{'
+  {0x0000,0x0000,0x0000,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0},  // '|'
+  {0x0000,0x0000,0x0000,0x1f00,0x1f80,0x1fc0,0x01c0,0x01c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00e0,0x00e0,0x007e,0x003e,0x007e,0x00f0,0x00e0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x01c0,0x01c0,0x1fc0,0x1f80,0x1f00,0x0000},  // '}'
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x1f00,0x3fe1,0x60ff,0x003e,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},  // '~'
+};
+
+// (print declarations)
+namespace Printer {
+
+  static const int FILE_COLS = 80;     // the /CardSat/Reports/*.txt sink is always 80 columns
+
+  enum Format { FMT_ESCPOS = 0, FMT_TEXT = 1, FMT_PCL = 2, FMT_POSTSCRIPT = 3,
+                FMT_ESCP2 = 4, FMT_STAR = 5, FMT_ZPL = 6, FMT_PWG_RASTER = 7,
+                FMT_URF_RASTER = 8 };
+
+  // Transport for the network printer sink. RAW9100 streams the page language
+  // straight to a socket (the default for all the formats above). IPP wraps the
+  // same page-language bytes in an HTTP/IPP Print-Job to port 631 -- for office
+  // printers that expose IPP but not raw 9100. IPP carries PCL or PostScript as
+  // its document payload; it CANNOT rasterize, so raster-only (AirPrint-only)
+  // printers that advertise only image/urf or image/pwg-raster are NOT supported.
+  enum Transport { RAW9100 = 0, IPP = 1 };
+
+  struct Sinks {
+    const char* host = nullptr;        // printer IP ("" / null = no printer sink)
+    uint16_t    port = 9100;
+    int         printerCols = 32;       // 32 (58mm), 42/48 (80mm), 64 (Font B)
+    int         format = FMT_ESCPOS;    // page language for the network printer sink
+    bool        toSerial = false;       // echo the report to the USB serial console
+    bool        toFile   = false;       // also write /CardSat/Reports/<fileTitle>-<stamp>.txt
+    const char* fileTitle = "report";   // filename stem for the file sink
+    int         transport = RAW9100;    // RAW9100 (port 9100) or IPP (HTTP POST :631)
+    const char* ippResource = "/ipp/print"; // IPP resource path on the printer
+  };
+
+  bool begin(const Sinks& s);
+  bool printerOk();                    // did the TCP printer sink connect?
+  String probeCapabilities(const char* host, uint16_t port);  // IPP Get-Printer-Attributes -> formats
+  bool ippAccepted();                  // IPP: did the printer return HTTP 2xx? (RAW9100: false)
+  bool anySink();                      // is at least one sink active?
+  String lastFile();                   // path of the file sink written ("" if none)
+
+  int  cols();                         // widest active sink's column count (for layout)
+
+  void line(const String& s);          // one line to every active sink
+  void wrap(const String& s);          // hard-wrap at each sink's width
+  void blank();
+  void title(const String& s);         // emphasized/centered where the format allows
+  void rule();                         // a row of '-' at each sink's width
+  void feedCut();                      // finish the page (cut / form-feed / showpage)
+
+  void end();                          // flush + close all sinks
+}
+
+
+
+// Three-sink report emitter with a selectable page language on the network sink.
+// Per-sink hard wrapping keeps a narrow printer inside its paper while a wider
+// file/serial sink shows the full-width layout.
+namespace {
+  WiFiClient s_cli;
+  bool       s_pOK  = false;            // printer sink connected (this-session, cleared by end())
+  bool       s_pConnected = false;      // LATCHED: printer connected at least once (survives end())
+  int        s_pCols = 32;              // printer sink width (columns)
+  int        s_fmt  = Printer::FMT_ESCPOS;
+  int        s_transport = Printer::RAW9100;   // RAW9100 or IPP
+  bool       s_chunkOpen = false;       // IPP: HTTP chunked body is open
+  bool       s_ippAccepted = false;     // IPP: printer returned HTTP 2xx for the job
+  // Raster mode (FMT_PWG_RASTER): report lines are COLLECTED, then rendered as a
+  // page at end()/feedCut() rather than streamed as text.
+  static const int RAS_MAX_LINES = 90;
+  String     s_rasLines[RAS_MAX_LINES];
+  int        s_rasN = 0;
+  bool       s_ser  = false;            // serial sink active
+  bool       s_file = false;            // file sink active
+  int        s_fCols = Printer::FILE_COLS;
+  File       s_f;
+  String     s_fpath;
+
+  // ---- PostScript page state (FMT_POSTSCRIPT only) ----
+  // Courier at 10 pt on US Letter: 72 lines fit in a 720 pt text column from a
+  // 750 pt top; 12 pt leading. We stream show-commands and eject as we fill.
+  int   s_psY   = 0;                    // current baseline (pt from bottom); 0 = need new page
+  int   s_psPage = 0;                   // pages started
+  const int PS_TOP = 750, PS_BOT = 40, PS_LEAD = 12, PS_LEFT = 36;
+
+  // ---- ZPL label state (FMT_ZPL only) ----
+  // Each report line is one ^FO(x,y)^A0N,h,w^FD(text)^FS field. y advances down
+  // the label; when it passes ZPL_MAX we close the label (^XZ) and open a new one.
+  int   s_zplY  = 0;                    // current y (dots from top); -1 = no label open
+  const int ZPL_TOP = 20, ZPL_MAX = 1180, ZPL_LEAD = 26, ZPL_LEFT = 20;
+  const int ZPL_FH = 22, ZPL_FW = 12;   // font cell height/width (dots) ~ small monospace
+
+  template <typename W>
+  void wrapTo(const String& s, int width, W writeLine) {
+    // Word-aware wrapping: break at the last space that fits; if a single word is
+    // longer than the width, hard-break it so nothing overflows the column. Leading
+    // spaces created by a break are consumed. Blank lines are preserved.
+    int n = s.length();
+    if (n == 0) { writeLine(String("")); return; }
+    if (width < 1) width = 1;
+    int i = 0;
+    while (i < n) {
+      if (n - i <= width) { writeLine(s.substring(i)); break; }
+      // find last space in s[i .. i+width] (inclusive of the boundary char)
+      int brk = -1;
+      for (int k = i + width; k > i; --k) { if (s.charAt(k) == ' ') { brk = k; break; } }
+      if (brk <= i) {                       // no space: hard-break a long word
+        writeLine(s.substring(i, i + width));
+        i += width;
+      } else {
+        writeLine(s.substring(i, brk));     // break at the space
+        i = brk + 1;                        // consume it
+      }
+    }
+  }
+
+  // ---- HTTP chunked-transfer writer (IPP transport) ----
+  // Each write becomes one HTTP chunk: <hex-length>CRLF <bytes> CRLF. This lets us
+  // stream a document of unknown total length (the report is built line-by-line),
+  // keeping the zero-buffer model. RAW9100 writes go straight to the socket.
+  void sockWrite(const uint8_t* b, size_t n) {
+    if (!s_pOK || n == 0) return;
+    if (s_transport == Printer::IPP && s_chunkOpen) {
+      char hdr[12];
+      int hn = snprintf(hdr, sizeof(hdr), "%X\r\n", (unsigned)n);
+      s_cli.write((const uint8_t*)hdr, hn);
+      s_cli.write(b, n);
+      s_cli.write((const uint8_t*)"\r\n", 2);
+    } else {
+      s_cli.write(b, n);
+    }
+  }
+  void pRaw(const uint8_t* b, size_t n) { if (s_pOK) sockWrite(b, n); }
+  void pStr(const String& s)            { if (s_pOK && s.length()) sockWrite((const uint8_t*)s.c_str(), s.length()); }
+  void pNL()                            { if (s_pOK) { uint8_t c = '\n'; sockWrite(&c, 1); } }
+
+  // Append one IPP attribute: value-tag(1) name-len(2) name value-len(2) value.
+  void ippAttr(String& b, uint8_t tag, const char* name, const String& val) {
+    b += (char)tag;
+    int nl = strlen(name);   b += (char)(nl >> 8); b += (char)(nl & 0xFF); b += name;
+    int vl = val.length();   b += (char)(vl >> 8); b += (char)(vl & 0xFF); b += val;
+  }
+
+  // Build the IPP Print-Job operation header (everything before the document data).
+  String ippHeader(const char* host, const char* resource, const String& docFormat) {
+    String uri = String("ipp://") + host + resource;
+    String b;
+    b += (char)0x01; b += (char)0x01;              // version 1.1
+    b += (char)0x00; b += (char)0x02;              // operation-id = Print-Job
+    b += (char)0x00; b += (char)0x00; b += (char)0x00; b += (char)0x01;  // request-id
+    b += (char)0x01;                               // operation-attributes-tag
+    ippAttr(b, 0x47, "attributes-charset", "utf-8");
+    ippAttr(b, 0x48, "attributes-natural-language", "en");
+    ippAttr(b, 0x45, "printer-uri", uri);
+    ippAttr(b, 0x42, "requesting-user-name", "cardsat");
+    ippAttr(b, 0x42, "job-name", "CardSat report");
+    ippAttr(b, 0x49, "document-format", docFormat);
+    b += (char)0x03;                               // end-of-attributes-tag
+    return b;
+  }
+
+  // Escape a line for PostScript string literals: \ ( ) and non-ASCII.
+  String psEscape(const String& s) {
+    String o; o.reserve(s.length() + 4);
+    for (size_t i = 0; i < s.length(); ++i) {
+      char c = s[i];
+      if (c == '\\' || c == '(' || c == ')') { o += '\\'; o += c; }
+      else if ((uint8_t)c < 32 || (uint8_t)c > 126) o += ' ';
+      else o += c;
+    }
+    return o;
+  }
+
+  void psBeginPage() {
+    s_psPage++;
+    pStr("%%Page: "); pStr(String(s_psPage)); pStr(" "); pStr(String(s_psPage)); pNL();
+    pStr("/Courier findfont 10 scalefont setfont\n");
+    s_psY = PS_TOP;
+  }
+  void psShowLine(const String& s) {
+    if (!s_pOK) return;
+    if (s_psY <= PS_BOT) { pStr("showpage\n"); psBeginPage(); }
+    pStr(String(PS_LEFT)); pStr(" "); pStr(String(s_psY)); pStr(" moveto (");
+    pStr(psEscape(s)); pStr(") show\n");
+    s_psY -= PS_LEAD;
+  }
+
+  // Escape a line for a ZPL ^FD field: ^ and ~ are ZPL control chars; drop non-ASCII.
+  String zplEscape(const String& s) {
+    String o; o.reserve(s.length() + 2);
+    for (size_t i = 0; i < s.length(); ++i) {
+      char c = s[i];
+      if (c == '^' || c == '~') o += ' ';                 // neutralize ZPL command chars
+      else if ((uint8_t)c < 32 || (uint8_t)c > 126) o += ' ';
+      else o += c;
+    }
+    return o;
+  }
+  void zplBeginLabel() {
+    if (!s_pOK) return;
+    pStr("^XA\n");                                        // start label
+    pStr("^CI28\n");                                      // UTF-8 input (ASCII-safe)
+    s_zplY = ZPL_TOP;
+  }
+  void zplEndLabel() {
+    if (!s_pOK || s_zplY < 0) return;
+    pStr("^XZ\n");                                        // end + print label
+    s_zplY = -1;
+  }
+  void zplShowLine(const String& s) {
+    if (!s_pOK) return;
+    if (s_zplY < 0) zplBeginLabel();
+    if (s_zplY > ZPL_MAX) { zplEndLabel(); zplBeginLabel(); }   // overflow -> next label
+    pStr("^FO"); pStr(String(ZPL_LEFT)); pStr(","); pStr(String(s_zplY));
+    pStr("^A0N,"); pStr(String(ZPL_FH)); pStr(","); pStr(String(ZPL_FW));
+    pStr("^FD"); pStr(zplEscape(s)); pStr("^FS\n");
+    s_zplY += ZPL_LEAD;
+  }
+
+  // Emit one text line to the PRINTER sink, honoring the page language.
+  void printerLine(const String& s) {
+    if (!s_pOK) return;
+    if (s_fmt == Printer::FMT_POSTSCRIPT) {
+      wrapTo(s, s_pCols, [](const String& ln){ psShowLine(ln); });
+    } else if (s_fmt == Printer::FMT_ZPL) {
+      wrapTo(s, s_pCols, [](const String& ln){ zplShowLine(ln); });
+    } else {
+      // ESC/POS, TEXT, PCL, ESC/P2 and Star are all plain text at the line level.
+      wrapTo(s, s_pCols, [](const String& ln){ pStr(ln); pNL(); });
+    }
+  }
+
+  void serialFileLine(const String& s) {
+    int w = s_fCols;
+    if (s_ser)  wrapTo(s, w, [](const String& ln){ Serial.println(ln); });
+    if (s_file) wrapTo(s, w, [](const String& ln){ s_f.print(ln); s_f.print('\n'); });
+  }
+}
+
+
+// ===========================================================================
+//  PWG Raster generation (FMT_PWG_RASTER): render report text into a raster
+//  page, scanline-by-scanline, and stream it through the current sink (over the
+//  IPP chunked transport for AirPrint/driverless printers). Validated
+//  byte-identical to ppm2pwg; ~4 KB working RAM, no full-page buffer.
+// ===========================================================================
+namespace RasterGen {
+  // These write through the printer sink via the file-scope pRaw() above.
+  static uint32_t s_rw = 0, s_rh = 0, s_rdpi = 300;
+  static bool     s_rvalid = false;
+  static uint8_t  s_rreps  = 0;
+  static uint8_t  s_rprev[2560];        // one scanline hold (max width we support)
+  static uint8_t  s_rscan[2560];        // scanline compose buffer
+
+  static void rU32(uint32_t v) { uint8_t b[4]={(uint8_t)(v>>24),(uint8_t)(v>>16),(uint8_t)(v>>8),(uint8_t)v}; pRaw(b,4); }
+  static void rI32(int32_t v)  { rU32((uint32_t)v); }
+  static void rStr(const char* s, int n) {
+    uint8_t buf[64]; memset(buf,0,sizeof(buf));
+    if (n>64) n=64; size_t k = s?strlen(s):0; if((int)k>n-1)k=n-1; if(k)memcpy(buf,s,k);
+    pRaw(buf,n);
+  }
+  static void rPad(int n){ uint8_t z[64]={0}; while(n>0){ int c=n<64?n:64; pRaw(z,c); n-=c; } }
+
+  static void beginDoc(){ pRaw((const uint8_t*)"RaS2",4); }
+  static void beginPage(uint32_t w, uint32_t h, uint32_t dpi){
+    s_rw=w; s_rh=h; s_rdpi=dpi; s_rvalid=false; s_rreps=0;
+    rStr("PwgRaster",64); rStr("",64); rStr("",64); rStr("",64);   // sync + 3 strings
+    rPad(12);
+    rU32(0); rU32(0);                 // CutMedia, Duplex
+    rU32(dpi); rU32(dpi);             // HWResolution X/Y
+    rPad(16);
+    rU32(0); rU32(0); rU32(0);        // InsertSheet, Jog, LeadingEdge
+    rPad(12);
+    rU32(0); rU32(0);                 // MediaPosition, MediaWeightMetric
+    rPad(8);
+    rU32(1); rU32(0);                 // NumCopies, Orientation
+    rPad(4);
+    rU32(612); rU32(792);             // PageSize X/Y (points, letter)
+    rPad(8);
+    rU32(0); rU32(w); rU32(h);        // Tumble, Width, Height
+    rPad(4);
+    rU32(8); rU32(8); rU32(w);        // BitsPerColor, BitsPerPixel, BytesPerLine
+    rU32(0); rU32(18);                // ColorOrder=Chunky, ColorSpace=sGray
+    rPad(16);
+    rU32(1);                          // NumColors
+    rPad(28);
+    rU32(0); rI32(1); rI32(1);        // TotalPageCount, CrossFeedTransform, FeedTransform
+    rU32(0); rU32(0); rU32(0); rU32(0); // ImageBox L/T/R/B
+    rU32(0x00FFFFFF); rU32(0);        // AlternatePrimary, PrintQuality
+    rPad(20);
+    rU32(0); rU32(0);                 // VendorIdentifier, VendorLength
+    rPad(1088); rPad(64);
+    rStr("",64); rStr("na_letter_8.5x11in",64);  // RenderingIntent, PageSizeName
+  }
+  // PWG PackBits (exact ppm2pwg compress_line, oneChunk=1).
+  static void compress(const uint8_t* raw, size_t len){
+    size_t pos=0;
+    while(pos!=len){
+      size_t start=pos; uint8_t cur=raw[pos]; pos++;
+      if(pos==len || raw[pos]==cur){
+        int rep=0;
+        while(pos!=len && raw[pos]==cur){ pos++; rep++; if(rep==127)break; }
+        uint8_t rb=(uint8_t)rep; pRaw(&rb,1); pRaw(&cur,1);
+      } else {
+        size_t verb=1;
+        for(;;){ cur=raw[pos]; pos++; verb++; if(verb==127)break; if(!(pos!=len && raw[pos]!=cur))break; }
+        if(pos!=len) verb--;
+        if(verb==1){ pos=start+1; uint8_t z=0; pRaw(&z,1); pRaw(&raw[start],1); }
+        else { pos=start+verb; uint8_t vb=(uint8_t)(257-verb); pRaw(&vb,1); pRaw(&raw[start],verb); }
+      }
+    }
+  }
+  static void flush(){ if(!s_rvalid)return; pRaw(&s_rreps,1); compress(s_rprev,s_rw); s_rvalid=false; s_rreps=0; }
+  static void row(const uint8_t* r){
+    if(s_rvalid && s_rreps<255 && memcmp(r,s_rprev,s_rw)==0){ s_rreps++; return; }
+    flush(); memcpy(s_rprev,r, s_rw<=sizeof(s_rprev)?s_rw:sizeof(s_rprev)); s_rvalid=true; s_rreps=0;
+  }
+  static void endDoc(){ flush(); }
+
+  // ---- URF (Apple Raster, image/urf) container ----
+  // Same RLE row data as PWG; only the file magic + a compact 32-byte page header
+  // differ. Validated byte-identical to ppm2pwg -f urf.
+  static void beginDocUrf(uint32_t pages){
+    pRaw((const uint8_t*)"UNIRAST\0", 8);   // 8-byte magic incl. trailing NUL
+    rU32(pages);                             // page count (0 = unspecified/stream)
+  }
+  static void beginPageUrf(uint32_t w, uint32_t h, uint32_t dpi){
+    s_rw=w; s_rh=h; s_rdpi=dpi; s_rvalid=false; s_rreps=0;
+    uint8_t ph[32]; memset(ph,0,32);
+    ph[0]=8;   // BitsPerPixel = 8
+    ph[1]=0;   // ColorSpace = sGray
+    ph[2]=1;   // Duplex = OneSided
+    ph[3]=0;   // Quality = Default
+    ph[4]=0;   // MediaType = auto
+    ph[5]=0;   // MediaPosition = auto
+    ph[12]=(uint8_t)(w>>24); ph[13]=(uint8_t)(w>>16); ph[14]=(uint8_t)(w>>8); ph[15]=(uint8_t)w;
+    ph[16]=(uint8_t)(h>>24); ph[17]=(uint8_t)(h>>16); ph[18]=(uint8_t)(h>>8); ph[19]=(uint8_t)h;
+    ph[20]=(uint8_t)(dpi>>24); ph[21]=(uint8_t)(dpi>>16); ph[22]=(uint8_t)(dpi>>8); ph[23]=(uint8_t)dpi;
+    pRaw(ph, 32);
+  }
+}
+
+// Render an array of monospace text lines as a full raster page and stream it.
+// scale integer-scales the 16x32 font. Called by Printer when FMT_PWG_RASTER.
+namespace RasterGen {
+  static void renderTextPage(const char* const* lines, int n,
+                             uint32_t W, uint32_t H, uint32_t dpi,
+                             int scale, int marginX, int marginY, int lineGap,
+                             bool urf = false) {
+    if (W > sizeof(s_rscan)) W = sizeof(s_rscan);
+    const int GW = FONT_W*scale, GH = FONT_H*scale, pitch = GH + lineGap;
+    if (urf) { beginDocUrf(0); beginPageUrf(W,H,dpi); }
+    else     { beginDoc();     beginPage(W,H,dpi); }
+    for(uint32_t y=0; y<H; ++y){
+      memset(s_rscan, 0xFF, W);                 // white background
+      int ty=(int)y - marginY;
+      if(ty>=0){
+        int rr=ty/pitch, gy=ty%pitch;
+        if(rr<n && gy<GH){
+          int srcY=gy/scale; const char* s=lines[rr]; int x=marginX;
+          for(const char* p=s; *p && x+GW<=(int)W; ++p, x+=GW){
+            unsigned char c=(unsigned char)*p;
+            if(c<FONT_FIRST||c>FONT_LAST) continue;
+            uint16_t bits=FONT16x32[c-FONT_FIRST][srcY];
+            for(int gx=0; gx<FONT_W; ++gx){
+              if(bits & (1<<(FONT_W-1-gx))){
+                int px0=x+gx*scale;
+                for(int sx=0; sx<scale; ++sx){ int px=px0+sx; if(px>=0&&px<(int)W) s_rscan[px]=0x00; }
+              }
+            }
+          }
+        }
+      }
+      row(s_rscan);
+    }
+    endDoc();
+  }
+}
+
+namespace Printer {
+
+// True when the active format is a raster container (PWG or URF): both collect
+// report lines and render a page rather than streaming text.
+static inline bool isRaster() { return s_fmt == FMT_PWG_RASTER || s_fmt == FMT_URF_RASTER; }
+
+bool begin(const Sinks& s) {
+  s_pOK = false; s_pConnected = false; s_ser = s.toSerial; s_file = false; s_fpath = "";
+  s_pCols = (s.printerCols >= 24 && s.printerCols <= 72) ? s.printerCols : 32;
+  s_fmt   = (s.format >= FMT_ESCPOS && s.format <= FMT_URF_RASTER) ? s.format : FMT_ESCPOS;
+  s_fCols = FILE_COLS;
+  s_psY = 0; s_psPage = 0;
+
+  // Printer sink (optional; failure is non-fatal to the others).
+  s_transport = (s.transport == Printer::IPP) ? Printer::IPP : Printer::RAW9100;
+  // PWG raster is only meaningful over IPP (driverless printers); force it.
+  if (s.format == FMT_PWG_RASTER || s.format == FMT_URF_RASTER) s_transport = Printer::IPP;
+  s_chunkOpen = false; s_ippAccepted = false; s_rasN = 0;
+  if (s.host && s.host[0]) {
+    s_cli.setTimeout(4000);                       // socket read/write timeout
+    // IPP rides HTTP on 631 unless the caller overrode the port; raw uses 9100.
+    uint16_t pport = s.port ? s.port
+                    : (s_transport == Printer::IPP ? 631 : 9100);
+    // Raster over IPP: if the port is still the raw-9100 default, use IPP's 631.
+    if ((s.format == FMT_PWG_RASTER || s.format == FMT_URF_RASTER) && pport == 9100) pport = 631;
+    if (s_cli.connect(s.host, pport)) {           // 2-arg form (matches net.cpp; the
+                                                  // 3-arg timeout overload is unreliable
+                                                  // on several ESP32 core versions)
+      s_pOK = true;
+      s_pConnected = true;   // latch success so status survives end()
+
+      // IPP transport: open a chunked HTTP POST and send the IPP operation header
+      // as the first body bytes, BEFORE the page-language preamble streams in.
+      if (s_transport == Printer::IPP) {
+        // Document format is the page language IPP will carry.
+        String docFmt = (s_fmt == FMT_POSTSCRIPT)  ? "application/postscript"
+                      : (s_fmt == FMT_PCL)          ? "application/vnd.hp-PCL"
+                      : (s_fmt == FMT_PWG_RASTER)   ? "image/pwg-raster"
+                      : (s_fmt == FMT_URF_RASTER)   ? "image/urf"
+                      :                               "application/octet-stream";
+        const char* res = s.ippResource && s.ippResource[0] ? s.ippResource : "/ipp/print";
+        String req  = String("POST ") + res + " HTTP/1.1\r\n";
+        req += "Host: " + String(s.host) + "\r\n";
+        req += "Content-Type: application/ipp\r\n";
+        req += "Transfer-Encoding: chunked\r\n";
+        req += "Connection: close\r\n\r\n";
+        s_cli.print(req);                         // HTTP request line + headers (unchunked)
+        s_chunkOpen = true;                       // from here, body writes are chunked
+        String hdr = ippHeader(s.host, res, docFmt);
+        pRaw((const uint8_t*)hdr.c_str(), hdr.length());   // IPP header = first chunk(s)
+      }
+      // Per-format document preamble.
+      if (s_fmt == FMT_ESCPOS) {
+        uint8_t reset[2] = {0x1B, 0x40}; pRaw(reset, 2);          // ESC @
+      } else if (s_fmt == FMT_PCL) {
+        // PJL-wrapped PCL so office HPs reliably interpret the raw job. The UEL
+        // (ESC %-12345X) enters PJL; @PJL ENTER LANGUAGE=PCL selects PCL; ESC E
+        // resets; ESC(s0p16.67h8.5v0s0b0T selects a fixed-pitch (Courier) font so
+        // columns line up. A matching UEL is sent at end() to close the job.
+        pStr("\x1B%-12345X@PJL\r\n");
+        pStr("@PJL ENTER LANGUAGE=PCL\r\n");
+        uint8_t reset[2] = {0x1B, 'E'};  pRaw(reset, 2);          // ESC E : reset
+        pStr("\x1B(s0p16.67h8.5v0s0b0T");                        // fixed-pitch Courier ~16.67 cpi
+      } else if (s_fmt == FMT_POSTSCRIPT) {
+        pStr("%!PS-Adobe-3.0\n");
+        pStr("%%Creator: CardSat\n%%Pages: (atend)\n%%EndComments\n");
+        psBeginPage();
+      } else if (s_fmt == FMT_ESCP2) {
+        uint8_t reset[2] = {0x1B, 0x40}; pRaw(reset, 2);          // ESC @ : ESC/P2 reset
+      } else if (s_fmt == FMT_STAR) {
+        uint8_t reset[2] = {0x1B, 0x40}; pRaw(reset, 2);          // ESC @ : Star reset
+      } else if (s_fmt == FMT_ZPL) {
+        s_zplY = -1;                                              // no label open yet
+      }
+      // FMT_TEXT: no preamble at all.
+    }
+  }
+
+  // File sink (optional): /CardSat/Reports/<title>-<uptime>.txt. All app data lives
+  // under /CardSat (matching RovePlans, workable, search, etc.); mkdir is idempotent.
+  if (s.toFile && Store::ready()) {
+    if (!Store::fs().exists("/CardSat")) Store::fs().mkdir("/CardSat");
+    if (!Store::fs().exists("/CardSat/Reports")) Store::fs().mkdir("/CardSat/Reports");
+    String stem = s.fileTitle ? String(s.fileTitle) : String("report");
+    stem.replace(' ', '_'); stem.replace('/', '_');
+    s_fpath = "/CardSat/Reports/" + stem + "-" + String((unsigned long)millis()) + ".txt";
+    s_f = Store::fs().open(s_fpath, "w");
+    s_file = (bool)s_f;
+    if (!s_file) s_fpath = "";
+  }
+
+  if (s_ser) Serial.println(F("---- CardSat report ----"));
+  return s_pOK || s_ser || s_file;
+}
+
+
+// ---------------------------------------------------------------------------
+//  Printer capability probe: Get-Printer-Attributes over IPP, report which
+//  document formats the printer accepts. Lets a user check whether their printer
+//  supports the raster formats CardSat generates (image/pwg-raster, image/urf)
+//  before relying on it. Returns a short human summary; empty on failure.
+// ---------------------------------------------------------------------------
+String probeCapabilities(const char* host, uint16_t port) {
+  if (!host || !host[0]) return String("");
+  uint16_t pport = port ? port : 631;
+  WiFiClient cli;
+  cli.setTimeout(5000);
+  if (!cli.connect(host, pport)) return String("unreachable");
+
+  // Build a Get-Printer-Attributes (operation 0x000B) request.
+  String uri = String("ipp://") + host + "/ipp/print";
+  String b;
+  b += (char)0x01; b += (char)0x01;              // IPP 1.1
+  b += (char)0x00; b += (char)0x0B;              // op = Get-Printer-Attributes
+  b += (char)0x00; b += (char)0x00; b += (char)0x00; b += (char)0x01;  // request-id
+  b += (char)0x01;                               // operation-attributes-tag
+  ippAttr(b, 0x47, "attributes-charset", "utf-8");
+  ippAttr(b, 0x48, "attributes-natural-language", "en");
+  ippAttr(b, 0x45, "printer-uri", uri);
+  ippAttr(b, 0x44, "requested-attributes", "document-format-supported");
+  b += (char)0x03;                               // end-of-attributes-tag
+
+  String req = String("POST /ipp/print HTTP/1.1\r\n");
+  req += "Host: " + String(host) + "\r\n";
+  req += "Content-Type: application/ipp\r\n";
+  req += "Content-Length: " + String(b.length()) + "\r\n";
+  req += "Connection: close\r\n\r\n";
+  cli.print(req);
+  cli.write((const uint8_t*)b.c_str(), b.length());
+
+  // Read the whole response into a RAW byte buffer. IPP responses are binary and
+  // contain many null bytes (2-byte length prefixes), so an Arduino String would be
+  // truncated at the first '\0' and miss the format tokens further in. Use a plain
+  // buffer and scan it with memory search.
+  static uint8_t buf[4096];
+  size_t blen = 0;
+  uint32_t t0 = millis();
+  while (cli.connected() && (millis() - t0) < 6000 && blen < sizeof(buf)) {
+    while (cli.available() && blen < sizeof(buf)) { buf[blen++] = (uint8_t)cli.read(); t0 = millis(); }
+    delay(5);
+  }
+  cli.stop();
+
+  // Search the raw bytes for each format token (binary-safe substring search).
+  auto has = [&](const char* tok) -> bool {
+    size_t tl = strlen(tok);
+    if (tl == 0 || tl > blen) return false;
+    for (size_t i = 0; i + tl <= blen; ++i) {
+      if (memcmp(buf + i, tok, tl) == 0) return true;
+    }
+    return false;
+  };
+  String out;
+  if (has("image/pwg-raster")) out += "PWG ";
+  if (has("image/urf"))        out += "URF ";
+  if (has("application/pdf"))   out += "PDF ";
+  if (has("image/jpeg"))        out += "JPEG ";
+  if (has("application/postscript")) out += "PS ";
+  if (has("PCL") || has("pcl")) out += "PCL ";
+  if (out.length() == 0) {
+    // Connected but no recognizable formats found (or empty reply).
+    return blen ? String("connected; formats unknown") : String("no reply");
+  }
+  out.trim();
+  return out;
+}
+
+bool printerOk() { return s_pConnected; }   // did the printer connect this print? (survives end())
+bool ippAccepted() { return s_ippAccepted; }
+bool anySink()   { return s_pOK || s_ser || s_file; }
+String lastFile(){ return s_fpath; }
+
+int cols() {
+  int w = 0;
+  if (s_ser || s_file) w = s_fCols;
+  if (s_pOK && s_pCols > w) w = s_pCols;
+  return w > 0 ? w : s_pCols;
+}
+
+// Collect one report line for the raster page, wrapping to s_pCols so long lines
+// don't run off the printable width (mirrors what the text formats do via wrapTo).
+void rasterCollect(const String& s) {
+  wrapTo(s, s_pCols, [](const String& ln){
+    if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = ln;
+  });
+}
+
+void line(const String& s) {
+  if (s_pOK && isRaster()) {
+    rasterCollect(s);                                       // wrap + collect for the page
+    serialFileLine(s);                                      // serial/file still get text
+    return;
+  }
+  printerLine(s);
+  serialFileLine(s);
+}
+
+void wrap(const String& s) { line(s); }   // line() already per-sink wraps
+
+void blank() {
+  if (s_pOK) {
+    if (isRaster()) { if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = String(""); }
+    else if (s_fmt == FMT_POSTSCRIPT) psShowLine(String(""));
+    else if (s_fmt == FMT_ZPL)   zplShowLine(String(""));
+    else pNL();
+  }
+  if (s_ser)  Serial.println();
+  if (s_file) s_f.print('\n');
+}
+
+void rule() {
+  auto dash = [](int w){ String r; r.reserve(w); for (int i=0;i<w;++i) r += '-'; return r; };
+  if (s_pOK && isRaster()) {
+    if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = dash(s_pCols);
+    if (s_ser)  Serial.println(dash(s_fCols));
+    if (s_file) { s_f.print(dash(s_fCols)); s_f.print('\n'); }
+    return;
+  }
+  if (s_pOK)  printerLine(dash(s_pCols));
+  if (s_ser)  Serial.println(dash(s_fCols));
+  if (s_file) { s_f.print(dash(s_fCols)); s_f.print('\n'); }
+}
+
+void title(const String& s) {
+  if (s_pOK && isRaster()) {
+    rasterCollect(s);
+    if (s_ser)  Serial.println(s);
+    if (s_file) { s_f.print(s); s_f.print('\n'); }
+    rule();
+    return;
+  }
+  if (s_pOK) {
+    if (s_fmt == FMT_ESCPOS) {
+      uint8_t c1[3] = {0x1B, 0x61, 0x01}; pRaw(c1, 3);   // ESC a 1  center
+      uint8_t c2[3] = {0x1B, 0x45, 0x01}; pRaw(c2, 3);   // ESC E 1  emphasis on
+      pStr(s); pNL();
+      uint8_t c3[3] = {0x1B, 0x45, 0x00}; pRaw(c3, 3);
+      uint8_t c4[3] = {0x1B, 0x61, 0x00}; pRaw(c4, 3);
+    } else if (s_fmt == FMT_ESCP2) {
+      uint8_t on[2]  = {0x1B, 0x45}; pRaw(on, 2);        // ESC E : bold on
+      pStr(s); pNL();
+      uint8_t off[2] = {0x1B, 0x46}; pRaw(off, 2);       // ESC F : bold off
+    } else {
+      // TEXT / PCL / PostScript / Star / ZPL: emit the title as an ordinary line.
+      printerLine(s);
+    }
+  }
+  if (s_ser)  Serial.println(s);
+  if (s_file) { s_f.print(s); s_f.print('\n'); }
+  rule();
+}
+
+void feedCut() {
+  if (s_pOK) {
+    if (s_fmt == FMT_ESCPOS) {
+      uint8_t fd[3] = {0x1B, 0x64, 0x04}; pRaw(fd, 3);   // ESC d 4  feed 4 lines
+      uint8_t cut[3] = {0x1D, 0x56, 0x01}; pRaw(cut, 3); // GS V 1   partial cut
+    } else if (s_fmt == FMT_PCL) {
+      pNL(); { uint8_t ff=0x0C; pRaw(&ff,1); }          // form feed: eject the page
+    } else if (s_fmt == FMT_POSTSCRIPT) {
+      pStr("showpage\n");
+    } else if (s_fmt == FMT_ESCP2) {
+      { uint8_t ff=0x0C; pRaw(&ff,1); }                  // form feed: eject the page
+    } else if (s_fmt == FMT_STAR) {
+      uint8_t fd[3]  = {0x1B, 0x64, 0x03}; pRaw(fd, 3);  // ESC d 3 : Star feed 3 lines
+      uint8_t cut[3] = {0x1B, 0x64, 0x02}; pRaw(cut, 3); // ESC d 2 : Star partial cut
+    } else if (s_fmt == FMT_ZPL) {
+      zplEndLabel();                                     // ^XZ : print the label
+    } else if (isRaster()) {
+      // Render the collected report lines as a raster page and stream it now.
+      const char* ptrs[RAS_MAX_LINES];
+      for (int i = 0; i < s_rasN; ++i) ptrs[i] = s_rasLines[i].c_str();
+      // Letter @ 300 DPI. Auto-size the font so s_pCols columns fit inside the
+      // printable width (printers have an unprintable border ~1/4in; use a safe
+      // 2400px imageable area of the 2550px sheet). Pick the largest integer scale
+      // whose text block fits, so wider column settings shrink the glyphs to fit.
+      const int SAFE_W = 2400, marginX = 60;
+      int cols = (s_pCols > 0) ? s_pCols : 32;
+      int scale = 3;
+      while (scale > 1 && (cols * FONT_W * scale + 2 * marginX) > SAFE_W) scale--;
+      RasterGen::renderTextPage(ptrs, s_rasN, 2550, 3300, 300, scale, marginX, 100, 12,
+                                 /*urf=*/ s_fmt == FMT_URF_RASTER);
+    }
+    // FMT_TEXT: nothing; some printers need a manual eject, noted in the docs.
+  }
+  if (s_ser)  Serial.println(F("---- end ----"));
+  if (s_file) { s_f.print("\n"); }
+}
+
+void end() {
+  if (s_pOK) {
+    if (s_fmt == FMT_POSTSCRIPT) {
+      pStr("%%Trailer\n%%Pages: "); pStr(String(s_psPage)); pStr("\n%%EOF\n");
+    } else if (s_fmt == FMT_PCL) {
+      uint8_t reset[2] = {0x1B, 'E'}; pRaw(reset, 2);             // ESC E : reset
+      pStr("\x1B%-12345X");                                      // UEL : end the PJL job
+    } else if (s_fmt == FMT_ZPL) {
+      zplEndLabel();                                             // close any open label
+    }
+    // IPP: terminate the chunked body (0-length chunk) and read the HTTP status so
+    // the connection closes cleanly and we can tell whether the job was accepted.
+    if (s_transport == Printer::IPP && s_chunkOpen) {
+      s_cli.print("0\r\n\r\n");                                 // last-chunk marker
+      s_chunkOpen = false;
+      s_cli.flush();
+      // Read the status line (e.g. "HTTP/1.1 200 OK"); a 2xx means accepted.
+      String status = s_cli.readStringUntil('\n');
+      s_ippAccepted = (status.indexOf(" 200") >= 0 || status.indexOf(" 202") >= 0);
+    }
+    s_cli.flush(); s_cli.stop(); s_pOK = false;
+  }
+  if (s_file) { s_f.close(); s_file = false; }
+  s_ser = false;
+}
+
+}  // namespace Printer
 
 
 // =========================================================================
@@ -13151,7 +13994,16 @@ bool Settings::load() {
   strncpy(ssid2, d["ssid2"] | "", sizeof(ssid2)-1); ssid2[sizeof(ssid2)-1]=0;
   strncpy(pass2, d["pass2"] | "", sizeof(pass2)-1); pass2[sizeof(pass2)-1]=0;
   strncpy(gpUrl, d["gpurl"] | AMSAT_GP_URL, sizeof(gpUrl)-1); gpUrl[sizeof(gpUrl)-1]=0;
+  strncpy(printerHost, d["prhost"] | "", sizeof(printerHost)-1); printerHost[sizeof(printerHost)-1]=0;
+  printerPort = d["prport"] | 9100;
+  printerCols = d["prcols"] | 32;
+  printFormat = d["prfmt"] | 0;
+  printTransport = d["prtx"] | 0;
+  printToSerial = d["prser"] | false;
+  printToFile   = d["prfile"] | false;
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
+  strncpy(opName,  d["opname"]  | "", sizeof(opName)-1);  opName[sizeof(opName)-1]=0;
+  strncpy(opEmail, d["opemail"] | "", sizeof(opEmail)-1); opEmail[sizeof(opEmail)-1]=0;
   strncpy(qrzUser, d["qrzuser"] | "", sizeof(qrzUser)-1); qrzUser[sizeof(qrzUser)-1]=0;
   strncpy(qrzPass, d["qrzpass"] | "", sizeof(qrzPass)-1); qrzPass[sizeof(qrzPass)-1]=0;
   strncpy(clUrl,  d["clurl"]  | "", sizeof(clUrl)-1);  clUrl[sizeof(clUrl)-1]=0;
@@ -13303,7 +14155,16 @@ bool Settings::save() {
   d["ssid"] = ssid;  d["pass"] = pass;
   d["ssid2"] = ssid2; d["pass2"] = pass2;
   d["gpurl"] = gpUrl;
+  d["prhost"] = printerHost;
+  d["prport"] = printerPort;
+  d["prcols"] = printerCols;
+  d["prfmt"] = printFormat;
+  d["prtx"] = printTransport;
+  d["prser"] = printToSerial;
+  d["prfile"] = printToFile;
   d["mycall"] = myCall;
+  d["opname"] = opName;
+  d["opemail"] = opEmail;
   d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
   d["clurl"] = clUrl; d["clkey"] = clKey; d["clstation"] = clStation;
   d["lotwdxcc"] = lotwDxcc; d["lotwcqz"] = lotwCqz; d["lotwituz"] = lotwItuz;
@@ -15293,6 +16154,12 @@ void App::keyNotes(char c, bool enter, bool back) {
   }
   if (isBack(c, back)) { logMenuSel = 6; screen = SCR_LOG; lastDrawMs = 0; return; }
   if (c == 'n') { noteEditNew(); return; }
+  if (c == 'p') {                                   // print the highlighted note
+    if (noteSel >= 0 && noteSel < noteListN && Notes::read(noteList[noteSel], noteBuf, NOTE_BUF_MAX)) {
+      noteName = noteList[noteSel]; printReport(PR_NOTE);
+    } else setStatus("No note to print");
+    return;
+  }
   if (noteListN == 0) return;
   if (isUp(c))   { noteSel = (noteSel + noteListN - 1) % noteListN; lastDrawMs = 0; }
   if (isDown(c)) { noteSel = (noteSel + 1) % noteListN; lastDrawMs = 0; }
@@ -15368,6 +16235,7 @@ void App::keyNoteEdit(char c, bool enter, bool back) {
   // nav punctuation ; . , /) types literally. Fn+s = save, Fn+,/ = left/right,
   // Fn+;/. = up/down.
   if (keyFn) {
+    if (c == 'p') { printReport(PR_NOTE); return; }   // Fn+p: print this note
     if (c == 's') {                              // Fn+s: save
       if (noteName.length() == 0) {              // unnamed new note -> prompt for a name
         editTarget = 710; editTitle = "Note name"; editBuf = "";
@@ -18472,6 +19340,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
     case SCR_FOXTEXT: keyFoxText(c, enter, back); break;
     case SCR_CSIMINFO: keyCsimInfo(c, enter, back); break;
+    case SCR_PRINTABOUT: keyPrintAbout(c, enter, back); break;
     case SCR_ORBITZOO: keyOrbitZoo(c, enter, back); break;
     case SCR_MATHREF: keyMathRef(c, enter, back); break;
     case SCR_PLANNER: keyPlanner(c, enter, back); break;
@@ -18794,6 +19663,7 @@ void App::keySchedule(char c, bool enter, bool back) {
   if (c == 'z') { sleepUntilNextPass(); return; }     // deep-sleep until AOS
   if (c == 'm') { mapReturn = SCR_SCHEDULE; screen = SCR_WORLDMAP; lastDrawMs = 0; return; }  // live world map
   if (c == 't') { buildSkyGlance(); screen = SCR_SKYGLANCE; lastDrawMs = 0; return; }            // sky-at-a-glance timeline
+  if (c == 'P') { printReport(PR_ALLPASS); return; }   // print all favorites' passes
   if (c == 'p') { planSeedDefaults(); planField = 0; planN = 0; planComputed = false;             // rove planner
                   planJobFav = 0; planJobRunning = false; screen = SCR_PLANNER; lastDrawMs = 0; return; }
   if (c == 'w') {                                    // workable horizon: 10-day "ever workable" union
@@ -19181,7 +20051,7 @@ void App::drawWorkHzn() {
       snprintf(line, sizeof(line), "Grids  %d", whGridN);
       canvas.setCursor(12, y); canvas.print(line); y += 13;
     }
-    footer("s states  d DXCC  g +grids  w save  ` bk");
+    footer("s states d DXCC g +grids w save `bk");
   } else {
     canvas.setCursor(6, y); canvas.print("(idle)");
     footer("` back");
@@ -19257,7 +20127,7 @@ void App::drawPlanner() {
   if (planComputed && planN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 78);
     canvas.print("No passes in the window.");
-    footer(";/. field  ENTER edit/GO  l saved  ` back");
+    footer(";/. fld ENTER edit/GO l saved `back");
     return;
   }
   if (planN == 0) {                                   // fresh, not yet computed
@@ -19265,7 +20135,7 @@ void App::drawPlanner() {
     canvas.setCursor(6, 60); canvas.print("Set grid/date/time, then GO.");
     canvas.setCursor(6, 72); canvas.print("Lists passes for all favorites");
     canvas.setCursor(6, 82); canvas.print("with workable states & DXCC.");
-    footer(";/. field  ENTER edit/GO  l saved  ` back");
+    footer(";/. fld ENTER edit/GO l saved `back");
     return;
   }
   // column header
@@ -19587,6 +20457,7 @@ void App::keyPasses(char c, bool enter, bool back) {
     dxccLive = false; dxccScroll = 0; buildDxcc(passes[passSel].aos, passes[passSel].los);
     setStatus(""); screen = SCR_DXCC; lastDrawMs = 0; return;
   }
+  if (c == 'p') { printReport(PR_PASSES); return; }   // print the passes day-sheet
   if (c == 'v') { visReturn = SCR_PASSES; visDayOff = 0; buildVis();   screen = SCR_VIS;   lastDrawMs = 0; return; }
   if (c == 'V') { buildVisList(); screen = SCR_VISLIST; lastDrawMs = 0; return; }  // visible-pass LIST (10 days)
   if (c == 'i') { visReturn = SCR_PASSES; illumDayOff = 0; buildIllum(); screen = SCR_ILLUM; lastDrawMs = 0; return; }
@@ -19908,7 +20779,7 @@ void App::drawPassPolar() {
   canvas.setTextSize(1);
   if (!pdValid) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
                   canvas.setCursor(6, 50); canvas.print("No pass data.");
-                  footer("` back"); return; }
+                  footer("P print  ` back"); return; }
 
   const int cx = 66, cy = 70, R = 44;
   drawPolarGrid(cx, cy, R);
@@ -19940,10 +20811,11 @@ void App::drawPassPolar() {
   canvas.setCursor(rx, 78); canvas.printf("A az %03.0f", pdPass.azAos);
   canvas.setTextColor(CL_ORANGE, CL_BLACK);
   canvas.setCursor(rx, 90); canvas.printf("L az %03.0f", pdPass.azLos);
-  footer("p plot   ` back");
+  footer("p plot  P print  ` back");
 }
 
 void App::keyPassPolar(char c, bool enter, bool back) {
+  if (c == 'P') { printReport(PR_PASSPOLAR); return; }  // print this pass's sky track
   if (c == 'p') { screen = SCR_PASSDETAIL; lastDrawMs = 0; return; }  // toggle to elev plot
   if (isBack(c, back) || enter) { screen = passDetailReturn; lastDrawMs = 0; }
 }
@@ -19990,7 +20862,7 @@ void App::drawMutual() {
   if (mutualN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 44); canvas.print("No co-visibility windows.");
-    footer("` back"); return;
+    footer("p print  ` back"); return;
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(4, 28); canvas.print("Start UTC    Dur   me  dx");
@@ -20009,10 +20881,11 @@ void App::drawMutual() {
     canvas.printf("%s %ld:%02ld %3.0f %3.0f", fmtMDHM(m.start).c_str(),
                   secs/60, secs%60, m.myMaxEl, m.dxMaxEl);
   }
-  footer(";/. select  ENT detail  d Doppler  ` back");
+  footer(";/. sel  ENT detail  d Doppler  `back");
 }
 
 void App::keyMutual(char c, bool enter, bool back) {
+  if (c == 'p') { printReport(PR_MUTUAL); return; }   // print mutual windows + sky map
   if (isBack(c, back)) { screen = SCR_PASSES; return; }
   if (mutualN) {
     if (isUp(c))   mutualSel = (mutualSel + mutualN - 1) % mutualN;
@@ -20578,7 +21451,7 @@ void App::drawDxDopp() {
   SatEntry* s = activeSat();
   header(s ? (String(s->name) + " DX Dopp") : String("DX Doppler"));
   canvas.setTextSize(1);
-  if (!s) { footer("` back"); return; }
+  if (!s) { footer("p print  ` back"); return; }
   if (dxdWin >= mutualN) { dxdWin = 0; }
   if (mutualN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
@@ -20648,6 +21521,7 @@ void App::drawDxDopp() {
 }
 
 void App::keyDxDopp(char c, bool enter, bool back) {
+  if (c == 'p') { printReport(PR_DXDOPP); return; }   // print the DX Doppler table
   if (isBack(c, back)) { screen = dxdReturn; lastDrawMs = 0; return; }
   if (mutualN == 0 || activeTxCount == 0) return;
   MutualWindow& w = mutual[dxdWin];
@@ -21027,8 +21901,8 @@ static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_PASS[]  = {3,66,67,68,40,7,84,54,61};
 static const int SET_DISP[]  = {48,82,25,43,85,49,77,79,81};
-static const int SET_LOG[]   = {26,69,70,71,72,73,78,74,75,76};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,55,60,56,57,58,59,80,83,27,28,29};
+static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,90,91,92,97,98,87,93,94,55,60,56,57,58,59,80,83,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
                                                     SET_DISP, SET_LOG, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -21058,7 +21932,8 @@ void App::keySettings(char c, bool enter, bool back) {
   if (c == '{')  { setSel -= 9; if (setSel < 0) setSel = 0; }          // page up
   if (c == '}')  { setSel += 9; if (setSel > len - 1) setSel = len - 1; }  // page down
   const int sel = SET_CAT_ROWS[setCat][setSel];                   // absolute row index
-  if (c == 's' && sel == 4) { startWifiScan(); return; }          // scan from the SSID row
+  if (c == 's' && sel == 4)  { startWifiScan(false); return; }     // scan -> WiFi 1
+  if (c == 's' && sel == 50) { startWifiScan(true);  return; }     // scan -> WiFi 2
 
   auto adj = [&](int dir){
     switch (sel) {
@@ -21276,10 +22151,37 @@ void App::keySettings(char c, bool enter, bool back) {
       case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
       case 20: gpSrcSel = 0; gpSrcScroll = 0; screen = SCR_GPSRC; lastDrawMs = 0; break;
+      case 95: editTarget = 280; editTitle = "Operator name";
+               editBuf = cfg.opName; screen = SCR_EDIT; break;
+      case 96: editTarget = 281; editTitle = "Operator email";
+               editBuf = cfg.opEmail; screen = SCR_EDIT; break;
       case 26: editTarget = 204; editTitle = "My callsign";
                editBuf = cfg.myCall; screen = SCR_EDIT; break;
       case 41: editTarget = 214; editTitle = "QRZ username";
                editBuf = cfg.qrzUser; screen = SCR_EDIT; break;
+      case 90: editTarget = 270; editTitle = "Printer IP (blank=off)";
+               editBuf = cfg.printerHost; screen = SCR_EDIT; break;
+      case 91: editTarget = 271; editTitle = "Printer port (default 9100)";
+               editBuf = String(cfg.printerPort); screen = SCR_EDIT; break;
+      case 92: cfg.printerCols = (cfg.printerCols >= 64) ? 32
+                           : (cfg.printerCols >= 48) ? 64
+                           : (cfg.printerCols >= 42) ? 48 : 42;
+               cfg.save(); break;
+      case 93: cfg.printToSerial = !cfg.printToSerial; cfg.save(); break;
+      case 94: cfg.printToFile   = !cfg.printToFile;   cfg.save(); break;
+      case 97: cfg.printFormat = (cfg.printFormat >= 8) ? 0 : cfg.printFormat + 1;
+               cfg.save(); break;
+      case 98: cfg.printTransport = cfg.printTransport ? 0 : 1; cfg.save(); break;
+      case 87: {   // probe the printer's supported document formats over IPP
+        if (!cfg.printerHost[0]) { setStatus("No printer IP set", 3000); break; }
+        setStatus("Probing printer...", 1500);
+        String caps = Printer::probeCapabilities(cfg.printerHost,
+                        cfg.printerPort ? cfg.printerPort : 631);
+        if (caps.length() == 0 || caps == "unreachable")
+          setStatus("Printer unreachable", 4000);
+        else
+          setStatus("Formats: " + caps, 6000);
+        break; }
       case 42: editTarget = 215; editTitle = "QRZ password";
                editBuf = cfg.qrzPass; screen = SCR_EDIT; break;
       case 69: lotwPickEnter(LP_DXCC); break;   // DXCC entity picker (full list, subdiv-bearing first)
@@ -21405,6 +22307,14 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.pass2[sizeof(cfg.pass2)-1] = 0; break;
       case 203: strncpy(cfg.gpUrl, editBuf.c_str(), sizeof(cfg.gpUrl)-1);
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;
+      case 270: strncpy(cfg.printerHost, editBuf.c_str(), sizeof(cfg.printerHost)-1);
+                cfg.printerHost[sizeof(cfg.printerHost)-1] = 0; cfg.save(); break;
+      case 271: { int p = editBuf.toInt(); cfg.printerPort = (p > 0 && p < 65536) ? p : 9100;
+                  cfg.save(); } break;
+      case 280: strncpy(cfg.opName, editBuf.c_str(), sizeof(cfg.opName)-1);
+                cfg.opName[sizeof(cfg.opName)-1] = 0; cfg.save(); break;
+      case 281: strncpy(cfg.opEmail, editBuf.c_str(), sizeof(cfg.opEmail)-1);
+                cfg.opEmail[sizeof(cfg.opEmail)-1] = 0; cfg.save(); break;
       case 204: { String v = editBuf; v.trim(); v.toUpperCase();   // callsigns are upper-case
                   strncpy(cfg.myCall, v.c_str(), sizeof(cfg.myCall)-1);
                   cfg.myCall[sizeof(cfg.myCall)-1] = 0; break; }
@@ -22071,7 +22981,7 @@ void App::drawAbout() {
              (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
     line(String(b));
   }
-  footer("r ready  t tools  l license  z game  ` back");
+  footer("p print a/c t tools l lic z game `bk");
 }
 
 void App::keyAbout(char c, bool enter, bool back) {
@@ -22079,6 +22989,9 @@ void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'z') { gamesSel = 0; screen = SCR_GAMES; lastDrawMs = 0; return; }   // Games menu
   if (c == 'r') { screen = SCR_READY; lastDrawMs = 0; return; }                 // station readiness
   if (c == 't') { screen = SCR_TOOLS; lastDrawMs = 0; return; }    // Tools hub (keeps last selection)
+  if (c == 'p') { paSel = 0; screen = SCR_PRINTABOUT; lastDrawMs = 0; return; }   // Print submenu (all reports)
+  if (c == 'a') { printReport(PR_AMSAT);  return; }   // print the "support AMSAT" page
+  if (c == 'c') { printReport(PR_OPCARD); return; }   // print the operator contact card
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
 
@@ -22918,7 +23831,7 @@ void App::drawLotw() {
   if (lotwRebootPrompt) footer("ENT reboot + upload   ` cancel");
   else if (!haveCard)        footer("` back   (insert SD card)");
   else if (!haveCred)   footer("` back   (no LoTW key on SD)");
-  else if (toSend)      footer(lotwResend ? "u upload ALL  a un-uploaded only  ` back"
+  else if (toSend)      footer(lotwResend ? "u upload ALL  a un-uploaded  `back"
                                           : "u sign & upload  a re-send all  ` back");
   else if (lotwTotal)   footer("a re-send all   ` back");
   else                  footer("` back   (nothing to upload)");
@@ -24285,6 +25198,7 @@ void App::draw() {
     case SCR_FOXANAT: drawFoxAnat(); break;
     case SCR_FOXTEXT: drawFoxText(); break;
     case SCR_CSIMINFO: drawCsimInfo(); break;
+    case SCR_PRINTABOUT: drawPrintAbout(); break;
     case SCR_ORBITZOO: drawOrbitZoo(); break;
     case SCR_MATHREF: drawMathRef(); break;
     case SCR_PLANNER: drawPlanner(); break;
@@ -24875,6 +25789,7 @@ void App::drawHelp() {
     " g grids  w states  e DXCC",
     " v 10-day  V vis-list",
     " i illum  x DX mutual",
+    " p print menu",
     "MUTUAL WINDOWS (x)",
     " co-visibility with a DX",
     " ;/. scroll  d Doppler",
@@ -26580,10 +27495,10 @@ void App::serviceAudioRelease() {
 }
 
 // --- Read-only serial command console (USB) --------------------------------
-// Polled once per loop. Accumulates a line, then dispatches it. Everything here only READS
-// device state and prints -- it never mutates anything -- so it's safe to leave always-on and
-// carries no heap cost (fixed cliBuf, no allocation). Handy for bench debugging over the same
-// USB cable used for flashing: `heap`, `sats`, `next`, etc.
+// Polled once per loop. Accumulates a line, then dispatches it. Commands never mutate
+// DEVICE state (`print` only transmits a report to the configured receipt printer), so the
+// console is safe to leave always-on; it carries no heap cost (fixed cliBuf, no allocation).
+// Handy for bench debugging over the same USB cable used for flashing: `heap`, `sats`, `print`.
 // Case-insensitive substring match (strcasestr is a GNU extension; avoid relying on it).
 static bool ciFind(const char* hay, const char* needle) {
   if (!*needle) return true;
@@ -26621,6 +27536,7 @@ void App::runSerialCommand(const char* cmd) {
     Serial.println(F("  fs    storage backend + free space"));
     Serial.println(F("  up    uptime"));
     Serial.println(F("  pass <sat>  next pass, any catalog sat"));
+    Serial.println(F("  print <what> passes|ticket|card|keps|log|rove|horizon"));
   } else if (is("ver")) {
     Serial.printf("CardSat v%s (built %s)\n", FW_VERSION, __DATE__);
   } else if (is("heap")) {
@@ -26671,6 +27587,30 @@ void App::runSerialCommand(const char* cmd) {
   } else if (is("up")) {
     unsigned long m = millis() / 60000UL;
     Serial.printf("uptime: %luh %lum\n", m / 60, m % 60);
+  } else if (strncasecmp(cmd, "print", 5) == 0) {
+    const char* q = cmd + 5; while (*q == ' ') ++q;
+    if (!cfg.printerHost[0]) { Serial.println(F("no printer set (Settings)")); return; }
+    PrintReport pr; bool ok = true;
+    if      (!strcasecmp(q, "passes"))  pr = PR_PASSES;
+    else if (!strcasecmp(q, "ticket"))  pr = PR_TICKET;
+    else if (!strcasecmp(q, "card"))    pr = PR_SATCARD;
+    else if (!strcasecmp(q, "keps"))    pr = PR_KEPS;
+    else if (!strcasecmp(q, "log"))     pr = PR_LOG;
+    else if (!strcasecmp(q, "rove"))    pr = PR_ROVE;
+    else if (!strcasecmp(q, "horizon")) pr = PR_HORIZON;
+    else if (!strcasecmp(q, "amsat"))   pr = PR_AMSAT;
+    else if (!strcasecmp(q, "contact")) pr = PR_OPCARD;
+    else if (!strcasecmp(q, "mutual"))  pr = PR_MUTUAL;
+    else if (!strcasecmp(q, "dxdopp"))  pr = PR_DXDOPP;
+    else if (!strcasecmp(q, "eqx"))     pr = PR_EQX;
+    else if (!strcasecmp(q, "allpass")) pr = PR_ALLPASS;
+    else if (!strcasecmp(q, "target"))  pr = PR_TARGET;
+    else if (!strcasecmp(q, "note"))    pr = PR_NOTE;
+    else ok = false;
+    if (!ok) { Serial.println(F("usage: print passes|ticket|card|keps|log|rove|horizon|")); 
+               Serial.println(F("             amsat|contact|mutual|dxdopp|eqx|allpass|target|note")); return; }
+    Serial.printf("printing %s to %s...\n", q, cfg.printerHost);
+    Serial.println(printReport(pr) ? "ok" : "FAILED (see screen)");
   } else if (strncasecmp(cmd, "pass", 4) == 0) {
     const char* q = cmd + 4; while (*q == ' ') ++q;
     if (!*q) { Serial.println(F("usage: pass <name or NORAD>")); return; }
@@ -26692,6 +27632,586 @@ void App::runSerialCommand(const char* cmd) {
   } else {
     Serial.printf("unknown: %s (try 'help')\n", cmd);
   }
+}
+
+
+// ===========================================================================
+//  Receipt-printer reports (ESC/POS over TCP:9100). Each report streams 32-col
+//  text to the printer and closes; no report is buffered whole. Times are UTC
+//  (the firmware runs in UTC) and labeled as such. See docs/design/PRINTING_SCOPE.md.
+// ===========================================================================
+
+// Compass octant for an azimuth in degrees.
+static const char* azOctant(float az) {
+  static const char* C[8] = { "N","NE","E","SE","S","SW","W","NW" };
+  int i = (int)((az + 22.5f) / 45.0f) & 7;
+  return C[i];
+}
+
+// Gather upcoming favorite passes in [from,to] into parallel arrays, sorted by AOS.
+// Returns the count (<= maxN). Reused by the day-sheet and the serial console.
+int App::buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
+                        uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN) {
+  int n = 0;
+  pred.setSite(loc.obs());
+  for (int f = 0; f < favN && n < maxN; ++f) {
+    int idx = db.indexOfNorad(favs[f]);
+    if (idx < 0) continue;
+    if (!pred.setSat(db.at(idx))) continue;
+    PassPredict p[6];
+    int np = pred.predictPasses(from, cfg.minPassEl, p, 6, to);
+    for (int i = 0; i < np && n < maxN; ++i) {
+      if (p[i].aos > to) break;
+      norads[n] = favs[f];
+      aoss[n]   = p[i].aos;
+      els[n]    = (uint8_t)(p[i].maxEl + 0.5f);
+      azs[n]    = (uint16_t)p[i].azAos;
+      durs[n]   = (uint16_t)((p[i].los - p[i].aos) / 60);
+      n++;
+    }
+  }
+  // insertion sort by AOS (n is small: <= maxN)
+  for (int a = 1; a < n; ++a) {
+    uint32_t kn = norads[a]; time_t ka = aoss[a]; uint8_t ke = els[a];
+    uint16_t kz = azs[a], kd = durs[a]; int b = a - 1;
+    while (b >= 0 && aoss[b] > ka) {
+      norads[b+1]=norads[b]; aoss[b+1]=aoss[b]; els[b+1]=els[b]; azs[b+1]=azs[b]; durs[b+1]=durs[b]; --b;
+    }
+    norads[b+1]=kn; aoss[b+1]=ka; els[b+1]=ke; azs[b+1]=kz; durs[b+1]=kd;
+  }
+  return n;
+}
+
+bool App::printActiveHint() {
+  SatEntry* a = activeSat();
+  if (!a) { Printer::line("No active satellite."); Printer::line("Select one, then print."); return false; }
+  return true;
+}
+
+void App::printPasses() {
+  Printer::title("TODAY'S PASSES");
+  if (!timeIsSet()) { Printer::line("Clock not set."); return; }
+  Printer::line("Station " + Location::toGrid(loc.obs().lat, loc.obs().lon));
+  Printer::line("From " + fmtMDHM(nowUtc()) + " UTC");
+  Printer::line("Next 24h, min el " + String((int)cfg.minPassEl) + " deg");
+  Printer::blank();
+  static const int MAXP = 48;
+  static uint32_t norads[MAXP]; static time_t aoss[MAXP];
+  static uint8_t els[MAXP]; static uint16_t azs[MAXP], durs[MAXP];
+  int n = buildFavPasses(nowUtc(), nowUtc() + 24*3600, norads, aoss, els, azs, durs, MAXP);
+  if (n == 0) { Printer::line("(no favorite passes)"); Printer::line("Add favorites first."); return; }
+  bool wide = Printer::cols() >= 44;     // 80 mm paper: room for a longer name + LOS column
+  if (wide) Printer::line("SATELLITE        AOS   LOS   EL  AZ  MIN");
+  else      Printer::line("SAT       UTC   EL  AZ  MIN");
+  for (int i = 0; i < n; ++i) {
+    int idx = db.indexOfNorad(norads[i]);
+    const char* nm = (idx >= 0) ? db.at(idx).name : "?";
+    char row[56];
+    if (wide) {
+      time_t los = aoss[i] + (time_t)durs[i] * 60;
+      snprintf(row, sizeof(row), "%-16.16s %s %s %3d %-2s %3d",
+               nm, fmtHM(aoss[i]).c_str(), fmtHM(los).c_str(), els[i], azOctant(azs[i]), durs[i]);
+    } else {
+      snprintf(row, sizeof(row), "%-9.9s %s %3d %-2s %3d",
+               nm, fmtHM(aoss[i]).c_str(), els[i], azOctant(azs[i]), durs[i]);
+    }
+    Printer::line(String(row));
+  }
+  Printer::blank();
+  Printer::line(String(n) + " passes. Times UTC.");
+}
+
+void App::printTicket() {
+  Printer::title("WORK A SATELLITE");
+  if (!printActiveHint()) return;
+  if (!timeIsSet()) { Printer::line("Clock not set."); return; }
+  SatEntry* a = activeSat();
+  pred.setSite(loc.obs()); pred.setSat(*a);
+  PassPredict p;
+  if (pred.predictPasses(nowUtc(), cfg.minPassEl, &p, 1) < 1) {
+    Printer::line(String(a->name)); Printer::line("No pass in the next window.");
+    return;
+  }
+  Printer::blank();
+  Printer::line(String(a->name));
+  Printer::blank();
+  Printer::line("Rises " + fmtHM(p.aos) + " UTC");
+  Printer::line("in the " + String(azOctant(p.azAos)) + ", up to " + String((int)p.maxEl) + " deg");
+  Printer::line("Visible ~" + String((int)((p.los - p.aos) / 60)) + " minutes");
+  // Downlink line: prefer the transponder the operator has SELECTED on Track (curTx),
+  // since that's the one they intend to work; fall back to the first active downlink
+  // only if no selection applies to this satellite.
+  const Transponder* pick = nullptr;
+  if (activeSat() == a && activeTxCount > 0 && curTx >= 0 && curTx < activeTxCount
+      && activeTx[curTx].downlink)
+    pick = &activeTx[curTx];
+  static Transponder tp[16];
+  if (!pick) {
+    int tn = SatDb::loadTxCache(a->norad, tp, 16);
+    for (int i = 0; i < tn; ++i)
+      if (tp[i].downlink && tp[i].active) { pick = &tp[i]; break; }
+  }
+  if (pick) {
+    char f[56];
+    if (pick->isLinear && pick->downlinkHigh > pick->downlink)
+      snprintf(f, sizeof(f), "Listen %.3f-%.3f MHz %s", pick->downlink/1e6, pick->downlinkHigh/1e6, pick->mode);
+    else
+      snprintf(f, sizeof(f), "Listen %.3f MHz %s", pick->downlink/1e6, pick->mode);
+    Printer::wrap(String(f));
+    if (pick->uplink) {
+      char u[56];
+      if (pick->isLinear && pick->uplinkHigh > pick->uplink)
+        snprintf(u, sizeof(u), "Transmit %.3f-%.3f MHz%s", pick->uplink/1e6, pick->uplinkHigh/1e6, pick->invert?" (inv)":"");
+      else
+        snprintf(u, sizeof(u), "Transmit %.3f MHz%s", pick->uplink/1e6, pick->invert?" (inv)":"");
+      Printer::wrap(String(u));
+    }
+    if (pick->desc[0]) Printer::wrap(String(pick->desc));
+  }
+  Printer::blank();
+  Printer::wrap("You can hear a satellite with a handheld radio. Ask me how! -- AMSAT");
+}
+
+void App::printSatCard() {
+  Printer::title("SATELLITE CARD");
+  if (!printActiveHint()) return;
+  SatEntry* a = activeSat();
+  Printer::line(String(a->name) + "  #" + String(a->norad));
+  Printer::blank();
+  Printer::line("TRANSPONDERS");
+  static Transponder tp[16];
+  int tn = SatDb::loadTxCache(a->norad, tp, 16);
+  if (tn == 0) Printer::line(" (none cached)");
+  for (int i = 0; i < tn; ++i) {
+    Printer::wrap(" " + String(tp[i].mode) + " " + String(tp[i].desc)
+                  + (tp[i].active ? "" : " (off)")
+                  + (tp[i].isLinear && tp[i].invert ? " (inv)" : ""));
+    // For a linear transponder show the whole passband (low-high); for a channelized
+    // one (FM, single-channel) show the single frequency.
+    if (tp[i].downlink) {
+      char d[52];
+      if (tp[i].isLinear && tp[i].downlinkHigh > tp[i].downlink)
+        snprintf(d, sizeof(d), "  D %.4f-%.4f", tp[i].downlink/1e6, tp[i].downlinkHigh/1e6);
+      else
+        snprintf(d, sizeof(d), "  D %.4f", tp[i].downlink/1e6);
+      Printer::line(String(d));
+    }
+    if (tp[i].uplink) {
+      char u[52];
+      if (tp[i].isLinear && tp[i].uplinkHigh > tp[i].uplink)
+        snprintf(u, sizeof(u), "  U %.4f-%.4f", tp[i].uplink/1e6, tp[i].uplinkHigh/1e6);
+      else
+        snprintf(u, sizeof(u), "  U %.4f", tp[i].uplink/1e6);
+      Printer::line(String(u));
+    }
+  }
+  Printer::blank();
+  Printer::line("NEXT PASSES (UTC)");
+  if (timeIsSet()) {
+    pred.setSite(loc.obs()); pred.setSat(*a);
+    PassPredict p[3];
+    int np = pred.predictPasses(nowUtc(), cfg.minPassEl, p, 3);
+    for (int i = 0; i < np; ++i) {
+      char r[40];
+      snprintf(r, sizeof(r), " %s el%d %s",
+               fmtMDHM(p[i].aos).c_str(), (int)p[i].maxEl, azOctant(p[i].azAos));
+      Printer::line(String(r));
+    }
+    if (np == 0) Printer::line(" (none found)");
+  } else Printer::line(" (clock not set)");
+}
+
+void App::printKeps() {
+  Printer::title("KEPLERIAN ELEMENTS");
+  if (!printActiveHint()) return;
+  SatEntry* a = activeSat();
+  Printer::line(String(a->name) + "  #" + String(a->norad));
+  Printer::line("Intl des " + String(a->intlDes));
+  Printer::blank();
+  char b[40];
+  Printer::line("Epoch " + fmtMDHM((time_t)a->epochUnix) + " UTC");
+  snprintf(b, sizeof(b), "Inclination %.4f deg", a->incl);     Printer::line(String(b));
+  snprintf(b, sizeof(b), "Eccentricity %.7f", a->ecc);         Printer::line(String(b));
+  snprintf(b, sizeof(b), "RAAN        %.4f deg", a->raan);      Printer::line(String(b));
+  snprintf(b, sizeof(b), "Arg perigee %.4f deg", a->argp);     Printer::line(String(b));
+  snprintf(b, sizeof(b), "Mean anom   %.4f deg", a->ma); Printer::line(String(b));
+  snprintf(b, sizeof(b), "Mean motion %.8f", a->meanMotion);   Printer::line(String(b));
+  Printer::blank();
+  Printer::wrap("Once these arrived by mail on paper. Now they fit in your pocket.");
+}
+
+void App::printLog() {
+  Printer::title("QSO LOG");
+  loadLog();
+  if (logRecN == 0) { Printer::line("(log empty)"); return; }
+  Printer::line("Last " + String(logRecN) + " QSOs (UTC)");
+  Printer::blank();
+  bool wide = Printer::cols() >= 44;
+  for (int i = 0; i < logRecN; ++i) {
+    PendingQso& q = logRecs[i];
+    char r[64];
+    if (wide) {
+      // 80 mm: everything on one line -- date, sat, call, grid, RST.
+      snprintf(r, sizeof(r), "%s %-10.10s %-10.10s %-6.6s %s/%s",
+               fmtMDHM((time_t)q.utc).c_str(), q.sat, q.call, q.grid, q.rstS, q.rstR);
+      Printer::line(String(r));
+    } else {
+      snprintf(r, sizeof(r), "%s %-8.8s %-9.9s", fmtMDHM((time_t)q.utc).c_str(), q.sat, q.call);
+      Printer::line(String(r));
+      if (q.grid[0] || q.rstS[0]) {
+        char s[40]; snprintf(s, sizeof(s), "   %s %s/%s", q.grid, q.rstS, q.rstR);
+        Printer::line(String(s));
+      }
+    }
+  }
+}
+
+
+
+// ---- Additional printable reports (items 9-11): mutual windows, DX Doppler, EQX,
+//      all-favorite passes, target-search hits, notes, and ASCII polar maps. ----
+
+// ASCII polar map (item 11): plot az/el points as a text sky chart using only
+// safe 7-bit characters (no box-drawing / Unicode), so the widest range of ESC/POS
+// printers render it. Zenith at center, horizon at the edge; N up, E right.
+void App::printPolarAscii(const float* az, const float* el, int n, const char* mark) {
+  const int R = 7;                       // rows above center = radius (fits 32-col paper)
+  const int W = 2 * R + 1;               // grid is W x W character cells (E-W doubled for aspect)
+  for (int gy = 0; gy <= 2 * R; ++gy) {
+    String row;
+    for (int gx = 0; gx <= 2 * R; ++gx) {
+      // cell center in unit disk coords (-1..1); y up
+      float ux = (gx - R) / (float)R;
+      float uy = (R - gy) / (float)R;
+      float rr = sqrtf(ux * ux + uy * uy);
+      char c = ' ';
+      if (rr > 1.02f) { row += ' '; continue; }          // outside the sky
+      if (gx == R && gy == R) c = '+';                    // zenith
+      else if (rr > 0.96f && rr < 1.04f) c = '.';         // horizon ring
+      // plot any sample that lands in this cell
+      for (int i = 0; i < n; ++i) {
+        if (el[i] < 0) continue;
+        float r = (90.0f - el[i]) / 90.0f;                // el 90 -> center, 0 -> edge
+        float a = az[i] * 3.14159265f / 180.0f;           // 0=N
+        float px =  r * sinf(a);                          // E to the right
+        float py =  r * cosf(a);                          // N up
+        int cx = (int)lroundf(R + px * R);
+        int cy = (int)lroundf(R - py * R);
+        if (cx == gx && cy == gy) { c = mark[0]; break; }
+      }
+      row += c;
+    }
+    // trim trailing spaces to keep lines short
+    int endp = row.length(); while (endp > 0 && row[endp-1] == ' ') --endp;
+    Printer::line(row.substring(0, endp));
+  }
+  Printer::line("  (N up, E right; + zenith, . horizon)");
+}
+
+void App::printMutual() {
+  SatEntry* s = activeSat();
+  Printer::title("MUTUAL WINDOWS");
+  if (!s) { Printer::line("No active satellite."); return; }
+  Printer::line(String(s->name));
+  Printer::line("me " + Location::toGrid(loc.obs().lat, loc.obs().lon) + "  DX " + String(dxGrid));
+  Printer::blank();
+  if (mutualN == 0) { Printer::line("(no mutual windows)"); return; }
+  Printer::line("START (UTC)     MIN  myEl dxEl");
+  for (int i = 0; i < mutualN; ++i) {
+    MutualWindow& w = mutual[i];
+    char r[48];
+    snprintf(r, sizeof(r), "%s %3d  %3d  %3d",
+             fmtMDHM(w.start).c_str(), (int)((w.end - w.start) / 60),
+             (int)w.myMaxEl, (int)w.dxMaxEl);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line(String(mutualN) + " windows. Times UTC.");
+}
+
+void App::printDxDopp() {
+  SatEntry* s = activeSat();
+  Printer::title("DX DOPPLER");
+  if (!s) { Printer::line("No active satellite."); return; }
+  if (mutualN == 0 || dxdWin >= mutualN) { Printer::line("No mutual window selected."); return; }
+  MutualWindow& w = mutual[dxdWin];
+  Printer::line(String(s->name) + "  DX " + String(dxGrid));
+  Printer::line("Window " + fmtMDHM(w.start) + " UTC");
+  Printer::blank();
+  Printer::line("UTC    myRX     myTX");
+  // step every 30 s across the window (cap rows so a long pass stays on one slip)
+  int step = 30, rows = 0, maxRows = 40;
+  for (time_t t = w.start; t <= w.end && rows < maxRows; t += step, ++rows) {
+    uint32_t myRx, myTx, dxRx, dxTx;
+    dxDoppFreqs(t, myRx, myTx, dxRx, dxTx);
+    char r[48];
+    snprintf(r, sizeof(r), "%s %.4f %.4f", fmtHM(t).c_str(), myRx / 1e6, myTx / 1e6);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line("MHz. Times UTC.");
+}
+
+void App::printEqx() {
+  SatEntry* s = activeSat();
+  Printer::title(eqxDescending ? "DESCENDING NODES" : "EQUATOR CROSSINGS");
+  if (!s) { Printer::line("No active satellite."); return; }
+  Printer::line(String(s->name));
+  Printer::blank();
+  if (eqxN == 0) { Printer::line("(none computed)"); return; }
+  Printer::line("TIME (UTC)        LON");
+  for (int i = 0; i < eqxN; ++i) {
+    float lonW = eqxLonW[i];
+    float lonE = (lonW <= 180.0f) ? -lonW : (360.0f - lonW);   // to E-positive -180..180
+    char r[48];
+    snprintf(r, sizeof(r), "%s  %6.1f", fmtMDHM(eqxT[i]).c_str(), lonE);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line(String(eqxN) + " crossings. Lon +E.");
+}
+
+void App::printAllPasses() {
+  Printer::title("ALL FAVORITE PASSES");
+  if (schedN == 0) { Printer::line("(no passes scheduled)"); Printer::line("Add favorites first."); return; }
+  Printer::line("Station " + Location::toGrid(loc.obs().lat, loc.obs().lon));
+  Printer::blank();
+  bool wide = Printer::cols() >= 44;
+  if (wide) Printer::line("SATELLITE        AOS    LOS    EL VIS");
+  else      Printer::line("SAT       AOS   EL VIS");
+  for (int i = 0; i < schedN; ++i) {
+    SchedEntry& e = sched[i];
+    const char* vis = e.visible ? "yes" : "-";
+    char r[56];
+    if (wide)
+      snprintf(r, sizeof(r), "%-16.16s %s %s %3d %s",
+               e.name, fmtHM(e.aos).c_str(), fmtHM(e.los).c_str(), (int)e.maxEl, vis);
+    else
+      snprintf(r, sizeof(r), "%-9.9s %s %3d %s",
+               e.name, fmtHM(e.aos).c_str(), (int)e.maxEl, vis);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line(String(schedN) + " passes. Times UTC.");
+}
+
+void App::printTargetHits() {
+  Printer::title("TARGET SEARCH");
+  if (tsHitN == 0) { Printer::line("(no results -- run a search first)"); return; }
+  Printer::line("Chances to work the target:");
+  Printer::blank();
+  Printer::line("SAT       INSIDE(UTC)   MIN elMax");
+  for (int i = 0; i < tsHitN; ++i) {
+    HitRow& h = tsHits[i];
+    int idx = db.indexOfNorad(h.norad);
+    const char* nm = (idx >= 0) ? db.at(idx).name : "?";
+    char r[56];
+    snprintf(r, sizeof(r), "%-9.9s %s %3d  %3d",
+             nm, fmtHM(h.inStart).c_str(), (int)((h.inEnd - h.inStart) / 60), h.maxElWhole);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line(String(tsHitN) + " windows. Times UTC.");
+}
+
+void App::printPassPolar() {
+  SatEntry* s = activeSat();
+  Printer::title("PASS SKY TRACK");
+  if (!s) { Printer::line("No active satellite."); return; }
+  Printer::line(String(s->name));
+  // pdAz/pdEl were sampled for the pass being viewed (buildPassDetail). Filter to the
+  // above-horizon points and hand them to the ASCII plotter.
+  Printer::blank();
+  printPolarAscii(pdAz, pdEl, PD_SAMPLES, "*");
+  Printer::blank();
+  // A few key facts under the chart: peak elevation and its azimuth.
+  float maxEl = -1; int mi = 0;
+  for (int i = 0; i < PD_SAMPLES; ++i) if (pdEl[i] > maxEl) { maxEl = pdEl[i]; mi = i; }
+  if (maxEl >= 0) {
+    char b[48];
+    snprintf(b, sizeof(b), "Peak el %d deg at az %d", (int)maxEl, (int)pdAz[mi]);
+    Printer::line(String(b));
+  }
+}
+
+void App::printNote() {
+  Printer::title("NOTE");
+  if (noteName.length()) Printer::line(noteName);
+  Printer::blank();
+  if (noteBuf.length() == 0) { Printer::line("(empty)"); return; }
+  // stream the buffer line by line; Printer wraps each to the sink width
+  int i = 0, n = noteBuf.length();
+  String ln;
+  while (i < n) {
+    char c = noteBuf[i++];
+    if (c == '\r') continue;
+    if (c == '\n') { Printer::wrap(ln); ln = ""; }
+    else if (ln.length() < 200) ln += c;
+  }
+  if (ln.length()) Printer::wrap(ln);
+}
+
+void App::printAmsatPitch() {
+  Printer::title("SUPPORT AMSAT");
+  Printer::wrap("AMSAT is the volunteer, nonprofit organization that keeps amateur "
+                "radio in space -- designing, building, and operating satellites that "
+                "any licensed ham can use.");
+  Printer::blank();
+  Printer::line("WHY IT MATTERS");
+  Printer::wrap("Ham satellites give students, experimenters, and emergency operators "
+                "a hands-on path to space -- FM repeaters and linear transponders you "
+                "can work with modest gear, plus telemetry and STEM projects that put "
+                "real spacecraft in classrooms.");
+  Printer::blank();
+  Printer::line("HOW YOU CAN HELP");
+  Printer::wrap(" - Join or renew: amsat.org/join");
+  Printer::wrap(" - Donate to the satellite programs");
+  Printer::wrap(" - Get on the birds and mentor a newcomer");
+  Printer::wrap(" - Volunteer your skills");
+  Printer::blank();
+  Printer::wrap("Every membership and donation directly funds the next generation of "
+                "amateur satellites. Learn more at amsat.org.");
+  Printer::blank();
+  Printer::line("     amsat.org  -  keep ham radio in space");
+}
+
+void App::printOpCard() {
+  Printer::title("AMATEUR RADIO CONTACT");
+  // Operator identity (from Settings). Callsign is the anchor; name/email optional.
+  if (cfg.myCall[0]) { Printer::blank(); Printer::line(String("   ") + cfg.myCall); }
+  if (cfg.opName[0]) Printer::line(String("   ") + cfg.opName);
+  if (cfg.opEmail[0]) Printer::line(String("   ") + cfg.opEmail);
+  if (cfg.myCall[0] && loc.obs().valid)
+    Printer::line(String("   Grid ") + Location::toGrid(loc.obs().lat, loc.obs().lon));
+  Printer::blank();
+  Printer::line("WHAT IS AMATEUR RADIO?");
+  Printer::wrap("Amateur (\"ham\") radio is a licensed hobby and service: operators use "
+                "radio to talk across town or around the world, experiment with "
+                "electronics, and provide communications in emergencies -- no internet "
+                "or phone network required.");
+  Printer::blank();
+  Printer::line("RADIO... FROM SPACE?");
+  Printer::wrap("Yes. Amateurs build and use their own satellites. Some carry FM "
+                "repeaters you can work with a handheld and a small antenna; others "
+                "carry linear transponders for SSB and CW. The Space Station has ham "
+                "gear too. Passes last only minutes, which is half the fun.");
+  Printer::blank();
+  Printer::line("HOW TO GET STARTED");
+  Printer::wrap(" - Anyone can LISTEN. To transmit, you get a license (in the US, no "
+                "Morse code required).");
+  Printer::wrap(" - Study, take a simple exam, get your callsign.");
+  Printer::wrap(" - Find a local club or visit arrl.org (US) or your national society.");
+  Printer::wrap(" - For satellites specifically: amsat.org.");
+  Printer::blank();
+  Printer::wrap("Ask me about the satellite you just saw me work -- I am happy to show "
+                "you how it works.");
+}
+
+// Print a text file (rove plan / workable-horizon union) line by line to the printer.
+static void printTextFile(const String& path) {
+  File f = Store::fs().open(path, "r");
+  if (!f) { Printer::line("(file unavailable)"); return; }
+  String ln;
+  while (f.available()) {
+    char c = (char)f.read();
+    if (c == '\r') continue;
+    if (c == '\n') { Printer::wrap(ln); ln = ""; }
+    else if (ln.length() < 200) ln += c;
+  }
+  if (ln.length()) Printer::wrap(ln);
+  f.close();
+}
+
+// Map each report to a short filename stem for the /CardSat/Reports file sink.
+const char* App::prtStem(PrintReport w) {
+  switch (w) {
+    case PR_PASSES:  return "passes";
+    case PR_TICKET:  return "ticket";
+    case PR_SATCARD: return "satcard";
+    case PR_KEPS:    return "keps";
+    case PR_LOG:     return "qsolog";
+    case PR_ROVE:    return "roveplan";
+    case PR_HORIZON: return "horizon";
+    case PR_AMSAT:   return "amsat";
+    case PR_OPCARD:  return "contact";
+    case PR_MUTUAL:  return "mutual";
+    case PR_DXDOPP:  return "dxdoppler";
+    case PR_EQX:     return "eqx";
+    case PR_ALLPASS: return "allpasses";
+    case PR_TARGET:  return "target";
+    case PR_NOTE:    return "note";
+    case PR_PASSPOLAR: return "polar";
+  }
+  return "report";
+}
+
+bool App::printReport(PrintReport which) {
+  // Fan out to whatever the operator has enabled: TCP printer, USB serial console,
+  // and/or a /CardSat/Reports/*.txt file. An operator with no printer can still enable the
+  // serial and/or file sinks and pull the report that way -- so we do NOT require a
+  // printer host here; we only fail if NO sink is available at all.
+  Printer::Sinks sk;
+  sk.host        = cfg.printerHost[0] ? cfg.printerHost : nullptr;
+  sk.port        = cfg.printerPort;
+  sk.printerCols = cfg.printerCols;
+  sk.format      = cfg.printFormat;
+  sk.transport   = cfg.printTransport;
+  sk.toSerial    = cfg.printToSerial;
+  sk.toFile      = cfg.printToFile;
+  sk.fileTitle   = prtStem(which);
+  if (!sk.host && !sk.toSerial && !sk.toFile) {
+    setStatus("No print output on (Settings>Network)"); return false;
+  }
+  setStatus("Printing..."); draw();
+  if (!Printer::begin(sk)) { setStatus("No print sink opened"); return false; }
+  switch (which) {
+    case PR_PASSES:  printPasses(); break;
+    case PR_TICKET:  printTicket(); break;
+    case PR_SATCARD: printSatCard(); break;
+    case PR_KEPS:    printKeps(); break;
+    case PR_LOG:     printLog(); break;
+    case PR_ROVE:    Printer::title("ROVE PLAN");
+                     if (printPath.length()) { printTextFile(printPath); printPath = ""; }
+                     else                    printTextFile(exportRovePlan());
+                     break;
+    case PR_HORIZON: Printer::title("WORKABLE HORIZON");
+                     printTextFile(whExport()); break;
+    case PR_AMSAT:   printAmsatPitch(); break;
+    case PR_OPCARD:  printOpCard(); break;
+    case PR_MUTUAL:  printMutual(); break;
+    case PR_DXDOPP:  printDxDopp(); break;
+    case PR_EQX:     printEqx(); break;
+    case PR_ALLPASS: printAllPasses(); break;
+    case PR_TARGET:  printTargetHits(); break;
+    case PR_NOTE:    printNote(); break;
+    case PR_PASSPOLAR: printPassPolar(); break;
+  }
+  Printer::feedCut();
+  Printer::end();
+  // Report which sinks actually worked, so a wrong printer IP is visible even when
+  // serial/file succeeded.
+  // Build an accurate, self-clearing status. The printer sink is OPTIONAL: if serial or
+  // file succeeded, the print still "worked" even when no printer was configured/reached.
+  bool wantPrinter = (sk.host != nullptr);
+  bool printerFail = wantPrinter && !Printer::printerOk();
+  String st;
+  if (printerFail && !cfg.printToSerial && !cfg.printToFile)
+    st = "Printer unreachable: " + String(cfg.printerHost);   // nothing else caught it
+  else {
+    st = "Printed";
+    if (cfg.printToFile && Printer::lastFile().length()) st += " (saved)";
+    if (printerFail) st += " (printer down)";                 // note it, but it's not a failure
+    // IPP: the printer connected and we sent the job over HTTP. A 2xx means it was
+    // ACCEPTED (not necessarily rendered -- raster-only printers accept then discard
+    // PCL/PS). Surface the distinction so a silent no-page isn't mistaken for success.
+    // Raster forces IPP even when the transport setting is "raw", so include it here.
+    bool usedIpp = (cfg.printTransport == 1) || (cfg.printFormat == 7);
+    if (wantPrinter && !printerFail && usedIpp) {
+      st += Printer::ippAccepted() ? " (IPP ok)" : " (IPP: sent, not confirmed)";
+    }
+  }
+  setStatus(st, 4000);          // auto-clear after 4 s instead of persisting
+  return true;
 }
 
 // Tilt left/right signal in [-1, +1] (negative = roll left). Returns false when
@@ -28364,7 +29884,7 @@ void App::drawOrbit() {
     orow("Node drift", String(Odot, 3) + " /day", CL_WHITE);
     orow("Sun-sync",   (fabs(Odot - 0.98565) < 0.05) ? "yes" : "no",
          (fabs(Odot - 0.98565) < 0.05) ? CL_GREEN : CL_GREY);
-    footer(";/. row  type edit  x reseed  ,// page  ` bk");
+    footer(";/. row type edit x reseed ,// pg `bk");
     return;
   }
 
@@ -28524,7 +30044,7 @@ void App::drawEqx() {
            : String("EQX table"));
   canvas.setTextSize(1);
   if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-            canvas.print("No satellite."); footer("` back"); return; }
+            canvas.print("No satellite."); footer("p print  ` back"); return; }
   if (!timeIsSet()) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 52);
     canvas.print("Clock not set.");
@@ -28569,6 +30089,7 @@ void App::drawEqx() {
 }
 
 void App::keyEqx(char c, bool enter, bool back) {
+  if (c == 'p') { printReport(PR_EQX); return; }   // print the equator-crossing table
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
   const int ROWS = 10;
@@ -32716,6 +34237,80 @@ void App::keyCsimInfo(char c, bool enter, bool back) {
 }
 
 // ---------------------------------------------------------------------------
+//  Print submenu (SCR_PRINTABOUT): a scrollable list of every printable report,
+//  opened with `p` from the About screen. ENTER prints the highlighted report and
+//  STAYS on the list (status line reports the result) so several can run in a row.
+//  Reports needing an active satellite self-guard (they print a one-line note).
+//  Order groups the "no home screen" reports first, then the contextual ones.
+// ---------------------------------------------------------------------------
+namespace {
+  // Labels only; the row->report mapping lives in App::keyPrintAbout (the PrintReport
+  // enum is private to App, so a file-scope table can't name it). Keep these in sync.
+  const char* const PA_ITEMS[] = {
+    "Passes day sheet (favs 24h)",   // 0
+    "All favorites' passes",         // 1
+    "Outreach ticket (active sat)",  // 2
+    "Satellite card (active sat)",   // 3
+    "Keplerian elements",            // 4
+    "QSO log (recent)",              // 5
+    "Workable horizon",              // 6
+    "Mutual windows",                // 7
+    "DX Doppler table",              // 8
+    "Equator crossings (EQX)",       // 9
+    "Target search results",         // 10
+    "Rove plan (latest survey)",     // 11
+    "Pass sky track (polar)",        // 12
+    "Support AMSAT page",            // 13
+    "Operator contact card",         // 14
+  };
+  const int PA_N = (int)(sizeof(PA_ITEMS) / sizeof(PA_ITEMS[0]));
+}
+
+void App::drawPrintAbout() {
+  header("Print a report");
+  canvas.setTextSize(1);
+  canvas.setCursor(6, 18);
+  if (cfg.printerHost[0] || cfg.printToSerial || cfg.printToFile) {
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    String dst;
+    if (cfg.printerHost[0]) dst += String(cfg.printerHost);
+    if (cfg.printToSerial)  dst += (dst.length()?"+":"") + String("serial");
+    if (cfg.printToFile)    dst += (dst.length()?"+":"") + String("file");
+    canvas.print("-> " + dst);
+  } else {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.print("No output on (Settings>Network)");
+  }
+  const int ROWS = 8;
+  int scroll = (paSel >= ROWS) ? (paSel - ROWS + 1) : 0;
+  for (int r = 0; r < ROWS && (scroll + r) < PA_N; ++r) {
+    int i = scroll + r; bool sel = (i == paSel);
+    int y = 30 + r * 11;
+    if (sel) { canvas.fillRect(0, y - 1, 240, 11, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(PA_ITEMS[i]);
+  }
+  footer("ENTER print  ;/. move  ` back");
+}
+
+void App::keyPrintAbout(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--paSel < 0) paSel = PA_N - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++paSel >= PA_N) paSel = 0; lastDrawMs = 0; return; }
+  if (enter) {
+    // Row order must match the PA_ITEMS[] labels above.
+    static const PrintReport MAP[] = {
+      PR_PASSES, PR_ALLPASS, PR_TICKET, PR_SATCARD, PR_KEPS, PR_LOG, PR_HORIZON,
+      PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_TARGET, PR_ROVE, PR_PASSPOLAR, PR_AMSAT, PR_OPCARD,
+    };
+    static_assert(sizeof(MAP)/sizeof(MAP[0]) == PA_N, "PA_ITEMS labels and MAP must match");
+    if (paSel >= 0 && paSel < (int)(sizeof(MAP)/sizeof(MAP[0]))) printReport(MAP[paSel]);
+    lastDrawMs = 0; return;
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 //  Radio math reference (SCR_MATHREF): a scrolling cheat sheet distilled from the
 //  ARRL Handbook "Radio Mathematics" supplement -- the decibel table, AC voltage
 //  factors, useful constants, and the formulas hams reach for. Static PROGMEM-style
@@ -33093,7 +34688,7 @@ void App::drawGpFit() {
     canvas.setCursor(90, y); canvas.print(" SOLVE ");
     canvas.setTextColor(CL_MGREY, CL_BLACK);
     canvas.setCursor(4, 118); canvas.print(gpfFrame==1 ? "J2000 rotated to TEME; B*=0" : "input must be TEME; B*=0");
-    footer(";/. field  ENTER edit  ,// frame  ` back");
+    footer(";/. fld ENTER edit ,// frame `back");
     return;
   }
   // ---- results ----
@@ -33918,7 +35513,7 @@ void App::drawToolForm() {
            toolId == TOOL_RFEXP || toolId == TOOL_BATT || toolId == TOOL_DEBRIS ||
            toolId == TOOL_PHASE || toolId == TOOL_ATTEN || toolId == TOOL_UNITS ||
            toolId == TOOL_XAREA)
-                            footer("type val  ;/. fld  ,// scroll  x reset  ` bk");
+                            footer("type val ;/. fld ,// scrl x reset `bk");
   else                      footer("type value  ;/. field  x reset  ` back");
 }
 
@@ -36059,7 +37654,7 @@ void App::drawTgtHits() {
     canvas.setTextColor(CL_CYAN);
     snprintf(line, sizeof(line), "pass %d/%d (%d%%)  hits %d", tsPassesDone, tsPassesTotal, pct, tsHitN);
     canvas.setCursor(6, y); canvas.print(line);
-    footer("` cancel");
+    footer("p print  ` cancel");
     return;
   }
   if (tsHitN == 0) {
@@ -36100,6 +37695,7 @@ void App::drawTgtHits() {
 }
 
 void App::keyTgtHits(char c, bool enter, bool back) {
+  if (c == 'p') { printReport(PR_TARGET); return; }   // print target-search results
   if (tsPhase == TS_RUNNING) {
     if (isBack(c, back)) { tsPhase = TS_CANCEL; screen = SCR_TGTSEARCH; lastDrawMs = 0; }
     return;
@@ -36359,6 +37955,13 @@ void App::keyRoveView(char c, bool enter, bool back) {
     // frees the heap buffer. This is portable across Arduino String implementations.
     roveViewBuf = (const char*)nullptr;
     screen = SCR_ROVELIST; lastDrawMs = 0; return;
+  }
+  if (c == 'p') {                        // print the plan being VIEWED (not a fresh export)
+    printPath = String("/CardSat/RovePlans/") + roveViewName;
+    if (!printPath.endsWith(".txt")) printPath += ".txt";
+    printReport(PR_ROVE);
+    printPath = "";
+    return;
   }
   NoteVRow rows[256];
   int nrows = noteWrap(roveViewBuf, rows, 256);
@@ -37313,7 +38916,7 @@ void App::drawSchedule() {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 42); canvas.print("No favorites yet.");
     canvas.setCursor(6, 54); canvas.print("Star sats with 'f' in Satellites.");
-    footer("` back");
+    footer("P print-all  ` back");
     return;
   }
   if (!timeIsSet()) {
@@ -37415,7 +39018,7 @@ void App::drawPasses() {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 40); canvas.print("Clock not set.");
     canvas.setCursor(6, 52); canvas.print("Run Update (NTP) or GPS.");
-    footer("r recompute  ` back");
+    footer("p print  r recompute  ` back");
     return;
   }
   if (!loc.obs().valid) {
@@ -37908,8 +39511,8 @@ void App::drawManual() {
   else        canvas.print("Manual: tune RX to DN above");
 
   if (linear)
-    footer(trackMode == 0 ? ",/tune u=leg s=stp x=ctr m=cal t l p `bk"
-                          : ",/DN ;.UP u=leg s=stp x=0 m=tn t l p `bk");
+    footer(trackMode == 0 ? ",/tune u=leg s=stp x=ctr m=cal t l p`bk"
+                          : ",/DN ;.UP u=leg s=stp x=0 m=tn t l p`bk");
   else
     footer(haveUp ? "u=leg m=cal t=tp l p ` back" : "m=cal t=tp l p ` back");
 }
@@ -38773,7 +40376,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 86;          // must exceed the highest rows[] index used below (currently 85)
+  const int N = 99;          // must exceed the highest rows[] index used below (transport 98)
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -38784,7 +40387,7 @@ void App::drawSettings() {
                    : (cfg.visSunElMax >= -12) ? "nautical (-12)" : "astro (-18)";
     rows[67] = String("Sky-dark gate: ") + dk; }
   rows[68] = String("Visible min el: ") + String((int)cfg.visMinEl) + " deg";
-  rows[4]  = String("WiFi SSID: ") + cfg.ssid;
+  rows[4]  = String("WiFi SSID: ") + (cfg.ssid[0] ? cfg.ssid : "(none)");
   rows[5]  = String("WiFi pass: ") + String(strlen(cfg.pass) ? "******" : "(none)");
   rows[6]  = String("Save & test WiFi (1/2)");
   rows[50] = String("WiFi 2 SSID: ") + String(strlen(cfg.ssid2) ? cfg.ssid2 : "(none)");
@@ -38793,6 +40396,29 @@ void App::drawSettings() {
              + (cfg.webEnable && net.connected()
                 ? String(" (") + WiFi.localIP().toString() + ")" : String(""));
   rows[53] = String("Web port: ") + String(cfg.webPort);
+  rows[90] = String("Printer IP: ") + String(cfg.printerHost[0] ? cfg.printerHost : "(off)");
+  rows[91] = String("Printer port: ") + String(cfg.printerPort);
+  { const char* pw = (cfg.printerCols >= 64) ? "Font B (64 col)"
+                    : (cfg.printerCols >= 48) ? "80mm (48 col)"
+                    : (cfg.printerCols >= 42) ? "80mm (42 col)" : "58mm (32 col)";
+    rows[92] = String("Printer paper: ") + pw; }
+  { const char* pf;
+    switch (cfg.printFormat) {
+      case 1:  pf = "Plain text";        break;
+      case 2:  pf = "PCL (HP)";          break;
+      case 3:  pf = "PostScript";        break;
+      case 4:  pf = "ESC/P2 (Epson)";    break;
+      case 5:  pf = "Star Line";         break;
+      case 6:  pf = "ZPL (Zebra label)"; break;
+      case 7:  pf = "PWG raster (AirPrint)"; break;
+      case 8:  pf = "URF raster (AirPrint)"; break;
+      default: pf = "ESC/POS (receipt)"; break;
+    }
+    rows[97] = String("Printer format: ") + pf; }
+  rows[98] = String("Printer transport: ") + (cfg.printTransport == 1 ? "IPP (:631)" : "Raw (:9100)");
+  rows[87] = String("Test printer (probe formats)");
+  rows[93] = String("Print to serial: ") + (cfg.printToSerial ? "on" : "off");
+  rows[94] = String("Save to /CardSat/Reports: ") + (cfg.printToFile ? "on" : "off");
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[84] = String("AOS lead alert: ") + (cfg.aosLeadMin ? (String((int)cfg.aosLeadMin) + " min") : String("off"));
   rows[83] = String("AMSAT status window: ") + (int)cfg.amsatWindowH + " h";
@@ -38851,6 +40477,8 @@ void App::drawSettings() {
              : (cfg.dimSecs % 60 == 0) ? String(cfg.dimSecs / 60) + " min"
                                        : String(cfg.dimSecs) + " s");
   rows[26] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
+  rows[95] = String("Operator name: ") + (cfg.opName[0] ? cfg.opName : "(not set)");
+  rows[96] = String("Operator email: ") + (cfg.opEmail[0] ? cfg.opEmail : "(not set)");
   rows[27] = String("Backup config+favs -> SD");
   rows[28] = String("Restore config+favs");
   rows[29] = String("Reset all data (erase)");
@@ -38953,11 +40581,13 @@ void App::drawSettings() {
     else                 canvas.setTextColor(danger ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(rows[ai]);
   }
-  if (SET_CAT_ROWS[setCat][setSel] == 4) footer(",/ change  ENT edit  s scan  ` back");
-  else                                   footer(",/ change  ENT edit  ` back");
+  { int _id = SET_CAT_ROWS[setCat][setSel];
+    if (_id == 4 || _id == 50) footer(",/ change  ENT edit  s scan  ` back");
+    else                       footer(",/ change  ENT edit  ` back"); }
 }
 
-void App::startWifiScan() {
+void App::startWifiScan(bool forSecond) {
+  wifiScan2 = forSecond;
   setStatus("Scanning WiFi...");
   draw();                                   // show the notice before the blocking scan
   wifiApCount = net.scanWifi(wifiAp, MAX_WIFI_AP);
@@ -38975,24 +40605,27 @@ void App::keyWifiScan(char c, bool enter, bool back) {
   if (isUp(c))   wifiSel = (wifiSel + wifiApCount - 1) % wifiApCount;
   if (isDown(c)) wifiSel = (wifiSel + 1) % wifiApCount;
   if (enter) {
-    strncpy(cfg.ssid, wifiAp[wifiSel].ssid, sizeof(cfg.ssid) - 1);
-    cfg.ssid[sizeof(cfg.ssid) - 1] = 0;
+    char* ss  = wifiScan2 ? cfg.ssid2 : cfg.ssid;
+    char* pw  = wifiScan2 ? cfg.pass2 : cfg.pass;
+    int   sssz = wifiScan2 ? (int)sizeof(cfg.ssid2) : (int)sizeof(cfg.ssid);
+    strncpy(ss, wifiAp[wifiSel].ssid, sssz - 1);
+    ss[sssz - 1] = 0;
     cfg.save();
     if (wifiAp[wifiSel].enc) {                  // secured -> ask for the password
-      editTarget = 202;
-      editTitle  = String("Password: ") + cfg.ssid;
+      editTarget = wifiScan2 ? 218 : 202;       // 218 = WiFi-2 pass, 202 = WiFi-1 pass
+      editTitle  = String("Password: ") + ss;
       editBuf    = "";
       screen     = SCR_EDIT;
     } else {                                    // open network -> no password
-      cfg.pass[0] = 0; cfg.save();
-      setStatus(String("Selected ") + cfg.ssid);
+      pw[0] = 0; cfg.save();
+      setStatus(String("Selected ") + ss);
       screen = SCR_SETTINGS;
     }
   }
 }
 
 void App::drawWifiScan() {
-  header("WiFi scan");
+  header(wifiScan2 ? "WiFi scan (net 2)" : "WiFi scan");
   canvas.setTextSize(1);
   if (wifiApCount <= 0) {
     canvas.setTextColor(CL_GREY, CL_BLACK);

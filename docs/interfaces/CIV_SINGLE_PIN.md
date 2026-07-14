@@ -13,6 +13,11 @@ number of signal wires to the radio.
 > interfacing to the radio. **Verify the wiring with a meter before connecting a
 > radio — wrong wiring can damage a GPIO.**
 
+**Recommended level-shifter build:** the 5 V / 3.3 V interfacing the banner above
+warns about is solved cleanly by one $1 off-the-shelf module powered entirely from
+the Grove port — see
+[CIV_SINGLE_PIN_LEVELSHIFTER.md](CIV_SINGLE_PIN_LEVELSHIFTER.md).
+
 This applies to **wired Icom CI-V only.** It has no effect on Yaesu, Kenwood, or the
 IC-9700 RS-BA1 LAN backend.
 

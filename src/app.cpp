@@ -2,6 +2,7 @@
 //  app.cpp  -  UI state machine, rendering, and real-time Doppler control
 // ===========================================================================
 #include "app.h"
+#include "print.h"
 #include "config.h"
 #include <M5Cardputer.h>
 #include <LittleFS.h>
@@ -1814,6 +1815,12 @@ void App::keyNotes(char c, bool enter, bool back) {
   }
   if (isBack(c, back)) { logMenuSel = 6; screen = SCR_LOG; lastDrawMs = 0; return; }
   if (c == 'n') { noteEditNew(); return; }
+  if (c == 'p') {                                   // print the highlighted note
+    if (noteSel >= 0 && noteSel < noteListN && Notes::read(noteList[noteSel], noteBuf, NOTE_BUF_MAX)) {
+      noteName = noteList[noteSel]; printReport(PR_NOTE);
+    } else setStatus("No note to print");
+    return;
+  }
   if (noteListN == 0) return;
   if (isUp(c))   { noteSel = (noteSel + noteListN - 1) % noteListN; lastDrawMs = 0; }
   if (isDown(c)) { noteSel = (noteSel + 1) % noteListN; lastDrawMs = 0; }
@@ -1889,6 +1896,7 @@ void App::keyNoteEdit(char c, bool enter, bool back) {
   // nav punctuation ; . , /) types literally. Fn+s = save, Fn+,/ = left/right,
   // Fn+;/. = up/down.
   if (keyFn) {
+    if (c == 'p') { printReport(PR_NOTE); return; }   // Fn+p: print this note
     if (c == 's') {                              // Fn+s: save
       if (noteName.length() == 0) {              // unnamed new note -> prompt for a name
         editTarget = 710; editTitle = "Note name"; editBuf = "";
@@ -4987,6 +4995,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
     case SCR_FOXTEXT: keyFoxText(c, enter, back); break;
     case SCR_CSIMINFO: keyCsimInfo(c, enter, back); break;
+    case SCR_PRINTABOUT: keyPrintAbout(c, enter, back); break;
     case SCR_ORBITZOO: keyOrbitZoo(c, enter, back); break;
     case SCR_MATHREF: keyMathRef(c, enter, back); break;
     case SCR_PLANNER: keyPlanner(c, enter, back); break;
@@ -5308,6 +5317,7 @@ void App::keySchedule(char c, bool enter, bool back) {
   if (c == 'z') { sleepUntilNextPass(); return; }     // deep-sleep until AOS
   if (c == 'm') { mapReturn = SCR_SCHEDULE; screen = SCR_WORLDMAP; lastDrawMs = 0; return; }  // live world map
   if (c == 't') { buildSkyGlance(); screen = SCR_SKYGLANCE; lastDrawMs = 0; return; }            // sky-at-a-glance timeline
+  if (c == 'P') { printReport(PR_ALLPASS); return; }   // print all favorites' passes
   if (c == 'p') { planSeedDefaults(); planField = 0; planN = 0; planComputed = false;             // rove planner
                   planJobFav = 0; planJobRunning = false; screen = SCR_PLANNER; lastDrawMs = 0; return; }
   if (c == 'w') {                                    // workable horizon: 10-day "ever workable" union
@@ -5696,7 +5706,7 @@ void App::drawWorkHzn() {
       snprintf(line, sizeof(line), "Grids  %d", whGridN);
       canvas.setCursor(12, y); canvas.print(line); y += 13;
     }
-    footer("s states  d DXCC  g +grids  w save  ` bk");
+    footer("s states d DXCC g +grids w save `bk");
   } else {
     canvas.setCursor(6, y); canvas.print("(idle)");
     footer("` back");
@@ -5772,7 +5782,7 @@ void App::drawPlanner() {
   if (planComputed && planN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 78);
     canvas.print("No passes in the window.");
-    footer(";/. field  ENTER edit/GO  l saved  ` back");
+    footer(";/. fld ENTER edit/GO l saved `back");
     return;
   }
   if (planN == 0) {                                   // fresh, not yet computed
@@ -5780,7 +5790,7 @@ void App::drawPlanner() {
     canvas.setCursor(6, 60); canvas.print("Set grid/date/time, then GO.");
     canvas.setCursor(6, 72); canvas.print("Lists passes for all favorites");
     canvas.setCursor(6, 82); canvas.print("with workable states & DXCC.");
-    footer(";/. field  ENTER edit/GO  l saved  ` back");
+    footer(";/. fld ENTER edit/GO l saved `back");
     return;
   }
   // column header
@@ -6102,6 +6112,7 @@ void App::keyPasses(char c, bool enter, bool back) {
     dxccLive = false; dxccScroll = 0; buildDxcc(passes[passSel].aos, passes[passSel].los);
     setStatus(""); screen = SCR_DXCC; lastDrawMs = 0; return;
   }
+  if (c == 'p') { printReport(PR_PASSES); return; }   // print the passes day-sheet
   if (c == 'v') { visReturn = SCR_PASSES; visDayOff = 0; buildVis();   screen = SCR_VIS;   lastDrawMs = 0; return; }
   if (c == 'V') { buildVisList(); screen = SCR_VISLIST; lastDrawMs = 0; return; }  // visible-pass LIST (10 days)
   if (c == 'i') { visReturn = SCR_PASSES; illumDayOff = 0; buildIllum(); screen = SCR_ILLUM; lastDrawMs = 0; return; }
@@ -6423,7 +6434,7 @@ void App::drawPassPolar() {
   canvas.setTextSize(1);
   if (!pdValid) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
                   canvas.setCursor(6, 50); canvas.print("No pass data.");
-                  footer("` back"); return; }
+                  footer("P print  ` back"); return; }
 
   const int cx = 66, cy = 70, R = 44;
   drawPolarGrid(cx, cy, R);
@@ -6455,10 +6466,11 @@ void App::drawPassPolar() {
   canvas.setCursor(rx, 78); canvas.printf("A az %03.0f", pdPass.azAos);
   canvas.setTextColor(CL_ORANGE, CL_BLACK);
   canvas.setCursor(rx, 90); canvas.printf("L az %03.0f", pdPass.azLos);
-  footer("p plot   ` back");
+  footer("p plot  P print  ` back");
 }
 
 void App::keyPassPolar(char c, bool enter, bool back) {
+  if (c == 'P') { printReport(PR_PASSPOLAR); return; }  // print this pass's sky track
   if (c == 'p') { screen = SCR_PASSDETAIL; lastDrawMs = 0; return; }  // toggle to elev plot
   if (isBack(c, back) || enter) { screen = passDetailReturn; lastDrawMs = 0; }
 }
@@ -6505,7 +6517,7 @@ void App::drawMutual() {
   if (mutualN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 44); canvas.print("No co-visibility windows.");
-    footer("` back"); return;
+    footer("p print  ` back"); return;
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(4, 28); canvas.print("Start UTC    Dur   me  dx");
@@ -6524,10 +6536,11 @@ void App::drawMutual() {
     canvas.printf("%s %ld:%02ld %3.0f %3.0f", fmtMDHM(m.start).c_str(),
                   secs/60, secs%60, m.myMaxEl, m.dxMaxEl);
   }
-  footer(";/. select  ENT detail  d Doppler  ` back");
+  footer(";/. sel  ENT detail  d Doppler  `back");
 }
 
 void App::keyMutual(char c, bool enter, bool back) {
+  if (c == 'p') { printReport(PR_MUTUAL); return; }   // print mutual windows + sky map
   if (isBack(c, back)) { screen = SCR_PASSES; return; }
   if (mutualN) {
     if (isUp(c))   mutualSel = (mutualSel + mutualN - 1) % mutualN;
@@ -7092,7 +7105,7 @@ void App::drawDxDopp() {
   SatEntry* s = activeSat();
   header(s ? (String(s->name) + " DX Dopp") : String("DX Doppler"));
   canvas.setTextSize(1);
-  if (!s) { footer("` back"); return; }
+  if (!s) { footer("p print  ` back"); return; }
   if (dxdWin >= mutualN) { dxdWin = 0; }
   if (mutualN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
@@ -7162,6 +7175,7 @@ void App::drawDxDopp() {
 }
 
 void App::keyDxDopp(char c, bool enter, bool back) {
+  if (c == 'p') { printReport(PR_DXDOPP); return; }   // print the DX Doppler table
   if (isBack(c, back)) { screen = dxdReturn; lastDrawMs = 0; return; }
   if (mutualN == 0 || activeTxCount == 0) return;
   MutualWindow& w = mutual[dxdWin];
@@ -7542,8 +7556,8 @@ static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,
 static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_PASS[]  = {3,66,67,68,40,7,84,54,61};
 static const int SET_DISP[]  = {48,82,25,43,85,49,77,79,81};
-static const int SET_LOG[]   = {26,69,70,71,72,73,78,74,75,76};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,55,60,56,57,58,59,80,83,27,28,29};
+static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,90,91,92,97,98,87,93,94,55,60,56,57,58,59,80,83,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
                                                     SET_DISP, SET_LOG, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -7573,7 +7587,8 @@ void App::keySettings(char c, bool enter, bool back) {
   if (c == '{')  { setSel -= 9; if (setSel < 0) setSel = 0; }          // page up
   if (c == '}')  { setSel += 9; if (setSel > len - 1) setSel = len - 1; }  // page down
   const int sel = SET_CAT_ROWS[setCat][setSel];                   // absolute row index
-  if (c == 's' && sel == 4) { startWifiScan(); return; }          // scan from the SSID row
+  if (c == 's' && sel == 4)  { startWifiScan(false); return; }     // scan -> WiFi 1
+  if (c == 's' && sel == 50) { startWifiScan(true);  return; }     // scan -> WiFi 2
 
   auto adj = [&](int dir){
     switch (sel) {
@@ -7791,10 +7806,37 @@ void App::keySettings(char c, bool enter, bool back) {
       case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
       case 20: gpSrcSel = 0; gpSrcScroll = 0; screen = SCR_GPSRC; lastDrawMs = 0; break;
+      case 95: editTarget = 280; editTitle = "Operator name";
+               editBuf = cfg.opName; screen = SCR_EDIT; break;
+      case 96: editTarget = 281; editTitle = "Operator email";
+               editBuf = cfg.opEmail; screen = SCR_EDIT; break;
       case 26: editTarget = 204; editTitle = "My callsign";
                editBuf = cfg.myCall; screen = SCR_EDIT; break;
       case 41: editTarget = 214; editTitle = "QRZ username";
                editBuf = cfg.qrzUser; screen = SCR_EDIT; break;
+      case 90: editTarget = 270; editTitle = "Printer IP (blank=off)";
+               editBuf = cfg.printerHost; screen = SCR_EDIT; break;
+      case 91: editTarget = 271; editTitle = "Printer port (default 9100)";
+               editBuf = String(cfg.printerPort); screen = SCR_EDIT; break;
+      case 92: cfg.printerCols = (cfg.printerCols >= 64) ? 32
+                           : (cfg.printerCols >= 48) ? 64
+                           : (cfg.printerCols >= 42) ? 48 : 42;
+               cfg.save(); break;
+      case 93: cfg.printToSerial = !cfg.printToSerial; cfg.save(); break;
+      case 94: cfg.printToFile   = !cfg.printToFile;   cfg.save(); break;
+      case 97: cfg.printFormat = (cfg.printFormat >= 8) ? 0 : cfg.printFormat + 1;
+               cfg.save(); break;
+      case 98: cfg.printTransport = cfg.printTransport ? 0 : 1; cfg.save(); break;
+      case 87: {   // probe the printer's supported document formats over IPP
+        if (!cfg.printerHost[0]) { setStatus("No printer IP set", 3000); break; }
+        setStatus("Probing printer...", 1500);
+        String caps = Printer::probeCapabilities(cfg.printerHost,
+                        cfg.printerPort ? cfg.printerPort : 631);
+        if (caps.length() == 0 || caps == "unreachable")
+          setStatus("Printer unreachable", 4000);
+        else
+          setStatus("Formats: " + caps, 6000);
+        break; }
       case 42: editTarget = 215; editTitle = "QRZ password";
                editBuf = cfg.qrzPass; screen = SCR_EDIT; break;
       case 69: lotwPickEnter(LP_DXCC); break;   // DXCC entity picker (full list, subdiv-bearing first)
@@ -7920,6 +7962,14 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.pass2[sizeof(cfg.pass2)-1] = 0; break;
       case 203: strncpy(cfg.gpUrl, editBuf.c_str(), sizeof(cfg.gpUrl)-1);
                 cfg.gpUrl[sizeof(cfg.gpUrl)-1] = 0; break;
+      case 270: strncpy(cfg.printerHost, editBuf.c_str(), sizeof(cfg.printerHost)-1);
+                cfg.printerHost[sizeof(cfg.printerHost)-1] = 0; cfg.save(); break;
+      case 271: { int p = editBuf.toInt(); cfg.printerPort = (p > 0 && p < 65536) ? p : 9100;
+                  cfg.save(); } break;
+      case 280: strncpy(cfg.opName, editBuf.c_str(), sizeof(cfg.opName)-1);
+                cfg.opName[sizeof(cfg.opName)-1] = 0; cfg.save(); break;
+      case 281: strncpy(cfg.opEmail, editBuf.c_str(), sizeof(cfg.opEmail)-1);
+                cfg.opEmail[sizeof(cfg.opEmail)-1] = 0; cfg.save(); break;
       case 204: { String v = editBuf; v.trim(); v.toUpperCase();   // callsigns are upper-case
                   strncpy(cfg.myCall, v.c_str(), sizeof(cfg.myCall)-1);
                   cfg.myCall[sizeof(cfg.myCall)-1] = 0; break; }
@@ -8586,7 +8636,7 @@ void App::drawAbout() {
              (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
     line(String(b));
   }
-  footer("r ready  t tools  l license  z game  ` back");
+  footer("p print a/c t tools l lic z game `bk");
 }
 
 void App::keyAbout(char c, bool enter, bool back) {
@@ -8594,6 +8644,9 @@ void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'z') { gamesSel = 0; screen = SCR_GAMES; lastDrawMs = 0; return; }   // Games menu
   if (c == 'r') { screen = SCR_READY; lastDrawMs = 0; return; }                 // station readiness
   if (c == 't') { screen = SCR_TOOLS; lastDrawMs = 0; return; }    // Tools hub (keeps last selection)
+  if (c == 'p') { paSel = 0; screen = SCR_PRINTABOUT; lastDrawMs = 0; return; }   // Print submenu (all reports)
+  if (c == 'a') { printReport(PR_AMSAT);  return; }   // print the "support AMSAT" page
+  if (c == 'c') { printReport(PR_OPCARD); return; }   // print the operator contact card
   if (isBack(c, back) || enter) screen = SCR_HOME;
 }
 
@@ -9050,7 +9103,7 @@ void App::drawLotw() {
   if (lotwRebootPrompt) footer("ENT reboot + upload   ` cancel");
   else if (!haveCard)        footer("` back   (insert SD card)");
   else if (!haveCred)   footer("` back   (no LoTW key on SD)");
-  else if (toSend)      footer(lotwResend ? "u upload ALL  a un-uploaded only  ` back"
+  else if (toSend)      footer(lotwResend ? "u upload ALL  a un-uploaded  `back"
                                           : "u sign & upload  a re-send all  ` back");
   else if (lotwTotal)   footer("a re-send all   ` back");
   else                  footer("` back   (nothing to upload)");
@@ -10432,6 +10485,7 @@ void App::draw() {
     case SCR_FOXANAT: drawFoxAnat(); break;
     case SCR_FOXTEXT: drawFoxText(); break;
     case SCR_CSIMINFO: drawCsimInfo(); break;
+    case SCR_PRINTABOUT: drawPrintAbout(); break;
     case SCR_ORBITZOO: drawOrbitZoo(); break;
     case SCR_MATHREF: drawMathRef(); break;
     case SCR_PLANNER: drawPlanner(); break;
@@ -11022,6 +11076,7 @@ void App::drawHelp() {
     " g grids  w states  e DXCC",
     " v 10-day  V vis-list",
     " i illum  x DX mutual",
+    " p print menu",
     "MUTUAL WINDOWS (x)",
     " co-visibility with a DX",
     " ;/. scroll  d Doppler",
@@ -12728,10 +12783,10 @@ void App::serviceAudioRelease() {
 }
 
 // --- Read-only serial command console (USB) --------------------------------
-// Polled once per loop. Accumulates a line, then dispatches it. Everything here only READS
-// device state and prints -- it never mutates anything -- so it's safe to leave always-on and
-// carries no heap cost (fixed cliBuf, no allocation). Handy for bench debugging over the same
-// USB cable used for flashing: `heap`, `sats`, `next`, etc.
+// Polled once per loop. Accumulates a line, then dispatches it. Commands never mutate
+// DEVICE state (`print` only transmits a report to the configured receipt printer), so the
+// console is safe to leave always-on; it carries no heap cost (fixed cliBuf, no allocation).
+// Handy for bench debugging over the same USB cable used for flashing: `heap`, `sats`, `print`.
 // Case-insensitive substring match (strcasestr is a GNU extension; avoid relying on it).
 static bool ciFind(const char* hay, const char* needle) {
   if (!*needle) return true;
@@ -12769,6 +12824,7 @@ void App::runSerialCommand(const char* cmd) {
     Serial.println(F("  fs    storage backend + free space"));
     Serial.println(F("  up    uptime"));
     Serial.println(F("  pass <sat>  next pass, any catalog sat"));
+    Serial.println(F("  print <what> passes|ticket|card|keps|log|rove|horizon"));
   } else if (is("ver")) {
     Serial.printf("CardSat v%s (built %s)\n", FW_VERSION, __DATE__);
   } else if (is("heap")) {
@@ -12819,6 +12875,30 @@ void App::runSerialCommand(const char* cmd) {
   } else if (is("up")) {
     unsigned long m = millis() / 60000UL;
     Serial.printf("uptime: %luh %lum\n", m / 60, m % 60);
+  } else if (strncasecmp(cmd, "print", 5) == 0) {
+    const char* q = cmd + 5; while (*q == ' ') ++q;
+    if (!cfg.printerHost[0]) { Serial.println(F("no printer set (Settings)")); return; }
+    PrintReport pr; bool ok = true;
+    if      (!strcasecmp(q, "passes"))  pr = PR_PASSES;
+    else if (!strcasecmp(q, "ticket"))  pr = PR_TICKET;
+    else if (!strcasecmp(q, "card"))    pr = PR_SATCARD;
+    else if (!strcasecmp(q, "keps"))    pr = PR_KEPS;
+    else if (!strcasecmp(q, "log"))     pr = PR_LOG;
+    else if (!strcasecmp(q, "rove"))    pr = PR_ROVE;
+    else if (!strcasecmp(q, "horizon")) pr = PR_HORIZON;
+    else if (!strcasecmp(q, "amsat"))   pr = PR_AMSAT;
+    else if (!strcasecmp(q, "contact")) pr = PR_OPCARD;
+    else if (!strcasecmp(q, "mutual"))  pr = PR_MUTUAL;
+    else if (!strcasecmp(q, "dxdopp"))  pr = PR_DXDOPP;
+    else if (!strcasecmp(q, "eqx"))     pr = PR_EQX;
+    else if (!strcasecmp(q, "allpass")) pr = PR_ALLPASS;
+    else if (!strcasecmp(q, "target"))  pr = PR_TARGET;
+    else if (!strcasecmp(q, "note"))    pr = PR_NOTE;
+    else ok = false;
+    if (!ok) { Serial.println(F("usage: print passes|ticket|card|keps|log|rove|horizon|")); 
+               Serial.println(F("             amsat|contact|mutual|dxdopp|eqx|allpass|target|note")); return; }
+    Serial.printf("printing %s to %s...\n", q, cfg.printerHost);
+    Serial.println(printReport(pr) ? "ok" : "FAILED (see screen)");
   } else if (strncasecmp(cmd, "pass", 4) == 0) {
     const char* q = cmd + 4; while (*q == ' ') ++q;
     if (!*q) { Serial.println(F("usage: pass <name or NORAD>")); return; }
@@ -12840,6 +12920,586 @@ void App::runSerialCommand(const char* cmd) {
   } else {
     Serial.printf("unknown: %s (try 'help')\n", cmd);
   }
+}
+
+
+// ===========================================================================
+//  Receipt-printer reports (ESC/POS over TCP:9100). Each report streams 32-col
+//  text to the printer and closes; no report is buffered whole. Times are UTC
+//  (the firmware runs in UTC) and labeled as such. See docs/design/PRINTING_SCOPE.md.
+// ===========================================================================
+
+// Compass octant for an azimuth in degrees.
+static const char* azOctant(float az) {
+  static const char* C[8] = { "N","NE","E","SE","S","SW","W","NW" };
+  int i = (int)((az + 22.5f) / 45.0f) & 7;
+  return C[i];
+}
+
+// Gather upcoming favorite passes in [from,to] into parallel arrays, sorted by AOS.
+// Returns the count (<= maxN). Reused by the day-sheet and the serial console.
+int App::buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
+                        uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN) {
+  int n = 0;
+  pred.setSite(loc.obs());
+  for (int f = 0; f < favN && n < maxN; ++f) {
+    int idx = db.indexOfNorad(favs[f]);
+    if (idx < 0) continue;
+    if (!pred.setSat(db.at(idx))) continue;
+    PassPredict p[6];
+    int np = pred.predictPasses(from, cfg.minPassEl, p, 6, to);
+    for (int i = 0; i < np && n < maxN; ++i) {
+      if (p[i].aos > to) break;
+      norads[n] = favs[f];
+      aoss[n]   = p[i].aos;
+      els[n]    = (uint8_t)(p[i].maxEl + 0.5f);
+      azs[n]    = (uint16_t)p[i].azAos;
+      durs[n]   = (uint16_t)((p[i].los - p[i].aos) / 60);
+      n++;
+    }
+  }
+  // insertion sort by AOS (n is small: <= maxN)
+  for (int a = 1; a < n; ++a) {
+    uint32_t kn = norads[a]; time_t ka = aoss[a]; uint8_t ke = els[a];
+    uint16_t kz = azs[a], kd = durs[a]; int b = a - 1;
+    while (b >= 0 && aoss[b] > ka) {
+      norads[b+1]=norads[b]; aoss[b+1]=aoss[b]; els[b+1]=els[b]; azs[b+1]=azs[b]; durs[b+1]=durs[b]; --b;
+    }
+    norads[b+1]=kn; aoss[b+1]=ka; els[b+1]=ke; azs[b+1]=kz; durs[b+1]=kd;
+  }
+  return n;
+}
+
+bool App::printActiveHint() {
+  SatEntry* a = activeSat();
+  if (!a) { Printer::line("No active satellite."); Printer::line("Select one, then print."); return false; }
+  return true;
+}
+
+void App::printPasses() {
+  Printer::title("TODAY'S PASSES");
+  if (!timeIsSet()) { Printer::line("Clock not set."); return; }
+  Printer::line("Station " + Location::toGrid(loc.obs().lat, loc.obs().lon));
+  Printer::line("From " + fmtMDHM(nowUtc()) + " UTC");
+  Printer::line("Next 24h, min el " + String((int)cfg.minPassEl) + " deg");
+  Printer::blank();
+  static const int MAXP = 48;
+  static uint32_t norads[MAXP]; static time_t aoss[MAXP];
+  static uint8_t els[MAXP]; static uint16_t azs[MAXP], durs[MAXP];
+  int n = buildFavPasses(nowUtc(), nowUtc() + 24*3600, norads, aoss, els, azs, durs, MAXP);
+  if (n == 0) { Printer::line("(no favorite passes)"); Printer::line("Add favorites first."); return; }
+  bool wide = Printer::cols() >= 44;     // 80 mm paper: room for a longer name + LOS column
+  if (wide) Printer::line("SATELLITE        AOS   LOS   EL  AZ  MIN");
+  else      Printer::line("SAT       UTC   EL  AZ  MIN");
+  for (int i = 0; i < n; ++i) {
+    int idx = db.indexOfNorad(norads[i]);
+    const char* nm = (idx >= 0) ? db.at(idx).name : "?";
+    char row[56];
+    if (wide) {
+      time_t los = aoss[i] + (time_t)durs[i] * 60;
+      snprintf(row, sizeof(row), "%-16.16s %s %s %3d %-2s %3d",
+               nm, fmtHM(aoss[i]).c_str(), fmtHM(los).c_str(), els[i], azOctant(azs[i]), durs[i]);
+    } else {
+      snprintf(row, sizeof(row), "%-9.9s %s %3d %-2s %3d",
+               nm, fmtHM(aoss[i]).c_str(), els[i], azOctant(azs[i]), durs[i]);
+    }
+    Printer::line(String(row));
+  }
+  Printer::blank();
+  Printer::line(String(n) + " passes. Times UTC.");
+}
+
+void App::printTicket() {
+  Printer::title("WORK A SATELLITE");
+  if (!printActiveHint()) return;
+  if (!timeIsSet()) { Printer::line("Clock not set."); return; }
+  SatEntry* a = activeSat();
+  pred.setSite(loc.obs()); pred.setSat(*a);
+  PassPredict p;
+  if (pred.predictPasses(nowUtc(), cfg.minPassEl, &p, 1) < 1) {
+    Printer::line(String(a->name)); Printer::line("No pass in the next window.");
+    return;
+  }
+  Printer::blank();
+  Printer::line(String(a->name));
+  Printer::blank();
+  Printer::line("Rises " + fmtHM(p.aos) + " UTC");
+  Printer::line("in the " + String(azOctant(p.azAos)) + ", up to " + String((int)p.maxEl) + " deg");
+  Printer::line("Visible ~" + String((int)((p.los - p.aos) / 60)) + " minutes");
+  // Downlink line: prefer the transponder the operator has SELECTED on Track (curTx),
+  // since that's the one they intend to work; fall back to the first active downlink
+  // only if no selection applies to this satellite.
+  const Transponder* pick = nullptr;
+  if (activeSat() == a && activeTxCount > 0 && curTx >= 0 && curTx < activeTxCount
+      && activeTx[curTx].downlink)
+    pick = &activeTx[curTx];
+  static Transponder tp[16];
+  if (!pick) {
+    int tn = SatDb::loadTxCache(a->norad, tp, 16);
+    for (int i = 0; i < tn; ++i)
+      if (tp[i].downlink && tp[i].active) { pick = &tp[i]; break; }
+  }
+  if (pick) {
+    char f[56];
+    if (pick->isLinear && pick->downlinkHigh > pick->downlink)
+      snprintf(f, sizeof(f), "Listen %.3f-%.3f MHz %s", pick->downlink/1e6, pick->downlinkHigh/1e6, pick->mode);
+    else
+      snprintf(f, sizeof(f), "Listen %.3f MHz %s", pick->downlink/1e6, pick->mode);
+    Printer::wrap(String(f));
+    if (pick->uplink) {
+      char u[56];
+      if (pick->isLinear && pick->uplinkHigh > pick->uplink)
+        snprintf(u, sizeof(u), "Transmit %.3f-%.3f MHz%s", pick->uplink/1e6, pick->uplinkHigh/1e6, pick->invert?" (inv)":"");
+      else
+        snprintf(u, sizeof(u), "Transmit %.3f MHz%s", pick->uplink/1e6, pick->invert?" (inv)":"");
+      Printer::wrap(String(u));
+    }
+    if (pick->desc[0]) Printer::wrap(String(pick->desc));
+  }
+  Printer::blank();
+  Printer::wrap("You can hear a satellite with a handheld radio. Ask me how! -- AMSAT");
+}
+
+void App::printSatCard() {
+  Printer::title("SATELLITE CARD");
+  if (!printActiveHint()) return;
+  SatEntry* a = activeSat();
+  Printer::line(String(a->name) + "  #" + String(a->norad));
+  Printer::blank();
+  Printer::line("TRANSPONDERS");
+  static Transponder tp[16];
+  int tn = SatDb::loadTxCache(a->norad, tp, 16);
+  if (tn == 0) Printer::line(" (none cached)");
+  for (int i = 0; i < tn; ++i) {
+    Printer::wrap(" " + String(tp[i].mode) + " " + String(tp[i].desc)
+                  + (tp[i].active ? "" : " (off)")
+                  + (tp[i].isLinear && tp[i].invert ? " (inv)" : ""));
+    // For a linear transponder show the whole passband (low-high); for a channelized
+    // one (FM, single-channel) show the single frequency.
+    if (tp[i].downlink) {
+      char d[52];
+      if (tp[i].isLinear && tp[i].downlinkHigh > tp[i].downlink)
+        snprintf(d, sizeof(d), "  D %.4f-%.4f", tp[i].downlink/1e6, tp[i].downlinkHigh/1e6);
+      else
+        snprintf(d, sizeof(d), "  D %.4f", tp[i].downlink/1e6);
+      Printer::line(String(d));
+    }
+    if (tp[i].uplink) {
+      char u[52];
+      if (tp[i].isLinear && tp[i].uplinkHigh > tp[i].uplink)
+        snprintf(u, sizeof(u), "  U %.4f-%.4f", tp[i].uplink/1e6, tp[i].uplinkHigh/1e6);
+      else
+        snprintf(u, sizeof(u), "  U %.4f", tp[i].uplink/1e6);
+      Printer::line(String(u));
+    }
+  }
+  Printer::blank();
+  Printer::line("NEXT PASSES (UTC)");
+  if (timeIsSet()) {
+    pred.setSite(loc.obs()); pred.setSat(*a);
+    PassPredict p[3];
+    int np = pred.predictPasses(nowUtc(), cfg.minPassEl, p, 3);
+    for (int i = 0; i < np; ++i) {
+      char r[40];
+      snprintf(r, sizeof(r), " %s el%d %s",
+               fmtMDHM(p[i].aos).c_str(), (int)p[i].maxEl, azOctant(p[i].azAos));
+      Printer::line(String(r));
+    }
+    if (np == 0) Printer::line(" (none found)");
+  } else Printer::line(" (clock not set)");
+}
+
+void App::printKeps() {
+  Printer::title("KEPLERIAN ELEMENTS");
+  if (!printActiveHint()) return;
+  SatEntry* a = activeSat();
+  Printer::line(String(a->name) + "  #" + String(a->norad));
+  Printer::line("Intl des " + String(a->intlDes));
+  Printer::blank();
+  char b[40];
+  Printer::line("Epoch " + fmtMDHM((time_t)a->epochUnix) + " UTC");
+  snprintf(b, sizeof(b), "Inclination %.4f deg", a->incl);     Printer::line(String(b));
+  snprintf(b, sizeof(b), "Eccentricity %.7f", a->ecc);         Printer::line(String(b));
+  snprintf(b, sizeof(b), "RAAN        %.4f deg", a->raan);      Printer::line(String(b));
+  snprintf(b, sizeof(b), "Arg perigee %.4f deg", a->argp);     Printer::line(String(b));
+  snprintf(b, sizeof(b), "Mean anom   %.4f deg", a->ma); Printer::line(String(b));
+  snprintf(b, sizeof(b), "Mean motion %.8f", a->meanMotion);   Printer::line(String(b));
+  Printer::blank();
+  Printer::wrap("Once these arrived by mail on paper. Now they fit in your pocket.");
+}
+
+void App::printLog() {
+  Printer::title("QSO LOG");
+  loadLog();
+  if (logRecN == 0) { Printer::line("(log empty)"); return; }
+  Printer::line("Last " + String(logRecN) + " QSOs (UTC)");
+  Printer::blank();
+  bool wide = Printer::cols() >= 44;
+  for (int i = 0; i < logRecN; ++i) {
+    PendingQso& q = logRecs[i];
+    char r[64];
+    if (wide) {
+      // 80 mm: everything on one line -- date, sat, call, grid, RST.
+      snprintf(r, sizeof(r), "%s %-10.10s %-10.10s %-6.6s %s/%s",
+               fmtMDHM((time_t)q.utc).c_str(), q.sat, q.call, q.grid, q.rstS, q.rstR);
+      Printer::line(String(r));
+    } else {
+      snprintf(r, sizeof(r), "%s %-8.8s %-9.9s", fmtMDHM((time_t)q.utc).c_str(), q.sat, q.call);
+      Printer::line(String(r));
+      if (q.grid[0] || q.rstS[0]) {
+        char s[40]; snprintf(s, sizeof(s), "   %s %s/%s", q.grid, q.rstS, q.rstR);
+        Printer::line(String(s));
+      }
+    }
+  }
+}
+
+
+
+// ---- Additional printable reports (items 9-11): mutual windows, DX Doppler, EQX,
+//      all-favorite passes, target-search hits, notes, and ASCII polar maps. ----
+
+// ASCII polar map (item 11): plot az/el points as a text sky chart using only
+// safe 7-bit characters (no box-drawing / Unicode), so the widest range of ESC/POS
+// printers render it. Zenith at center, horizon at the edge; N up, E right.
+void App::printPolarAscii(const float* az, const float* el, int n, const char* mark) {
+  const int R = 7;                       // rows above center = radius (fits 32-col paper)
+  const int W = 2 * R + 1;               // grid is W x W character cells (E-W doubled for aspect)
+  for (int gy = 0; gy <= 2 * R; ++gy) {
+    String row;
+    for (int gx = 0; gx <= 2 * R; ++gx) {
+      // cell center in unit disk coords (-1..1); y up
+      float ux = (gx - R) / (float)R;
+      float uy = (R - gy) / (float)R;
+      float rr = sqrtf(ux * ux + uy * uy);
+      char c = ' ';
+      if (rr > 1.02f) { row += ' '; continue; }          // outside the sky
+      if (gx == R && gy == R) c = '+';                    // zenith
+      else if (rr > 0.96f && rr < 1.04f) c = '.';         // horizon ring
+      // plot any sample that lands in this cell
+      for (int i = 0; i < n; ++i) {
+        if (el[i] < 0) continue;
+        float r = (90.0f - el[i]) / 90.0f;                // el 90 -> center, 0 -> edge
+        float a = az[i] * 3.14159265f / 180.0f;           // 0=N
+        float px =  r * sinf(a);                          // E to the right
+        float py =  r * cosf(a);                          // N up
+        int cx = (int)lroundf(R + px * R);
+        int cy = (int)lroundf(R - py * R);
+        if (cx == gx && cy == gy) { c = mark[0]; break; }
+      }
+      row += c;
+    }
+    // trim trailing spaces to keep lines short
+    int endp = row.length(); while (endp > 0 && row[endp-1] == ' ') --endp;
+    Printer::line(row.substring(0, endp));
+  }
+  Printer::line("  (N up, E right; + zenith, . horizon)");
+}
+
+void App::printMutual() {
+  SatEntry* s = activeSat();
+  Printer::title("MUTUAL WINDOWS");
+  if (!s) { Printer::line("No active satellite."); return; }
+  Printer::line(String(s->name));
+  Printer::line("me " + Location::toGrid(loc.obs().lat, loc.obs().lon) + "  DX " + String(dxGrid));
+  Printer::blank();
+  if (mutualN == 0) { Printer::line("(no mutual windows)"); return; }
+  Printer::line("START (UTC)     MIN  myEl dxEl");
+  for (int i = 0; i < mutualN; ++i) {
+    MutualWindow& w = mutual[i];
+    char r[48];
+    snprintf(r, sizeof(r), "%s %3d  %3d  %3d",
+             fmtMDHM(w.start).c_str(), (int)((w.end - w.start) / 60),
+             (int)w.myMaxEl, (int)w.dxMaxEl);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line(String(mutualN) + " windows. Times UTC.");
+}
+
+void App::printDxDopp() {
+  SatEntry* s = activeSat();
+  Printer::title("DX DOPPLER");
+  if (!s) { Printer::line("No active satellite."); return; }
+  if (mutualN == 0 || dxdWin >= mutualN) { Printer::line("No mutual window selected."); return; }
+  MutualWindow& w = mutual[dxdWin];
+  Printer::line(String(s->name) + "  DX " + String(dxGrid));
+  Printer::line("Window " + fmtMDHM(w.start) + " UTC");
+  Printer::blank();
+  Printer::line("UTC    myRX     myTX");
+  // step every 30 s across the window (cap rows so a long pass stays on one slip)
+  int step = 30, rows = 0, maxRows = 40;
+  for (time_t t = w.start; t <= w.end && rows < maxRows; t += step, ++rows) {
+    uint32_t myRx, myTx, dxRx, dxTx;
+    dxDoppFreqs(t, myRx, myTx, dxRx, dxTx);
+    char r[48];
+    snprintf(r, sizeof(r), "%s %.4f %.4f", fmtHM(t).c_str(), myRx / 1e6, myTx / 1e6);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line("MHz. Times UTC.");
+}
+
+void App::printEqx() {
+  SatEntry* s = activeSat();
+  Printer::title(eqxDescending ? "DESCENDING NODES" : "EQUATOR CROSSINGS");
+  if (!s) { Printer::line("No active satellite."); return; }
+  Printer::line(String(s->name));
+  Printer::blank();
+  if (eqxN == 0) { Printer::line("(none computed)"); return; }
+  Printer::line("TIME (UTC)        LON");
+  for (int i = 0; i < eqxN; ++i) {
+    float lonW = eqxLonW[i];
+    float lonE = (lonW <= 180.0f) ? -lonW : (360.0f - lonW);   // to E-positive -180..180
+    char r[48];
+    snprintf(r, sizeof(r), "%s  %6.1f", fmtMDHM(eqxT[i]).c_str(), lonE);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line(String(eqxN) + " crossings. Lon +E.");
+}
+
+void App::printAllPasses() {
+  Printer::title("ALL FAVORITE PASSES");
+  if (schedN == 0) { Printer::line("(no passes scheduled)"); Printer::line("Add favorites first."); return; }
+  Printer::line("Station " + Location::toGrid(loc.obs().lat, loc.obs().lon));
+  Printer::blank();
+  bool wide = Printer::cols() >= 44;
+  if (wide) Printer::line("SATELLITE        AOS    LOS    EL VIS");
+  else      Printer::line("SAT       AOS   EL VIS");
+  for (int i = 0; i < schedN; ++i) {
+    SchedEntry& e = sched[i];
+    const char* vis = e.visible ? "yes" : "-";
+    char r[56];
+    if (wide)
+      snprintf(r, sizeof(r), "%-16.16s %s %s %3d %s",
+               e.name, fmtHM(e.aos).c_str(), fmtHM(e.los).c_str(), (int)e.maxEl, vis);
+    else
+      snprintf(r, sizeof(r), "%-9.9s %s %3d %s",
+               e.name, fmtHM(e.aos).c_str(), (int)e.maxEl, vis);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line(String(schedN) + " passes. Times UTC.");
+}
+
+void App::printTargetHits() {
+  Printer::title("TARGET SEARCH");
+  if (tsHitN == 0) { Printer::line("(no results -- run a search first)"); return; }
+  Printer::line("Chances to work the target:");
+  Printer::blank();
+  Printer::line("SAT       INSIDE(UTC)   MIN elMax");
+  for (int i = 0; i < tsHitN; ++i) {
+    HitRow& h = tsHits[i];
+    int idx = db.indexOfNorad(h.norad);
+    const char* nm = (idx >= 0) ? db.at(idx).name : "?";
+    char r[56];
+    snprintf(r, sizeof(r), "%-9.9s %s %3d  %3d",
+             nm, fmtHM(h.inStart).c_str(), (int)((h.inEnd - h.inStart) / 60), h.maxElWhole);
+    Printer::line(String(r));
+  }
+  Printer::blank();
+  Printer::line(String(tsHitN) + " windows. Times UTC.");
+}
+
+void App::printPassPolar() {
+  SatEntry* s = activeSat();
+  Printer::title("PASS SKY TRACK");
+  if (!s) { Printer::line("No active satellite."); return; }
+  Printer::line(String(s->name));
+  // pdAz/pdEl were sampled for the pass being viewed (buildPassDetail). Filter to the
+  // above-horizon points and hand them to the ASCII plotter.
+  Printer::blank();
+  printPolarAscii(pdAz, pdEl, PD_SAMPLES, "*");
+  Printer::blank();
+  // A few key facts under the chart: peak elevation and its azimuth.
+  float maxEl = -1; int mi = 0;
+  for (int i = 0; i < PD_SAMPLES; ++i) if (pdEl[i] > maxEl) { maxEl = pdEl[i]; mi = i; }
+  if (maxEl >= 0) {
+    char b[48];
+    snprintf(b, sizeof(b), "Peak el %d deg at az %d", (int)maxEl, (int)pdAz[mi]);
+    Printer::line(String(b));
+  }
+}
+
+void App::printNote() {
+  Printer::title("NOTE");
+  if (noteName.length()) Printer::line(noteName);
+  Printer::blank();
+  if (noteBuf.length() == 0) { Printer::line("(empty)"); return; }
+  // stream the buffer line by line; Printer wraps each to the sink width
+  int i = 0, n = noteBuf.length();
+  String ln;
+  while (i < n) {
+    char c = noteBuf[i++];
+    if (c == '\r') continue;
+    if (c == '\n') { Printer::wrap(ln); ln = ""; }
+    else if (ln.length() < 200) ln += c;
+  }
+  if (ln.length()) Printer::wrap(ln);
+}
+
+void App::printAmsatPitch() {
+  Printer::title("SUPPORT AMSAT");
+  Printer::wrap("AMSAT is the volunteer, nonprofit organization that keeps amateur "
+                "radio in space -- designing, building, and operating satellites that "
+                "any licensed ham can use.");
+  Printer::blank();
+  Printer::line("WHY IT MATTERS");
+  Printer::wrap("Ham satellites give students, experimenters, and emergency operators "
+                "a hands-on path to space -- FM repeaters and linear transponders you "
+                "can work with modest gear, plus telemetry and STEM projects that put "
+                "real spacecraft in classrooms.");
+  Printer::blank();
+  Printer::line("HOW YOU CAN HELP");
+  Printer::wrap(" - Join or renew: amsat.org/join");
+  Printer::wrap(" - Donate to the satellite programs");
+  Printer::wrap(" - Get on the birds and mentor a newcomer");
+  Printer::wrap(" - Volunteer your skills");
+  Printer::blank();
+  Printer::wrap("Every membership and donation directly funds the next generation of "
+                "amateur satellites. Learn more at amsat.org.");
+  Printer::blank();
+  Printer::line("     amsat.org  -  keep ham radio in space");
+}
+
+void App::printOpCard() {
+  Printer::title("AMATEUR RADIO CONTACT");
+  // Operator identity (from Settings). Callsign is the anchor; name/email optional.
+  if (cfg.myCall[0]) { Printer::blank(); Printer::line(String("   ") + cfg.myCall); }
+  if (cfg.opName[0]) Printer::line(String("   ") + cfg.opName);
+  if (cfg.opEmail[0]) Printer::line(String("   ") + cfg.opEmail);
+  if (cfg.myCall[0] && loc.obs().valid)
+    Printer::line(String("   Grid ") + Location::toGrid(loc.obs().lat, loc.obs().lon));
+  Printer::blank();
+  Printer::line("WHAT IS AMATEUR RADIO?");
+  Printer::wrap("Amateur (\"ham\") radio is a licensed hobby and service: operators use "
+                "radio to talk across town or around the world, experiment with "
+                "electronics, and provide communications in emergencies -- no internet "
+                "or phone network required.");
+  Printer::blank();
+  Printer::line("RADIO... FROM SPACE?");
+  Printer::wrap("Yes. Amateurs build and use their own satellites. Some carry FM "
+                "repeaters you can work with a handheld and a small antenna; others "
+                "carry linear transponders for SSB and CW. The Space Station has ham "
+                "gear too. Passes last only minutes, which is half the fun.");
+  Printer::blank();
+  Printer::line("HOW TO GET STARTED");
+  Printer::wrap(" - Anyone can LISTEN. To transmit, you get a license (in the US, no "
+                "Morse code required).");
+  Printer::wrap(" - Study, take a simple exam, get your callsign.");
+  Printer::wrap(" - Find a local club or visit arrl.org (US) or your national society.");
+  Printer::wrap(" - For satellites specifically: amsat.org.");
+  Printer::blank();
+  Printer::wrap("Ask me about the satellite you just saw me work -- I am happy to show "
+                "you how it works.");
+}
+
+// Print a text file (rove plan / workable-horizon union) line by line to the printer.
+static void printTextFile(const String& path) {
+  File f = Store::fs().open(path, "r");
+  if (!f) { Printer::line("(file unavailable)"); return; }
+  String ln;
+  while (f.available()) {
+    char c = (char)f.read();
+    if (c == '\r') continue;
+    if (c == '\n') { Printer::wrap(ln); ln = ""; }
+    else if (ln.length() < 200) ln += c;
+  }
+  if (ln.length()) Printer::wrap(ln);
+  f.close();
+}
+
+// Map each report to a short filename stem for the /CardSat/Reports file sink.
+const char* App::prtStem(PrintReport w) {
+  switch (w) {
+    case PR_PASSES:  return "passes";
+    case PR_TICKET:  return "ticket";
+    case PR_SATCARD: return "satcard";
+    case PR_KEPS:    return "keps";
+    case PR_LOG:     return "qsolog";
+    case PR_ROVE:    return "roveplan";
+    case PR_HORIZON: return "horizon";
+    case PR_AMSAT:   return "amsat";
+    case PR_OPCARD:  return "contact";
+    case PR_MUTUAL:  return "mutual";
+    case PR_DXDOPP:  return "dxdoppler";
+    case PR_EQX:     return "eqx";
+    case PR_ALLPASS: return "allpasses";
+    case PR_TARGET:  return "target";
+    case PR_NOTE:    return "note";
+    case PR_PASSPOLAR: return "polar";
+  }
+  return "report";
+}
+
+bool App::printReport(PrintReport which) {
+  // Fan out to whatever the operator has enabled: TCP printer, USB serial console,
+  // and/or a /CardSat/Reports/*.txt file. An operator with no printer can still enable the
+  // serial and/or file sinks and pull the report that way -- so we do NOT require a
+  // printer host here; we only fail if NO sink is available at all.
+  Printer::Sinks sk;
+  sk.host        = cfg.printerHost[0] ? cfg.printerHost : nullptr;
+  sk.port        = cfg.printerPort;
+  sk.printerCols = cfg.printerCols;
+  sk.format      = cfg.printFormat;
+  sk.transport   = cfg.printTransport;
+  sk.toSerial    = cfg.printToSerial;
+  sk.toFile      = cfg.printToFile;
+  sk.fileTitle   = prtStem(which);
+  if (!sk.host && !sk.toSerial && !sk.toFile) {
+    setStatus("No print output on (Settings>Network)"); return false;
+  }
+  setStatus("Printing..."); draw();
+  if (!Printer::begin(sk)) { setStatus("No print sink opened"); return false; }
+  switch (which) {
+    case PR_PASSES:  printPasses(); break;
+    case PR_TICKET:  printTicket(); break;
+    case PR_SATCARD: printSatCard(); break;
+    case PR_KEPS:    printKeps(); break;
+    case PR_LOG:     printLog(); break;
+    case PR_ROVE:    Printer::title("ROVE PLAN");
+                     if (printPath.length()) { printTextFile(printPath); printPath = ""; }
+                     else                    printTextFile(exportRovePlan());
+                     break;
+    case PR_HORIZON: Printer::title("WORKABLE HORIZON");
+                     printTextFile(whExport()); break;
+    case PR_AMSAT:   printAmsatPitch(); break;
+    case PR_OPCARD:  printOpCard(); break;
+    case PR_MUTUAL:  printMutual(); break;
+    case PR_DXDOPP:  printDxDopp(); break;
+    case PR_EQX:     printEqx(); break;
+    case PR_ALLPASS: printAllPasses(); break;
+    case PR_TARGET:  printTargetHits(); break;
+    case PR_NOTE:    printNote(); break;
+    case PR_PASSPOLAR: printPassPolar(); break;
+  }
+  Printer::feedCut();
+  Printer::end();
+  // Report which sinks actually worked, so a wrong printer IP is visible even when
+  // serial/file succeeded.
+  // Build an accurate, self-clearing status. The printer sink is OPTIONAL: if serial or
+  // file succeeded, the print still "worked" even when no printer was configured/reached.
+  bool wantPrinter = (sk.host != nullptr);
+  bool printerFail = wantPrinter && !Printer::printerOk();
+  String st;
+  if (printerFail && !cfg.printToSerial && !cfg.printToFile)
+    st = "Printer unreachable: " + String(cfg.printerHost);   // nothing else caught it
+  else {
+    st = "Printed";
+    if (cfg.printToFile && Printer::lastFile().length()) st += " (saved)";
+    if (printerFail) st += " (printer down)";                 // note it, but it's not a failure
+    // IPP: the printer connected and we sent the job over HTTP. A 2xx means it was
+    // ACCEPTED (not necessarily rendered -- raster-only printers accept then discard
+    // PCL/PS). Surface the distinction so a silent no-page isn't mistaken for success.
+    // Raster forces IPP even when the transport setting is "raw", so include it here.
+    bool usedIpp = (cfg.printTransport == 1) || (cfg.printFormat == 7);
+    if (wantPrinter && !printerFail && usedIpp) {
+      st += Printer::ippAccepted() ? " (IPP ok)" : " (IPP: sent, not confirmed)";
+    }
+  }
+  setStatus(st, 4000);          // auto-clear after 4 s instead of persisting
+  return true;
 }
 
 // Tilt left/right signal in [-1, +1] (negative = roll left). Returns false when
@@ -14511,7 +15171,7 @@ void App::drawOrbit() {
     orow("Node drift", String(Odot, 3) + " /day", CL_WHITE);
     orow("Sun-sync",   (fabs(Odot - 0.98565) < 0.05) ? "yes" : "no",
          (fabs(Odot - 0.98565) < 0.05) ? CL_GREEN : CL_GREY);
-    footer(";/. row  type edit  x reseed  ,// page  ` bk");
+    footer(";/. row type edit x reseed ,// pg `bk");
     return;
   }
 
@@ -14671,7 +15331,7 @@ void App::drawEqx() {
            : String("EQX table"));
   canvas.setTextSize(1);
   if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-            canvas.print("No satellite."); footer("` back"); return; }
+            canvas.print("No satellite."); footer("p print  ` back"); return; }
   if (!timeIsSet()) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 52);
     canvas.print("Clock not set.");
@@ -14716,6 +15376,7 @@ void App::drawEqx() {
 }
 
 void App::keyEqx(char c, bool enter, bool back) {
+  if (c == 'p') { printReport(PR_EQX); return; }   // print the equator-crossing table
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
   const int ROWS = 10;
@@ -18871,6 +19532,80 @@ void App::keyCsimInfo(char c, bool enter, bool back) {
 }
 
 // ---------------------------------------------------------------------------
+//  Print submenu (SCR_PRINTABOUT): a scrollable list of every printable report,
+//  opened with `p` from the About screen. ENTER prints the highlighted report and
+//  STAYS on the list (status line reports the result) so several can run in a row.
+//  Reports needing an active satellite self-guard (they print a one-line note).
+//  Order groups the "no home screen" reports first, then the contextual ones.
+// ---------------------------------------------------------------------------
+namespace {
+  // Labels only; the row->report mapping lives in App::keyPrintAbout (the PrintReport
+  // enum is private to App, so a file-scope table can't name it). Keep these in sync.
+  const char* const PA_ITEMS[] = {
+    "Passes day sheet (favs 24h)",   // 0
+    "All favorites' passes",         // 1
+    "Outreach ticket (active sat)",  // 2
+    "Satellite card (active sat)",   // 3
+    "Keplerian elements",            // 4
+    "QSO log (recent)",              // 5
+    "Workable horizon",              // 6
+    "Mutual windows",                // 7
+    "DX Doppler table",              // 8
+    "Equator crossings (EQX)",       // 9
+    "Target search results",         // 10
+    "Rove plan (latest survey)",     // 11
+    "Pass sky track (polar)",        // 12
+    "Support AMSAT page",            // 13
+    "Operator contact card",         // 14
+  };
+  const int PA_N = (int)(sizeof(PA_ITEMS) / sizeof(PA_ITEMS[0]));
+}
+
+void App::drawPrintAbout() {
+  header("Print a report");
+  canvas.setTextSize(1);
+  canvas.setCursor(6, 18);
+  if (cfg.printerHost[0] || cfg.printToSerial || cfg.printToFile) {
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    String dst;
+    if (cfg.printerHost[0]) dst += String(cfg.printerHost);
+    if (cfg.printToSerial)  dst += (dst.length()?"+":"") + String("serial");
+    if (cfg.printToFile)    dst += (dst.length()?"+":"") + String("file");
+    canvas.print("-> " + dst);
+  } else {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.print("No output on (Settings>Network)");
+  }
+  const int ROWS = 8;
+  int scroll = (paSel >= ROWS) ? (paSel - ROWS + 1) : 0;
+  for (int r = 0; r < ROWS && (scroll + r) < PA_N; ++r) {
+    int i = scroll + r; bool sel = (i == paSel);
+    int y = 30 + r * 11;
+    if (sel) { canvas.fillRect(0, y - 1, 240, 11, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(PA_ITEMS[i]);
+  }
+  footer("ENTER print  ;/. move  ` back");
+}
+
+void App::keyPrintAbout(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--paSel < 0) paSel = PA_N - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++paSel >= PA_N) paSel = 0; lastDrawMs = 0; return; }
+  if (enter) {
+    // Row order must match the PA_ITEMS[] labels above.
+    static const PrintReport MAP[] = {
+      PR_PASSES, PR_ALLPASS, PR_TICKET, PR_SATCARD, PR_KEPS, PR_LOG, PR_HORIZON,
+      PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_TARGET, PR_ROVE, PR_PASSPOLAR, PR_AMSAT, PR_OPCARD,
+    };
+    static_assert(sizeof(MAP)/sizeof(MAP[0]) == PA_N, "PA_ITEMS labels and MAP must match");
+    if (paSel >= 0 && paSel < (int)(sizeof(MAP)/sizeof(MAP[0]))) printReport(MAP[paSel]);
+    lastDrawMs = 0; return;
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 //  Radio math reference (SCR_MATHREF): a scrolling cheat sheet distilled from the
 //  ARRL Handbook "Radio Mathematics" supplement -- the decibel table, AC voltage
 //  factors, useful constants, and the formulas hams reach for. Static PROGMEM-style
@@ -19248,7 +19983,7 @@ void App::drawGpFit() {
     canvas.setCursor(90, y); canvas.print(" SOLVE ");
     canvas.setTextColor(CL_MGREY, CL_BLACK);
     canvas.setCursor(4, 118); canvas.print(gpfFrame==1 ? "J2000 rotated to TEME; B*=0" : "input must be TEME; B*=0");
-    footer(";/. field  ENTER edit  ,// frame  ` back");
+    footer(";/. fld ENTER edit ,// frame `back");
     return;
   }
   // ---- results ----
@@ -20074,7 +20809,7 @@ void App::drawToolForm() {
            toolId == TOOL_RFEXP || toolId == TOOL_BATT || toolId == TOOL_DEBRIS ||
            toolId == TOOL_PHASE || toolId == TOOL_ATTEN || toolId == TOOL_UNITS ||
            toolId == TOOL_XAREA)
-                            footer("type val  ;/. fld  ,// scroll  x reset  ` bk");
+                            footer("type val ;/. fld ,// scrl x reset `bk");
   else                      footer("type value  ;/. field  x reset  ` back");
 }
 
@@ -22231,7 +22966,7 @@ void App::drawTgtHits() {
     canvas.setTextColor(CL_CYAN);
     snprintf(line, sizeof(line), "pass %d/%d (%d%%)  hits %d", tsPassesDone, tsPassesTotal, pct, tsHitN);
     canvas.setCursor(6, y); canvas.print(line);
-    footer("` cancel");
+    footer("p print  ` cancel");
     return;
   }
   if (tsHitN == 0) {
@@ -22272,6 +23007,7 @@ void App::drawTgtHits() {
 }
 
 void App::keyTgtHits(char c, bool enter, bool back) {
+  if (c == 'p') { printReport(PR_TARGET); return; }   // print target-search results
   if (tsPhase == TS_RUNNING) {
     if (isBack(c, back)) { tsPhase = TS_CANCEL; screen = SCR_TGTSEARCH; lastDrawMs = 0; }
     return;
@@ -22534,6 +23270,13 @@ void App::keyRoveView(char c, bool enter, bool back) {
     // frees the heap buffer. This is portable across Arduino String implementations.
     roveViewBuf = (const char*)nullptr;
     screen = SCR_ROVELIST; lastDrawMs = 0; return;
+  }
+  if (c == 'p') {                        // print the plan being VIEWED (not a fresh export)
+    printPath = String("/CardSat/RovePlans/") + roveViewName;
+    if (!printPath.endsWith(".txt")) printPath += ".txt";
+    printReport(PR_ROVE);
+    printPath = "";
+    return;
   }
   NoteVRow rows[256];
   int nrows = noteWrap(roveViewBuf, rows, 256);
@@ -23488,7 +24231,7 @@ void App::drawSchedule() {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 42); canvas.print("No favorites yet.");
     canvas.setCursor(6, 54); canvas.print("Star sats with 'f' in Satellites.");
-    footer("` back");
+    footer("P print-all  ` back");
     return;
   }
   if (!timeIsSet()) {
@@ -23590,7 +24333,7 @@ void App::drawPasses() {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 40); canvas.print("Clock not set.");
     canvas.setCursor(6, 52); canvas.print("Run Update (NTP) or GPS.");
-    footer("r recompute  ` back");
+    footer("p print  r recompute  ` back");
     return;
   }
   if (!loc.obs().valid) {
@@ -24082,8 +24825,8 @@ void App::drawManual() {
   else        canvas.print("Manual: tune RX to DN above");
 
   if (linear)
-    footer(trackMode == 0 ? ",/tune u=leg s=stp x=ctr m=cal t l p `bk"
-                          : ",/DN ;.UP u=leg s=stp x=0 m=tn t l p `bk");
+    footer(trackMode == 0 ? ",/tune u=leg s=stp x=ctr m=cal t l p`bk"
+                          : ",/DN ;.UP u=leg s=stp x=0 m=tn t l p`bk");
   else
     footer(haveUp ? "u=leg m=cal t=tp l p ` back" : "m=cal t=tp l p ` back");
 }
@@ -24951,7 +25694,7 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 86;          // must exceed the highest rows[] index used below (currently 85)
+  const int N = 99;          // must exceed the highest rows[] index used below (transport 98)
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -24962,7 +25705,7 @@ void App::drawSettings() {
                    : (cfg.visSunElMax >= -12) ? "nautical (-12)" : "astro (-18)";
     rows[67] = String("Sky-dark gate: ") + dk; }
   rows[68] = String("Visible min el: ") + String((int)cfg.visMinEl) + " deg";
-  rows[4]  = String("WiFi SSID: ") + cfg.ssid;
+  rows[4]  = String("WiFi SSID: ") + (cfg.ssid[0] ? cfg.ssid : "(none)");
   rows[5]  = String("WiFi pass: ") + String(strlen(cfg.pass) ? "******" : "(none)");
   rows[6]  = String("Save & test WiFi (1/2)");
   rows[50] = String("WiFi 2 SSID: ") + String(strlen(cfg.ssid2) ? cfg.ssid2 : "(none)");
@@ -24971,6 +25714,29 @@ void App::drawSettings() {
              + (cfg.webEnable && net.connected()
                 ? String(" (") + WiFi.localIP().toString() + ")" : String(""));
   rows[53] = String("Web port: ") + String(cfg.webPort);
+  rows[90] = String("Printer IP: ") + String(cfg.printerHost[0] ? cfg.printerHost : "(off)");
+  rows[91] = String("Printer port: ") + String(cfg.printerPort);
+  { const char* pw = (cfg.printerCols >= 64) ? "Font B (64 col)"
+                    : (cfg.printerCols >= 48) ? "80mm (48 col)"
+                    : (cfg.printerCols >= 42) ? "80mm (42 col)" : "58mm (32 col)";
+    rows[92] = String("Printer paper: ") + pw; }
+  { const char* pf;
+    switch (cfg.printFormat) {
+      case 1:  pf = "Plain text";        break;
+      case 2:  pf = "PCL (HP)";          break;
+      case 3:  pf = "PostScript";        break;
+      case 4:  pf = "ESC/P2 (Epson)";    break;
+      case 5:  pf = "Star Line";         break;
+      case 6:  pf = "ZPL (Zebra label)"; break;
+      case 7:  pf = "PWG raster (AirPrint)"; break;
+      case 8:  pf = "URF raster (AirPrint)"; break;
+      default: pf = "ESC/POS (receipt)"; break;
+    }
+    rows[97] = String("Printer format: ") + pf; }
+  rows[98] = String("Printer transport: ") + (cfg.printTransport == 1 ? "IPP (:631)" : "Raw (:9100)");
+  rows[87] = String("Test printer (probe formats)");
+  rows[93] = String("Print to serial: ") + (cfg.printToSerial ? "on" : "off");
+  rows[94] = String("Save to /CardSat/Reports: ") + (cfg.printToFile ? "on" : "off");
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[84] = String("AOS lead alert: ") + (cfg.aosLeadMin ? (String((int)cfg.aosLeadMin) + " min") : String("off"));
   rows[83] = String("AMSAT status window: ") + (int)cfg.amsatWindowH + " h";
@@ -25029,6 +25795,8 @@ void App::drawSettings() {
              : (cfg.dimSecs % 60 == 0) ? String(cfg.dimSecs / 60) + " min"
                                        : String(cfg.dimSecs) + " s");
   rows[26] = String("My callsign: ") + (cfg.myCall[0] ? cfg.myCall : "(not set)");
+  rows[95] = String("Operator name: ") + (cfg.opName[0] ? cfg.opName : "(not set)");
+  rows[96] = String("Operator email: ") + (cfg.opEmail[0] ? cfg.opEmail : "(not set)");
   rows[27] = String("Backup config+favs -> SD");
   rows[28] = String("Restore config+favs");
   rows[29] = String("Reset all data (erase)");
@@ -25131,11 +25899,13 @@ void App::drawSettings() {
     else                 canvas.setTextColor(danger ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(rows[ai]);
   }
-  if (SET_CAT_ROWS[setCat][setSel] == 4) footer(",/ change  ENT edit  s scan  ` back");
-  else                                   footer(",/ change  ENT edit  ` back");
+  { int _id = SET_CAT_ROWS[setCat][setSel];
+    if (_id == 4 || _id == 50) footer(",/ change  ENT edit  s scan  ` back");
+    else                       footer(",/ change  ENT edit  ` back"); }
 }
 
-void App::startWifiScan() {
+void App::startWifiScan(bool forSecond) {
+  wifiScan2 = forSecond;
   setStatus("Scanning WiFi...");
   draw();                                   // show the notice before the blocking scan
   wifiApCount = net.scanWifi(wifiAp, MAX_WIFI_AP);
@@ -25153,24 +25923,27 @@ void App::keyWifiScan(char c, bool enter, bool back) {
   if (isUp(c))   wifiSel = (wifiSel + wifiApCount - 1) % wifiApCount;
   if (isDown(c)) wifiSel = (wifiSel + 1) % wifiApCount;
   if (enter) {
-    strncpy(cfg.ssid, wifiAp[wifiSel].ssid, sizeof(cfg.ssid) - 1);
-    cfg.ssid[sizeof(cfg.ssid) - 1] = 0;
+    char* ss  = wifiScan2 ? cfg.ssid2 : cfg.ssid;
+    char* pw  = wifiScan2 ? cfg.pass2 : cfg.pass;
+    int   sssz = wifiScan2 ? (int)sizeof(cfg.ssid2) : (int)sizeof(cfg.ssid);
+    strncpy(ss, wifiAp[wifiSel].ssid, sssz - 1);
+    ss[sssz - 1] = 0;
     cfg.save();
     if (wifiAp[wifiSel].enc) {                  // secured -> ask for the password
-      editTarget = 202;
-      editTitle  = String("Password: ") + cfg.ssid;
+      editTarget = wifiScan2 ? 218 : 202;       // 218 = WiFi-2 pass, 202 = WiFi-1 pass
+      editTitle  = String("Password: ") + ss;
       editBuf    = "";
       screen     = SCR_EDIT;
     } else {                                    // open network -> no password
-      cfg.pass[0] = 0; cfg.save();
-      setStatus(String("Selected ") + cfg.ssid);
+      pw[0] = 0; cfg.save();
+      setStatus(String("Selected ") + ss);
       screen = SCR_SETTINGS;
     }
   }
 }
 
 void App::drawWifiScan() {
-  header("WiFi scan");
+  header(wifiScan2 ? "WiFi scan (net 2)" : "WiFi scan");
   canvas.setTextSize(1);
   if (wifiApCount <= 0) {
     canvas.setTextColor(CL_GREY, CL_BLACK);

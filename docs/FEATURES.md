@@ -455,4 +455,47 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   leaving the previous catalog untouched (protects internal-flash units).
 - **USB serial console** (115200) — a read-only bench console: `help`, `ver`, `heap`,
   `sats`, `fav`, `next`, `net`, `time`, `gps`, `bat`, `fs`, `up`, and `pass <sat>`
-  (next pass for any catalog bird). Zero heap cost; never changes device state.
+  (next pass for any catalog bird), and `print <report>` for the receipt printer.
+  Zero heap cost; never changes device state (`print` only transmits to your printer).
+
+## Printing (v0.9.55)
+
+- **Receipt printing, three ways** — CardSat turns satellite data into paper. Any of its
+  **sixteen reports** can fan out to any combination of three sinks: a network **ESC/POS
+  printer** over TCP:9100 (e.g. the Epson TM-P20II Wi-Fi or an 80 mm GZM8022), the **USB
+  serial console** (copy/paste — no printer needed), and an 80-column **/CardSat/Reports/*.txt
+  file** on the SD card. Streamed line-by-line, so the resident memory cost is zero.
+  **Printer format** matches your hardware — **ESC/POS** (receipt), **plain text** (universal
+  fallback), **PCL** (HP/office), **PostScript**, and, provided-but-untested, **ESC/P2**
+  (Epson), **Star Line** (Star thermal), and **ZPL** (Zebra network label printers) — all
+  sharing one zero-RAM streaming path, so CardSat drives receipt, office, and label printers
+  alike.
+- **Raster printing (PWG + URF)** — for the large class of driverless printers (AirPrint, IPP
+  Everywhere, Mopria) that accept only raster page images, CardSat renders the report to a
+  300-DPI grayscale page **on the device**, one scanline at a time (~4 KB RAM, no full-page
+  buffer), and streams it over IPP. Emits **PWG raster** (`image/pwg-raster`, required by IPP
+  Everywhere) or **URF raster** (`image/urf`, Apple Raster). Both validated byte-identical to
+  the reference `ppm2pwg` encoders; PWG confirmed printing on a real AirPrint printer.
+- **Test printer (probe formats)** — an IPP Get-Printer-Attributes query that reports which
+  document formats a printer accepts (PWG, URF, PDF, JPEG, PS, PCL), so you can tell which
+  format to use before printing.
+- **IPP transport** — besides raw port 9100, the printer sink can send over **IPP** (HTTP,
+  port 631), carrying PCL/PostScript for office printers that expose IPP but not 9100, or the
+  raster formats for driverless/AirPrint printers (which accept jobs only over IPP). Streams
+  via HTTP chunked encoding, still zero-buffer. Raster formats select IPP automatically.
+  **Paper width** is a setting: 58 mm (32 col), 80 mm (42 or 48 col), or Font B (64 col);
+  each sink hard-wraps to its width. (Bluetooth printers are not supported — the ESP32-S3 has
+  no Bluetooth Classic.) *Full implementation details: `docs/design/PRINTING_IMPLEMENTATION.md`.*
+- **Contextual printing** — every report prints from its own screen with `p` (Passes,
+  Mutual windows, DX Doppler, EQX, Target search, Notes) or `P` (all-favorite passes on
+  the schedule); the rove-plan viewer and note editor print what they're showing.
+- **About → Print submenu** (`p`) — a scrollable list of **every** report, giving on-device
+  access to the ones without a natural home screen (ticket, card, keps, log, horizon)
+  alongside the contextual keys. `a` and `c` also print the **Support AMSAT** sheet and the
+  **operator contact card** (callsign/name/email + a public-friendly explainer) directly;
+  operator name and email are new settings.
+- **ASCII polar sky maps** — a pass's polar (sky-track) screen prints a text sky map of the
+  satellite's arc (`P`), drawn in 7-bit-safe characters (`+` zenith, `.` horizon, `*` track)
+  for the widest printer compatibility.
+- **Second-network WiFi scan** — the WiFi scanner can now target the WiFi-2 slot (`s` on
+  the WiFi 2 SSID row in Settings), not just the primary network.

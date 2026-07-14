@@ -12,11 +12,13 @@ namespace {
   int        s_pCols = 32;              // printer sink width (columns)
   int        s_fmt  = Printer::FMT_ESCPOS;
   int        s_transport = Printer::RAW9100;   // RAW9100 or IPP
+  int        s_paper = 0;                      // raster paper: 0 Letter, 1 A4
   bool       s_chunkOpen = false;       // IPP: HTTP chunked body is open
   bool       s_ippAccepted = false;     // IPP: printer returned HTTP 2xx for the job
+  bool       s_writeOk = true;          // all socket writes completed (no partial/failed write)
   // Raster mode (FMT_PWG_RASTER): report lines are COLLECTED, then rendered as a
   // page at end()/feedCut() rather than streamed as text.
-  static const int RAS_MAX_LINES = 90;
+  static const int RAS_MAX_LINES = 400;   // ~10 letter pages of report text
   String     s_rasLines[RAS_MAX_LINES];
   int        s_rasN = 0;
   bool       s_ser  = false;            // serial sink active
@@ -67,16 +69,32 @@ namespace {
   // Each write becomes one HTTP chunk: <hex-length>CRLF <bytes> CRLF. This lets us
   // stream a document of unknown total length (the report is built line-by-line),
   // keeping the zero-buffer model. RAW9100 writes go straight to the socket.
+  // Write every byte or record a failure. WiFiClient::write returns bytes written;
+  // a short write (full TCP buffer, disconnect, timeout) is a real error we must not
+  // ignore -- otherwise a job that dies mid-transmission still reports success.
+  void wrChecked(const uint8_t* b, size_t n) {
+    size_t off = 0;
+    while (off < n && s_writeOk) {
+      size_t w = s_cli.write(b + off, n - off);
+      if (w == 0) {                            // could not place any bytes
+        if (!s_cli.connected()) { s_writeOk = false; return; }
+        delay(2);                              // transient full buffer: brief retry
+        w = s_cli.write(b + off, n - off);
+        if (w == 0) { s_writeOk = false; return; }
+      }
+      off += w;
+    }
+  }
   void sockWrite(const uint8_t* b, size_t n) {
     if (!s_pOK || n == 0) return;
     if (s_transport == Printer::IPP && s_chunkOpen) {
       char hdr[12];
       int hn = snprintf(hdr, sizeof(hdr), "%X\r\n", (unsigned)n);
-      s_cli.write((const uint8_t*)hdr, hn);
-      s_cli.write(b, n);
-      s_cli.write((const uint8_t*)"\r\n", 2);
+      wrChecked((const uint8_t*)hdr, hn);
+      wrChecked(b, n);
+      wrChecked((const uint8_t*)"\r\n", 2);
     } else {
-      s_cli.write(b, n);
+      wrChecked(b, n);
     }
   }
   void pRaw(const uint8_t* b, size_t n) { if (s_pOK) sockWrite(b, n); }
@@ -196,6 +214,9 @@ namespace {
 namespace RasterGen {
   // These write through the printer sink via the file-scope pRaw() above.
   static uint32_t s_rw = 0, s_rh = 0, s_rdpi = 300;
+  // Media geometry for the PWG page header (set by renderReport per paper choice).
+  static uint32_t s_pagePtsW = 612, s_pagePtsH = 792;
+  static const char* s_pageName = "na_letter_8.5x11in";
   static bool     s_rvalid = false;
   static uint8_t  s_rreps  = 0;
   static uint8_t  s_rprev[2560];        // one scanline hold (max width we support)
@@ -224,7 +245,7 @@ namespace RasterGen {
     rPad(8);
     rU32(1); rU32(0);                 // NumCopies, Orientation
     rPad(4);
-    rU32(612); rU32(792);             // PageSize X/Y (points, letter)
+    rU32(s_pagePtsW); rU32(s_pagePtsH);  // PageSize X/Y (points)
     rPad(8);
     rU32(0); rU32(w); rU32(h);        // Tumble, Width, Height
     rPad(4);
@@ -239,7 +260,7 @@ namespace RasterGen {
     rPad(20);
     rU32(0); rU32(0);                 // VendorIdentifier, VendorLength
     rPad(1088); rPad(64);
-    rStr("",64); rStr("na_letter_8.5x11in",64);  // RenderingIntent, PageSizeName
+    rStr("",64); rStr(s_pageName,64);   // RenderingIntent, PageSizeName
   }
   // PWG PackBits (exact ppm2pwg compress_line, oneChunk=1).
   static void compress(const uint8_t* raw, size_t len){
@@ -292,14 +313,14 @@ namespace RasterGen {
 // Render an array of monospace text lines as a full raster page and stream it.
 // scale integer-scales the 16x32 font. Called by Printer when FMT_PWG_RASTER.
 namespace RasterGen {
-  static void renderTextPage(const char* const* lines, int n,
-                             uint32_t W, uint32_t H, uint32_t dpi,
-                             int scale, int marginX, int marginY, int lineGap,
-                             bool urf = false) {
-    if (W > sizeof(s_rscan)) W = sizeof(s_rscan);
+  // Render ONE page from lines[0..n-1] (already sliced to fit) into the current
+  // open raster document. Does NOT emit the file magic or endDoc -- the caller
+  // brackets the whole document so multiple pages share one job.
+  static void renderOnePage(const char* const* lines, int n,
+                            uint32_t W, uint32_t H, uint32_t dpi,
+                            int scale, int marginX, int marginY, int lineGap, bool urf) {
+    if (urf) beginPageUrf(W,H,dpi); else beginPage(W,H,dpi);
     const int GW = FONT_W*scale, GH = FONT_H*scale, pitch = GH + lineGap;
-    if (urf) { beginDocUrf(0); beginPageUrf(W,H,dpi); }
-    else     { beginDoc();     beginPage(W,H,dpi); }
     for(uint32_t y=0; y<H; ++y){
       memset(s_rscan, 0xFF, W);                 // white background
       int ty=(int)y - marginY;
@@ -322,6 +343,30 @@ namespace RasterGen {
       }
       row(s_rscan);
     }
+    flush();   // emit the last page's pending (coalesced) row before the next page
+  }
+
+  // Render a whole report as one raster document, paginating across as many pages
+  // as the line count needs (PWG/URF both support multiple pages in one job). The
+  // report text never overflows a single sheet now -- long reports simply span pages.
+  static void renderReport(const char* const* lines, int n,
+                           uint32_t W, uint32_t H, uint32_t dpi,
+                           int scale, int marginX, int marginY, int lineGap, bool urf) {
+    // W/H are the pixel dimensions the caller computed from the paper choice; the
+    // point size and PWG media name are set alongside them (see feedCut).
+    if (W > sizeof(s_rscan)) W = sizeof(s_rscan);
+    const int GH = FONT_H*scale, pitch = GH + lineGap;
+    int usableH = (int)H - 2*marginY;
+    int perPage = usableH / pitch;
+    if (perPage < 1) perPage = 1;
+    int pages = (n + perPage - 1) / perPage;
+    if (pages < 1) pages = 1;                    // always emit at least one page
+    if (urf) beginDocUrf((uint32_t)pages); else beginDoc();
+    for (int pg = 0; pg < pages; ++pg) {
+      int start = pg * perPage;
+      int cnt = n - start; if (cnt > perPage) cnt = perPage;
+      renderOnePage(lines + start, cnt, W, H, dpi, scale, marginX, marginY, lineGap, urf);
+    }
     endDoc();
   }
 }
@@ -337,6 +382,7 @@ bool begin(const Sinks& s) {
   s_pOK = false; s_pConnected = false; s_ser = s.toSerial; s_file = false; s_fpath = "";
   s_pCols = (s.printerCols >= 24 && s.printerCols <= 72) ? s.printerCols : 32;
   s_fmt   = (s.format >= FMT_ESCPOS && s.format <= FMT_URF_RASTER) ? s.format : FMT_ESCPOS;
+  s_paper = (s.paper == 1) ? 1 : 0;
   s_fCols = FILE_COLS;
   s_psY = 0; s_psPage = 0;
 
@@ -344,7 +390,7 @@ bool begin(const Sinks& s) {
   s_transport = (s.transport == Printer::IPP) ? Printer::IPP : Printer::RAW9100;
   // PWG raster is only meaningful over IPP (driverless printers); force it.
   if (s.format == FMT_PWG_RASTER || s.format == FMT_URF_RASTER) s_transport = Printer::IPP;
-  s_chunkOpen = false; s_ippAccepted = false; s_rasN = 0;
+  s_chunkOpen = false; s_ippAccepted = false; s_rasN = 0; s_writeOk = true;
   if (s.host && s.host[0]) {
     s_cli.setTimeout(4000);                       // socket read/write timeout
     // IPP rides HTTP on 631 unless the caller overrode the port; raw uses 9100.
@@ -461,11 +507,14 @@ String probeCapabilities(const char* host, uint16_t port) {
   // contain many null bytes (2-byte length prefixes), so an Arduino String would be
   // truncated at the first '\0' and miss the format tokens further in. Use a plain
   // buffer and scan it with memory search.
-  static uint8_t buf[4096];
+  // Reuse the raster scanline workspace (s_rscan, 2560 B) -- the probe and raster
+  // rendering never run at the same time, so they can share one buffer.
+  uint8_t* buf = RasterGen::s_rscan;
+  const size_t bufCap = sizeof(RasterGen::s_rscan);
   size_t blen = 0;
   uint32_t t0 = millis();
-  while (cli.connected() && (millis() - t0) < 6000 && blen < sizeof(buf)) {
-    while (cli.available() && blen < sizeof(buf)) { buf[blen++] = (uint8_t)cli.read(); t0 = millis(); }
+  while (cli.connected() && (millis() - t0) < 6000 && blen < bufCap) {
+    while (cli.available() && blen < bufCap) { buf[blen++] = (uint8_t)cli.read(); t0 = millis(); }
     delay(5);
   }
   cli.stop();
@@ -496,6 +545,7 @@ String probeCapabilities(const char* host, uint16_t port) {
 
 bool printerOk() { return s_pConnected; }   // did the printer connect this print? (survives end())
 bool ippAccepted() { return s_ippAccepted; }
+bool documentSent() { return s_writeOk; }   // did the whole document transmit without a write error?
 bool anySink()   { return s_pOK || s_ser || s_file; }
 String lastFile(){ return s_fpath; }
 
@@ -508,10 +558,16 @@ int cols() {
 
 // Collect one report line for the raster page, wrapping to s_pCols so long lines
 // don't run off the printable width (mirrors what the text formats do via wrapTo).
+// Append one already-wrapped line to the raster page buffer. On overflow, stamp a
+// visible truncation marker in the last slot instead of silently dropping lines.
+static void rasterPush(const String& ln) {
+  if (s_rasN < RAS_MAX_LINES - 1) { s_rasLines[s_rasN++] = ln; }
+  else if (s_rasN == RAS_MAX_LINES - 1) { s_rasLines[s_rasN++] = String("-- report truncated --"); }
+  // once full (s_rasN == RAS_MAX_LINES) further lines are dropped, marker already set
+}
+
 void rasterCollect(const String& s) {
-  wrapTo(s, s_pCols, [](const String& ln){
-    if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = ln;
-  });
+  wrapTo(s, s_pCols, [](const String& ln){ rasterPush(ln); });
 }
 
 void line(const String& s) {
@@ -528,7 +584,7 @@ void wrap(const String& s) { line(s); }   // line() already per-sink wraps
 
 void blank() {
   if (s_pOK) {
-    if (isRaster()) { if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = String(""); }
+    if (isRaster()) { rasterPush(String("")); }
     else if (s_fmt == FMT_POSTSCRIPT) psShowLine(String(""));
     else if (s_fmt == FMT_ZPL)   zplShowLine(String(""));
     else pNL();
@@ -540,7 +596,7 @@ void blank() {
 void rule() {
   auto dash = [](int w){ String r; r.reserve(w); for (int i=0;i<w;++i) r += '-'; return r; };
   if (s_pOK && isRaster()) {
-    if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = dash(s_pCols);
+    rasterPush(dash(s_pCols));
     if (s_ser)  Serial.println(dash(s_fCols));
     if (s_file) { s_f.print(dash(s_fCols)); s_f.print('\n'); }
     return;
@@ -603,12 +659,18 @@ void feedCut() {
       // printable width (printers have an unprintable border ~1/4in; use a safe
       // 2400px imageable area of the 2550px sheet). Pick the largest integer scale
       // whose text block fits, so wider column settings shrink the glyphs to fit.
-      const int SAFE_W = 2400, marginX = 60;
+      // Paper geometry at 300 DPI: Letter 2550x3300 / A4 2480x3508.
+      uint32_t pxW, pxH, ptW, ptH; const char* pname;
+      if (s_paper == 1) { pxW=2480; pxH=3508; ptW=595; ptH=842; pname="iso_a4_210x297mm"; }
+      else              { pxW=2550; pxH=3300; ptW=612; ptH=792; pname="na_letter_8.5x11in"; }
+      RasterGen::s_pagePtsW = ptW; RasterGen::s_pagePtsH = ptH; RasterGen::s_pageName = pname;
+      const int marginX = 60;
+      int safeW = (int)pxW - 150;      // ~1/4in unprintable border each side
       int cols = (s_pCols > 0) ? s_pCols : 32;
       int scale = 3;
-      while (scale > 1 && (cols * FONT_W * scale + 2 * marginX) > SAFE_W) scale--;
-      RasterGen::renderTextPage(ptrs, s_rasN, 2550, 3300, 300, scale, marginX, 100, 12,
-                                 /*urf=*/ s_fmt == FMT_URF_RASTER);
+      while (scale > 1 && (cols * FONT_W * scale + 2 * marginX) > safeW) scale--;
+      RasterGen::renderReport(ptrs, s_rasN, pxW, pxH, 300, scale, marginX, 100, 12,
+                              /*urf=*/ s_fmt == FMT_URF_RASTER);
     }
     // FMT_TEXT: nothing; some printers need a manual eject, noted in the docs.
   }

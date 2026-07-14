@@ -258,6 +258,22 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   RF-exposure gained per-mode duty presets, and the scientific calculator gained
   amateur-radio helpers (dBm/W, dB, wavelength), metric-prefix input (`100k`, `2.2n`) and
   an engineering-notation display mode.
+- **Tiny BASIC, graphing calculator, and location converter (0.9.56)** — the Tools hub gains a
+  small **line-numbered BASIC interpreter** with an on-device editor: `LET`/`PRINT`/`IF-THEN`/
+  `GOTO`/`GOSUB-RETURN`/`FOR-NEXT-STEP`/`REM`/`END`, 26 variables A-Z, and `ABS INT SQR SIN COS
+  RND` (trig in degrees). Programs are capped at **4 KB** and saved to `/CardSat/basic/*.bas`;
+  execution is **bounded on every axis** (200 lines, GOSUB depth 16, FOR depth 8, 6 KB output,
+  500,000 statements per run) so a runaway loop halts with a `loop?` message instead of hanging
+  the device, and the interpreter's working state is heap-allocated only while a program runs.
+  A **graphing calculator** plots `y = f(x)` over a pan/zoomable window, reusing the scientific
+  calculator's expression parser with an added `x` binding (so both share identical math);
+  discontinuities like `tan(x)` poles break the curve rather than drawing a spurious vertical
+  line. A **location converter** shows one position simultaneously as **Maidenhead** (6- and
+  8-character), **decimal degrees**, **DMS**, **DDM**, **Plus Code** (Open Location Code),
+  **UTM**, **MGRS**, and **USNG** — all computed on-device with no network, and each projection
+  validated byte-for-byte against reference implementations across both hemispheres including
+  the Norway/Svalbard UTM zone exceptions. (what3words is deliberately excluded: it is a
+  proprietary network-only wordlist lookup, not an offline algorithm.)
 - **Transponder list & reporting (0.9.50)** — a satellite's transponders are now ordered
   by usefulness: **two-way transponders first**, amateur-band before non-amateur (so
   out-of-band TT&C/telemetry downlinks sink to the end), active before inactive.
@@ -427,18 +443,32 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   **LittleFS** if no card is present.
 - **Screenshots** — press **`b`** on any screen to save a 24-bit BMP to
   `/CardSat/Screenshots/` on the SD card (handy for documentation).
+- **Global emergency stop (0.9.56)** — **`Fn`+back** (`` ` `` or DEL) from any operating screen
+  immediately disengages **all** radio and rotator control: CAT output, rotator output, the
+  satellite-mode and EME/grid-chase drivers, and pass tracking, with a beep and an "All control
+  stopped" banner. One keystroke to stop everything if a rotator heads the wrong way or a radio
+  is transmitting when it shouldn't. (Excluded on the text-editor screens, where a plain back
+  is an edit action.)
+- **Memory diagnostics (0.9.56)** — the serial console gains `mem` (free/min-ever heap, largest
+  free block, and the `sizeof` + resident cost of every major structure and array) and `memtrace`
+  (a one-line heap log on every screen change, for profiling which screens allocate). The About
+  screen also shows live/largest/min-ever heap. Built to measure before optimizing.
+
 - **Favorites**, **manual GP / transponder / time entry**, per-satellite
   **calibration**, and a **factory reset**.
 
-- **Tools hub** (About -> `t`) — 32 offline bench tools, covered in detail in the
-  *Tools* entries above: the scientific and programmer's calculators, character/DXCC/CQ/ITU
-  lookups and references, the link-budget / RF-exposure / battery / debris / cross-section
-  calculators, the antenna and feedline forms (coax, dipole, vertical, yagi, quad, phasing,
-  wavelength, attenuator, dB-chain), the ARRL radio-math tools (complex/polar, reactance &
-  resonance, RC/RL time constant, radio-math reference), and the operating-references and
-  CTCSS cards, plus the CubeSatSim C2C command crib (DTMF / APRS / carrier commands
-  for AMSAT's CubeSat Simulator, with the config-script options). All math is local and works with no network. (The DXCC *lookup* database
-  covers 340 entities; the workable-DXCC footprint reference uses the same 340-entity set.)
+- **Tools hub** (About -> `t`) — 35 offline bench tools, ordered **compute-first** (the
+  interactive calculators and converters, then the satellite-compute tools, then the reference
+  lookups, then the live-recalc forms). Covered in detail in the *Tools* entries above: the
+  scientific, programmer's, and **graphing** calculators, **Tiny BASIC**, the **location
+  converter**, character/DXCC/CQ/ITU lookups and references, the link-budget / RF-exposure /
+  battery / debris / cross-section calculators, the antenna and feedline forms (coax, dipole,
+  vertical, yagi, quad, phasing, wavelength, attenuator, dB-chain), the ARRL radio-math tools
+  (complex/polar, reactance & resonance, RC/RL time constant, radio-math reference), and the
+  operating-references and CTCSS cards, plus the CubeSatSim C2C command crib (DTMF / APRS /
+  carrier commands for AMSAT's CubeSat Simulator, with the config-script options). All math is
+  local and works with no network. (The DXCC *lookup* database covers 340 entities; the
+  workable-DXCC footprint reference uses the same 340-entity set.)
 - **AMSAT Fox anatomy** (Help -> `a`) — an animated Learn explainer: a rotating 1U
   Fox CubeSat with cycling labeled callouts (antennas, solar, battery, IHU, FM
   transponder, magnetic stabilization, experiment bay), every label verified against
@@ -458,10 +488,12 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   (next pass for any catalog bird), and `print <report>` for the receipt printer.
   Zero heap cost; never changes device state (`print` only transmits to your printer).
 
-## Printing (v0.9.55)
+## Printing (v0.9.55, refined v0.9.56)
 
 - **Receipt printing, three ways** — CardSat turns satellite data into paper. Any of its
-  **sixteen reports** can fan out to any combination of three sinks: a network **ESC/POS
+  **nineteen menu-listed reports** — plus the context-only ones that print from the screen
+  that holds their data (notes, Tiny BASIC listings and output, calculator and converter
+  results) — can fan out to any combination of three sinks: a network **ESC/POS
   printer** over TCP:9100 (e.g. the Epson TM-P20II Wi-Fi or an 80 mm GZM8022), the **USB
   serial console** (copy/paste — no printer needed), and an 80-column **/CardSat/Reports/*.txt
   file** on the SD card. Streamed line-by-line, so the resident memory cost is zero.
@@ -479,6 +511,8 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **Test printer (probe formats)** — an IPP Get-Printer-Attributes query that reports which
   document formats a printer accepts (PWG, URF, PDF, JPEG, PS, PCL), so you can tell which
   format to use before printing.
+- **Multi-page raster + A4** — long reports paginate across as many raster sheets as needed
+  (no one-page truncation); raster paper is selectable **US Letter or A4** (Settings → Network).
 - **IPP transport** — besides raw port 9100, the printer sink can send over **IPP** (HTTP,
   port 631), carrying PCL/PostScript for office printers that expose IPP but not 9100, or the
   raster formats for driverless/AirPrint printers (which accept jobs only over IPP). Streams
@@ -497,5 +531,25 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **ASCII polar sky maps** — a pass's polar (sky-track) screen prints a text sky map of the
   satellite's arc (`P`), drawn in 7-bit-safe characters (`+` zenith, `.` horizon, `*` track)
   for the widest printer compatibility.
+- **Four analysis reports, with ASCII renderings of their screens (0.9.56)** — **orbital
+  analysis**, **illumination**, **10-day passes**, and the **6-hour timeline** print from their
+  own screens (`p`) and from the About → Print submenu. The three visual ones carry a text
+  rendering of what the screen draws: illumination prints a per-day raster (`#` sunlit / `.`
+  eclipse across each orbit), the 10-day report a 24 h UTC track per day with passes marked by
+  elevation tier (`:` low, `=` mid, `#` high), and the timeline one row per favorite across the
+  window. All width-checked for both 58 mm (32-col) and 80 mm (44-col) paper.
+- **Orbital analysis as a permanent record (0.9.56)** — the orbital-analysis report deliberately
+  **omits live values** (current range, Doppler, az/el, sub-point, next pass) and instead captures
+  the orbit's lasting characteristics at that element set: Keplerian elements with epoch, period,
+  SMA, apogee/perigee with footprint diameters, orbital speeds, J2 nodal and apsidal drift,
+  sun-synchronous flag, repeat-track resonance, longest-possible pass, beta angle with the
+  full-sun/eclipse geometry, decay estimate, and launch identity. It's a snapshot of the orbit,
+  not of the moment.
+- **Printing from the tools (0.9.56)** — Tiny BASIC prints its **program listing** (`Fn`+`P` in
+  the editor) and its **last run's output** (`p` on the console); the **scientific calculator**
+  (`Fn`+`p`), **programmer calculator**, **graphing calculator**, **location converter**, and
+  **character lookup** (`p`) print their results. The split is deliberate: the two screens where
+  you type free text use `Fn`+`p` so a plain `p` still types, matching the note editor's
+  convention; tools that don't accept typed text use plain `p`.
 - **Second-network WiFi scan** — the WiFi scanner can now target the WiFi-2 slot (`s` on
   the WiFi 2 SSID row in Settings), not just the primary network.

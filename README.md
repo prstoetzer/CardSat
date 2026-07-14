@@ -17,15 +17,32 @@ transit prediction, sun/eclipse status, and more.
 > over one wire). The other per-protocol CAT encoders (separate-pin CI-V, Yaesu,
 > Kenwood), the **Icom LAN (RS-BA1)** backend, and the rotator backends are host-tested
 > but not yet confirmed against that specific hardware — verify those on the air. See
-> **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**.
+> **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**. What stands between here and a
+> 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
+> tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
-> **New in v0.9.55:** **CardSat prints — everything, three ways.** Turn any of **sixteen
+> **New in v0.9.56:** **a pocket workbench — and reports that look like the screen.** Tools
+> gains a **Tiny BASIC** interpreter with an on-device editor (line-numbered BASIC, 4 KB programs,
+> `Fn`+`R` to run — bounded so a runaway loop can't hang the radio), a **graphing calculator**
+> that plots `y = f(x)` with the scientific calculator's own parser, and a **location converter**
+> showing one position as Maidenhead, decimal, DMS, DDM, **Plus Code**, **UTM**, **MGRS**, and
+> **USNG** (every projection validated byte-for-byte against reference implementations). The
+> Tools menu is regrouped **compute-first**, and the tools **print** — listings, output,
+> conversions, calculator results. Four printable reports join the roster (**orbital analysis**,
+> **illumination**, **10-day passes**, **6-hour timeline**), the visual ones carrying **ASCII
+> renderings of their screens**; orbital analysis is now a **permanent record** of an element
+> set's characteristics rather than a snapshot of live values. A global **Fn+Back emergency
+> stop** halts all radio/rotator control from any screen, and **memory diagnostics** (`mem`,
+> `memtrace`) land for measuring the heap.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.56.md)**.
+
+> **New in v0.9.55:** **CardSat prints — everything, three ways.** Turn any of **nineteen
 > reports** into paper on a network **ESC/POS** printer (TCP 9100; reference targets are Epson's
 > battery **TM-P20II Wi-Fi** and the 80 mm **GZM8022**), copy them out of the **USB serial console**
 > with no printer at all, or save an 80-column **/CardSat/Reports/*.txt** to the SD card — any combination.
 > Reports print **contextually** (`p` on the screen that shows the data — passes, mutual windows, DX
 > Doppler, EQX, target search, a pass's **ASCII sky-track** map, notes), with an **About → Print**
-> submenu listing them all. Two are made for outreach: a **Support AMSAT** page and an **operator
+> submenu listing every report that doesn't depend on a tool's transient state. Two are made for outreach: a **Support AMSAT** page and an **operator
 > contact card** that explains ham radio and satellites to the public. **Paper width** is a setting
 > (58 mm / 80 mm / Font B). Streamed line-by-line — zero resident memory. Eight page-description
 > languages are supported, from ESC/POS receipt to **on-device PWG/URF raster** — so besides the
@@ -36,19 +53,9 @@ transit prediction, sun/eclipse status, and more.
 > story is in `docs/design/PRINTING_SCOPE.md`. See the
 > **[release notes](docs/releases/RELEASE_NOTES_0.9.55.md)**.
 
-> **New in v0.9.54:** **big satellite lists, handled honestly — plus a serial console.** Choose a
-> large CelesTrak group and CardSat now loads your **favorites first**, fills the rest in file
-> order, and *says so* — "Loaded 150 of 812" — instead of silently keeping the first 150. GP
-> downloads are **preflighted** against free storage, so a multi-megabyte group can't fill an
-> internal-flash unit mid-write. A **read-only USB serial console** (115200: `help`, `heap`,
-> `sats`, `pass <sat>`…) joins for bench debugging, and Tools gains a **CubeSatSim C2C
-> reference** — the DTMF/APRS command crib for AMSAT's CubeSat Simulator. A new **Learn
-> corner** rounds it out: an animated **AMSAT Fox anatomy** (Help → `a`; every callout
-> verified against AMSAT's Fox documentation), a *Fox & CubeSats* primer, and a
-> **CubeSat Simulator** intro.
-> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.54.md)**.
-
 > **Earlier releases** — one line each; full stories in [docs/releases/](docs/releases/):
+> **0.9.54** big satellite lists handled honestly (favorites-first loading, preflighted
+> downloads), serial console, CubeSatSim C2C reference, Learn corner ·
 > **0.9.53** memory & reliability — LoTW/Cloudlog upload fixes, 4-bpp display, on-demand audio, multi-file web download ·
 > **0.9.52** workable-horizon & target-search planners + the 130-page manual ·
 > **0.9.51** rove pass-planner + state-vector→GP tool · **0.9.50** mode-aware AMSAT status
@@ -171,9 +178,10 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 
 ## Screenshots
 
-*(The captures below are from v0.9.49; the newer screens — rove planner, workable horizon,
-target search, and the Files page's multi-select — will be added in an upcoming screenshot
-refresh.)*
+*(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
+unchanged since. Several features added since — rove planner, workable horizon, target
+search, on-device printing, the Files page's multi-select — are not pictured yet; a
+screenshot refresh is planned. The current firmware is v0.9.56.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#20-screen-by-screen-reference).
@@ -195,7 +203,7 @@ A few of CardSat's screens (240×135 native captures). The full set is in the
 <td align="center"><img src="docs/img/home.jpg" width="240"><br><b>Home</b> — every screen is one hop away</td>
 </tr>
 <tr>
-<td align="center"><img src="docs/img/tools.jpg" width="240"><br><b>Tools</b> — 20 offline bench &amp; mission tools</td>
+<td align="center"><img src="docs/img/tools.jpg" width="240"><br><b>Tools</b> — 35 offline bench &amp; mission tools</td>
 <td align="center"><img src="docs/img/tools-link-budget.jpg" width="240"><br><b>Link budget</b> — EIRP, path loss, SNR, margin</td>
 <td align="center"><img src="docs/img/tools-orbit-lifetime.jpg" width="240"><br><b>Orbit lifetime</b> — drag decay vs disposal rules</td>
 </tr>
@@ -270,6 +278,7 @@ See **[MANUAL.md](MANUAL.md)** for the complete guide.
 | **[docs/WIRING.md](docs/WIRING.md)** | CAT, GPS, and rotator wiring. |
 | **[docs/RADIOS.md](docs/RADIOS.md)** | Per-radio behavior: bands, sat mode, read-back. |
 | **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)** | What's confirmed on hardware vs still to test on the air. |
+| **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)** | What stands between here and 1.0: blockers, deferred work, and the decisions behind them. |
 | **[docs/interfaces/](docs/interfaces/)** | Electrical/protocol interface specs: CI-V, single-pin CI-V (+ level-shifter build guide), Icom LAN, rotator, RS-232, radio settings chart. |
 | **[docs/guides/ARDUINO_SETUP.md](docs/guides/ARDUINO_SETUP.md)** | From-scratch Arduino IDE setup. |
 | **[docs/guides/PORTING.md](docs/guides/PORTING.md)** | Porting CardSat (or a subset) to other ESP32 boards or non-ESP32 platforms. |
@@ -287,7 +296,7 @@ AMSAT publishes **GP (OMM) element sets as JSON**; CardSat reads
 `https://newark192.amsat.org/gpdata/current/daily-bulletin.json` (configurable in
 **Settings → GP URL**), streams it straight to flash, and parses one element set at a
 time so the full catalog loads on the no-PSRAM S3. Transponders come from the
-**SatNOGS DB** (`db.satnogs.org`). Up to **220 satellites** in RAM and **64
+**SatNOGS DB** (`db.satnogs.org`). Up to **150 satellites** in RAM and **64
 transponders** per active satellite. The **Workable DXCC** entity list is derived from
 **cty.dat** (AD1C, country-files.com), bundled in flash. Optional screens pull live,
 cached data: **space weather** from **NOAA SWPC**, **terrestrial weather** from

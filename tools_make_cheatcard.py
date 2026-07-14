@@ -38,7 +38,7 @@ FRONT = [
  ("GLOBAL",
   "<b>;</b> up &middot; <b>.</b> down &middot; <b>,</b> <b>/</b> left/right &middot; "
   "<b>ENTER</b> select &middot; <b>`</b>/<b>DEL</b> back &middot; Home: 2-col grid, letter jumps, <b>,</b>/<b>/</b> hop columns &middot; "
-  "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help "
+  "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help &middot; <b>Fn+`</b>/<b>Fn+DEL</b> STOP all radio/rotator control "
   "(Help links: <b>g</b> glossary+math &middot; <b>m</b> user guide &middot; <b>s</b> sat history &middot; <b>t</b> tech help &middot; <b>l</b> learn theory &middot; <b>f</b> band plan)"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
@@ -197,7 +197,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (31): calculators, DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b> (fit mean elements from a launch state vector, TEME/J2000, save as sat), Q-codes/phonetics/RST, CTCSS &middot; <b>p</b> <b>Print</b>: 16 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (35): scientific/graphing/programmer calculators, <b>Tiny BASIC</b>, <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b> (fit mean elements from a launch state vector, TEME/J2000, save as sat), Q-codes/phonetics/RST, CTCSS &middot; <b>p</b> <b>Print</b>: 19 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
 ]
 
 

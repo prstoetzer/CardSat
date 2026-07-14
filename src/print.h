@@ -8,7 +8,7 @@
 //    * the USB serial console (copy/paste when there is no printer),
 //    * a text file under /CardSat/Reports (an 80-column .txt to pull off the SD).
 //
-//  The NETWORK printer sink can speak one of four page languages, chosen by the
+//  The NETWORK printer sink can speak one of NINE page languages, chosen by the
 //  operator to match their hardware (Sinks.format):
 //    FMT_ESCPOS  - ESC/POS control codes for thermal RECEIPT printers (default;
 //                  e.g. Epson TM-P20II, GZM8022). Center/bold titles, feed+cut.
@@ -25,6 +25,12 @@
 //    FMT_ZPL     - Zebra ZPL for network label printers: each line becomes a
 //                  positioned ^FO/^FD field inside an ^XA...^XZ label; a new
 //                  label starts when one fills. Also drives many Godex/compatibles.
+//    FMT_PWG_RASTER - on-device PWG Raster (image/pwg-raster) for driverless /
+//                  AirPrint / IPP Everywhere printers: the report is rendered to a
+//                  300-DPI grayscale page (paginated across sheets) and streamed
+//                  over IPP. No PCL/PostScript interpreter needed on the printer.
+//    FMT_URF_RASTER - the Apple-Raster (image/urf) variant for AirPrint printers
+//                  that accept only URF. Same render, different container.
 //  The serial and file sinks are ALWAYS plain text regardless of format.
 //
 //  Design for a no-PSRAM ESP32-S3: a THIN STREAMING transport. Nothing buffers a
@@ -39,11 +45,12 @@ namespace Printer {
                 FMT_URF_RASTER = 8 };
 
   // Transport for the network printer sink. RAW9100 streams the page language
-  // straight to a socket (the default for all the formats above). IPP wraps the
-  // same page-language bytes in an HTTP/IPP Print-Job to port 631 -- for office
-  // printers that expose IPP but not raw 9100. IPP carries PCL or PostScript as
-  // its document payload; it CANNOT rasterize, so raster-only (AirPrint-only)
-  // printers that advertise only image/urf or image/pwg-raster are NOT supported.
+  // straight to a socket (the default for text formats). IPP wraps the page bytes
+  // in an HTTP/IPP Print-Job to port 631 -- for office printers that expose IPP but
+  // not raw 9100, and for driverless/AirPrint printers, which accept jobs ONLY over
+  // IPP. IPP carries whichever format is selected, including the on-device PWG/URF
+  // raster (FMT_PWG_RASTER / FMT_URF_RASTER) -- so raster-only AirPrint printers ARE
+  // supported. The raster formats select IPP automatically.
   enum Transport { RAW9100 = 0, IPP = 1 };
 
   struct Sinks {
@@ -55,6 +62,7 @@ namespace Printer {
     bool        toFile   = false;       // also write /CardSat/Reports/<fileTitle>-<stamp>.txt
     const char* fileTitle = "report";   // filename stem for the file sink
     int         transport = RAW9100;    // RAW9100 (port 9100) or IPP (HTTP POST :631)
+    int         paper     = 0;          // raster media: 0 = US Letter, 1 = A4
     const char* ippResource = "/ipp/print"; // IPP resource path on the printer
   };
 
@@ -62,6 +70,7 @@ namespace Printer {
   bool printerOk();                    // did the TCP printer sink connect?
   String probeCapabilities(const char* host, uint16_t port);  // IPP Get-Printer-Attributes -> formats
   bool ippAccepted();                  // IPP: did the printer return HTTP 2xx? (RAW9100: false)
+  bool documentSent();                 // did the entire document transmit without a socket write error?
   bool anySink();                      // is at least one sink active?
   String lastFile();                   // path of the file sink written ("" if none)
 

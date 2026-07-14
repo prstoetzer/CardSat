@@ -3,9 +3,10 @@
 A complete guide to operating **CardSat**, the amateur-radio satellite tracker and
 multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, Kenwood).
 
-> **Status.** CardSat runs on the Cardputer ADV, and every feature has been
-> exercised on hardware. **Single-pin CI-V is confirmed working on an IC-821** (full
-> bidirectional exchange over one wire). The remaining CAT paths — separate-pin CI-V,
+> **Status.** CardSat runs on the Cardputer ADV, with its core features (display,
+> keyboard, GPS, pass prediction, tracking, alarms, logging, and the on-device data
+> caches) confirmed on hardware. **Single-pin CI-V is confirmed working on an IC-821**
+> (full bidirectional exchange over one wire). The remaining CAT paths — separate-pin CI-V,
 > Yaesu and Kenwood encoders, the Icom LAN (RS-BA1) backend — and all of the rotator
 > backends (GS-232, Easycomm I/II/III, and SPID over the I²C→UART bridge; the rotctld
 > TCP client; PstRotator UDP; and the direct-Yaesu I²C interface) are host-tested but
@@ -310,7 +311,6 @@ error-prone.
 
 After upgrading, confirm the running version on the **About** screen (Main menu →
 **About**). A power cycle after flashing is good practice to clear any stale state.
-
 
 ---
 
@@ -651,7 +651,7 @@ CardSat tracks what it has sent in a new `uploaded` column in `qso_log.csv`.)
 **Large uploads are automatic.** A full log is uploaded in **batches of 6 QSOs**, each
 small enough to clear a fixed limit in the ESP32's network stack (a larger single upload
 would stall part-way through — see
-[docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md](design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md)).
+[docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md](docs/design/UPLOAD_AND_AUDIO_TLS_POSTMORTEM.md)).
 When more QSOs remain after a batch, CardSat **continues on its own in the same session**,
 and you **enter your key password only once** for the whole run. The upload screen shows the
 progress ("Batch sent; N left…"). This works for both **`u` upload (un-uploaded only)** and
@@ -2246,7 +2246,6 @@ At get-ready time the battery is checked too: at or below **30%** the flash carr
 yellow **BATT n%** note (with a low warning tone), so a pass is not lost to a dying
 cell that a quick top-up before AOS would have saved.
 
-
 ## 13. Sun, Moon, weather, and reference tools
 
 CardSat computes the Sun's position and whether the satellite is illuminated:
@@ -2447,7 +2446,6 @@ needing a re-fetch.
 
 *Weather data by Open-Meteo.com, licensed under CC BY 4.0.*
 
-
 The same fetch now also pulls **hourly cloud cover for the next 48 hours**. It is not
 shown on the Weather screen itself; it feeds the **visible-pass list** and the
 **Sun/Moon transit finder**, which append a color-coded cloud percentage to each row —
@@ -2512,8 +2510,6 @@ path and long path**.
 
 Your own grid comes from your set location, so set that first on the **Location**
 screen. `` ` `` returns to the main menu.
-
-
 
 ### Upcoming activations (Activations)
 
@@ -2728,7 +2724,6 @@ offline, and **running the online Update (`k`) with WiFi overwrites `/CardSat/gp
 > checklist.
 
 ---
-
 
 **What persists and works without WiFi.** Every network data source is cached to
 flash and reloaded at boot, so after one online refresh the unit is fully usable
@@ -3446,7 +3441,12 @@ Keplerian elements, QSO log, workable horizon) as well as all the others; ENTER 
 highlighted one and the list stays open. **`a`** and **`c`** on About remain direct
 shortcuts for the *Support AMSAT* page and your *operator contact card*. Over the USB serial console (115200), the
 `print` command does any report from a keyboard — `print passes|ticket|card|keps|log|rove|
-horizon|amsat|contact|mutual|dxdopp|eqx|allpass|target|note`.
+horizon|amsat|contact|mutual|dxdopp|eqx|allpass|target|note|orbit|illum|tenday|timeline`. The console also has read-only
+diagnostics: `heap` (free heap + largest block), `mem` (a full memory baseline — live heap,
+min-ever high-water, and the static byte cost of the catalog and the large per-screen arrays),
+and `memtrace` (toggles a one-line heap log on every screen change, for profiling which screens
+cost the most). The About screen's heap line likewise shows live / largest-block / minimum-ever
+free heap. These exist to establish a memory baseline ahead of any future RAM optimization.
 
 **The reports.** *Passes* — favorites' AOS/elevation/azimuth/duration for 24 h, one line
 each. *Ticket* — an outreach slip for the active satellite (rise time, direction, and the
@@ -3456,7 +3456,21 @@ satellite's transponders (for a **linear** transponder the whole passband is sho
 low–high, not just the bottom edge) plus its next three passes. *Keps* — the active satellite's
 Keplerian elements. *Log* — your recent QSOs as a paper backup. *Rove* — the plan being
 viewed (viewer `p`), or a fresh export of the current survey from the menu/console.
-*Horizon* — the workable-horizon union export. All
+*Horizon* — the workable-horizon union export.
+*Orbital analysis* — a **permanent record** of the active satellite's orbital characteristics
+at the current element set: Keplerian elements, epoch, period, SMA, apogee/perigee and their
+footprint diameters, orbital speeds at apogee/perigee, J2 nodal and apsidal drift, sun-synchronous
+flag, repeat-track resonance, longest-possible pass, beta angle and full-sun/eclipse geometry,
+decay estimate, and launch identity. It deliberately **omits live values** (current range,
+Doppler, az/el, sub-point, next pass) so the printout is a lasting snapshot of the orbit rather
+than a momentary look. Printed with `p` from the Orbital-analysis screen. *Illumination* — the
+active satellite's sunlit fraction of each orbit over the next 60 days, plus an **ASCII raster**
+(one line per day, `#` sunlit / `.` eclipse across the orbit) mirroring the on-screen shading,
+from the Illumination screen. *10-day passes* — every pass of the active satellite over the
+coming ten days as a dated table (AOS/LOS/peak elevation) **and an ASCII day-timeline** (a 24 h
+UTC track per day, passes marked by elevation tier), from the 10-day screen. *6-hour timeline* —
+all favorites' passes in the next six hours as a sorted list **and an ASCII timeline** (one row
+per favorite across the six-hour window), from the Sky-at-a-glance timeline. All
 times are **UTC**. Reports stream a line at a time, so printing costs the device almost
 no memory.
 
@@ -3526,11 +3540,10 @@ OfficeJet; PostScript for PostScript-capable models). **Plain text** is a safe u
 fallback. If unsure, turn on **Save to /CardSat/Reports** and print the .txt from a computer instead.
 
 If the printer exposes **IPP but not raw 9100**, set **Printer transport → IPP (:631)** with
-format **PCL** or **PostScript**. But note: if the printer is **raster-only** (AirPrint-style,
-advertising only `image/urf`/`image/pwg-raster`), IPP will report the job as sent but nothing
-prints — CardSat can't rasterize on-device, so those printers aren't supported. Run
-`tools/ipp_probe.py <printer-ip>` to see which formats a printer accepts; if PCL and
-PostScript are absent, use the /CardSat/Reports file route.
+format **PCL** or **PostScript**. If the printer is **raster-only** (AirPrint-style, advertising
+only `image/urf`/`image/pwg-raster`), select **Printer format → PWG raster** (or **URF raster**)
+instead — CardSat renders the page on-device and prints to it over IPP. Use **Test printer
+(probe formats)** to see which formats a printer accepts and pick the matching one.
 
 **Bench debugging over USB.** Connect a serial monitor at **115200 baud** and type
 `help`: a read-only console reports the firmware version (`ver`), free heap and largest
@@ -4585,8 +4598,9 @@ engine underneath; they differ only in the direction of the question.
 - **Shows** — per-screen key summaries.
 - **Keys** — `;`/`.` scroll; `g` opens the **Glossary & math**; `m` opens the
   **User guide**; `s` opens the **Ham satellite history**; `t` opens the **Tech
-  help** guide; `l` opens the **Learn** (radio + orbit theory) screen; `f` opens the
-  **band plan / frequency reference**; `a` opens the **AMSAT Fox anatomy** — an
+  help** guide; `l` opens the **Learn** (radio + orbit theory) screen; `o` opens the
+  **Orbit animations**; `f` opens the **band plan / frequency reference**; `a` opens
+  the **AMSAT Fox anatomy** — an
   animated, labeled tour of a 1U Fox CubeSat (spin with `;`/`.`, pause with space,
   cycle the callouts with `,`/`/`; facts sourced from AMSAT's Fox documentation;
   `i` inside opens a short **Fox & CubeSats** primer); `c` opens a **CubeSat
@@ -4705,12 +4719,28 @@ operation.
 
 ![Cross-section area](docs/img/tools-cross-section.jpg)
 
-- **Purpose** — a set of offline ham-radio bench tools, all computed locally (no
-  network needed): an infix **scientific calculator** and live-recalc forms for
-  **coax loss / power**, **dipole**, **vertical / ground plane**, **yagi**, and
-  **quad** dimensions, **RF unit** conversions (dBm / W / V), **SWR / return loss**,
-  **free-space path loss**, and a general **unit converter**.
+- **Purpose** — a set of **35 offline** ham-radio and satellite bench tools, all computed
+  locally (no network needed): the **scientific**, **programmer's**, and **graphing**
+  calculators, a **Tiny BASIC** interpreter, a **location converter** (Maidenhead / decimal /
+  DMS / DDM / Plus Code / UTM / MGRS / USNG), the **link budget** chain, **state vector → GP**,
+  the **CubeSatSim C2C** crib, the DXCC / CQ-zone / ITU-zone / CTCSS / operating / radio-math
+  reference cards, **character lookup**, and the live-recalc forms for **coax loss / power**,
+  **dipole**, **vertical / ground plane**, **yagi** and **quad** dimensions, **RF unit**
+  conversions (dBm / W / V), **SWR / return loss**, **free-space path loss**, **RF exposure**,
+  **battery runtime**, **orbit lifetime**, **cross-section area**, **phasing line / stub**,
+  **wavelength / frequency**, **attenuator pad**, **dB chain sum**, the ARRL radio-math
+  calculators (**complex / polar**, **reactance & resonance**, **RC/RL time constant**), and a
+  general **unit converter**.
 - **Reached from** — About -> `t`.
+- **Menu order** — the menu is grouped **compute-first**: the interactive calculators and
+  converters (scientific, graphing, programmer, Tiny BASIC, location converter, link budget),
+  then the satellite-compute tools (state vector → GP, CubeSatSim), then the reference lookups
+  (DXCC, CQ zones, ITU zones, CTCSS, operating references, radio math, character lookup), then
+  the live-recalc **forms**. A **first-letter jump** (press a letter to hop to the next tool
+  starting with it) and last-tool memory make the list quick to navigate. The entries below
+  follow roughly the same grouping — calculators and converters first, then the references,
+  then the forms — though the **forms** are described together after the link budget rather
+  than strictly last.
 - **Calculator** — a traditional tape interface: type an expression
   (`2+3*sin(45)`), ENTER evaluates, and the expression and its result join a
   **scrolling tape** above the entry line (`[`/`]` scroll back through history —
@@ -4728,6 +4758,33 @@ operation.
   `m`=milli), and press **`\`** to toggle **engineering-notation** output (results shown
   as a mantissa with a metric prefix, e.g. `4.7 k`). DEL backspaces (and only
   backspaces — it never exits); `` ` `` returns.
+- **Graphing calculator** — plot **y = f(x)** using the same expression parser and function
+  set as the scientific calculator, with the added variable **x**. Press ENTER to type a
+  function (e.g. `sin(x)`, `x^2-4`, `1/x`, `exp(x/50)`); the curve is sampled one point per
+  pixel column and drawn across a pan/zoomable window. **Arrow keys pan**, **`+`/`-` zoom**
+  about the centre, **`a`** auto-fits the vertical range to the visible data, and **`r`** resets
+  the window. As with the scientific calculator, **trig is in degrees**, so the default window
+  is x ∈ [-180, 180]. Discontinuities (the poles of `tan(x)`, `1/x` at zero) break the curve
+  rather than drawing a spurious vertical line. All local, no network.
+
+- **Tiny BASIC** — a small line-numbered BASIC interpreter with a built-in editor, for
+  writing and running little programs on the device (4 KB program limit, all local). See
+  **[Tiny BASIC reference](#tiny-basic-reference)** below for the full language, editor keys,
+  limits, and worked examples.
+
+- **Location converter** — one position shown at once in every format a satellite or field
+  operator is likely to need. Seeds from your station location; edit the **grid**, **latitude**,
+  or **longitude** (`;`/`.` pick the field, ENTER to type) and every other format re-derives.
+  Outputs: **Maidenhead** (6- and 8-character), **decimal degrees**, **degrees-minutes-seconds
+  (DMS)**, **degrees-decimal-minutes (DDM)**, **Plus Code** (Open Location Code, 10-digit),
+  **UTM** (zone + easting/northing, WGS84), **MGRS**, and **USNG** (the spaced form of the same
+  military grid). `,`/`/` scroll the derived list; **`s`** adopts the shown position as your
+  station QTH. All conversions are computed on-device with no network. The UTM/MGRS projection
+  and the Plus Code encoder were validated byte-for-byte against reference implementations across
+  both hemispheres; they are accurate to about a metre, which is well within what these grids
+  represent. (**what3words** is intentionally not offered — it is a proprietary, network-only
+  wordlist lookup, not an offline algorithm, so it doesn't fit an offline tool.)
+
 - **Programmer calc** — a 64-bit value shown at once in **hex / dec / bin / oct**.
   Type digits in the current entry base; **`;`/`.` (up/down) move the highlighted
   base row** and `w` cycles the display width (8/16/32/64 bits, which masks the
@@ -4849,12 +4906,166 @@ operation.
   before the epoch are the nominal pre-launch orbit; re-run predictions once the true
   post-deployment elements are published.
 
+Several tools can **print their result** to the configured print sinks (Wi-Fi/serial/file, set
+under Settings → Network). On tools that don't accept typed text — the **programmer calculator**,
+**graphing calculator**, **location converter**, and **character lookup**, plus the **Tiny BASIC
+output console** — press **`p`** to print. On the two tools where you type freely — the
+**scientific calculator** and the **Tiny BASIC editor** — use **`Fn`+`p`** instead, so a plain
+`p` still types normally. The scientific calculator prints the current entry and result; the
+programmer calculator prints all four bases; the location converter prints every coordinate
+format; Tiny BASIC prints either the program listing (`Fn`+`p` in the editor) or the last run's
+output (`p` on the console).
+
 The Tools menu supports a **first-letter jump** (press a letter to hop to the next tool
 starting with it) and **remembers the last tool** you used. Form tools **remember their
 field values** between sessions (your coax, power, gains stay put); press **`x`** in a form
 tool to reset it to defaults. The **antenna-lengths units** (ft/in or metres) are set in
 **Settings → Display / sound**. Note that orbital distances, altitudes and satellite sizes
 are always shown in metric regardless of that setting.
+
+<a name="tiny-basic-reference"></a>
+### Tiny BASIC reference
+
+CardSat includes a small **line-numbered BASIC interpreter** with a built-in editor, reached
+from **Tools → Tiny BASIC**. It's meant for short programs — quick calculations, loops, table
+generation, or just playing with code in the field — and runs entirely on the device with no
+network. Programs are capped at **4 KB**.
+
+#### The editor
+
+The editor opens empty (nothing is pre-populated). Type your program with one statement per
+**numbered** line, pressing ENTER to start each new line. Plain keys type literally, so `s`, `b`,
+`h`, and the punctuation keys all insert characters; editor commands are on **`Fn`**:
+
+| Key | Action |
+|---|---|
+| `Fn`+`R` | **Run** the program (switches to the output console) |
+| `Fn`+`S` | **Save** (prompts for a name the first time) to `/CardSat/basic/<name>.bas` |
+| `Fn`+`L` | **Load** a saved program by name |
+| `Fn`+`N` | **New** — clear the editor to start a fresh program |
+| `Fn`+`P` | **Print** the program listing (to the configured print sinks) |
+| `Fn`+`,` / `Fn`+`/` | Move the cursor **left / right** |
+| `Fn`+`;` / `Fn`+`.` | Move the cursor **up / down** a line |
+| DEL | Backspace |
+| `` ` `` | Back to the Tools menu |
+
+The header row shows the program name (or `(unsaved)`) and the current size out of 4096 bytes.
+
+On the **output console**, `;`/`.` scroll, **`p`** prints the output, and `` ` `` returns to the
+editor. If the program stopped with an error, the reason is shown on the last line (in red),
+prefixed with `?`.
+
+#### Program structure
+
+Every statement lives on a numbered line: `10 PRINT "HI"`. Lines may be **entered in any order** —
+they are sorted by line number before running, so you can insert `15 …` between `10` and `20`
+later. Line numbers are also the targets for `GOTO`/`GOSUB`/`IF … THEN`.
+
+#### Statements
+
+| Statement | Meaning |
+|---|---|
+| `LET A = expr` | Assign a variable. The `LET` is optional: `A = 5` works too. |
+| `PRINT …` | Print text and values (see below). `?` is a shorthand for `PRINT`. |
+| `IF cond THEN …` | If the condition is true, either jump to a line number or run the statement after `THEN`. |
+| `GOTO n` | Jump to line `n`. |
+| `GOSUB n` … `RETURN` | Call a subroutine at line `n`; `RETURN` comes back to the line after the `GOSUB`. |
+| `FOR V = a TO b [STEP s]` … `NEXT V` | Loop `V` from `a` to `b` (by `s`, default 1; `s` may be negative). |
+| `REM …` | A comment (ignored). |
+| `END` | Stop the program. |
+
+#### PRINT details
+
+- **Strings** go in double quotes: `PRINT "HELLO"`.
+- **Expressions** print their value: `PRINT 3*4` → `12`.
+- A **comma** between items inserts spacing (a simple tab): `PRINT A, B`.
+- A **semicolon** joins items with no space and, at the end of a line, **suppresses the
+  newline** so the next `PRINT` continues on the same line: `PRINT "X=";X`.
+- `PRINT` on its own prints a blank line.
+
+#### Expressions
+
+Numbers may be integers or decimals. Operators, in precedence order: `^` (power), then `*` `/`,
+then `+` `-`, with parentheses `( )` to group. There are **26 numeric variables, `A` through
+`Z`** (single letters). Comparisons for `IF`: `=`, `<`, `>`, `<=`, `>=`, `<>` (not equal).
+
+**Functions** (one argument, in parentheses): `ABS(x)` absolute value, `INT(x)` floor to integer,
+`SQR(x)` square root, `SIN(x)` / `COS(x)` (**x in degrees**, matching CardSat's calculators), and
+`RND(n)` a random integer from `0` to `n-1`.
+
+#### Examples
+
+Count to five:
+
+```
+10 FOR I = 1 TO 5
+20 PRINT I
+30 NEXT I
+```
+
+A times table using nested loops (the trailing `;` keeps each row on one line; the bare
+`PRINT` on line 50 ends the row):
+
+```
+10 FOR A = 1 TO 3
+20 FOR B = 1 TO 3
+30 PRINT A*B; " ";
+40 NEXT B
+50 PRINT
+60 NEXT A
+```
+
+which prints:
+
+```
+1 2 3
+2 4 6
+3 6 9
+```
+
+A subroutine and a conditional loop:
+
+```
+10 LET N = 1
+20 GOSUB 100
+30 LET N = N + 1
+40 IF N <= 5 THEN 20
+50 END
+100 PRINT "SQUARE OF ";N;" IS ";N*N
+110 RETURN
+```
+
+Roll two dice:
+
+```
+10 PRINT "YOU ROLLED ";
+20 PRINT RND(6)+1; " AND "; RND(6)+1
+```
+
+#### Limits and safety
+
+So that nothing you type can lock up the device, execution is **bounded on every axis**:
+
+- Program size: **4 KB**.
+- At most **200 numbered lines**.
+- `GOSUB` nesting to **16** deep; `FOR` nesting to **8** deep.
+- Output capped at **~6 KB** per run.
+- A per-run budget of **500,000 statements** — an accidental infinite loop (e.g. `10 GOTO 10`)
+  stops on its own with a `loop?` message instead of hanging.
+
+Common error messages include `no line N` (a `GOTO`/`GOSUB` target that doesn't exist), `RETURN
+w/o GOSUB`, `NEXT w/o FOR`, `GOSUB too deep`, `FOR too deep`, and `syntax`. Each is prefixed with
+the line number where it occurred.
+
+#### Notes and limitations
+
+This is a deliberately **tiny** BASIC. It has numeric variables only (no strings variables or
+arrays), no `INPUT` (programs run start to finish without interaction), and no `DATA`/`READ`.
+Trig is in degrees to match the rest of CardSat. Programs and their state don't persist across a
+reboot unless you `Fn`+`S` save them; saved `.bas` files live in `/CardSat/basic/` on the active
+filesystem and can be copied off over USB like any other file.
+
+---
 
 ### Glossary & math
 
@@ -5004,12 +5215,12 @@ or press **`1`–`4`** to answer directly.
 > (two pages). Print at actual size; the front covers operating and the back
 > covers setup and tools. Regenerate it with `python3 tools_make_cheatcard.py`.
 
-**Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot · `h` help.
+**Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot · `h` help · **`Fn`+back (`` ` ``/DEL) = emergency stop** (disengages all radio + rotator control from any screen).
 
 | Screen | Keys |
 |---|---|
 | **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `k` OSCARLOCATOR · `3` 3D globe · `2` sat-to-sat visibility · `o` orbital analysis · `y` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports · colored down-arrow = decaying orbit (yellow watch / orange decaying / red imminent) |
-| **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / Pass outlook / Orbit position / Phys) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Live: az/el/range/Doppler, mean anomaly/phase, sunlit/eclipse + **eclipse depth** (deg; >0 = in shadow) · Next pass: slant ranges + path delay + peak eclipse depth · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · Pass outlook: 7-day pass count/>30° count/longest/avg gap + the best upcoming pass (elevation, when, duration) · Orbit position: mean/true anomaly, argument of latitude, time to perigee/apogee, RAAN, rev number · Phys: orbital velocity now + apo/peri spread, launch year/number + years in orbit (from the COSPAR ID) · `r` recompute · `` ` `` back |
+| **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / Pass outlook / Orbit position / Phys) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Live: az/el/range/Doppler, mean anomaly/phase, sunlit/eclipse + **eclipse depth** (deg; >0 = in shadow) · Next pass: slant ranges + path delay + peak eclipse depth · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · Pass outlook: 7-day pass count/>30° count/longest/avg gap + the best upcoming pass (elevation, when, duration) · Orbit position: mean/true anomaly, argument of latitude, time to perigee/apogee, RAAN, rev number · Phys: orbital velocity now + apo/peri spread, launch year/number + years in orbit (from the COSPAR ID) · `r` recompute · **`p` print report** · `` ` `` back |
 | **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |
 | **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
@@ -5029,8 +5240,8 @@ or press **`1`–`4`** to answer directly.
 | **Notes (browser)** | `;`/`.` select · ENTER open · `n` new · `d`+ENTER delete · `` ` `` back · list shows last-saved date/time (UTC), newest first |
 | **Notes (editor)** | type freely (ENTER = newline, DEL = backspace) · **Fn+`,`/`/`** cursor L/R · **Fn+`;`/`.`** cursor up/down · **Fn+`s`** save (names it the first time) · `` ` `` exit (auto-saves) |
 | **Mutual** | `;`/`.` scroll · `` ` ``/ENTER back to passes |
-| **10-day** | `;`/`.` scroll ∓1 day (forward indefinitely, oldest day off the top; not before today) · `r` recompute · `` ` ``/ENTER back |
-| **Illum** | `,`/`/` scroll ∓1 day (forward indefinitely; not before today) · `r` recompute · `` ` ``/ENTER back |
+| **10-day** | `;`/`.` scroll ∓1 day (forward indefinitely, oldest day off the top; not before today) · `r` recompute · **`p` print report** · `` ` ``/ENTER back |
+| **Illum** | `,`/`/` scroll ∓1 day (forward indefinitely; not before today) · `r` recompute · **`p` print report** · `` ` ``/ENTER back |
 | **Location** | `e`/`o`/`a` lat/lon/alt · `g` grid · `p` GPS on/off · `s` GPS source · `c` set clock · `v` live GPS position · ENTER GPS sky plot |
 | **Live GPS position** | DMS + decimal lat/lon, altitude, grid, speed, course · `` ` `` back |
 | **GPS sky plot** | live GNSS az/el colored by signal · `` ` `` back |
@@ -5053,6 +5264,7 @@ or press **`1`–`4`** to answer directly.
 | **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
 | **About** | build/version, IP, free heap and diagnostics (read-only) · `r` station readiness checklist · `l` license · `z` games |
+| **Printing** (contextual) | `p` prints the current screen's report on the printable screens (Passes day-sheet, Mutual, DX Doppler, EQX, Target-search, Pass detail/polar, **Orbital analysis, Illumination, 10-day passes, 6-hour timeline**) · `P` prints all-favorite passes from the schedule · `Fn`+`p` prints the note in the note editor · About → `p` opens a Print submenu listing **every** report; About → `a` Support-AMSAT card; About → `c` operator contact card |
 
 ---
 

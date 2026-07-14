@@ -1,5 +1,8 @@
 # CardSat — What's Verified, and What to Check on the Air
 
+*Companion document: **[ROADMAP_TO_1.0.md](ROADMAP_TO_1.0.md)** tracks what stands between the
+current release and 1.0 — the hardware-verification gap below is the largest single blocker.*
+
 CardSat is developed and tested host-side (x86 logic simulations plus brace/parity
 checks); the firmware author flashes and confirms behavior on real hardware. This page
 records what is confirmed on the Cardputer ADV versus what still needs verification
@@ -34,6 +37,23 @@ the seven reports against a real printer (or a host running `nc -l 9100`), the
 Settings → Network printer IP/port entry and persistence, the `p` Print menu on a
 satellite's Passes screen (and the rove viewer's `p`), the serial `print` commands, and the error paths (unreachable printer fails
 fast; blank IP reports "No printer set").
+
+**Added in 0.9.56, not yet on hardware:** the **Tiny BASIC** editor and console (typing a program
+on the Cardputer keyboard, `Fn`-modified commands, cursor movement including `Fn`+up/down by line,
+save/load to `/CardSat/basic/*.bas`, the run → console → back flow, and the empty-editor hint);
+the **graphing calculator**'s rendering (curve density at 240×105, axis and window-readout
+legibility, pan/zoom feel); the **location converter** screen (field navigation, scrolling the
+derived list, `s`-to-QTH, and whether the widest lines — UTM and USNG — fit the 240 px width);
+the **four new printable reports** (orbital analysis, illumination, 10-day, 6-hour timeline) on a
+real printer, especially the **ASCII renderings**, whose character-cell aspect ratio can render
+differently across printer fonts (the 80 mm layouts were sized by calculation, not by eye); the
+**tool printing** keys (`p` / `Fn`+`p`) behaving correctly — nothing should type when it should
+print; the **global emergency stop** (`Fn`+back) disengaging control from each operating screen;
+and the **memory diagnostics** (`mem`, `memtrace`) output.
+
+The interpreter *logic*, the coordinate projections, and the report *content* are host-validated
+(see [ROADMAP_TO_1.0.md](ROADMAP_TO_1.0.md) §4 for what that does and doesn't mean); what needs
+hardware is the **display, input, and printer output**.
 
 **Single-pin CI-V is confirmed on an IC-821** — the full bidirectional CI-V exchange
 (frequency reads and ACKs) works over one shared open-drain GPIO, including **Doppler

@@ -23,7 +23,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -989,6 +989,12 @@ private:
   String      webdBuf;            // request-assembly buffer (request line + headers)
   String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
+  // Memory telemetry (opt-in, off by default; toggled by the serial "memtrace" command).
+  // Logs free heap + largest block on each screen change so the runtime cost of heavy
+  // screens can be measured ahead of the RAM-lifecycle refactor. Read-only diagnostics.
+  bool     memTrace = false;
+  Screen   lastMemScreen = SCR_HOME;
+  uint32_t memTraceMinBlk = 0xFFFFFFFF;   // smallest largest-block seen while tracing
   uint32_t lastNetCycleMs = 0;    // millis() when the last update cycle STARTED (0 = never);
                                   // gates back-to-back cycles so TIME_WAIT PCBs can drain
   bool netCooldownOk();           // true if a new update cycle may start; else sets a "wait Ns" status
@@ -1221,6 +1227,7 @@ private:
   // ---- input ----
   void handleKey(char c, bool enter, bool back);
   void takeScreenshot();                   // 'b' key -> BMP to /CardSat/Screenshots/
+  void stopAllControl();                   // global emergency stop: disengage radio + rotator
 
   // ---- per-screen render ----
   void draw();
@@ -1387,6 +1394,34 @@ private:
   String calcBuf, calcResult; bool calcErr = false; double calcAns = 0;
   void drawCalc(); void keyCalc(char c, bool enter, bool back);
   double calcEval(const char* s, bool& ok);
+  double calcEvalX(const char* s, double x, bool& ok);   // eval with grapher variable x
+
+  // Graphing calculator (SCR_GRAPH). Plots y = f(x) using the same expression parser as
+  // the scientific calculator (with the added variable x). The window is pan/zoomable.
+  void drawGraph(); void keyGraph(char c, bool enter, bool back); void graphInit();
+  String graphExpr;                  // the function, editable (seeded in graphInit)
+  double graphXmin = -180, graphXmax = 180;   // default window suits the degree-based trig
+  double graphYmin = -1.5,  graphYmax = 1.5;
+  bool   graphErr = false;           // last expression failed to parse
+
+  // ---- Tiny BASIC interpreter (SCR_BASIC editor + SCR_BASICRUN console) ----------
+  // A small line-numbered BASIC. Programs are capped at BASIC_PROG_MAX bytes (4 KB) and
+  // execution is bounded (line count, GOSUB/FOR nesting, and a per-run statement budget)
+  // so a runaway program can never hang the device. Reuses no other subsystem's state.
+  static const int BASIC_PROG_MAX  = 4096;   // program-text cap (user-facing "4K limit")
+  // (interpreter bounds MAX_LINES/GOSUB/FOR/STMT_BUDGET are file-scope in app.cpp, near BasicVM)
+  String basicBuf;                  // program source (the editor buffer)
+  int    basicCur = 0;              // editor cursor index into basicBuf
+  int    basicTopLine = 0;          // editor scroll (first visible wrapped row)
+  String basicName;                 // loaded/saved base name (no dir/.bas)
+  String basicOut;                  // console output from the last run
+  int    basicOutScroll = 0;        // console scroll (first visible row)
+  String basicErr;                  // run error (empty = ok / not run)
+  void drawBasic();    void keyBasic(char c, bool enter, bool back);
+  void drawBasicRun(); void keyBasicRun(char c, bool enter, bool back);
+  void basicInit();                 // open the editor (seed a sample on first use)
+  void basicRun();                  // execute basicBuf -> basicOut / basicErr
+  bool basicSave();  bool basicLoad(const char* base);
 
   // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
   // hex / dec / bin / oct, with bitwise ops (AND OR XOR NOT << >>) and +-*/ via a
@@ -1471,6 +1506,17 @@ private:
   void drawCubeSim();
   void keyCubeSim(char c, bool enter, bool back);
   int  cubesimScroll = 0;
+
+  // Location-format converter (SCR_LOCONV). One position, shown simultaneously in every
+  // supported format. Editing the grid or the decimal lat/lon re-derives all the others.
+  void drawLoconv();
+  void keyLoconv(char c, bool enter, bool back);
+  void locoInit();               // seed from the station location
+  void locoRecompute();          // re-derive all formats from locoLat/locoLon
+  double locoLat = 0, locoLon = 0;   // canonical position (decimal degrees)
+  bool   locoValid = false;          // false until a valid position is entered
+  int    locoField = 0;              // which input field is highlighted (0 grid, 1 lat, 2 lon)
+  int    locoScroll = 0;             // scroll offset into the derived-format list
   // AMSAT Fox anatomy (SCR_FOXANAT): animated Learn explainer -- a rotating 1U
   // wireframe with one doc-verified callout at a time (see drawFoxAnat).
   void drawFoxAnat();
@@ -1778,7 +1824,9 @@ private:
   // socket only. printReport() is the shared entry (opens/closes + error status); the per-report
   // builders assume an open job. Returns false (with setStatus) if the printer can't be reached.
   enum PrintReport { PR_PASSES, PR_ROVE, PR_TICKET, PR_HORIZON, PR_SATCARD, PR_LOG, PR_KEPS,
-                     PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR };
+                     PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR,
+                     PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
+                     PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -1794,9 +1842,17 @@ private:
   void printAllPasses();     // every favorite's upcoming passes (the schedule)
   void printTargetHits();    // target-search results
   void printNote();          // the note currently open in the editor/viewer
-  void printPassPolar();     // ASCII polar sky sheet for the pass being viewed (pdAz/pdEl)
+  void printPassPolar();
+  void printOrbit();       // orbital-analysis data dump
+  void printIllum();       // illumination summary
+  void printTenDay();      // 10-day pass progression
+  void printTimeline();    // next-6-hours favorites timeline     // ASCII polar sky sheet for the pass being viewed (pdAz/pdEl)
   void printPolarAscii(const float* az, const float* el, int n, const char* mark);
   bool printActiveHint();    // shared helper: "no active satellite" line, returns false if none
+  void printBasicList();     // Tiny BASIC: the program listing
+  void printBasicOut();      // Tiny BASIC: the last run's console output
+  void printToolOut();       // generic: the active tool screen's key result(s)
+  void printCharLk();        // char lookup: current value's encodings (near its tables)
   int  buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
                       uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN);  // shared pass gather
   bool     audioUp = false;                    // is the speaker currently begun?

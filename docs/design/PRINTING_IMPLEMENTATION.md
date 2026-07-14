@@ -1,7 +1,7 @@
 # CardSat Printing Implementation
 
 *A complete technical description of CardSat's printing subsystem: the three-sink
-emitter, eight page-description languages, two network transports, on-device raster
+emitter, nine page-description languages, two network transports, on-device raster
 generation (PWG and URF), the IPP client, the capability probe, and the memory model
 that makes all of it fit on a no-PSRAM ESP32-S3.*
 
@@ -23,9 +23,10 @@ on this device. Every design decision below follows from that fact.
 
 The goals:
 
-1. **Zero steady-state memory.** Printing must cost nothing when idle and only a
-   transient socket-sized amount while active — the same heap class as an ordinary HTTP
-   fetch. No report is ever buffered whole.
+1. **Memory that does not scale with content.** No report or page is ever buffered whole;
+   everything streams. A small fixed workspace (~5 KB static, see §9) is reserved for raster
+   rendering, but a 1-page and a 10-page report cost the same working set. This is the
+   property that matters on a no-PSRAM part — not a literal zero, but a constant.
 2. **The field receipt printer is the primary target.** CardSat is built for the
    pocket, battery WiFi thermal printer a rover carries — ESC/POS over raw TCP 9100.
    Everything else is a bonus that must not compromise this path.
@@ -70,7 +71,7 @@ to up to three **sinks** simultaneously:
 - **File** — an 80-column text file under `/CardSat/Reports/<title>-<uptime>.txt`.
 
 The serial and file sinks always emit plain text. The network sink emits whichever of the
-eight page-description languages is selected. Each sink **hard-wraps to its own column
+nine page-description languages is selected. Each sink **hard-wraps to its own column
 width**, so a 32-column receipt printer stays inside its paper while the file keeps the
 full 80-column layout.
 
@@ -86,7 +87,7 @@ full 80-column layout.
 It is shared by every sink and every text format, so improving it improves all outputs at
 once (receipt, PostScript, ZPL, serial, file, and the raster renderer's line collection).
 
-## 3. The eight page-description languages
+## 3. The nine page-description languages
 
 The network sink branches on `s_fmt` only where the wire format actually differs —
 `begin()` (preamble), `feedCut()` (page finish), and the per-line emit. Everything else is
@@ -157,10 +158,26 @@ Connection: close
 
 `begin()` writes the HTTP request line + headers (unchunked), then sets `s_chunkOpen`.
 From that point, `sockWrite()` wraps every write as its own chunk: `<hex length>CRLF <bytes>
-CRLF`. `end()` writes the `0\r\n\r\n` terminator and reads the HTTP status line; a 2xx sets
-`s_ippAccepted`. The **IPP operation header** (a Print-Job operation carrying
-`printer-uri`, `requesting-user-name`, `job-name`, and `document-format`) is built by
-`ippHeader()` and sent as the first body chunk.
+CRLF`. The **IPP operation header** (a Print-Job operation carrying `printer-uri`,
+`requesting-user-name`, `job-name`, and `document-format`) is built by `ippHeader()` and sent
+as the first body chunk. `end()` writes the `0\r\n\r\n` terminator and reads the HTTP status
+line; a 2xx sets `s_ippAccepted`.
+
+**Write completeness (`documentSent`).** Every socket write goes through `wrChecked()`, which
+loops until all bytes are placed or records a failure (`s_writeOk = false`) on a dropped link
+or an unrecoverable short write. This matters most for raster jobs, which are many writes over
+a longer interval: a job can connect and then fail mid-transmission, and `printerOk()` (which
+reflects only the initial connect) would not catch it. `documentSent()` does, and the print
+status surfaces `(send failed)` when it happens.
+
+**What "accepted" means (and doesn't).** The IPP acceptance check reads the **HTTP** status
+line only — it does not parse the binary IPP operation-status, job-id, or job-state. An HTTP
+2xx means the printer *accepted the request*, not that a page was *rendered*: a printer that
+does not truly support the sent format can still return 200 and discard the job. The status
+wording preserves this distinction on purpose — `(IPP ok)` means "HTTP-accepted," and the UI
+never claims a page was printed. Parsing the full IPP response (to read `job-state` /
+`unsupported-attributes`) is a possible future refinement; today the capability probe (§7) is
+the way to know a format will work *before* printing.
 
 The `document-format` attribute is set from `s_fmt`: `application/postscript`,
 `application/vnd.hp-PCL`, `image/pwg-raster`, `image/urf`, or `application/octet-stream`.
@@ -214,9 +231,14 @@ area (typically scale 2 → 32-px glyphs → ~64 columns across a letter page in
 
 In raster mode, `line()`, `title()`, `blank()`, and `rule()` do **not** stream — they
 **collect** the (word-wrapped) report lines into `s_rasLines[]`. Then `feedCut()` renders the
-whole collected page through `renderTextPage()`, which streams the encoded raster over the
-already-open IPP chunked connection. This keeps the report builders completely unaware of
-raster: they call the same `line()`/`title()` API as every other format.
+collected lines through `renderReport()`, which **paginates**: it computes how many text rows
+fit on one sheet and emits as many raster pages as the report needs (PWG and URF both support
+multiple pages in one job), streaming each over the already-open IPP chunked connection. A
+long report (all-favorite passes, a big QSO log) therefore spans multiple sheets rather than
+being clipped at one page. The collection buffer holds up to 400 wrapped lines (~10 pages); if
+a report somehow exceeds that, a visible `-- report truncated --` marker is emitted rather
+than silently dropping lines. Report builders stay completely unaware of raster: they call the
+same `line()`/`title()` API as every other format.
 
 ## 6. The raster encoders (PWG and URF)
 
@@ -275,7 +297,8 @@ IPP **Get-Printer-Attributes** operation (op `0x000B`) requesting
 and searched with a binary-safe `memcmp` scan — an Arduino `String` is null-terminated and
 would truncate at the first `\0`, missing every format token. This is exposed in the UI as
 **Settings → Network → Test printer (probe formats)**; it is a read-only query and sends no
-print job, so it is always safe to run.
+print job, so it is always safe to run. It targets the `/ipp/print` resource (see §10 for the
+limitation) and reads up to one scanline-buffer of response.
 
 ## 8. Validation methodology
 
@@ -301,18 +324,46 @@ reference `ppm2pwg` / `pwg2ppm` build.
 
 ## 9. Memory model summary
 
-| Component | Resident cost |
-|---|---|
-| Idle (no print in progress) | **0** |
-| Text formats (0–6), during print | one `WiFiClient` socket; lines stream, nothing buffered |
-| Raster formats (7–8), during print | ~4 KB encoder hold-row + ~2.5 KB scanline compose buffer + socket ≈ **< 10 KB** |
-| Font table | ~6 KB flash (not heap) |
-| Capability probe | one 4 KB response buffer + socket, transient |
+The subsystem keeps a small, fixed **static (BSS)** workspace that is resident whenever the
+firmware is running, plus transient heap for the active socket. The static workspace is a
+deliberate trade: on a no-PSRAM part, a fixed BSS buffer is safer than repeated heap
+allocation (which risks fragmenting the one large free block). The numbers:
 
-No path holds a whole report, a whole page, or a whole IPP response in a way that scales with
-content. The largest single allocation anywhere in the subsystem is the 4 KB probe buffer.
+| Component | Cost | Resident when |
+|---|---|---|
+| Raster scanline workspace (`s_rprev` + `s_rscan`, 2560 B each) | **5120 B static** | always (BSS) |
+| Report line buffer (`s_rasLines`, 400 `String` slots) | slot array static; character storage only while a raster report is being collected | array always; strings during raster print |
+| Capability probe response buffer | **0 extra** — reuses `s_rscan` (probe and raster never overlap) | — |
+| Font table | ~6 KB flash (not heap) | n/a |
+| Active print | one `WiFiClient` socket | during a print |
 
-## 10. Status and honesty
+So the honest figure is **~5 KB of static RAM reserved at all times** for the raster/probe
+workspace (plus the `String` slot array), **not zero**. What *is* true, and is the important
+property: **no path's memory scales with report or page size** — a 1-page report and a
+10-page report cost the same working set, because the page is streamed one scanline at a
+time and never assembled whole. Earlier drafts of this document claimed "Idle: 0"; that was
+wrong and is corrected here. The largest single buffer is 2560 B.
+
+## 10. Known limitations
+
+- **Media**: raster prints **US Letter or A4** (Settings → Network → Raster paper). There is
+  no live media negotiation — CardSat does not query `media-supported` / `media-default` and
+  pick automatically; it sends the selected size and relies on the printer to place it on the
+  loaded stock (most do). A printer that strictly rejects a size it does not have loaded would
+  need the matching selection.
+- **IPP resource path**: both printing and the capability probe target `/ipp/print`, the
+  near-universal default. A printer that requires a different resource (`/ipp/printer`,
+  `/printers/<name>`) is not currently reachable — there is no configurable resource setting.
+- **IPP status depth**: acceptance is judged from the HTTP status line, not the parsed IPP
+  operation-status or job-state (see §4).
+- **Capability probe parse**: the probe substring-searches the first response for MIME tokens
+  rather than parsing IPP attributes; an unusually large or structured response could read as
+  "formats unknown" even when the printer supplied the list.
+
+These are bounded and documented rather than hidden; none affect the primary receipt-printer
+path, and the Letter/A4 choice covers the common raster cases.
+
+## 11. Status and honesty
 
 - **Confirmed on hardware**: ESC/POS receipt printing; PWG raster printing a legible page on
   a real AirPrint printer (the on-device raster was captured off the wire and verified

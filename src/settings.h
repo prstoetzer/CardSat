@@ -101,6 +101,7 @@ struct Settings {
   uint8_t  printerCols = 32;       // ESC/POS text columns: 32 (58mm), 42/48 (80mm), 64 (Font B)
   uint8_t  printFormat = 0;        // network printer language: 0 ESC/POS 1 text 2 PCL 3 PostScript 4 ESC/P2 5 Star 6 ZPL
   uint8_t  printTransport = 0;     // 0 = raw TCP 9100, 1 = IPP (HTTP POST :631)
+  uint8_t  printPaper = 0;         // raster media: 0 = US Letter, 1 = A4
   bool     printToSerial = false;  // also echo reports to the USB serial console
   bool     printToFile   = false;  // also write reports to /CardSat/Reports/*.txt (80-col)
   // Cloudlog/Wavelog upload (self-hosted online logbook). Uploading here also feeds
@@ -121,8 +122,11 @@ struct Settings {
   //   0 = separate TX/RX  -> G2 = TX, G1 = RX (the normal, most reliable path)
   //   1 = single-pin on G2 -> one shared open-drain wire on G2 (G1 unused)
   //   2 = single-pin on G1 -> one shared open-drain wire on G1 (G2 unused)
-  // Single-pin uses the real CI-V one-wire bus electrically; it is UNVERIFIED and
-  // the separate TX/RX path is recommended. See CIV_SINGLE_PIN.md.
+  // Single-pin uses the real CI-V one-wire bus electrically. CONFIRMED on hardware:
+  // full bidirectional CI-V (frequency reads + ACKs), Doppler compensation, and radio-
+  // knob tuning over one shared open-drain GPIO on an Icom IC-821H (CI-V addr 4Ch, TTL
+  // level via level-shifter, 19200 baud), firmware 0.9.x. The separate TX/RX path is
+  // still the simplest wiring for a first bring-up. See CIV_SINGLE_PIN.md.
   uint8_t  civPinMode = 0;
   // CAT transport. CAT_NET drives the radio over the RS-BA1 LAN protocol using
   // the host/port/credentials below instead of the wired CI-V UART.

@@ -139,6 +139,7 @@ static const uint32_t LOTW_BATCH_MAGIC = 0x1073B47C; // "LoTW BATCh"
 #include <string.h>
 #include <sys/time.h>
 #include <math.h>
+#include <new>
 // LoTW upload: signing (mbedTLS, part of the ESP32 core that WiFiClientSecure
 // uses) + gzip (ROM miniz). See the QSO logging / LoTW section below.
 #include <mbedtls/pk.h>
@@ -321,7 +322,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.55";
+static constexpr const char* FW_VERSION = "0.9.56";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -1403,6 +1404,12 @@ Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t por
 // ===========================================================================
 
 struct Transponder {
+  // Frequencies are 32-bit unsigned Hz, so the representable ceiling is 2^32-1 =
+  // ~4.294 GHz. This covers every band CardSat tracks (through 23 cm / 1.3 GHz and
+  // the amateur 3.4 GHz allocation) but NOT higher microwave transponders (5.6 GHz
+  // and up). Birds with only >4.29 GHz transponders can't be represented in this
+  // field; a future move to 32-bit kHz would lift the ceiling to ~4.29 THz at 1 kHz
+  // resolution with no extra RAM. See docs/guides/CODE_REFERENCE.md.
   char     desc[40];
   uint32_t downlink     = 0; // Hz (downlink_low;  0 if none)
   uint32_t downlinkHigh = 0; // Hz (downlink_high; 0 if single-channel)
@@ -1731,7 +1738,22 @@ public:
   // transport failure (e.g. the Cloudlog reboot-to-clean-heap prompt) trigger on
   // it -- a fresh boot is exactly the cure when the heap is fragmented this way.
   static const int HEAP_ABORT_CODE = -100;
-  String lastErr  = "";    // short human-readable reason
+  String lastErr  = "";    // short human-readable reason (UI text)
+
+  // Typed download outcome, so retry/abort policy branches on a code rather than on
+  // display text (which drifts and silently breaks string comparisons). Set by the
+  // file-download path; translated to lastErr text at the point it is raised.
+  enum class DownloadError : uint8_t {
+    None = 0,        // success
+    ConnectFailed,   // socket/TLS never established (lastCode <= 0)
+    HttpError,       // server returned a non-200 status
+    StorageFull,     // declared size won't fit the filesystem (do NOT retry)
+    WriteFailed,     // filesystem write error mid-stream
+    ShortRead,       // fewer bytes than the declared Content-Length
+    EmptyBody,       // 200 with no body
+    TooManyRedirects
+  };
+  DownloadError lastDlErr = DownloadError::None;
 
   // --- Socket-failure recovery -------------------------------------------
   // Connect-level failures (code <= 0, e.g. the -1 returned once the LWIP socket
@@ -2025,6 +2047,7 @@ struct Settings {
   uint8_t  printerCols = 32;       // ESC/POS text columns: 32 (58mm), 42/48 (80mm), 64 (Font B)
   uint8_t  printFormat = 0;        // network printer language: 0 ESC/POS 1 text 2 PCL 3 PostScript 4 ESC/P2 5 Star 6 ZPL
   uint8_t  printTransport = 0;     // 0 = raw TCP 9100, 1 = IPP (HTTP POST :631)
+  uint8_t  printPaper = 0;         // raster media: 0 = US Letter, 1 = A4
   bool     printToSerial = false;  // also echo reports to the USB serial console
   bool     printToFile   = false;  // also write reports to /CardSat/Reports/*.txt (80-col)
   // Cloudlog/Wavelog upload (self-hosted online logbook). Uploading here also feeds
@@ -2045,8 +2068,11 @@ struct Settings {
   //   0 = separate TX/RX  -> G2 = TX, G1 = RX (the normal, most reliable path)
   //   1 = single-pin on G2 -> one shared open-drain wire on G2 (G1 unused)
   //   2 = single-pin on G1 -> one shared open-drain wire on G1 (G2 unused)
-  // Single-pin uses the real CI-V one-wire bus electrically; it is UNVERIFIED and
-  // the separate TX/RX path is recommended. See CIV_SINGLE_PIN.md.
+  // Single-pin uses the real CI-V one-wire bus electrically. CONFIRMED on hardware:
+  // full bidirectional CI-V (frequency reads + ACKs), Doppler compensation, and radio-
+  // knob tuning over one shared open-drain GPIO on an Icom IC-821H (CI-V addr 4Ch, TTL
+  // level via level-shifter, 19200 baud), firmware 0.9.x. The separate TX/RX path is
+  // still the simplest wiring for a first bring-up. See CIV_SINGLE_PIN.md.
   uint8_t  civPinMode = 0;
   // CAT transport. CAT_NET drives the radio over the RS-BA1 LAN protocol using
   // the host/port/credentials below instead of the wired CI-V UART.
@@ -2197,7 +2223,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -6315,6 +6341,12 @@ private:
   String      webdBuf;            // request-assembly buffer (request line + headers)
   String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
+  // Memory telemetry (opt-in, off by default; toggled by the serial "memtrace" command).
+  // Logs free heap + largest block on each screen change so the runtime cost of heavy
+  // screens can be measured ahead of the RAM-lifecycle refactor. Read-only diagnostics.
+  bool     memTrace = false;
+  Screen   lastMemScreen = SCR_HOME;
+  uint32_t memTraceMinBlk = 0xFFFFFFFF;   // smallest largest-block seen while tracing
   uint32_t lastNetCycleMs = 0;    // millis() when the last update cycle STARTED (0 = never);
                                   // gates back-to-back cycles so TIME_WAIT PCBs can drain
   bool netCooldownOk();           // true if a new update cycle may start; else sets a "wait Ns" status
@@ -6547,6 +6579,7 @@ private:
   // ---- input ----
   void handleKey(char c, bool enter, bool back);
   void takeScreenshot();                   // 'b' key -> BMP to /CardSat/Screenshots/
+  void stopAllControl();                   // global emergency stop: disengage radio + rotator
 
   // ---- per-screen render ----
   void draw();
@@ -6713,6 +6746,34 @@ private:
   String calcBuf, calcResult; bool calcErr = false; double calcAns = 0;
   void drawCalc(); void keyCalc(char c, bool enter, bool back);
   double calcEval(const char* s, bool& ok);
+  double calcEvalX(const char* s, double x, bool& ok);   // eval with grapher variable x
+
+  // Graphing calculator (SCR_GRAPH). Plots y = f(x) using the same expression parser as
+  // the scientific calculator (with the added variable x). The window is pan/zoomable.
+  void drawGraph(); void keyGraph(char c, bool enter, bool back); void graphInit();
+  String graphExpr;                  // the function, editable (seeded in graphInit)
+  double graphXmin = -180, graphXmax = 180;   // default window suits the degree-based trig
+  double graphYmin = -1.5,  graphYmax = 1.5;
+  bool   graphErr = false;           // last expression failed to parse
+
+  // ---- Tiny BASIC interpreter (SCR_BASIC editor + SCR_BASICRUN console) ----------
+  // A small line-numbered BASIC. Programs are capped at BASIC_PROG_MAX bytes (4 KB) and
+  // execution is bounded (line count, GOSUB/FOR nesting, and a per-run statement budget)
+  // so a runaway program can never hang the device. Reuses no other subsystem's state.
+  static const int BASIC_PROG_MAX  = 4096;   // program-text cap (user-facing "4K limit")
+  // (interpreter bounds MAX_LINES/GOSUB/FOR/STMT_BUDGET are file-scope in app.cpp, near BasicVM)
+  String basicBuf;                  // program source (the editor buffer)
+  int    basicCur = 0;              // editor cursor index into basicBuf
+  int    basicTopLine = 0;          // editor scroll (first visible wrapped row)
+  String basicName;                 // loaded/saved base name (no dir/.bas)
+  String basicOut;                  // console output from the last run
+  int    basicOutScroll = 0;        // console scroll (first visible row)
+  String basicErr;                  // run error (empty = ok / not run)
+  void drawBasic();    void keyBasic(char c, bool enter, bool back);
+  void drawBasicRun(); void keyBasicRun(char c, bool enter, bool back);
+  void basicInit();                 // open the editor (seed a sample on first use)
+  void basicRun();                  // execute basicBuf -> basicOut / basicErr
+  bool basicSave();  bool basicLoad(const char* base);
 
   // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
   // hex / dec / bin / oct, with bitwise ops (AND OR XOR NOT << >>) and +-*/ via a
@@ -6797,6 +6858,17 @@ private:
   void drawCubeSim();
   void keyCubeSim(char c, bool enter, bool back);
   int  cubesimScroll = 0;
+
+  // Location-format converter (SCR_LOCONV). One position, shown simultaneously in every
+  // supported format. Editing the grid or the decimal lat/lon re-derives all the others.
+  void drawLoconv();
+  void keyLoconv(char c, bool enter, bool back);
+  void locoInit();               // seed from the station location
+  void locoRecompute();          // re-derive all formats from locoLat/locoLon
+  double locoLat = 0, locoLon = 0;   // canonical position (decimal degrees)
+  bool   locoValid = false;          // false until a valid position is entered
+  int    locoField = 0;              // which input field is highlighted (0 grid, 1 lat, 2 lon)
+  int    locoScroll = 0;             // scroll offset into the derived-format list
   // AMSAT Fox anatomy (SCR_FOXANAT): animated Learn explainer -- a rotating 1U
   // wireframe with one doc-verified callout at a time (see drawFoxAnat).
   void drawFoxAnat();
@@ -7104,7 +7176,9 @@ private:
   // socket only. printReport() is the shared entry (opens/closes + error status); the per-report
   // builders assume an open job. Returns false (with setStatus) if the printer can't be reached.
   enum PrintReport { PR_PASSES, PR_ROVE, PR_TICKET, PR_HORIZON, PR_SATCARD, PR_LOG, PR_KEPS,
-                     PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR };
+                     PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR,
+                     PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
+                     PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -7120,9 +7194,17 @@ private:
   void printAllPasses();     // every favorite's upcoming passes (the schedule)
   void printTargetHits();    // target-search results
   void printNote();          // the note currently open in the editor/viewer
-  void printPassPolar();     // ASCII polar sky sheet for the pass being viewed (pdAz/pdEl)
+  void printPassPolar();
+  void printOrbit();       // orbital-analysis data dump
+  void printIllum();       // illumination summary
+  void printTenDay();      // 10-day pass progression
+  void printTimeline();    // next-6-hours favorites timeline     // ASCII polar sky sheet for the pass being viewed (pdAz/pdEl)
   void printPolarAscii(const float* az, const float* el, int n, const char* mark);
   bool printActiveHint();    // shared helper: "no active satellite" line, returns false if none
+  void printBasicList();     // Tiny BASIC: the program listing
+  void printBasicOut();      // Tiny BASIC: the last run's console output
+  void printToolOut();       // generic: the active tool screen's key result(s)
+  void printCharLk();        // char lookup: current value's encodings (near its tables)
   int  buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
                       uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN);  // shared pass gather
   bool     audioUp = false;                    // is the speaker currently begun?
@@ -7426,6 +7508,7 @@ namespace Printer {
     bool        toFile   = false;       // also write /CardSat/Reports/<fileTitle>-<stamp>.txt
     const char* fileTitle = "report";   // filename stem for the file sink
     int         transport = RAW9100;    // RAW9100 (port 9100) or IPP (HTTP POST :631)
+    int         paper     = 0;          // raster media: 0 = US Letter, 1 = A4
     const char* ippResource = "/ipp/print"; // IPP resource path on the printer
   };
 
@@ -7433,6 +7516,7 @@ namespace Printer {
   bool printerOk();                    // did the TCP printer sink connect?
   String probeCapabilities(const char* host, uint16_t port);  // IPP Get-Printer-Attributes -> formats
   bool ippAccepted();                  // IPP: did the printer return HTTP 2xx? (RAW9100: false)
+  bool documentSent();                 // did the entire document transmit without a socket write error?
   bool anySink();                      // is at least one sink active?
   String lastFile();                   // path of the file sink written ("" if none)
 
@@ -7460,11 +7544,13 @@ namespace {
   int        s_pCols = 32;              // printer sink width (columns)
   int        s_fmt  = Printer::FMT_ESCPOS;
   int        s_transport = Printer::RAW9100;   // RAW9100 or IPP
+  int        s_paper = 0;                      // raster paper: 0 Letter, 1 A4
   bool       s_chunkOpen = false;       // IPP: HTTP chunked body is open
   bool       s_ippAccepted = false;     // IPP: printer returned HTTP 2xx for the job
+  bool       s_writeOk = true;          // all socket writes completed (no partial/failed write)
   // Raster mode (FMT_PWG_RASTER): report lines are COLLECTED, then rendered as a
   // page at end()/feedCut() rather than streamed as text.
-  static const int RAS_MAX_LINES = 90;
+  static const int RAS_MAX_LINES = 400;   // ~10 letter pages of report text
   String     s_rasLines[RAS_MAX_LINES];
   int        s_rasN = 0;
   bool       s_ser  = false;            // serial sink active
@@ -7515,16 +7601,32 @@ namespace {
   // Each write becomes one HTTP chunk: <hex-length>CRLF <bytes> CRLF. This lets us
   // stream a document of unknown total length (the report is built line-by-line),
   // keeping the zero-buffer model. RAW9100 writes go straight to the socket.
+  // Write every byte or record a failure. WiFiClient::write returns bytes written;
+  // a short write (full TCP buffer, disconnect, timeout) is a real error we must not
+  // ignore -- otherwise a job that dies mid-transmission still reports success.
+  void wrChecked(const uint8_t* b, size_t n) {
+    size_t off = 0;
+    while (off < n && s_writeOk) {
+      size_t w = s_cli.write(b + off, n - off);
+      if (w == 0) {                            // could not place any bytes
+        if (!s_cli.connected()) { s_writeOk = false; return; }
+        delay(2);                              // transient full buffer: brief retry
+        w = s_cli.write(b + off, n - off);
+        if (w == 0) { s_writeOk = false; return; }
+      }
+      off += w;
+    }
+  }
   void sockWrite(const uint8_t* b, size_t n) {
     if (!s_pOK || n == 0) return;
     if (s_transport == Printer::IPP && s_chunkOpen) {
       char hdr[12];
       int hn = snprintf(hdr, sizeof(hdr), "%X\r\n", (unsigned)n);
-      s_cli.write((const uint8_t*)hdr, hn);
-      s_cli.write(b, n);
-      s_cli.write((const uint8_t*)"\r\n", 2);
+      wrChecked((const uint8_t*)hdr, hn);
+      wrChecked(b, n);
+      wrChecked((const uint8_t*)"\r\n", 2);
     } else {
-      s_cli.write(b, n);
+      wrChecked(b, n);
     }
   }
   void pRaw(const uint8_t* b, size_t n) { if (s_pOK) sockWrite(b, n); }
@@ -7644,6 +7746,9 @@ namespace {
 namespace RasterGen {
   // These write through the printer sink via the file-scope pRaw() above.
   static uint32_t s_rw = 0, s_rh = 0, s_rdpi = 300;
+  // Media geometry for the PWG page header (set by renderReport per paper choice).
+  static uint32_t s_pagePtsW = 612, s_pagePtsH = 792;
+  static const char* s_pageName = "na_letter_8.5x11in";
   static bool     s_rvalid = false;
   static uint8_t  s_rreps  = 0;
   static uint8_t  s_rprev[2560];        // one scanline hold (max width we support)
@@ -7672,7 +7777,7 @@ namespace RasterGen {
     rPad(8);
     rU32(1); rU32(0);                 // NumCopies, Orientation
     rPad(4);
-    rU32(612); rU32(792);             // PageSize X/Y (points, letter)
+    rU32(s_pagePtsW); rU32(s_pagePtsH);  // PageSize X/Y (points)
     rPad(8);
     rU32(0); rU32(w); rU32(h);        // Tumble, Width, Height
     rPad(4);
@@ -7687,7 +7792,7 @@ namespace RasterGen {
     rPad(20);
     rU32(0); rU32(0);                 // VendorIdentifier, VendorLength
     rPad(1088); rPad(64);
-    rStr("",64); rStr("na_letter_8.5x11in",64);  // RenderingIntent, PageSizeName
+    rStr("",64); rStr(s_pageName,64);   // RenderingIntent, PageSizeName
   }
   // PWG PackBits (exact ppm2pwg compress_line, oneChunk=1).
   static void compress(const uint8_t* raw, size_t len){
@@ -7740,14 +7845,14 @@ namespace RasterGen {
 // Render an array of monospace text lines as a full raster page and stream it.
 // scale integer-scales the 16x32 font. Called by Printer when FMT_PWG_RASTER.
 namespace RasterGen {
-  static void renderTextPage(const char* const* lines, int n,
-                             uint32_t W, uint32_t H, uint32_t dpi,
-                             int scale, int marginX, int marginY, int lineGap,
-                             bool urf = false) {
-    if (W > sizeof(s_rscan)) W = sizeof(s_rscan);
+  // Render ONE page from lines[0..n-1] (already sliced to fit) into the current
+  // open raster document. Does NOT emit the file magic or endDoc -- the caller
+  // brackets the whole document so multiple pages share one job.
+  static void renderOnePage(const char* const* lines, int n,
+                            uint32_t W, uint32_t H, uint32_t dpi,
+                            int scale, int marginX, int marginY, int lineGap, bool urf) {
+    if (urf) beginPageUrf(W,H,dpi); else beginPage(W,H,dpi);
     const int GW = FONT_W*scale, GH = FONT_H*scale, pitch = GH + lineGap;
-    if (urf) { beginDocUrf(0); beginPageUrf(W,H,dpi); }
-    else     { beginDoc();     beginPage(W,H,dpi); }
     for(uint32_t y=0; y<H; ++y){
       memset(s_rscan, 0xFF, W);                 // white background
       int ty=(int)y - marginY;
@@ -7770,6 +7875,30 @@ namespace RasterGen {
       }
       row(s_rscan);
     }
+    flush();   // emit the last page's pending (coalesced) row before the next page
+  }
+
+  // Render a whole report as one raster document, paginating across as many pages
+  // as the line count needs (PWG/URF both support multiple pages in one job). The
+  // report text never overflows a single sheet now -- long reports simply span pages.
+  static void renderReport(const char* const* lines, int n,
+                           uint32_t W, uint32_t H, uint32_t dpi,
+                           int scale, int marginX, int marginY, int lineGap, bool urf) {
+    // W/H are the pixel dimensions the caller computed from the paper choice; the
+    // point size and PWG media name are set alongside them (see feedCut).
+    if (W > sizeof(s_rscan)) W = sizeof(s_rscan);
+    const int GH = FONT_H*scale, pitch = GH + lineGap;
+    int usableH = (int)H - 2*marginY;
+    int perPage = usableH / pitch;
+    if (perPage < 1) perPage = 1;
+    int pages = (n + perPage - 1) / perPage;
+    if (pages < 1) pages = 1;                    // always emit at least one page
+    if (urf) beginDocUrf((uint32_t)pages); else beginDoc();
+    for (int pg = 0; pg < pages; ++pg) {
+      int start = pg * perPage;
+      int cnt = n - start; if (cnt > perPage) cnt = perPage;
+      renderOnePage(lines + start, cnt, W, H, dpi, scale, marginX, marginY, lineGap, urf);
+    }
     endDoc();
   }
 }
@@ -7784,6 +7913,7 @@ bool begin(const Sinks& s) {
   s_pOK = false; s_pConnected = false; s_ser = s.toSerial; s_file = false; s_fpath = "";
   s_pCols = (s.printerCols >= 24 && s.printerCols <= 72) ? s.printerCols : 32;
   s_fmt   = (s.format >= FMT_ESCPOS && s.format <= FMT_URF_RASTER) ? s.format : FMT_ESCPOS;
+  s_paper = (s.paper == 1) ? 1 : 0;
   s_fCols = FILE_COLS;
   s_psY = 0; s_psPage = 0;
 
@@ -7791,7 +7921,7 @@ bool begin(const Sinks& s) {
   s_transport = (s.transport == Printer::IPP) ? Printer::IPP : Printer::RAW9100;
   // PWG raster is only meaningful over IPP (driverless printers); force it.
   if (s.format == FMT_PWG_RASTER || s.format == FMT_URF_RASTER) s_transport = Printer::IPP;
-  s_chunkOpen = false; s_ippAccepted = false; s_rasN = 0;
+  s_chunkOpen = false; s_ippAccepted = false; s_rasN = 0; s_writeOk = true;
   if (s.host && s.host[0]) {
     s_cli.setTimeout(4000);                       // socket read/write timeout
     // IPP rides HTTP on 631 unless the caller overrode the port; raw uses 9100.
@@ -7908,11 +8038,14 @@ String probeCapabilities(const char* host, uint16_t port) {
   // contain many null bytes (2-byte length prefixes), so an Arduino String would be
   // truncated at the first '\0' and miss the format tokens further in. Use a plain
   // buffer and scan it with memory search.
-  static uint8_t buf[4096];
+  // Reuse the raster scanline workspace (s_rscan, 2560 B) -- the probe and raster
+  // rendering never run at the same time, so they can share one buffer.
+  uint8_t* buf = RasterGen::s_rscan;
+  const size_t bufCap = sizeof(RasterGen::s_rscan);
   size_t blen = 0;
   uint32_t t0 = millis();
-  while (cli.connected() && (millis() - t0) < 6000 && blen < sizeof(buf)) {
-    while (cli.available() && blen < sizeof(buf)) { buf[blen++] = (uint8_t)cli.read(); t0 = millis(); }
+  while (cli.connected() && (millis() - t0) < 6000 && blen < bufCap) {
+    while (cli.available() && blen < bufCap) { buf[blen++] = (uint8_t)cli.read(); t0 = millis(); }
     delay(5);
   }
   cli.stop();
@@ -7943,6 +8076,7 @@ String probeCapabilities(const char* host, uint16_t port) {
 
 bool printerOk() { return s_pConnected; }   // did the printer connect this print? (survives end())
 bool ippAccepted() { return s_ippAccepted; }
+bool documentSent() { return s_writeOk; }   // did the whole document transmit without a write error?
 bool anySink()   { return s_pOK || s_ser || s_file; }
 String lastFile(){ return s_fpath; }
 
@@ -7955,10 +8089,16 @@ int cols() {
 
 // Collect one report line for the raster page, wrapping to s_pCols so long lines
 // don't run off the printable width (mirrors what the text formats do via wrapTo).
+// Append one already-wrapped line to the raster page buffer. On overflow, stamp a
+// visible truncation marker in the last slot instead of silently dropping lines.
+static void rasterPush(const String& ln) {
+  if (s_rasN < RAS_MAX_LINES - 1) { s_rasLines[s_rasN++] = ln; }
+  else if (s_rasN == RAS_MAX_LINES - 1) { s_rasLines[s_rasN++] = String("-- report truncated --"); }
+  // once full (s_rasN == RAS_MAX_LINES) further lines are dropped, marker already set
+}
+
 void rasterCollect(const String& s) {
-  wrapTo(s, s_pCols, [](const String& ln){
-    if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = ln;
-  });
+  wrapTo(s, s_pCols, [](const String& ln){ rasterPush(ln); });
 }
 
 void line(const String& s) {
@@ -7975,7 +8115,7 @@ void wrap(const String& s) { line(s); }   // line() already per-sink wraps
 
 void blank() {
   if (s_pOK) {
-    if (isRaster()) { if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = String(""); }
+    if (isRaster()) { rasterPush(String("")); }
     else if (s_fmt == FMT_POSTSCRIPT) psShowLine(String(""));
     else if (s_fmt == FMT_ZPL)   zplShowLine(String(""));
     else pNL();
@@ -7987,7 +8127,7 @@ void blank() {
 void rule() {
   auto dash = [](int w){ String r; r.reserve(w); for (int i=0;i<w;++i) r += '-'; return r; };
   if (s_pOK && isRaster()) {
-    if (s_rasN < RAS_MAX_LINES) s_rasLines[s_rasN++] = dash(s_pCols);
+    rasterPush(dash(s_pCols));
     if (s_ser)  Serial.println(dash(s_fCols));
     if (s_file) { s_f.print(dash(s_fCols)); s_f.print('\n'); }
     return;
@@ -8050,12 +8190,18 @@ void feedCut() {
       // printable width (printers have an unprintable border ~1/4in; use a safe
       // 2400px imageable area of the 2550px sheet). Pick the largest integer scale
       // whose text block fits, so wider column settings shrink the glyphs to fit.
-      const int SAFE_W = 2400, marginX = 60;
+      // Paper geometry at 300 DPI: Letter 2550x3300 / A4 2480x3508.
+      uint32_t pxW, pxH, ptW, ptH; const char* pname;
+      if (s_paper == 1) { pxW=2480; pxH=3508; ptW=595; ptH=842; pname="iso_a4_210x297mm"; }
+      else              { pxW=2550; pxH=3300; ptW=612; ptH=792; pname="na_letter_8.5x11in"; }
+      RasterGen::s_pagePtsW = ptW; RasterGen::s_pagePtsH = ptH; RasterGen::s_pageName = pname;
+      const int marginX = 60;
+      int safeW = (int)pxW - 150;      // ~1/4in unprintable border each side
       int cols = (s_pCols > 0) ? s_pCols : 32;
       int scale = 3;
-      while (scale > 1 && (cols * FONT_W * scale + 2 * marginX) > SAFE_W) scale--;
-      RasterGen::renderTextPage(ptrs, s_rasN, 2550, 3300, 300, scale, marginX, 100, 12,
-                                 /*urf=*/ s_fmt == FMT_URF_RASTER);
+      while (scale > 1 && (cols * FONT_W * scale + 2 * marginX) > safeW) scale--;
+      RasterGen::renderReport(ptrs, s_rasN, pxW, pxH, 300, scale, marginX, 100, 12,
+                              /*urf=*/ s_fmt == FMT_URF_RASTER);
     }
     // FMT_TEXT: nothing; some printers need a manual eject, noted in the docs.
   }
@@ -12233,8 +12379,8 @@ void Net::pcbCounts(int& active, int& timeWait) {
 // that a WiFi radio reset doesn't flush), which contributed to a whole-stack connect()
 // wedge after a session. Kept single-shot; the caller handles a failed GET.
 bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
-  lastCode = 0; lastErr = "";
-  if (!connected()) { lastErr = "no WiFi"; return false; }
+  lastCode = 0; lastErr = ""; lastDlErr = DownloadError::None;
+  if (!connected()) { lastErr = "no WiFi"; lastDlErr = DownloadError::ConnectFailed; return false; }
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
@@ -12415,7 +12561,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 
     uint32_t t0 = millis();
     if (!client.connect(host.c_str(), port)) {
-      lastCode = -1; lastErr = "connect failed";
+      lastCode = -1; lastErr = "connect failed"; lastDlErr = DownloadError::ConnectFailed;
       noteConnResult(-1);
       Serial.printf("[net] GET connect failed in %ums (host=%s)\n",
                     (unsigned)(millis() - t0), host.c_str());
@@ -12472,6 +12618,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
     noteConnResult(code);
     if (code != 200) {
       lastErr = "HTTP " + String(code);
+      lastDlErr = DownloadError::HttpError;
       Serial.printf("[net] GET failed: code=%d\n", code);
       return false;
     }
@@ -12485,14 +12632,15 @@ bool Net::httpsGetToFile(const String& url, const char* path,
     if (len > 0) {
       size_t freeFs = Store::freeBytes();
       if (freeFs > 0 && (size_t)len + 32768 > freeFs) {
-        lastErr = "file too big for storage (" + String(len / 1024) + "KB > "
+        lastErr = "download exceeds storage (" + String(len / 1024) + "KB > "
                   + String((int)(freeFs / 1024)) + "KB free)";
+        lastDlErr = DownloadError::StorageFull;
         return false;
       }
     }
 
     File f = Store::fs().open(path, "w");
-    if (!f) { lastErr = Store::ready() ? "fs open failed" : "no filesystem"; return false; }
+    if (!f) { lastErr = Store::ready() ? "fs open failed" : "no filesystem"; lastDlErr = DownloadError::WriteFailed; return false; }
 
     // Stream the body straight to flash. Chunked responses are dechunked inline; with a
     // Content-Length we stop at len; otherwise we stop on close/idle. Each chunk is
@@ -12550,17 +12698,20 @@ bool Net::httpsGetToFile(const String& url, const char* path,
     Serial.printf("[net] streamed %u bytes to %s (declared %d), heap now %u (largest %u)\n",
                   (unsigned)total, path, len, (unsigned)ESP.getFreeHeap(),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    if (writeErr)   { lastErr = "fs write failed"; return false; }
-    if (total == 0) { lastErr = "empty body"; return false; }
+    if (writeErr)   { lastErr = "fs write failed"; lastDlErr = DownloadError::WriteFailed; return false; }
+    if (total == 0) { lastErr = "empty body"; lastDlErr = DownloadError::EmptyBody; return false; }
     if (!chunked && len > 0 && total < (size_t)len) {
       lastErr = "short read " + String((unsigned)total) + "/" + String(len);
+      lastDlErr = DownloadError::ShortRead;
       return false;
     }
+    lastDlErr = DownloadError::None;
     return true;   // success on this hop
   }
   // Fell out of the redirect loop without a definitive result (e.g. a redirect with
   // no Location, or a second redirect we don't follow).
   lastErr = "too many redirects";
+  lastDlErr = DownloadError::TooManyRedirects;
   return false;
 }
 
@@ -12571,8 +12722,10 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
   TlsBusyGuard _tls;   // hold listeners down across the whole retry sequence
   for (int i = 0; i < attempts; i++) {
     if (httpsGetToFile(url, path, maxBytes, written, firstByteMs)) return true;
-    // A "low flash" failure won't fix itself on retry -- bail immediately.
-    if (lastErr == "low flash") return false;
+    // A storage-full failure won't fix itself on retry -- bail immediately. (Previously
+    // this compared lastErr to "low flash", a string the code never produced, so the
+    // abort never fired; the typed code makes the intent reliable.)
+    if (lastDlErr == DownloadError::StorageFull) return false;
     // A connect-LEVEL failure (code <= 0, e.g. "connection refused") is a socket-
     // pool / TIME_WAIT problem, not a mid-stream stall. Rapid retries only pile
     // more PCBs into the pool and make it worse (and the heap machinery can't fix
@@ -12592,11 +12745,55 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
 }
 
 bool Net::fetchGpToFile(const String& url, const char* path) {
-  // GP is the largest and most important download; on a weak link it can be cut
-  // short mid-body, so allow a few attempts. httpsGetToFile now reports a short
-  // read (got fewer bytes than the declared Content-Length) as a failure, so the
-  // retry wrapper re-attempts instead of caching a truncated catalog.
-  return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
+  // GP is the largest and most important download and the one file a field user can't
+  // easily re-fetch without signal, so the update is TRANSACTIONAL: we download to a
+  // sibling ".tmp", and only replace the live catalog once the new file has fully and
+  // validly arrived. A failed or truncated download therefore never destroys the
+  // previous good catalog -- the old file stays in place and only the temp is removed.
+  //
+  // Size cap: rather than a fixed 400 KB limit (which conflicted with the large groups
+  // the docs advertise), the ceiling is the actual free space on the filesystem minus a
+  // margin. httpsGetToFile also preflights any declared Content-Length against free space
+  // and raises DownloadError::StorageFull (no retry) when it won't fit.
+  size_t freeFs = Store::freeBytes();
+  size_t budget = (freeFs > 65536) ? (freeFs - 65536) : freeFs;   // keep ~64 KB headroom
+  if (budget < 32768) budget = 32768;                             // floor for tiny / unknown FS
+
+  String tmp = String(path) + ".tmp";
+  fs::FS& fs = Store::fs();
+  if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());             // clear any stale temp
+
+  // On a weak link the body can be cut short mid-stream; allow a few attempts. A short
+  // read (fewer bytes than declared) is reported as a failure, so we retry rather than
+  // promote a truncated catalog.
+  if (!httpsGetToFileRetry(url, tmp.c_str(), budget, nullptr, 3)) {
+    if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());           // discard the partial temp
+    return false;                                                // old catalog untouched
+  }
+
+  // Sanity gate before promotion: the temp must be non-empty. (A deeper parse-check of
+  // record boundaries could go here; the streaming parser already rejects a malformed
+  // catalog at load time, and short reads are caught above.)
+  File tf = fs.open(tmp.c_str(), "r");
+  size_t tsz = tf ? tf.size() : 0;
+  if (tf) tf.close();
+  if (tsz == 0) {
+    if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
+    lastErr = "empty download"; lastDlErr = DownloadError::EmptyBody;
+    return false;
+  }
+
+  // Atomic-ish promotion: remove the live file, then rename the temp into place. (fs
+  // rename won't overwrite an existing target on LittleFS, hence the remove first.)
+  if (fs.exists(path)) fs.remove(path);
+  if (!fs.rename(tmp.c_str(), path)) {
+    // Rename failed after a good download: keep the temp so the data isn't lost, and
+    // report it. The caller still has no live catalog, but nothing good was destroyed
+    // that wasn't already removed; the temp holds the fresh data for recovery.
+    lastErr = "promote failed (temp kept)"; lastDlErr = DownloadError::WriteFailed;
+    return false;
+  }
+  return true;
 }
 
 // DEPRECATED -- DO NOT CALL. Reads the entire GP catalog (~400 KB) into a single
@@ -13999,6 +14196,7 @@ bool Settings::load() {
   printerCols = d["prcols"] | 32;
   printFormat = d["prfmt"] | 0;
   printTransport = d["prtx"] | 0;
+  printPaper = d["prpr"] | 0;
   printToSerial = d["prser"] | false;
   printToFile   = d["prfile"] | false;
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
@@ -14160,6 +14358,7 @@ bool Settings::save() {
   d["prcols"] = printerCols;
   d["prfmt"] = printFormat;
   d["prtx"] = printTransport;
+  d["prpr"] = printPaper;
   d["prser"] = printToSerial;
   d["prfile"] = printToFile;
   d["mycall"] = myCall;
@@ -14261,6 +14460,10 @@ static const uint16_t CL_PALETTE[] = {
 static const uint32_t CL_PALETTE_N = sizeof(CL_PALETTE) / sizeof(CL_PALETTE[0]);
 
 static M5Canvas canvas(&M5Cardputer.Display);
+
+// Back-key predicate (backtick or Delete). Defined lower down; forward-declared here
+// so the early key handlers and the global emergency-stop hotkey can all call it.
+static bool isBack(char c, bool del);
 
 // --- small time helpers ----------------------------------------------------
 static bool timeIsSet() { time_t t = time(nullptr); return t > 1700000000; }
@@ -18771,6 +18974,16 @@ uint32_t App::dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
 
 void App::loop() {
   M5Cardputer.update();
+  // Memory telemetry: when the screen changes and tracing is on, log the heap so the
+  // per-screen resident cost is visible for the RAM-lifecycle refactor baseline.
+  if (memTrace && screen != lastMemScreen) {
+    uint32_t blk = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (blk < memTraceMinBlk) memTraceMinBlk = blk;
+    Serial.printf("[mem] screen %d->%d  free %u  largest %u  min-blk-seen %u\n",
+                  (int)lastMemScreen, (int)screen, (unsigned)ESP.getFreeHeap(),
+                  (unsigned)blk, (unsigned)memTraceMinBlk);
+    lastMemScreen = screen;
+  }
   // While parked on the Charge / Sleep screen WiFi is powered off and the CPU is
   // down-clocked, so the network/radio services below are both pointless and (for the
   // WiFi ones) operating on a downed stack. Skip them there; the keyboard read further
@@ -19153,6 +19366,13 @@ void App::loop() {
   if (screen == SCR_LORARX && ms - lastDrawMs > 200) { lastDrawMs = ms; draw(); }
 #endif
 
+  // Global banner-expiry sweep. Every transient status banner is set via setStatus()
+  // with a timeout; on continuously-redrawn screens it vanishes on its own, but a
+  // static screen (which only repaints on a keypress) could otherwise leave an expired
+  // banner painted until the next key. Clearing it here -- on any screen, once its time
+  // is up -- guarantees every banner disappears after its timeout, then repaints once.
+  if (status.length() && millis() >= statusUntil) { status = ""; lastDrawMs = ms; draw(); }
+
   // While an AOS alarm is flashing or counting down, animate on any screen.
   long dt = (nextAos && timeIsSet()) ? (long)(nextAos - nowUtc()) : 999999;
   bool alarmActive = (millis() < aosFlashUntil) || (cfg.aosAlarm && dt <= 60 && dt > -2);
@@ -19209,6 +19429,24 @@ void App::loop() {
 // Capture the current screen to /CardSat/Screenshots/shot_NNNN.bmp on the SD
 // card (24-bit BMP, no library). Bound to the 'b' key; a short beep confirms.
 // Requires SD-card storage; a low beep means no SD (running on LittleFS).
+// Global emergency stop: disengage every form of external equipment control from any
+// screen. Clears radio-frequency output and all rotator-pointing modes (sat-track,
+// Sun/Moon, EME/Moon, grid-bearing) so nothing keeps commanding the rig or moving the
+// antenna. Safe to call when nothing is engaged (it just does nothing visible then).
+void App::stopAllControl() {
+  bool wasEngaged = radioOut || rotOut || smOut || emeRotOut || gcRotOut;
+  radioOut = false;
+  rotOut = false; smOut = false; emeRotOut = false; gcRotOut = false;
+  trackedNorad = 0;
+  if (wasEngaged) {
+    beep(660, 80);                       // audible confirmation
+    setStatus("All control stopped", 3000);
+  } else {
+    setStatus("No control was active", 2000);
+  }
+  lastDrawMs = 0;                         // force a repaint so any RAD/ROT tag clears
+}
+
 void App::takeScreenshot() {
   if (!Store::onSD()) { beep(300, 120); return; }
   fs::FS& fsx = Store::fs();
@@ -19275,6 +19513,13 @@ void App::handleKey(char c, bool enter, bool back) {
   if (c == 'h' && lettersFree && screen != SCR_HELP) {
     helpReturn = screen; helpScroll = 0; screen = SCR_HELP; lastDrawMs = 0; return;
   }
+  // Global emergency stop: Fn+Back (backtick or Del) disengages radio + rotator control
+  // from any operating screen, so external equipment can always be halted without hunting
+  // for the Track screen. Excluded only in the two text editors, where Fn + Del/backtick
+  // are editing keystrokes (and which never control hardware anyway).
+  if (keyFn && isBack(c, back) && screen != SCR_EDIT && screen != SCR_NOTEEDIT) {
+    stopAllControl(); return;
+  }
   switch (screen) {
     case SCR_HOME:     keyHome(c, enter, back); break;
     case SCR_SATLIST:  keySatList(c, enter, back); break;
@@ -19337,6 +19582,10 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_OPREF: keyOpref(c, enter, back); break;
     case SCR_CTCSS: keyCtcss(c, enter, back); break;
     case SCR_CUBESIM: keyCubeSim(c, enter, back); break;
+    case SCR_LOCONV:  keyLoconv(c, enter, back); break;
+    case SCR_GRAPH:   keyGraph(c, enter, back); break;
+    case SCR_BASIC:    keyBasic(c, enter, back); break;
+    case SCR_BASICRUN: keyBasicRun(c, enter, back); break;
     case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
     case SCR_FOXTEXT: keyFoxText(c, enter, back); break;
     case SCR_CSIMINFO: keyCsimInfo(c, enter, back); break;
@@ -19826,12 +20075,13 @@ void App::drawSkyGlance() {
       canvas.drawFastVLine(x1 + w / 2, ry, rowH - 2, CL_WHITE);
     }
   }
-  footer("r refresh  ; sched  ` back");
+  footer("r refresh  p print  ; sched  ` back");
 }
 
 void App::keySkyGlance(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SCHEDULE; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_TIMELINE); return; }
   if (c == 'r') { setStatus("Computing timeline..."); draw(); buildSkyGlance();
                   setStatus("Timeline updated"); lastDrawMs = 0; return; }
   if (isUp(c) || isDown(c) || c == ';' || c == '.') {     // back to the list view
@@ -21594,7 +21844,7 @@ void App::drawVis() {
   if (visN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 56); canvas.print("No passes in this 10-day window.");
-    footer(";/. +/-1d  r recomp  ` bk"); return;
+    footer(";/. +/-1d  r recomp  p print  ` bk"); return;
   }
   const int barX0 = 40, barW = 196;          // 196 px = 24 h
   const int y0 = 19, rowH = 10;
@@ -21626,11 +21876,12 @@ void App::drawVis() {
   // "Now" marker only on today's row (first row when not scrolled into the future).
   if (visDayOff == 0)
     canvas.drawFastVLine(barX0 + (int)(barW * (nowUtc() - mid0) / 86400), y0, rowH, CL_RED);
-  footer(";/. +/-1d  r recomp  ` bk");
+  footer(";/. +/-1d  r recomp  p print  ` bk");
 }
 
 void App::keyVis(char c, bool enter, bool back) {
   if (isBack(c, back) || enter) { screen = visReturn; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_TENDAY); return; }
   if (c == 'r') { buildVis(); lastDrawMs = 0; return; }
   if (isDown(c)) { visDayOff++; buildVis(); lastDrawMs = 0; return; }              // . scroll 1 day forward
   if (isUp(c) && visDayOff > 0) { visDayOff--; buildVis(); lastDrawMs = 0; return; } // ; scroll 1 day back (>= today)
@@ -21832,11 +22083,12 @@ void App::drawIllum() {
     canvas.printf("-> %s in %ldm", illumNextEclipse ? "shadow" : "sun",
                   illumNextSec / 60);
   }
-  footer(",// +/-60d  r recomp  ` bk");
+  footer(",// +/-60d  r recomp  p print  ` bk");
 }
 
 void App::keyIllum(char c, bool enter, bool back) {
   if (isBack(c, back) || enter) { screen = visReturn; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_ILLUM); return; }
   if (c == 'r') { buildIllum(); lastDrawMs = 0; return; }
   if (isRight(c)) { illumDayOff += ILLUM_DAYS; buildIllum(); lastDrawMs = 0; return; }   // / next 60-day window
   if (isLeft(c)) {                                                                       // , previous 60-day window (>= today)
@@ -21902,7 +22154,7 @@ static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_PASS[]  = {3,66,67,68,40,7,84,54,61};
 static const int SET_DISP[]  = {48,82,25,43,85,49,77,79,81};
 static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,90,91,92,97,98,87,93,94,55,60,56,57,58,59,80,83,27,28,29};
+static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,90,91,92,97,98,88,87,93,94,55,60,56,57,58,59,80,83,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
                                                     SET_DISP, SET_LOG, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -22172,6 +22424,7 @@ void App::keySettings(char c, bool enter, bool back) {
       case 97: cfg.printFormat = (cfg.printFormat >= 8) ? 0 : cfg.printFormat + 1;
                cfg.save(); break;
       case 98: cfg.printTransport = cfg.printTransport ? 0 : 1; cfg.save(); break;
+      case 88: cfg.printPaper = cfg.printPaper ? 0 : 1; cfg.save(); break;
       case 87: {   // probe the printer's supported document formats over IPP
         if (!cfg.printerHost[0]) { setStatus("No printer IP set", 3000); break; }
         setStatus("Probing printer...", 1500);
@@ -22244,6 +22497,9 @@ static Screen editHome(int t) {
   if (t == 704 || t == 705) return SCR_MESSAGES;  // LoRa sked-send date/time prompts (cancel)
   if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
   if (t == 729) return SCR_GRID;        // workable-grids prefix filter (cancel)
+  if (t >= 770 && t <= 772) return SCR_LOCONV;   // location-converter input fields
+  if (t == 780) return SCR_GRAPH;                // graphing-calculator expression field
+  if (t == 781 || t == 782) return SCR_BASIC;    // Tiny BASIC save/load name prompts
   if (t >= 720) return SCR_SKEDENTRY;   // manual activation/sked entry fields (cancel)
   if (t == 250) return SCR_CATMON;      // CAT monitor: raw hex send (cancel/commit)
   if (t == 260) return SCR_TRACK;       // per-satellite operating note
@@ -22290,6 +22546,36 @@ void App::keyEdit(char c, bool enter, bool back) {
           dxLat = dlat; dxLon = dlon;
           setStatus(String("DX set: ") + dxGrid);
         } else setStatus("Bad grid (e.g. FM18lw)");
+      } break;
+      case 781: {                                   // Tiny BASIC: save under a name
+        String v = editBuf; v.trim();
+        if (v.length()) { basicName = v; basicSave(); }
+      } break;
+      case 782: {                                   // Tiny BASIC: load by name
+        String v = editBuf; v.trim();
+        if (v.length()) basicLoad(v.c_str());
+      } break;
+      case 780: {                                   // graphing calculator: expression
+        String v = editBuf; v.trim();
+        if (v.length()) { graphExpr = v; bool ok; calcEvalX(graphExpr.c_str(), 0.0, ok); graphErr = !ok;
+                          if (graphErr) setStatus("Expression error"); }
+      } break;
+      case 770: {                                   // location converter: grid in
+        double dlat, dlon; String g = editBuf; g.trim(); g.toUpperCase();
+        if (Location::gridToLatLon(g, dlat, dlon)) { locoLat = dlat; locoLon = dlon; locoValid = true; locoRecompute(); }
+        else setStatus("Bad grid (e.g. FM18lw)");
+      } break;
+      case 771: {                                   // location converter: latitude in
+        String v = editBuf; v.trim();
+        double d = v.toFloat();
+        if (v.length() && d >= -90.0 && d <= 90.0) { locoLat = d; locoValid = true; locoRecompute(); }
+        else setStatus("Lat must be -90..90");
+      } break;
+      case 772: {                                   // location converter: longitude in
+        String v = editBuf; v.trim();
+        double d = v.toFloat();
+        if (v.length() && d >= -180.0 && d <= 180.0) { locoLon = d; locoValid = true; locoRecompute(); }
+        else setStatus("Lon must be -180..180");
       } break;
       case 200: cfg.civAddr = (uint8_t)strtol(editBuf.c_str(), nullptr, 16); break;
       case 250: catMonSendHex(editBuf); break;   // CAT monitor: transmit typed hex
@@ -22841,7 +23127,8 @@ void App::keyEdit(char c, bool enter, bool back) {
         editTarget == 500 || editTarget == 503 || editTarget == 600 ||
         editTarget == 350 || editTarget == 351 || editTarget == 360 ||
         editTarget == 370 ||
-        editTarget == 721 || editTarget == 723 || editTarget == 729 || editTarget == 760) {
+        editTarget == 721 || editTarget == 723 || editTarget == 729 || editTarget == 760 ||
+        editTarget == 770) {
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
     }
@@ -22972,8 +23259,9 @@ void App::drawAbout() {
     if ((int)M5.Power.isCharging() == 1) s += " (charging)";  // 1=charging; ignore "unknown" (2)
     line(s);
   }
-  line(String("Free heap: ") + String(ESP.getFreeHeap() / 1024) + " KB (max blk " +
-       String(ESP.getMaxAllocHeap() / 1024) + "K)");
+  line(String("Heap ") + String(ESP.getFreeHeap() / 1024) + "K  blk " +
+       String(ESP.getMaxAllocHeap() / 1024) + "K  min " +
+       String(ESP.getMinFreeHeap() / 1024) + "K");
   {
     uint32_t up = millis() / 1000;
     char b[28];
@@ -25195,6 +25483,10 @@ void App::draw() {
     case SCR_OPREF: drawOpref(); break;
     case SCR_CTCSS: drawCtcss(); break;
     case SCR_CUBESIM: drawCubeSim(); break;
+    case SCR_LOCONV:  drawLoconv(); break;
+    case SCR_GRAPH:   drawGraph(); break;
+    case SCR_BASIC:    drawBasic(); break;
+    case SCR_BASICRUN: drawBasicRun(); break;
     case SCR_FOXANAT: drawFoxAnat(); break;
     case SCR_FOXTEXT: drawFoxText(); break;
     case SCR_CSIMINFO: drawCsimInfo(); break;
@@ -27526,6 +27818,8 @@ void App::runSerialCommand(const char* cmd) {
     Serial.println(F("CardSat serial console (read-only):"));
     Serial.println(F("  ver   firmware version + build date"));
     Serial.println(F("  heap  free heap + largest contiguous block"));
+    Serial.println(F("  mem   full memory baseline (heap + struct/array sizes)"));
+    Serial.println(F("  memtrace  toggle per-screen heap logging"));
     Serial.println(F("  sats  catalog count (loaded/seen) + truncation"));
     Serial.println(F("  fav   favorites count + active satellite"));
     Serial.println(F("  next  next pass for the active satellite"));
@@ -27543,6 +27837,33 @@ void App::runSerialCommand(const char* cmd) {
     Serial.printf("heap free %u, largest block %u\n",
                   (unsigned)ESP.getFreeHeap(),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  } else if (is("mem")) {
+    // Memory baseline for the RAM-lifecycle refactor (see docs/design/RAM_LIFECYCLE_SCOPE.md).
+    // Read-only. Live heap + high-water, then the static cost of each candidate array so a
+    // future refactor can be prioritized against real byte counts rather than estimates.
+    Serial.println(F("--- CardSat memory baseline ---"));
+    Serial.printf("heap: free %u, min-ever %u, largest block %u\n",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    Serial.printf("sizeof: SatEntry %u, SatDb %u, PassPredict %u, Transponder %u, MemoEntry %u, App %u\n",
+                  (unsigned)sizeof(SatEntry), (unsigned)sizeof(SatDb),
+                  (unsigned)sizeof(PassPredict), (unsigned)sizeof(Transponder),
+                  (unsigned)sizeof(VoiceMemo::MemoEntry), (unsigned)sizeof(App));
+    Serial.println(F("resident arrays (always-allocated, refactor candidates):"));
+    Serial.printf("  catalog _sats[%d]        = %u B\n", MAX_SATS, (unsigned)(sizeof(SatEntry) * MAX_SATS));
+    Serial.printf("  favs[%d]+view[%d]        = %u B\n", MAX_SATS, MAX_SATS,
+                  (unsigned)((sizeof(uint32_t) + sizeof(int)) * MAX_SATS));
+    Serial.printf("  visPasses[%d]+vlPasses[%d]= %u B\n", VIS_PASS_MAX, VIS_PASS_MAX,
+                  (unsigned)(2u * sizeof(PassPredict) * VIS_PASS_MAX));
+    Serial.printf("  memos[%d]               = %u B\n", MEMO_LIST_MAX,
+                  (unsigned)(sizeof(VoiceMemo::MemoEntry) * MEMO_LIST_MAX));
+    Serial.printf("  activeTx[%d]            = %u B\n", MAX_TX_PER_SAT,
+                  (unsigned)(sizeof(Transponder) * MAX_TX_PER_SAT));
+    Serial.printf("catalog loaded: %d / %d\n", db.count(), MAX_SATS);
+  } else if (is("memtrace")) {
+    memTrace = !memTrace;
+    if (memTrace) { lastMemScreen = screen; memTraceMinBlk = 0xFFFFFFFF; }
+    Serial.printf("mem tracing %s\n", memTrace ? "ON (logs heap on each screen change)" : "OFF");
   } else if (is("sats")) {
     Serial.printf("catalog: %d loaded", db.count());
     if (db.seenCount() > db.count()) Serial.printf(" of %d seen (truncated; favorites kept)", db.seenCount());
@@ -27606,9 +27927,14 @@ void App::runSerialCommand(const char* cmd) {
     else if (!strcasecmp(q, "allpass")) pr = PR_ALLPASS;
     else if (!strcasecmp(q, "target"))  pr = PR_TARGET;
     else if (!strcasecmp(q, "note"))    pr = PR_NOTE;
+    else if (!strcasecmp(q, "orbit"))   pr = PR_ORBIT;
+    else if (!strcasecmp(q, "illum"))   pr = PR_ILLUM;
+    else if (!strcasecmp(q, "tenday"))  pr = PR_TENDAY;
+    else if (!strcasecmp(q, "timeline")) pr = PR_TIMELINE;
     else ok = false;
     if (!ok) { Serial.println(F("usage: print passes|ticket|card|keps|log|rove|horizon|")); 
-               Serial.println(F("             amsat|contact|mutual|dxdopp|eqx|allpass|target|note")); return; }
+               Serial.println(F("             amsat|contact|mutual|dxdopp|eqx|allpass|target|note|")); 
+               Serial.println(F("             orbit|illum|tenday|timeline")); return; }
     Serial.printf("printing %s to %s...\n", q, cfg.printerHost);
     Serial.println(printReport(pr) ? "ok" : "FAILED (see screen)");
   } else if (strncasecmp(cmd, "pass", 4) == 0) {
@@ -28034,6 +28360,319 @@ void App::printPassPolar() {
   }
 }
 
+// ---- Orbital analysis report (mirrors the SCR_ORBIT numeric pages) --------------
+void App::printOrbit() {
+  Printer::title("ORBITAL ANALYSIS");
+  if (!printActiveHint()) return;
+  SatEntry* s = activeSat();
+  buildOrbit(true);                             // recompute derived orbital state (quiet)
+  time_t now = timeIsSet() ? nowUtc() : 0;
+  const double D2R = 0.017453292519943295;
+  const double MU  = 398600.4418, RE = 6378.137;
+  double mm = s->meanMotion;
+  double periodMin = (mm > 0) ? 1440.0 / mm : 0;
+  double nRad = mm * 2.0 * M_PI / 86400.0;      // rad/s
+  double a = (mm > 0) ? pow(MU / (nRad * nRad), 1.0/3.0) : 0;
+  char b[64];
+
+  Printer::line(String(s->name) + "  #" + String(s->norad));
+  Printer::line("Intl des " + String(s->intlDes));
+  // A permanent record is only meaningful against the epoch it describes, so stamp it.
+  Printer::line("Epoch " + fmtMDHM((time_t)s->epochUnix) + "Z  elset #" + String(s->elsetNum));
+  if (now) Printer::line("Printed " + fmtMDHM(now) + "Z");
+  Printer::blank();
+
+  // --- Keplerian elements (permanent, from the element set) ---
+  Printer::line("-- Elements --");
+  snprintf(b, sizeof(b), "Inclination  %.4f deg", s->incl);      Printer::line(String(b));
+  snprintf(b, sizeof(b), "Eccentricity %.7f", s->ecc);           Printer::line(String(b));
+  snprintf(b, sizeof(b), "RAAN         %.4f deg", s->raan);       Printer::line(String(b));
+  snprintf(b, sizeof(b), "Arg perigee  %.4f deg", s->argp);      Printer::line(String(b));
+  snprintf(b, sizeof(b), "Mean anomaly %.4f deg", s->ma);        Printer::line(String(b));
+  snprintf(b, sizeof(b), "Mean motion  %.8f rev/day", s->meanMotion); Printer::line(String(b));
+  snprintf(b, sizeof(b), "B*           %.6f", s->bstar);         Printer::line(String(b));
+  snprintf(b, sizeof(b), "Rev at epoch %ld", (long)s->revAtEpoch); Printer::line(String(b));
+  Printer::blank();
+
+  // --- Derived geometry (permanent shape of the orbit) ---
+  Printer::line("-- Orbit geometry --");
+  snprintf(b, sizeof(b), "Period       %.2f min", periodMin);    Printer::line(String(b));
+  snprintf(b, sizeof(b), "SMA (a)      %.1f km", a);             Printer::line(String(b));
+  snprintf(b, sizeof(b), "Apogee alt   %.1f km", orbApoKm);      Printer::line(String(b));
+  snprintf(b, sizeof(b), "Perigee alt  %.1f km", orbPeriKm);     Printer::line(String(b));
+  // Footprint diameters (widest simultaneous view => longest possible QSO span).
+  auto fpDia = [&](double h) -> double { return (h > 0) ? 2.0 * RE * acos(RE / (RE + h)) : 0.0; };
+  snprintf(b, sizeof(b), "Footprint apo %.0f km dia", fpDia(orbApoKm)); Printer::line(String(b));
+  snprintf(b, sizeof(b), "Footprint per %.0f km dia", fpDia(orbPeriKm)); Printer::line(String(b));
+  // Orbital speed at apogee/perigee (vis-viva; geometry, not a live position).
+  double vApo = (a > 0) ? sqrt(MU * (2.0 / (a * (1 + s->ecc)) - 1.0 / a)) : 0.0;
+  double vPer = (a > 0) ? sqrt(MU * (2.0 / (a * (1 - s->ecc)) - 1.0 / a)) : 0.0;
+  snprintf(b, sizeof(b), "Speed apo/per %.3f / %.3f km/s", vApo, vPer); Printer::line(String(b));
+  Printer::blank();
+
+  // --- Nodal dynamics (J2 secular rates; a function of the orbit, not the clock) ---
+  {
+    double ci = cos(s->incl * D2R);
+    double pp = a * (1.0 - s->ecc * s->ecc);
+    double ReP2 = (pp > 0) ? (RE / pp) * (RE / pp) : 0.0;
+    const double J2 = 0.00108262998905, DPD = 57.29577951308232 * 86400.0;
+    double Odot = -1.5 * nRad * J2 * ReP2 * ci * DPD;              // node regression deg/day
+    double Wdot = 0.75 * nRad * J2 * ReP2 * (5 * ci * ci - 1) * DPD; // apsidal deg/day
+    Printer::line("-- Nodal dynamics --");
+    snprintf(b, sizeof(b), "Node drift   %+.3f deg/day", Odot);   Printer::line(String(b));
+    snprintf(b, sizeof(b), "Perig drift  %+.3f deg/day", Wdot);   Printer::line(String(b));
+    Printer::line(String("Sun-synchronous: ") + ((fabs(Odot - 0.98565) < 0.05) ? "yes" : "no"));
+    // Repeat ground track (permanent resonance property).
+    double best = 1e9; int bP = 0, bQ = 0;
+    for (int P = 1; P <= 30; ++P) { int Q = (int)lround(mm * P);
+      double err = fabs(mm - (double)Q / (double)P);
+      if (err < best) { best = err; bP = P; bQ = Q; } }
+    if (bP && best < 0.015) Printer::line("Repeat track " + String(bQ) + " rev/" + String(bP) + "d");
+    else                    Printer::line("Repeat track none <30d");
+    // Longest possible pass (overhead at apogee).
+    double rApo = a * (1.0 + s->ecc);
+    double lamA = (rApo > RE) ? acos(RE / rApo) : 0.0;
+    double wApo = sqrt(MU * pp) / (rApo * rApo);
+    double tmax = (wApo > 0) ? 2.0 * lamA / wApo / 60.0 : 0.0;
+    snprintf(b, sizeof(b), "Max pass     %.1f min", tmax);        Printer::line(String(b));
+    Printer::blank();
+  }
+
+  // --- Illumination geometry (beta angle + full-sun threshold; orbit-plane vs Sun) ---
+  if (now) {
+    double beta = pred.betaAngleDeg(now, s->incl, s->raan);
+    double hMean = a - RE;
+    double betaStar = (hMean > 0) ? acos(RE / (RE + hMean)) / D2R : 0.0;
+    Printer::line("-- Illumination geometry --");
+    snprintf(b, sizeof(b), "Beta angle   %+.1f deg", beta);      Printer::line(String(b));
+    snprintf(b, sizeof(b), "Beta* full-sun +/-%.1f deg", betaStar); Printer::line(String(b));
+    // Full-sun vs eclipsed verdict for the current orbit (sampled the same way the screen does).
+    if (periodMin > 0) {
+      time_t period = (time_t)(periodMin * 60.0 + 0.5);
+      int N = 180, ecl = 0;
+      for (int k = 0; k < N; ++k) if (!pred.sunlitAt(now + (time_t)((double)period * k / N))) ecl++;
+      double fEcl = (double)ecl / N;
+      if (ecl == 0) Printer::line("Sunlight     full-sun orbit");
+      else {
+        snprintf(b, sizeof(b), "Eclipse      %.0f%% /orbit (%.1f min)", fEcl * 100.0, fEcl * periodMin);
+        Printer::line(String(b));
+      }
+    }
+    Printer::blank();
+  }
+
+  // --- Decay estimate (physical property of the current element set) ---
+  if (orbDecayDays >= 0 && orbDecayDays < 1e8) {
+    Printer::line("-- Decay --");
+    Printer::line("Estimate     " + fmtDecay(orbDecayDays));
+    Printer::line("Range        " + fmtDecayShort(orbDecayHi) + "-" + fmtDecayShort(orbDecayLo)
+                  + " (" + String(solarActLabel(cfg.solarAct)) + ")");
+    Printer::blank();
+  }
+
+  // --- Identity / launch (permanent) ---
+  {
+    int lyear = 0, lnum = 0;
+    if (s->intlDes[0] && strlen(s->intlDes) >= 5 && s->intlDes[4] == '-'
+        && isdigit((unsigned char)s->intlDes[0]) && isdigit((unsigned char)s->intlDes[1])
+        && isdigit((unsigned char)s->intlDes[2]) && isdigit((unsigned char)s->intlDes[3])) {
+      lyear = (s->intlDes[0]-'0')*1000 + (s->intlDes[1]-'0')*100
+            + (s->intlDes[2]-'0')*10 + (s->intlDes[3]-'0');
+      lnum = atoi(s->intlDes + 5);
+    }
+    if (lyear >= 1957) {
+      Printer::line("-- Identity --");
+      Printer::line("Launched     " + String(lyear) + (lnum ? (" (#" + String(lnum) + ")") : String("")));
+      if (now) {
+        struct tm ly; memset(&ly, 0, sizeof(ly));
+        ly.tm_year = lyear - 1900; ly.tm_mday = 1;
+        double ageY = (now - mktime(&ly)) / 31557600.0;
+        Printer::line("In orbit     " + String(ageY, 1) + " yr");
+      }
+      Printer::line("COSPAR       " + String(s->intlDes));
+    }
+  }
+}
+
+// ---- Illumination summary (mirrors SCR_ILLUM; the screen is a sunlit/eclipse raster,
+//      summarized here as the sunlit fraction over the coming orbits) --------------
+void App::printIllum() {
+  Printer::title("ILLUMINATION");
+  if (!printActiveHint()) return;
+  SatEntry* s = activeSat();
+  buildIllum();
+  if (!illumValid) { Printer::line("No orbit/illumination data."); return; }
+  Printer::line(String(s->name) + "  #" + String(s->norad));
+  char b[56];
+  snprintf(b, sizeof(b), "Orbit period ~%.0f min", illumPeriodMin);  Printer::line(String(b));
+  Printer::line(String("Now: ") + (illumSunNow ? "SUNLIT" : "ECLIPSE"));
+  Printer::blank();
+  Printer::line("Sunlit fraction of each orbit,");
+  Printer::line("next " + String(ILLUM_DAYS) + " days (dNN: percent):");
+  Printer::blank();
+  // For each day column, count sunlit rows (a bit not set = sunlit in the raster).
+  bool wide = Printer::cols() >= 44;
+  String rowbuf; int perRow = wide ? 6 : 4;
+  for (int c = 0; c < ILLUM_DAYS; ++c) {
+    int sun = 0;
+    for (int r = 0; r < ILLUM_ROWS; ++r)
+      if (!(illumBits[c][r >> 3] & (1 << (r & 7)))) sun++;
+    int pct = (int)lround(100.0 * sun / ILLUM_ROWS);
+    char cell[12]; snprintf(cell, sizeof(cell), "d%02d:%3d%%", c, pct);
+    rowbuf += cell; rowbuf += ' ';
+    if ((c % perRow) == perRow - 1) { Printer::line(rowbuf); rowbuf = ""; }
+  }
+  if (rowbuf.length()) Printer::line(rowbuf);
+  Printer::blank();
+
+  // ASCII raster: one line per day, a bar across one orbit ('#' sunlit, '.' eclipse),
+  // mirroring the on-screen day-vs-orbit-phase shading. Width follows the paper.
+  int cw = Printer::cols();
+  int barW = (cw >= 44) ? 38 : (cw >= 32 ? 26 : 18);   // orbit-phase samples per line (label = 5)
+  Printer::line("Per-orbit sun(#)/eclipse(.):");
+  Printer::line("day |orbit phase ->");
+  int dayStep = (ILLUM_DAYS > 30) ? 2 : 1;             // <=30 printed lines
+  for (int c = 0; c < ILLUM_DAYS; c += dayStep) {
+    String bar;
+    for (int x = 0; x < barW; ++x) {
+      int r = (int)((long)x * ILLUM_ROWS / barW);      // map bar column -> raster row
+      bool ecl = illumBits[c][r >> 3] & (1 << (r & 7));
+      bar += ecl ? '.' : '#';
+    }
+    char lbl[8]; snprintf(lbl, sizeof(lbl), "+%2dd", c);
+    Printer::line(String(lbl) + "|" + bar);
+  }
+  Printer::blank();
+  Printer::wrap("100% = full sun that orbit; lower values mean a longer eclipse "
+                "(battery-only) fraction each orbit.");
+}
+
+// ---- 10-day pass progression (mirrors SCR_VIS) ----------------------------------
+void App::printTenDay() {
+  Printer::title("10-DAY PASSES");
+  if (!printActiveHint()) return;
+  SatEntry* s = activeSat();
+  buildVis();
+  if (visN == 0) { Printer::line("No passes in the 10-day window."); return; }
+  Printer::line(String(s->name) + "  (>= " + String(cfg.minPassEl) + " deg)");
+  Printer::line(String(visN) + " passes, times UTC");
+  Printer::blank();
+  bool wide = Printer::cols() >= 44;
+  if (wide) Printer::line("Date   AOS   LOS   Peak  AzAOS");
+  else      Printer::line("Date   AOS   Peak");
+  Printer::rule();
+  char r[64];
+  for (int i = 0; i < visN; ++i) {
+    PassPredict& p = visPasses[i];
+    struct tm tmv; gmtime_r(&p.aos, &tmv);
+    char dstr[8]; snprintf(dstr, sizeof(dstr), "%02d/%02d", tmv.tm_mon + 1, tmv.tm_mday);
+    if (wide) {
+      snprintf(r, sizeof(r), "%s  %s %s  %3d  %3d",
+               dstr, fmtHM(p.aos).c_str(), fmtHM(p.los).c_str(),
+               (int)p.maxEl, (int)p.azAos);
+    } else {
+      snprintf(r, sizeof(r), "%s  %s  %2d", dstr, fmtHM(p.aos).c_str(), (int)p.maxEl);
+    }
+    Printer::line(String(r));
+  }
+
+  // ASCII day timeline, mirroring the on-screen 24h bars: one line per day, a
+  // 00-24 h UTC track where each pass is drawn by elevation tier
+  // (': low <15  = mid  # high >=40').
+  Printer::blank();
+  Printer::line("Daily 00---06---12---18--24h UTC");
+  int cw = Printer::cols();
+  int barW = (cw >= 44) ? 38 : (cw >= 32 ? 24 : 18);   // columns across 24 h (label = 6)
+  time_t today0 = nowUtc() - (nowUtc() % 86400);
+  for (int d = 0; d < VIS_DAYS; ++d) {
+    time_t dayStart = today0 + (time_t)d * 86400;
+    struct tm tmv; gmtime_r(&dayStart, &tmv);
+    char lbl[8]; snprintf(lbl, sizeof(lbl), "%02d/%02d", tmv.tm_mon + 1, tmv.tm_mday);
+    String bar; for (int x = 0; x < barW; ++x) bar += ' ';
+    for (int i = 0; i < visN; ++i) {
+      time_t a = visPasses[i].aos, b = visPasses[i].los;
+      time_t s0 = (a > dayStart) ? a : dayStart;
+      time_t s1 = (b < dayStart + 86400) ? b : dayStart + 86400;
+      if (s1 <= s0) continue;
+      int x1 = (int)((long)barW * (s0 - dayStart) / 86400);
+      int x2 = (int)((long)barW * (s1 - dayStart) / 86400);
+      if (x2 <= x1) x2 = x1 + 1;
+      float me = visPasses[i].maxEl;
+      char ch = (me < 15.0f) ? ':' : (me < 40.0f ? '=' : '#');
+      for (int x = x1; x < x2 && x < barW; ++x) bar.setCharAt(x, ch);
+    }
+    Printer::line(String(lbl) + "|" + bar);
+  }
+}
+
+// ---- Next-6-hours timeline for all favorites (mirrors SCR_SKYGLANCE) ------------
+void App::printTimeline() {
+  Printer::title("6-HOUR TIMELINE");
+  buildSkyGlance();
+  if (!timeIsSet()) { Printer::line("Clock not set."); return; }
+  if (skyBarN == 0) { Printer::line("No favorite passes in the next 6 h."); return; }
+  Printer::line("Favorite passes, next " + String(SKY_HOURS) + " h (UTC)");
+  Printer::line("Sorted by AOS");
+  Printer::blank();
+  bool wide = Printer::cols() >= 44;
+  if (wide) Printer::line("AOS   LOS   Peak  Satellite");
+  else      Printer::line("AOS   Peak  Sat");
+  Printer::rule();
+  // Sort bar indices by AOS (simple insertion sort over the small fixed array).
+  int order[SKY_BARS];
+  for (int i = 0; i < skyBarN; ++i) order[i] = i;
+  for (int i = 1; i < skyBarN; ++i) {
+    int key = order[i], j = i - 1;
+    while (j >= 0 && skyBars[order[j]].aos > skyBars[key].aos) { order[j + 1] = order[j]; j--; }
+    order[j + 1] = key;
+  }
+  char r[64];
+  for (int k = 0; k < skyBarN; ++k) {
+    SkyBar& bar = skyBars[order[k]];
+    const char* nm = skyName[bar.row];
+    if (wide) {
+      snprintf(r, sizeof(r), "%s %s  %3d  %s",
+               fmtHM(bar.aos).c_str(), fmtHM(bar.los).c_str(), (int)bar.maxEl, nm);
+    } else {
+      snprintf(r, sizeof(r), "%s  %2d  %-8.8s", fmtHM(bar.aos).c_str(), (int)bar.maxEl, nm);
+    }
+    Printer::line(String(r));
+  }
+
+  // ASCII timeline, mirroring the on-screen sky-at-a-glance: one row per favorite with a
+  // pass in the window, drawn across the SKY_HOURS span. Each pass is placed by AOS/LOS
+  // and marked by elevation tier (': low <15  = mid  # high >=40').
+  Printer::blank();
+  int cw = Printer::cols();
+  int nameW = 7;
+  int barW = (cw >= 44) ? 36 : (cw >= 32 ? 24 : 16);   // columns across the window
+  // Axis header: "now" at the left edge, "+Nh" at the right edge of the bar.
+  { String axis = "now"; while ((int)axis.length() < barW - 3) axis += ' ';
+    axis += "+" + String(SKY_HOURS) + "h";
+    String pad; for (int x = 0; x < nameW; ++x) pad += ' ';
+    Printer::line(pad + "|" + axis); }
+  time_t winEnd = skyStart + (time_t)SKY_HOURS * 3600;
+  double span = (double)(winEnd - skyStart);
+  for (int rw = 0; rw < skyRowN; ++rw) {
+    String bar; for (int x = 0; x < barW; ++x) bar += ' ';
+    for (int i = 0; i < skyBarN; ++i) {
+      if (skyBars[i].row != rw) continue;
+      time_t a = skyBars[i].aos, b = skyBars[i].los;
+      if (a < skyStart) a = skyStart;
+      if (b > winEnd)   b = winEnd;
+      if (b <= a) continue;
+      int x1 = (int)(barW * (a - skyStart) / span);
+      int x2 = (int)(barW * (b - skyStart) / span);
+      if (x2 <= x1) x2 = x1 + 1;
+      float me = skyBars[i].maxEl;
+      char ch = (me < 15.0f) ? ':' : (me < 40.0f ? '=' : '#');
+      for (int x = x1; x < x2 && x < barW; ++x) bar.setCharAt(x, ch);
+    }
+    char nm2[8]; snprintf(nm2, sizeof(nm2), "%-*.*s", nameW, nameW, skyName[rw]);
+    Printer::line(String(nm2) + "|" + bar);
+  }
+}
+
 void App::printNote() {
   Printer::title("NOTE");
   if (noteName.length()) Printer::line(noteName);
@@ -28050,6 +28689,39 @@ void App::printNote() {
   }
   if (ln.length()) Printer::wrap(ln);
 }
+
+// ---- Tiny BASIC printing -------------------------------------------------------
+void App::printBasicList() {
+  Printer::title("BASIC LISTING");
+  if (basicName.length()) Printer::line(basicName);
+  Printer::blank();
+  if (basicBuf.length() == 0) { Printer::line("(empty program)"); return; }
+  int i = 0, n = basicBuf.length(); String ln;
+  while (i < n) {
+    char c = basicBuf[i++];
+    if (c == '\r') continue;
+    if (c == '\n') { Printer::wrap(ln); ln = ""; }
+    else if (ln.length() < 200) ln += c;
+  }
+  if (ln.length()) Printer::wrap(ln);
+}
+
+void App::printBasicOut() {
+  Printer::title("BASIC OUTPUT");
+  if (basicName.length()) Printer::line(basicName);
+  Printer::blank();
+  if (basicOut.length() == 0 && basicErr.length() == 0) { Printer::line("(not run yet)"); return; }
+  int i = 0, n = basicOut.length(); String ln;
+  while (i < n) {
+    char c = basicOut[i++];
+    if (c == '\r') continue;
+    if (c == '\n') { Printer::wrap(ln); ln = ""; }
+    else if (ln.length() < 200) ln += c;
+  }
+  if (ln.length()) Printer::wrap(ln);
+  if (basicErr.length()) { Printer::blank(); Printer::wrap(String("? ") + basicErr); }
+}
+
 
 void App::printAmsatPitch() {
   Printer::title("SUPPORT AMSAT");
@@ -28141,6 +28813,14 @@ const char* App::prtStem(PrintReport w) {
     case PR_TARGET:  return "target";
     case PR_NOTE:    return "note";
     case PR_PASSPOLAR: return "polar";
+    case PR_ORBIT:   return "orbit";
+    case PR_ILLUM:   return "illum";
+    case PR_TENDAY:  return "tenday";
+    case PR_TIMELINE: return "timeline";
+    case PR_BASICLIST: return "basic_listing";
+    case PR_BASICOUT:  return "basic_output";
+    case PR_TOOLOUT:   return "tool_output";
+    case PR_CHARLK:    return "char_lookup";
   }
   return "report";
 }
@@ -28156,6 +28836,7 @@ bool App::printReport(PrintReport which) {
   sk.printerCols = cfg.printerCols;
   sk.format      = cfg.printFormat;
   sk.transport   = cfg.printTransport;
+  sk.paper       = cfg.printPaper;
   sk.toSerial    = cfg.printToSerial;
   sk.toFile      = cfg.printToFile;
   sk.fileTitle   = prtStem(which);
@@ -28185,6 +28866,14 @@ bool App::printReport(PrintReport which) {
     case PR_TARGET:  printTargetHits(); break;
     case PR_NOTE:    printNote(); break;
     case PR_PASSPOLAR: printPassPolar(); break;
+    case PR_ORBIT:   printOrbit(); break;
+    case PR_ILLUM:   printIllum(); break;
+    case PR_TENDAY:  printTenDay(); break;
+    case PR_TIMELINE: printTimeline(); break;
+    case PR_BASICLIST: printBasicList(); break;
+    case PR_BASICOUT:  printBasicOut(); break;
+    case PR_TOOLOUT:   printToolOut(); break;
+    case PR_CHARLK:    printCharLk(); break;
   }
   Printer::feedCut();
   Printer::end();
@@ -28201,12 +28890,17 @@ bool App::printReport(PrintReport which) {
     st = "Printed";
     if (cfg.printToFile && Printer::lastFile().length()) st += " (saved)";
     if (printerFail) st += " (printer down)";                 // note it, but it's not a failure
-    // IPP: the printer connected and we sent the job over HTTP. A 2xx means it was
-    // ACCEPTED (not necessarily rendered -- raster-only printers accept then discard
-    // PCL/PS). Surface the distinction so a silent no-page isn't mistaken for success.
-    // Raster forces IPP even when the transport setting is "raw", so include it here.
-    bool usedIpp = (cfg.printTransport == 1) || (cfg.printFormat == 7);
-    if (wantPrinter && !printerFail && usedIpp) {
+    // A printer can connect and then fail mid-transmission (dropped link, full buffer).
+    // documentSent() reports whether every byte went out; flag a partial send so it is
+    // not mistaken for a good print.
+    else if (wantPrinter && !Printer::documentSent())
+      st += " (send failed)";
+    // IPP: the printer connected and we sent the whole job over HTTP. A 2xx means it was
+    // ACCEPTED (not necessarily rendered -- raster-only printers accept then discard the
+    // wrong format). Surface the distinction so a silent no-page isn't mistaken for success.
+    // Raster (PWG=7, URF=8) forces IPP even when the transport setting is "raw".
+    bool usedIpp = (cfg.printTransport == 1) || (cfg.printFormat == 7) || (cfg.printFormat == 8);
+    if (wantPrinter && !printerFail && Printer::documentSent() && usedIpp) {
       st += Printer::ippAccepted() ? " (IPP ok)" : " (IPP: sent, not confirmed)";
     }
   }
@@ -29483,7 +30177,7 @@ void App::drawOrbit() {
                            orbAscLon < 0 ? 'W' : 'E', tmv.tm_hour, tmv.tm_min);
       row("Asc node", String(b));
     } else row("Asc node", "--");
-    footer(",// page  r refresh  ` bk");
+    footer(",// page  r refresh  p print  ` bk");
     return;
   }
 
@@ -29511,7 +30205,7 @@ void App::drawOrbit() {
 
   if (orbitPage == 2) {                              // ---------- Next pass ----------
     if (!orbHasPass) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-      canvas.print("No upcoming pass."); footer(",// page  r refresh  ` bk"); return; }
+      canvas.print("No upcoming pass."); footer(",// page  r refresh  p print  ` bk"); return; }
     auto hms = [](long sec) -> String { if (sec < 0) sec = 0; char b[12];
       snprintf(b, sizeof(b), "%ld:%02ld", sec / 60, sec % 60); return String(b); };
     row("AOS in",   hms((long)(orbPass.aos - now)));
@@ -29541,7 +30235,7 @@ void App::drawOrbit() {
     canvas.setTextColor(orbVisible ? CL_YELLOW : CL_GREY, CL_BLACK);
     canvas.setCursor(2, y); canvas.print(orbVisible ? "Optically VISIBLE pass"
                                                     : "Not optically visible");
-    footer(",// page  r refresh  ` bk");
+    footer(",// page  r refresh  p print  ` bk");
     return;
   }
 
@@ -29627,19 +30321,19 @@ void App::drawOrbit() {
         row(wantFull ? "-> full sun" : "-> eclipses", ">180d");
       }
     }
-    footer(",// page  r refresh  ` bk");
+    footer(",// page  r refresh  p print  ` bk");
     return;
   }
 
   if (orbitPage == 7) {                              // ---------- Pass outlook ----------
     if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-                canvas.print("Clock not set."); footer(",// page  r refresh  ` bk"); return; }
+                canvas.print("Clock not set."); footer(",// page  r refresh  p print  ` bk"); return; }
     canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(2, y);
     canvas.printf("Next %d days", ORB_OUTLOOK_DAYS); y += LH;
     if (orbOutlookN == 0) {
       canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, y);
       canvas.print("No passes above mask.");
-      footer(",// page  r refresh  ` bk"); return;
+      footer(",// page  r refresh  p print  ` bk"); return;
     }
     auto hms = [](long sec) -> String { if (sec < 0) sec = 0; char b[12];
       snprintf(b, sizeof(b), "%ld:%02ld", sec / 60, sec % 60); return String(b); };
@@ -29656,7 +30350,7 @@ void App::drawOrbit() {
       row("Best in",  hms((long)(orbBestT - now)));
       row("Best dur", hms((long)orbBestDur));
     }
-    footer(",// page  r refresh  ` bk");
+    footer(",// page  r refresh  p print  ` bk");
     return;
   }
 
@@ -29733,7 +30427,7 @@ void App::drawOrbit() {
       double tmax = (wApo > 0) ? 2.0 * lamA / wApo / 60.0 : 0.0;
       row("Max pass",  String(tmax, 1) + " min");
     }
-    footer(",// page  r refresh  ` bk");
+    footer(",// page  r refresh  p print  ` bk");
     return;
   }
 
@@ -29947,6 +30641,7 @@ void App::oxSeedFromSat() {
 
 void App::keyOrbit(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_SATLIST; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_ORBIT); return; }
 
   // Orbit explorer (page 10): row select + in-place numeric edit. Handled before the
   // generic page nav so digit entry doesn't page-flip. Left/right still change page.
@@ -32610,17 +33305,20 @@ enum { TOOL_COAX = 0, TOOL_DIPOLE, TOOL_VERTICAL, TOOL_YAGI, TOOL_QUAD,
 
 static const char* const TOOLS_NAMES[] = {
   "Scientific calculator",
+  "Graphing calculator",
   "Programmer calc (hex/bin)",
-  "Char lookup (ASCII/RTTY)",
+  "Tiny BASIC",
+  "Location converter",
+  "Link budget",
+  "State vector -> GP",
+  "CubeSatSim C2C ref",
   "DXCC entity lookup",
   "CQ zones (WAZ)",
   "ITU zones",
-  "Link budget",
-  "Operating references",
   "CTCSS tone reference",
+  "Operating references",
   "Radio math reference",
-  "State vector -> GP",
-  "CubeSatSim C2C ref",
+  "Char lookup (ASCII/RTTY)",
   "Coax loss / power",
   "Dipole length",
   "Vertical / ground plane",
@@ -32644,12 +33342,13 @@ static const char* const TOOLS_NAMES[] = {
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
-// The first twelve Tools menu entries are standalone screens (sci calc, programmer calc,
+// The first fifteen Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
-// reference, radio-math reference, state-vector->GP, CubeSatSim C2C ref); everything after them is a numeric
+// reference, radio-math reference, state-vector->GP, CubeSatSim C2C ref, location converter,
+// graphing calculator, Tiny BASIC); everything after them is a numeric
 // "form" tool whose form-id is (menu index - TOOLS_FIRST_FORM). Keeping this as one named
 // constant means the two places that convert between menu index and form id stay in step.
-static const int TOOLS_FIRST_FORM = 12;
+static const int TOOLS_FIRST_FORM = 15;
 
 // Compile-time guard: the number of form-based tools in the menu (everything after the
 // standalone ones) must exactly match the size of the form enum (TOOL_COAX..TOOL__N).
@@ -32698,28 +33397,34 @@ void App::keyTools(char c, bool enter, bool back) {
     if (toolsSel == 0) {                       // scientific calculator
       calcBuf = ""; calcResult = ""; calcErr = false;
       screen = SCR_CALC;
-    } else if (toolsSel == 1) {                // programmer's calculator
+    } else if (toolsSel == 1) {                // graphing calculator
+      graphInit(); screen = SCR_GRAPH;
+    } else if (toolsSel == 2) {                // programmer's calculator
       screen = SCR_PCALC;
-    } else if (toolsSel == 2) {                // character / raw-value lookup
-      screen = SCR_CHARLK;
-    } else if (toolsSel == 3) {                // DXCC entity lookup
-      dxQuery = ""; dxRunFilter(); screen = SCR_DXLK;
-    } else if (toolsSel == 4) {                // CQ (WAZ) zone reference
-      cqzSel = 0; cqzScroll = 0; screen = SCR_CQZ;
-    } else if (toolsSel == 5) {                // ITU zone reference
-      ituSel = 0; ituScroll = 0; screen = SCR_ITUZ;
-    } else if (toolsSel == 6) {                // link budget calculator
+    } else if (toolsSel == 3) {                // Tiny BASIC
+      basicInit(); screen = SCR_BASIC;
+    } else if (toolsSel == 4) {                // location-format converter
+      locoInit(); screen = SCR_LOCONV;
+    } else if (toolsSel == 5) {                // link budget calculator
       lbInit(); screen = SCR_LINKB;
-    } else if (toolsSel == 7) {                // operating references (Q/phonetics/RST)
-      oprefTab = 0; oprefScroll = 0; screen = SCR_OPREF;
-    } else if (toolsSel == 8) {                // CTCSS tone reference
-      ctcssScroll = 0; screen = SCR_CTCSS;
-    } else if (toolsSel == 9) {                // radio math reference (cheat sheet)
-      mathRefScroll = 0; screen = SCR_MATHREF;
-    } else if (toolsSel == 10) {               // state vector -> GP elements
+    } else if (toolsSel == 6) {                // state vector -> GP elements
       gpfInit(); screen = SCR_GPFIT;
-    } else if (toolsSel == 11) {               // CubeSatSim C2C reference
+    } else if (toolsSel == 7) {                // CubeSatSim C2C reference
       cubesimScroll = 0; screen = SCR_CUBESIM;
+    } else if (toolsSel == 8) {                // DXCC entity lookup
+      dxQuery = ""; dxRunFilter(); screen = SCR_DXLK;
+    } else if (toolsSel == 9) {                // CQ (WAZ) zone reference
+      cqzSel = 0; cqzScroll = 0; screen = SCR_CQZ;
+    } else if (toolsSel == 10) {               // ITU zone reference
+      ituSel = 0; ituScroll = 0; screen = SCR_ITUZ;
+    } else if (toolsSel == 11) {               // CTCSS tone reference
+      ctcssScroll = 0; screen = SCR_CTCSS;
+    } else if (toolsSel == 12) {               // operating references (Q/phonetics/RST)
+      oprefTab = 0; oprefScroll = 0; screen = SCR_OPREF;
+    } else if (toolsSel == 13) {               // radio math reference (cheat sheet)
+      mathRefScroll = 0; screen = SCR_MATHREF;
+    } else if (toolsSel == 14) {               // character / raw-value lookup
+      screen = SCR_CHARLK;
     } else {                                   // one of the live-recalc forms
       toolFormInit(toolsSel - TOOLS_FIRST_FORM);   // form id = menu index - (standalone tools that precede)
       screen = SCR_TOOLFORM;
@@ -32741,6 +33446,7 @@ void App::keyTools(char c, bool enter, bool back) {
 namespace {
   struct CalcP {
     const char* p; bool ok; double ans;
+    double xval = 0.0; bool hasX = false;   // bound variable for the grapher (y = f(x))
     void ws() { while (*p == ' ') ++p; }
     bool word(const char* w) {                 // match a keyword, case-sensitive
       const char* q = p; while (*w && *q == *w) { ++q; ++w; }
@@ -32788,6 +33494,7 @@ namespace {
       if (word("pi"))  return 3.14159265358979323846;
       if (word("e"))   return 2.71828182845904523536;
       if (word("Ans")) return ans;
+      if (hasX && word("x")) return xval;   // grapher variable
       // --- amateur-radio / satellite constants ---
       if (word("c"))   return 299792458.0;              // speed of light, m/s
       if (word("kB"))  return 1.380649e-23;             // Boltzmann, J/K
@@ -32881,6 +33588,16 @@ double App::calcEval(const char* s, bool& ok) {
   ok = c.ok; return v;
 }
 
+// Evaluate an expression with the grapher variable x bound to a value. Same parser
+// and function set as the scientific calculator, plus the identifier 'x'. Used to
+// sample y = f(x) across the plot window. ok=false on parse error or non-finite result.
+double App::calcEvalX(const char* s, double x, bool& ok) {
+  CalcP c; c.p = s; c.ok = true; c.ans = calcAns; c.hasX = true; c.xval = x;
+  double v = c.expr(); c.ws();
+  if (*c.p != 0) c.ok = false;
+  ok = c.ok; return v;                         // note: caller decides how to treat non-finite
+}
+
 void App::drawCalc() {
   header("Calculator");
   canvas.setTextSize(1);
@@ -32924,6 +33641,9 @@ void App::keyCalc(char c, bool enter, bool back) {
   // so it must be treated as backspace here -- NOT routed through isBack(), which
   // would exit. (This mirrors keyEdit's handling of text entry.)
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  // Fn+p prints the current entry + result. Guarded on keyFn so a plain 'p' (needed for
+  // "pi", "exp", "power") still types into the expression normally.
+  if (keyFn && (c == 'p' || c == 'P')) { printReport(PR_TOOLOUT); return; }
   if (c == '\'') { calcHintPage2 = !calcHintPage2; lastDrawMs = 0; return; }   // toggle fn-hint page
   if (c == '\\') { calcEngNota = !calcEngNota; lastDrawMs = 0; return; }        // toggle eng-notation output
   // Tape scroll uses [ ] -- the arrow keys ; and . are expression characters
@@ -33035,6 +33755,7 @@ void App::drawPCalc() {
 
 void App::keyPCalc(char c, bool enter, bool back) {
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
+  if (c == 'p') { printReport(PR_TOOLOUT); return; }   // p: print hex/dec/bin/oct
   uint64_t mask = pcMask(pcalcWidth);
 
   auto applyPending = [&]() {                    // fold acc <op> val -> val
@@ -33253,6 +33974,7 @@ void App::drawCharLkTable() {
 void App::keyCharLk(char c, bool enter, bool back) {
   (void)enter;
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }   // only backtick exits
+  if (c == 'p') { printReport(PR_CHARLK); return; }   // p: print this character's encodings
   if (c == '=') {                                // toggle full-table view
     clkTableMode = !clkTableMode; lastDrawMs = 0; return;
   }
@@ -33287,6 +34009,27 @@ void App::keyCharLk(char c, bool enter, bool back) {
   if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
     clkVal = (uint8_t)c; clkFresh = true; lastDrawMs = 0; return;
   }
+}
+
+// Char lookup: print the current value's encodings. Placed here so the anonymous-namespace
+// helper clkBaseFmt and the MORSE_/ASCII_NAME tables (all defined nearby) are in scope.
+void App::printCharLk() {
+  Printer::title("CHAR LOOKUP");
+  uint8_t v = clkVal;
+  char nm[40];
+  if (v <= 32)      snprintf(nm, sizeof(nm), "ASCII %s (control)", ASCII_NAME[v]);
+  else if (v < 127) snprintf(nm, sizeof(nm), "ASCII '%c'", (char)v);
+  else              snprintf(nm, sizeof(nm), "value %u", v);
+  Printer::line(String(nm));
+  Printer::line(String("HEX ") + clkBaseFmt(v, 16));
+  Printer::line(String("DEC ") + clkBaseFmt(v, 10));
+  Printer::line(String("BIN ") + clkBaseFmt(v, 2));
+  Printer::line(String("OCT ") + clkBaseFmt(v, 8));
+  String mo = "--";
+  if (v >= 'A' && v <= 'Z')      mo = MORSE_TBL[v - 'A'];
+  else if (v >= 'a' && v <= 'z') mo = MORSE_TBL[v - 'a'];
+  else if (v >= '0' && v <= '9') mo = MORSE_DIG[v - '0'];
+  Printer::line(String("Morse ") + mo);
 }
 // ---------------------------------------------------------------------------
 //  DXCC entity lookup (SCR_DXLK search + SCR_DXLKD detail). Type a prefix, a
@@ -33998,6 +34741,793 @@ void App::keyCubeSim(char c, bool enter, bool back) {
   if (isDown(c)) { if (cubesimScroll + 11 < CUBESIM_N) ++cubesimScroll; lastDrawMs = 0; return; }
 }
 
+// ===========================================================================
+//  Location-format converter (SCR_LOCONV). One position, displayed at once in
+//  every format a ham or satellite operator is likely to need: Maidenhead grid
+//  (6 and 8 char), decimal degrees, degrees/minutes/seconds (DMS), degrees +
+//  decimal minutes (DDM), and a copy-ready "lat, lon" pair. Editing the grid or
+//  either decimal field re-derives all the rest. All math is local (no network).
+//  Leaf computation -- no heap allocation beyond the small String outputs.
+// ===========================================================================
+
+// Longer-precision Maidenhead (8-char) from decimal degrees. Location::toGrid
+// gives the standard 6-char square; this extends it with the sub-square pair for
+// the tighter fix some loggers want.
+static String loconvGrid8(double lat, double lon) {
+  // Progressive residual: subtract each level's contribution before computing the next,
+  // so the subsquare/extended digits are the position WITHIN the parent cell. Validated
+  // byte-for-byte against the reference `maidenhead` library and against Location::toGrid
+  // for the first six characters.
+  double lonA = lon + 180.0, latA = lat + 90.0;
+  int f1 = (int)(lonA / 20.0);        lonA -= f1 * 20.0;          // field  (20 deg lon)
+  int f2 = (int)(latA / 10.0);        latA -= f2 * 10.0;          // field  (10 deg lat)
+  int s1 = (int)(lonA / 2.0);         lonA -= s1 * 2.0;           // square (2 deg lon)
+  int s2 = (int)(latA / 1.0);         latA -= s2 * 1.0;           // square (1 deg lat)
+  int u1 = (int)(lonA / (2.0/24.0));  lonA -= u1 * (2.0/24.0);    // subsquare (5' lon)
+  int u2 = (int)(latA / (1.0/24.0));  latA -= u2 * (1.0/24.0);    // subsquare (2.5' lat)
+  int x1 = (int)(lonA / (2.0/240.0));                             // extended (0.5' lon)
+  int x2 = (int)(latA / (1.0/240.0));                             // extended (0.25' lat)
+  if (x1 < 0) x1 = 0; if (x1 > 9) x1 = 9;                         // clamp against fp edge
+  if (x2 < 0) x2 = 0; if (x2 > 9) x2 = 9;
+  char g[9];
+  g[0] = 'A' + f1;  g[1] = 'A' + f2;
+  g[2] = '0' + s1;  g[3] = '0' + s2;
+  g[4] = 'a' + u1;  g[5] = 'a' + u2;
+  g[6] = '0' + x1;  g[7] = '0' + x2;
+  g[8] = 0;
+  return String(g);
+}
+
+// Format decimal degrees as DMS: 38 deg 51' 15.1" N
+static String loconvDMS(double v, bool isLat) {
+  char hemi = isLat ? (v >= 0 ? 'N' : 'S') : (v >= 0 ? 'E' : 'W');
+  double a = fabs(v);
+  int d = (int)a;
+  double mf = (a - d) * 60.0;
+  int m = (int)mf;
+  double s = (mf - m) * 60.0;
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d %02d' %04.1f\" %c", d, m, s, hemi);
+  return String(buf);
+}
+
+// Format decimal degrees as DDM: 38 deg 51.252' N (what most loggers/APRS use)
+static String loconvDDM(double v, bool isLat) {
+  char hemi = isLat ? (v >= 0 ? 'N' : 'S') : (v >= 0 ? 'E' : 'W');
+  double a = fabs(v);
+  int d = (int)a;
+  double mf = (a - d) * 60.0;
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d %06.3f' %c", d, mf, hemi);
+  return String(buf);
+}
+
+// --- Open Location Code (Plus Codes), 10-digit. Integer-precision port of the
+//     Google reference (validated byte-for-byte). No projection, no tables. -------
+static String loconvPlusCode(double lat, double lon) {
+  static const char* A = "23456789CFGHJMPQRVWX";
+  if (lat < -90) lat = -90; if (lat > 90) lat = 90;
+  lon = fmod(lon + 180.0, 360.0); if (lon < 0) lon += 360.0; lon -= 180.0;
+  if (lat == 90) lat = 90 - 1e-9;
+  int64_t latVal = (int64_t)llround((lat + 90.0) * 25000000.0) / 3125;   // /5^5
+  int64_t lngVal = (int64_t)llround((lon + 180.0) * 8192000.0) / 1024;   // /4^5
+  String rev;
+  for (int i = 0; i < 5; i++) {
+    char lc = A[lngVal % 20]; lngVal /= 20;
+    char tc = A[latVal % 20]; latVal /= 20;
+    rev = String(tc) + String(lc) + rev;                  // prepend the (lat,lng) pair
+  }
+  String out;
+  for (unsigned i = 0; i < rev.length(); i++) { out += rev[i]; if (i == 7) out += '+'; }
+  return out;
+}
+
+// --- UTM zone/band lettering ----------------------------------------------------
+static char loconvUtmBand(double lat) {
+  if (lat < -80 || lat > 84) return '?';
+  static const char* B = "CDEFGHJKLMNPQRSTUVWX";
+  int i = (int)floor((lat + 80.0) / 8.0); if (i > 19) i = 19;
+  return B[i];
+}
+
+// --- UTM forward projection (WGS84, Snyder series; validated sub-metre) ----------
+// Fills zone/band/easting/northing. Handles the Norway/Svalbard zone exceptions.
+static void loconvToUTM(double lat, double lon, int& zone, char& band, double& easting, double& northing) {
+  const double a = 6378137.0, f = 1.0 / 298.257223563;
+  const double e2 = f * (2 - f), ep2 = e2 / (1 - e2), k0 = 0.9996;
+  zone = (int)floor((lon + 180.0) / 6.0) + 1;
+  if (lat >= 56 && lat < 64 && lon >= 3 && lon < 12) zone = 32;
+  if (lat >= 72 && lat < 84) {
+    if      (lon >= 0  && lon < 9)  zone = 31; else if (lon >= 9  && lon < 21) zone = 33;
+    else if (lon >= 21 && lon < 33) zone = 35; else if (lon >= 33 && lon < 42) zone = 37;
+  }
+  double lon0 = (zone - 1) * 6 - 180 + 3;
+  double latR = lat * M_PI / 180, lonR = lon * M_PI / 180, lon0R = lon0 * M_PI / 180;
+  double N = a / sqrt(1 - e2 * sin(latR) * sin(latR));
+  double T = tan(latR) * tan(latR);
+  double C = ep2 * cos(latR) * cos(latR);
+  double Aa = cos(latR) * (lonR - lon0R);
+  double M = a * ((1 - e2/4 - 3*e2*e2/64 - 5*e2*e2*e2/256) * latR
+    - (3*e2/8 + 3*e2*e2/32 + 45*e2*e2*e2/1024) * sin(2*latR)
+    + (15*e2*e2/256 + 45*e2*e2*e2/1024) * sin(4*latR)
+    - (35*e2*e2*e2/3072) * sin(6*latR));
+  easting = k0 * N * (Aa + (1 - T + C) * Aa*Aa*Aa / 6
+    + (5 - 18*T + T*T + 72*C - 58*ep2) * pow(Aa, 5) / 120) + 500000.0;
+  northing = k0 * (M + N * tan(latR) * (Aa*Aa/2 + (5 - T + 9*C + 4*C*C) * pow(Aa, 4) / 24
+    + (61 - 58*T + T*T + 600*C - 330*ep2) * pow(Aa, 6) / 720));
+  if (lat < 0) northing += 10000000.0;
+  band = loconvUtmBand(lat);
+}
+
+// --- MGRS / USNG from UTM (100km-square lettering; validated against ref) --------
+// usng=false -> packed MGRS "18SUJ2295908127"; usng=true -> spaced "18S UJ 22959 08127".
+static String loconvMGRS(double lat, double lon, bool usng) {
+  int zone; char band; double e, n;
+  loconvToUTM(lat, lon, zone, band, e, n);
+  static const char* COL = "ABCDEFGHJKLMNPQRSTUVWXYZ";   // no I,O (24)
+  static const char* ROW = "ABCDEFGHJKLMNPQRSTUV";        // no I,O (20)
+  int set = (zone - 1) % 6;
+  int colIdx = (int)floor(e / 100000.0) - 1;
+  int colStart = (set % 3) * 8;
+  char colLetter = COL[(colStart + colIdx) % 24];
+  long nn = (long)fmod(n, 2000000.0);
+  int rowIdx = (int)floor(nn / 100000.0);
+  int rowStart = (zone % 2 == 1) ? 0 : 5;
+  char rowLetter = ROW[(rowStart + rowIdx) % 20];
+  long eD = (long)fmod(e, 100000.0);
+  long nD = (long)fmod(n, 100000.0);
+  char buf[40];
+  if (usng) snprintf(buf, sizeof(buf), "%d%c %c%c %05ld %05ld", zone, band, colLetter, rowLetter, eD, nD);
+  else      snprintf(buf, sizeof(buf), "%d%c%c%c%05ld%05ld",    zone, band, colLetter, rowLetter, eD, nD);
+  return String(buf);
+}
+
+void App::locoInit() {
+  Observer o = loc.obs();
+  if (o.valid) { locoLat = o.lat; locoLon = o.lon; locoValid = true; }
+  else         { locoLat = 0; locoLon = 0; locoValid = false; }
+  locoField = 0;
+  locoRecompute();
+}
+
+void App::locoRecompute() {
+  // Clamp to valid ranges so a stray entry can't produce garbage grids.
+  if (locoLat >  90.0) locoLat =  90.0;   if (locoLat < -90.0)  locoLat = -90.0;
+  if (locoLon > 180.0) locoLon = 180.0;   if (locoLon < -180.0) locoLon = -180.0;
+}
+
+void App::drawLoconv() {
+  header("Location converter");
+  canvas.setTextSize(1);
+  int y = 22;
+  auto row = [&](const char* label, const String& val, bool sel) {
+    if (sel) canvas.fillRect(2, y - 1, 236, 10, CL_SELBG);
+    canvas.setTextColor(CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(4, y); canvas.print(label);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(96, y); canvas.print(val);
+    y += 11;
+  };
+
+  if (!locoValid) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 40); canvas.print("Enter a grid or lat/lon.");
+  }
+
+  // --- Input fields (editable; highlighted by locoField) ---
+  String grid6 = locoValid ? Location::toGrid(locoLat, locoLon) : String("--");
+  row("Grid",  grid6, locoField == 0);
+  row("Lat",   locoValid ? String(locoLat, 5) : String("--"), locoField == 1);
+  row("Lon",   locoValid ? String(locoLon, 5) : String("--"), locoField == 2);
+
+  // --- Derived formats (read-only). More than fit on one screen, so the derived
+  //     block scrolls with ,/ while ;/. move between the three editable fields. ---
+  canvas.drawFastHLine(2, y, 236, CL_DGREY); y += 4;
+  if (locoValid) {
+    int zone; char band; double ue, un;
+    loconvToUTM(locoLat, locoLon, zone, band, ue, un);
+    char utmbuf[40];
+    snprintf(utmbuf, sizeof(utmbuf), "%d%c %.0fE %.0fN", zone, band, ue, un);
+    struct { const char* label; String val; } derived[] = {
+      { "Grid8",   loconvGrid8(locoLat, locoLon) },
+      { "Plus",    loconvPlusCode(locoLat, locoLon) },
+      { "UTM",     String(utmbuf) },
+      { "MGRS",    loconvMGRS(locoLat, locoLon, false) },
+      { "USNG",    loconvMGRS(locoLat, locoLon, true) },
+      { "DMS lat", loconvDMS(locoLat, true) },
+      { "DMS lon", loconvDMS(locoLon, false) },
+      { "DDM lat", loconvDDM(locoLat, true) },
+      { "DDM lon", loconvDDM(locoLon, false) },
+    };
+    int nDeriv = (int)(sizeof(derived) / sizeof(derived[0]));
+    int visRows = 6;                               // rows that fit below the divider
+    if (locoScroll < 0) locoScroll = 0;
+    if (locoScroll > nDeriv - visRows) locoScroll = nDeriv - visRows;
+    for (int r = 0; r < visRows && locoScroll + r < nDeriv; r++)
+      row(derived[locoScroll + r].label, derived[locoScroll + r].val, false);
+    if (locoScroll > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 66); canvas.print("^"); }
+    if (locoScroll + visRows < nDeriv) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 118); canvas.print("v"); }
+  }
+
+  footer(";/.,// nav ENT edit s>QTH p print");
+}
+
+void App::keyLoconv(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_TOOLOUT); return; }   // p: print all formats
+  if (isUp(c))   { if (--locoField < 0) locoField = 2; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++locoField > 2) locoField = 0; lastDrawMs = 0; return; }
+  if (isLeft(c))  { if (--locoScroll < 0) locoScroll = 0; lastDrawMs = 0; return; }
+  if (isRight(c)) { ++locoScroll; lastDrawMs = 0; return; }
+  if (c == 's') {                                   // adopt as the station QTH
+    if (locoValid) { cfg.lat = locoLat; cfg.lon = locoLon; cfg.save();
+      loc.setManual(locoLat, locoLon, loc.obs().altM);
+      pred.setSite(loc.obs()); setStatus("Set as your location"); }
+    else setStatus("No position yet");
+    return;
+  }
+  if (enter) {                                      // edit the highlighted field
+    if (locoField == 0) { editTarget = 770; editTitle = "Grid (Maidenhead)";
+      editBuf = locoValid ? Location::toGrid(locoLat, locoLon) : String(""); }
+    else if (locoField == 1) { editTarget = 771; editTitle = "Latitude (deg)";
+      editBuf = locoValid ? String(locoLat, 5) : String(""); }
+    else { editTarget = 772; editTitle = "Longitude (deg)";
+      editBuf = locoValid ? String(locoLon, 5) : String(""); }
+    screen = SCR_EDIT; lastDrawMs = 0;
+    return;
+  }
+}
+
+// ===========================================================================
+//  Graphing calculator (SCR_GRAPH). Plots y = f(x) over a pan/zoomable window
+//  using the scientific calculator's expression parser (with the variable x).
+//  Trig is in DEGREES (matching the sci calc), so the default window is +/-180.
+//  Leaf computation -- samples one value per pixel column, no heap allocation.
+// ===========================================================================
+
+void App::graphInit() {
+  if (graphExpr.length() == 0) graphExpr = "sin(x)";   // seed a sample on first open (lazy)
+  graphErr = false;
+  // Validate the current expression so an error shows immediately on entry.
+  bool ok; calcEvalX(graphExpr.c_str(), 0.0, ok); graphErr = !ok;
+}
+
+void App::drawGraph() {
+  header("Graph");
+  canvas.setTextSize(1);
+  // Expression on its own row just below the header bar (not overlaid on it).
+  canvas.setTextColor(graphErr ? CL_RED : CL_CYAN, CL_BLACK);
+  canvas.setCursor(4, 18);
+  { String e = String("y=") + graphExpr; if (e.length() > 39) e = e.substring(0, 39); canvas.print(e); }
+
+  // Plot area (below the expression row; y grows downward on screen).
+  const int PX0 = 2, PX1 = 237;              // left/right pixel columns
+  const int PY0 = 28, PY1 = 116;             // top/bottom pixel rows
+  const int PW = PX1 - PX0, PH = PY1 - PY0;
+  double xmin = graphXmin, xmax = graphXmax, ymin = graphYmin, ymax = graphYmax;
+  double xr = xmax - xmin, yr = ymax - ymin;
+  if (xr <= 0 || yr <= 0) { footer("bad window"); return; }
+
+  // Map data <-> pixels.
+  auto sx = [&](double x) -> int { return PX0 + (int)lround((x - xmin) / xr * PW); };
+  auto sy = [&](double y) -> int { return PY1 - (int)lround((y - ymin) / yr * PH); };
+
+  // Grid + axes. Draw the zero axes if they fall inside the window.
+  canvas.drawRect(PX0, PY0, PW + 1, PH + 1, CL_DGREY);
+  if (0 >= ymin && 0 <= ymax) { int y0 = sy(0); canvas.drawFastHLine(PX0, y0, PW + 1, CL_GREY); }
+  if (0 >= xmin && 0 <= xmax) { int x0 = sx(0); canvas.drawFastVLine(x0, PY0, PH + 1, CL_GREY); }
+
+  // Plot: one sample per pixel column; connect consecutive in-range samples with a line
+  // (a NaN/inf or a jump larger than the whole window height breaks the curve, so poles
+  // in tan(x) etc. don't draw a spurious vertical bar).
+  if (!graphErr) {
+    int prevX = 0, prevY = 0; bool havePrev = false;
+    for (int px = PX0; px <= PX1; ++px) {
+      double x = xmin + (double)(px - PX0) / PW * xr;
+      bool ok; double y = calcEvalX(graphExpr.c_str(), x, ok);
+      if (!ok || !isfinite(y)) { havePrev = false; continue; }
+      int py = sy(y);
+      // Clamp far-off-screen values so the connecting line enters/leaves cleanly.
+      bool off = (py < PY0 - PH || py > PY1 + PH);
+      if (off) { havePrev = false; continue; }
+      if (py < PY0) py = PY0; if (py > PY1) py = PY1;
+      if (havePrev) canvas.drawLine(prevX, prevY, px, py, CL_YELLOW);
+      else          canvas.drawPixel(px, py, CL_YELLOW);
+      prevX = px; prevY = py; havePrev = true;
+    }
+  } else {
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.setCursor(70, 60); canvas.print("expression error");
+  }
+
+  // Window readout under the plot.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  char b[48];
+  snprintf(b, sizeof(b), "x[%g,%g] y[%g,%g]", xmin, xmax, ymin, ymax);
+  canvas.setCursor(2, 120); canvas.print(b);
+
+  footer("ENT edit arrows pan +/- zoom a fit pprt");
+}
+
+void App::keyGraph(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_TOOLOUT); return; }   // p: print expr + window
+  if (enter) {                                   // edit the expression
+    editTarget = 780; editTitle = "y = f(x)"; editBuf = graphExpr;
+    screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+  double xr = graphXmax - graphXmin, yr = graphYmax - graphYmin;
+  // Pan by 10% of the current span.
+  if (isLeft(c))  { graphXmin -= xr * 0.1; graphXmax -= xr * 0.1; lastDrawMs = 0; return; }
+  if (isRight(c)) { graphXmin += xr * 0.1; graphXmax += xr * 0.1; lastDrawMs = 0; return; }
+  if (isUp(c))    { graphYmin += yr * 0.1; graphYmax += yr * 0.1; lastDrawMs = 0; return; }
+  if (isDown(c))  { graphYmin -= yr * 0.1; graphYmax -= yr * 0.1; lastDrawMs = 0; return; }
+  // Zoom about the window centre.
+  if (c == '+' || c == '=') {                    // zoom in (shrink span)
+    double cx = (graphXmin + graphXmax) / 2, cy = (graphYmin + graphYmax) / 2;
+    graphXmin = cx - xr * 0.4; graphXmax = cx + xr * 0.4;
+    graphYmin = cy - yr * 0.4; graphYmax = cy + yr * 0.4; lastDrawMs = 0; return;
+  }
+  if (c == '-' || c == '_') {                    // zoom out (grow span)
+    double cx = (graphXmin + graphXmax) / 2, cy = (graphYmin + graphYmax) / 2;
+    graphXmin = cx - xr * 0.625; graphXmax = cx + xr * 0.625;
+    graphYmin = cy - yr * 0.625; graphYmax = cy + yr * 0.625; lastDrawMs = 0; return;
+  }
+  if (c == 'a') {                                // auto-fit y to the sampled range
+    if (graphErr) { setStatus("Fix expression first"); return; }
+    double lo = 1e300, hi = -1e300; int n = 0;
+    for (int i = 0; i <= 235; ++i) {
+      double x = graphXmin + (double)i / 235.0 * (graphXmax - graphXmin);
+      bool ok; double y = calcEvalX(graphExpr.c_str(), x, ok);
+      if (ok && isfinite(y)) { if (y < lo) lo = y; if (y > hi) hi = y; ++n; }
+    }
+    if (n > 1 && hi > lo) {
+      double pad = (hi - lo) * 0.1;
+      graphYmin = lo - pad; graphYmax = hi + pad;
+      setStatus("Y fit to data");
+    } else setStatus("Can't fit");
+    lastDrawMs = 0; return;
+  }
+  if (c == 'r') {                                // reset to the default window
+    graphXmin = -180; graphXmax = 180; graphYmin = -1.5; graphYmax = 1.5;
+    lastDrawMs = 0; return;
+  }
+}
+
+// Tiny BASIC interpreter bounds (file-scope: used by the BasicVM helper below and by
+// App::basicRun). Kept out of the class so the anonymous-namespace VM can name them.
+static const int  BASIC_MAX_LINES = 200;      // program lines
+static const int  BASIC_GOSUB_MAX = 16;       // GOSUB nesting depth
+static const int  BASIC_FOR_MAX   = 8;        // FOR nesting depth
+static const long BASIC_STMT_BUDGET = 500000; // statements/run before "loop?" halt
+
+// ===========================================================================
+//  Tiny BASIC interpreter (SCR_BASIC editor + SCR_BASICRUN console).
+//  A classic line-numbered BASIC: LET/PRINT/IF-THEN/GOTO/GOSUB-RETURN/FOR-NEXT/
+//  REM/END, 26 numeric variables A-Z, integer + float math, and the functions
+//  ABS/INT/RND/SQR/SIN/COS. Trig is in DEGREES to match the calculators.
+//  Bounded on every axis (program size, line count, GOSUB/FOR depth, and a
+//  per-run statement budget) so nothing a user types can hang the device.
+//  Self-contained -- shares no state with other subsystems.
+// ===========================================================================
+namespace {
+  struct BasicVM {
+    struct Line { int num; const char* text; };
+    Line   lines[BASIC_MAX_LINES];
+    int    nLines = 0;
+    double vars[26];
+    String out;
+    String err;
+    int    gosubStack[BASIC_GOSUB_MAX]; int gosubSP = 0;
+    struct ForRec { int var; double limit, step; int lineIdx; };
+    ForRec forStack[BASIC_FOR_MAX]; int forSP = 0;
+    long   stmts = 0;
+    const char* p = nullptr;                    // expression cursor
+
+    void ws() { while (*p == ' ' || *p == '\t') ++p; }
+    bool kw(const char* w) {                     // match keyword (case-insensitive), not mid-identifier
+      const char* q = p; while (*w) { if (toupper((unsigned char)*q) != *w) return false; ++q; ++w; }
+      p = q; return true;
+    }
+    double expr() { double v = term(); for (;;) { ws();
+      if (*p == '+') { ++p; v += term(); } else if (*p == '-') { ++p; v -= term(); } else break; } return v; }
+    double term() { double v = power(); for (;;) { ws();
+      if (*p == '*') { ++p; v *= power(); }
+      else if (*p == '/') { ++p; double d = power(); v = (d != 0) ? v / d : 0; } else break; } return v; }
+    double power() { double v = unary(); ws(); if (*p == '^') { ++p; v = pow(v, power()); } return v; }
+    double unary() { ws(); if (*p == '-') { ++p; return -unary(); } if (*p == '+') { ++p; return unary(); } return atom(); }
+    double atom() { ws();
+      const double D2R = 0.017453292519943295;
+      if (*p == '(') { ++p; double v = expr(); ws(); if (*p == ')') ++p; else err = "paren"; return v; }
+      if (isalpha((unsigned char)*p)) {
+        if (kw("ABS")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return fabs(v); } }
+        else if (kw("INT")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return floor(v); } }
+        else if (kw("SQR")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return v>0?sqrt(v):0; } }
+        else if (kw("SIN")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return sin(v*D2R); } }
+        else if (kw("COS")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return cos(v*D2R); } }
+        else if (kw("RND")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p;
+              long m = (long)(v < 1 ? 1 : v); return (double)(esp_random() % (m > 0 ? m : 1)); } }
+        // single-letter variable
+        char v = toupper((unsigned char)*p); ++p;
+        // guard: a two-letter identifier we don't know is an error, not a var
+        if (isalpha((unsigned char)*p)) { err = "unknown name"; return 0; }
+        return vars[v - 'A'];
+      }
+      char* e = nullptr; double v = strtod(p, &e);
+      if (e == p) { err = "syntax"; return 0; }
+      p = e; return v;
+    }
+    double relation() {
+      double l = expr(); ws();
+      char a = *p, b = *(p + 1);
+      if (a == '<' && b == '=') { p += 2; return l <= expr(); }
+      if (a == '>' && b == '=') { p += 2; return l >= expr(); }
+      if (a == '<' && b == '>') { p += 2; return l != expr(); }
+      if (a == '=') { ++p; return l == expr(); }
+      if (a == '<') { ++p; return l < expr(); }
+      if (a == '>') { ++p; return l > expr(); }
+      return l;
+    }
+    int findLine(int num) { for (int i = 0; i < nLines; ++i) if (lines[i].num == num) return i; return -1; }
+
+    void printNum(double v) {
+      char b[32];
+      if (v == floor(v) && fabs(v) < 1e15) snprintf(b, sizeof(b), "%ld", (long)v);
+      else snprintf(b, sizeof(b), "%g", v);
+      out += b;
+    }
+    void printStmt() {
+      // suppressNL is set by a trailing ',' or ';' and cleared when an item follows it.
+      // emitted tracks whether any item was printed at all: an empty PRINT (no items,
+      // no trailing separator) still prints a blank line.
+      bool suppressNL = false, emitted = false, sawSep = false;
+      for (;;) { ws();
+        if (*p == 0 || *p == ':') break;
+        if (*p == '"') { ++p; while (*p && *p != '"') out += *p++; if (*p == '"') ++p; emitted = true; suppressNL = false; }
+        else if (*p == ',') { out += "  "; ++p; suppressNL = true; sawSep = true; }
+        else if (*p == ';') { ++p; suppressNL = true; sawSep = true; }
+        else { double v = expr(); printNum(v); emitted = true; suppressNL = false; if (!err.isEmpty()) return; }
+      }
+      // Newline unless the statement ended with a ',' or ';'. A bare PRINT (nothing at
+      // all -- no items and no separator) always emits a blank line.
+      if (!suppressNL || (!emitted && !sawSep)) out += '\n';
+    }
+    int assign() { ws(); char v = toupper((unsigned char)*p); ++p; ws(); if (*p == '=') ++p; vars[v-'A'] = expr(); return -1; }
+
+    // Execute one line; -1 fall-through, >=0 jump to line index, -999 END.
+    int execLine(const char* text, int curIdx) {
+      p = text; ws();
+      if (isdigit((unsigned char)*p)) { strtol(p, (char**)&p, 10); ws(); }   // skip line number
+      if (*p == 0) return -1;
+      if (kw("REM")) return -1;
+      if (kw("END")) return -999;
+      if (kw("PRINT")) { printStmt(); return -1; }
+      if (*p == '?') { ++p; printStmt(); return -1; }
+      if (kw("LET")) return assign();
+      if (kw("IF")) {
+        double cond = relation(); ws();
+        kw("THEN"); ws();
+        if (cond != 0) {
+          if (isdigit((unsigned char)*p)) { int ln = (int)strtol(p, (char**)&p, 10);
+            int idx = findLine(ln); if (idx < 0) { err = "no line " + String(ln); return -1; } return idx; }
+          // inline statement after THEN
+          if (kw("PRINT")) { printStmt(); return -1; }
+          if (*p == '?') { ++p; printStmt(); return -1; }
+          if (kw("LET")) return assign();
+          if (kw("GOTO")) { ws(); int ln = (int)strtol(p, (char**)&p, 10);
+            int idx = findLine(ln); if (idx < 0) err = "no line " + String(ln); return idx; }
+          if (isalpha((unsigned char)*p)) return assign();
+        }
+        return -1;
+      }
+      if (kw("GOTO")) { ws(); int ln = (int)strtol(p, (char**)&p, 10);
+        int idx = findLine(ln); if (idx < 0) { err = "no line " + String(ln); return -1; } return idx; }
+      if (kw("GOSUB")) { ws(); int ln = (int)strtol(p, (char**)&p, 10);
+        int idx = findLine(ln); if (idx < 0) { err = "no line " + String(ln); return -1; }
+        if (gosubSP >= BASIC_GOSUB_MAX) { err = "GOSUB too deep"; return -1; }
+        gosubStack[gosubSP++] = curIdx + 1; return idx; }
+      if (kw("RETURN")) { if (gosubSP <= 0) { err = "RETURN w/o GOSUB"; return -1; } return gosubStack[--gosubSP]; }
+      if (kw("FOR")) { ws(); char v = toupper((unsigned char)*p); ++p; ws(); if (*p == '=') ++p;
+        double start = expr(); ws(); kw("TO"); double lim = expr(); ws(); double step = 1;
+        if (kw("STEP")) step = expr();
+        vars[v-'A'] = start;
+        if (forSP >= BASIC_FOR_MAX) { err = "FOR too deep"; return -1; }
+        forStack[forSP++] = { v - 'A', lim, step, curIdx }; return -1; }
+      if (kw("NEXT")) { ws();
+        if (forSP <= 0) { err = "NEXT w/o FOR"; return -1; }
+        ForRec& f = forStack[forSP - 1];
+        vars[f.var] += f.step;
+        bool cont = (f.step >= 0) ? (vars[f.var] <= f.limit) : (vars[f.var] >= f.limit);
+        if (cont) return f.lineIdx + 1; else { forSP--; return -1; }
+      }
+      if (isalpha((unsigned char)*p)) return assign();     // bare VAR = expr
+      err = "syntax"; return -1;
+    }
+
+    void run() {
+      out = ""; err = ""; gosubSP = forSP = 0; stmts = 0;
+      for (int i = 0; i < 26; ++i) vars[i] = 0;
+      int pc = 0;
+      while (pc >= 0 && pc < nLines) {
+        if (++stmts > BASIC_STMT_BUDGET) { err = "stopped (loop? >500k stmts)"; return; }
+        if ((stmts & 0x3FF) == 0) yield();          // keep the watchdog happy on long runs
+        if (out.length() > 6000) { err = "output too large (>6KB)"; return; }
+        int next = execLine(lines[pc].text, pc);
+        if (!err.isEmpty()) { err = "line " + String(lines[pc].num) + ": " + err; return; }
+        if (next == -999) return;
+        pc = (next >= 0) ? next : pc + 1;
+      }
+    }
+  };
+
+  // Parse basicBuf into the VM line table (sorted by line number). Lines without a
+  // leading number are skipped (BASIC requires line numbers here). Returns false + sets
+  // err if there are too many lines. The VM points into a persistent copy of the source.
+  // Inside the anonymous namespace so it can name BasicVM.
+  // `work` is the caller-owned, tokenized copy of the source; the VM's line pointers
+  // reference into it, so it must outlive the run (see App::basicRun). Passed in rather
+  // than held static so nothing here occupies .bss at boot.
+  static bool basicParse(BasicVM& vm, const String& src, String& work, String& perr) {
+  work = src;
+  vm.nLines = 0;
+  char* base = (char*)work.c_str();   // mutable; we NUL-terminate each line in place
+  char* s = base;
+  while (*s) {
+    char* lineStart = s;
+    while (*s && *s != '\n') ++s;
+    if (*s == '\n') { *s = 0; ++s; }
+    // trim leading spaces
+    char* q = lineStart; while (*q == ' ' || *q == '\t') ++q;
+    if (isdigit((unsigned char)*q)) {
+      if (vm.nLines >= BASIC_MAX_LINES) { perr = "too many lines (>200)"; return false; }
+      vm.lines[vm.nLines].num = atoi(q);
+      vm.lines[vm.nLines].text = q;
+      vm.nLines++;
+    }
+  }
+  // insertion sort by line number (stable, small n)
+  for (int i = 1; i < vm.nLines; ++i) {
+    BasicVM::Line key = vm.lines[i]; int j = i - 1;
+    while (j >= 0 && vm.lines[j].num > key.num) { vm.lines[j+1] = vm.lines[j]; j--; }
+    vm.lines[j+1] = key;
+  }
+  return true;
+  }
+}  // namespace
+
+void App::basicRun() {
+  // Allocate the interpreter state on the heap only while a program is running, then free
+  // it -- the VM's line table is ~3.8 KB and would otherwise sit in .bss for the whole
+  // session even though BASIC is used rarely. `work` holds the tokenized source the VM
+  // points into and is freed together with the VM after the output is copied out.
+  basicErr = ""; basicOut = ""; basicOutScroll = 0;
+  BasicVM* vm = new (std::nothrow) BasicVM();
+  if (!vm) { basicErr = "out of memory"; return; }
+  String* work = new (std::nothrow) String();
+  if (!work) { delete vm; basicErr = "out of memory"; return; }
+  String perr;
+  if (!basicParse(*vm, basicBuf, *work, perr)) { basicErr = perr; }
+  else if (vm->nLines == 0) { basicErr = "no numbered lines"; }
+  else { vm->run(); basicOut = vm->out; basicErr = vm->err; }
+  delete work; delete vm;
+}
+
+// ---- Generic tool-result printing ----------------------------------------------
+// Prints the result of whichever tool screen is active. Only the tools that produce a
+// meaningful textual result are handled; others print a short "nothing to print" note.
+void App::printToolOut() {
+  switch (screen) {
+    case SCR_CALC: {
+      Printer::title("CALCULATOR");
+      if (calcBuf.length())    Printer::wrap(calcBuf);
+      if (calcResult.length()) Printer::line(String("= ") + calcResult);
+      else if (calcBuf.length() == 0) Printer::line("(no entry)");
+      break;
+    }
+    case SCR_PCALC: {
+      Printer::title("PROGRAMMER CALC");
+      uint64_t v = pcalcVal & pcMask(pcalcWidth);
+      Printer::line(String("HEX ") + pcFmt(v, 16, pcalcWidth));
+      Printer::line(String("DEC ") + pcFmt(v, 10, pcalcWidth));
+      Printer::line(String("BIN ") + pcFmt(v, 2,  pcalcWidth));
+      Printer::line(String("OCT ") + pcFmt(v, 8,  pcalcWidth));
+      break;
+    }
+    case SCR_GRAPH: {
+      Printer::title("GRAPH");
+      Printer::line(String("y = ") + graphExpr);
+      char b[64];
+      snprintf(b, sizeof(b), "x [%g, %g]", graphXmin, graphXmax); Printer::line(String(b));
+      snprintf(b, sizeof(b), "y [%g, %g]", graphYmin, graphYmax); Printer::line(String(b));
+      if (graphErr) Printer::line("(expression error)");
+      break;
+    }
+    case SCR_LOCONV: {
+      Printer::title("LOCATION");
+      if (!locoValid) { Printer::line("(no position)"); break; }
+      Printer::line(String("Grid  ") + Location::toGrid(locoLat, locoLon));
+      Printer::line(String("Grid8 ") + loconvGrid8(locoLat, locoLon));
+      Printer::line(String("Lat   ") + String(locoLat, 5));
+      Printer::line(String("Lon   ") + String(locoLon, 5));
+      Printer::line(String("DMS   ") + loconvDMS(locoLat, true));
+      Printer::line(String("      ") + loconvDMS(locoLon, false));
+      Printer::line(String("DDM   ") + loconvDDM(locoLat, true));
+      Printer::line(String("      ") + loconvDDM(locoLon, false));
+      Printer::line(String("Plus  ") + loconvPlusCode(locoLat, locoLon));
+      { int z; char bd; double e, nn; loconvToUTM(locoLat, locoLon, z, bd, e, nn);
+        char b[48]; snprintf(b, sizeof(b), "UTM   %d%c %.0fE %.0fN", z, bd, e, nn); Printer::line(String(b)); }
+      Printer::line(String("MGRS  ") + loconvMGRS(locoLat, locoLon, false));
+      Printer::line(String("USNG  ") + loconvMGRS(locoLat, locoLon, true));
+      break;
+    }
+    default:
+      Printer::title("TOOL");
+      Printer::line("(nothing to print here)");
+      break;
+  }
+}
+
+// ---- Tiny BASIC editor + console UI --------------------------------------------
+// The editor reuses the note editor's word-wrap (noteWrap/NoteVRow/noteLocate) and
+// the same Fn-modified command scheme, so typing is literal and commands don't
+// collide with program text. Programs live in /CardSat/basic/<name>.bas.
+
+static const char* BASIC_DIR = "/CardSat/basic";
+
+void App::basicInit() {
+  // Open the editor on whatever program is already in the buffer (empty on first use --
+  // no example is pre-populated). basicBuf persists across visits within a session.
+  basicCur = basicBuf.length();
+  basicTopLine = 0;
+  basicErr = "";
+}
+
+bool App::basicSave() {
+  char nm[24];
+  strncpy(nm, basicName.c_str(), sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
+  // reuse the note name sanitizer (alnum + a few safe chars)
+  if (!Notes::sanitizeName(nm, sizeof(nm))) { setStatus("Bad program name"); return false; }
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists(BASIC_DIR)) fsx.mkdir(BASIC_DIR);
+  String path = String(BASIC_DIR) + "/" + nm + ".bas";
+  File f = fsx.open(path, "w");
+  if (!f) { setStatus("Save failed"); return false; }
+  f.print(basicBuf); f.close();
+  basicName = nm;
+  setStatus(String("Saved ") + nm);
+  return true;
+}
+
+bool App::basicLoad(const char* base) {
+  fs::FS& fsx = Store::fs();
+  String path = String(BASIC_DIR) + "/" + base + ".bas";
+  File f = fsx.open(path, "r");
+  if (!f) { setStatus("Load failed"); return false; }
+  basicBuf = "";
+  while (f.available() && basicBuf.length() < BASIC_PROG_MAX) basicBuf += (char)f.read();
+  f.close();
+  basicName = base; basicCur = 0; basicTopLine = 0; basicErr = "";
+  setStatus(String("Loaded ") + base);
+  return true;
+}
+
+void App::drawBasic() {
+  header("Tiny BASIC");
+  canvas.setTextSize(1);
+  // Program name + size on their own row below the header (not overlaid on it).
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  { char b[48]; snprintf(b, sizeof(b), "%s  %d/4096", basicName.length() ? basicName.c_str() : "(unsaved)",
+                         (int)basicBuf.length()); canvas.setCursor(4, 18); canvas.print(b); }
+
+  NoteVRow rows[256];
+  int nrows = noteWrap(basicBuf, rows, 256);
+  int curRow, curCol; noteLocate(rows, nrows, basicCur, curRow, curCol);
+  const int VIS = 10, LH = 9;
+  if (curRow < basicTopLine) basicTopLine = curRow;
+  if (curRow >= basicTopLine + VIS) basicTopLine = curRow - VIS + 1;
+  if (basicBuf.length() == 0) {                 // empty editor: show a faint hint, not a blank
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(10, 40); canvas.print("Type a program, e.g.");
+    canvas.setCursor(10, 52); canvas.print("10 PRINT \"HI\"");
+    canvas.setCursor(10, 64); canvas.print("Fn+R runs it.");
+  }
+  for (int r = 0; r < VIS && basicTopLine + r < nrows; ++r) {
+    int idx = basicTopLine + r; int y = 28 + r * LH;
+    String seg = basicBuf.substring(rows[idx].start, rows[idx].end);
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, y); canvas.print(seg);
+    if (idx == curRow) {                     // cursor block
+      int cx = 4 + curCol * 6;
+      canvas.fillRect(cx, y, 2, 8, CL_CYAN);
+    }
+  }
+  footer("Fn+R run S save L load P print ` bk");
+}
+
+void App::keyBasic(char c, bool enter, bool back) {
+  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (keyFn) {
+    if (c == 'r') {                          // RUN
+      basicRun();
+      basicOutScroll = 0; screen = SCR_BASICRUN; lastDrawMs = 0; return;
+    }
+    if (c == 'p') { printReport(PR_BASICLIST); return; }   // Fn+p: print the listing
+    if (c == 's') {                          // SAVE (prompt for a name if unnamed)
+      if (basicName.length() == 0) { editTarget = 781; editTitle = "Program name"; editBuf = "";
+        screen = SCR_EDIT; lastDrawMs = 0; return; }
+      basicSave(); lastDrawMs = 0; return;
+    }
+    if (c == 'l') { editTarget = 782; editTitle = "Load program name"; editBuf = "";
+      screen = SCR_EDIT; lastDrawMs = 0; return; }
+    if (c == 'n') { basicBuf = ""; basicName = ""; basicCur = 0; basicTopLine = 0;
+      setStatus("New program"); lastDrawMs = 0; return; }
+    // cursor movement (matches the note editor): ,// left/right, ;/. up/down a line.
+    if (c == ',') { if (basicCur > 0) basicCur--; lastDrawMs = 0; return; }
+    if (c == '/') { if (basicCur < (int)basicBuf.length()) basicCur++; lastDrawMs = 0; return; }
+    if (c == ';' || c == '.') {
+      NoteVRow rows[256];
+      int nrows = noteWrap(basicBuf, rows, 256);
+      int r, col; noteLocate(rows, nrows, basicCur, r, col);
+      int tr = r + (c == ';' ? -1 : 1);
+      if (tr >= 0 && tr < nrows) {
+        int rowLen = rows[tr].end - rows[tr].start;
+        int tc = col > rowLen ? rowLen : col;
+        basicCur = rows[tr].start + tc;
+      }
+      lastDrawMs = 0; return;
+    }
+    return;
+  }
+  if (enter) {                               // newline
+    if (basicBuf.length() < BASIC_PROG_MAX) { basicBuf = basicBuf.substring(0, basicCur) + "\n" + basicBuf.substring(basicCur); basicCur++; }
+    else setStatus("4K limit reached");
+    lastDrawMs = 0; return;
+  }
+  if (back || c == 8 || c == 127) {          // backspace
+    if (basicCur > 0) { basicBuf = basicBuf.substring(0, basicCur - 1) + basicBuf.substring(basicCur); basicCur--; }
+    lastDrawMs = 0; return;
+  }
+  if (c >= 32 && c < 127) {                   // printable -> insert (respect the 4K cap)
+    if (basicBuf.length() < BASIC_PROG_MAX) {
+      basicBuf = basicBuf.substring(0, basicCur) + String(c) + basicBuf.substring(basicCur);
+      basicCur++;
+    } else setStatus("4K limit reached");
+    lastDrawMs = 0; return;
+  }
+}
+
+void App::drawBasicRun() {
+  header("BASIC output");
+  canvas.setTextSize(1);
+  String body = basicOut;
+  if (basicErr.length()) body += (body.length() && body[body.length()-1] != '\n' ? "\n" : "") + String("? ") + basicErr;
+  if (body.length() == 0) body = "(no output)";
+  NoteVRow rows[256];
+  int nrows = noteWrap(body, rows, 256);
+  const int VIS = 12, LH = 9;
+  if (basicOutScroll > nrows - VIS) basicOutScroll = nrows - VIS;
+  if (basicOutScroll < 0) basicOutScroll = 0;
+  for (int r = 0; r < VIS && basicOutScroll + r < nrows; ++r) {
+    int idx = basicOutScroll + r; int y = 20 + r * LH;
+    String seg = body.substring(rows[idx].start, rows[idx].end);
+    // error line in red
+    bool errLine = basicErr.length() && idx == nrows - 1;
+    canvas.setTextColor(errLine ? CL_RED : CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, y); canvas.print(seg);
+  }
+  if (basicOutScroll > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 20); canvas.print("^"); }
+  if (basicOutScroll + VIS < nrows) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 112); canvas.print("v"); }
+  footer(";/. scroll  p print  ` back");
+}
+
+void App::keyBasicRun(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_BASIC; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_BASICOUT); return; }   // p: print the output
+  if (isUp(c))   { if (--basicOutScroll < 0) basicOutScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { basicOutScroll++; lastDrawMs = 0; return; }
+}
+
 // ---------------------------------------------------------------------------
 //  AMSAT Fox anatomy (SCR_FOXANAT): animated Learn explainer. A 1U CubeSat
 //  wireframe spins (~15 fps via the ORBITZOO tick) while one labeled callout at
@@ -34262,6 +35792,10 @@ namespace {
     "Pass sky track (polar)",        // 12
     "Support AMSAT page",            // 13
     "Operator contact card",         // 14
+    "Orbital analysis (active sat)", // 15
+    "Illumination (active sat)",     // 16
+    "10-day passes (active sat)",    // 17
+    "6-hour timeline (favorites)",   // 18
   };
   const int PA_N = (int)(sizeof(PA_ITEMS) / sizeof(PA_ITEMS[0]));
 }
@@ -34302,6 +35836,7 @@ void App::keyPrintAbout(char c, bool enter, bool back) {
     static const PrintReport MAP[] = {
       PR_PASSES, PR_ALLPASS, PR_TICKET, PR_SATCARD, PR_KEPS, PR_LOG, PR_HORIZON,
       PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_TARGET, PR_ROVE, PR_PASSPOLAR, PR_AMSAT, PR_OPCARD,
+      PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
     };
     static_assert(sizeof(MAP)/sizeof(MAP[0]) == PA_N, "PA_ITEMS labels and MAP must match");
     if (paSel >= 0 && paSel < (int)(sizeof(MAP)/sizeof(MAP[0]))) printReport(MAP[paSel]);
@@ -40417,6 +41952,7 @@ void App::drawSettings() {
     rows[97] = String("Printer format: ") + pf; }
   rows[98] = String("Printer transport: ") + (cfg.printTransport == 1 ? "IPP (:631)" : "Raw (:9100)");
   rows[87] = String("Test printer (probe formats)");
+  rows[88] = String("Raster paper: ") + (cfg.printPaper == 1 ? "A4" : "US Letter");
   rows[93] = String("Print to serial: ") + (cfg.printToSerial ? "on" : "off");
   rows[94] = String("Save to /CardSat/Reports: ") + (cfg.printToFile ? "on" : "off");
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");

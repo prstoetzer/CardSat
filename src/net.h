@@ -115,7 +115,22 @@ public:
   // transport failure (e.g. the Cloudlog reboot-to-clean-heap prompt) trigger on
   // it -- a fresh boot is exactly the cure when the heap is fragmented this way.
   static const int HEAP_ABORT_CODE = -100;
-  String lastErr  = "";    // short human-readable reason
+  String lastErr  = "";    // short human-readable reason (UI text)
+
+  // Typed download outcome, so retry/abort policy branches on a code rather than on
+  // display text (which drifts and silently breaks string comparisons). Set by the
+  // file-download path; translated to lastErr text at the point it is raised.
+  enum class DownloadError : uint8_t {
+    None = 0,        // success
+    ConnectFailed,   // socket/TLS never established (lastCode <= 0)
+    HttpError,       // server returned a non-200 status
+    StorageFull,     // declared size won't fit the filesystem (do NOT retry)
+    WriteFailed,     // filesystem write error mid-stream
+    ShortRead,       // fewer bytes than the declared Content-Length
+    EmptyBody,       // 200 with no body
+    TooManyRedirects
+  };
+  DownloadError lastDlErr = DownloadError::None;
 
   // --- Socket-failure recovery -------------------------------------------
   // Connect-level failures (code <= 0, e.g. the -1 returned once the LWIP socket

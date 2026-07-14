@@ -8,7 +8,7 @@ the **key functions** with line anchors, and **porting notes**.
 This is a map, not a transcription — the source itself is heavily commented
 (`app.cpp` alone carries ~1,560 comment lines), so this document points you *to* the code
 and explains how the pieces fit, rather than repeating every line. Line numbers are
-accurate as of firmware **0.9.31**; treat them as "near here," since edits shift them.
+accurate as of firmware **0.9.56**; treat them as "near here," since edits shift them.
 
 **How CardSat is laid out.** Three layers (see PORTING.md §1):
 
@@ -64,7 +64,11 @@ Key contents:
   `ROT_XTAL_HZ`, `ROT_I2C_HZ`.
 - **IR beacon** — `IR_LED_PIN` (44), `IR_CARRIER_HZ` (38 kHz), burst/gap timing, and the
   `IR_N_*` flash-count table for each pass event.
-- **Limits** — `MAX_SATS` (220), `MAX_TX_PER_SAT` (64), `GP_STALE_DAYS` (7), and the
+- **Frequency ceiling** — transponder frequencies are 32-bit unsigned **Hz**, capping at
+  ~**4.294 GHz**. Covers all bands CardSat tracks (through 23 cm and the 3.4 GHz allocation);
+  microwave transponders at 5.6 GHz and above cannot be represented. A 32-bit kHz format would
+  extend this with no RAM cost, if higher bands are ever needed.
+- **Limits** — `MAX_SATS` (150), `MAX_TX_PER_SAT` (64), `GP_STALE_DAYS` (7), and the
   `CAT_BYTES_PER_UPDATE` throttle. These embody the no-PSRAM frugality; relax them freely
   if your target has RAM to spare.
 - **`FW_VERSION`** — the version string (shown on the About screen; the manual/PDF build
@@ -314,7 +318,7 @@ sockets for the network paths and termios for GS-232. Wire protocols are documen
 
 WiFi, NTP, and HTTPS fetching. Includes a **streaming GP download** that writes/parses the
 feed without a large contiguous buffer, and uses `esp_heap_caps_get_largest_free_block()` to
-watch for fragmentation on the no-PSRAM S3. TLS via `WiFiClientSecure::setInsecure()` (fine
+watch for fragmentation on the no-PSRAM S3. TLS via `ESP_SSLClient` (BearSSL) with `setInsecure()` — no cert validation (fine
 for public GP data; pin a CA root if you care).
 
 **Porting note:** on another ESP32 this works as-is. On non-ESP32, **don't port this file** —

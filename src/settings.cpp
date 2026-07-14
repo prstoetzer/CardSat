@@ -40,6 +40,7 @@ bool Settings::load() {
   printerCols = d["prcols"] | 32;
   printFormat = d["prfmt"] | 0;
   printTransport = d["prtx"] | 0;
+  printPaper = d["prpr"] | 0;
   printToSerial = d["prser"] | false;
   printToFile   = d["prfile"] | false;
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
@@ -201,6 +202,7 @@ bool Settings::save() {
   d["prcols"] = printerCols;
   d["prfmt"] = printFormat;
   d["prtx"] = printTransport;
+  d["prpr"] = printPaper;
   d["prser"] = printToSerial;
   d["prfile"] = printToFile;
   d["mycall"] = myCall;

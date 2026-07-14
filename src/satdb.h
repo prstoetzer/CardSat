@@ -17,6 +17,12 @@
 #include "config.h"
 
 struct Transponder {
+  // Frequencies are 32-bit unsigned Hz, so the representable ceiling is 2^32-1 =
+  // ~4.294 GHz. This covers every band CardSat tracks (through 23 cm / 1.3 GHz and
+  // the amateur 3.4 GHz allocation) but NOT higher microwave transponders (5.6 GHz
+  // and up). Birds with only >4.29 GHz transponders can't be represented in this
+  // field; a future move to 32-bit kHz would lift the ceiling to ~4.29 THz at 1 kHz
+  // resolution with no extra RAM. See docs/guides/CODE_REFERENCE.md.
   char     desc[40];
   uint32_t downlink     = 0; // Hz (downlink_low;  0 if none)
   uint32_t downlinkHigh = 0; // Hz (downlink_high; 0 if single-channel)

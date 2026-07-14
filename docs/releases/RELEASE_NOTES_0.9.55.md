@@ -91,9 +91,9 @@ columns is the ESC/POS Font A standard at 576 dots, e.g. the GZM8022) are suppor
 alongside the pocket 58 mm. Each sink hard-wraps to its own width, so a narrow printer
 stays inside its paper while the file/serial copies keep the full 80-column layout.
 
-### Page languages: eight formats, receipt to raster
+### Page languages: nine formats, receipt to raster
 
-The network printer sink speaks one of **eight page languages**, set by **Settings →
+The network printer sink speaks one of **nine page languages**, set by **Settings →
 Network → Printer format**, so CardSat prints to receipt printers, office printers, label
 printers, and driverless/AirPrint printers alike:
 
@@ -198,14 +198,12 @@ printers that expose IPP but not raw 9100. It streams via HTTP chunked transfer-
 it keeps the same zero-buffer model — no whole-document buffering. The IPP request byte
 layout was validated against a real printer (which returned HTTP 200) before implementation.
 
-**Limitation — raster-only printers are not supported.** IPP here sends PCL/PostScript; it
-does not rasterize. Many modern home/AirPrint printers accept *only* `image/urf` or
-`image/pwg-raster` and have no PCL/PostScript interpreter — they will **accept an IPP job and
-silently discard it**. Rendering a full page to a bitmap on a no-PSRAM ESP32-S3 isn't
-feasible (the framebuffer doesn't fit), so CardSat can't drive those printers; the /CardSat/Reports
-file remains the fallback. A helper, `tools/ipp_probe.py`, queries a printer's supported
-formats and sends test pages so you can tell before relying on it. *(On-device IPP client is
-new and untested on hardware beyond the byte-layout validation.)*
+> **Note (superseded later in 0.9.55):** an earlier draft of these notes said raster-only
+> printers were unsupported. That was true only before the raster work landed in this same
+> release. CardSat **does** generate PWG/URF raster on the device and drives raster-only
+> AirPrint printers — see "And, notably: it prints to ordinary home printers too" above,
+> which is the accurate description. A helper, `tools/ipp_probe.py`, queries a printer's
+> supported formats before you rely on it.
 
 ### Why not Bluetooth
 
@@ -232,11 +230,11 @@ survey are in `docs/design/PRINTING_SCOPE.md`.
 
 ### Scope honesty
 
-Target-search printing was **intentionally not shipped** in Phase 0: the target hit
-list is transient `.bss` populated only during a live search, so printing it outside
-that flow would print stale or empty data. The `Printer` transport and the report
-pattern make it a clean future addition if wanted. Graphics (a polar-plot raster) are
-likewise deferred to a later phase — text covers every top report.
+Target-search printing **is shipped** — press `p` on the Target-search results screen,
+or `print target` on the serial console. (An earlier draft of these notes said it was
+deferred; that was superseded within this release.) A polar-plot *raster* graphic remains
+deferred — the polar sky-track prints today as an ASCII map, and the raster encoder could
+render real pixels in a later phase, but text covers every top report.
 
 ## Verification status
 

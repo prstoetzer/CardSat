@@ -274,8 +274,8 @@ void Net::pcbCounts(int& active, int& timeWait) {
 // that a WiFi radio reset doesn't flush), which contributed to a whole-stack connect()
 // wedge after a session. Kept single-shot; the caller handles a failed GET.
 bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
-  lastCode = 0; lastErr = "";
-  if (!connected()) { lastErr = "no WiFi"; return false; }
+  lastCode = 0; lastErr = ""; lastDlErr = DownloadError::None;
+  if (!connected()) { lastErr = "no WiFi"; lastDlErr = DownloadError::ConnectFailed; return false; }
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
@@ -456,7 +456,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
 
     uint32_t t0 = millis();
     if (!client.connect(host.c_str(), port)) {
-      lastCode = -1; lastErr = "connect failed";
+      lastCode = -1; lastErr = "connect failed"; lastDlErr = DownloadError::ConnectFailed;
       noteConnResult(-1);
       Serial.printf("[net] GET connect failed in %ums (host=%s)\n",
                     (unsigned)(millis() - t0), host.c_str());
@@ -513,6 +513,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
     noteConnResult(code);
     if (code != 200) {
       lastErr = "HTTP " + String(code);
+      lastDlErr = DownloadError::HttpError;
       Serial.printf("[net] GET failed: code=%d\n", code);
       return false;
     }
@@ -526,14 +527,15 @@ bool Net::httpsGetToFile(const String& url, const char* path,
     if (len > 0) {
       size_t freeFs = Store::freeBytes();
       if (freeFs > 0 && (size_t)len + 32768 > freeFs) {
-        lastErr = "file too big for storage (" + String(len / 1024) + "KB > "
+        lastErr = "download exceeds storage (" + String(len / 1024) + "KB > "
                   + String((int)(freeFs / 1024)) + "KB free)";
+        lastDlErr = DownloadError::StorageFull;
         return false;
       }
     }
 
     File f = Store::fs().open(path, "w");
-    if (!f) { lastErr = Store::ready() ? "fs open failed" : "no filesystem"; return false; }
+    if (!f) { lastErr = Store::ready() ? "fs open failed" : "no filesystem"; lastDlErr = DownloadError::WriteFailed; return false; }
 
     // Stream the body straight to flash. Chunked responses are dechunked inline; with a
     // Content-Length we stop at len; otherwise we stop on close/idle. Each chunk is
@@ -591,17 +593,20 @@ bool Net::httpsGetToFile(const String& url, const char* path,
     Serial.printf("[net] streamed %u bytes to %s (declared %d), heap now %u (largest %u)\n",
                   (unsigned)total, path, len, (unsigned)ESP.getFreeHeap(),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    if (writeErr)   { lastErr = "fs write failed"; return false; }
-    if (total == 0) { lastErr = "empty body"; return false; }
+    if (writeErr)   { lastErr = "fs write failed"; lastDlErr = DownloadError::WriteFailed; return false; }
+    if (total == 0) { lastErr = "empty body"; lastDlErr = DownloadError::EmptyBody; return false; }
     if (!chunked && len > 0 && total < (size_t)len) {
       lastErr = "short read " + String((unsigned)total) + "/" + String(len);
+      lastDlErr = DownloadError::ShortRead;
       return false;
     }
+    lastDlErr = DownloadError::None;
     return true;   // success on this hop
   }
   // Fell out of the redirect loop without a definitive result (e.g. a redirect with
   // no Location, or a second redirect we don't follow).
   lastErr = "too many redirects";
+  lastDlErr = DownloadError::TooManyRedirects;
   return false;
 }
 
@@ -612,8 +617,10 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
   TlsBusyGuard _tls;   // hold listeners down across the whole retry sequence
   for (int i = 0; i < attempts; i++) {
     if (httpsGetToFile(url, path, maxBytes, written, firstByteMs)) return true;
-    // A "low flash" failure won't fix itself on retry -- bail immediately.
-    if (lastErr == "low flash") return false;
+    // A storage-full failure won't fix itself on retry -- bail immediately. (Previously
+    // this compared lastErr to "low flash", a string the code never produced, so the
+    // abort never fired; the typed code makes the intent reliable.)
+    if (lastDlErr == DownloadError::StorageFull) return false;
     // A connect-LEVEL failure (code <= 0, e.g. "connection refused") is a socket-
     // pool / TIME_WAIT problem, not a mid-stream stall. Rapid retries only pile
     // more PCBs into the pool and make it worse (and the heap machinery can't fix
@@ -633,11 +640,55 @@ bool Net::httpsGetToFileRetry(const String& url, const char* path,
 }
 
 bool Net::fetchGpToFile(const String& url, const char* path) {
-  // GP is the largest and most important download; on a weak link it can be cut
-  // short mid-body, so allow a few attempts. httpsGetToFile now reports a short
-  // read (got fewer bytes than the declared Content-Length) as a failure, so the
-  // retry wrapper re-attempts instead of caching a truncated catalog.
-  return httpsGetToFileRetry(url, path, 400000, nullptr, 3);
+  // GP is the largest and most important download and the one file a field user can't
+  // easily re-fetch without signal, so the update is TRANSACTIONAL: we download to a
+  // sibling ".tmp", and only replace the live catalog once the new file has fully and
+  // validly arrived. A failed or truncated download therefore never destroys the
+  // previous good catalog -- the old file stays in place and only the temp is removed.
+  //
+  // Size cap: rather than a fixed 400 KB limit (which conflicted with the large groups
+  // the docs advertise), the ceiling is the actual free space on the filesystem minus a
+  // margin. httpsGetToFile also preflights any declared Content-Length against free space
+  // and raises DownloadError::StorageFull (no retry) when it won't fit.
+  size_t freeFs = Store::freeBytes();
+  size_t budget = (freeFs > 65536) ? (freeFs - 65536) : freeFs;   // keep ~64 KB headroom
+  if (budget < 32768) budget = 32768;                             // floor for tiny / unknown FS
+
+  String tmp = String(path) + ".tmp";
+  fs::FS& fs = Store::fs();
+  if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());             // clear any stale temp
+
+  // On a weak link the body can be cut short mid-stream; allow a few attempts. A short
+  // read (fewer bytes than declared) is reported as a failure, so we retry rather than
+  // promote a truncated catalog.
+  if (!httpsGetToFileRetry(url, tmp.c_str(), budget, nullptr, 3)) {
+    if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());           // discard the partial temp
+    return false;                                                // old catalog untouched
+  }
+
+  // Sanity gate before promotion: the temp must be non-empty. (A deeper parse-check of
+  // record boundaries could go here; the streaming parser already rejects a malformed
+  // catalog at load time, and short reads are caught above.)
+  File tf = fs.open(tmp.c_str(), "r");
+  size_t tsz = tf ? tf.size() : 0;
+  if (tf) tf.close();
+  if (tsz == 0) {
+    if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
+    lastErr = "empty download"; lastDlErr = DownloadError::EmptyBody;
+    return false;
+  }
+
+  // Atomic-ish promotion: remove the live file, then rename the temp into place. (fs
+  // rename won't overwrite an existing target on LittleFS, hence the remove first.)
+  if (fs.exists(path)) fs.remove(path);
+  if (!fs.rename(tmp.c_str(), path)) {
+    // Rename failed after a good download: keep the temp so the data isn't lost, and
+    // report it. The caller still has no live catalog, but nothing good was destroyed
+    // that wasn't already removed; the temp holds the fresh data for recovery.
+    lastErr = "promote failed (temp kept)"; lastDlErr = DownloadError::WriteFailed;
+    return false;
+  }
+  return true;
 }
 
 // DEPRECATED -- DO NOT CALL. Reads the entire GP catalog (~400 KB) into a single

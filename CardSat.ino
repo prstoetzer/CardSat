@@ -322,7 +322,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.56";
+static constexpr const char* FW_VERSION = "0.9.57";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -6772,7 +6772,9 @@ private:
   void drawBasic();    void keyBasic(char c, bool enter, bool back);
   void drawBasicRun(); void keyBasicRun(char c, bool enter, bool back);
   void basicInit();                 // open the editor (seed a sample on first use)
-  void basicRun();                  // execute basicBuf -> basicOut / basicErr
+  void basicRun();           // execute basicBuf -> basicOut / basicErr
+  void basicFree();          // release the BASIC output buffer when leaving the tool
+  Screen   lastScreenSeen = SCR_HOME;   // screen-transition housekeeping (see loop())
   bool basicSave();  bool basicLoad(const char* base);
 
   // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
@@ -7178,7 +7180,9 @@ private:
   enum PrintReport { PR_PASSES, PR_ROVE, PR_TICKET, PR_HORIZON, PR_SATCARD, PR_LOG, PR_KEPS,
                      PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR,
                      PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
-                     PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK };
+                     PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
+                     PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
+                     PR_STATES, PR_DXCCLIST, PR_VISLIST };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -7205,6 +7209,15 @@ private:
   void printBasicOut();      // Tiny BASIC: the last run's console output
   void printToolOut();       // generic: the active tool screen's key result(s)
   void printCharLk();        // char lookup: current value's encodings (near its tables)
+  void printEme();           // EME: live lunar geometry + per-band self-echo Doppler
+  void printEmePlan();       // EME: 30-day declination/degradation planning table
+  void printEmeMut();        // EME: mutual-Moon window list vs a DX grid
+  void printQrz();           // QRZ lookup result
+  void printReady();         // station readiness checklist
+  void printAwards();        // awards totals + per-satellite tally
+  void printStates();        // workable US states (the list, not just the count)
+  void printDxccList();      // workable DXCC entities (the list)
+  void printVisList();       // visible-pass list (10 days)
   int  buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
                       uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN);  // shared pass gather
   bool     audioUp = false;                    // is the speaker currently begun?
@@ -18974,6 +18987,23 @@ uint32_t App::dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
 
 void App::loop() {
   M5Cardputer.update();
+  // ---- Screen-transition housekeeping ----------------------------------------------
+  // Release screen-local buffers the moment their screen is left, from ONE place. Doing
+  // this inside a key handler only covers the exits that handler knows about: leaving the
+  // BASIC editor with Fn+h (the global Help hotkey) bypassed it entirely and stranded the
+  // output buffer until you happened to come back and press backtick. Every screen change
+  // funnels through here, so this cannot be bypassed.
+  if (screen != lastScreenSeen) {
+    Screen from = lastScreenSeen;
+    // Leaving Tiny BASIC entirely (the editor and its run console are one tool): the
+    // program's output can be the full 6 KB cap, and holding it for the rest of the
+    // session starves the big contiguous block a TLS upload needs.
+    if ((from == SCR_BASIC || from == SCR_BASICRUN) &&
+        screen != SCR_BASIC && screen != SCR_BASICRUN && screen != SCR_EDIT) {
+      basicFree();
+    }
+    lastScreenSeen = screen;
+  }
   // Memory telemetry: when the screen changes and tracing is on, log the heap so the
   // per-screen resident cost is visible for the RAM-lifecycle refactor baseline.
   if (memTrace && screen != lastMemScreen) {
@@ -19500,24 +19530,43 @@ void App::takeScreenshot() {
 
 void App::handleKey(char c, bool enter, bool back) {
   // Bare-letter global hotkeys ('b' screenshot, 'h' help) must never steal a
-  // keystroke from a context that consumes letters. Beyond the two text editors,
-  // that means the Tools first-letter jump ('b' must reach the Battery tool) and
-  // the inline query entries of the DXCC and character lookups ("HB9" needs both
-  // its h and its b). Home's menu jump has no H/B items, so the globals keep
-  // working there; the CAT monitor's hex entry is already safe (it goes through
-  // the shared editor). One predicate keeps both hotkeys' exclusions in sync.
+  // keystroke from a context that consumes letters. That means every screen that
+  // types free text (the two shared editors, the Tiny BASIC editor, the scientific
+  // calculator's expression entry, and the LoTW passphrase entry), plus the Tools
+  // first-letter jump ('b' must reach the Battery tool) and the inline query entries
+  // of the DXCC and character lookups ("HB9" needs both its h and its b). Home's menu
+  // jump has no H/B items, so the globals keep working there; the CAT monitor's hex
+  // entry is already safe (it goes through the shared editor). One predicate keeps
+  // both hotkeys' exclusions in sync.
+  //
+  // Wherever a bare letter is claimed, the globals stay reachable as **Fn+h** / **Fn+b**,
+  // matching the Fn-is-for-commands convention the editors already use for save, run and
+  // cursor movement. That keeps "screenshot any screen" true everywhere: no screen can
+  // consume Fn+b, because none of these handlers look at keyFn at all.
   const bool lettersFree = (screen != SCR_EDIT && screen != SCR_NOTEEDIT &&
+                            screen != SCR_BASIC && screen != SCR_CALC &&
+                            screen != SCR_LOTWSUB &&
                             screen != SCR_TOOLS && screen != SCR_DXLK &&
                             screen != SCR_CHARLK);
-  if (c == 'b' && lettersFree) { takeScreenshot(); return; }
-  if (c == 'h' && lettersFree && screen != SCR_HELP) {
+  // Fn+b / Fn+h reach the globals from every screen that claims bare letters -- both the
+  // text-entry screens and the first-letter-jump / type-to-search lists.
+  // Lowercase only: Fn+shift+b / Fn+shift+h must still type a capital B / H in the
+  // editors, and the shifted forms are never needed to reach a global.
+  if (c == 'b' && (lettersFree || keyFn)) { takeScreenshot(); return; }
+  if (c == 'h' && (lettersFree || keyFn) && screen != SCR_HELP) {
     helpReturn = screen; helpScroll = 0; screen = SCR_HELP; lastDrawMs = 0; return;
   }
   // Global emergency stop: Fn+Back (backtick or Del) disengages radio + rotator control
   // from any operating screen, so external equipment can always be halted without hunting
-  // for the Track screen. Excluded only in the two text editors, where Fn + Del/backtick
-  // are editing keystrokes (and which never control hardware anyway).
-  if (keyFn && isBack(c, back) && screen != SCR_EDIT && screen != SCR_NOTEEDIT) {
+  // for the Track screen. Excluded in the text editors, where Del is backspace and Fn+Del
+  // must keep editing rather than silently disengaging the rig behind the user's back.
+  // Keep this list in step with the editors: EDIT, NOTEEDIT, BASIC and the scientific
+  // CALC all treat `back` as backspace, so Fn+Del there must delete, not stop the rig.
+  // (None of them control hardware themselves.) LOTWSUB is deliberately absent: its Del
+  // exits rather than deleting, so the emergency stop is safe to keep there.
+  const bool textEditor = (screen == SCR_EDIT || screen == SCR_NOTEEDIT ||
+                           screen == SCR_BASIC || screen == SCR_CALC);
+  if (keyFn && isBack(c, back) && !textEditor) {
     stopAllControl(); return;
   }
   switch (screen) {
@@ -21981,6 +22030,7 @@ void App::drawVisList() {
 
 void App::keyVisList(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_PASSES; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_VISLIST); return; }   // p: print the visible-pass list
   if (c == 'r') { buildVisList(); lastDrawMs = 0; return; }
   if (vlN == 0) return;
   if (isUp(c))   { if (vlSel > 0) vlSel--; lastDrawMs = 0; }
@@ -26046,18 +26096,42 @@ void App::drawHelp() {
     " ;/. pick Sun or Moon",
     " o rotor track  x stop",
     " g graphic  t transits",
+    " e EME / moonbounce",
     " s sky sources (planets,",
     "   radio sources)",
     " parks while body is set",
     " takes rotor from sat trk",
+    "EME / MOONBOUNCE (Sun/Moon e)",
+    " Moon az/el, range + rate,",
+    " path degradation vs perigee,",
+    " sky noise, self-echo Doppler",
+    " per band (50..10368 MHz)",
+    " p  30-day plan (dec+degrad)",
+    " m  mutual Moon vs DX grid",
+    " g  set the DX grid",
+    " o  point rotor at Moon",
+    " x  stop the rotor",
+    " Fn+p print (p is taken here)",
+    " red SUN flag: Sun <10 deg",
+    "  from the Moon = noisy",
     "SATELLITES",
-    " ENT  toggle favorite",
+    " ENT  open passes",
+    " f  toggle favorite",
+    " v  favorites only",
+    " n  new manual sat",
+    " x  delete manual sat (x2)",
     " o  orbital analysis",
     " y  simulation (time)",
+    " t  transponder database",
     " e  EQX table",
     " k  OSCARLOCATOR view",
+    " 3  3D globe",
     " 2  sat-to-sat windows",
-    " arrows scroll the list",
+    " d  10-day overview",
+    " i  illumination",
+    " s  AMSAT status roster",
+    " L  share GP over LoRa",
+    " arrows scroll  {} page",
     " AMSAT: dot=heard",
     "  sq=telemetry  ring=no",
     "ORBIT ANALYSIS",
@@ -26076,6 +26150,11 @@ void App::drawHelp() {
     "NEXT PASSES (favs)",
     " ENT track  m world map",
     " r refresh  z deep-sleep",
+    " t sky timeline (6h)",
+    " w workable horizon (10d)",
+    " s target search",
+    " p rove planner",
+    " P print all favs' passes",
     "PASSES",
     " ENT/t track  d detail",
     " g grids  w states  e DXCC",
@@ -26100,11 +26179,14 @@ void App::drawHelp() {
     " o rotator  p polar",
     " a point-here arrow",
     " z big readout  l log QSO",
+    " f manual freq calculator",
+    " N per-sat operating note",
+    " i x2 report Heard to AMSAT",
     " v voice memo (SD)",
     " y tilt tuning (ADV)",
-    " g grids now  p polar",
-    " w US states now",
+    " g grids now  w US states",
     " e DXCC now",
+    " after LOS: q sleep to next",
     "BIG READOUT (z)",
     " large RX/TX + az/el;",
     " radio+rotator keep going",
@@ -26169,12 +26251,15 @@ void App::drawHelp() {
     "SPACE WX (menu)",
     " solar flux + Kp + A idx",
     " HF/sat outlook  r refresh",
+    " p HF/6m propagation guide",
     "WEATHER (menu)",
     " current + forecast (site)",
     " r refresh  cached offline",
     "QRZ LOOKUP (menu)",
     " callsign -> name/grid/QTH",
     " needs QRZ XML sub + WiFi",
+    " ENT look up a callsign",
+    " p print the result",
     "SETTINGS",
     " ;/. move  ,// change",
     " ENT select / edit field",
@@ -26227,7 +26312,10 @@ void App::drawHelp() {
     " build, IP, free heap,",
     " diagnostics",
     " r  station readiness check",
-    " t  Tools hub (26 tools)",
+    " t  Tools hub (35 tools)",
+    " p  PRINT menu (every report)",
+    " a  print support-AMSAT page",
+    " c  print operator card",
     " z  games menu",
     " l  license & credits",
     "TOOLS (About > t)",
@@ -26244,6 +26332,34 @@ void App::drawHelp() {
     "  ASCII/Morse/Baudot table",
     " Antenna lengths ft/m:",
     "  Settings > Display",
+    "TINY BASIC (Tools > Tiny BASIC)",
+    " type a program, one",
+    " numbered line each",
+    " Fn+r  run    Fn+s  save",
+    " Fn+l  load   Fn+n  new",
+    " Fn+p  print listing",
+    " Fn+;. / Fn+,/  cursor",
+    " p on the output console",
+    "  prints the output",
+    " plain letters type, so",
+    "  h/b are Fn+h / Fn+b",
+    " 4KB max, 200 lines;",
+    " runaway loops self-halt",
+    "PRINTING",
+    " p on a report screen",
+    "  prints what you're",
+    "  looking at",
+    " About > p = menu of ALL",
+    "  reports (28)",
+    " where p is already taken",
+    "  (EME, calculator, BASIC",
+    "  editor, notes) use Fn+p",
+    " sinks: network printer,",
+    "  serial, /Reports file --",
+    "  any mix, in Settings >",
+    "  Network / data",
+    " P on Next Passes prints",
+    "  every favorite's passes",
     "CHARGE / SLEEP",
     " low-power: screen off,",
     " any key shows battery,",
@@ -28422,6 +28538,34 @@ void App::printOrbit() {
     snprintf(b, sizeof(b), "Node drift   %+.3f deg/day", Odot);   Printer::line(String(b));
     snprintf(b, sizeof(b), "Perig drift  %+.3f deg/day", Wdot);   Printer::line(String(b));
     Printer::line(String("Sun-synchronous: ") + ((fabs(Odot - 0.98565) < 0.05) ? "yes" : "no"));
+    // Local time of the ascending node. Unlike the drift rates above this is NOT a pure
+    // property of the orbit: it is (RAAN - RA_sun)/15 + 12, so it moves as the node
+    // regresses and the Sun's RA advances. d(LTAN)/dt = (Odot - 0.9856)/15 h/day, which is
+    // ~zero for a sun-synchronous orbit (that is the whole point of one) but sweeps fast
+    // otherwise -- ISS runs about -24 min/day. So print it as a stamped snapshot with its
+    // rate, never bare: on paper a week later a bare LTAN would be badly wrong.
+    if (now) {
+      double d = ((double)now - 946728000.0) / 86400.0;        // days since J2000
+      double Ls = 280.460 + 0.9856474 * d;
+      double g  = (357.528 + 0.9856003 * d) * D2R;
+      double lam = (Ls + 1.915 * sin(g) + 0.020 * sin(2 * g)) * D2R;
+      double eps = 23.439 * D2R;
+      double ra = atan2(cos(eps) * sin(lam), cos(lam)) / D2R;   // Sun RA, deg
+      double lt = fmod((s->raan - ra) / 15.0 + 12.0 + 48.0, 24.0);
+      int hh = (int)lt, mi = (int)((lt - hh) * 60.0 + 0.5);
+      if (mi >= 60) { mi -= 60; hh = (hh + 1) % 24; }
+      double ltanRate = (Odot - 0.9856474) / 15.0 * 60.0;       // minutes of LTAN per day
+      // Width-tuned to 32 cols so it doesn't wrap on 58 mm receipt paper, matching the
+      // "Speed apo/per" and "Eclipse" lines above.
+      snprintf(b, sizeof(b), "LTAN         %02d:%02d  %+.1f min/d", hh, mi, ltanRate);
+      Printer::line(String(b));
+      { struct tm tmv; time_t tt = (time_t)now; gmtime_r(&tt, &tmv);
+        snprintf(b, sizeof(b), "  as of %04d-%02d-%02d %02d:%02dZ",
+                 tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+        Printer::line(String(b)); }
+    } else {
+      Printer::line("LTAN         -- (clock not set)");
+    }
     // Repeat ground track (permanent resonance property).
     double best = 1e9; int bP = 0, bQ = 0;
     for (int P = 1; P <= 30; ++P) { int Q = (int)lround(mm * P);
@@ -28821,6 +28965,15 @@ const char* App::prtStem(PrintReport w) {
     case PR_BASICOUT:  return "basic_output";
     case PR_TOOLOUT:   return "tool_output";
     case PR_CHARLK:    return "char_lookup";
+    case PR_EME:       return "eme";
+    case PR_EMEPLAN:   return "eme_plan";
+    case PR_EMEMUT:    return "eme_mutual";
+    case PR_QRZ:       return "qrz";
+    case PR_READY:     return "readiness";
+    case PR_AWARDS:    return "awards";
+    case PR_STATES:    return "workable_states";
+    case PR_DXCCLIST:  return "workable_dxcc";
+    case PR_VISLIST:   return "visible_passes";
   }
   return "report";
 }
@@ -28874,6 +29027,15 @@ bool App::printReport(PrintReport which) {
     case PR_BASICOUT:  printBasicOut(); break;
     case PR_TOOLOUT:   printToolOut(); break;
     case PR_CHARLK:    printCharLk(); break;
+    case PR_EME:       printEme(); break;
+    case PR_EMEPLAN:   printEmePlan(); break;
+    case PR_EMEMUT:    printEmeMut(); break;
+    case PR_QRZ:       printQrz(); break;
+    case PR_READY:     printReady(); break;
+    case PR_AWARDS:    printAwards(); break;
+    case PR_STATES:    printStates(); break;
+    case PR_DXCCLIST:  printDxccList(); break;
+    case PR_VISLIST:   printVisList(); break;
   }
   Printer::feedCut();
   Printer::end();
@@ -31183,6 +31345,11 @@ void App::drawEme() {
 
 void App::keyEme(char c, bool enter, bool back) {
   (void)enter;
+  // Fn+p prints. A bare 'p' is already the 30-day plan here, so this follows the
+  // convention used wherever p is taken. Prints whichever view is on screen.
+  if (keyFn && c == 'p') {
+    printReport(emeMutShown ? PR_EMEMUT : PR_EME); return;
+  }
   if (isBack(c, back)) {
     if (emeMutShown) { emeMutShown = false; lastDrawMs = 0; return; }   // sub-view -> main
     if (emeRotOut && rot) rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
@@ -33633,7 +33800,7 @@ void App::drawCalc() {
     canvas.setCursor(4, 106); canvas.print("const: c kB Re mu g0  suffix p n u m k M G");
   }
   if (calcEngNota) { canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(210, 96); canvas.print("ENG"); }
-  footer("' fns  \\ eng  [ ] scroll  ` back");
+  footer("' fns  \ eng  [ ] scroll  Fn+h help");
 }
 
 void App::keyCalc(char c, bool enter, bool back) {
@@ -35100,6 +35267,9 @@ static const int  BASIC_MAX_LINES = 200;      // program lines
 static const int  BASIC_GOSUB_MAX = 16;       // GOSUB nesting depth
 static const int  BASIC_FOR_MAX   = 8;        // FOR nesting depth
 static const long BASIC_STMT_BUDGET = 500000; // statements/run before "loop?" halt
+// Hard cap on console output. basicRun() reserves exactly this much for both the VM's
+// buffer and the surviving copy, so neither ever reallocs -- see the ordering note there.
+static const int  BASIC_OUT_MAX = 6000;       // bytes of output per run
 
 // ===========================================================================
 //  Tiny BASIC interpreter (SCR_BASIC editor + SCR_BASICRUN console).
@@ -35111,11 +35281,77 @@ static const long BASIC_STMT_BUDGET = 500000; // statements/run before "loop?" h
 //  Self-contained -- shares no state with other subsystems.
 // ===========================================================================
 namespace {
+  // Read-only system data, snapshotted ONCE per run in basicRun() and carried inside the
+  // VM -- which is heap-allocated per run and deleted at the end, so this costs zero
+  // permanent RAM and is freed automatically when the program stops.
+  //
+  // Why a snapshot rather than live reads: basicRun() executes to completion inside a key
+  // handler and never yields to loop(), while the statement budget is 500,000. If a bare
+  // name could trigger SGP4 (~0.3-1 ms), "10 PRINT SATEL / 20 GOTO 10" would call it half a
+  // million times and trip the task watchdog. Snapshotting costs exactly one look() per run
+  // no matter what the program does. The values are therefore frozen for the run -- which is
+  // no loss, since a run lasts milliseconds -- and mean "the sky when you pressed Fn+r".
+  struct BasicSys {
+    // Availability flags. Readable as SATOK/TIMEOK/... so a program can branch instead of halt.
+    bool satOk = false, timeOk = false, posOk = false, wxOk = false, spwxOk = false, passOk = false;
+    double satAz = 0, satEl = 0, satRng = 0, satRR = 0, satLat = 0, satLon = 0, satAlt = 0, satSun = 0;
+    double satInc = 0, satEcc = 0, satRaan = 0, satMM = 0, satNor = 0;
+    double aosIn = 0, losIn = 0, passEl = 0, passVis = 0;
+    double sunAz = 0, sunEl = 0, moonAz = 0, moonEl = 0;
+    double myLat = 0, myLon = 0, myAlt = 0;
+    double utcH = 0, utcM = 0, utcS = 0, utcDay = 0, utcMon = 0, utcYr = 0;
+    double sfi = 0, kp = 0, aIdx = 0;
+    double wxTemp = 0, wxWind = 0, wxDir = 0, wxHum = 0;
+    double batt = 0, gpAge = 0, nfav = 0;
+  };
+
+  // System-name table. Read-only; every entry is data the firmware already has.
+  // NOTE ON SAFETY: the app signals "no data" with -1 (spaceKp/spaceA/wxWindDirNow/
+  // wxHumidNow) and -999 (wxTempNow/wxWindNow). Those are NUMBERS, and BASIC has no NULL,
+  // so letting them through would mean "IF WXTEMP < 0 THEN PRINT FREEZING" printing
+  // FREEZING when no weather was ever fetched -- confidently wrong. Worse, an unset SATAZ
+  // reading 0 says "point due North", a perfectly plausible bearing. So a read of missing
+  // data HALTS the run with a real error; the *OK flags exist for programs that would
+  // rather branch than stop.
+  struct BasicSysEnt { const char* name; uint8_t id; };
+  static const BasicSysEnt BASIC_SYS[] = {
+    {"SATAZ",1},{"SATEL",2},{"SATRNG",3},{"SATRR",4},{"SATLAT",5},{"SATLON",6},
+    {"SATALT",7},{"SATSUN",8},{"SATINC",9},{"SATECC",10},{"SATRAAN",11},{"SATMM",12},
+    {"SATNOR",13},{"AOSIN",14},{"LOSIN",15},{"PASSEL",16},{"PASSVIS",17},
+    {"SUNAZ",18},{"SUNEL",19},{"MOONAZ",20},{"MOONEL",21},
+    {"MYLAT",22},{"MYLON",23},{"MYALT",24},
+    {"UTCH",25},{"UTCM",26},{"UTCS",27},{"UTCDAY",28},{"UTCMON",29},{"UTCYR",30},
+    {"SFI",31},{"KP",32},{"AINDEX",33},
+    {"WXTEMP",34},{"WXWIND",35},{"WXDIR",36},{"WXHUM",37},
+    {"BATT",38},{"GPAGE",39},{"NFAV",40},
+    {"SATOK",41},{"TIMEOK",42},{"POSOK",43},{"WXOK",44},{"SPWXOK",45},{"PASSOK",46},
+  };
+  static const int BASIC_SYS_N = (int)(sizeof(BASIC_SYS) / sizeof(BASIC_SYS[0]));
+
+  // Longest match at p, rejecting a name followed by another alnum so "KP1" stays an
+  // error rather than silently parsing as KP then 1 (the single-letter path has the same
+  // guard). Returns the id and sets len; 0 = no match.
+  static uint8_t basicSysMatch(const char* p, int& len) {
+    uint8_t best = 0; int bestLen = 0;
+    for (int i = 0; i < BASIC_SYS_N; ++i) {
+      const char* w = BASIC_SYS[i].name;
+      int n = (int)strlen(w);
+      bool ok = true;
+      for (int k = 0; k < n; ++k)
+        if (toupper((unsigned char)p[k]) != w[k]) { ok = false; break; }
+      if (!ok) continue;
+      if (isalnum((unsigned char)p[n])) continue;      // trailing-alnum guard
+      if (n > bestLen) { best = BASIC_SYS[i].id; bestLen = n; }
+    }
+    len = bestLen; return best;
+  }
+
   struct BasicVM {
     struct Line { int num; const char* text; };
     Line   lines[BASIC_MAX_LINES];
     int    nLines = 0;
     double vars[26];
+    BasicSys sys;                               // snapshot; freed with the VM
     String out;
     String err;
     int    gosubStack[BASIC_GOSUB_MAX]; int gosubSP = 0;
@@ -35125,6 +35361,42 @@ namespace {
     const char* p = nullptr;                    // expression cursor
 
     void ws() { while (*p == ' ' || *p == '\t') ++p; }
+
+    // Resolve a matched system name to its value. The *OK flags never error (that is the
+    // point of them); every other group errors when its data is missing rather than
+    // returning a plausible-looking zero.
+    double sysValue(uint8_t id) {
+      switch (id) {                                   // availability flags: always safe
+        case 41: return sys.satOk  ? 1 : 0;  case 42: return sys.timeOk ? 1 : 0;
+        case 43: return sys.posOk  ? 1 : 0;  case 44: return sys.wxOk   ? 1 : 0;
+        case 45: return sys.spwxOk ? 1 : 0;  case 46: return sys.passOk ? 1 : 0;
+      }
+      if (id >= 1  && id <= 13 && !sys.satOk)  { err = "no active satellite"; return 0; }
+      if (id >= 14 && id <= 17 && !sys.passOk) { err = "no pass predicted";   return 0; }
+      if (id >= 18 && id <= 21 && (!sys.posOk || !sys.timeOk))
+                                               { err = "no position/clock";   return 0; }
+      if (id >= 22 && id <= 24 && !sys.posOk)  { err = "no position";         return 0; }
+      if (id >= 25 && id <= 30 && !sys.timeOk) { err = "clock not set";       return 0; }
+      if (id >= 31 && id <= 33 && !sys.spwxOk) { err = "no space wx data";    return 0; }
+      if (id >= 34 && id <= 37 && !sys.wxOk)   { err = "no weather data";     return 0; }
+      switch (id) {
+        case 1:  return sys.satAz;   case 2:  return sys.satEl;   case 3:  return sys.satRng;
+        case 4:  return sys.satRR;   case 5:  return sys.satLat;  case 6:  return sys.satLon;
+        case 7:  return sys.satAlt;  case 8:  return sys.satSun;  case 9:  return sys.satInc;
+        case 10: return sys.satEcc;  case 11: return sys.satRaan; case 12: return sys.satMM;
+        case 13: return sys.satNor;  case 14: return sys.aosIn;   case 15: return sys.losIn;
+        case 16: return sys.passEl;  case 17: return sys.passVis; case 18: return sys.sunAz;
+        case 19: return sys.sunEl;   case 20: return sys.moonAz;  case 21: return sys.moonEl;
+        case 22: return sys.myLat;   case 23: return sys.myLon;   case 24: return sys.myAlt;
+        case 25: return sys.utcH;    case 26: return sys.utcM;    case 27: return sys.utcS;
+        case 28: return sys.utcDay;  case 29: return sys.utcMon;  case 30: return sys.utcYr;
+        case 31: return sys.sfi;     case 32: return sys.kp;      case 33: return sys.aIdx;
+        case 34: return sys.wxTemp;  case 35: return sys.wxWind;  case 36: return sys.wxDir;
+        case 37: return sys.wxHum;   case 38: return sys.batt;    case 39: return sys.gpAge;
+        case 40: return sys.nfav;
+      }
+      return 0;
+    }
     bool kw(const char* w) {                     // match keyword (case-insensitive), not mid-identifier
       const char* q = p; while (*w) { if (toupper((unsigned char)*q) != *w) return false; ++q; ++w; }
       p = q; return true;
@@ -35147,6 +35419,11 @@ namespace {
         else if (kw("COS")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return cos(v*D2R); } }
         else if (kw("RND")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p;
               long m = (long)(v < 1 ? 1 : v); return (double)(esp_random() % (m > 0 ? m : 1)); } }
+        // System data (read-only). Checked before the single-letter fallback; every
+        // multi-letter identifier was already an error before these existed, so no
+        // previously-valid program changes meaning.
+        { int slen = 0; uint8_t sid = basicSysMatch(p, slen);
+          if (sid) { p += slen; return sysValue(sid); } }
         // single-letter variable
         char v = toupper((unsigned char)*p); ++p;
         // guard: a two-letter identifier we don't know is an error, not a var
@@ -35251,7 +35528,7 @@ namespace {
       while (pc >= 0 && pc < nLines) {
         if (++stmts > BASIC_STMT_BUDGET) { err = "stopped (loop? >500k stmts)"; return; }
         if ((stmts & 0x3FF) == 0) yield();          // keep the watchdog happy on long runs
-        if (out.length() > 6000) { err = "output too large (>6KB)"; return; }
+        if ((int)out.length() > BASIC_OUT_MAX) { err = "output too large (>6KB)"; return; }
         int next = execLine(lines[pc].text, pc);
         if (!err.isEmpty()) { err = "line " + String(lines[pc].num) + ": " + err; return; }
         if (next == -999) return;
@@ -35300,16 +35577,108 @@ void App::basicRun() {
   // it -- the VM's line table is ~3.8 KB and would otherwise sit in .bss for the whole
   // session even though BASIC is used rarely. `work` holds the tokenized source the VM
   // points into and is freed together with the VM after the output is copied out.
+  //
+  // basicOut holds the run's output so the console can scroll it, and can reach
+  // BASIC_OUT_MAX (6 KB). It MUST be released when you leave BASIC -- see basicFree(),
+  // called from the editor and console exits. A runaway program fills this buffer to the
+  // cap, and on this no-PSRAM board a permanently-held 6 KB is enough to starve the
+  // contiguous allocation a TLS handshake needs (LoTW/Cloudlog upload).
   basicErr = ""; basicOut = ""; basicOutScroll = 0;
   BasicVM* vm = new (std::nothrow) BasicVM();
   if (!vm) { basicErr = "out of memory"; return; }
   String* work = new (std::nothrow) String();
   if (!work) { delete vm; basicErr = "out of memory"; return; }
+  // ---- One system snapshot per run (see BasicSys). Filled inline because it needs App
+  // members and BasicSys lives in the anonymous namespace below, so it cannot be named in
+  // app.h. Exactly one look()/skyObjAzEl() pair per run regardless of what the program does.
+  {
+    BasicSys& sy = vm->sys;
+    Observer o = loc.obs();
+    sy.posOk  = o.valid;
+    sy.timeOk = timeIsSet();
+    if (sy.posOk) { sy.myLat = o.lat; sy.myLon = o.lon; sy.myAlt = o.altM; }
+    if (sy.timeOk) {
+      time_t nw = nowUtc(); struct tm tmv; gmtime_r(&nw, &tmv);
+      sy.utcH = tmv.tm_hour; sy.utcM = tmv.tm_min;  sy.utcS = tmv.tm_sec;
+      sy.utcDay = tmv.tm_mday; sy.utcMon = tmv.tm_mon + 1; sy.utcYr = tmv.tm_year + 1900;
+    }
+    SatEntry* as = activeSat();
+    if (as) {
+      sy.satInc = as->incl; sy.satEcc = as->ecc; sy.satRaan = as->raan;
+      sy.satMM = as->meanMotion; sy.satNor = as->norad;
+      sy.gpAge = gpAgeDays(*as);
+      if (sy.posOk && sy.timeOk) {                       // the single SGP4 call
+        pred.setSite(o); 
+        if (pred.setSat(*as)) {
+          LiveLook L = pred.look(nowUtc());
+          sy.satAz = L.az; sy.satEl = L.el; sy.satRng = L.rangeKm; sy.satRR = L.rangeRate;
+          sy.satLat = L.subLat; sy.satLon = L.subLon; sy.satAlt = L.satAltKm;
+          sy.satSun = L.sunlit ? 1 : 0;
+          sy.sunAz = L.sunAz; sy.sunEl = L.sunEl;
+          sy.satOk = true;
+        }
+      }
+    }
+    if (sy.posOk && sy.timeOk) {                         // cheap closed-form trig
+      double maz, mel; skyObjAzEl(nowUtc(), o.lat, o.lon, true, maz, mel);
+      sy.moonAz = maz; sy.moonEl = mel;
+    }
+    if (passN > 0 && sy.timeOk) {                        // already-predicted pass table
+      time_t nw = nowUtc();
+      for (int i = 0; i < passN; ++i) {
+        if (passes[i].los <= nw) continue;               // first pass not yet finished
+        sy.aosIn  = (passes[i].aos - nw) / 60.0;         // minutes (negative = in progress)
+        sy.losIn  = (passes[i].los - nw) / 60.0;
+        sy.passEl = passes[i].maxEl;
+        sy.passVis = 0;
+        sy.passOk = true;
+        break;
+      }
+    }
+    if (spaceF107 >= 0 && spaceKp >= 0) {                // -1 = never fetched
+      sy.sfi = spaceF107; sy.kp = spaceKp;
+      sy.aIdx = (spaceA >= 0) ? spaceA : 0;
+      sy.spwxOk = true;
+    }
+    if (wxTempNow > -900) {                              // -999 = never fetched
+      sy.wxTemp = wxTempNow;
+      sy.wxWind = (wxWindNow > -900) ? wxWindNow : 0;
+      sy.wxDir  = (wxWindDirNow >= 0) ? wxWindDirNow : 0;
+      sy.wxHum  = (wxHumidNow  >= 0) ? wxHumidNow  : 0;
+      sy.wxOk = true;
+    }
+    sy.batt = batteryPercent();
+    sy.nfav = favN;
+  }
   String perr;
   if (!basicParse(*vm, basicBuf, *work, perr)) { basicErr = perr; }
   else if (vm->nLines == 0) { basicErr = "no numbered lines"; }
   else { vm->run(); basicOut = vm->out; basicErr = vm->err; }
   delete work; delete vm;
+}
+
+// Release everything BASIC holds. Called when leaving the editor/console for another
+// screen: the program text and the run's output are up to 4 KB + 6 KB together, and
+// holding them for the rest of the session starves the big contiguous block that TLS
+// uploads need. Arduino's String only frees its buffer on destruction/assignment from
+// another String, so assigning an empty temporary is what actually returns the memory --
+// `= ""` keeps the old capacity.
+void App::basicFree() {
+  // Arduino's String NEVER releases its buffer on assignment. Verified against the real
+  // cores/esp32/WString.cpp: operator=(const String&) calls copy(), which calls reserve(),
+  // which early-returns whenever the existing capacity is already big enough; the
+  // rvalue/move path is worse -- move() explicitly keeps the destination's buffer when
+  // capacity() >= rhs.len() ("use case: when reserve() was called..."). So `= ""`,
+  // `= String()`, and `= someEmptyString` ALL leave the full 6 KB allocated, and
+  // reserve() cannot shrink it either. Measured: each frees 0 bytes.
+  //
+  // Destroying the object is the only thing that calls invalidate() -> free(). Placement-new
+  // then puts a fresh, empty String back in the same storage. Measured: frees the whole
+  // buffer. This is why a runaway program used to hold ~6 KB for the rest of the session and
+  // starve the contiguous block a TLS upload needs.
+  basicOut.~String(); new (static_cast<void*>(&basicOut)) String();
+  basicErr.~String(); new (static_cast<void*>(&basicErr)) String();
+  basicOutScroll = 0;
 }
 
 // ---- Generic tool-result printing ----------------------------------------------
@@ -35441,10 +35810,12 @@ void App::drawBasic() {
       canvas.fillRect(cx, y, 2, 8, CL_CYAN);
     }
   }
-  footer("Fn+R run S save L load P print ` bk");
+  footer("Fn+r run  Fn+s save  Fn+h help  ` exit");
 }
 
 void App::keyBasic(char c, bool enter, bool back) {
+  // Note: the output buffer is released by the screen-transition hook in loop(), which
+  // catches every way out of BASIC (including Fn+h to Help), not just this one.
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
   if (keyFn) {
     if (c == 'r') {                          // RUN
@@ -35796,6 +36167,15 @@ namespace {
     "Illumination (active sat)",     // 16
     "10-day passes (active sat)",    // 17
     "6-hour timeline (favorites)",   // 18
+    "EME / moonbounce now",          // 19
+    "EME 30-day plan",               // 20
+    "EME mutual Moon (DX grid)",     // 21
+    "Station readiness",             // 22
+    "Awards (from the log)",         // 23
+    "Workable US states (list)",     // 24
+    "Workable DXCC (list)",          // 25
+    "Visible passes (active sat)",   // 26
+    "QRZ lookup result",             // 27
   };
   const int PA_N = (int)(sizeof(PA_ITEMS) / sizeof(PA_ITEMS[0]));
 }
@@ -35837,6 +36217,8 @@ void App::keyPrintAbout(char c, bool enter, bool back) {
       PR_PASSES, PR_ALLPASS, PR_TICKET, PR_SATCARD, PR_KEPS, PR_LOG, PR_HORIZON,
       PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_TARGET, PR_ROVE, PR_PASSPOLAR, PR_AMSAT, PR_OPCARD,
       PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
+      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_READY, PR_AWARDS,
+      PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_QRZ,
     };
     static_assert(sizeof(MAP)/sizeof(MAP[0]) == PA_N, "PA_ITEMS labels and MAP must match");
     if (paSel >= 0 && paSel < (int)(sizeof(MAP)/sizeof(MAP[0]))) printReport(MAP[paSel]);
@@ -37619,8 +38001,9 @@ void App::drawReady() {
 }
 
 void App::keyReady(char c, bool enter, bool back) {
-  (void)c; (void)enter;
+  (void)enter;
   if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_READY); return; }   // p: print the checklist
 }
 // ===========================================================================
 //  EME 30-day planner (SCR_EMEPLAN), 'p' from the EME screen. One row per day:
@@ -37661,6 +38044,7 @@ void App::drawEmePlan() {
 void App::keyEmePlan(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_EME; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_EMEPLAN); return; }   // p: print the 30-day table
   if (isUp(c))   { if (--emePlanScroll < 0) emePlanScroll = 0; lastDrawMs = 0; return; }
   if (isDown(c)) { ++emePlanScroll; lastDrawMs = 0; return; }
   if (c == '{')  { emePlanScroll -= 9; if (emePlanScroll < 0) emePlanScroll = 0; lastDrawMs = 0; return; }
@@ -38117,6 +38501,7 @@ void App::drawQrz() {
 
 void App::keyQrz(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (c == 'p' && qrzHaveResult) { printReport(PR_QRZ); return; }   // p: print the result
   if (!net.connected()) return;
   if (cfg.qrzUser[0] == 0 || cfg.qrzPass[0] == 0) return;
   if (enter) {                                  // open the text editor for a callsign
@@ -38589,6 +38974,7 @@ void App::drawStates() {
 void App::keyStates(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = stateLive ? liveReturn : wListReturn; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_STATES); return; }   // p: print the entity list
   const int PER = 6 * 8;
   if (isDown(c)) { if (stateScroll + PER < stateN) stateScroll += 6; lastDrawMs = 0; return; }
   if (isUp(c))   { if (stateScroll >= 6) stateScroll -= 6; lastDrawMs = 0; return; }
@@ -38947,6 +39333,232 @@ String App::whExport() {
   return String(path);
 }
 
+
+// ---- Gap reports (EME, QRZ, readiness, awards, workable lists, visible passes) -------
+// Placed here so STATE_CODE / dxccCode() (defined just above) and the Moon helpers are all
+// in scope: a method that calls file-scope helpers must follow them in the translation unit.
+
+void App::printEme() {
+  Printer::title("EME / MOONBOUNCE");
+  Observer o = loc.obs();
+  if (!o.valid || !timeIsSet()) {
+    Printer::line(!o.valid ? "(no location set)" : "(clock not set)");
+    return;
+  }
+  time_t now = nowUtc();
+  { struct tm tmv; gmtime_r(&now, &tmv);
+    char b[48]; snprintf(b, sizeof(b), "%04d-%02d-%02d %02d:%02dZ",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+    Printer::line(String(b)); }
+  Printer::blank();
+
+  double az, el; skyObjAzEl(now, o.lat, o.lon, true, az, el);
+  double rangeKm, rrMs; moonTopoRangeRate(now, o.lat, o.lon, rangeKm, rrMs);
+  double galLat = moonGalacticLatDeg(now);
+  const double D2R_ = 0.017453292519943295;
+  double saz, sel_; skyObjAzEl(now, o.lat, o.lon, false, saz, sel_);
+  double sunSep = acos(sin(el * D2R_) * sin(sel_ * D2R_)
+                     + cos(el * D2R_) * cos(sel_ * D2R_) * cos((az - saz) * D2R_)) / D2R_;
+
+  char b[64];
+  snprintf(b, sizeof(b), "Moon    Az %.1f  El %.1f %s", az, el, el > 0 ? "UP" : "down");
+  Printer::line(String(b));
+  snprintf(b, sizeof(b), "Range   %.0f km", rangeKm);            Printer::line(String(b));
+  snprintf(b, sizeof(b), "Rate    %+.0f m/s", rrMs);             Printer::line(String(b));
+  const double RP = 356500.0, RA = 406700.0;
+  double degdB = 40.0 * log10(rangeKm / RP);
+  const char* pa = (rangeKm < RP + 8000) ? " (near perigee)"
+                 : (rangeKm > RA - 8000) ? " (near apogee)" : "";
+  snprintf(b, sizeof(b), "Degrad  %.2f dB%s", degdB, pa);        Printer::line(String(b));
+  double bb = fabs(galLat);
+  const char* sky = (bb < 10) ? "HOT (galactic plane)" : (bb < 25) ? "warm" : "cold sky";
+  snprintf(b, sizeof(b), "Sky     %s", sky);                     Printer::line(String(b));
+  snprintf(b, sizeof(b), "        gal lat %+.0f deg", galLat);   Printer::line(String(b));
+  if (el > 0 && sunSep < 10.0) {
+    snprintf(b, sizeof(b), "WARNING Sun only %.0f deg away", sunSep);
+    Printer::line(String(b));
+  }
+  Printer::blank();
+  Printer::line("Self-echo Doppler (round trip)");
+  struct { const char* n; double mhz; } bands[] = {
+    {"50", 50.0}, {"144", 144.0}, {"432", 432.0}, {"1296", 1296.0}, {"10G", 10368.0}
+  };
+  const double C = 299792458.0;
+  for (int i = 0; i < 5; ++i) {
+    double dop = -2.0 * bands[i].mhz * 1e6 * rrMs / C;
+    if (fabs(dop) >= 1000) snprintf(b, sizeof(b), "  %-5s MHz  %+.2f kHz", bands[i].n, dop / 1000.0);
+    else                   snprintf(b, sizeof(b), "  %-5s MHz  %+.0f Hz",  bands[i].n, dop);
+    Printer::line(String(b));
+  }
+}
+
+void App::printEmePlan() {
+  Printer::title("EME 30-DAY PLAN");
+  if (emePlanN <= 0) { Printer::line("(not computed yet)"); return; }
+  Printer::line("Declination and path degradation");
+  Printer::line("at 12:00 UTC each day.");
+  Printer::blank();
+  Printer::line("Date    Dec     Degrad");
+  char b[64];
+  for (int i = 0; i < emePlanN && i < 30; ++i) {
+    time_t d = emePlanT0 + (time_t)i * 86400;
+    struct tm tmv; gmtime_r(&d, &tmv);
+    snprintf(b, sizeof(b), "%02d-%02d  %+5.1f   %.2f dB",
+             tmv.tm_mon + 1, tmv.tm_mday, emePlanDec[i], emePlanDeg[i]);
+    Printer::line(String(b));
+  }
+}
+
+void App::printEmeMut() {
+  Printer::title("EME MUTUAL MOON");
+  if (emeMutGrid[0] == 0) { Printer::line("(no DX grid set)"); return; }
+  Printer::line(String("Common Moon window vs ") + emeMutGrid);
+  Printer::blank();
+  if (emeMutN == 0) { Printer::line("No common window in 14 days."); return; }
+  Printer::line("Start (UTC)      Duration");
+  char b[64];
+  for (int i = 0; i < emeMutN; ++i) {
+    time_t a = emeMut[i].aos, l = emeMut[i].los;
+    long durMin = (long)(l - a) / 60;
+    struct tm tmv; gmtime_r(&a, &tmv);
+    snprintf(b, sizeof(b), "%02d-%02d %02d:%02dZ      %ldh%02ldm",
+             tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min, durMin / 60, durMin % 60);
+    Printer::line(String(b));
+  }
+}
+
+void App::printQrz() {
+  Printer::title("QRZ LOOKUP");
+  if (!qrzHaveResult) { Printer::line("(no result -- look one up first)"); return; }
+  Printer::line(qrzCall);
+  Printer::blank();
+  if (qrzName.length())    Printer::wrap(qrzName);
+  if (qrzAddr.length()) {                       // may hold an embedded newline
+    String a = qrzAddr; int nl = a.indexOf('\n');
+    if (nl >= 0) { Printer::wrap(a.substring(0, nl)); Printer::wrap(a.substring(nl + 1)); }
+    else Printer::wrap(a);
+  }
+  if (qrzCountry.length()) Printer::wrap(qrzCountry);
+  if (qrzGrid.length())    Printer::line(String("Grid  ") + qrzGrid);
+  if (qrzClass.length())   Printer::line(String("Class ") + qrzClass);
+}
+
+void App::printReady() {
+  Printer::title("STATION READINESS");
+  { time_t now = timeIsSet() ? nowUtc() : 0;
+    if (now) { struct tm tmv; gmtime_r(&now, &tmv);
+      char b[48]; snprintf(b, sizeof(b), "%04d-%02d-%02d %02d:%02dZ",
+               tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+      Printer::line(String(b)); } }
+  Printer::blank();
+  // Mirrors drawReady() exactly -- same checks, same wording.
+  Printer::line(String("Clock     ") + (timeIsSet() ? "UTC set" : "NOT SET (GPS/NTP)"));
+  bool locOk = (cfg.lat != 0.0 || cfg.lon != 0.0);
+  Printer::line(String("Location  ") + (locOk ? (String(cfg.lat, 2) + ", " + String(cfg.lon, 2))
+                                              : String("NOT SET")));
+  int nSat = db.count();
+  if (nSat > 0 && timeIsSet()) {
+    double newest = 0;
+    for (int i2 = 0; i2 < nSat; ++i2) if (db.at(i2).epochUnix > newest) newest = db.at(i2).epochUnix;
+    double ageD = (nowUtc() - newest) / 86400.0;
+    Printer::line(String("GP data   ") + String(nSat) + " sats, " + String(ageD, 1) + "d old");
+  } else {
+    Printer::line(String("GP data   ") + (nSat > 0 ? String(nSat) + " sats"
+                                                   : String("NONE - run Update")));
+  }
+  Printer::line(String("WiFi      ") + (cfg.ssid[0] ? (net.connected() ? String(cfg.ssid) + " (up)"
+                                                                       : String(cfg.ssid))
+                                                    : String("NOT SET")));
+  Printer::line(String("Radio CAT ") + (cfg.catType == CAT_WIRED ? "CI-V wired" : "network (LAN)"));
+  Printer::line(String("Rotator   ") + (cfg.rotType == ROT_GS232 ? "GS-232" : "other/rotctld"));
+  Printer::line(String("SD card   ") + (Store::onSD() ? "present" : "none (memos off)"));
+  Printer::line(String("Callsign  ") + (cfg.myCall[0] ? String(cfg.myCall) : String("NOT SET")));
+  int lvl = M5.Power.getBatteryLevel();
+  Printer::line(String("Battery   ") + (lvl >= 0 ? String(lvl) + "%" : String("--")));
+}
+
+void App::printAwards() {
+  Printer::title("AWARDS");
+  char b[64];
+  snprintf(b, sizeof(b), "QSOs        %d", awQsoTotal);   Printer::line(String(b));
+  snprintf(b, sizeof(b), "Grids       %d", awGridN);      Printer::line(String(b));
+  snprintf(b, sizeof(b), "US states   %d", awStateN);     Printer::line(String(b));
+  snprintf(b, sizeof(b), "DXCC        %d", awDxccN);      Printer::line(String(b));
+  snprintf(b, sizeof(b), "Satellites  %d", awSatN);       Printer::line(String(b));
+  if (awSatN > 0) {
+    Printer::blank();
+    Printer::line("Per satellite:");
+    for (int i = 0; i < awSatN; ++i) {
+      snprintf(b, sizeof(b), "  %-16s %4d", awSatName[i], awSatQso[i]);
+      Printer::line(String(b));
+    }
+  }
+}
+
+void App::printStates() {
+  Printer::title("WORKABLE US STATES");
+  if (printActiveHint()) {
+    SatEntry* s = activeSat();
+    Printer::line(String(s->name) + (stateLive ? "  (live now)" : "  (this pass)"));
+  }
+  char b[64];
+  snprintf(b, sizeof(b), "%d entities", stateN);   Printer::line(String(b));
+  Printer::blank();
+  if (stateN == 0) { Printer::line("(none -- run the screen first)"); return; }
+  String row;
+  int drawn = 0;
+  for (int idx = 0; idx < STATE_N; ++idx) {
+    if (!(stateBits[idx >> 3] & (1 << (idx & 7)))) continue;
+    char g[3]; g[0] = STATE_CODE[idx * 2]; g[1] = STATE_CODE[idx * 2 + 1]; g[2] = 0;
+    row += g; row += ' ';
+    if (++drawn % 10 == 0) { Printer::line(row); row = ""; }
+  }
+  if (row.length()) Printer::line(row);
+}
+
+void App::printDxccList() {
+  Printer::title("WORKABLE DXCC");
+  if (printActiveHint()) {
+    SatEntry* s = activeSat();
+    Printer::line(String(s->name));
+  }
+  char b[64];
+  snprintf(b, sizeof(b), "%d entities", dxccN);   Printer::line(String(b));
+  Printer::blank();
+  if (dxccN == 0) { Printer::line("(none -- run the screen first)"); return; }
+  String row;
+  int drawn = 0;
+  for (int idx = 0; idx < DXCC_N; ++idx) {
+    if (!(dxccBits[idx >> 3] & (1 << (idx & 7)))) continue;
+    char g[8]; dxccCode(idx, g);
+    row += g; row += ' ';
+    // 5 per row: the longest real DXCC code is 5 chars (e.g. "3D2/c"), so 5*(5+1) = 30
+    // columns -- inside the 32-col 58 mm receipt width. 6 would reach 36 and wrap.
+    if (++drawn % 5 == 0) { Printer::line(row); row = ""; }
+  }
+  if (row.length()) Printer::line(row);
+}
+
+void App::printVisList() {
+  Printer::title("VISIBLE PASSES");
+  if (!printActiveHint()) return;
+  SatEntry* s = activeSat();
+  Printer::line(String(s->name));
+  Printer::line("Optically visible, next 10 days");
+  Printer::blank();
+  if (vlN == 0) { Printer::line("(none in the window)"); return; }
+  Printer::line("Date   AOS    Dur  El  Rise");
+  char b[64];
+  for (int i = 0; i < vlN; ++i) {
+    time_t a = vlPasses[i].aos;
+    long durMin = (long)(vlPasses[i].los - a) / 60;
+    struct tm tmv; gmtime_r(&a, &tmv);
+    snprintf(b, sizeof(b), "%02d-%02d  %02d:%02dZ %3ldm %3.0f %s",
+             tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min,
+             durMin, (double)vlPasses[i].maxEl, windDirName((int)vlPasses[i].azAos));
+    Printer::line(String(b));
+  }
+}
 
 void App::tsRefillFav(int fi) {
   // Load favorite fi's NEXT genuine pass into tsNextPass[fi]/tsNextAos[fi]. This must fetch a
@@ -39887,6 +40499,7 @@ void App::drawDxcc() {
 void App::keyDxcc(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = dxccLive ? liveReturn : wListReturn; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_DXCCLIST); return; }   // p: print the entity list
   const int PER = 5 * 8;
   if (isDown(c)) { if (dxccScroll + PER < dxccN) dxccScroll += 5; lastDrawMs = 0; return; }
   if (isUp(c))   { if (dxccScroll >= 5) dxccScroll -= 5; lastDrawMs = 0; return; }
@@ -40103,6 +40716,7 @@ void App::drawAwards() {
 
 void App::keyAwards(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_AWARDS); return; }   // p: print totals + per-sat tally
   if (isUp(c)   && awSatN) { awSel = (awSel + awSatN - 1) % awSatN; lastDrawMs = 0; return; }
   if (isDown(c) && awSatN) { awSel = (awSel + 1) % awSatN; lastDrawMs = 0; return; }
   // All-sats worked lists. The all-sats bitsets are in memory after buildAwards();

@@ -197,7 +197,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (35): scientific/graphing/programmer calculators, <b>Tiny BASIC</b>, <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b> (fit mean elements from a launch state vector, TEME/J2000, save as sat), Q-codes/phonetics/RST, CTCSS &middot; <b>p</b> <b>Print</b>: 19 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (35): scientific/graphing/programmer calculators, <b>Tiny BASIC</b>, <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b> (fit mean elements from a launch state vector, TEME/J2000, save as sat), Q-codes/phonetics/RST, CTCSS &middot; <b>p</b> <b>Print</b>: 28 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
 ]
 
 

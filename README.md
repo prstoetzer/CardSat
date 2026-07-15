@@ -21,6 +21,23 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.57:** **BASIC that can see the sky, and a lot more that prints.** Tiny BASIC
+> programs can now read the system's own data as bare names — `SATAZ`, `SATEL`, `AOSIN`, `SFI`,
+> `KP`, `MOONEL`, `MYLAT`, UTC and more — so a five-line program can tell you where to point and
+> how long you've got. It costs **zero permanent RAM**: the values are snapshotted once per run
+> into the interpreter's own state and freed with it, and missing data **halts with an error**
+> rather than handing a program a plausible-looking zero. **Nine more reports print**, including
+> **EME / moonbounce**, which had none — self-echo Doppler per band, path degradation, the 30-day
+> plan, and the mutual-Moon window against a DX grid — plus QRZ results, station readiness,
+> awards, the visible-pass list, and the **workable states/DXCC entity lists** (the counts already
+> printed; *which* entities never did). The on-device **Help** was audited against the actual key
+> handlers and corrected — it had been naming the wrong key on the Satellites screen — and gained
+> the printing and EME topics it never had. Fixes: a runaway BASIC program no longer holds 6 KB
+> for the rest of the session (which could starve a LoTW upload), `h` and `b` no longer get stolen
+> on screens where you type, **every** screen can now take a screenshot, and the orbit report
+> includes **LTAN**.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.57.md)**.
+
 > **New in v0.9.56:** **a pocket workbench — and reports that look like the screen.** Tools
 > gains a **Tiny BASIC** interpreter with an on-device editor (line-numbered BASIC, 4 KB programs,
 > `Fn`+`R` to run — bounded so a runaway loop can't hang the radio), a **graphing calculator**
@@ -181,7 +198,7 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 *(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
 unchanged since. Several features added since — rove planner, workable horizon, target
 search, on-device printing, the Files page's multi-select — are not pictured yet; a
-screenshot refresh is planned. The current firmware is v0.9.56.)*
+screenshot refresh is planned. The current firmware is v0.9.57.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#22-screen-by-screen-reference).

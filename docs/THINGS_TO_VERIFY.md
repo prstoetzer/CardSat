@@ -38,6 +38,33 @@ Settings → Network printer IP/port entry and persistence, the `p` Print menu o
 satellite's Passes screen (and the rove viewer's `p`), the serial `print` commands, and the error paths (unreachable printer fails
 fast; blank IP reports "No printer set").
 
+**Added in 0.9.57, not yet on hardware:**
+
+- ~~**The BASIC heap fix**~~ — **CONFIRMED ON HARDWARE (0.9.57).** A runaway program's output
+  buffer is released on leaving BASIC; the largest contiguous block returns to its pre-run value
+  and the LoTW upload this was breaking now succeeds. (Worth knowing for the future: the *first*
+  attempt at this fix shipped and did nothing, because it was written against a hand-authored
+  model of Arduino's `String` rather than the real one. Only destruct + placement-new frees a
+  `String`'s buffer — every assignment form keeps the capacity.) Still worth a glance when
+  convenient: that the buffer is *not* dropped where it shouldn't be — run a program, scroll the
+  console, `` ` `` back to the editor, and the output should still be there.
+- **The keyboard changes** — `h` and `b` now type on the BASIC editor, scientific calculator and
+  LoTW passphrase prompt; **`Fn`+`h`** / **`Fn`+`b`** reach Help and screenshot from *every*
+  letter-consuming screen (including Tools and the DXCC/char lookups, which previously could not
+  screenshot at all); `Fn`+`shift`+`b` still types a capital B; and `Fn`+DEL no longer fires the
+  emergency stop while editing in BASIC or the calculator.
+- **BASIC system data** — the bare names (`SATAZ`, `AOSIN`, `SFI`, `MOONEL`, …) on real data, the
+  `…OK` flags, and that a missing-data read halts with the right message. Host-validated against
+  the shipped resolver; the on-device check is that the snapshot matches what the screens show.
+- **The nine new reports on paper** — EME (`Fn`+`p`), EME 30-day plan, EME mutual Moon, QRZ,
+  readiness, awards, workable states/DXCC lists, visible passes. Widths are checked against 32-col
+  (58 mm) paper on the host, but the real test is the printer.
+- **LTAN in the orbit report** — cross-checked to the minute against an independent solar-position
+  implementation; confirm it matches the Nodal page on the device.
+- **The Help screen corrections** — the Satellites topic previously named the wrong key
+  ("ENT toggle favorite"; ENTER opens Passes, `f` is the toggle). Worth a read-through on the
+  device against the footers.
+
 **Added in 0.9.56, not yet on hardware:** the **Tiny BASIC** editor and console (typing a program
 on the Cardputer keyboard, `Fn`-modified commands, cursor movement including `Fn`+up/down by line,
 save/load to `/CardSat/basic/*.bas`, the run → console → back flow, and the empty-editor hint);

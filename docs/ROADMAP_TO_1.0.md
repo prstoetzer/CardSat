@@ -1,6 +1,6 @@
 # CardSat — Road to 1.0
 
-*Status as of **v0.9.56** (July 2026). This is the single place to look for what stands between
+*Status as of **v0.9.57** (July 2026). This is the single place to look for what stands between
 CardSat and a 1.0 release: what's deliberately deferred, what's blocked on hardware
 verification, and what the author has decided not to do. Each item links to the scoping
 document that sized it, where one exists.*
@@ -119,6 +119,21 @@ remains of the boot-heap change across 0.9.56 is compiled code footprint (`.data
 new features), not runtime allocation — it is the cost of the code existing, and is not
 lazy-able. This is the pattern to follow for any future screen-local working memory.
 
+**And a 0.9.57 correction to that pattern.** Freeing heap-allocated state is not enough if a
+**surviving `String`** holds the memory instead. A runaway BASIC program's 6 KB output buffer was
+stranded for the rest of the session — enough, on this no-PSRAM board, to starve the contiguous
+block a TLS upload needs, which is how it surfaced (LoTW failing, not BASIC). Two lessons, both
+general:
+
+- **Arduino's `String` never releases its buffer on assignment.** Not `= ""`, not
+  `= emptyString`, not `= String()`; `reserve()` cannot shrink either. Verified against the real
+  `cores/esp32/WString.cpp`: all of them free **0 bytes**. Only **destroying the object**
+  (destruct + placement-new) calls `invalidate()` → `free()`. Any future "release this buffer"
+  code must do that, not assign.
+- **Release on the screen transition, not in a key handler.** The first fix freed the buffer in
+  the BASIC editor's backtick handler, which missed every other exit — `Fn`+`h` to Help walked
+  straight past it. `loop()` now has a single transition hook that no path can bypass.
+
 **Revisit triggers:** catalog scaling past ~150 satellites, or a larger TLS trust store (see 1.2)
 changing the block-size picture.
 
@@ -153,12 +168,12 @@ a two-tier disk catalog.
 
 **What's solid.** The core mission — track satellites, predict passes, tune radios for Doppler,
 point rotators, log and upload QSOs, plan roves, and work offline — is complete and, for the
-CI-V path, hardware-confirmed. Printing is comprehensive (nineteen menu-listed reports plus
+CI-V path, hardware-confirmed. Printing is comprehensive (twenty-eight menu-listed reports plus
 context-only ones, three sinks, nine page-description formats including on-device PWG/URF
 raster). The Tools hub is a genuine offline bench (35 tools). The documentation is thorough: a
-139-page manual, a features list, per-interface wiring guides, and a design-decision archive.
+142-page manual, a features list, per-interface wiring guides, and a design-decision archive.
 
-**What a 1.0 needs beyond the blockers above.** Nothing structural. The gap between 0.9.56 and
+**What a 1.0 needs beyond the blockers above.** Nothing structural. The gap between 0.9.57 and
 1.0 is mostly *confidence*, not *scope*: hardware confirmation of the radio/rotator matrix, a
 deliberate security decision, and reproducible builds.
 
@@ -188,6 +203,14 @@ file than the file-scope helpers it called.
 **The resulting rule:** a method that calls tool/screen helpers belongs *after* them in the
 translation unit, not grouped with its logical siblings. The gates cannot see this; only the
 compiler can.
+
+**A second class the compiler cannot catch either: wrong assumptions about library behaviour.**
+0.9.57 shipped a memory fix that did nothing, because it was validated against a *hand-written
+model* of Arduino's `String` rather than the real one — the model freed on assignment; the real
+implementation never does. It compiled, the host test passed, and the bug survived to the field.
+The fix was only found by fetching `cores/esp32/WString.cpp`, compiling it, and measuring. **When
+behaviour depends on a library's internals, test against the library, not a stand-in.** A host
+harness that models the dependency is testing the model.
 
 **Neither substitutes for the other, and neither substitutes for on-air use.**
 

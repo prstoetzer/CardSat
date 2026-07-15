@@ -329,15 +329,24 @@ CardSat uses the arrow legends printed on the Cardputer keys:
 | `` ` `` or **DEL** | back / cancel |
 | `{` `}` | page up / page down (lists) |
 | **Fn** + key | a modifier used by the Notes editor for cursor movement and save, so the `;` `.` `,` `/` keys stay typeable as punctuation (see [§8 → Notes](#notes-free-form-text-editor)) |
-| `h` | open **Help** (global; exceptions below) |
-| `b` | save a screenshot to the SD card (see [§20](#20-managing-data-and-factory-reset)) |
+| `h` | open **Help** (global; on text-entry screens use **`Fn`+`h`** — see below) |
+| `b` | save a screenshot to the SD card (on letter-consuming screens use **`Fn`+`b`**) — see [§20](#20-managing-data-and-factory-reset) |
 
 Other letter keys are screen-specific actions and are shown in the **footer** at
 the bottom of each screen. When in doubt, read the footer. Two global exceptions
 are deliberately not shown in footers: **`h`** opens Help and **`b`** saves a
 screenshot. Both work on any screen *except* where letters are themselves input —
-the text editors, the Tools list's first-letter jump, and the DXCC / character
-lookups' type-to-search.
+the text editors, the **Tiny BASIC editor**, the **scientific calculator's**
+expression entry, the LoTW passphrase prompt, the Tools list's first-letter jump,
+and the DXCC / character lookups' type-to-search.
+
+On every screen that claims bare letters, the two globals stay reachable as
+**`Fn`+`h`** (Help) and **`Fn`+`b`** (screenshot), so a plain `h` or `b` still
+does the screen's own job — typing the letter in the editors and the calculator,
+or jumping/searching in the Tools list and the DXCC / character lookups. This
+matches the `Fn`-is-for-commands convention those screens already use for save,
+run, print and cursor movement, and it means **every screen can be
+screenshotted**. (`Fn`+`shift`+`b` still types a capital B.)
 
 ---
 
@@ -3472,18 +3481,38 @@ viewed (viewer `p`), or a fresh export of the current survey from the menu/conso
 *Orbital analysis* — a **permanent record** of the active satellite's orbital characteristics
 at the current element set: Keplerian elements, epoch, period, SMA, apogee/perigee and their
 footprint diameters, orbital speeds at apogee/perigee, J2 nodal and apsidal drift, sun-synchronous
-flag, repeat-track resonance, longest-possible pass, beta angle and full-sun/eclipse geometry,
-decay estimate, and launch identity. It deliberately **omits live values** (current range,
-Doppler, az/el, sub-point, next pass) so the printout is a lasting snapshot of the orbit rather
-than a momentary look. Printed with `p` from the Orbital-analysis screen. *Illumination* — the
-active satellite's sunlit fraction of each orbit over the next 60 days, plus an **ASCII raster**
+flag, **LTAN**, repeat-track resonance, longest-possible pass, beta angle and full-sun/eclipse
+geometry, decay estimate, and launch identity. It deliberately **omits live values** (current
+range, Doppler, az/el, sub-point, next pass) so the printout is a lasting snapshot of the orbit
+rather than a momentary look. The one time-dependent entry is **LTAN** (local solar time of the
+ascending node), which is printed with the timestamp it was computed at and its drift rate in
+minutes per day: on a sun-synchronous orbit that rate is ~0 and the LTAN is effectively a fixed
+property, but on other orbits it sweeps quickly (the ISS moves about −24 min/day), so the rate
+tells you how fast the printed figure goes stale. Printed with `p` from the Orbital-analysis
+screen.
+
+*Illumination* — the active satellite's sunlit fraction of each orbit over the next 60 days,
+plus an **ASCII raster**
 (one line per day, `#` sunlit / `.` eclipse across the orbit) mirroring the on-screen shading,
 from the Illumination screen. *10-day passes* — every pass of the active satellite over the
 coming ten days as a dated table (AOS/LOS/peak elevation) **and an ASCII day-timeline** (a 24 h
 UTC track per day, passes marked by elevation tier), from the 10-day screen. *6-hour timeline* —
 all favorites' passes in the next six hours as a sorted list **and an ASCII timeline** (one row
-per favorite across the six-hour window), from the Sky-at-a-glance timeline. All
-times are **UTC**. Reports stream a line at a time, so printing costs the device almost
+per favorite across the six-hour window), from the Sky-at-a-glance timeline.
+
+*EME / moonbounce* — the Moon's az/el, topocentric range and range-rate, path degradation vs
+perigee, the sky-noise flag, and **self-echo Doppler for all five bands** (50/144/432/1296/10368
+MHz), from the EME screen with **`Fn`+`p`** (a bare `p` there opens the 30-day plan). *EME 30-day
+plan* — declination and degradation for each of the next 30 days, from that plan screen with `p`.
+*EME mutual Moon* — the common-Moon-window list against a DX grid, printed with **`Fn`+`p`** while
+that sub-view is showing. *QRZ lookup result* — the callsign, name, address, country, grid and
+class of the last lookup (`p`). *Station readiness* — the pre-operating checklist exactly as the
+screen shows it (`p`). *Awards* — QSO/grid/state/DXCC totals plus the per-satellite tally, from
+the Awards screen (`p`). *Workable US states* and *Workable DXCC* — the **entity lists**
+themselves, not just the counts (`p` on either screen). *Visible passes* — the optically-visible
+passes over the next ten days with their rise directions (`p`).
+
+All times are **UTC**. Reports stream a line at a time, so printing costs the device almost
 no memory.
 
 ---
@@ -4692,7 +4721,7 @@ engine underneath; they differ only in the direction of the question.
 
 ### Print a report
 
-- **Purpose** — a scrollable list of **every** menu-printable report (nineteen),
+- **Purpose** — a scrollable list of **every** menu-printable report (twenty-eight),
   so reports that have no natural home screen can be printed from one place.
   Reports that need an active satellite guard themselves with a one-line note.
 - **Reached from** — About → `p`.
@@ -5050,12 +5079,16 @@ The editor opens empty (nothing is pre-populated). Type your program with one st
 | `Fn`+`L` | **Load** a saved program by name |
 | `Fn`+`N` | **New** — clear the editor to start a fresh program |
 | `Fn`+`P` | **Print** the program listing (to the configured print sinks) |
+| `Fn`+`H` | open **Help** (a plain `h` types the letter) |
+| `Fn`+`b` | save a **screenshot** (a plain `b` types the letter) |
 | `Fn`+`,` / `Fn`+`/` | Move the cursor **left / right** |
 | `Fn`+`;` / `Fn`+`.` | Move the cursor **up / down** a line |
 | DEL | Backspace |
 | `` ` `` | Back to the Tools menu |
 
 The header row shows the program name (or `(unsaved)`) and the current size out of 4096 bytes.
+The footer shows only the most-used keys — press **`Fn`+`h`** for the full list on the Help
+screen.
 
 On the **output console**, `;`/`.` scroll, **`p`** prints the output, and `` ` `` returns to the
 editor. If the program stopped with an error, the reason is shown on the last line (in red),
@@ -5098,6 +5131,67 @@ then `+` `-`, with parentheses `( )` to group. There are **26 numeric variables,
 **Functions** (one argument, in parentheses): `ABS(x)` absolute value, `INT(x)` floor to integer,
 `SQR(x)` square root, `SIN(x)` / `COS(x)` (**x in degrees**, matching CardSat's calculators), and
 `RND(n)` a random integer from `0` to `n-1`.
+
+#### System data
+
+Programs can read the data CardSat already has, as **read-only bare names** (no parentheses).
+They can be used anywhere a number can:
+
+| group | names |
+|---|---|
+| **Satellite** (the active one) | `SATAZ` `SATEL` azimuth/elevation · `SATRNG` slant range km · `SATRR` range rate km/s (+ receding) · `SATLAT` `SATLON` sub-point · `SATALT` altitude km · `SATSUN` 1 = sunlit |
+| **Elements** | `SATINC` inclination · `SATECC` eccentricity · `SATRAAN` · `SATMM` mean motion · `SATNOR` NORAD number |
+| **Next pass** | `AOSIN` minutes to AOS (negative = in progress) · `LOSIN` minutes to LOS · `PASSEL` peak elevation · `PASSVIS` |
+| **Sun / Moon** | `SUNAZ` `SUNEL` `MOONAZ` `MOONEL` |
+| **Your station** | `MYLAT` `MYLON` `MYALT` |
+| **Clock (UTC)** | `UTCH` `UTCM` `UTCS` `UTCDAY` `UTCMON` `UTCYR` |
+| **Space weather** | `SFI` 10.7 cm flux · `KP` · `AINDEX` |
+| **Weather** | `WXTEMP` `WXWIND` `WXDIR` `WXHUM` (in your configured units) |
+| **Device** | `BATT` battery % · `GPAGE` element age in days · `NFAV` favorites |
+| **Availability** | `SATOK` `TIMEOK` `POSOK` `WXOK` `SPWXOK` `PASSOK` |
+
+Two things to know about how these behave.
+
+**They are a snapshot, not a live feed.** Every value is read **once, when you press `Fn`+`R`**,
+and stays fixed for that run. This is deliberate: a program runs start-to-finish in a few
+milliseconds, so nothing would visibly move anyway, and computing satellite geometry on *every*
+statement would let a runaway loop lock up the device. Think of the values as *the sky at the
+moment you pressed run*.
+
+**Missing data stops the program.** If you read `WXTEMP` when no weather has been fetched, or
+`SATAZ` with no satellite selected, the run halts with an error (`no weather data`, `no active
+satellite`) rather than handing you a number. That is on purpose — a silent `0` for an azimuth
+means "point due North", which is a perfectly plausible bearing and completely wrong. If you would
+rather branch than stop, test the matching `…OK` flag first; those never error:
+
+```
+10 IF WXOK = 0 THEN 40
+20 PRINT "Temp ";WXTEMP
+30 END
+40 PRINT "No weather cached"
+```
+
+A practical example — where do I point, and how long have I got?
+
+```
+10 IF SATEL < 0 THEN 60
+20 PRINT "AZ ";INT(SATAZ);" EL ";INT(SATEL)
+30 PRINT "RANGE ";INT(SATRNG);" KM"
+40 PRINT "LOS in ";INT(LOSIN);" min"
+50 END
+60 PRINT "Below horizon, AOS in ";INT(AOSIN)
+```
+
+Estimating Doppler shift on a 145.9 MHz downlink:
+
+```
+10 LET F = 145900000
+20 LET D = -F * SATRR / 299792
+30 PRINT "Shift ";INT(D);" Hz"
+```
+
+Nothing here can transmit, move a rotator, touch the network, or write to storage — BASIC reads
+the system, it does not drive it.
 
 #### Examples
 
@@ -5321,7 +5415,7 @@ or press **`1`–`4`** to answer directly.
 > (two pages). Print at actual size; the front covers operating and the back
 > covers setup and tools. Regenerate it with `python3 tools_make_cheatcard.py`.
 
-**Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot · `h` help · **`Fn`+back (`` ` ``/DEL) = emergency stop** (disengages all radio + rotator control from any screen).
+**Global:** `;` up · `.` down · `,` left · `/` right · ENTER select · `` ` ``/DEL back · `{`/`}` page · `b` screenshot · `h` help (on screens that use bare letters — the editors, calculator, Tools list, DXCC/char lookups — use **`Fn`+`b`** / **`Fn`+`h`**) · **`Fn`+back (`` ` ``/DEL) = emergency stop** (disengages all radio + rotator control from any screen; excluded in the text editors and calculator, where DEL is backspace).
 
 | Screen | Keys |
 |---|---|

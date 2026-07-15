@@ -258,6 +258,22 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   RF-exposure gained per-mode duty presets, and the scientific calculator gained
   amateur-radio helpers (dBm/W, dB, wavelength), metric-prefix input (`100k`, `2.2n`) and
   an engineering-notation display mode.
+- **BASIC can read the system (0.9.57)** — Tiny BASIC programs can read the data the firmware
+  already has, as **read-only bare names**: satellite geometry (`SATAZ` `SATEL` `SATRNG` `SATRR`
+  `SATLAT` `SATLON` `SATALT` `SATSUN`), elements (`SATINC` `SATECC` `SATRAAN` `SATMM` `SATNOR`),
+  next-pass timings (`AOSIN` `LOSIN` `PASSEL`), sun and moon position (`SUNAZ` `SUNEL` `MOONAZ`
+  `MOONEL`), your station (`MYLAT` `MYLON` `MYALT`), UTC, space weather (`SFI` `KP` `AINDEX`),
+  terrestrial weather (`WXTEMP` `WXWIND` `WXDIR` `WXHUM`), and device state (`BATT` `GPAGE`
+  `NFAV`). **Zero permanent RAM**: the values are snapshotted once per run into the interpreter's
+  own heap-allocated state and freed with it. The snapshot is deliberate — a program runs to
+  completion inside one key handler with a 500,000-statement budget, so a live `SATEL` read could
+  fire SGP4 half a million times and trip the watchdog; snapshotting costs exactly one call per
+  run. Reading data that isn't there **halts the program with an error** (`no weather data`, `no
+  active satellite`) rather than returning the firmware's `-1`/`-999` sentinels, which BASIC has
+  no way to distinguish from real values — a silent `0` azimuth reads as "point due North".
+  `SATOK` / `TIMEOK` / `POSOK` / `WXOK` / `SPWXOK` / `PASSOK` let a program branch instead. BASIC
+  reads the system; it cannot transmit, move a rotator, touch the network, or write to storage.
+
 - **Tiny BASIC, graphing calculator, and location converter (0.9.56)** — the Tools hub gains a
   small **line-numbered BASIC interpreter** with an on-device editor: `LET`/`PRINT`/`IF-THEN`/
   `GOTO`/`GOSUB-RETURN`/`FOR-NEXT-STEP`/`REM`/`END`, 26 variables A-Z, and `ABS INT SQR SIN COS
@@ -443,6 +459,16 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   **LittleFS** if no card is present.
 - **Screenshots** — press **`b`** on any screen to save a 24-bit BMP to
   `/CardSat/Screenshots/` on the SD card (handy for documentation).
+- **Global hotkeys reach every screen (0.9.57)** — `h` (Help) and `b` (screenshot) are global,
+  and are suppressed wherever a bare letter is claimed: the text editors, the Tiny BASIC editor,
+  the scientific calculator's expression entry, the LoTW passphrase prompt, the Tools
+  first-letter jump, and the DXCC / character-lookup type-to-search. On **all** of those they are
+  now reachable as **`Fn`+`h`** and **`Fn`+`b`**, so `PRINT "HI"` types and **every screen can be
+  screenshotted** — the Tools list and the two lookups previously had no way to capture one at
+  all. (`Fn`+`shift`+`b` still types a capital B.) The **`Fn`+Back emergency stop** is likewise
+  excluded in the editors *and* the calculator, where Back is backspace: it was silently
+  disengaging the rig instead of deleting a character.
+
 - **Global emergency stop (0.9.56)** — **`Fn`+back** (`` ` `` or DEL) from any operating screen
   immediately disengages **all** radio and rotator control: CAT output, rotator output, the
   satellite-mode and EME/grid-chase drivers, and pass tracking, with a beep and an "All control
@@ -491,7 +517,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 ## Printing (v0.9.55, refined v0.9.56)
 
 - **Receipt printing, three ways** — CardSat turns satellite data into paper. Any of its
-  **nineteen menu-listed reports** — plus the context-only ones that print from the screen
+  **twenty-eight menu-listed reports** — plus the context-only ones that print from the screen
   that holds their data (notes, Tiny BASIC listings and output, calculator and converter
   results) — can fan out to any combination of three sinks: a network **ESC/POS
   printer** over TCP:9100 (e.g. the Epson TM-P20II Wi-Fi or an 80 mm GZM8022), the **USB
@@ -545,6 +571,17 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   sun-synchronous flag, repeat-track resonance, longest-possible pass, beta angle with the
   full-sun/eclipse geometry, decay estimate, and launch identity. It's a snapshot of the orbit,
   not of the moment.
+- **Nine more printable reports (0.9.57)** — **EME / moonbounce** (`Fn`+`p`, since a bare `p`
+  opens the 30-day plan) prints Moon az/el, topocentric range and rate, path degradation vs
+  perigee, the sky-noise flag, and **self-echo Doppler for all five bands** (50/144/432/1296/10368
+  MHz); the **EME 30-day plan** (`p`) prints declination and degradation per day; the **EME mutual
+  Moon** window list against a DX grid prints with `Fn`+`p` from that sub-view. Also **QRZ lookup
+  results**, **station readiness**, **awards** (totals + per-satellite tally), the **visible-pass
+  list**, and — the subtle one — the **workable US states and DXCC entity lists**: the *counts*
+  already reached paper inside other reports, but *which* entities are workable never did, and
+  that is the part a rover needs. All nine join the About → Print menu (now **28 reports**), and
+  every line is width-checked against 32-column 58 mm stock.
+
 - **Printing from the tools (0.9.56)** — Tiny BASIC prints its **program listing** (`Fn`+`P` in
   the editor) and its **last run's output** (`p` on the console); the **scientific calculator**
   (`Fn`+`p`), **programmer calculator**, **graphing calculator**, **location converter**, and

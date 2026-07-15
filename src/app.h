@@ -1420,7 +1420,9 @@ private:
   void drawBasic();    void keyBasic(char c, bool enter, bool back);
   void drawBasicRun(); void keyBasicRun(char c, bool enter, bool back);
   void basicInit();                 // open the editor (seed a sample on first use)
-  void basicRun();                  // execute basicBuf -> basicOut / basicErr
+  void basicRun();           // execute basicBuf -> basicOut / basicErr
+  void basicFree();          // release the BASIC output buffer when leaving the tool
+  Screen   lastScreenSeen = SCR_HOME;   // screen-transition housekeeping (see loop())
   bool basicSave();  bool basicLoad(const char* base);
 
   // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
@@ -1826,7 +1828,9 @@ private:
   enum PrintReport { PR_PASSES, PR_ROVE, PR_TICKET, PR_HORIZON, PR_SATCARD, PR_LOG, PR_KEPS,
                      PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR,
                      PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
-                     PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK };
+                     PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
+                     PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
+                     PR_STATES, PR_DXCCLIST, PR_VISLIST };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -1853,6 +1857,15 @@ private:
   void printBasicOut();      // Tiny BASIC: the last run's console output
   void printToolOut();       // generic: the active tool screen's key result(s)
   void printCharLk();        // char lookup: current value's encodings (near its tables)
+  void printEme();           // EME: live lunar geometry + per-band self-echo Doppler
+  void printEmePlan();       // EME: 30-day declination/degradation planning table
+  void printEmeMut();        // EME: mutual-Moon window list vs a DX grid
+  void printQrz();           // QRZ lookup result
+  void printReady();         // station readiness checklist
+  void printAwards();        // awards totals + per-satellite tally
+  void printStates();        // workable US states (the list, not just the count)
+  void printDxccList();      // workable DXCC entities (the list)
+  void printVisList();       // visible-pass list (10 days)
   int  buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
                       uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN);  // shared pass gather
   bool     audioUp = false;                    // is the speaker currently begun?

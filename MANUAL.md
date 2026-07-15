@@ -36,13 +36,14 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 16. [Radio-specific notes](#16-radio-specific-notes)
 17. [Antenna rotator (GS-232, rotctl, PstRotator, Yaesu direct, rotctld server)](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server)
 18. [Mobile web control](#18-mobile-web-control)
-19. [Managing data and factory reset](#19-managing-data-and-factory-reset)
-20. [Troubleshooting](#20-troubleshooting)
-21. [Screen-by-screen reference](#21-screen-by-screen-reference)
-22. [Key reference (cheat sheet)](#22-key-reference-cheat-sheet)
-23. [Glossary](#23-glossary)
-24. [Supporting AMSAT](#24-supporting-amsat)
-25. [License](#25-license)
+19. [Printing to a receipt printer](#19-printing-to-a-receipt-printer)
+20. [Managing data and factory reset](#20-managing-data-and-factory-reset)
+21. [Troubleshooting](#21-troubleshooting)
+22. [Screen-by-screen reference](#22-screen-by-screen-reference)
+23. [Key reference (cheat sheet)](#23-key-reference-cheat-sheet)
+24. [Glossary](#24-glossary)
+25. [Supporting AMSAT](#25-supporting-amsat)
+26. [License](#26-license)
 
 ---
 
@@ -65,7 +66,7 @@ controller. It:
   passes** (sunlit satellite, dark sky), predicts **Sun/Moon transits** (when a bird
   crosses the solar or lunar disc from your location), shows **decay/reentry** watch
   flags on declining orbits, and keeps a **per-satellite operating note** for each bird;
-- points an **az/el antenna rotator** -- a wired **GS-232**, **Easycomm**, or **SPID**
+- points an **az/el antenna rotator** — a wired **GS-232**, **Easycomm**, or **SPID**
   controller, a **Yaesu rotator driven directly** (no GS-232 box, via an I²C
   ADC + output expander), or a networked **Hamlib `rotctld`** / **PstRotator** server;
 - **logs QSOs** on the device and **exports ADIF** for LoTW / eQSL or your main logger.
@@ -329,7 +330,7 @@ CardSat uses the arrow legends printed on the Cardputer keys:
 | `{` `}` | page up / page down (lists) |
 | **Fn** + key | a modifier used by the Notes editor for cursor movement and save, so the `;` `.` `,` `/` keys stay typeable as punctuation (see [§8 → Notes](#notes-free-form-text-editor)) |
 | `h` | open **Help** (global; exceptions below) |
-| `b` | save a screenshot to the SD card (see §18) |
+| `b` | save a screenshot to the SD card (see [§20](#20-managing-data-and-factory-reset)) |
 
 Other letter keys are screen-specific actions and are shown in the **footer** at
 the bottom of each screen. When in doubt, read the footer. Two global exceptions
@@ -446,10 +447,11 @@ still be transmitting. Stop with `r` (radio) or `o` (rotator) — see
 
 ### Home
 
-A menu: **Satellites · Next Passes (favs) · Passes (sel) · Track (sel) ·
-World Map · Sun / Moon · Space Wx · Weather · Activations · Overhead now · Grid dist/bearing ·
-QRZ Lookup · Location · Update · Settings · Log · Messages · About / diagnostics · Charge / Sleep.** The
-currently selected satellite is shown at the bottom right. `;`/`.` move, ENTER selects.
+A menu of twenty items: **Satellites · Next Passes (favs) · Passes (sel) · Track (sel) ·
+World Map · Sun / Moon · Space Wx · Weather · Activations · AMSAT status · Overhead now ·
+Grid dist/bearing · QRZ Lookup · Location · Update · Settings · Log · Messages · About ·
+Charge / Sleep.** The currently selected satellite is shown at the bottom right.
+`;`/`.` move, ENTER selects, and any letter jumps to the next item starting with it.
 
 ### About
 
@@ -962,8 +964,8 @@ The pages:
   thermospheric density swings about a factor of ten over the solar cycle - the
   single biggest driver of lifetime - a second **"Decay rng"** line shows the
   bracket from **solar maximum (shortest)** to **solar minimum (longest)**, with
-  the assumed level (`mean`/`min`/`max`/`auto`, set in *Settings -> Station /
-  display -> Decay solar*) in parentheses. In **`auto`** the density scale is
+  the assumed level (`mean`/`min`/`max`/`auto`, set in *Settings → Station /
+  display → Decay solar*) in parentheses. In **`auto`** the density scale is
   derived from the live **F10.7 solar flux**, downloaded with the GP elements and
   cached (the setting row shows the current value); without a cached flux it
   falls back to mean. Treat all of this as **order-of-magnitude**: it
@@ -1244,6 +1246,11 @@ Controls:
 - `d` — cycle the **Doppler tune mode** (linear birds): FULL One True Rule →
   downlink-only → uplink-only → hold-both. The passband line shows the active mode.
 - `l` — **Log QSO** (also on the Polar screen): capture the contact you're working.
+- `i` — **"I heard it"**: submit an **AMSAT status report** for the bird you're
+  tracking. Press `i` once to arm (the status line shows what will be sent), and
+  `i` again to send. Your callsign, grid and the satellite are filled in; needs
+  WiFi and your callsign set. On a multi-mode bird with no clear catalog fit, a
+  picker opens instead.
   Radio control keeps running while you fill in the entry.
 - `t` — cycle to the next transponder.
 - `n` — **jump to the beacon**: select the satellite's beacon (a downlink-only
@@ -1274,6 +1281,9 @@ Controls:
 - `o` — turn **rotator** pointing **on/off** (if a rotator is configured; sends
   live az/el to the selected backend, parks on stop). See [§17](#17-antenna-rotator-gs-232-rotctl-pstrotator-yaesu-direct-rotctld-server).
 - `p` — open the **Polar** plot.
+- `a` — open the **point-here arrow**: a big compass arrow to the satellite's
+  azimuth with an elevation bar, for aiming a handheld antenna; radio and rotator
+  keep running underneath.
 - `z` — open the **large-font readout** (see below). A quick way to read RX/TX,
   az/el and the AOS/LOS countdown at arm's length; radio and rotator keep running.
 - `y` — toggle **tilt tuning** on/off on the fly (only if the board has the sensor
@@ -1281,6 +1291,8 @@ Controls:
   tuning on for a tricky stretch and back off without opening Settings.
 - `v` — start/stop a **voice memo** (recorded to the microSD card via the ADV's
   built-in mic); radio and rotator tracking keep running while you record.
+- `q` — for ~60 s after LOS a prompt offers **deep sleep until the next favorite
+  pass**; press `q` inside that window to take it (see [§12](#12-aos-alarm-and-deep-sleep)).
 - `g` / `w` / `e` — show the **workable grids / US states / DXCC** reachable under
   the footprint **right now**, refreshing live; radio and rotator control keep
   running while you look. (The same three lists are also available per-pass from
@@ -1657,7 +1669,7 @@ outing, a club net, or a SOTA/portable activation.
 > operating within your license and local regulations.
 
 **Using it.** Set your callsign (Settings → Station, or the QRZ screen), enable
-**LoRa msg** in Settings → Network/data, pick your **LoRa region**, then fine-tune
+**LoRa msg** in Settings → Network / data, pick your **LoRa region**, then fine-tune
 the frequency/SF/bandwidth to match the other stations. Open **Messages** from the
 Home menu. Press `n` to write a message on the full keyboard and **ENTER** to send;
 `;`/`.` scroll back through history. Your own messages show in cyan as `>me`;
@@ -1734,7 +1746,7 @@ on the **untested** LoRa path — treat it as experimental, and confirm any impo
 against a known pass before relying on it. Requires LoRa enabled on both units on the same
 frequency/spreading-factor.
 
-**Automatic position reply.** With **Auto position reply** on (Settings → Network/data,
+**Automatic position reply.** With **Auto position reply** on (Settings → Network / data,
 **off by default**), CardSat answers a received position report with its own `@lat,lon`
 automatically — handy for a net where everyone wants to see who's where without each
 operator pressing `p`. Because it broadcasts your location, it is opt-in. Two safeguards keep
@@ -1743,7 +1755,7 @@ transmit at once), and loop guards — CardSat won't auto-reply to the same stat
 once every few minutes, and never more than once every 30 seconds overall — so two
 auto-replying units can't ping-pong endlessly.
 
-**Settings.** In Settings → Network/data: **LoRa msg** on/off (turning it on
+**Settings.** In Settings → Network / data: **LoRa msg** on/off (turning it on
 brings the radio up); **LoRa region** (US 33cm / EU 70cm / JP 430 — selecting one
 seeds a legal default frequency + 125 kHz bandwidth for that band); **LoRa freq**
 (arrow-adjust in 100 kHz steps, or ENTER to type an exact MHz value, 150–960 MHz);
@@ -1757,7 +1769,7 @@ to hear each other.
 receiver is left on whenever LoRa is enabled), so a message can arrive while you're
 on any screen. When one does, an **envelope badge with an unread count** appears in
 the header (top, just left of the battery) on every screen, and — depending on the
-**Msg notify** setting (Settings → Network/data) — a brief banner shows the
+**Msg notify** setting (Settings → Network / data) — a brief banner shows the
 sender's callsign, optionally with a short beep. Opening **Messages** clears the
 badge. **Msg notify** options: *off* (silent badge only), *banner* (the default,
 a cross-screen banner on arrival), or *banner+beep* (adds an audible chirp — handy
@@ -2988,33 +3000,33 @@ trusted LAN only.
 CardSat can drive an az/el antenna rotator through one of several interchangeable
 backends, chosen in Settings with **Rot type**:
 
-- **GS-232** -- a directly-attached controller speaking the **Yaesu GS-232A/B**
+- **GS-232** — a directly-attached controller speaking the **Yaesu GS-232A/B**
   protocol (a Yaesu G-5500 with a GS-232B, a SPID controller in GS-232 mode, or any
   GS-232 emulator: K3NG / RadioArtisan / ERC). Because all three ESP32-S3 UARTs are
   already in use (USB, CAT, GPS), this link is created by an **I2C->UART bridge**
   (SC16IS750/752) on a second I2C bus, so it coexists with the radio and GPS.
-- **Easycomm I / II / III** -- the open, plain-ASCII tracking protocol used by
+- **Easycomm I / II / III** — the open, plain-ASCII tracking protocol used by
   **SatNOGS, K3NG, ERC** and most homebrew rotator controllers (the same protocol
   Hamlib's `easycomm` backends speak). Choose the version your controller expects:
   **II** is the common decimal-degree form (`AZ123.4 EL045.0`), **I** is the older
   integer form, and **III** shares II's positioning grammar. Uses the same
   **I2C->UART bridge** as GS-232.
-- **SPID Rot2Prog** -- the binary protocol of **SPID MD-01 / MD-02** (Alfa/
+- **SPID Rot2Prog** — the binary protocol of **SPID MD-01 / MD-02** (Alfa/
   RFHamDesign) controllers, as documented in Hamlib's `spid` (`rot2prog`) backend.
   Whole-degree positioning over the same **I2C->UART bridge**. (If your SPID box is
   set to GS-232 emulation, you can use **GS-232** instead.)
-- **rotctl (net)** -- connects to a **Hamlib `rotctld` server** anywhere on the same WiFi
+- **rotctl (net)** — connects to a **Hamlib `rotctld` server** anywhere on the same WiFi
   network. CardSat is the TCP client (the same role Gpredict plays), so any
   rotator Hamlib supports can be driven over the LAN with no extra CardSat wiring.
-- **PstRotator (net)** -- a **PstRotator** (YO3DMU) instance on the LAN, driven
+- **PstRotator (net)** — a **PstRotator** (YO3DMU) instance on the LAN, driven
   over **UDP** (the same datagrams Gpredict/SatPC32 send it). CardSat sends
   `<PST>...</PST>` control messages to PstRotator's UDP Control port; PstRotator
   then drives whatever controller it is configured for.
-- **Yaesu (direct)** -- a Yaesu **G-5500**-class az/el controller wired **straight to
+- **Yaesu (direct)** — a Yaesu **G-5500**-class az/el controller wired **straight to
   CardSat**, with no GS-232 box: an I2C **ADS1115** reads the position-feedback
   voltages and an I2C **PCF8574** drives the four direction lines, both on the same
   I2C bus the GS-232 bridge would use. CardSat closes the pointing loop itself. This
-  is a hardware build with its own calibration step -- see
+  is a hardware build with its own calibration step — see
   **[ROTOR_INTERFACE.md](docs/interfaces/ROTOR_INTERFACE.md)** (⚠️ untested; build at your own risk).
   Calibrate from **Settings → Rotator → Rotator: manual control** (capture keys
   **1/2/3/4** at the axis endpoints).
@@ -3024,13 +3036,13 @@ backends, chosen in Settings with **Rot type**:
 > off-device, but neither has been exercised against a physical controller yet.
 > Treat them as untested; verify carefully before trusting them with real hardware.
 
-Only one rotator is active at a time. The pointing logic -- alignment offsets,
-deadband, flip mode, park-on-LOS -- is identical for all of them; **Rot type** only
+Only one rotator is active at a time. The pointing logic — alignment offsets,
+deadband, flip mode, park-on-LOS — is identical for all of them; **Rot type** only
 changes how the final azimuth/elevation reaches the hardware.
 
 ### Wiring
 
-Chain: **Cardputer I2C (Wire1) -> SC16IS750 -> MAX3232 -> DB-9 -> GS-232 controller.**
+Chain: **Cardputer I2C (Wire1) → SC16IS750 → MAX3232 → DB-9 → GS-232 controller.**
 
 - The bridge runs on the Cardputer-ADV expansion I2C bus, **G8 = SDA / G9 = SCL**
   (`ROT_I2C_SDA` / `ROT_I2C_SCL` in `config.h`), on a second I2C controller
@@ -3057,7 +3069,7 @@ Enable and tune the rotator in **Settings** (scroll past the radio rows):
 | Rotator | off / on (builds the selected backend) |
 | Rot type | **GS-232** (I²C bridge), **Easycomm I/II/III** (I²C bridge), **SPID Rot2Prog** (I²C bridge), **rotctl (net)** (TCP), **PstRotator (net)** (UDP), or **Yaesu (direct)** (I²C ADC + output expander, no GS-232 box) |
 | Net host | server IP / hostname (rotctl or PstRotator backend) |
-| Net port | server port -- rotctld TCP **4533**, PstRotator UDP **12000** |
+| Net port | server port — rotctld TCP **4533**, PstRotator UDP **12000** |
 | Rot baud | GS-232 serial speed (1200 / 4800 / 9600); GS-232 backend only |
 | Rot deadband | degrees; suppress moves smaller than this (anti-chatter) |
 | Rot park az | azimuth the rotator parks at on LOS / when disabled |
@@ -3077,8 +3089,8 @@ On the **Track** screen press **`o`** to start/stop pointing. The status line
 shows **Rot ON / off / n/c** (*n/c* = no link: the I2C bridge wasn't found, or
 the rotctld server isn't reachable). Pressing `o` re-attempts the link on the
 spot, so you can engage as soon as the controller or server comes up. While on,
-CardSat sends the satellite's azimuth and elevation about once a second -- the
-GS-232 `W aaa eee` command, rotctld's `P <az> <el>`, or PstRotator's `<PST><AZIMUTH>..</AZIMUTH><ELEVATION>..</ELEVATION></PST>` datagram -- but only when the
+CardSat sends the satellite's azimuth and elevation about once a second — the
+GS-232 `W aaa eee` command, rotctld's `P <az> <el>`, or PstRotator's `<PST><AZIMUTH>..</AZIMUTH><ELEVATION>..</ELEVATION></PST>` datagram — but only when the
 position has moved past the deadband, since rotators are slow and mechanical.
 When the satellite sets, or you press `o` again or leave the screen, the rotator
 **parks** at the configured azimuth/elevation.
@@ -3088,27 +3100,27 @@ across the sky, so by the time it reaches the rise bearing the pass has already
 begun. With **Rot pre-point** set to a lead time (default **2 min**; `off`
 disables it), CardSat predicts the next pass for the tracked satellite and, once
 AOS is within that window, aims the rotator at the **rise azimuth on the horizon**
-instead of the idle park position -- so it is already pointed when the satellite
+instead of the idle park position — so it is already pointed when the satellite
 appears and live tracking takes over smoothly. Set the lead a little longer than
 your rotator's worst-case slew time. Outside the window it still rests at **Rot
 park az**.
 
-**Azimuth range (0-360 / +/-180 / 0-450).** By default CardSat assumes the
+**Azimuth range (0-360 / ±180 / 0-450).** By default CardSat assumes the
 azimuth axis runs **0 to 360 deg**, 0 deg = North, 180 deg = South. **Rot az
 range** offers two alternatives for rotators built differently:
 
-- **-180..+180** -- the axis is centered on North and swings +/-180 deg. CardSat
-  re-expresses each bearing into that range (e.g. 270 deg -> -90 deg), the same
+- **-180..+180** — the axis is centered on North and swings ±180 deg. CardSat
+  re-expresses each bearing into that range (e.g. 270° → −90°), the same
   option Gpredict offers.
-- **0..450** -- the rotator has **90 deg of overlap** past North (a common
+- **0..450** — the rotator has **90 deg of overlap** past North (a common
   Yaesu/SatPC32 arrangement). A bearing of 0-90 deg is reachable either directly
   or as 360-450 deg, so CardSat commands whichever is **nearer its current
   position**: a pass crossing North continues up into the 360-450 region instead
-  of unwinding a full turn -- no dead-zone spin at culmination.
+  of unwinding a full turn — no dead-zone spin at culmination.
 
 Both affect what is sent on the **rotctld** path (e.g. `P -90.0 12.0` or
 `P 372.0 8.0`). GS-232 controllers natively accept 0-450 and re-wrap negatives, so
-the GS-232 backend follows the overlap but the +/-180 framing has no visible
+the GS-232 backend follows the overlap but the ±180 framing has no visible
 effect there.
 
 For overhead passes, setting **Rot el range** to **180 deg** enables a **flip**:
@@ -3138,7 +3150,7 @@ like nothing is being sent); swap in your rotator's model and
 serial port for the real thing. CardSat opens the socket when you enable the
 rotator and reconnects on its own (throttled to a few seconds) if it drops, so a
 server that is briefly down or rebooted recovers without intervention. Pointing
-is open-loop from CardSat's SGP4 prediction -- it does not read the heading back.
+is open-loop from CardSat's SGP4 prediction — it does not read the heading back.
 
 Hardware that speaks rotctld natively works the same way, with no PC in between.
 For example, the **MuseLab AntRunner** (BG5DIW) portable az/el rotator (360 deg
@@ -3148,7 +3160,7 @@ present a Hamlib `rotctld`-compatible network service. Set **Rot type** to
 **rotctl (net)** and point **Net host** / **Net port** at the AntRunner's rotctld
 service (or at a `rotctld` instance bridging to it over USB).
 
-> rotctld has **no authentication** -- keep it on a trusted LAN and never expose
+> rotctld has **no authentication** — keep it on a trusted LAN and never expose
 > the port to the internet. Several clients may connect to one rotctld and can
 > contend for the rotator.
 
@@ -3156,39 +3168,39 @@ service (or at a `rotctld` instance bridging to it over USB).
 drive it directly instead of a rotctld server. In PstRotator, open
 **Communication > UDP Control Port**, set the port (default **12000**), and tick
 **UDP Control** in Setup. On CardSat set **Rot type** to **PstRotator (net)**,
-**Net host** to the PC's IP, and **Net port** to that UDP port -- *remember to
+**Net host** to the PC's IP, and **Net port** to that UDP port — *remember to
 change it from rotctld's 4533 to 12000*. CardSat then sends
 `<PST><AZIMUTH>az</AZIMUTH><ELEVATION>el</ELEVATION></PST>` to point and
 `<PST><STOP>1</STOP></PST>` to stop. PstRotator does its own azimuth range,
 offsets and flip, so CardSat sends a plain 0-360 bearing here; leave CardSat's
 **Rot az range** / **Rot el range** at default and let PstRotator manage overlap
-and flip (or use CardSat's and keep PstRotator neutral -- just don't double up).
+and flip (or use CardSat's and keep PstRotator neutral — just don't double up).
 
-This backend also drives the **WA4MCM PSR-100** (Don Friend, WA4MCM) -- a popular
+This backend also drives the **WA4MCM PSR-100** (Don Friend, WA4MCM) — a popular
 portable, lightweight az/el satellite-rotor kit for field/portable work. The
 PSR-100 accepts the same PstRotator-style `<PST>` UDP az/el datagrams over its
 WiFi interface, so CardSat points it directly: set **Rot type** to **PstRotator
-(net)** and aim **Net host** / **Net port** at the PSR-100's UDP interface -- no
+(net)** and aim **Net host** / **Net port** at the PSR-100's UDP interface — no
 PC running PstRotator in between.
 
-> The PstRotator UDP control is **unauthenticated and connectionless** -- keep it
+> The PstRotator UDP control is **unauthenticated and connectionless** — keep it
 > on a trusted LAN. Because UDP has no connection to lose, CardSat reports
 > **Rot ON** whenever WiFi is up and a host is set; it cannot tell whether
 > PstRotator is actually listening, so confirm the antenna follows on the first
 > pass.
 
 > The rotator only points while you are on the Track or Polar screen. It only
-> moves the antenna -- it does not change the radio's bands, and CAT on the
+> moves the antenna — it does not change the radio's bands, and CAT on the
 > Yaesu/Kenwood sat rigs can't switch the band pair either, so set those by hand.
 
 The GS-232 backend is bench-reasoned against the GS-232A/B manuals and Hamlib's
 gs232a/gs232b backends, and host-tested for the bridge baud math and command
-formatting -- it has not been run against a physical SC16IS750 or a real rotator.
+formatting — it has not been run against a physical SC16IS750 or a real rotator.
 The I2C pins (G8/G9) are confirmed from the Cap LoRa-1262 pinmap; still confirm
 the SC16IS750's strapped address and the controller's baud before keying real
 motors. The rotctld backend follows the published Hamlib `rotctld` protocol and
 is the one rotator path you can fully bench-test without trusting hardware
-encoders -- point it at `rotctld -m 1` and watch the commands -- but it has not
+encoders — point it at `rotctld -m 1` and watch the commands — but it has not
 driven a physical rotator either. The **PstRotator** UDP backend is host-verified
 for message formatting against the PstRotator manual (Rev. 7.5); it has not been
 run against a live PstRotator instance.
@@ -3336,11 +3348,11 @@ so keep them on a trusted LAN.
 
 ---
 
-## 18b. Printing to a receipt printer
+## 19. Printing to a receipt printer
 
 CardSat can print text reports to a **network thermal receipt printer** — the pocket
 battery kind — over WiFi. It speaks **ESC/POS over raw TCP port 9100**, which virtually
-every receipt printer supports; the reference target is an **Epson TM-P20II (Wi-Fi
+every receipt printer supports; the reference target is an **Epson TM-P20II (WiFi
 model)**. (Bluetooth printers are *not* supported: the ESP32-S3 has no Bluetooth
 Classic, and most cheap BT receipt printers are Classic-only. See
 [docs/design/PRINTING_SCOPE.md](docs/design/PRINTING_SCOPE.md).)
@@ -3380,7 +3392,7 @@ matching raster format will work. Raster is heavier than the text formats — pr
 format (PCL/PostScript/ESC-POS) where the printer supports one; use raster when it is the only
 thing the printer accepts, which is the common case for home printers.
 
-**Suggested settings by printer type.** Set these under Settings → Network. When unsure on a
+**Suggested settings by printer type.** Set these under Settings → Network / data. When unsure on a
 network printer, run **Test printer** first to see what it accepts.
 
 | Printer type | Example | Printer format | Paper width | Transport |
@@ -3418,7 +3430,7 @@ where it helps (the day-sheet gains an LOS time and full-width names; the log pu
 QSO on one line).
 
 **Three ways to receive a report — you don't need a printer.** Any report can go to any
-combination of three places, set in Settings → Network:
+combination of three places, set in Settings → Network / data:
 - the **network printer** (Printer IP above),
 - the **USB serial console** (*Print to serial: on*) — the report prints in your serial
   monitor, ready to copy and paste, so an operator with no printer still benefits,
@@ -3433,7 +3445,7 @@ the relevant screen: the **Passes** screen prints the day-sheet; **Mutual window
 Doppler**, **EQX**, and **Target search** each print their table; the **Notes** browser
 prints the highlighted note; the rove-plan viewer prints the plan you're reading. On the
 **schedule**, **`P`** prints every favorite's upcoming passes. On a pass's **polar
-(sky-track) screen**, **`P`** prints an ASCII sky map of that pass -- the satellite's arc
+(sky-track) screen**, **`P`** prints an ASCII sky map of that pass — the satellite's arc
 across the sky in printer-safe characters (`+` zenith, `.` horizon, `*` track). In the note editor,
 **`Fn+p`** prints the note. On the **About** screen, **`p`** opens a **Print submenu** listing **every** report — the
 one place to reach the ones without a natural home screen (ticket, satellite card,
@@ -3476,7 +3488,7 @@ no memory.
 
 ---
 
-## 19. Managing data and factory reset
+## 20. Managing data and factory reset
 
 CardSat keeps all of its data in a **`/CardSat`** folder:
 
@@ -3514,7 +3526,7 @@ first-run state. Use it to start over or before handing the unit to someone else
 
 ---
 
-## 20. Troubleshooting
+## 21. Troubleshooting
 
 **No passes / "Clock not set."** Set the clock first: Update → `k` (NTP), enable
 GPS, or Location → `c` to enter UTC manually. Also confirm your location is set.
@@ -3553,7 +3565,7 @@ bird (`fav`), the next pass (`next`), and WiFi state (`net`) — plus `time`, `g
 `pass <sat>` for the next pass of *any* catalog bird by name fragment or NORAD number.
 It never changes *device* state —
 the `print` commands only transmit a report to your configured printer
-([§18b](#18b-printing-to-a-receipt-printer)) — so it is safe to leave connected.
+([§19](#19-printing-to-a-receipt-printer)) — so it is safe to leave connected.
 
 **Radio doesn't respond / wrong VFO moves.** Check the **CAT baud** (and, for
 Icom, the **CI-V address**) in Settings match the radio. Open the serial monitor at
@@ -3609,7 +3621,7 @@ in line and the controller's baud matches **Rot baud** in Settings.
 
 ---
 
-## 21. Screen-by-screen reference
+## 22. Screen-by-screen reference
 
 This section catalogs **every screen** in the firmware in a uniform format —
 what it is for, how you get to it, what it shows, and what each key does. It
@@ -3633,9 +3645,11 @@ listed below.
   Weather, Activations, AMSAT status, Overhead now, Grid dist/bearing, QRZ Lookup,
   Location, Update, Settings, Log, Messages, About, and Charge / Sleep. The header
   carries the clock and battery gauge.
-- **Keys** — **`t`** opens the **Tools** hub (below); after LOS, `q` (60 s window) deep-sleeps until the next favorite pass; `;`/`.` move the highlight; **ENTER** opens the selected item; any; `{`/`}` page within a category.
-  **letter** jumps to the next item starting with it (repeat to cycle — `s` steps
-  through Satellites, Sun / Moon, Space Wx, Settings).
+- **Keys** — **`t`** opens the **Tools** hub (below); after LOS, `q` (60 s window)
+  deep-sleeps until the next favorite pass; `;`/`.` move the highlight; `{`/`}` page;
+  **ENTER** opens the selected item; any **letter** jumps to the next item starting
+  with it (repeat to cycle — `s` steps through Satellites, Sun / Moon, Space Wx,
+  Settings).
 
 ### Satellites
 
@@ -3655,7 +3669,9 @@ listed below.
   **Transponder database**; `e` open the **EQX table**; `k` open the
   **OSCARLOCATOR** view; `2` open the **sat-to-sat visibility finder**; `3` open
   the **3D Globe**; `d` open the **10-day pass overview**; `i` open the
-  **Illumination** raster; **ENTER** opens **Passes** for the highlighted bird.
+  **Illumination** raster; `s` open the **AMSAT status** roster; `L` **share the
+  selected satellite's GP elements over LoRa** to nearby CardSats (needs LoRa
+  enabled); **ENTER** opens **Passes** for the highlighted bird.
 
 ### Orbital analysis
 
@@ -3698,7 +3714,7 @@ listed below.
 
 - **Purpose** — a "time machine" that propagates the selected satellite to an
   arbitrary time so you can preview geometry past or future.
-- **Reached from** — Satellites → `s`.
+- **Reached from** — Satellites → `y`.
 - **Shows** — the sub-point and footprint (and, in world-map view, the track) at
   the simulated instant, with the offset from now.
 - **Keys** — `,`/`/` step the time backward/forward; `;`/`.` change the step
@@ -3968,6 +3984,17 @@ engine underneath; they differ only in the direction of the question.
 - **Keys** — `,`/`/` scroll one day through the window (forward indefinitely, not
   before today); `r` recompute; `` ` `` back to Passes.
 
+### Visible-pass list
+
+- **Purpose** — the optically-visible passes of the selected satellite over the
+  next 10 days: satellite **sunlit**, your **sky dark**, peak elevation over the
+  visibility minimum. Full detail in [§8 → Visible-pass list](#visible-pass-list-v-from-passes).
+- **Reached from** — Passes → `V` (capital; lowercase `v` is the 10-day chart).
+- **Shows** — one row per visible pass: AOS time, duration, peak elevation, and
+  the rise compass direction (where on the horizon it comes up).
+- **Keys** — `;`/`.` scroll; **ENTER** open the pass-detail plot (returns here);
+  `r` recompute; `` ` `` back to Passes.
+
 ### Track
 
 ![Track — live Doppler & CAT](docs/img/track.jpg)
@@ -3984,13 +4011,16 @@ engine underneath; they differ only in the direction of the question.
   line, the radio status, a rotator status line, and a `PL` tone line on FM birds
   that need one.
 - **Keys** — `m` switch TUNE/CAL; `d` cycle Doppler tune mode (linear birds);
-  `t` next transponder; `c` set CTCSS/PL tone; `r` radio output on/off; `o`
-  rotator on/off; `p` **Polar**; `z` large-font readout; `f` **Manual mode**;
-  `l` **Log QSO**; `v` voice memo (SD card); `a` **point-here arrow**; `y` tilt
-  tuning on/off (ADV, if IMU); `g`/`w`/`e` workable grids / US states / DXCC now;
-  in TUNE: `,`/`/` move spot, `s` step, `x` recenter; in CAL: `,`/`/` trim
-  downlink, `;`/`.` trim uplink, `s` step, `x` zero; **ENTER** save calibration;
-  `` ` `` leave (returns to where you came from).
+  `t` next transponder; `n` jump to the **beacon**; `c` set CTCSS/PL tone;
+  `k` toggle **CW on both legs** (linear birds); `N` edit the per-satellite
+  **operating note**; `r` radio output on/off; `o` rotator on/off; `p` **Polar**;
+  `z` large-font readout; `f` **Manual mode**; `l` **Log QSO**; `i`×2 **"I heard
+  it"** AMSAT status report (first tap arms, second sends); `v` voice memo (SD card); `a` **point-here
+  arrow**; `y` tilt tuning on/off (ADV, if IMU); `g`/`w`/`e` workable grids /
+  US states / DXCC now; after LOS, `q` (60 s prompt) deep-sleeps to the next
+  favorite pass; in TUNE: `,`/`/` move spot, `s` step, `x` recenter; in CAL:
+  `,`/`/` trim downlink, `;`/`.` trim uplink, `s` step, `x` zero; **ENTER** save
+  calibration; `` ` `` leave (returns to where you came from).
 - **Leaving keeps tracking** — pressing `` ` `` returns to the previous screen and,
   if the radio/rotator are engaged, **they keep tracking in the background** (a green
   **RAD**/**ROT**/**R+R** header tag appears on other screens). Stop with `r`
@@ -4006,6 +4036,19 @@ engine underneath; they differ only in the direction of the question.
   az/elevation/range, the rise compass direction, and a status line. The radio and
   rotator keep running underneath.
 - **Keys** — `` ` `` back to Track.
+
+### Large-font readout
+
+- **Purpose** — a stripped-down, glanceable view of the live session: RX/TX in
+  the largest digits that fit, az/el and the Doppler tune mode beneath, RAD/ROT/
+  TILT badges. The radio, rotator and Doppler service keep running — it is an
+  alternate view of the same session, not a different mode.
+- **Reached from** — Track → `z`.
+- **Shows** — RX and TX frequencies large; az/el; tune mode (FULL/DL/UL/TUNE/CAL);
+  passband position on linear birds; transponder index; status badges.
+- **Keys** — mirrors Track in place: `l` **Log QSO**; `v` voice memo; `c` CTCSS
+  tone; `k` CW-on-both-legs toggle; `g`/`w`/`e` workable grids / states / DXCC;
+  `f`/`p` Manual mode / Polar; `z` or `` ` `` back to Track.
 
 ### Manual mode
 
@@ -4375,6 +4418,19 @@ engine underneath; they differ only in the direction of the question.
   is built into the standard binaries (RadioLib required at build time). Untested
   hardware path.
 
+### LoRa RX / hex monitor
+
+- **Purpose** — receive and inspect **any** LoRa signal on the Cap LoRa (SX1262):
+  check whether a transmitter is on the air, view a beacon's raw bytes, peak
+  reception by ear. Not satellite-specific; no network involved. Full detail in
+  [§8 → LoRa RX / hex monitor](#lora-rx--hex-monitor-messages--m).
+- **Reached from** — Messages → `m` (LoRa enabled in Settings; messaging is
+  paused while the monitor holds the radio).
+- **Shows** — received frames newest-first (hex + printable ASCII), with RSSI/SNR
+  per frame and the current radio parameters.
+- **Keys** — `;`/`.` scroll; parameter keys as shown in the footer (frequency,
+  SF, bandwidth, etc.); `` ` `` back to Messages (releases the radio).
+
 ### GPS sky plot
 
 ![GPS position](docs/img/gps-position.jpg)
@@ -4535,6 +4591,18 @@ engine underneath; they differ only in the direction of the question.
 - **Keys** — `;`/`.` move; **ENTER** open a record to edit; (within a record)
   `x` twice to delete; `` ` `` back.
 
+### Awards
+
+- **Purpose** — a summary of what you've worked, read straight from the QSO log:
+  all-satellite totals (QSOs, unique grids, distinct satellites, US states, DXCC
+  entities) and a per-satellite breakdown. Full detail in
+  [§8 → Awards](#awards-log--awards).
+- **Reached from** — Log menu → Awards.
+- **Shows** — the totals block, then one row per satellite worked with its QSO
+  and unique-grid counts.
+- **Keys** — `g`/`s`/`d` open the full worked **grids / US states / DXCC** lists;
+  `;`/`.` scroll; `` ` `` back to the Log menu.
+
 ### Voice Memos
 
 - **Purpose** — browse, play back, and manage the voice memos on the SD card, and
@@ -4606,6 +4674,44 @@ engine underneath; they differ only in the direction of the question.
   `i` inside opens a short **Fox & CubeSats** primer); `c` opens a **CubeSat
   Simulator** intro — AMSAT's desktop satellite for hands-on learning (kits at the
   AMSAT Store; cubesatsim.com); `` ` `` back.
+
+### About
+
+- **Purpose** — build and diagnostic information, and the doorway to the Tools
+  hub, printing, games, readiness and license screens. Full detail in
+  [§8 → About](#about).
+- **Reached from** — Home → About.
+- **Shows** — author credit, firmware version and build date, storage backend,
+  GP catalog size and freshest element age, WiFi/IP, battery, uptime, and the
+  heap line (total free + **largest free block** — the number that matters for
+  TLS uploads on this no-PSRAM board).
+- **Keys** — `t` **Tools** hub; `p` **Print a report** submenu; `r` **Station
+  readiness** checklist; `z` **Games menu**; `a` print the **Support AMSAT**
+  page; `c` print the **operator contact card**; `l` **License & credits**;
+  `` ` `` or **ENTER** back Home.
+
+### Print a report
+
+- **Purpose** — a scrollable list of **every** menu-printable report (nineteen),
+  so reports that have no natural home screen can be printed from one place.
+  Reports that need an active satellite guard themselves with a one-line note.
+- **Reached from** — About → `p`.
+- **Shows** — the report list with the current print destination(s) in the
+  header (printer host, serial, file — or a warning if no output is enabled).
+- **Keys** — `;`/`.` move; **ENTER** print the highlighted report (the list
+  **stays open**, with the result on the status line, so several can be run in a
+  row); `` ` `` back to About.
+
+### Charge / Sleep
+
+- **Purpose** — a minimal low-power mode for charging or parking the device.
+  Full detail in [§8 → Charge / Sleep](#charge--sleep).
+- **Reached from** — Home → Charge / Sleep (the last item).
+- **Shows** — a blanked screen; any key wakes a brief status view (battery,
+  charge state) before it blanks again.
+- **Keys** — any key wakes the status view for a few seconds; `` ` ``/**DEL**
+  exits to Home, restoring the backlight, the 240 MHz clock, and WiFi (both are
+  reduced/off while parked).
 
 ### Station readiness
 
@@ -4731,7 +4837,7 @@ operation.
   **wavelength / frequency**, **attenuator pad**, **dB chain sum**, the ARRL radio-math
   calculators (**complex / polar**, **reactance & resonance**, **RC/RL time constant**), and a
   general **unit converter**.
-- **Reached from** — About -> `t`.
+- **Reached from** — About → `t`.
 - **Menu order** — the menu is grouped **compute-first**: the interactive calculators and
   converters (scientific, graphing, programmer, Tiny BASIC, location converter, link budget),
   then the satellite-compute tools (state vector → GP, CubeSatSim), then the reference lookups
@@ -4754,7 +4860,7 @@ operation.
   `mu` (Earth GM) and `g0`. So `wl(146)` gives the 2 m wavelength, `dbm(100)` gives
   50 dBm, `db(2)` gives 3.01 dB. The function hints stay pinned just above the footer;
   `'` toggles between the general and ham pages. You can also type **metric-prefix
-  suffixes** on numbers (`100k`, `2.2n`, `47p`, `146M` -- case matters, `M`=mega vs
+  suffixes** on numbers (`100k`, `2.2n`, `47p`, `146M` — case matters, `M`=mega vs
   `m`=milli), and press **`\`** to toggle **engineering-notation** output (results shown
   as a mantissa with a metric prefix, e.g. `4.7 k`). DEL backspaces (and only
   backspaces — it never exits); `` ` `` returns.
@@ -4906,8 +5012,8 @@ operation.
   before the epoch are the nominal pre-launch orbit; re-run predictions once the true
   post-deployment elements are published.
 
-Several tools can **print their result** to the configured print sinks (Wi-Fi/serial/file, set
-under Settings → Network). On tools that don't accept typed text — the **programmer calculator**,
+Several tools can **print their result** to the configured print sinks (WiFi/serial/file, set
+under Settings → Network / data). On tools that don't accept typed text — the **programmer calculator**,
 **graphing calculator**, **location converter**, and **character lookup**, plus the **Tiny BASIC
 output console** — press **`p`** to print. On the two tools where you type freely — the
 **scientific calculator** and the **Tiny BASIC editor** — use **`Fn`+`p`** instead, so a plain
@@ -5208,7 +5314,7 @@ or press **`1`–`4`** to answer directly.
 
 ---
 
-## 22. Key reference (cheat sheet)
+## 23. Key reference (cheat sheet)
 
 > A **printable version** of this reference is included as
 > `CardSat_CheatCard_4x6.pdf` — a **4×6** landscape index card, front and back
@@ -5219,14 +5325,14 @@ or press **`1`–`4`** to answer directly.
 
 | Screen | Keys |
 |---|---|
-| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `k` OSCARLOCATOR · `3` 3D globe · `2` sat-to-sat visibility · `o` orbital analysis · `y` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports · colored down-arrow = decaying orbit (yellow watch / orange decaying / red imminent) |
+| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `k` OSCARLOCATOR · `3` 3D globe · `2` sat-to-sat visibility · `o` orbital analysis · `y` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · `s` AMSAT status roster · `L` share GP over LoRa · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports · colored down-arrow = decaying orbit (yellow watch / orange decaying / red imminent) |
 | **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / Pass outlook / Orbit position / Phys) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Live: az/el/range/Doppler, mean anomaly/phase, sunlit/eclipse + **eclipse depth** (deg; >0 = in shadow) · Next pass: slant ranges + path delay + peak eclipse depth · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · Pass outlook: 7-day pass count/>30° count/longest/avg gap + the best upcoming pass (elevation, when, duration) · Orbit position: mean/true anomaly, argument of latitude, time to perigee/apogee, RAAN, rev number · Phys: orbital velocity now + apo/peri spread, launch year/number + years in orbit (from the COSPAR ID) · `r` recompute · **`p` print report** · `` ` `` back |
 | **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `r` refresh · `z` deep-sleep until AOS |
-| **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
+| **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `V` visible-pass list · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `n` jump to beacon · `N` per-sat operating note · `k` CW both legs (linear) · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `v` voice memo (SD card; also drops a **log stub** to finish after LOS) · after LOS: `q` (60 s window) deep-sleeps until the next favorite pass · `i`×2 report Heard to AMSAT (mode-aware) · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
+| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `n` jump to beacon · `N` per-sat operating note · `k` CW both legs (linear) · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `a` point-here arrow · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `v` voice memo (SD card; also drops a **log stub** to finish after LOS) · after LOS: `q` (60 s window) deep-sleeps until the next favorite pass · `i`×2 report Heard to AMSAT (mode-aware) · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
 | **Large-font readout** (`z` from Track) | big RX/TX + az/el + tune mode · `,`/`/` tune · `s`/`x` step/center · `m` TUNE/CAL · `d` mode · `t` next TX · `n` beacon · `k` CW (linear) · `r` radio · `o` rotator · `y` tilt · `l` log · `v` voice memo · `z`/`` ` `` back to Track |
 | **Manual large-font** (`z` from Manual) | HOLD/TUNE legs in big digits · `u` swap leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z`/`` ` `` back to Manual |
 | **Manual mode** (`f` from Track) | no-radio frequency calculator · `u` toggle which leg is fixed (HOLD vs TUNE>) · `,`/`/` move fixed freq in passband (linear) · `s` step · `x` center · `m` CAL · `t` next TX · `l` log · `p` polar · `g` grids (all return here) · ENTER save cal · `` ` ``/`f` back to Track |
@@ -5256,19 +5362,19 @@ or press **`1`–`4`** to answer directly.
 | **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · `s` sky sources (radio sources/planets) · `t` Sun/Moon transit finder · `e` EME / moonbounce · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
 | **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labeled & color-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Space Wx" bar + result · also refreshes with Update · `p` HF/6m propagation guide · `r` refresh · `` ` `` back |
 | **Weather** (main menu) | terrestrial current conditions + multi-day forecast for the operating site from Open-Meteo · current temp/sky/wind/humidity then per-day hi/lo & precip chance · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Weather" bar + result · also refreshes with Update · `r` refresh · cached offline · `` ` `` back |
-| **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
+| **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network / data) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
 | **EME / moonbounce** (Sun/Moon → `e`) | self-echo Doppler per band (50/144/432/1296/10368, topocentric) · range + rate · degradation vs perigee · galactic sky-noise flag · red SUN flag <10° · `p` 30-day plan (dec + degr, `;`/`.` scroll) · `m` mutual-Moon window vs DX grid (`g` grid, `;`/`.` select) · `o` point rotator at Moon · `x` stop · `` ` `` back |
 | **Grid dist/bearing** (main menu) | great-circle distance + heading to a Maidenhead grid (short/long path, km/mi) · `g` grid · `q` QRZ→grid lookup · `o` point rotator at bearing (el 0) · `x` stop · `` ` `` back |
 | **QRZ → grid** (Grid dist/bearing → `q`) | resolve a callsign to its grid · `c` callsign · ENTER use grid in the calculator · `` ` `` back |
 | **HF/6m propagation** (Space Wx → `p`) | band guidance from solar flux + Kp: HF conditions, 10/15/20 m open/marg/shut, geomagnetic, auroral VHF, absorption · rule-of-thumb (6 m Es seasonal) · `r` refetch · `` ` `` back |
 | **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
-| **About** | build/version, IP, free heap and diagnostics (read-only) · `r` station readiness checklist · `l` license · `z` games |
-| **Printing** (contextual) | `p` prints the current screen's report on the printable screens (Passes day-sheet, Mutual, DX Doppler, EQX, Target-search, Pass detail/polar, **Orbital analysis, Illumination, 10-day passes, 6-hour timeline**) · `P` prints all-favorite passes from the schedule · `Fn`+`p` prints the note in the note editor · About → `p` opens a Print submenu listing **every** report; About → `a` Support-AMSAT card; About → `c` operator contact card |
+| **About** | build/version, IP, free heap and diagnostics (read-only) · `t` Tools hub · `p` Print submenu · `r` station readiness checklist · `l` license · `z` games |
+| **Printing** (contextual) | `p` prints the current screen's report on the printable screens (Passes day-sheet, Mutual, DX Doppler, EQX, Target-search, Pass detail/polar, **Orbital analysis, Illumination, 10-day passes, 6-hour timeline**) · `P` prints all-favorite passes from the schedule · `Fn`+`p` prints the note in the note editor · About → `p` opens a Print submenu listing **every** report; About → `a` Support-AMSAT card; About → `c` operator contact card · **tools:** `p` prints on the programmer calc / graphing calc / location converter / char lookup / BASIC console; `Fn`+`p` on the scientific calc and BASIC editor (where plain `p` types) |
 
 ---
 
-## 23. Glossary
+## 24. Glossary
 
 - **AOS / LOS** — Acquisition / Loss of Signal: when the satellite rises above and
   sets below your horizon.
@@ -5303,7 +5409,7 @@ or press **`1`–`4`** to answer directly.
 
 ---
 
-## 24. Supporting AMSAT
+## 25. Supporting AMSAT
 
 CardSat exists because of the work **AMSAT** and its volunteers do — building and
 keeping amateur satellites flying, publishing the orbital data this app depends on,
@@ -5314,7 +5420,7 @@ track and work with this very tool.
 
 ---
 
-## 25. License
+## 26. License
 
 CardSat is released under the **MIT License**.
 

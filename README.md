@@ -184,7 +184,7 @@ search, on-device printing, the Files page's multi-select — are not pictured y
 screenshot refresh is planned. The current firmware is v0.9.56.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
-[manual](MANUAL.md#20-screen-by-screen-reference).
+[manual](MANUAL.md#22-screen-by-screen-reference).
 
 <table>
 <tr>

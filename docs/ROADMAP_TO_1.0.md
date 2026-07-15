@@ -156,7 +156,7 @@ point rotators, log and upload QSOs, plan roves, and work offline — is complet
 CI-V path, hardware-confirmed. Printing is comprehensive (nineteen menu-listed reports plus
 context-only ones, three sinks, nine page-description formats including on-device PWG/URF
 raster). The Tools hub is a genuine offline bench (35 tools). The documentation is thorough: a
-138-page manual, a features list, per-interface wiring guides, and a design-decision archive.
+139-page manual, a features list, per-interface wiring guides, and a design-decision archive.
 
 **What a 1.0 needs beyond the blockers above.** Nothing structural. The gap between 0.9.56 and
 1.0 is mostly *confidence*, not *scope*: hardware confirmation of the radio/rotator matrix, a

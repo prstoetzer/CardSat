@@ -43,10 +43,24 @@
 // trick rig.h plays with setExternalStream(), for the same reason: it keeps every
 // protocol working over every wire with no per-transport duplication.
 
+// Base for rotator transports that OWN something and must clean up.
+//
+// Arduino's Stream has NO virtual destructor, and freeRotator() deletes its
+// transport through a Stream* -- so a derived destructor would never run. That
+// silently defeated UsbRotStream's rotEnd() in 0.9.58: the CDC port stayed bound
+// after the rotator was disabled, and the radio's picker kept skipping that
+// adapter until reboot. GCC warns about exactly this
+// (-Wdelete-non-virtual-dtor); the build passes -w, so the warning never
+// surfaced. Deleting through THIS type is well-defined.
+class RotWire : public Stream {
+public:
+  virtual ~RotWire() {}
+};
+
 // SC16IS750/752 I2C->UART bridge, presented as a Stream.
 // The register-level code is lifted verbatim from what Gs232Rotator/
 // EasycommRotator/SpidRotator each used to carry privately -- one copy now.
-class BridgeStream : public Stream {
+class BridgeStream : public RotWire {
 public:
   BridgeStream(uint8_t i2cAddr, uint32_t baud) : _addr(i2cAddr), _baud(baud) {}
   bool begin();                       // Wire1 + bridge init + presence test
@@ -73,7 +87,7 @@ private:
 // rotator's CDC is a SECOND port on the same host the radio may be using --
 // see usbserial.h (rotator port) for the address-binding rules that keep the
 // two from stealing each other's adapter.
-class UsbRotStream : public Stream {
+class UsbRotStream : public RotWire {
 public:
   // RAII: this object owns the rotator's CDC port for its lifetime. The
   // destructor is not optional -- freeRotator() deletes the transport whenever
@@ -82,7 +96,7 @@ public:
   // adapter then stayed reserved (the radio's picker skips the rotator's) until
   // reboot, which is the "turning the rotator off permanently binds the adapter"
   // bug. Whoever owns the Stream owns the port; that is the whole invariant.
-  ~UsbRotStream();
+  ~UsbRotStream() override;
   bool begin();                       // bind the rotator's CDC port
   bool ok() const;
   int  available() override;

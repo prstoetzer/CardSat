@@ -352,8 +352,30 @@ with tempfile.TemporaryDirectory() as d:
     open(src, 'w').write(tu)
     # Compile AND link: link catches the anon-namespace duplicate-decl trap
     # (decl inside `namespace {}` + `static` def outside = ambiguous overload).
-    p = subprocess.run(['g++', '-std=gnu++17', src, '-o', out],
+    #
+    # -Wall -Wextra is NOT decoration. The Arduino build ships `-w`, which
+    # silences every warning the compiler has -- and 0.9.58 shipped a real bug
+    # because of it: freeRotator() deleted its transport through a `Stream*`, and
+    # Arduino's Stream has no virtual destructor, so ~UsbRotStream() (which
+    # releases the USB CDC port) NEVER RAN. GCC said so four times, in a build
+    # nobody could hear. This is the only place in the project where the compiler
+    # is allowed to talk.
+    p = subprocess.run(['g++', '-std=gnu++17', '-Wall', '-Wextra',
+                        '-Wno-unused-parameter', '-Wno-unused-variable',
+                        src, '-o', out],
                        capture_output=True, text=True)
+    # Warnings that indicate a REAL defect in CardSat's own code. Kept narrow on
+    # purpose: a gate that cries wolf gets ignored, and the stub's own modelling
+    # (e.g. EspUsbHostCdcSerial deriving from Stream) produces false positives
+    # that the device build does not have.
+    FATAL = ('-Wdelete-non-virtual-dtor',)
+    fatal = [l for l in p.stderr.splitlines()
+             if any(f in l for f in FATAL) and 'EspUsbHostCdcSerial' not in l]
+    if fatal:
+        print('  compile gate: FAILED -- warning(s) that indicate real bugs:')
+        for l in fatal[:6]:
+            print('   ', l.replace(src, 'usbserial'))
+        sys.exit(1)
     if p.returncode != 0:
         errs = [l for l in p.stderr.splitlines() if 'error' in l][:6]
         print('  compile gate: FAILED -- usbserial/rotator does not build:')

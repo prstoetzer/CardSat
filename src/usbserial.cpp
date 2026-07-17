@@ -912,7 +912,9 @@ uint8_t scanAdapters() {
   rotTrace("scan: adapters");
   if (!hostUpForRotator()) { rotTrace("scan: host would not start"); return 0; }
   for (uint8_t i = 0; i < s_serDevN; ++i) {
-    char b[96];
+    // 96 clipped the KEY on long adapter names -- and the key is the one field
+    // the operator must copy into Settings. 160 covers label(48) + key(40) + framing.
+    char b[160];
     snprintf(b, sizeof(b), "scan: adapter[%u] addr=%u %s key=%s",
              (unsigned)i, (unsigned)s_serDev[i].address, s_serDev[i].label, s_serDev[i].key);
     rotTrace(b);
@@ -979,7 +981,9 @@ bool rotBegin() {
   // no CAT engaged this is the ONLY way to see whether the device was found at
   // all, what it identifies as, and which key to persist.
   for (uint8_t i = 0; i < s_serDevN; ++i) {
-    char b[96];
+    // 96 clipped the KEY on long adapter names -- and the key is the one field
+    // the operator must copy into Settings. 160 covers label(48) + key(40) + framing.
+    char b[160];
     snprintf(b, sizeof(b), "rot: adapter[%u] addr=%u %s key=%s",
              (unsigned)i, (unsigned)s_serDev[i].address, s_serDev[i].label, s_serDev[i].key);
     rotTrace(b);

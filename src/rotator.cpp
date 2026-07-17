@@ -659,6 +659,13 @@ void YaesuRotator::service() {
 // enough and avoids giving every backend an owning pointer it would have to
 // delete correctly.
 static Stream* s_rotXport = nullptr;
+// The transport we ALLOCATED, if any. Separate from s_rotXport because the Grove
+// UART is a borrowed static HardwareSerial we must never delete -- and because
+// deleting must go through RotWire*, whose destructor is virtual. Deleting
+// through Stream* silently skips ~UsbRotStream() (Arduino's Stream has no virtual
+// dtor), which is exactly how 0.9.58 shipped with the rotator's USB port never
+// being released. GCC warns; the build uses -w.
+static RotWire* s_rotOwned = nullptr;
 
 // Grove UART1 on G1/G2. SHARED with wired CI-V and the Grove GPS -- the app must
 // have cleared the conflict before we get here (App::rotTransportConflict).
@@ -673,9 +680,13 @@ static HardwareSerial* groveSerial() {
 
 // Build the serial transport for `transport`, open it, and return it (or nullptr
 // if it could not be opened -- caller reports "rotator not ready" as usual).
+// Returns the Stream the protocol talks through, and sets s_rotOwned to the
+// object we allocated (nullptr for Grove, which we borrow).
 static Stream* makeRotTransport(uint8_t transport, uint32_t baud) {
+  s_rotOwned = nullptr;
   switch (transport) {
     case ROT_XPORT_GROVE: {
+      // Borrowed: a static HardwareSerial reused across rebuilds. Not ours to free.
       HardwareSerial* hs = groveSerial();
       hs->begin(baud, SERIAL_8N1, ROT_GROVE_RX_PIN, ROT_GROVE_TX_PIN);
       return hs;
@@ -683,12 +694,14 @@ static Stream* makeRotTransport(uint8_t transport, uint32_t baud) {
     case ROT_XPORT_USB: {
       UsbRotStream* u = new UsbRotStream();
       if (!u->begin()) { delete u; return nullptr; }
+      s_rotOwned = u;
       return u;
     }
     case ROT_XPORT_BRIDGE:
     default: {
       BridgeStream* b = new BridgeStream(ROT_I2C_ADDR, baud);
       if (!b->begin()) { delete b; return nullptr; }  // bridge absent: no rotator
+      s_rotOwned = b;
       return b;
     }
   }
@@ -703,7 +716,9 @@ Rotator* makeRotator(uint8_t type, uint8_t transport, uint32_t baud,
   if (type == ROT_PST) return new PstRotator(host, port);
 
   // Serial backends: transport first, then the protocol that speaks over it.
-  if (s_rotXport) { delete s_rotXport; s_rotXport = nullptr; }   // never leak a prior one
+  // Never leak a prior one. Through RotWire*, so the virtual destructor runs.
+  if (s_rotOwned) { delete s_rotOwned; s_rotOwned = nullptr; }
+  s_rotXport = nullptr;
   Stream* xp = makeRotTransport(transport, baud);
   if (!xp) return nullptr;               // no wire -> no rotator; app shows not-ready
   s_rotXport = xp;
@@ -718,12 +733,11 @@ Rotator* makeRotator(uint8_t type, uint8_t transport, uint32_t baud,
 }
 
 void freeRotator(Rotator* r) {
-  delete r;                              // protocol first: it points at the Stream
-  if (s_rotXport) {
-    // The Grove UART is a static HardwareSerial reused across rebuilds (see
-    // groveSerial); deleting it would destroy a peripheral the next rebuild wants.
-    // Everything else (BridgeStream, UsbRotStream) is ours to free.
-    if (s_rotXport != (Stream*)groveSerial()) delete s_rotXport;
-    s_rotXport = nullptr;
-  }
+  delete r;                    // protocol first: it points at the transport
+  // Delete through RotWire*, NOT Stream*. Stream has no virtual destructor,
+  // so `delete (Stream*)p` skips ~UsbRotStream() and the USB CDC port is never
+  // released -- which is how 0.9.58 shipped still binding the adapter after the
+  // rotator was turned off. s_rotOwned is null for Grove (borrowed, never freed).
+  if (s_rotOwned) { delete s_rotOwned; s_rotOwned = nullptr; }
+  s_rotXport = nullptr;
 }

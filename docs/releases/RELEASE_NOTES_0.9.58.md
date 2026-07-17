@@ -435,6 +435,41 @@ caught, in the first attempt at fixing the first. Verified both ways: re-inject 
 gate reproduces the bench compiler's exact error; fix it and the gate passes. Skips cleanly where
 `g++` is absent.
 
+# Post-release: 0.9.58.1
+
+**A compiler audit found a real bug that 0.9.58 shipped with.** The Arduino build passes **`-w`**,
+which silences every warning GCC has. Compiling the same sources with `-Wall -Wextra` produced 13
+warnings — and four of them were the same defect:
+
+```
+deleting object of polymorphic class type 'UsbRotStream'
+which has non-virtual destructor might cause undefined behavior
+```
+
+`freeRotator()` deletes its transport through a **`Stream*`**, and Arduino's `Stream` has **no
+virtual destructor** — so `~UsbRotStream()`, which calls `rotEnd()` to release the USB CDC port,
+**never ran**. The "disabling the rotator permanently binds the adapter" bug reported against the
+previous build was therefore *still live in 0.9.58*: the RAII fix was correct and unreachable.
+Host-proven both ways — delete via `Stream*`, destructor skipped; via a base with a virtual dtor,
+destructor runs.
+
+Fixed with a `RotWire` base that has a virtual destructor, plus an explicit ownership split
+(`s_rotOwned` is what we allocated; the Grove UART is borrowed and never freed). Renaming was
+forced: `RotTransport` was already the enum name in `settings.h` — a collision that would have
+broken the device build, caught by the same audit.
+
+**The compile gate now fails on `-Wdelete-non-virtual-dtor`**, verified by re-injecting the shipped
+bug. It is the only place in the project where the compiler is allowed to speak, and it earned that
+on its first outing.
+
+Also from the audit: the adapter trace buffers were widened (96 → 160 B) because a long device name
+could clip the **key** — the one field an operator has to copy into Settings. `snprintf` truncates
+safely, so this was never a crash, only a lost value.
+
+**The `-Os` switch is confirmed in the artifacts**: `.flash.text` 2,061,244 → **1,843,116** (−10.6%)
+and the `.bin` 2,921,408 → **2,661,040**, taking the app partition from **92.9% → 84.6%** full.
+`.bss` rose 1,208 B — the new `Logstore`/`ConsoleLog` buffers, accounted for symbol by symbol.
+
 # Verification status
 
 - **Host-validated:** the loop-timing exponential moving average. The first version was

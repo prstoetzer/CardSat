@@ -48,10 +48,16 @@ public:
   bool selVerified() const override { return RADIOS[_model].selVerified; }
   const char* name() const override { return RADIOS[_model].name; }
 
+  // Clear the cached transport too (see Rig::setExternalStream). begin() copies
+  // extStream into _stream, so the base-class version alone would leave this
+  // backend pointing at a Stream the caller is about to delete.
+  void setExternalStream(Stream* s) override { Rig::setExternalStream(s); _stream = s; }
+
 private:
   Stream*    _stream = nullptr;
   RadioModel _model;
 
+  void   drainStale();                 // bounded RX flush (never spins)
   bool   sendCmd(const String& cmd);
   bool   setVfoFreq(const char* vfo, uint32_t hz);
   bool   setModeKw(RigMode m);

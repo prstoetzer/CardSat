@@ -3,6 +3,7 @@
 // ===========================================================================
 #include "rotator.h"
 #include <Wire.h>
+#include "usbserial.h"   // UsbSerial::rot* -- the USB rotator transport
 
 // Set to 0 to silence the rotator trace on the serial monitor (115200 baud).
 #define ROT_DEBUG 1
@@ -21,13 +22,21 @@ static constexpr uint8_t SC_IOCTL = 0x0E;   // I/O control (bit3 = soft reset)
 static constexpr uint8_t SC_DLL   = 0x00;   // divisor low  (when LCR[7]=1)
 static constexpr uint8_t SC_DLH   = 0x01;   // divisor high (when LCR[7]=1)
 
-void Gs232Rotator::wreg(uint8_t reg, uint8_t val) {
+// ---------------------------------------------------------------------------
+//  BridgeStream -- SC16IS750/752 I2C->UART bridge as an Arduino Stream
+// ---------------------------------------------------------------------------
+//  One copy of the register plumbing that Gs232Rotator, EasycommRotator and
+//  SpidRotator each used to carry privately. Behaviour is byte-for-byte what
+//  they did: same soft reset, same divisor maths, same scratchpad presence test,
+//  same 50 ms THR-empty guard so a stalled bridge can never hang the loop.
+void BridgeStream::wreg(uint8_t reg, uint8_t val) {
   Wire1.beginTransmission(_addr);
   Wire1.write((uint8_t)(reg << 3));        // channel 0
   Wire1.write(val);
   Wire1.endTransmission();
 }
-uint8_t Gs232Rotator::rreg(uint8_t reg) {
+
+uint8_t BridgeStream::rreg(uint8_t reg) {
   Wire1.beginTransmission(_addr);
   Wire1.write((uint8_t)(reg << 3));
   Wire1.endTransmission();
@@ -35,7 +44,7 @@ uint8_t Gs232Rotator::rreg(uint8_t reg) {
   return Wire1.available() ? (uint8_t)Wire1.read() : 0x00;
 }
 
-bool Gs232Rotator::bridgeInit() {
+bool BridgeStream::bridgeInit() {
   wreg(SC_IOCTL, 0x08);                    // software reset (self-clearing)
   delay(5);
   uint32_t div = ROT_XTAL_HZ / (16UL * _baud);
@@ -49,33 +58,112 @@ bool Gs232Rotator::bridgeInit() {
   bool ok = (rreg(SC_SPR) == 0x5A);
 #if ROT_DEBUG
   Serial.printf("[ROT] SC16IS750 @0x%02X %s (baud %lu, div %lu)\n",
-                _addr, ok ? "ready" : "NOT FOUND", (unsigned long)_baud,
-                (unsigned long)div);
+                _addr, ok ? "found" : "NOT FOUND",
+                (unsigned long)_baud, (unsigned long)div);
 #endif
   return ok;
 }
 
-void Gs232Rotator::begin() {
+bool BridgeStream::begin() {
   Wire1.begin(ROT_I2C_SDA, ROT_I2C_SCL, ROT_I2C_HZ);
   _ok = bridgeInit();
+  return _ok;
 }
 
-void Gs232Rotator::putc_(char c) {
+size_t BridgeStream::write(uint8_t c) {
+  if (!_ok) return 0;
   uint32_t t0 = millis();
   while (!(rreg(SC_LSR) & 0x20)) {         // wait for THR empty
-    if (millis() - t0 > 50) break;         // don't hang if the bridge stalls
+    if (millis() - t0 > 50) return 0;      // don't hang if the bridge stalls
   }
-  wreg(SC_THR, (uint8_t)c);
+  wreg(SC_THR, c);
+  return 1;
 }
-void Gs232Rotator::puts_(const char* s) {
-  while (*s) putc_(*s++);
+
+int BridgeStream::available() {
+  if (_peek >= 0) return 1;
+  return _ok ? (int)rreg(SC_RXLVL) : 0;
 }
-int Gs232Rotator::getc_() {
-  if (rreg(SC_RXLVL) == 0) return -1;
+
+int BridgeStream::read() {
+  if (_peek >= 0) { int c = _peek; _peek = -1; return c; }
+  if (!_ok || rreg(SC_RXLVL) == 0) return -1;
   return (int)rreg(SC_RHR);
 }
-void Gs232Rotator::flushIn() {
-  while (rreg(SC_RXLVL)) rreg(SC_RHR);
+
+int BridgeStream::peek() {
+  if (_peek < 0) _peek = read();
+  return _peek;
+}
+
+// ---------------------------------------------------------------------------
+//  UsbRotStream -- the rotator's USB<->serial adapter as a Stream
+// ---------------------------------------------------------------------------
+//  All the hard parts (resident host, device binding, slot rules) live in
+//  usbserial.cpp; this is a forwarding shim so the rotator backends see a Stream
+//  like any other.
+UsbRotStream::~UsbRotStream() {
+#if CARDSAT_HAS_USBCAT
+  UsbSerial::rotEnd();     // release the CDC port with the Stream that owns it
+#endif
+}
+
+bool UsbRotStream::begin() {
+#if CARDSAT_HAS_USBCAT
+  return UsbSerial::rotBegin();
+#else
+  return false;
+#endif
+}
+bool UsbRotStream::ok() const {
+#if CARDSAT_HAS_USBCAT
+  return UsbSerial::rotActive();
+#else
+  return false;
+#endif
+}
+int UsbRotStream::available() {
+#if CARDSAT_HAS_USBCAT
+  if (_peek >= 0) return 1;
+  Stream* s = UsbSerial::rotStream();
+  return s ? s->available() : 0;
+#else
+  return 0;
+#endif
+}
+int UsbRotStream::read() {
+#if CARDSAT_HAS_USBCAT
+  if (_peek >= 0) { int c = _peek; _peek = -1; return c; }
+  Stream* s = UsbSerial::rotStream();
+  return s ? s->read() : -1;
+#else
+  return -1;
+#endif
+}
+int UsbRotStream::peek() {
+  if (_peek < 0) _peek = read();
+  return _peek;
+}
+void UsbRotStream::flush() {
+#if CARDSAT_HAS_USBCAT
+  Stream* s = UsbSerial::rotStream();
+  if (s) s->flush();
+#endif
+}
+size_t UsbRotStream::write(uint8_t c) {
+#if CARDSAT_HAS_USBCAT
+  Stream* s = UsbSerial::rotStream();
+  return s ? s->write(c) : 0;
+#else
+  (void)c; return 0;
+#endif
+}
+
+void Gs232Rotator::begin() {
+  // The transport is already open (makeRotator built and began it); GS-232 needs
+  // no link-level handshake, so "ready" is simply "we have a working wire".
+  _ok = (_s != nullptr);
+  if (_ok) flushIn();
 }
 
 bool Gs232Rotator::point(float az, float el) {
@@ -144,50 +232,9 @@ bool Gs232Rotator::readPos(float& az, float& el) {
 // Bridge plumbing mirrors Gs232Rotator (same register map / sequence); kept as
 // its own copy rather than refactored into a shared base so the working GS-232
 // path is untouched.
-void EasycommRotator::wreg(uint8_t reg, uint8_t val) {
-  Wire1.beginTransmission(_addr);
-  Wire1.write((uint8_t)(reg << 3));
-  Wire1.write(val);
-  Wire1.endTransmission();
-}
-uint8_t EasycommRotator::rreg(uint8_t reg) {
-  Wire1.beginTransmission(_addr);
-  Wire1.write((uint8_t)(reg << 3));
-  Wire1.endTransmission();
-  Wire1.requestFrom((int)_addr, 1);
-  return Wire1.available() ? (uint8_t)Wire1.read() : 0x00;
-}
-bool EasycommRotator::bridgeInit() {
-  wreg(SC_IOCTL, 0x08); delay(5);
-  uint32_t div = ROT_XTAL_HZ / (16UL * _baud);
-  wreg(SC_LCR, 0x80);
-  wreg(SC_DLL, (uint8_t)(div & 0xFF));
-  wreg(SC_DLH, (uint8_t)((div >> 8) & 0xFF));
-  wreg(SC_LCR, 0x03);
-  wreg(SC_FCR, 0x07);
-  wreg(SC_SPR, 0x5A);
-  bool ok = (rreg(SC_SPR) == 0x5A);
-#if ROT_DEBUG
-  Serial.printf("[ROT] Easycomm SC16IS750 @0x%02X %s (baud %lu)\n",
-                _addr, ok ? "ready" : "NOT FOUND", (unsigned long)_baud);
-#endif
-  return ok;
-}
-void EasycommRotator::putc_(char c) {
-  uint32_t t0 = millis();
-  while (!(rreg(SC_LSR) & 0x20)) { if (millis() - t0 > 50) break; }
-  wreg(SC_THR, (uint8_t)c);
-}
-void EasycommRotator::puts_(const char* s) { while (*s) putc_(*s++); }
-int EasycommRotator::getc_() {
-  if (rreg(SC_RXLVL) == 0) return -1;
-  return (int)rreg(SC_RHR);
-}
-void EasycommRotator::flushIn() { while (rreg(SC_RXLVL)) rreg(SC_RHR); }
-
 void EasycommRotator::begin() {
-  Wire1.begin(ROT_I2C_SDA, ROT_I2C_SCL, ROT_I2C_HZ);
-  _ok = bridgeInit();
+  _ok = (_s != nullptr);
+  if (_ok) flushIn();
 }
 
 bool EasycommRotator::point(float az, float el) {
@@ -246,53 +293,22 @@ bool EasycommRotator::readPos(float& az, float& el) {
 // ---------------------------------------------------------------------------
 //  SPID Rot2Prog (MD-01/02) backend (binary) over the I2C->UART bridge
 // ---------------------------------------------------------------------------
-void SpidRotator::wreg(uint8_t reg, uint8_t val) {
-  Wire1.beginTransmission(_addr);
-  Wire1.write((uint8_t)(reg << 3));
-  Wire1.write(val);
-  Wire1.endTransmission();
+void SpidRotator::begin() {
+  _ok = (_s != nullptr);
+  if (_ok) flushIn();
 }
-uint8_t SpidRotator::rreg(uint8_t reg) {
-  Wire1.beginTransmission(_addr);
-  Wire1.write((uint8_t)(reg << 3));
-  Wire1.endTransmission();
-  Wire1.requestFrom((int)_addr, 1);
-  return Wire1.available() ? (uint8_t)Wire1.read() : 0x00;
-}
-bool SpidRotator::bridgeInit() {
-  wreg(SC_IOCTL, 0x08); delay(5);
-  uint32_t div = ROT_XTAL_HZ / (16UL * _baud);
-  wreg(SC_LCR, 0x80);
-  wreg(SC_DLL, (uint8_t)(div & 0xFF));
-  wreg(SC_DLH, (uint8_t)((div >> 8) & 0xFF));
-  wreg(SC_LCR, 0x03);
-  wreg(SC_FCR, 0x07);
-  wreg(SC_SPR, 0x5A);
-  bool ok = (rreg(SC_SPR) == 0x5A);
-#if ROT_DEBUG
-  Serial.printf("[ROT] SPID SC16IS750 @0x%02X %s (baud %lu)\n",
-                _addr, ok ? "ready" : "NOT FOUND", (unsigned long)_baud);
-#endif
-  return ok;
-}
-void SpidRotator::putb_(uint8_t b) {
-  uint32_t t0 = millis();
-  while (!(rreg(SC_LSR) & 0x20)) { if (millis() - t0 > 50) break; }
-  wreg(SC_THR, b);
-}
+
+// Blocking-with-timeout single byte. SPID replies are fixed 12-byte frames, so
+// the caller reads a known count; this bounds each byte so a silent controller
+// can never spin the loop.
 int SpidRotator::getb_(uint32_t toMs) {
+  if (!_s) return -1;
   uint32_t t0 = millis();
   while (millis() - t0 < toMs) {
-    if (rreg(SC_RXLVL)) return (int)rreg(SC_RHR);
+    if (_s->available()) return _s->read();
     delay(1);
   }
   return -1;
-}
-void SpidRotator::flushIn() { while (rreg(SC_RXLVL)) rreg(SC_RHR); }
-
-void SpidRotator::begin() {
-  Wire1.begin(ROT_I2C_SDA, ROT_I2C_SCL, ROT_I2C_HZ);
-  _ok = bridgeInit();
 }
 
 // Rot2Prog SET frame (13 bytes): 0x57 H1 H2 H3 H4 PH V1 V2 V3 V4 PV CMD 0x20.
@@ -631,12 +647,83 @@ void YaesuRotator::service() {
   outWrite(bits);
 }
 
-Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port) {
-  if (type == 1) return new RotctlRotator(host, port);   // 1 = ROT_NET (settings.h)
-  if (type == 2) return new PstRotator(host, port);        // 2 = ROT_PST (settings.h)
-  if (type == 4) return new EasycommRotator(ROT_I2C_ADDR, baud, 1);  // Easycomm I
-  if (type == 5) return new EasycommRotator(ROT_I2C_ADDR, baud, 2);  // Easycomm II
-  if (type == 6) return new EasycommRotator(ROT_I2C_ADDR, baud, 3);  // Easycomm III
-  if (type == 7) return new SpidRotator(ROT_I2C_ADDR, baud);          // SPID Rot2Prog
-  return new Gs232Rotator(ROT_I2C_ADDR, baud);
+// ---------------------------------------------------------------------------
+//  Rotator + transport construction
+// ---------------------------------------------------------------------------
+// The serial backends hold a Stream* they do not own. Keeping the pair together
+// is the whole job here: build the transport, open it, hand it to the protocol,
+// and remember it so freeRotator() can delete both. A bare `delete rot` would
+// leak the Stream -- which is why the app calls freeRotator() instead.
+//
+// One transport is live at a time (a single rotator), so a file-scope pointer is
+// enough and avoids giving every backend an owning pointer it would have to
+// delete correctly.
+static Stream* s_rotXport = nullptr;
+
+// Grove UART1 on G1/G2. SHARED with wired CI-V and the Grove GPS -- the app must
+// have cleared the conflict before we get here (App::rotTransportConflict).
+// Constructed once and reused: HardwareSerial owns a UART peripheral, and
+// churning it on every rebuild is how you strand pin mux state (see the same
+// static-instance reasoning in civ.cpp begin()).
+static HardwareSerial* groveSerial() {
+  static HardwareSerial* hs = nullptr;
+  if (!hs) hs = new HardwareSerial(ROT_GROVE_UART_NUM);
+  return hs;
+}
+
+// Build the serial transport for `transport`, open it, and return it (or nullptr
+// if it could not be opened -- caller reports "rotator not ready" as usual).
+static Stream* makeRotTransport(uint8_t transport, uint32_t baud) {
+  switch (transport) {
+    case ROT_XPORT_GROVE: {
+      HardwareSerial* hs = groveSerial();
+      hs->begin(baud, SERIAL_8N1, ROT_GROVE_RX_PIN, ROT_GROVE_TX_PIN);
+      return hs;
+    }
+    case ROT_XPORT_USB: {
+      UsbRotStream* u = new UsbRotStream();
+      if (!u->begin()) { delete u; return nullptr; }
+      return u;
+    }
+    case ROT_XPORT_BRIDGE:
+    default: {
+      BridgeStream* b = new BridgeStream(ROT_I2C_ADDR, baud);
+      if (!b->begin()) { delete b; return nullptr; }  // bridge absent: no rotator
+      return b;
+    }
+  }
+}
+
+Rotator* makeRotator(uint8_t type, uint8_t transport, uint32_t baud,
+                     const char* host, uint16_t port) {
+  // Network backends carry their own socket and never touch a serial Stream, so
+  // they are built before any transport exists -- rotTransport is meaningless for
+  // them and the Settings UI hides it.
+  if (type == ROT_NET) return new RotctlRotator(host, port);
+  if (type == ROT_PST) return new PstRotator(host, port);
+
+  // Serial backends: transport first, then the protocol that speaks over it.
+  if (s_rotXport) { delete s_rotXport; s_rotXport = nullptr; }   // never leak a prior one
+  Stream* xp = makeRotTransport(transport, baud);
+  if (!xp) return nullptr;               // no wire -> no rotator; app shows not-ready
+  s_rotXport = xp;
+
+  switch (type) {
+    case ROT_EASYCOMM1: return new EasycommRotator(xp, 1);
+    case ROT_EASYCOMM2: return new EasycommRotator(xp, 2);
+    case ROT_EASYCOMM3: return new EasycommRotator(xp, 3);
+    case ROT_SPID:      return new SpidRotator(xp);
+    default:            return new Gs232Rotator(xp);   // ROT_GS232
+  }
+}
+
+void freeRotator(Rotator* r) {
+  delete r;                              // protocol first: it points at the Stream
+  if (s_rotXport) {
+    // The Grove UART is a static HardwareSerial reused across rebuilds (see
+    // groveSerial); deleting it would destroy a peripheral the next rebuild wants.
+    // Everything else (BridgeStream, UsbRotStream) is ours to free.
+    if (s_rotXport != (Stream*)groveSerial()) delete s_rotXport;
+    s_rotXport = nullptr;
+  }
 }

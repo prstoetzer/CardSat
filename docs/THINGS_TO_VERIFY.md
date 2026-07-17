@@ -132,6 +132,35 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
   `KNOB_MOVE_SSB_HZ` / `KNOB_MOVE_FM_HZ` / `TUNE_GRACE_MS` in `app.h` if the feel needs
   adjusting. (The IC-821 single-pin path above is the one CAT backend that **is**
   hardware-confirmed.)
+- **Rotator serial transports (0.9.58).** The three serial protocols now run over the I²C
+  bridge, **Grove G1/G2**, or a **USB adapter**. Only the transport plumbing is verified —
+  no protocol has been driven by a real controller over Grove or USB. The Grove conflict
+  rules (a Grove rotator refuses while wired CI-V or the Grove GPS hold G1/G2; CAT/GPS
+  claiming Grove makes the rotator yield to the bridge) are logic-tested, not bench-tested.
+- **Two USB adapters — radio and rotator at once (0.9.58).** Built, guarded, never run with
+  two adapters plugged in. The hazard is real and specific: `EspUsbHostCdcSerial` defaults
+  to `ANY_ADDRESS`, which the library resolves to *the first enumerated device with a
+  bulk-OUT endpoint*, so two default-bound ports take the **same** adapter and the radio's
+  Doppler writes land on the rotator. CardSat binds explicit device addresses to prevent
+  it, and refuses rather than guessing when two adapters are present and neither is
+  nominated. **Verify:** scan, assign each port, confirm each drives the right device, then
+  replug and confirm the assignment survives (it persists by adapter serial number where
+  one is reported — CH340s often report none, and those can only be told apart by address).
+- **IC-9100 / IC-9700 over USB (0.9.58).** Never tested. Those radios present an internal
+  hub with both a serial interface and a **USB Audio** device. The claim that audio cannot
+  be mistaken for the CAT port is *structural* — a serial candidate needs a **bulk** OUT
+  endpoint and audio streams are **isochronous** — and drawn from the library and IDF
+  sources, not from a radio. The claim that a 9700 is **one** device slot (a composite
+  device: one USB address, two interfaces) rather than two is the same kind of inference.
+  **Verify:** does it enumerate, does CAT work, and does `/CardSat/Logs/usb.log` list the
+  adapters you expect? If it reports slot exhaustion, that is the evidence to raise
+  `ESP_USB_HOST_MAX_DEVICES` from 4 to 5 (+2,048 B — measured, not estimated).
+- **Console-capture cost (0.9.58).** The ~0.5%-of-loop figure is **modelled**, not measured:
+  ~6 ms per LittleFS write is an estimate, and the absolute could be off 2× either way.
+  **Verify:** turn on Settings → Log → *Console to file*, track a pass, and confirm tracking
+  stays smooth and `console.log` stops growing at the cap. Every line is timestamped, so the
+  log profiles itself.
+
 - **Antenna rotator (hardware paths).** The motor-driving backends are host-tested only.
   For **GS-232**, the I²C pins (G8/G9) are confirmed from the Cap LoRa-1262 pinmap, but
   the SC16IS750 I²C→UART bridge and command path are host-tested for baud math and

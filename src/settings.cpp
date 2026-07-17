@@ -70,7 +70,23 @@ bool Settings::load() {
   civPinMode = d["civpin"] | (uint8_t)0;     // CI-V wiring: 0 TX/RX, 1 G2, 2 G1
   if (civPinMode > 2) civPinMode = 0;
   catType    = d["cattype"] | (uint8_t)CAT_WIRED;
-  if (catType > CAT_RIGCTL) catType = CAT_WIRED;
+  strncpy(catUsbKey, d["catusbkey"] | "", sizeof(catUsbKey)-1);
+  catUsbKey[sizeof(catUsbKey)-1] = 0;
+  consoleLog = d["conslog"] | false;
+  // Bounds-check against the LAST enumerator, not a hardcoded one. This read
+  // `> CAT_RIGCTL` (2), which silently reset a saved CAT_USB (3) to CAT_WIRED on
+  // every load: the setting survived in RAM until reboot, then reverted -- so a
+  // build with USB CAT selected came back up driving the G1/G2 UART instead, and
+  // the USB path was never entered at all. The clamp was written before CAT_USB
+  // existed and was never revisited when it was added.
+  //
+  // When USB CAT is compiled out, a config that selects it must still fall back to
+  // something usable rather than leave an unhandled value.
+#if CARDSAT_HAS_USBCAT
+  if (catType > CAT_USB) catType = CAT_WIRED;
+#else
+  if (catType > CAT_RIGCTL) catType = CAT_WIRED;   // CAT_USB not built: fall back
+#endif
   strncpy(catHost, d["cathost"] | "", sizeof(catHost)-1); catHost[sizeof(catHost)-1]=0;
   catPort    = d["catport"] | (uint16_t)50001;
   if (catPort == 0) catPort = 50001;
@@ -113,7 +129,15 @@ bool Settings::load() {
   calUlHz    = d["calul"] | 0;
   rotEnable  = d["roten"]  | false;
   rotType    = d["rottype"]| (uint8_t)ROT_GS232;
-  if (rotType > ROT_PST) rotType = ROT_GS232;
+  // Clamp to the LAST defined type, not ROT_PST. The old bound was ROT_PST (2),
+  // written before ROT_YAESU(3), ROT_EASYCOMM1..3(4-6) and ROT_SPID(7) existed --
+  // so every config using one of those was silently reset to GS-232 on load, and
+  // the Settings screen would show GS-232 no matter what the user picked.
+  if (rotType > ROT_SPID) rotType = ROT_GS232;
+  rotTransport = d["rotxport"] | (uint8_t)ROT_XPORT_BRIDGE;
+  if (rotTransport >= ROT_XPORT_N) rotTransport = ROT_XPORT_BRIDGE;
+  strncpy(rotUsbKey, d["rotusbkey"] | "", sizeof(rotUsbKey)-1);
+  rotUsbKey[sizeof(rotUsbKey)-1] = 0;
   strncpy(rotHost, d["rothost"] | "", sizeof(rotHost)-1); rotHost[sizeof(rotHost)-1]=0;
   rotPort    = d["rotport"]| (uint16_t)4533;
   if (rotPort == 0) rotPort = 4533;
@@ -218,6 +242,8 @@ bool Settings::save() {
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
   d["civpin"] = civPinMode;
   d["cattype"] = catType; d["cathost"] = catHost; d["catport"] = catPort;
+  d["catusbkey"] = catUsbKey;
+  d["conslog"] = consoleLog;
   d["catuser"] = catUser; d["catpass"] = catPass;
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
   d["rxovfo"] = rxOnlyVfo;
@@ -241,6 +267,7 @@ bool Settings::save() {
   d["gamesnd"]  = gameSound;
   d["morseswap"]= morseSwap;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
+  d["rotxport"]=rotTransport; d["rotusbkey"]=rotUsbKey;
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;

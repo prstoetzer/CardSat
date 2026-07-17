@@ -137,6 +137,18 @@ general:
 **Revisit triggers:** catalog scaling past ~150 satellites, or a larger TLS trust store (see 1.2)
 changing the block-size picture.
 
+**A measured reduction path now exists** — `docs/design/RAM_REDUCTION_ANALYSIS.md`. The key fact:
+`App` is `static` (**`.bss`**, not heap), so shrinking its resident arrays moves the heap floor
+down and raises **free heap *and* largest block by the same amount**, un-fragmentably. That is the
+best currency for TLS. **Both low-risk items shipped in 0.9.58**, reclaiming **11,776 B**: `memos[64]` (6,656 B — a
+rarely-visited screen's directory listing) is now heap-allocated on its screen, and
+`visPasses[]`/`vlPasses[]` are merged into one `passScratch[128]` (5,120 B — they were never live
+at once, and `buildOrbit()` already reused one of them as scratch informally; the merge makes that
+contract explicit). Expected: `largest block` 31,732 → ~43,508 — **more than twice** what an
+`EspUsbHost` at `MAX_DEVICES=1` would cost, banked before any USB work. **Pending bench
+confirmation of the figure.** Still available: `SatEntry::amsatName[28]` × 150 = ~4,200 B for data
+only ~47 satellites have.
+
 **Scope:** [design/RAM_LIFECYCLE_SCOPE.md](design/RAM_LIFECYCLE_SCOPE.md) — sequence the safe,
 isolated pieces first (share the two 128-entry pass arrays; allocate the memo directory only while
 browsing; allocate transponders only when loaded).
@@ -150,14 +162,179 @@ data-format change; the **disclosure** shipped in 0.9.56, the **migration** is d
 Practical impact: the amateur satellite service's microwave allocations above 4.294 GHz (5.6 GHz
 and up) cannot be represented.
 
-### 2.3 what3words support — *declined, by design*
+### 2.3 BLE printer support — *deferred, pending one measurement*
+
+**What:** connect a Bluetooth LE thermal printer instead of requiring a WiFi one. Attractive
+because the primary field use case is a receipt printer with no infrastructure, and today that
+still needs an access point or the printer's own AP.
+
+**Why it's deferred:** RAM, on a board that has none to spare. Espressif's own `components/bt`
+Kconfig puts the BT controller's text/data/bss at *"~21kB or more of IRAM"* before the NimBLE
+host and GATT buffers, against a measured `free 55376 / largest block 31732` at boot — and
+`largest block 8180` during a TLS fetch. The 0.9.57 bug where a stranded **6 KB** broke LoTW
+uploads is the calibration for how little slack exists.
+
+Two further frictions: Espressif rates **WiFi-STA-connected + BLE** as **C1, "performance is
+unstable"** (the pure-BLE field case is stable — it is the print-after-a-fetch case that is
+not); and there is no common GATT profile across BLE thermal printers, so "BLE support" really
+means "support for the printer on the bench."
+
+**Revisit trigger:** a ten-minute measurement — add `NimBLEDevice::init("")` to a scratch build,
+then compare the `mem` baseline and `[net] heap before TLS` against today's numbers. If the
+largest contiguous block no longer clears what TLS needs, the answer is settled.
+
+**Scope doc:** `docs/design/BLE_PRINTER_SCOPE.md`.
+
+### 2.4 USB devices: CAT, rotator, printer — *researched; blocked on one build question*
+
+Research: `docs/design/USB_DEVICES_SCOPE.md`. USB **mass storage** was declined separately (the
+web UI already gets data out) — `docs/design/USB_MSC_DECISION.md`.
+
+**The finding:** Espressif ships official Apache-2.0 USB **host** drivers for exactly the chips
+involved — `usb_host_cdc_acm`, `usb_host_cp210x_vcp` (what Icom rigs use), `usb_host_ch34x_vcp`,
+`usb_host_ftdi_vcp`, and a `usb_host_vcp` wrapper that auto-selects the right one. There is **no**
+printer-class component.
+
+**CAT over USB is the biggest prize, and was wrongly out of scope.** CardSat's protocol encoders
+already take a `Stream*` (`civ.h`, `kenwood.h`) and there is one `makeRig()` factory, so
+`CAT_USB` would be a *transport* — every protocol and radio unchanged. Two uses: modern rigs with
+a USB port (IC-9100; the IC-9700 already has LAN), and — the bigger one — **every pre-USB rig via
+a £3 USB-serial adapter**, replacing the MAX3232 harness that `WIRING.md` documents today. The
+Icom USB-echo quirk that Hamlib probes for at runtime is **already solved** by CardSat's
+`drainEcho()`.
+
+**Rotator over USB** is the same mechanism, replacing the SC16IS750 I²C→UART chain. But there is
+**one USB port**: a USB rotator and USB CAT are mutually exclusive without a hub.
+
+**USB printers**: three possible interfaces (printer class 0x07 / serial bridge / CDC-ACM), all
+carrying the same ESC/POS bytes CardSat already emits. Only the class-0x07 case needs a driver
+written. Smallest payoff of the three — a WiFi printer in AP mode already works with zero code.
+
+**The build blocker does not exist.** [EspUsbHost](https://github.com/tanakamasayuki/EspUsbHost)
+is a plain **Arduino library** (v2.3.0, Library Manager) doing USB host on the ESP32-S3 — it
+includes `<usb/usb_host.h>` directly, so the IDF host stack *is* reachable from a sketch. No
+`framework = arduino, espidf`, no PlatformIO-only feature, and the single-file `CardSat.ino` path
+survives. Its `EspUsbHostCdcSerial` **is an Arduino `Stream`** covering CDC-ACM + FTDI/CP210x/CH34x
+— a drop-in for the `Stream*` that `makeRig()` already passes to the protocol encoder.
+
+**RAM — one build flag decides it.** EspUsbHost's `ESP_USB_HOST_MAX_DEVICES` defaults to **8**, and
+its own header warns each slot is *"a sizable static DeviceState (several KB)... this constant
+dominates the library's static RAM use."* Eight slots is **≥ ~36 KB of `.bss`** — fatal. But
+`-DESP_USB_HOST_MAX_DEVICES=1` is explicitly supported, and CardSat needs exactly one device (one
+port). That is **≥ ~4.6 KB permanent** — the same order as the 3.8 KB the BASIC VM cost before
+0.9.56 made it lazy — plus an estimated ~12–15 KB only while `begin()` is active, reclaimed by
+`end()`.
+
+**Next step is one compile:** build with `-DESP_USB_HOST_MAX_DEVICES=1` and measure the static
+delta. Then verify `end()` actually returns the heap rather than assuming it — that assumption is
+precisely what made the 0.9.57 `basicFree()` bug.
+
+> **Outcome (0.9.58-wip, 2026-07-15) — the flag is only safe as a *global* flag.** The
+> implementation first tried the per-file variant (`#define` in `usbserial.cpp` before the
+> include, to keep the Arduino IDE path flag-free). That is a one-definition-rule violation:
+> the slot array is a **member of the `EspUsbHost` object**, so the library's own translation
+> unit kept the 8-slot layout while `usbserial.cpp` allocated a 1-slot object — the first
+> library call wrote past the object and **froze the firmware the moment USB CAT was enabled**.
+> Shipped fix: no define at all; the host object is heap-allocated only between `begin()` and
+> `end()`. A global `-DESP_USB_HOST_MAX_DEVICES=2` stays available to PlatformIO builds (2, not
+> 1: a hub in the chain is itself a device). Sizing revision from the v2.3.0 source: the
+> per-slot `hidReportDescriptors` entries are ~8 B each (512 was a parse cap, not storage), so a
+> slot's static fields are ~1–2 KB and the whole 8-slot object is on the order of 10–20 KB —
+> now transient, not `.bss`. Details: the comment block at the top of `src/usbserial.cpp`.
+
+**Risk to weigh:** EspUsbHost is one maintainer's library, self-described as under active
+development with possibly-breaking 2.x APIs. Pin it (§1.4) and keep wired CI-V / SC16IS750 as the
+primary paths, with USB as an alternative transport.
+
+### 2.5 Rotator transports: USB and Grove — *designed, not built*
+
+Two related asks, one answer. Scope docs: `docs/design/ROTATOR_USB_OPTIONS.md` and
+`docs/design/GROVE_ROTATOR_SCOPE.md`.
+
+**Correction on record:** I first said the rotator had "seven backends, none `Stream`-based,"
+framing USB rotator support as a big refactor. It is **six** concrete backends and **only three are
+serial** (`Gs232`, `Easycomm`, `Spid`); the rest are TCP, UDP, or an I²C ADC + relay board that
+could never use USB. Measured: **~101 lines of triplicated SC16IS750 plumbing** against **~174
+lines of unique protocol logic**.
+
+**The design (`RotIo`):** extract only the byte-level shim behind a small interface — the existing
+SC16IS750 code moves **verbatim** into `RotIoBridge`; `RotIoUsb` wraps `UsbSerial::stream()`;
+`RotIoGrove` wraps `HardwareSerial(1)` on G1/G2. Protocol methods are not rewritten, not moved and
+not duplicated; only `putc_(c)` becomes `_io->write(&c,1)`.
+
+**Why not a separate backend per protocol per transport:** three protocols × three transports =
+nine classes, with the protocol logic copied three times and expected to stay in step forever.
+
+**The Grove case is the surprise: it does not need USB.** The Cardputer's own Grove port *is* G1/G2
+— the same pins as wired CI-V (`config.h:78`) — so it is free under `CAT_NET`, `CAT_RIGCTL` *or*
+`CAT_USB`. With an IC-9700 on LAN it is testable **today**, which makes it the right way to prove
+the `RotIo` seam before anything depends on the unproven USB stack. It drops the SC16IS750 (one
+chip, one I²C dependency) but still needs a MAX3232 — GS-232 is RS-232.
+
+**The thing that must not be skipped:** G1/G2 would then be contended three ways (CAT, GPS,
+rotator). Today CardSat only *warns* in `WIRING.md`. With three claimants the Settings screen must
+**refuse the combination at selection time**, or an operator gets a rotator that silently does not
+move.
+
+### 2.6 The single-file `.ino` is near an Xtensa limit — *discovered, not yet a blocker*
+
+Found while first compiling USB CAT (0.9.58). The link failed with:
+
+```
+dangerous relocation: l32r: literal target out of range (try using text-section-literals)
+  in function `EspUsbHostCdcSerial::~EspUsbHostCdcSerial()'
+```
+
+**Not a library bug and not really a USB bug.** Xtensa's `l32r` reaches a literal pool through a
+**signed 16-bit offset** — roughly 256 KB backwards. `CardSat.ino` is a **~2.1 MB single
+translation unit**; adding one header-defined class with a vtable pushed a literal reference out
+of reach. USB CAT was the straw, not the cause.
+
+**Workaround** (documented in `BUILD_AND_FLASH.md`): a `build_opt.h` next to the sketch containing
+`-mtext-section-literals`, which places literal pools beside the code that uses them. That is the
+fix the linker itself suggests, and it is per-sketch — the Arduino IDE already reads `build_opt.h`.
+
+**PlatformIO is unaffected** — `src/*.cpp` are separate TUs, each far below the limit. So this is
+specifically a cost of the dual-representation invariant.
+
+**Why it matters beyond USB CAT:** the `.ino` has finite headroom and this is the first thing to
+reach it. Anything that adds a header-defined class with virtual methods — a BLE printer, a USB
+rotator, another third-party wrapper — will hit the same wall. Options if it recurs: ship
+`build_opt.h` in the repo (simple, but the Arduino IDE silently ignores it if the sketch folder
+name and `.ino` name ever diverge), or accept that some features are PlatformIO-only, or split the
+`.ino` — which would end the single-file build that Launcher users rely on.
+
+**No action needed yet.** The stock build is nowhere near the limit; only the opt-in USB CAT path
+crosses it, and it has a documented one-line fix.
+
+### 2.7 what3words support — *declined, by design*
 
 Deliberately excluded from the location converter. It is a proprietary, network-only wordlist
 lookup rather than an offline algorithm: it cannot be computed on-device, the wordlist is
 licensed, and it would break the "all Tools math is local" contract every other tool honors.
 Documented in the manual so the omission is explained rather than looking like a gap.
 
-### 2.4 UX items
+### 2.8 Ideas from Mini-FT8 — *two worth doing*
+
+[Mini-FT8](https://github.com/wcheng95/Mini-FT8) (Wei, AG6AQ) — the project that inspired CardSat,
+same board. Reading it turned up two gaps worth filling:
+
+- **USB mass storage** (its `C` key exposes FATFS to a PC, then remounts). CardSat has none, so
+  getting reports/logs/memos/`calib.txt` off means **physically removing the microSD**. This also
+  caught a **documentation bug**: the manual told operators to use "USB mass storage" that does
+  not exist (now fixed). Independent of the USB *printer* question, and the stronger idea.
+- **An on-device performance monitor** (its `P` key). CardSat's `mem`/`memtrace` are serial-only
+  — the 0.9.57 heap bug was found *because* a laptop was attached. A live heap/largest-block
+  readout on the About screen would make that visible in the field and give §2.1 a live number.
+
+Also considered and mostly declined: uniform `1`–`6` row selection (good idiom, but CardSat's
+Satellites screen already binds `2`/`3` — only worth it if genuinely uniform), flat menu pages
+(doesn't scale to ~90 settings), an ignore list (favourites mostly cover it), copy-to-SD (CardSat
+is already SD-first; MSC solves the LittleFS case better).
+
+**Ideas doc:** `docs/design/IDEAS_FROM_MINI_FT8.md`.
+
+### 2.9 UX items
 
 Scoped but not scheduled: a task-hub navigation model, a screen registry, accessibility modes, and
 a two-tier disk catalog.

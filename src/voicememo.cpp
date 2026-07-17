@@ -68,6 +68,11 @@ bool VoiceMemo::start(const char* satName) {
     _err = "SD nearly full"; _state = ERROR; return false;
   }
 
+  // Rent the 4 KB ping-pong capture buffer for the life of the recording (RAM
+  // Tier 1: it used to be permanent .bss inside poll()). Freed in finalize().
+  _recBuf = (int16_t*)malloc(2 * MEMO_BLOCK_SAMPLES * sizeof(int16_t));
+  if (!_recBuf) { _err = "Out of RAM"; _state = ERROR; return false; }
+
   // Sanitize the satellite name into a short filename-safe tag: keep only
   // [A-Za-z0-9-], cap at 12 chars. e.g. "AO-91" -> "AO-91", "ISS (ZARYA)" ->
   // "ISSZARYA". Empty if no sat. The browser parses this back out of the name.
@@ -154,7 +159,9 @@ void VoiceMemo::poll() {
   // filling it (isRecording() goes false), write A to SD and kick buffer B,
   // ping-ponging. (Writing immediately after record() returns would capture
   // empty/garbage data.)
-  static int16_t buf[2][MEMO_BLOCK_SAMPLES];
+  if (!_recBuf) return;                        // defensive: start() rents this
+  int16_t (*buf)[MEMO_BLOCK_SAMPLES] =
+      reinterpret_cast<int16_t (*)[MEMO_BLOCK_SAMPLES]>(_recBuf);
 
   if (!_primed) {
     if (M5.Mic.record(buf[_bufIdx], MEMO_BLOCK_SAMPLES, MEMO_SAMPLE_HZ)) _primed = true;
@@ -200,6 +207,7 @@ void VoiceMemo::finalize(bool ok) {
     while (M5.Mic.isRecording() && millis() - t0 < 200) { M5.delay(1); }
   }
   M5.Mic.end();
+  if (_recBuf) { free(_recBuf); _recBuf = nullptr; }   // rented in start()
   if (_spkWasOn) M5Cardputer.Speaker.begin();
 
   if (_file) {
@@ -382,10 +390,17 @@ bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume)
 
   // Stream blocks: read PCM from SD into a small buffer, hand to playRaw, wait
   // for it to drain (polling the cancel hook), repeat. No whole-clip buffer.
-  static int16_t pbuf[MEMO_PLAY_SAMPLES];
+  // Heap-on-demand (RAM Tier 1): 2 KB alive only while a memo plays.
+  int16_t* pbuf = (int16_t*)malloc(MEMO_PLAY_SAMPLES * sizeof(int16_t));
+  if (!pbuf) {
+    f.close();
+    if (!spkWasOn) M5Cardputer.Speaker.end();
+    _err = "Out of RAM";
+    return false;
+  }
   bool cancelled = false;
   for (;;) {
-    size_t got = f.read((uint8_t*)pbuf, sizeof(pbuf));
+    size_t got = f.read((uint8_t*)pbuf, MEMO_PLAY_SAMPLES * sizeof(int16_t));
     if (got < 2) break;                       // EOF
     size_t nsamp = got / 2;
     // Wait for the previous block to finish so we don't overrun the channel.
@@ -408,5 +423,6 @@ bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume)
 
   f.close();
   if (!spkWasOn) { /* leave speaker on; app expects it available */ }
+  free(pbuf);                                  // rented above; drain is done
   return true;
 }

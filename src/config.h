@@ -4,6 +4,55 @@
 // ===========================================================================
 #include <Arduino.h>
 
+// ---- Console capture (see consolelog.h) -----------------------------------
+// arduino-esp32 defines `Serial` as a MACRO aliasing the real device --
+// `#define Serial HWCDCSerial` (HardwareSerial.h:413, this board's config:
+// ARDUINO_USB_MODE=1 + ARDUINO_USB_CDC_ON_BOOT=1). Redefining it here points
+// every Serial.print/printf/println in CardSat at a tee that forwards to the
+// hardware AND (when the Settings toggle is on) captures the text to
+// /CardSat/Logs/console.log. ~181 call sites, none of them edited.
+//
+// This MUST come after <Arduino.h> (which defines the macro we are replacing)
+// and before any code that uses Serial. Every module includes config.h first,
+// which is exactly why it lives here rather than in consolelog.h.
+//
+// Left alone when console capture is compiled out, so a build without it is
+// byte-for-byte the stock Serial.
+// The class must be DEFINED here, not forward-declared: `Serial.print(...)` needs
+// a complete type at every call site, and a forward declaration gives
+// "'CardSatSerialTee' has incomplete type" at all ~181 of them. So the tee is
+// declared inline here and its behaviour lives in consolelog.cpp.
+#ifndef CARDSAT_NO_CONSOLE_LOG
+namespace ConsoleLog {
+  // Byte sink: consolelog.cpp decides whether to buffer it. Kept out of line so
+  // this header stays free of logstore/Store dependencies -- config.h is included
+  // by everything, including modules that must not drag in the filesystem.
+  void teeByte(uint8_t c);
+  void teeBytes(const uint8_t* b, size_t n);
+
+  class Tee : public Print {
+   public:
+    size_t write(uint8_t c) override { HWCDCSerial.write(c); teeByte(c); return 1; }
+    size_t write(const uint8_t* b, size_t n) override {
+      const size_t w = HWCDCSerial.write(b, n); teeBytes(b, n); return w;
+    }
+    // Stream/HWCDC pass-throughs: code that treats Serial as more than a Print
+    // (Serial.begin, `if (Serial)`, Serial.read) must keep working unchanged.
+    int  available()            { return HWCDCSerial.available(); }
+    int  read()                 { return HWCDCSerial.read(); }
+    int  peek()                 { return HWCDCSerial.peek(); }
+    void flush()                { HWCDCSerial.flush(); }
+    void begin(unsigned long b) { HWCDCSerial.begin(b); }
+    void end()                  { HWCDCSerial.end(); }
+    void setDebugOutput(bool e) { HWCDCSerial.setDebugOutput(e); }
+    operator bool()             { return (bool)HWCDCSerial; }
+  };
+}
+extern ConsoleLog::Tee CardSatSerialTee;
+#undef Serial
+#define Serial CardSatSerialTee
+#endif
+
 // ---- Speed of light (m/s) used for Doppler ----
 static constexpr double C_LIGHT = 299792458.0;
 
@@ -87,6 +136,15 @@ enum GpsSource : uint8_t {
   GPS_SRC_COUNT
 };
 
+// --- Grove rotator (ROT_XPORT_GROVE) --------------------------------------
+// The SAME two pins and the SAME UART as wired CI-V, deliberately: the Cardputer
+// has one Grove port. Whoever gets it is a settings-level decision, and the app
+// enforces that only one claimant is ever configured (App::rotTransportConflict
+// blocks Grove rotator against wired CI-V and against the Grove GPS).
+static constexpr int   ROT_GROVE_UART_NUM = 1;   // UART1, same as CI-V
+static constexpr int   ROT_GROVE_RX_PIN   = 1;   // G1
+static constexpr int   ROT_GROVE_TX_PIN   = 2;   // G2
+
 static constexpr int   CIV_UART_NUM   = 1;     // CI-V owns UART1 on G1/G2
 static constexpr int   CIV_RX_PIN     = 1;     // G1
 static constexpr int   CIV_TX_PIN     = 2;     // G2
@@ -126,7 +184,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.57";
+static constexpr const char* FW_VERSION = "0.9.58";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -180,6 +238,29 @@ static constexpr uint16_t YAESU_ADC_MS    = 6;     // single-shot settle for 250
 // ---------------------------------------------------------------------------
 static constexpr int   MAX_SATS        = 150;  // sats held in RAM from GP data
 static constexpr int   MAX_TX_PER_SAT  = 64;   // transmitters held for active sat (e.g. ISS has ~49 on SatNOGS)
+
+// ---- USB-host CAT (CAT_USB) ------------------------------------------------
+// OPT-IN, default OFF -- unlike LoRa, which ships on. Two reasons: it needs a
+// third-party library (tanakamasayuki/EspUsbHost) that a stock Arduino IDE install
+// will not have, so an unguarded build would break for everyone; and it is UNPROVEN
+// on hardware. Defined here rather than in usbserial.h because settings.h needs it
+// for CAT_TYPE_N and does not include usbserial.h.
+//
+// TO ENABLE, either:
+//   * Arduino IDE  -- change the 0 below to 1, and install EspUsbHost from the
+//                     Library Manager. No build flags: the IDE has no field for
+//                     them, and nothing here needs one.
+//   * PlatformIO   -- uncomment the two lines in platformio.ini.
+// There is deliberately NO per-file ESP_USB_HOST_MAX_DEVICES define: the slot
+// array is a member of the host object, sized in the LIBRARY's header, so only a
+// global -D (PlatformIO build_flags) can change it consistently for the library's
+// own translation unit too -- a per-file define diverges the layouts and corrupts
+// the firmware (the 0.9.58-wip enable-USB-CAT freeze; see usbserial.cpp). The
+// Arduino IDE path needs no flag at all: the host object is heap-allocated only
+// while USB CAT is engaged, so the library's 8-slot default costs nothing at rest.
+#ifndef CARDSAT_HAS_USBCAT
+#define CARDSAT_HAS_USBCAT 0
+#endif
 static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
 static constexpr int   PD_SAMPLES      = 100;  // samples in the pass-detail curve
@@ -191,6 +272,34 @@ static constexpr int   VIS_DAYS        = 10;   // InstantTrack-style overview ho
 static constexpr int   ORB_OUTLOOK_DAYS = 7;   // orbital-analysis pass-outlook window (days)
 static constexpr int   VIS_PASS_MAX    = 128;  // passes cached for the 10-day overview
 static constexpr int   VIS_DAY_MAX     = 32;   // passes in ONE day-window (scratch; a LEO does ~16/day)
+
+// ---- Shared scratch arena (RAM Tier 1) -----------------------------------------
+// One 1.5 KB buffer replaces five function-static scratch buffers that can never
+// be live at the same time (all run to completion on loopTask; none calls another):
+//   buildVisList day[VIS_DAY_MAX]  1,280 B    printTicket tp[16]        1,216 B
+//   printSatCard tp[16]            1,216 B    SatDb::scanGpFile obj[]   1,200 B
+//   takeScreenshot line[]+row[]    1,536 B
+// drawOrbit's 816 B scratch stays a plain static ON PURPOSE: buildVisList paints
+// a status line mid-build via draw(), and the draw dispatch can reach drawOrbit --
+// a real nesting the arena must not serve. The RAII Lease releases on every return
+// path; if the arena is unexpectedly busy (a nesting this comment missed), the
+// Lease falls back to a one-shot heap block so the feature still works.
+static constexpr size_t SCRATCH_BYTES = 1536;
+namespace Scratch {
+  inline uint8_t     buf[SCRATCH_BYTES] __attribute__((aligned(8)));
+  inline const char* owner = nullptr;   // who holds the arena right now (debug)
+  struct Lease {
+    uint8_t* p    = nullptr;
+    bool     heap = false;              // fallback path: block came from malloc()
+    Lease(const char* who, size_t need) {
+      if (owner == nullptr && need <= SCRATCH_BYTES) { owner = who; p = buf; }
+      else { p = (uint8_t*)malloc(need); heap = (p != nullptr); }
+    }
+    ~Lease() { if (heap) free(p); else if (p) owner = nullptr; }
+    Lease(const Lease&) = delete;
+    Lease& operator=(const Lease&) = delete;
+  };
+}
                                                // (busy LEO ~10-12/day x 10 d; was 64,
                                                // which truncated the last day-rows)
 static constexpr int   ILLUM_DAYS      = 60;   // illumination raster columns (days)
@@ -222,6 +331,20 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_FAVS_BAK "/CardSat/favs.bak"      // backup copy of favs.txt
 #define FILE_AMSTAT   "/CardSat/amstat.json"   // cached AMSAT OSCAR status summary
 #define FILE_AMSCAT   "/CardSat/amscat.json"   // cached AMSAT status-API catalog (name map)
+// ---- Logs -----------------------------------------------------------------
+// One directory so the web portal can list it, and so a user can clear every log
+// without touching caches or config. Works identically on SD and on bare flash.
+#define LOG_DIR      "/CardSat/Logs"
+// Per-file cap; each log rotates ONCE to .1, so the hard ceiling is 2x this.
+// Flash is a few hundred KB shared with the GP cache, config and tx caches -- an
+// uncapped log there breaks the things CardSat needs to work. The SD card has
+// room to be useful.
+#define LOG_MAX_BYTES_FLASH  (16u * 1024u)   // 32 KB worst case per log on flash
+#define LOG_MAX_BYTES_SD     (256u * 1024u)  // 512 KB worst case per log on SD
+
+// (FILE_USBCAT_LOG removed: every writer now goes through Logstore, which owns
+// rotation and the size cap. A bare path invites an uncapped open() that fills a
+// flash-only Cardputer's filesystem -- the log path lives in logstore.cpp now.)
 #define AMSAT_STATUS_URL  "https://www.amsat.org/status/api/v1/summary.php?hours="
 #define AMSAT_REPORTS_URL "https://www.amsat.org/status/api/v1/reports.php?name="
 #define AMSAT_CATALOG_URL "https://www.amsat.org/status/api/v1/catalog.php"

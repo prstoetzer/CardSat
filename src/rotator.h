@@ -24,6 +24,77 @@
 #include <WiFiUdp.h>        // WiFiUDP for the PstRotator (network) backend
 #include "config.h"
 
+// ===========================================================================
+//  Rotator serial transports
+// ===========================================================================
+// Every serial rotator protocol below talks through a plain Arduino Stream, so
+// the wire it runs on is a runtime choice (settings: rotTransport), not a
+// compile-time class. Three transports exist:
+//
+//   ROT_XPORT_BRIDGE : SC16IS750/752 I2C->UART bridge on Wire1 (the original
+//                      path; all three ESP32-S3 hardware UARTs are spoken for).
+//   ROT_XPORT_GROVE  : Cardputer Grove HY2.0-4P on G1/G2 via UART1. SHARED with
+//                      wired CI-V CAT and the Grove GPS -- the app enforces the
+//                      exclusion (see App::rotTransportConflict).
+//   ROT_XPORT_USB    : a USB<->serial adapter on the resident EspUsbHost, the
+//                      same host USB CAT uses.
+//
+// The backends never learn which is which; they see a Stream. That is the same
+// trick rig.h plays with setExternalStream(), for the same reason: it keeps every
+// protocol working over every wire with no per-transport duplication.
+
+// SC16IS750/752 I2C->UART bridge, presented as a Stream.
+// The register-level code is lifted verbatim from what Gs232Rotator/
+// EasycommRotator/SpidRotator each used to carry privately -- one copy now.
+class BridgeStream : public Stream {
+public:
+  BridgeStream(uint8_t i2cAddr, uint32_t baud) : _addr(i2cAddr), _baud(baud) {}
+  bool begin();                       // Wire1 + bridge init + presence test
+  bool ok() const { return _ok; }
+  // Stream/Print
+  int  available() override;
+  int  read() override;
+  int  peek() override;
+  void flush() override {}            // TX is pushed byte-by-byte; nothing buffered
+  size_t write(uint8_t c) override;
+  using Print::write;
+private:
+  uint8_t  _addr;
+  uint32_t _baud;
+  bool     _ok    = false;
+  int      _peek  = -1;               // one-byte pushback for peek()
+  void    wreg(uint8_t reg, uint8_t val);
+  uint8_t rreg(uint8_t reg);
+  bool    bridgeInit();
+};
+
+// A USB<->serial adapter on the resident EspUsbHost, presented as a Stream.
+// Thin: UsbSerial owns the host and the CDC object; this just forwards. The
+// rotator's CDC is a SECOND port on the same host the radio may be using --
+// see usbserial.h (rotator port) for the address-binding rules that keep the
+// two from stealing each other's adapter.
+class UsbRotStream : public Stream {
+public:
+  // RAII: this object owns the rotator's CDC port for its lifetime. The
+  // destructor is not optional -- freeRotator() deletes the transport whenever
+  // the rotator is rebuilt, disabled or moved to another wire, and without a
+  // dtor UsbSerial kept the port bound to a Stream that no longer existed. The
+  // adapter then stayed reserved (the radio's picker skips the rotator's) until
+  // reboot, which is the "turning the rotator off permanently binds the adapter"
+  // bug. Whoever owns the Stream owns the port; that is the whole invariant.
+  ~UsbRotStream();
+  bool begin();                       // bind the rotator's CDC port
+  bool ok() const;
+  int  available() override;
+  int  read() override;
+  int  peek() override;
+  void flush() override;
+  size_t write(uint8_t c) override;
+  using Print::write;
+private:
+  int _peek = -1;
+};
+
 class Rotator {
 public:
   virtual ~Rotator() {}
@@ -40,10 +111,12 @@ public:
   virtual bool rawPos(int32_t& azCnt, int32_t& elCnt) { (void)azCnt; (void)elCnt; return false; }
 };
 
-// GS-232A/B rotator via an SC16IS750/752 I2C->UART bridge on Wire1.
+// GS-232A/B rotator over any Stream (bridge, Grove UART or USB adapter).
+// The caller owns the Stream and must keep it alive for the rotator's lifetime;
+// makeRotator() builds the pair and the app deletes them together.
 class Gs232Rotator : public Rotator {
 public:
-  Gs232Rotator(uint8_t i2cAddr, uint32_t baud) : _addr(i2cAddr), _baud(baud) {}
+  explicit Gs232Rotator(Stream* s) : _s(s) {}
   void begin() override;
   bool ready() const override { return _ok; }
   bool point(float az, float el) override;
@@ -52,19 +125,11 @@ public:
   const char* name() const override { return "GS-232"; }
 
 private:
-  uint8_t  _addr;
-  uint32_t _baud;
-  bool     _ok = false;
-
-  // SC16IS750 I2C-UART bridge register access (Wire1).
-  void    wreg(uint8_t reg, uint8_t val);
-  uint8_t rreg(uint8_t reg);
-  bool    bridgeInit();
-  // Byte-level UART through the bridge.
-  void    putc_(char c);
-  void    puts_(const char* s);
-  int     getc_();                 // -1 if no byte ready
-  void    flushIn();
+  Stream* _s;
+  bool    _ok = false;
+  void    puts_(const char* s) { if (_s) _s->print(s); }
+  int     getc_()              { return (_s && _s->available()) ? _s->read() : -1; }
+  void    flushIn()            { if (_s) while (_s->available()) _s->read(); }
 };
 
 // Easycomm I/II/III rotator over the same SC16IS750/752 I2C->UART bridge.
@@ -80,8 +145,7 @@ private:
 class EasycommRotator : public Rotator {
 public:
   // ver: 1 = Easycomm I (integer AZ/EL), 2 = II, 3 = III (II/III identical here).
-  EasycommRotator(uint8_t i2cAddr, uint32_t baud, uint8_t ver)
-    : _addr(i2cAddr), _baud(baud), _ver(ver ? ver : 2) {}
+  EasycommRotator(Stream* s, uint8_t ver) : _s(s), _ver(ver ? ver : 2) {}
   void begin() override;
   bool ready() const override { return _ok; }
   bool point(float az, float el) override;
@@ -91,10 +155,10 @@ public:
     return _ver == 1 ? "Easycomm I" : _ver == 3 ? "Easycomm III" : "Easycomm II";
   }
 private:
-  uint8_t _addr; uint32_t _baud; uint8_t _ver; bool _ok = false;
-  void wreg(uint8_t reg, uint8_t val); uint8_t rreg(uint8_t reg);
-  bool bridgeInit();
-  void putc_(char c); void puts_(const char* s); int getc_(); void flushIn();
+  Stream* _s; uint8_t _ver; bool _ok = false;
+  void puts_(const char* s) { if (_s) _s->print(s); }
+  int  getc_()              { return (_s && _s->available()) ? _s->read() : -1; }
+  void flushIn()            { if (_s) while (_s->available()) _s->read(); }
 };
 
 // SPID Rot2Prog (MD-01/02, ROT2PROG) rotator over the same I2C->UART bridge.
@@ -107,7 +171,7 @@ private:
 // the controller's pulses-per-degree (commonly 1 or 2); we use 1 (whole-degree).
 class SpidRotator : public Rotator {
 public:
-  SpidRotator(uint8_t i2cAddr, uint32_t baud) : _addr(i2cAddr), _baud(baud) {}
+  explicit SpidRotator(Stream* s) : _s(s) {}
   void begin() override;
   bool ready() const override { return _ok; }
   bool point(float az, float el) override;
@@ -115,11 +179,11 @@ public:
   void stop() override;
   const char* name() const override { return "SPID Rot2Prog"; }
 private:
-  uint8_t _addr; uint32_t _baud; bool _ok = false;
+  Stream* _s; bool _ok = false;
   static constexpr int RES = 1;            // pulses/degree (whole-degree control)
-  void wreg(uint8_t reg, uint8_t val); uint8_t rreg(uint8_t reg);
-  bool bridgeInit();
-  void putb_(uint8_t b); int getb_(uint32_t toMs); void flushIn();
+  void putb_(uint8_t b) { if (_s) _s->write(b); }
+  int  getb_(uint32_t toMs);               // blocking-with-timeout read
+  void flushIn()        { if (_s) while (_s->available()) _s->read(); }
 };
 
 // rotctld (Hamlib "NET rotctl") TCP client. CardSat is the client; a rotctld
@@ -212,9 +276,16 @@ private:
   static bool cnt2deg(int32_t c, int c0, int cF, float dmax, float& outDeg);
 };
 
-// Build the configured rotator backend. Caller owns the returned object.
-//   type 0 = GS-232 (ROT_GS232) on the I2C->UART bridge
-//   type 1 = rotctld (ROT_NET) to host:port over TCP
-//   type 2 = PstRotator (ROT_PST) UDP control to host:port
+// Build the configured rotator backend AND its transport. The caller owns both
+// and must free them together -- freeRotator() does exactly that, and the app
+// calls it rather than a bare delete, because deleting the Rotator alone would
+// leak the Stream it is still pointing at.
+//
+//   type      : ROT_* from settings.h (GS232 / NET / PST / EASYCOMM1..3 / SPID)
+//   transport : ROT_XPORT_* -- ignored by the network backends (NET, PST), which
+//               carry their own socket and never touch a serial Stream.
 // (ROT_YAESU is built by the app, which supplies calibration -- not here.)
-Rotator* makeRotator(uint8_t type, uint32_t baud, const char* host, uint16_t port);
+Rotator* makeRotator(uint8_t type, uint8_t transport, uint32_t baud,
+                     const char* host, uint16_t port);
+// Free a rotator built by makeRotator(), including its transport Stream.
+void     freeRotator(Rotator* r);

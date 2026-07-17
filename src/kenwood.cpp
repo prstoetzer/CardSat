@@ -17,6 +17,11 @@ static inline void kwLog(const char*, const String&) {}
 #endif
 
 void KenwoodRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
+  // CAT_USB: transport already open (see Rig::setExternalStream). The adapter's
+  // driver owns framing; the baud-dependent stop-bit logic below is a property of
+  // the on-board UART path only.
+  if (extStream) { _stream = extStream; (void)baud; (void)uartNum;
+                   (void)rxPin; (void)txPin; return; }
   static HardwareSerial* hs = nullptr;
   if (!hs) hs = new HardwareSerial(uartNum);
   // Kenwood CAT framing is 8 data bits, no parity. Stop bits are baud-dependent:
@@ -50,6 +55,18 @@ char KenwoodRig::modeDigit(RigMode m) {
   }
 }
 
+// Discard whatever is already buffered, with a HARD bound. A bare
+// `while (_stream->available()) _stream->read();` never returns against a stream
+// that supplies bytes as fast as they are read -- which a USB serial adapter can.
+void KenwoodRig::drainStale() {
+  if (!_stream) return;
+  const uint32_t t0 = millis();
+  unsigned n = 512;
+  while (_stream->available() > 0 && n-- && millis() - t0 < 20) {
+    if (_stream->read() < 0) break;              // -1: stream gone
+  }
+}
+
 bool KenwoodRig::sendCmd(const String& cmd) {
   if (!_stream) return false;
   kwLog("TX", cmd);
@@ -73,14 +90,29 @@ bool KenwoodRig::setModeKw(RigMode m) {
 
 bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
   if (!_stream || !RADIOS[_model].canReadFreq) return false;
-  while (_stream->available()) _stream->read();    // clear stale bytes
+  drainStale();                                    // bounded (never spins)
   sendCmd("FA;");                                  // query VFO A (downlink)
   // Collect the reply up to the ';' terminator within a short window.
-  String rx; uint32_t t0 = millis();
-  while (millis() - t0 < 250) {
-    while (_stream->available()) {
-      char c = (char)_stream->read();
-      rx += c; t0 = millis();
+  // HARD deadline, fixed at entry, and a bounded reply. The old loop reset t0 on
+  // every byte (a deadline that cannot expire while bytes arrive) AND appended to an
+  // uncapped String -- so a chatty stream both span forever and grew the String until
+  // the heap gave out. Over USB CAT that is reachable with a wrong baud or a floating
+  // RX line. A Kenwood reply is "FA" + 11 digits + ';' = 14 chars; 64 is generous.
+  // Inactivity window (250 ms, as the original) + 800 ms ceiling. Same shape as
+  // civ.cpp's loops: a 1200-baud reply ("FA"+11 digits+';' = 117 ms of bus time
+  // plus radio processing) is collected byte-by-byte with the window extending,
+  // while a stream that never goes quiet hits the ceiling and returns. The 64-char
+  // cap already bounds memory; this bounds time without penalizing slow bauds.
+  String rx; rx.reserve(64);
+  const uint32_t t0 = millis(); uint32_t lastByteMs = t0;
+  while (millis() - lastByteMs < 250 && millis() - t0 < 800) {
+    unsigned guard = 64;                           // always fall through to the test
+    while (_stream->available() > 0 && guard--) {
+      const int rc = _stream->read();
+      if (rc < 0) break;                          // -1: stream gone, not a byte
+      char c = (char)rc;                          // always CONSUME
+      if (rx.length() < 64) rx += c;
+      lastByteMs = millis();
       if (c == ';') break;
     }
     if (rx.endsWith(";")) break;

@@ -30,10 +30,18 @@ static inline void yaLog(const char*, const uint8_t*, size_t) {}
 #endif
 
 void YaesuRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
+  // CAT_USB: transport already open (see Rig::setExternalStream). NOTE for the
+  // future: Yaesu CAT is 8N2, and the USB adapter must be configured for 2 stop bits
+  // by the caller (EspUsbHostCdcSerial::setConfig) -- this backend cannot do it,
+  // because it does not know what kind of Stream it has been handed.
+  if (extStream) { _stream = extStream; (void)baud; (void)uartNum;
+                   (void)rxPin; (void)txPin; }
+  else {
   static HardwareSerial* hs = nullptr;
   if (!hs) hs = new HardwareSerial(uartNum);
   hs->begin(baud, SERIAL_8N2, rxPin, txPin);   // Yaesu CAT = 8N2
   _stream = hs;
+  }
   const uint8_t catOn[5] = { 0x00, 0x00, 0x00, 0x00, 0x00 };  // enable CAT
   send(catOn);
 }
@@ -68,6 +76,20 @@ void YaesuRig::freqToBcd(uint32_t hz, uint8_t out[4]) {
   out[3] = (uint8_t)((((f/10)%10)<<4)       | (f%10));
 }
 
+// Bounded, -1-safe RX flush. A bare `while (_stream->available()) _stream->read();`
+// has TWO ways to hang: an HWCDC/USBCDC whose port was closed returns -1 for
+// available() (and `while (-1)` is true -- this exact pattern froze USB CAT via
+// App::serviceSerialCli), and a USB adapter can supply bytes as fast as they are
+// read. `> 0` fixes the first, the count and time caps fix the second.
+void YaesuRig::drainStale() {
+  if (!_stream) return;
+  const uint32_t t0 = millis();
+  unsigned n = 512;
+  while (_stream->available() > 0 && n-- && millis() - t0 < 20) {
+    if (_stream->read() < 0) break;
+  }
+}
+
 bool YaesuRig::send(const uint8_t cmd[5]) {
   if (!_stream) return false;
   yaLog("TX", cmd, 5);
@@ -76,7 +98,7 @@ bool YaesuRig::send(const uint8_t cmd[5]) {
   _stream->flush();
   delay(_postMs);              // Yaesu CAT dislikes back-to-back fast writes
   // Yaesu set commands are not acknowledged; drain any stray bytes.
-  while (_stream->available()) _stream->read();
+  drainStale();
   return true;
 }
 
@@ -106,15 +128,21 @@ uint32_t YaesuRig::bcdToFreq(const uint8_t in[4]) {
 // FT-736R has no read path (canReadFreq is false for it).
 bool YaesuRig::readSubFreq(uint32_t& hzOut) {
   if (!_stream || !RADIOS[_model].canReadFreq) return false;
-  while (_stream->available()) _stream->read();                 // flush stale bytes
+  drainStale();                                                 // flush stale bytes
   const uint8_t cmd[5] = { 0x00, 0x00, 0x00, 0x00, 0x13 };      // read SAT-RX
   yaLog("TX", cmd, 5);
   catTrace("TX", cmd, 5);
   _stream->write(cmd, 5);
   _stream->flush();
-  uint8_t r[5]; size_t n = 0; uint32_t t0 = millis();
-  while (millis() - t0 < 200 && n < 5) {
-    if (_stream->available()) { r[n++] = (uint8_t)_stream->read(); t0 = millis(); }
+  // HARD deadline, fixed at entry. `t0 = millis()` was reset on every byte, which
+  // cannot expire while bytes keep arriving. On the G1/G2 UART a silent radio ends
+  // the loop; over USB CAT (echo, baud mismatch, noise on a floating RX) it spins
+  // with no yield -- no watchdog, no crash, frozen screen. Same defect as civ.cpp's
+  // drainEcho/readPtt/readFreqCiv had; every wire-level backend carried it.
+  uint8_t r[5]; size_t n = 0;
+  const uint32_t deadline = millis() + 200;
+  while ((int32_t)(millis() - deadline) < 0 && n < 5) {
+    if (_stream->available()) r[n++] = (uint8_t)_stream->read();
     else delay(1);
   }
   if (n) catTrace("RX", r, n);

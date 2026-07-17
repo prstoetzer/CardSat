@@ -2135,7 +2135,7 @@ The passband position is *not* persisted (it's per-pass); calibration *is*.
 
 Per-satellite calibrations are stored as a plain-text file, so you can author or
 bulk-edit them on a computer instead of nudging each bird by hand. With the
-microSD removed (or over USB mass storage), open **`/CardSat/calib.txt`**. Each
+microSD removed and put in a computer, open **`/CardSat/calib.txt`**. Each
 line is one satellite:
 
 ```
@@ -2941,6 +2941,13 @@ CardSat prints **every CAT frame it sends** to the serial monitor at **115200
 baud**, decoded, with the radio's reply where the protocol provides one. Connect
 over USB, open a serial monitor at 115200, and you'll see traffic like:
 
+> **If you drive the radio over USB, the console is gone.** Engaging USB CAT (or a USB
+> rotator) claims the S3's one USB PHY, and it does not come back until reboot — so there
+> is no serial monitor to watch. Two ways round it: run the radio on **Grove** and keep
+> the console, or turn on **Settings → Log → `Console to file`** and read the trace from
+> `/CardSat/Logs/console.log` afterwards (web files portal, or pull the card). See
+> *Logs on disk* below.
+
 Icom (CI-V):
 ```
 [CI-V TX] FE FE A2 E0 07 D1 FD  sel-band SUB
@@ -2977,6 +2984,47 @@ it carries are the same ones shown above). Silence a backend by setting `CIV_DEB
 `YAESU_DEBUG` / `KW_DEBUG` / `ICOMNET_DEBUG 0` at the top of
 `civ.cpp` / `yaesu.cpp` / `kenwood.cpp` / `icomnet.cpp` and rebuild.
 
+### Logs on disk (`/CardSat/Logs`)
+
+Everything below is retrievable through the **web files portal** (or by pulling the card),
+and works identically whether CardSat is on an SD card or bare internal flash.
+
+**`/CardSat/Logs/usb.log`** — the USB story for *both* ports, in one file, in order.
+Written automatically; nothing to turn on. CAT lines are prefixed `cat:` and rotator lines
+`rot:`, because once a radio and a rotator are both in play an unprefixed line is
+ambiguous:
+
+```
+20268 cat: allocating USB host heap=85720 largest=31732
+20437 rot: adapter[0] addr=1 FTDI FT232R 0403:6001 key=0403:6001/A50285BI
+20514 cat: bind: done heap=56648 largest=31732
+```
+
+Every engage, bind, failure and teardown lands here with the free heap and largest
+contiguous block at that moment — so the same file that names a failure also profiles what
+it cost. A refusal always writes its reason (`No USB serial adapter detected`, `Only
+adapter is the radio's`, `That adapter is the rotator's`).
+
+**`/CardSat/Logs/console.log`** — **Settings → Log → `Console to file`**, default **off**.
+Mirrors the *entire* serial console to disk. This exists because engaging USB takes the
+console away for the session, which is exactly when you most want a trace.
+
+**Size is capped and cannot run away.** Each log is limited and rotates once to `.1`:
+roughly **32 KB total on flash**, **512 KB on SD**. An uncapped log on a flash-only
+Cardputer would fill the same filesystem the GP cache and your config live on. Delete the
+`/CardSat/Logs` folder to reclaim all of it.
+
+**What console capture costs.** Writes are buffered, so with capture on it is about **0.5%
+of the main loop** while Doppler tracking, and nothing measurable when off. The honest
+caveat: a **hard crash loses whatever is still in the buffer** — usually the last line or
+two. The buffer is flushed on every reboot CardSat performs itself and before a USB
+engage, and the USB trace above is written *unbuffered*, so the one trace that has to
+survive a freeze always does.
+
+> **Leave it off unless you are diagnosing something.** It is a diagnostic, not a feature —
+> the cost is small but it is not zero, and the log will happily record thousands of lines
+> of Doppler chatter you will never read.
+
 ### CAT self-test
 
 **Settings → Radio / CAT → Run CAT self-test** exercises the whole CAT link in one
@@ -3011,9 +3059,24 @@ backends, chosen in Settings with **Rot type**:
 
 - **GS-232** — a directly-attached controller speaking the **Yaesu GS-232A/B**
   protocol (a Yaesu G-5500 with a GS-232B, a SPID controller in GS-232 mode, or any
-  GS-232 emulator: K3NG / RadioArtisan / ERC). Because all three ESP32-S3 UARTs are
-  already in use (USB, CAT, GPS), this link is created by an **I2C->UART bridge**
-  (SC16IS750/752) on a second I2C bus, so it coexists with the radio and GPS.
+  GS-232 emulator: K3NG / RadioArtisan / ERC).
+
+**Which wire a serial rotator runs on is a separate setting: `Rot wire`.** The protocol
+(`Rot type`) and the transport are independent, so any of GS-232, Easycomm or SPID works
+over any of these three:
+
+- **I2C bridge** (default) — an **SC16IS750/752 I2C→UART bridge** on a second I2C bus.
+  This is what every pre-0.9.58 configuration meant, and it is still the only option that
+  coexists with *both* a Grove radio and a Grove GPS.
+- **Grove G1/G2** — the Cardputer's Grove port, driven directly. **The Cardputer has one
+  Grove port**, and wired CI-V CAT and the Grove GPS use the same two pins, so this needs
+  **CAT on USB or LAN** and **GPS not on Grove**. CardSat enforces that both ways: it
+  refuses a Grove rotator while Grove is taken, and if you later put CAT or GPS on Grove
+  the rotator **yields** to the I2C bridge and tells you.
+- **USB adapter** — a USB↔serial adapter on the USB-C port, sharing the resident USB host
+  with USB CAT. Engaging USB claims the S3's one USB PHY, so the **serial console closes
+  for the rest of the session** (see §16). Rotator-only works; radio *and* rotator
+  together is supported but **experimental** — see *Two USB adapters* below.
 - **Easycomm I / II / III** — the open, plain-ASCII tracking protocol used by
   **SatNOGS, K3NG, ERC** and most homebrew rotator controllers (the same protocol
   Hamlib's `easycomm` backends speak). Choose the version your controller expects:
@@ -3048,6 +3111,44 @@ backends, chosen in Settings with **Rot type**:
 Only one rotator is active at a time. The pointing logic — alignment offsets,
 deadband, flip mode, park-on-LOS — is identical for all of them; **Rot type** only
 changes how the final azimuth/elevation reaches the hardware.
+
+
+#### Two USB adapters: radio and rotator at once (experimental)
+
+With **one** adapter there is nothing to configure: whichever port engages takes it, and
+the other is refused rather than both binding the same wire.
+
+With **two** — say an IC-9700 on a hub plus a rotator adapter — assign them explicitly:
+
+1. **Settings → Radio → `Scan USB adapters`** (the same row exists under Rotator). This
+   brings the USB host up and enumerates. It is a deliberate keypress because it closes
+   the serial console for the session; that should be your choice, not a side effect of
+   opening a menu.
+2. **`Radio USB:`** — cycle to the adapter driving the radio.
+3. **`Rot USB:`** — cycle to the other one. The radio's adapter is **skipped**: visible in
+   the list but not selectable, so you can see it is taken. The same applies in reverse.
+
+Selections persist by a stable key — the adapter's **serial number** where it reports one
+(FTDI and CP210x usually do; CH340 usually does not), else VID:PID plus address. Two
+adapters of the *same model with no serial numbers* can only be told apart by address, so
+**re-check the selection after replugging those**.
+
+`Auto` (the default) means *"the only adapter that is not the other port's"*. With two
+adapters and neither nominated, engage **refuses** rather than guessing — enumeration
+order is not a decision.
+
+> **Untested.** This path has never had a radio and a rotator plugged in together. The
+> hazard it guards against is real: left at the library's default, two ports both bind the
+> *first* enumerated adapter and the radio's Doppler writes land on the rotator. CardSat
+> binds explicit addresses to prevent that, but treat the combination as experimental.
+
+**IC-9100 / IC-9700 owners:** those radios present an internal hub carrying both a serial
+port and a **USB Audio** device. CardSat does not use USB audio, and audio can never be
+mistaken for the CAT port — a serial candidate needs a *bulk* endpoint, and audio streams
+are *isochronous*. What audio costs is a device slot's worth of enumeration: a 9700 is a
+composite device (one USB address, two interfaces), so a 9700 plus a rotator adapter is
+**3 devices** of the 4-slot budget. If you ever see a slot-exhaustion error, that is the
+signal — it is reported explicitly rather than as a vague "no device".
 
 ### Wiring
 

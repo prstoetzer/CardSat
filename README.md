@@ -16,10 +16,27 @@ transit prediction, sun/eclipse status, and more.
 > **Single-pin CI-V is confirmed working on an IC-821** (full bidirectional exchange
 > over one wire). The other per-protocol CAT encoders (separate-pin CI-V, Yaesu,
 > Kenwood), the **Icom LAN (RS-BA1)** backend, and the rotator backends are host-tested
-> but not yet confirmed against that specific hardware — verify those on the air. See
+> but not yet confirmed against that specific hardware — verify those on the air.
+> **CAT over USB is confirmed on an IC-821 + FTDI**; running a radio and a rotator on USB
+> *at the same time* is built and guarded but has never been tested with two adapters. See
 > **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)**. What stands between here and a
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
+
+> **New in v0.9.58:** **CAT over USB, rotators on any wire, and logs that outlive the console.**
+> A fourth CAT transport — a **USB↔serial adapter** on the USB-C port, no level shifter — works for
+> every protocol and every radio, and is **bench-proven on an IC-821** through engage, disengage and
+> re-engage. The three serial **rotator** protocols (GS-232, Easycomm I/II/III, SPID) now run over
+> the **I2C bridge, the Grove port, or a USB adapter**, chosen as a separate setting from the
+> protocol; CardSat enforces the one-Grove-port rule in both directions. Radio **and** rotator can
+> share the USB host, each bound to an explicitly chosen adapter — *experimental, untested with two
+> adapters*. Engaging USB claims the S3's one USB PHY and the console does not come back, so the
+> diagnostics moved: **`/CardSat/Logs`** holds a capped USB trace, and **Console to file** (Settings
+> → Log, default off) mirrors the whole serial console to disk — retrievable from the web files
+> portal, on SD or bare flash. Plus **~23 KB more free heap** (`.bss` 145,904 → 122,336), a
+> **rotator setting that stopped silently reverting to GS-232 on every boot**, and a task-watchdog
+> reset during LoTW uploads, removed.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.58.md)**.
 
 > **New in v0.9.57:** **BASIC that can see the sky, and a lot more that prints.** Tiny BASIC
 > programs can now read the system's own data as bare names — `SATAZ`, `SATEL`, `AOSIN`, `SFI`,
@@ -293,6 +310,7 @@ See **[MANUAL.md](MANUAL.md)** for the complete guide.
 | **[docs/FEATURES.md](docs/FEATURES.md)** | Full, detailed feature list. |
 | **[docs/BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md)** | Prebuilt binaries, upgrading, building from source. |
 | **[docs/WIRING.md](docs/WIRING.md)** | CAT, GPS, and rotator wiring. |
+| **[docs/interfaces/ROTATOR_TRANSPORTS.md](docs/interfaces/ROTATOR_TRANSPORTS.md)** | Rotator over I2C bridge, Grove G1/G2 or USB: which wires conflict, and the radio+rotator-on-USB guardrails. |
 | **[docs/RADIOS.md](docs/RADIOS.md)** | Per-radio behavior: bands, sat mode, read-back. |
 | **[docs/THINGS_TO_VERIFY.md](docs/THINGS_TO_VERIFY.md)** | What's confirmed on hardware vs still to test on the air. |
 | **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)** | What stands between here and 1.0: blockers, deferred work, and the decisions behind them. |

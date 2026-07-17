@@ -14,6 +14,7 @@
 #include "irbeacon.h"
 #include "lora.h"
 #include "lorarx.h"   // general LoRa RX / hex monitor (feature-guarded)
+#include "usbserial.h" // CAT_USB transport: UsbSerial::Stage for the onStage hook
 
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
@@ -23,7 +24,7 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -223,14 +224,31 @@ private:
   void drawActDopp();    void keyActDopp(char c, bool enter, bool back);
   void dxdStepAnchorToHz(uint32_t targetHz);  // park anchored dial on a specific freq (activation)
 
-  // 10-day pass overview (InstantTrack-style), cached on entry
-  PassPredict visPasses[VIS_PASS_MAX];
+  // ---- Shared pass scratch buffer -------------------------------------------------
+  // ONE PassPredict[VIS_PASS_MAX] (~5 KB) serves three consumers that are never live
+  // at the same time. Previously the 10-day chart and the visible-pass list each had
+  // their own array, costing ~10 KB of resident .bss for data that is rebuilt on
+  // every entry.
+  //
+  // THE CONTRACT: the buffer belongs to whoever built into it LAST. Every consumer
+  // rebuilds before reading, so nothing may hold an index or pointer across a screen
+  // change. Verified for every navigation path:
+  //   * SCR_VIS      (10-day chart) : keyPasses 'v' calls buildVis() on entry
+  //   * SCR_VISLIST  (visible list) : keyPasses 'V' calls buildVisList() on entry
+  //   * buildOrbit()                : uses it as pure scratch (it already did exactly
+  //                                   this to the 10-day array before the merge)
+  //   * printTenDay()/printVisList(): each calls its own builder first, because both
+  //                                   are reachable from About > Print with nothing built
+  //   * buildPassDetail()           : COPIES the pass (pdPass = p), holds no reference
+  //
+  // visN and vlN are the per-consumer counts; only the one whose builder ran last is
+  // meaningful. Do not add a consumer that reads without building.
+  PassPredict passScratch[VIS_PASS_MAX];
+  // 10-day pass overview (InstantTrack-style), built on entry into passScratch[]
   int      visN = 0;
   int      visDayOff = 0;         // 10-day overview start offset from today, in DAYS (>=0)
   // Visible-passes LIST screen (SCR_VISLIST): optically-visible passes for the
-  // active sat over the next VIS_DAYS days, as a scrollable list (distinct from
-  // the 10-day chart above).
-  PassPredict vlPasses[VIS_PASS_MAX];
+  // active sat over the next VIS_DAYS days, built on entry into passScratch[].
   int      vlN = 0;
   int      vlSel = 0;
   int      vlScroll = 0;
@@ -299,8 +317,14 @@ private:
   int      simStepIdx = 2;          // index into SIM_STEP[] (1m/10m/1h/6h/1d)
   int      homeScroll = 0;          // scroll offset for the (now scrollable) home menu
   // Voice-memo browser (SCR_MEMOS): list of memos on the SD card, newest first.
-  VoiceMemo::MemoEntry memos[MEMO_LIST_MAX];
-  int      memoN = 0;               // number of memos currently listed
+  // Heap-allocated on entry and freed on leaving the screen: MEMO_LIST_MAX x
+  // sizeof(MemoEntry) is ~6.6 KB, and this is a directory listing for one rarely
+  // visited screen. Held resident it was ~6.6 KB of .bss -- and because App is a
+  // `static` object, .bss sits below the heap, so every byte here directly lowers
+  // both free heap AND the largest contiguous block that a TLS upload needs.
+  // Freed by the screen-transition hook in loop(); see memoFree().
+  VoiceMemo::MemoEntry* memos = nullptr;
+  int      memoN = 0;               // number of memos currently listed (0 when freed)
   int      memoSel = 0;             // selected row
   int      memoScroll = 0;          // scroll offset
   bool      memoConfirmDel = false; // true while a delete confirmation is pending
@@ -1048,7 +1072,12 @@ private:
                                                // (free their sockets) before a
                                                // blocking download; they auto-rebuild
   static App* s_self;                          // for the static Net TLS hook to reach us
+  bool usbTickTrace = false;                   // trace the first CAT tick after engage
   static void tlsBusyTrampoline(bool busy);    // Net::onTlsBusy target
+#if CARDSAT_HAS_USBCAT
+  static void usbStageTrampoline(UsbSerial::Stage s);
+  static void usbRotTraceTrampoline(const char* line);  // UsbSerial::onStage target
+#endif
   static void catMonTrampoline(const char* dir, const uint8_t* b, size_t n);  // CatTraceFn target
   static int  s_fetchDepth;                    // >0 while any outbound fetch is active
   static bool netFetchActive();                // service*() skip rebuild while true
@@ -1065,6 +1094,11 @@ private:
   void webdSendFileList(const String& path);   // GET /api/files?dir=... (JSON dir listing)
   void webdSendFile(const String& path);       // GET /api/file?path=... (stream a download)
   void applyRotatorFromCfg();
+  const char* rotTransportConflict() const;   // nullptr = transport is free
+  void        yieldGroveIfTaken(const char* who);  // CAT/GPS just claimed Grove
+  void        scanUsbAdapters();
+  void        cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio);
+  String      usbAdapterLabel(const char* key) const;
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
@@ -1422,6 +1456,16 @@ private:
   void basicInit();                 // open the editor (seed a sample on first use)
   void basicRun();           // execute basicBuf -> basicOut / basicErr
   void basicFree();          // release the BASIC output buffer when leaving the tool
+  void memoFree();           // release the voice-memo list when leaving its screen
+  void drawPerf(); void keyPerf(char c, bool enter, bool back);   // performance monitor
+  // Performance monitor (SCR_PERF): a live on-device view of the numbers that
+  // memtrace only ever showed over USB serial. The 0.9.57 heap bug was found because
+  // a laptop happened to be attached; in the field there is no console.
+  uint32_t perfMinFree = 0xFFFFFFFF;   // smallest free heap seen since boot
+  uint32_t perfMinBlk  = 0xFFFFFFFF;   // smallest largest-free-block seen since boot
+  uint32_t perfLoopMax = 0;            // slowest loop() seen, microseconds
+  uint32_t perfLoopAvg = 0;            // rolling average loop time, microseconds
+  uint32_t perfLastLoopUs = 0;         // timestamp of the previous loop() entry
   Screen   lastScreenSeen = SCR_HOME;   // screen-transition housekeeping (see loop())
   bool basicSave();  bool basicLoad(const char* base);
 
@@ -1830,7 +1874,7 @@ private:
                      PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
                      PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
-                     PR_STATES, PR_DXCCLIST, PR_VISLIST };
+                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -1866,6 +1910,7 @@ private:
   void printStates();        // workable US states (the list, not just the count)
   void printDxccList();      // workable DXCC entities (the list)
   void printVisList();       // visible-pass list (10 days)
+  void printPerf();          // performance/heap snapshot (diagnostic)
   int  buildFavPasses(time_t from, time_t to, uint32_t* norads, time_t* aoss,
                       uint8_t* els, uint16_t* azs, uint16_t* durs, int maxN);  // shared pass gather
   bool     audioUp = false;                    // is the speaker currently begun?

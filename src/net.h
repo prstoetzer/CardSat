@@ -178,4 +178,6 @@ public:
   // Guarding here (the single choke point) covers every fetch -- GP, weather,
   // space weather, AMSAT, transponders, QRZ -- without per-call-site discipline.
   static void (*onTlsBusy)(bool busy);
+  static bool tlsHeapTooLow();   // contiguous heap too small for a TLS handshake
+                                 // (USB CAT engaged leaves ~7 KB largest block)
 };

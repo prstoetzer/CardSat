@@ -29,7 +29,19 @@ enum CatType : uint8_t {
   CAT_WIRED = 0,   // CI-V over the TTL UART (default)
   CAT_NET   = 1,   // Icom LAN (RS-BA1 UDP): control 50001 + serial 50002
   CAT_RIGCTL = 2,  // rigctld (Hamlib NET rigctl) client: drive a remote rig over TCP
+  CAT_USB   = 3,   // USB<->serial adapter (FTDI/CP210x/CH34x) on the USB-C port.
+                   // Works for ANY wire-level protocol (CI-V/Yaesu/Kenwood): the
+                   // transport is swapped, the dialect is unchanged. Only present
+                   // when built with CARDSAT_HAS_USBCAT=1; see usbserial.h.
 };
+// How many CAT transports the Settings row cycles through. CAT_USB is only
+// selectable when the feature is compiled in, so a build without it behaves
+// exactly as before -- the operator cannot land on an unimplemented transport.
+#if CARDSAT_HAS_USBCAT
+static constexpr uint8_t CAT_TYPE_N = 4;
+#else
+static constexpr uint8_t CAT_TYPE_N = 3;
+#endif
 
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
 // rotctld server reached over TCP (CardSat is the client).
@@ -43,6 +55,17 @@ enum RotType : uint8_t {
   ROT_EASYCOMM3 = 6,  // Easycomm III (II grammar + velocity) via the bridge
   ROT_SPID      = 7,  // SPID Rot2Prog (MD-01/02) binary via the bridge
 };
+
+// Which wire a SERIAL rotator protocol runs on (settings: rotTransport).
+// Orthogonal to rotType: any of GS-232/Easycomm/SPID over any of these.
+enum RotTransport : uint8_t {
+  ROT_XPORT_BRIDGE = 0,  // SC16IS750/752 I2C->UART bridge on Wire1 (default;
+                         // what every pre-0.9.58 config meant)
+  ROT_XPORT_GROVE  = 1,  // Cardputer Grove G1/G2 via UART1 -- shared with wired
+                         // CI-V and the Grove GPS; the app blocks the overlap
+  ROT_XPORT_USB    = 2,  // USB<->serial adapter on the resident EspUsbHost
+};
+static constexpr uint8_t ROT_XPORT_N = 3;
 
 // Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
 enum RotAzRange : uint8_t {
@@ -131,6 +154,18 @@ struct Settings {
   // CAT transport. CAT_NET drives the radio over the RS-BA1 LAN protocol using
   // the host/port/credentials below instead of the wired CI-V UART.
   uint8_t  catType    = CAT_WIRED;
+  // WHICH USB adapter is the radio (a UsbSerial::serialDeviceKey), when
+  // catType == CAT_USB and more than one adapter is plugged in. Empty = "use the
+  // only adapter that is not the rotator's". Symmetric with rotUsbKey; both are
+  // persisted because enumeration order is not stable across replugs but the key
+  // is (serial number when the adapter reports one -- see usbserial.cpp makeKey).
+  char     catUsbKey[40] = "";
+  // Mirror the serial console to /CardSat/Logs/console.log. Off by default: it
+  // costs ~0.5% of loopTask while tracking (buffered; see consolelog.h), and a
+  // diagnostic should be something you turn on when diagnosing, not a tax
+  // everyone pays. Survives the console being taken away by a USB engage, which
+  // is the whole point.
+  bool     consoleLog = false;
   char     catHost[40] = "";    // radio IP / hostname (catType = CAT_NET)
   uint16_t catPort     = 50001; // RS-BA1 control port (serial = +1, audio = +2)
   char     catUser[24] = "";    // radio Network User1 id
@@ -182,6 +217,18 @@ struct Settings {
   // Rotator (GS-232 over an I2C->UART bridge, or rotctld over TCP)
   bool     rotEnable   = false;
   uint8_t  rotType     = ROT_GS232;  // GS-232 (bridge) or rotctld (network)
+  // WHICH WIRE the serial protocols above run on. Separate from rotType on
+  // purpose: protocol and transport are independent, so 3 protocols x 3
+  // transports needs 3+3 settings rather than 9 enum values -- and every rotType
+  // that existed before this field keeps its meaning, so upgrading configs stay
+  // valid (the default is the bridge, which is what they were).
+  // Ignored by ROT_NET/ROT_PST, which carry their own socket.
+  uint8_t  rotTransport = ROT_XPORT_BRIDGE;
+  // WHICH USB adapter is the rotator (a UsbSerial::serialDeviceKey), when
+  // rotTransport == ROT_XPORT_USB and more than one adapter is plugged in.
+  // Empty = "use the only adapter present". Persisted because enumeration order
+  // is not stable across replugs but this key is -- see usbserial.cpp makeKey().
+  char     rotUsbKey[40] = "";
   char     rotHost[40] = "";         // rotctld server host/IP (rotType=ROT_NET)
   uint16_t rotPort     = 4533;       // rotctld TCP port (Hamlib default 4533)
   uint32_t rotBaud     = 9600;   // GS-232 serial (commonly 9600)

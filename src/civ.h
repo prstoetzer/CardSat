@@ -50,6 +50,11 @@ public:
   void    setAddress(uint8_t a) override { _addr = a; }
   uint8_t address() const       override { return _addr; }
 
+  // Clear the cached transport too (see Rig::setExternalStream). begin() copies
+  // extStream into _stream, so the base-class version alone would leave this
+  // backend pointing at a Stream the caller is about to delete.
+  void setExternalStream(Stream* s) override { Rig::setExternalStream(s); _stream = s; }
+
 private:
   Stream*    _stream = nullptr;
   RadioModel _model;
@@ -68,5 +73,6 @@ private:
   bool   readFreqCiv(bool sub, uint32_t& hzOut);
   static CivMode toCiv(RigMode m);
   static void freqToBcd(uint32_t hz, uint8_t out[5]);
+  void   drainStale();                        // bounded RX flush (never spins)
   bool   drainEcho(uint32_t timeoutMs = 60);  // CI-V is a shared bus: read back
 };

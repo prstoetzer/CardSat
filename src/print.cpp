@@ -1,6 +1,7 @@
 #include "print.h"
 #include "storage.h"
 #include "font16x32.h"
+#include <new>              // std::nothrow raster buffers (heap-on-demand)
 
 // Three-sink report emitter with a selectable page language on the network sink.
 // Per-sink hard wrapping keeps a narrow printer inside its paper while a wider
@@ -19,7 +20,11 @@ namespace {
   // Raster mode (FMT_PWG_RASTER): report lines are COLLECTED, then rendered as a
   // page at end()/feedCut() rather than streamed as text.
   static const int RAS_MAX_LINES = 400;   // ~10 letter pages of report text
-  String     s_rasLines[RAS_MAX_LINES];
+  // Heap-on-demand (RAM Tier 1): 400 String objects are 6,400 B of .bss -- and
+  // after a raster job their CONTENTS used to stay allocated until the next job
+  // overwrote them. Allocated in begin() only for raster jobs, freed (objects AND
+  // contents) in end(). ESC/POS receipts -- the field path -- never pay for this.
+  String*    s_rasLines = nullptr;
   int        s_rasN = 0;
   bool       s_ser  = false;            // serial sink active
   bool       s_file = false;            // file sink active
@@ -219,8 +224,12 @@ namespace RasterGen {
   static const char* s_pageName = "na_letter_8.5x11in";
   static bool     s_rvalid = false;
   static uint8_t  s_rreps  = 0;
-  static uint8_t  s_rprev[2560];        // one scanline hold (max width we support)
-  static uint8_t  s_rscan[2560];        // scanline compose buffer
+  static const uint32_t RAS_SCAN_BYTES = 2560;   // max scanline width we support
+  // Heap-on-demand (RAM Tier 1): 5,120 B of permanent .bss for buffers only alive
+  // while a raster page renders. One block, allocated in Printer::begin() for
+  // raster jobs, freed in Printer::end(); s_rprev = s_rscan + RAS_SCAN_BYTES.
+  static uint8_t* s_rprev = nullptr;    // one scanline hold
+  static uint8_t* s_rscan = nullptr;    // scanline compose buffer
 
   static void rU32(uint32_t v) { uint8_t b[4]={(uint8_t)(v>>24),(uint8_t)(v>>16),(uint8_t)(v>>8),(uint8_t)v}; pRaw(b,4); }
   static void rI32(int32_t v)  { rU32((uint32_t)v); }
@@ -283,7 +292,7 @@ namespace RasterGen {
   static void flush(){ if(!s_rvalid)return; pRaw(&s_rreps,1); compress(s_rprev,s_rw); s_rvalid=false; s_rreps=0; }
   static void row(const uint8_t* r){
     if(s_rvalid && s_rreps<255 && memcmp(r,s_rprev,s_rw)==0){ s_rreps++; return; }
-    flush(); memcpy(s_rprev,r, s_rw<=sizeof(s_rprev)?s_rw:sizeof(s_rprev)); s_rvalid=true; s_rreps=0;
+    flush(); memcpy(s_rprev,r, s_rw<=RAS_SCAN_BYTES?s_rw:RAS_SCAN_BYTES); s_rvalid=true; s_rreps=0;
   }
   static void endDoc(){ flush(); }
 
@@ -354,7 +363,7 @@ namespace RasterGen {
                            int scale, int marginX, int marginY, int lineGap, bool urf) {
     // W/H are the pixel dimensions the caller computed from the paper choice; the
     // point size and PWG media name are set alongside them (see feedCut).
-    if (W > sizeof(s_rscan)) W = sizeof(s_rscan);
+    if (W > RAS_SCAN_BYTES) W = RAS_SCAN_BYTES;
     const int GH = FONT_H*scale, pitch = GH + lineGap;
     int usableH = (int)H - 2*marginY;
     int perPage = usableH / pitch;
@@ -391,6 +400,24 @@ bool begin(const Sinks& s) {
   // PWG raster is only meaningful over IPP (driverless printers); force it.
   if (s.format == FMT_PWG_RASTER || s.format == FMT_URF_RASTER) s_transport = Printer::IPP;
   s_chunkOpen = false; s_ippAccepted = false; s_rasN = 0; s_writeOk = true;
+  // Raster jobs rent their buffers for the life of the job (see the notes at the
+  // declarations). Free any stale set first -- an aborted job that never reached
+  // end() must not leak into this one.
+  if (s_rasLines) { delete[] s_rasLines; s_rasLines = nullptr; }
+  if (RasterGen::s_rscan) {
+    free(RasterGen::s_rscan);
+    RasterGen::s_rscan = nullptr; RasterGen::s_rprev = nullptr;
+  }
+  if (isRaster()) {
+    s_rasLines = new (std::nothrow) String[RAS_MAX_LINES];
+    RasterGen::s_rscan = (uint8_t*)malloc(2 * RasterGen::RAS_SCAN_BYTES);
+    if (!s_rasLines || !RasterGen::s_rscan) {
+      if (s_rasLines) { delete[] s_rasLines; s_rasLines = nullptr; }
+      if (RasterGen::s_rscan) { free(RasterGen::s_rscan); RasterGen::s_rscan = nullptr; }
+      return false;                     // caller reports begin() failure as usual
+    }
+    RasterGen::s_rprev = RasterGen::s_rscan + RasterGen::RAS_SCAN_BYTES;
+  }
   if (s.host && s.host[0]) {
     s_cli.setTimeout(4000);                       // socket read/write timeout
     // IPP rides HTTP on 631 unless the caller overrode the port; raw uses 9100.
@@ -507,10 +534,12 @@ String probeCapabilities(const char* host, uint16_t port) {
   // contain many null bytes (2-byte length prefixes), so an Arduino String would be
   // truncated at the first '\0' and miss the format tokens further in. Use a plain
   // buffer and scan it with memory search.
-  // Reuse the raster scanline workspace (s_rscan, 2560 B) -- the probe and raster
-  // rendering never run at the same time, so they can share one buffer.
-  uint8_t* buf = RasterGen::s_rscan;
-  const size_t bufCap = sizeof(RasterGen::s_rscan);
+  // One-shot heap buffer: the raster workspace this used to borrow is now itself
+  // heap-on-demand (allocated only inside a raster job), so the probe rents its
+  // own 2,560 B for the few seconds it runs.
+  const size_t bufCap = 2560;
+  uint8_t* buf = (uint8_t*)malloc(bufCap);
+  if (!buf) { cli.stop(); return String("no RAM for probe"); }
   size_t blen = 0;
   uint32_t t0 = millis();
   while (cli.connected() && (millis() - t0) < 6000 && blen < bufCap) {
@@ -535,6 +564,7 @@ String probeCapabilities(const char* host, uint16_t port) {
   if (has("image/jpeg"))        out += "JPEG ";
   if (has("application/postscript")) out += "PS ";
   if (has("PCL") || has("pcl")) out += "PCL ";
+  free(buf);                                     // token scan done; buf unused below
   if (out.length() == 0) {
     // Connected but no recognizable formats found (or empty reply).
     return blen ? String("connected; formats unknown") : String("no reply");
@@ -561,6 +591,7 @@ int cols() {
 // Append one already-wrapped line to the raster page buffer. On overflow, stamp a
 // visible truncation marker in the last slot instead of silently dropping lines.
 static void rasterPush(const String& ln) {
+  if (!s_rasLines) return;               // raster job without buffers (OOM guard)
   if (s_rasN < RAS_MAX_LINES - 1) { s_rasLines[s_rasN++] = ln; }
   else if (s_rasN == RAS_MAX_LINES - 1) { s_rasLines[s_rasN++] = String("-- report truncated --"); }
   // once full (s_rasN == RAS_MAX_LINES) further lines are dropped, marker already set
@@ -651,7 +682,7 @@ void feedCut() {
       uint8_t cut[3] = {0x1B, 0x64, 0x02}; pRaw(cut, 3); // ESC d 2 : Star partial cut
     } else if (s_fmt == FMT_ZPL) {
       zplEndLabel();                                     // ^XZ : print the label
-    } else if (isRaster()) {
+    } else if (isRaster() && s_rasLines && RasterGen::s_rscan) {
       // Render the collected report lines as a raster page and stream it now.
       const char* ptrs[RAS_MAX_LINES];
       for (int i = 0; i < s_rasN; ++i) ptrs[i] = s_rasLines[i].c_str();
@@ -701,6 +732,13 @@ void end() {
     s_cli.flush(); s_cli.stop(); s_pOK = false;
   }
   if (s_file) { s_f.close(); s_file = false; }
+  // Return the raster job's rented buffers (String objects AND their contents).
+  if (s_rasLines) { delete[] s_rasLines; s_rasLines = nullptr; }
+  s_rasN = 0;
+  if (RasterGen::s_rscan) {
+    free(RasterGen::s_rscan);
+    RasterGen::s_rscan = nullptr; RasterGen::s_rprev = nullptr;
+  }
   s_ser = false;
 }
 

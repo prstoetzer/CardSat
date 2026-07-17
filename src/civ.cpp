@@ -73,6 +73,12 @@ static inline void civLogRaw(const char*, const uint8_t*, size_t) {}
 #endif
 
 void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
+  // CAT_USB: the transport is a USB<->serial adapter, already open. Use it and do
+  // NOT touch the on-board UART or its pins -- none of the pin muxing, open-drain or
+  // signal-inversion work below applies, and doing it would disturb G1/G2 for no
+  // reason. The adapter's own driver handles framing; CI-V is 8N1 either way.
+  if (extStream) { _stream = extStream; (void)baud; (void)uartNum;
+                   (void)rxPin; (void)txPin; return; }
   static HardwareSerial* hs = nullptr;   // construct once, reuse on re-begin
   if (!hs) hs = new HardwareSerial(uartNum);
 
@@ -183,6 +189,22 @@ bool CivRig::sendFrame(const uint8_t* payload, size_t len) {
   return true;
 }
 
+// Discard whatever is already sitting in the RX buffer, with a HARD bound.
+// A bare `while (_stream->available()) _stream->read();` is an infinite loop against
+// any stream that produces bytes as fast as they are consumed -- which a USB serial
+// adapter can, and a UART generally cannot. Both call sites want "clear what is
+// there now", not "read until the end of time", so a cap is a faithful fix and not
+// a behaviour change: 512 bytes is far more than any CI-V frame or echo (longest is
+// ~11 bytes), and the time bound catches a stream that is merely fast.
+void CivRig::drainStale() {
+  if (!_stream) return;
+  const uint32_t t0 = millis();
+  unsigned n = 512;
+  while (_stream->available() > 0 && n-- && millis() - t0 < 20) {
+    if (_stream->read() < 0) break;              // -1: stream gone
+  }
+}
+
 bool CivRig::drainEcho(uint32_t timeoutMs) {
   if (!_stream) return false;
   uint32_t t0 = millis();
@@ -193,18 +215,50 @@ bool CivRig::drainEcho(uint32_t timeoutMs) {
   // Capture received bytes for the on-device serial monitor (separate small
   // buffer so it works even when CIV_DEBUG is off).
   uint8_t mon[48]; size_t mn = 0;
-  while (millis() - t0 < timeoutMs) {
-    while (_stream->available()) {
-      uint8_t b = (uint8_t)_stream->read();
+  // HARD deadline, never extended. The inner loop below used to do `t0 = millis()`
+  // on every byte received, which is a timeout that cannot expire while bytes keep
+  // arriving: the inner `while (available())` never exits, `delay(1)` is never
+  // reached, nothing yields, and the task spins forever. On a UART that was
+  // survivable -- a silent radio stops sending and the loop drains. Over USB it is
+  // not: an adapter that echoes, a wrong baud producing framing garbage, or plain
+  // noise on a floating RX line keeps available() true indefinitely. That froze the
+  // firmware at engage with no watchdog and no crash (0.9.58-wip bench: the freeze
+  // landed immediately after begin() returned, on the first CAT read).
+  //
+  // `deadline` is now fixed at entry. The inner loop additionally caps the bytes it
+  // will consume per pass, so it always returns to the outer test.
+  // INACTIVITY timeout plus an ABSOLUTE ceiling -- both, deliberately.
+  //
+  // The original loop reset its deadline on every byte: adaptive to slow bauds
+  // (at 1200 bps a set-freq echo alone is ~92 ms) but unbounded against a stream
+  // that never goes quiet -- the USB CAT freeze. The first fix (a hard deadline
+  // from entry) was bounded but NOT adaptive: 60 ms expires mid-echo at 1200 bps,
+  // stranding half a frame in the RX buffer to poison the next read. The IC-820H's
+  // documented default CI-V rate is exactly 1200 bps, so that was a real wired-path
+  // regression, caught in review before it shipped.
+  //
+  // This shape has both properties: a byte extends the deadline by timeoutMs (the
+  // old, baud-tolerant behavior), and nothing can extend it past hardCap from entry
+  // (the termination guarantee). A healthy 1200-baud bus finishes its frame with
+  // 8 ms inter-byte gaps and exits on the early tests; a chatty adapter hits the
+  // ceiling at 400 ms and returns.
+  const uint32_t hardCap = 400;
+  uint32_t lastByteMs = t0;
+  while (millis() - lastByteMs < timeoutMs && millis() - t0 < hardCap) {
+    unsigned guard = 64;                       // bytes per pass: always fall through
+    while (_stream->available() > 0 && guard--) {
+      const int rb = _stream->read();
+      if (rb < 0) break;                         // -1: stream gone, not a byte
+      uint8_t b = (uint8_t)rb;
 #if CIV_DEBUG
       if (rn < sizeof(rx)) rx[rn++] = b;
 #endif
       if (mn < sizeof(mon)) mon[mn++] = b;
       if (b == 0xFD) fd++;
-      t0 = millis();
+      lastByteMs = millis();                   // extends the inactivity window
     }
-    if (fd >= 2) break;                       // echo + ACK/NAK both arrived
-    if (fd >= 1 && millis() - t0 > 25) break;  // echo seen, radio not replying
+    if (fd >= 2) break;                        // echo + ACK/NAK both arrived
+    if (fd >= 1 && millis() - lastByteMs > 25) break;  // echo seen, radio not replying
     delay(1);
   }
   if (mn) catTrace("RX", mon, mn);     // report raw received bytes to the monitor
@@ -360,15 +414,31 @@ bool CivRig::readMainFreq(uint32_t& hzOut) { return readFreqCiv(false, hzOut); }
 // silent; after a few misses we stop polling so we don't load a single-wire bus.
 bool CivRig::readPtt(bool& tx) {
   if (!_stream || _pttRead == 0) return false;
-  while (_stream->available()) _stream->read();      // clear stale bytes
+  drainStale();                                      // bounded (see drainStale)
   uint8_t f[7] = { 0xFE, 0xFE, _addr, 0xE0, 0x1C, 0x00, 0xFD };
   civLog("TX", f, 7);
   _stream->write(f, 7);
   _stream->flush();
-  uint8_t buf[48]; size_t bn = 0; uint32_t t0 = millis();
-  while (millis() - t0 < 80) {
-    while (_stream->available() && bn < sizeof(buf)) {
-      buf[bn++] = (uint8_t)_stream->read(); t0 = millis();
+  // HARD deadline, fixed at entry. `t0 = millis()` used to be reset on every byte
+  // received, which cannot expire while bytes keep arriving -- the same defect as
+  // drainEcho had. Worse here: once bn hits sizeof(buf) the inner loop stops
+  // CONSUMING but available() stays true, so the bytes are never drained and the
+  // deadline never advances. Over USB (echo, baud mismatch, noise on a floating RX)
+  // that is an unbreakable spin with no yield: no watchdog, no crash, frozen screen.
+  // Inactivity window (80 ms, as the original) + absolute ceiling (400 ms). See
+  // drainEcho for the full rationale: at 1200 bps the echo+reply is ~125 ms of
+  // bus time, so a hard 80 ms truncates it -- the inactivity form collects the
+  // whole exchange at any baud, and the ceiling still guarantees termination.
+  uint8_t buf[48]; size_t bn = 0;
+  const uint32_t t0 = millis(); uint32_t lastByteMs = t0;
+  while (millis() - lastByteMs < 80 && millis() - t0 < 400) {
+    unsigned guard = 64;                          // always fall through to the test
+    while (_stream->available() > 0 && guard--) {
+      const int rb = _stream->read();
+      if (rb < 0) break;                         // -1: stream gone, not a byte
+      uint8_t b = (uint8_t)rb;       // always CONSUME, even if full
+      if (bn < sizeof(buf)) buf[bn++] = b;
+      lastByteMs = millis();
     }
     delay(1);
   }
@@ -405,7 +475,7 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
   // the configured CAT inter-command delay after the select, which doubles as the
   // settle time the IC-821's SUB band needs before it will report correctly.
   sub ? selectSub() : selectMain();
-  while (_stream->available()) _stream->read();      // clear stale/echo bytes
+  drainStale();                                      // bounded (see drainStale)
 
   // Send read-operating-frequency request (cmd 0x03) WITHOUT draining: we want
   // the radio's reply, which on a single-wire CI-V bus arrives after our echo.
@@ -414,10 +484,21 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
   _stream->write(f, 6);
   _stream->flush();
   // Collect the response bytes (echo + reply) for a short window.
-  uint8_t buf[48]; size_t bn = 0; uint32_t t0 = millis();
-  while (millis() - t0 < (readBudgetMs ? readBudgetMs : 150)) {
-    while (_stream->available() && bn < sizeof(buf)) {
-      buf[bn++] = (uint8_t)_stream->read(); t0 = millis();
+  // HARD deadline, fixed at entry -- see readPtt for why. This is the read the
+  // Doppler loop runs every CAT tick, so a spin here freezes tracking outright.
+  // Inactivity window (the CAT read budget, as the original) + 500 ms ceiling.
+  // See drainEcho: adaptive to slow bauds, bounded against a chatty stream.
+  uint8_t buf[48]; size_t bn = 0;
+  const uint32_t inact = (readBudgetMs ? readBudgetMs : 150);
+  const uint32_t t0 = millis(); uint32_t lastByteMs = t0;
+  while (millis() - lastByteMs < inact && millis() - t0 < 500) {
+    unsigned guard = 64;                          // always fall through to the test
+    while (_stream->available() > 0 && guard--) {
+      const int rb = _stream->read();
+      if (rb < 0) break;                         // -1: stream gone, not a byte
+      uint8_t b = (uint8_t)rb;       // always CONSUME, even if full
+      if (bn < sizeof(buf)) buf[bn++] = b;
+      lastByteMs = millis();
     }
     delay(1);
   }

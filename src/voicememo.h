@@ -75,6 +75,7 @@ private:
   uint32_t _dataBytes = 0;                     // PCM payload written so far
   char     _path[64] = {0};
   bool     _primed = false;                    // a record buffer is in flight
+  int16_t* _recBuf = nullptr;                  // 2-block ping-pong; heap only while recording
   uint8_t  _bufIdx = 0;                         // which buffer is being filled
   uint16_t _peak   = 0;                         // peak |sample| seen (silence detect)
   uint16_t _rawPeak = 0;                        // peak |raw AC| before gain (calibration)

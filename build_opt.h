@@ -1,0 +1,2 @@
+-DESP_USB_HOST_MAX_DEVICES=4
+-mtext-section-literals

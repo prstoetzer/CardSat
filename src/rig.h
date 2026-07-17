@@ -39,9 +39,36 @@ public:
   // I/O (especially the LAN backend) can't stall the cooperative main loop.
   // 0 = use the backend's built-in default. Set from the CAT cycle rate at engage.
   void setReadBudgetMs(uint16_t ms) { readBudgetMs = ms; }
+
+  // ---- External transport (USB-serial) --------------------------------------
+  // Supply a ready-made Stream for the wire-level backends to talk through,
+  // INSTEAD of them opening the on-board UART in begin(). Used by CAT_USB, where a
+  // USB<->serial adapter (FTDI/CP210x/CH34x) is the transport and the ESP32 UART is
+  // not involved at all.
+  //
+  // Why a setter rather than a new backend: the three wire-level backends
+  // (CivRig/YaesuRig/KenwoodRig) already talk through `Stream* _stream` and know
+  // nothing about what is underneath. Only their begin() binds a UART. So the whole
+  // of CAT -- every protocol, every radio, every command -- works unchanged over any
+  // Stream. Set this before begin(); begin() then skips all UART/pin setup.
+  //
+  // Lifetime: the caller owns the Stream and must keep it alive for as long as the
+  // Rig is, and must clear it (or delete the Rig) before tearing the Stream down.
+  //
+  // VIRTUAL, and it must stay that way. Each backend's begin() caches this pointer
+  // in its own `_stream` member, so clearing ONLY extStream here leaves the backend
+  // holding a second copy -- which is exactly the 0.9.58-wip fix31 crash: disengage
+  // cleared extStream, UsbSerial::end() deleted the CDC object, and the next CAT
+  // call dereferenced the backend's stale _stream (loopTask LoadProhibited in the
+  // rig path, right after "end: done"). The bug was latent for as long as the
+  // caching existed and only became fatal when end() started actually deleting.
+  // Overrides clear BOTH, so one call from the caller is enough.
+  virtual void setExternalStream(Stream* s) { extStream = s; }
+  Stream* externalStream() const { return extStream; }
 protected:
   uint16_t cmdDelayMs = 70;
   uint16_t readBudgetMs = 0;
+  Stream*  extStream = nullptr;      // non-null => begin() must not touch the UART
 public:
 
   // Independent downlink (Sub/RX) and uplink (Main/TX) control.

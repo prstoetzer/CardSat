@@ -2,12 +2,15 @@
 //  app.cpp  -  UI state machine, rendering, and real-time Doppler control
 // ===========================================================================
 #include "app.h"
+#include "usbserial.h"   // CAT_USB transport (compiled out unless CARDSAT_HAS_USBCAT)
 #include "print.h"
 #include "config.h"
 #include <M5Cardputer.h>
 #include <LittleFS.h>
 #include "storage.h"
 #include "lotw.h"        // LoTW .tq8 build + upload (SD-required)
+#include "logstore.h"   // capped console/USB logs in /CardSat/Logs
+#include "consolelog.h"  // Serial tee -> console.log (Settings toggle)
 #include "lotw_subdiv.h"
 #include "dxcc_lookup.h" // DXCC entity lookup table (generated from ARRL list)
 #include "cqzones.h"      // CQ WAZ zone definitions (generated from cqww.com)
@@ -20,6 +23,7 @@
 #include <esp_sleep.h>   // deep-sleep-until-next-pass
 #include <esp_system.h>  // esp_reset_reason() for validating RTC-held batch state
 #include <esp_heap_caps.h>   // heap_caps_get_largest_free_block() for the TLS sprite-free
+#include <esp_core_dump.h>   // read the panic backtrace back on the next boot
 
 // LoTW multi-batch upload state, persisted in RTC RAM across the DELIBERATE
 // ESP.restart() we issue between batches. Rationale: a full log's .tq8 body can
@@ -138,6 +142,58 @@ static String fmtCountdown(long s) {
 
 // --- GP element-set age (staleness) ---------------------------------------
 // The epoch is stored directly as Unix seconds when the GP record is parsed.
+// ---- Deep-space orbit label ---------------------------------------------------
+// True for orbits the propagator handles with the DEEP-SPACE model (SDP4) rather
+// than the near-Earth one: period >= 225 min, i.e. mean motion <= 6.4 rev/day. That
+// is the standard Spacetrack boundary -- the same test PREDICT uses
+// (predict.c:1104) and, more to the point, the same one INSIDE THE LIBRARY CARDSAT
+// LINKS: Hopperpop's Sgp4-Library is the Vallado unified SGP4 and switches at
+// sgp4unit.cpp:1523
+//     if ((2*pi / satrec.no) >= 225.0) satrec.method = 'd';
+// so deep-space orbits are already propagated CORRECTLY, with no work on CardSat's
+// part. Verified by compiling that library and driving an AO-40-class HEO through
+// CardSat's exact path (gpToTle -> Sgp4::init -> twoline2rv -> sgp4init): method
+// 'd', resonance initialised, propagates clean.
+//
+// Kept purely as a LABEL: a deep-space orbit behaves so unlike a LEO pass (a GEO
+// bird simply sits there) that naming the model is useful. NOT a warning -- an
+// earlier version of this claimed the output was unreliable, which was wrong.
+static bool isDeepSpace(const SatEntry& s) {
+  return s.meanMotion > 0 && (1440.0 / s.meanMotion) >= 225.0;
+}
+
+// ---- Can this satellite EVER rise from here? ----------------------------------
+// Ported from PREDICT's AosHappens() (predict.c), which has been the reference
+// answer for thirty years. The point is IO-86-class birds: a 6-degree inclination
+// satellite simply never clears the horizon from a mid-latitude site, and without
+// this the pass search runs its full 200-step hunt and returns an empty list --
+// indistinguishable from "no passes in the next few days".
+//
+// The geometry: acos(Re/r) is the Earth-central half-angle of the visibility cap at
+// orbital radius r -- how far the horizon reaches. Add the inclination and you have
+// the highest latitude the footprint edge can ever touch. If that exceeds |your
+// latitude|, the satellite can rise for you.
+//
+// Retrograde orbits fold (98 deg behaves like 82 deg for coverage). The 331.25
+// constant is Kepler's third law with the period in minutes and the answer in km:
+// (mu*3600/(4*pi^2))^(1/3) = 331.2533 for mu = 398600.4418 -- derived, not copied.
+//
+// CONSERVATIVE BY CONSTRUCTION: it uses APOGEE and the footprint EDGE, i.e. the
+// best case. So it can only ever be generous -- a false "never rises" is
+// geometrically impossible, which is the property that makes it safe to act on.
+// Verified against real SGP4: IO-86 from FM18LU peaks at -7.4 deg over 10 days.
+static bool aosPossible(const SatEntry& s, double stnLatDeg) {
+  if (s.meanMotion <= 0) return true;              // unknown -> do not block
+  const double RE = 6378.137;
+  double lin = s.incl;
+  if (lin >= 90.0) lin = 180.0 - lin;              // retrograde folds
+  double sma = 331.25 * exp(log(1440.0 / s.meanMotion) * (2.0 / 3.0));
+  double apogee = sma * (1.0 + s.ecc) - RE;        // apogee ALTITUDE, km
+  if (apogee <= 0) return true;                    // nonsense elements -> do not block
+  const double D2R = 0.017453292519943295;
+  return (acos(RE / (apogee + RE)) + lin * D2R) > fabs(stnLatDeg * D2R);
+}
+
 static double gpAgeDays(const SatEntry& s) {
   if (!timeIsSet() || s.epochUnix <= 0) return -1;
   return ((double)time(nullptr) - s.epochUnix) / 86400.0;
@@ -250,11 +306,127 @@ void App::setup() {
 
   setenv("TZ", "UTC0", 1); tzset();   // work entirely in UTC
 
+#if CARDSAT_HAS_USBCAT
+  // Read the USB CAT breadcrumb BEFORE anything else can reset the device: if the
+  // last boot froze inside UsbSerial::begin(), the console was already down and
+  // this RTC marker is the only surviving evidence of where. Reported below, after
+  // the routine storage messages, so it is the message left on screen.
+  UsbSerial::checkLastBootStage();
+  // Paint each stage as begin() reaches it. begin() runs on this task, so a hang
+  // inside it means loop()/draw() never run again -- the screen keeps whatever was
+  // painted last. Painting from inside begin() therefore leaves the name of the
+  // exact call that hung frozen on screen, with no reset and no console required.
+  ConsoleLog::begin();   // safe this early: only stamps the idle timer
+  UsbSerial::onStage = &App::usbStageTrampoline;
+  UsbSerial::onRotTrace = &App::usbRotTraceTrampoline;
+#endif
+
   db.begin();
   if (!Store::ready())
     setStatus("No filesystem! Allocate SPIFFS or insert SD.", 8000);
   else if (Store::onSD())
     setStatus("Using SD card for storage", 4000);
+
+#if CARDSAT_HAS_USBCAT
+  // Overrides the storage status deliberately: a firmware freeze outranks "using
+  // SD card". Only fires when the previous boot actually died mid-begin().
+  // ---- The coredump: the backtrace the dead console could not print ------------
+  // reason=6 (ESP_RST_TASK_WDT) proves the loop task stopped returning and the
+  // watchdog rebooted us. A TWDT panic prints a BACKTRACE naming the exact hung
+  // function -- straight to the console USB CAT had already torn down, so it was
+  // lost. But every precondition for retrieving it later already holds, verified
+  // in arduino-esp32 3.2.1's own lib-builder defconfig and huge_app.csv:
+  //   CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y, CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+  //   coredump, data, coredump, 0x3F0000, 0x10000   <- the partition exists
+  // So the panic ALREADY writes a full dump to flash. This reads the summary on
+  // the next boot and puts the faulting task, PC and backtrace on the SD card --
+  // no console, no host tools, no reboot paradox. Then it erases the dump so the
+  // next crash is unambiguous.
+  //
+  // Decode the addresses on the Mac with:
+  //   xtensa-esp32s3-elf-addr2line -pfiaC -e CardSat.ino.elf <addr> <addr> ...
+  // Only report a dump for a reset that actually FAULTED. A coredump image can
+  // linger from any earlier restart, and CardSat calls ESP.restart() routinely
+  // (LoTW batching, factory reset) -- reporting those printed a scary-looking
+  // "## COREDUMP task=IDLE0" whose backtrace was just prvIdleTask waiting in
+  // esp_cpu_wait_for_intr, i.e. the idle task doing its job. Pure noise, and
+  // actively misleading next to a real USB CAT trace. PANIC/TASK_WDT/INT_WDT are
+  // the reasons where a dump means something; anything else, erase and move on.
+  const esp_reset_reason_t cdRr = esp_reset_reason();
+  const bool cdFaulted = (cdRr == ESP_RST_PANIC || cdRr == ESP_RST_TASK_WDT ||
+                          cdRr == ESP_RST_INT_WDT || cdRr == ESP_RST_WDT);
+  if (Store::ready()) {
+    size_t cdAddr = 0, cdSize = 0;
+    if (esp_core_dump_image_get(&cdAddr, &cdSize) == ESP_OK && cdSize > 0 && cdFaulted) {
+      esp_core_dump_summary_t* sum =
+          (esp_core_dump_summary_t*)malloc(sizeof(esp_core_dump_summary_t));
+      if (sum) {
+        if (esp_core_dump_get_summary(sum) == ESP_OK) {
+          {
+            Logstore::linef(Logstore::LOG_USB,
+                     "## COREDUMP task=%s pc=0x%08lx exc_cause=%lu depth=%lu%s",
+                     sum->exc_task, (unsigned long)sum->exc_pc,
+                     (unsigned long)sum->ex_info.exc_cause,
+                     (unsigned long)sum->exc_bt_info.depth,
+                     sum->exc_bt_info.corrupted ? " (CORRUPTED)" : "");
+            // Assemble the backtrace into ONE line: Logstore writes whole lines
+            // (it owns the newline), and a per-frame printf would produce one log
+            // line per address -- unusable for addr2line, which wants them together.
+            char bt[200] = "## backtrace:";
+            for (uint32_t i = 0; i < sum->exc_bt_info.depth && i < 16; ++i) {
+              char one[12];
+              snprintf(one, sizeof(one), " 0x%08lx", (unsigned long)sum->exc_bt_info.bt[i]);
+              strncat(bt, one, sizeof(bt) - strlen(bt) - 1);
+            }
+            Logstore::line(Logstore::LOG_USB, bt);
+            Logstore::line(Logstore::LOG_USB,
+                     "## decode: xtensa-esp32s3-elf-addr2line -pfiaC -e CardSat.ino.elf <addrs>");
+          }
+        }
+        free(sum);
+      }
+      esp_core_dump_image_erase();     // next crash writes a fresh, unambiguous dump
+    } else if (cdSize > 0) {
+      esp_core_dump_image_erase();     // stale dump from a routine restart: bin it
+    }
+  }
+
+  if (UsbSerial::lastBootStage() != UsbSerial::USBCAT_STAGE_NONE) {
+    setStatus(String("USB CAT froze: ") +
+              UsbSerial::stageName(UsbSerial::lastBootStage()), 10000);
+    // ...and to the CARD. Reporting a freeze only to the screen was a real hole:
+    // a 10 s status message is gone by the time the operator reads the log, so a
+    // panic-and-reboot and a true hang produce IDENTICAL logs -- both just stop.
+    // Appending here (the log is truncated at the next engage, not at boot) means
+    // the file itself distinguishes them: a "## REBOOTED" line after the last
+    // stage says the device came back; its absence says it never did.
+    if (Store::ready()) {
+      {
+        Logstore::linef(Logstore::LOG_USB, "## REBOOTED - previous run stopped at: %s",
+                 UsbSerial::stageName(UsbSerial::lastBootStage()));
+        // Legend from esp_system.h, IDF v5.4 (do NOT write these from memory --
+        // the first version of this line said "9=TWDT" and TASK_WDT is 6):
+        //   1=POWERON 3=SW(esp_restart) 4=PANIC 5=INT_WDT 6=TASK_WDT 9=BROWNOUT
+        Logstore::linef(Logstore::LOG_USB,
+                 "## reset reason=%d (1=power-on 4=panic 5=int-wdt 6=task-wdt 9=brownout)",
+                 (int)esp_reset_reason());
+      }
+    }
+  } else if (Store::ready()) {
+    // No breadcrumb, but still record the reset reason -- a reboot with a CLEAN
+    // breadcrumb (e.g. the panic landed outside begin()/the tick) is itself a fact
+    // worth having, and its absence proves the device never rebooted at all.
+    const esp_reset_reason_t rr = esp_reset_reason();
+    if (rr != ESP_RST_POWERON) {
+      Logstore::linef(Logstore::LOG_USB,
+                      "## REBOOTED - reset reason=%d, no USB CAT breadcrumb", (int)rr);
+    }
+  }
+#endif
+  // Console capture is applied AFTER cfg.load() -- reading cfg.consoleLog before
+  // it would always see the compiled-in default (false), so the toggle would
+  // silently never survive a reboot. The load below may fail and leave defaults
+  // in RAM; enable() is called after either way, so the state always matches cfg.
   if (!cfg.load()) {
     // Only seed defaults to disk on a true first boot (file absent). If the file
     // EXISTS but failed to parse (transient SD/SPI read glitch, half-written file
@@ -263,6 +435,7 @@ void App::setup() {
     if (cfg.cfgFileMissing) cfg.save();
   }
   M5Cardputer.Display.setBrightness(cfg.bright);   // apply the saved brightness
+  ConsoleLog::enable(cfg.consoleLog);              // now that cfg is real
   calDl = cfg.calDlHz; calUl = cfg.calUlHz;
 
   applyRadioFromCfg();
@@ -370,6 +543,18 @@ void App::applyRadioFromCfg() {
   // UART setup). Only meaningful for wired CI-V; a no-op on Yaesu/Kenwood/LAN.
   if (RADIOS[m].proto == PROTO_CIV && cfg.catType == CAT_WIRED)
     rig->setPinMode(cfg.civPinMode);
+#if CARDSAT_HAS_USBCAT
+  // CAT_USB: the transport is only opened when the radio is engaged (see the USB CAT
+  // lifecycle block in loop()). Opening the on-board UART here would be wrong twice
+  // over -- it would bind G1/G2 for a path that never uses them, and the rig would
+  // then be begin()'d a second time when the USB stream appears.
+  if (cfg.catType == CAT_USB) {
+    if (RADIOS[m].proto == PROTO_CIV)
+      rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
+    rig->setCmdDelay(cfg.catDelayMs);
+    return;
+  }
+#endif
   rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);   // net backend ignores UART args
   if (RADIOS[m].proto == PROTO_CIV)
     rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
@@ -378,8 +563,134 @@ void App::applyRadioFromCfg() {
   // Sat Mode setting when radio control is engaged (see keyTrack, 'r' key).
 }
 
+// Is the configured rotator transport unavailable because something else owns
+// that wire? Returns the reason, or nullptr when the transport is free.
+//
+// The Cardputer has ONE Grove port (G1/G2 = UART1) and ONE USB port, and both are
+// contested:
+//   Grove : wired CI-V CAT (CAT_WIRED) and the Grove GPS both use G1/G2.
+//   USB   : USB CAT (CAT_USB) uses the resident host -- which the rotator can
+//           SHARE (a second CDC, bound to its own adapter), so USB is only a
+//           conflict when there is no second adapter to bind. That is detected at
+//           rotBegin() time, not here.
+// Reporting the conflict beats silently mis-driving someone's rotator: two
+// claimants on one UART means both see garbage.
+// A CAT or GPS choice just claimed the Grove port. If a Grove rotator was
+// configured, it cannot keep it: one UART, one owner. Yield the rotator back to
+// the I2C bridge and say so, rather than leaving two claimants to garble each
+// other -- or blocking the CAT/GPS row, which would strand the user on a setting
+// that silently refuses to change.
+void App::yieldGroveIfTaken(const char* who) {
+  if (!cfg.rotEnable) return;
+  if (cfg.rotTransport != ROT_XPORT_GROVE) return;
+  if (!rotTransportConflict()) return;        // still free: nothing to do
+  cfg.rotTransport = ROT_XPORT_BRIDGE;
+  cfg.save();
+  applyRotatorFromCfg();
+  setStatus(String("Rotator moved to I2C bridge (") + who + " took Grove)", 5000);
+}
+
+// Cycle a USB adapter selection through what the host has ENUMERATED, storing the
+// chosen adapter's stable key (or "" for Auto). Used by both the radio and rotator
+// picker rows -- with two adapters plugged in, "first one wins" is a coin flip, so
+// each port must be nominated explicitly.
+//
+// The list is only populated once the USB host is up and has enumerated (i.e.
+// after a first engage). Before that there is nothing to choose from, which the
+// row says plainly rather than offering an empty cycle.
+// Human-readable name for a stored adapter key. "Auto" when unset; the adapter's
+// label when the host has seen it; "(not present)" when the key names an adapter
+// that is not currently plugged in -- which is the useful answer, not a blank.
+String App::usbAdapterLabel(const char* key) const {
+#if CARDSAT_HAS_USBCAT
+  if (!key || !key[0]) return String("Auto");
+  for (uint8_t i = 0; i < UsbSerial::serialDeviceCount(); ++i)
+    if (strcmp(UsbSerial::serialDeviceKey(i), key) == 0)
+      return String(UsbSerial::serialDeviceLabel(i));
+  // The key names an adapter that is not plugged in (or has not been scanned for).
+  // That is the useful answer -- a blank would look like "nothing selected" when
+  // the truth is "your selection is missing", which is what sends someone to the
+  // wrong fix.
+  return String("(not present)");
+#else
+  (void)key; return String("n/a");
+#endif
+}
+
+// Settings action: enumerate USB adapters so the pickers have something to offer.
+// Explicit (a keypress, not automatic on entering the screen) because it takes the
+// USB PHY -- the console goes away and the host stays resident until reboot. The
+// warning is in the status line, not buried: an operator who did not want that
+// deserves to know it happened.
+void App::scanUsbAdapters() {
+#if CARDSAT_HAS_USBCAT
+  setStatus("Scanning USB (console closes)...", 2000);
+  draw();                                     // paint it: the scan blocks ~2.5 s
+  const uint8_t n = UsbSerial::scanAdapters();
+  if (n == 0) setStatus("No USB adapters found", 4000);
+  else        setStatus(String(n) + " adapter" + (n == 1 ? "" : "s") + " found", 4000);
+#else
+  setStatus("USB CAT not in this build", 3000);
+#endif
+}
+
+void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio) {
+#if CARDSAT_HAS_USBCAT
+  const uint8_t n = UsbSerial::serialDeviceCount();
+  if (n == 0) { setStatus("Scan USB adapters first", 4000); return; }
+
+  // The OTHER port's adapter is shown in the list but never selectable: skipping
+  // it while cycling is what makes it "greyed out" rather than hidden. Hiding it
+  // would be worse -- an operator looking for the adapter they can see plugged in
+  // would think CardSat had lost it, instead of learning it is the radio's.
+  const char* taken = isRadio ? cfg.rotUsbKey : cfg.catUsbKey;
+
+  // Current index: 0 = Auto, 1..n = adapter[i-1]
+  int cur = 0;
+  if (key[0])
+    for (uint8_t i = 0; i < n; ++i)
+      if (strcmp(UsbSerial::serialDeviceKey(i), key) == 0) { cur = i + 1; break; }
+
+  // Step past any entry the other port owns. Bounded by the number of slots, so a
+  // list where EVERY adapter is taken lands back on Auto rather than spinning.
+  const int slots = (int)n + 1;
+  const int step  = (dir >= 0) ? 1 : -1;
+  for (int tries = 0; tries < slots; ++tries) {
+    cur = (cur + step + slots) % slots;
+    if (cur == 0) break;                                       // Auto is always free
+    const char* k = UsbSerial::serialDeviceKey(cur - 1);
+    if (!(taken[0] && strcmp(k, taken) == 0)) break;            // free: take it
+  }
+
+  if (cur == 0) key[0] = 0;                                     // Auto
+  else          snprintf(key, keyLen, "%s", UsbSerial::serialDeviceKey(cur - 1));
+  cfg.save();
+  if (!isRadio) applyRotatorFromCfg();   // a rotator key change must re-bind
+#else
+  (void)key; (void)keyLen; (void)dir; (void)isRadio;
+  setStatus("USB CAT not in this build", 3000);
+#endif
+}
+
+const char* App::rotTransportConflict() const {
+  if (!cfg.rotEnable) return nullptr;
+  if (cfg.rotType == ROT_NET || cfg.rotType == ROT_PST) return nullptr;  // network
+  if (cfg.rotType == ROT_YAESU) return nullptr;                          // I2C direct
+  if (cfg.rotTransport == ROT_XPORT_GROVE) {
+    // CAT_WIRED means the rig backend opens UART1 on G1/G2 in begin(), whatever
+    // the protocol (CI-V, Yaesu, Kenwood all do). USB/LAN CAT leave Grove free,
+    // which is exactly the combination this transport is for.
+    if (cfg.catType == CAT_WIRED)
+      return "Grove rotator needs CAT on USB or LAN";
+    // The Grove GPS options are the SAME two pins (config.h GpsSource).
+    if (cfg.gpsSource == GPS_SRC_GROVE_9600 || cfg.gpsSource == GPS_SRC_GROVE_115K)
+      return "Grove rotator conflicts with Grove GPS";
+  }
+  return nullptr;
+}
+
 void App::applyRotatorFromCfg() {
-  if (rot) { delete rot; rot = nullptr; }
+  if (rot) { freeRotator(rot); rot = nullptr; }   // frees the transport Stream too
   rotOut = false; rotParked = false;
   lastAzCmd = lastElCmd = lastUnwrappedAz = -999.0f;
   rotPassValid = false; rotPassNorad = 0;
@@ -390,9 +701,45 @@ void App::applyRotatorFromCfg() {
     rot = new YaesuRotator(azFull, cfg.rotAzCnt0, cfg.rotAzCntF,
                            cfg.rotElCnt0, cfg.rotElCntF, cfg.rotDeadband);
   } else {
-    rot = makeRotator(cfg.rotType, cfg.rotBaud, cfg.rotHost, cfg.rotPort);
+    // Refuse rather than fight over the wire: two claimants on one UART means
+    // both see garbage, and a rotator driven by garbage is a rotator driving
+    // into its stops.
+    const char* why = rotTransportConflict();
+    if (why) { setStatus(why, 5000); return; }
+    // Tell the USB port which adapter is the rotator's before it binds.
+    if (cfg.rotTransport == ROT_XPORT_USB) {
+#if CARDSAT_HAS_USBCAT
+      UsbSerial::rotConfigure(cfg.rotUsbKey, cfg.rotBaud);
+#else
+      setStatus("USB rotator needs a USB-host build", 5000);
+      return;
+#endif
+    }
+#if CARDSAT_HAS_USBCAT
+    // Paint BEFORE the call, for the same reason USB CAT does: a USB rotator
+    // brings the host up on this task, and if that blocks, draw() never runs
+    // again -- the screen would freeze showing whatever was there before.
+    if (cfg.rotTransport == ROT_XPORT_USB) { setStatus("USB rotator: starting..."); draw(); }
+#endif
+    rot = makeRotator(cfg.rotType, cfg.rotTransport, cfg.rotBaud, cfg.rotHost, cfg.rotPort);
+    if (!rot) {
+#if CARDSAT_HAS_USBCAT
+      if (cfg.rotTransport == ROT_XPORT_USB)
+        setStatus(String("USB rotator: ") + UsbSerial::rotLastError(), 5000);
+      else
+#endif
+      setStatus("Rotator: no link on that transport", 5000);
+      return;
+    }
   }
   if (rot) rot->begin();
+#if CARDSAT_HAS_USBCAT
+  // Success gets a line too. The rotator used to report only failures, so a
+  // working USB rotator was silent while a working radio announced itself --
+  // and "nothing happened" is indistinguishable from "it did not try".
+  if (rot && cfg.rotTransport == ROT_XPORT_USB && UsbSerial::rotActive())
+    setStatus(String("USB rotator: ") + UsbSerial::rotDeviceName(), 3000);
+#endif
 }
 
 // Decide whether a pass should be tracked "flipped" (elevation 0-180, azimuth
@@ -529,6 +876,7 @@ void App::factoryReset() {
   draw();
   Store::formatInternal();
   delay(300);
+  ConsoleLog::flush();   // never lose the tail across a deliberate reboot
   ESP.restart();   // reboot -> setup() runs fresh with built-in defaults
 }
 
@@ -3438,6 +3786,103 @@ void App::tickCanvasRestore() {
 // loop runs between fetches, giving the outbound TLS connects maximum headroom.
 App* App::s_self = nullptr;
 int  App::s_fetchDepth = 0;
+#if CARDSAT_HAS_USBCAT
+// Paint the stage UsbSerial::begin() is about to attempt. begin() runs on the main
+// task, so if the next call blocks, loop() and draw() never run again and this paint
+// is the last thing the screen will ever show -- which is precisely the point: the
+// frozen display then names the call that hung. Deliberately minimal: a status write
+// and a draw, nothing that could itself block.
+// Rotator trace sink: append to the SAME log as the CAT trace, so one file tells
+// the whole USB story in order -- which port bound which adapter, and why anything
+// was refused. The rotator bind is short and linear (no stages), so this is a
+// plain line writer rather than a stage machine. Cheap: only fires during a bind.
+void App::usbRotTraceTrampoline(const char* line) {
+  if (!line) return;
+  // Through Logstore, not a bare open(): it owns rotation and the size cap, and
+  // an uncapped log on a flash-only Cardputer fills the filesystem the GP cache
+  // and config live on. Same file as the CAT trace -- one USB story, in order.
+  Logstore::linef(Logstore::LOG_USB, "%s heap=%lu largest=%lu",
+                  line,
+                  (unsigned long)ESP.getFreeHeap(),
+                  (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+void App::usbStageTrampoline(UsbSerial::Stage s) {
+  if (!s_self) return;
+  const char* n = UsbSerial::stageName(s);
+  if (!n || !*n) return;                     // STAGE_NONE: nothing to announce
+
+  // NOT to the screen. Stages are setup detail -- "bind: set DTR" tells an
+  // operator nothing they can act on, and 20 of them at 8 s each bury the one
+  // line that matters (the bound device, or the error). They go to the log,
+  // which is where they were actually useful: every USB bug this session was
+  // found by reading them in a file, never off the screen. The rotator has
+  // always worked this way; CAT now matches it.
+  //
+  // A freeze is still reported, and does not need this: the stage is written to
+  // the RTC breadcrumb by stage() itself, and setup() replays it on the next boot
+  // as "USB CAT froze: <stage>" (see the lastBootStage() block). That report is
+  // strictly better than the live paint it replaces -- it survives the reboot,
+  // and it is on screen when the operator is actually looking.
+
+  // At the first teardown stage the host tasks have done all their real work
+  // (enumeration, binding, CAT traffic). end() snapshots their high-water marks
+  // just before it starts killing them; we log that SNAPSHOT here. Log them:
+  // taskStackSize (kTaskStack, both tasks) is 16.4 KB of the ~46 KB an engage
+  // costs -- the big runtime lever. Size it from this log, never
+  // from a guess -- a too-small stack trades a clean OOM for a stack overflow.
+  if (s == UsbSerial::USBCAT_STAGE_END_CDC && Store::ready()) {
+    // The SNAPSHOT, not a live probe: end() sampled these before teardown began.
+    // Probing here raced the dying tasks and read freed TCBs -- the bench's
+    // "free=28208" of an 8192-byte stack, and the IDLE0 panic that followed.
+    const uint32_t hh = UsbSerial::hostHeadroomSnapshot();
+    const uint32_t ch = UsbSerial::clientHeadroomSnapshot();
+    {
+      const unsigned long stk = (unsigned long)UsbSerial::taskStackBytes();
+      // Clamp: a headroom larger than the stack means the sample was bad (a raced
+      // read of a dying TCB did exactly that). Report it as such instead of
+      // underflowing the subtraction into a 4-billion "used".
+      const bool hOk = (hh > 0 && hh <= stk), cOk = (ch > 0 && ch <= stk);
+      Logstore::linef(Logstore::LOG_USB,
+                "## stack of %lu each: EspUsbHost used=%s%lu free=%lu | Client used=%s%lu free=%lu",
+                stk,
+                hOk ? "" : "?", (unsigned long)(hOk ? stk - hh : 0), (unsigned long)hh,
+                cOk ? "" : "?", (unsigned long)(cOk ? stk - ch : 0), (unsigned long)ch);
+      Logstore::line(Logstore::LOG_USB,
+                "## -> safe taskStackSize ~= used + 2048, rounded up; frees 2x the cut");
+    }
+  }
+
+  // ---- and to the SD card ------------------------------------------------------
+  // The console CANNOT be used to diagnose this: engaging USB CAT tears the console
+  // down by design (both need the S3's one USB PHY), and getting the console back
+  // requires a reboot, which un-engages USB CAT. The two states are mutually
+  // exclusive, so no amount of timing gets a live console during a USB CAT freeze.
+  //
+  // The card has none of that coupling. Each stage is appended and FLUSHED before
+  // the call it announces, so a freeze leaves its name as the last line in the file
+  // -- and a hang, a panic, a watchdog reset or a battery pull all preserve it
+  // equally. Read it by pulling the card. Only ~20 short lines per engage, only
+  // while USB CAT is engaging, so the write cost is irrelevant.
+  // Via Logstore: it owns rotation and the cap (an uncapped trace fills a
+  // flash-only Cardputer's filesystem). Same file as the rotator trace.
+  // heap + largest free block per line: the engage sequence IS the memory event
+  // (host object ~18-19 KB in ONE contiguous alloc, two 8 KB task stacks, the IDF
+  // host stack), so the same log that names a freeze also profiles the cost and
+  // shows whether a failed engage was fragmentation (largest << free) or genuine
+  // exhaustion. Numbers: docs/design/USBCAT_MEMORY.md.
+  // "cat:" prefix to match the rotator's "rot:". One log holds both ports, so
+  // every line has to name its own -- otherwise "bind: cdc begin" and
+  // "rot: binding addr=1" read as different kinds of event when they are the
+  // same kind, on two different wires.
+  Logstore::linef(Logstore::LOG_USB, "cat: %s heap=%lu largest=%lu", n,
+                  (unsigned long)ESP.getFreeHeap(),
+                  (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  // (Logstore flushes and closes every line: the last line before a hang is the
+  // one that matters, and it must not be sitting in a buffer.)
+}
+#endif
+
 void App::tlsBusyTrampoline(bool busy) {
   if (!s_self) return;
   // On an outbound TLS session we suspend the LAN listeners (rigd/rotd) for the duration
@@ -4431,6 +4876,181 @@ uint32_t App::dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
 
 void App::loop() {
   M5Cardputer.update();
+  // Land a partial console buffer that has gone quiet. Cheap: a flag test and a
+  // millis() compare unless capture is on AND something is pending.
+  ConsoleLog::poll();
+  // ---- Performance sampling --------------------------------------------------------
+  // Sampled EVERY loop, on every screen: min-ever values are only meaningful if they
+  // cannot be missed. The perf screen just displays what this collects. Cost is two
+  // heap queries and some arithmetic per loop -- the same calls memtrace already makes
+  // on screen changes, so this is not new machinery, only continuous.
+  {
+    uint32_t fr  = ESP.getFreeHeap();
+    uint32_t blk = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (fr  < perfMinFree) perfMinFree = fr;
+    if (blk < perfMinBlk)  perfMinBlk  = blk;
+    uint32_t now = micros();
+    if (perfLastLoopUs) {
+      uint32_t dt = now - perfLastLoopUs;          // wraps cleanly on uint32 subtraction
+      if (dt > perfLoopMax && dt < 5000000UL) perfLoopMax = dt;   // ignore post-sleep gaps
+      // Exponential moving average, integer-only: avg += (dt - avg) / 16.
+      // The delta MUST be computed in signed arithmetic and only then applied: writing
+      // this as `avg + (dt - (int32_t)avg)/16` promotes the subtraction back to unsigned,
+      // so every sample below the average wraps to a huge positive. (Caught on the host:
+      // that version ran away to ~1.4e9 within six samples.)
+      if (!perfLoopAvg) perfLoopAvg = dt;
+      else { int32_t delta = (int32_t)dt - (int32_t)perfLoopAvg;
+             perfLoopAvg = (uint32_t)((int32_t)perfLoopAvg + delta / 16); }
+    }
+    perfLastLoopUs = now;
+  }
+#if CARDSAT_HAS_USBCAT
+  // ---- USB CAT lifecycle -----------------------------------------------------------
+  // Reconcile the USB transport against radioOut, from ONE place, every loop.
+  //
+  // Why reconcile rather than hook the toggle: radioOut is SET in one place (keyTrack
+  // 'r') but CLEARED in six -- the emergency stop, charge mode, losing the tracked
+  // sat, and others. Hanging teardown off the toggle would miss five of them and
+  // strand the USB host stack (and the serial console with it). This is the same
+  // lesson as basicFree(): a handler only knows the exits it implements. Reconciling
+  // a desired state against an actual one cannot be bypassed by a new call site.
+  //
+  // The cost being managed: while up, this holds the IDF host stack, its daemon task
+  // and transfer buffers -- and the USB CDC console, which is the same OTG controller.
+  // Both come back the moment the radio is disengaged.
+  if (cfg.catType == CAT_USB) {
+    const bool want = radioOut && rig;
+    if (want && !UsbSerial::active()) {
+      uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[(RadioModel)cfg.radioModel].defaultBaud;
+      // Yaesu CAT is 8N2; CI-V and Kenwood are 8N1. The adapter must be told, because
+      // the protocol backend cannot -- it only has a Stream (see yaesu.cpp begin()).
+      const bool yaesu = (RADIOS[(RadioModel)cfg.radioModel].proto == PROTO_YAESU);
+      // Paint BEFORE the call, not after. UsbSerial::begin() runs on this task, so
+      // if it blocks, loop() never comes back and draw() never runs again -- the
+      // screen freezes showing whatever was last painted ("Radio ON"), which is
+      // exactly the reported symptom and tells us nothing. Painting first means the
+      // frozen screen names the last stage begin() announced. Costs one frame on
+      // the healthy path, where it is overwritten ~3.5 s later by the real status.
+      setStatus("USB CAT: starting..."); draw();
+      // Land the console buffer BEFORE the engage. If begin() freezes -- which
+      // is the failure this whole log exists to diagnose -- the task never
+      // returns, poll() never runs again, and everything still buffered is lost.
+      // The engage TRACE is written unbuffered by Logstore and survives on its
+      // own; this is about the console context leading up to it.
+      ConsoleLog::flush();
+#if CARDSAT_HAS_USBCAT
+      // APPEND across attempts, and mark each one. The log used to truncate at every
+      // engage (FILE_WRITE), which meant it only ever held the LAST attempt -- and
+      // these failures are caused by the PREVIOUS attempt, not the one that reports
+      // them. The bench's "259 on re-engage" traces arrived with the successful
+      // engage and the disengage already overwritten, which is precisely the
+      // evidence needed to tell "this install failed" from "the last session never
+      // released the stack". Keep the history; a boot marker separates sessions.
+      if (Store::ready()) {
+        {
+          // raw(): the "# ..." header is a block the reader takes in at once; an
+          // uptime prefix on each line would be noise. Same rotation and cap.
+          Logstore::rawf(Logstore::LOG_USB, "\n# ---- ENGAGE ATTEMPT (uptime %lus) ----",
+                    (unsigned long)(millis() / 1000));
+          Logstore::raw(Logstore::LOG_USB, "# CardSat USB CAT engage trace");
+          Logstore::rawf(Logstore::LOG_USB, "# radio=%s baud=%lu civaddr=0x%02X catdelay=%u",
+                    RADIOS[(RadioModel)cfg.radioModel].name, (unsigned long)baud,
+                    (unsigned)(cfg.civAddr ? cfg.civAddr : RADIOS[(RadioModel)cfg.radioModel].civAddr),
+                    (unsigned)cfg.catDelayMs);
+          Logstore::rawf(Logstore::LOG_USB, "# heap=%lu largest=%lu",
+                    (unsigned long)ESP.getFreeHeap(),
+                    (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+          Logstore::raw(Logstore::LOG_USB, "# the LAST line below is where it stopped");
+        }
+      }
+#endif
+      // Which adapter is the radio's. Empty = "the only one that is not the
+      // rotator's"; with two adapters the user nominates each in Settings.
+      UsbSerial::catConfigure(cfg.catUsbKey);
+      if (UsbSerial::begin(baud, 8, 0 /*none*/, yaesu ? 2 /*2 stop*/ : 0 /*1 stop*/)) {
+        // Each step announces itself for the same reason begin()'s do: this all runs
+        // on the loop task, so a hang here freezes the screen on the last paint. The
+        // bench reported "bind: done" -- which was begin()'s LAST paint, since the
+        // final stage(STAGE_NONE) deliberately paints nothing. So "bind: done" could
+        // not distinguish "hung on the last library call" from "hung anywhere after
+        // begin() returned". These stages remove that ambiguity.
+        UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_STREAM);
+        rig->setExternalStream(UsbSerial::stream());
+        UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_BEGIN);
+        rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);   // skips UART setup
+        if (RADIOS[(RadioModel)cfg.radioModel].proto == PROTO_CIV) {
+          UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_ADDR);
+          rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[(RadioModel)cfg.radioModel].civAddr);
+        }
+        UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_DELAY);
+        rig->setCmdDelay(cfg.catDelayMs);
+        UsbSerial::markStage(UsbSerial::USBCAT_STAGE_ENGAGED);
+        usbTickTrace = true;          // narrate the first tick, then stop
+        // NO loop-task watchdog here. It was armed at engage to catch a begin()
+        // that never returned -- but that span is now watched precisely by
+        // UsbSerial's own TWDT *user* subscription (armFreezeWatchdog), which
+        // covers exactly begin()'s risky code and is disarmed the moment it
+        // returns. enableLoopWDT() instead watched the WHOLE engaged session, and
+        // loopTask only feeds the TWDT once per loop() pass -- so any legitimately
+        // long pass became a reboot. A LoTW upload is exactly that: Net::postFile
+        // allows a 30 s no-progress budget inside ONE pass, six times the 5 s TWDT
+        // default, and its delay()/yield() hand the CPU to the scheduler without
+        // ever feeding the watchdog. Result, from the bench: "reset reason=6
+        // (task-wdt), task=IDLE1" while uploading to LoTW with the radio engaged --
+        // IDLE1 starved because loopTask was busy doing exactly what it was asked
+        // to do. The watchdog could not tell a TLS upload from a hang, and its only
+        // remaining catch was false positives on healthy behaviour.
+        setStatus(String("USB CAT: ") + UsbSerial::deviceName(), 3000);
+      } else {
+        // Do not silently pretend to be tracking a radio that is not there.
+        radioOut = false;
+        // "USB CAT: <reason>", matching the rotator's failure line exactly. The
+        // prefix is not decoration: with both ports able to fail for adapter
+        // reasons ("Only adapter is the rotator's"), an unprefixed error leaves
+        // the operator guessing WHICH port is complaining.
+        const String why = UsbSerial::lastError();
+        setStatus(String("USB CAT: ") + why, 4000);
+#if CARDSAT_HAS_USBCAT
+        // Write the REASON to the log, not just the stage it stopped at. Without
+        // this the file ends at the last stage paint and the actual esp_err_t --
+        // the one thing that separates "install refused (259)" from "no device" or
+        // "out of memory" -- lives only in a 4-second status bar the operator has
+        // to catch and retype. Also record whether the stack was released, since a
+        // failed engage that leaves it installed is what poisons the NEXT one.
+        if (Store::ready()) {
+          {
+            Logstore::rawf(Logstore::LOG_USB, "## ENGAGE FAILED: %s", why.c_str());
+            const String diag = UsbSerial::uninstallDiag();
+            if (diag.length()) Logstore::rawf(Logstore::LOG_USB, "## uninstall diag: %s", diag.c_str());
+            Logstore::rawf(Logstore::LOG_USB, "## stack released=%s | heap=%lu largest=%lu",
+                      UsbSerial::hostReleased() ? "yes" : "NO (reboot needed)",
+                      (unsigned long)ESP.getFreeHeap(),
+                      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+          }
+        }
+#endif
+      }
+    } else if (!want && UsbSerial::active()) {
+      if (rig) rig->setExternalStream(nullptr);   // drop the pointer BEFORE the Stream dies
+      UsbSerial::end();                            // frees the host stack; console returns
+      // Record the teardown's RESULT. A disengage that fails to release the IDF
+      // stack is invisible at the UI (the heap even looks fine) and only surfaces
+      // one engage LATER as a 259 -- which is exactly how the bench lost four
+      // rounds to a log that had already been truncated. heap here vs the next
+      // attempt's header is also the leak measurement.
+      if (Store::ready()) {
+        {
+          const String ddiag = UsbSerial::uninstallDiag();
+          if (ddiag.length()) Logstore::rawf(Logstore::LOG_USB, "## uninstall diag: %s", ddiag.c_str());
+          Logstore::rawf(Logstore::LOG_USB, "## DISENGAGED: stack released=%s | heap=%lu largest=%lu",
+                    UsbSerial::hostReleased() ? "yes" : "NO (reboot needed)",
+                    (unsigned long)ESP.getFreeHeap(),
+                    (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        }
+      }
+    }
+  }
+#endif
   // ---- Screen-transition housekeeping ----------------------------------------------
   // Release screen-local buffers the moment their screen is left, from ONE place. Doing
   // this inside a key handler only covers the exits that handler knows about: leaving the
@@ -4446,6 +5066,9 @@ void App::loop() {
         screen != SCR_BASIC && screen != SCR_BASICRUN && screen != SCR_EDIT) {
       basicFree();
     }
+    // Leaving the voice-memo browser: its directory listing is ~6.6 KB and is
+    // rebuilt on every entry, so nothing needs it to survive.
+    if (from == SCR_MEMOS && screen != SCR_MEMOS) memoFree();
     lastScreenSeen = screen;
   }
   // Memory telemetry: when the screen changes and tracing is on, log the heap so the
@@ -4567,6 +5190,25 @@ void App::loop() {
   }
   if (radioOut && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
       lastDoppMs = ms;
+#if CARDSAT_HAS_USBCAT
+      // Trace the FIRST tick only, and only over USB CAT. The bench froze right
+      // after "engaged", i.e. in this tick -- which paints nothing of its own, so
+      // the screen kept the engage message and told us nothing further. usbTickTrace
+      // is cleared once a tick completes, so this costs one pass and then stops
+      // touching the status line.
+      const bool tickTrace = (cfg.catType == CAT_USB) && usbTickTrace;
+#else
+      const bool tickTrace = false;
+#endif
+#if CARDSAT_HAS_USBCAT
+      // Mark the tick ENTRY, before any branch. The other tick markers live inside
+      // `if (otr)`, which requires a linear transponder AND tuneMode FULL/DL AND
+      // rig->canReadFreq() -- if any of those is false, none of them ever fire and
+      // the screen sits on "engaged" even though the tick is running normally. That
+      // ambiguity is why the bench could not distinguish "frozen at engage" from
+      // "ticking, but silently". This marker cannot be branched around.
+      if (tickTrace) { UsbSerial::markStage(UsbSerial::USBCAT_STAGE_TICK_ENTER); draw(); }
+#endif
       SatEntry* s = activeSat();
       if (s && activeTxCount > 0 && timeIsSet()) {
         LiveLook L = pred.look(nowUtc());
@@ -4596,6 +5238,9 @@ void App::loop() {
           // the passband, then Doppler-correct BOTH legs around that fixed
           // satellite frequency. Let go of the knob and nothing drifts.
           uint32_t rxNow; bool txNow = false;
+#if CARDSAT_HAS_USBCAT
+          if (tickTrace) { UsbSerial::markStage(UsbSerial::USBCAT_STAGE_TICK_PTT); draw(); }
+#endif
           bool transmitting = rig->readPtt(txNow) && txNow;
           bool knobMoved = false;
           if (lastRxSet == 0) lastKnobMoveMs = 0;   // re-sync clears any stale grace window
@@ -4603,6 +5248,9 @@ void App::loop() {
           // passband point to the rig instead of adopting whatever freq it is
           // parked on (push-then-track). Also skip while transmitting -- the rig
           // reports the TX VFO then, which would look like a wild dial jump.
+#if CARDSAT_HAS_USBCAT
+          if (tickTrace) { UsbSerial::markStage(UsbSerial::USBCAT_STAGE_TICK_READ); draw(); }
+#endif
           if (lastRxSet != 0 && !transmitting && rigReadDownlinkFreq(rxNow)) {
             double beta = L.rangeRate * 1000.0 / 299792458.0;
             // lastRxSet is the actual read-back freq, so a difference beyond the
@@ -4636,6 +5284,9 @@ void App::loop() {
           bool tuningNow = (lastKnobMoveMs != 0 && (ms - lastKnobMoveMs) < TUNE_GRACE_MS);
           // Downlink first; read it back (unless transmitting) so the rig's
           // rounding can't later look like a knob move. Held off while tuning.
+#if CARDSAT_HAS_USBCAT
+          if (tickTrace) { UsbSerial::markStage(UsbSerial::USBCAT_STAGE_TICK_WRITE); draw(); }
+#endif
           bool dlWrote = (!tuningNow && drvDL && t.downlink && driveDownlink(rx, !transmitting, threshHz));
           // Uplink with a one-tick defer after a downlink write or operator knob
           // move (OscarWatch "defer uplink after a dial move"): consume any pending
@@ -4648,11 +5299,22 @@ void App::loop() {
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
+#if CARDSAT_HAS_USBCAT
+          if (tickTrace) { UsbSerial::markStage(UsbSerial::USBCAT_STAGE_TICK_WRITE); draw(); }
+#endif
           bool dlWrote = (drvDL && t.downlink && driveDownlink(rx, false, threshHz));  // HOLD/UL: no knob follow
           driveUplinkDeferred(tx, threshHz, dlWrote, drvUL && t.uplink);
         }
         applyCtcssForCurrentTx();   // FM uplink PL tone (only re-sends on change)
       }
+#if CARDSAT_HAS_USBCAT
+      // A full tick completed: CAT is alive over USB. Say so once, then stop
+      // tracing so the status line returns to normal use.
+      if (tickTrace) {
+        UsbSerial::markStage(UsbSerial::USBCAT_STAGE_TICK_DONE);
+        usbTickTrace = false;
+      }
+#endif
     }
     // CAT serial-monitor heartbeat: while the monitor screen is open and polling is
     // on, periodically read the rig's frequency so the screen always shows live
@@ -4957,8 +5619,13 @@ void App::takeScreenshot() {
   // from the sprite's native format (no RGB565 byte-order ambiguity), and the
   // public RGBColor type exposes named .r/.g/.b members (layout-independent).
   // A 24-bit BMP stores pixels as B,G,R, so emit them in that order.
-  static RGBColor line[256];
-  static uint8_t  row[256 * 3];
+  // Arena scratch (config.h): both row buffers live only while the BMP writes
+  // (1,536 B that used to be permanent .bss). readRectRGB() fully rewrites line[]
+  // and the loop fully rewrites row[], so no init is needed.
+  Scratch::Lease shotLease("shot", 256 * sizeof(RGBColor) + 256 * 3);
+  if (!shotLease.p) { fp.close(); fsx.remove(path); beep(300, 120); return; }
+  RGBColor* line = (RGBColor*)shotLease.p;
+  uint8_t*  row  = shotLease.p + 256 * sizeof(RGBColor);
   for (int y = H - 1; y >= 0; --y) {            // BMP rows are bottom-up
     canvas.readRectRGB(0, y, W, 1, line);
     for (int x = 0; x < W; ++x) {
@@ -5079,6 +5746,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_GRAPH:   keyGraph(c, enter, back); break;
     case SCR_BASIC:    keyBasic(c, enter, back); break;
     case SCR_BASICRUN: keyBasicRun(c, enter, back); break;
+    case SCR_PERF:     keyPerf(c, enter, back); break;
     case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
     case SCR_FOXTEXT: keyFoxText(c, enter, back); break;
     case SCR_CSIMINFO: keyCsimInfo(c, enter, back); break;
@@ -5227,10 +5895,25 @@ void App::keyHome(char c, bool enter, bool back) {
 }
 
 // ---- Voice-memo browser (SCR_MEMOS) ---------------------------------------
-// (Re)enumerate the memos on the SD card into memos[], newest first.
+// (Re)enumerate the memos on the SD card into memos[], newest first. The list is
+// heap-allocated here and released by memoFree() when the screen is left, so its
+// ~6.6 KB is not resident for the whole session (see the declaration in app.h).
 void App::buildMemoList() {
+  if (!memos) {
+    memos = new (std::nothrow) VoiceMemo::MemoEntry[MEMO_LIST_MAX];
+    if (!memos) { memoN = 0; memoSel = 0; memoScroll = 0;
+                  setStatus("Out of memory"); return; }
+  }
   memoN = VoiceMemo::listMemos(memos, MEMO_LIST_MAX);
   if (memoSel >= memoN) memoSel = memoN > 0 ? memoN - 1 : 0;
+}
+
+// Release the memo list. Called from the screen-transition hook in loop() when the
+// browser is left, so nothing can bypass it (the same reasoning as basicFree(): a
+// key handler only knows the exits it implements, and Fn+h to Help is not one).
+void App::memoFree() {
+  delete[] memos; memos = nullptr;
+  memoN = 0; memoSel = 0; memoScroll = 0; memoConfirmDel = false;
 }
 
 // Poll the keyboard directly for a cancel during blocking playback. Any keypress
@@ -5285,7 +5968,7 @@ void App::drawMemos() {
   if (memoSel > memoScroll + VIS - 1)  memoScroll = memoSel - VIS + 1;
   if (memoScroll < 0) memoScroll = 0;
 
-  for (int r = 0; r < VIS && (memoScroll + r) < memoN; ++r) {
+  for (int r = 0; r < VIS && memos && (memoScroll + r) < memoN; ++r) {
     int i = memoScroll + r, y = 30 + r * 11;
     const VoiceMemo::MemoEntry& m = memos[i];
     if (i == memoSel) { canvas.fillRect(0, y - 2, 240, 11, CL_SELBG);
@@ -7318,7 +8001,7 @@ void App::buildVis() {
   time_t today0 = nowUtc() - (nowUtc() % 86400);
   time_t winStart = today0 + (time_t)visDayOff * 86400;
   time_t winEnd   = winStart + (time_t)VIS_DAYS * 86400;
-  visN = pred.predictPasses(winStart, cfg.minPassEl, visPasses, VIS_PASS_MAX, winEnd);
+  visN = pred.predictPasses(winStart, cfg.minPassEl, passScratch, VIS_PASS_MAX, winEnd);
   building = false;
   setStatus("");
 }
@@ -7335,6 +8018,18 @@ void App::drawVis() {
     footer("` back"); return;
   }
   if (visN == 0) {
+    // A low-inclination bird seen from a high-latitude site has no passes in ANY
+    // window -- say so rather than implying another 10 days might help.
+    { SatEntry* vs = activeSat(); Observer vo = loc.obs();
+      if (vs && vo.valid && !aosPossible(*vs, vo.lat)) {
+        canvas.setTextColor(CL_RED, CL_BLACK);
+        canvas.setCursor(6, 50); canvas.print("Never rises from your QTH:");
+        canvas.setTextColor(CL_YELLOW, CL_BLACK);
+        canvas.setCursor(6, 62);
+        canvas.printf("incl %.1f too low for %.1f%c", (double)vs->incl,
+                      fabs(vo.lat), vo.lat >= 0 ? 'N' : 'S');
+        footer(";/. +/-1d  r recomp  p print  ` bk"); return;
+      } }
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 56); canvas.print("No passes in this 10-day window.");
     footer(";/. +/-1d  r recomp  p print  ` bk"); return;
@@ -7354,14 +8049,14 @@ void App::drawVis() {
     canvas.setCursor(2, ry + 1); canvas.print(lbl);
     canvas.drawFastHLine(barX0, ry + rowH - 1, barW, CL_DGREY);
     for (int i = 0; i < visN; ++i) {
-      time_t a = visPasses[i].aos, b = visPasses[i].los;
+      time_t a = passScratch[i].aos, b = passScratch[i].los;
       time_t s0 = (a > dayStart) ? a : dayStart;
       time_t s1 = (b < dayStart + 86400) ? b : dayStart + 86400;
       if (s1 <= s0) continue;
       int x1 = barX0 + (int)(barW * (s0 - dayStart) / 86400);
       int x2 = barX0 + (int)(barW * (s1 - dayStart) / 86400);
       int w  = (x2 - x1 < 1) ? 1 : x2 - x1;
-      float me = visPasses[i].maxEl;
+      float me = passScratch[i].maxEl;
       uint16_t col = (me < 15.0f) ? CL_DGREEN : (me < 40.0f ? CL_GREEN : CL_YELLOW);
       canvas.fillRect(x1, ry + 1, w, rowH - 3, col);
     }
@@ -7397,11 +8092,15 @@ void App::buildVisList() {
   // Scan the 10-day span in 1-day windows and keep only the optically-visible
   // passes. Windowing avoids predictPasses' VIS_PASS_MAX cap silently dropping
   // the tail of the span for high-pass-rate LEO sats (~15 passes/day x 10 days
-  // would exceed a single 128-pass batch). vlPasses[] holds only the VISIBLE
+  // would exceed a single 128-pass batch). passScratch[] holds only the VISIBLE
   // passes, which are far fewer, so its cap is rarely a constraint.
   // One day-window's passes only (segEnd = from + 86400); a LEO does ~16/day, so this is
-  // deliberately much smaller than the 10-day visPasses/vlPasses caps -- it's pure scratch.
-  static PassPredict day[VIS_DAY_MAX];
+  // deliberately much smaller than the 10-day visPasses/vlPasses caps -- it's pure scratch,
+  // so it rents the shared arena (config.h Scratch) instead of 1,280 B of permanent .bss.
+  Scratch::Lease dayLease("vis", sizeof(PassPredict) * VIS_DAY_MAX);
+  PassPredict* day = (PassPredict*)dayLease.p;
+  if (!day) { building = false; setStatus("Out of RAM"); return; }
+  for (int i = 0; i < VIS_DAY_MAX; ++i) new (&day[i]) PassPredict();
   time_t from = now;
   while (from < winEnd && vlN < VIS_PASS_MAX) {
     time_t segEnd = from + 86400; if (segEnd > winEnd) segEnd = winEnd;
@@ -7410,7 +8109,7 @@ void App::buildVisList() {
     for (int i = 0; i < n && vlN < VIS_PASS_MAX; ++i) {
       bool vis = false;
       if (visEvalPass(day[i].aos, day[i].los, day[i].maxEl, vis) == 1 && vis)
-        vlPasses[vlN++] = day[i];
+        passScratch[vlN++] = day[i];
     }
     // Advance past the last pass found so the next window doesn't re-list it.
     time_t lastLos = day[n - 1].los;
@@ -7449,7 +8148,7 @@ void App::drawVisList() {
   for (int r = 0; r < VISROWS && (vlScroll + r) < vlN; ++r) {
     int i = vlScroll + r;
     int y = 30 + r*10;
-    PassPredict& p = vlPasses[i];
+    PassPredict& p = passScratch[i];
     long mins = (p.los - p.aos) / 60;
     if (i == vlSel) { canvas.fillRect(0, y-1, 240, 10, CL_SELBG);
                       canvas.setTextColor(CL_BLACK, CL_SELBG); }
@@ -7483,7 +8182,7 @@ void App::keyVisList(char c, bool enter, bool back) {
     SatEntry* s = activeSat();
     if (s) { pred.setSite(loc.obs()); pred.setSat(*s);
              passDetailReturn = SCR_VISLIST;
-             buildPassDetail(vlPasses[vlSel]); screen = SCR_PASSDETAIL; lastDrawMs = 0; }
+             buildPassDetail(passScratch[vlSel]); screen = SCR_PASSDETAIL; lastDrawMs = 0; }
   }
 }
 
@@ -7601,6 +8300,7 @@ void App::keyLocation(char c, bool enter, bool back) {
   }
   if (c == 's') {                       // cycle GPS source
     cfg.gpsSource = (cfg.gpsSource + 1) % GPS_SRC_COUNT;
+    yieldGroveIfTaken("GPS");
     cfg.save();
     if (cfg.useGps) startGps();         // re-open on the new port/baud
     setStatus(String("GPS: ") + GPS_PROFILES[cfg.gpsSource].name);
@@ -7643,11 +8343,11 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Passes / alerts", "Display / sound",
   "Station / logging", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
-static const int SET_ROTOR[] = {8,9,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
+static const int SET_RADIO[] = {0,30,89,100,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
+static const int SET_ROTOR[] = {8,9,86,99,101,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_PASS[]  = {3,66,67,68,40,7,84,54,61};
 static const int SET_DISP[]  = {48,82,25,43,85,49,77,79,81};
-static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76};
+static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76,102};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,90,91,92,97,98,88,87,93,94,55,60,56,57,58,59,80,83,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
                                                     SET_DISP, SET_LOG, SET_NET };
@@ -7745,6 +8445,25 @@ void App::keySettings(char c, bool enter, bool back) {
       case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 8) % 8);
               cfg.save(); applyRotatorFromCfg(); break;
+      // Rot wire: which transport a SERIAL rotator protocol runs on. Cycling it
+      // re-applies immediately so a conflict (Grove already taken by CAT or GPS)
+      // is reported the moment it is chosen, not silently at the next pass.
+      case 86: cfg.rotTransport = (uint8_t)((cfg.rotTransport + dir + ROT_XPORT_N) % ROT_XPORT_N);
+               cfg.save(); applyRotatorFromCfg(); break;
+      // USB adapter pickers. Cycle through what the host has actually enumerated
+      // and store the chosen adapter's stable KEY. "Auto" (empty key) is the
+      // first entry: correct whenever only one adapter is free, and the only
+      // sensible default for the single-adapter case that most users have.
+      case 89: cycleUsbAdapter(cfg.catUsbKey, sizeof(cfg.catUsbKey), dir, /*isRadio=*/true); break;
+      case 99: cycleUsbAdapter(cfg.rotUsbKey, sizeof(cfg.rotUsbKey), dir, /*isRadio=*/false); break;
+      // Scan: bring the USB host up and enumerate, so the pickers above have
+      // something to offer. Same action in both menus. Explicit because it costs
+      // the console and ~11.8 KB for the session -- see UsbSerial::scanAdapters.
+      case 100: case 101: scanUsbAdapters(); break;
+      // Console -> file. Applied immediately: enable(false) flushes what is
+      // pending, so toggling off never silently drops captured lines.
+      case 102: cfg.consoleLog = !cfg.consoleLog; cfg.save();
+                ConsoleLog::enable(cfg.consoleLog); break;
       case 11: { long p = (long)cfg.rotPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rotPort = (uint16_t)p; cfg.save(); } break;
       case 12: { uint32_t bs[] = {1200,4800,9600};
@@ -7782,7 +8501,8 @@ void App::keySettings(char c, bool enter, bool back) {
                  for (int i=0;i<5;i++) if (opts[i]==cfg.dimSecs) idx=i;
                  idx = (idx + dir + 5) % 5; cfg.dimSecs = opts[idx];
                  cfg.save(); lastInputMs = millis(); } break;
-      case 30: cfg.catType = (uint8_t)((cfg.catType + dir + 3) % 3);
+      case 30: cfg.catType = (uint8_t)((cfg.catType + dir + CAT_TYPE_N) % CAT_TYPE_N);
+               yieldGroveIfTaken("CAT");
                cfg.save(); applyRadioFromCfg(); break;
       case 32: { long p = (long)cfg.catPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.catPort = (uint16_t)p;
@@ -7962,7 +8682,8 @@ void App::keySettings(char c, bool enter, bool back) {
       } break;
       case 29: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
-      case 30: cfg.catType = (uint8_t)((cfg.catType + 1) % 3);
+      case 30: cfg.catType = (uint8_t)((cfg.catType + 1) % CAT_TYPE_N);
+               yieldGroveIfTaken("CAT");
                cfg.save(); applyRadioFromCfg(); break;
       case 31: editTarget = 207;
                editTitle = (cfg.catType == CAT_RIGCTL) ? "rigctld host (IP)" : "Radio LAN host (IP)";
@@ -8769,7 +9490,8 @@ void App::drawAbout() {
 void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'l') { licScroll = 0; screen = SCR_LICENSE; lastDrawMs = 0; return; }
   if (c == 'z') { gamesSel = 0; screen = SCR_GAMES; lastDrawMs = 0; return; }   // Games menu
-  if (c == 'r') { screen = SCR_READY; lastDrawMs = 0; return; }                 // station readiness
+  if (c == 'r') { screen = SCR_READY; lastDrawMs = 0; return; }
+  if (c == 'm') { screen = SCR_PERF;  lastDrawMs = 0; return; }   // performance monitor                 // station readiness
   if (c == 't') { screen = SCR_TOOLS; lastDrawMs = 0; return; }    // Tools hub (keeps last selection)
   if (c == 'p') { paSel = 0; screen = SCR_PRINTABOUT; lastDrawMs = 0; return; }   // Print submenu (all reports)
   if (c == 'a') { printReport(PR_AMSAT);  return; }   // print the "support AMSAT" page
@@ -8799,7 +9521,8 @@ void App::drawNetReboot() {
 void App::keyNetReboot(char c, bool enter, bool back) {
   if (enter || c == 'y') {
     setStatus("Rebooting..."); draw(); delay(300);
-    ESP.restart();
+    ConsoleLog::flush();   // never lose the tail across a deliberate reboot
+  ESP.restart();
     return;
   }
   if (isBack(c, back) || c == 'n') {
@@ -9804,6 +10527,7 @@ void App::lotwRebootUpload() {
   Serial.println("[lotw] reboot-to-upload requested; restarting");
   setStatus("Rebooting to upload...", 2000);
   draw(); delay(1500);
+  ConsoleLog::flush();   // never lose the tail across a deliberate reboot
   ESP.restart();
 }
 
@@ -10251,6 +10975,7 @@ void App::cloudlogRebootUpload(bool resend, int cursor) {
   Serial.println("[cloudlog] reboot-to-upload requested; restarting");
   setStatus("Rebooting to upload...", 2000);
   draw(); delay(1500);
+  ConsoleLog::flush();   // never lose the tail across a deliberate reboot
   ESP.restart();
 }
 
@@ -10613,6 +11338,7 @@ void App::draw() {
     case SCR_GRAPH:   drawGraph(); break;
     case SCR_BASIC:    drawBasic(); break;
     case SCR_BASICRUN: drawBasicRun(); break;
+    case SCR_PERF:     drawPerf(); break;
     case SCR_FOXANAT: drawFoxAnat(); break;
     case SCR_FOXTEXT: drawFoxText(); break;
     case SCR_CSIMINFO: drawCsimInfo(); break;
@@ -11390,6 +12116,7 @@ void App::drawHelp() {
     " r  station readiness check",
     " t  Tools hub (35 tools)",
     " p  PRINT menu (every report)",
+    " m  performance / heap monitor",
     " a  print support-AMSAT page",
     " c  print operator card",
     " z  games menu",
@@ -12940,6 +13667,13 @@ void App::sfx(uint16_t freq, uint16_t ms) {
 void App::audioAcquire() {
   audioReleaseAt = 0;                          // cancel any pending release
   if (audioUp) return;
+#if CARDSAT_HAS_USBCAT
+  // USB CAT engaged leaves ~17 KB free with a ~7 KB largest block (measured); the
+  // speaker's I2S buffers want ~8 KB. Bringing audio up there either fails or
+  // strands the contiguous heap. Beeps are cosmetic; a running radio is not --
+  // skip silently rather than fail loudly, and audio returns on disengage.
+  if (UsbSerial::active()) return;
+#endif
   // Mic and speaker share the I2S peripheral; make sure the mic is down first.
   if (M5.Mic.isEnabled()) M5.Mic.end();
   M5Cardputer.Speaker.begin();
@@ -12996,12 +13730,36 @@ static bool ciFind(const char* hay, const char* needle) {
 }
 
 void App::serviceSerialCli() {
-  while (Serial.available()) {
-    char c = (char)Serial.read();
-    if (c == '\r') continue;
+  // `available() > 0`, NOT `available()`. This is the USB CAT freeze, found by
+  // decoding a task-watchdog coredump backtrace after nine wrong hypotheses:
+  //
+  //   loopTask -> loop() -> App::loop()+474 -> App::serviceSerialCli()+79
+  //
+  // `Serial` is HWCDCSerial, and UsbSerial::begin() calls Serial.end() to release
+  // the USB PHY to the host stack. HWCDC::end() frees rx_queue, after which
+  // HWCDC::available() returns **-1** (not 0) and read() returns -1. `while (-1)`
+  // is TRUE, and (char)-1 is 0xFF which is never '\n', so cliLen just cycles
+  // 0..62 forever: an infinite loop with no yield, on a console that no longer
+  // exists. No exception, so no crash; nothing starves on the other core, so no
+  // panic until the loop-task WDT was finally armed. Every earlier symptom
+  // follows -- the frozen screen showing the last paint ("engaged"), the tick
+  // markers that never fired (this runs at app.cpp:4827, BEFORE the tick at
+  // :4889), and the silence of every watchdog.
+  //
+  // The -1 sentinel is Arduino's documented "no stream" return; treating it as a
+  // count is the bug. Guarding it makes the CLI simply inert while the console is
+  // down, and it resumes by itself on disengage when Serial.begin() reallocates
+  // the queue -- no state, no flag, nothing to reset.
+  int n = Serial.available();
+  while (n > 0) {
+    const int r = Serial.read();
+    if (r < 0) break;                        // stream died mid-drain: stop now
+    const char c = (char)r;
+    if (c == '\r') { n = Serial.available(); continue; }
     if (c == '\n') { cliBuf[cliLen] = 0; if (cliLen) runSerialCommand(cliBuf); cliLen = 0; }
     else if (cliLen < sizeof(cliBuf) - 1) cliBuf[cliLen++] = c;
     else cliLen = 0;                         // overlong line: drop it
+    n = Serial.available();
   }
 }
 
@@ -13046,9 +13804,10 @@ void App::runSerialCommand(const char* cmd) {
     Serial.printf("  catalog _sats[%d]        = %u B\n", MAX_SATS, (unsigned)(sizeof(SatEntry) * MAX_SATS));
     Serial.printf("  favs[%d]+view[%d]        = %u B\n", MAX_SATS, MAX_SATS,
                   (unsigned)((sizeof(uint32_t) + sizeof(int)) * MAX_SATS));
-    Serial.printf("  visPasses[%d]+vlPasses[%d]= %u B\n", VIS_PASS_MAX, VIS_PASS_MAX,
-                  (unsigned)(2u * sizeof(PassPredict) * VIS_PASS_MAX));
-    Serial.printf("  memos[%d]               = %u B\n", MEMO_LIST_MAX,
+    Serial.printf("  passScratch[%d]         = %u B (merged; was 2 arrays)\n", VIS_PASS_MAX,
+                  (unsigned)(sizeof(PassPredict) * VIS_PASS_MAX));
+    Serial.printf("  memos[%d]               = %u B (heap; only on its screen)\n",
+                  MEMO_LIST_MAX,
                   (unsigned)(sizeof(VoiceMemo::MemoEntry) * MEMO_LIST_MAX));
     Serial.printf("  activeTx[%d]            = %u B\n", MAX_TX_PER_SAT,
                   (unsigned)(sizeof(Transponder) * MAX_TX_PER_SAT));
@@ -13264,7 +14023,13 @@ void App::printTicket() {
   if (activeSat() == a && activeTxCount > 0 && curTx >= 0 && curTx < activeTxCount
       && activeTx[curTx].downlink)
     pick = &activeTx[curTx];
-  static Transponder tp[16];
+  // Arena scratch (config.h): 1,216 B that used to sit in .bss permanently for a
+  // buffer only alive while this card prints. Placement-init keeps the Transponder
+  // defaults (active=true etc.) the loader relies on.
+  Scratch::Lease tpLease("tp", sizeof(Transponder) * 16);
+  Transponder* tp = (Transponder*)tpLease.p;
+  if (!tp) { Printer::line("(out of RAM)"); return; }
+  for (int i = 0; i < 16; ++i) new (&tp[i]) Transponder();
   if (!pick) {
     int tn = SatDb::loadTxCache(a->norad, tp, 16);
     for (int i = 0; i < tn; ++i)
@@ -13298,7 +14063,13 @@ void App::printSatCard() {
   Printer::line(String(a->name) + "  #" + String(a->norad));
   Printer::blank();
   Printer::line("TRANSPONDERS");
-  static Transponder tp[16];
+  // Arena scratch (config.h): 1,216 B that used to sit in .bss permanently for a
+  // buffer only alive while this card prints. Placement-init keeps the Transponder
+  // defaults (active=true etc.) the loader relies on.
+  Scratch::Lease tpLease("tp", sizeof(Transponder) * 16);
+  Transponder* tp = (Transponder*)tpLease.p;
+  if (!tp) { Printer::line("(out of RAM)"); return; }
+  for (int i = 0; i < 16; ++i) new (&tp[i]) Transponder();
   int tn = SatDb::loadTxCache(a->norad, tp, 16);
   if (tn == 0) Printer::line(" (none cached)");
   for (int i = 0; i < tn; ++i) {
@@ -13570,6 +14341,12 @@ void App::printOrbit() {
 
   Printer::line(String(s->name) + "  #" + String(s->norad));
   Printer::line("Intl des " + String(s->intlDes));
+  if (isDeepSpace(*s)) {
+    Printer::blank();
+    Printer::wrap("Deep-space orbit (period >= 225 min): propagated with the SDP4 "
+                  "model. Pass geometry behaves quite differently from a LEO bird.");
+    Printer::blank();
+  }
   // A permanent record is only meaningful against the epoch it describes, so stamp it.
   Printer::line("Epoch " + fmtMDHM((time_t)s->epochUnix) + "Z  elset #" + String(s->elsetNum));
   if (now) Printer::line("Printed " + fmtMDHM(now) + "Z");
@@ -13774,7 +14551,19 @@ void App::printTenDay() {
   if (!printActiveHint()) return;
   SatEntry* s = activeSat();
   buildVis();
-  if (visN == 0) { Printer::line("No passes in the 10-day window."); return; }
+  if (visN == 0) {
+    // On paper this matters more, not less: a report saying "no passes in the
+    // 10-day window" invites trying again next week, forever.
+    Observer po = loc.obs();
+    if (po.valid && !aosPossible(*s, po.lat)) {
+      Printer::wrap(String("NEVER RISES from your QTH: inclination ") +
+                    String((double)s->incl, 1) + " deg is too low to clear the "
+                    "horizon at latitude " + String(fabs(po.lat), 1) +
+                    (po.lat >= 0 ? " N." : " S.") + " No window will show a pass.");
+      return;
+    }
+    Printer::line("No passes in the 10-day window."); return;
+  }
   Printer::line(String(s->name) + "  (>= " + String(cfg.minPassEl) + " deg)");
   Printer::line(String(visN) + " passes, times UTC");
   Printer::blank();
@@ -13784,7 +14573,7 @@ void App::printTenDay() {
   Printer::rule();
   char r[64];
   for (int i = 0; i < visN; ++i) {
-    PassPredict& p = visPasses[i];
+    PassPredict& p = passScratch[i];
     struct tm tmv; gmtime_r(&p.aos, &tmv);
     char dstr[8]; snprintf(dstr, sizeof(dstr), "%02d/%02d", tmv.tm_mon + 1, tmv.tm_mday);
     if (wide) {
@@ -13811,14 +14600,14 @@ void App::printTenDay() {
     char lbl[8]; snprintf(lbl, sizeof(lbl), "%02d/%02d", tmv.tm_mon + 1, tmv.tm_mday);
     String bar; for (int x = 0; x < barW; ++x) bar += ' ';
     for (int i = 0; i < visN; ++i) {
-      time_t a = visPasses[i].aos, b = visPasses[i].los;
+      time_t a = passScratch[i].aos, b = passScratch[i].los;
       time_t s0 = (a > dayStart) ? a : dayStart;
       time_t s1 = (b < dayStart + 86400) ? b : dayStart + 86400;
       if (s1 <= s0) continue;
       int x1 = (int)((long)barW * (s0 - dayStart) / 86400);
       int x2 = (int)((long)barW * (s1 - dayStart) / 86400);
       if (x2 <= x1) x2 = x1 + 1;
-      float me = visPasses[i].maxEl;
+      float me = passScratch[i].maxEl;
       char ch = (me < 15.0f) ? ':' : (me < 40.0f ? '=' : '#');
       for (int x = x1; x < x2 && x < barW; ++x) bar.setCharAt(x, ch);
     }
@@ -14051,6 +14840,7 @@ const char* App::prtStem(PrintReport w) {
     case PR_STATES:    return "workable_states";
     case PR_DXCCLIST:  return "workable_dxcc";
     case PR_VISLIST:   return "visible_passes";
+    case PR_PERF:      return "performance";
   }
   return "report";
 }
@@ -14113,6 +14903,7 @@ bool App::printReport(PrintReport which) {
     case PR_STATES:    printStates(); break;
     case PR_DXCCLIST:  printDxccList(); break;
     case PR_VISLIST:   printVisList(); break;
+    case PR_PERF:      printPerf(); break;
   }
   Printer::feedCut();
   Printer::end();
@@ -15335,17 +16126,17 @@ void App::buildOrbit(bool quiet) {
     time_t winEnd = now + (time_t)ORB_OUTLOOK_DAYS * 86400;
     // Reuse the 10-day overview buffer (only live while that screen is open; it
     // is rebuilt on entry there, so borrowing it here is safe).
-    int n = pred.predictPasses(now, cfg.minPassEl, visPasses, VIS_PASS_MAX, winEnd);
+    int n = pred.predictPasses(now, cfg.minPassEl, passScratch, VIS_PASS_MAX, winEnd);
     orbOutlookN = n;
     for (int i = 0; i < n; ++i) {
-      const PassPredict& p = visPasses[i];
+      const PassPredict& p = passScratch[i];
       int dur = (int)(p.los - p.aos);
       if (p.maxEl > orbBestEl) { orbBestEl = p.maxEl; orbBestT = p.aos; orbBestDur = dur; }
       if (dur / 60.0f > orbLongestMin) orbLongestMin = dur / 60.0f;
       if (p.maxEl >= 30.0f) orbOutlookHi++;
     }
     if (n > 1)
-      orbAvgGapH = (float)(visPasses[n - 1].aos - visPasses[0].aos) / (n - 1) / 3600.0f;
+      orbAvgGapH = (float)(passScratch[n - 1].aos - passScratch[0].aos) / (n - 1) / 3600.0f;
   }
   if (!quiet) setStatus("");
 }
@@ -15354,8 +16145,14 @@ void App::drawOrbit() {
   SatEntry* s = activeSat();
   static const char* PG[] = { "Info", "Live", "Pass", "Track", "Doppler", "Nodal",
                               "Sun/B", "Outlook", "OrbPos", "Phys", "Explore" };
-  { String h = (s ? String(s->name) : String("Orbit")) + " " + PG[orbitPage] +
-               " " + String(orbitPage + 1) + "/11";
+  { // Label a deep-space orbit on every page. It is propagated correctly -- SDP4 is
+    // selected inside the SGP4 library -- but its geometry is so unlike a LEO bird's
+    // that naming the model earns its five characters. Leads the title because
+    // header() clips to the right.
+    String h;
+    if (s && isDeepSpace(*s)) h = "SDP4 ";
+    h += (s ? String(s->name) : String("Orbit")) + " " + PG[orbitPage] +
+         " " + String(orbitPage + 1) + "/11";
     header(h); }
   canvas.setTextSize(1);
   if (!s) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
@@ -15569,6 +16366,14 @@ void App::drawOrbit() {
     canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(2, y);
     canvas.printf("Next %d days", ORB_OUTLOOK_DAYS); y += LH;
     if (orbOutlookN == 0) {
+      { Observer oo = loc.obs();
+        if (oo.valid && !aosPossible(*s, oo.lat)) {
+          canvas.setTextColor(CL_RED, CL_BLACK); canvas.setCursor(2, y);
+          canvas.print("Never rises from your QTH."); y += LH;
+          canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, y);
+          canvas.printf("incl %.1f vs lat %.1f", (double)s->incl, fabs(oo.lat));
+          footer(",// page  r refresh  p print  ` bk"); return;
+        } }
       canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, y);
       canvas.print("No passes above mask.");
       footer(",// page  r refresh  p print  ` bk"); return;
@@ -15821,11 +16626,34 @@ void App::drawOrbit() {
   }
 
 
-  {
+  if (orbitPage == 4) {                              // ---------- Doppler curve ----------
+    // This was a bare `{ ... }` block that ran only because every other page had
+    // already returned -- correct by accident of ordering, and unreadable next to
+    // its siblings (it looked unimplemented). Guard it explicitly.
     const int PX = 30, PY = 20, PW = 204, PH = 90;
     canvas.drawRect(PX - 1, PY - 1, PW + 2, PH + 2, CL_MGREY);
-    if (!orbHasPass) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-      canvas.print("No upcoming pass."); footer(",// page  ` bk"); return; }
+    if (!orbHasPass) {
+      // "No upcoming pass." is ambiguous, and for a low-inclination bird seen from
+      // a high-latitude site it is permanently wrong: there is no pass to wait for.
+      // Say which case this is (see aosPossible(), ported from PREDICT's AosHappens).
+      Observer po = loc.obs();
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      if (po.valid && !aosPossible(*s, po.lat)) {
+        canvas.setTextColor(CL_RED, CL_BLACK);
+        canvas.setCursor(6, 50); canvas.print("Never rises from your QTH");
+        canvas.setTextColor(CL_YELLOW, CL_BLACK);
+        canvas.setCursor(6, 62);
+        canvas.printf("incl %.1f too low for %.1f%c", (double)s->incl,
+                      fabs(po.lat), po.lat >= 0 ? 'N' : 'S');
+      } else if (!timeIsSet()) {
+        canvas.setCursor(6, 56); canvas.print("Clock not set.");
+      } else {
+        canvas.setCursor(6, 56); canvas.print("No upcoming pass.");
+      }
+      // Keep `f` advertised: the key handler accepts it on this page regardless of
+      // whether a pass exists, and the beacon frequency is worth setting in advance.
+      footer(",// page  f freq  ` bk"); return;
+    }
     pred.setSat(*s);
     static float buf[PW > 0 ? PW : 1];
     double dur = (double)(orbPass.los - orbPass.aos);
@@ -21260,6 +22088,7 @@ namespace {
     "Workable DXCC (list)",          // 25
     "Visible passes (active sat)",   // 26
     "QRZ lookup result",             // 27
+    "Performance / heap",            // 28
   };
   const int PA_N = (int)(sizeof(PA_ITEMS) / sizeof(PA_ITEMS[0]));
 }
@@ -21302,7 +22131,7 @@ void App::keyPrintAbout(char c, bool enter, bool back) {
       PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_TARGET, PR_ROVE, PR_PASSPOLAR, PR_AMSAT, PR_OPCARD,
       PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
       PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_READY, PR_AWARDS,
-      PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_QRZ,
+      PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_QRZ, PR_PERF,
     };
     static_assert(sizeof(MAP)/sizeof(MAP[0]) == PA_N, "PA_ITEMS labels and MAP must match");
     if (paSel >= 0 && paSel < (int)(sizeof(MAP)/sizeof(MAP[0]))) printReport(MAP[paSel]);
@@ -23076,7 +23905,39 @@ void App::drawReady() {
       cfg.ssid[0] ? (net.connected() ? CL_GREEN : CL_WHITE) : CL_YELLOW);
   // Radio + rotator (informational: both defaults are valid configurations)
   row("Radio CAT", cfg.catType == CAT_WIRED ? "CI-V wired" : "network (LAN)", CL_WHITE);
-  row("Rotator", cfg.rotType == ROT_GS232 ? "GS-232" : "other/rotctld", CL_WHITE);
+  // Rotator: protocol + WIRE + link state. The old row said "GS-232" or
+  // "other/rotctld" and nothing else -- with a USB adapter and no radio engaged
+  // that told the operator nothing about whether the link was up, which adapter
+  // bound, or why it did not. Colour carries the link state so it reads at a
+  // glance: green = talking, red = configured but no link, white = off.
+  if (!cfg.rotEnable) {
+    row("Rotator", "off", CL_WHITE);
+  } else {
+    String proto = rot ? String(rot->name())
+                 : cfg.rotType == ROT_GS232 ? String("GS-232")
+                 : cfg.rotType == ROT_NET   ? String("rotctl")
+                 : cfg.rotType == ROT_PST   ? String("PstRotator")
+                 : cfg.rotType == ROT_YAESU ? String("Yaesu") : String("serial");
+    const bool serialRot = (cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+                            cfg.rotType != ROT_YAESU);
+    if (serialRot)
+      proto += cfg.rotTransport == ROT_XPORT_GROVE ? "/Grove"
+             : cfg.rotTransport == ROT_XPORT_USB   ? "/USB" : "/bridge";
+    const bool up = (rot && rot->ready());
+    String st = up ? String("ready") : String("no link");
+#if CARDSAT_HAS_USBCAT
+    // On USB, name the adapter when bound and the reason when not -- that is the
+    // whole diagnostic in one line.
+    if (serialRot && cfg.rotTransport == ROT_XPORT_USB) {
+      if (UsbSerial::rotActive() && *UsbSerial::rotDeviceName()) st = UsbSerial::rotDeviceName();
+      else if (*UsbSerial::rotLastError())                       st = UsbSerial::rotLastError();
+    }
+#endif
+    // A conflict outranks the link state: it is the reason there is no link.
+    const char* clash = rotTransportConflict();
+    if (clash) { st = clash; }
+    row("Rotator", proto + ": " + st, clash ? CL_RED : (up ? CL_GREEN : CL_RED));
+  }
   // SD (voice memos)
   row("SD card", Store::onSD() ? "present" : "none (memos off)",
       Store::onSD() ? CL_GREEN : CL_GREY);
@@ -24643,21 +25504,130 @@ void App::printVisList() {
   Printer::title("VISIBLE PASSES");
   if (!printActiveHint()) return;
   SatEntry* s = activeSat();
+  // Rebuild rather than trusting passScratch[]: this report is reachable from the
+  // About > Print menu without ever visiting the Visible-pass screen, in which case
+  // vlN is 0 and we would print "(none)" for a satellite that has passes. printTenDay()
+  // calls buildVis() for exactly the same reason.
+  buildVisList();
   Printer::line(String(s->name));
   Printer::line("Optically visible, next 10 days");
   Printer::blank();
-  if (vlN == 0) { Printer::line("(none in the window)"); return; }
+  if (vlN == 0) {
+    Observer po = loc.obs();
+    if (po.valid && !aosPossible(*s, po.lat)) {
+      Printer::wrap(String("NEVER RISES from your QTH: inclination ") +
+                    String((double)s->incl, 1) + " deg is too low to clear the "
+                    "horizon at latitude " + String(fabs(po.lat), 1) +
+                    (po.lat >= 0 ? " N." : " S."));
+      return;
+    }
+    Printer::line("(none in the window)"); return;
+  }
   Printer::line("Date   AOS    Dur  El  Rise");
   char b[64];
   for (int i = 0; i < vlN; ++i) {
-    time_t a = vlPasses[i].aos;
-    long durMin = (long)(vlPasses[i].los - a) / 60;
+    time_t a = passScratch[i].aos;
+    long durMin = (long)(passScratch[i].los - a) / 60;
     struct tm tmv; gmtime_r(&a, &tmv);
     snprintf(b, sizeof(b), "%02d-%02d  %02d:%02dZ %3ldm %3.0f %s",
              tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min,
-             durMin, (double)vlPasses[i].maxEl, windDirName((int)vlPasses[i].azAos));
+             durMin, (double)passScratch[i].maxEl, windDirName((int)passScratch[i].azAos));
     Printer::line(String(b));
   }
+}
+
+// ---- Performance monitor (SCR_PERF) -------------------------------------------------
+// What memtrace showed over USB serial, shown on the device instead. The 0.9.57 heap bug
+// (a runaway BASIC program stranding its 6 KB output buffer, which then starved the
+// contiguous block a TLS upload needs) was only caught because a laptop happened to be
+// attached. In the field there is no console, so this screen exists to make the same
+// numbers visible where the device actually gets used.
+//
+// The number that matters on this no-PSRAM board is LARGEST BLOCK, not free heap: TLS
+// needs one big contiguous allocation, and fragmentation can starve it while "free"
+// still looks healthy. The thresholds below are anchored to measured behaviour -- a GP
+// fetch runs with ~25 KB free and the largest block dipping to ~8 KB.
+void App::drawPerf() {
+  header("Performance");
+  canvas.setTextSize(1);
+  int y = 20; const int LH = 10;
+  auto row = [&](const char* k, const String& v, uint16_t vc) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(2, y);  canvas.print(k);
+    canvas.setTextColor(vc, CL_BLACK);       canvas.setCursor(86, y); canvas.print(v);
+    y += LH;
+  };
+  uint32_t fr  = ESP.getFreeHeap();
+  uint32_t blk = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+  // Largest contiguous block: the figure that decides whether a TLS upload can run.
+  uint16_t blkCol = (blk < 12000) ? CL_RED : (blk < 20000) ? CL_YELLOW : CL_GREEN;
+  row("Largest blk", String(blk) + " B", blkCol);
+  row("  min ever", perfMinBlk == 0xFFFFFFFF ? String("--") : String(perfMinBlk) + " B",
+      (perfMinBlk < 12000) ? CL_YELLOW : CL_GREY);
+  row("Free heap", String(fr) + " B", (fr < 25000) ? CL_YELLOW : CL_GREEN);
+  row("  min ever", perfMinFree == 0xFFFFFFFF ? String("--") : String(perfMinFree) + " B", CL_GREY);
+
+  // Loop timing: a slow loop means a starved watchdog and a sluggish UI.
+  { char b[32];
+    snprintf(b, sizeof(b), "%lu us", (unsigned long)perfLoopAvg);
+    row("Loop avg", String(b), perfLoopAvg > 100000 ? CL_YELLOW : CL_WHITE);
+    snprintf(b, sizeof(b), "%lu us", (unsigned long)perfLoopMax);
+    row("  worst", String(b), perfLoopMax > 1000000 ? CL_YELLOW : CL_GREY); }
+
+  { uint32_t up = millis() / 1000; char b[28];
+    snprintf(b, sizeof(b), "%luh %lum", (unsigned long)(up / 3600),
+             (unsigned long)((up % 3600) / 60));
+    row("Uptime", String(b), CL_WHITE); }
+  row("Storage", Store::onSD() ? "SD card" : "internal", CL_WHITE);
+
+  footer("x reset peaks   p print   ` back");
+}
+
+void App::keyPerf(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (c == 'x') {                                  // reset the peak trackers
+    perfMinFree = 0xFFFFFFFF; perfMinBlk = 0xFFFFFFFF;
+    perfLoopMax = 0; perfLoopAvg = 0;
+    setStatus("Peaks reset");
+    lastDrawMs = 0; return;
+  }
+  if (c == 'p') { printReport(PR_PERF); return; }
+}
+
+void App::printPerf() {
+  Printer::title("PERFORMANCE");
+  { time_t now = timeIsSet() ? nowUtc() : 0;
+    if (now) { struct tm tmv; gmtime_r(&now, &tmv); char b[48];
+      snprintf(b, sizeof(b), "%04d-%02d-%02d %02d:%02dZ", tmv.tm_year + 1900,
+               tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+      Printer::line(String(b)); } }
+  Printer::line(String("FW ") + FW_VERSION);
+  Printer::blank();
+  char b[64];
+  snprintf(b, sizeof(b), "Largest blk  %lu B",
+           (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  Printer::line(String(b));
+  if (perfMinBlk != 0xFFFFFFFF) {
+    snprintf(b, sizeof(b), "  min ever   %lu B", (unsigned long)perfMinBlk);
+    Printer::line(String(b));
+  }
+  snprintf(b, sizeof(b), "Free heap    %lu B", (unsigned long)ESP.getFreeHeap());
+  Printer::line(String(b));
+  if (perfMinFree != 0xFFFFFFFF) {
+    snprintf(b, sizeof(b), "  min ever   %lu B", (unsigned long)perfMinFree);
+    Printer::line(String(b));
+  }
+  snprintf(b, sizeof(b), "Loop avg     %lu us", (unsigned long)perfLoopAvg);
+  Printer::line(String(b));
+  snprintf(b, sizeof(b), "  worst      %lu us", (unsigned long)perfLoopMax);
+  Printer::line(String(b));
+  { uint32_t up = millis() / 1000;
+    snprintf(b, sizeof(b), "Uptime       %luh %lum", (unsigned long)(up / 3600),
+             (unsigned long)((up % 3600) / 60));
+    Printer::line(String(b)); }
+  Printer::line(String("Storage      ") + (Store::onSD() ? "SD card" : "internal"));
+  Printer::line(String("Catalog      ") + String(db.count()) + " sats");
 }
 
 void App::tsRefillFav(int fi) {
@@ -26293,8 +27263,23 @@ void App::drawPasses() {
     }
   }
   if (passN == 0) {
-    canvas.setTextColor(CL_YELLOW, CL_BLACK);
-    canvas.setCursor(6, 40); canvas.print("No passes >= min elev.");
+    // Distinguish "nothing soon" from "nothing, ever". A low-inclination bird
+    // (IO-86 at 6 deg) simply cannot clear the horizon from a mid-latitude site,
+    // and "No passes >= min elev." reads like a temporary condition worth waiting
+    // out. Say which it is.
+    SatEntry* ps = activeSat();
+    Observer  po = loc.obs();
+    if (ps && po.valid && !aosPossible(*ps, po.lat)) {
+      canvas.setTextColor(CL_RED, CL_BLACK);
+      canvas.setCursor(6, 40); canvas.print("Never rises from your QTH:");
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.setCursor(6, 52);
+      canvas.printf("incl %.1f too low for %.1f%c", (double)ps->incl,
+                    fabs(po.lat), po.lat >= 0 ? 'N' : 'S');
+    } else {
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.setCursor(6, 40); canvas.print("No passes >= min elev.");
+    }
   }
   for (int i = 0; i < passN && i < 9; ++i) {
     int y = 30 + i*10;
@@ -27632,7 +28617,13 @@ void App::drawUpdate() {
 void App::drawSettings() {
   header(setCat < 0 ? "Settings" : SET_CAT_NAME[setCat]);
   canvas.setTextSize(1);
-  const int N = 99;          // must exceed the highest rows[] index used below (transport 98)
+  // MUST exceed the highest rows[] index used below. This is a hand-maintained
+  // bound on a stack array of Strings, so getting it wrong is not a cosmetic bug:
+  // rows[99..101] (the USB picker and scan rows) were written past the end of a
+  // 99-element array -- undefined behaviour that showed up as "the new settings
+  // rows have no label" and was quietly constructing String objects on whatever
+  // followed on the stack. check_settings_rows.py now enforces this bound.
+  const int N = 110;         // highest index used: 101 (scan rows)
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -27691,6 +28682,63 @@ void App::drawSettings() {
     rows[61] = String("Msg notify: ") + mn; }
   rows[80] = String("Auto position reply: ") + (cfg.autoPosReply ? "on" : "off");
   rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
+  {
+    // Rot wire: only meaningful for the serial protocols -- the network backends
+    // carry their own socket and ROT_YAESU is I2C-direct, so say so rather than
+    // offering a choice that does nothing.
+    const bool serialRot = (cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+                            cfg.rotType != ROT_YAESU);
+    String w = !serialRot ? String("n/a")
+             : cfg.rotTransport == ROT_XPORT_GROVE ? String("Grove G1/G2")
+             : cfg.rotTransport == ROT_XPORT_USB   ? String("USB adapter")
+             : String("I2C bridge");
+    // Name the clash inline: the Settings screen is where it can still be fixed.
+    if (serialRot && cfg.rotEnable) {
+      const char* bad = rotTransportConflict();
+      if (bad) w += " (!)";
+    }
+    rows[86] = String("Rot wire: ") + w;
+  }
+  {
+    // Radio USB adapter. Only meaningful on CAT_USB.
+    String v = (cfg.catType == CAT_USB) ? usbAdapterLabel(cfg.catUsbKey) : String("n/a");
+    // Both ports on ONE adapter is a misconfiguration the engage will refuse
+    // (catPickAdapter / rotBegin). Say so HERE, where it can still be fixed --
+    // cycling now skips the other port's pick, so this can only be reached by an
+    // older config or by pointing them at each other from opposite menus.
+    if (cfg.catType == CAT_USB && cfg.catUsbKey[0] &&
+        strcmp(cfg.catUsbKey, cfg.rotUsbKey) == 0)
+      v += " (!rotator's)";
+    rows[89] = String("Radio USB: ") + v;
+  }
+  {
+    // Rotator USB adapter. Only meaningful on a USB-transport serial rotator.
+    const bool usbRot = (cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+                         cfg.rotType != ROT_YAESU && cfg.rotTransport == ROT_XPORT_USB);
+    String v = usbRot ? usbAdapterLabel(cfg.rotUsbKey) : String("n/a");
+    if (usbRot && cfg.rotUsbKey[0] && strcmp(cfg.rotUsbKey, cfg.catUsbKey) == 0)
+      v += " (!radio's)";
+    rows[99] = String("Rot USB: ") + v;
+  }
+  {
+    // Scan rows: one per menu, same action. Report what is already known so the
+    // row is useful before AND after -- "3 seen" tells you a re-scan is optional.
+#if CARDSAT_HAS_USBCAT
+    const uint8_t n = UsbSerial::serialDeviceCount();
+    String v = n ? (String(n) + " seen - press to re-scan") : String("press to scan");
+#else
+    String v = "n/a";
+#endif
+    rows[100] = String("Scan USB adapters: ") + v;
+    // Name the size cap: on a flash-only Cardputer the log is bounded at ~32 KB
+    // (2 x 16 KB with rotation), on SD ~512 KB. An operator turning this on
+    // deserves to know what it will cost before it costs it.
+    rows[102] = String("Console to file: ") +
+                (cfg.consoleLog ? (Store::onSD() ? "on (SD, ~512KB cap)"
+                                                 : "on (flash, ~32KB cap)")
+                                : "off");
+    rows[101] = rows[100];
+  }
   rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
                      : cfg.rotType == ROT_NET ? "rotctl (net)"
                      : cfg.rotType == ROT_YAESU ? "Yaesu (direct)"
@@ -27739,14 +28787,17 @@ void App::drawSettings() {
   rows[27] = String("Backup config+favs -> SD");
   rows[28] = String("Restore config+favs");
   rows[29] = String("Reset all data (erase)");
-  rows[30] = String("CAT type: ") + (cfg.catType == CAT_RIGCTL ? "rigctl (net)"
+  rows[30] = String("CAT type: ") + (cfg.catType == CAT_USB ? "USB serial"
+                     : cfg.catType == CAT_RIGCTL ? "rigctl (net)"
                      : cfg.catType == CAT_NET ? "Icom LAN" : "Wired CI-V");
   {
     String h = cfg.catHost[0] ? String(cfg.catHost) : String("(not set)");
     if (h.length() > 17) h = "..." + h.substring(h.length() - 14);
-    rows[31] = String(cfg.catType == CAT_RIGCTL ? "rigctld host: " : "LAN host: ") + h;
+    rows[31] = (cfg.catType == CAT_USB) ? String("Host: n/a (USB)")
+             : String(cfg.catType == CAT_RIGCTL ? "rigctld host: " : "LAN host: ") + h;
   }
-  rows[32] = String(cfg.catType == CAT_RIGCTL ? "rigctld port: " : "LAN port: ") + String(cfg.catPort);
+  rows[32] = (cfg.catType == CAT_USB) ? String("Port: n/a (USB)")
+           : String(cfg.catType == CAT_RIGCTL ? "rigctld port: " : "LAN port: ") + String(cfg.catPort);
   rows[33] = String("LAN user: ") + (cfg.catUser[0] ? cfg.catUser : "(not set)");
   rows[34] = String("LAN pass: ") + String(strlen(cfg.catPass) ? "******" : "(none)");
   rows[35] = String("Rotator: manual control");
@@ -27780,7 +28831,11 @@ void App::drawSettings() {
   rows[81] = String("Morse keys: ") + (cfg.morseSwap ? String("U dot / T dash") : String("T dot / U dash"));
   rows[62] = String("Run CAT self-test");
   { const char* pm = (cfg.civPinMode == 1) ? "1-pin G2" : (cfg.civPinMode == 2) ? "1-pin G1" : "TX/RX (G2/G1)";
-    rows[63] = String("CI-V wiring: ") + pm; }
+    // Under CAT_USB the on-board UART is never opened (civ.cpp begin() takes the
+    // external-stream path), so the pin mode has no effect. Show that, rather than a
+    // live-looking value that does nothing.
+    rows[63] = (cfg.catType == CAT_USB) ? String("CI-V wiring: n/a (USB)")
+                                        : String("CI-V wiring: ") + pm; }
   rows[64] = String("CAT serial monitor");
   // ---- LoTW station location (unified DXCC -> primary -> secondary) ----
   { const DxccEntry* e = lotwFindDxcc(cfg.lotwDxcc);

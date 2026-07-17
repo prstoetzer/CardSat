@@ -647,7 +647,11 @@ int SatDb::scanGpFile(const char* path, bool (*accept)(uint32_t, void*), void* c
   if (!f) { if (loaded) *loaded = 0; return 0; }
 
   static const size_t OBJ_MAX = 1200;     // largest OMM object is ~800 bytes
-  static char obj[OBJ_MAX];               // static: keep it off the stack
+  // Arena scratch (config.h): off the stack AND out of permanent .bss -- alive
+  // only for this scan. Falls back to a heap block if the arena is busy.
+  Scratch::Lease objLease("gp", OBJ_MAX);
+  char* obj = (char*)objLease.p;
+  if (!obj) { f.close(); if (loaded) *loaded = 0; return 0; }
   uint8_t rd[256];
   size_t oi = 0;
   int  depth = 0;

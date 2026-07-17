@@ -273,9 +273,22 @@ void Net::pcbCounts(int& active, int& timeWait) {
 // only churned the LWIP socket pool faster (rapid connect/close leaves PCBs in TIME_WAIT
 // that a WiFi radio reset doesn't flush), which contributed to a whole-stack connect()
 // wedge after a session. Kept single-shot; the caller handles a failed GET.
+// A BearSSL handshake needs several KB of contiguous heap at once. With USB CAT
+// engaged the board sits at ~17 KB free / ~7 KB largest block (measured), so a
+// handshake there does not merely fail -- it fails after allocating, which is the
+// worst kind of failure on a fragmented heap. Refuse early, with a reason the
+// operator can act on. Both TLS entry points check this; the predicate lives here
+// so there is ONE definition rather than a copy per call site.
+bool Net::tlsHeapTooLow() {
+  const uint32_t big = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  return big < 16384;
+}
+
 bool Net::httpsGet(const String& url, String& out, size_t maxBytes) {
   lastCode = 0; lastErr = ""; lastDlErr = DownloadError::None;
   if (!connected()) { lastErr = "no WiFi"; lastDlErr = DownloadError::ConnectFailed; return false; }
+  if (tlsHeapTooLow()) { lastErr = "low heap (USB CAT on?)";
+                         lastDlErr = DownloadError::ConnectFailed; return false; }
   TlsBusyGuard _tls;   // free the app's LAN listener sockets for this session
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);   // let a just-closed socket leave the pool
 
@@ -413,6 +426,7 @@ bool Net::httpsGetToFile(const String& url, const char* path,
   lastCode = 0; lastErr = "";
   if (written) *written = 0;
   if (!connected()) { lastErr = "no WiFi"; return false; }
+  if (tlsHeapTooLow()) { lastErr = "low heap (USB CAT on?)"; return false; }
   TlsBusyGuard _tls;   // suspend the app's LAN listeners for this session
   if (INTER_FETCH_MS) delay(INTER_FETCH_MS);
 

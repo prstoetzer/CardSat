@@ -53,12 +53,18 @@ public:
   bool selVerified() const override { return RADIOS[_model].selVerified; }
   const char* name() const override { return RADIOS[_model].name; }
 
+  // Clear the cached transport too (see Rig::setExternalStream). begin() copies
+  // extStream into _stream, so the base-class version alone would leave this
+  // backend pointing at a Stream the caller is about to delete.
+  void setExternalStream(Stream* s) override { Rig::setExternalStream(s); _stream = s; }
+
 private:
   Stream*    _stream = nullptr;
   RadioModel _model;
   uint16_t   _postMs;          // inter-command delay (FT-736R needs more)
   uint32_t   _lastSubHz = 0;   // last downlink we commanded (wrong-VFO guard)
 
+  void   drainStale();               // bounded, -1-safe RX flush (never spins)
   bool   send(const uint8_t cmd[5]);
   bool   setFreq(uint8_t opcode, uint32_t hz);
   bool   setMode(uint8_t opcode, RigMode m);

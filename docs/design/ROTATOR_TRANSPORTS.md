@@ -1,6 +1,10 @@
 # Rotator Transports: Serial (G1/G2) and USB
 
-**Status: DESIGN — nothing in this document is implemented.** Phase 0 (proving
+> **SUPERSEDED (0.9.58).** This design shipped. The as-built reference is
+> **[docs/interfaces/ROTATOR_TRANSPORTS.md](../interfaces/ROTATOR_TRANSPORTS.md)**;
+> this file is kept as the design-time record.
+
+**Status: DESIGN (historical) — written before implementation.** Phase 0 (proving
 single-adapter USB CAT on real hardware) is still in progress; this design exists so
 the rotator work lands on an architecture that was planned, not bolted on.
 

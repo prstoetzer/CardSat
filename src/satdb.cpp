@@ -212,6 +212,14 @@ bool SatDb::addGp(const SatEntry& s) {
 
   // Persist as one compact OMM object per line (NDJSON), kept separate so an
   // AMSAT refresh that rewrites FILE_GP doesn't wipe hand-entered satellites.
+  File f = Store::fs().open(FILE_MGP, "a");
+  if (f) { writeGpLine(f, s); f.close(); }
+  return true;
+}
+
+// One compact OMM object + newline -- the shared NDJSON record writer behind both the
+// manual-sat file (FILE_MGP) and the CelesTrak-extras file (FILE_CTX).
+void SatDb::writeGpLine(File& f, const SatEntry& s) {
   JsonDocument d;
   d["AMSAT_NAME"]        = s.name;
   d["OBJECT_ID"]         = s.intlDes;
@@ -228,9 +236,114 @@ bool SatDb::addGp(const SatEntry& s) {
   d["MEAN_MOTION_DDOT"]  = s.nddot;
   d["REV_AT_EPOCH"]      = s.revAtEpoch;
   d["ELEMENT_SET_NO"]    = s.elsetNum;
-  File f = Store::fs().open(FILE_MGP, "a");
-  if (f) { serializeJson(d, f); f.print("\n"); f.close(); }
+  serializeJson(d, f); f.print("\n");
+}
+
+// ---- CelesTrak extra favorites (FILE_CTX) -------------------------------------------
+
+uint32_t SatDb::gpLineNorad(const char* line, size_t len) {
+  char v[16];
+  if (!gpFindValue(line, len, "NORAD_CAT_ID", v, sizeof(v))) return 0;
+  return (uint32_t)strtoul(v, nullptr, 10);
+}
+
+bool SatDb::addCtExtra(const SatEntry& s) {
+  if (s.norad == 0 || s.meanMotion <= 0) return false;
+  if (isCtExtra(s.norad)) return true;           // already tracked; refresh will update it
+  int total = 0;                                 // cap the file at CTX_MAX (heap-bounds every
+  listNdjsonNorads(FILE_CTX, nullptr, 0, &total);//  walk AND matches the refresh cap)
+  if (total >= CTX_MAX) return false;
+  File f = Store::fs().open(FILE_CTX, "a");
+  if (!f) return false;
+  writeGpLine(f, s); f.close();
   return true;
+}
+
+bool SatDb::isCtExtra(uint32_t norad) {
+  File f = Store::fs().open(FILE_CTX, "r");
+  if (!f) return false;
+  bool found = false;
+  while (f.available() && !found) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    if (gpLineNorad(line.c_str(), line.length()) == norad) found = true;
+  }
+  f.close();
+  return found;
+}
+
+// Rewrite-to-temp, never whole-file-in-RAM: the old version accumulated every kept
+// line into one String (a ~20 KB heap spike at the CTX_MAX cap, and a fragmentation
+// hazard beside TLS buffers). Now each kept line streams straight to a temp file
+// which is renamed over the original -- flat RAM, and a crash mid-write leaves the
+// original intact.
+bool SatDb::removeCtExtra(uint32_t norad) {
+  File f = Store::fs().open(FILE_CTX, "r");
+  if (!f) return false;
+  const char* tmp = "/CardSat/ctx.rm";
+  Store::fs().remove(tmp);
+  File w = Store::fs().open(tmp, "w");
+  if (!w) { f.close(); return false; }
+  bool removed = false; int kept = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    if (gpLineNorad(line.c_str(), line.length()) == norad) { removed = true; continue; }
+    w.print(line); w.print('\n'); ++kept;
+  }
+  f.close(); w.close();
+  if (!removed) { Store::fs().remove(tmp); return false; }
+  Store::fs().remove(FILE_CTX);
+  if (kept == 0) { Store::fs().remove(tmp); return true; }
+  Store::fs().rename(tmp, FILE_CTX);
+  return true;
+}
+
+int SatDb::loadCtExtraFile(const uint32_t* favs, int favN) {
+  File f = Store::fs().open(FILE_CTX, "r");
+  if (!f) return 0;
+  int merged = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    JsonDocument d;
+    if (deserializeJson(d, line)) continue;
+    SatEntry tmp;
+    if (!parseGpObject(d.as<JsonObjectConst>(), tmp)) continue;
+    if (indexOfNorad(tmp.norad) >= 0) continue;  // primary/manual already has it: theirs is fresher
+    int idx = -1;
+    if (_n < MAX_SATS) { idx = _n; _n++; }
+    else {
+      // Full: evict the last non-favorite (extras are explicit user picks and outrank
+      // file-order fills). If every slot is a favorite, this extra just doesn't fit.
+      for (int i = _n - 1; i >= 0; --i) {
+        bool fav = false;
+        for (int k = 0; k < favN; ++k) if (favs && favs[k] == _sats[i].norad) { fav = true; break; }
+        if (!fav) { idx = i; break; }
+      }
+      if (idx < 0) continue;   // every slot is a favorite; caller reports via merged<total
+    }
+    _sats[idx] = tmp; merged++;
+  }
+  f.close();
+  return merged;
+}
+
+int SatDb::listNdjsonNorads(const char* path, uint32_t* out, int maxN, int* total) {
+  File f = Store::fs().open(path, "r");
+  if (!f) { if (total) *total = 0; return 0; }
+  int n = 0, seen = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    uint32_t nd = gpLineNorad(line.c_str(), line.length());   // no per-line JsonDocument
+    if (!nd) continue;
+    seen++;
+    if (out && n < maxN) out[n++] = nd;
+  }
+  f.close();
+  if (total) *total = seen;
+  return n;
 }
 
 bool SatDb::loadManualGpFile() {
@@ -387,6 +500,39 @@ static void amsNorm(const char* in, char* out, int outsz) {
 }
 
 // Does padded " haystackNorm " contain " needleNorm " as a delimited token run?
+// Forward decl: findByServiceName (below) shares these primitives.
+static bool amsTokenIn(const char* hayNorm, const char* needleNorm);
+
+int SatDb::findByServiceName(const char* svc) const {
+  if (!svc || !*svc) return -1;
+  char sn[40]; amsNorm(svc, sn, sizeof(sn));
+  if (!sn[0]) return -1;
+  // 1. parenthesised-designator equality (the CelesTrak-name bridge)
+  for (int i = 0; i < _n; ++i) {
+    const char* p = strchr(_sats[i].name, '(');
+    while (p) {
+      const char* e = strchr(p, ')');
+      if (!e) break;
+      char tok[24]; int L = (int)(e - p - 1); if (L > 23) L = 23;
+      memcpy(tok, p + 1, L); tok[L] = 0;
+      char tn[40]; amsNorm(tok, tn, sizeof(tn));
+      if (tn[0] && strcmp(tn, sn) == 0) return i;
+      p = strchr(e, '(');
+    }
+  }
+  // 2. whole-name equality
+  for (int i = 0; i < _n; ++i) {
+    char nn[40]; amsNorm(_sats[i].name, nn, sizeof(nn));
+    if (strcmp(nn, sn) == 0) return i;
+  }
+  // 3. delimited-token containment (either direction)
+  for (int i = 0; i < _n; ++i) {
+    char nn[40]; amsNorm(_sats[i].name, nn, sizeof(nn));
+    if (amsTokenIn(nn, sn) || amsTokenIn(sn, nn)) return i;
+  }
+  return -1;
+}
+
 static bool amsTokenIn(const char* hayNorm, const char* needleNorm) {
   if (!needleNorm[0]) return false;
   char hay[72]; snprintf(hay, sizeof(hay), " %s ", hayNorm);
@@ -700,6 +846,59 @@ int SatDb::scanGpFile(const char* path, bool (*accept)(uint32_t, void*), void* c
   f.close();
   if (loaded) *loaded = _n;
   return seen;
+}
+
+// Transient sibling of scanGpFile: stream a GP/OMM JSON file object-by-object and hand each
+// parsed SatEntry to sink(entry, ctx). Deliberately touches NO member state (_sats/_n), so a
+// caller can screen a large CelesTrak group without disturbing the resident catalog. Flat RAM
+// regardless of file size (256-byte reads, one object assembled at a time) and the same
+// allocation-free parseGpObjectRaw field parse as the bulk load.
+int SatDb::streamGpFileEntries(const char* path,
+                               void (*sink)(const SatEntry&, void*), void* ctx) {
+  int parsed = 0;
+  File f = Store::fs().open(path, "r");
+  if (!f) return 0;
+  static const size_t OBJ_MAX = 1200;      // largest OMM object is ~800 bytes
+  Scratch::Lease objLease("gpx", OBJ_MAX); // transient arena, freed at scope end
+  char* obj = (char*)objLease.p;
+  if (!obj) { f.close(); return 0; }
+  uint8_t rd[256];
+  size_t oi = 0;
+  int  depth = 0;
+  bool inStr = false, esc = false, collecting = false, started = false;
+  int avail;
+  while ((avail = f.read(rd, sizeof(rd))) > 0) {
+    for (int i = 0; i < avail; ++i) {
+      char c = (char)rd[i];
+      if (!started) { if (c == '[') started = true; continue; }
+      if (!collecting) {                   // between objects: wait for '{'
+        if (c == '{') { collecting = true; depth = 1; inStr = false; esc = false;
+                        oi = 0; obj[oi++] = c; }
+        continue;
+      }
+      bool overflow = (oi >= OBJ_MAX - 1);
+      if (!overflow) obj[oi++] = c;
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c == '\\') esc = true;
+        else if (c == '"')  inStr = false;
+      } else if (c == '"') inStr = true;
+      else if (c == '{')   ++depth;
+      else if (c == '}') {
+        if (--depth == 0) {                // object complete
+          collecting = false;
+          if (!overflow) {                 // only parse if captured whole
+            obj[oi] = 0;
+            SatEntry tmp;
+            if (parseGpObjectRaw(obj, oi, tmp)) { parsed++; if (sink) sink(tmp, ctx); }
+          }
+          oi = 0;
+        }
+      }
+    }
+  }
+  f.close();
+  return parsed;
 }
 
 // Legacy entry point: first-MAX_SATS-in-file-order (no favorites priority). Kept for callers

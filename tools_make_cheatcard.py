@@ -42,10 +42,10 @@ FRONT = [
   "(Help links: <b>g</b> glossary+math &middot; <b>m</b> user guide &middot; <b>s</b> sat history &middot; <b>t</b> tech help &middot; <b>l</b> learn theory &middot; <b>f</b> band plan)"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "World Map, Sun/Moon, Space Wx, Weather, Activations, Overhead now, Grid dist/bearing, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
+  "World Map, Sun/Moon, Space Wx, Weather, Activations, AMSAT status, Overhead now, Grid dist/bearing, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
  ("SATELLITES",
-  "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>n</b> new GP sat &middot; <b>x</b> del manual sat &middot; "
-  "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>y</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>L</b> share GP over LoRa &middot; <b>ENTER</b> passes &middot; "
+  "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>/</b> search ALL of CelesTrak &rarr; add as auto-updating fav (10 s/2 h courtesy limits) &middot; <b>n</b> new GP sat &middot; <b>x</b> del added sat &middot; "
+  "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>y</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>s</b> AMSAT status &middot; <b>L</b> share GP over LoRa &middot; <b>ENTER</b> passes &middot; "
   "right edge: dot = AMSAT heard, square = telemetry, ring = not heard"),
  ("SAT-TO-SAT (Sats &rarr; 2)",
   "Windows when selected sat + a 2nd fav are BOTH above your horizon (start, dur, peak el each). <b>n</b> next sat &middot; <b>r</b> recompute &middot; <b>`</b> back"),
@@ -59,7 +59,7 @@ FRONT = [
   "<b>;</b>/<b>.</b> scroll &middot; <b>d</b> asc/desc node &middot; <b>r</b> recompute &middot; <b>`</b> back"),
  ("OSCARLOCATOR (Sats &rarr; k)",
   "Live azimuthal-equidistant plot: sub-point, footprint, QTH range ring + full ground track (AOS/LOS). "
-  "<b>m</b> toggle polar (default, auto N/S, flips at equator) / QTH-centred &middot; <b>`</b> back"),
+  "<b>m</b> toggle polar (default, auto N/S, flips at equator) / QTH-centered &middot; <b>`</b> back"),
  ("DX DOPPLER TABLE (Mutual &rarr; ENTER &rarr; d)",
   "RX/TX dial freqs for BOTH stations every 30s across a mutual window. Two lines/step: me (green) + DX (cyan). From the Mutual list, <b>ENTER</b> opens a polar detail (me+DX arcs, AOS/LOS/el) then <b>d</b> the table (or <b>d</b> straight from the list). "
   "<b>t</b> cycle transponder &middot; <b>m</b> mode: true rule / fixed DL / fixed UL &middot; <b>a</b> anchor dial (me/DX RX/TX) &middot; <b>,</b>/<b>/</b> in fixed mode step anchored dial to round 1 kHz (else passband 1 kHz) &middot; header shows pb +/- from center &middot; <b>;</b>/<b>.</b> scroll &middot; <b>`</b> back"),
@@ -80,7 +80,7 @@ FRONT = [
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
   "<b>c</b> CTCSS &middot; <b>N</b> sat note &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>a</b> point-here arrow &middot; <b>z</b> big readout &middot; "
   "<b>y</b> tilt on/off (ADV) &middot; "
-  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>i</b>&times;2 report Heard (AMSAT) &middot; <b>ENTER</b> save cal"),
+  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>i</b>&times;2 report Heard (AMSAT) &middot; after LOS <b>q</b> (60s) deep-sleep to next pass &middot; <b>ENTER</b> save cal"),
  ("BIG READOUT (z from Track)",
   "Big RX/TX + az/el + tune mode (follows Track). Radio+rotator keep tracking &middot; "
   "<b>,</b>/<b>/</b> tune &middot; <b>s</b>/<b>x</b> step/ctr &middot; <b>m</b>/<b>d</b> mode &middot; "
@@ -110,7 +110,7 @@ FRONT = [
   "<b>s</b> sky sources &middot; <b>t</b> transits &middot; <b>e</b> EME &middot; <b>x</b> stop &middot; <b>`</b> back"),
 
  ("SKY SOURCES (Sun/Moon &rarr; s)",
-  "Planets (cyan dots) + strong radio sources (orange +): Cas A, Cyg A, galactic centre, Crab, Virgo A, on a sky dome. "
+  "Planets (cyan dots) + strong radio sources (orange +): Cas A, Cyg A, galactic center, Crab, Virgo A, on a sky dome. "
   "Antenna-pointing / RF reference. <b>;</b>/<b>.</b> select &middot; <b>`</b> back"),
  ("EME / MOONBOUNCE (Sun/Moon &rarr; e)",
   "Self-echo Doppler per band (50/144/432/1296/10368, topocentric) &middot; range + rate &middot; path degradation vs perigee &middot; "
@@ -122,8 +122,8 @@ FRONT = [
 
 BACK = [
  ("SPACE WX (menu)",
-  "Solar 10.7cm flux + planetary Kp + A index + aurora likelihood (from Kp), labelled "
-  "&amp; colour-coded, with HF/sat operating outlook &amp; data age &middot; <b>p</b> HF/6m propagation &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
+  "Solar 10.7cm flux + planetary Kp + A index + aurora likelihood (from Kp), labeled "
+  "&amp; color-coded, with HF/sat operating outlook &amp; data age &middot; <b>p</b> HF/6m propagation &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
  ("HF/6m PROPAGATION (Space Wx &rarr; p)",
   "Turns solar flux + Kp into band guidance: HF conditions (10/15/20m open/marg/shut), geomagnetic effect, "
   "auroral-VHF likelihood (6m/2m, beam N), D-layer absorption. Rule-of-thumb &middot; <b>r</b> refresh &middot; <b>`</b> back"),
@@ -145,8 +145,8 @@ BACK = [
   "Sat's transponder/beacon entries, two lines each: <b>D</b>=downlink+mode line, "
   "<b>U</b>=uplink+tone/inv line. Ordered two-way &gt; amateur &gt; active; inactive dimmed &amp; <b>(off)</b>. <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
-  "<b>,</b>/<b>/</b> 10 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
-  "Pass outlook / Orbit position / Phys (velocity + launch date/age) &middot; <b>r</b> recompute &middot; Doppler <b>f</b> sets beacon freq"),
+  "<b>,</b>/<b>/</b> 11 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
+  "Pass outlook / Orbit position / Phys (velocity + launch date/age) / Explore (what-if apo/peri/incl sandbox, <b>x</b> reseed) &middot; <b>r</b> recompute &middot; Doppler <b>f</b> sets beacon freq"),
  ("SIMULATION",
   "<b>,</b>/<b>/</b> step time &middot; <b>;</b>/<b>.</b> step size &middot; "
   "<b>m</b> world-map view (sub-point + footprint) &middot; "
@@ -155,7 +155,7 @@ BACK = [
   "<b>e</b>/<b>o</b>/<b>a</b> lat/lon/alt &middot; <b>g</b> grid &middot; <b>p</b> GPS on/off &middot; "
   "<b>s</b> GPS source &middot; <b>c</b> set clock &middot; <b>v</b> live position (DMS) &middot; <b>ENTER</b> GPS sky plot"),
  ("GPS SKY PLOT",
-  "Live GNSS by az/el, coloured by signal (green=strong, grey=weak) &middot; <b>`</b> back"),
+  "Live GNSS by az/el, colored by signal (green=strong, gray=weak) &middot; <b>`</b> back"),
  ("WORLD MAP",
   "All footprints + night-side shading &middot; <b>f</b> highlight favorite &middot; <b>c</b> recenter on QTH/0&deg; &middot; "
   "yellow=sunlit cyan=eclipse &middot; <b>`</b> back"),
@@ -163,7 +163,7 @@ BACK = [
   "10-day: <b>;</b>/<b>.</b> scroll +/-1 day (fills full days), <b>r</b> recompute &middot; "
   "Illum: <b>,</b>/<b>/</b> scroll +/-60 days &middot; Mutual: <b>;</b>/<b>.</b> scroll, <b>ENTER</b> polar detail, <b>d</b> Doppler"),
  ("LOG",
-  "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes / awards &middot; <b>Awards</b>: QSO/grid/state/DXCC totals (states+DXCC derived from grid), <b>g</b>/<b>s</b>/<b>d</b> scrollable worked lists, <b>ENTER</b> per-sat &middot; List: <b>;</b>/<b>.</b> scroll, "
+  "Menu (scrolls): <b>ENTER</b> new QSO / browse / export ADIF / LoTW upload / Cloudlog upload / voice memos / notes / awards / fill grids (QRZ) &middot; <b>Awards</b>: QSO/grid/state/DXCC totals (states+DXCC derived from grid), <b>g</b>/<b>s</b>/<b>d</b> scrollable worked lists, <b>ENTER</b> per-sat &middot; List: <b>;</b>/<b>.</b> scroll, "
   "<b>ENTER</b> edit &middot; Entry: <b>;</b>/<b>.</b> field, <b>ENTER</b> edit, <b>s</b> save, "
   "<b>x</b> x2 delete &middot; editing a QSO re-arms its upload; extra <b>LoTW</b>/<b>Cloudlog</b> rows (ENTER toggles) override that"),
  ("SIGN &amp; UPLOAD TO LoTW (Log &rarr; Sign &amp; upload)",
@@ -191,13 +191,13 @@ BACK = [
   "<b>,</b>/<b>/</b> az &middot; <b>;</b>/<b>.</b> el &middot; <b>s</b> step &middot; "
   "<b>x</b> stop &middot; <b>`</b> back"),
  ("NETWORK SERVERS",
-  "<b>rigctld</b> PC drives rig (VFOA=DL/B=UL) &middot; <b>rotctld</b> PC drives GS-232 &middot; "
+  "<b>rigctld</b> PC drives rig (VFOA=DL/B=UL) &middot; <b>rotctld</b> PC drives the configured rotator &middot; "
   "<b>rigctl</b> drives remote rig &middot; <b>Web</b> opt-in mobile page (no auth, trusted LAN): live sky plot, "
   "Doppler readout, tap-to-copy freqs, visible-pass list + AOS alerts, radio/rotator control, <b>Files</b> = download-only /CardSat browser (no upload)"),
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (35): scientific/graphing/programmer calculators, <b>Tiny BASIC</b>, <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b> (fit mean elements from a launch state vector, TEME/J2000, save as sat), Q-codes/phonetics/RST, CTCSS &middot; <b>p</b> <b>Print</b>: 28 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (55): scientific/graphing/programmer calculators, <b>Tiny BASIC</b> (0.9.59: SATSEL/LPRINT/gfx; no INPUT), <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b>, Q-codes/phonetics/RST, CTCSS; <b>0.9.59 sat/build tools</b>: conjunction screener, orbital neighborhood, transponder planner, link-margin curve, debris-group screen, Doppler budget, cascade NF/G&sol;T, sun-noise G&sol;T, helix, L&sol;Pi&sol;T match, pointing loss, IMD, microstrip Z0, toroid, delta-v, thermal, Faraday, ampacity, PLL plan &middot; <b>p</b> <b>Print</b>: 29 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens + all form tools, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
 ]
 
 

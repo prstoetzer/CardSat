@@ -9,6 +9,10 @@
 //      CivRig     (civ.cpp)     Icom CI-V          IC-820/821/910/970/9100/9700
 //      YaesuRig   (yaesu.cpp)   Yaesu 5-byte CAT   FT-847, FT-736R
 //      KenwoodRig (kenwood.cpp) Kenwood ASCII CAT  TS-790, TS-2000
+//      IcomNetRig (icomnet.cpp) Icom LAN (RS-BA1)  IC-9700 over UDP, no wiring
+//      RigctlRig  (below)       Hamlib NET rigctl  any rig behind a rigctld
+//  The three wire-level backends take a Stream*, so their transport is a
+//  runtime choice: the G1/G2 UART or a USB<->serial adapter (CAT_USB).
 //
 //  Convention used everywhere in the app (kept regardless of how a given rig
 //  labels its VFOs): "Sub" = downlink / RX, "Main" = uplink / TX.

@@ -1,6 +1,6 @@
 # CardSat — Road to 1.0
 
-*Status as of **v0.9.57** (July 2026). This is the single place to look for what stands between
+*Status as of **v0.9.58.1** (July 2026), at the start of the 0.9.59 cycle. This is the single place to look for what stands between
 CardSat and a 1.0 release: what's deliberately deferred, what's blocked on hardware
 verification, and what the author has decided not to do. Each item links to the scoping
 document that sized it, where one exists.*
@@ -26,14 +26,17 @@ confirmation would be dishonest.
 | Interface | Status |
 |---|---|
 | **Icom CI-V (single-pin)** | **Confirmed on IC-821H** — bidirectional exchange, Doppler compensation, knob tuning |
-| **Icom LAN (IC-9700)** | Host-tested only |
+| **CAT over USB** | **Confirmed on IC-821H + FTDI (0.9.58)** — engage/disengage/re-engage + Doppler over many cycles; default-on since 0.9.59. Two adapters at once (radio + rotator) untested |
+| **Icom LAN (IC-9700)** | Transport **confirmed against an IC-705**; the IC-9700 itself — the intended radio — untested |
 | **Yaesu CAT** | Host-tested only |
 | **Kenwood CAT** | Host-tested only |
 | **GS-232 rotator** | Host-tested only |
-| **rotctl / rotctld** | Host-tested only |
-| **PstRotator** | Host-tested only |
+| **Easycomm / SPID rotator** | Host-tested only |
+| **Rotator over Grove or USB (0.9.58 transports)** | Host-tested only — no physical controller has been driven over either wire |
+| **rotctl / rotctld** | Network commands verified; no physical rotator driven |
+| **PstRotator** | Network commands verified; no physical rotator driven |
 | **Yaesu direct rotator** | Host-tested only |
-| **LoRa (SX126x)** | **UNTESTED** — marked as such in firmware |
+| **LoRa (SX126x)** | **Messaging confirmed on hardware** (0.9.39, vs. a T-LoRa Pager); the RX/hex monitor and sat-RX paths remain untested |
 
 The authoritative, continuously-updated list is **[THINGS_TO_VERIFY.md](THINGS_TO_VERIFY.md)**.
 Everything hardware-facing carries an untested / at-your-own-risk banner in the manual and the
@@ -185,7 +188,7 @@ largest contiguous block no longer clears what TLS needs, the answer is settled.
 
 **Scope doc:** `docs/design/BLE_PRINTER_SCOPE.md`.
 
-### 2.4 USB devices: CAT, rotator, printer — *researched; blocked on one build question*
+### 2.4 USB devices: CAT, rotator, printer — *CAT and rotator shipped in 0.9.58; printer declined*
 
 Research: `docs/design/USB_DEVICES_SCOPE.md`. USB **mass storage** was declined separately (the
 web UI already gets data out) — `docs/design/USB_MSC_DECISION.md`.
@@ -195,16 +198,22 @@ involved — `usb_host_cdc_acm`, `usb_host_cp210x_vcp` (what Icom rigs use), `us
 `usb_host_ftdi_vcp`, and a `usb_host_vcp` wrapper that auto-selects the right one. There is **no**
 printer-class component.
 
-**CAT over USB is the biggest prize, and was wrongly out of scope.** CardSat's protocol encoders
-already take a `Stream*` (`civ.h`, `kenwood.h`) and there is one `makeRig()` factory, so
-`CAT_USB` would be a *transport* — every protocol and radio unchanged. Two uses: modern rigs with
-a USB port (IC-9100; the IC-9700 already has LAN), and — the bigger one — **every pre-USB rig via
-a £3 USB-serial adapter**, replacing the MAX3232 harness that `WIRING.md` documents today. The
-Icom USB-echo quirk that Hamlib probes for at runtime is **already solved** by CardSat's
-`drainEcho()`.
+**CAT over USB was the biggest prize, and it shipped in 0.9.58 — then went
+default-on in 0.9.59.** The prediction held exactly: the protocol encoders already
+took a `Stream*` (`civ.h`, `kenwood.h`) and there is one `makeRig()` factory, so
+`CAT_USB` landed as a pure *transport* — every protocol and radio unchanged. Both
+predicted uses apply: modern rigs with a USB port (IC-9100; the IC-9700 already has
+LAN), and — the bigger one — **every pre-USB rig via a $5 USB-serial adapter**,
+replacing the MAX3232 harness `WIRING.md` documents. Bench-proven on an IC-821 +
+FTDI. The Icom USB-echo quirk that Hamlib probes for at runtime was already solved
+by CardSat's `drainEcho()`.
 
-**Rotator over USB** is the same mechanism, replacing the SC16IS750 I²C→UART chain. But there is
-**one USB port**: a USB rotator and USB CAT are mutually exclusive without a hub.
+**Rotator over USB shipped in the same release**, alongside the Grove transport
+(`Rot wire` decouples the serial protocol from the wire). Radio *and* rotator can
+share the USB host through a hub, each bound to an explicitly chosen adapter —
+built and guarded, **untested with two physical adapters**. See
+`docs/interfaces/ROTATOR_TRANSPORTS.md` for what shipped and
+`docs/releases/RELEASE_NOTES_0.9.58.md` for the verification story.
 
 **USB printers**: three possible interfaces (printer class 0x07 / serial bridge / CDC-ACM), all
 carrying the same ESC/POS bytes CardSat already emits. Only the class-0x07 case needs a driver
@@ -329,7 +338,7 @@ same board. Reading it turned up two gaps worth filling:
 
 Also considered and mostly declined: uniform `1`–`6` row selection (good idiom, but CardSat's
 Satellites screen already binds `2`/`3` — only worth it if genuinely uniform), flat menu pages
-(doesn't scale to ~90 settings), an ignore list (favourites mostly cover it), copy-to-SD (CardSat
+(doesn't scale to ~90 settings), an ignore list (favorites mostly cover it), copy-to-SD (CardSat
 is already SD-first; MSC solves the LittleFS case better).
 
 **Ideas doc:** `docs/design/IDEAS_FROM_MINI_FT8.md`.
@@ -345,10 +354,10 @@ a two-tier disk catalog.
 
 **What's solid.** The core mission — track satellites, predict passes, tune radios for Doppler,
 point rotators, log and upload QSOs, plan roves, and work offline — is complete and, for the
-CI-V path, hardware-confirmed. Printing is comprehensive (twenty-eight menu-listed reports plus
+CI-V path, hardware-confirmed. Printing is comprehensive (twenty-nine menu-listed reports plus
 context-only ones, three sinks, nine page-description formats including on-device PWG/URF
-raster). The Tools hub is a genuine offline bench (35 tools). The documentation is thorough: a
-142-page manual, a features list, per-interface wiring guides, and a design-decision archive.
+raster). The Tools hub is a genuine offline bench (55 tools). The documentation is thorough: a
+140-plus-page manual, a features list, per-interface wiring guides, and a design-decision archive.
 
 **What a 1.0 needs beyond the blockers above.** Nothing structural. The gap between 0.9.57 and
 1.0 is mostly *confidence*, not *scope*: hardware confirmation of the radio/rotator matrix, a
@@ -381,12 +390,12 @@ file than the file-scope helpers it called.
 translation unit, not grouped with its logical siblings. The gates cannot see this; only the
 compiler can.
 
-**A second class the compiler cannot catch either: wrong assumptions about library behaviour.**
+**A second class the compiler cannot catch either: wrong assumptions about library behavior.**
 0.9.57 shipped a memory fix that did nothing, because it was validated against a *hand-written
 model* of Arduino's `String` rather than the real one — the model freed on assignment; the real
 implementation never does. It compiled, the host test passed, and the bug survived to the field.
 The fix was only found by fetching `cores/esp32/WString.cpp`, compiling it, and measuring. **When
-behaviour depends on a library's internals, test against the library, not a stand-in.** A host
+behavior depends on a library's internals, test against the library, not a stand-in.** A host
 harness that models the dependency is testing the model.
 
 **Neither substitutes for the other, and neither substitutes for on-air use.**

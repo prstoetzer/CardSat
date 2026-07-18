@@ -244,7 +244,7 @@ printReport(transport=USB) -> USB.end(); host init; enumerate; bulk-OUT the ESC/
 
 **Still worth saying:** a **WiFi receipt printer in AP mode** does this today with zero code, no
 adapter, and no console juggling. USB's honest advantage is narrow — operators who already own a
-USB-only printer. That is a real constituency (these printers are £20), but it is not "the field
+USB-only printer. That is a real constituency (these printers are $25), but it is not "the field
 case is broken."
 
 ## Honest note on this assessment

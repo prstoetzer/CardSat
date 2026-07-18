@@ -42,6 +42,7 @@ bool Settings::load() {
   printTransport = d["prtx"] | 0;
   printPaper = d["prpr"] | 0;
   printToSerial = d["prser"] | false;
+  basicFileWrite = d["basfw"] | false;
   printToFile   = d["prfile"] | false;
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
   strncpy(opName,  d["opname"]  | "", sizeof(opName)-1);  opName[sizeof(opName)-1]=0;
@@ -228,6 +229,7 @@ bool Settings::save() {
   d["prtx"] = printTransport;
   d["prpr"] = printPaper;
   d["prser"] = printToSerial;
+  d["basfw"] = basicFileWrite;
   d["prfile"] = printToFile;
   d["mycall"] = myCall;
   d["opname"] = opName;

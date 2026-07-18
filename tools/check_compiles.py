@@ -113,6 +113,8 @@ struct String : std::string {
   float toFloat() const { return atof(c_str()); }
   int   toInt()   const { return atoi(c_str()); }
   void  trim() {}
+  void  toUpperCase() {}
+  void  toLowerCase() {}
   bool  startsWith(const char* s) const { return rfind(s,0)==0; }
   String& operator+=(const char* s){ std::string::operator+=(s); return *this; }
   String& operator+=(const String& s){ std::string::operator+=(s); return *this; }
@@ -337,6 +339,15 @@ struct PstRotator : public Rotator {
     # logstore AFTER cfg_txt: it needs LOG_DIR and LOG_MAX_BYTES_* from config.h.
     if os.path.isfile(LOG_H) and os.path.isfile(LOG_CPP):
         tu += (LOG_STUB + rot_body(LOG_H) + '\n' + rot_body(LOG_CPP) + '\n')
+    # NOT extended to rig/yaesu/kenwood. It was tried: they pull radio_profiles.h,
+    # then String::toUpperCase, then stand-ins for IcomNetRig/RigctlRig and the
+    # Arduino network stack behind them -- a growing fake modelling code this
+    # refactor never touched. The specific hazard that motivated the attempt is
+    # already answered without them: `Rig` and `Rotator` BOTH declare
+    # `virtual ~` (rig.h:25, rotator.h:114), so `delete rig` / `delete r` through
+    # a base pointer are well-defined. The bug was confined to the transport
+    # Stream*, which this gate does cover.
+
     # consolelog defines CardSatSerialTee, which config.h declares extern and
     # every Serial.print in the TU references. Without it the gate link-fails on
     # a symbol the real build resolves fine -- so include it rather than stub it.

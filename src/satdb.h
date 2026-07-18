@@ -73,46 +73,67 @@ struct Transponder {
 
 // One satellite's GP mean elements (the SGP4 inputs) plus identity.
 struct SatEntry {
-  char     name[26];          // AMSAT_NAME
+  // FIELD ORDER IS DELIBERATE (0.9.59): members are grouped largest-alignment-first
+  // -- 8-byte doubles, then 4-byte words, then 2-byte, then the char arrays, then the
+  // 1-byte flags last -- so the compiler inserts no internal alignment padding. The
+  // previous source-logical order left four holes (a 4-byte gap before meanMotion,
+  // tail pad after name/intlDes, trailing struct pad) totalling 8 bytes/entry; at
+  // MAX_SATS that was ~1.2 KB of dead RAM in the single largest resident block on a
+  // no-PSRAM part. Reordering is purely a memory-layout change: every access is by
+  // name and nothing here depends on declaration order. Keep new fields in the right
+  // size bucket when adding them. (Verified against the DWARF layout in the 0.9.59
+  // compiler-output audit; see docs/design/RAM_AUDIT_0_9_59.md.)
+
+  // -- 8-byte: doubles (MUST stay double; see notes) --
+  double   epochUnix = 0;     // EPOCH as Unix UTC seconds (FRACTIONAL) -- MUST stay double.
+                              //   Not just for magnitude (~1.7e9) but for the sub-second
+                              //   fraction: gpToTle() renders it into the TLE epoch as
+                              //   %012.8f day-of-year (~0.86 ms), and tsince is measured
+                              //   from this instant. float (~128 s steps) OR a whole-second
+                              //   integer would corrupt the epoch SGP4 re-parses.
+  double   meanMotion = 0;    // MEAN_MOTION       (rev/day) -- MUST stay double
+                              //   (%11.8f needs ~10 sig figs; float resolves only ~7)
+
+  // -- 4-byte: identifiers, counters, and the float mean elements --
   uint32_t norad = 0;         // NORAD_CAT_ID (identity / display)
-  char     intlDes[12] = {0}; // OBJECT_ID, e.g. "1974-089B"
-  double   epochUnix = 0;     // EPOCH as Unix UTC seconds (fractional) -- MUST stay double
-                              //   (a ~1.7e9 value; float would round it to ~128 s steps)
+  uint32_t revAtEpoch = 0;    // REV_AT_EPOCH
+  uint32_t amsatHeardEpoch = 0; // UTC epoch of the winning report's latest_reported_time (0 = none)
   // --- BEGIN 0.9.41 float-elements optimisation (REVERSIBLE) -------------------
   // These eight mean elements are stored as float instead of double to shrink the
-  // resident SatEntry (~32 bytes/entry, ~4-5 KB across MAX_SATS) and so leave more
-  // contiguous heap for the TLS handshake on this no-PSRAM part (mbedTLS when this
-  // was written; BearSSL since 0.9.43 -- the contiguity motive is unchanged). This is SAFE
-  // because the elements are never fed to SGP4 as raw numbers: gpToTle() formats
-  // them into a fixed-width TLE text string (which SGP4 re-parses), and float's ~7
-  // significant digits exceed every field's precision -- 4-decimal angles, 7-digit
-  // eccentricity, ~5-digit bstar/ndot. (meanMotion is deliberately NOT here: its
-  // %11.8f field wants ~10 sig figs, beyond float, so it stays double below.)
+  // resident SatEntry and so leave more contiguous heap for the TLS handshake on this
+  // no-PSRAM part (mbedTLS when this was written; BearSSL since 0.9.43 -- the contiguity
+  // motive is unchanged). This is SAFE because the elements are never fed to SGP4 as raw
+  // numbers: gpToTle() formats them into a fixed-width TLE text string (which SGP4
+  // re-parses), and float's ~7 significant digits exceed every field's precision --
+  // 4-decimal angles, 7-digit eccentricity, ~5-digit bstar/ndot. (meanMotion is
+  // deliberately NOT here: its %11.8f field wants ~10 sig figs, beyond float, so it
+  // stays double above.)
   //
-  // TO REVERT to all-double: change the eight `float` lines below back to `double`.
-  // No other code changes are needed -- every read/write site relies on implicit
-  // float<->double conversion, and the TLE formatting promotes float to double for
-  // %f automatically. (See docs/design/HEAP_FLOAT_ELEMENTS.md.)
+  // TO REVERT to all-double: change the eight `float` lines below back to `double` AND
+  // move them into the 8-byte group above (to keep the no-padding invariant). Every
+  // read/write site relies on implicit float<->double conversion, and the TLE
+  // formatting promotes float to double for %f automatically. (See
+  // docs/design/HEAP_FLOAT_ELEMENTS.md.)
   float    incl = 0;          // INCLINATION       (deg)    [float: 4-dp TLE field]
   float    ecc = 0;           // ECCENTRICITY      (dimensionless) [float: 7-digit field]
   float    raan = 0;          // RA_OF_ASC_NODE    (deg)    [float: 4-dp TLE field]
   float    argp = 0;          // ARG_OF_PERICENTER (deg)    [float: 4-dp TLE field]
   float    ma = 0;            // MEAN_ANOMALY      (deg)    [float: 4-dp TLE field]
-  // --- END 0.9.41 float-elements optimisation ---------------------------------
-  double   meanMotion = 0;    // MEAN_MOTION       (rev/day) -- MUST stay double
-                              //   (%11.8f needs ~10 sig figs; float resolves only ~7)
-  // --- 0.9.41 float-elements optimisation, continued (REVERSIBLE: -> double) ---
   float    bstar = 0;         // BSTAR             (1/earth radii) [float: ~5-digit field]
   float    ndot = 0;          // MEAN_MOTION_DOT   (rev/day^2, = ndot/2)  [float]
   float    nddot = 0;         // MEAN_MOTION_DDOT  (rev/day^3, = nddot/6) [float]
-  // ----------------------------------------------------------------------------
-  uint32_t revAtEpoch = 0;    // REV_AT_EPOCH
+  // --- END 0.9.41 float-elements optimisation ---------------------------------
+
+  // -- char arrays (byte-aligned; grouped so no field forces re-alignment after) --
+  char     name[26];          // AMSAT_NAME
+  char     amsatName[28] = ""; // the AMSAT API name of the matched status row (for reports.php)
+  char     intlDes[12] = {0}; // OBJECT_ID, e.g. "1974-089B"
+
+  // -- 2-byte then 1-byte: keeps the trailing pad minimal --
   uint16_t elsetNum = 0;      // ELEMENT_SET_NO
   bool     txLoaded = false;  // have we fetched transponders this session?
   uint8_t  amsatStatus = 0;   // AMSAT: 0 none, 1 heard, 2 not heard, 3 telemetry only
-  uint32_t amsatHeardEpoch = 0; // UTC epoch of the winning report's latest_reported_time (0 = none)
   uint8_t  amsatReports = 0;  // report_count of the winning row (how many stations reported)
-  char     amsatName[28] = ""; // the AMSAT API name of the matched status row (for reports.php)
 };
 
 class SatDb {
@@ -144,6 +165,12 @@ public:
   void applyAmsatCatalogFile(const char* path);   // (re)build the map from cached catalog.php
   int  amsFindByName(const char* apiName) const;  // exact API-name -> sat index, or -1
   int  amsNamesFor(int satIdx, const char* out[], int maxN) const; // this sat's API names
+  // Resolve an external service's satellite name (AMSAT status, hams.at, LoTW) to a
+  // catalog index, source-independently: parenthesised-designator equality first
+  // (bridges CelesTrak's "FOX-1B (AO-91)" to a service's "AO-91"), then whole-name
+  // equality, then delimited-token containment -- the same normalized primitives the
+  // AMSAT status matcher uses. Returns -1 when nothing matches.
+  int  findByServiceName(const char* svc) const;
   int  amsMapCount() const { return _amsMapN; }
   int  loadGpFromFile(const char* path);       // stream-parse a GP file (low RAM)
   // Favorites-first priority load: guarantees every NORAD in favs[] is loaded even if it
@@ -151,6 +178,39 @@ public:
   // Also records seenCount() so the caller can report "loaded X of Y". favs may be null.
   int  loadGpFromFilePreferring(const char* path, const uint32_t* favs, int favN);
   bool saveGpJson(const String& json);         // cache the downloaded blob
+
+  // ---- CelesTrak extra favorites (FILE_CTX) -----------------------------------------
+  // Objects the user added from the CelesTrak search screen that are NOT covered by the
+  // primary catalog source. Persisted one OMM object per line like FILE_MGP, but with a
+  // crucial difference in lifecycle: on every GP update the firmware re-fetches each of
+  // these from CelesTrak (courtesy-throttled), so their elements stay fresh. Hand-entered
+  // FILE_MGP satellites (state-vector fits, pre-launch objects) are deliberately NEVER
+  // auto-fetched -- many aren't in the public catalog at all.
+  static void writeGpLine(File& f, const SatEntry& s);   // one compact OMM object + newline
+  bool addCtExtra(const SatEntry& s);          // append to FILE_CTX (no-op if norad present)
+  bool isCtExtra(uint32_t norad);              // has a line in FILE_CTX
+  bool removeCtExtra(uint32_t norad);          // drop its line from FILE_CTX
+  // Merge FILE_CTX into the loaded catalog. Skip-if-present (a primary-catalog entry is
+  // fresher than our line); when the DB is full, evict the last non-favorite to make room
+  // (extras are explicit user picks and outrank file-order fills, same philosophy as the
+  // favorites-preferring loader). Returns the number merged.
+  int  loadCtExtraFile(const uint32_t* favs, int favN);
+  // List the NORAD ids present in an NDJSON GP file (one object per line). Returns count
+  // written (capped at maxN; out may be null with maxN 0 to just count); *total
+  // (optional) receives the number of lines seen.
+  static int listNdjsonNorads(const char* path, uint32_t* out, int maxN, int* total);
+  // NORAD id from one raw NDJSON GP line WITHOUT a JsonDocument -- the per-line
+  // alloc/free of a document is exactly the no-PSRAM fragmentation pattern the bulk
+  // parser avoids (see gpFindValue), so every norad-only file walk uses this instead.
+  static uint32_t gpLineNorad(const char* line, size_t len);
+
+  // Stream a GP/OMM JSON file object-by-object into a caller sink WITHOUT touching the
+  // resident catalog -- for transient screens (e.g. the debris-group tool). Same flat-RAM
+  // streaming and allocation-free field parse as scanGpFile; sink(entry, ctx) is called for
+  // each parsed object. Returns the number of objects parsed. GP JSON, not TLE: the legacy
+  // TLE format's 5-digit catalog field can't represent newer objects.
+  static int streamGpFileEntries(const char* path,
+                                 void (*sink)(const SatEntry&, void*), void* ctx);
 
   // Reconstruct a TLE line-pair from a satellite's GP elements (69 chars each,
   // checksummed). Only used to initialise the SGP4 propagator. Returns false

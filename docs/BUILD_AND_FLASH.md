@@ -18,6 +18,9 @@ its WebUI/OTA), then start Launcher and pick **CardSat** — it builds the right
 partition layout and installs the app. The file has no standalone bootloader, so it
 runs only through Launcher.
 
+Both binaries are built with **USB CAT included** — *USB serial* is in the CAT
+type row out of the box (it is on by default in source too; see below).
+
 **M5Burner / direct flash:** use `CardSat_Merged.bin`. In M5Burner, add it as a
 custom firmware and burn. To flash directly:
 
@@ -93,25 +96,40 @@ The default ~1.25 MB app partition is too small and the build fails with *"Sketc
 too big"*; the 3 MB "Huge APP" layout fits with room to spare and provides the
 1 MB SPIFFS region that LittleFS uses for cached data.
 
-### Optional: USB CAT (`CAT_USB`) — off by default
-
-**Nothing here is needed for a standard build.** The stock firmware compiles with the
-libraries and settings above, exactly as it did before 0.9.58 — no new dependency, no
-new flags.
+### USB CAT (`CAT_USB`) — on by default since 0.9.59
 
 USB CAT drives a radio through a **USB↔serial adapter** (FTDI / CP210x / CH34x) on the
-USB-C port instead of the G1/G2 UART and its level shifter. It is **opt-in and unproven
-on hardware**. (The 0.9.58-wip freeze-on-enable is fixed — the host object is now
-heap-allocated with a layout the library agrees on; see `src/usbserial.cpp` — but the
-path still awaits its first successful bench contact.)
+USB-C port instead of the G1/G2 UART and its level shifter. It shipped opt-in in
+0.9.58, was **bench-proven on an IC-821 + FTDI adapter** (engage, disengage,
+re-engage, and Doppler tracking over many cycles), and is **part of the default build
+since 0.9.59**. That makes **EspUsbHost** (TANAKA Masayuki) a required library —
+**v2.3.1 or later, which compiles clean with no patch** (the `peripheral_map` fix
+this section used to require landed upstream in v2.3.1; the note below is kept for
+stale ≤2.3.0 copies). Verified end-to-end: CardSat 0.9.59 compiles against a
+pristine v2.3.2 checkout on arduino-esp32 3.2.1 (85% of the 3 MB app partition),
+and the v2.3.0 → v2.3.2 diff was audited — the entire API surface CardSat uses is
+unchanged (classes, config structs, enum values, task names, `end()` semantics,
+the `ESP_USB_HOST_MAX_DEVICES` mechanism), and the behavioral changes are
+improvements on CardSat's paths: transfer-error recovery on unplug is now deferred
+to the client task so a disconnected adapter is released instead of re-submitted
+to, and serial-endpoint binding is pinned to the recorded CDC-data / vendor
+interface number (better behavior on composite devices like an IC-9700's own USB
+port). To build **without** USB CAT (no EspUsbHost needed, no *USB serial* CAT
+type, otherwise identical firmware), see *Building without USB CAT* at the end of
+this section.
 
-> ⚠️ **EspUsbHost does not compile against arduino-esp32 3.2.1 without a one-line edit.**
+> ✅ **Fixed upstream in v2.3.1** — the assignment now sits inside
+> `#if defined(CONFIG_IDF_TARGET_ESP32P4)`, a *target* guard (even better than the
+> version guard this note originally asked for). **Everything below applies only to
+> stale copies ≤ 2.3.0**, kept for anyone with an old Library Manager cache.
+>
+> ⚠️ **EspUsbHost ≤ 2.3.0 does not compile against arduino-esp32 3.2.1 without a one-line edit.**
 > ```
 > EspUsbHost.cpp:4796:14: error: 'struct usb_host_config_t' has no member named 'peripheral_map'
 > ```
 > `peripheral_map` selects among *multiple* USB peripherals — an **ESP32-P4** feature — and is not
 > in the IDF v5.4 snapshot arduino-esp32 3.2.1 ships. EspUsbHost sets it unconditionally, with no
-> `ESP_IDF_VERSION` guard. **Every 2.x release has this** (checked 2.0.0 → 2.3.0), and 1.0.1 —
+> `ESP_IDF_VERSION` guard. **Every 2.x release through 2.3.0 has this** (checked 2.0.0 → 2.3.0; fixed in 2.3.1), and 1.0.1 —
 > the last version without it — is the original HID-only library with no USB-serial support at
 > all. So downgrading does not help.
 >
@@ -126,24 +144,22 @@ path still awaits its first successful bench contact.)
 > ```
 > Why this is safe: `hostPeripheralMap()` is `#if defined(CONFIG_IDF_TARGET_ESP32P4)` — on an
 > ESP32-S3 it **always returns 0**, and IDF documents `peripheral_map = 0` as "use the default
-> peripheral". `hostConfig` is already zero-initialised by `= {}`. The line assigns zero to a field
+> peripheral". `hostConfig` is already zero-initialized by `= {}`. The line assigns zero to a field
 > that would be zero anyway; on an S3 it does nothing.
 >
-> This is a **local patch to a third-party library** — it will be overwritten by a Library Manager
-> update, and it is worth reporting upstream (the field wants an `ESP_IDF_VERSION_VAL` guard).
-> Without it, leave `CARDSAT_HAS_USBCAT` at `0` (the default) and the standard build is unaffected.
+> This is a **local patch to a third-party library** — it will be overwritten by a Library
+> Manager update, which since v2.3.1 is exactly the fix: updating **replaces the patch with
+> the upstream guard**, and a previously-patched copy updates cleanly.
+> Without it the default build fails; either apply the patch or build with
+> `CARDSAT_HAS_USBCAT` set to `0` (see *Building without USB CAT* below).
 
-**Arduino IDE** — three steps:
+**Arduino IDE** — one step: install **EspUsbHost** (TANAKA Masayuki, **v2.3.1 or
+later** — current Library Manager serves v2.3.2) from **Library Manager**. No
+patch. `CARDSAT_HAS_USBCAT` is already `1` in `CardSat.ino`, and the repo already
+ships the **`build_opt.h`** the `.ino` build needs (it carries
+`-mtext-section-literals` and `-DESP_USB_HOST_MAX_DEVICES=4`).
 
-1. Install **EspUsbHost** (TANAKA Masayuki) from **Library Manager**, and apply the one-line patch
-   above.
-2. In `CardSat.ino`, find `#define CARDSAT_HAS_USBCAT 0` and change the **`0` to `1`**.
-3. Create a file called **`build_opt.h`** next to `CardSat.ino` containing:
-   ```
-   -mtext-section-literals
-   ```
-
-> **Why step 3 is needed.** Without it the link fails:
+> **Why `-mtext-section-literals` is needed.** Without it the link fails:
 > ```
 > dangerous relocation: l32r: literal target out of range (try using text-section-literals)
 >   in function `EspUsbHostCdcSerial::~EspUsbHostCdcSerial()'
@@ -162,9 +178,17 @@ path still awaits its first successful bench contact.)
 > below the limit). Worth knowing for the future: the single-file `.ino` has finite headroom, and
 > this is the first thing to hit it.
 
-**PlatformIO** — uncomment the two lines already present in `platformio.ini`: the
-`tanakamasayuki/EspUsbHost` entry under `lib_deps`, and `-DCARDSAT_HAS_USBCAT=1` under
-`build_flags`.
+**PlatformIO** — nothing to enable: `platformio.ini` ships with
+`tanakamasayuki/EspUsbHost @ ^2.3.1` under `lib_deps` and
+`-DESP_USB_HOST_MAX_DEVICES=4` active (`CARDSAT_HAS_USBCAT` defaults to `1` in
+`config.h`, so no flag is needed). The PlatformIO registry serves ≥ 2.3.1, so the
+downloaded copy compiles clean with no patch.
+
+**Building without USB CAT** — drops the EspUsbHost dependency and the *USB serial*
+CAT type; everything else is byte-for-byte identical. Arduino IDE: change
+`#define CARDSAT_HAS_USBCAT 1` to `0` in `CardSat.ino`. PlatformIO: add
+`-DCARDSAT_HAS_USBCAT=0` under `build_flags` and comment out the EspUsbHost
+`lib_dep`.
 
 > **You do not need to set `ESP_USB_HOST_MAX_DEVICES` — and do not pin it per-file.** An
 > earlier revision had `usbserial.cpp` define it to `1` before including `EspUsbHost.h`.
@@ -174,7 +198,7 @@ path still awaits its first successful bench contact.)
 > layout — a one-definition-rule violation, and the first out-of-line library call wrote
 > past the end of the object. The safe form is a **global** define that reaches the library's
 > translation unit too — and the repo now ships one: `build_opt.h` in the sketch folder carries
-> `-DESP_USB_HOST_MAX_DEVICES=4` (root hub + adapter, headroom for the planned USB rotator;
+> `-DESP_USB_HOST_MAX_DEVICES=4` (root hub + adapter, headroom for the USB rotator that shipped in 0.9.58;
 > ~1.7 KB per slot removed from the transient host object). The Arduino IDE passes
 > `build_opt.h` to **every** c/cpp compile — sketch, core and libraries alike (arduino-esp32
 > 3.2.1 `platform.txt`, `recipe.c.o.pattern` / `recipe.cpp.o.pattern`). One caveat: the IDE's
@@ -184,7 +208,7 @@ path still awaits its first successful bench contact.)
 >
 ## Console capture to file
 
-**Settings → Log → `Console to file`** (default **off**) mirrors the entire serial console to
+**Settings → Station / logging → `Console to file`** (default **off**) mirrors the entire serial console to
 `/CardSat/Logs/console.log`, retrievable through the web files portal.
 
 Why it exists: engaging USB CAT or a USB rotator claims the S3's one USB PHY, which closes the
@@ -196,7 +220,7 @@ How it works: arduino-esp32 defines `Serial` as a macro aliasing the real device
 forwards to the hardware **and** captures the text. All ~181 `Serial.print` call sites are
 covered with none of them edited.
 
-**Cost, measured and modelled:**
+**Cost, measured and modeled:**
 
 | | |
 |---|---|

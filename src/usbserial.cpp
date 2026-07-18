@@ -32,8 +32,8 @@
 // arduino-esp32 3.2.1 platform.txt: recipe.c.o.pattern and recipe.cpp.o.pattern
 // both carry "@{build.opt.path}", and prebuild hook 5 copies the sketch's
 // build_opt.h into the build dir). CardSat ships one with
-// -DESP_USB_HOST_MAX_DEVICES=4 (root hub + adapter, headroom for the planned
-// USB rotator): 4 fewer DeviceState slots means a smaller host object AND a
+// -DESP_USB_HOST_MAX_DEVICES=4 (root hub + adapter, headroom for the USB
+// rotator that shipped in 0.9.58): 4 fewer DeviceState slots means a smaller host object AND a
 // smaller CONTIGUOUS block for begin() to find on a fragmented heap -- watch
 // the ALLOC-stage heap delta on the next bench engage for the exact number.
 // NOTE: gcc response files cannot carry comments (hence this one lives here),
@@ -412,7 +412,13 @@ namespace {
   // host's own task: plain byte stores only, read back after a bounded wait.
   void onDev(const EspUsbHostDeviceInfo& d) {
     s_sawDev = true;
-    snprintf(s_dev, sizeof(s_dev), "%s %s %04x:%04x",
+    // The device ADDRESS leads the string: two identical adapters (the classic
+    // dual-Prolific bench) produce byte-identical manufacturer/product/VID:PID,
+    // and on a 240-px row the tail truncates first -- so the one distinguishing
+    // token must come FIRST. The address is also exactly the id explicit binding
+    // stores, so what the user reads is what the firmware binds.
+    snprintf(s_dev, sizeof(s_dev), "#%u %s %s %04x:%04x",
+             (unsigned)d.address,
              (d.manufacturer && *d.manufacturer) ? d.manufacturer : "USB",
              (d.product && *d.product) ? d.product : "serial",
              (unsigned)d.vid, (unsigned)d.pid);
@@ -423,7 +429,8 @@ namespace {
     if (s_serDevN >= (uint8_t)(sizeof(s_serDev) / sizeof(s_serDev[0]))) return;  // full
     SerialDev& e = s_serDev[s_serDevN];
     e.address = d.address; e.vid = d.vid; e.pid = d.pid;
-    snprintf(e.label, sizeof(e.label), "%s %s %04x:%04x",
+    snprintf(e.label, sizeof(e.label), "#%u %s %s %04x:%04x",   // address-first: see s_dev
+             (unsigned)d.address,
              (d.manufacturer && *d.manufacturer) ? d.manufacturer : "USB",
              (d.product && *d.product) ? d.product : "serial",
              (unsigned)d.vid, (unsigned)d.pid);

@@ -117,7 +117,7 @@ better.**
 
 Worth stating, because the borrowing isn't one-directional and it shapes what's worth taking:
 
-- **Printing** — nine formats, three sinks, 28 reports. Mini-FT8 has none.
+- **Printing** — nine formats, three sinks, 29 reports. Mini-FT8 has none.
 - **Breadth** — CardSat is a tracker + CAT + rotator + logger + toolbox; Mini-FT8 is one mode
   done well. That's why its flat 3-page menu works and CardSat's can't.
 - **The scale difference is the point:** Mini-FT8's UI ideas are good *because* its scope is

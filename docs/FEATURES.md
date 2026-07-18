@@ -20,6 +20,78 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   **[RADIO_SETTINGS.md](interfaces/RADIO_SETTINGS.md)** (note: on the older sat rigs the band
   pair, MAIN/SUB, sat mode, and tone are set up **on the radio** — CAT only
   Doppler-tunes within that layout).
+- **Every new tool prints (0.9.59).** One refactor makes **all 34 form tools**
+  printable with `p` — `drawToolForm`'s output lambda tees to the report sinks
+  (`tfEmit`), so the print is byte-for-byte the compute path the screen shows, with
+  zero per-tool code and zero buffering — and the four new screens gain contextual
+  reports: conjunction (approaches + the awareness-only caveat printed verbatim),
+  orbital neighborhood, debris-group runs (with a UTC stamp — a screening paper
+  trail), and the link-margin curve as a 5°-step table **plus an ASCII rendering**
+  per the 0.9.56 precedent. All contextual; the 29-report Print menu doesn't grow.
+- **Higher orbits predict properly; the device is a better citizen (0.9.59).**
+  Pass prediction now covers **Molniya-class, GTO, and geosynchronous** orbits: for
+  periods over ~225 min CardSat scans elevation itself and bisects the crossings to
+  ~1 s (the LEO-tuned library search demonstrably misses them; deep-space SDP4 was
+  always present), and a bird parked above your horizon reports one honest
+  horizon-long pass — all Skyfield-verified in the host harness (crossings ≤ 0.04°,
+  coverage 194/194). The **primary GP fetch** gains CelesTrak's 2-hour courtesy
+  throttle (persisted across reboots; changing source fetches immediately). **USB
+  device strings lead with `#N`**, the device address, so two identical Prolific
+  adapters are tellable apart on a narrow row — and `#N` is the very id explicit
+  binding stores. **AMSAT status, hams.at, and LoTW** resolve satellite names
+  through one source-independent bridge (parenthetical designator → whole name →
+  token), so a CelesTrak catalog maps as cleanly as an AMSAT one: favorite
+  activations tint green, and LoTW export auto-resolves CelesTrak-named QSOs.
+- **BASIC grows up; the calculators become instruments (0.9.59).** Tiny BASIC gains
+  `TAN/ATN/LOG/EXP/SGN/MIN/MAX`, `MOD`, `AND/OR/NOT`, one `DIM @(n)` array (≤256),
+  `DATA/READ/RESTORE`, `ON…GOTO`, and a system bridge: `SATSEL i` re-runs SGP4 for **any**
+  catalog satellite (host-verified `lookFor`, 2,000/run budget), `TXSEL`, pass lookahead
+  `PASSAOS/LOS/MAX(k)`, `LSTHR`, GPS names, `HEAPFREE/UPTIME/NSAT/NTX`. Programs can now
+  **draw** (`CLS/PSET/LINE/CIRCLE/TEXT/SHOW`, frame held after the run), **print**
+  (`LPRINT` through the report sinks), and — behind a Settings gate that defaults OFF —
+  **log** (`FOPEN/FPRINT/FCLOSE` under `/CardSat/basic/`, plus `FILES`). Still **no
+  `INPUT`**: the no-interactive-programs rule stands. The sci calc adds ~25 functions
+  (`atan2/hypot/ncr/fact…`, RF pairs `swr2rl/nf2t/fspl/dop…`, orbital `porb/vorb/fpr`,
+  femto suffix); the grapher gains a second trace, a trace cursor with dy/dx, zero and
+  intersection finding, Simpson ∫ between marks, a table view, and a flat-RAM **CSV plot
+  mode** for `/CardSat/plot.csv`.
+- **Search all of CelesTrak; add anything as an auto-updating favorite (0.9.59).**
+  The satellite list's `/` searches the **entire public catalog** by name or NORAD
+  number via `gp.php` — independent of the configured GP source — and ENTER adds the
+  pick as a favorite. Objects the primary source doesn't carry are persisted to
+  `/CardSat/ctx.json`, and **both GP update paths re-fetch each of them from
+  CelesTrak** so their elements never go stale (hand-entered manual sats are
+  deliberately never auto-fetched — pre-launch fits aren't in the catalog).
+  **Courtesy limits are enforced** so shared IPs never get banned: ≥10 s between
+  searches, identical queries within 2 h served from the cached result, the extras
+  refresh at most once per 2 h with the timestamp **persisted across reboots**, 2 s
+  spacing between object fetches, and a 25-object cap per update. Deleting with `x`
+  now covers these extras too, and results stream through the same allocation-free
+  GP parser as everything else — 800 B of state for the whole feature.
+- **Twenty new bench & satellite tools (0.9.59).** The Tools hub grows to **55 tools**. Five
+  are standalone satellite screens: a **conjunction screener** (propagate the active bird
+  against any loaded object, 6 h, minima refined to 1 s), an **orbital neighborhood** shell
+  view, a **transponder passband planner** (printable dial-pair crib), a **link-margin-vs-
+  elevation** plot, and a **debris-group screen** (transient CelesTrak fragmentation-cloud
+  **GP JSON** fetch, band-filtered and screened, resident DB untouched). The two screeners state plainly
+  that public-catalog GP elements make them **awareness, not collision avoidance**. The rest are
+  live-recalc forms: **Doppler budget**, **cascade NF & G/T** (Friis), a **sun-noise G/T**
+  helper that reuses the live 10.7 cm flux and Sun ephemeris, a **helix** designer, **L/Pi/T
+  matching networks** (Pi/T ABCD-verified on the host), **pointing loss**, **IMD products**,
+  **microstrip/stripline** Z0, **toroid winding**, a **delta-v** mini-set, **thermal
+  equilibrium**, **polarization/Faraday**, **trace & wire ampacity**, and a **PLL/frequency-
+  plan** helper. The orbital & Doppler math behind them was audited against skyfield the same
+  cycle (`docs/design/ORBITAL_MATH_AUDIT_0.9.59.md`).
+- **CAT over a USB↔serial adapter (0.9.58; on by default since 0.9.59).** Plug an
+  **FTDI / CP210x / CH34x** (or any CDC-ACM) adapter into the USB-C port and set
+  **CAT type → USB serial** — a pure transport swap, so it works for **every radio
+  and protocol** above, and replaces the MAX3232/CI-V interface on the pre-USB rigs.
+  **Bench-proven on an IC-821 + FTDI** (engage/disengage/re-engage + Doppler over
+  many cycles). Engaging USB claims the S3's one USB PHY, so the serial console is
+  gone for the session — diagnostics move to `/CardSat/Logs/usb.log` and the
+  optional **Console to file** capture. Radio *and* rotator can share the host via
+  a hub, each bound to an explicitly chosen adapter (experimental, untested with
+  two adapters).
 - **Native Icom LAN control (no CI-V wiring).** The **IC-9700** can be driven over
   WiFi/Ethernet using the radio's own **RS-BA1 UDP** protocol — the same one Icom's
   remote software uses — with no level shifter or UART. The LAN path is
@@ -111,8 +183,11 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   whether the satellite is sunlit or in Earth's shadow.
 - **GP age** — element-set age shown and color-graded so you know when elements are stale.
 - **Antenna rotator (GS-232, Easycomm, SPID, rotctl, PstRotator, or direct Yaesu)** — point an az/el rotator (Yaesu
-  G-5500 + GS-232B, SPID MD-01/02, K3NG/RadioArtisan, SatNOGS/ERC via **Easycomm I/II/III**) through an I²C→UART bridge so the radio
-  and GPS keep their UARTs, or over WiFi to a **Hamlib rotctld** server or a
+  G-5500 + GS-232B, SPID MD-01/02, K3NG/RadioArtisan, SatNOGS/ERC via **Easycomm I/II/III**) over a
+  **runtime-selected wire** (`Rot wire`, 0.9.58): the **SC16IS750 I²C→UART bridge**
+  (so the radio and GPS keep their UARTs), the **Grove port** directly, or a
+  **USB↔serial adapter** — see
+  **[ROTATOR_TRANSPORTS.md](interfaces/ROTATOR_TRANSPORTS.md)**; or over WiFi to a **Hamlib rotctld** server or a
   **PstRotator** instance, or wire a **Yaesu G-5500-class controller directly**
   (I²C ADC + outputs, no GS-232 box — see **[ROTOR_INTERFACE.md](interfaces/ROTOR_INTERFACE.md)**).
   Deadband, park-on-LOS, pre-positioning before AOS,
@@ -120,8 +195,9 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   for jogging the antenna by hand with live position read-back.
   *(Status: the **rotctl** and **PstRotator** network paths are confirmed to emit
   accurate commands on the wire, but have not been driven against a physical rotator;
-  the **GS-232/Easycomm/SPID** I²C→UART bridge and the **direct-Yaesu** backend are
-  host-tested only — verify before keying real motors.)*
+  the **GS-232/Easycomm/SPID** serial protocols — over the I²C→UART bridge, Grove,
+  or USB — and the **direct-Yaesu** backend are host-tested only — verify before
+  keying real motors.)*
 - **CardSat as a network server.** Run a **rigctld server** so a PC (Gpredict,
   WSJT-X, a logger) drives the wired/LAN radio through CardSat, and/or a
   **rotctld server** so a PC drives the wired GS-232 rotator through CardSat —
@@ -137,7 +213,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   hand-tuning calculator, and an Orbit card shows the analysis numbers.
 - **rigctl network radio.** Drive a radio attached to a remote **Hamlib rigctld**
   server over WiFi (Settings -> CAT type -> rigctl) — Doppler both legs via split.
-- **World map with coastline** — recognisable continents with **all favorites'**
+- **World map with coastline** — recognizable continents with **all favorites'**
   footprints at once; `f` highlights one bird at a time, and **`c` recenters the map
   on your own location** so your QTH sits in the middle.
 - **Time-step simulation** — off the Satellites list (`s`), step a satellite
@@ -517,7 +593,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 ## Printing (v0.9.55, refined v0.9.56)
 
 - **Receipt printing, three ways** — CardSat turns satellite data into paper. Any of its
-  **twenty-eight menu-listed reports** — plus the context-only ones that print from the screen
+  **twenty-nine menu-listed reports** — plus the context-only ones that print from the screen
   that holds their data (notes, Tiny BASIC listings and output, calculator and converter
   results) — can fan out to any combination of three sinks: a network **ESC/POS
   printer** over TCP:9100 (e.g. the Epson TM-P20II Wi-Fi or an 80 mm GZM8022), the **USB
@@ -579,7 +655,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   results**, **station readiness**, **awards** (totals + per-satellite tally), the **visible-pass
   list**, and — the subtle one — the **workable US states and DXCC entity lists**: the *counts*
   already reached paper inside other reports, but *which* entities are workable never did, and
-  that is the part a rover needs. All nine join the About → Print menu (now **28 reports**), and
+  that is the part a rover needs. All nine join the About → Print menu (now **29 reports**), and
   every line is width-checked against 32-column 58 mm stock.
 
 - **Printing from the tools (0.9.56)** — Tiny BASIC prints its **program listing** (`Fn`+`P` in

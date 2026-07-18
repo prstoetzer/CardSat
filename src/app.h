@@ -24,7 +24,8 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
+  SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -78,6 +79,11 @@ class App {
 public:
   void setup();
   void loop();
+
+  // Public type: the CelesTrak-search result row (the file-local parse sinks in
+  // app.cpp name it as App::CtRow, so it can't be private).
+  struct CtRow { char name[22]; uint32_t norad; float peri, apo, incl; };
+  static const int CTS_MAX = 20;
 
 #if CARDSAT_HAS_LORARX
   friend class LoraRxMon;   // the RX monitor reads cfg/lora and calls loraStart via this
@@ -1095,6 +1101,14 @@ private:
   void webdSendFile(const String& path);       // GET /api/file?path=... (stream a download)
   void applyRotatorFromCfg();
   const char* rotTransportConflict() const;   // nullptr = transport is free
+  // True only when the rotTransport wire setting actually applies AND is USB: the
+  // serial protocols run over a chosen transport, but ROT_NET/ROT_PST carry their own
+  // socket and ROT_YAESU is I2C-direct, so for those rotTransport is meaningless and a
+  // stale ROT_XPORT_USB value must NOT drive the USB host or its "starting" status.
+  bool        rotUsesUsb() const {
+    return cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+           cfg.rotType != ROT_YAESU && cfg.rotTransport == ROT_XPORT_USB;
+  }
   void        yieldGroveIfTaken(const char* who);  // CAT/GPS just claimed Grove
   void        scanUsbAdapters();
   void        cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio);
@@ -1437,6 +1451,18 @@ private:
   double graphXmin = -180, graphXmax = 180;   // default window suits the degree-based trig
   double graphYmin = -1.5,  graphYmax = 1.5;
   bool   graphErr = false;           // last expression failed to parse
+  // 0.9.59 grapher features: second trace, cursor trace, zeros, marks/integral,
+  // table + CSV-file modes. The 236-column sample buffers live as statics inside
+  // drawGraph and are shared by the CSV downsample cache (mode-exclusive).
+  String graphExpr2;                 // Y2 (empty = off), drawn orange
+  int    gTrace = -1;                // trace cursor pixel column (-1 = off)
+  int    gMode  = 0;                 // 0 plot, 1 table, 2 CSV file
+  double gMarkA = NAN, gMarkB = NAN; // integral marks (x values)
+  double gTabX0 = NAN;               // table start x
+  float  gRoots[4]; int gRootsN = 0; // last zero/intersection find
+  int    gCsvN = 0;                  // CSV rows cached (0 = not loaded)
+  float  gCsvLo = 0, gCsvHi = 1;     // CSV y-range from the last load (for 'a' fit)
+  int    graphCsvLoad();             // stream /CardSat/plot.csv into the column buffers
 
   // ---- Tiny BASIC interpreter (SCR_BASIC editor + SCR_BASICRUN console) ----------
   // A small line-numbered BASIC. Programs are capped at BASIC_PROG_MAX bytes (4 KB) and
@@ -1468,6 +1494,23 @@ private:
   uint32_t perfLastLoopUs = 0;         // timestamp of the previous loop() entry
   Screen   lastScreenSeen = SCR_HOME;   // screen-transition housekeeping (see loop())
   bool basicSave();  bool basicLoad(const char* base);
+  // BASIC host hooks (0.9.59): the VM lives in an anonymous namespace and reaches the
+  // system only through these static trampolines (static members have private access).
+  // satsel re-snapshots the SAT* names for any catalog index via pred.lookFor (one local
+  // SGP4 per call, budgeted VM-side); txsel snapshots one of the active sat's loaded
+  // transponders; lpr streams LPRINT lines to the configured report sinks (opened
+  // lazily, closed after the run); gfx draws BASIC's CLS/PSET/LINE/CIRCLE/TEXT/SHOW on
+  // the canvas; file is the Settings-gated /CardSat/basic/ append writer + FILES lister.
+  static bool basHookSatsel(void* self, int idx, double out[13]);
+  static bool basHookTxsel(void* self, int idx, double out[5]);
+  static bool basHookLpr(void* self, const char* line, int op);
+  static void basHookGfx(void* self, int op, double a, double b, double c, double d,
+                         double e, const char* s);
+  static int  basHookFile(void* self, int op, const char* a, String* out);
+  bool  basLprOpen = false;          // LPRINT sinks currently open
+  bool  basFileOpen = false;         // FOPEN file currently open
+  File  basFile;                     // the one BASIC output file
+  bool  basGfxHold = false;          // a SHOWed frame is on screen; next key clears it
 
   // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
   // hex / dec / bin / oct, with bitwise ops (AND OR XOR NOT << >>) and +-*/ via a
@@ -1639,6 +1682,74 @@ private:
   bool calcHintPage2 = false;                     // ' toggles the function-hint page
   bool calcEngNota = false;                        // = toggles engineering-notation output
   int tfOutScroll = 0;                            // form output scroll (yagi/quad element lists)
+
+  // ---- 0.9.59 satellite tools (standalone screens) --------------------------
+  // Orbital neighborhood: loaded objects whose perigee-apogee band overlaps the
+  // active satellite's, sorted by band gap. ENTER hands the pick to the screener.
+  static const int NEIGH_MAX = 40;
+  int16_t neighIdx[NEIGH_MAX]; float neighGap[NEIGH_MAX];
+  int   neighN = 0, neighScroll = 0;
+  void  neighInit();
+  void  drawNeigh(); void keyNeigh(char c, bool enter, bool back);
+
+  // Conjunction screener: propagate the active satellite against a chosen second
+  // object (public GP elements: awareness, not avoidance) and list the closest
+  // approaches in the scan window.
+  static const int CONJ_MAX = 5;
+  int    conjB = -1;                    // db index of the second object (-1 = pick)
+  time_t conjT[CONJ_MAX]; float conjMiss[CONJ_MAX]; float conjRvel[CONJ_MAX];
+  int    conjN = 0; bool conjRan = false;
+  int    conjPct = -1, dgPct = -1;      // >=0 while a screen's compute is running
+  void   conjRun();
+  void   drawConj(); void keyConj(char c, bool enter, bool back);
+
+  // Transponder passband planner: satellite-frame dial pairs across the passband
+  // (a paper crib for coordination; the live loop applies Doppler on the air).
+  int   txplanTx = 0;
+  void  txplanPrint();
+  void  drawTxplan(); void keyTxplan(char c, bool enter, bool back);
+
+  // Link margin vs elevation: M(el) = M0 + [FSPL(range at 0 deg) - FSPL(range at el)].
+  double lcAlt = 500, lcF = 435.5, lcM0 = 6.0;
+  int    lcSel = 0; bool lcEdit = false; String lcBuf;
+  void   drawLnkCrv(); void keyLnkCrv(char c, bool enter, bool back);
+
+  // Debris-group screen: fetch a CelesTrak group TLE to a temp file, keep the
+  // objects sharing the active bird's altitude band, and coarse-screen each for
+  // closest approach. Transient only -- the resident 150-sat DB is untouched.
+  static const int DG_MAX = 14;
+  SatEntry dgSat[DG_MAX]; float dgMiss[DG_MAX]; time_t dgT[DG_MAX];
+  int   dgN = 0, dgGroup = 0, dgScroll = 0, dgState = 0;   // 0 pick, 1 results
+  bool  dgFetchAndScreen(String& err);
+  void  drawDebGrp(); void keyDebGrp(char c, bool enter, bool back);
+
+  // CelesTrak whole-catalog search (SCR_CTSEARCH, sat list '/'): query gp.php by NAME
+  // (or CATNR when the query is all digits), browse the streamed results, ENTER adds the
+  // pick as a favorite. Adds persist to FILE_CTX so every GP update re-fetches their
+  // elements from CelesTrak (courtesy-throttled) -- see refreshCtExtras. Results are held
+  // as slim rows; the full entry is re-streamed from the cached result file on add.
+  CtRow  ctsRows[CTS_MAX];
+  int    ctsN = 0, ctsTotal = 0, ctsSel = 0, ctsScroll = 0;
+  // Universal form-tool printing (0.9.59, all 34 form tools for one refactor):
+  // when tfEmit is set, drawToolForm's field loop and out() lambda tee every line
+  // to Printer::line instead of the canvas -- no buffering, no per-tool code.
+  bool   tfEmit = false;
+  void   printToolForm(); void printConj(); void printNeigh();
+  void   printDebGrp();   void printLnkCrv();
+  String ctsBuf;                        // last query text (editor round-trips through it)
+  uint32_t ctsLastQueryMs = 0;          // 10 s interactive spacing (millis; survives clockless boots)
+  void   ctSearchRun();                 // throttle + fetch (or reuse cache) + parse into rows
+  void   ctAddSelected();               // favorite an in-catalog hit, or persist + merge an extra
+  void   refreshCtExtras();             // re-fetch every FILE_CTX object (2 h courtesy throttle)
+  // Primary-catalog courtesy throttle (0.9.59): CelesTrak asks that the same GP
+  // data not be pulled more than ~every 2 h. Keyed on the URL hash (changing the
+  // source fetches immediately) and persisted in /CardSat/gp.ts so reboots or
+  // boot-time updates can't hammer. A skipped fetch reloads the cached FILE_GP.
+  bool   gpFetchDue(const String& url);
+  void   gpFetchMark(const String& url);
+  void   ctxTsLoad(uint32_t& lastQ, uint32_t& qHash, uint32_t& lastRef);
+  void   ctxTsSave(uint32_t lastQ, uint32_t qHash, uint32_t lastRef);
+  void   drawCtSearch(); void keyCtSearch(char c, bool enter, bool back);
 
   // Live-recalc form engine (SCR_TOOLFORM). Each tool is a set of labeled numeric
   // fields plus computed output lines; editing a field recomputes instantly.
@@ -1844,7 +1955,7 @@ private:
   void gameReset(bool full);   // (re)start: full=new game, else next wave
   void gameStep();             // advance one formation step + shots
 
-  // Games menu + the five mini-games. Each is draw + key + a reset; all fixed-size.
+  // Games menu + the six mini-games. Each is draw + key + a reset; all fixed-size.
   void drawGamesMenu(); void keyGamesMenu(char c, bool enter, bool back);
   void beep(uint16_t freq, uint16_t ms);       // on-demand speaker beep (acquires + schedules release)
   void sfx(uint16_t freq, uint16_t ms);        // gated game sound (cfg.gameSound)
@@ -1865,7 +1976,8 @@ private:
   void runSerialCommand(const char* cmd);      // dispatch one completed command line
   char     cliBuf[64] = {0};                   // serial input line accumulator
   uint8_t  cliLen = 0;
-  // ---- Receipt printing (TCP:9100 ESC/POS; see print.h + docs/design/PRINTING_SCOPE.md) ----
+  // ---- Printing (9 page languages over raw TCP:9100 or IPP:631, plus serial +
+  //      file sinks; see print.h + docs/design/PRINTING_IMPLEMENTATION.md) ----
   // Each report opens a Printer job, streams 32-col text, and closes -- no big buffer, transient
   // socket only. printReport() is the shared entry (opens/closes + error status); the per-report
   // builders assume an open job. Returns false (with setStatus) if the printer can't be reached.
@@ -1873,6 +1985,7 @@ private:
                      PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR,
                      PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
                      PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
+                     PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
                      PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report

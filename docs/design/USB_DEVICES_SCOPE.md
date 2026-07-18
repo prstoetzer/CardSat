@@ -165,7 +165,7 @@ every radio, every existing feature works unchanged.**
    helps the IC-9100.)
 2. **Every old rig, via a USB-serial adapter** — and this is the bigger prize. Today, wired CI-V
    needs G1/G2 and a level shifter; RS-232 rigs (TS-790, TS-2000, FT-847) need a **MAX3232** and
-   the wiring documented in `WIRING.md`. A £3 USB-RS232 adapter with an FTDI or CP210x chip
+   the wiring documented in `WIRING.md`. A $5 USB-RS232 adapter with an FTDI or CP210x chip
    replaces that whole harness — and `usb_host_vcp` already drives all of them.
 
 That second case makes CAT-over-USB *more* valuable than the printer work, because it simplifies
@@ -236,7 +236,7 @@ CardSat's `makeRig()` factory hands a `Stream*` to the protocol encoder. **That 
   multiple serial devices can exhaust channels quickly."*
 
 That second one bites here specifically: **an IC-9700/IC-9100 over USB is a composite device**
-(CI-V serial *plus* audio). A plain USB-serial adapter is not. So the £3-adapter case for the
+(CI-V serial *plus* audio). A plain USB-serial adapter is not. So the $5-adapter case for the
 eight pre-USB rigs may actually be *easier* than the modern-rig case.
 
 # RAM: what USB→Serial actually costs
@@ -320,7 +320,7 @@ it."**
 
 1. **CAT over USB (`CAT_USB`)** — the clear first target. `EspUsbHostCdcSerial` **is** an Arduino
    `Stream`; CardSat's `makeRig()` already hands a `Stream*` to the protocol encoder. Every rig,
-   every protocol, unchanged. The £3 USB-serial adapter case (all eight pre-USB rigs, replacing
+   every protocol, unchanged. The $5 USB-serial adapter case (all eight pre-USB rigs, replacing
    the MAX3232 harness) is the real prize — and it is *simpler* than the modern-rig case, because
    an IC-9700 over USB is a composite device and the S3 has few host channels.
 2. **Rotator over USB (`ROT_USB`)** — same `Stream` seam, replaces the SC16IS750 chain. **One

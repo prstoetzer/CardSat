@@ -42,6 +42,7 @@ bool Predictor::setSat(SatEntry& s) {
   if (!SatDb::gpToTle(s, _l1, _l2)) { _haveSat = false; return false; }
   _sat.init(_name, _l1, _l2);
   _haveSat = (_sat.satrec.error == 0);
+  _mmRevDay = s.meanMotion;          // recorded for the high-orbit pass finder
   _epochUnix = s.epochUnix;          // for fractional-time range rate (rangeRateAt)
   return _haveSat;
 }
@@ -75,6 +76,70 @@ bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3
   r[0] = r[1] = r[2] = v[0] = v[1] = v[2] = 0.0;
   sgp4(wgs72, fp.satrec, tsince, r, v);                 // TEME position (km), velocity (km/s)
   if (fp.satrec.error != 0) return false;
+  return true;
+}
+
+bool Predictor::lookFor(SatEntry& s, time_t t, float& az, float& el, float& rangeKm,
+                        float& rrKmS, float& subLat, float& subLon, float& altKm,
+                        bool& sunlit) {
+  double r[3], v[3];
+  if (!temeStateAt(s, (double)t, r, v)) return false;
+
+  // Observer position + velocity in TEME -- the same expressions as rangeRateAt().
+  double jd  = (double)t / 86400.0 + 2440587.5;
+  double th  = gmstRad(jd);
+  double ct = cos(th), st = sin(th);
+  double phi = _o.lat * DEG, lam = _o.lon * DEG, hKm = _o.altM / 1000.0;
+  double e2  = 6.694318e-3;                     // WGS72 first eccentricity^2
+  double sphi = sin(phi), cphi = cos(phi);
+  double Nn  = RE_KM / sqrt(1.0 - e2 * sphi * sphi);
+  double xe = (Nn + hKm) * cphi * cos(lam);
+  double ye = (Nn + hKm) * cphi * sin(lam);
+  double ze = (Nn * (1.0 - e2) + hKm) * sphi;
+  double ox = xe * ct - ye * st, oy = xe * st + ye * ct, oz = ze;
+  const double we = 7.2921150e-5;
+  double ovx = -we * oy, ovy = we * ox, ovz = 0.0;
+
+  double rx = r[0] - ox, ry = r[1] - oy, rz = r[2] - oz;
+  double vx = v[0] - ovx, vy = v[1] - ovy, vz = v[2] - ovz;
+  double rmag = sqrt(rx * rx + ry * ry + rz * rz);
+  if (rmag <= 0) return false;
+  rangeKm = (float)rmag;
+  rrKmS   = (float)((rx * vx + ry * vy + rz * vz) / rmag);
+
+  // Topocentric az/el: ENU basis at the observer (same basis as look()'s Sun block).
+  double ost = sin(th + lam), oct = cos(th + lam);
+  double eC = (-ost) * rx + (oct) * ry;
+  double nC = (-sphi * oct) * rx + (-sphi * ost) * ry + (cphi) * rz;
+  double uC = ( cphi * oct) * rx + ( cphi * ost) * ry + (sphi) * rz;
+  el = (float)(atan2(uC, sqrt(eC * eC + nC * nC)) / DEG);
+  double a = atan2(eC, nC) / DEG; if (a < 0) a += 360.0;
+  az = (float)a;
+
+  // Sub-point: satellite TEME -> ECEF (Rz(-theta)) -> geodetic (iterative).
+  double gx =  r[0] * ct + r[1] * st;
+  double gy = -r[0] * st + r[1] * ct;
+  double gz =  r[2];
+  double lon = atan2(gy, gx) / DEG;
+  double pd  = sqrt(gx * gx + gy * gy);
+  double lat = atan2(gz, pd * (1.0 - e2));
+  double Nl = RE_KM;
+  for (int i = 0; i < 4; ++i) {
+    double sl = sin(lat);
+    Nl  = RE_KM / sqrt(1.0 - e2 * sl * sl);
+    lat = atan2(gz + e2 * Nl * sl, pd);
+  }
+  subLat = (float)(lat / DEG);
+  subLon = (float)lon;
+  altKm  = (float)(pd / cos(lat) - Nl);
+
+  // Cylindrical shadow, evaluated directly in TEME (a Z-rotation of the ECEF test:
+  // dot products and norms are invariant, so the result is identical to look()'s).
+  double sx, sy, sz; sunEciUnit(jd, sx, sy, sz);
+  double proj = r[0] * sx + r[1] * sy + r[2] * sz;
+  double rm2  = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+  double perp = sqrt(fmax(0.0, rm2 - proj * proj));
+  sunlit = !(proj < 0.0 && perp < RE_KM);
   return true;
 }
 
@@ -429,6 +494,76 @@ int Predictor::mutualWindows(time_t from, const Observer& dx, float minEl,
 int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int maxN,
                              time_t horizonEnd) {
   if (!_haveSat) return 0;
+
+  // ---- High-orbit finder (period >= ~225 min; 0.9.59) --------------------------------
+  // The library's nextpass() hops one revolution at a time and Brent-brackets a rise
+  // and a set around each elevation maximum -- an excellent LEO strategy (harness:
+  // 7/7 vs skyfield) that demonstrably fails for Molniya-class orbits and cannot
+  // represent a continuously-visible geosynchronous bird at all (there is no rise to
+  // bracket). Deep-space SDP4 propagation itself is present and healthy in this
+  // build's sgp4unit (harness look(): Molniya el/range spot-on), so for slow orbits
+  // we scan elevation ourselves and bisect the threshold crossings: step = period/96
+  // clamped to [120 s, 900 s], AOS/LOS refined to ~1 s, max-elevation sampled inside
+  // the pass at <= 240 points. A bird above minEl for the whole horizon yields one
+  // horizon-long pass (aos = from, los = horizon) -- the honest answer for a GEO
+  // stationed in view. Verified against skyfield in tools/host_orbit_audit (HIORBIT).
+  if (_mmRevDay > 0 && _mmRevDay <= 6.4) {
+    time_t hEnd = horizonEnd ? horizonEnd : from + 86400;
+    if (hEnd <= from || maxN <= 0) return 0;
+    double periodS = 86400.0 / _mmRevDay;
+    time_t step = (time_t)fmax(120.0, fmin(900.0, periodS / 96.0));
+    auto elAt = [&](time_t t) { return (double)look(t).el; };
+    auto refine = [&](time_t lo, time_t hi, bool rising) -> time_t {
+      // invariant: el(lo) and el(hi) straddle minEl in the stated direction
+      for (int i = 0; i < 20 && hi - lo > 1; ++i) {
+        time_t mid = lo + (hi - lo) / 2;
+        bool up = elAt(mid) >= minEl;
+        if (up == rising) hi = mid; else lo = mid;
+      }
+      return hi;
+    };
+    int found = 0;
+    bool  prevUp = elAt(from) >= minEl;
+    time_t prevT = from, aos = prevUp ? from : 0;
+    for (time_t t = from + step; found < maxN; t += step) {
+      if (t > hEnd) t = hEnd;
+      bool up = elAt(t) >= minEl;
+      if (up && !prevUp)      aos = refine(prevT, t, true);
+      else if (!up && prevUp && aos) {
+        time_t los = refine(prevT, t, false);
+        PassPredict& p = out[found];
+        p.aos = aos; p.los = los;
+        time_t ps = (los - aos) / 240; if (ps < 60) ps = 60;
+        double mE = -90; time_t tM = aos; float aA = 0, aL = 0;
+        { LiveLook L = look(aos); aA = L.az; }
+        for (time_t q = aos; q <= los; q += ps) {
+          LiveLook L = look(q);
+          if (L.el > mE) { mE = L.el; tM = q; }
+        }
+        { LiveLook L = look(los); aL = L.az; }
+        p.tca = tM; p.maxEl = (float)mE; p.azAos = aA; p.azLos = aL;
+        found++; aos = 0;
+      }
+      prevUp = up; prevT = t;
+      if (t >= hEnd) break;
+    }
+    if (aos && found < maxN) {         // still above minEl at the horizon's edge
+      PassPredict& p = out[found];
+      p.aos = aos; p.los = hEnd;
+      time_t ps = (hEnd - aos) / 240; if (ps < 60) ps = 60;
+      double mE = -90; time_t tM = aos; float aA = 0, aL = 0;
+      { LiveLook L = look(aos); aA = L.az; }
+      for (time_t q = aos; q <= hEnd; q += ps) {
+        LiveLook L = look(q);
+        if (L.el > mE) { mE = L.el; tM = q; }
+      }
+      { LiveLook L = look(hEnd); aL = L.az; }
+      p.tca = tM; p.maxEl = (float)mE; p.azAos = aA; p.azLos = aL;
+      found++;
+    }
+    return found;
+  }
+
   passinfo overpass;
   _sat.initpredpoint((unsigned long)from, (double)minEl);
 
@@ -447,6 +582,37 @@ int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int max
     p.azAos = (float)overpass.azstart;
     p.azLos = (float)overpass.azstop;
     found++;
+  }
+
+  // Belt-and-braces for the LIBRARY path only (slow orbits never reach here --
+  // the scan finder above owns them, always-up case included): if nextpass()
+  // found nothing but the bird is above minEl right now, sample the horizon and
+  // report continuous visibility as one horizon-long pass. Costs a single extra
+  // look() in the common no-pass case.
+  if (found == 0 && maxN > 0) {
+    LiveLook L0 = look(from);
+    if (L0.el >= minEl) {
+      time_t hEnd = horizonEnd ? horizonEnd : from + 86400;
+      if (hEnd > from) {
+        const int NS = 49;                         // ~30 min grid over 24 h
+        double maxE = L0.el; time_t tMax = from;
+        float azA = L0.az, azL = L0.az;
+        bool allUp = true;
+        for (int k = 1; k < NS; ++k) {
+          time_t t = from + (time_t)(((int64_t)(hEnd - from) * k) / (NS - 1));
+          LiveLook L = look(t);
+          azL = L.az;
+          if (L.el < minEl) { allUp = false; break; }
+          if (L.el > maxE) { maxE = L.el; tMax = t; }
+        }
+        if (allUp) {
+          PassPredict& p = out[0];
+          p.aos = from; p.los = hEnd; p.tca = tMax;
+          p.maxEl = (float)maxE; p.azAos = azA; p.azLos = azL;
+          found = 1;
+        }
+      }
+    }
   }
   return found;
 }

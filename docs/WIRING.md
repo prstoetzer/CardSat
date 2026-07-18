@@ -14,10 +14,11 @@ differs by family**, because the electrical layer is different:
 - **Icom CI-V** — single-wire half-duplex bus idling near 5 V. Use a 3.3 V-safe
   CI-V interface (the common one-transistor circuit or a ready-made board) on the
   radio's REMOTE jack. Full build guide: **[CIV_INTERFACE.md](interfaces/CIV_INTERFACE.md)**.
-  CardSat also has an experimental **single-pin CI-V** mode (one shared open-drain
-  GPIO for the whole bus) selectable in *Settings → Radio → CI-V wiring* — it is
-  **unverified**; the normal TX/RX path is recommended. See
-  **[CIV_SINGLE_PIN.md](interfaces/CIV_SINGLE_PIN.md)**.
+  CardSat also has a **single-pin CI-V** mode (one shared open-drain GPIO for the
+  whole bus) selectable in *Settings → Radio / CAT → CI-V wiring* — **confirmed
+  working on an IC-821** (full bidirectional exchange, Doppler, knob tuning), but it
+  needs correct open-drain 5 V/3.3 V interfacing; the TX/RX path stays the simplest.
+  See **[CIV_SINGLE_PIN.md](interfaces/CIV_SINGLE_PIN.md)**.
 - **Kenwood (TS-790, TS-2000)** — true **RS-232** on a DB-9 COM port (±12 V). Use a
   **MAX3232-class level shifter** between the DB-9 and G1/G2; do **not** use the CI-V
   circuit. On the TS-2000, a straight 3-wire cable with **CTS/RTS bridged** (or the
@@ -29,13 +30,27 @@ differs by family**, because the electrical layer is different:
   select **FT-847** in Settings in that case. Build guide (MAX3232):
   **[RS232_INTERFACE.md](interfaces/RS232_INTERFACE.md)**.
 
+**No-solder alternative — CAT over USB (0.9.58; on by default since 0.9.59).**
+Instead of any of the interfaces above, a **USB↔serial adapter** (FTDI / CP210x /
+CH34x, or any CDC-ACM device) on the Cardputer's **USB-C port** can carry CAT for
+**every radio family** — set **CAT type → USB serial**. The adapter's TTL/RS-232 side
+still has to match the radio's CAT jack levels (an FTDI *cable* built for the rig, or
+adapter + the matching level interface), but the Cardputer end is plug-in: no G1/G2
+wiring, no level shifter at the Cardputer. Bench-proven on an IC-821 + FTDI. Engaging
+USB takes the S3's one USB PHY, so the **serial console is gone for the session** —
+diagnostics land in `/CardSat/Logs/usb.log`. G1/G2 stay free, which is what lets a
+**Grove rotator** (below) coexist with CAT.
+
 Set the **model** and **CAT baud** in **Settings** to match the radio's menu (the CI-V
 **address** field applies to Icom only). Yaesu is 8N2; Icom and Kenwood are 8N1 —
 the firmware sets this automatically per backend.
 
-**Icom over the network (no wiring).** A network-capable Icom (**IC-9700**, IC-705,
-IC-7610, IC-785x) can be driven over **WiFi/Ethernet** with no CI-V interface at all —
-CardSat speaks the radio's RS-BA1 UDP protocol directly. On the radio enable **Network
+**Icom over the network (no wiring).** The **IC-9700** can be driven over
+**WiFi/Ethernet** with no CI-V interface at all — CardSat speaks the radio's RS-BA1
+UDP protocol directly. (The transport is proven — it has controlled an **IC-705** —
+but the LAN feature is *intended for the IC-9700*: the other networked Icoms
+(IC-705/7610/785x) speak the protocol yet lack the dual-receiver satellite
+architecture, and the IC-9700 itself has not been LAN-tested yet.) On the radio enable **Network
 Control**, set a **Network User1** id + password, keep the **Control port** at 50001,
 and turn **CI-V Transceive ON**. In **Settings** set **CAT type → Icom LAN** and fill in
 **LAN host / port / user / pass**. Only CAT is carried (the audio stream is not opened);
@@ -58,17 +73,26 @@ Both Cap LoRa modules carry the same AT6668 GNSS at **115200 8N1** on G15/G13;
 the two Grove rows differ only in baud, to match whatever receiver you plug in.
 
 > ⚠️ The **Grove** GPS option uses **G1/G2 — the same pins as the default CAT
-> port.** Don't run Grove GPS and CAT at the same time on those pins. The two Cap
-> LoRa sources use G15/G13 and coexist with CAT fine.
+> port and the Grove rotator wire.** Only one of the three can own those pins at a
+> time; CardSat enforces it, but wire accordingly. The two Cap LoRa sources use
+> G15/G13 and coexist with all of it fine.
 
 ---
 
-### Antenna rotator (GS-232 over I²C, or rotctld / PstRotator over WiFi)
+### Antenna rotator (GS-232 / Easycomm / SPID over three wires, Yaesu direct, or rotctld / PstRotator over WiFi)
 
-CardSat drives an az/el rotator through one of two interchangeable backends,
-chosen in **Settings → Rot type**. Only one is active at a time, and the pointing
-logic — alignment offsets, deadband, flip mode, park-on-LOS — is shared, so
-switching transports doesn't change behavior. Enable the rotator in Settings and
+CardSat drives an az/el rotator through one of **eight interchangeable backends**,
+chosen in **Settings → Rot type**: the three serial protocols **GS-232**,
+**Easycomm I/II/III**, and **SPID Rot2Prog**; the two network clients **rotctl
+(net)** and **PstRotator (net)**; and the controller-less **Yaesu (direct)** build.
+For the serial protocols, **which wire they run on is a second setting — `Rot
+wire`**: the **SC16IS750 I²C→UART bridge** (the wiring below), the **Grove port
+(G1/G2)** driven directly, or a **USB↔serial adapter** on the USB-C port. Protocol
+and wire are independent; conflict rules and the guardrails for radio+rotator on
+USB are in **[interfaces/ROTATOR_TRANSPORTS.md](interfaces/ROTATOR_TRANSPORTS.md)**.
+Only one rotator is active at a time, and the pointing logic — alignment offsets,
+deadband, flip mode, park-on-LOS — is shared, so switching backends or wires
+doesn't change behavior. Enable the rotator in Settings and
 press **`o`** on the Track screen to start/stop pointing; it parks at the
 configured azimuth on LOS. With **Rot pre-point** set (default 2 min), it also
 slews to the next pass's rise bearing that far before AOS, so a slow rotator is
@@ -78,8 +102,10 @@ azimuth travel — `0..360`, `-180..+180` (centered on North, like Gpredict), or
 unwinding a full turn). **Rot el range** picks `90` or `180`°; at 180° a high pass
 **flips over the top** rather than swinging azimuth 180° at culmination.
 
-**Wired — GS-232.** All three UARTs are spoken for (USB, CAT, GPS), so the
-rotator's serial port is made with an **I²C→UART bridge**. Chain:
+**Wired, `Rot wire` = I2C bridge (the default).** With wired CAT on G1/G2 and a
+Grove GPS both possible, the bridge is the one serial wire that coexists with
+everything — the rotator gets its own UART on the expansion I²C bus. Chain
+(GS-232 shown; Easycomm and SPID use the identical chain):
 
 **Wire1 → SC16IS750 → MAX3232 → DB-9 → GS-232 controller.**
 
@@ -94,6 +120,28 @@ rotator's serial port is made with an **I²C→UART bridge**. Chain:
 - GS-232 uses RS-232 levels, so a **MAX3232** sits between the bridge's TTL pins
   and the controller's DB-9 (TXD / RXD / GND). Set **Rot baud** to match the
   controller (commonly 9600).
+
+**Wired, `Rot wire` = Grove G1/G2.** The serial protocols can instead drive the
+**Grove port directly** — TTL on G1/G2, through a MAX3232 if the controller wants
+RS-232 levels. **The Cardputer has one Grove port**: wired CI-V CAT and the Grove
+GPS use the same two pins, so a Grove rotator needs **CAT on USB or LAN** and the
+**GPS off Grove** (Cap LoRa GNSS is fine — it uses G15/G13). CardSat enforces this
+both ways: it refuses a Grove rotator while Grove is taken, and yields back to the
+bridge if CAT or GPS later claims Grove.
+
+**Wired, `Rot wire` = USB adapter.** A **USB↔serial adapter** on the USB-C port,
+sharing the resident USB host with USB CAT. Engaging USB closes the serial console
+for the session. Rotator-only is straightforward; **radio and rotator on USB at
+once** (through a hub, each bound to a chosen adapter) is built and guarded but
+**untested with two physical adapters** — see
+**[interfaces/ROTATOR_TRANSPORTS.md](interfaces/ROTATOR_TRANSPORTS.md)**.
+
+**Wired — Yaesu (direct), no controller box.** A G-5500-class controller can be
+wired **straight to CardSat**: an I²C **ADS1115** reads the position-feedback
+voltages and an I²C **PCF8574** drives the four direction lines, on the same Wire1
+bus the bridge would use. Hardware build + calibration:
+**[interfaces/ROTOR_INTERFACE.md](interfaces/ROTOR_INTERFACE.md)** (⚠️ untested; at
+your own risk).
 
 **Networked — rotctld.** No extra wiring: set **Rot type → rotctld (net)** and
 point CardSat at a **Hamlib `rotctld`** server on the same WiFi network — enter

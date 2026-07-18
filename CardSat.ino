@@ -384,7 +384,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.58";
+static constexpr const char* FW_VERSION = "0.9.59";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -440,26 +440,34 @@ static constexpr int   MAX_SATS        = 150;  // sats held in RAM from GP data
 static constexpr int   MAX_TX_PER_SAT  = 64;   // transmitters held for active sat (e.g. ISS has ~49 on SatNOGS)
 
 // ---- USB-host CAT (CAT_USB) ------------------------------------------------
-// OPT-IN, default OFF -- unlike LoRa, which ships on. Two reasons: it needs a
-// third-party library (tanakamasayuki/EspUsbHost) that a stock Arduino IDE install
-// will not have, so an unguarded build would break for everyone; and it is UNPROVEN
-// on hardware. Defined here rather than in usbserial.h because settings.h needs it
-// for CAT_TYPE_N and does not include usbserial.h.
+// ON by default since 0.9.59 -- like LoRa, ship every feature. It was opt-in
+// while unproven; 0.9.58 bench-proved it on an IC-821 + FTDI adapter (engage /
+// disengage / re-engage / Doppler tracking over many cycles). Defined here
+// rather than in usbserial.h because settings.h needs it for CAT_TYPE_N and
+// does not include usbserial.h.
 //
-// TO ENABLE, either:
-//   * Arduino IDE  -- change the 0 below to 1, and install EspUsbHost from the
-//                     Library Manager. No build flags: the IDE has no field for
-//                     them, and nothing here needs one.
-//   * PlatformIO   -- uncomment the two lines in platformio.ini.
+// The default build therefore REQUIRES tanakamasayuki/EspUsbHost, v2.3.1 or
+// later (Library Manager / lib_deps). v2.3.1 fixed the peripheral_map compile
+// error upstream (the assignment is now inside an ESP32-P4 target guard), so no
+// library patch is needed; only stale copies <= 2.3.0 still need the one-line
+// edit in docs/BUILD_AND_FLASH.md.
+//
+// TO BUILD WITHOUT USB CAT (no EspUsbHost needed; Settings cannot reach
+// "USB serial"; otherwise byte-for-byte the same firmware):
+//   * Arduino IDE  -- change the 1 below to 0.
+//   * PlatformIO   -- add -DCARDSAT_HAS_USBCAT=0 under build_flags and comment
+//                     out the EspUsbHost line under lib_deps.
 // There is deliberately NO per-file ESP_USB_HOST_MAX_DEVICES define: the slot
 // array is a member of the host object, sized in the LIBRARY's header, so only a
-// global -D (PlatformIO build_flags) can change it consistently for the library's
-// own translation unit too -- a per-file define diverges the layouts and corrupts
-// the firmware (the 0.9.58-wip enable-USB-CAT freeze; see usbserial.cpp). The
-// Arduino IDE path needs no flag at all: the host object is heap-allocated only
-// while USB CAT is engaged, so the library's 8-slot default costs nothing at rest.
+// global -D can change it consistently for the library's own translation unit
+// too -- a per-file define diverges the layouts and corrupts the firmware (the
+// 0.9.58-wip enable-USB-CAT freeze; see usbserial.cpp). Both build paths supply
+// that global -D as ESP_USB_HOST_MAX_DEVICES=4: the Arduino IDE via build_opt.h
+// (which the esp32 core applies to every translation unit, libraries included),
+// PlatformIO via build_flags in platformio.ini. The host object is heap-
+// allocated only while USB is engaged, so the slots cost nothing at rest.
 #ifndef CARDSAT_HAS_USBCAT
-#define CARDSAT_HAS_USBCAT 0
+#define CARDSAT_HAS_USBCAT 1
 #endif
 static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
@@ -526,6 +534,11 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_NOTES   "/CardSat/notes.txt"     // per-sat operating notes: "norad<TAB>text" lines
 #define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
 #define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
+#define FILE_CTX     "/CardSat/ctx.json"      // CelesTrak-sourced extra favorites (one OMM object/line);
+                                              // refreshed from CelesTrak on GP updates, unlike FILE_MGP
+#define FILE_CTX_TS  "/CardSat/ctx.ts"        // CelesTrak courtesy-limit state (timestamps + last query hash)
+#define CTX_MAX      25                       // max CelesTrak extras tracked (matches the per-update
+                                              // refresh cap; also bounds every ctx file walk)
 #define FILE_MTX     "/CardSat/mtx_%lu.json"  // manual transponders per norad (text lines)
 #define FILE_CFG_BAK  "/CardSat/config.bak"    // backup copy of config.json
 #define FILE_FAVS_BAK "/CardSat/favs.bak"      // backup copy of favs.txt
@@ -912,6 +925,10 @@ static const RadioProfile RADIOS[RIG_COUNT] = {
 //      CivRig     (civ.cpp)     Icom CI-V          IC-820/821/910/970/9100/9700
 //      YaesuRig   (yaesu.cpp)   Yaesu 5-byte CAT   FT-847, FT-736R
 //      KenwoodRig (kenwood.cpp) Kenwood ASCII CAT  TS-790, TS-2000
+//      IcomNetRig (icomnet.cpp) Icom LAN (RS-BA1)  IC-9700 over UDP, no wiring
+//      RigctlRig  (below)       Hamlib NET rigctl  any rig behind a rigctld
+//  The three wire-level backends take a Stream*, so their transport is a
+//  runtime choice: the G1/G2 UART or a USB<->serial adapter (CAT_USB).
 //
 //  Convention used everywhere in the app (kept regardless of how a given rig
 //  labels its VFOs): "Sub" = downlink / RX, "Main" = uplink / TX.
@@ -1334,10 +1351,18 @@ private:
 // ===========================================================================
 //
 //  Mirrors the Rig abstraction: the app points the rotator through a narrow
-//  interface and the backend handles the wire protocol. The only backend so
-//  far is GS-232 (Yaesu's de-facto standard, also emulated by SPID, K3NG,
-//  RadioArtisan, ERC, etc.), reached through an SC16IS750/752 I2C->UART bridge
-//  because all three ESP32-S3 hardware UARTs are already in use.
+//  interface and the backend handles the wire protocol. Seven backends:
+//      GS-232            Yaesu's de-facto serial standard (also emulated by
+//                        SPID, K3NG, RadioArtisan, ERC, ...)
+//      Easycomm I/II/III plain-ASCII serial (SatNOGS, K3NG, homebrew)
+//      SPID Rot2Prog     binary serial (SPID MD-01/MD-02)
+//      rotctl (net)      TCP client to a Hamlib rotctld server
+//      PstRotator (net)  UDP datagrams to PstRotator / a PSR-100
+//      Yaesu (direct)    I2C ADS1115 feedback + PCF8574 drive, no controller
+//  The three SERIAL protocols run over a runtime-selected wire (settings:
+//  rotTransport -- I2C bridge, Grove G1/G2, or a USB adapter; see the transport
+//  block below). The net backends need no wire; Yaesu (direct) has its own I2C
+//  hardware.
 //
 //  GS-232 (per the Yaesu GS-232A/B manuals and Hamlib rotators/gs232a,gs232b):
 //      "Waaa eee\r"  point to azimuth aaa (000-360/450) + elevation eee (000-180)
@@ -1861,46 +1886,67 @@ struct Transponder {
 
 // One satellite's GP mean elements (the SGP4 inputs) plus identity.
 struct SatEntry {
-  char     name[26];          // AMSAT_NAME
+  // FIELD ORDER IS DELIBERATE (0.9.59): members are grouped largest-alignment-first
+  // -- 8-byte doubles, then 4-byte words, then 2-byte, then the char arrays, then the
+  // 1-byte flags last -- so the compiler inserts no internal alignment padding. The
+  // previous source-logical order left four holes (a 4-byte gap before meanMotion,
+  // tail pad after name/intlDes, trailing struct pad) totalling 8 bytes/entry; at
+  // MAX_SATS that was ~1.2 KB of dead RAM in the single largest resident block on a
+  // no-PSRAM part. Reordering is purely a memory-layout change: every access is by
+  // name and nothing here depends on declaration order. Keep new fields in the right
+  // size bucket when adding them. (Verified against the DWARF layout in the 0.9.59
+  // compiler-output audit; see docs/design/RAM_AUDIT_0_9_59.md.)
+
+  // -- 8-byte: doubles (MUST stay double; see notes) --
+  double   epochUnix = 0;     // EPOCH as Unix UTC seconds (FRACTIONAL) -- MUST stay double.
+                              //   Not just for magnitude (~1.7e9) but for the sub-second
+                              //   fraction: gpToTle() renders it into the TLE epoch as
+                              //   %012.8f day-of-year (~0.86 ms), and tsince is measured
+                              //   from this instant. float (~128 s steps) OR a whole-second
+                              //   integer would corrupt the epoch SGP4 re-parses.
+  double   meanMotion = 0;    // MEAN_MOTION       (rev/day) -- MUST stay double
+                              //   (%11.8f needs ~10 sig figs; float resolves only ~7)
+
+  // -- 4-byte: identifiers, counters, and the float mean elements --
   uint32_t norad = 0;         // NORAD_CAT_ID (identity / display)
-  char     intlDes[12] = {0}; // OBJECT_ID, e.g. "1974-089B"
-  double   epochUnix = 0;     // EPOCH as Unix UTC seconds (fractional) -- MUST stay double
-                              //   (a ~1.7e9 value; float would round it to ~128 s steps)
+  uint32_t revAtEpoch = 0;    // REV_AT_EPOCH
+  uint32_t amsatHeardEpoch = 0; // UTC epoch of the winning report's latest_reported_time (0 = none)
   // --- BEGIN 0.9.41 float-elements optimisation (REVERSIBLE) -------------------
   // These eight mean elements are stored as float instead of double to shrink the
-  // resident SatEntry (~32 bytes/entry, ~4-5 KB across MAX_SATS) and so leave more
-  // contiguous heap for the TLS handshake on this no-PSRAM part (mbedTLS when this
-  // was written; BearSSL since 0.9.43 -- the contiguity motive is unchanged). This is SAFE
-  // because the elements are never fed to SGP4 as raw numbers: gpToTle() formats
-  // them into a fixed-width TLE text string (which SGP4 re-parses), and float's ~7
-  // significant digits exceed every field's precision -- 4-decimal angles, 7-digit
-  // eccentricity, ~5-digit bstar/ndot. (meanMotion is deliberately NOT here: its
-  // %11.8f field wants ~10 sig figs, beyond float, so it stays double below.)
+  // resident SatEntry and so leave more contiguous heap for the TLS handshake on this
+  // no-PSRAM part (mbedTLS when this was written; BearSSL since 0.9.43 -- the contiguity
+  // motive is unchanged). This is SAFE because the elements are never fed to SGP4 as raw
+  // numbers: gpToTle() formats them into a fixed-width TLE text string (which SGP4
+  // re-parses), and float's ~7 significant digits exceed every field's precision --
+  // 4-decimal angles, 7-digit eccentricity, ~5-digit bstar/ndot. (meanMotion is
+  // deliberately NOT here: its %11.8f field wants ~10 sig figs, beyond float, so it
+  // stays double above.)
   //
-  // TO REVERT to all-double: change the eight `float` lines below back to `double`.
-  // No other code changes are needed -- every read/write site relies on implicit
-  // float<->double conversion, and the TLE formatting promotes float to double for
-  // %f automatically. (See docs/design/HEAP_FLOAT_ELEMENTS.md.)
+  // TO REVERT to all-double: change the eight `float` lines below back to `double` AND
+  // move them into the 8-byte group above (to keep the no-padding invariant). Every
+  // read/write site relies on implicit float<->double conversion, and the TLE
+  // formatting promotes float to double for %f automatically. (See
+  // docs/design/HEAP_FLOAT_ELEMENTS.md.)
   float    incl = 0;          // INCLINATION       (deg)    [float: 4-dp TLE field]
   float    ecc = 0;           // ECCENTRICITY      (dimensionless) [float: 7-digit field]
   float    raan = 0;          // RA_OF_ASC_NODE    (deg)    [float: 4-dp TLE field]
   float    argp = 0;          // ARG_OF_PERICENTER (deg)    [float: 4-dp TLE field]
   float    ma = 0;            // MEAN_ANOMALY      (deg)    [float: 4-dp TLE field]
-  // --- END 0.9.41 float-elements optimisation ---------------------------------
-  double   meanMotion = 0;    // MEAN_MOTION       (rev/day) -- MUST stay double
-                              //   (%11.8f needs ~10 sig figs; float resolves only ~7)
-  // --- 0.9.41 float-elements optimisation, continued (REVERSIBLE: -> double) ---
   float    bstar = 0;         // BSTAR             (1/earth radii) [float: ~5-digit field]
   float    ndot = 0;          // MEAN_MOTION_DOT   (rev/day^2, = ndot/2)  [float]
   float    nddot = 0;         // MEAN_MOTION_DDOT  (rev/day^3, = nddot/6) [float]
-  // ----------------------------------------------------------------------------
-  uint32_t revAtEpoch = 0;    // REV_AT_EPOCH
+  // --- END 0.9.41 float-elements optimisation ---------------------------------
+
+  // -- char arrays (byte-aligned; grouped so no field forces re-alignment after) --
+  char     name[26];          // AMSAT_NAME
+  char     amsatName[28] = ""; // the AMSAT API name of the matched status row (for reports.php)
+  char     intlDes[12] = {0}; // OBJECT_ID, e.g. "1974-089B"
+
+  // -- 2-byte then 1-byte: keeps the trailing pad minimal --
   uint16_t elsetNum = 0;      // ELEMENT_SET_NO
   bool     txLoaded = false;  // have we fetched transponders this session?
   uint8_t  amsatStatus = 0;   // AMSAT: 0 none, 1 heard, 2 not heard, 3 telemetry only
-  uint32_t amsatHeardEpoch = 0; // UTC epoch of the winning report's latest_reported_time (0 = none)
   uint8_t  amsatReports = 0;  // report_count of the winning row (how many stations reported)
-  char     amsatName[28] = ""; // the AMSAT API name of the matched status row (for reports.php)
 };
 
 class SatDb {
@@ -1932,10 +1978,49 @@ public:
   void applyAmsatCatalogFile(const char* path);   // (re)build the map from cached catalog.php
   int  amsFindByName(const char* apiName) const;  // exact API-name -> sat index, or -1
   int  amsNamesFor(int satIdx, const char* out[], int maxN) const; // this sat's API names
+  // Resolve an external service's satellite name (AMSAT status, hams.at, LoTW) to a
+  // catalog index, source-independently: parenthesised-designator equality first
+  // (bridges CelesTrak's "FOX-1B (AO-91)" to a service's "AO-91"), then whole-name
+  // equality, then delimited-token containment -- the same normalized primitives the
+  // AMSAT status matcher uses. Returns -1 when nothing matches.
+  int  findByServiceName(const char* svc) const;
   int  amsMapCount() const { return _amsMapN; }
   int  loadGpFromFile(const char* path);       // stream-parse a GP file (low RAM)
   int  loadGpFromFilePreferring(const char* path, const uint32_t* favs, int favN);
   bool saveGpJson(const String& json);         // cache the downloaded blob
+
+  // ---- CelesTrak extra favorites (FILE_CTX) -----------------------------------------
+  // Objects the user added from the CelesTrak search screen that are NOT covered by the
+  // primary catalog source. Persisted one OMM object per line like FILE_MGP, but with a
+  // crucial difference in lifecycle: on every GP update the firmware re-fetches each of
+  // these from CelesTrak (courtesy-throttled), so their elements stay fresh. Hand-entered
+  // FILE_MGP satellites (state-vector fits, pre-launch objects) are deliberately NEVER
+  // auto-fetched -- many aren't in the public catalog at all.
+  static void writeGpLine(File& f, const SatEntry& s);   // one compact OMM object + newline
+  bool addCtExtra(const SatEntry& s);          // append to FILE_CTX (no-op if norad present)
+  bool isCtExtra(uint32_t norad);              // has a line in FILE_CTX
+  bool removeCtExtra(uint32_t norad);          // drop its line from FILE_CTX
+  // Merge FILE_CTX into the loaded catalog. Skip-if-present (a primary-catalog entry is
+  // fresher than our line); when the DB is full, evict the last non-favorite to make room
+  // (extras are explicit user picks and outrank file-order fills, same philosophy as the
+  // favorites-preferring loader). Returns the number merged.
+  int  loadCtExtraFile(const uint32_t* favs, int favN);
+  // List the NORAD ids present in an NDJSON GP file (one object per line). Returns count
+  // written (capped at maxN; out may be null with maxN 0 to just count); *total
+  // (optional) receives the number of lines seen.
+  static int listNdjsonNorads(const char* path, uint32_t* out, int maxN, int* total);
+  // NORAD id from one raw NDJSON GP line WITHOUT a JsonDocument -- the per-line
+  // alloc/free of a document is exactly the no-PSRAM fragmentation pattern the bulk
+  // parser avoids (see gpFindValue), so every norad-only file walk uses this instead.
+  static uint32_t gpLineNorad(const char* line, size_t len);
+
+  // Stream a GP/OMM JSON file object-by-object into a caller sink WITHOUT touching the
+  // resident catalog -- for transient screens (e.g. the debris-group tool). Same flat-RAM
+  // streaming and allocation-free field parse as scanGpFile; sink(entry, ctx) is called for
+  // each parsed object. Returns the number of objects parsed. GP JSON, not TLE: the legacy
+  // TLE format's 5-digit catalog field can't represent newer objects.
+  static int streamGpFileEntries(const char* path,
+                                 void (*sink)(const SatEntry&, void*), void* ctx);
 
   // Reconstruct a TLE line-pair from a satellite's GP elements (69 chars each,
   // checksummed). Only used to initialise the SGP4 propagator. Returns false
@@ -2046,7 +2131,8 @@ private:
 // =========================================================================
 
 // ===========================================================================
-//  net.h  -  WiFi + HTTPS downloads (AMSAT GP, SatNOGS transponders)
+//  net.h  -  WiFi + HTTPS: downloads (GP, transponders, space wx, weather,
+//             activations) and uploads (LoTW .tq8, Cloudlog QSOs)
 // ===========================================================================
 
 // One access point returned by a WiFi scan.
@@ -2253,6 +2339,16 @@ public:
   // state-vector -> GP-element fitter. Returns false if the elements don't initialise.
   bool temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]);
 
+  // Full topocentric look for an ARBITRARY satellite entry at time t, computed with a
+  // local propagator (temeStateAt) so the live tracking state (_sat) is never disturbed.
+  // Built for BASIC's SATSEL: one call = one SGP4 init+prop. Outputs az/el/range (deg,
+  // km), range rate (km/s, +receding), the geodetic sub-point and altitude, and the
+  // cylindrical-shadow sunlit flag. The observer/ENU/shadow math mirrors rangeRateAt()
+  // and look() expression-for-expression; the host audit harness compares lookFor()
+  // against look() sample-by-sample to hold them together.
+  bool lookFor(SatEntry& s, time_t t, float& az, float& el, float& rangeKm,
+               float& rrKmS, float& subLat, float& subLon, float& altKm, bool& sunlit);
+
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
 
@@ -2342,6 +2438,7 @@ private:
   Sgp4   _sat;
   Observer _o;
   bool   _haveSat = false;
+  double _mmRevDay = 0;      // mean motion (rev/day); <= 6.4 selects the scan pass finder
   double _epochUnix = 0;        // element-set epoch (Unix UTC s), for tsince
   char   _name[26], _l1[72], _l2[72];
 };
@@ -2381,7 +2478,8 @@ enum CatType : uint8_t {
   CAT_USB   = 3,   // USB<->serial adapter (FTDI/CP210x/CH34x) on the USB-C port.
                    // Works for ANY wire-level protocol (CI-V/Yaesu/Kenwood): the
                    // transport is swapped, the dialect is unchanged. Only present
-                   // when built with CARDSAT_HAS_USBCAT=1; see usbserial.h.
+                   // when built with CARDSAT_HAS_USBCAT=1 (the default since
+                   // 0.9.59); see usbserial.h.
 };
 // How many CAT transports the Settings row cycles through. CAT_USB is only
 // selectable when the feature is compiled in, so a build without it behaves
@@ -2475,6 +2573,8 @@ struct Settings {
   uint8_t  printTransport = 0;     // 0 = raw TCP 9100, 1 = IPP (HTTP POST :631)
   uint8_t  printPaper = 0;         // raster media: 0 = US Letter, 1 = A4
   bool     printToSerial = false;  // also echo reports to the USB serial console
+  bool     basicFileWrite = false; // allow BASIC FOPEN/FPRINT to write under /CardSat/basic/
+                                   // (default OFF: preserves the 0.9.57 no-storage-writes stance)
   bool     printToFile   = false;  // also write reports to /CardSat/Reports/*.txt (80-col)
   // Cloudlog/Wavelog upload (self-hosted online logbook). Uploading here also feeds
   // LoTW if the user has LoTW configured in Cloudlog, so it's an alternative to the
@@ -2673,7 +2773,8 @@ enum Screen : uint8_t {
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
+  SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -5694,8 +5795,8 @@ private:
 //     the Arduino IDE after all -- the sketch-folder build_opt.h is passed to
 //     every translation unit, libraries included (verified against arduino-esp32
 //     3.2.1 platform.txt; details in the .cpp) -- and CardSat ships one with
-//     -DESP_USB_HOST_MAX_DEVICES=4 (root hub + adapter, headroom for the planned
-//     USB rotator support).
+//     -DESP_USB_HOST_MAX_DEVICES=4 (root hub + adapter, headroom for the USB
+//     rotator support that shipped in 0.9.58).
 //
 //  3. COMPOSITE DEVICES. A plain USB<->serial cable (the FTDI CI-V cable this was
 //     written for) is a single-interface device: the simple case. A modern rig
@@ -5724,8 +5825,9 @@ namespace UsbSerial {
   bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
 
   // Detach the CDC port and stop CAT. The IDF host stack and the ~11.8 KB host
-  // object STAY RESIDENT until reboot, by design: EspUsbHost v2.3.0 cannot release
-  // its client (its end() kills the client task before running client-scoped
+  // object STAY RESIDENT until reboot, by design: EspUsbHost cannot release its
+  // client (checked v2.3.0 and unchanged through v2.3.2: end() kills the client
+  // task before running client-scoped
   // cleanup), so a real teardown leaves the stack installed with a live client --
   // and then even a rebind is refused. Bench-proven over eight revisions; the full
   // account is in end() in the .cpp. Consequences the caller must know:
@@ -6163,6 +6265,11 @@ class App {
 public:
   void setup();
   void loop();
+
+  // Public type: the CelesTrak-search result row (the file-local parse sinks in
+  // app.cpp name it as App::CtRow, so it can't be private).
+  struct CtRow { char name[22]; uint32_t norad; float peri, apo, incl; };
+  static const int CTS_MAX = 20;
 
 #if CARDSAT_HAS_LORARX
   friend class LoraRxMon;   // the RX monitor reads cfg/lora and calls loraStart via this
@@ -7179,6 +7286,14 @@ private:
   void webdSendFile(const String& path);       // GET /api/file?path=... (stream a download)
   void applyRotatorFromCfg();
   const char* rotTransportConflict() const;   // nullptr = transport is free
+  // True only when the rotTransport wire setting actually applies AND is USB: the
+  // serial protocols run over a chosen transport, but ROT_NET/ROT_PST carry their own
+  // socket and ROT_YAESU is I2C-direct, so for those rotTransport is meaningless and a
+  // stale ROT_XPORT_USB value must NOT drive the USB host or its "starting" status.
+  bool        rotUsesUsb() const {
+    return cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+           cfg.rotType != ROT_YAESU && cfg.rotTransport == ROT_XPORT_USB;
+  }
   void        yieldGroveIfTaken(const char* who);  // CAT/GPS just claimed Grove
   void        scanUsbAdapters();
   void        cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio);
@@ -7521,6 +7636,18 @@ private:
   double graphXmin = -180, graphXmax = 180;   // default window suits the degree-based trig
   double graphYmin = -1.5,  graphYmax = 1.5;
   bool   graphErr = false;           // last expression failed to parse
+  // 0.9.59 grapher features: second trace, cursor trace, zeros, marks/integral,
+  // table + CSV-file modes. The 236-column sample buffers live as statics inside
+  // drawGraph and are shared by the CSV downsample cache (mode-exclusive).
+  String graphExpr2;                 // Y2 (empty = off), drawn orange
+  int    gTrace = -1;                // trace cursor pixel column (-1 = off)
+  int    gMode  = 0;                 // 0 plot, 1 table, 2 CSV file
+  double gMarkA = NAN, gMarkB = NAN; // integral marks (x values)
+  double gTabX0 = NAN;               // table start x
+  float  gRoots[4]; int gRootsN = 0; // last zero/intersection find
+  int    gCsvN = 0;                  // CSV rows cached (0 = not loaded)
+  float  gCsvLo = 0, gCsvHi = 1;     // CSV y-range from the last load (for 'a' fit)
+  int    graphCsvLoad();             // stream /CardSat/plot.csv into the column buffers
 
   // ---- Tiny BASIC interpreter (SCR_BASIC editor + SCR_BASICRUN console) ----------
   // A small line-numbered BASIC. Programs are capped at BASIC_PROG_MAX bytes (4 KB) and
@@ -7552,6 +7679,23 @@ private:
   uint32_t perfLastLoopUs = 0;         // timestamp of the previous loop() entry
   Screen   lastScreenSeen = SCR_HOME;   // screen-transition housekeeping (see loop())
   bool basicSave();  bool basicLoad(const char* base);
+  // BASIC host hooks (0.9.59): the VM lives in an anonymous namespace and reaches the
+  // system only through these static trampolines (static members have private access).
+  // satsel re-snapshots the SAT* names for any catalog index via pred.lookFor (one local
+  // SGP4 per call, budgeted VM-side); txsel snapshots one of the active sat's loaded
+  // transponders; lpr streams LPRINT lines to the configured report sinks (opened
+  // lazily, closed after the run); gfx draws BASIC's CLS/PSET/LINE/CIRCLE/TEXT/SHOW on
+  // the canvas; file is the Settings-gated /CardSat/basic/ append writer + FILES lister.
+  static bool basHookSatsel(void* self, int idx, double out[13]);
+  static bool basHookTxsel(void* self, int idx, double out[5]);
+  static bool basHookLpr(void* self, const char* line, int op);
+  static void basHookGfx(void* self, int op, double a, double b, double c, double d,
+                         double e, const char* s);
+  static int  basHookFile(void* self, int op, const char* a, String* out);
+  bool  basLprOpen = false;          // LPRINT sinks currently open
+  bool  basFileOpen = false;         // FOPEN file currently open
+  File  basFile;                     // the one BASIC output file
+  bool  basGfxHold = false;          // a SHOWed frame is on screen; next key clears it
 
   // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
   // hex / dec / bin / oct, with bitwise ops (AND OR XOR NOT << >>) and +-*/ via a
@@ -7723,6 +7867,74 @@ private:
   bool calcHintPage2 = false;                     // ' toggles the function-hint page
   bool calcEngNota = false;                        // = toggles engineering-notation output
   int tfOutScroll = 0;                            // form output scroll (yagi/quad element lists)
+
+  // ---- 0.9.59 satellite tools (standalone screens) --------------------------
+  // Orbital neighborhood: loaded objects whose perigee-apogee band overlaps the
+  // active satellite's, sorted by band gap. ENTER hands the pick to the screener.
+  static const int NEIGH_MAX = 40;
+  int16_t neighIdx[NEIGH_MAX]; float neighGap[NEIGH_MAX];
+  int   neighN = 0, neighScroll = 0;
+  void  neighInit();
+  void  drawNeigh(); void keyNeigh(char c, bool enter, bool back);
+
+  // Conjunction screener: propagate the active satellite against a chosen second
+  // object (public GP elements: awareness, not avoidance) and list the closest
+  // approaches in the scan window.
+  static const int CONJ_MAX = 5;
+  int    conjB = -1;                    // db index of the second object (-1 = pick)
+  time_t conjT[CONJ_MAX]; float conjMiss[CONJ_MAX]; float conjRvel[CONJ_MAX];
+  int    conjN = 0; bool conjRan = false;
+  int    conjPct = -1, dgPct = -1;      // >=0 while a screen's compute is running
+  void   conjRun();
+  void   drawConj(); void keyConj(char c, bool enter, bool back);
+
+  // Transponder passband planner: satellite-frame dial pairs across the passband
+  // (a paper crib for coordination; the live loop applies Doppler on the air).
+  int   txplanTx = 0;
+  void  txplanPrint();
+  void  drawTxplan(); void keyTxplan(char c, bool enter, bool back);
+
+  // Link margin vs elevation: M(el) = M0 + [FSPL(range at 0 deg) - FSPL(range at el)].
+  double lcAlt = 500, lcF = 435.5, lcM0 = 6.0;
+  int    lcSel = 0; bool lcEdit = false; String lcBuf;
+  void   drawLnkCrv(); void keyLnkCrv(char c, bool enter, bool back);
+
+  // Debris-group screen: fetch a CelesTrak group TLE to a temp file, keep the
+  // objects sharing the active bird's altitude band, and coarse-screen each for
+  // closest approach. Transient only -- the resident 150-sat DB is untouched.
+  static const int DG_MAX = 14;
+  SatEntry dgSat[DG_MAX]; float dgMiss[DG_MAX]; time_t dgT[DG_MAX];
+  int   dgN = 0, dgGroup = 0, dgScroll = 0, dgState = 0;   // 0 pick, 1 results
+  bool  dgFetchAndScreen(String& err);
+  void  drawDebGrp(); void keyDebGrp(char c, bool enter, bool back);
+
+  // CelesTrak whole-catalog search (SCR_CTSEARCH, sat list '/'): query gp.php by NAME
+  // (or CATNR when the query is all digits), browse the streamed results, ENTER adds the
+  // pick as a favorite. Adds persist to FILE_CTX so every GP update re-fetches their
+  // elements from CelesTrak (courtesy-throttled) -- see refreshCtExtras. Results are held
+  // as slim rows; the full entry is re-streamed from the cached result file on add.
+  CtRow  ctsRows[CTS_MAX];
+  int    ctsN = 0, ctsTotal = 0, ctsSel = 0, ctsScroll = 0;
+  // Universal form-tool printing (0.9.59, all 34 form tools for one refactor):
+  // when tfEmit is set, drawToolForm's field loop and out() lambda tee every line
+  // to Printer::line instead of the canvas -- no buffering, no per-tool code.
+  bool   tfEmit = false;
+  void   printToolForm(); void printConj(); void printNeigh();
+  void   printDebGrp();   void printLnkCrv();
+  String ctsBuf;                        // last query text (editor round-trips through it)
+  uint32_t ctsLastQueryMs = 0;          // 10 s interactive spacing (millis; survives clockless boots)
+  void   ctSearchRun();                 // throttle + fetch (or reuse cache) + parse into rows
+  void   ctAddSelected();               // favorite an in-catalog hit, or persist + merge an extra
+  void   refreshCtExtras();             // re-fetch every FILE_CTX object (2 h courtesy throttle)
+  // Primary-catalog courtesy throttle (0.9.59): CelesTrak asks that the same GP
+  // data not be pulled more than ~every 2 h. Keyed on the URL hash (changing the
+  // source fetches immediately) and persisted in /CardSat/gp.ts so reboots or
+  // boot-time updates can't hammer. A skipped fetch reloads the cached FILE_GP.
+  bool   gpFetchDue(const String& url);
+  void   gpFetchMark(const String& url);
+  void   ctxTsLoad(uint32_t& lastQ, uint32_t& qHash, uint32_t& lastRef);
+  void   ctxTsSave(uint32_t lastQ, uint32_t qHash, uint32_t lastRef);
+  void   drawCtSearch(); void keyCtSearch(char c, bool enter, bool back);
 
   // Live-recalc form engine (SCR_TOOLFORM). Each tool is a set of labeled numeric
   // fields plus computed output lines; editing a field recomputes instantly.
@@ -7928,7 +8140,7 @@ private:
   void gameReset(bool full);   // (re)start: full=new game, else next wave
   void gameStep();             // advance one formation step + shots
 
-  // Games menu + the five mini-games. Each is draw + key + a reset; all fixed-size.
+  // Games menu + the six mini-games. Each is draw + key + a reset; all fixed-size.
   void drawGamesMenu(); void keyGamesMenu(char c, bool enter, bool back);
   void beep(uint16_t freq, uint16_t ms);       // on-demand speaker beep (acquires + schedules release)
   void sfx(uint16_t freq, uint16_t ms);        // gated game sound (cfg.gameSound)
@@ -7949,7 +8161,8 @@ private:
   void runSerialCommand(const char* cmd);      // dispatch one completed command line
   char     cliBuf[64] = {0};                   // serial input line accumulator
   uint8_t  cliLen = 0;
-  // ---- Receipt printing (TCP:9100 ESC/POS; see print.h + docs/design/PRINTING_SCOPE.md) ----
+  // ---- Printing (9 page languages over raw TCP:9100 or IPP:631, plus serial +
+  //      file sinks; see print.h + docs/design/PRINTING_IMPLEMENTATION.md) ----
   // Each report opens a Printer job, streams 32-col text, and closes -- no big buffer, transient
   // socket only. printReport() is the shared entry (opens/closes + error status); the per-report
   // builders assume an open job. Returns false (with setStatus) if the printer can't be reached.
@@ -7957,6 +8170,7 @@ private:
                      PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR,
                      PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
                      PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
+                     PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
                      PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
@@ -12099,8 +12313,8 @@ void IrBeacon::service() {
 // arduino-esp32 3.2.1 platform.txt: recipe.c.o.pattern and recipe.cpp.o.pattern
 // both carry "@{build.opt.path}", and prebuild hook 5 copies the sketch's
 // build_opt.h into the build dir). CardSat ships one with
-// -DESP_USB_HOST_MAX_DEVICES=4 (root hub + adapter, headroom for the planned
-// USB rotator): 4 fewer DeviceState slots means a smaller host object AND a
+// -DESP_USB_HOST_MAX_DEVICES=4 (root hub + adapter, headroom for the USB
+// rotator that shipped in 0.9.58): 4 fewer DeviceState slots means a smaller host object AND a
 // smaller CONTIGUOUS block for begin() to find on a fragmented heap -- watch
 // the ALLOC-stage heap delta on the next bench engage for the exact number.
 // NOTE: gcc response files cannot carry comments (hence this one lives here),
@@ -12479,7 +12693,13 @@ namespace {
   // host's own task: plain byte stores only, read back after a bounded wait.
   void onDev(const EspUsbHostDeviceInfo& d) {
     s_sawDev = true;
-    snprintf(s_dev, sizeof(s_dev), "%s %s %04x:%04x",
+    // The device ADDRESS leads the string: two identical adapters (the classic
+    // dual-Prolific bench) produce byte-identical manufacturer/product/VID:PID,
+    // and on a 240-px row the tail truncates first -- so the one distinguishing
+    // token must come FIRST. The address is also exactly the id explicit binding
+    // stores, so what the user reads is what the firmware binds.
+    snprintf(s_dev, sizeof(s_dev), "#%u %s %s %04x:%04x",
+             (unsigned)d.address,
              (d.manufacturer && *d.manufacturer) ? d.manufacturer : "USB",
              (d.product && *d.product) ? d.product : "serial",
              (unsigned)d.vid, (unsigned)d.pid);
@@ -12490,7 +12710,8 @@ namespace {
     if (s_serDevN >= (uint8_t)(sizeof(s_serDev) / sizeof(s_serDev[0]))) return;  // full
     SerialDev& e = s_serDev[s_serDevN];
     e.address = d.address; e.vid = d.vid; e.pid = d.pid;
-    snprintf(e.label, sizeof(e.label), "%s %s %04x:%04x",
+    snprintf(e.label, sizeof(e.label), "#%u %s %s %04x:%04x",   // address-first: see s_dev
+             (unsigned)d.address,
              (d.manufacturer && *d.manufacturer) ? d.manufacturer : "USB",
              (d.product && *d.product) ? d.product : "serial",
              (unsigned)d.vid, (unsigned)d.pid);
@@ -13659,6 +13880,14 @@ bool SatDb::addGp(const SatEntry& s) {
 
   // Persist as one compact OMM object per line (NDJSON), kept separate so an
   // AMSAT refresh that rewrites FILE_GP doesn't wipe hand-entered satellites.
+  File f = Store::fs().open(FILE_MGP, "a");
+  if (f) { writeGpLine(f, s); f.close(); }
+  return true;
+}
+
+// One compact OMM object + newline -- the shared NDJSON record writer behind both the
+// manual-sat file (FILE_MGP) and the CelesTrak-extras file (FILE_CTX).
+void SatDb::writeGpLine(File& f, const SatEntry& s) {
   JsonDocument d;
   d["AMSAT_NAME"]        = s.name;
   d["OBJECT_ID"]         = s.intlDes;
@@ -13675,9 +13904,114 @@ bool SatDb::addGp(const SatEntry& s) {
   d["MEAN_MOTION_DDOT"]  = s.nddot;
   d["REV_AT_EPOCH"]      = s.revAtEpoch;
   d["ELEMENT_SET_NO"]    = s.elsetNum;
-  File f = Store::fs().open(FILE_MGP, "a");
-  if (f) { serializeJson(d, f); f.print("\n"); f.close(); }
+  serializeJson(d, f); f.print("\n");
+}
+
+// ---- CelesTrak extra favorites (FILE_CTX) -------------------------------------------
+
+uint32_t SatDb::gpLineNorad(const char* line, size_t len) {
+  char v[16];
+  if (!gpFindValue(line, len, "NORAD_CAT_ID", v, sizeof(v))) return 0;
+  return (uint32_t)strtoul(v, nullptr, 10);
+}
+
+bool SatDb::addCtExtra(const SatEntry& s) {
+  if (s.norad == 0 || s.meanMotion <= 0) return false;
+  if (isCtExtra(s.norad)) return true;           // already tracked; refresh will update it
+  int total = 0;                                 // cap the file at CTX_MAX (heap-bounds every
+  listNdjsonNorads(FILE_CTX, nullptr, 0, &total);//  walk AND matches the refresh cap)
+  if (total >= CTX_MAX) return false;
+  File f = Store::fs().open(FILE_CTX, "a");
+  if (!f) return false;
+  writeGpLine(f, s); f.close();
   return true;
+}
+
+bool SatDb::isCtExtra(uint32_t norad) {
+  File f = Store::fs().open(FILE_CTX, "r");
+  if (!f) return false;
+  bool found = false;
+  while (f.available() && !found) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    if (gpLineNorad(line.c_str(), line.length()) == norad) found = true;
+  }
+  f.close();
+  return found;
+}
+
+// Rewrite-to-temp, never whole-file-in-RAM: the old version accumulated every kept
+// line into one String (a ~20 KB heap spike at the CTX_MAX cap, and a fragmentation
+// hazard beside TLS buffers). Now each kept line streams straight to a temp file
+// which is renamed over the original -- flat RAM, and a crash mid-write leaves the
+// original intact.
+bool SatDb::removeCtExtra(uint32_t norad) {
+  File f = Store::fs().open(FILE_CTX, "r");
+  if (!f) return false;
+  const char* tmp = "/CardSat/ctx.rm";
+  Store::fs().remove(tmp);
+  File w = Store::fs().open(tmp, "w");
+  if (!w) { f.close(); return false; }
+  bool removed = false; int kept = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    if (gpLineNorad(line.c_str(), line.length()) == norad) { removed = true; continue; }
+    w.print(line); w.print('\n'); ++kept;
+  }
+  f.close(); w.close();
+  if (!removed) { Store::fs().remove(tmp); return false; }
+  Store::fs().remove(FILE_CTX);
+  if (kept == 0) { Store::fs().remove(tmp); return true; }
+  Store::fs().rename(tmp, FILE_CTX);
+  return true;
+}
+
+int SatDb::loadCtExtraFile(const uint32_t* favs, int favN) {
+  File f = Store::fs().open(FILE_CTX, "r");
+  if (!f) return 0;
+  int merged = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    JsonDocument d;
+    if (deserializeJson(d, line)) continue;
+    SatEntry tmp;
+    if (!parseGpObject(d.as<JsonObjectConst>(), tmp)) continue;
+    if (indexOfNorad(tmp.norad) >= 0) continue;  // primary/manual already has it: theirs is fresher
+    int idx = -1;
+    if (_n < MAX_SATS) { idx = _n; _n++; }
+    else {
+      // Full: evict the last non-favorite (extras are explicit user picks and outrank
+      // file-order fills). If every slot is a favorite, this extra just doesn't fit.
+      for (int i = _n - 1; i >= 0; --i) {
+        bool fav = false;
+        for (int k = 0; k < favN; ++k) if (favs && favs[k] == _sats[i].norad) { fav = true; break; }
+        if (!fav) { idx = i; break; }
+      }
+      if (idx < 0) continue;   // every slot is a favorite; caller reports via merged<total
+    }
+    _sats[idx] = tmp; merged++;
+  }
+  f.close();
+  return merged;
+}
+
+int SatDb::listNdjsonNorads(const char* path, uint32_t* out, int maxN, int* total) {
+  File f = Store::fs().open(path, "r");
+  if (!f) { if (total) *total = 0; return 0; }
+  int n = 0, seen = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    uint32_t nd = gpLineNorad(line.c_str(), line.length());   // no per-line JsonDocument
+    if (!nd) continue;
+    seen++;
+    if (out && n < maxN) out[n++] = nd;
+  }
+  f.close();
+  if (total) *total = seen;
+  return n;
 }
 
 bool SatDb::loadManualGpFile() {
@@ -13834,6 +14168,39 @@ static void amsNorm(const char* in, char* out, int outsz) {
 }
 
 // Does padded " haystackNorm " contain " needleNorm " as a delimited token run?
+// Forward decl: findByServiceName (below) shares these primitives.
+static bool amsTokenIn(const char* hayNorm, const char* needleNorm);
+
+int SatDb::findByServiceName(const char* svc) const {
+  if (!svc || !*svc) return -1;
+  char sn[40]; amsNorm(svc, sn, sizeof(sn));
+  if (!sn[0]) return -1;
+  // 1. parenthesised-designator equality (the CelesTrak-name bridge)
+  for (int i = 0; i < _n; ++i) {
+    const char* p = strchr(_sats[i].name, '(');
+    while (p) {
+      const char* e = strchr(p, ')');
+      if (!e) break;
+      char tok[24]; int L = (int)(e - p - 1); if (L > 23) L = 23;
+      memcpy(tok, p + 1, L); tok[L] = 0;
+      char tn[40]; amsNorm(tok, tn, sizeof(tn));
+      if (tn[0] && strcmp(tn, sn) == 0) return i;
+      p = strchr(e, '(');
+    }
+  }
+  // 2. whole-name equality
+  for (int i = 0; i < _n; ++i) {
+    char nn[40]; amsNorm(_sats[i].name, nn, sizeof(nn));
+    if (strcmp(nn, sn) == 0) return i;
+  }
+  // 3. delimited-token containment (either direction)
+  for (int i = 0; i < _n; ++i) {
+    char nn[40]; amsNorm(_sats[i].name, nn, sizeof(nn));
+    if (amsTokenIn(nn, sn) || amsTokenIn(sn, nn)) return i;
+  }
+  return -1;
+}
+
 static bool amsTokenIn(const char* hayNorm, const char* needleNorm) {
   if (!needleNorm[0]) return false;
   char hay[72]; snprintf(hay, sizeof(hay), " %s ", hayNorm);
@@ -14147,6 +14514,59 @@ int SatDb::scanGpFile(const char* path, bool (*accept)(uint32_t, void*), void* c
   f.close();
   if (loaded) *loaded = _n;
   return seen;
+}
+
+// Transient sibling of scanGpFile: stream a GP/OMM JSON file object-by-object and hand each
+// parsed SatEntry to sink(entry, ctx). Deliberately touches NO member state (_sats/_n), so a
+// caller can screen a large CelesTrak group without disturbing the resident catalog. Flat RAM
+// regardless of file size (256-byte reads, one object assembled at a time) and the same
+// allocation-free parseGpObjectRaw field parse as the bulk load.
+int SatDb::streamGpFileEntries(const char* path,
+                               void (*sink)(const SatEntry&, void*), void* ctx) {
+  int parsed = 0;
+  File f = Store::fs().open(path, "r");
+  if (!f) return 0;
+  static const size_t OBJ_MAX = 1200;      // largest OMM object is ~800 bytes
+  Scratch::Lease objLease("gpx", OBJ_MAX); // transient arena, freed at scope end
+  char* obj = (char*)objLease.p;
+  if (!obj) { f.close(); return 0; }
+  uint8_t rd[256];
+  size_t oi = 0;
+  int  depth = 0;
+  bool inStr = false, esc = false, collecting = false, started = false;
+  int avail;
+  while ((avail = f.read(rd, sizeof(rd))) > 0) {
+    for (int i = 0; i < avail; ++i) {
+      char c = (char)rd[i];
+      if (!started) { if (c == '[') started = true; continue; }
+      if (!collecting) {                   // between objects: wait for '{'
+        if (c == '{') { collecting = true; depth = 1; inStr = false; esc = false;
+                        oi = 0; obj[oi++] = c; }
+        continue;
+      }
+      bool overflow = (oi >= OBJ_MAX - 1);
+      if (!overflow) obj[oi++] = c;
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c == '\\') esc = true;
+        else if (c == '"')  inStr = false;
+      } else if (c == '"') inStr = true;
+      else if (c == '{')   ++depth;
+      else if (c == '}') {
+        if (--depth == 0) {                // object complete
+          collecting = false;
+          if (!overflow) {                 // only parse if captured whole
+            obj[oi] = 0;
+            SatEntry tmp;
+            if (parseGpObjectRaw(obj, oi, tmp)) { parsed++; if (sink) sink(tmp, ctx); }
+          }
+          oi = 0;
+        }
+      }
+    }
+  }
+  f.close();
+  return parsed;
 }
 
 // Legacy entry point: first-MAX_SATS-in-file-order (no favorites priority). Kept for callers
@@ -16214,6 +16634,7 @@ bool Predictor::setSat(SatEntry& s) {
   if (!SatDb::gpToTle(s, _l1, _l2)) { _haveSat = false; return false; }
   _sat.init(_name, _l1, _l2);
   _haveSat = (_sat.satrec.error == 0);
+  _mmRevDay = s.meanMotion;          // recorded for the high-orbit pass finder
   _epochUnix = s.epochUnix;          // for fractional-time range rate (rangeRateAt)
   return _haveSat;
 }
@@ -16247,6 +16668,70 @@ bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3
   r[0] = r[1] = r[2] = v[0] = v[1] = v[2] = 0.0;
   sgp4(wgs72, fp.satrec, tsince, r, v);                 // TEME position (km), velocity (km/s)
   if (fp.satrec.error != 0) return false;
+  return true;
+}
+
+bool Predictor::lookFor(SatEntry& s, time_t t, float& az, float& el, float& rangeKm,
+                        float& rrKmS, float& subLat, float& subLon, float& altKm,
+                        bool& sunlit) {
+  double r[3], v[3];
+  if (!temeStateAt(s, (double)t, r, v)) return false;
+
+  // Observer position + velocity in TEME -- the same expressions as rangeRateAt().
+  double jd  = (double)t / 86400.0 + 2440587.5;
+  double th  = gmstRad(jd);
+  double ct = cos(th), st = sin(th);
+  double phi = _o.lat * DEG, lam = _o.lon * DEG, hKm = _o.altM / 1000.0;
+  double e2  = 6.694318e-3;                     // WGS72 first eccentricity^2
+  double sphi = sin(phi), cphi = cos(phi);
+  double Nn  = RE_KM / sqrt(1.0 - e2 * sphi * sphi);
+  double xe = (Nn + hKm) * cphi * cos(lam);
+  double ye = (Nn + hKm) * cphi * sin(lam);
+  double ze = (Nn * (1.0 - e2) + hKm) * sphi;
+  double ox = xe * ct - ye * st, oy = xe * st + ye * ct, oz = ze;
+  const double we = 7.2921150e-5;
+  double ovx = -we * oy, ovy = we * ox, ovz = 0.0;
+
+  double rx = r[0] - ox, ry = r[1] - oy, rz = r[2] - oz;
+  double vx = v[0] - ovx, vy = v[1] - ovy, vz = v[2] - ovz;
+  double rmag = sqrt(rx * rx + ry * ry + rz * rz);
+  if (rmag <= 0) return false;
+  rangeKm = (float)rmag;
+  rrKmS   = (float)((rx * vx + ry * vy + rz * vz) / rmag);
+
+  // Topocentric az/el: ENU basis at the observer (same basis as look()'s Sun block).
+  double ost = sin(th + lam), oct = cos(th + lam);
+  double eC = (-ost) * rx + (oct) * ry;
+  double nC = (-sphi * oct) * rx + (-sphi * ost) * ry + (cphi) * rz;
+  double uC = ( cphi * oct) * rx + ( cphi * ost) * ry + (sphi) * rz;
+  el = (float)(atan2(uC, sqrt(eC * eC + nC * nC)) / DEG);
+  double a = atan2(eC, nC) / DEG; if (a < 0) a += 360.0;
+  az = (float)a;
+
+  // Sub-point: satellite TEME -> ECEF (Rz(-theta)) -> geodetic (iterative).
+  double gx =  r[0] * ct + r[1] * st;
+  double gy = -r[0] * st + r[1] * ct;
+  double gz =  r[2];
+  double lon = atan2(gy, gx) / DEG;
+  double pd  = sqrt(gx * gx + gy * gy);
+  double lat = atan2(gz, pd * (1.0 - e2));
+  double Nl = RE_KM;
+  for (int i = 0; i < 4; ++i) {
+    double sl = sin(lat);
+    Nl  = RE_KM / sqrt(1.0 - e2 * sl * sl);
+    lat = atan2(gz + e2 * Nl * sl, pd);
+  }
+  subLat = (float)(lat / DEG);
+  subLon = (float)lon;
+  altKm  = (float)(pd / cos(lat) - Nl);
+
+  // Cylindrical shadow, evaluated directly in TEME (a Z-rotation of the ECEF test:
+  // dot products and norms are invariant, so the result is identical to look()'s).
+  double sx, sy, sz; sunEciUnit(jd, sx, sy, sz);
+  double proj = r[0] * sx + r[1] * sy + r[2] * sz;
+  double rm2  = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+  double perp = sqrt(fmax(0.0, rm2 - proj * proj));
+  sunlit = !(proj < 0.0 && perp < RE_KM);
   return true;
 }
 
@@ -16601,6 +17086,76 @@ int Predictor::mutualWindows(time_t from, const Observer& dx, float minEl,
 int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int maxN,
                              time_t horizonEnd) {
   if (!_haveSat) return 0;
+
+  // ---- High-orbit finder (period >= ~225 min; 0.9.59) --------------------------------
+  // The library's nextpass() hops one revolution at a time and Brent-brackets a rise
+  // and a set around each elevation maximum -- an excellent LEO strategy (harness:
+  // 7/7 vs skyfield) that demonstrably fails for Molniya-class orbits and cannot
+  // represent a continuously-visible geosynchronous bird at all (there is no rise to
+  // bracket). Deep-space SDP4 propagation itself is present and healthy in this
+  // build's sgp4unit (harness look(): Molniya el/range spot-on), so for slow orbits
+  // we scan elevation ourselves and bisect the threshold crossings: step = period/96
+  // clamped to [120 s, 900 s], AOS/LOS refined to ~1 s, max-elevation sampled inside
+  // the pass at <= 240 points. A bird above minEl for the whole horizon yields one
+  // horizon-long pass (aos = from, los = horizon) -- the honest answer for a GEO
+  // stationed in view. Verified against skyfield in tools/host_orbit_audit (HIORBIT).
+  if (_mmRevDay > 0 && _mmRevDay <= 6.4) {
+    time_t hEnd = horizonEnd ? horizonEnd : from + 86400;
+    if (hEnd <= from || maxN <= 0) return 0;
+    double periodS = 86400.0 / _mmRevDay;
+    time_t step = (time_t)fmax(120.0, fmin(900.0, periodS / 96.0));
+    auto elAt = [&](time_t t) { return (double)look(t).el; };
+    auto refine = [&](time_t lo, time_t hi, bool rising) -> time_t {
+      // invariant: el(lo) and el(hi) straddle minEl in the stated direction
+      for (int i = 0; i < 20 && hi - lo > 1; ++i) {
+        time_t mid = lo + (hi - lo) / 2;
+        bool up = elAt(mid) >= minEl;
+        if (up == rising) hi = mid; else lo = mid;
+      }
+      return hi;
+    };
+    int found = 0;
+    bool  prevUp = elAt(from) >= minEl;
+    time_t prevT = from, aos = prevUp ? from : 0;
+    for (time_t t = from + step; found < maxN; t += step) {
+      if (t > hEnd) t = hEnd;
+      bool up = elAt(t) >= minEl;
+      if (up && !prevUp)      aos = refine(prevT, t, true);
+      else if (!up && prevUp && aos) {
+        time_t los = refine(prevT, t, false);
+        PassPredict& p = out[found];
+        p.aos = aos; p.los = los;
+        time_t ps = (los - aos) / 240; if (ps < 60) ps = 60;
+        double mE = -90; time_t tM = aos; float aA = 0, aL = 0;
+        { LiveLook L = look(aos); aA = L.az; }
+        for (time_t q = aos; q <= los; q += ps) {
+          LiveLook L = look(q);
+          if (L.el > mE) { mE = L.el; tM = q; }
+        }
+        { LiveLook L = look(los); aL = L.az; }
+        p.tca = tM; p.maxEl = (float)mE; p.azAos = aA; p.azLos = aL;
+        found++; aos = 0;
+      }
+      prevUp = up; prevT = t;
+      if (t >= hEnd) break;
+    }
+    if (aos && found < maxN) {         // still above minEl at the horizon's edge
+      PassPredict& p = out[found];
+      p.aos = aos; p.los = hEnd;
+      time_t ps = (hEnd - aos) / 240; if (ps < 60) ps = 60;
+      double mE = -90; time_t tM = aos; float aA = 0, aL = 0;
+      { LiveLook L = look(aos); aA = L.az; }
+      for (time_t q = aos; q <= hEnd; q += ps) {
+        LiveLook L = look(q);
+        if (L.el > mE) { mE = L.el; tM = q; }
+      }
+      { LiveLook L = look(hEnd); aL = L.az; }
+      p.tca = tM; p.maxEl = (float)mE; p.azAos = aA; p.azLos = aL;
+      found++;
+    }
+    return found;
+  }
+
   passinfo overpass;
   _sat.initpredpoint((unsigned long)from, (double)minEl);
 
@@ -16619,6 +17174,37 @@ int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int max
     p.azAos = (float)overpass.azstart;
     p.azLos = (float)overpass.azstop;
     found++;
+  }
+
+  // Belt-and-braces for the LIBRARY path only (slow orbits never reach here --
+  // the scan finder above owns them, always-up case included): if nextpass()
+  // found nothing but the bird is above minEl right now, sample the horizon and
+  // report continuous visibility as one horizon-long pass. Costs a single extra
+  // look() in the common no-pass case.
+  if (found == 0 && maxN > 0) {
+    LiveLook L0 = look(from);
+    if (L0.el >= minEl) {
+      time_t hEnd = horizonEnd ? horizonEnd : from + 86400;
+      if (hEnd > from) {
+        const int NS = 49;                         // ~30 min grid over 24 h
+        double maxE = L0.el; time_t tMax = from;
+        float azA = L0.az, azL = L0.az;
+        bool allUp = true;
+        for (int k = 1; k < NS; ++k) {
+          time_t t = from + (time_t)(((int64_t)(hEnd - from) * k) / (NS - 1));
+          LiveLook L = look(t);
+          azL = L.az;
+          if (L.el < minEl) { allUp = false; break; }
+          if (L.el > maxE) { maxE = L.el; tMax = t; }
+        }
+        if (allUp) {
+          PassPredict& p = out[0];
+          p.aos = from; p.los = hEnd; p.tca = tMax;
+          p.maxEl = (float)maxE; p.azAos = azA; p.azLos = azL;
+          found = 1;
+        }
+      }
+    }
   }
   return found;
 }
@@ -16667,6 +17253,7 @@ bool Settings::load() {
   printTransport = d["prtx"] | 0;
   printPaper = d["prpr"] | 0;
   printToSerial = d["prser"] | false;
+  basicFileWrite = d["basfw"] | false;
   printToFile   = d["prfile"] | false;
   strncpy(myCall, d["mycall"] | "", sizeof(myCall)-1); myCall[sizeof(myCall)-1]=0;
   strncpy(opName,  d["opname"]  | "", sizeof(opName)-1);  opName[sizeof(opName)-1]=0;
@@ -16853,6 +17440,7 @@ bool Settings::save() {
   d["prtx"] = printTransport;
   d["prpr"] = printPaper;
   d["prser"] = printToSerial;
+  d["basfw"] = basicFileWrite;
   d["prfile"] = printToFile;
   d["mycall"] = myCall;
   d["opname"] = opName;
@@ -17357,6 +17945,7 @@ void App::setup() {
   }
   else setStatus("No GP data yet. Use Update.");
   db.loadManualGpFile();    // merge any hand-entered satellites
+  db.loadCtExtraFile(favs, favN);   // merge CelesTrak extra favorites
   loadSpaceWeather();       // restore cached F10.7 for the decay estimate
   bool wxOk = loadWeatherCache();   // restore cached terrestrial weather for offline view
   Serial.printf("[boot] caches: wx=%s spacewx=%s (fs=%s)\n",
@@ -17594,7 +18183,7 @@ void App::applyRotatorFromCfg() {
     const char* why = rotTransportConflict();
     if (why) { setStatus(why, 5000); return; }
     // Tell the USB port which adapter is the rotator's before it binds.
-    if (cfg.rotTransport == ROT_XPORT_USB) {
+    if (rotUsesUsb()) {
 #if CARDSAT_HAS_USBCAT
       UsbSerial::rotConfigure(cfg.rotUsbKey, cfg.rotBaud);
 #else
@@ -17606,12 +18195,12 @@ void App::applyRotatorFromCfg() {
     // Paint BEFORE the call, for the same reason USB CAT does: a USB rotator
     // brings the host up on this task, and if that blocks, draw() never runs
     // again -- the screen would freeze showing whatever was there before.
-    if (cfg.rotTransport == ROT_XPORT_USB) { setStatus("USB rotator: starting..."); draw(); }
+    if (rotUsesUsb()) { setStatus("USB rotator: starting..."); draw(); }
 #endif
     rot = makeRotator(cfg.rotType, cfg.rotTransport, cfg.rotBaud, cfg.rotHost, cfg.rotPort);
     if (!rot) {
 #if CARDSAT_HAS_USBCAT
-      if (cfg.rotTransport == ROT_XPORT_USB)
+      if (rotUsesUsb())
         setStatus(String("USB rotator: ") + UsbSerial::rotLastError(), 5000);
       else
 #endif
@@ -17624,7 +18213,7 @@ void App::applyRotatorFromCfg() {
   // Success gets a line too. The rotator used to report only failures, so a
   // working USB rotator was silent while a working radio announced itself --
   // and "nothing happened" is indistinguishable from "it did not try".
-  if (rot && cfg.rotTransport == ROT_XPORT_USB && UsbSerial::rotActive())
+  if (rot && rotUsesUsb() && UsbSerial::rotActive())
     setStatus(String("USB rotator: ") + UsbSerial::rotDeviceName(), 3000);
 #endif
 }
@@ -17996,12 +18585,16 @@ void App::doUpdateGp() {
   setStatus("Downloading GP..."); draw();
   // Stream straight to the cache file (the download IS the offline cache) and
   // parse from flash -- avoids holding the whole ~75 KB body in RAM.
-  if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
+  if (!gpFetchDue(cfg.gpUrl)) {
+    setStatus("GP cache <2 h old (courtesy) - reloading"); draw();
+  } else if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
     Serial.printf("[gp] download failed: %s\n", net.lastErr.c_str());
     setStatus("GP DL failed: " + net.lastErr); return;
-  }
+  } else gpFetchMark(cfg.gpUrl);       // real fetch succeeded: start the 2 h window
+  refreshCtExtras();                   // re-fetch CelesTrak extras (2 h courtesy throttle)
   int n = db.loadGpFromFilePreferring(FILE_GP, favs, favN);   // favorites survive truncation
   db.loadManualGpFile();               // re-merge hand-entered sats after replace
+  db.loadCtExtraFile(favs, favN);      // then the auto-refreshed CelesTrak extras
   Serial.printf("[gp] parsed %d of %d satellites%s\n", n, db.seenCount(),
                 db.wasTruncated() ? " (truncated; favorites kept)" : "");
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
@@ -18033,12 +18626,16 @@ void App::doFastUpdate() {
   }
   net.syncTimeNtp();
   setStatus("Fast: GP..."); draw();
-  if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
+  if (!gpFetchDue(cfg.gpUrl)) {
+    setStatus("GP cache <2 h old (courtesy) - reloading"); draw();
+  } else if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
     Serial.printf("[fast] GP download failed: %s\n", net.lastErr.c_str());
     setStatus("GP DL failed: " + net.lastErr); return;
-  }
+  } else gpFetchMark(cfg.gpUrl);       // real fetch succeeded: start the 2 h window
+  refreshCtExtras();                   // throttled: usually a no-op within 2 h
   int n = db.loadGpFromFilePreferring(FILE_GP, favs, favN);
   db.loadManualGpFile();
+  db.loadCtExtraFile(favs, favN);
   Serial.printf("[fast] parsed %d of %d satellites%s\n", n, db.seenCount(),
                 db.wasTruncated() ? " (truncated; favorites kept)" : "");
   if (n <= 0) { setStatus("Got data but parsed 0 sats"); return; }
@@ -18828,10 +19425,13 @@ void App::drawHamsat() {
     int idx = hamsatScroll + i;
     const Activation& a = hamsatList[idx];
     bool mine = (idx >= firstUser);
+    int di = db.findByServiceName(a.sat);          // source-independent name bridge
+    bool fav = (di >= 0) && isFav(db.at(di).norad);
     int y = 18 + i*13;
     if (idx == hamsatSel) { canvas.fillRect(0, y-2, 240, 12, CL_SELBG);
                             canvas.setTextColor(CL_BLACK, CL_SELBG); }
-    else                    canvas.setTextColor(mine ? CL_CYAN : CL_WHITE, CL_BLACK);
+    else                    canvas.setTextColor(mine ? CL_CYAN : (fav ? CL_GREEN : CL_WHITE),
+                                                CL_BLACK);
     // "*MM-DD CALL SAT GRID" -- a leading * marks your own (editable) entries.
     const char* md = (strlen(a.date) >= 10) ? a.date + 5 : a.date;  // MM-DD
     canvas.setCursor(4, y);
@@ -22693,7 +23293,9 @@ void App::handleKey(char c, bool enter, bool back) {
                             screen != SCR_BASIC && screen != SCR_CALC &&
                             screen != SCR_LOTWSUB &&
                             screen != SCR_TOOLS && screen != SCR_DXLK &&
-                            screen != SCR_CHARLK);
+                            screen != SCR_CHARLK &&
+                            screen != SCR_GRAPH);   // 0.9.59: grapher claims bare 'b'
+                                                    // (table view) -- Fn+b screenshots
   // Fn+b / Fn+h reach the globals from every screen that claims bare letters -- both the
   // text-entry screens and the first-letter-jump / type-to-search lists.
   // Lowercase only: Fn+shift+b / Fn+shift+h must still type a capital B / H in the
@@ -22798,6 +23400,12 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_TGTSEARCH: keyTgtSearch(c, enter, back); break;
     case SCR_TGTHITS: keyTgtHits(c, enter, back); break;
     case SCR_TOOLFORM: keyToolForm(c, enter, back); break;
+    case SCR_CONJ:   keyConj(c, enter, back); break;
+    case SCR_NEIGH:  keyNeigh(c, enter, back); break;
+    case SCR_TXPLAN: keyTxplan(c, enter, back); break;
+    case SCR_LNKCRV: keyLnkCrv(c, enter, back); break;
+    case SCR_DEBGRP: keyDebGrp(c, enter, back); break;
+    case SCR_CTSEARCH: keyCtSearch(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
 #endif
@@ -23778,6 +24386,11 @@ void App::keySatList(char c, bool enter, bool back) {
     editTarget = 310; editTitle = "Sat name"; editBuf = ""; screen = SCR_EDIT;
     return;
   }
+  if (c == '/') {                              // search the whole CelesTrak catalog
+    editTarget = 326; editTitle = "CelesTrak name / NORAD";
+    editBuf = ctsBuf; screen = SCR_EDIT;
+    return;
+  }
   if (c == 'v') { favOnly = !favOnly; buildSatView();
                   setStatus(favOnly ? "Favorites only" : "All satellites"); return; }
   if (c == 'L' && viewN > 0) {                  // share this satellite's GP elements over LoRa
@@ -23802,16 +24415,20 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   if (c == 'x' && viewN > 0) {                  // delete a hand-entered (manual) sat
     uint32_t nd = db.at(view[viewSel]).norad;
-    if (!db.isManualGp(nd)) { setStatus("Only manually-added sats can be deleted");
-                              satDelArm = false; return; }
+    bool manual = db.isManualGp(nd), ctx = db.isCtExtra(nd);
+    if (!manual && !ctx) { setStatus("Only added sats can be deleted");
+                           satDelArm = false; return; }
     if (!satDelArm) { satDelArm = true; setStatus("Press x again to delete this sat");
                       return; }
     satDelArm = false;
-    if (db.removeManualGp(nd)) {
+    // Bitwise | on purpose: if a norad somehow has lines in BOTH files, remove both.
+    bool removed = (manual && db.removeManualGp(nd)) | (ctx && db.removeCtExtra(nd));
+    if (removed) {
       // Rebuild the in-memory catalog from the cached GP file + remaining manual
       // sats so the deleted entry is gone without a fragile in-place array removal.
       db.loadGpFromFile(FILE_GP);
       db.loadManualGpFile();
+      db.loadCtExtraFile(favs, favN);
       if (isFav(nd)) toggleFav(nd);             // drop it from favorites too
       buildSatView();
       if (viewSel >= viewN) viewSel = viewN > 0 ? viewN - 1 : 0;
@@ -25382,7 +25999,7 @@ static const int SET_RADIO[] = {0,30,89,100,1,2,63,31,32,33,34,21,65,22,23,24,44
 static const int SET_ROTOR[] = {8,9,86,99,101,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
 static const int SET_PASS[]  = {3,66,67,68,40,7,84,54,61};
 static const int SET_DISP[]  = {48,82,25,43,85,49,77,79,81};
-static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76,102};
+static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76,102,103};
 static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,90,91,92,97,98,88,87,93,94,55,60,56,57,58,59,80,83,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
                                                     SET_DISP, SET_LOG, SET_NET };
@@ -25669,6 +26286,9 @@ void App::keySettings(char c, bool enter, bool back) {
                            : (cfg.printerCols >= 42) ? 48 : 42;
                cfg.save(); break;
       case 93: cfg.printToSerial = !cfg.printToSerial; cfg.save(); break;
+      case 103: cfg.basicFileWrite = !cfg.basicFileWrite; cfg.save();
+               setStatus(cfg.basicFileWrite ? "BASIC may write /CardSat/basic/"
+                                            : "BASIC file writes off"); break;
       case 94: cfg.printToFile   = !cfg.printToFile;   cfg.save(); break;
       case 97: cfg.printFormat = (cfg.printFormat >= 8) ? 0 : cfg.printFormat + 1;
                cfg.save(); break;
@@ -25748,7 +26368,8 @@ static Screen editHome(int t) {
   if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
   if (t == 729) return SCR_GRID;        // workable-grids prefix filter (cancel)
   if (t >= 770 && t <= 772) return SCR_LOCONV;   // location-converter input fields
-  if (t == 780) return SCR_GRAPH;                // graphing-calculator expression field
+  if (t == 780 || t == 783) return SCR_GRAPH;    // grapher Y1 / Y2 expression fields
+  if (t == 326) return SCR_CTSEARCH;             // CelesTrak search query (cancel)
   if (t == 781 || t == 782) return SCR_BASIC;    // Tiny BASIC save/load name prompts
   if (t >= 720) return SCR_SKEDENTRY;   // manual activation/sked entry fields (cancel)
   if (t == 250) return SCR_CATMON;      // CAT monitor: raw hex send (cancel/commit)
@@ -25805,6 +26426,13 @@ void App::keyEdit(char c, bool enter, bool back) {
         String v = editBuf; v.trim();
         if (v.length()) basicLoad(v.c_str());
       } break;
+      case 783: {                                   // graphing calculator: Y2 (empty = off)
+        String v = editBuf; v.trim();
+        graphExpr2 = v;
+        if (v.length()) { bool ok; calcEvalX(v.c_str(), 0.0, ok);
+                          if (!ok) { graphExpr2 = ""; setStatus("Y2 expression error"); } }
+        screen = SCR_GRAPH; return;
+      }
       case 780: {                                   // graphing calculator: expression
         String v = editBuf; v.trim();
         if (v.length()) { graphExpr = v; bool ok; calcEvalX(graphExpr.c_str(), 0.0, ok); graphErr = !ok;
@@ -26154,6 +26782,9 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 385: gpfV[0] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
       case 386: gpfV[1] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
       case 387: gpfV[2] = atof(editBuf.c_str()); screen = SCR_GPFIT; return;
+
+      // ---- CelesTrak catalog search query ----
+      case 326: ctsBuf = editBuf; screen = SCR_CTSEARCH; ctSearchRun(); return;
 
       // ---- manual GP entry: name then each orbital element ----
       case 310: strncpy(mtSat.name, editBuf.c_str(), sizeof(mtSat.name)-1);
@@ -26755,9 +27386,29 @@ static const int LOTW_SATS_N = sizeof(LOTW_SATS) / sizeof(LOTW_SATS[0]);
 // Resolve to a LoTW SAT_NAME. Returns 0 if resolved (a mapping was found, or the
 // name already fits in 6 chars), or 1 if there is no mapping and the name is too
 // long to use as-is (caller should prompt). 'out' always gets a usable value.
+// Candidate forms of a logged satellite name, tried in order: the string itself,
+// then each parenthesised token ("FOX-1B (AO-91)" yields "AO-91"). This is what
+// makes LoTW resolution source-independent: CelesTrak names carry the common
+// designator in parentheses, AMSAT names ARE the designator, and both funnel to
+// the same table keys without prompting the user.
+static int lotwCandidates(const char* name, char cand[4][24]) {
+  int n = 0;
+  strncpy(cand[n], name, 23); cand[n][23] = 0; n++;
+  const char* p = strchr(name, '(');
+  while (p && n < 4) {
+    const char* e = strchr(p, ')');
+    if (!e) break;
+    int L = (int)(e - p - 1); if (L > 23) L = 23;
+    if (L > 0) { memcpy(cand[n], p + 1, L); cand[n][L] = 0; n++; }
+    p = strchr(e, '(');
+  }
+  return n;
+}
+
 static int lotwSatResolve(const char* amsat, char out[7]) {
+  char cand[4][24]; int cn = lotwCandidates(amsat, cand);
   File f = Store::fs().open(FILE_LOTW, "r");
-  if (f) {
+  if (f) {                                   // user CSV overrides, any candidate form
     while (f.available()) {
       String line = f.readStringUntil('\n'); line.trim();
       if (!line.length() || line.startsWith("SAT_NAME")) continue;
@@ -26765,17 +27416,23 @@ static int lotwSatResolve(const char* amsat, char out[7]) {
       if (comma < 0) continue;
       String sn = line.substring(0, comma);     sn.trim();
       String an = line.substring(comma + 1);     an.trim();
-      if (an.equalsIgnoreCase(amsat)) {
-        strncpy(out, sn.c_str(), 6); out[6] = 0;
-        f.close(); return 0;
-      }
+      for (int c = 0; c < cn; ++c)
+        if (an.equalsIgnoreCase(cand[c])) {
+          strncpy(out, sn.c_str(), 6); out[6] = 0;
+          f.close(); return 0;
+        }
     }
     f.close();
   }
-  for (int i = 0; i < LOTW_SATS_N; ++i)
-    if (!strcasecmp(LOTW_SATS[i].amsat, amsat)) {
-      strncpy(out, LOTW_SATS[i].lotw, 6); out[6] = 0; return 0;
-    }
+  for (int c = 0; c < cn; ++c)               // built-in table, any candidate form
+    for (int i = 0; i < LOTW_SATS_N; ++i)
+      if (!strcasecmp(LOTW_SATS[i].amsat, cand[c])) {
+        strncpy(out, LOTW_SATS[i].lotw, 6); out[6] = 0; return 0;
+      }
+  // Last resort: a parenthetical designator that FITS LoTW's 6-char field beats
+  // a truncated long name ("FOX-1B (AO-91)" -> "AO-91", not "FOX-1B").
+  for (int c = 1; c < cn; ++c)
+    if (strlen(cand[c]) <= 6) { strncpy(out, cand[c], 6); out[6] = 0; return 0; }
   strncpy(out, amsat, 6); out[6] = 0;
   return (strlen(amsat) > 6) ? 1 : 0;
 }
@@ -28758,6 +29415,12 @@ void App::draw() {
     case SCR_TGTSEARCH: drawTgtSearch(); break;
     case SCR_TGTHITS: drawTgtHits(); break;
     case SCR_TOOLFORM: drawToolForm(); break;
+    case SCR_CONJ:   drawConj(); break;
+    case SCR_NEIGH:  drawNeigh(); break;
+    case SCR_TXPLAN: drawTxplan(); break;
+    case SCR_LNKCRV: drawLnkCrv(); break;
+    case SCR_DEBGRP: drawDebGrp(); break;
+    case SCR_CTSEARCH: drawCtSearch(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
 #endif
@@ -29280,9 +29943,19 @@ void App::drawHelp() {
     "GLOBAL",
     " `  back / home",
     " h  open this help",
-    " b  screenshot to SD",
+    " b  screenshot to SD (Fn+b on",
+    "    letter-using screens e.g. graph)",
     " ;/.  up/down",
     " ,//  left/right",
+    "SATELLITES",
+    " /  search ALL of CelesTrak; adds",
+    "    become auto-updating favorites",
+    "TOOLS (0.9.59)",
+    " p  print: any form tool, conj,",
+    "    neighborhood, debris, link curve",
+    "GRAPHING CALC",
+    " 2 Y2  t trace  z/Z zeros/isect",
+    " m marks+integral  b table  c CSV",
     "HELP TOPICS (from this screen)",
     " g  glossary & math",
     " m  user guide",
@@ -31046,7 +31719,7 @@ void App::keyGame(char c, bool enter, bool back) {
   }
 }
 // ===========================================================================
-//  Shared game helpers + Games menu + five satellite-themed mini-games.
+//  Shared game helpers + Games menu + six satellite-themed mini-games.
 //  Every game keeps ALL state in fixed .bss members (declared in app.h): no
 //  heap, no String in the loop, sprites drawn with canvas primitives. Sound is
 //  gated on cfg.gameSound; tilt steering on cfg.gameTilt + imuReady (ADV-only,
@@ -32232,6 +32905,11 @@ const char* App::prtStem(PrintReport w) {
     case PR_BASICLIST: return "basic_listing";
     case PR_BASICOUT:  return "basic_output";
     case PR_TOOLOUT:   return "tool_output";
+    case PR_TOOLFORM:  return "tool_form";
+    case PR_CONJ:      return "conjunction";
+    case PR_NEIGH:     return "neighborhood";
+    case PR_DEBGRP:    return "debris";
+    case PR_LNKCRV:    return "linkcurve";
     case PR_CHARLK:    return "char_lookup";
     case PR_EME:       return "eme";
     case PR_EMEPLAN:   return "eme_plan";
@@ -32295,6 +32973,11 @@ bool App::printReport(PrintReport which) {
     case PR_BASICLIST: printBasicList(); break;
     case PR_BASICOUT:  printBasicOut(); break;
     case PR_TOOLOUT:   printToolOut(); break;
+    case PR_TOOLFORM:  printToolForm(); break;
+    case PR_CONJ:      printConj(); break;
+    case PR_NEIGH:     printNeigh(); break;
+    case PR_DEBGRP:    printDebGrp(); break;
+    case PR_LNKCRV:    printLnkCrv(); break;
     case PR_CHARLK:    printCharLk(); break;
     case PR_EME:       printEme(); break;
     case PR_EMEPLAN:   printEmePlan(); break;
@@ -32686,7 +33369,7 @@ void App::drawGMorse() {
       for (int i = 0; i < GMOR_MAX; ++i) if (gmLetter[i] < 0) {
         gmLetter[i] = (int8_t)(esp_random() % 26);
         gmX[i] = 20 + (int)(esp_random() % 200);
-        gmY[i] = 22;
+        gmY[i] = 28;   // below the Score/lives row (y=18, rows 18-25)
         break;
       }
     }
@@ -32697,7 +33380,7 @@ void App::drawGMorse() {
     for (int i = 0; i < GMOR_MAX; ++i) {
       if (gmLetter[i] < 0) continue;
       gmY[i] += fall * fdt;
-      if (gmY[i] >= 118) {                                // hit the ground -> life lost
+      if (gmY[i] >= 104) {                                // hit the ground -> life lost
         gmLetter[i] = -1; gmTypeN = 0; gmType[0] = 0;
         if (--gLives <= 0) { gState = 3; sfx(200, 300); }
         else sfx(350, 150);
@@ -32734,16 +33417,19 @@ void App::drawGMorse() {
     canvas.printf("%c", 'A' + gmLetter[i]);
     // Also show that letter's Morse dimly under it.
     canvas.setTextColor(CL_DGREY, CL_BLACK);
-    canvas.setCursor(gmX[i] - 6, (int)gmY[i] + 10); canvas.print(MORSE_TBL[gmLetter[i]]);
+    { int my = (int)gmY[i] + 10;                     // code hint under the letter...
+      if (my + 8 > 108) my = (int)gmY[i] - 10;       // ...flipped above it near the ground
+      canvas.setCursor(gmX[i] - 6, my); canvas.print(MORSE_TBL[gmLetter[i]]); }
     if (gmY[i] > lowY) { lowY = gmY[i]; lowest = i; }
   }
-  // Ground line + typed buffer.
-  canvas.drawFastHLine(0, 120, 240, CL_DGREY);
+  // Ground line + typed buffer. Geometry: line y=108, text row y=112 (rows 112-119)
+  // -- both clear of the y=127 footer; letters die at 104 so nothing reaches this band.
+  canvas.drawFastHLine(0, 108, 240, CL_DGREY);
   canvas.setTextColor(CL_CYAN, CL_BLACK);
-  canvas.setCursor(6, 124); canvas.printf("Key: %s", gmType);
+  canvas.setCursor(6, 112); canvas.printf("Key: %s", gmType);
   if (lowest >= 0) {
     canvas.setTextColor(CL_GREEN, CL_BLACK);
-    canvas.setCursor(150, 124); canvas.printf("-> %c", 'A' + gmLetter[lowest]);
+    canvas.setCursor(150, 112); canvas.printf("-> %c", 'A' + gmLetter[lowest]);
   }
   footer(cfg.morseSwap ? "U dot  T dash   ` back" : "T dot  U dash   ` back");
 }
@@ -36775,7 +37461,10 @@ void App::keyAmsRpick(char c, bool enter, bool back) {
 enum { TOOL_COAX = 0, TOOL_DIPOLE, TOOL_VERTICAL, TOOL_YAGI, TOOL_QUAD,
        TOOL_RFCONV, TOOL_SWR, TOOL_FSPL, TOOL_UNITS, TOOL_RFEXP, TOOL_BATT,
        TOOL_DEBRIS, TOOL_XAREA, TOOL_PHASE, TOOL_WAVELEN, TOOL_ATTEN,
-       TOOL_DBCHAIN, TOOL_COMPLEX, TOOL_REACT, TOOL_TIMECONST, TOOL__N };
+       TOOL_DBCHAIN, TOOL_COMPLEX, TOOL_REACT, TOOL_TIMECONST,
+       TOOL_DOPPBUD, TOOL_CASCNF, TOOL_SUNGT, TOOL_HELIX, TOOL_MATCH,
+       TOOL_POINT, TOOL_IMD, TOOL_USTRIP, TOOL_TOROID, TOOL_DV,
+       TOOL_THERM, TOOL_FARAD, TOOL_AMPAC, TOOL_PLL, TOOL__N };
 
 static const char* const TOOLS_NAMES[] = {
   "Scientific calculator",
@@ -36793,6 +37482,11 @@ static const char* const TOOLS_NAMES[] = {
   "Operating references",
   "Radio math reference",
   "Char lookup (ASCII/RTTY)",
+  "Conjunction screener",
+  "Orbital neighborhood",
+  "Transponder planner",
+  "Link margin vs elevation",
+  "Debris group screen",
   "Coax loss / power",
   "Dipole length",
   "Vertical / ground plane",
@@ -36813,16 +37507,32 @@ static const char* const TOOLS_NAMES[] = {
   "Complex / polar",
   "Reactance & resonance",
   "RC/RL time constant",
+  "Doppler budget (orbit)",
+  "Cascade NF & G/T",
+  "Sun-noise G/T measure",
+  "Helix antenna",
+  "L/Pi/T match network",
+  "Pointing loss",
+  "IMD products",
+  "Microstrip/stripline Z0",
+  "Toroid winding",
+  "Delta-v (Hohmann/plane)",
+  "Thermal equilibrium",
+  "Polarization / Faraday",
+  "Trace & wire ampacity",
+  "PLL / frequency plan",
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
-// The first fifteen Tools menu entries are standalone screens (sci calc, programmer calc,
+// The first twenty Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
 // reference, radio-math reference, state-vector->GP, CubeSatSim C2C ref, location converter,
-// graphing calculator, Tiny BASIC); everything after them is a numeric
+// graphing calculator, Tiny BASIC, and the five 0.9.59 satellite tools: conjunction
+// screener, orbital neighborhood, transponder planner, link-margin curve, debris group
+// screen); everything after them is a numeric
 // "form" tool whose form-id is (menu index - TOOLS_FIRST_FORM). Keeping this as one named
 // constant means the two places that convert between menu index and form id stay in step.
-static const int TOOLS_FIRST_FORM = 15;
+static const int TOOLS_FIRST_FORM = 20;
 
 // Compile-time guard: the number of form-based tools in the menu (everything after the
 // standalone ones) must exactly match the size of the form enum (TOOL_COAX..TOOL__N).
@@ -36899,12 +37609,938 @@ void App::keyTools(char c, bool enter, bool back) {
       mathRefScroll = 0; screen = SCR_MATHREF;
     } else if (toolsSel == 14) {               // character / raw-value lookup
       screen = SCR_CHARLK;
+    } else if (toolsSel == 15) {               // conjunction screener
+      conjRan = false; conjN = 0; screen = SCR_CONJ;
+    } else if (toolsSel == 16) {               // orbital neighborhood
+      neighInit(); screen = SCR_NEIGH;
+    } else if (toolsSel == 17) {               // transponder passband planner
+      txplanTx = curTx; screen = SCR_TXPLAN;
+    } else if (toolsSel == 18) {               // link margin vs elevation
+      lcSel = 0; lcEdit = false; screen = SCR_LNKCRV;
+    } else if (toolsSel == 19) {               // debris group screen
+      dgState = 0; dgScroll = 0; screen = SCR_DEBGRP;
     } else {                                   // one of the live-recalc forms
       toolFormInit(toolsSel - TOOLS_FIRST_FORM);   // form id = menu index - (standalone tools that precede)
       screen = SCR_TOOLFORM;
     }
     lastDrawMs = 0;
   }
+}
+
+
+// ===========================================================================
+//  0.9.59 satellite tools: orbital neighborhood, conjunction screener,
+//  transponder passband planner, link-margin curve, debris-group screen.
+//  All five live under Tools; the two propagation screens reuse the fitter's
+//  pairwise forward model (Predictor::temeStateAt) and carry the TLE-accuracy
+//  caveat on screen: kilometre-class elements make this AWARENESS, not
+//  collision avoidance.
+// ===========================================================================
+
+// Apogee/perigee altitude (km) from mean motion + eccentricity.
+static void satBandKm(const SatEntry& s, double& peri, double& apo) {
+  const double MU = 398600.4418, RE = 6378.137;
+  double nr = s.meanMotion * 6.283185307179586 / 86400.0;
+  double a  = (nr > 0) ? pow(MU / (nr * nr), 1.0 / 3.0) : 0;
+  apo  = a * (1 + s.ecc) - RE;
+  peri = a * (1 - s.ecc) - RE;
+}
+
+// ---- Orbital neighborhood --------------------------------------------------
+void App::neighInit() {
+  neighN = 0; neighScroll = 0;
+  SatEntry* A = activeSat();
+  if (!A || A->meanMotion <= 0) return;
+  double pA, aA; satBandKm(*A, pA, aA);
+  for (int i = 0; i < db.count(); ++i) {
+    SatEntry& B = db.at(i);
+    if (&B == A || B.meanMotion <= 0) continue;
+    double pB, aB; satBandKm(B, pB, aB);
+    double gap = (pB > aA) ? (pB - aA) : ((pA > aB) ? (pA - aB) : 0.0);
+    if (gap > 150.0) continue;                       // not in the neighborhood
+    // negative "gap" = amount of band overlap, for sorting the closest first
+    double key = (gap > 0) ? gap : -fmin(aA, aB) + fmax(pA, pB);
+    int k = neighN < NEIGH_MAX ? neighN : NEIGH_MAX - 1;
+    while (k > 0 && neighGap[k - 1] > key) {
+      if (k < NEIGH_MAX) { neighGap[k] = neighGap[k - 1]; neighIdx[k] = neighIdx[k - 1]; }
+      --k;
+    }
+    if (k < NEIGH_MAX) { neighGap[k] = (float)key; neighIdx[k] = (int16_t)i;
+                         if (neighN < NEIGH_MAX) ++neighN; }
+  }
+}
+
+void App::drawNeigh() {
+  header("Orbital neighborhood");
+  canvas.setTextSize(1);
+  SatEntry* A = activeSat();
+  if (!A) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
+            canvas.setCursor(6, 44); canvas.print("No active satellite.");
+            footer("` back"); return; }
+  double pA, aA; satBandKm(*A, pA, aA);
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 18);
+  canvas.printf("%.13s  %.0f-%.0f km", A->name, pA, aA);
+  if (neighN == 0) {
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("No cataloged object within");
+    canvas.setCursor(6, 62); canvas.print("150 km of this band.");
+    footer("` back"); return;
+  }
+  const int VIS = 9;
+  if (neighScroll > neighN - 1) neighScroll = neighN - 1;
+  for (int r = 0; r < VIS; ++r) {
+    int i = neighScroll + r; if (i >= neighN) break;
+    SatEntry& B = db.at(neighIdx[i]);
+    double pB, aB; satBandKm(B, pB, aB);
+    bool ovl = !(pB > aA || pA > aB);
+    int y = 30 + r * 10;
+    canvas.setTextColor(ovl ? CL_ORANGE : CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, y);  canvas.printf("%-13.13s", B.name);
+    canvas.setCursor(88, y); canvas.printf("%4.0f-%-4.0f", pB, aB);
+    canvas.setCursor(150, y); canvas.printf("i%5.1f", (double)B.incl);
+    canvas.setCursor(196, y);
+    if (ovl) canvas.print("OVLP");
+    else     { String g = String((int)neighGap[i]) + "km"; canvas.print(g); }
+  }
+  canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, 120);
+  canvas.printf("%d in band  (TLE ~km accuracy)", neighN);
+  footer(";/. scroll ENTER pair  p prt  `bk");
+}
+
+void App::keyNeigh(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_NEIGH); return; }
+  if (isUp(c))   { if (neighScroll > 0) --neighScroll; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (neighScroll < neighN - 1) ++neighScroll; lastDrawMs = 0; return; }
+  if (enter && neighN > 0) {
+    conjB = neighIdx[neighScroll]; conjRan = false; conjN = 0;
+    screen = SCR_CONJ; lastDrawMs = 0;
+  }
+}
+
+// ---- Conjunction screener --------------------------------------------------
+void App::conjRun() {
+  conjN = 0; conjRan = false;
+  SatEntry* A = activeSat();
+  if (!A || conjB < 0 || conjB >= db.count()) return;
+  SatEntry& B = db.at(conjB);
+  time_t t0 = nowUtc();
+  const int STEP = 30, WIN = 6 * 3600;
+  double pd = 1e12, ppd = 1e12; time_t pt = 0;
+  conjPct = 0;
+  for (int k = 0; k <= WIN / STEP; ++k) {
+    time_t t = t0 + (time_t)k * STEP;
+    double rA[3], vA[3], rB[3], vB[3];
+    if (!pred.temeStateAt(*A, (double)t, rA, vA) ||
+        !pred.temeStateAt(B,  (double)t, rB, vB)) continue;
+    double dx = rA[0]-rB[0], dy = rA[1]-rB[1], dz = rA[2]-rB[2];
+    double d = sqrt(dx*dx + dy*dy + dz*dz);
+    // local minimum one step back?
+    if (pt && pd < ppd && pd <= d && pd < 800.0) {
+      // refine +/- STEP at 1 s
+      time_t bt = pt; double bd = pd, brv = 0;
+      for (time_t rt = pt - STEP; rt <= pt + STEP; ++rt) {
+        double r1[3], v1[3], r2[3], v2[3];
+        if (!pred.temeStateAt(*A, (double)rt, r1, v1) ||
+            !pred.temeStateAt(B,  (double)rt, r2, v2)) continue;
+        double ex = r1[0]-r2[0], ey = r1[1]-r2[1], ez = r1[2]-r2[2];
+        double rd = sqrt(ex*ex + ey*ey + ez*ez);
+        if (rd < bd) { bd = rd; bt = rt;
+          double wx = v1[0]-v2[0], wy = v1[1]-v2[1], wz = v1[2]-v2[2];
+          brv = sqrt(wx*wx + wy*wy + wz*wz); }
+      }
+      // insert by miss distance
+      int i = conjN < CONJ_MAX ? conjN : CONJ_MAX - 1;
+      while (i > 0 && conjMiss[i - 1] > bd) {
+        if (i < CONJ_MAX) { conjMiss[i] = conjMiss[i-1]; conjT[i] = conjT[i-1]; conjRvel[i] = conjRvel[i-1]; }
+        --i;
+      }
+      if (i < CONJ_MAX) { conjMiss[i] = (float)bd; conjT[i] = bt; conjRvel[i] = (float)brv;
+                          if (conjN < CONJ_MAX) ++conjN; }
+    }
+    ppd = pd; pd = d; pt = t;
+    if ((k & 15) == 0) { conjPct = k * 100 / (WIN / STEP); draw(); }
+  }
+  conjPct = -1; conjRan = true;
+}
+
+void App::drawConj() {
+  header("Conjunction screener");
+  canvas.setTextSize(1);
+  SatEntry* A = activeSat();
+  if (!A) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
+            canvas.setCursor(6, 44); canvas.print("No active satellite.");
+            footer("` back"); return; }
+  if (conjB < 0 || conjB >= db.count()) conjB = (conjB == 0 && db.count() > 1) ? 1 : 0;
+  if (&db.at(conjB) == A) conjB = (conjB + 1) % db.count();
+  SatEntry& B = db.at(conjB);
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(4, 18);
+  canvas.printf("A %.14s", A->name);
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, 28);
+  canvas.printf("B %.14s", B.name);
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(130, 28);
+  canvas.print(";/. pick B");
+  if (conjPct >= 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.printf("Screening 6 h... %d%%", conjPct);
+    footer("scanning"); return;
+  }
+  if (!conjRan) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 50); canvas.print("ENTER scans the next 6 h at");
+    canvas.setCursor(6, 60); canvas.print("30 s, refines minima to 1 s.");
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(6, 78); canvas.print("Public GP elements: km-class.");
+    canvas.setCursor(6, 88); canvas.print("Awareness, not avoidance.");
+  } else if (conjN == 0) {
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.print("No approach < 800 km in 6 h.");
+  } else {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 42);
+    canvas.print("UTC          miss     rel-v");
+    for (int i = 0; i < conjN; ++i) {
+      struct tm tv; time_t tt = conjT[i]; gmtime_r(&tt, &tv);
+      int y = 54 + i * 11;
+      canvas.setTextColor(conjMiss[i] < 25 ? CL_RED :
+                          (conjMiss[i] < 100 ? CL_ORANGE : CL_WHITE), CL_BLACK);
+      canvas.setCursor(4, y);
+      canvas.printf("%02d-%02d %02d:%02d:%02d %5.1fkm %4.1fkm/s",
+                    tv.tm_mon + 1, tv.tm_mday, tv.tm_hour, tv.tm_min, tv.tm_sec,
+                    (double)conjMiss[i], (double)conjRvel[i]);
+    }
+  }
+  footer(";/. object  ENTER scan  p prt  `bk");
+}
+
+void App::keyConj(char c, bool enter, bool back) {
+  if (conjPct >= 0) return;                       // ignore keys mid-scan
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_CONJ); return; }
+  SatEntry* A = activeSat();
+  int n = db.count();
+  if (A && n > 1) {
+    if (isUp(c))   { do { conjB = (conjB + n - 1) % n; } while (&db.at(conjB) == A);
+                     conjRan = false; conjN = 0; lastDrawMs = 0; return; }
+    if (isDown(c)) { do { conjB = (conjB + 1) % n; } while (&db.at(conjB) == A);
+                     conjRan = false; conjN = 0; lastDrawMs = 0; return; }
+  }
+  if (enter && A && n > 1) { setStatus("Screening..."); conjRun(); lastDrawMs = 0; }
+}
+
+// ---- Transponder passband planner -------------------------------------------
+void App::drawTxplan() {
+  header("Transponder planner");
+  canvas.setTextSize(1);
+  SatEntry* A = activeSat();
+  if (!A || activeTxCount == 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("No transponders loaded for");
+    canvas.setCursor(6, 56); canvas.print("the active satellite.");
+    footer("` back"); return;
+  }
+  if (txplanTx >= activeTxCount) txplanTx = 0;
+  Transponder& t = activeTx[txplanTx];
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(4, 18);
+  canvas.printf("%.13s %d/%d", A->name, txplanTx + 1, activeTxCount);
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 27);
+  canvas.printf("%.28s %.6s", t.desc, t.mode);
+  uint32_t bw = t.bandwidth();
+  if (!t.isLinear || bw == 0) {
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, 48); canvas.printf("DL %s", fmtMHz(t.downlink).c_str());
+    canvas.setCursor(6, 60);
+    if (t.uplink) canvas.printf("UL %s", fmtMHz(t.uplink).c_str());
+    else          canvas.print("UL (none / beacon)");
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    canvas.setCursor(6, 78); canvas.print("Single channel - no passband.");
+  } else {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 37);
+    canvas.printf("  %%      downlink      uplink %s", t.invert ? "INV" : "");
+    for (int k = 0; k <= 10; ++k) {
+      uint32_t dl, ul;
+      Predictor::passbandFreqs(t, (int32_t)((int64_t)bw * k / 10), dl, ul);
+      int y = 47 + k * 7;
+      canvas.setTextColor((k == 5) ? CL_CYAN : CL_WHITE, CL_BLACK);
+      canvas.setCursor(4, y);
+      canvas.printf("%3d  %11.11s  %11.11s", k * 10,
+                    fmtMHz(dl).c_str(), ul ? fmtMHz(ul).c_str() : "--");
+    }
+  }
+  footer(";/. transponder  p print  ` back");
+}
+
+// Universal form-tool report: title, the input fields, a rule, then every computed
+// output line -- produced by re-running drawToolForm with tfEmit set, so the print
+// is byte-for-byte the same compute path the screen shows and every current AND
+// future form tool is printable with zero per-tool code. Lines stream straight to
+// the sinks; nothing is buffered.
+void App::printToolForm() {
+  Printer::title(TOOLS_NAMES[toolId + TOOLS_FIRST_FORM]);
+  tfEmit = true;
+  drawToolForm();                          // canvas side effects are harmless; next draw repaints
+  tfEmit = false;
+}
+
+void App::printConj() {
+  SatEntry* A = activeSat();
+  if (!A || !conjRan) { Printer::line("(no screening run)"); return; }
+  SatEntry& B = db.at(conjB);
+  Printer::title("Conjunction screener");
+  Printer::line(String("A: ") + A->name);
+  Printer::line(String("B: ") + B.name);
+  Printer::line(String("Element ages: A ") + String(gpAgeDays(*A), 1) + "d  B "
+                + String(gpAgeDays(B), 1) + "d");
+  Printer::line("");
+  if (conjN == 0) Printer::line("No approach < 800 km in 6 h.");
+  for (int i = 0; i < conjN; ++i) {
+    struct tm tv; time_t tt = conjT[i]; gmtime_r(&tt, &tv);
+    char b[64];
+    snprintf(b, sizeof(b), "%02d:%02d:%02dz  miss %.1f km  rel %.2f km/s",
+             tv.tm_hour, tv.tm_min, tv.tm_sec,
+             (double)conjMiss[i], (double)conjRvel[i]);
+    Printer::line(b);
+  }
+  Printer::line("");
+  Printer::line("Public GP elements: awareness only,");
+  Printer::line("NOT collision avoidance.");
+}
+
+void App::printNeigh() {
+  SatEntry* A = activeSat();
+  if (!A || neighN == 0) { Printer::line("(no neighborhood computed)"); return; }
+  double pA, aA; satBandKm(*A, pA, aA);
+  Printer::title("Orbital neighborhood");
+  char b[72];
+  snprintf(b, sizeof(b), "%.14s  band %.0f-%.0f km  i%.1f",
+           A->name, pA, aA, (double)A->incl);
+  Printer::line(b);
+  Printer::line("");
+  for (int i = 0; i < neighN; ++i) {
+    SatEntry& B = db.at(neighIdx[i]);
+    double pB, aB; satBandKm(B, pB, aB);
+    double gap = (pB > aA) ? (pB - aA) : ((pA > aB) ? (pA - aB) : 0.0);
+    snprintf(b, sizeof(b), "%-14.14s %5.0f-%-5.0f i%5.1f  %s%.0fkm",
+             B.name, pB, aB, (double)B.incl, gap > 0 ? "gap " : "OVLP ", gap);
+    Printer::line(b);
+  }
+}
+
+void App::printLnkCrv() {
+  Printer::title("Link margin vs elevation");
+  char b[64];
+  snprintf(b, sizeof(b), "Alt %.0f km  %.1f MHz  margin@0deg %.1f dB",
+           lcAlt, lcF, lcM0);
+  Printer::line(b);
+  Printer::line("");
+  // Margin vs elevation: M(el) = M0 + 20*log10(range(0)/range(el)) -- the same
+  // slant-range model drawLnkCrv plots.
+  const double RE = 6378.137; double h = lcAlt;
+  auto rng = [&](double elDeg) {
+    double e = elDeg * 0.017453292519943295, se = sin(e);
+    return sqrt(RE * RE * se * se + 2 * RE * h + h * h) - RE * se;
+  };
+  double r0 = rng(0);
+  Printer::line("el   range km   margin dB");
+  double marg[19];
+  for (int k = 0; k <= 18; ++k) {
+    double el = k * 5.0, r = rng(el);
+    marg[k] = lcM0 + 20.0 * log10(r0 / r);
+    snprintf(b, sizeof(b), "%2.0f   %7.0f    %+6.1f", el, r, marg[k]);
+    Printer::line(b);
+  }
+  // Mini ASCII curve (0.9.56 screen-rendering precedent): 19 columns x 10 rows.
+  Printer::line("");
+  double lo = marg[0], hi = marg[18];
+  if (hi <= lo) hi = lo + 1;
+  for (int row = 9; row >= 0; --row) {
+    char ln[40];
+    int j = 0;
+    ln[j++] = (row == 9 || row == 0) ? '+' : '|';
+    for (int k = 0; k <= 18; ++k) {
+      double frac = (marg[k] - lo) / (hi - lo);
+      int r2 = (int)lround(frac * 9.0);
+      ln[j++] = (r2 == row) ? '*' : ((row == 0) ? '-' : ' ');
+    }
+    ln[j] = 0;
+    Printer::line(ln);
+  }
+  Printer::line(" 0        45        90 deg");
+}
+
+void App::txplanPrint() {
+  SatEntry* A = activeSat();
+  if (!A || activeTxCount == 0) { setStatus("Nothing to print"); return; }
+  Transponder& t = activeTx[txplanTx];
+  Printer::Sinks sk;
+  sk.host        = cfg.printerHost[0] ? cfg.printerHost : nullptr;
+  sk.port        = cfg.printerPort;
+  sk.printerCols = cfg.printerCols;
+  sk.format      = cfg.printFormat;
+  sk.transport   = cfg.printTransport;
+  sk.paper       = cfg.printPaper;
+  sk.toSerial    = cfg.printToSerial;
+  sk.toFile      = cfg.printToFile;
+  sk.fileTitle   = "txplan";
+  if (!sk.host && !sk.toSerial && !sk.toFile) { setStatus("No print output on (Settings>Network)"); return; }
+  setStatus("Printing..."); draw();
+  if (!Printer::begin(sk)) { setStatus("No print sink opened"); return; }
+  Printer::title("TRANSPONDER PLAN");
+  Printer::line(String(A->name));
+  Printer::line(String(t.desc) + "  " + t.mode + (t.invert ? "  INVERTING" : ""));
+  Printer::line("");
+  uint32_t bw = t.bandwidth();
+  if (!t.isLinear || bw == 0) {
+    Printer::line("DL " + fmtMHz(t.downlink));
+    Printer::line("UL " + (t.uplink ? fmtMHz(t.uplink) : String("(none)")));
+  } else {
+    Printer::line("  %     downlink        uplink");
+    for (int k = 0; k <= 10; ++k) {
+      uint32_t dl, ul;
+      Predictor::passbandFreqs(t, (int32_t)((int64_t)bw * k / 10), dl, ul);
+      char b[48];
+      snprintf(b, sizeof(b), "%3d   %-12s  %-12s", k * 10,
+               fmtMHz(dl).c_str(), ul ? fmtMHz(ul).c_str() : "--");
+      Printer::line(String(b));
+    }
+    Printer::line("");
+    Printer::line("Satellite-frame pairs (no Doppler);");
+    Printer::line("the tracker applies Doppler on air.");
+  }
+  Printer::end();
+  setStatus("Printed");
+}
+
+void App::keyTxplan(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (activeTxCount) txplanTx = (txplanTx + activeTxCount - 1) % activeTxCount; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (activeTxCount) txplanTx = (txplanTx + 1) % activeTxCount; lastDrawMs = 0; return; }
+  if (c == 'p') { txplanPrint(); lastDrawMs = 0; }
+}
+
+// ---- Link margin vs elevation ------------------------------------------------
+void App::drawLnkCrv() {
+  header("Link margin vs elev");
+  canvas.setTextSize(1);
+  const double RE = 6378.137;
+  double h = lcAlt;
+  auto rng = [&](double elDeg) {
+    double e = elDeg * 0.017453292519943295, se = sin(e);
+    return sqrt(RE * RE * se * se + 2 * RE * h + h * h) - RE * se;
+  };
+  // parameter row
+  const char* lab[3] = { "Alt", "Freq", "M@0" };
+  double v[3] = { lcAlt, lcF, lcM0 };
+  const char* un[3] = { "km", "MHz", "dB" };
+  int x = 4;
+  for (int i = 0; i < 3; ++i) {
+    bool sel = (i == lcSel);
+    canvas.setTextColor(sel ? CL_GREEN : CL_GREY, CL_BLACK);
+    canvas.setCursor(x, 18); canvas.print(lab[i]);
+    canvas.setTextColor(sel ? CL_GREEN : CL_WHITE, CL_BLACK);
+    String vs = (sel && lcEdit) ? (lcBuf + "_") : String(v[i], (i == 1) ? 1 : 0);
+    canvas.setCursor(x + 26, 18); canvas.print(vs + un[i]);
+    x += 80;
+  }
+  // curve frame
+  const int PX = 26, PY = 30, PW = 208, PH = 78;
+  canvas.drawRect(PX - 1, PY - 1, PW + 2, PH + 2, CL_MGREY);
+  double r0 = rng(0);
+  double mLo = 1e9, mHi = -1e9; static float mbuf[208];
+  for (int i = 0; i < PW; ++i) {
+    double el = 90.0 * i / (PW - 1);
+    double m = lcM0 + 20.0 * log10(r0 / rng(el));
+    mbuf[i] = (float)m;
+    if (m < mLo) mLo = m; if (m > mHi) mHi = m;
+  }
+  if (mLo > 0) mLo = 0;                      // keep the 0 dB line in frame
+  if (mHi <= mLo) mHi = mLo + 1;
+  int zy = PY + (int)((mHi - 0.0) / (mHi - mLo) * (PH - 1));
+  if (zy >= PY && zy < PY + PH) canvas.drawFastHLine(PX, zy, PW, CL_DGREY);
+  int ppx = 0, ppy = 0;
+  for (int i = 0; i < PW; ++i) {
+    int yv = PY + (int)((mHi - mbuf[i]) / (mHi - mLo) * (PH - 1));
+    if (i) canvas.drawLine(ppx, ppy, PX + i, yv, CL_GREEN);
+    ppx = PX + i; ppy = yv;
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(2, PY - 2);        canvas.printf("%+.0f", mHi);
+  canvas.setCursor(2, PY + PH - 6);   canvas.printf("%+.0f", mLo);
+  canvas.setCursor(PX, 112);          canvas.print("0");
+  canvas.setCursor(PX + PW / 2 - 6, 112); canvas.print("45");
+  canvas.setCursor(PX + PW - 12, 112);    canvas.print("90 el");
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(150, PY - 2);
+  canvas.printf("TCA %+.1f dB", mbuf[PW - 1]);
+  footer(";/. fld type val x alt p prt `bk");
+}
+
+void App::keyLnkCrv(char c, bool enter, bool back) {
+  if (lcEdit) {
+    if ((c >= '0' && c <= '9') || c == '.' ) { lcBuf += c; lastDrawMs = 0; return; }
+    if (isBack(c, back)) { lcEdit = false; lcBuf = ""; lastDrawMs = 0; return; }
+    if (enter) {
+      double nv = lcBuf.toFloat();
+      if (nv > 0) { if (lcSel == 0) lcAlt = nv; else if (lcSel == 1) lcF = nv; else lcM0 = nv; }
+      lcEdit = false; lcBuf = ""; lastDrawMs = 0; return;
+    }
+    return;
+  }
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_LNKCRV); return; }
+  if (isUp(c))   { lcSel = (lcSel + 2) % 3; lastDrawMs = 0; return; }
+  if (isDown(c)) { lcSel = (lcSel + 1) % 3; lastDrawMs = 0; return; }
+  if ((c >= '0' && c <= '9') || c == '.') { lcEdit = true; lcBuf = String(c); lastDrawMs = 0; return; }
+  if (c == 'x') {
+    SatEntry* A = activeSat();
+    if (A && A->meanMotion > 0) { double p, a; satBandKm(*A, p, a); lcAlt = 0.5 * (p + a); }
+    lastDrawMs = 0; return;
+  }
+  (void)enter;
+}
+
+// ---- Debris-group screen ------------------------------------------------------
+namespace {
+  struct DebGroup { const char* name; const char* slug; };
+  const DebGroup DEB_GROUPS[] = {
+    { "Cosmos-2251 debris",  "cosmos-2251-debris" },
+    { "Iridium-33 debris",   "iridium-33-debris" },
+    { "Fengyun-1C debris",   "fengyun-1c-debris" },
+    { "Recent launches 30d", "last-30-days" },
+  };
+  const int DEB_GROUPS_N = (int)(sizeof(DEB_GROUPS) / sizeof(DEB_GROUPS[0]));
+
+  // Per-object sink for the GP JSON stream: keep objects whose perigee-apogee band comes
+  // within 150 km of the active satellite's, retaining the closest maxN by band gap.
+  struct DgParseCtx { double pA, aA; SatEntry* out; float* gap; int n, maxN; };
+  void dgSink(const SatEntry& e, void* vp) {
+    DgParseCtx& c = *static_cast<DgParseCtx*>(vp);
+    double pB, aB; satBandKm(e, pB, aB);
+    double gap = (pB > c.aA) ? (pB - c.aA) : ((c.pA > aB) ? (c.pA - aB) : 0.0);
+    if (gap > 150.0) return;
+    int k = (c.n < c.maxN) ? c.n : c.maxN - 1;
+    while (k > 0 && c.gap[k - 1] > gap) {
+      if (k < c.maxN) { c.gap[k] = c.gap[k - 1]; c.out[k] = c.out[k - 1]; }
+      --k;
+    }
+    if (k < c.maxN) { c.gap[k] = (float)gap; c.out[k] = e; if (c.n < c.maxN) ++c.n; }
+  }
+}
+
+void App::printDebGrp() {
+  if (dgState != 1 || dgN == 0) { Printer::line("(no screening run)"); return; }
+  SatEntry* A = activeSat();
+  Printer::title("Debris group screen");
+  Printer::line(String("Group: ") + DEB_GROUPS[dgGroup].name);
+  if (A) Printer::line(String("vs ") + A->name);
+  if (timeIsSet()) {
+    time_t nw = nowUtc(); struct tm tv; gmtime_r(&nw, &tv);
+    char b[40];
+    snprintf(b, sizeof(b), "Printed %04d-%02d-%02d %02d:%02dz",
+             tv.tm_year + 1900, tv.tm_mon + 1, tv.tm_mday, tv.tm_hour, tv.tm_min);
+    Printer::line(b);
+  }
+  Printer::line("");
+  for (int i = 0; i < dgN; ++i) {
+    struct tm tv; time_t tt = dgT[i]; gmtime_r(&tt, &tv);
+    char b[64];
+    snprintf(b, sizeof(b), "%-14.14s %02d:%02dz  %.0f km",
+             dgSat[i].name, tv.tm_hour, tv.tm_min, (double)dgMiss[i]);
+    Printer::line(b);
+  }
+  Printer::line("");
+  Printer::line("Public GP elements: awareness only,");
+  Printer::line("NOT collision avoidance.");
+}
+
+bool App::dgFetchAndScreen(String& err) {
+  SatEntry* A = activeSat();
+  if (!A || A->meanMotion <= 0) { err = "No active satellite"; return false; }
+  double pA, aA; satBandKm(*A, pA, aA);
+  // GP JSON (not TLE): the rest of CardSat downloads OMM/GP JSON, and the legacy TLE format's
+  // 5-digit catalog field can't represent newer objects at all, so a TLE fetch would silently
+  // miss recent debris. Fetch transactionally to a temp file, stream-parse it with the shared
+  // allocation-free GP parser (flat RAM even for a large cloud), then delete the temp -- the
+  // resident 150-satellite catalog is never touched.
+  const char* path = "/CardSat/dbg.json";
+  String url = String("https://celestrak.org/NORAD/elements/gp.php?GROUP=")
+             + DEB_GROUPS[dgGroup].slug + "&FORMAT=JSON";
+  setStatus("Fetching group..."); draw();
+  if (!net.fetchGpToFile(url, path)) { err = net.lastErr; return false; }
+  dgN = 0;
+  { float gapArr[DG_MAX];
+    DgParseCtx ctx{ pA, aA, dgSat, gapArr, 0, DG_MAX };
+    SatDb::streamGpFileEntries(path, dgSink, &ctx);
+    dgN = ctx.n;
+  }
+  Store::fs().remove(path);
+  if (dgN == 0) { err = "No object within 150 km band"; return false; }
+  // coarse-screen each candidate against the active bird: 3 h at 60 s + refine
+  time_t t0 = nowUtc();
+  const int STEP = 60, WIN = 3 * 3600, NS = WIN / STEP;
+  for (int j = 0; j < dgN; ++j) { dgMiss[j] = 1e9f; dgT[j] = 0; }
+  dgPct = 0;
+  for (int k = 0; k <= NS; ++k) {
+    time_t t = t0 + (time_t)k * STEP;
+    double rA[3], vA[3];
+    if (!pred.temeStateAt(*A, (double)t, rA, vA)) continue;
+    for (int j = 0; j < dgN; ++j) {
+      double rB[3], vB[3];
+      if (!pred.temeStateAt(dgSat[j], (double)t, rB, vB)) continue;
+      double dx = rA[0]-rB[0], dy = rA[1]-rB[1], dz = rA[2]-rB[2];
+      double d = sqrt(dx*dx + dy*dy + dz*dz);
+      if (d < dgMiss[j]) { dgMiss[j] = (float)d; dgT[j] = t; }
+    }
+    if ((k & 7) == 0) { dgPct = k * 100 / NS; setStatus(String("Screening ") + dgPct + "%"); draw(); }
+  }
+  dgPct = -1;
+  // simple selection sort by miss
+  for (int a = 0; a < dgN - 1; ++a)
+    for (int b = a + 1; b < dgN; ++b)
+      if (dgMiss[b] < dgMiss[a]) {
+        SatEntry ts = dgSat[a]; dgSat[a] = dgSat[b]; dgSat[b] = ts;
+        float tm = dgMiss[a]; dgMiss[a] = dgMiss[b]; dgMiss[b] = tm;
+        time_t tt = dgT[a]; dgT[a] = dgT[b]; dgT[b] = tt;
+      }
+  return true;
+}
+
+void App::drawDebGrp() {
+  header("Debris group screen");
+  canvas.setTextSize(1);
+  if (dgPct >= 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 56); canvas.printf("Screening 3 h... %d%%", dgPct);
+    footer("working"); return;
+  }
+  if (dgState == 0) {
+    SatEntry* A = activeSat();
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 18);
+    if (A) { double p, a; satBandKm(*A, p, a);
+             canvas.printf("vs %.13s %.0f-%.0f km", A->name, p, a); }
+    else canvas.print("No active satellite.");
+    for (int i = 0; i < DEB_GROUPS_N; ++i) {
+      bool sel = (i == dgGroup);
+      int y = 36 + i * 12;
+      if (sel) canvas.fillRect(2, y - 2, 236, 12, CL_SELBG);
+      canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(8, y); canvas.print(DEB_GROUPS[i].name);
+    }
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(4, 92);  canvas.print("Fetch + 3 h screen vs active");
+    canvas.setCursor(4, 102); canvas.print("bird. GP elements: awareness");
+    canvas.setCursor(4, 112); canvas.print("only, not avoidance.");
+    footer(";/. group  ENTER fetch+screen  ` back");
+    return;
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 18);
+  canvas.printf("%s: %d in band", DEB_GROUPS[dgGroup].name, dgN);
+  canvas.setCursor(4, 28); canvas.print("closest approach in 3 h:");
+  const int VIS = 7;
+  if (dgScroll > dgN - 1) dgScroll = 0;
+  for (int r = 0; r < VIS; ++r) {
+    int i = dgScroll + r; if (i >= dgN) break;
+    struct tm tv; time_t tt = dgT[i]; gmtime_r(&tt, &tv);
+    int y = 40 + r * 10;
+    canvas.setTextColor(dgMiss[i] < 25 ? CL_RED :
+                        (dgMiss[i] < 100 ? CL_ORANGE : CL_WHITE), CL_BLACK);
+    canvas.setCursor(4, y);
+    canvas.printf("%-11.11s %5.0fkm %02d:%02d", dgSat[i].name,
+                  (double)dgMiss[i], tv.tm_hour, tv.tm_min);
+  }
+  footer(";/. scroll  x new grp  p prt  `bk");
+}
+
+void App::keyDebGrp(char c, bool enter, bool back) {
+  if (dgPct >= 0) return;
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'p' && dgState == 1) { printReport(PR_DEBGRP); return; }
+  if (dgState == 0) {
+    if (isUp(c))   { dgGroup = (dgGroup + DEB_GROUPS_N - 1) % DEB_GROUPS_N; lastDrawMs = 0; return; }
+    if (isDown(c)) { dgGroup = (dgGroup + 1) % DEB_GROUPS_N; lastDrawMs = 0; return; }
+    if (enter) {
+      String err;
+      if (dgFetchAndScreen(err)) { dgState = 1; dgScroll = 0; setStatus("Done"); }
+      else setStatus(err);
+      lastDrawMs = 0;
+    }
+    return;
+  }
+  if (isUp(c))   { if (dgScroll > 0) --dgScroll; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (dgScroll < dgN - 1) ++dgScroll; lastDrawMs = 0; return; }
+  if (c == 'x') { dgState = 0; lastDrawMs = 0; return; }
+  (void)enter;
+}
+
+
+// ---- CelesTrak whole-catalog search + auto-refreshed extra favorites ---------
+//
+// The satellite list's '/' opens a search of the ENTIRE public catalog via
+// CelesTrak's gp.php (NAME= substring match, or CATNR= when the query is all
+// digits), independent of whatever the primary GP source is. ENTER on a result
+// adds it as a favorite. If the object isn't covered by the primary catalog it
+// is persisted to FILE_CTX, and every GP update re-fetches those objects from
+// CelesTrak so their elements never go stale -- the piece hand-entered manual
+// sats deliberately don't get (many aren't in the public catalog at all).
+//
+// CelesTrak courtesy limits, enforced so users don't get their IP banned:
+//   - >= 10 s between interactive searches (millis-based, works clockless);
+//   - an identical query within 2 h reuses the cached result file instead of
+//     re-fetching (CelesTrak's guidance: the data updates ~3x/day, so
+//     re-pulling the same query inside 2 h is abuse);
+//   - the extras refresh runs at most once per 2 h (timestamp persisted in
+//     FILE_CTX_TS so reboots can't be used to hammer), fetches are spaced 2 s
+//     apart, and at most CTREF_MAX objects are refreshed per update;
+//   - always celestrak.org (the .com host's redirect chain has led to
+//     firewalled IPs -- same rule as the GP source picker).
+
+namespace {
+  const int CTREF_MAX = 25;             // extras refreshed per update, max
+  const char* CTQ_PATH = "/CardSat/ctq.json";   // search / single-object fetch cache
+
+  uint32_t ctHash(const char* s) {      // djb2 -- to detect "same query again"
+    uint32_t h = 5381; while (*s) h = h * 33u + (uint8_t)*s++; return h;
+  }
+
+  // Sink: fill the slim results table (first CTS_MAX objects).
+  struct CtParseCtx { App::CtRow* rows; int n, maxN; };
+  void ctRowSink(const SatEntry& e, void* vp) {
+    CtParseCtx& c = *static_cast<CtParseCtx*>(vp);
+    if (c.n >= c.maxN) return;
+    App::CtRow& r = c.rows[c.n++];
+    strncpy(r.name, e.name, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
+    r.norad = e.norad;
+    double p, a; satBandKm(e, p, a);
+    r.peri = (float)p; r.apo = (float)a; r.incl = e.incl;
+  }
+
+  // Sink: find one object by NORAD and copy the full entry out.
+  struct CtFindCtx { uint32_t norad; SatEntry* out; bool found; };
+  void ctFindSink(const SatEntry& e, void* vp) {
+    CtFindCtx& c = *static_cast<CtFindCtx*>(vp);
+    if (!c.found && e.norad == c.norad) { *c.out = e; c.found = true; }
+  }
+}
+
+// FILE_CTX_TS: three unsigned lines -- last interactive query unix time, its
+// query-URL hash, and the last extras-refresh unix time.
+bool App::gpFetchDue(const String& url) {
+  if (!Store::fs().exists(FILE_GP)) return true;        // no cache: must fetch
+  if (!timeIsSet()) return true;                        // clockless: can't judge age
+  File f = Store::fs().open("/CardSat/gp.ts", "r");
+  if (!f) return true;
+  uint32_t ts = (uint32_t)f.readStringUntil('\n').toInt();
+  uint32_t h  = (uint32_t)f.readStringUntil('\n').toInt();
+  f.close();
+  if (h != ctHash(url.c_str())) return true;            // source changed: fetch now
+  return !ts || (uint32_t)nowUtc() - ts >= 7200;
+}
+
+void App::gpFetchMark(const String& url) {
+  if (!timeIsSet()) return;
+  File f = Store::fs().open("/CardSat/gp.ts", "w");
+  if (!f) return;
+  f.printf("%lu\n%lu\n", (unsigned long)nowUtc(), (unsigned long)ctHash(url.c_str()));
+  f.close();
+}
+
+void App::ctxTsLoad(uint32_t& lastQ, uint32_t& qHash, uint32_t& lastRef) {
+  lastQ = qHash = lastRef = 0;
+  File f = Store::fs().open(FILE_CTX_TS, "r");
+  if (!f) return;
+  lastQ   = (uint32_t)f.readStringUntil('\n').toInt();
+  qHash   = (uint32_t)f.readStringUntil('\n').toInt();
+  lastRef = (uint32_t)f.readStringUntil('\n').toInt();
+  f.close();
+}
+
+void App::ctxTsSave(uint32_t lastQ, uint32_t qHash, uint32_t lastRef) {
+  File f = Store::fs().open(FILE_CTX_TS, "w");
+  if (!f) return;
+  f.printf("%lu\n%lu\n%lu\n", (unsigned long)lastQ, (unsigned long)qHash,
+           (unsigned long)lastRef);
+  f.close();
+}
+
+void App::ctSearchRun() {
+  String q = ctsBuf; q.trim();
+  if (!q.length()) { setStatus("Type a name or NORAD number"); return; }
+  // 10 s interactive spacing.
+  uint32_t ms = millis();
+  if (ctsLastQueryMs && ms - ctsLastQueryMs < 10000) {
+    setStatus("CelesTrak courtesy: wait " +
+              String((10000 - (ms - ctsLastQueryMs)) / 1000 + 1) + " s");
+    return;
+  }
+  bool digits = true;
+  for (size_t i = 0; i < q.length(); ++i) if (!isDigit(q[i])) { digits = false; break; }
+  String enc; enc.reserve(q.length() + 8);
+  for (size_t i = 0; i < q.length(); ++i) {     // minimal URL-encode
+    char c = q[i];
+    if (c == ' ') enc += "%20";
+    else if (c == '&' || c == '#' || c == '+' || c == '?') { }   // drop
+    else enc += c;
+  }
+  String url = String("https://celestrak.org/NORAD/elements/gp.php?")
+             + (digits ? "CATNR=" : "NAME=") + enc + "&FORMAT=JSON";
+
+  // Same query within 2 h: reuse the cached result file (no network).
+  uint32_t lastQ, qHash, lastRef; ctxTsLoad(lastQ, qHash, lastRef);
+  uint32_t h = ctHash(url.c_str());
+  bool cached = false;
+  if (timeIsSet() && qHash == h && lastQ &&
+      (uint32_t)nowUtc() - lastQ < 7200 && Store::fs().exists(CTQ_PATH)) {
+    cached = true;
+  } else {
+    if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed"); return; }
+    setStatus("Searching CelesTrak..."); draw();
+    if (!net.fetchGpToFile(url, CTQ_PATH)) {
+      // A NAME with no match returns a body CelesTrak phrases as an error; surface it.
+      setStatus("No match / " + net.lastErr);
+      ctsLastQueryMs = ms;
+      return;
+    }
+    ctsLastQueryMs = ms;
+    ctxTsSave(timeIsSet() ? (uint32_t)nowUtc() : 0, h, lastRef);
+  }
+
+  CtParseCtx ctx{ ctsRows, 0, CTS_MAX };
+  ctsTotal = SatDb::streamGpFileEntries(CTQ_PATH, ctRowSink, &ctx);
+  ctsN = ctx.n; ctsSel = 0; ctsScroll = 0;
+  if (ctsN == 0) setStatus(cached ? "No results (cached)" : "No results");
+  else if (cached) setStatus("Results from cache (<2 h old)");
+  lastDrawMs = 0;
+}
+
+void App::ctAddSelected() {
+  if (ctsN == 0 || ctsSel >= ctsN) return;
+  CtRow& r = ctsRows[ctsSel];
+  if (db.indexOfNorad(r.norad) >= 0) {
+    // Primary (or manual) catalog already covers it -- just make it a favorite. No
+    // FILE_CTX line: the primary source keeps it fresh, and an extra per-object fetch
+    // on every update would waste CelesTrak's bandwidth for nothing.
+    if (!isFav(r.norad)) toggleFav(r.norad);
+    buildSatView();
+    setStatus(String(r.name) + ": already in catalog, marked favorite");
+    return;
+  }
+  SatEntry e; CtFindCtx fc{ r.norad, &e, false };
+  SatDb::streamGpFileEntries(CTQ_PATH, ctFindSink, &fc);
+  if (!fc.found) { setStatus("Result cache stale - search again"); return; }
+  if (!db.addCtExtra(e)) { setStatus("Extras full (" + String(CTX_MAX) + ") or storage error"); return; }
+  db.loadCtExtraFile(favs, favN);               // merge into the live catalog
+  if (db.indexOfNorad(e.norad) < 0) {
+    setStatus("Saved, but catalog is full of favorites");
+    return;
+  }
+  if (!isFav(e.norad)) toggleFav(e.norad);
+  buildSatView();
+  setStatus(String(e.name) + " added as favorite (auto-updates)");
+}
+
+// Re-fetch every FILE_CTX object from CelesTrak. Called from both GP update paths
+// after the primary download succeeds and before the catalog is (re)loaded, so the
+// subsequent loadCtExtraFile merge picks up the fresh elements.
+void App::refreshCtExtras() {
+  uint32_t ids[CTREF_MAX]; int total = 0;
+  int n = SatDb::listNdjsonNorads(FILE_CTX, ids, CTREF_MAX, &total);
+  if (n == 0) return;                            // nothing tracked
+  uint32_t lastQ, qHash, lastRef; ctxTsLoad(lastQ, qHash, lastRef);
+  if (timeIsSet() && lastRef && (uint32_t)nowUtc() - lastRef < 7200) {
+    uint32_t ago = (uint32_t)nowUtc() - lastRef;
+    setStatus("CT extras fresh (" + String(ago / 60) + " min ago)"); draw();
+    return;                                      // 2 h courtesy throttle
+  }
+  // Rewrite FILE_CTX line by line: fresh elements when the fetch succeeds, the
+  // existing line kept when it doesn't (stale beats gone).
+  File in = Store::fs().open(FILE_CTX, "r");
+  if (!in) return;
+  const char* tmpPath = "/CardSat/ctx.tmp";
+  Store::fs().remove(tmpPath);
+  File outF = Store::fs().open(tmpPath, "w");
+  if (!outF) { in.close(); return; }
+  int i = 0, fresh = 0;
+  while (in.available()) {
+    String line = in.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    uint32_t nd = SatDb::gpLineNorad(line.c_str(), line.length());  // no JsonDocument churn
+    bool wrote = false;
+    if (nd && i < CTREF_MAX) {
+      ++i;
+      setStatus("CT extra " + String(i) + "/" + String(n) + "..."); draw();
+      String url = String("https://celestrak.org/NORAD/elements/gp.php?CATNR=")
+                 + nd + "&FORMAT=JSON";
+      if (net.fetchGpToFile(url, CTQ_PATH)) {
+        SatEntry e; CtFindCtx fc{ nd, &e, false };
+        SatDb::streamGpFileEntries(CTQ_PATH, ctFindSink, &fc);
+        if (fc.found) { SatDb::writeGpLine(outF, e); wrote = true; ++fresh; }
+      }
+      delay(2000);                               // courtesy spacing between object fetches
+    }
+    if (!wrote) { outF.print(line); outF.print('\n'); }
+  }
+  in.close(); outF.close();
+  Store::fs().remove(FILE_CTX);
+  Store::fs().rename(tmpPath, FILE_CTX);
+  Store::fs().remove(CTQ_PATH);
+  ctxTsSave(lastQ, qHash, timeIsSet() ? (uint32_t)nowUtc() : 0);
+  String msg = "CT extras: " + String(fresh) + "/" + String(n) + " refreshed";
+  if (total > CTREF_MAX) msg += " (first " + String(CTREF_MAX) + " of " + String(total) + ")";
+  setStatus(msg); draw();
+}
+
+void App::drawCtSearch() {
+  header("CelesTrak search");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(4, 18);
+  canvas.print(ctsBuf.length() ? ctsBuf.substring(0, 38) : String("(no query)"));
+  if (ctsN == 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 40); canvas.print("Search the ENTIRE public catalog");
+    canvas.setCursor(6, 50); canvas.print("by name or NORAD number --");
+    canvas.setCursor(6, 60); canvas.print("independent of your GP source.");
+    canvas.setCursor(6, 74); canvas.print("Picks become favorites and are");
+    canvas.setCursor(6, 84); canvas.print("re-fetched on every GP update.");
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    canvas.setCursor(6, 100); canvas.print("Courtesy limits: 10 s between");
+    canvas.setCursor(6, 110); canvas.print("searches, 2 h same-query cache.");
+    footer("/ query  ` back");
+    return;
+  }
+  const int VIS = 8;
+  if (ctsSel < ctsScroll) ctsScroll = ctsSel;
+  if (ctsSel >= ctsScroll + VIS) ctsScroll = ctsSel - VIS + 1;
+  for (int rI = 0; rI < VIS; ++rI) {
+    int idx = ctsScroll + rI; if (idx >= ctsN) break;
+    CtRow& r = ctsRows[idx];
+    int y = 30 + rI * 10;
+    bool sel = (idx == ctsSel);
+    bool have = (db.indexOfNorad(r.norad) >= 0);
+    if (sel) { canvas.fillRect(0, y - 2, 240, 10, CL_SELBG); }
+    canvas.setTextColor(sel ? CL_BLACK : (have ? CL_GREEN : CL_WHITE),
+                        sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(2, y);
+    canvas.printf("%-14.14s", r.name);
+    canvas.setCursor(90, y);  canvas.printf("%6lu", (unsigned long)r.norad);
+    canvas.setCursor(132, y); canvas.printf("%4.0f-%-4.0f", (double)r.peri, (double)r.apo);
+    canvas.setCursor(196, y); canvas.printf("i%4.1f", (double)r.incl);
+    if (isFav(r.norad)) { canvas.setCursor(232, y); canvas.print("*"); }
+  }
+  canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, 114);
+  if (ctsTotal > ctsN) canvas.printf("%d of %d shown  green=in catalog", ctsN, ctsTotal);
+  else                 canvas.printf("%d result%s  green=in catalog", ctsN, ctsN == 1 ? "" : "s");
+  footer(";/. pick  ENTER add fav  / new  ` back");
+}
+
+void App::keyCtSearch(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_SATLIST; buildSatView(); lastDrawMs = 0; return; }
+  if (c == '/') {
+    editTarget = 326; editTitle = "CelesTrak name / NORAD";
+    editBuf = ctsBuf; screen = SCR_EDIT; return;
+  }
+  if (ctsN == 0) return;
+  if (isUp(c))   { if (ctsSel > 0) --ctsSel; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (ctsSel < ctsN - 1) ++ctsSel; lastDrawMs = 0; return; }
+  if (enter) { ctAddSelected(); lastDrawMs = 0; }
 }
 
 // ---------------------------------------------------------------------------
@@ -36962,6 +38598,14 @@ namespace {
       if (*p == ')') ++p; else ok = false;
       return f(a * scale);
     }
+    double callFn2(double (*f)(double, double)) {       // f(a, b) -- comma-separated
+      ws(); if (*p != '(') { ok = false; return 0; }
+      ++p; double a = expr(); ws();
+      if (*p == ',') ++p; else { ok = false; return 0; }
+      double b = expr(); ws();
+      if (*p == ')') ++p; else ok = false;
+      return f(a, b);
+    }
     double atom() { ws();
       const double D2R = 0.017453292519943295, R2D = 57.29577951308232;
       if (*p == '(') { ++p; double v = expr(); ws(); if (*p == ')') ++p; else ok = false; return v; }
@@ -36993,6 +38637,52 @@ namespace {
       if (word("floor")) return callFn(::floor, 1.0);
       if (word("ceil"))  return callFn(::ceil,  1.0);
       if (word("round")) return callFn(::round, 1.0);
+      // --- general math (0.9.59 additions) ---
+      if (word("atan2")) { double r = callFn2([](double y, double x){ return atan2(y, x); }); return r * R2D; }
+      if (word("hypot")) return callFn2([](double a, double b){ return hypot(a, b); });
+      if (word("mod"))   return callFn2([](double a, double b){ return (b != 0) ? fmod(a, b) : 0.0; });
+      if (word("min"))   return callFn2([](double a, double b){ return a < b ? a : b; });
+      if (word("max"))   return callFn2([](double a, double b){ return a > b ? a : b; });
+      if (word("ncr"))   return callFn2([](double n, double r){
+            if (n < 0 || r < 0 || r > n || n > 170) return 0.0;
+            return round(exp(lgamma(n + 1) - lgamma(r + 1) - lgamma(n - r + 1))); });
+      if (word("npr"))   return callFn2([](double n, double r){
+            if (n < 0 || r < 0 || r > n || n > 170) return 0.0;
+            return round(exp(lgamma(n + 1) - lgamma(n - r + 1))); });
+      if (word("sign"))  return callFn([](double v){ return (v > 0) - (v < 0) + 0.0; }, 1.0);
+      if (word("log2"))  return callFn(::log2, 1.0);
+      if (word("cbrt"))  return callFn(::cbrt, 1.0);
+      if (word("fact"))  return callFn([](double n){
+            if (n < 0 || n > 170 || n != floor(n)) return 0.0;
+            return round(exp(lgamma(n + 1))); }, 1.0);
+      if (word("d2r"))   return callFn([](double d){ return d * 0.017453292519943295; }, 1.0);
+      if (word("r2d"))   return callFn([](double r){ return r * 57.29577951308232; }, 1.0);
+      if (word("rnd"))   { ws(); if (p[0]=='(' && p[1]==')') { p += 2;
+            return (double)esp_random() / 4294967296.0; } ok = false; return 0; }
+      // --- RF / satellite (0.9.59 additions; companions to the new tools) ---
+      if (word("swr2rl")) return callFn([](double s){                       // VSWR -> return loss dB
+            if (s <= 1) return 99.0; double g = (s - 1) / (s + 1); return -20.0 * log10(g); }, 1.0);
+      if (word("rl2swr")) return callFn([](double rl){                      // return loss dB -> VSWR
+            double g = pow(10.0, -fabs(rl) / 20.0); return (g >= 1) ? 999.0 : (1 + g) / (1 - g); }, 1.0);
+      if (word("mml"))    return callFn([](double s){                       // mismatch loss dB
+            if (s <= 1) return 0.0; double g = (s - 1) / (s + 1);
+            return -10.0 * log10(1.0 - g * g); }, 1.0);
+      if (word("fspl"))   return callFn2([](double mhz, double km){         // free-space path loss dB
+            if (mhz <= 0 || km <= 0) return 0.0;
+            return 20.0 * log10(km) + 20.0 * log10(mhz) + 32.44778; });
+      if (word("nf2t"))   return callFn([](double nf){ return 290.0 * (pow(10.0, nf / 10.0) - 1.0); }, 1.0);
+      if (word("t2nf"))   return callFn([](double tk){ return (tk < 0) ? 0.0 : 10.0 * log10(1.0 + tk / 290.0); }, 1.0);
+      if (word("dbd"))    return callFn([](double dbi){ return dbi - 2.15; }, 1.0);   // dBi -> dBd
+      if (word("dbi"))    return callFn([](double dbd){ return dbd + 2.15; }, 1.0);   // dBd -> dBi
+      if (word("dop"))    return callFn2([](double mhz, double rr){          // Doppler Hz from rr km/s
+            return -rr / 299792.458 * mhz * 1e6; });
+      // --- orbital one-liners (audited formulas; alt in km above the surface) ---
+      if (word("porb"))  return callFn([](double alt){ double r = 6378.137 + alt;
+            return (r > 0) ? 2 * 3.14159265358979 * sqrt(r * r * r / 398600.4418) / 60.0 : 0.0; }, 1.0);
+      if (word("vorb"))  return callFn([](double alt){ double r = 6378.137 + alt;
+            return (r > 0) ? sqrt(398600.4418 / r) : 0.0; }, 1.0);
+      if (word("fpr"))   return callFn([](double alt){ double r = 6378.137 + alt;
+            return (r > 6378.137) ? 6378.137 * acos(6378.137 / r) : 0.0; }, 1.0);
       // --- amateur-radio / satellite helper functions (single-argument) ---
       // Power/ratio in dB, watts<->dBm, and frequency(MHz)->wavelength(m).
       if (word("dbm"))   return callFn([](double w){ return 10.0*log10(w) + 30.0; }, 1.0); // W -> dBm
@@ -37015,6 +38705,7 @@ namespace {
         bool nextIdent = (nxt >= 'a' && nxt <= 'z') || (nxt >= 'A' && nxt <= 'Z');
         double mult = 0.0;
         switch (sfx) {
+          case 'f': mult = 1e-15; break;
           case 'p': mult = 1e-12; break;
           case 'n': mult = 1e-9;  break;
           case 'u': mult = 1e-6;  break;
@@ -37104,7 +38795,7 @@ void App::drawCalc() {
     canvas.setCursor(4, 106); canvas.print("log exp abs floor ceil ^ pi e Ans");
   } else {
     canvas.setCursor(4, 96);  canvas.print("ham: dbm() w() db() undb() wl() fq()");
-    canvas.setCursor(4, 106); canvas.print("const: c kB Re mu g0  suffix p n u m k M G");
+    canvas.setCursor(4, 106); canvas.print("const c kB Re mu g0 sfx p n u m k M G T");
   }
   if (calcEngNota) { canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(210, 96); canvas.print("ENG"); }
   footer("' fns  \ eng  [ ] scroll  Fn+h help");
@@ -38466,6 +40157,57 @@ void App::graphInit() {
   bool ok; calcEvalX(graphExpr.c_str(), 0.0, ok); graphErr = !ok;
 }
 
+// Per-column sample buffers for the grapher: filled by drawGraph's plot loop and
+// reused by trace/roots; mode-exclusively they double as the CSV downsample cache
+// (A = per-column min, B = per-column max), which is why they live at file scope --
+// graphCsvLoad() fills them outside the draw. 1.9 KB of .bss, never stack.
+static float gGraphBufA[236], gGraphBufB[236];
+
+// Stream /CardSat/plot.csv into the column buffers, decimated min/max per pixel
+// column. Rows are sequential samples: the LAST comma-separated field on each line
+// is the y value (so both "y" and "x,y" files plot). Two streaming passes -- count,
+// then bucket -- keep RAM flat for any file size. Returns rows found (0 = none);
+// also sets the y window to the data range (padded) and remembers it for 'a'.
+int App::graphCsvLoad() {
+  File f = Store::fs().open("/CardSat/plot.csv", "r");
+  if (!f) return 0;
+  int n = 0;
+  while (f.available()) {                       // pass 1: count numeric rows
+    String ln = f.readStringUntil('\n'); ln.trim();
+    if (!ln.length()) continue;
+    int cm = ln.lastIndexOf(',');
+    const char* ys = ln.c_str() + (cm >= 0 ? cm + 1 : 0);
+    char* e = nullptr; strtod(ys, &e);
+    if (e != ys) ++n;
+  }
+  f.close();
+  if (n == 0) return 0;
+  for (int i = 0; i < 236; ++i) { gGraphBufA[i] = NAN; gGraphBufB[i] = NAN; }
+  f = Store::fs().open("/CardSat/plot.csv", "r");
+  if (!f) return 0;
+  double lo = 1e300, hi = -1e300; int idx = 0;
+  while (f.available()) {                       // pass 2: min/max bucket per column
+    String ln = f.readStringUntil('\n'); ln.trim();
+    if (!ln.length()) continue;
+    int cm = ln.lastIndexOf(',');
+    const char* ys = ln.c_str() + (cm >= 0 ? cm + 1 : 0);
+    char* e = nullptr; double y = strtod(ys, &e);
+    if (e == ys) continue;
+    int col = (int)((int64_t)idx * 235 / (n > 1 ? n - 1 : 1));
+    if (col > 235) col = 235;
+    if (isnan(gGraphBufA[col]) || y < gGraphBufA[col]) gGraphBufA[col] = (float)y;
+    if (isnan(gGraphBufB[col]) || y > gGraphBufB[col]) gGraphBufB[col] = (float)y;
+    if (y < lo) lo = y; if (y > hi) hi = y;
+    ++idx;
+  }
+  f.close();
+  if (hi <= lo) hi = lo + 1;
+  double pad = (hi - lo) * 0.08;
+  gCsvLo = (float)lo; gCsvHi = (float)hi;
+  graphYmin = lo - pad; graphYmax = hi + pad;
+  return n;
+}
+
 void App::drawGraph() {
   header("Graph");
   canvas.setTextSize(1);
@@ -38491,36 +40233,153 @@ void App::drawGraph() {
   if (0 >= ymin && 0 <= ymax) { int y0 = sy(0); canvas.drawFastHLine(PX0, y0, PW + 1, CL_GREY); }
   if (0 >= xmin && 0 <= xmax) { int x0 = sx(0); canvas.drawFastVLine(x0, PY0, PH + 1, CL_GREY); }
 
+  float* ybuf = gGraphBufA; float* y2buf = gGraphBufB;   // see file-scope note
+
+  // ---- CSV-file mode: plot /CardSat/plot.csv (decimated min/max per column) ----
+  if (gMode == 2) {
+    if (gCsvN <= 0) {
+      canvas.setTextColor(CL_ORANGE, CL_BLACK);
+      canvas.setCursor(30, 56); canvas.print("No /CardSat/plot.csv loaded");
+      canvas.setCursor(30, 68); canvas.print("(x re-read, c back to plot)");
+    } else {
+      // ybuf = per-column min, y2buf = per-column max (filled by the 'c'/'x' loader).
+      for (int i = 0; i <= PW; ++i) {
+        float lo = ybuf[i], hi = y2buf[i];
+        if (!isfinite(lo) || !isfinite(hi)) continue;
+        int ylo = sy(lo), yhi = sy(hi);
+        if (ylo < PY0) ylo = PY0; if (ylo > PY1) ylo = PY1;
+        if (yhi < PY0) yhi = PY0; if (yhi > PY1) yhi = PY1;
+        canvas.drawFastVLine(PX0 + i, min(ylo, yhi), abs(ylo - yhi) + 1, CL_GREEN);
+      }
+      canvas.setTextColor(CL_GREY, CL_BLACK);
+      canvas.setCursor(2, 120);
+      canvas.printf("plot.csv %d rows  y[%g,%g]", gCsvN, ymin, ymax);
+    }
+    footer("c plot mode  x re-read  a fit  ` back");
+    return;
+  }
+
+  // ---- Table mode: x / Y1 / Y2 rows ----
+  if (gMode == 1) {
+    if (isnan(gTabX0)) gTabX0 = xmin;
+    double stp = xr / 11.0;
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 30); canvas.print("x");
+    canvas.setCursor(80, 30); canvas.print("Y1");
+    if (graphExpr2.length()) { canvas.setCursor(160, 30); canvas.print("Y2"); }
+    for (int r = 0; r < 10; ++r) {
+      double x = gTabX0 + r * stp;
+      bool ok; double y1 = calcEvalX(graphExpr.c_str(), x, ok);
+      int y = 40 + r * 8;
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(2, y);  canvas.printf("%10.4g", x);
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.setCursor(70, y);
+      if (ok && isfinite(y1)) canvas.printf("%11.5g", y1); else canvas.print("      --");
+      if (graphExpr2.length()) {
+        bool ok2; double y2 = calcEvalX(graphExpr2.c_str(), x, ok2);
+        canvas.setTextColor(CL_ORANGE, CL_BLACK);
+        canvas.setCursor(150, y);
+        if (ok2 && isfinite(y2)) canvas.printf("%11.5g", y2); else canvas.print("      --");
+      }
+    }
+    footer(";/. shift  +/- step  b plot  ` back");
+    return;
+  }
+
   // Plot: one sample per pixel column; connect consecutive in-range samples with a line
   // (a NaN/inf or a jump larger than the whole window height breaks the curve, so poles
   // in tan(x) etc. don't draw a spurious vertical bar).
-  if (!graphErr) {
+  auto plotExpr = [&](const String& ex, float* buf, uint16_t col) {
     int prevX = 0, prevY = 0; bool havePrev = false;
     for (int px = PX0; px <= PX1; ++px) {
       double x = xmin + (double)(px - PX0) / PW * xr;
-      bool ok; double y = calcEvalX(graphExpr.c_str(), x, ok);
+      bool ok; double y = calcEvalX(ex.c_str(), x, ok);
+      buf[px - PX0] = (ok && isfinite(y)) ? (float)y : NAN;
       if (!ok || !isfinite(y)) { havePrev = false; continue; }
       int py = sy(y);
       // Clamp far-off-screen values so the connecting line enters/leaves cleanly.
       bool off = (py < PY0 - PH || py > PY1 + PH);
       if (off) { havePrev = false; continue; }
       if (py < PY0) py = PY0; if (py > PY1) py = PY1;
-      if (havePrev) canvas.drawLine(prevX, prevY, px, py, CL_YELLOW);
-      else          canvas.drawPixel(px, py, CL_YELLOW);
+      if (havePrev) canvas.drawLine(prevX, prevY, px, py, col);
+      else          canvas.drawPixel(px, py, col);
       prevX = px; prevY = py; havePrev = true;
     }
+  };
+  bool y2on = graphExpr2.length() > 0;
+  if (!graphErr) {
+    plotExpr(graphExpr, ybuf, CL_YELLOW);
+    if (y2on) plotExpr(graphExpr2, y2buf, CL_ORANGE);
   } else {
     canvas.setTextColor(CL_RED, CL_BLACK);
     canvas.setCursor(70, 60); canvas.print("expression error");
   }
 
-  // Window readout under the plot.
-  canvas.setTextColor(CL_GREY, CL_BLACK);
-  char b[48];
-  snprintf(b, sizeof(b), "x[%g,%g] y[%g,%g]", xmin, xmax, ymin, ymax);
-  canvas.setCursor(2, 120); canvas.print(b);
+  // Zero / intersection markers from the last 'z'/'Z' find.
+  for (int i = 0; i < gRootsN; ++i) {
+    if (gRoots[i] < xmin || gRoots[i] > xmax) continue;
+    int px = sx(gRoots[i]);
+    canvas.drawFastVLine(px, PY1 - 5, 5, CL_CYAN);
+    canvas.drawPixel(px - 1, PY1 - 5, CL_CYAN); canvas.drawPixel(px + 1, PY1 - 5, CL_CYAN);
+  }
 
-  footer("ENT edit arrows pan +/- zoom a fit pprt");
+  // Integral marks + Simpson value when both are set.
+  auto markLine = [&](double mx, uint16_t col) {
+    if (isnan(mx) || mx < xmin || mx > xmax) return;
+    canvas.drawFastVLine(sx(mx), PY0, PH + 1, col);
+  };
+  markLine(gMarkA, CL_MGREY); markLine(gMarkB, CL_MGREY);
+  if (!isnan(gMarkA) && !isnan(gMarkB) && !graphErr) {
+    double a = min(gMarkA, gMarkB), b2 = max(gMarkA, gMarkB);
+    const int NS = 200; double h = (b2 - a) / NS, acc = 0; bool good = (h > 0);
+    for (int i = 0; i <= NS && good; ++i) {
+      bool ok; double y = calcEvalX(graphExpr.c_str(), a + i * h, ok);
+      if (!ok || !isfinite(y)) { good = false; break; }
+      acc += y * ((i == 0 || i == NS) ? 1 : (i & 1 ? 4 : 2));
+    }
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(120, 20);
+    if (good) canvas.printf("S=%.6g", acc * h / 3.0);
+    else      canvas.print("S: undefined");
+  }
+
+  // Trace cursor: crosshair + readout (x, y, numeric dy/dx) replaces the window line.
+  if (gTrace >= 0 && !graphErr) {
+    if (gTrace > PW) gTrace = PW;
+    int px = PX0 + gTrace;
+    canvas.drawFastVLine(px, PY0, PH + 1, CL_DGREY);
+    double x = xmin + (double)gTrace / PW * xr;
+    float y = ybuf[gTrace];
+    if (isfinite(y)) {
+      int py = sy(y); if (py >= PY0 && py <= PY1) {
+        canvas.drawFastHLine(px - 3, py, 7, CL_WHITE);
+        canvas.drawFastVLine(px, py - 3, 7, CL_WHITE);
+      }
+    }
+    // dy/dx: central difference over the sample spacing.
+    double dydx = NAN, hx = xr / PW;
+    if (gTrace > 0 && gTrace < PW &&
+        isfinite(ybuf[gTrace - 1]) && isfinite(ybuf[gTrace + 1]))
+      dydx = (ybuf[gTrace + 1] - ybuf[gTrace - 1]) / (2 * hx);
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    char tb[64];
+    if (y2on && isfinite(y2buf[gTrace]))
+      snprintf(tb, sizeof(tb), "x=%.5g y1=%.5g y2=%.5g", x, (double)y, (double)y2buf[gTrace]);
+    else if (isfinite(dydx))
+      snprintf(tb, sizeof(tb), "x=%.5g y=%.5g y'=%.4g", x, (double)y, dydx);
+    else
+      snprintf(tb, sizeof(tb), "x=%.5g y=%.5g", x, (double)y);
+    canvas.setCursor(2, 120); canvas.print(tb);
+  } else {
+    // Window readout under the plot.
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    char b[48];
+    snprintf(b, sizeof(b), "x[%g,%g] y[%g,%g]", xmin, xmax, ymin, ymax);
+    canvas.setCursor(2, 120); canvas.print(b);
+  }
+
+  footer(gTrace >= 0 ? ",// move {} x10  m mark  t off  z zero"
+                     : "ENT e1 2 e2 t trc z zero m mk b tbl c csv");
 }
 
 void App::keyGraph(char c, bool enter, bool back) {
@@ -38529,6 +40388,87 @@ void App::keyGraph(char c, bool enter, bool back) {
   if (enter) {                                   // edit the expression
     editTarget = 780; editTitle = "y = f(x)"; editBuf = graphExpr;
     screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+  if (c == '2') {                                // edit / clear the second trace
+    editTarget = 783; editTitle = "y2 = f(x) (empty=off)"; editBuf = graphExpr2;
+    screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+  if (c == 'b') { gMode = (gMode == 1) ? 0 : 1; gTabX0 = graphXmin; lastDrawMs = 0; return; }
+  if (c == 'c' || (gMode == 2 && c == 'x')) {    // CSV mode toggle / re-read
+    if (c == 'c' && gMode == 2) { gMode = 0; lastDrawMs = 0; return; }
+    gMode = 2; gTrace = -1;
+    // Load /CardSat/plot.csv into the drawGraph column buffers via a static hook:
+    // rows are sequential samples (col 1 = y, or "x,y" with x ignored for scaling);
+    // two streaming passes (count, then min/max bucket) keep RAM flat for any size.
+    gCsvN = graphCsvLoad();
+    if (gCsvN > 0) setStatus(String(gCsvN) + " rows");
+    else setStatus("No /CardSat/plot.csv");
+    lastDrawMs = 0; return;
+  }
+  if (gMode == 1) {                              // table-mode keys
+    double stp = (graphXmax - graphXmin) / 11.0;
+    if (isUp(c))   { gTabX0 -= stp; lastDrawMs = 0; return; }
+    if (isDown(c)) { gTabX0 += stp; lastDrawMs = 0; return; }
+    if (c == '+' || c == '=') { double cx=(graphXmin+graphXmax)/2, xr2=(graphXmax-graphXmin)*0.4;
+      graphXmin = cx-xr2; graphXmax = cx+xr2; gTabX0 = graphXmin; lastDrawMs = 0; return; }
+    if (c == '-' || c == '_') { double cx=(graphXmin+graphXmax)/2, xr2=(graphXmax-graphXmin)*0.625;
+      graphXmin = cx-xr2; graphXmax = cx+xr2; gTabX0 = graphXmin; lastDrawMs = 0; return; }
+    return;
+  }
+  if (gMode == 2) {                              // CSV mode: only c/x/a/` do anything
+    if (c == 'a' && gCsvN > 0) {
+      double pad = (gCsvHi - gCsvLo) * 0.08;
+      graphYmin = gCsvLo - pad; graphYmax = gCsvHi + pad;
+      setStatus("Y fit to data"); lastDrawMs = 0;
+    }
+    return;
+  }
+  if (c == 't') { gTrace = (gTrace < 0) ? 118 : -1; lastDrawMs = 0; return; }
+  if (gTrace >= 0) {                             // trace-cursor movement
+    if (isLeft(c))  { if (gTrace > 0)   --gTrace;      lastDrawMs = 0; return; }
+    if (isRight(c)) { if (gTrace < 235) ++gTrace;      lastDrawMs = 0; return; }
+    if (c == '{')   { gTrace = max(0, gTrace - 10);    lastDrawMs = 0; return; }
+    if (c == '}')   { gTrace = min(235, gTrace + 10);  lastDrawMs = 0; return; }
+    if (c == 'm') {                              // mark cycle: A -> B -> clear
+      double x = graphXmin + (double)gTrace / 235.0 * (graphXmax - graphXmin);
+      if (isnan(gMarkA)) gMarkA = x;
+      else if (isnan(gMarkB)) gMarkB = x;
+      else { gMarkA = NAN; gMarkB = NAN; }
+      lastDrawMs = 0; return;
+    }
+  }
+  if (c == 'x') { gMarkA = gMarkB = NAN; gRootsN = 0; lastDrawMs = 0; return; }
+  if (c == 'z' || c == 'Z') {                    // zeros of Y1 / intersections Y1=Y2
+    if (graphErr) { setStatus("Fix expression first"); return; }
+    bool inter = (c == 'Z');
+    if (inter && !graphExpr2.length()) { setStatus("No Y2 set (key 2)"); return; }
+    gRootsN = 0;
+    double xr2 = graphXmax - graphXmin;
+    auto f = [&](double x, bool& ok) {
+      double v = calcEvalX(graphExpr.c_str(), x, ok);
+      if (inter && ok) { bool o2; double v2 = calcEvalX(graphExpr2.c_str(), x, o2);
+                         ok = ok && o2; v -= v2; }
+      return v;
+    };
+    bool pv = false; double py = 0;
+    for (int i = 0; i <= 235 && gRootsN < 4; ++i) {
+      double x = graphXmin + (double)i / 235.0 * xr2;
+      bool ok; double y = f(x, ok);
+      if (!ok || !isfinite(y)) { pv = false; continue; }
+      if (pv && ((py < 0 && y >= 0) || (py > 0 && y <= 0))) {
+        double a = graphXmin + (double)(i - 1) / 235.0 * xr2, b2 = x;
+        for (int k = 0; k < 40; ++k) {           // bisection refine
+          double m = 0.5 * (a + b2); bool o3; double ym = f(m, o3);
+          if (!o3) break;
+          if ((ym < 0) == (py < 0)) a = m; else b2 = m;
+        }
+        gRoots[gRootsN++] = (float)(0.5 * (a + b2));
+      }
+      pv = true; py = y;
+    }
+    setStatus(gRootsN ? (String(inter ? "Intersections: " : "Zeros: ") + gRootsN)
+                      : String("None in window"));
+    lastDrawMs = 0; return;
   }
   double xr = graphXmax - graphXmin, yr = graphYmax - graphYmin;
   // Pan by 10% of the current span.
@@ -38610,6 +40550,12 @@ namespace {
     double sfi = 0, kp = 0, aIdx = 0;
     double wxTemp = 0, wxWind = 0, wxDir = 0, wxHum = 0;
     double batt = 0, gpAge = 0, nfav = 0;
+    // 0.9.59 additions
+    double lstHr = 0;                                     // local sidereal time, hours
+    bool   gpsOk = false;  double gpsSats = 0, gpsSpd = 0, gpsLat = 0, gpsLon = 0, gpsAlt = 0;
+    double heapFree = 0, upTime = 0, nSat = 0, nTx = 0;
+    bool   txOk = false;   double txDl = 0, txUl = 0, txBw = 0, txInv = 0, txLin = 0;
+    double pAos[8], pLos[8], pMax[8]; int pN = 0;         // up to 8 upcoming passes
   };
 
   // System-name table. Read-only; every entry is data the firmware already has.
@@ -38632,6 +40578,10 @@ namespace {
     {"WXTEMP",34},{"WXWIND",35},{"WXDIR",36},{"WXHUM",37},
     {"BATT",38},{"GPAGE",39},{"NFAV",40},
     {"SATOK",41},{"TIMEOK",42},{"POSOK",43},{"WXOK",44},{"SPWXOK",45},{"PASSOK",46},
+    {"LSTHR",47},{"GPSOK",48},{"GPSSATS",49},{"GPSSPD",50},
+    {"GPSLAT",51},{"GPSLON",52},{"GPSALT",53},
+    {"HEAPFREE",54},{"UPTIME",55},{"NSAT",56},{"NTX",57},{"PASSN",58},
+    {"TXDL",59},{"TXUL",60},{"TXBW",61},{"TXINV",62},{"TXLIN",63},
   };
   static const int BASIC_SYS_N = (int)(sizeof(BASIC_SYS) / sizeof(BASIC_SYS[0]));
 
@@ -38666,8 +40616,33 @@ namespace {
     ForRec forStack[BASIC_FOR_MAX]; int forSP = 0;
     long   stmts = 0;
     const char* p = nullptr;                    // expression cursor
+    double* arr = nullptr; int arrN = 0;        // the one @() array (DIM @(n), n<=256)
+    int    dataLineIdx = 0;                     // DATA read cursor: line index...
+    const char* dataP = nullptr;                //   ...and position inside its value list
+    // Host hooks (set by basicRun; null = feature unavailable). The VM stays ignorant of
+    // App: everything crosses these five function pointers. satsel/txsel re-snapshot the
+    // sat/transponder groups; lpr streams a finished line to the report sinks; gfx draws
+    // on the canvas; file is the gated /CardSat/basic/ writer + FILES lister.
+    void* host = nullptr;
+    bool (*satselCb)(void*, int, double out[13]) = nullptr;
+    bool (*txselCb)(void*, int, double out[5])   = nullptr;
+    bool (*lprCb)(void*, const char*, int op)    = nullptr;   // 1 = line, 2 = close
+    void (*gfxCb)(void*, int op, double a, double b, double c2, double d, double e, const char* s) = nullptr;
+    int  (*fileCb)(void*, int op, const char* a, String* out) = nullptr;
+    int  satselLeft = 2000;                     // SGP4-per-run budget for SATSEL
+    bool gfxUsed = false, lprUsed = false, fileUsed = false;
+    ~BasicVM() { delete[] arr; }
 
     void ws() { while (*p == ' ' || *p == '\t') ++p; }
+    // Boundary-checked keyword match for WORD OPERATORS (MOD/AND/OR/NOT...): unlike kw(),
+    // refuses when the next char is alphanumeric, so a variable named M followed by "OD"
+    // can never be swallowed as MOD.
+    bool kwb(const char* w) {
+      const char* q = p; const char* w0 = w;
+      while (*w0) { if (toupper((unsigned char)*q) != *w0) return false; ++q; ++w0; }
+      if (isalnum((unsigned char)*q)) return false;
+      p = q; return true;
+    }
 
     // Resolve a matched system name to its value. The *OK flags never error (that is the
     // point of them); every other group errors when its data is missing rather than
@@ -38677,6 +40652,11 @@ namespace {
         case 41: return sys.satOk  ? 1 : 0;  case 42: return sys.timeOk ? 1 : 0;
         case 43: return sys.posOk  ? 1 : 0;  case 44: return sys.wxOk   ? 1 : 0;
         case 45: return sys.spwxOk ? 1 : 0;  case 46: return sys.passOk ? 1 : 0;
+        case 48: return sys.gpsOk  ? 1 : 0;
+        case 49: return sys.gpsSats;         case 50: return sys.gpsSpd;
+        case 54: return sys.heapFree;        case 55: return sys.upTime;
+        case 56: return sys.nSat;            case 57: return sys.nTx;
+        case 58: return sys.pN;
       }
       if (id >= 1  && id <= 13 && !sys.satOk)  { err = "no active satellite"; return 0; }
       if (id >= 14 && id <= 17 && !sys.passOk) { err = "no pass predicted";   return 0; }
@@ -38686,6 +40666,9 @@ namespace {
       if (id >= 25 && id <= 30 && !sys.timeOk) { err = "clock not set";       return 0; }
       if (id >= 31 && id <= 33 && !sys.spwxOk) { err = "no space wx data";    return 0; }
       if (id >= 34 && id <= 37 && !sys.wxOk)   { err = "no weather data";     return 0; }
+      if (id == 47 && (!sys.timeOk || !sys.posOk)) { err = "no position/clock"; return 0; }
+      if (id >= 51 && id <= 53 && !sys.gpsOk)  { err = "no GPS fix";        return 0; }
+      if (id >= 59 && id <= 63 && !sys.txOk)   { err = "no transponder (TXSEL)"; return 0; }
       switch (id) {
         case 1:  return sys.satAz;   case 2:  return sys.satEl;   case 3:  return sys.satRng;
         case 4:  return sys.satRR;   case 5:  return sys.satLat;  case 6:  return sys.satLon;
@@ -38701,6 +40684,10 @@ namespace {
         case 34: return sys.wxTemp;  case 35: return sys.wxWind;  case 36: return sys.wxDir;
         case 37: return sys.wxHum;   case 38: return sys.batt;    case 39: return sys.gpAge;
         case 40: return sys.nfav;
+        case 47: return sys.lstHr;
+        case 51: return sys.gpsLat;  case 52: return sys.gpsLon;  case 53: return sys.gpsAlt;
+        case 59: return sys.txDl;    case 60: return sys.txUl;    case 61: return sys.txBw;
+        case 62: return sys.txInv;   case 63: return sys.txLin;
       }
       return 0;
     }
@@ -38712,12 +40699,21 @@ namespace {
       if (*p == '+') { ++p; v += term(); } else if (*p == '-') { ++p; v -= term(); } else break; } return v; }
     double term() { double v = power(); for (;;) { ws();
       if (*p == '*') { ++p; v *= power(); }
-      else if (*p == '/') { ++p; double d = power(); v = (d != 0) ? v / d : 0; } else break; } return v; }
+      else if (*p == '/') { ++p; double d = power(); v = (d != 0) ? v / d : 0; }
+      else if (kwb("MOD")) { double d = power(); v = (d != 0) ? fmod(v, d) : 0; } else break; } return v; }
     double power() { double v = unary(); ws(); if (*p == '^') { ++p; v = pow(v, power()); } return v; }
     double unary() { ws(); if (*p == '-') { ++p; return -unary(); } if (*p == '+') { ++p; return unary(); } return atom(); }
     double atom() { ws();
       const double D2R = 0.017453292519943295;
       if (*p == '(') { ++p; double v = expr(); ws(); if (*p == ')') ++p; else err = "paren"; return v; }
+      if (*p == '@') {                            // the one array: @(index)
+        ++p; ws(); if (*p != '(') { err = "@ needs ()"; return 0; }
+        ++p; double iv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return 0; }
+        int i = (int)iv;
+        if (!arr) { err = "no DIM @"; return 0; }
+        if (i < 0 || i >= arrN) { err = "@ index"; return 0; }
+        return arr[i];
+      }
       if (isalpha((unsigned char)*p)) {
         if (kw("ABS")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return fabs(v); } }
         else if (kw("INT")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return floor(v); } }
@@ -38726,6 +40722,29 @@ namespace {
         else if (kw("COS")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return cos(v*D2R); } }
         else if (kw("RND")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p;
               long m = (long)(v < 1 ? 1 : v); return (double)(esp_random() % (m > 0 ? m : 1)); } }
+        else if (kw("TAN")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return tan(v*D2R); } }
+        else if (kw("ATN")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return atan(v)/D2R; } }
+        else if (kw("LOG")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return v>0?log(v):0; } }
+        else if (kw("EXP")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return exp(v); } }
+        else if (kw("SGN")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return (v>0)-(v<0)+0.0; } }
+        else if (kw("MIN")) { ws(); if (*p=='(') { ++p; double a2=expr(); ws(); if(*p==',')++p;
+              double b2=expr(); ws(); if(*p==')')++p; return a2<b2?a2:b2; } }
+        else if (kw("MAX")) { ws(); if (*p=='(') { ++p; double a2=expr(); ws(); if(*p==',')++p;
+              double b2=expr(); ws(); if(*p==')')++p; return a2>b2?a2:b2; } }
+        // Pass lookahead: PASSAOS(k)/PASSLOS(k)/PASSMAX(k), k = 1..PASSN. Function
+        // style (they take an index), so they're matched here, before the bare-name
+        // table -- which also keeps its PASSEL/PASSOK prefixes unambiguous.
+        else if (kw("PASSAOS") || kw("PASSLOS") || kw("PASSMAX")) {
+          // p-3..p-1 are the final 3 chars of whichever keyword matched: AOS/LOS/MAX.
+          char w3 = toupper((unsigned char)*(p - 3));
+          ws(); if (*p != '(') { err = "needs (k)"; return 0; }
+          ++p; double kv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return 0; }
+          int k = (int)kv;
+          if (k < 1 || k > sys.pN) { err = "pass index"; return 0; }
+          if (w3 == 'A') return sys.pAos[k - 1];            // ...AOS
+          if (w3 == 'L') return sys.pLos[k - 1];            // ...LOS
+          return sys.pMax[k - 1];                           // ...MAX
+        }
         // System data (read-only). Checked before the single-letter fallback; every
         // multi-letter identifier was already an error before these existed, so no
         // previously-valid program changes meaning.
@@ -38741,6 +40760,15 @@ namespace {
       if (e == p) { err = "syntax"; return 0; }
       p = e; return v;
     }
+    // IF-condition grammar: OR-of ANDs of (optionally NOT-ed) relations. Word operators
+    // are boundary-checked (kwb) so single-letter variables can't be eaten. Both sides
+    // are always evaluated (no short-circuit) -- simple, and side-effect-free here.
+    double lnot() { ws(); if (kwb("NOT")) return (lnot() == 0) ? 1 : 0; return relation(); }
+    double land() { double v = lnot(); for (;;) { ws();
+      if (kwb("AND")) { double r = lnot(); v = (v != 0 && r != 0) ? 1 : 0; } else break; } return v; }
+    double lor()  { double v = land(); for (;;) { ws();
+      if (kwb("OR"))  { double r = land(); v = (v != 0 || r != 0) ? 1 : 0; } else break; } return v; }
+
     double relation() {
       double l = expr(); ws();
       char a = *p, b = *(p + 1);
@@ -38760,6 +40788,22 @@ namespace {
       else snprintf(b, sizeof(b), "%g", v);
       out += b;
     }
+    // PRINT's item grammar rendered into a caller String -- one finished line, no
+    // trailing newline. Shared by LPRINT (report sinks) and FPRINT (gated file).
+    void emitLine(String& dst) {
+      for (;;) { ws();
+        if (*p == 0 || *p == ':') break;
+        if (*p == '"') { ++p; while (*p && *p != '"') dst += *p++; if (*p == '"') ++p; }
+        else if (*p == ',') { dst += "  "; ++p; }
+        else if (*p == ';') { ++p; }
+        else { double v = expr(); if (!err.isEmpty()) return;
+          char b[32];
+          if (v == floor(v) && fabs(v) < 1e15) snprintf(b, sizeof(b), "%ld", (long)v);
+          else snprintf(b, sizeof(b), "%g", v);
+          dst += b; }
+      }
+    }
+
     void printStmt() {
       // suppressNL is set by a trailing ',' or ';' and cleared when an item follows it.
       // emitted tracks whether any item was printed at all: an empty PRINT (no items,
@@ -38776,7 +40820,48 @@ namespace {
       // all -- no items and no separator) always emits a blank line.
       if (!suppressNL || (!emitted && !sawSep)) out += '\n';
     }
-    int assign() { ws(); char v = toupper((unsigned char)*p); ++p; ws(); if (*p == '=') ++p; vars[v-'A'] = expr(); return -1; }
+    int assign() { ws();
+      if (*p == '@') {                            // @(index) = expr
+        ++p; ws(); if (*p != '(') { err = "@ needs ()"; return -1; }
+        ++p; double iv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+        ws(); if (*p == '=') ++p; else { err = "="; return -1; }
+        double val = expr();
+        int i = (int)iv;
+        if (!arr) { err = "no DIM @"; return -1; }
+        if (i < 0 || i >= arrN) { err = "@ index"; return -1; }
+        arr[i] = val; return -1;
+      }
+      char v = toupper((unsigned char)*p); ++p; ws(); if (*p == '=') ++p; vars[v-'A'] = expr(); return -1; }
+
+    // Pull the next DATA value (numbers only, comma-separated, optional sign) scanning
+    // forward from the read cursor across the program's DATA lines. false = out of DATA.
+    bool nextData(double& out) {
+      for (;;) {
+        if (dataP) {                              // continue inside the current DATA line
+          const char* q = dataP;
+          while (*q == ' ' || *q == '\t' || *q == ',') ++q;
+          if (*q) {
+            char* e = nullptr; double v = strtod(q, &e);
+            if (e == q) { dataP = nullptr; ++dataLineIdx; continue; }   // junk: next line
+            dataP = e; out = v; return true;
+          }
+          dataP = nullptr; ++dataLineIdx;         // line exhausted
+        }
+        // find the next DATA line at/after dataLineIdx
+        while (dataLineIdx < nLines) {
+          const char* q = lines[dataLineIdx].text;
+          while (*q == ' ' || *q == '\t') ++q;
+          if (isdigit((unsigned char)*q)) { strtol(q, (char**)&q, 10);
+                                            while (*q == ' ' || *q == '\t') ++q; }
+          bool isData = true; const char* w = "DATA";
+          for (int k = 0; k < 4; ++k)
+            if (toupper((unsigned char)q[k]) != w[k]) { isData = false; break; }
+          if (isData && !isalnum((unsigned char)q[4])) { dataP = q + 4; break; }
+          ++dataLineIdx;
+        }
+        if (dataLineIdx >= nLines) return false;  // no more DATA anywhere
+      }
+    }
 
     // Execute one line; -1 fall-through, >=0 jump to line index, -999 END.
     int execLine(const char* text, int curIdx) {
@@ -38789,7 +40874,7 @@ namespace {
       if (*p == '?') { ++p; printStmt(); return -1; }
       if (kw("LET")) return assign();
       if (kw("IF")) {
-        double cond = relation(); ws();
+        double cond = lor(); ws();
         kw("THEN"); ws();
         if (cond != 0) {
           if (isdigit((unsigned char)*p)) { int ln = (int)strtol(p, (char**)&p, 10);
@@ -38800,6 +40885,7 @@ namespace {
           if (kw("LET")) return assign();
           if (kw("GOTO")) { ws(); int ln = (int)strtol(p, (char**)&p, 10);
             int idx = findLine(ln); if (idx < 0) err = "no line " + String(ln); return idx; }
+          if (*p == '@') return assign();
           if (isalpha((unsigned char)*p)) return assign();
         }
         return -1;
@@ -38824,6 +40910,134 @@ namespace {
         bool cont = (f.step >= 0) ? (vars[f.var] <= f.limit) : (vars[f.var] >= f.limit);
         if (cont) return f.lineIdx + 1; else { forSP--; return -1; }
       }
+      if (kw("DIM")) {                           // DIM @(n) -- the one numeric array
+        ws(); if (*p == '@') ++p; else { err = "DIM @(n)"; return -1; }
+        ws(); if (*p != '(') { err = "DIM @(n)"; return -1; }
+        ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+        int n = (int)nv;
+        if (n < 1 || n > 256) { err = "@ size 1..256"; return -1; }
+        delete[] arr; arr = new (std::nothrow) double[n];
+        if (!arr) { err = "out of memory"; arrN = 0; return -1; }
+        arrN = n; for (int i = 0; i < n; ++i) arr[i] = 0;
+        return -1; }
+      if (kwb("DATA")) return -1;                 // data lines execute as no-ops
+      if (kw("RESTORE")) { dataLineIdx = 0; dataP = nullptr; return -1; }
+      if (kw("READ")) {                           // READ X[,Y,@(I),...]
+        for (;;) { ws();
+          double v;
+          if (!nextData(v)) { err = "out of DATA"; return -1; }
+          if (*p == '@') {                        // array target
+            ++p; ws(); if (*p != '(') { err = "@ needs ()"; return -1; }
+            ++p; double iv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+            int i = (int)iv;
+            if (!arr || i < 0 || i >= arrN) { err = "@ index"; return -1; }
+            arr[i] = v;
+          } else if (isalpha((unsigned char)*p)) {
+            char vc = toupper((unsigned char)*p); ++p;
+            if (isalnum((unsigned char)*p)) { err = "READ var"; return -1; }
+            vars[vc - 'A'] = v;
+          } else { err = "READ var"; return -1; }
+          ws(); if (*p == ',') { ++p; continue; }
+          break;
+        }
+        return -1; }
+      if (kw("ON")) {                             // ON expr GOTO l1,l2,... (1-based)
+        double sel = expr(); ws();
+        if (!kw("GOTO")) { err = "ON..GOTO"; return -1; }
+        int want = (int)sel, i = 1, target = -1;
+        for (;;) { ws();
+          if (!isdigit((unsigned char)*p)) break;
+          int ln = (int)strtol(p, (char**)&p, 10);
+          if (i == want) target = ln;
+          ++i; ws();
+          if (*p == ',') { ++p; continue; }
+          break;
+        }
+        if (target < 0) return -1;                // out of range: fall through (classic)
+        int idx = findLine(target);
+        if (idx < 0) { err = "no line " + String(target); return -1; }
+        return idx; }
+      if (kw("SATSEL")) {                        // re-snapshot the SAT* names for sat #expr
+        double iv = expr(); if (!err.isEmpty()) return -1;
+        if (!satselCb) { err = "SATSEL unavailable"; return -1; }
+        if (--satselLeft < 0) { err = "SATSEL limit (2000/run)"; return -1; }
+        double o[13];
+        if (!satselCb(host, (int)iv, o)) { err = "bad sat index"; return -1; }
+        sys.satAz = o[0]; sys.satEl = o[1]; sys.satRng = o[2]; sys.satRR = o[3];
+        sys.satLat = o[4]; sys.satLon = o[5]; sys.satAlt = o[6]; sys.satSun = o[7];
+        sys.satInc = o[8]; sys.satEcc = o[9]; sys.satRaan = o[10]; sys.satMM = o[11];
+        sys.satNor = o[12]; sys.satOk = true;
+        return -1; }
+      if (kw("TXSEL")) {                         // snapshot transponder #expr (active sat)
+        double iv = expr(); if (!err.isEmpty()) return -1;
+        if (!txselCb) { err = "TXSEL unavailable"; return -1; }
+        double o[5];
+        if (!txselCb(host, (int)iv, o)) { err = "bad tx index"; return -1; }
+        sys.txDl = o[0]; sys.txUl = o[1]; sys.txBw = o[2]; sys.txInv = o[3];
+        sys.txLin = o[4]; sys.txOk = true;
+        return -1; }
+      if (kw("LPRINT")) {                        // PRINT, but through the report sinks
+        String ln2; emitLine(ln2); if (!err.isEmpty()) return -1;
+        if (!lprCb || !lprCb(host, ln2.c_str(), 1)) { err = "no print output"; return -1; }
+        lprUsed = true; return -1; }
+      if (kw("CLS"))  { if (gfxCb) { gfxCb(host, 0, 0,0,0,0,0, nullptr); gfxUsed = true; } return -1; }
+      if (kw("SHOW")) { if (gfxCb) { gfxCb(host, 5, 0,0,0,0,0, nullptr); gfxUsed = true; } return -1; }
+      if (kw("PSET")) {
+        double x = expr(); ws(); if (*p == ',') ++p; else { err = ","; return -1; }
+        double y = expr(); double col = 1; ws();
+        if (*p == ',') { ++p; col = expr(); }
+        if (gfxCb) { gfxCb(host, 1, x, y, col, 0, 0, nullptr); gfxUsed = true; }
+        return -1; }
+      if (kw("LINE")) {
+        double x1 = expr(); ws(); if (*p == ',') ++p; else { err = ","; return -1; }
+        double y1 = expr(); ws(); if (*p == ',') ++p; else { err = ","; return -1; }
+        double x2 = expr(); ws(); if (*p == ',') ++p; else { err = ","; return -1; }
+        double y2 = expr(); double col = 1; ws();
+        if (*p == ',') { ++p; col = expr(); }
+        if (gfxCb) { gfxCb(host, 2, x1, y1, x2, y2, col, nullptr); gfxUsed = true; }
+        return -1; }
+      if (kw("CIRCLE")) {
+        double x = expr(); ws(); if (*p == ',') ++p; else { err = ","; return -1; }
+        double y = expr(); ws(); if (*p == ',') ++p; else { err = ","; return -1; }
+        double r = expr(); double col = 1; ws();
+        if (*p == ',') { ++p; col = expr(); }
+        if (gfxCb) { gfxCb(host, 3, x, y, r, col, 0, nullptr); gfxUsed = true; }
+        return -1; }
+      if (kw("TEXT")) {
+        double x = expr(); ws(); if (*p == ',') ++p; else { err = ","; return -1; }
+        double y = expr(); ws(); if (*p == ',') ++p; else { err = ","; return -1; }
+        ws();
+        char tb[64]; tb[0] = 0;
+        if (*p == '"') { ++p; int i = 0;
+          while (*p && *p != '"' && i < 63) tb[i++] = *p++;
+          if (*p == '"') ++p; tb[i] = 0;
+        } else { double v = expr(); if (!err.isEmpty()) return -1;
+          if (v == floor(v) && fabs(v) < 1e15) snprintf(tb, sizeof(tb), "%ld", (long)v);
+          else snprintf(tb, sizeof(tb), "%g", v); }
+        if (gfxCb) { gfxCb(host, 4, x, y, 0, 0, 0, tb); gfxUsed = true; }
+        return -1; }
+      if (kw("FOPEN")) {                         // FOPEN "name" (append, /CardSat/basic/)
+        ws(); if (*p != '"') { err = "FOPEN \"name\""; return -1; }
+        ++p; char nb[40]; int i = 0;
+        while (*p && *p != '"' && i < 39) nb[i++] = *p++;
+        if (*p == '"') ++p; nb[i] = 0;
+        int rc = fileCb ? fileCb(host, 0, nb, nullptr) : 1;
+        if (rc == 1) { err = "file write off (Settings)"; return -1; }
+        if (rc == 2) { err = "bad file name"; return -1; }
+        if (rc != 0) { err = "open failed"; return -1; }
+        fileUsed = true; return -1; }
+      if (kw("FPRINT")) {
+        String ln2; emitLine(ln2); if (!err.isEmpty()) return -1;
+        int rc = fileCb ? fileCb(host, 1, ln2.c_str(), nullptr) : 4;
+        if (rc != 0) { err = "no file open (FOPEN)"; return -1; }
+        return -1; }
+      if (kw("FCLOSE")) { if (fileCb) fileCb(host, 2, nullptr, nullptr); return -1; }
+      if (kw("FILES")) {                         // list /CardSat/basic/ to the console
+        String ls;
+        if (fileCb && fileCb(host, 3, nullptr, &ls) == 0) out += ls;
+        else out += "(no files)\n";
+        return -1; }
+      if (*p == '@') return assign();             // bare @(i) = expr
       if (isalpha((unsigned char)*p)) return assign();     // bare VAR = expr
       err = "syntax"; return -1;
     }
@@ -38879,6 +41093,136 @@ namespace {
   }
 }  // namespace
 
+// ---- BASIC host trampolines (see the declarations' comment in app.h) ---------------
+
+bool App::basHookSatsel(void* self, int idx, double out[13]) {
+  App& a = *static_cast<App*>(self);
+  if (idx < 0 || idx >= a.db.count()) return false;
+  Observer o = a.loc.obs();
+  if (!o.valid || !timeIsSet()) return false;
+  SatEntry& e = a.db.at(idx);
+  float az, el, rg, rr, la, lo, al; bool su;
+  a.pred.setSite(o);
+  if (!a.pred.lookFor(e, a.nowUtc(), az, el, rg, rr, la, lo, al, su)) return false;
+  out[0] = az; out[1] = el; out[2] = rg; out[3] = rr;
+  out[4] = la; out[5] = lo; out[6] = al; out[7] = su ? 1 : 0;
+  out[8] = e.incl; out[9] = e.ecc; out[10] = e.raan; out[11] = e.meanMotion;
+  out[12] = e.norad;
+  yield();                                       // one SGP4 per call; keep the WDT fed
+  return true;
+}
+
+bool App::basHookTxsel(void* self, int idx, double out[5]) {
+  App& a = *static_cast<App*>(self);
+  if (idx < 0 || idx >= a.activeTxCount) return false;
+  Transponder& t = a.activeTx[idx];
+  out[0] = t.downlink; out[1] = t.uplink; out[2] = t.bandwidth();
+  out[3] = t.invert ? 1 : 0; out[4] = t.isLinear ? 1 : 0;
+  return true;
+}
+
+bool App::basHookLpr(void* self, const char* line, int op) {
+  App& a = *static_cast<App*>(self);
+  if (op == 2) {                                 // close after the run
+    if (a.basLprOpen) { Printer::end(); a.basLprOpen = false; }
+    return true;
+  }
+  if (!a.basLprOpen) {                           // lazy open on the first LPRINT
+    Printer::Sinks sk;
+    sk.host        = a.cfg.printerHost[0] ? a.cfg.printerHost : nullptr;
+    sk.port        = a.cfg.printerPort;
+    sk.printerCols = a.cfg.printerCols;
+    sk.format      = a.cfg.printFormat;
+    sk.transport   = a.cfg.printTransport;
+    sk.paper       = a.cfg.printPaper;
+    sk.toSerial    = a.cfg.printToSerial;
+    sk.toFile      = a.cfg.printToFile;
+    sk.fileTitle   = "basic";
+    if (!sk.host && !sk.toSerial && !sk.toFile) return false;
+    if (!Printer::begin(sk)) return false;
+    Printer::title("BASIC LPRINT");
+    a.basLprOpen = true;
+  }
+  Printer::line(line ? line : "");
+  return true;
+}
+
+void App::basHookGfx(void* self, int op, double pa, double pb, double pc, double pd,
+                     double pe, const char* s) {
+  App& a = *static_cast<App*>(self);
+  // Small fixed palette of canvas colour INDICES (the canvas is a paletted sprite;
+  // draw calls take CL_* indices, not 565 values). Out of range = white; 0 = black
+  // (useful for erasing). BASIC colours: 0 blk 1 wht 2 red 3 grn 4 blu 5 yel 6 cyn
+  // 7 org 8 gry 9 dark-green.
+  static const uint8_t PAL[10] = { CL_BLACK, CL_WHITE, CL_RED, CL_GREEN, CL_BLUE,
+                                   CL_YELLOW, CL_CYAN, CL_ORANGE, CL_GREY, CL_DGREEN };
+  auto col = [&](double c) -> uint8_t {
+    int i = (int)c; return (i >= 0 && i < 10) ? PAL[i] : (uint8_t)CL_WHITE; };
+  // `canvas` is the file-scope paletted sprite, not an App member.
+  switch (op) {
+    case 0: canvas.fillRect(0, 0, 240, 135, CL_BLACK); break;                   // CLS
+    case 1: canvas.drawPixel((int)pa, (int)pb, col(pc)); break;                 // PSET
+    case 2: canvas.drawLine((int)pa, (int)pb, (int)pc, (int)pd, col(pe)); break;   // LINE
+    case 3: canvas.drawCircle((int)pa, (int)pb, (int)pc, col(pd)); break;       // CIRCLE
+    case 4: canvas.setTextSize(1);                                              // TEXT
+            canvas.setTextColor(CL_WHITE, CL_BLACK);
+            canvas.setCursor((int)pa, (int)pb);
+            if (s) canvas.print(s);
+            break;
+    case 5: canvas.pushSprite(0, 0); a.basGfxHold = true; break;                // SHOW
+  }
+}
+
+int App::basHookFile(void* self, int op, const char* arg, String* out) {
+  App& a = *static_cast<App*>(self);
+  switch (op) {
+    case 0: {                                    // FOPEN "name" -- gated, sandboxed, append
+      if (!a.cfg.basicFileWrite) return 1;
+      if (!arg || !*arg) return 2;
+      char nb[48]; int j = 0;
+      for (const char* q = arg; *q && j < 40; ++q) {   // alnum . - _ only, no paths
+        char ch = *q;
+        if (isalnum((unsigned char)ch) || ch == '.' || ch == '-' || ch == '_') nb[j++] = ch;
+        else return 2;
+      }
+      nb[j] = 0;
+      if (!j) return 2;
+      if (a.basFileOpen) { a.basFile.close(); a.basFileOpen = false; }
+      Store::fs().mkdir("/CardSat/basic");
+      String path = String("/CardSat/basic/") + nb;
+      a.basFile = Store::fs().open(path.c_str(), "a");
+      if (!a.basFile) return 3;
+      a.basFileOpen = true;
+      return 0;
+    }
+    case 1:                                      // FPRINT line
+      if (!a.basFileOpen) return 4;
+      a.basFile.print(arg ? arg : ""); a.basFile.print('\n');
+      return 0;
+    case 2:                                      // FCLOSE
+      if (a.basFileOpen) { a.basFile.close(); a.basFileOpen = false; }
+      return 0;
+    case 3: {                                    // FILES -> newline list into *out
+      if (!out) return 3;
+      *out = "";
+      File d = Store::fs().open("/CardSat/basic");
+      if (!d || !d.isDirectory()) { *out = "(none)\n"; return 0; }
+      File f = d.openNextFile();
+      int n = 0;
+      while (f && n < 40) {
+        const char* nm = f.name();
+        const char* base = strrchr(nm, '/'); base = base ? base + 1 : nm;
+        *out += base; *out += '\n'; ++n;
+        f = d.openNextFile();
+      }
+      d.close();
+      if (!n) *out = "(none)\n";
+      return 0;
+    }
+  }
+  return 3;
+}
+
 void App::basicRun() {
   // Allocate the interpreter state on the heap only while a program is running, then free
   // it -- the VM's line table is ~3.8 KB and would otherwise sit in .bss for the whole
@@ -38895,6 +41239,13 @@ void App::basicRun() {
   if (!vm) { basicErr = "out of memory"; return; }
   String* work = new (std::nothrow) String();
   if (!work) { delete vm; basicErr = "out of memory"; return; }
+  vm->host = this;                              // host hooks (see app.h comment)
+  vm->satselCb = &App::basHookSatsel;
+  vm->txselCb  = &App::basHookTxsel;
+  vm->lprCb    = &App::basHookLpr;
+  vm->gfxCb    = &App::basHookGfx;
+  vm->fileCb   = &App::basHookFile;
+  basLprOpen = false; basFileOpen = false; basGfxHold = false;
   // ---- One system snapshot per run (see BasicSys). Filled inline because it needs App
   // members and BasicSys lives in the anonymous namespace below, so it cannot be named in
   // app.h. Exactly one look()/skyObjAzEl() pair per run regardless of what the program does.
@@ -38941,7 +41292,31 @@ void App::basicRun() {
         sy.passOk = true;
         break;
       }
+      for (int i = 0; i < passN && sy.pN < 8; ++i) {     // PASSAOS/PASSLOS/PASSMAX(k)
+        if (passes[i].los <= nw) continue;
+        sy.pAos[sy.pN] = (passes[i].aos - nw) / 60.0;
+        sy.pLos[sy.pN] = (passes[i].los - nw) / 60.0;
+        sy.pMax[sy.pN] = passes[i].maxEl;
+        sy.pN++;
+      }
     }
+    if (sy.timeOk && sy.posOk) {                         // LSTHR: IAU-82 GMST + east lon
+      double jd = (double)nowUtc() / 86400.0 + 2440587.5;
+      double Tc = (jd - 2451545.0) / 36525.0;
+      double g  = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
+                + Tc * Tc * (0.000387933 - Tc / 38710000.0);
+      g = fmod(g, 360.0); if (g < 0) g += 360.0;
+      double lst = fmod(g + loc.obs().lon, 360.0); if (lst < 0) lst += 360.0;
+      sy.lstHr = lst / 15.0;
+    }
+    sy.gpsOk   = loc.gpsHasFix();
+    sy.gpsSats = loc.gpsSats();
+    sy.gpsSpd  = loc.gpsSpeedKmh();
+    if (sy.gpsOk) { Observer og = loc.obs(); sy.gpsLat = og.lat; sy.gpsLon = og.lon; sy.gpsAlt = og.altM; }
+    sy.heapFree = (double)esp_get_free_heap_size();
+    sy.upTime   = millis() / 1000.0;
+    sy.nSat     = db.count();
+    sy.nTx      = activeTxCount;
     if (spaceF107 >= 0 && spaceKp >= 0) {                // -1 = never fetched
       sy.sfi = spaceF107; sy.kp = spaceKp;
       sy.aIdx = (spaceA >= 0) ? spaceA : 0;
@@ -38961,6 +41336,8 @@ void App::basicRun() {
   if (!basicParse(*vm, basicBuf, *work, perr)) { basicErr = perr; }
   else if (vm->nLines == 0) { basicErr = "no numbered lines"; }
   else { vm->run(); basicOut = vm->out; basicErr = vm->err; }
+  if (vm->lprUsed)  basHookLpr(this, nullptr, 2);       // close the report sinks
+  if (basFileOpen) { basFile.close(); basFileOpen = false; }  // and the FOPEN file
   delete work; delete vm;
 }
 
@@ -39175,6 +41552,7 @@ void App::keyBasic(char c, bool enter, bool back) {
 }
 
 void App::drawBasicRun() {
+  if (basGfxHold) return;                        // leave the program's SHOWed frame up
   header("BASIC output");
   canvas.setTextSize(1);
   String body = basicOut;
@@ -39200,6 +41578,7 @@ void App::drawBasicRun() {
 
 void App::keyBasicRun(char c, bool enter, bool back) {
   (void)enter;
+  if (basGfxHold) { basGfxHold = false; lastDrawMs = 0; return; }   // any key: to console
   if (isBack(c, back)) { screen = SCR_BASIC; lastDrawMs = 0; return; }
   if (c == 'p') { printReport(PR_BASICOUT); return; }   // p: print the output
   if (isUp(c))   { if (--basicOutScroll < 0) basicOutScroll = 0; lastDrawMs = 0; return; }
@@ -40172,6 +42551,72 @@ namespace {
   };
   const int RFDUTY_N = (int)(sizeof(RFDUTY) / sizeof(RFDUTY[0]));
 
+  // ---- 0.9.59 tool tables --------------------------------------------------
+  // Matching-network topology (TOOL_MATCH).
+  const char* const MATCH_TOPO[] = { "L-network", "Pi network", "T network" };
+  const int MATCH_TOPO_N = 3;
+
+  // Toroid cores (TOOL_TOROID). Amidon conventions: iron-powder AL is uH per
+  // 100 turns (N = 100*sqrt(L_uH/AL)); ferrite AL is mH per 1000 turns
+  // (N = 1000*sqrt(L_mH/AL)). mmTurn is a single-layer wire length per turn
+  // (approximate, from core cross-section + clearance) for a wire-length hint.
+  struct ToroidCore { const char* name; double al; bool ferrite; double mmTurn; };
+  const ToroidCore TOROID_TBL[] = {
+    { "T37-2",    4.0*10, false, 25 },   // iron AL values are the published uH/100t
+    { "T37-6",    3.0*10, false, 25 },
+    { "T50-2",    4.9*10, false, 32 },
+    { "T50-6",    4.0*10, false, 32 },
+    { "T68-2",    5.7*10, false, 41 },
+    { "T68-6",    4.7*10, false, 41 },
+    { "T106-2",  13.5*10, false, 62 },
+    { "T130-2",  11.0*10, false, 73 },
+    { "T200-2",  12.0*10, false, 100 },
+    { "FT37-43",  350,  true, 25 },
+    { "FT50-43",  523,  true, 33 },
+    { "FT82-43",  557,  true, 52 },
+    { "FT114-43", 603,  true, 70 },
+    { "FT140-43", 952,  true, 86 },
+    { "FT37-61",  55.3, true, 25 },
+    { "FT50-61",  68.0, true, 33 },
+  };
+  const int TOROID_N = (int)(sizeof(TOROID_TBL) / sizeof(TOROID_TBL[0]));
+
+  // Flat-plate thermal surface presets (TOOL_THERM): solar absorptivity alpha and
+  // IR emissivity epsilon, typical handbook values (first-order only).
+  struct ThermMat { const char* name; double a, e; };
+  const ThermMat THERM_MAT[] = {
+    { "Custom",       0,    0    },
+    { "White paint",  0.25, 0.88 },
+    { "Black anodize",0.95, 0.90 },
+    { "Solar cell",   0.75, 0.83 },
+    { "Polished Al",  0.20, 0.08 },
+    { "Gold / MLI",   0.25, 0.03 },
+    { "Kapton (alum)",0.40, 0.60 },
+  };
+  const int THERM_MAT_N = (int)(sizeof(THERM_MAT) / sizeof(THERM_MAT[0]));
+
+  // Ionospheric condition presets for the Faraday estimate (TOOL_FARAD): a
+  // representative slant TEC in TEC units (1e16 e-/m^2).
+  struct FaradCond { const char* name; double tecu; };
+  const FaradCond FARAD_COND[] = {
+    { "Quiet (10 TECU)", 10 }, { "Moderate (30)", 30 }, { "Storm (80)", 80 },
+  };
+  const int FARAD_COND_N = 3;
+
+  // Ampacity modes (TOOL_AMPAC) and microstrip modes (TOOL_USTRIP).
+  const char* const AMPAC_MODE[]  = { "PCB external", "PCB internal", "Wire (AWG)" };
+  const int AMPAC_MODE_N = 3;
+  const char* const USTRIP_MODE[] = { "Microstrip", "Stripline" };
+  const int USTRIP_MODE_N = 2;
+
+  // Chassis-wiring ampacity by AWG (ARRL Handbook chassis column), even sizes.
+  struct WireAmp { int awg; double amps; };
+  const WireAmp WIRE_AMP[] = {
+    { 10, 55 }, { 12, 41 }, { 14, 32 }, { 16, 22 }, { 18, 16 },
+    { 20, 11 }, { 22, 7 }, { 24, 3.5 }, { 26, 2.2 }, { 28, 1.4 },
+  };
+  const int WIRE_AMP_N = (int)(sizeof(WIRE_AMP) / sizeof(WIRE_AMP[0]));
+
   // FCC OET-65 Maximum Permissible Exposure limits (mW/cm^2) by frequency (MHz).
   double mpeUncontrolled(double f) {         // general population / uncontrolled
     if (f < 1.34) return 100.0;
@@ -40255,6 +42700,24 @@ const char* App::tfChoiceLabel(int field, int idx) {
   if (toolId == TOOL_RFEXP && field == 2) {
     if (idx >= 0 && idx < RFDUTY_N) return RFDUTY[idx].name;
   }
+  if (toolId == TOOL_MATCH && field == 0) {
+    if (idx >= 0 && idx < MATCH_TOPO_N) return MATCH_TOPO[idx];
+  }
+  if (toolId == TOOL_TOROID && field == 0) {
+    if (idx >= 0 && idx < TOROID_N) return TOROID_TBL[idx].name;
+  }
+  if (toolId == TOOL_THERM && field == 0) {
+    if (idx >= 0 && idx < THERM_MAT_N) return THERM_MAT[idx].name;
+  }
+  if (toolId == TOOL_FARAD && field == 1) {
+    if (idx >= 0 && idx < FARAD_COND_N) return FARAD_COND[idx].name;
+  }
+  if (toolId == TOOL_AMPAC && field == 0) {
+    if (idx >= 0 && idx < AMPAC_MODE_N) return AMPAC_MODE[idx];
+  }
+  if (toolId == TOOL_USTRIP && field == 0) {
+    if (idx >= 0 && idx < USTRIP_MODE_N) return USTRIP_MODE[idx];
+  }
   return "?";
 }
 
@@ -40333,6 +42796,67 @@ void App::toolFormInit(int id) {
     case TOOL_TIMECONST:
       // RC / RL time constant and the charge/discharge percentages at 1..5 tau.
       tfN = 2; FLD(0, "Resist R", "ohm", 1000.0); FLD(1, "Cap C", "uF", 1.0); break;
+    case TOOL_DOPPBUD: {
+      // Doppler budget for an arbitrary orbit; apogee/perigee seed from the active
+      // satellite when one is selected, else a generic 800 km LEO.
+      double ap = 800, pe = 800;
+      SatEntry* as_ = activeSat();
+      if (as_ && as_->meanMotion > 0) {
+        double nr = as_->meanMotion * 6.283185307179586 / 86400.0;
+        double aa = pow(398600.4418 / (nr * nr), 1.0 / 3.0);
+        ap = aa * (1 + as_->ecc) - 6378.137; pe = aa * (1 - as_->ecc) - 6378.137;
+      }
+      tfN = 3; FLD(0, "Apogee alt", "km", ap); FLD(1, "Perigee alt", "km", pe);
+      FLD(2, "Freq", "MHz", 435.5); break;
+    }
+    case TOOL_CASCNF:
+      // Friis cascade for the classic sat-station chain: antenna -> LNA -> coax -> rig.
+      tfN = 6; FLD(0, "Ant gain", "dBi", 16.0); FLD(1, "Sky temp", "K", 150.0);
+      FLD(2, "LNA NF", "dB", 0.8); FLD(3, "LNA gain", "dB", 20.0);
+      FLD(4, "Coax loss", "dB", 3.0); FLD(5, "Rig NF", "dB", 6.0); break;
+    case TOOL_SUNGT:
+      // Sun-noise Y-factor -> G/T. Flux field seeds from the last-fetched 10.7 cm
+      // index when Space Wx has one; enter the flux AT YOUR FREQUENCY for best truth.
+      tfN = 4; FLD(0, "Y-factor", "dB", 1.0);
+      FLD(1, "Solar flux", "sfu", (spaceF107 > 0) ? (double)spaceF107 : 150.0);
+      FLD(2, "Freq", "MHz", 435.0); FLD(3, "Ant gain", "dBi", 0.0); break;
+    case TOOL_HELIX:
+      tfN = 4; FLD(0, "Freq", "MHz", 435.0); FLD(1, "Turns", "", 8);
+      FLD(2, "Circumf", "wl", 1.05); FLD(3, "Pitch", "deg", 12.5); break;
+    case TOOL_MATCH:
+      tfN = 5; FLD(0, "Topology", "", 0); tfChoice[0] = 0; tfChoiceN[0] = MATCH_TOPO_N;
+      FLD(1, "R source", "ohm", 50.0); FLD(2, "R load", "ohm", 200.0);
+      FLD(3, "Freq", "MHz", 14.2); FLD(4, "Loaded Q", "", 5.0); break;
+    case TOOL_POINT:
+      // Pointing loss; the error field seeds from the configured rotator deadband.
+      tfN = 2; FLD(0, "HPBW", "deg", 30.0);
+      FLD(1, "Point err", "deg", (double)cfg.rotDeadband); break;
+    case TOOL_IMD:
+      tfN = 4; FLD(0, "Freq 1", "MHz", 145.900); FLD(1, "Freq 2", "MHz", 145.950);
+      FLD(2, "Band low", "MHz", 145.800); FLD(3, "Band high", "MHz", 146.000); break;
+    case TOOL_USTRIP:
+      tfN = 5; FLD(0, "Line", "", 0); tfChoice[0] = 0; tfChoiceN[0] = USTRIP_MODE_N;
+      FLD(1, "Er", "", 4.4); FLD(2, "H (sub/gap)", "mm", 1.6);
+      FLD(3, "W trace", "mm", 3.0); FLD(4, "Freq", "MHz", 435.0); break;
+    case TOOL_TOROID:
+      tfN = 2; FLD(0, "Core", "", 2); tfChoice[0] = 2; tfChoiceN[0] = TOROID_N; // default T50-2
+      FLD(1, "Target L", "uH", 10.0); break;
+    case TOOL_DV:
+      tfN = 3; FLD(0, "Alt 1", "km", 400.0); FLD(1, "Alt 2", "km", 800.0);
+      FLD(2, "Plane chg", "deg", 0.0); break;
+    case TOOL_THERM:
+      tfN = 3; FLD(0, "Surface", "", 1); tfChoice[0] = 1; tfChoiceN[0] = THERM_MAT_N;
+      FLD(1, "Custom a", "", 0.25); FLD(2, "Custom e", "", 0.85); break;
+    case TOOL_FARAD:
+      tfN = 2; FLD(0, "Freq", "MHz", 145.9);
+      FLD(1, "Ionosphere", "", 1); tfChoice[1] = 1; tfChoiceN[1] = FARAD_COND_N; break;
+    case TOOL_AMPAC:
+      tfN = 5; FLD(0, "Mode", "", 0); tfChoice[0] = 0; tfChoiceN[0] = AMPAC_MODE_N;
+      FLD(1, "Current", "A", 1.0); FLD(2, "Temp rise", "C", 10.0);
+      FLD(3, "Copper", "oz", 1.0); FLD(4, "Wire", "AWG", 24); break;
+    case TOOL_PLL:
+      tfN = 4; FLD(0, "Reference", "MHz", 10.0); FLD(1, "R divider", "", 1);
+      FLD(2, "N divider", "", 40); FLD(3, "Multiplier", "", 1); break;
   }
   toolDefLoad(id);        // overlay any values remembered from a previous session (unless resetting)
 }
@@ -40410,18 +42934,24 @@ void App::drawToolForm() {
   // --- input fields ---
   for (int i = 0; i < tfN; ++i) {
     bool sel = (i == tfSel);
-    if (sel) canvas.fillRect(2, y - 2, 236, 11, CL_SELBG);
-    canvas.setTextColor(sel ? CL_BLACK : CL_GREY, sel ? CL_SELBG : CL_BLACK);
-    canvas.setCursor(6, y); canvas.print(tfLabel[i]);
-    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
     String vs;
-    if (tfChoice[i] >= 0)            vs = tfChoiceLabel(i, tfChoice[i]);
-    else if (sel && tfEditing)       vs = tfEditBuf + "_";
+    if (tfChoice[i] >= 0)                  vs = tfChoiceLabel(i, tfChoice[i]);
+    else if (!tfEmit && sel && tfEditing)  vs = tfEditBuf + "_";
     else {
       char b[20]; dtostrf(tfVal[i], 0, 3, b);
       String r(b); while (r.indexOf('.') >= 0 && (r.endsWith("0") || r.endsWith("."))) r.remove(r.length() - 1);
       vs = r;
     }
+    if (tfEmit) {                          // tee: "label ......... value unit"
+      String ln(tfLabel[i]); while (ln.length() < 19) ln += ' ';
+      ln += vs; if (tfUnit[i][0]) { ln += ' '; ln += tfUnit[i]; }
+      Printer::line(ln);
+      continue;
+    }
+    if (sel) canvas.fillRect(2, y - 2, 236, 11, CL_SELBG);
+    canvas.setTextColor(sel ? CL_BLACK : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(tfLabel[i]);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
     canvas.setCursor(120, y); canvas.print(vs);
     if (tfUnit[i][0]) { canvas.setCursor(120 + (int)vs.length() * 6 + 4, y); canvas.print(tfUnit[i]); }
     y += LH;
@@ -40433,6 +42963,11 @@ void App::drawToolForm() {
   // "more" arrows show when the list extends past either edge.
   int skip = tfOutScroll; bool moreBelow = false; int outTop = y;
   auto out = [&](const String& k, const String& v, uint16_t col) {
+    if (tfEmit) {                          // tee the complete list, no scroll/clip
+      String ln(k); while (ln.length() < 19) ln += ' ';
+      ln += v; Printer::line(ln); (void)col;
+      return;
+    }
     if (skip > 0) { --skip; return; }
     if (y > 112) { moreBelow = true; return; }
     canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(6, y);   canvas.print(k);
@@ -40729,6 +43264,312 @@ void App::drawToolForm() {
       out("cutoff f", (tau > 0 ? String(1.0 / (2.0 * M_PI * tau), 1) + " Hz" : String("--")), CL_ORANGE);
       break;
     }
+    case TOOL_DOPPBUD: {
+      // Doppler budget for an arbitrary orbit. Circularized at the mean altitude
+      // (worst-case shift is quoted at perigee velocity below for eccentric birds).
+      // Earth's rotation is ignored, consistent with the Explore page (<~6% for LEO).
+      const double MU = 398600.4418, RE = 6378.137, CKM = 299792.458;
+      double ap = tfVal[0], pe = tfVal[1], f = tfVal[2] * 1e6;
+      if (pe > ap) { double t = ap; ap = pe; pe = t; }
+      double r = RE + 0.5 * (ap + pe);
+      double w = sqrt(MU / (r * r * r));                  // rad/s (circular @ mean alt)
+      double thH = (r > RE) ? acos(RE / r) : 0;           // geocentric angle at horizon
+      double rrMax = 0;
+      for (int i = 1; i <= 200; ++i) {                    // scan an overhead pass
+        double th = thH * i / 200.0;
+        double rho = sqrt(r * r + RE * RE - 2 * r * RE * cos(th));
+        double rr = (rho > 0) ? r * RE * sin(th) * w / rho : 0;
+        if (rr > rrMax) rrMax = rr;
+      }
+      double rateTCA = (r > RE) ? r * RE * w * w / (r - RE) : 0;   // km/s^2 at zenith
+      double rhoH = sqrt(r * r + RE * RE - 2 * r * RE * cos(thH));
+      out("Max Doppler", "+/-" + String(f * rrMax / CKM / 1e3, 2) + " kHz", CL_CYAN);
+      out("Rate at TCA", String(f * rateTCA / CKM, 1) + " Hz/s", CL_CYAN);
+      out("per MHz", "+/-" + String(1e6 * rrMax / CKM, 1) + " Hz", CL_WHITE);
+      out("Max LOS vel", String(rrMax, 3) + " km/s", CL_WHITE);
+      out("Period", String(2 * M_PI / w / 60.0, 1) + " min", CL_GREY);
+      out("Horizon range", String(rhoH, 0) + " km", CL_GREY);
+      break;
+    }
+    case TOOL_CASCNF: {
+      // Friis cascade: antenna(T_sky) -> LNA -> coax(loss=NF) -> rig. All linear math.
+      double gAnt = tfVal[0], tSky = tfVal[1];
+      double Fl = pow(10.0, tfVal[2] / 10.0), Gl = pow(10.0, tfVal[3] / 10.0);
+      double L  = pow(10.0, tfVal[4] / 10.0), Fr = pow(10.0, tfVal[5] / 10.0);
+      double Fsys  = Fl + (L * Fr - 1.0) / (Gl > 0 ? Gl : 1e-9);
+      double Trx   = (Fsys - 1.0) * 290.0;
+      double Tsys  = tSky + Trx;
+      double GT    = gAnt - 10.0 * log10(Tsys > 0 ? Tsys : 1e-9);
+      double F0    = L * Fr;                               // same chain, no LNA
+      double Tsys0 = tSky + (F0 - 1.0) * 290.0;
+      double GT0   = gAnt - 10.0 * log10(Tsys0 > 0 ? Tsys0 : 1e-9);
+      out("System NF", String(10.0 * log10(Fsys), 2) + " dB", CL_CYAN);
+      out("T rx", String(Trx, 0) + " K", CL_WHITE);
+      out("T sys", String(Tsys, 0) + " K", CL_WHITE);
+      out("G/T", String(GT, 2) + " dB/K", CL_CYAN);
+      out("G/T no LNA", String(GT0, 2) + " dB/K", CL_ORANGE);
+      out("LNA buys", "+" + String(GT - GT0, 2) + " dB", CL_GREEN);
+      break;
+    }
+    case TOOL_SUNGT: {
+      // Sun-noise Y-factor -> G/T (point-source form; the sun is 0.53 deg, so this
+      // holds for beamwidths well above ~3 deg -- i.e., every amateur sat antenna).
+      // Enter the solar flux AT YOUR FREQUENCY (the seeded value is the 10.7 cm
+      // index, an upper bound below ~2 GHz).
+      const double KB = 1.380649e-23;
+      double y = pow(10.0, tfVal[0] / 10.0);
+      double S = tfVal[1] * 1e-22;                         // sfu -> W/m^2/Hz
+      double lam = (tfVal[2] > 0) ? 299.792458 / tfVal[2] : 1;   // m
+      double gt = ((y > 1) && S > 0)
+                  ? 10.0 * log10((y - 1.0) * 8.0 * M_PI * KB / (lam * lam * S)) : -99;
+      out("G/T", String(gt, 2) + " dB/K", CL_CYAN);
+      if (tfVal[3] > 0)
+        out("T sys @gain", String(pow(10.0, (tfVal[3] - gt) / 10.0), 0) + " K", CL_WHITE);
+      out("Sun size", "0.53 deg (point src)", CL_GREY);
+      if (spaceF107 > 0) out("SFI 10.7cm", String(spaceF107, 0) + " sfu now", CL_MGREY);
+      out("Flux note", "enter flux AT freq", CL_MGREY);
+      break;
+    }
+    case TOOL_HELIX: {
+      // Axial-mode helix, Kraus formulas (gain runs ~1 dB optimistic vs modern
+      // measurements -- noted). Boom and wire are antenna dimensions -> antLen.
+      double f = tfVal[0]; int N = (int)tfVal[1]; if (N < 1) N = 1;
+      double C = tfVal[2], p = tfVal[3] * M_PI / 180.0;
+      double S = C * tan(p);
+      double lam = (f > 0) ? 299.792458 / f : 1;           // m
+      double gNum = 15.0 * C * C * N * S;
+      double gain = (gNum > 0) ? 10.0 * log10(gNum) : 0;
+      double hpbw = (C > 0 && N * S > 0) ? 52.0 / (C * sqrt((double)N * S)) : 0;
+      double z = 140.0 * C;
+      double boomFt = N * S * lam / 0.3048;
+      double wireFt = N * lam * sqrt(C * C + S * S) / 0.3048;
+      out("Gain (Kraus)", String(gain, 1) + " dBi ~1dB hi", CL_CYAN);
+      out("HPBW", String(hpbw, 1) + " deg", CL_WHITE);
+      out("Z feed", String(z, 0) + " ohm", CL_WHITE);
+      out("  match", "1/4-wl strip->50", CL_MGREY);
+      out("Boom", antLen(boomFt), CL_CYAN);
+      out("Wire total", antLen(wireFt), CL_WHITE);
+      out("Diameter", String(C * lam / M_PI * 100.0, 1) + " cm", CL_GREY);
+      out("Axial ratio", String((2.0 * N + 1) / (2.0 * N), 2), CL_GREY);
+      break;
+    }
+    case TOOL_MATCH: {
+      // L / Pi / T matching networks (lowpass forms: series L, shunt C).
+      // Pi and T verified by ABCD round-trip on the host before shipping; both
+      // need Q > sqrt(Rbig/Rsmall - 1) (Pi and T place a virtual R inside).
+      int topo = (tfChoice[0] >= 0) ? tfChoice[0] : 0;
+      double R1 = tfVal[1], R2 = tfVal[2], f = tfVal[3] * 1e6, Q = tfVal[4];
+      double w = 2 * M_PI * f;
+      auto Lu = [&](double X) { return String(X / w * 1e6, 3) + " uH"; };
+      auto Cp = [&](double X) { return String(1.0 / (w * X) * 1e12, 1) + " pF"; };
+      if (R1 <= 0 || R2 <= 0 || f <= 0) { out("Enter R,R,f", "> 0", CL_ORANGE); break; }
+      double Rb = (R1 > R2) ? R1 : R2, Rs = (R1 > R2) ? R2 : R1;
+      double Qmin = (Rb > Rs) ? sqrt(Rb / Rs - 1.0) : 0;
+      if (topo == 0) {                                     // L-network (Q is fixed by ratio)
+        if (Rb == Rs) { out("R1 == R2", "no L-net needed", CL_ORANGE); break; }
+        double Xs = Qmin * Rs, Xp = Rb / Qmin;
+        out("Network Q", String(Qmin, 2), CL_GREY);
+        out("Series L", Lu(Xs) + " @lowR", CL_CYAN);
+        out("Shunt C", Cp(Xp) + " @highR", CL_CYAN);
+        out("or HP: ser C", Cp(Xs), CL_WHITE);
+        out("   shunt L", Lu(Xp), CL_WHITE);
+      } else if (topo == 1) {                              // Pi: shunt C - series L - shunt C
+        if (Q <= Qmin) { out("Q too low", "need > " + String(Qmin, 2), CL_ORANGE); break; }
+        double Rv = Rb / (Q * Q + 1.0);
+        double Q2 = sqrt(Rs / Rv - 1.0);
+        double XpB = Rb / Q, XsB = Q * Rv;
+        double XpS = Rs / Q2, XsS = Q2 * Rv;
+        double Xl = XsB + XsS;
+        double XcSrc = (R1 >= R2) ? XpB : XpS, XcLoad = (R2 > R1) ? XpB : XpS;
+        out("C @source", Cp(XcSrc), CL_CYAN);
+        out("Series L", Lu(Xl), CL_CYAN);
+        out("C @load", Cp(XcLoad), CL_CYAN);
+        out("min Q", String(Qmin, 2), CL_GREY);
+      } else {                                             // T: series L - shunt C - series L
+        if (Q <= Qmin) { out("Q too low", "need > " + String(Qmin, 2), CL_ORANGE); break; }
+        double Xl1 = Q * R1, B = R1 * (1.0 + Q * Q);
+        if (B / R2 <= 1.0) { out("Q too low", "for this ratio", CL_ORANGE); break; }
+        double Xl2 = R2 * sqrt(B / R2 - 1.0);
+        double Xc = B / (Q + Xl2 / R2);
+        out("L @source", Lu(Xl1), CL_CYAN);
+        out("Shunt C", Cp(Xc), CL_CYAN);
+        out("L @load", Lu(Xl2), CL_CYAN);
+        out("min Q", String(Qmin, 2), CL_GREY);
+      }
+      break;
+    }
+    case TOOL_POINT: {
+      // Pointing loss, parabolic main-lobe approximation L = 12*(err/HPBW)^2 dB
+      // (good to about half the beamwidth). Error seeds from the rotator deadband.
+      double b = tfVal[0], e = tfVal[1];
+      double loss = (b > 0) ? 12.0 * (e / b) * (e / b) : 0;
+      out("Loss", String(loss, 2) + " dB", loss > 1 ? CL_ORANGE : CL_CYAN);
+      out("1 dB at", "+/-" + String(b * 0.2887, 1) + " deg", CL_WHITE);
+      out("3 dB at", "+/-" + String(b * 0.5, 1) + " deg", CL_WHITE);
+      out("Rot deadband", String((int)cfg.rotDeadband) + " deg set", CL_GREY);
+      if (e > b * 0.5) out("Note", "approx past HPBW/2", CL_MGREY);
+      break;
+    }
+    case TOOL_IMD: {
+      // Odd-order intermod products of two carriers, flagged when they land
+      // inside the entered band (e.g. a transponder passband).
+      double f1 = tfVal[0], f2 = tfVal[1], lo = tfVal[2], hi = tfVal[3];
+      auto imd = [&](const char* k, double f) {
+        bool in = (f >= lo && f <= hi);
+        out(k, String(f, 4) + (in ? " IN" : " out"), in ? CL_ORANGE : CL_WHITE);
+      };
+      out("Spacing", String(fabs(f2 - f1) * 1000.0, 1) + " kHz", CL_GREY);
+      imd("3rd 2f1-f2", 2 * f1 - f2);
+      imd("3rd 2f2-f1", 2 * f2 - f1);
+      imd("5th 3f1-2f2", 3 * f1 - 2 * f2);
+      imd("5th 3f2-2f1", 3 * f2 - 2 * f1);
+      break;
+    }
+    case TOOL_USTRIP: {
+      // Microstrip: Hammerstad. Stripline: the IPC t->0 approximation with H as
+      // the total ground-to-ground spacing b.
+      int mode = (tfChoice[0] >= 0) ? tfChoice[0] : 0;
+      double er = tfVal[1], H = tfVal[2], W = tfVal[3], f = tfVal[4];
+      if (er < 1 || H <= 0 || W <= 0) { out("Enter er,H,W", "> 0", CL_ORANGE); break; }
+      double z0 = 0, eeff = er;
+      if (mode == 0) {
+        double u = W / H;
+        eeff = (er + 1) / 2.0 + (er - 1) / 2.0 * pow(1.0 + 12.0 / u, -0.5)
+               + ((u < 1) ? 0.04 * (1 - u) * (1 - u) * (er - 1) / 2.0 : 0.0);
+        z0 = (u <= 1)
+             ? (60.0 / sqrt(eeff)) * log(8.0 / u + u / 4.0)
+             : 120.0 * M_PI / (sqrt(eeff) * (u + 1.393 + 0.667 * log(u + 1.444)));
+      } else {
+        z0 = (60.0 / sqrt(er)) * log(1.9 * H / (0.8 * W));
+        eeff = er;
+      }
+      out("Z0", String(z0, 1) + " ohm", CL_CYAN);
+      out("e-eff", String(eeff, 2), CL_WHITE);
+      if (f > 0) {
+        double q = 74948.1 / (f * sqrt(eeff));             // quarter-wave, mm
+        out("90deg line", String(q, 1) + " mm", CL_CYAN);
+        out("Guided wl", String(4 * q, 1) + " mm", CL_GREY);
+      }
+      break;
+    }
+    case TOOL_TOROID: {
+      // Amidon conventions: iron AL = uH/100t (N=100*sqrt(L/AL)); ferrite AL =
+      // mH/1000t (N=1000*sqrt(L_mH/AL)). Wire is single-layer per-turn approx.
+      int ci = (tfChoice[0] >= 0) ? tfChoice[0] : 0;
+      const ToroidCore& tc = TOROID_TBL[ci];
+      double L = tfVal[1];
+      double n = tc.ferrite ? 1000.0 * sqrt((L / 1000.0) / tc.al)
+                            : 100.0 * sqrt(L / tc.al);
+      int N = (int)ceil(n - 1e-9); if (N < 1) N = 1;
+      double act = tc.ferrite ? tc.al * (N / 1000.0) * (N / 1000.0) * 1000.0
+                              : tc.al * (N / 100.0) * (N / 100.0);
+      out("Turns", String(N), CL_CYAN);
+      out("Actual L", String(act, act < 10 ? 2 : 1) + " uH", CL_WHITE);
+      out("AL", String(tc.al, 1) + (tc.ferrite ? " mH/1k t" : " uH/100t"), CL_GREY);
+      out("Wire approx", String(N * tc.mmTurn / 10.0, 0) + " cm +lead", CL_WHITE);
+      out("Material", tc.ferrite ? "ferrite" : "iron powder", CL_MGREY);
+      break;
+    }
+    case TOOL_DV: {
+      // Hohmann transfer between two circular altitudes, plane change at alt 2,
+      // and a deorbit burn to a 60 km perigee -- all vis-viva.
+      const double MU = 398600.4418, RE = 6378.137;
+      double r1 = RE + tfVal[0], r2 = RE + tfVal[1], di = tfVal[2] * M_PI / 180.0;
+      if (r1 <= RE || r2 <= RE) { out("Alt", "> 0 km", CL_ORANGE); break; }
+      double v1 = sqrt(MU / r1), v2 = sqrt(MU / r2);
+      double at = 0.5 * (r1 + r2);
+      double dv1 = fabs(sqrt(MU * (2.0 / r1 - 1.0 / at)) - v1);
+      double dv2 = fabs(v2 - sqrt(MU * (2.0 / r2 - 1.0 / at)));
+      double tt = M_PI * sqrt(at * at * at / MU) / 60.0;
+      double dvp = 2.0 * v2 * sin(di / 2.0);
+      double ad = 0.5 * (r1 + RE + 60.0);
+      double dvd = v1 - sqrt(MU * (2.0 / r1 - 1.0 / ad));
+      out("Hohmann dv1", String(dv1 * 1000.0, 1) + " m/s", CL_CYAN);
+      out("Hohmann dv2", String(dv2 * 1000.0, 1) + " m/s", CL_CYAN);
+      out("Total", String((dv1 + dv2) * 1000.0, 1) + " m/s", CL_WHITE);
+      out("Transfer t", String(tt, 1) + " min", CL_GREY);
+      if (di > 0) out("Plane chg", String(dvp * 1000.0, 0) + " m/s @alt2", CL_ORANGE);
+      out("Deorbit", String(dvd * 1000.0, 1) + " m/s ->60km", CL_WHITE);
+      break;
+    }
+    case TOOL_THERM: {
+      // Flat-plate solar equilibrium, first order: T = (a*S / (n*eps*sigma))^0.25
+      // with n = 1 (insulated back) or 2 (both faces radiate). S = 1361 W/m^2.
+      int mi = (tfChoice[0] >= 0) ? tfChoice[0] : 0;
+      double a = (mi == 0) ? tfVal[1] : THERM_MAT[mi].a;
+      double e = (mi == 0) ? tfVal[2] : THERM_MAT[mi].e;
+      const double S = 1361.0, SIG = 5.670374419e-8;
+      if (a <= 0 || e <= 0) { out("a,e", "> 0", CL_ORANGE); break; }
+      double t1 = pow(a * S / (e * SIG), 0.25);
+      double t2 = pow(a * S / (2.0 * e * SIG), 0.25);
+      out("a / e", String(a, 2) + " / " + String(e, 2) + " =" + String(a / e, 2), CL_GREY);
+      out("1-side rad", String(t1 - 273.15, 0) + " C (" + String(t1, 0) + "K)", CL_CYAN);
+      out("2-side rad", String(t2 - 273.15, 0) + " C (" + String(t2, 0) + "K)", CL_CYAN);
+      out("Eclipse", "cools to ~ -60..-100C", CL_WHITE);
+      out("Note", "1st order, no albedo/IR", CL_MGREY);
+      break;
+    }
+    case TOOL_FARAD: {
+      // Faraday rotation Omega = 2.36e4 * B|| * TEC / f^2 (rad), with a typical
+      // mid-latitude projected field of 4e-5 T -- an order-of-magnitude aid.
+      double f = tfVal[0] * 1e6;
+      int ci = (tfChoice[1] >= 0) ? tfChoice[1] : 0;
+      double tec = FARAD_COND[ci].tecu * 1e16;
+      const double B = 4e-5;
+      auto rots = [&](double fh) { return 2.36e4 * B * tec / (fh * fh) / (2 * M_PI); };
+      out("Rotations", String(rots(f), 1) + " @entered f", CL_CYAN);
+      out("  @146 MHz", String(rots(146e6), 1) + " turns", CL_WHITE);
+      out("  @437 MHz", String(rots(437e6), 2) + " turns", CL_WHITE);
+      out("Lin<->CP", "3 dB always", CL_GREY);
+      out("CP wrong hand", "> 20 dB", CL_GREY);
+      out("Fix", "use CP on lin sats", CL_MGREY);
+      break;
+    }
+    case TOOL_AMPAC: {
+      // PCB: IPC-2221 (k = 0.048 external, 0.024 internal). Wire: AWG geometry +
+      // the Handbook chassis-wiring ampacity column.
+      int mode = (tfChoice[0] >= 0) ? tfChoice[0] : 0;
+      double I = tfVal[1], dT = tfVal[2], oz = tfVal[3];
+      if (mode < 2) {
+        double k = (mode == 0) ? 0.048 : 0.024;
+        if (I <= 0 || dT <= 0 || oz <= 0) { out("I,dT,oz", "> 0", CL_ORANGE); break; }
+        double area = pow(I / (k * pow(dT, 0.44)), 1.0 / 0.725);   // mil^2
+        double wMil = area / (1.378 * oz);
+        out("Trace width", String(wMil * 0.0254, 2) + " mm", CL_CYAN);
+        out("  = mils", String(wMil, 0) + " mil", CL_WHITE);
+        out("Cu / rise", String(oz, 1) + " oz / " + String(dT, 0) + "C", CL_GREY);
+        out("Std (IPC2221)", mode == 0 ? "external" : "internal", CL_MGREY);
+      } else {
+        int awg = (int)tfVal[4];
+        double dmm = 0.127 * pow(92.0, (36.0 - awg) / 39.0);
+        double A = M_PI * dmm * dmm / 4.0 * 1e-6;                  // m^2
+        double Rm = 1.724e-8 / A * 1000.0;                         // mOhm/m
+        double amp = -1;
+        for (int i = 0; i < WIRE_AMP_N; ++i)
+          if (WIRE_AMP[i].awg >= awg) { amp = WIRE_AMP[i].amps; break; }
+        if (amp < 0) amp = WIRE_AMP[WIRE_AMP_N - 1].amps;
+        out("Diameter", String(dmm, 2) + " mm", CL_WHITE);
+        out("R", String(Rm, 1) + " mOhm/m", CL_WHITE);
+        out("Chassis max", String(amp, 1) + " A", CL_CYAN);
+        out("Your load", String(I, 1) + " A " + (I <= amp ? "OK" : "OVER"),
+            I <= amp ? CL_GREEN : CL_RED);
+      }
+      break;
+    }
+    case TOOL_PLL: {
+      // Integer-N synthesis: Fout = (Ref/R) * N * Mult. Spurs sit at multiples of
+      // the (multiplied) comparison frequency around the carrier.
+      double ref = tfVal[0], R = tfVal[1], N = tfVal[2], M = tfVal[3];
+      if (ref <= 0 || R < 1 || N < 1 || M < 1) { out("Enter", "ref,R,N,M >= 1", CL_ORANGE); break; }
+      double fpd = ref / R;
+      double fout = fpd * N * M;
+      out("F out", String(fout, 4) + " MHz", CL_CYAN);
+      out("F compare", String(fpd * 1000.0, 1) + " kHz", CL_WHITE);
+      out("Step", String(fpd * M * 1000.0, 1) + " kHz", CL_WHITE);
+      out("Spurs at", "+/-" + String(fpd * M * 1000.0, 0) + " kHz", CL_ORANGE);
+      out("Ref spur", "+/-" + String(ref * M, 3) + " MHz", CL_GREY);
+      break;
+    }
   }
   if (tfOutScroll > 0)  { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, outTop); canvas.print("^"); }
   if (moreBelow)        { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 108);    canvas.print("v"); }
@@ -40744,6 +43585,7 @@ void App::drawToolForm() {
 
 void App::keyToolForm(char c, bool enter, bool back) {
   if (c == '`') { toolDefSave(toolId); screen = SCR_TOOLS; lastDrawMs = 0; return; }   // save & exit
+  if (!tfEditing && c == 'p') { printReport(PR_TOOLFORM); return; }  // print this form
   if (!tfEditing && c == 'x') {              // reset this tool to factory defaults
     int id = toolId; tfDefOnly = true; toolFormInit(id); tfDefOnly = false;
     lastDrawMs = 0; return;
@@ -44605,7 +47447,7 @@ void App::drawSatList() {
   }
   bool selManual = (viewN > 0 && viewSel < viewN && db.isManualGp(db.at(view[viewSel]).norad));
   if (selManual) footer("ENT pass o orb t tx s status x del `bk");
-  else           footer("ENT pass o orb t tx s status f fav `bk");
+  else           footer("ENT pass o orb t tx s status f fav / `bk");
 }
 
 void App::drawPasses() {
@@ -44671,7 +47513,7 @@ void App::drawPasses() {
       canvas.setCursor(232, y); canvas.print("*");
     }
   }
-  footer("ENT trk d dtl n g w e dx x V vis* `bk");
+  footer("ENT trk d dtl n / g w e dx x V vis* `bk");
 }
 
 void App::drawPassDetail() {
@@ -46038,6 +48880,7 @@ void App::drawSettings() {
   rows[87] = String("Test printer (probe formats)");
   rows[88] = String("Raster paper: ") + (cfg.printPaper == 1 ? "A4" : "US Letter");
   rows[93] = String("Print to serial: ") + (cfg.printToSerial ? "on" : "off");
+  rows[103] = String("BASIC file write: ") + (cfg.basicFileWrite ? "on" : "OFF");
   rows[94] = String("Save to /CardSat/Reports: ") + (cfg.printToFile ? "on" : "off");
   rows[7]  = String("AOS alarm: ") + (cfg.aosAlarm ? "on" : "off");
   rows[84] = String("AOS lead alert: ") + (cfg.aosLeadMin ? (String((int)cfg.aosLeadMin) + " min") : String("off"));

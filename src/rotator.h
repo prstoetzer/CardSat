@@ -4,10 +4,18 @@
 // ===========================================================================
 //
 //  Mirrors the Rig abstraction: the app points the rotator through a narrow
-//  interface and the backend handles the wire protocol. The only backend so
-//  far is GS-232 (Yaesu's de-facto standard, also emulated by SPID, K3NG,
-//  RadioArtisan, ERC, etc.), reached through an SC16IS750/752 I2C->UART bridge
-//  because all three ESP32-S3 hardware UARTs are already in use.
+//  interface and the backend handles the wire protocol. Seven backends:
+//      GS-232            Yaesu's de-facto serial standard (also emulated by
+//                        SPID, K3NG, RadioArtisan, ERC, ...)
+//      Easycomm I/II/III plain-ASCII serial (SatNOGS, K3NG, homebrew)
+//      SPID Rot2Prog     binary serial (SPID MD-01/MD-02)
+//      rotctl (net)      TCP client to a Hamlib rotctld server
+//      PstRotator (net)  UDP datagrams to PstRotator / a PSR-100
+//      Yaesu (direct)    I2C ADS1115 feedback + PCF8574 drive, no controller
+//  The three SERIAL protocols run over a runtime-selected wire (settings:
+//  rotTransport -- I2C bridge, Grove G1/G2, or a USB adapter; see the transport
+//  block below). The net backends need no wire; Yaesu (direct) has its own I2C
+//  hardware.
 //
 //  GS-232 (per the Yaesu GS-232A/B manuals and Hamlib rotators/gs232a,gs232b):
 //      "Waaa eee\r"  point to azimuth aaa (000-360/450) + elevation eee (000-180)

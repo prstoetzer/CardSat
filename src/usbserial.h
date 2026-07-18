@@ -37,8 +37,8 @@
 //     the Arduino IDE after all -- the sketch-folder build_opt.h is passed to
 //     every translation unit, libraries included (verified against arduino-esp32
 //     3.2.1 platform.txt; details in the .cpp) -- and CardSat ships one with
-//     -DESP_USB_HOST_MAX_DEVICES=4 (root hub + adapter, headroom for the planned
-//     USB rotator support).
+//     -DESP_USB_HOST_MAX_DEVICES=4 (root hub + adapter, headroom for the USB
+//     rotator support that shipped in 0.9.58).
 //
 //  3. COMPOSITE DEVICES. A plain USB<->serial cable (the FTDI CI-V cable this was
 //     written for) is a single-interface device: the simple case. A modern rig
@@ -69,8 +69,9 @@ namespace UsbSerial {
   bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
 
   // Detach the CDC port and stop CAT. The IDF host stack and the ~11.8 KB host
-  // object STAY RESIDENT until reboot, by design: EspUsbHost v2.3.0 cannot release
-  // its client (its end() kills the client task before running client-scoped
+  // object STAY RESIDENT until reboot, by design: EspUsbHost cannot release its
+  // client (checked v2.3.0 and unchanged through v2.3.2: end() kills the client
+  // task before running client-scoped
   // cleanup), so a real teardown leaves the stack installed with a live client --
   // and then even a rebind is refused. Bench-proven over eight revisions; the full
   // account is in end() in the .cpp. Consequences the caller must know:

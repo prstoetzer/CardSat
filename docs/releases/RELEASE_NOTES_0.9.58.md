@@ -16,13 +16,14 @@ their `begin()` binds a UART. Handing them a USB stream instead changes the tran
 else; the Doppler loop, calibration and UI are untouched.
 
 The point is not the modern rigs. It is that **every pre-USB radio** — IC-821, TS-790, FT-847 and
-the rest — could use a £3 adapter instead of the MAX3232 harness `WIRING.md` documents today.
+the rest — could use a $5 adapter instead of the MAX3232 harness `WIRING.md` documents today.
 
-- **The console comes back when the radio is disengaged.** USB host and the USB CDC console share
-  the S3's **one internal USB PHY**, so the console is released on engage and restored on
-  disengage — exactly the model asked for, and the one Mini-FT8 uses for its FATFS-to-PC mode.
-  Expect the PC's serial port to disappear when the radio engages; whether it re-attaches on
-  disengage without a reboot is an open bench question (cosmetic either way).
+- **Engaging USB takes the serial console for the rest of the session.** USB host and
+  the USB CDC console share the S3's **one internal USB PHY**: the console is released
+  on engage and — by design — **does not come back until reboot** (see *The USB host
+  now stays up* below for why the restore-on-disengage model was tried and abandoned).
+  Diagnostics move to disk instead: `/CardSat/Logs/usb.log` and the new *Console to
+  file* capture.
 - **RAM is allocated on engage and freed on disengage**, driven by a **reconciliation in `loop()`**
   rather than a hook on the toggle: `radioOut` is *set* in one place but *cleared* in six (the
   emergency stop, charge mode, losing the tracked satellite...), and hanging teardown off the
@@ -38,7 +39,7 @@ the rest — could use a £3 adapter instead of the MAX3232 harness `WIRING.md` 
   because they are class `0xFF` with no standard descriptor to detect them by: **FTDI** `0403:6001/
   6010/6011/6014/6015`, **CP210x** `10c4:ea60/ea70/ea71`, **CH34x** `1a86:5523/55d3/7522/7523`,
   **PL2303** `067b:2303/23a3`. A clone with an unlisted PID enumerates fine and is simply not
-  recognised — so the status line now distinguishes `No USB device detected` (nothing there) from
+  recognized — so the status line now distinguishes `No USB device detected` (nothing there) from
   `Not a known serial adapter: <name> <vid:pid>` (there, but unlisted), which need entirely
   different fixes.
 
@@ -187,7 +188,7 @@ identical on SD and on bare flash.
 - **`/CardSat/Logs/usb.log`** — the full USB story for both ports, in one file, in order. CAT lines
   are prefixed `cat:` and rotator lines `rot:`, because an unprefixed line is ambiguous the moment
   both are in play.
-- **`/CardSat/Logs/console.log`** — **Settings → Log → `Console to file`** (default **off**) mirrors
+- **`/CardSat/Logs/console.log`** — **Settings → Station / logging → `Console to file`** (default **off**) mirrors
   the entire serial console. `Serial` is a *macro* in arduino-esp32 (`#define Serial HWCDCSerial`),
   so CardSat redefines it to a `Print`-derived tee that forwards to the hardware and captures the
   text: **~181 call sites covered, none edited.**
@@ -235,7 +236,7 @@ footprint edge can ever touch. Retrograde orbits fold (98° behaves like 82°).
 **Applied to every single-satellite empty state**, after an audit of all sixteen "no passes"
 messages in the app: the **Passes** screen, the **10-day chart**, **Orbital analysis** pages 4
 (Doppler) and 7 (Outlook), and the **10-day** and **visible-pass reports**. Deliberately *not*
-applied to the favourites-list screens (Next Passes, Sky glance, Rove planner) — those aggregate
+applied to the favorites-list screens (Next Passes, Sky glance, Rove planner) — those aggregate
 many satellites, so an empty list there genuinely does mean "none soon".
 
 ### And a real bug in the Doppler page, found while auditing
@@ -253,7 +254,7 @@ case, so it can only ever be generous. A false "never rises" is geometrically im
 the property that makes it safe to act on. Degenerate elements (zero or absurd mean motion) return
 "rises" rather than blocking.
 
-## Deep-space orbits are labelled SDP4
+## Deep-space orbits are labeled SDP4
 
 An audit against **PREDICT 3.0.0** (KD2BD, released 13-Jul-2026) prompted a look at the propagation
 model, and turned up a correction worth stating plainly: **CardSat already handles deep-space
@@ -268,7 +269,7 @@ if ((2*pi / satrec.no) >= 225.0) satrec.method = 'd';
 
 — the identical 225-minute boundary PREDICT uses. Verified by compiling that library and driving an
 AO-40-class HEO (2.05 rev/day, ecc 0.72, perigee 951 km) through CardSat's exact path
-(`gpToTle` → `Sgp4::init` → `twoline2rv` → `sgp4init`): SDP4 selected, resonance initialised,
+(`gpToTle` → `Sgp4::init` → `twoline2rv` → `sgp4init`): SDP4 selected, resonance initialized,
 propagates with no error. QO-100 likewise.
 
 So the **Orbital analysis** now simply *labels* it: the title leads with **`SDP4`** on a deep-space
@@ -321,7 +322,7 @@ The performance monitor puts those numbers **on the device**:
 
 | | |
 |---|---|
-| **Largest block** | the figure that decides whether a TLS upload can run, colour-coded (red under 12 KB, amber under 20 KB) |
+| **Largest block** | the figure that decides whether a TLS upload can run, color-coded (red under 12 KB, amber under 20 KB) |
 | **min ever** | the worst it has been since boot — the number that catches a leak you weren't watching |
 | **Free heap** | and its own min-ever |
 | **Loop avg / worst** | slow loops mean a starved watchdog and a sluggish UI |
@@ -329,7 +330,7 @@ The performance monitor puts those numbers **on the device**:
 
 Largest block leads deliberately: on this no-PSRAM board it, not free heap, is what fails first —
 fragmentation can starve TLS while "free" still looks healthy. The thresholds are anchored to
-measured behaviour (a GP fetch runs with ~25 KB free and the largest block dipping to ~8 KB).
+measured behavior (a GP fetch runs with ~25 KB free and the largest block dipping to ~8 KB).
 
 `x` resets the peak trackers, `p` prints the snapshot, `` ` `` goes back. It is also report **29**
 in the About → Print menu, so a heap snapshot can go on paper next to whatever else you're
@@ -366,7 +367,7 @@ maintained constant:
 
 Adding the USB picker and scan rows at 99, 100 and 101 wrote three `String` objects **past
 the end** of that array. It was reported as "the new settings rows have no visible label" —
-but the missing label was the harmless symptom. The real behaviour was undefined:
+but the missing label was the harmless symptom. The real behavior was undefined:
 constructing Strings over whatever followed on the stack.
 
 Nothing structural catches it. Braces balance. Parity matches (both representations carry
@@ -478,7 +479,7 @@ and the `.bin` 2,921,408 → **2,661,040**, taking the app partition from **92.9
   to ~1.4×10⁹ within six samples. The shipped version computes the delta in signed arithmetic
   first. Printed report widths are checked against 32-column (58 mm) paper; the footer fits the
   39-char budget; `PA_ITEMS` and the dispatch `MAP` are 29/29 and the `static_assert` holds.
-- **Needs bench confirmation:** the screen's layout and colour thresholds on real hardware, and
+- **Needs bench confirmation:** the screen's layout and color thresholds on real hardware, and
   whether the loop-timing figures are useful in practice or just noise. The heap numbers should
   agree with what `memtrace` reports over serial — worth checking they match on the first run,
   since that cross-check is free.
@@ -498,18 +499,18 @@ and the `.bin` 2,921,408 → **2,661,040**, taking the app partition from **92.9
   disengage, and that is now by design rather than a defect — see the resident-host section.
 - **Two USB adapters at once is NOT proven.** It is built, guarded, and reasoned about carefully,
   but it has never had a radio and a rotator plugged in together. The misbind hazard is real and
-  the explicit-address binding is the defence; treat it as experimental. If both adapters are the
+  the explicit-address binding is the defense; treat it as experimental. If both adapters are the
   *same model with no serial numbers*, they can only be told apart by address — re-check the
   selection after a replug.
 - **IC-9100 / IC-9700 has never been tested.** The composite-device reasoning (audio takes an
   *interface*, not a device slot; isochronous endpoints can never look like a bulk-OUT serial port)
   is drawn from the library and IDF sources, not from a radio. If a 9700 ever reports slot
   exhaustion, that is the evidence to raise `ESP_USB_HOST_MAX_DEVICES` from 4 to 5 (+2,048 B).
-- **The console-capture cost figure is modelled, not measured.** ~6 ms per `Logstore` write on
+- **The console-capture cost figure is modeled, not measured.** ~6 ms per `Logstore` write on
   LittleFS is an estimate; the ratios hold but the absolute could be off 2× either way. The first
   bench run with capture on will settle it — every line is timestamped, so the log profiles itself.
   Watch for: does tracking stay smooth with it on, and does `console.log` stop growing at the cap.
 - **The Grove rotator has not been driven by a rotator.** The transport, the conflict rules and the
-  yield behaviour are exercised; an actual GS-232/Easycomm/SPID controller on G1/G2 is not.
+  yield behavior are exercised; an actual GS-232/Easycomm/SPID controller on G1/G2 is not.
 - **`rotType` was silently reverting to GS-232 on every boot** for anyone using Yaesu, Easycomm or
   SPID (a stale clamp). Worth confirming your rotator setting now survives a reboot.

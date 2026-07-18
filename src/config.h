@@ -184,7 +184,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.58";
+static constexpr const char* FW_VERSION = "0.9.59";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -240,26 +240,34 @@ static constexpr int   MAX_SATS        = 150;  // sats held in RAM from GP data
 static constexpr int   MAX_TX_PER_SAT  = 64;   // transmitters held for active sat (e.g. ISS has ~49 on SatNOGS)
 
 // ---- USB-host CAT (CAT_USB) ------------------------------------------------
-// OPT-IN, default OFF -- unlike LoRa, which ships on. Two reasons: it needs a
-// third-party library (tanakamasayuki/EspUsbHost) that a stock Arduino IDE install
-// will not have, so an unguarded build would break for everyone; and it is UNPROVEN
-// on hardware. Defined here rather than in usbserial.h because settings.h needs it
-// for CAT_TYPE_N and does not include usbserial.h.
+// ON by default since 0.9.59 -- like LoRa, ship every feature. It was opt-in
+// while unproven; 0.9.58 bench-proved it on an IC-821 + FTDI adapter (engage /
+// disengage / re-engage / Doppler tracking over many cycles). Defined here
+// rather than in usbserial.h because settings.h needs it for CAT_TYPE_N and
+// does not include usbserial.h.
 //
-// TO ENABLE, either:
-//   * Arduino IDE  -- change the 0 below to 1, and install EspUsbHost from the
-//                     Library Manager. No build flags: the IDE has no field for
-//                     them, and nothing here needs one.
-//   * PlatformIO   -- uncomment the two lines in platformio.ini.
+// The default build therefore REQUIRES tanakamasayuki/EspUsbHost, v2.3.1 or
+// later (Library Manager / lib_deps). v2.3.1 fixed the peripheral_map compile
+// error upstream (the assignment is now inside an ESP32-P4 target guard), so no
+// library patch is needed; only stale copies <= 2.3.0 still need the one-line
+// edit in docs/BUILD_AND_FLASH.md.
+//
+// TO BUILD WITHOUT USB CAT (no EspUsbHost needed; Settings cannot reach
+// "USB serial"; otherwise byte-for-byte the same firmware):
+//   * Arduino IDE  -- change the 1 below to 0.
+//   * PlatformIO   -- add -DCARDSAT_HAS_USBCAT=0 under build_flags and comment
+//                     out the EspUsbHost line under lib_deps.
 // There is deliberately NO per-file ESP_USB_HOST_MAX_DEVICES define: the slot
 // array is a member of the host object, sized in the LIBRARY's header, so only a
-// global -D (PlatformIO build_flags) can change it consistently for the library's
-// own translation unit too -- a per-file define diverges the layouts and corrupts
-// the firmware (the 0.9.58-wip enable-USB-CAT freeze; see usbserial.cpp). The
-// Arduino IDE path needs no flag at all: the host object is heap-allocated only
-// while USB CAT is engaged, so the library's 8-slot default costs nothing at rest.
+// global -D can change it consistently for the library's own translation unit
+// too -- a per-file define diverges the layouts and corrupts the firmware (the
+// 0.9.58-wip enable-USB-CAT freeze; see usbserial.cpp). Both build paths supply
+// that global -D as ESP_USB_HOST_MAX_DEVICES=4: the Arduino IDE via build_opt.h
+// (which the esp32 core applies to every translation unit, libraries included),
+// PlatformIO via build_flags in platformio.ini. The host object is heap-
+// allocated only while USB is engaged, so the slots cost nothing at rest.
 #ifndef CARDSAT_HAS_USBCAT
-#define CARDSAT_HAS_USBCAT 0
+#define CARDSAT_HAS_USBCAT 1
 #endif
 static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
@@ -326,6 +334,11 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_NOTES   "/CardSat/notes.txt"     // per-sat operating notes: "norad<TAB>text" lines
 #define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
 #define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
+#define FILE_CTX     "/CardSat/ctx.json"      // CelesTrak-sourced extra favorites (one OMM object/line);
+                                              // refreshed from CelesTrak on GP updates, unlike FILE_MGP
+#define FILE_CTX_TS  "/CardSat/ctx.ts"        // CelesTrak courtesy-limit state (timestamps + last query hash)
+#define CTX_MAX      25                       // max CelesTrak extras tracked (matches the per-update
+                                              // refresh cap; also bounds every ctx file walk)
 #define FILE_MTX     "/CardSat/mtx_%lu.json"  // manual transponders per norad (text lines)
 #define FILE_CFG_BAK  "/CardSat/config.bak"    // backup copy of config.json
 #define FILE_FAVS_BAK "/CardSat/favs.bak"      // backup copy of favs.txt

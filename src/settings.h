@@ -32,7 +32,8 @@ enum CatType : uint8_t {
   CAT_USB   = 3,   // USB<->serial adapter (FTDI/CP210x/CH34x) on the USB-C port.
                    // Works for ANY wire-level protocol (CI-V/Yaesu/Kenwood): the
                    // transport is swapped, the dialect is unchanged. Only present
-                   // when built with CARDSAT_HAS_USBCAT=1; see usbserial.h.
+                   // when built with CARDSAT_HAS_USBCAT=1 (the default since
+                   // 0.9.59); see usbserial.h.
 };
 // How many CAT transports the Settings row cycles through. CAT_USB is only
 // selectable when the feature is compiled in, so a build without it behaves
@@ -126,6 +127,8 @@ struct Settings {
   uint8_t  printTransport = 0;     // 0 = raw TCP 9100, 1 = IPP (HTTP POST :631)
   uint8_t  printPaper = 0;         // raster media: 0 = US Letter, 1 = A4
   bool     printToSerial = false;  // also echo reports to the USB serial console
+  bool     basicFileWrite = false; // allow BASIC FOPEN/FPRINT to write under /CardSat/basic/
+                                   // (default OFF: preserves the 0.9.57 no-storage-writes stance)
   bool     printToFile   = false;  // also write reports to /CardSat/Reports/*.txt (80-col)
   // Cloudlog/Wavelog upload (self-hosted online logbook). Uploading here also feeds
   // LoTW if the user has LoTW configured in Cloudlog, so it's an alternative to the

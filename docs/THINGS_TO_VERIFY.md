@@ -17,7 +17,7 @@ Sun-Moon-transit / per-satellite-note features, and the offline GP/transponder c
 
 **v0.9.52–0.9.53 additions confirmed:** on-demand speaker power (audio buffers up only while
 sound plays, released after — including game exit via any path), the **4bpp display sprite**
-(colours verified unchanged on hardware), and the **multi-batch LoTW upload fix** — three
+(colors verified unchanged on hardware), and the **multi-batch LoTW upload fix** — three
 back-to-back signed uploads with zero send stalls, confirmed via the on-device heap log
 (largest block recovering to its ceiling before every batch). The one 0.9.53 addition **not**
 yet exercised on hardware is multi-file download from a phone browser (the Files page's
@@ -32,11 +32,14 @@ anatomy animation (spin smoothness, callout cycling, leader tracking, Orbit-zoo
 regression on the shared 66 ms tick), plus its two companion text screens (`i`
 primer from the anatomy; Help `c` Simulator intro).
 
-**Added in 0.9.55, not yet on hardware:** the entire TCP:9100 printing path — each of
-the seven reports against a real printer (or a host running `nc -l 9100`), the
-Settings → Network printer IP/port entry and persistence, the `p` Print menu on a
-satellite's Passes screen (and the rove viewer's `p`), the serial `print` commands, and the error paths (unreachable printer fails
-fast; blank IP reports "No printer set").
+**Printing (0.9.55, updated):** the **PWG/URF raster + IPP (port 631) path is
+confirmed on a real AirPrint printer** — on-device raster generation, the chunked
+IPP transport, and the capability probe all work against real hardware. Still to
+verify: the **raw TCP:9100 receipt path** (ESC/POS and the other page languages)
+against a physical receipt printer — the report *content* (now **29 reports**) is
+host-validated and prints over serial/file, but no physical 9100 printer has
+confirmed the wire path yet — plus the Settings printer IP/port persistence and the
+error paths (unreachable printer fails fast; blank IP reports "No printer set").
 
 **Added in 0.9.57, not yet on hardware:**
 
@@ -82,6 +85,21 @@ The interpreter *logic*, the coordinate projections, and the report *content* ar
 (see [ROADMAP_TO_1.0.md](ROADMAP_TO_1.0.md) §4 for what that does and doesn't mean); what needs
 hardware is the **display, input, and printer output**.
 
+**EspUsbHost v2.3.1+ compiles CardSat clean, unpatched (verified 0.9.59)** — the
+`peripheral_map` fix landed upstream in v2.3.1; a pristine v2.3.2 checkout builds
+the full monolith on arduino-esp32 3.2.1 (85% app partition), the 2.3.0→2.3.2 diff
+audit found the whole API surface CardSat uses unchanged, and `end()` is untouched
+(the resident-host design still applies). Still worth one bench engage after a
+library *update*: the changed serial-path behaviors — deferred unplug recovery and
+interface-number-pinned binding — should be invisible on a single-interface FTDI,
+but "should" is the word this file exists for.
+
+**CAT over USB is confirmed on an IC-821 + FTDI adapter (0.9.58)** — engage,
+disengage, re-engage, and full Doppler tracking, over many cycles. The console does
+not return while USB is engaged (resident host, by design); diagnostics land in
+`/CardSat/Logs/usb.log` and, when enabled, `console.log`. Since **0.9.59 USB CAT is
+part of the default build** (`CARDSAT_HAS_USBCAT=1`).
+
 **Single-pin CI-V is confirmed on an IC-821** — the full bidirectional CI-V exchange
 (frequency reads and ACKs) works over one shared open-drain GPIO, including **Doppler
 compensation and full radio-knob tuning**. See
@@ -120,6 +138,79 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
 
 ## Still to verify on real equipment
 
+- **Tool printing (0.9.59) — untested on paper.** `p` on any form tool should print
+  the inputs, a rule, and the complete output list (past what fits on screen); `p` on
+  conjunction/neighborhood/debris/link-curve prints their reports (the link curve
+  includes an ASCII plot — check it survives the 42- and 48-column printer widths).
+  Confirm no `p` fires while a form field is being edited (it types instead).
+- **Six-task batch (0.9.59) — bench items.** High-orbit passes: pick a real HEO or
+  GEO GP (period > 225 min) and confirm the Next Passes list populates, a
+  geostationary-in-view bird shows one horizon-long pass, and the scan cost feels
+  acceptable on-device. GP throttle: press `k` twice within 2 h — second run must say
+  courtesy-skip and still reload; reboot between to prove persistence; change source
+  and confirm an immediate fetch. USB `#N`: two identical adapters must show distinct
+  leading ids matching what binding stores. hams.at: a favorite's activation rows
+  tint green with a CelesTrak-sourced catalog. LoTW: a QSO logged under a CelesTrak
+  name exports without a prompt. Graph screen: `b` toggles the table; `Fn+b`
+  screenshots.
+- **BASIC + calculator expansion (0.9.59) — none exercised on hardware.** Gate-checked and
+  compiled; the `lookFor` math behind `SATSEL` is host-verified against `look()`, but every
+  on-device path needs a bench pass:
+  - `SATSEL` in a loop (e.g. scan all `NSAT` birds for the highest `SATEL`) completes without
+    a watchdog trip and errors cleanly at the 2,000-call budget.
+  - `TXSEL`, `PASSAOS/LOS/MAX(k)`, `LSTHR`, GPS names (with and without a fix), `HEAPFREE`.
+  - `LPRINT` opens the sinks lazily, prints, and closes at run end — including on a runtime
+    error mid-program; `no print output` with no sink configured.
+  - Graphics: `SHOW` holds the frame after the run, any key returns to the console; colors
+    0–9 render; drawing off-screen coordinates is harmless.
+  - File gate: `FOPEN` refuses with the setting OFF; ON, it appends under `/CardSat/basic/`,
+    rejects path characters, closes at run end; `FILES` lists; the grapher's CSV mode plots
+    a file `FPRINT` produced.
+  - Grapher: trace readout, `z`/`Z` roots and intersections on something known
+    (`sin(x)` zeros at 0/±180; `sin(x)`=`cos(x)` at 45°), Simpson `S=` vs a known integral,
+    table view, CSV decimation on a large file.
+  - Calc: spot-check `atan2(1,1)=45`, `ncr(49,6)`, `fspl(435.5,800)`, `nf2t(0.5)`,
+    `porb(400)` ≈ 92.6 min, and the `f` suffix.
+- **CelesTrak catalog search + auto-refreshed extras (0.9.59) — network paths untested.**
+  Host-verified (gates + full compile) but no on-air run yet. To confirm on hardware:
+  - `/` search by NAME and by CATNR both return and render results; a query with no
+    match surfaces CelesTrak's error body as a status rather than a blank screen.
+  - Adding an out-of-source object creates `/CardSat/ctx.json`, the satellite appears
+    with a favorite mark, and survives a reboot.
+  - Running Update re-fetches the extras (watch for the "CT extra i/N" statuses) and a
+    second Update within 2 h shows "CT extras fresh (Nm ago)" instead — including
+    across a power cycle (the throttle timestamp is persisted in `/CardSat/ctx.ts`).
+  - The 10 s search spacing and the 2 h same-query cache statuses appear when provoked.
+  - `x` on a `/`-added satellite deletes it, removes the ctx line, and it does NOT
+    come back on the next Update.
+- **The twenty new tools (0.9.59) — none exercised on hardware.** All were verified
+  host-side (balance/parity gates, a full arduino-cli firmware compile, and the orbital
+  math cross-checked against skyfield), but none has been run on the Cardputer yet.
+  Specifically worth confirming on-device:
+  - **Conjunction screener & debris-group screen runtime.** Each propagates the fitter's
+    pairwise SGP4 forward model many thousands of times. On the ESP32-S3 (no PSRAM) confirm
+    the 6 h conjunction scan and the 3 h debris screen finish in a tolerable time and that
+    the progress redraws (`conjPct` / `dgPct`) keep the UI responsive rather than tripping
+    the watchdog. If a scan is too slow, widen the coarse step or cap the candidate count.
+  - **Debris-group network path.** The debris screen fetches a CelesTrak GROUP as **GP JSON**
+    (`FORMAT=JSON`, like the rest of the program — the legacy TLE format can't represent newer
+    objects) to a temp file over TLS on the no-PSRAM heap, then stream-parses it with the shared
+    allocation-free GP parser. Confirm the fetch succeeds for each of the four groups, the temp
+    file is parsed and then deleted, and the resident 150-satellite database is genuinely
+    untouched afterward. **Note the size ceiling:** GP JSON is ~800 bytes per object, so a large
+    historical cloud (Fengyun-1C is thousands of objects, >1 MB) may exceed the download's
+    free-space budget and stop with StorageFull — the smaller groups (last-30-days, Iridium-33)
+    are the ones expected to fit comfortably. RAM stays flat regardless of file size.
+  - **Transponder planner print.** `p` prints the dial-pair table through the same sink block
+    as the report menu; confirm it reaches the field receipt printer / serial / file like the
+    other reports.
+  - **Sun-noise G/T against a real measurement.** Sanity-check the computed G/T on the bench
+    (sun vs cold sky Y-factor) — and remember the seeded 10.7 cm flux is an upper bound; enter
+    the flux at the operating frequency for the truest number.
+  - **Number spot-checks.** The closed-form tools were checked against hand calculations and,
+    for the Pi/T matching networks, an ABCD round-trip; a couple of real-world cross-checks on
+    the bench (a known toroid turn count, a known microstrip line) would still be worthwhile.
+
 - **CAT radio control (other paths).** Separate-pin CI-V, Yaesu, and Kenwood encoders
   are host-tested but not yet confirmed against those specific radios. Watch the CAT
   serial monitor to confirm the rig ACKs (`FB`) rather than NAKs (`FA`), that the
@@ -130,8 +221,23 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
   (≈30 Hz SSB/CW, 250 Hz FM, floored at the rig's tuning step), with a short grace
   window that holds off downlink writes while you're turning — tune
   `KNOB_MOVE_SSB_HZ` / `KNOB_MOVE_FM_HZ` / `TUNE_GRACE_MS` in `app.h` if the feel needs
-  adjusting. (The IC-821 single-pin path above is the one CAT backend that **is**
-  hardware-confirmed.)
+  adjusting. (Single-pin CI-V and CAT-over-USB — both on the IC-821, above — are
+  the CAT paths that **are** hardware-confirmed.)
+- **92% of the code has never been compiled with warnings on.** The Arduino build ships
+  `-w`, which silences every warning GCC has. `tools/check_compiles.py` is the only place
+  that turns them back on, and it reaches **~3.5k of ~46.5k lines (8%)** — `usbserial`,
+  the serial rotator path, `logstore` and `consolelog`. `app.cpp` (30k lines), `net.cpp`
+  and `civ.cpp` are **unaudited**, and that gap already cost one shipped bug: 0.9.58's
+  non-virtual-destructor defect was in covered code and *still* only surfaced when someone
+  thought to run the audit. Extending the gate was attempted and abandoned deliberately —
+  `rig/yaesu/kenwood` pull `radio_profiles.h`, then `String::toUpperCase`, then stand-ins
+  for `IcomNetRig`/`RigctlRig` and the network stack behind them: a growing fake modeling
+  code the change never touched. **The honest fix is to drop `-w` from the real build** and
+  triage what falls out, rather than to grow a parallel fake. That is a 1.0 item.
+- **`Rig` and `Rotator` base-pointer deletes are safe** — both declare `virtual ~`
+  (`rig.h:25`, `rotator.h:114`), checked after the 0.9.58 transport bug. The defect was
+  confined to deleting a transport through Arduino's `Stream*`, which has no virtual dtor.
+
 - **Rotator serial transports (0.9.58).** The three serial protocols now run over the I²C
   bridge, **Grove G1/G2**, or a **USB adapter**. Only the transport plumbing is verified —
   no protocol has been driven by a real controller over Grove or USB. The Grove conflict
@@ -155,9 +261,9 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
   **Verify:** does it enumerate, does CAT work, and does `/CardSat/Logs/usb.log` list the
   adapters you expect? If it reports slot exhaustion, that is the evidence to raise
   `ESP_USB_HOST_MAX_DEVICES` from 4 to 5 (+2,048 B — measured, not estimated).
-- **Console-capture cost (0.9.58).** The ~0.5%-of-loop figure is **modelled**, not measured:
+- **Console-capture cost (0.9.58).** The ~0.5%-of-loop figure is **modeled**, not measured:
   ~6 ms per LittleFS write is an estimate, and the absolute could be off 2× either way.
-  **Verify:** turn on Settings → Log → *Console to file*, track a pass, and confirm tracking
+  **Verify:** turn on Settings → Station / logging → *Console to file*, track a pass, and confirm tracking
   stays smooth and `console.log` stops growing at the cap. Every line is timestamped, so the
   log profiles itself.
 

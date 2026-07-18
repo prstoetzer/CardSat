@@ -23,6 +23,31 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.59:** **a satellite workbench, BASIC that reaches everything, honest higher-orbit
+> passes, and a device that's a better citizen.** **Twenty new tools** join the Tools menu — a full
+> satellite & construction bench (conjunction screener, orbital neighborhood, debris-group screen,
+> link-margin curve, thermal, cascade NF, and more), every form tool now **prints** with `p` (one
+> refactor, all 34), and the four new screens print contextual reports. **Search all of CelesTrak**
+> from the satellite list (`/`, by name or catalog number) and anything you add becomes an
+> **auto-updating favorite** — with built-in courtesy throttles (2 h per source, persisted across
+> reboots) on both the extras *and* the primary catalog fetch. **Tiny BASIC** gains `MOD`,
+> `AND/OR/NOT`, a `DIM @(n)` array, `DATA/READ/RESTORE`, `ON…GOTO`, and a system bridge:
+> `SATSEL i` re-runs SGP4 for *any* catalog satellite (host-verified `lookFor`, ≤0.0003° vs the
+> live path), `TXSEL`, pass lookahead `PASSAOS/LOS/MAX(k)`, GPS/device names — plus canvas
+> **graphics** (`CLS…SHOW`, the frame holds after the run), `LPRINT` through the report sinks, and
+> Settings-gated file logging. Still **no `INPUT`**, by design. The calculators become instruments:
+> ~25 new functions (two-argument `atan2/ncr/fspl/dop…`), and the grapher gains Y2, a trace cursor
+> with dy/dx, zero/intersection finding, Simpson ∫ between marks, a table view, and a flat-RAM
+> **CSV plot mode**. **Pass prediction now covers Molniya/GTO/GEO**: a scan-and-bisect finder for
+> periods over ~225 min, Skyfield-verified (crossings ≤0.04°; a bird parked in view reports one
+> honest horizon-long pass). **USB CAT is on by default**; USB device strings lead with **`#N`** so
+> two identical adapters are tellable apart. AMSAT status, **hams.at** (favorites tint green), and
+> **LoTW** (CelesTrak-named QSOs auto-resolve) share one source-independent name bridge. Under the
+> hood: an orbital-math audit (zero defects), a RAM/heap audit with fixes (JSON-churn eliminated,
+> streamed rewrites, `SatEntry` repacked 144→136 B), and a compiled-image audit. Two 4×6 cards now
+> ship: the **key reference** and a new **hardware/data/calc/BASIC reference card**.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.59.md)**.
+
 > **New in v0.9.58:** **CAT over USB, rotators on any wire, and logs that outlive the console.**
 > A fourth CAT transport — a **USB↔serial adapter** on the USB-C port, no level shifter — works for
 > every protocol and every radio, and is **bench-proven on an IC-821** through engage, disengage and
@@ -32,7 +57,7 @@ transit prediction, sun/eclipse status, and more.
 > share the USB host, each bound to an explicitly chosen adapter — *experimental, untested with two
 > adapters*. Engaging USB claims the S3's one USB PHY and the console does not come back, so the
 > diagnostics moved: **`/CardSat/Logs`** holds a capped USB trace, and **Console to file** (Settings
-> → Log, default off) mirrors the whole serial console to disk — retrievable from the web files
+> → Station / logging, default off) mirrors the whole serial console to disk — retrievable from the web files
 > portal, on SD or bare flash. Plus **~23 KB more free heap** (`.bss` 145,904 → 122,336), a
 > **rotator setting that stopped silently reverting to GS-232 on every boot**, and a task-watchdog
 > reset during LoTW uploads, removed.
@@ -215,7 +240,7 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 *(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
 unchanged since. Several features added since — rove planner, workable horizon, target
 search, on-device printing, the Files page's multi-select — are not pictured yet; a
-screenshot refresh is planned. The current firmware is v0.9.57.)*
+screenshot refresh is planned. The current firmware is v0.9.59.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#22-screen-by-screen-reference).
@@ -258,8 +283,9 @@ A few of CardSat's screens (240×135 native captures). The full set is in the
   interface; Kenwood = a MAX3232 RS-232 level shifter; Yaesu = a serial CAT interface
   (verify TTL vs RS-232).
 - *(Optional)* a GPS source (Grove port or an M5Stack Cap LoRa GNSS), and an
-  *(optional)* **antenna rotator** (GS-232A/B via an SC16IS750 I²C→UART bridge +
-  MAX3232, or a direct-Yaesu I²C interface).
+  *(optional)* **antenna rotator** — GS-232A/B, Easycomm, or SPID serial over an
+  SC16IS750 I²C→UART bridge + MAX3232, the Grove port, or a USB↔serial adapter;
+  or a direct-Yaesu I²C interface; or rotctld / PstRotator over the network.
 
 Full pin-by-pin wiring is in **[docs/WIRING.md](docs/WIRING.md)**.
 
@@ -271,6 +297,9 @@ Two prebuilt binaries ship with each release — no toolchain required:
 |---|---|---|
 | `CardSat.bin` | **[Launcher](https://github.com/bmorcelli/Launcher)** | App-only image; Launcher writes the partition table/bootloader. **Preserves saved data** on upgrade. |
 | `CardSat_Merged.bin` | **M5Burner** / direct flash (esptool / web flasher) at `0x0` | Complete standalone image; carries an empty filesystem. |
+
+Both binaries include **USB CAT** — *USB serial* is in the CAT type row out of the
+box (and USB CAT is on by default in source builds too, since 0.9.59).
 
 **Your settings live on the microSD card when one is inserted** (CardSat prefers SD,
 under `/CardSat`, and falls back to internal flash otherwise). Flashing never touches
@@ -297,8 +326,8 @@ Navigation uses the legends printed on the Cardputer keys:
 4. **Satellites** — pick a bird (`f` to favorite); transponders load from cache or
    SatNOGS.
 5. **Next Passes** — what's coming up across all favorites.
-6. **Passes → Track** — live az/el and Doppler; `m` switches TUNE/CAL, `d` toggles
-   radio-knob tuning.
+6. **Passes → Track** — live az/el and Doppler; `m` switches TUNE/CAL, `d` cycles
+   the tune mode (FULL / DL / UL / hold).
 
 See **[MANUAL.md](MANUAL.md)** for the complete guide.
 
@@ -323,6 +352,7 @@ See **[MANUAL.md](MANUAL.md)** for the complete guide.
 | **[docs/design/](docs/design/)** | Design/scope notes for current and proposed features. |
 | **[docs/releases/](docs/releases/)** | Per-version release notes. |
 | **[CardSat_CheatCard_4x6.pdf](CardSat_CheatCard_4x6.pdf)** | Printable 4×6 key-reference card (front: operating, back: setup). |
+| **[CardSat_RefCard_4x6.pdf](CardSat_RefCard_4x6.pdf)** | Printable 4×6 reference card — radio & rotator support, data sources & courtesy limits, the file map, all calculator functions, the full BASIC language & system names. |
 | **[CardSat_Manual.pdf](CardSat_Manual.pdf)** | PDF build of the manual. |
 
 ## Data sources
@@ -352,5 +382,5 @@ CardSat useful, please consider joining and/or donating to AMSAT at
 - "One True Rule" Doppler tuning: Paul Williamson **KB5MU**,
   [AMSAT](https://www.amsat.org/the-one-true-rule-for-doppler-tuning/).
 
-Released under the **MIT License** (see [MANUAL.md](MANUAL.md) §23 for the full text).
+Released under the **MIT License** (see [MANUAL.md](MANUAL.md) §26 for the full text).
 Built for amateur-radio use; respect your local licensing and band plans.

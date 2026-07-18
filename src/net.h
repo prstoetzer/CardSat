@@ -1,6 +1,7 @@
 #pragma once
 // ===========================================================================
-//  net.h  -  WiFi + HTTPS downloads (AMSAT GP, SatNOGS transponders)
+//  net.h  -  WiFi + HTTPS: downloads (GP, transponders, space wx, weather,
+//             activations) and uploads (LoTW .tq8, Cloudlog QSOs)
 // ===========================================================================
 #include <Arduino.h>
 #include <WiFiClient.h>

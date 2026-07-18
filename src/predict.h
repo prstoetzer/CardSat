@@ -45,6 +45,16 @@ public:
   // state-vector -> GP-element fitter. Returns false if the elements don't initialise.
   bool temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]);
 
+  // Full topocentric look for an ARBITRARY satellite entry at time t, computed with a
+  // local propagator (temeStateAt) so the live tracking state (_sat) is never disturbed.
+  // Built for BASIC's SATSEL: one call = one SGP4 init+prop. Outputs az/el/range (deg,
+  // km), range rate (km/s, +receding), the geodetic sub-point and altitude, and the
+  // cylindrical-shadow sunlit flag. The observer/ENU/shadow math mirrors rangeRateAt()
+  // and look() expression-for-expression; the host audit harness compares lookFor()
+  // against look() sample-by-sample to hold them together.
+  bool lookFor(SatEntry& s, time_t t, float& az, float& el, float& rangeKm,
+               float& rrKmS, float& subLat, float& subLon, float& altKm, bool& sunlit);
+
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
 
@@ -134,6 +144,7 @@ private:
   Sgp4   _sat;
   Observer _o;
   bool   _haveSat = false;
+  double _mmRevDay = 0;      // mean motion (rev/day); <= 6.4 selects the scan pass finder
   double _epochUnix = 0;        // element-set epoch (Unix UTC s), for tsince
   char   _name[26], _l1[72], _l2[72];
 };

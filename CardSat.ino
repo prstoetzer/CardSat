@@ -384,7 +384,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.59";
+static constexpr const char* FW_VERSION = "0.9.60";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -2351,6 +2351,7 @@ public:
 
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
+  double mmRevDay() const { return _mmRevDay; }   // 0 unknown; <=6.4 => high orbit
 
   // True if the satellite is in sunlight (not in Earth's cylindrical shadow) at
   // time t. Lightweight: propagate + shadow test only, no observer geometry.
@@ -2584,6 +2585,12 @@ struct Settings {
   char     clStation[8] = ""; // station_profile_id (numeric, from the Cloudlog UI)
   // Location
   double   lat = 0.0, lon = 0.0, altM = 0.0;
+  // Named ground-station presets (0.9.60): five recallable QTH slots managed from
+  // the Location screen (`q`). Recalling one turns GPS off -- an explicit site
+  // choice should not be silently overridden by the receiver a minute later.
+  char     qthName[5][14] = {{0}};
+  double   qthLat[5] = {0}, qthLon[5] = {0};
+  float    qthAlt[5] = {0};
   bool     useGps = false;
   uint8_t  gpsSource = GPS_SRC_CAP1262;  // GpsSource: Grove / Cap868 / Cap1262
   // Radio
@@ -2774,7 +2781,8 @@ enum Screen : uint8_t {
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
   SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
-  SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH
+  SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
+  SCR_KESSLER, SCR_QTHPRE
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -6332,7 +6340,11 @@ private:
   // on the device and echoed to the serial monitor. Fixed buffer (no heap churn
   // on the no-PSRAM ESP32); lines past the cap are dropped.
   static const int CATTEST_MAX = 48;
-  String   catLines[CATTEST_MAX];
+  // Fixed-width line store (0.9.60): was String[], whose per-line heap allocations
+  // (and Arduino String's never-freed-on-reassign buffers) were a mid-heap-hole
+  // source. A flat char[][] costs the same static RAM and allocates nothing.
+  static const int CATTEST_W = 56;
+  char     catLines[CATTEST_MAX][CATTEST_W] = {};
   int      catCount  = 0;        // number of result lines filled
   int      catScroll = 0;        // scroll offset on the results screen
 
@@ -6340,7 +6352,8 @@ private:
   // recent raw CAT frames (TX/RX hex), filled by the catTraceSink hook. Read-only
   // diagnostic; the operator can also type a raw hex frame to transmit.
   static const int CATMON_MAX = 64;     // ring-buffer depth (lines)
-  String   catMonLines[CATMON_MAX];
+  static const int CATMON_W   = 40;     // per-line chars (draw shows 36); no heap
+  char     catMonLines[CATMON_MAX][CATMON_W] = {};
   bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (colour), false = RX
   int      catMonHead = 0;              // next write index (ring)
   int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
@@ -6563,6 +6576,9 @@ private:
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
   // dome, off the Sun/Moon screen. For antenna pointing and RF-source reference.
   int       skySel = 0;               // highlighted object index
+  uint8_t   skyLayers = 1;            // sky-map star layers: 0 off, 1 stars, 2 +lines, 3 +names
+  int       qpSel = 0;                // QTH preset cursor (Location > q)
+  void drawQthPre(); void keyQthPre(char c, bool enter, bool back);
   void drawSkyMap();
   void keySkyMap(char c, bool enter, bool back);
   // Live GPS position (SCR_GPSPOS): DMS lat/lon to full precision, speed, course,
@@ -7189,20 +7205,30 @@ private:
   // rigctld TCP server (item 2): created when enabled and WiFi is up.
   WiFiServer* rigd = nullptr;
   WiFiClient  rigdCli;             // single connected client
-  String      rigdBuf;             // line-assembly buffer
+  // Fixed line buffers (0.9.60): rigctld/rotctld/web accumulate one char per RX byte;
+  // as String that was a heap realloc per byte on every LAN CAT/rotator/HTTP command
+  // (thousands per WSJT-X session). char[]+len allocates nothing on that hot path.
+  // A LineBuf appends with a hard cap and hands the completed line to the existing
+  // String-taking handlers as a C-string (one temporary per newline, not per byte).
+  struct LineBuf {
+    char b[208]; uint16_t n = 0; uint16_t cap;
+    LineBuf(uint16_t c = 200) : cap(c) { b[0] = 0; }
+    void clear() { n = 0; b[0] = 0; }
+    void push(char c) { if (n < cap && n < (uint16_t)sizeof(b) - 1) { b[n++] = c; b[n] = 0; } }
+    const char* c_str() const { return b; }
+    bool empty() const { return n == 0; }
+  };
+  LineBuf     rigdBuf{120}, rotdBuf{120}, webdBuf{200}, webdReqLine{200};
   uint8_t     rigdVfo = 0;         // 0 = downlink (VFOA/RX), 1 = uplink (VFOB/TX)
   uint32_t    rigdLastSub = 0, rigdLastMain = 0;  // last freq set (get_freq fallback)
   RigMode     rigdSubMode = RM_USB, rigdMainMode = RM_LSB;
   // rotctld TCP server (item 4): a networked PC drives the wired rotator.
   WiFiServer* rotd = nullptr;
   WiFiClient  rotdCli;             // single connected client
-  String      rotdBuf;             // line-assembly buffer
   // Mobile web control page: a phone on the LAN selects sats, sees passes, and
   // drives the radio/rotator. One client at a time, serviced cooperatively.
   WiFiServer* webd = nullptr;
   WiFiClient  webdCli;            // single connected client
-  String      webdBuf;            // request-assembly buffer (request line + headers)
-  String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
   // Memory telemetry (opt-in, off by default; toggled by the serial "memtrace" command).
   // Logs free heap + largest block on each screen change so the runtime cost of heavy
@@ -7696,6 +7722,20 @@ private:
   bool  basFileOpen = false;         // FOPEN file currently open
   File  basFile;                     // the one BASIC output file
   bool  basGfxHold = false;          // a SHOWed frame is on screen; next key clears it
+  // KESSLER (0.9.60): the two-player GORILLAS.BAS tribute. All game state lives in
+  // one heap-allocated struct that exists only while the screen is open -- the
+  // no-PSRAM RAM discipline for rarely-used features. Physics are GORILLAS'own
+  // equations run in its 640x350 EGA virtual space and scaled to 240x135 at draw.
+  struct Kessler;                    // defined in app.cpp
+  Kessler* kess = nullptr;
+  void kesslerInit(); void kesslerFree();
+  bool kessAnimating() const;        // flight/impact/dance: drives the 15 fps tier
+  bool kessNetReplaying = false;     // true while simulating a peer's shot (no re-broadcast)
+  void kessNewRound(); void kessSeedRound(uint16_t seed); void kessFire();
+  void kessNetSend(uint8_t kind, const uint8_t* body, int blen);
+  void kessNetRx(const uint8_t* b, int n, int rssi);
+  void kessNetNewRound(); void kessNetHost(); void kessNetService();
+  void drawKessler(); void keyKessler(char c, bool enter, bool back);
 
   // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
   // hex / dec / bin / oct, with bitwise ops (AND OR XOR NOT << >>) and +-*/ via a
@@ -8149,7 +8189,8 @@ private:
   // fail when the largest contiguous block gets too small). acquire() brings it up (idempotent);
   // releaseAfter() schedules an end() once the deadline passes (so an alarm's tail still plays and
   // we don't thrash begin/end -- each cycle pops). serviceAudioRelease() runs the deferred end().
-  void audioAcquire();                         // ensure speaker is up (begin + volume), cancel pending release
+  bool audioAcquire();                         // bring speaker up; returns false if refused (USB CAT + no heap)
+  static const uint32_t AUDIO_MIN_BLOCK = 11000;  // speaker I2S ~8KB + 2KB stream + slack
   void audioReleaseAfter(uint32_t ms);         // schedule speaker end() after ms of no audio
   void serviceAudioRelease();                  // loop hook: perform a due deferred end()
   // Serial command console (USB). Polled once per loop; accepts a short line and prints
@@ -17347,6 +17388,15 @@ bool Settings::load() {
   // the Settings screen would show GS-232 no matter what the user picked.
   if (rotType > ROT_SPID) rotType = ROT_GS232;
   rotTransport = d["rotxport"] | (uint8_t)ROT_XPORT_BRIDGE;
+  for (int i = 0; i < 5; ++i) {                  // QTH presets q0n/q0a/q0o/q0h ..
+    char k[6];
+    snprintf(k, sizeof(k), "q%dn", i);
+    const char* nm = d[k] | "";
+    strncpy(qthName[i], nm, sizeof(qthName[i]) - 1); qthName[i][13] = 0;
+    snprintf(k, sizeof(k), "q%da", i); qthLat[i] = d[k] | 0.0;
+    snprintf(k, sizeof(k), "q%do", i); qthLon[i] = d[k] | 0.0;
+    snprintf(k, sizeof(k), "q%dh", i); qthAlt[i] = d[k] | 0.0f;
+  }
   if (rotTransport >= ROT_XPORT_N) rotTransport = ROT_XPORT_BRIDGE;
   strncpy(rotUsbKey, d["rotusbkey"] | "", sizeof(rotUsbKey)-1);
   rotUsbKey[sizeof(rotUsbKey)-1] = 0;
@@ -17481,6 +17531,13 @@ bool Settings::save() {
   d["morseswap"]= morseSwap;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotxport"]=rotTransport; d["rotusbkey"]=rotUsbKey;
+  for (int i = 0; i < 5; ++i) {
+    char k[6];
+    snprintf(k, sizeof(k), "q%dn", i); d[k] = qthName[i];
+    snprintf(k, sizeof(k), "q%da", i); d[k] = qthLat[i];
+    snprintf(k, sizeof(k), "q%do", i); d[k] = qthLon[i];
+    snprintf(k, sizeof(k), "q%dh", i); d[k] = qthAlt[i];
+  }
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;
@@ -17606,6 +17663,21 @@ static String jsonEsc(const char* s) {
 }
 
 // Compact countdown: "45s", "12m", "1h05".
+// Fixed-width pass-duration label for the list columns. Minutes-only under an
+// hour ("  6m", " 60m"); switches to HhMM above so a Molniya (~4 h) or a GEO
+// horizon-long window (up to ~24 h) fits and never overruns into the elevation
+// column. Always 4 visible chars, right-justified.
+static void fmtPassDur(long secs, char* out, size_t n) {
+  if (secs < 0) secs = 0;
+  long m = secs / 60;
+  if (m < 100)          snprintf(out, n, "%3ldm", m);           // "  6m".."99m"
+  else {
+    long h = m / 60, mm = m % 60;
+    if (h < 10)         snprintf(out, n, "%ldh%02ld", h, mm);   // "2h30"
+    else                snprintf(out, n, "%2ldh", h);           // "12h".."24h"
+  }
+}
+
 static String fmtCountdown(long s) {
   if (s < 0) s = 0;
   char b[12];
@@ -18364,6 +18436,16 @@ void App::toggleMemo() {
     memo.stop();
     setStatus("Memo saved");
   } else {
+#if CARDSAT_HAS_USBCAT
+    // Recording uses the MIC (~4 KB ping-pong), not the speaker, so it fits under
+    // USB CAT where playback may not -- but still decline cleanly if the heap is
+    // momentarily too fragmented for even that block.
+    if (UsbSerial::active() &&
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 6000) {
+      setStatus("Memo needs more free RAM (USB CAT active)", 4000);
+      lastDrawMs = 0; return;
+    }
+#endif
     SatEntry* s = activeSat();
     if (memo.start(s ? s->name : nullptr)) {
       // memo.start() ends the speaker to claim the shared I2S for the mic; reflect that so our
@@ -20235,8 +20317,8 @@ int App::cacheTxBatch(int start) {
   int n = db.count();
   // Free the two rigctld/rotctld listener sockets for the batch (the pool is
   // tiny). serviceRigctld()/serviceRotctld() rebuild them next loop tick.
-  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
-  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
+  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf.clear(); }
+  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf.clear(); }
 
   int end = start + TX_CACHE_BATCH; if (end > n) end = n;
   for (int i = start; i < end; ++i) {
@@ -20270,8 +20352,8 @@ void App::doCacheAllTransponders() {
   Serial.printf("[tx] caching %d sats (single session)\n", n);
   // Release the LAN listener sockets for the duration (as the fetch paths' TlsBusyGuard
   // does per-fetch, but hold it across the whole run so nothing rebuilds between sats).
-  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
-  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
+  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf.clear(); }
+  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf.clear(); }
   int done = 0, failed = 0;
   for (int i = 0; i < n; ++i) {
     SatEntry& s = db.at(i);
@@ -20573,13 +20655,25 @@ void App::buildSchedule() {
     if (L.el >= 0.0) {
       // Currently above the horizon: show it now and find LOS by coarse scan.
       e.inProgress = true; e.aos = now; e.maxEl = (float)L.el;
+      // Horizon and step scale with the orbit: LEO sets within minutes (30 s steps,
+      // ~2 h ceiling is plenty), but a Molniya stays up for hours and a GEO in view
+      // never sets -- so cap the walk at 24 h and step by period/96 (clamped), then
+      // report LOS at the ceiling for a bird still up, exactly as the finder does.
+      double mm = pred.mmRevDay();
+      time_t horizon = (mm > 0 && mm <= 6.4) ? (now + 86400) : (now + 7200);
+      time_t step = 30;
+      if (mm > 0 && mm <= 6.4) {
+        double periodS = 86400.0 / mm;
+        step = (time_t)fmax(60.0, fmin(900.0, periodS / 96.0));
+      }
       time_t t = now, los = now;
-      for (int k = 0; k < 120; ++k) {            // up to 60 min, 30 s steps
-        t += 30; LiveLook l2 = pred.look(t);
+      for (t = now + step; t <= horizon; t += step) {
+        LiveLook l2 = pred.look(t);
         if (l2.el < 0.0) { los = t; break; }
         if (l2.el > e.maxEl) e.maxEl = (float)l2.el;
         los = t;
       }
+      if (los < now + step) los = (t > horizon) ? horizon : t;   // never-sets: cap at horizon
       e.los = los;
     } else {
       PassPredict p;
@@ -20889,13 +20983,13 @@ void App::serviceRigctld() {
   if (cfg.rigdEnable && net.connected()) {
     if (!rigd) { rigd = new WiFiServer(cfg.rigdPort); rigd->begin(); rigd->setNoDelay(true); }
   } else {
-    if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
+    if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf.clear(); }
     return;
   }
   // Accept one client at a time.
   if (!rigdCli || !rigdCli.connected()) {
     WiFiClient nc = rigd->available();
-    if (nc) { rigdCli = nc; rigdBuf = ""; }
+    if (nc) { rigdCli = nc; rigdBuf.clear(); }
   }
   if (!rigdCli || !rigdCli.connected()) return;
   // Consume available bytes, dispatching on each complete line.
@@ -20903,8 +20997,8 @@ void App::serviceRigctld() {
   while (rigdCli.available() && guard++ < 256) {
     char ch = (char)rigdCli.read();
     if (ch == '\r') continue;
-    if (ch == '\n') { rigdHandleLine(rigdBuf); rigdBuf = ""; }
-    else if (rigdBuf.length() < 120) rigdBuf += ch;
+    if (ch == '\n') { rigdHandleLine(rigdBuf.c_str()); rigdBuf.clear(); }
+    else rigdBuf.push(ch);
   }
 }
 
@@ -20975,20 +21069,20 @@ void App::serviceRotctld() {
   if (cfg.rotdEnable && net.connected()) {
     if (!rotd) { rotd = new WiFiServer(cfg.rotdPort); rotd->begin(); rotd->setNoDelay(true); }
   } else {
-    if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
+    if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf.clear(); }
     return;
   }
   if (!rotdCli || !rotdCli.connected()) {
     WiFiClient nc = rotd->available();
-    if (nc) { rotdCli = nc; rotdBuf = ""; }
+    if (nc) { rotdCli = nc; rotdBuf.clear(); }
   }
   if (!rotdCli || !rotdCli.connected()) return;
   int guard = 0;
   while (rotdCli.available() && guard++ < 256) {
     char ch = (char)rotdCli.read();
     if (ch == '\r') continue;
-    if (ch == '\n') { rotdHandleLine(rotdBuf); rotdBuf = ""; }
-    else if (rotdBuf.length() < 120) rotdBuf += ch;
+    if (ch == '\n') { rotdHandleLine(rotdBuf.c_str()); rotdBuf.clear(); }
+    else rotdBuf.push(ch);
   }
 }
 
@@ -21193,7 +21287,7 @@ function fmtHz(v){return(v>0?'+':'')+v+' Hz'}
 function fmtStep(hz){return hz>=1000?(hz/1000)+' kHz':hz+' Hz'}
 function pad(n){return(n<10?'0':'')+n}
 function hhmm(t){var d=new Date(t*1000);return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+'Z'}
-function dur(s){return Math.round(s/60)+'m'}
+function dur(s){var m=Math.round(s/60);if(m<100)return m+'m';return Math.floor(m/60)+'h'+('0'+(m%60)).slice(-2)}
 function ms(s){s=Math.max(0,Math.round(s));return Math.floor(s/60)+':'+pad(s%60)}
 function gid(i){return document.getElementById(i)}
 function setMode(m){mode=m;
@@ -21359,9 +21453,9 @@ loadSats();loop();setInterval(updCountdown,1000);
 // service functions rebuild each listener on the next loop tick once the download
 // sequence is done, so this is a transient suspend, not a disable.
 void App::suspendNetServers() {
-  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf = ""; }
-  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf = ""; }
-  if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf = ""; }
+  if (rigd) { rigdCli.stop(); rigd->stop(); delete rigd; rigd = nullptr; rigdBuf.clear(); }
+  if (rotd) { rotdCli.stop(); rotd->stop(); delete rotd; rotd = nullptr; rotdBuf.clear(); }
+  if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf.clear(); }
 }
 
 // The full-screen 240x135x16bpp sprite is a single ~64 KB contiguous allocation
@@ -21553,13 +21647,13 @@ void App::serviceWebd() {
   if (cfg.webEnable && net.connected()) {
     if (!webd) { webd = new WiFiServer(cfg.webPort); webd->begin(); webd->setNoDelay(true); }
   } else {
-    if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf = ""; }
+    if (webd) { webdCli.stop(); webd->stop(); delete webd; webd = nullptr; webdBuf.clear(); }
     return;
   }
   // Accept one client at a time.
   if (!webdCli || !webdCli.connected()) {
     WiFiClient nc = webd->available();
-    if (nc) { webdCli = nc; webdBuf = ""; }
+    if (nc) { webdCli = nc; webdBuf.clear(); }
   }
   if (!webdCli || !webdCli.connected()) return;
   // Read the request line + headers without blocking. We only need the request
@@ -21569,16 +21663,18 @@ void App::serviceWebd() {
     char ch = (char)webdCli.read();
     if (ch == '\r') continue;
     if (ch == '\n') {
-      if (webdBuf.length() == 0) {          // blank line: end of headers
-        webdHandleRequest(webdReqLine);
+      if (webdBuf.empty()) {                // blank line: end of headers
+        webdHandleRequest(webdReqLine.c_str());
         webdCli.stop();
-        webdReqLine = "";
+        webdReqLine.clear();
         return;
       }
-      if (webdReqLine.length() == 0) webdReqLine = webdBuf;  // first line = request line
-      webdBuf = "";
-    } else if (webdBuf.length() < 200) {
-      webdBuf += ch;
+      if (webdReqLine.empty()) {            // first line = request line
+        for (const char* p = webdBuf.c_str(); *p; ++p) webdReqLine.push(*p);
+      }
+      webdBuf.clear();
+    } else {
+      webdBuf.push(ch);
     }
   }
 }
@@ -22732,8 +22828,10 @@ void App::loop() {
 #if CARDSAT_HAS_LORARX
     if (lorarx.active()) lorarx.service();   // RX monitor owns the radio while active
     else loraPoll();          // LoRa messaging: drain any received frame (no-op if off)
+    kessNetService();         // KESSLER: host HELLO beacon + net repaints (no-op if not netplaying)
 #else
     loraPoll();               // LoRa messaging: drain any received frame (no-op if off)
+    kessNetService();         // KESSLER host beacon / net repaint
 #endif
   }
   // If the socket-recovery path exhausted its hard resets, surface a reboot
@@ -23115,8 +23213,9 @@ void App::loop() {
       (screen == SCR_TGTHITS && tsPhase == TS_RUNNING) ||
       loraObjTxActive) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
-  } else if (screen == SCR_ORBITZOO || screen == SCR_FOXANAT) {
-    if (ms - lastDrawMs > 66) { lastDrawMs = ms; draw(); }   // ~15 fps Learn animations
+  } else if (screen == SCR_ORBITZOO || screen == SCR_FOXANAT ||
+             (screen == SCR_KESSLER && kessAnimating())) {
+    if (ms - lastDrawMs > 66) { lastDrawMs = ms; draw(); }   // ~15 fps: Learn + KESSLER flight/anim
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
              screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
@@ -23406,6 +23505,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_LNKCRV: keyLnkCrv(c, enter, back); break;
     case SCR_DEBGRP: keyDebGrp(c, enter, back); break;
     case SCR_CTSEARCH: keyCtSearch(c, enter, back); break;
+    case SCR_KESSLER: keyKessler(c, enter, back); break;
+    case SCR_QTHPRE: keyQthPre(c, enter, back); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.key(c, enter, back); if (!lorarx.active()) { screen = SCR_MESSAGES; lastDrawMs = 0; } break;
 #endif
@@ -23518,12 +23619,12 @@ void App::keyHome(char c, bool enter, bool back) {
         }
       } break;
       case 4: mapHi = -1; mapReturn = SCR_HOME; screen = SCR_WORLDMAP; lastDrawMs = 0; break;  // all footprints
-      case 5: screen = SCR_SUNMOON; lastDrawMs = 0; break;
-      case 6: spaceWxEnter(); break;  // space weather (NOAA SWPC)
-      case 7: weatherEnter(); break;  // local terrestrial weather (open-meteo)
+      case 5: ovhValid = false; ovhScroll = 0; screen = SCR_OVERHEAD; lastDrawMs = 0; break;  // what's overhead now
+      case 6: screen = SCR_SUNMOON; lastDrawMs = 0; break;
+      case 7: spaceWxEnter(); break;  // space weather (NOAA SWPC)
       case 8: hamsatEnter(); break;   // upcoming activations (hams.at)
       case 9: buildAmsatStatusView(); amStatSel = 0; amStatScroll = 0; screen = SCR_AMSATSTAT; lastDrawMs = 0; break;
-      case 10: ovhValid = false; ovhScroll = 0; screen = SCR_OVERHEAD; lastDrawMs = 0; break;  // what's overhead now
+      case 10: weatherEnter(); break; // local terrestrial weather (open-meteo)
       case 11: gcRotOut = false; screen = SCR_GRIDCALC; lastDrawMs = 0; break;   // grid distance/bearing
       case 12: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
       case 13: screen = SCR_LOCATION; break;
@@ -23690,12 +23791,15 @@ void App::keyMemos(char c, bool enter, bool back) {
   if (c == 'r') { buildMemoList(); setStatus("Memo list refreshed"); }
   if (c == 'd' && memoN > 0) { memoConfirmDel = true; }
   if (enter && memoN > 0 && memoSel < memoN) {
-    setStatus("Playing... (any key stops)");
-    draw();                              // show the status before we block
-    audioAcquire();                      // power the speaker for playback (on-demand audio)
-    bool ok = memo.playMemo(memos[memoSel].file, &memoPlaybackCancel, cfg.spkVolume);
-    audioReleaseAfter(500);              // take it back down shortly after playback ends
-    setStatus(ok ? "Playback done" : (String("Play: ") + memo.lastError()));
+    if (!audioAcquire()) {               // USB CAT + too little contiguous heap right now
+      setStatus("Playback needs more free RAM (USB CAT active)", 4000);
+    } else {
+      setStatus("Playing... (any key stops)");
+      draw();                            // show the status before we block
+      bool ok = memo.playMemo(memos[memoSel].file, &memoPlaybackCancel, cfg.spkVolume);
+      audioReleaseAfter(500);            // take it back down shortly after playback ends
+      setStatus(ok ? "Playback done" : (String("Play: ") + memo.lastError()));
+    }
   }
   lastDrawMs = 0;
 }
@@ -24345,8 +24449,13 @@ void App::drawPlanDetail() {
   row("AOS", String(aost) + "Z", CL_WHITE);
   row("LOS", String(lost) + "Z", CL_WHITE);
   row("Max el", String(r.maxEl, 0) + " deg", CL_CYAN);
-  int mins = (int)((r.los - r.aos) / 60);
-  row("Length", String(mins) + " min", CL_WHITE);
+  {
+    long secs = (long)(r.los - r.aos);
+    long mins = secs / 60;
+    String len = (mins < 100) ? (String(mins) + " min")
+                              : (String(mins) + " min (" + fmtCountdown(secs) + ")");
+    row("Length", len, CL_WHITE);          // GEO/HEO: also show h:mm form
+  }
   y += 4;
   row("States", String(r.states), CL_ORANGE);
   row("DXCC", String(r.dxcc), CL_ORANGE);
@@ -24405,8 +24514,8 @@ void App::keySatList(char c, bool enter, bool back) {
   }
   int n = viewN;
   if (n == 0) return;
-  if (isUp(c)   && viewSel > 0)     { viewSel--; satDelArm = false; }
-  if (isDown(c) && viewSel < n - 1) { viewSel++; satDelArm = false; }
+  if (isUp(c)   && n) { viewSel = (viewSel + n - 1) % n; satDelArm = false; }
+  if (isDown(c) && n) { viewSel = (viewSel + 1) % n;     satDelArm = false; }
   if (c == '{') viewSel = max(0, viewSel - 10);
   if (c == '}') viewSel = min(n - 1, viewSel + 10);
   if (c == 'f') {                              // toggle favorite for selected
@@ -24883,7 +24992,8 @@ void App::drawPassPolar() {
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(rx, 24); canvas.printf("AOS %s", fmtHM(pdPass.aos).c_str());
   canvas.setCursor(rx, 36); canvas.printf("LOS %s", fmtHM(pdPass.los).c_str());
-  canvas.setCursor(rx, 48); canvas.printf("Dur %ldm", (long)((pdPass.los-pdPass.aos)/60));
+  { char db[8]; fmtPassDur((long)(pdPass.los - pdPass.aos), db, sizeof(db));
+    canvas.setCursor(rx, 48); canvas.printf("Dur %s", db); }
   canvas.setCursor(rx, 60); canvas.printf("Max el %.0f", pdPass.maxEl);
   canvas.setTextColor(CL_GREEN, CL_BLACK);
   canvas.setCursor(rx, 78); canvas.printf("A az %03.0f", pdPass.azAos);
@@ -25620,8 +25730,8 @@ void App::keyDxDopp(char c, bool enter, bool back) {
     lastDrawMs = 0; return;
   }
   if (c == 'a') { dxdAnchor = (dxdAnchor + 1) % 4; lastDrawMs = 0; return; }
-  if (isUp(c))   { if (dxdRow > 0) dxdRow--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (dxdRow < nSteps - 1) dxdRow++; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (nSteps) dxdRow = (dxdRow + nSteps - 1) % nSteps; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (nSteps) dxdRow = (dxdRow + 1) % nSteps;          lastDrawMs = 0; return; }
   // Passband operating point (linear only). In a FIXED mode the left/right keys
   // step the ANCHORED dial to the next round 1 kHz (so you park on, e.g.,
   // 145.950 MHz, not 145.9502); in true-rule mode they nudge the passband
@@ -25801,13 +25911,13 @@ void App::drawVisList() {
     int i = vlScroll + r;
     int y = 30 + r*10;
     PassPredict& p = passScratch[i];
-    long mins = (p.los - p.aos) / 60;
+    char durb[8]; fmtPassDur((long)(p.los - p.aos), durb, sizeof(durb));
     if (i == vlSel) { canvas.fillRect(0, y-1, 240, 10, CL_SELBG);
                       canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else canvas.setTextColor(CL_YELLOW, CL_BLACK);   // all rows are visible passes
     canvas.setCursor(4, y);
-    canvas.printf("%s  %2ldm %3.0f %-3s",
-                  fmtMDHM(p.aos).c_str(), mins, p.maxEl,
+    canvas.printf("%s  %s %3.0f %-3s",
+                  fmtMDHM(p.aos).c_str(), durb, p.maxEl,
                   windDirName((int)(p.azAos + 0.5f)));
     // Mid-pass cloud cover from the weather fetch: the go/no-go a visible pass
     // actually hinges on. Severity-colored; omitted outside the 48 h window.
@@ -25828,8 +25938,8 @@ void App::keyVisList(char c, bool enter, bool back) {
   if (c == 'p') { printReport(PR_VISLIST); return; }   // p: print the visible-pass list
   if (c == 'r') { buildVisList(); lastDrawMs = 0; return; }
   if (vlN == 0) return;
-  if (isUp(c))   { if (vlSel > 0) vlSel--; lastDrawMs = 0; }
-  if (isDown(c)) { if (vlSel < vlN - 1) vlSel++; lastDrawMs = 0; }
+  if (isUp(c))   { vlSel = (vlSel + vlN - 1) % vlN; lastDrawMs = 0; }
+  if (isDown(c)) { vlSel = (vlSel + 1) % vlN;       lastDrawMs = 0; }
   if (enter) {                                   // open the selected pass's detail plot
     SatEntry* s = activeSat();
     if (s) { pred.setSite(loc.obs()); pred.setSat(*s);
@@ -25945,6 +26055,7 @@ void App::keyIllum(char c, bool enter, bool back) {
 void App::keyLocation(char c, bool enter, bool back) {
   if (isBack(c, back)) { pred.setSite(loc.obs()); screen = SCR_HOME; return; }
   if (enter) { screen = SCR_GPS; lastDrawMs = 0; return; }   // GPS data + sky plot
+  if (c == 'q') { qpSel = 0; screen = SCR_QTHPRE; lastDrawMs = 0; return; }  // presets
   if (c == 'p') {                       // toggle GPS use
     cfg.useGps = !cfg.useGps; cfg.save();
     if (cfg.useGps) startGps();
@@ -25995,12 +26106,12 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Passes / alerts", "Display / sound",
   "Station / logging", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,89,100,1,2,63,31,32,33,34,21,65,22,23,24,44,45,46,36,37,62,64};
-static const int SET_ROTOR[] = {8,9,86,99,101,10,11,12,18,47,19,16,17,13,14,15,35,38,39};
-static const int SET_PASS[]  = {3,66,67,68,40,7,84,54,61};
-static const int SET_DISP[]  = {48,82,25,43,85,49,77,79,81};
+static const int SET_RADIO[] = {0,30,89,100,1,2,63,31,32,33,34,36,37,21,65,22,23,24,44,45,46,62,64};
+static const int SET_ROTOR[] = {8,9,86,99,101,12,10,11,38,39,18,19,16,17,13,47,14,15,35};
+static const int SET_PASS[]  = {3,40,66,67,68,7,84,54,61};
+static const int SET_DISP[]  = {48,25,82,43,85,49,77,79,81};
 static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76,102,103};
-static const int SET_NET[]   = {4,5,50,51,6,20,41,42,52,53,90,91,92,97,98,88,87,93,94,55,60,56,57,58,59,80,83,27,28,29};
+static const int SET_NET[]   = {4,5,50,51,6,20,83,41,42,52,53,98,90,91,97,92,88,87,93,94,55,60,56,57,58,59,80,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
                                                     SET_DISP, SET_LOG, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -26426,6 +26537,11 @@ void App::keyEdit(char c, bool enter, bool back) {
         String v = editBuf; v.trim();
         if (v.length()) basicLoad(v.c_str());
       } break;
+      case 784: {                                   // QTH preset name
+        strncpy(cfg.qthName[qpSel], editBuf.c_str(), sizeof(cfg.qthName[qpSel]) - 1);
+        cfg.qthName[qpSel][13] = 0;
+        cfg.save(); screen = SCR_QTHPRE; lastDrawMs = 0; return;
+      }
       case 783: {                                   // graphing calculator: Y2 (empty = off)
         String v = editBuf; v.trim();
         graphExpr2 = v;
@@ -29421,6 +29537,8 @@ void App::draw() {
     case SCR_LNKCRV: drawLnkCrv(); break;
     case SCR_DEBGRP: drawDebGrp(); break;
     case SCR_CTSEARCH: drawCtSearch(); break;
+    case SCR_KESSLER: drawKessler(); break;
+    case SCR_QTHPRE: drawQthPre(); break;
 #if CARDSAT_HAS_LORARX
     case SCR_LORARX:   lorarx.draw(canvas, this); break;
 #endif
@@ -29953,6 +30071,13 @@ void App::drawHelp() {
     "TOOLS (0.9.59)",
     " p  print: any form tool, conj,",
     "    neighborhood, debris, link curve",
+    "Sky Map: c cycles star layers (1018",
+    " stars, constellation lines, names)",
+    "Location: q = five named QTH presets",
+    " (ENTER recall; recall turns GPS off)",
+    "KESSLER (About>Games): 2P artillery,",
+    " GORILLAS.BAS on the Moon. Type angle",
+    " + velocity, ENTER fires; g gravity",
     "GRAPHING CALC",
     " 2 Y2  t trace  z/Z zeros/isect",
     " m marks+integral  b table  c CSV",
@@ -31719,7 +31844,7 @@ void App::keyGame(char c, bool enter, bool back) {
   }
 }
 // ===========================================================================
-//  Shared game helpers + Games menu + six satellite-themed mini-games.
+//  Shared game helpers + Games menu + the satellite-themed mini-games (seven since KESSLER).
 //  Every game keeps ALL state in fixed .bss members (declared in app.h): no
 //  heap, no String in the loop, sprites drawn with canvas primitives. Sound is
 //  gated on cfg.gameSound; tilt steering on cfg.gameTilt + imuReady (ADV-only,
@@ -31739,21 +31864,27 @@ void App::sfx(uint16_t freq, uint16_t ms) {
   M5Cardputer.Speaker.tone(freq, ms);
 }
 
-void App::audioAcquire() {
+bool App::audioAcquire() {
   audioReleaseAt = 0;                          // cancel any pending release
-  if (audioUp) return;
+  if (audioUp) return true;
 #if CARDSAT_HAS_USBCAT
-  // USB CAT engaged leaves ~17 KB free with a ~7 KB largest block (measured); the
-  // speaker's I2S buffers want ~8 KB. Bringing audio up there either fails or
-  // strands the contiguous heap. Beeps are cosmetic; a running radio is not --
-  // skip silently rather than fail loudly, and audio returns on disengage.
-  if (UsbSerial::active()) return;
+  // USB CAT engaged runs the heap tight (~17 KB free, ~7 KB largest block when
+  // first measured). The speaker's I2S buffers want ~8 KB contiguous, so rather
+  // than refuse outright (old behaviour) we now check the ACTUAL largest free
+  // block at the moment of the request: if it clears AUDIO_MIN_BLOCK the speaker
+  // comes up and playback works alongside USB CAT; if not, we decline so the
+  // caller can say so instead of stranding the heap mid-allocation. Cosmetic
+  // beeps that pass through here simply stay silent when the block is tight.
+  if (UsbSerial::active() &&
+      heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < AUDIO_MIN_BLOCK)
+    return false;
 #endif
   // Mic and speaker share the I2S peripheral; make sure the mic is down first.
   if (M5.Mic.isEnabled()) M5.Mic.end();
   M5Cardputer.Speaker.begin();
   M5Cardputer.Speaker.setVolume(cfg.spkVolume);
   audioUp = true;
+  return true;
 }
 
 void App::audioReleaseAfter(uint32_t ms) {
@@ -31771,7 +31902,7 @@ void App::serviceAudioRelease() {
   if (audioGameOwned) {
     bool onGame = (screen == SCR_GAME || screen == SCR_GAMES || screen == SCR_GDOPPLER ||
                    screen == SCR_GPASS || screen == SCR_GROTOR || screen == SCR_GMORSE ||
-                   screen == SCR_GGRID);
+                   screen == SCR_GGRID || screen == SCR_KESSLER);
     if (!onGame) {
       audioGameOwned = false;
       if (audioUp) { M5Cardputer.Speaker.stop(); audioReleaseAt = millis(); }  // release now (below)
@@ -33047,15 +33178,15 @@ bool App::gameTiltAxis(float& outLR) {
 // --- Games menu ------------------------------------------------------------
 static const char* const GAMES_NAMES[] = {
   "Zap the Sats", "Doppler Lock", "Catch the Pass", "Rotor Runner",
-  "Morse Meteors", "Grid Chase"
+  "Morse Meteors", "Grid Chase", "KESSLER (2-player)"
 };
-static const int GAMES_N = 6;
+static const int GAMES_N = 7;
 
 void App::drawGamesMenu() {
   header("Games");
   canvas.setTextSize(1);
   for (int i = 0; i < GAMES_N; ++i) {
-    int y = 22 + i * 15;
+    int y = 20 + i * 14;                        // 7 rows since KESSLER; last clears the footer
     bool sel = (i == gamesSel);
     if (sel) canvas.fillRect(2, y - 2, 236, 13, CL_SELBG);
     canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
@@ -33077,6 +33208,7 @@ void App::keyGamesMenu(char c, bool enter, bool back) {
       case 3: gRotorReset();   screen = SCR_GROTOR;   break;
       case 4: gMorseReset();   screen = SCR_GMORSE;   break;
       case 5: gGridReset();    screen = SCR_GGRID;    break;
+      case 6: kesslerInit();   screen = SCR_KESSLER;  break;   // the GORILLAS tribute
     }
     lastDrawMs = 0;
   }
@@ -33572,7 +33704,10 @@ void App::keyGGrid(char c, bool enter, bool back) {
 
 void App::catLog(const String& line) {
   Serial.print("[CAT-TEST] "); Serial.println(line);     // echo to serial monitor
-  if (catCount < CATTEST_MAX) catLines[catCount++] = line;
+  if (catCount < CATTEST_MAX) {
+    strncpy(catLines[catCount], line.c_str(), CATTEST_W - 1);
+    catLines[catCount][CATTEST_W - 1] = 0; catCount++;
+  }
 }
 
 void App::catStep(const String& name, bool ok, const String& detail) {
@@ -33697,14 +33832,14 @@ void App::drawCatTest() {
   if (catScroll > catCount - rows) catScroll = catCount - rows;
   if (catScroll < 0) catScroll = 0;
   for (int i = 0; i < rows && (catScroll + i) < catCount; i++) {
-    const String& s = catLines[catScroll + i];
+    const char* s = catLines[catScroll + i];
     uint16_t col = CL_WHITE;
-    if      (s.startsWith("[PASS]")) col = CL_GREEN;
-    else if (s.startsWith("[FAIL]")) col = CL_RED;
-    else if (s.startsWith("[INFO]")) col = CL_CYAN;
+    if      (!strncmp(s, "[PASS]", 6)) col = CL_GREEN;
+    else if (!strncmp(s, "[FAIL]", 6)) col = CL_RED;
+    else if (!strncmp(s, "[INFO]", 6)) col = CL_CYAN;
     canvas.setTextColor(col, CL_BLACK);
     canvas.setCursor(4, 20 + i * 12);
-    canvas.print(s.substring(0, 38));
+    canvas.printf("%.38s", s);
   }
   footer("; / . scroll   ` back");
 }
@@ -33735,13 +33870,11 @@ void App::catMonTrampoline(const char* dir, const uint8_t* b, size_t n) {
 
 void App::catMonPush(const char* dir, const uint8_t* b, size_t n) {
   bool isTx = (dir && dir[0] == 'T');
-  String line;
-  for (size_t i = 0; i < n && i < 32; ++i) {
-    char h[4]; snprintf(h, sizeof(h), "%02X ", b[i]);
-    line += h;
-  }
-  if (n > 32) line += "...";
-  catMonLines[catMonHead] = line;
+  char* line = catMonLines[catMonHead];
+  int p = 0;
+  for (size_t i = 0; i < n && i < 32 && p < CATMON_W - 4; ++i)
+    p += snprintf(line + p, CATMON_W - p, "%02X ", b[i]);
+  if (n > 32 && p < CATMON_W - 4) snprintf(line + p, CATMON_W - p, "...");
   catMonIsTx[catMonHead]  = isTx;
   catMonHead = (catMonHead + 1) % CATMON_MAX;
   if (catMonCount < CATMON_MAX) catMonCount++;
@@ -33774,7 +33907,7 @@ void App::drawCatMon() {
     bool tx = catMonIsTx[slot];
     canvas.setTextColor(tx ? CL_CYAN : CL_GREEN, CL_BLACK);
     canvas.setCursor(2, 20 + i * 12);
-    canvas.printf("%s %s", tx ? "T" : "R", catMonLines[slot].substring(0, 36).c_str());
+    canvas.printf("%s %.36s", tx ? "T" : "R", catMonLines[slot]);
   }
   if (total == 0) {
     canvas.setTextColor(CL_GREY, CL_BLACK);
@@ -35074,8 +35207,8 @@ void App::keySim(char c, bool enter, bool back) {
   if (simTime == 0 && timeIsSet()) simTime = nowUtc();
   if (isRight(c)) { simTime += SIM_STEP[simStepIdx]; lastDrawMs = 0; return; }
   if (isLeft(c))  { simTime -= SIM_STEP[simStepIdx]; lastDrawMs = 0; return; }
-  if (isDown(c))  { if (++simStepIdx > 4) simStepIdx = 4; lastDrawMs = 0; return; }
-  if (isUp(c))    { if (--simStepIdx < 0) simStepIdx = 0; lastDrawMs = 0; return; }
+  if (isDown(c))  { simStepIdx = (simStepIdx + 1) % 5; lastDrawMs = 0; return; }
+  if (isUp(c))    { simStepIdx = (simStepIdx + 4) % 5; lastDrawMs = 0; return; }
   if (c == 'x')   { if (timeIsSet()) simTime = nowUtc(); lastDrawMs = 0; return; }
 }
 
@@ -35637,6 +35770,33 @@ void App::keyBandPlan(char c, bool enter, bool back) {
 // Equatorial (RA/Dec, degrees, J2000-ish) -> horizontal (az/el) for the observer
 // at time t. The same conversion used inside skyObjAzEl, factored out so fixed
 // catalogue sources and computed planet positions can share it.
+// GENERATED by tools/make_star_tables.py -- do not edit by hand.
+// Data: d3-celestial (BSD-3, ofrohn/d3-celestial; BSC5/HYG). RA/dec in 0.01 deg.
+// Stars sorted brightest-first (mag encoded as (mag+2)*10 in a uint8).
+static const int STAR_N = 1018;
+static const uint16_t STAR_RA[] = {
+  10129,9599,21392,21990,27923,7917,7863,11483,2443,8879,21096,29770,18665,6898,20130,24735,11633,34441,19193,31036,21990,15209,10466,11365,18779,26340,8128,8157,13830,8405,33206,8519,12238,19351,5108,27604,16593,10710,20689,12563,26433,8988,25217,9943,13118,30641,3795,9567,14190,3179,15499,1090,28382,21167,210,1743,8694,22268,34067,26373,4704,3097,17726,1418,19038,12090,13927,23367,13700,20098,30556,1013,26915,8300,229,20497,24008,25254,22048,21888,16546,22125,32605,26562,657,17846,25759,34594,11102,31964,14053,31155,34619,4557,24929,20888,16853,24136,8318,18209,18395,28565,22925,23607,2866,8491,8993,18860,2145,20867,22463,7425,16169,18930,26269,10929,27525,29656,24359,24600,16074,19042,8386,20015,22272,26587,7696,24756,25866,18379,26261,23379,8206,25032,644,24897,27699,331,12189,23879,5853,26132,26296,5687,19554,32676,2969,29624,9574,22973,33463,4457,28744,11179,19401,23971,5946,24530,32289,4620,14678,34075,10248,18747,33145,5951,8441,14646,27145,19973,26690,28635,3239,16742,23018,25297,32848,5573,9508,10576,18253,7549,19157,21802,29268,30525,10098,15558,28814,27441,13385,16241,17395,30939,8774,13480,25466,25876,22479,14026,14281,25876,9944,14321,25720,28141,7663,22063,7246,7637,25442,26746,31823,35484,23034,24458,27533,32217,10205,30283,11231,21159,22602,28474,5681,983,26050,34366,7823,15343,23123,6850,15801,9372,26135,1652,4629,18386,25804,26976,28674,6361,16856,11732,2860,8112,10132,12757,29137,23067,13169,20367,8378,15427,19390,33271,6717,2209,6017,20738,22807,31132,34037,2827,24003,26661,31124,13774,15417,28656,15427,1228,1715,11919,22888,4083,20740,15183,25072,2602,10543,16962,22549,27674,34214,10246,11003,34242,29969,34250,5581,14529,14922,28252,28443,33255,6715,12413,17325,23740,26440,6447,8674,21485,27526,30218,486,3413,16984,25308,11611,13591,21796,23045,10952,30451,2450,7940,8612,17767,18534,2101,10320,13007,14268,23426,26277,4250,5120,15265,19557,26643,2287,5729,11631,25365,34548,17640,30939,6495,14288,23655,27166,33721,23196,23466,21110,31370,7280,13090,29685,34736,924,2899,7562,14631,17651,32502,4988,26944,34929,7356,8910,11805,23770,27184,29883,5323,5622,8988,31623,5179,22156,26838,32537,34315,2787,24548,31870,13604,26697,8341,8783,9720,28617,29243,33782,4267,5630,6573,8469,12643,13016,25245,30991,32167,33175,10719,11143,14775,16337,22029,31192,4737,16333,16955,4802,11471,23370,28928,30341,6889,15697,23569,35439,3051,13971,17285,24773,26487,15652,20957,22197,5605,5608,6714,13376,15820,15933,18812,27189,27344,29704,6350,8682,9553,15368,18837,18943,23911,27592,27880,1419,6955,8280,24386,24836,26906,33541,5646,13151,20967,22077,23922,29812,235,2838,14819,22798,34759,4411,10353,13859,18498,29908,14496,17025,20276,6079,12642,18701,22628,23388,24494,25507,29042,31896,655,2281,4356,6908,11546,16715,24170,27016,1710,11531,11595,13117,31429,3086,9917,6217,8979,13516,13782,29066,29097,30387,35074,6601,8787,10921,13003,18291,23774,30015,33732,34163,5974,32350,3000,9371,15610,20131,34936,13561,17098,24300,2592,7138,10603,10870,22049,24047,24496,28076,30735,13263,18210,28491,28542,3433,7585,13167,19365,27136,30830,35983,6297,17646,21630,33884,4727,12463,13110,17028,20737,21514,21947,34240,7409,11398,17122,18439,18461,22091,25490,21400,22721,22938,33729,1183,3544,3987,4560,10355,14361,16494,28383,31649,32052,8423,23718,2420,4105,11731,27721,28751,4017,10594,12941,14787,15887,17663,23418,28737,34522,3990,6372,9060,18130,29882,31296,33744,8099,9724,23846,31152,34151,35499,5272,5658,12941,18172,23323,23940,32616,33399,10797,26092,35510,9103,11228,24109,26159,825,5736,33421,21322,21410,24909,33376,34016,20736,28142,8270,11921,15697,24853,34167,34399,5227,6634,25149,30740,32161,4265,5671,11833,24165,24676,27519,28179,28305,28363,31142,31935,34858,502,11583,19797,20642,21041,24219,25077,28660,32588,32670,1719,3675,4103,18459,18844,24785,26535,34897,1894,6165,6891,6917,7729,12571,19336,21688,32636,1738,2635,4998,5345,6401,7351,13462,26414,27038,33095,1574,4124,6388,6954,7056,19673,22963,29080,31166,35199,6658,14427,15679,26184,30335,32056,33250,34672,5422,7989,15983,17823,23601,24778,33161,33788,35453,1465,3704,5630,5715,6637,8998,13081,16390,17424,17742,18802,21508,30441,13015,21673,23112,24185,30958,5412,7011,8305,9384,13159,14293,18076,19750,20796,22291,26021,11204,19328,21655,25884,27215,27497,922,964,1778,8619,9796,12516,13905,14421,21043,23451,26163,28119,28176,32613,33738,4791,7265,9874,10432,12198,13211,18673,22946,26305,27581,28909,32624,789,1084,3325,5264,6117,7322,7831,8938,10403,12215,21151,29418,49,9414,10968,16504,27219,29993,19749,30222,35151,35324,2841,5738,8371,8860,9594,12057,15198,22573,25350,26025,29502,29526,31997,1430,11702,12226,28424,32948,10246,10778,21576,26268,26963,31948,34697,34948,34971,9189,9947,10838,10856,12351,16558,22257,23661,27044,33589,35134,5654,6382,7432,28844,30066,30597,31086,31193,366,1217,6412,7014,9491,11351,12284,12464,21815,29218,2536,4227,7807,9298,12969,13502,15890,16145,16917,24803,28889,29352,3727,5857,7832,13722,16791,18202,24680,34313,4128,5008,7464,9704,9823,11956,13629,14116,14371,17779,21867,22430,31862,33153,1118,6022,6659,10197,15198,23084,24603,34597,34667,3049,6838,10100,10814,11816,15186,22018,29411,31678,32604,35551,35568,35998,8480,8746,13168,15523,17700,20682,30394,31740,32218,33210,33347,34013,458,1792,8729,14231,14484,23539,30070,31101,32427,33683,35860,4198,20066,20100,21478,22611,27281,29043,31134,32249,33762,789,1245,9001,11434,21337,26166,26689,31185,34814,7954,9876,14300,14356,14362,22285,22806,23079,29924,34675,35229,94,5248,7610,10502,11245,14803,23397,24516,27202,32548,33526,33613,4288,5969,8833,13663,16880,21653,26392,31303,31665,5427,24635,24640,26548,28369,28709,29837,8385,14792,16088,19807,20786,24308,26446,35016,1033,5571,5759,8171,13005,14229,15490,16815,23740,23840,28109,29418,35723,6456,15128,16418,22131,23133,23817,29017
+};
+static const int16_t STAR_DEC[] = {
+  -1672,-5270,1918,-6083,3878,4600,-820,522,-5724,741,-6037,887,-6310,1651,-1116,-2643,2803,-2962,-5969,4528,-6084,1197,-2897,3189,-5711,-3710,635,2861,-6972,-120,-4696,-194,-4734,5596,4986,-3438,6175,-2639,4931,-5951,-4300,4495,-6903,1640,-5471,-5674,8926,-1796,-866,2346,1984,-1799,-2630,-3637,2909,3562,-967,7416,-4688,1256,4096,4233,1457,6072,-4896,-4000,-5928,2671,-4343,5493,4026,5654,5149,-30,5915,-5347,-2262,-3429,-4739,-4216,5638,2707,988,-3903,-4231,5369,-1572,2808,-2930,6259,-5501,3397,1521,409,-1057,-4729,2052,-1981,-1782,-5072,-1754,-2988,-938,643,2081,-3407,3721,-2340,6024,1840,-4313,3317,-4942,-6914,-3730,-3710,-2983,1061,-369,6151,-6439,-145,-591,-3671,-1604,457,-509,2149,1439,-5875,5230,-4117,-2076,3160,-7725,-2822,-2542,1518,-2430,-6343,3188,-5553,-4988,2411,1096,-1613,-6157,4513,2251,-6868,-6026,-4030,-2102,829,3832,-2611,4001,-2559,-557,5351,-6507,3022,-5061,-1652,-32,-1351,2114,2377,-3042,-2317,-4013,1386,3499,4450,7183,-3805,-3736,4779,-3006,-2383,-2262,4382,-6811,3831,2796,-1478,2513,4150,6766,-3676,595,-1619,-6302,-4729,-3577,4804,-5599,2484,-4210,3439,-5703,3681,-4320,5168,6571,-2699,4123,-6498,696,-2237,938,-3704,3023,7763,-4065,-469,-290,7056,-6194,-82,-4330,-2668,-2528,3269,-7424,3086,-2500,-1582,-1621,-7004,5897,-5504,-6169,2251,-5638,-4672,3884,5703,-4324,-977,-2767,-6247,1543,-2486,6367,-240,1290,6072,311,-4469,642,-60,993,-6133,340,5820,1587,-4332,1249,-4169,-5210,6184,1083,2958,-3840,2772,-6620,-5897,2342,-488,4291,5782,-1018,-5298,3331,324,-4247,1676,3892,-1594,-2793,3309,4039,-4597,-5132,-3251,2198,6620,1949,2460,-976,989,-5457,3336,-2111,620,1918,919,-3186,-343,-1540,-3380,-1482,-4606,7273,-6618,-882,-5151,-1478,-3802,2440,4716,3037,-3626,1654,-1254,4863,-684,-2245,176,-6040,-818,3396,-5292,-4047,-2814,-6068,2726,903,-1235,-7155,-6472,1535,2405,-3797,-4236,4233,-6673,1460,1563,6306,1542,-5009,-2,2911,-2978,6438,-5845,561,-3319,1853,-2117,5390,-5161,4108,-6251,4778,-1666,-2176,2925,328,244,-1417,-4058,448,956,641,-946,2411,5428,4393,973,189,5687,-7739,-758,-1034,1915,3805,-4710,271,-6249,-2088,-703,-2174,5173,5028,5590,4258,1754,-260,-6614,-4665,-5904,1591,-2241,2535,-7050,2780,5904,-5885,1373,-950,4486,3421,3153,-2899,-2680,1054,5337,4674,-3056,-5874,2630,4646,276,3680,6933,198,4601,-1684,-4210,-7904,-6481,3229,1596,-6064,931,-4823,-7213,2876,-2106,7027,-4229,-5107,-3344,-4212,6979,-4854,1566,2177,-824,3850,-1430,-3547,-6369,-7890,3725,-139,2437,-4604,-4480,-566,-2921,101,-4575,1929,2601,-4874,-4525,-890,-2418,231,-67,3508,-114,-5449,-3941,599,-391,-5023,-4705,-1479,4631,3093,-1785,525,-4368,-4907,5276,-335,-7261,-5898,-2067,293,-5525,-955,-2895,1815,4117,7242,-1926,4771,-4282,4178,-6232,-4446,-4062,4771,-2010,-3402,3915,-6796,-3531,-5237,-3363,-7291,-4350,2357,3579,4559,-2108,-627,-7403,5499,-5824,-6640,1053,-1946,5069,-325,2057,-2677,-3779,5857,-5016,-7143,3037,-2771,-2473,1507,-574,3385,6044,2876,-5718,250,1130,686,-684,653,5185,-12,4961,-7692,-4265,603,1580,-3789,-4943,-1359,1351,2690,-1768,-6796,-6400,-3517,-5316,-600,-4528,-5880,5842,2427,-6866,33,-2362,-1204,-5923,-1830,4395,-1723,1980,929,1814,4141,4923,-4637,-4907,-3934,-3986,-1563,-4299,-1485,-7861,-6118,-6632,-3790,-5275,-6827,4841,965,873,-4187,-2692,-4375,-781,2021,-1673,-2527,-8138,563,1294,2395,570,-6461,3136,2688,2564,3775,-49,3715,4433,2326,3178,-1137,-2418,6293,-3620,-778,-1027,4609,-3526,5704,-2704,-3445,2055,595,-2288,3671,4244,1217,-3254,5994,2229,8204,6299,-6537,3832,-2325,-4810,-3680,-1846,7134,-475,-6219,3690,3072,3939,-605,-6487,2888,2788,-3304,154,4493,-7752,-3706,5878,4931,8626,-4770,-1386,-7931,4136,-3470,-1288,-909,-6888,5035,1016,4126,-875,4319,-4018,7570,6112,4724,916,-4307,-2163,-5149,6634,1186,-3864,2160,6463,789,1011,889,1251,2296,-4991,-4788,-4480,1612,638,2281,8133,-3107,-2987,5657,-1683,3318,-4352,40,-1318,-5560,-3391,7779,-1661,-1387,-3235,4327,-2936,846,2447,-3762,1793,4594,340,2475,-82,-6379,-1620,-5639,-1251,-5976,-8367,3738,-2087,-111,4819,-1967,1859,2950,-1355,2297,-6331,1753,-3299,-4358,-1285,893,-4894,-4538,-2660,-6367,3606,3372,2931,5515,-6574,-2342,-7748,-5754,-4936,-4560,-4257,414,3761,1818,1735,4771,1973,890,-5298,5842,-6862,584,2827,-3015,8659,-6149,3813,-3303,-6296,-5746,885,4800,2208,-545,-1294,-3528,-1705,-298,-4118,-129,-601,-3514,-2495,-4223,2081,-3528,-554,7771,-2064,-3782,-4630,6553,949,2028,459,233,1000,209,1017,-2111,1801,1748,-5345,2342,-2594,-1924,-6723,-5499,-5362,3025,-3951,2611,3019,3490,7539,-918,-3253,1477,-1824,-4464,-2635,-4035,2018,-2796,735,131,5223,2340,-1210,-765,5375,3915,-2771,3219,1507,-503,-1893,759,-5930,-4186,5901,-2230,-3962,-3666,-5046,2466,549,-3241,-1187,1421,334,-4125,-5756,-8054,-365,-2147,7336,738,6740,-295,286,5160,-2283,-5066,-4755,-3288,-1857,2905,171,-3258,733,-4924,-7260,2618,5205,-4517,2975,-435,1001,-3954,4828,-6216,1562,241,-37,-5932,-2004,382,-2374,7091,-2977,1323,-4676,-3886,3524,1642,5022,-2501,2874,178,-1454,-6558,412,-5617,-5677,-5604,2022,1746,2781,-1137,-2181,-3299,3971,4428,3679,3009,3918,-3595,-6133,1967,6787,-5192,-1947,-6497,5750,2925,-6099,-6454,-1337,2695,-4595,-1596,5758,2364,4312,-6297,4108,-307,-3497,5179,-509,-2783,3649,4941,3337,-2296,-118,3640,6983,1910,-1979,-3686,-2717,941,1276,-1734,5888,-3548,7698,1201,5406,-4496,-2417,-2846,7131,4654,4948,3506,-6140,2761,3845,2310,-4522,-4651,2710,4765,-4027,1403,-2345,7215,2265,-4050,2408,-484,-4655,-6057,-5992,6472,-2793,-812,2374,-4608,-3731,7133,310,6433,-277,-5503,-6032,2607,-2533,3961,-2488,-2813,5030,-1306,-3714,1696,-3873,4245,6571
+};
+static const uint8_t STAR_MAG[] = {
+  6,14,20,20,20,21,22,24,24,24,26,28,28,29,30,31,32,32,32,32,34,34,35,36,36,36,36,36,37,37,37,37,38,38,38,38,38,38,38,39,39,39,39,39,39,39,40,40,40,40,40,40,40,41,41,41,41,41,41,41,41,41,41,42,42,42,42,42,42,42,42,42,42,42,43,43,43,43,43,43,43,44,44,44,44,44,44,44,44,44,45,45,45,45,45,46,46,46,46,46,46,46,46,46,46,46,46,46,47,47,47,47,47,47,47,47,47,47,47,47,47,47,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,51,51,51,51,51,51,51,51,51,51,51,51,51,51,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,52,53,53,53,53,53,53,53,53,53,53,53,53,53,53,53,53,53,53,53,53,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,54,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,55,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,56,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,58,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,59,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,61,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,62,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,65,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66
+};
+static const int CLIN_RUNS_N = 150;
+static const uint8_t CLIN_RUN[] = {
+  4,7,3,5,2,3,4,10,2,2,2,3,10,7,4,11,10,5,4,6,3,4,2,2,7,2,5,2,11,13,7,5,11,2,3,3,11,2,16,6,3,4,2,3,8,7,6,9,2,2,2,6,4,6,8,14,2,2,3,27,3,11,2,6,4,8,2,2,8,2,6,19,6,6,9,3,7,4,6,9,3,6,2,12,2,7,8,4,6,5,5,7,5,4,10,6,4,8,9,8,3,11,10,6,19,4,3,8,3,23,2,10,9,4,4,5,3,2,5,5,19,4,3,12,4,5,9,6,4,7,4,3,3,4,4,7,8,4,3,2,5,4,2,8,8,8,3,4,7,5
+};
+static const uint16_t CLIN_RA[] = {
+  3097,1743,983,210,1430,1183,964,983,922,35453,34548,35453,35510,35439,1743,1419,1245,1738,2450,35510,35651,14231,15679,16418,22197,24509,25077,24836,31192,31316,32289,33145,33541,33721,33884,34315,34948,34736,32289,33161,33145,33421,33721,33632,35074,34948,35544,29656,29770,29883,30283,29812,29137,28635,29770,29137,28656,26135,26277,25245,25466,25490,26296,26132,4250,3179,2866,2838,8988,7917,7663,7425,8157,8993,8988,8988,7917,7549,7562,20682,20867,21392,21796,21802,22549,22888,22125,21392,22029,21802,21410,21337,21630,21410,6771,7014,7051,7610,7432,7585,7351,5759,5738,5227,7351,9471,10502,13462,13117,13082,13167,13117,12413,19400,18844,9567,10129,10576,10710,10543,10466,9508,11102,10710,10129,10403,10594,10355,10403,11483,11179,30441,30525,30722,31152,31296,32167,32676,32502,32056,31649,30441,9944,9599,13830,15343,16074,15801,15427,13927,12563,11919,12238,13118,13927,16074,16664,16714,16815,16715,16337,15801,2860,2145,1418,1013,229,17025,18209,18701,19038,20497,20888,20740,20738,21167,21888,22479,20738,20015,21990,20497,21096,18701,18291,17294,30740,31132,31964,32588,33376,33271,33729,34242,35484,32217,31964,32217,34242,4083,3897,3704,4124,4493,4557,4083,3987,3484,2787,2602,1090,486,1715,2101,2787,12463,15887,16132,18459,17991,15887,22938,22063,23084,9553,8774,8491,8280,8774,8979,19750,19797,18673,28468,28660,28737,28751,28709,28578,28240,27838,23323,23196,23367,23569,23740,23940,24036,18210,18253,18395,18747,18860,18253,17417,17115,16984,16494,16791,17084,17122,17619,17900,16984,17122,19193,18379,18665,18779,31823,31155,30556,29624,29243,28928,31036,30556,29908,29268,30830,30939,30991,31166,31086,30939,6401,6850,8341,8619,8853,8341,7638,6850,26838,26915,26261,26307,26838,28814,27519,25720,24600,24047,23123,21110,18837,17285,27519,27526,28814,29704,31896,31862,31759,7696,7138,6908,6297,5951,5654,5581,5323,4411,4103,4128,4560,4988,5345,5671,6889,6601,6447,5736,5427,4998,4457,4017,3675,3413,2899,2443,4802,4227,3112,9372,9574,10098,10778,11365,11633,11398,11003,10603,9943,10132,11003,10952,34522,34214,34067,33744,33206,34067,33732,33390,33153,32848,24548,24756,25032,25072,24853,24494,24219,23817,25032,25507,25072,25876,26906,26092,25876,25507,25876,26661,26944,27189,25866,24756,6350,4064,3935,4017,4590,4470,13169,13211,13081,12969,12941,13169,13385,13859,14496,14190,14787,15265,15652,16241,17325,17823,19973,21159,22257,644,5681,3990,3544,2873,2969,30939,31101,31370,32948,31997,30939,33589,33782,33738,33526,33762,34013,33738,33613,33589,33762,33347,33399,15209,15183,15499,16853,17726,16856,15209,15499,15417,14819,14646,15186,15648,16333,15697,15186,14356,9154,8910,8674,8318,7823,7637,8206,8612,8783,7831,7823,7989,22602,22272,22925,23388,23426,23466,22272,23388,23774,23494,23045,23034,22463,22048,22807,22963,23067,23379,24003,24165,23034,23379,9491,10432,11168,12571,13516,13971,14026,28119,28109,27923,28119,28363,28474,28252,28119,9256,8297,7380,7568,31249,31212,32019,31948,31532,31249,11531,12215,10797,9720,9371,10797,10197,9594,9823,10024,17640,18439,18930,19157,19557,18812,18930,24162,24680,24496,24080,24162,21673,34151,32537,21673,26976,26697,26587,26373,25442,24773,24359,24458,24929,25759,25442,24929,24778,24676,24603,24640,26587,25759,26050,26184,9189,8860,9098,9298,9060,8879,8128,7372,7464,7356,7280,7246,7265,7372,7409,7614,7742,7863,8112,8300,8128,8378,8879,8519,8694,8519,8405,8300,30641,31124,30218,28305,27581,27215,26643,28076,30015,31124,32161,33250,34075,34594,210,331,34619,34167,34037,33255,32605,34619,34594,34250,34163,33175,32616,5608,5853,5974,5946,5630,5573,5412,5108,4620,4267,4356,4727,4737,4704,4782,4629,4469,4492,4704,6165,6372,6217,5573,4727,4105,2592,657,1652,2209,2281,1710,1652,235,657,10205,8746,8682,1844,1792,1987,1844,1786,2287,2635,3051,2839,2536,2255,1843,1574,1217,35983,35499,35199,35009,34929,35173,35551,35660,35499,34929,34597,34016,34441,34399,34313,33788,33210,32624,32693,33210,34016,9944,10929,11385,11471,11732,11921,12189,12090,12238,11732,11702,11595,11385,12090,13003,13090,13263,6361,6412,5969,5605,6361,29502,29685,29969,29526,29685,27441,27604,27525,27699,27344,29066,29097,28565,28141,27699,29882,29993,29896,29418,29132,28889,28382,28141,27525,27145,27604,28565,28674,28382,28617,28744,28941,29042,29043,28617,28443,28354,28382,23971,24008,24136,24008,24530,24735,24897,25254,25297,25365,25804,26433,26690,26562,26340,1465,35723,34971,35324,27880,28179,28057,27730,27880,23655,23539,23718,23911,23655,23370,23607,23770,24359,25759,26440,26976,27077,27533,28405,15198,14813,15737,15757,8441,6898,6717,6495,6573,6715,8157,6495,6017,5179,6079,5179,5120,5422,27281,27674,27721,2827,3239,3433,2827,25217,23879,22973,25217,33463,34936,789,502,35998,33683,33463,18386,16593,16546,17846,18386,19351,20098,20689,17846,17651,16962,16955,17651,16742,15558,16742,15427,16593,14288,12757,14775,16546,16546,14803,14321,13480,13591,14321,23601,24438,23018,22268,23601,25149,26305,3795,13118,14053,14922,16169,15368,14268,13700,12238,17646,17767,18498,19042,19749,20130,21400,22077,19554,19390,19042,19749,20367,21041,22156,13561,12643,12198,10921,10719,12198,13561,28905,29218,29837,30028,30394
+};
+static const int16_t CLIN_DEC[] = {
+  4233,3562,3086,2909,2342,2427,2931,3086,3372,4327,4233,4327,4433,4646,3562,3850,4108,4724,4863,4433,4642,-3595,-3107,-3714,-7904,-7870,-7752,-7890,-950,-898,-557,-32,-139,-2,-12,-758,-918,-2117,-557,-1387,-32,-778,-2,138,-2010,-918,-1782,1061,887,641,-82,101,311,1386,887,311,-488,-5638,-6068,-5904,-5599,-5316,-4988,-5553,2726,2346,2081,1929,4495,4600,4123,3317,2861,3721,4495,5428,4600,4382,4108,1746,1840,1918,3037,3831,4039,3331,2707,1918,1373,3831,4609,5179,5185,4609,-4495,-4186,-3714,-3548,5375,6044,6634,7133,6553,5994,6634,6932,7698,1186,1815,2147,2877,1815,919,3831,4136,-1796,-1672,-2383,-2639,-2793,-2897,-3006,-2930,-2639,-1672,-1705,-1563,-1204,-1705,522,829,-1251,-1478,-1781,-2527,-2692,-2241,-1613,-1666,-1683,-1723,-1251,-4320,-5270,-6972,-7004,-6439,-6169,-6133,-5928,-5951,-5298,-4734,-5471,-5928,-6439,-6242,-6195,-6032,-5898,-5885,-6169,6367,6024,6072,5654,5915,-5449,-5072,-5023,-4896,-5347,-4729,-4247,-4169,-3637,-4216,-4210,-4169,-3671,-6084,-5347,-6037,-5023,-5237,-5944,6299,6184,6259,5878,5704,5820,5842,6620,7763,7056,6259,7056,6620,324,559,846,1011,891,409,324,33,-298,-1034,-1594,-1799,-882,-1018,-818,-1034,-7692,-7861,-8047,-7931,-7822,-7861,-5880,-6498,-5932,-3344,-3577,-3407,-3547,-3577,-4282,1753,2788,2827,-3711,-3706,-3790,-3934,-4050,-4210,-4343,-4231,3136,2911,2671,2630,2607,2688,2985,-2473,-2262,-1754,-1652,-2340,-2262,-980,-1086,-1478,-1830,-2283,-1878,-1768,-1835,-1715,-1478,-1768,-5969,-5875,-6310,-5711,3023,3397,4026,4513,5173,5337,4528,4026,3508,2796,1130,1460,1591,1612,1507,1460,-5149,-5504,-6249,-6574,-6309,-6249,-5747,-5504,5687,5149,5230,5517,5687,6766,7134,6571,6151,5857,5897,6438,6979,6933,7134,7273,6766,7027,525,1001,1013,-509,-325,-335,-684,-1351,-1210,-976,-946,-890,-1386,-1857,-2362,-2176,-2163,-2325,-3056,-3402,-3380,-3620,-4027,-4307,-4030,-3986,-4770,-5151,-5161,-5724,-2899,-3241,-2930,2251,2251,2513,3025,3189,2803,2690,2198,2057,1640,1290,2198,1654,-5275,-5132,-4688,-4375,-4696,-4688,-4350,-4135,-3954,-3736,1915,2149,3160,3892,4244,4631,4493,4245,3160,3093,3892,3681,3725,3715,3681,3093,2484,2772,2925,2876,1439,2149,-4229,-5080,-5254,-5455,-5974,-6407,642,584,340,334,570,642,595,231,-114,-866,-1485,-1235,-1684,-1619,-3186,-3391,-2317,-2668,-2796,-7725,-7424,-6827,-6866,-6765,-6157,-4729,-5192,-5845,-5499,-5345,-4729,5223,5028,4771,4654,4312,4428,4771,4948,5223,4312,3971,3775,1197,1676,1984,2052,1457,1543,1197,1984,2342,2601,2377,3524,3380,3421,3671,3524,3640,-1494,-1417,-1482,-1782,-1621,-2237,-2076,-2245,-2088,-1294,-1621,-1318,-2528,-1604,-938,-1479,-2814,-2978,-1604,-1479,-3363,-3441,-3626,-4065,-4313,-4739,-5210,-4788,-4469,-4117,-3840,-3680,-4065,-4117,5901,5842,4921,4319,4178,3680,3439,3761,3961,3878,3761,3690,3269,3336,3761,-7475,-7634,-7494,-7131,-3378,-4399,-4081,-3217,-3226,-3378,-955,-298,-49,-703,-627,-49,241,459,733,990,-6673,-6796,-6914,-6811,-7155,-7213,-6914,-4517,-4755,-5016,-4923,-4517,-8367,-8138,-7739,-8367,-977,271,457,1256,938,198,-369,-469,-1057,-1572,938,-1057,-1661,-1846,-2004,-2345,457,-1572,-2500,-2987,1477,2028,2014,1421,965,741,635,1015,171,244,561,696,890,1015,1351,1540,1560,-820,-240,-30,635,993,741,-194,-967,-194,-120,-30,-5674,-6620,-6618,-6219,-6149,-6367,-6472,-7143,-7291,-6620,-6537,3318,3022,2808,2909,1518,1521,1217,1083,620,988,1521,2808,2460,2357,2535,2564,3229,3188,3579,4001,4258,4779,4819,4986,5351,5590,5276,4961,4486,4096,3961,3884,3966,4103,4096,5035,4841,4771,4779,4961,4923,5069,-4231,-4672,-4332,-4907,-5525,-4672,-4575,-4231,-6194,-5617,-5107,2458,3009,2726,2458,2103,1535,916,276,319,549,614,758,789,759,686,563,638,538,328,126,178,349,563,328,382,-2704,-2962,-3254,-3288,-3235,-3299,-3303,-3090,-3299,-2704,-4320,-3710,-2837,-2680,-2486,-2288,-2430,-4000,-4734,-2486,-2594,-2895,-2837,-4000,-3531,-3319,-2771,-6247,-5930,-6140,-6481,-6247,1801,1853,1949,1748,1853,-3676,-3438,-2983,-2542,-2106,-4446,-4062,-2988,-2699,-2542,-4187,-3528,-2630,-2488,-2451,-2526,-2630,-2699,-2983,-3042,-3438,-2988,-2767,-2630,-2174,-2102,-1895,-1785,-1596,-2174,-2111,-2274,-2630,-2611,-2262,-1981,-2262,-2559,-2643,-2822,-3429,-3805,-4236,-4324,-4300,-4013,-3903,-3710,-2936,-2813,-3253,-3782,-824,-475,-905,-1457,-824,1542,1967,1814,1566,1542,1054,643,448,-369,-1572,-1540,-977,-818,-290,420,-37,-810,-274,-64,2114,1651,1587,1563,1754,1918,2861,1563,1249,973,599,973,903,40,-4595,-4597,-4907,2958,3499,3385,2958,-6903,-6343,-6868,-6903,-6026,-5824,-6296,-6487,-6558,-6497,-6026,5703,6175,5638,5369,5703,5596,5493,4931,5369,4778,3309,3153,4778,4450,4150,4450,4291,6175,6306,6072,5904,5638,5638,5406,5168,4804,4716,5168,7779,7576,7183,7416,7779,8204,8659,8926,-5471,-5501,-5457,-4942,-4212,-4047,-4343,-4734,653,176,-67,-145,-554,-1116,-600,-566,1096,340,-145,-554,-60,154,189,-6640,-6614,-6862,-6796,-7050,-6862,-6640,2139,2466,2408,2775,2781
+};
+static const int STAR_NAME_N = 16;
+static const uint16_t STAR_NAME_IDX[] = { 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 };
+static const char* const STAR_NAME[] = { "Sirius","Canopus","Arcturus","Rigil Kentaurus","Vega","Capella","Rigel","Procyon","Achernar","Betelgeuse","Hadar","Altair","Acrux","Aldebaran","Spica","Antares" };
+
 static void raDecToAzEl(time_t t, double latDeg, double lonDeg,
                         double raDeg, double decDeg, double& az, double& el) {
   const double D2R = 0.017453292519943295, R2D = 57.29577951308232,
@@ -35728,8 +35888,10 @@ void App::drawSkyMap() {
   time_t now = nowUtc();
 
   // Build the combined object list: 5 planets, then the catalogue sources.
-  const int NP = 5, NTOT = NP + SKY_RF_N;
-  double az[32], el[32]; const char* nm[32]; bool isRf[32];
+  const int NP = 5;
+  const int NST = (skyLayers >= 3) ? STAR_NAME_N : 0;   // named stars join the list
+  const int NTOT = NP + SKY_RF_N + NST;
+  double az[48], el[48]; const char* nm[48]; bool isRf[48]; bool isStar[48] = {false};
   for (int p = 0; p < NP; ++p) {
     double ra, dec; planetRaDec(p, now, ra, dec);
     raDecToAzEl(now, o.lat, o.lon, ra, dec, az[p], el[p]);
@@ -35744,6 +35906,15 @@ void App::drawSkyMap() {
     }
     nm[k] = SKY_RF[i].name; isRf[k] = SKY_RF[i].rf;
   }
+  // Layer 3 (0.9.60 rev B): the sixteen named stars become SELECTABLE objects.
+  // On-dome labels at 6-px type collided with each other, the ring, and the info
+  // panel (bench photos); the panel already exists to answer "which one is that",
+  // so names live there -- cursor a star with ;/. and read name/az/el at right.
+  for (int i = 0; i < NST; ++i) {
+    int k = NP + SKY_RF_N + i, si = STAR_NAME_IDX[i];
+    raDecToAzEl(now, o.lat, o.lon, STAR_RA[si] / 100.0, STAR_DEC[si] / 100.0, az[k], el[k]);
+    nm[k] = STAR_NAME[i]; isRf[k] = false; isStar[k] = true;
+  }
   if (skySel < 0) skySel = NTOT - 1;
   if (skySel >= NTOT) skySel = 0;
 
@@ -35757,9 +35928,51 @@ void App::drawSkyMap() {
     x = cx + (int)lround(rr * sin(ar));
     y = cy - (int)lround(rr * cos(ar));
   };
+  // ---- Star layers (0.9.60): live star field / constellation lines / names ----
+  // ~1000 stars to mag 4.6 plus constellation polylines from flash tables
+  // (src/stars.h, generated from d3-celestial's BSD-3 data -- the same catalog
+  // SatObserver-MX draws). Everything recomputes from the clock each frame via
+  // the same raDecToAzEl the radio sources use; below-horizon points are culled,
+  // so the whole layer is ~2k short trig calls -- nothing at 240 MHz.
+  if (skyLayers >= 1) {
+    for (int i = 0; i < STAR_N; ++i) {
+      double sa, se;
+      raDecToAzEl(now, o.lat, o.lon, STAR_RA[i] / 100.0, STAR_DEC[i] / 100.0, sa, se);
+      if (se < 0) continue;
+      int sx2, sy2; domeXY(sa, se, sx2, sy2);
+      float mag = STAR_MAG[i] / 10.0f - 2.0f;
+      if (mag < 1.3f)      canvas.fillRect(sx2, sy2, 2, 2, CL_WHITE);
+      else if (mag < 3.0f) canvas.drawPixel(sx2, sy2, CL_WHITE);
+      else                 canvas.drawPixel(sx2, sy2, CL_GREY);
+    }
+  }
+  if (skyLayers >= 2) {                  // constellation polylines
+    int vi = 0;
+    for (int r2 = 0; r2 < CLIN_RUNS_N; ++r2) {
+      int px2 = 0, py2 = 0; bool pv = false;
+      for (int v = 0; v < CLIN_RUN[r2]; ++v, ++vi) {
+        double la, le;
+        raDecToAzEl(now, o.lat, o.lon, CLIN_RA[vi] / 100.0, CLIN_DEC[vi] / 100.0, la, le);
+        bool ok = le > -1;
+        int lx, ly; domeXY(la, le, lx, ly);
+        if (ok && pv) canvas.drawLine(px2, py2, lx, ly, CL_DGREY);
+        px2 = lx; py2 = ly; pv = ok;
+      }
+    }
+  }
+
   for (int k = 0; k < NTOT; ++k) {
     int x, y; domeXY(az[k], el[k], x, y);
     bool up = el[k] > 0;
+    if (isStar[k]) {                     // star pixel already drawn by layer 1;
+      if (k == skySel && up) {           // selection = a small diamond around it
+        canvas.drawLine(x - 3, y, x, y - 3, CL_YELLOW);
+        canvas.drawLine(x, y - 3, x + 3, y, CL_YELLOW);
+        canvas.drawLine(x + 3, y, x, y + 3, CL_YELLOW);
+        canvas.drawLine(x, y + 3, x - 3, y, CL_YELLOW);
+      }
+      continue;
+    }
     uint16_t col = isRf[k] ? (up ? CL_ORANGE : CL_DGREY)
                            : (up ? CL_CYAN   : CL_DGREY);
     if (isRf[k]) {                       // RF source: small cross
@@ -35789,10 +36002,11 @@ void App::drawSkyMap() {
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(px, 104); canvas.printf("%d/%d", skySel + 1, NTOT);
 
-  footer(";/. select  ` back");
+  footer(";/. select  c stars  ` back");
 }
 
 void App::keySkyMap(char c, bool enter, bool back) {
+  if (c == 'c') { skyLayers = (uint8_t)((skyLayers + 1) & 3); lastDrawMs = 0; return; }
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SUNMOON; lastDrawMs = 0; return; }
   const int NTOT = 5 + SKY_RF_N;
@@ -36128,8 +36342,8 @@ void App::keyTransit(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { transitJobPhase = 0; screen = SCR_SUNMOON; lastDrawMs = 0; return; }
   if (c == 'r') { transitStartJob(); lastDrawMs = 0; return; }
-  if (isUp(c))   { if (transitSel > 0) transitSel--; lastDrawMs = 0; }
-  if (isDown(c)) { if (transitSel < transitN - 1) transitSel++; lastDrawMs = 0; }
+  if (isUp(c)   && transitN) { transitSel = (transitSel + transitN - 1) % transitN; lastDrawMs = 0; }
+  if (isDown(c) && transitN) { transitSel = (transitSel + 1) % transitN;            lastDrawMs = 0; }
 }
 
 void App::drawSatSat() {
@@ -36246,8 +36460,8 @@ void App::keySatSat(char c, bool enter, bool back) {
   if (c == 'r' || enter) {                     // run (or re-run) the search for the pick
     satsatPicking = false; satsatStartJob(); lastDrawMs = 0; return;
   }
-  if (isUp(c))   { if (satsatSel > 0) satsatSel--; lastDrawMs = 0; }
-  if (isDown(c)) { if (satsatSel < satsatN - 1) satsatSel++; lastDrawMs = 0; }
+  if (isUp(c)   && satsatN) { satsatSel = (satsatSel + satsatN - 1) % satsatN; lastDrawMs = 0; }
+  if (isDown(c) && satsatN) { satsatSel = (satsatSel + 1) % satsatN;           lastDrawMs = 0; }
 }
 
 // ===========================================================================
@@ -36450,12 +36664,19 @@ void App::loraStart() {
   loraStarted = lora.begin(cfg.loraFreqKHz, cfg.loraSf, cfg.loraBwHz, tx);
 }
 
+static const uint8_t KES_MAGIC = 0xC7;
+static const uint8_t KES_HELLO = 1, KES_FIRE = 2, KES_SYNC = 3;
+
 void App::loraPoll() {
   if (!lora.ready()) return;
   uint8_t buf[64]; size_t n = 0; float rssi = 0, snr = 0;
   if (!lora.poll(buf, sizeof(buf), n, rssi, snr)) return;
   // Object-transfer frames (magic 0xC6) carry chunked objects (e.g. GP element sets);
   // route them to the reassembler before the text-message path.
+  if (n >= 2 && buf[0] == KES_MAGIC) {          // KESSLER netplay frame
+    kessNetRx(buf, (int)n, (int)lroundf(rssi));
+    return;
+  }
   if (n >= 2 && buf[0] == LORA_OBJ_MAGIC) {
     loraObjRxFrame(buf, (int)n, (int)lroundf(rssi), (int)lroundf(snr));
     return;
@@ -36852,8 +37073,8 @@ void App::drawLoraSat() {
         time_t aos = pp.aos; gmtime_r(&aos, &g);
         strftime(buf, sizeof(buf), "%m-%d %H:%M", &g);
         canvas.setCursor(6, 68); canvas.printf("Next AOS %s UTC", buf);
-        canvas.setCursor(6, 82); canvas.printf("Max el %.0f  dur %ldm",
-                                               pp.maxEl, (long)((pp.los - pp.aos) / 60));
+        { char db[8]; fmtPassDur((long)(pp.los - pp.aos), db, sizeof(db));
+          canvas.setCursor(6, 82); canvas.printf("Max el %.0f  dur %s", pp.maxEl, db); }
       } else {
         canvas.setCursor(6, 68); canvas.print("No pass in the search window.");
       }
@@ -37114,8 +37335,8 @@ void App::keyAmsatStatus(char c, bool enter, bool back) {
     }
     return;
   }
-  if (isUp(c)   && amStatSel > 0)            { amStatSel--; lastDrawMs = 0; return; }
-  if (isDown(c) && amStatSel < amStatN - 1)  { amStatSel++; lastDrawMs = 0; return; }
+  if (isUp(c)   && amStatN) { amStatSel = (amStatSel + amStatN - 1) % amStatN; lastDrawMs = 0; return; }
+  if (isDown(c) && amStatN) { amStatSel = (amStatSel + 1) % amStatN;           lastDrawMs = 0; return; }
   if (c == '{') { amStatSel = max(0, amStatSel - 9); lastDrawMs = 0; return; }
   if (c == '}') { amStatSel = min(amStatN - 1, amStatSel + 9); lastDrawMs = 0; return; }
   if (c == 'p' && amStatN > 0) {              // post a status report (full picker)
@@ -37524,6 +37745,18 @@ static const char* const TOOLS_NAMES[] = {
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
+// Menu DISPLAY order (0.9.60 menu-order audit). TOOLS_NAMES order is the CANONICAL
+// tool id -- form ids, print stems, and toolFormInit all key off it -- and it grew by
+// accretion, which by fifty-four entries had orbit tools in three places and antennas
+// in two. This permutation is purely presentational: the list shows tools banded as
+// calculators & code / satellite & orbit / antennas & feedline / RF & measurement /
+// electronics & power / references & lookups, while every id stays put. Append new
+// tools to TOOLS_NAMES as always, then slot the new id into the right band here; the
+// static_assert keeps the two tables the same length (a missing or duplicate id
+// would scramble the menu, so the release checklist includes eyeballing this list).
+static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,15,16,17,18,19,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14 };
+static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 54, "TOOLS_ORDER size");
+
 // The first twenty Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
 // reference, radio-math reference, state-vector->GP, CubeSatSim C2C ref, location converter,
@@ -37554,7 +37787,7 @@ void App::drawTools() {
     bool sel = (i == toolsSel);
     if (sel) canvas.fillRect(2, y - 2, 236, 9, CL_SELBG);
     canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
-    canvas.setCursor(8, y); canvas.print(TOOLS_NAMES[i]);
+    canvas.setCursor(8, y); canvas.print(TOOLS_NAMES[TOOLS_ORDER[i]]);
   }
   if (toolsScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 20);  canvas.print("^"); }
   if (toolsScroll + VIS < TOOLS_N)     { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 110); canvas.print("v"); }
@@ -37571,56 +37804,57 @@ void App::keyTools(char c, bool enter, bool back) {
     char want = (char)(c - 'a' + 'A');
     for (int k = 1; k <= TOOLS_N; ++k) {
       int idx = (toolsSel + k) % TOOLS_N;
-      char f = TOOLS_NAMES[idx][0];
+      char f = TOOLS_NAMES[TOOLS_ORDER[idx]][0];
       if (f >= 'a' && f <= 'z') f = (char)(f - 'a' + 'A');
       if (f == want) { toolsSel = idx; lastDrawMs = 0; return; }
     }
     return;
   }
   if (enter) {
-    if (toolsSel == 0) {                       // scientific calculator
+    const int toolsSelC = TOOLS_ORDER[toolsSel];   // canonical tool id (display order differs)
+    if (toolsSelC == 0) {                      // scientific calculator
       calcBuf = ""; calcResult = ""; calcErr = false;
       screen = SCR_CALC;
-    } else if (toolsSel == 1) {                // graphing calculator
+    } else if (toolsSelC == 1) {                // graphing calculator
       graphInit(); screen = SCR_GRAPH;
-    } else if (toolsSel == 2) {                // programmer's calculator
+    } else if (toolsSelC == 2) {                // programmer's calculator
       screen = SCR_PCALC;
-    } else if (toolsSel == 3) {                // Tiny BASIC
+    } else if (toolsSelC == 3) {                // Tiny BASIC
       basicInit(); screen = SCR_BASIC;
-    } else if (toolsSel == 4) {                // location-format converter
+    } else if (toolsSelC == 4) {                // location-format converter
       locoInit(); screen = SCR_LOCONV;
-    } else if (toolsSel == 5) {                // link budget calculator
+    } else if (toolsSelC == 5) {                // link budget calculator
       lbInit(); screen = SCR_LINKB;
-    } else if (toolsSel == 6) {                // state vector -> GP elements
+    } else if (toolsSelC == 6) {                // state vector -> GP elements
       gpfInit(); screen = SCR_GPFIT;
-    } else if (toolsSel == 7) {                // CubeSatSim C2C reference
+    } else if (toolsSelC == 7) {                // CubeSatSim C2C reference
       cubesimScroll = 0; screen = SCR_CUBESIM;
-    } else if (toolsSel == 8) {                // DXCC entity lookup
+    } else if (toolsSelC == 8) {                // DXCC entity lookup
       dxQuery = ""; dxRunFilter(); screen = SCR_DXLK;
-    } else if (toolsSel == 9) {                // CQ (WAZ) zone reference
+    } else if (toolsSelC == 9) {                // CQ (WAZ) zone reference
       cqzSel = 0; cqzScroll = 0; screen = SCR_CQZ;
-    } else if (toolsSel == 10) {               // ITU zone reference
+    } else if (toolsSelC == 10) {               // ITU zone reference
       ituSel = 0; ituScroll = 0; screen = SCR_ITUZ;
-    } else if (toolsSel == 11) {               // CTCSS tone reference
+    } else if (toolsSelC == 11) {               // CTCSS tone reference
       ctcssScroll = 0; screen = SCR_CTCSS;
-    } else if (toolsSel == 12) {               // operating references (Q/phonetics/RST)
+    } else if (toolsSelC == 12) {               // operating references (Q/phonetics/RST)
       oprefTab = 0; oprefScroll = 0; screen = SCR_OPREF;
-    } else if (toolsSel == 13) {               // radio math reference (cheat sheet)
+    } else if (toolsSelC == 13) {               // radio math reference (cheat sheet)
       mathRefScroll = 0; screen = SCR_MATHREF;
-    } else if (toolsSel == 14) {               // character / raw-value lookup
+    } else if (toolsSelC == 14) {               // character / raw-value lookup
       screen = SCR_CHARLK;
-    } else if (toolsSel == 15) {               // conjunction screener
+    } else if (toolsSelC == 15) {               // conjunction screener
       conjRan = false; conjN = 0; screen = SCR_CONJ;
-    } else if (toolsSel == 16) {               // orbital neighborhood
+    } else if (toolsSelC == 16) {               // orbital neighborhood
       neighInit(); screen = SCR_NEIGH;
-    } else if (toolsSel == 17) {               // transponder passband planner
+    } else if (toolsSelC == 17) {               // transponder passband planner
       txplanTx = curTx; screen = SCR_TXPLAN;
-    } else if (toolsSel == 18) {               // link margin vs elevation
+    } else if (toolsSelC == 18) {               // link margin vs elevation
       lcSel = 0; lcEdit = false; screen = SCR_LNKCRV;
-    } else if (toolsSel == 19) {               // debris group screen
+    } else if (toolsSelC == 19) {               // debris group screen
       dgState = 0; dgScroll = 0; screen = SCR_DEBGRP;
     } else {                                   // one of the live-recalc forms
-      toolFormInit(toolsSel - TOOLS_FIRST_FORM);   // form id = menu index - (standalone tools that precede)
+      toolFormInit(toolsSelC - TOOLS_FIRST_FORM);   // form id = CANONICAL index - standalone count (display order differs)
       screen = SCR_TOOLFORM;
     }
     lastDrawMs = 0;
@@ -38016,6 +38250,625 @@ void App::keyTxplan(char c, bool enter, bool back) {
   if (isUp(c))   { if (activeTxCount) txplanTx = (txplanTx + activeTxCount - 1) % activeTxCount; lastDrawMs = 0; return; }
   if (isDown(c)) { if (activeTxCount) txplanTx = (txplanTx + 1) % activeTxCount; lastDrawMs = 0; return; }
   if (c == 'p') { txplanPrint(); lastDrawMs = 0; }
+}
+
+
+// ============================================================================
+// KESSLER -- a two-player GORILLAS.BAS tribute (0.9.60)
+//
+// The 1991 QBasic classic, altered to a satellite theme: two LUNAR GROUND
+// STATIONS lob retired CubeSats at each other across a skyline of habitat
+// modules. The physics are GORILLAS' own equations, run unchanged in its
+// 640x350 EGA virtual space and only scaled to 240x135 when drawn:
+//
+//   x = x0 + (v cos a) t + 1/2 (Wind/5) t^2                 (PlotShot line-for-line)
+//   y = y0 - [(v sin a) t - 1/2 g t^2] * (350/350)
+//   Wind = FnRan(10)-5, then a 50/50 +/- FnRan(10)          (same distribution)
+//   t += 0.1 per step at ~5 t-units/second
+//
+// Terrain follows MakeCityScape's EGA constants (BottomLine 335, HtInc 10,
+// DefBWidth 37, RandomHeight 120, slope walk with V / inverted-V profiles),
+// rasterized into a 240-column surface-height map so blast craters are one
+// max() per column. The sun becomes EARTH in the lunar sky -- complete with
+// the shocked face when a shot flies through it. Deliberate deviations for a
+// 240x135 screen, each tiny: blast radius 5 px (a scaled 2.7 px crater reads
+// as a flicker), each player's last angle/velocity is prefilled (retyping
+// 3-digit numbers on a thumb keyboard is homage nobody asked for), and
+// gravity is picked from Moon/Mars/Earth presets instead of typed. Still no
+// INPUT in Tiny BASIC -- which is exactly why this lives in firmware.
+//
+// All state sits in one heap struct that exists only while the screen is
+// open (~1 KB; the no-PSRAM discipline for rarely-used features).
+// ============================================================================
+
+struct App::Kessler {
+  // phases: 0 setup, 1 aim, 2 flight, 3 impact anim, 4 round over, 5 match over
+  uint8_t  phase = 0;
+  uint8_t  sky[240];                 // surface y per screen column (135 = ground)
+  int16_t  stX[2]; uint8_t stY[2];   // station center (screen px)
+  uint8_t  wins[2] = {0, 0}, playTo = 3;
+  uint8_t  turn = 0;                 // 0 = left player, 1 = right player
+  uint8_t  gravSel = 0;              // 0 Moon 1.62, 1 Mars 3.71, 2 Earth 9.8
+  int8_t   wind = 0;                 // GORILLAS wind units
+  uint16_t seed = 1;                 // porthole/star hash seed, fixed per round
+  // aim entry (per player memory)
+  int16_t  angle[2] = {45, 45}, vel[2] = {60, 60};
+  uint8_t  field = 0;                // 0 angle, 1 velocity
+  char     buf[5] = ""; uint8_t bufN = 0;
+  // flight (virtual 640x350 space)
+  uint32_t t0 = 0;                   // millis at launch
+  float    fx0 = 0, fy0 = 0, fvx = 0, fvy = 0;
+  bool     sunShockThis = false;     // one shock per shot, like SunHit
+  bool     ownClear = false;         // shot has left the shooter's own hit box once
+  uint8_t  shooter = 0;              // who fired THIS shot (footer truth, whatever turn does)
+  float    tPrev = 0;                // last simulated t (sub-stepping; see phase 2)
+  bool     kick = false;             // one-shot: repaint once after an in-draw phase change
+  // ---- LoRa netplay (0.9.60) ----
+  // net==0 local hot-seat (unchanged); 1 host (chose the match, is P1); 2 guest (P2).
+  // In a net match BOTH radios run identical physics from shared parameters -- only
+  // three tiny packets cross the air (HELLO/FIRE/SYNC), so each shot arcs the same on
+  // both screens with nothing streamed per frame. `mePlayer` is which station is
+  // physically ours; input is accepted only when turn == mePlayer.
+  uint8_t  net = 0;
+  uint8_t  mePlayer = 0;             // 0 = we are P1 (host), 1 = we are P2 (guest)
+  uint16_t netSeed = 0;              // agreed terrain/gravity seed (host picks)
+  bool     netHelloAcked = false;    // guest has echoed our HELLO (host) / we saw HELLO (guest)
+  uint32_t netLastTx = 0;            // for HELLO/keepalive resend cadence
+  char     netPeer[10] = "";         // peer callsign, for the header
+  uint32_t shockUntil = 0;
+  // impact / dance
+  uint32_t animUntil = 0;
+  int16_t  impX = 0, impY = 0;       // screen px
+  uint8_t  impKind = 0;              // 0 terrain, 1 station0 hit, 2 station1 hit
+};
+
+static inline uint32_t kessHash(uint32_t x) {          // tiny stable hash
+  x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+  return x;
+}
+static inline int kessRan(int n) { return (int)(esp_random() % (uint32_t)n) + 1; } // FnRan (local)
+// Seeded LCG FnRan for netplay: both stations, given the same seed, walk the terrain
+// and wind identically. Advanced by reference so a round is one deterministic stream.
+static inline int kessRanS(uint32_t& st, int n) {
+  st = st * 1103515245u + 12345u;
+  return (int)((st >> 16) % (uint32_t)n) + 1;
+}
+
+// KESSLER-over-LoRa wire frames (magic 0xC7). Fixed layout, no heap, all <16 B so
+// they clear the 64-byte RX buffer with room to spare. One shared RNG seed makes
+// both sides build byte-identical terrain; the shooter's wind travels in the FIRE
+// packet so the trajectory is identical on both screens without streaming points.
+//   HELLO host->guest: seed, gravity, playTo         (guest echoes to ack)
+//   FIRE  shooter->peer: turn, angle, velocity, wind (peer simulates locally)
+//   SYNC  either: round result (winner, scores)       (reconcile + who's next)
+
+void App::kessNetSend(uint8_t kind, const uint8_t* body, int blen) {
+  if (!lora.ready()) return;
+  uint8_t f[16]; f[0] = KES_MAGIC; f[1] = kind;
+  int m = blen; if (m > 13) m = 13;
+  for (int i = 0; i < m; ++i) f[2 + i] = body[i];
+  lora.sendRaw(f, 2 + m);
+}
+
+// Handle a received KESSLER frame (magic already matched by loraPoll).
+void App::kessNetRx(const uint8_t* b, int n, int rssi) {
+  (void)rssi;
+  if (n < 2) return;
+  uint8_t kind = b[1];
+
+  // A HELLO can arrive when we are NOT in a game yet: that is an inbound invite.
+  if (kind == KES_HELLO) {
+    if (n < 6) return;
+    if (!kess) { kesslerInit(); if (!kess) return; }
+    Kessler& K = *kess;
+    if (K.net == 0) {                       // accept the invite as guest (P2)
+      K.net = 2; K.mePlayer = 1;
+    }
+    if (K.net == 2) {
+      K.netSeed = (uint16_t)(b[2] | (b[3] << 8));
+      K.gravSel = b[4] % 3; K.playTo = b[5] ? b[5] : 3;
+      K.netHelloAcked = true;
+      uint8_t ack[4] = { b[2], b[3], b[4], b[5] };
+      kessNetSend(KES_HELLO, ack, 4);       // echo = ack
+      K.wins[0] = K.wins[1] = 0; K.turn = 0; K.shooter = 0;
+      kessNetNewRound();                    // seed-driven, identical both ends
+      screen = SCR_KESSLER; lastDrawMs = 0;
+    }
+    return;
+  }
+  if (!kess) return;
+  Kessler& K = *kess;
+  if (K.net == 0) return;
+
+  if (kind == KES_HELLO && K.net == 1) {    // guest's echo -> our invite is live
+    K.netHelloAcked = true; lastDrawMs = 0; return;
+  }
+  if (kind == KES_FIRE) {
+    if (n < 8) return;
+    uint8_t who = b[2];
+    if (who == K.mePlayer) return;          // our own shot echoed; ignore
+    K.turn = who;
+    K.angle[who] = (int16_t)(b[3] | (b[4] << 8));
+    K.vel[who]   = (int16_t)(b[5] | (b[6] << 8));
+    K.wind       = (int8_t)b[7];            // shooter's wind: simulate identically
+    kessNetReplaying = true;
+    kessFire();                             // local sim of the remote shot
+    kessNetReplaying = false;
+    lastDrawMs = 0; return;
+  }
+  if (kind == KES_SYNC) {
+    if (n < 5) return;
+    K.wins[0] = b[3]; K.wins[1] = b[4];     // authoritative scores from peer
+    uint8_t winner = b[2];
+    if (K.wins[0] >= K.playTo || K.wins[1] >= K.playTo) { K.phase = 5; K.kick = true; }
+    else {
+      K.turn = (uint8_t)((winner + 1) & 1); // loser opens next round... but seed is shared
+      kessNetNewRound(); K.kick = true;
+    }
+    lastDrawMs = 0; return;
+  }
+}
+
+// Round setup driven purely by the shared seed, so host and guest build identical
+// terrain, stations, and wind without exchanging any of it.
+void App::kessNetNewRound() {
+  Kessler& K = *kess;
+  kessSeedRound(K.netSeed);
+  K.netSeed = (uint16_t)(K.netSeed * 1103515245u + 12345u);  // advance for next round
+}
+
+// Host-side HELLO beacon: while we are hosting and no guest has acked, resend the
+// invite once a second (up to ~15 s), then give up quietly. Cheap no-op otherwise.
+void App::kessNetService() {
+  if (!kess) return;
+  Kessler& K = *kess;
+  if (K.net != 1 || K.netHelloAcked) return;
+  uint32_t now = millis();
+  if (K.netLastTx && now - K.netLastTx < 1000) return;
+  if (K.netLastTx && now - K.netLastTx > 60000) return;      // stale host: stop
+  static uint8_t tries = 0;
+  if (!K.netLastTx) tries = 0;
+  if (tries >= 15) return;
+  uint8_t body[4] = { (uint8_t)(K.netSeed & 0xFF), (uint8_t)(K.netSeed >> 8),
+                      K.gravSel, K.playTo };
+  kessNetSend(KES_HELLO, body, 4);
+  K.netLastTx = now; tries++;
+  if (screen == SCR_KESSLER) lastDrawMs = 0;
+}
+
+
+void App::kesslerFree() { delete kess; kess = nullptr; }
+
+bool App::kessAnimating() const { return kess && (kess->phase >= 2 || kess->kick); }
+
+void App::kesslerInit() {
+  kesslerFree();
+  kess = new (std::nothrow) Kessler();
+  if (!kess) { setStatus("out of memory"); screen = SCR_GAMES; return; }
+  memset(kess->sky, 130, sizeof(kess->sky));   // flat regolith until round 1
+  kess->stX[0] = 30; kess->stX[1] = 210; kess->stY[0] = kess->stY[1] = 130;
+}
+
+// Host a networked match: we become P1, pick the seed/gravity, and beacon HELLO
+// until a guest echoes it. The guest's CardSat pops the invite from loraPoll.
+void App::kessNetHost() {
+  if (!kess) return;
+  Kessler& K = *kess;
+  if (!lora.ready()) { setStatus("LoRa radio not ready", 4000); return; }
+  K.net = 1; K.mePlayer = 0;
+  K.netSeed = (uint16_t)esp_random(); if (!K.netSeed) K.netSeed = 1;
+  K.netHelloAcked = false; K.netLastTx = 0;
+  strncpy(K.netPeer, "waiting", sizeof(K.netPeer) - 1);
+  setStatus("Hosting KESSLER - waiting for guest...");
+}
+
+// New round: terrain, stations, wind -- MakeCityScape + PlaceGorillas, scaled.
+void App::kessNewRound() {
+  uint16_t s = (uint16_t)esp_random(); if (!s) s = 1;
+  kessSeedRound(s);
+}
+
+// Deterministic round builder: identical output for identical seed (netplay relies
+// on this). Local play calls it with a random seed via kessNewRound().
+void App::kessSeedRound(uint16_t seed) {
+  Kessler& K = *kess;
+  K.seed = seed ? seed : 1;
+  uint32_t rng = K.seed;
+  for (int i = 0; i < 240; ++i) K.sky[i] = 130;        // BottomLine 335 * 135/350
+  // Slope walk (EGA constants). NewHt/BHeight in VIRTUAL y units.
+  int slope = kessRanS(rng, 6);
+  int newHt = (slope == 2 || slope == 6) ? 130 : 15;
+  const int HtInc = 10, DefBW = 37, RandH = 120;
+  int x = 2;                                            // virtual x
+  int bIdx = 0; int stCol[2] = {30, 210};
+  int bCx[24]; int bTop[24]; int nB = 0;
+  while (x < 638) {
+    switch (slope) {                                    // per-building height walk
+      case 1: newHt += HtInc; break;                    // upward
+      case 2: newHt -= HtInc; break;                    // downward
+      case 6: if (x > 320) newHt += 2 * HtInc; else newHt -= 2 * HtInc; break;
+      default: if (x > 320) newHt -= 2 * HtInc; else newHt += 2 * HtInc; break;
+    }
+    if (newHt < HtInc) newHt = HtInc;
+    if (newHt > 260) newHt = 260;
+    int bw = kessRanS(rng, DefBW) + DefBW;
+    if (x + bw > 638) bw = 638 - x;
+    int bh = kessRanS(rng, RandH) + newHt;
+    if (bh < HtInc) bh = HtInc;
+    if (bh > 280) bh = 280;                             // leave sky for Earth + lobs
+    int c0 = (int)(x * 240L / 640), c1 = (int)((x + bw) * 240L / 640);
+    uint8_t top = (uint8_t)((335 - bh) * 135L / 350);
+    for (int c = c0; c < c1 && c < 240; ++c) K.sky[c] = top;
+    if (nB < 24) { bCx[nB] = (c0 + c1) / 2; bTop[nB] = top; nB++; }
+    x += bw + 2;
+    (void)bIdx;
+  }
+  // Stations on the 2nd/3rd building from each edge (PlaceGorillas), on its roof.
+  if (nB >= 6) {
+    int li = 1 + (kessRanS(rng, 2) - 1);                      // building 2 or 3
+    int ri = nB - 2 - (kessRanS(rng, 2) - 1);
+    stCol[0] = bCx[li]; stCol[1] = bCx[ri];
+  }
+  for (int p = 0; p < 2; ++p) {
+    K.stX[p] = (int16_t)stCol[p];
+    K.stY[p] = K.sky[stCol[p]];
+  }
+  // Wind: FnRan(10)-5, then 50/50 add/sub FnRan(10) -- the original distribution.
+  K.wind = (int8_t)(kessRanS(rng, 10) - 5);
+  if (kessRanS(rng, 2) == 1) K.wind += kessRanS(rng, 10); else K.wind -= kessRanS(rng, 10);
+  K.sunShockThis = false; K.shockUntil = 0;
+  K.phase = 1; K.field = 0; K.bufN = 0; K.buf[0] = 0;
+}
+
+// Fire: seed GORILLAS' PlotShot state. Angle mirrors for player 2 (they aim left).
+void App::kessFire() {
+  Kessler& K = *kess;
+  float aDeg = (float)K.angle[K.turn];
+  float a = aDeg * (float)M_PI / 180.0f;
+  float v = (float)K.vel[K.turn];
+  K.fvx = cosf(a) * v * (K.turn ? -1.0f : 1.0f);
+  K.fvy = sinf(a) * v;
+  // Launch from just above the station, in virtual coords.
+  K.fx0 = K.stX[K.turn] * 640.0f / 240.0f;
+  K.fy0 = (K.stY[K.turn] - 6) * 350.0f / 135.0f;
+  K.t0 = millis();
+  K.phase = 2;
+  K.ownClear = false;                          // suppress own-pad hit until clear
+  K.shooter = K.turn;                          // pin the footer to the actual shooter
+  K.tPrev = 0;
+  if (K.net && K.turn == K.mePlayer && !kessNetReplaying) {
+    uint8_t body[6] = { K.mePlayer,
+                        (uint8_t)(K.angle[K.turn] & 0xFF), (uint8_t)(K.angle[K.turn] >> 8),
+                        (uint8_t)(K.vel[K.turn] & 0xFF),   (uint8_t)(K.vel[K.turn] >> 8),
+                        (uint8_t)K.wind };
+    kessNetSend(KES_FIRE, body, 6);
+  }
+  sfx(880, 60);                                // the throw chirp
+}
+
+void App::keyKessler(char c, bool enter, bool back) {
+  if (!kess) { screen = SCR_GAMES; return; }
+  Kessler& K = *kess;
+  // Backspace EDITS during aim (bench: it quit the game); only ` quits there.
+  if (K.phase == 1 && back && c != '`') {
+    if (K.bufN) { K.buf[--K.bufN] = 0;
+                  int16_t& tgt = K.field ? K.vel[K.turn] : K.angle[K.turn];
+                  if (K.bufN) tgt = (int16_t)atoi(K.buf); }
+    else if (K.field) { K.field = 0; }           // step back to the angle field
+    lastDrawMs = 0; return;
+  }
+  if (isBack(c, back)) { kesslerFree(); screen = SCR_GAMES; lastDrawMs = 0; return; }
+  switch (K.phase) {
+    case 0:                                            // setup
+      if (c >= '1' && c <= '9') { K.playTo = (uint8_t)(c - '0'); lastDrawMs = 0; return; }
+      if (c == 'g') { K.gravSel = (uint8_t)((K.gravSel + 1) % 3); lastDrawMs = 0; return; }
+      if (c == 'n') { kessNetHost(); lastDrawMs = 0; return; }   // host over LoRa
+      if (enter) { K.net = 0; K.wins[0] = K.wins[1] = 0; K.turn = 0; kessNewRound(); lastDrawMs = 0; }
+      return;
+    case 1: {                                          // aim: a two-field form
+      if (K.net && K.turn != K.mePlayer) return;       // not our turn: peer is aiming
+      // Bench rev B: the sequential ask-angle-then-velocity flow proved fragile
+      // across turns (a player could land in the velocity field without ever
+      // seeing the angle ask). Both fields are now ALWAYS visible; ,/ (or ENTER
+      // from the angle side) moves between them, digits and backspace edit the
+      // active one, ;/. nudges, and ENTER on the velocity side fires. No hidden
+      // state survives a turn: every entry into phase 1 resets field and buffer.
+      int16_t& tgt = K.field ? K.vel[K.turn] : K.angle[K.turn];
+      if (c >= '0' && c <= '9') {
+        if (K.bufN >= 3) { K.bufN = 0; }               // fresh entry after 3 digits
+        K.buf[K.bufN++] = c; K.buf[K.bufN] = 0;
+        tgt = (int16_t)atoi(K.buf); lastDrawMs = 0; return;
+      }
+      if (isUp(c))    { if (tgt < 359) tgt++; K.bufN = 0; lastDrawMs = 0; return; }
+      if (isDown(c))  { if (tgt > 0)   tgt--; K.bufN = 0; lastDrawMs = 0; return; }
+      if (isLeft(c))  { K.field = 0; K.bufN = 0; lastDrawMs = 0; return; }
+      if (isRight(c)) { K.field = 1; K.bufN = 0; lastDrawMs = 0; return; }
+      if (enter) {
+        if (!K.field) { K.field = 1; K.bufN = 0; K.buf[0] = 0; }   // angle -> velocity
+        else {
+          if (K.vel[K.turn] < 2) K.vel[K.turn] = 1;    // the too-slow gag survives
+          K.field = 0; K.bufN = 0; kessFire();
+        }
+        lastDrawMs = 0;
+      }
+      return;
+    }
+    case 2: return;                                    // in flight: no keys
+    case 3: return;                                    // impact anim
+    case 4:                                            // round over
+      if (K.net) {                                     // netplay: SYNC already rebuilt
+        return;                                        // both sides; nothing to do here
+      }
+      if (enter) { K.turn = (uint8_t)((K.turn + 1) & 1); kessNewRound(); lastDrawMs = 0; }
+      return;
+    case 5:                                            // match over
+      if (enter) { K.phase = 0; lastDrawMs = 0; }
+      return;
+  }
+}
+
+// One frame. Also advances the simulation: flight time comes from millis so the
+// frame rate never changes the trajectory (GORILLAS stepped t by .1 per ~20 ms;
+// 5 t-units per second reproduces that pace).
+void App::drawKessler() {
+  if (!kess) return;
+  Kessler& K = *kess;
+  K.kick = false;                    // the post-transition repaint is this frame
+  canvas.fillSprite(CL_BLACK);
+
+  // Stars (stable per round) + EARTH where GORILLAS puts the sun: top center.
+  for (int i = 0; i < 34; ++i) {
+    uint32_t h = kessHash(K.seed * 97u + i);
+    int sx2 = h % 240, sy2 = (h >> 9) % 60;
+    canvas.drawPixel(sx2, sy2 + 10, CL_GREY);
+  }
+  const int ex = 120, ey = 16, er = 8;
+  canvas.fillCircle(ex, ey, er, CL_BLUE);
+  canvas.fillCircle(ex - 3, ey - 2, 3, CL_GREEN);      // continents, loosely
+  canvas.fillCircle(ex + 3, ey + 3, 2, CL_GREEN);
+  canvas.fillCircle(ex + 4, ey - 4, 1, CL_GREEN);
+  bool shocked = millis() < K.shockUntil;
+  canvas.drawPixel(ex - 3, ey - 1, CL_WHITE); canvas.drawPixel(ex + 3, ey - 1, CL_WHITE);
+  if (shocked) canvas.drawCircle(ex, ey + 3, 2, CL_WHITE);          // O mouth
+  else         canvas.drawFastHLine(ex - 2, ey + 4, 5, CL_WHITE);   // smile-ish
+
+  static const char* GNAME[3] = { "Moon", "Mars", "Earth" };
+  static const float GVAL[3]  = { 1.62f, 3.71f, 9.8f };
+  if (K.phase == 0) {
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(81, 34); canvas.print("K E S S L E R");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(15, 48);  canvas.print("a GORILLAS.BAS tribute, on the Moon");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(40, 70);  canvas.printf("Play to: %d   (press 1-9)", K.playTo);
+    canvas.setCursor(40, 82);  canvas.printf("Gravity: %s %.2f  (g cycles)", GNAME[K.gravSel], GVAL[K.gravSel]);
+    canvas.setCursor(46, 100); canvas.print("ENTER local   n host over LoRa");
+    if (K.net == 1) {
+      canvas.setTextColor(K.netHelloAcked ? CL_GREEN : CL_ORANGE, CL_BLACK);
+      canvas.setCursor(30, 116);
+      canvas.print(K.netHelloAcked ? "guest joined - starting..." : "hosting: waiting for guest");
+    }
+    footer("1-9 rounds  g grav  ENTER  n LoRa host");
+    return;
+  }
+
+  // Habitat modules from the height map, with stable lit portholes.
+  for (int x = 0; x < 240; ++x) {
+    int top = K.sky[x];
+    if (top >= 130) continue;
+    canvas.drawFastVLine(x, top, 130 - top, CL_DGREY);
+    if ((x % 4) == 1) {
+      for (int y = top + 3; y < 128; y += 6) {
+        uint32_t h = kessHash(((uint32_t)K.seed << 16) ^ (x << 8) ^ y);
+        canvas.drawPixel(x, y, (h & 3) ? CL_YELLOW : CL_BLACK);
+      }
+    }
+  }
+  canvas.drawFastHLine(0, 130, 240, CL_GREY);          // regolith line
+
+  // Stations: base, mast, dish facing the enemy. Winner's dish waggles in dance.
+  for (int p = 0; p < 2; ++p) {
+    int sx2 = K.stX[p], sy2 = K.stY[p];
+    uint16_t col = (K.phase == 1 && K.turn == p) ? CL_CYAN : CL_WHITE;
+    bool dead = (K.phase >= 3 && K.impKind == p + 1);
+    if (dead) continue;                                // vaporized this round
+    canvas.fillRect(sx2 - 3, sy2 - 3, 7, 3, col);
+    canvas.drawFastVLine(sx2, sy2 - 6, 3, col);
+    int d = p ? -1 : 1;                                // dish faces inward
+    bool wag = (K.phase >= 4) && (K.wins[p] > 0) && ((millis() >> 8) & 1) &&
+               (K.impKind == (uint8_t)(2 - p));        // the survivor dances
+    canvas.drawLine(sx2, sy2 - 6, sx2 + d * 3, sy2 - (wag ? 10 : 8), col);
+    canvas.drawCircle(sx2 + d * 3, sy2 - (wag ? 10 : 8), 2, col);
+  }
+
+  // Header: scores, wind, gravity, prompt.
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(2, 1);
+  canvas.printf("P1 %d", K.wins[0]);
+  canvas.setCursor(214, 1);
+  canvas.printf("%d P2", K.wins[1]);
+  // Solar wind arrow (magnitude = GORILLAS wind units).
+  int wl2 = K.wind; if (wl2 > 15) wl2 = 15; if (wl2 < -15) wl2 = -15;
+  canvas.drawFastHLine(120 - abs(wl2), 7, abs(wl2) * 2 ? abs(wl2) * 2 : 1, CL_ORANGE);
+  if (wl2) {
+    int tip = 120 + wl2, dd = (wl2 > 0) ? -1 : 1;
+    canvas.drawLine(tip, 7, tip + dd * 3, 5, CL_ORANGE);
+    canvas.drawLine(tip, 7, tip + dd * 3, 9, CL_ORANGE);
+  }
+
+  if (K.phase == 1) {
+    // The aim form sits on the AIMING PLAYER'S side (bench rev C): P1's is
+    // left-aligned, P2's right-aligned -- measured from the rendered string so it
+    // hugs the edge whatever the digit count -- which both reads as "whose turn"
+    // at a glance and keeps the middle clear of the wind arrow above it.
+    // Compact form (bench rev D): "P1 >a 45  v 60_" is 15 glyphs = 90 px, so
+    // P1's left-anchored and P2's right-anchored copies both stay clear of the
+    // Earth disc at x 112-128 that the wide bracket form used to overlap.
+    char fb[20];
+    snprintf(fb, sizeof(fb), "P%d %ca%3d %cv%3d%s", K.turn + 1,
+             K.field ? ' ' : '>', (int)K.angle[K.turn],
+             K.field ? '>' : ' ', (int)K.vel[K.turn],
+             K.bufN ? "_" : "");
+    int fx = K.turn ? (238 - (int)strlen(fb) * 6) : 2;
+    if (fx < 2) fx = 2;
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(fx, 10);
+    canvas.print(fb);
+    if (K.net && K.turn != K.mePlayer) {
+      canvas.setTextColor(CL_ORANGE, CL_BLACK);
+      canvas.setCursor(72, 122); canvas.print("waiting for peer's shot");
+      footer("LoRa: peer is aiming");
+    } else {
+      footer(K.net ? "LoRa: your shot  digits ,/. ENTER"
+                   : "digits/BS edit  ,/. field  ENTER fire");
+    }
+    return;
+  }
+
+  if (K.phase == 2) {
+    // GORILLAS' PlotShot, verbatim in virtual space; scaled only at the pixel.
+    // Bench rev D: collision is now evaluated on SUB-STEPS between frames. At
+    // 15 fps a fast shot crosses ~13 screen px per frame -- wider than the 9-px
+    // station box -- so frame-sampled tests let clean hits tunnel through
+    // untouched (photographed on the bench). dt = 0.02 t-units bounds motion to
+    // ~2 screen px per test at the maximum velocity; the frame only DRAWS the
+    // final position. And a crater no longer has to be a pinpoint: any station
+    // inside the blast circle (+margin) dies, as GORILLAS' explosion killed an
+    // adjacent gorilla. Exactness is for the harness, not the players.
+    float t = (millis() - K.t0) * 0.005f;              // 5 t-units per second
+    // Collision runs on EVERY dt sub-step from where we left off; the frame cap
+    // bounds *work*, not *coverage*. Earlier this fast-forwarded tS to t-1.6 when
+    // a frame's gap was large -- which silently skipped the sub-steps a projectile
+    // spent off-screen (top) and returning, so a shot that arced off the top and
+    // came straight down on the enemy could teleport past the hit box (bench).
+    // Now we advance tPrev only as far as we actually stepped: if the cap is hit,
+    // the NEXT frame resumes exactly here and no sub-step is ever skipped, even
+    // across a long off-screen excursion. A hard flight ceiling still bounds it.
+    const float dt = 0.02f;
+    float tS = K.tPrev;
+    float vx2 = 0, vy2 = 0; int px = 0, py = 0;
+    int hitSub = 0; bool landSub = false;
+    int budget = 400;                                 // max sub-steps this frame (8 t-units)
+    for (; tS <= t && !hitSub && !landSub && budget-- > 0; tS += dt) {
+      vx2 = K.fx0 + K.fvx * tS + 0.5f * (K.wind / 5.0f) * tS * tS;
+      vy2 = K.fy0 + (-(K.fvy * tS) + 0.5f * GVAL[K.gravSel] * tS * tS);
+      px = (int)(vx2 * 240.0f / 640.0f);
+      py = (int)(vy2 * 135.0f / 350.0f);
+      bool inOwnS = (abs(px - K.stX[K.shooter]) <= 4 &&
+                     py >= K.stY[K.shooter] - 9 && py <= K.stY[K.shooter]);
+      if (!K.ownClear && !inOwnS) K.ownClear = true;
+      for (int p = 0; p < 2 && !hitSub; ++p) {
+        if (p == (int)K.shooter && !K.ownClear) continue;
+        // No py>=0 guard: a station near the top is still hittable, and the
+        // returning-from-off-top path must be tested at every step it descends.
+        if (abs(px - K.stX[p]) <= 4 && py >= K.stY[p] - 9 && py <= K.stY[p])
+          hitSub = p + 1;
+      }
+      if (!hitSub && py >= 0 && px >= 0 && px < 240 && py >= K.sky[px])
+        landSub = true;
+    }
+    K.tPrev = tS;                                     // resume here next frame if capped
+    // Termination is GUARANTEED: geometric exit or a 40 t-unit ceiling (~8 s).
+    // Bench: a wind-curved lob could loiter past the old bounds while the phase
+    // ignored keys, so "shot in flight" became forever.
+    bool off = (vx2 < -10 || vx2 > 650 || vy2 > 360 || t > 40.0f);
+    // Earth shock: fly through the disc, get the face -- once per shot.
+    if (!K.sunShockThis && abs(px - ex) <= er && abs(py - ey) <= er) {
+      K.sunShockThis = true; K.shockUntil = millis() + 2500;
+    }
+    bool behindEarth = (abs(px - ex) <= er - 2 && abs(py - ey) <= er - 2);
+    // Station hit?
+    int hit = hitSub;
+    if (!hit && !K.ownClear && t > 8.0f) hit = (int)K.shooter + 1;  // the fizzle gag
+    if (hit) {
+      K.impKind = (uint8_t)hit; K.impX = px; K.impY = py;
+      K.wins[hit == 1 ? 1 : 0]++;                      // the OTHER player scores
+      K.animUntil = millis() + 1600; K.phase = 3;
+      sfx(220, 500);                                   // the big blast
+    } else if (landSub) {
+      // Terrain: carve the crater (max() per column against the blast circle).
+      const int r = 5;
+      for (int dx = -r; dx <= r; ++dx) {
+        int cx2 = px + dx; if (cx2 < 0 || cx2 >= 240) continue;
+        int q = (int)sqrtf((float)(r * r - dx * dx));
+        int ny = py + q; if (ny > 130) ny = 130;
+        if (K.sky[cx2] < ny) K.sky[cx2] = (uint8_t)ny;
+      }
+      // A crater can undermine a station: it falls to the new surface.
+      for (int p = 0; p < 2; ++p)
+        if (K.sky[K.stX[p]] > K.stY[p]) K.stY[p] = K.sky[K.stX[p]];
+      // Blast-proximity kill: a station inside the crater circle (+2 px margin)
+      // is destroyed even though the CubeSat itself struck dirt beside it.
+      int prox = 0;
+      for (int p = 0; p < 2; ++p) {
+        if (p == (int)K.shooter && !K.ownClear) continue;
+        if (abs(px - K.stX[p]) <= r + 2 && abs(py - (K.stY[p] - 4)) <= r + 4)
+          prox = p + 1;
+      }
+      if (prox) {
+        K.impKind = (uint8_t)prox; K.impX = px; K.impY = py;
+        K.wins[prox == 1 ? 1 : 0]++;
+        K.animUntil = millis() + 1600; K.phase = 3;
+        sfx(220, 500);
+      } else {
+        K.impKind = 0; K.impX = px; K.impY = py;
+        K.animUntil = millis() + 500; K.phase = 3;
+        sfx(330, 180);                                 // crater thump
+      }
+    } else if (off) {
+      K.turn = (uint8_t)((K.shooter + 1) & 1);         // sailed away: next player
+      K.phase = 1; K.field = 0; K.bufN = 0; K.kick = true;
+    } else if (py >= -20 && !behindEarth) {
+      // Tumbling CubeSat: body + solar wings, alternating diagonals.
+      canvas.drawPixel(px, py, CL_WHITE);
+      if (((int)(t * 8)) & 1) {
+        canvas.drawPixel(px - 2, py - 1, CL_CYAN); canvas.drawPixel(px + 2, py + 1, CL_CYAN);
+      } else {
+        canvas.drawPixel(px - 2, py + 1, CL_CYAN); canvas.drawPixel(px + 2, py - 1, CL_CYAN);
+      }
+    }
+    footer(K.shooter ? "P2 shot in flight" : "P1 shot in flight");
+    return;
+  }
+
+  if (K.phase == 3) {                                  // explosion rings
+    uint32_t left = (K.animUntil > millis()) ? (K.animUntil - millis()) : 0;
+    int r = (K.impKind ? 12 : 6) - (int)(left / (K.impKind ? 140 : 90));
+    if (r > 0) {
+      canvas.drawCircle(K.impX, K.impY, r, CL_RED);
+      canvas.drawCircle(K.impX, K.impY, r / 2, CL_ORANGE);
+    }
+    if (!left) {
+      K.kick = true;                       // paint the next phase without a keypress
+      if (K.impKind) {
+        uint8_t winner = (K.impKind == 1) ? 1 : 0;
+        // Net: the shooter announces the authoritative round result once.
+        if (K.net && K.shooter == K.mePlayer) {
+          uint8_t body[3] = { winner, K.wins[0], K.wins[1] };
+          kessNetSend(KES_SYNC, body, 3);
+        }
+        K.phase = (K.wins[winner] >= K.playTo) ? 5 : 4;
+      } else {
+        K.turn = (uint8_t)((K.shooter + 1) & 1);
+        K.phase = 1; K.field = 0; K.bufN = 0;
+      }
+    }
+    footer("");
+    return;
+  }
+
+  canvas.setTextColor(CL_YELLOW, CL_BLACK);
+  if (K.phase == 4) {
+    canvas.setCursor(56, 56);
+    canvas.printf("P%d takes the round!", K.impKind == 1 ? 2 : 1);
+    footer("ENTER next round  ` quit");
+  } else {                                             // 5: match over
+    canvas.setCursor(46, 50);
+    canvas.printf("* P%d WINS THE MATCH *", K.impKind == 1 ? 2 : 1);
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(72, 66); canvas.printf("%d : %d", K.wins[0], K.wins[1]);
+    footer("ENTER new match  ` back");
+  }
 }
 
 // ---- Link margin vs elevation ------------------------------------------------
@@ -38538,8 +39391,8 @@ void App::keyCtSearch(char c, bool enter, bool back) {
     editBuf = ctsBuf; screen = SCR_EDIT; return;
   }
   if (ctsN == 0) return;
-  if (isUp(c))   { if (ctsSel > 0) --ctsSel; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (ctsSel < ctsN - 1) ++ctsSel; lastDrawMs = 0; return; }
+  if (isUp(c))   { ctsSel = (ctsSel + ctsN - 1) % ctsN; lastDrawMs = 0; return; }
+  if (isDown(c)) { ctsSel = (ctsSel + 1) % ctsN;        lastDrawMs = 0; return; }
   if (enter) { ctAddSelected(); lastDrawMs = 0; }
 }
 
@@ -39297,8 +40150,8 @@ void App::drawDxLk() {
 
 void App::keyDxLk(char c, bool enter, bool back) {
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
-  if (isUp(c))   { if (dxSel > 0) dxSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (dxSel < dxMatchN - 1) dxSel++; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (dxMatchN) dxSel = (dxSel + dxMatchN - 1) % dxMatchN; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (dxMatchN) dxSel = (dxSel + 1) % dxMatchN;            lastDrawMs = 0; return; }
   if (enter) {
     if (dxMatchN > 0) { dxDetail = dxMatch[dxSel]; screen = SCR_DXLKD; lastDrawMs = 0; }
     return;
@@ -39409,8 +40262,8 @@ void App::drawCqz() {
 
 void App::keyCqz(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
-  if (isUp(c))   { if (cqzSel > 0) cqzSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (cqzSel < CQ_ZONES_N - 1) cqzSel++; lastDrawMs = 0; return; }
+  if (isUp(c))   { cqzSel = (cqzSel + CQ_ZONES_N - 1) % CQ_ZONES_N; lastDrawMs = 0; return; }
+  if (isDown(c)) { cqzSel = (cqzSel + 1) % CQ_ZONES_N;              lastDrawMs = 0; return; }
   if (enter) { openCqZone(CQ_ZONES[cqzSel].n, SCR_CQZ); lastDrawMs = 0; return; }
 }
 
@@ -39490,8 +40343,8 @@ void App::drawItuz() {
 
 void App::keyItuz(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
-  if (isUp(c))   { if (ituSel > 0) ituSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (ituSel < ITU_ZONES_N - 1) ituSel++; lastDrawMs = 0; return; }
+  if (isUp(c))   { ituSel = (ituSel + ITU_ZONES_N - 1) % ITU_ZONES_N; lastDrawMs = 0; return; }
+  if (isDown(c)) { ituSel = (ituSel + 1) % ITU_ZONES_N;               lastDrawMs = 0; return; }
   if (enter) { openItuZone(ITU_ZONES[ituSel].n, SCR_ITUZ); lastDrawMs = 0; return; }
 }
 
@@ -44401,8 +45254,8 @@ void App::keyTxDb(char c, bool enter, bool back) {
   if (c != 'x') txDbDelArm = false;            // any key other than x disarms the delete
   if (activeTxCount == 0) return;
   const int perPage = 3;
-  if (isUp(c))   { if (txDbSel > 0) txDbSel--; txDbDelArm = false; }
-  if (isDown(c)) { if (txDbSel < activeTxCount - 1) txDbSel++; txDbDelArm = false; }
+  if (isUp(c)   && activeTxCount) { txDbSel = (txDbSel + activeTxCount - 1) % activeTxCount; txDbDelArm = false; }
+  if (isDown(c) && activeTxCount) { txDbSel = (txDbSel + 1) % activeTxCount;                 txDbDelArm = false; }
   // keep the selected entry on-screen (page of `perPage` blocks)
   if (txDbSel < txDbScroll)            txDbScroll = (txDbSel / perPage) * perPage;
   if (txDbSel >= txDbScroll + perPage) txDbScroll = (txDbSel / perPage) * perPage;
@@ -46010,7 +46863,8 @@ void App::drawTgtSearch() {
     if (matchCount == tsPickSel) selRow = matchCount;
     matchCount++;
   }
-  if (tsPickSel >= matchCount) tsPickSel = matchCount > 0 ? matchCount - 1 : 0;
+  if (tsPickSel < 0)           tsPickSel = matchCount > 0 ? matchCount - 1 : 0;   // wrap up
+  if (tsPickSel >= matchCount) tsPickSel = 0;                                     // wrap down
   if (tsPickSel < tsPickScroll) tsPickScroll = tsPickSel;
   if (tsPickSel >= tsPickScroll + VIS) tsPickScroll = tsPickSel - VIS + 1;
   // draw the window
@@ -46055,8 +46909,8 @@ void App::keyTgtSearch(char c, bool enter, bool back) {
     }
     return;                                            // grid mode: no filter/list keys
   } else {
-    if (isUp(c))   { if (tsPickSel > 0) tsPickSel--; lastDrawMs = 0; return; }
-    if (isDown(c)) { tsPickSel++; lastDrawMs = 0; return; }   // draw clamps to match count
+    if (isUp(c))   { tsPickSel--; lastDrawMs = 0; return; }  // draw wraps (count lives there)
+    if (isDown(c)) { tsPickSel++; lastDrawMs = 0; return; }   // draw wraps to match count
     // A-Z / 0-9 / prefix punctuation types into the filter (not the nav keys ; . , /).
     if (c > 32 && c < 127 && c != ';' && c != '.' && c != ',' && c != '/') {
       int n = strlen(tsFilter);
@@ -46140,8 +46994,8 @@ void App::keyTgtHits(char c, bool enter, bool back) {
   }
   if (isBack(c, back)) { screen = SCR_TGTSEARCH; lastDrawMs = 0; return; }
   if (tsHitN == 0) return;
-  if (isUp(c))   { if (tsHitSel > 0) tsHitSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (tsHitSel < tsHitN - 1) tsHitSel++; lastDrawMs = 0; return; }
+  if (isUp(c))   { tsHitSel = (tsHitSel + tsHitN - 1) % tsHitN; lastDrawMs = 0; return; }
+  if (isDown(c)) { tsHitSel = (tsHitSel + 1) % tsHitN;          lastDrawMs = 0; return; }
   if (enter) {
     HitRow& h = tsHits[tsHitSel];
     int dbIdx = db.indexOfNorad(h.norad);
@@ -47286,8 +48140,14 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 }
 
 // Home-menu items, file-scope so keyHome's first-letter jump can search them too.
+// Column-major two-column grid: entries 0-9 are COLUMN 1 -- the sky-and-birds band
+// (list -> passes -> track -> the three live sky views -> conditions -> community),
+// 10-19 are COLUMN 2 -- the station-and-system band. 0.9.60 menu-order audit:
+// "Overhead now" moved from the top of the utility column into the sky band beside
+// World Map (both answer "where are the birds right now"), and "Weather" -- a
+// ground-site concern -- now opens the station column. Keep the bands when adding.
 const char* const HOME_ITEMS[] = { "Satellites", "Next Passes (favs)", "Passes (sel)",
-                        "Track (sel)", "World Map", "Sun / Moon", "Space Wx", "Weather", "Activations", "AMSAT status", "Overhead now", "Grid dist/bearing", "QRZ Lookup", "Location", "Update",
+                        "Track (sel)", "World Map", "Overhead now", "Sun / Moon", "Space Wx", "Activations", "AMSAT status", "Weather", "Grid dist/bearing", "QRZ Lookup", "Location", "Update",
                         "Settings", "Log", "Messages", "About", "Charge / Sleep" };
 static_assert(sizeof(HOME_ITEMS) / sizeof(HOME_ITEMS[0]) == 20,
               "Home menu item count must match keyHome's N");
@@ -47382,10 +48242,10 @@ void App::drawSchedule() {
                          canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else canvas.setTextColor(e.inProgress ? CL_GREEN : CL_WHITE, CL_BLACK);
     String when = e.inProgress ? String("NOW") : fmtCountdown((long)(e.aos - now));
-    long lenMin = (e.los - e.aos) / 60;
+    char durb[8]; fmtPassDur((long)(e.los - e.aos), durb, sizeof(durb));
     canvas.setCursor(4, y);
-    canvas.printf("%-6s %-13.13s %3.0f %2ldm",
-                  when.c_str(), e.name, e.maxEl, lenMin);
+    canvas.printf("%-6s %-13.13s %3.0f %s",
+                  when.c_str(), e.name, e.maxEl, durb);
     if (e.visible) {                              // visually observable pass
       canvas.setTextColor(CL_YELLOW, (i == schedSel) ? CL_SELBG : CL_BLACK);
       canvas.setCursor(223, y); canvas.print("*");
@@ -47501,13 +48361,13 @@ void App::drawPasses() {
   for (int i = 0; i < passN && i < 9; ++i) {
     int y = 30 + i*10;
     PassPredict& p = passes[i];
-    long mins = (p.los - p.aos) / 60;
+    char durb[8]; fmtPassDur((long)(p.los - p.aos), durb, sizeof(durb));
     if (i == passSel) { canvas.fillRect(0, y-1, 240, 10, CL_SELBG);
                         canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y);
-    canvas.printf("%s  %2ldm %3.0f %s",
-                  fmtMDHM(p.aos).c_str(), mins, p.maxEl, fmtHM(p.los).c_str());
+    canvas.printf("%s  %s %3.0f %s",
+                  fmtMDHM(p.aos).c_str(), durb, p.maxEl, fmtHM(p.los).c_str());
     if (passVis[i]) {                              // optically visible (cached)
       canvas.setTextColor(CL_YELLOW, (i == passSel) ? CL_SELBG : CL_BLACK);
       canvas.setCursor(232, y); canvas.print("*");
@@ -47563,9 +48423,9 @@ void App::drawPassDetail() {
   canvas.printf("AOS %s az%03.0f  max el%3.0f",
                 fmtHM(pdPass.aos).c_str(), pdPass.azAos, pdPass.maxEl);
   canvas.setCursor(2, 110);
-  canvas.printf("LOS %s az%03.0f  %ldm sun%d%%",
-                fmtHM(pdPass.los).c_str(), pdPass.azLos,
-                (long)((pdPass.los - pdPass.aos) / 60), sunPct);
+  { char durb[8]; fmtPassDur((long)(pdPass.los - pdPass.aos), durb, sizeof(durb));
+    canvas.printf("LOS %s az%03.0f  %s sun%d%%",
+                  fmtHM(pdPass.los).c_str(), pdPass.azLos, durb, sunPct); }
   if (cfg.visPasses) {                          // visual-observability verdict
     if (s) { pred.setSite(loc.obs()); pred.setSat(*s); }
     bool vis; uint8_t why = visEvalPass(pdPass.aos, pdPass.los, pdPass.maxEl, vis);
@@ -48790,6 +49650,72 @@ void App::drawGlobe() {
   footer("arrows turn  g DX  ENT follow  `bk");
 }
 
+// ---- QTH presets (0.9.60): five named, recallable station sites -------------
+// The handheld answer to SatObserver-MX's multi-station switcher: a small
+// settings-backed list reached from Location with `q`. ENTER recalls a slot into
+// cfg.lat/lon/altM, pushes it through loc.setManual and pred.setSite immediately,
+// and turns GPS OFF (recalling a named site is an explicit choice; the receiver
+// should not quietly win it back). `s` stores the CURRENT position into the slot
+// (prompting for a name if the slot is unnamed), `e` renames, `x` clears.
+void App::drawQthPre() {
+  header("QTH presets");
+  for (int i = 0; i < 5; ++i) {
+    int y = 24 + i * 16;
+    bool sel = (i == qpSel);
+    if (sel) { canvas.fillRect(2, y - 2, 236, 14, CL_SELBG);
+               canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
+    bool empty = !cfg.qthName[i][0] && cfg.qthLat[i] == 0 && cfg.qthLon[i] == 0;
+    if (empty) {
+      canvas.setCursor(8, y); canvas.printf("%d: (empty)", i + 1);
+    } else {
+      canvas.setCursor(8, y);
+      canvas.printf("%d: %-13.13s %+7.2f %+8.2f", i + 1,
+                    cfg.qthName[i][0] ? cfg.qthName[i] : "(unnamed)",
+                    cfg.qthLat[i], cfg.qthLon[i]);
+    }
+  }
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 110); canvas.printf("Now: %+.4f %+.4f  %.0fm%s",
+                cfg.lat, cfg.lon, cfg.altM, cfg.useGps ? "  (GPS on)" : "");
+  footer("ENT recall  s save-here  e name  x clr");
+}
+
+void App::keyQthPre(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_LOCATION; lastDrawMs = 0; return; }
+  if (isUp(c))   { qpSel = (qpSel + 4) % 5; lastDrawMs = 0; return; }
+  if (isDown(c)) { qpSel = (qpSel + 1) % 5; lastDrawMs = 0; return; }
+  if (c >= '1' && c <= '5') { qpSel = c - '1'; lastDrawMs = 0; return; }
+  bool empty = !cfg.qthName[qpSel][0] &&
+               cfg.qthLat[qpSel] == 0 && cfg.qthLon[qpSel] == 0;
+  if (enter) {                                  // recall
+    if (empty) { setStatus("Empty slot - press s to save here"); return; }
+    cfg.lat = cfg.qthLat[qpSel]; cfg.lon = cfg.qthLon[qpSel];
+    cfg.altM = cfg.qthAlt[qpSel];
+    if (cfg.useGps) { cfg.useGps = false; }     // explicit site choice wins
+    cfg.save();
+    loc.setManual(cfg.lat, cfg.lon, cfg.altM);
+    pred.setSite(loc.obs());
+    setStatus(String("QTH: ") + (cfg.qthName[qpSel][0] ? cfg.qthName[qpSel] : "preset"));
+    screen = SCR_LOCATION; lastDrawMs = 0; return;
+  }
+  if (c == 's') {                               // store current position here
+    cfg.qthLat[qpSel] = cfg.lat; cfg.qthLon[qpSel] = cfg.lon;
+    cfg.qthAlt[qpSel] = (float)cfg.altM;
+    cfg.save();
+    if (!cfg.qthName[qpSel][0]) {
+      editTarget = 784; editTitle = "Preset name";
+      editBuf = ""; screen = SCR_EDIT;
+    } else setStatus("Saved current position");
+    lastDrawMs = 0; return;
+  }
+  if (c == 'e') { editTarget = 784; editTitle = "Preset name";
+                  editBuf = String(cfg.qthName[qpSel]); screen = SCR_EDIT; return; }
+  if (c == 'x') { cfg.qthName[qpSel][0] = 0;
+                  cfg.qthLat[qpSel] = 0; cfg.qthLon[qpSel] = 0; cfg.qthAlt[qpSel] = 0;
+                  cfg.save(); setStatus("Slot cleared"); lastDrawMs = 0; return; }
+}
+
 void App::drawLocation() {
   header("Location");
   canvas.setTextSize(1);
@@ -48807,7 +49733,7 @@ void App::drawLocation() {
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 86);
   canvas.printf("Src: %s", GPS_PROFILES[cfg.gpsSource % GPS_SRC_COUNT].name);
-  footer("e/o/a grd p gps s src c clk v=pos ENT");
+  footer("e/o/a p gps s src c clk q pre v=pos");
 }
 
 void App::drawUpdate() {

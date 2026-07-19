@@ -57,6 +57,7 @@ public:
 
   // Compute az/el/range/range-rate at unix time `t` (UTC seconds).
   LiveLook look(time_t t);
+  double mmRevDay() const { return _mmRevDay; }   // 0 unknown; <=6.4 => high orbit
 
   // True if the satellite is in sunlight (not in Earth's cylindrical shadow) at
   // time t. Lightweight: propagate + shadow test only, no observer geometry.

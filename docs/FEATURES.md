@@ -28,6 +28,25 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   orbital neighborhood, debris-group runs (with a UTC stamp — a screening paper
   trail), and the link-margin curve as a 5°-step table **plus an ASCII rendering**
   per the 0.9.56 precedent. All contextual; the 29-report Print menu doesn't grow.
+- **Every selection list wraps (0.9.60).** Fourteen lists that stopped at their
+  ends — the satellite list first among them — now wrap top-to-bottom and back,
+  matching the rest of the UI. Document viewers still stop at their ends, on
+  purpose.
+- **A star field on the Sky dome; five QTH presets (0.9.60).** The dome draws
+  1,018 stars to mag 4.6 with constellation lines and sixteen proper names, live
+  from the clock (`c` cycles layers; ~9 KB flash, d3-celestial BSD-3 data). The
+  Location screen gains five named, recallable station sites (`q`); recalling one
+  applies instantly and turns GPS off.
+- **KESSLER over LoRa (0.9.60).** Two Cardputers play head-to-head on the
+  existing LoRa link: `n` hosts, another joins as P2. Deterministic lockstep — a
+  shared seed builds identical terrain on both ends, and only three tiny frames
+  (hello/fire/sync) cross the air, so shots arc identically with nothing streamed.
+  Third frame type (0xC7); ~2 KB flash, no resident RAM.
+- **KESSLER — GORILLAS.BAS on the Moon (0.9.60).** A two-player artillery game in
+  **About > Games** (the seventh title in the arcade): lunar ground stations, CubeSat projectiles, solar wind, habitat
+  modules that crater, Earth in the sky with the shocked face, and GORILLAS' own
+  physics run verbatim in its 640×350 virtual space. Moon/Mars/Earth gravity, first
+  to N wins, victory dance included. ~1 KB heap only while playing; 8 B at rest.
 - **Higher orbits predict properly; the device is a better citizen (0.9.59).**
   Pass prediction now covers **Molniya-class, GTO, and geosynchronous** orbits: for
   periods over ~225 min CardSat scans elevation itself and bisects the crossings to

@@ -136,6 +136,15 @@ bool Settings::load() {
   // the Settings screen would show GS-232 no matter what the user picked.
   if (rotType > ROT_SPID) rotType = ROT_GS232;
   rotTransport = d["rotxport"] | (uint8_t)ROT_XPORT_BRIDGE;
+  for (int i = 0; i < 5; ++i) {                  // QTH presets q0n/q0a/q0o/q0h ..
+    char k[6];
+    snprintf(k, sizeof(k), "q%dn", i);
+    const char* nm = d[k] | "";
+    strncpy(qthName[i], nm, sizeof(qthName[i]) - 1); qthName[i][13] = 0;
+    snprintf(k, sizeof(k), "q%da", i); qthLat[i] = d[k] | 0.0;
+    snprintf(k, sizeof(k), "q%do", i); qthLon[i] = d[k] | 0.0;
+    snprintf(k, sizeof(k), "q%dh", i); qthAlt[i] = d[k] | 0.0f;
+  }
   if (rotTransport >= ROT_XPORT_N) rotTransport = ROT_XPORT_BRIDGE;
   strncpy(rotUsbKey, d["rotusbkey"] | "", sizeof(rotUsbKey)-1);
   rotUsbKey[sizeof(rotUsbKey)-1] = 0;
@@ -270,6 +279,13 @@ bool Settings::save() {
   d["morseswap"]= morseSwap;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
   d["rotxport"]=rotTransport; d["rotusbkey"]=rotUsbKey;
+  for (int i = 0; i < 5; ++i) {
+    char k[6];
+    snprintf(k, sizeof(k), "q%dn", i); d[k] = qthName[i];
+    snprintf(k, sizeof(k), "q%da", i); d[k] = qthLat[i];
+    snprintf(k, sizeof(k), "q%do", i); d[k] = qthLon[i];
+    snprintf(k, sizeof(k), "q%dh", i); d[k] = qthAlt[i];
+  }
   d["rotport"]=rotPort; d["rotbaud"]=rotBaud; d["rotlead"]=rotLeadSec; d["rotazlk"]=rotAzLookSec; d["rotazr"]=rotAzRange; d["rotaz"]=rotAzOff;
   d["rotel"]=rotElOff; d["rotdb"]=rotDeadband; d["rotpaz"]=rotParkAz;
   d["rotpel"]=rotParkEl; d["rotflip"]=rotFlip;

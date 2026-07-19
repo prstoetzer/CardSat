@@ -143,6 +143,73 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
   conjunction/neighborhood/debris/link-curve prints their reports (the link curve
   includes an ASCII plot — check it survives the 42- and 48-column printer widths).
   Confirm no `p` fires while a form field is being edited (it types instead).
+- **LAN line buffers (0.9.60).** With rigctld/rotctld enabled, drive the radio and
+  rotator from WSJT-X/GPredict/Hamlib `rigctl` over the network: frequency-set and
+  rotator commands still parse and act correctly, long commands are bounded (no
+  overrun), and a sustained session runs without heap issues. Load the web-dashboard
+  page and click through its controls: requests route, the page serves. (Behaviour
+  identical; this is a heap change.)
+- **CAT fixed-buffer stores (0.9.60).** Open the CAT monitor during live CI-V
+  traffic: hex lines still render (up to 36 chars) with T/R colouring, the ring
+  scrolls, nothing truncates oddly. Run the CAT self-test: PASS/FAIL/INFO lines
+  colour correctly and scroll. (Behaviour identical to before; this is a heap
+  change, not a visible one.)
+- **Menu-order audit (0.9.60) — spot-checks.** Home: Overhead now launches from its
+  new slot beside World Map; Weather from the station column; all twenty land right.
+  Tools: every band opens the correct tool (the display permutation vs canonical ids
+  — a mistake here opens the *wrong tool*, so click through a few per band); form
+  tools still print with the right title. Settings: each category shows its new
+  order and every row still toggles/edits the right thing.
+- **List wraparound (0.9.60) — spot-checks.** Satellite list: up at the top lands
+  on the last bird with the window following; empty catalog doesn't crash. Target
+  search pick list: wrap in both directions with an active filter. Transponder
+  editor: wrap doesn't leave delete armed. DX Doppler table wraps to the last row.
+- **Star layer + QTH presets (0.9.60) — bench items.** Sky sources: `c` cycles four
+  states; Orion/Big Dipper recognizable and correctly placed vs a planetarium app;
+  names legible; redraw pace unchanged. Presets: save/name/recall round-trip; recall
+  updates passes immediately and shows GPS off; slots survive reboot; empty-slot
+  recall gives the hint; `1`–`5` jump.
+- **Voice memos under USB CAT (0.9.60).** With USB CAT engaged: recording a memo
+  works (mic path, ~4 KB) and shows REC; playback of a memo works IF the heap has
+  room, otherwise a clear "needs more free RAM" message rather than silent
+  no-audio; disengaging USB CAT restores normal audio. Games/alarm beeps still
+  degrade silently under a tight heap.
+- **High-orbit pass length was double-bugged (0.9.60).** The real cap was in
+  buildSchedule's in-progress LOS scan (hardcoded 60 min), not just the formatter.
+  Verify on the Schedule screen: a GEO favorite currently in view reads ~24h, a
+  Molniya reads its true multi-hour length, and a LEO pass still reads its normal
+  few-to-fifteen minutes (didn't regress).
+- **High-orbit pass duration — now including the Schedule screen (0.9.60).** The
+  multi-sat upcoming-pass list (Schedule) and the pass-detail LOS line were the
+  remaining `%2ldm` sites; a GEO/Molniya favorite there now reads h:mm, not ~60m.
+- **High-orbit pass duration (0.9.60).** Select a GEO or Molniya favorite and open
+  Next Passes: durations read as h:mm (e.g. `4h00`, `24h`), not a capped ~60m, and
+  the column doesn't overrun elevation. Check the pass-detail Dur, the sat-detail
+  dur line, the Length row, and the web dashboard match.
+- **KESSLER over LoRa (0.9.60) — needs TWO devices.** Host with `n`, confirm the
+  guest auto-joins and the title shows "guest joined"; both build the SAME terrain
+  and wind (compare screens); a fire on one plays identically on the other; you can
+  only aim on your turn ("waiting for peer" on the other); scores stay in sync
+  across rounds; the match ends on both at the same score; a dropped peer (power one
+  off mid-match) leaves the other showing the last state rather than hanging; other
+  LoRa messaging traffic on-channel is ignored by the game and vice versa.
+- **KESSLER game (0.9.60) — bench items.** Flight animates smoothly at the 15 fps
+  tier and the trajectory pace matches muscle memory (45°/60 on the Moon should
+  clear mid-screen modules); craters carve and a station over an undermined column
+  drops correctly; direct hit scores for the *other* player; Earth shock face
+  triggers once per shot; velocity < 2 self-hit gag; `;`/`.` nudge and 3-digit
+  entry both work; `` ` `` mid-flight exits cleanly and frees the heap (re-enter
+  and check free-heap is unchanged); Fn+b screenshots the battlefield. Off-top return: a shot fired near-vertical (high angle/velocity) that leaves the
+  top of the screen and comes down on the enemy base now explodes and scores (was
+  passing through). Self-hit fix: a normal 45/60 shot flies clear
+  (no instant round-end); a steep lob back onto your own roof still loses; v=1
+  wobbles ~1.6 s then detonates on the pad. Rev B: backspace deletes digits (game
+  survives), `,`/`/` swap fields, every turn shows both fields, off-screen and
+  loitering shots end within ~8 s, title centred, aim form sits on the aiming player's side (P1 left, P2 hugging the right edge, clear of the wind arrow), star names selectable with the
+  diamond marker and panel readout. Rev D: a fast direct hit at high velocity
+  connects (no tunneling); a crater beside a station kills it; after any impact
+  the next player's form appears with no keypress; the flight footer names the
+  actual shooter; the aim line clears the Earth on both sides.
 - **Six-task batch (0.9.59) — bench items.** High-orbit passes: pick a real HEO or
   GEO GP (period > 225 min) and confirm the Next Passes list populates, a
   geostationary-in-view bird shows one horizon-long pass, and the scan cost feels

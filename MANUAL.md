@@ -3894,8 +3894,8 @@ listed below.
 - **Purpose** — the top-level launcher.
 - **Reached from** — power-on lands here; `` ` `` from most top-level screens returns here.
 - **Shows** — a scrolling list of the twenty destinations: Satellites, Next
-  Passes (all favs), Passes (sel), Track (sel), World Map, Sun / Moon, Space Wx,
-  Weather, Activations, AMSAT status, Overhead now, Grid dist/bearing, QRZ Lookup,
+  Passes (all favs), Passes (sel), Track (sel), World Map, Overhead now, Sun / Moon,
+  Space Wx, Activations, AMSAT status, Weather, Grid dist/bearing, QRZ Lookup,
   Location, Update, Settings, Log, Messages, About, and Charge / Sleep. The header
   carries the clock and battery gauge.
 - **Keys** — **`t`** opens the **Tools** hub (below); after LOS, `q` (60 s window)
@@ -4416,6 +4416,14 @@ engine underneath; they differ only in the direction of the question.
 
 ### Sky sources
 
+> **Star layers (0.9.60):** the dome carries a live star field — 1,018 stars to
+> magnitude 4.6, constellation lines, and proper names for the sixteen brightest
+> (Sirius through Antares) — recomputed from the clock each frame, exactly like the
+> radio sources. **`c`** cycles off → stars → +lines → +names. The catalog is
+> compiled into flash (~9 KB) from d3-celestial's BSD-3 data (regenerate with
+> `tools/make_star_tables.py`). Brightness maps to pixel weight, so Orion looks
+> like Orion. Point a yagi at night by starlight.
+
 ![Sky sources](docs/img/sky-source.jpg)
 
 - **Purpose** — the planets and the strongest cosmic radio sources on a sky dome,
@@ -4644,6 +4652,13 @@ engine underneath; they differ only in the direction of the question.
   scroll; `` ` `` back.
 
 ### Location
+
+> **QTH presets (0.9.60):** press **`q`** for five named, recallable station sites.
+> **ENTER** recalls a slot straight into the live location (propagated to the
+> predictor immediately) and turns **GPS off** — recalling a named site is an
+> explicit choice the receiver shouldn't quietly override. **`s`** stores the
+> current position into the slot (prompting for a name if unnamed), **`e`**
+> renames, **`x`** clears, **`1`–`5`** jump. Stored in config.json.
 
 ![Location](docs/img/location.jpg)
 
@@ -5274,11 +5289,11 @@ operation.
 - **Phasing line / stub** — physical cable length for a wanted **electrical** length,
   the tool a satellite-antenna builder needs for circularly-polarized arrays (turnstiles,
   eggbeaters, crossed Yagis) and matching stubs. Pick the **coax type** (its velocity
-  factor is applied), enter the **frequency**, and choose a **fraction** (¼/½/⅜/¾/1 λ).
+  factor is applied), enter the **frequency**, and choose a **fraction** (¼/½/3/8/¾/1 λ).
   Shows the length in ft+in and meters (honors the antenna-units setting) plus the
   free-space wavelength. **Verify a cut line on an analyzer** before trusting it — real
   velocity factors vary between cable batches.
-- **Wavelength / frequency** — free-space λ = c/f with the common ¼/½/⅝-wave cut lengths,
+- **Wavelength / frequency** — free-space λ = c/f with the common ¼/½/5/8-wave cut lengths,
   in both unit systems.
 - **Attenuator pad** — resistor values for a **pi** and a **T** resistive pad at a target
   attenuation and system impedance (default 50 Ω), plus the power ratio.
@@ -5728,7 +5743,7 @@ filesystem and can be copied off over USB like any other file.
 - **Shows** — firmware version, IP address, free heap and other read-only
   diagnostics.
 - **Keys** — **`r`** opens the **Station readiness** checklist (below); `l` opens
-  **License & credits**; **`z`** opens the **Games menu** (six satellite-themed
+  **License & credits**; **`z`** opens the **Games menu** (seven satellite-themed
   mini-games — see below); `` ` `` back.
 
 ### Games menu (`z` from About)
@@ -5768,7 +5783,38 @@ because `h` is the global Help key; the **Morse swap** setting flips which is do
 correct grid from four options against a countdown. Use `;`/`.` (or up/down) then **ENTER**,
 or press **`1`–`4`** to answer directly.
 
-### License & credits
+**KESSLER (2-player)** — the 1991 QBasic classic **GORILLAS.BAS**, altered to a
+satellite theme: two **lunar ground stations** lob retired CubeSats at each other over a
+skyline of habitat modules, under **solar wind** and selectable gravity (Moon 1.62 by
+default; `g` cycles Mars and Earth on the title screen). The physics are GORILLAS' own
+equations — `x = x₀ + v·cos(a)·t + ½(W/5)t²`, wind drawn from the same `FnRan(10)−5 ±
+FnRan(10)` distribution, ~5 t-units/second — run unchanged in the original 640×350
+virtual space and only scaled to this screen when drawn, so angle 45 / velocity 60 on
+the Moon *feels* like the game you remember. Type the **angle**, ENTER, the **velocity**,
+ENTER to fire (`;`/`.` nudge; each player's last shot is prefilled). Blasts carve
+**craters** in the modules — a crater under a station drops it to the new surface — and a
+shot through the **Earth** hanging in the black sky earns you its shocked face, exactly
+where GORILLAS put the sun. Direct hits score; first to N (1–9, title screen) takes the
+match, and the survivor's dish does the victory dance. Two players, one Cardputer, pass
+it back and forth. Game state is heap-allocated only while the screen is open (~1 KB) and
+Two Cardputers can play **over LoRa**. On the title screen, one player presses
+**`n`** to host — that station becomes P1, picks the terrain seed, gravity, and
+round count, and beacons an invite on your shared LoRa frequency/SF/BW. Any other
+CardSat sitting in the game (or reached by the invite) joins as P2 automatically.
+Only three tiny fixed-layout frames ever cross the air: a hello (seed, gravity,
+rounds), a fire (angle, velocity, and the shooter's wind), and a round-result
+sync. Because both radios hold the same seed they build **byte-identical terrain**
+and run the same physics, so each CubeSat arcs the same on both screens with
+nothing streamed per frame — the half-duplex-friendly, deterministic-lockstep
+model. You aim only on your turn (the other station shows "waiting for peer's
+shot"); the wire is silent between shots. Range is your LoRa link's range —
+this is the same infrastructure as the messaging screen, on a third frame type
+(0xC7) that other LoRa traffic ignores. And no, it is **not** written in Tiny BASIC — GORILLAS needs `INPUT`, and
+the no-interactive-programs rule stands; that is precisely why it lives in firmware.
+
+##**Star & constellation catalog** derived from [d3-celestial](https://github.com/ofrohn/d3-celestial) (BSD-3; BSC5/HYG data).
+
+# License & credits
 
 ![License & credits](docs/img/license.jpg)
 

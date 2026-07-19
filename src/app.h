@@ -25,7 +25,8 @@ enum Screen : uint8_t {
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
   SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
-  SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH
+  SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
+  SCR_KESSLER, SCR_QTHPRE
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -146,7 +147,11 @@ private:
   // on the device and echoed to the serial monitor. Fixed buffer (no heap churn
   // on the no-PSRAM ESP32); lines past the cap are dropped.
   static const int CATTEST_MAX = 48;
-  String   catLines[CATTEST_MAX];
+  // Fixed-width line store (0.9.60): was String[], whose per-line heap allocations
+  // (and Arduino String's never-freed-on-reassign buffers) were a mid-heap-hole
+  // source. A flat char[][] costs the same static RAM and allocates nothing.
+  static const int CATTEST_W = 56;
+  char     catLines[CATTEST_MAX][CATTEST_W] = {};
   int      catCount  = 0;        // number of result lines filled
   int      catScroll = 0;        // scroll offset on the results screen
 
@@ -154,7 +159,8 @@ private:
   // recent raw CAT frames (TX/RX hex), filled by the catTraceSink hook. Read-only
   // diagnostic; the operator can also type a raw hex frame to transmit.
   static const int CATMON_MAX = 64;     // ring-buffer depth (lines)
-  String   catMonLines[CATMON_MAX];
+  static const int CATMON_W   = 40;     // per-line chars (draw shows 36); no heap
+  char     catMonLines[CATMON_MAX][CATMON_W] = {};
   bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (colour), false = RX
   int      catMonHead = 0;              // next write index (ring)
   int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
@@ -377,6 +383,9 @@ private:
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
   // dome, off the Sun/Moon screen. For antenna pointing and RF-source reference.
   int       skySel = 0;               // highlighted object index
+  uint8_t   skyLayers = 1;            // sky-map star layers: 0 off, 1 stars, 2 +lines, 3 +names
+  int       qpSel = 0;                // QTH preset cursor (Location > q)
+  void drawQthPre(); void keyQthPre(char c, bool enter, bool back);
   void drawSkyMap();
   void keySkyMap(char c, bool enter, bool back);
   // Live GPS position (SCR_GPSPOS): DMS lat/lon to full precision, speed, course,
@@ -1004,20 +1013,30 @@ private:
   // rigctld TCP server (item 2): created when enabled and WiFi is up.
   WiFiServer* rigd = nullptr;
   WiFiClient  rigdCli;             // single connected client
-  String      rigdBuf;             // line-assembly buffer
+  // Fixed line buffers (0.9.60): rigctld/rotctld/web accumulate one char per RX byte;
+  // as String that was a heap realloc per byte on every LAN CAT/rotator/HTTP command
+  // (thousands per WSJT-X session). char[]+len allocates nothing on that hot path.
+  // A LineBuf appends with a hard cap and hands the completed line to the existing
+  // String-taking handlers as a C-string (one temporary per newline, not per byte).
+  struct LineBuf {
+    char b[208]; uint16_t n = 0; uint16_t cap;
+    LineBuf(uint16_t c = 200) : cap(c) { b[0] = 0; }
+    void clear() { n = 0; b[0] = 0; }
+    void push(char c) { if (n < cap && n < (uint16_t)sizeof(b) - 1) { b[n++] = c; b[n] = 0; } }
+    const char* c_str() const { return b; }
+    bool empty() const { return n == 0; }
+  };
+  LineBuf     rigdBuf{120}, rotdBuf{120}, webdBuf{200}, webdReqLine{200};
   uint8_t     rigdVfo = 0;         // 0 = downlink (VFOA/RX), 1 = uplink (VFOB/TX)
   uint32_t    rigdLastSub = 0, rigdLastMain = 0;  // last freq set (get_freq fallback)
   RigMode     rigdSubMode = RM_USB, rigdMainMode = RM_LSB;
   // rotctld TCP server (item 4): a networked PC drives the wired rotator.
   WiFiServer* rotd = nullptr;
   WiFiClient  rotdCli;             // single connected client
-  String      rotdBuf;             // line-assembly buffer
   // Mobile web control page: a phone on the LAN selects sats, sees passes, and
   // drives the radio/rotator. One client at a time, serviced cooperatively.
   WiFiServer* webd = nullptr;
   WiFiClient  webdCli;            // single connected client
-  String      webdBuf;            // request-assembly buffer (request line + headers)
-  String      webdReqLine;        // the captured HTTP request line (method + path)
   uint32_t lastDrawMs = 0;
   // Memory telemetry (opt-in, off by default; toggled by the serial "memtrace" command).
   // Logs free heap + largest block on each screen change so the runtime cost of heavy
@@ -1511,6 +1530,20 @@ private:
   bool  basFileOpen = false;         // FOPEN file currently open
   File  basFile;                     // the one BASIC output file
   bool  basGfxHold = false;          // a SHOWed frame is on screen; next key clears it
+  // KESSLER (0.9.60): the two-player GORILLAS.BAS tribute. All game state lives in
+  // one heap-allocated struct that exists only while the screen is open -- the
+  // no-PSRAM RAM discipline for rarely-used features. Physics are GORILLAS'own
+  // equations run in its 640x350 EGA virtual space and scaled to 240x135 at draw.
+  struct Kessler;                    // defined in app.cpp
+  Kessler* kess = nullptr;
+  void kesslerInit(); void kesslerFree();
+  bool kessAnimating() const;        // flight/impact/dance: drives the 15 fps tier
+  bool kessNetReplaying = false;     // true while simulating a peer's shot (no re-broadcast)
+  void kessNewRound(); void kessSeedRound(uint16_t seed); void kessFire();
+  void kessNetSend(uint8_t kind, const uint8_t* body, int blen);
+  void kessNetRx(const uint8_t* b, int n, int rssi);
+  void kessNetNewRound(); void kessNetHost(); void kessNetService();
+  void drawKessler(); void keyKessler(char c, bool enter, bool back);
 
   // Programmer's calculator (SCR_PCALC): a 64-bit value shown simultaneously in
   // hex / dec / bin / oct, with bitwise ops (AND OR XOR NOT << >>) and +-*/ via a
@@ -1964,7 +1997,8 @@ private:
   // fail when the largest contiguous block gets too small). acquire() brings it up (idempotent);
   // releaseAfter() schedules an end() once the deadline passes (so an alarm's tail still plays and
   // we don't thrash begin/end -- each cycle pops). serviceAudioRelease() runs the deferred end().
-  void audioAcquire();                         // ensure speaker is up (begin + volume), cancel pending release
+  bool audioAcquire();                         // bring speaker up; returns false if refused (USB CAT + no heap)
+  static const uint32_t AUDIO_MIN_BLOCK = 11000;  // speaker I2S ~8KB + 2KB stream + slack
   void audioReleaseAfter(uint32_t ms);         // schedule speaker end() after ms of no audio
   void serviceAudioRelease();                  // loop hook: perform a due deferred end()
   // Serial command console (USB). Polled once per loop; accepts a short line and prints

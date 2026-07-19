@@ -138,6 +138,12 @@ struct Settings {
   char     clStation[8] = ""; // station_profile_id (numeric, from the Cloudlog UI)
   // Location
   double   lat = 0.0, lon = 0.0, altM = 0.0;
+  // Named ground-station presets (0.9.60): five recallable QTH slots managed from
+  // the Location screen (`q`). Recalling one turns GPS off -- an explicit site
+  // choice should not be silently overridden by the receiver a minute later.
+  char     qthName[5][14] = {{0}};
+  double   qthLat[5] = {0}, qthLon[5] = {0};
+  float    qthAlt[5] = {0};
   bool     useGps = false;
   uint8_t  gpsSource = GPS_SRC_CAP1262;  // GpsSource: Grove / Cap868 / Cap1262
   // Radio

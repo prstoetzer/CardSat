@@ -23,6 +23,23 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.60:** **a game you can play over the air, a sky full of stars, and a device that's
+> harder to fragment.** **KESSLER** — the two-player GORILLAS.BAS-style artillery duel added this
+> cycle — now plays **head-to-head over LoRa**: one Cardputer hosts, another joins, and a
+> deterministic-lockstep design (shared seed, three tiny frames) keeps both screens in sync with
+> nothing streamed. The **Sky sources dome grows a live star field** — 1,018 stars to magnitude
+> 4.6, constellation lines, and the sixteen brightest named, all recomputed from the clock (`c`
+> cycles layers; ~9 KB of flash from d3-celestial's BSD-3 data). **Five named QTH presets** (`q` on
+> the Location screen) recall a station instantly and turn GPS off. A real fix lands for **high-orbit
+> pass length**: the 60-minute ceiling was in the finder, not just the formatter — the Schedule
+> scan is now adaptive, so a Molniya reads its true multi-hour length and a GEO reads `24h`. **Voice
+> memos now work alongside USB CAT**, gated on live heap headroom rather than refused outright.
+> Every selection list **wraps** top-to-bottom, the **Tools/Home/Settings menus were reordered**
+> for logical grouping, and two rounds of **RAM-fragmentation hardening** convert the hottest
+> String buffers (LAN CAT/rotator/HTTP line assembly, the CAT monitor) to fixed storage. Both 4×6
+> reference cards and the full manual PDF are refreshed.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.60.md)**.
+
 > **New in v0.9.59:** **a satellite workbench, BASIC that reaches everything, honest higher-orbit
 > passes, and a device that's a better citizen.** **Twenty new tools** join the Tools menu — a full
 > satellite & construction bench (conjunction screener, orbital neighborhood, debris-group screen,
@@ -240,7 +257,7 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 *(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
 unchanged since. Several features added since — rove planner, workable horizon, target
 search, on-device printing, the Files page's multi-select — are not pictured yet; a
-screenshot refresh is planned. The current firmware is v0.9.59.)*
+screenshot refresh is planned. The current firmware is v0.9.60.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#22-screen-by-screen-reference).

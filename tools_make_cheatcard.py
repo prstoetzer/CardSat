@@ -42,7 +42,7 @@ FRONT = [
   "(Help links: <b>g</b> glossary+math &middot; <b>m</b> user guide &middot; <b>s</b> sat history &middot; <b>t</b> tech help &middot; <b>l</b> learn theory &middot; <b>f</b> band plan)"),
  ("HOME",
   "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "World Map, Sun/Moon, Space Wx, Weather, Activations, AMSAT status, Overhead now, Grid dist/bearing, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
+  "World Map, Overhead now, Sun/Moon, Space Wx, Activations, AMSAT status, Weather, Grid dist/bearing, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>/</b> search ALL of CelesTrak &rarr; add as auto-updating fav (10 s/2 h courtesy limits) &middot; <b>n</b> new GP sat &middot; <b>x</b> del added sat &middot; "
   "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>y</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>s</b> AMSAT status &middot; <b>L</b> share GP over LoRa &middot; <b>ENTER</b> passes &middot; "

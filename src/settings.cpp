@@ -115,6 +115,16 @@ bool Settings::load() {
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
+  // Independent unit fields (replaced the bundled wxUnits). When an old config lacks
+  // them, migrate from the legacy bundle: IMPERIAL -> F/mph, METRIC -> C/kmh,
+  // METRIC_MS -> C/ms; pressure had no legacy setting, so default by temperature
+  // (F -> inHg, C -> hPa) to match what a US vs metric user would expect.
+  { uint8_t mT = (wxUnits == WX_IMPERIAL) ? WXT_F : WXT_C;
+    uint8_t mW = (wxUnits == WX_IMPERIAL) ? WXW_MPH : (wxUnits == WX_METRIC_MS ? WXW_MS : WXW_KMH);
+    uint8_t mP = (wxUnits == WX_IMPERIAL) ? WXP_INHG : WXP_HPA;
+    wxTemp = d["wxtemp"] | mT; if (wxTemp > WXT_F)  wxTemp = mT;
+    wxWind = d["wxwind"] | mW; if (wxWind > WXW_MS)  wxWind = mW;
+    wxPres = d["wxpres"] | mP; if (wxPres > WXP_INHG) wxPres = mP; }
   antUnits   = d["antunits"] | (uint8_t)0; if (antUnits > 1) antUnits = 0;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
@@ -266,7 +276,10 @@ bool Settings::save() {
   d["irbeacon"] = irBeacon;
   d["beacon"] = beaconMHz;
   d["solar"] = solarAct;
-  d["wxunits"] = wxUnits;
+  d["wxunits"] = wxUnits;   // still written so an older firmware can still read a bundle
+  d["wxtemp"] = wxTemp;
+  d["wxwind"] = wxWind;
+  d["wxpres"] = wxPres;
   d["antunits"] = antUnits;
   d["dimsecs"] = dimSecs;
   d["bright"]  = bright;

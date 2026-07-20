@@ -2003,7 +2003,9 @@ on-screen key reference. The notable rows:
 | CAT baud | `,`/`/` cycle 1200…115200 (incl. 57600) — applies to all radio protocols |
 | Min pass el | `,`/`/` 0–30° |
 | Decay solar | `,`/`/` cycle assumed solar activity **mean → min → max → auto** for the orbital-analysis decay estimate (changes the headline number and the bracket). **auto** uses the live F10.7 flux fetched with GP data |
-| Weather units | `,`/`/` cycle the units for the **Weather** screen: **°F, mph → °C, km/h → °C, m/s**. Under *Display / sound*. |
+| Weather temp | `,`/`/` toggle the **Weather** temperature unit **°C ↔ °F**. Under *Display / sound*. |
+| Weather wind | `,`/`/` cycle the **Weather** wind unit **km/h → mph → m/s**. Independent of the temp unit. |
+| Weather pressure | `,`/`/` toggle the **Weather** pressure unit **hPa ↔ inHg**. Independent of the others. |
 | WiFi SSID | ENTER → edit · **`s`** → scan for networks and pick one |
 | WiFi pass | ENTER → edit |
 | WiFi 2 SSID | ENTER → edit an **optional second network** tried if the first fails (field use: a second router, or a phone hotspot). Leave blank to disable |
@@ -2455,6 +2457,16 @@ solar filtering on your eyes and optics.**
 
 #### EME / moonbounce (`e`)
 
+> **Analysis & planning (0.9.61):** the live screen adds the **spatial
+> polarization offset** (Pol) — the Moon's parallactic angle at your station, the
+> main reason 144 MHz echoes fade with the Moon up — and a coarse 144 MHz
+> **Faraday** figure when solar flux is known. Press **`p`** for the full report:
+> polarization (with a sked note to subtract the DX station's), a per-band table of
+> Doppler / Faraday / sky-temperature-K / libration spread from 50 MHz to 10 GHz, an
+> absolute round-trip **path-loss** budget, and a **ground-gain** window flag. The
+> planning table (**`p`** from the EME screen) now spans **90 days** and stars the
+> good days (high northern declination, low degradation). Every EME view prints.
+
 Press **`e`** on the Sun/Moon screen for the **EME (Earth-Moon-Earth) screen** — the
 numbers a moonbounce operator needs to find their own echo and judge whether the Moon
 is workable. It reads live from your location and clock:
@@ -2528,9 +2540,10 @@ Press **`p`** on the Space Wx screen for a **propagation guide** that turns the 
 two indices — the 10.7 cm solar flux and the Kp index — into band-by-band operating
 guidance, for the operator who works HF and 6 m as well as the birds:
 
-- **HF band conditions** from the solar flux: a summary (which bands are open in
-  daylight) and a quick **10 / 15 / 20 m** open / marginal / shut read. Higher flux
-  raises the maximum usable frequency, so the high bands open as the flux climbs.
+- **MUF estimate** from the solar flux and Kp: an approximate maximum usable
+  frequency for day and night. Higher flux raises the MUF, so the high bands open
+  as the flux climbs; the band-by-band day/night outlook lives on the **`b`**
+  outlook page (below).
 - **Geomagnetic effect** from Kp: quiet / unsettled / storm, and what that means for HF
   (a storm degrades paths and can black out polar routes).
 - **Auroral VHF** likelihood: a high Kp is the trigger for **6 m / 2 m auroral**
@@ -2542,8 +2555,19 @@ When a previous sample exists (six or more hours older), each index carries a
 **delta** — "142 sfu +5" is a rising flux, and direction is half of what these
 numbers tell an HF operator. The previous sample survives reboots via the cache.
 
-Press **`r`** to refetch the indices without leaving the screen; **`` ` ``** returns to
-Space Wx. As on the Space Wx screen itself, these are **climatological rules of thumb,
+Press **`o`** for the **outlook page**: the day/night band-by-band outlook
+(40/20/15/10 m open / fair / weak / shut), the MUF estimate, the current flare
+state, solar wind Bz + speed, the 3-day Kp forecast, and the VHF flag — everything
+the printed guide shows, on screen. The flare / solar-wind / Kp-forecast rows live
+here rather than on the core page. Two of the rows draw on data that was already
+being fetched but not previously shown: the **flare line** reports today's **C/M/X
+flare counts** and the number of **new sunspot regions** (from the daily solar-indices
+file the sunspot number comes from) — the daily counts convey activity *level*, which
+matters more to HF than a single latest-flare snapshot — and a **radio-blackout line**
+gives today's NOAA **R1–R2** (and R3) radio-blackout probability plus the **S1** solar-
+radiation-storm chance (from the 3-day forecast's B/C sections). A radio-blackout
+forecast is a direct HF-degradation predictor. Press **`r`** to refetch the indices without
+leaving the screen; **`` ` ``** returns (outlook page → core page → Space Wx). As on the Space Wx screen itself, these are **climatological rules of thumb,
 not a real-time model** — the screen says as much — and **6 m sporadic-E**, the dominant
 summer opening, is *seasonal* and is not predicted by these indices.
 
@@ -2565,9 +2589,26 @@ location first**) before the banner clears. It also refreshes when you run **Upd
 **`r`** forces a refresh. Like Space Wx, the last result is cached to flash, so it remains
 viewable offline with a note of its age.
 
-Units (°F·mph, °C·km/h, or °C·m/s) are selectable in *Settings → Station / logging
-→ Weather units*; changing them re-labels the cached values immediately without
-needing a re-fetch.
+Units are now three **independent** settings under *Settings → Display*: **Weather
+temp** (°C / °F), **Weather wind** (km/h / mph / m/s), and **Weather pressure** (hPa /
+inHg). Any combination is allowed — e.g. °F with m/s, or °C with inHg — and changing any
+of them re-labels the cached values immediately without a re-fetch (the fetch stores
+values in canonical units and converts at display time). Press **`p`** on the Weather
+screen to **print** the current conditions, the field figures, and the forecast to the
+configured print sinks; it is also in the *About → Print* menu as "Weather report".
+
+Press **`f`** for a second **field conditions** page aimed at operating away from
+home. It adds what the summary omits: the **feels-like** (apparent) temperature next
+to the air temperature and a day/night marker; **wind gusts** alongside the steady
+wind, flagged **MAST** when gusts reach a level worth thinking twice about for a
+portable mast; the **barometric pressure** with its **3-hour trend** (rising / steady
+/ FALLING — a falling barometer is the classic sign of deteriorating weather moving
+in); the day's **UV index** with a risk word (low → extreme), for judging sun exposure
+over a long operating session; and today's **sunrise / sunset** times, useful both for
+planning setup and teardown in daylight and for working **grayline** propagation. Below
+those is a per-day table of UV, peak gust, and sun times for the forecast days. All of
+it comes from the same cached fetch, so the page works offline too. Press **`f`** again
+(or `` ` ``) to return to the summary.
 
 *Weather data by Open-Meteo.com, licensed under CC BY 4.0.*
 
@@ -2582,8 +2623,10 @@ of the forecast, so the readouts work offline until the window ages out.
 From the **Satellites** list, press **`t`** to browse every transponder and
 beacon entry the on-device catalog holds for the selected satellite (sourced from
 SatNOGS with the transponder cache). Each entry is shown as a short block: its
-description, the **downlink** (a range for linear transponders) with mode, and the
-**uplink** with any CTCSS tone and inverting/linear flags. `;`/`.` scrolls through
+description, the **downlink** (a range for linear transponders) with mode and — when
+SatNOGS lists it — the **baud rate** (data rate; a CW transmitter's rate is shown in
+WPM), and the **uplink** with any CTCSS tone and inverting/linear flags. The baud tells
+you what decoder or terminal settings a telemetry beacon needs. `;`/`.` scrolls through
 the list. Entries are **ordered by usefulness**: two-way transponders first, then
 amateur-band before non-amateur (so any out-of-band TT&C or telemetry downlinks fall
 to the end), active before inactive. Transmitters SatNOGS marks **inactive** are
@@ -2628,10 +2671,31 @@ path and long path**.
 
 - Press **`o`** to **point a connected rotator** at the computed bearing. This is a
   terrestrial heading, so the elevation is set to 0.
+- The heading is shown both as **T** (true) and **M** (magnetic), with the local
+  **declination** in parentheses. If you are hand-tracking with a magnetic compass, or
+  your rotator is referenced to magnetic north, use the **M** figure. (Whether CardSat
+  *sends* true or magnetic to the rotator is a separate setting — see below.)
 - Press **`q`** to **look up a callsign's grid**: this opens a small **QRZ → grid**
   screen (separate from the main QRZ Lookup, which is untouched). Enter a callsign; on
   **ENTER** it seeds the calculator with that operator's grid so you get distance and
   bearing to them directly.
+
+#### True vs magnetic rotator bearings
+
+By default CardSat sends **true** bearings to the rotator, because most rotators are
+either aligned to true north or already apply their own declination correction.
+If your controller expects **magnetic** bearings and does *not* correct for
+declination, set **Rot bearing: magnetic** in Settings (rotator section). CardSat
+then subtracts the local magnetic declination from every commanded azimuth — tracking,
+park, pre-position, Sun/Moon, and manual alike. The declination comes from a built-in
+IGRF model; it is **approximate** (a few degrees, worst in the South Atlantic anomaly)
+— fine for pointing, but not a survey instrument. The value is also readable in BASIC
+as `MAGDECL`.
+
+The magnetic heading is also **displayed** wherever you would use a compass to point
+by hand: the manual rotator screen shows the magnetic target heading and the local
+declination, and the tracking side panel, OSCAR display, and globe view append the
+magnetic azimuth (**M###**) to the true azimuth.
 
 Your own grid comes from your set location, so set that first on the **Location**
 screen. `` ` `` returns to the main menu.
@@ -3668,7 +3732,7 @@ Keplerian elements, QSO log, workable horizon) as well as all the others; ENTER 
 highlighted one and the list stays open. **`a`** and **`c`** on About remain direct
 shortcuts for the *Support AMSAT* page and your *operator contact card*. Over the USB serial console (115200), the
 `print` command does any report from a keyboard — `print passes|ticket|card|keps|log|rove|
-horizon|amsat|contact|mutual|dxdopp|eqx|allpass|target|note|orbit|illum|tenday|timeline`. The console also has read-only
+horizon|amsat|contact|mutual|dxdopp|eqx|allpass|target|note|orbit|illum|tenday|timeline|weather`. The console also has read-only
 diagnostics: `heap` (free heap + largest block), `mem` (a full memory baseline — live heap,
 min-ever high-water, and the static byte cost of the catalog and the large per-screen arrays),
 and `memtrace` (toggles a one-line heap log on every screen change, for profiling which screens
@@ -4445,11 +4509,15 @@ engine underneath; they differ only in the direction of the question.
 - **Reached from** — Sun / Moon → `e`.
 - **Shows** — Moon az/el and up/down; range (km) and range-rate (m/s); degradation
   (dB, with a near-perigee/apogee note); sky flag (cold/warm/HOT with galactic
-  latitude); self-echo Doppler for 50/144/432/1296/10368 MHz. The `m` sub-view lists
+  latitude); self-echo Doppler for 50/144/432/1296/10368 MHz. The `a` analysis page
+  puts the printed per-band table on screen — Doppler, Faraday rotation, sky
+  temperature, and libration spread per band — plus the two-way path loss (+6 dB
+  lunar reflection) and the ground-gain window state. The `m` sub-view lists
   common Moon windows vs a DX grid over the next 14 days.
 - **Keys** — `o` point/stop rotator at the Moon; `x` stop; `m` mutual-Moon window
-  (then `g` change grid, `;`/`.` select); `p` 30-day planner; `` ` `` back
-  (sub-view → main → Sun/Moon). A red **SUN** flag appears when the Moon is within
+  (then `g` change grid, `;`/`.` select); `p` 30-day planner; `a` per-band analysis
+  page; `w` print the EME report (works from the live and mutual views); `` ` `` back
+  (analysis/sub-view → main → Sun/Moon). A red **SUN** flag appears when the Moon is within
   ~10° of the Sun.
 
 ### EME 30-day plan
@@ -4493,7 +4561,12 @@ engine underneath; they differ only in the direction of the question.
   operating site; detail in [§13 → Weather](#weather).
 - **Reached from** — Home → Weather.
 - **Shows** — current temperature, sky, wind and humidity, then per-day condition,
-  high/low and precipitation chance, plus a freshness note. Units per Settings.
+  high/low and precipitation chance, plus a freshness note. Units per Settings. A
+  second **field conditions** page (**`f`**) adds feels-like temperature, wind gusts
+  (with a MAST flag), pressure and its 3-hour trend, the UV index, and sunrise/sunset,
+  plus a per-day UV/gust/sun table — for portable and field operation.
+- **Keys** — **`f`** toggles the field-conditions page; **`p`** prints the weather
+  report; **`r`** refreshes the fetch; **`` ` ``** backs out (field page → summary → Home).
 - **Keys** — `r` refresh over WiFi; `` ` `` back.
 
 ### QRZ callsign lookup
@@ -4793,8 +4866,10 @@ engine underneath; they differ only in the direction of the question.
   [§17](#17-antenna-rotator-gs-232-easycomm-spid-rotctl-pstrotator-yaesu-direct-rotctld-server)
   and ROTOR_INTERFACE.md.
 - **Reached from** — Settings → Rotator: manual control → ENTER.
-- **Shows** — commanded and actual az/el; for Yaesu direct, the live ADC counts
-  for each axis.
+- **Shows** — commanded and actual az/el; the **magnetic target heading** with the
+  local declination (compass hand-pointing needs no arithmetic), flagged `->rotor`
+  when *Rotator → magnetic correction* is also applying it to the hardware; for
+  Yaesu direct, the live ADC counts for each axis.
 - **Keys** — `,`/`/` jog azimuth; `;`/`.` jog elevation; `s` step size; `x` stop;
   *(Yaesu direct only)* `1`/`2`/`3`/`4` capture the ADC counts at az 0 / az full /
   el 0 / el full; `` ` `` back.
@@ -5115,7 +5190,7 @@ operation.
 
 ![Cross-section area](docs/img/tools-cross-section.jpg)
 
-- **Purpose** — a set of **55 offline** ham-radio and satellite bench tools, all computed
+- **Purpose** — a set of **60 offline** ham-radio and satellite bench tools, all computed
   locally (no network needed): the **scientific**, **programmer's**, and **graphing**
   calculators, a **Tiny BASIC** interpreter, a **location converter** (Maidenhead / decimal /
   DMS / DDM / Plus Code / UTM / MGRS / USNG), the **link budget** chain, **state vector → GP**,
@@ -5135,15 +5210,25 @@ operation.
   mini-set, **thermal equilibrium**, a **polarization / Faraday** estimate, **trace & wire
   ampacity**, and a **PLL / frequency-plan** helper.
 - **Reached from** — About → `t`.
-- **Menu order** — the menu is grouped **compute-first**: the interactive calculators and
-  converters (scientific, graphing, programmer, Tiny BASIC, location converter, link budget),
-  then the satellite-compute tools (state vector → GP, CubeSatSim), then the reference lookups
-  (DXCC, CQ zones, ITU zones, CTCSS, operating references, radio math, character lookup), then
-  the live-recalc **forms**. A **first-letter jump** (press a letter to hop to the next tool
-  starting with it) and last-tool memory make the list quick to navigate. The entries below
-  follow roughly the same grouping — calculators and converters first, then the references,
-  then the forms — though the **forms** are described together after the link budget rather
-  than strictly last.
+- **Menu layout** — the sixty tools are organized into **six categories**, so Tools opens
+  on a short **category list** rather than one long scroll. Pick a category with `;`/`.` and
+  ENTER to open its tool list; `` ` `` steps back from a tool list to the categories (and
+  again to leave Tools). The categories are **Calculators & programming** (the scientific,
+  graphing, and programmer's calculators, Tiny BASIC, unit and location converters),
+  **Satellite & orbital** (conjunction screener, orbital neighborhood, transponder planner,
+  link-margin curve, debris-group screen, Doppler budget, orbit lifetime, cross-section,
+  delta-v, thermal equilibrium, polarization/Faraday, state vector → GP, CubeSatSim),
+  **Terrestrial propagation** (link budget, radio horizon, Fresnel clearance, terrestrial
+  path budget, tropo ducting, rain fade, terrain profile, free-space path loss, pointing
+  loss), **Antennas & feedlines** (dipole, vertical, yagi, quad, helix, matching networks,
+  phasing line, coax loss, microstrip/stripline, toroid winding), **RF chain & measurement**
+  (RF units, SWR, wavelength/frequency, dB chain, attenuator, cascade NF & G/T, sun-noise
+  G/T, IMD, RF exposure, PLL/frequency plan), and **Electronics & references** (complex/polar,
+  reactance, RC/RL, ampacity, battery runtime, DXCC, CQ/ITU zones, CTCSS, operating and
+  radio-math cards, character lookup). Each category row shows its tool **count**. A
+  **first-letter jump** (press a letter to hop to the next entry starting with it) works in
+  both the category list and inside a category, and Tools remembers the category you were
+  browsing. The entries below are described grouped roughly by these categories.
 - **Calculator** — a traditional tape interface: type an expression
   (`2+3*sin(45)`), ENTER evaluates, and the expression and its result join a
   **scrolling tape** above the entry line (`[`/`]` scroll back through history —
@@ -5259,7 +5344,7 @@ operation.
   moving off the field commits it); on a pick-list field (e.g. the coax type) `,`/`/`
   cycle the choices; results recompute instantly. **Yagi and quad take an element
   count** (up to 12 / 8) and list every element; `,`/`/` scroll the output when the
-  list runs past the screen. The Tools menu itself scrolls when it grows past eleven
+  list runs past the screen. Each Tools category scrolls when it grows past eight
   entries. `` ` `` back.
 - **RF exposure (MPE)** — enter frequency, power, duty cycle and antenna gain; shows the
   FCC OET-65 **Maximum Permissible Exposure** limits (controlled and uncontrolled, by
@@ -5885,7 +5970,7 @@ the no-interactive-programs rule stands; that is precisely why it lives in firmw
 | **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labeled & color-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Space Wx" bar + result · also refreshes with Update · `p` HF/6m propagation guide · `r` refresh · `` ` `` back |
 | **Weather** (main menu) | terrestrial current conditions + multi-day forecast for the operating site from Open-Meteo · current temp/sky/wind/humidity then per-day hi/lo & precip chance · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Weather" bar + result · also refreshes with Update · `r` refresh · cached offline · `` ` `` back |
 | **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network / data) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
-| **EME / moonbounce** (Sun/Moon → `e`) | self-echo Doppler per band (50/144/432/1296/10368, topocentric) · range + rate · degradation vs perigee · galactic sky-noise flag · red SUN flag <10° · `p` 30-day plan (dec + degr, `;`/`.` scroll) · `m` mutual-Moon window vs DX grid (`g` grid, `;`/`.` select) · `o` point rotator at Moon · `x` stop · `` ` `` back |
+| **EME / moonbounce** (Sun/Moon → `e`) | self-echo Doppler per band (50/144/432/1296/10368, topocentric) · range + rate · degradation vs perigee · galactic sky-noise flag · red SUN flag <10° · `p` 30-day plan (dec + degr, `;`/`.` scroll) · `m` mutual-Moon window vs DX grid (`g` grid, `;`/`.` select) · `o` point rotator at Moon · `x` stop · `a` per-band analysis page · `w` print · `` ` `` back |
 | **Grid dist/bearing** (main menu) | great-circle distance + heading to a Maidenhead grid (short/long path, km/mi) · `g` grid · `q` QRZ→grid lookup · `o` point rotator at bearing (el 0) · `x` stop · `` ` `` back |
 | **QRZ → grid** (Grid dist/bearing → `q`) | resolve a callsign to its grid · `c` callsign · ENTER use grid in the calculator · `` ` `` back |
 | **HF/6m propagation** (Space Wx → `p`) | band guidance from solar flux + Kp: HF conditions, 10/15/20 m open/marg/shut, geomagnetic, auroral VHF, absorption · rule-of-thumb (6 m Es seasonal) · `r` refetch · `` ` `` back |

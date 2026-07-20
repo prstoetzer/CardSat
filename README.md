@@ -23,6 +23,19 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.61:** **space weather that reads like an operating picture — and a station
+> that works the terrestrial bands too.** Solar flux and Kp grow into a full suite: **GOES
+> X-ray flares**, **real-time solar wind (Bz + speed)**, **sunspot number**, a **band-by-band
+> HF outlook** with a **MUF estimate**, a **VHF sporadic-E flag**, today's **radio-blackout
+> forecast**, and the **3-day Kp** — all of it printable and readable from BASIC. A family of
+> **VHF/UHF/microwave path tools** (radio horizon, Fresnel clearance, tropo ducting, rain
+> fade, terrestrial path budget, terrain profile) lands for terrestrial weak-signal work,
+> and the **EME** suite gains dedicated-software analysis quantities and a **90-day planner**.
+> The **Weather** screen grows an outdoor **field-conditions page** — feels-like, gusts,
+> pressure trend, UV, sun times — with **independently selectable units** and a printable
+> report. The sixty offline **Tools** are reorganized into **six navigable categories**.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.61.md)**.
+
 > **New in v0.9.60:** **a game you can play over the air, a sky full of stars, and a device that's
 > harder to fragment.** **KESSLER** — the two-player GORILLAS.BAS-style artillery duel added this
 > cycle — now plays **head-to-head over LoRa**: one Cardputer hosts, another joins, and a
@@ -257,7 +270,7 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 *(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
 unchanged since. Several features added since — rove planner, workable horizon, target
 search, on-device printing, the Files page's multi-select — are not pictured yet; a
-screenshot refresh is planned. The current firmware is v0.9.60.)*
+screenshot refresh is planned. The current firmware is v0.9.61.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#22-screen-by-screen-reference).

@@ -384,7 +384,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.60";
+static constexpr const char* FW_VERSION = "0.9.61";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -570,9 +570,25 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 // Best-effort: drives the orbital-decay density scale when "Decay solar = auto".
 #define SPACEWX_F107_URL  "https://services.swpc.noaa.gov/json/f107_cm_flux.json"
 #define SPACEWX_KP_URL    "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+// GOES primary X-ray flare summary (object JSON: newest flare with class letter +
+// peak flux). Drives the flare / HF-blackout indicator.
+#define SPACEWX_XRAY_URL  "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-latest.json"
+// Real-time solar wind Bz + speed from the SWPC dashboard summary products.
+// The legacy /products/solar-wind/*.json family was RETIRED by SCN 26-21 (bench
+// 404s, 2026-07); the summary files were kept: ~100 B objects, key:value.
+#define SPACEWX_MAG_URL   "https://services.swpc.noaa.gov/products/summary/solar-wind-mag-field.json"
+#define SPACEWX_PLASMA_URL "https://services.swpc.noaa.gov/products/summary/solar-wind-speed.json"
+// Daily observed sunspot number: SWPC 30-day text table (~2.5 KB). The JSON
+// sunspot_report.json is 170+ KB -- too large for the no-PSRAM heap.
+#define SPACEWX_SSN_URL   "https://services.swpc.noaa.gov/text/daily-solar-indices.txt"
+// SWPC 3-day geomagnetic forecast (max predicted Kp per day). Text product.
+#define SPACEWX_FCAST_URL "https://services.swpc.noaa.gov/text/3-day-forecast.txt"
 // Open-Meteo terrestrial weather (current + multi-day forecast) for the operating
 // site. Free, no key, non-commercial. https://open-meteo.com  Cached for offline use.
 #define WEATHER_API_BASE  "https://api.open-meteo.com/v1/forecast"
+// Open-Meteo elevation API: accepts comma-separated latitude/longitude lists and
+// returns an "elevation":[...] array (metres). Used by the terrain path profiler.
+#define ELEVATION_API_BASE "https://api.open-meteo.com/v1/elevation"
 #define FILE_WEATHER      "/CardSat/weather.txt"   // cached parsed weather
 #define FILE_WEATHER_TMP  "/CardSat/weather.tmp"   // scratch for streamed JSON (low heap)
 #define WX_FORECAST_DAYS  4                          // today + 3 days shown
@@ -1845,6 +1861,7 @@ struct Transponder {
   bool     invert   = false; // inverting linear transponder
   bool     isLinear = false; // true => has a tunable passband (do passband tracking)
   bool     active   = true;  // SatNOGS status==active / alive==true (false => decommissioned/off)
+  uint32_t baud     = 0;     // SatNOGS baud (data rate; CW = WPM). 0 = not specified
   float    toneHz   = 0.0f;  // required FM uplink CTCSS/PL tone (0 = none)
 
   // Downlink passband width in Hz (0 for single-channel / FM).
@@ -2532,12 +2549,17 @@ enum SolarActivity : uint8_t {
   SOLAR_AUTO = 3,  // derive density scale from the live F10.7 flux (fetched with GP)
 };
 
-// Units for the terrestrial Weather screen.
+// Units for the terrestrial Weather screen. The legacy WxUnits enum below bundled
+// temperature+wind into one setting; it is retained only to migrate old saved configs
+// into the three independent unit fields (temp / wind / pressure) that replaced it.
 enum WxUnits {
-  WX_IMPERIAL = 0,   // deg F, mph
-  WX_METRIC   = 1,   // deg C, km/h
-  WX_METRIC_MS = 2,  // deg C, m/s
+  WX_IMPERIAL = 0,   // deg F, mph  (legacy bundle)
+  WX_METRIC   = 1,   // deg C, km/h (legacy bundle)
+  WX_METRIC_MS = 2,  // deg C, m/s  (legacy bundle)
 };
+enum WxTempUnit { WXT_C = 0, WXT_F = 1 };                 // temperature
+enum WxWindUnit { WXW_KMH = 0, WXW_MPH = 1, WXW_MS = 2 }; // wind speed
+enum WxPresUnit { WXP_HPA = 0, WXP_INHG = 1 };            // barometric pressure
 
 struct Settings {
   // WiFi
@@ -2651,7 +2673,10 @@ struct Settings {
                                 // (distinct flash count per event; user-built RX)
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
-  uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
+  uint8_t  wxUnits    = WX_IMPERIAL; // legacy bundled units (kept only for config migration)
+  uint8_t  wxTemp     = WXT_F;       // Weather: temperature unit (WxTempUnit)
+  uint8_t  wxWind     = WXW_MPH;     // Weather: wind-speed unit (WxWindUnit)
+  uint8_t  wxPres     = WXP_INHG;    // Weather: pressure unit (WxPresUnit)
   uint8_t  antUnits   = 0;           // antenna/feedline length units in Tools: 0=imperial(ft+in) 1=metric
                                      // NOTE: applies ONLY to antenna/feedline dimensions a ham cuts by
                                      // hand. Orbital distances, altitudes and satellite sizes are ALWAYS
@@ -2694,6 +2719,12 @@ struct Settings {
   int16_t  rotAzOff    = 0;      // deg added to commanded azimuth (alignment)
   int16_t  rotElOff    = 0;      // deg added to commanded elevation
   uint8_t  rotDeadband = 3;      // deg; suppress smaller moves (anti-chatter)
+  // Send MAGNETIC bearings to the rotator instead of TRUE (default off). Most
+  // rotators are aligned to true north or self-correct, so CardSat sends true by
+  // default; enable only if your controller expects magnetic and does NOT already
+  // apply declination. When on, the local declination is subtracted from every
+  // commanded azimuth (true -> magnetic).
+  bool     rotMagCorrect = false;
   uint16_t rotParkAz   = 0;      // park azimuth on LOS / when disabled
   uint8_t  rotParkEl   = 0;      // park elevation
   bool     rotFlip     = false;  // flip mode (450 az + 0-180 el) for overhead passes
@@ -6860,10 +6891,28 @@ private:
   time_t   spaceWxEpoch   = 0;      // unix time the F10.7 value was observed/fetched
   float    spaceKp        = -1;     // latest planetary Kp index (0-9, -1 = none)
   float    spaceA         = -1;     // latest running A index (a_running, -1 = none)
+  // --- Expanded space weather (0.9.61) ---
+  float    spaceSSN       = -1;     // daily observed sunspot number (-1 = none)
+  char     spaceFlare[4]  = "";     // latest GOES X-ray flare class, e.g. "M1", "X2", "C5"
+  float    spaceXrayW     = -1;     // that flare's peak flux (W/m^2, -1 = none)
+  time_t   spaceFlareEpoch = 0;     // when that flare peaked (unix)
+  float    spaceBz        = -999;   // solar-wind IMF Bz, GSM (nT; -999 = none)
+  float    spaceWind      = -1;     // solar-wind bulk speed (km/s; -1 = none)
+  float    spaceFcastKp[3] = {-1,-1,-1};  // SWPC 3-day max predicted Kp
+  // Extra space-wx surfaced on the propagation outlook page (0.9.61). All -1 = none.
+  // From daily-solar-indices.txt (the same file the SSN comes from):
+  int      spaceFlareC     = -1;    // C-class flares in the most recent daily line
+  int      spaceFlareM     = -1;    // M-class flares that day
+  int      spaceFlareX     = -1;    // X-class flares that day
+  int      spaceNewRegions = -1;    // new sunspot regions that day
+  // From 3-day-forecast.txt sections B/C (today's column):
+  int      spaceR12Prob    = -1;    // R1-R2 radio blackout probability today (%)
+  int      spaceR3Prob     = -1;    // R3+ radio blackout probability today (%)
+  int      spaceS1Prob     = -1;    // S1+ solar radiation storm probability today (%)
 
   // Terrestrial weather (Open-Meteo), cached for offline use. -999 = no data.
-  float    wxTempNow      = -999;   // current temperature (in cfg.wxUnits)
-  float    wxWindNow      = -999;   // current wind speed (in cfg.wxUnits)
+  float    wxTempNow      = -999;   // current temperature (canonical: deg C)
+  float    wxWindNow      = -999;   // current wind speed (canonical: m/s)
   int      wxWindDirNow   = -1;     // current wind direction (deg, -1 = none)
   int      wxHumidNow     = -1;     // current relative humidity (%, -1 = none)
   int      wxCodeNow      = -1;     // current WMO weather code (-1 = none)
@@ -6878,6 +6927,17 @@ private:
   int      wxDayPop[WX_FORECAST_DAYS]  = {0};   // per-day precip probability max (%)
   long     wxDayEpoch[WX_FORECAST_DAYS] = {0};  // per-day date (unix, local midnight)
   time_t   wxEpoch        = 0;      // when this weather was fetched (0 = none)
+  uint8_t  wxPage         = 0;      // Weather view: 0 = summary+forecast, 1 = field conditions
+  // --- outdoor "field conditions" page (0.9.61) ---
+  float    wxFeelsNow     = -999;   // current apparent ("feels like") temp (canonical: deg C)
+  float    wxGustNow      = -999;   // current wind gust (canonical: m/s)
+  float    wxPresNow      = -999;   // current mean-sea-level pressure (hPa)
+  float    wxPres3hAgo    = -999;   // pressure 3 h earlier (hPa) -> trend; -999 = unknown
+  int      wxIsDay        = -1;     // 1 = day, 0 = night, -1 = unknown
+  float    wxDayUv[WX_FORECAST_DAYS]   = {0};   // per-day UV index max
+  float    wxDayGust[WX_FORECAST_DAYS] = {0};   // per-day wind gust max (canonical: m/s)
+  int      wxSunrise[WX_FORECAST_DAYS] = {0};   // per-day sunrise, local minutes past midnight (-1 none)
+  int      wxSunset[WX_FORECAST_DAYS]  = {0};   // per-day sunset,  local minutes past midnight (-1 none)
   uint8_t  wxCachedUnits  = 0;      // units the cached values are stored in
   int      spaceScroll    = 0;      // Space Wx screen scroll position
   char     dxGrid[8] = {0};
@@ -7429,15 +7489,27 @@ private:
   void resumeCacheIfPending();             // continue a batched cache run after reboot
   void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
   void fetchSpaceWeather();                // fetch F10.7 solar flux (best-effort, with GP)
-  void fetchWeather();                     // fetch terrestrial weather (Open-Meteo, best-effort)
+  void fetchWeather();
+  void fetchTerrainProfile();   // sample elevation along the path to gcGrid (TOOL_TERRAIN)                     // fetch terrestrial weather (Open-Meteo, best-effort)
   void spaceWxEnter();                     // open Space Wx screen, show cache, fetch if WiFi up
   void weatherEnter();                     // open Weather screen, show cache, fetch if WiFi up
   bool loadWeatherCache();                 // load cached weather from flash on boot
   static const char* wxCodeText(int code); // WMO weather code -> short label
   static const char* windDirName(int deg);  // degrees -> 16-point compass ("" if <0)
-  const char* wxTempUnit();                // "F" or "C" per cfg.wxUnits
-  const char* wxWindUnit();                // "mph" / "km/h" / "m/s" per cfg.wxUnits
+  const char* wxTempUnit();                // "F" or "C" per cfg.wxTemp
+  const char* wxWindUnit();                // "mph" / "km/h" / "m/s" per cfg.wxWind
+  const char* wxPresUnit();                // "hPa" or "inHg" per cfg.wxPres
+  float wxDispTemp(float c);               // canonical deg C -> display temp unit
+  float wxDispWind(float ms);              // canonical m/s   -> display wind unit
+  float wxDispPres(float hpa);             // canonical hPa   -> display pressure unit
   void loadSpaceWeather();                 // load cached F10.7 from flash at boot
+  void parse3DayKpForecast(const char* path);  // SWPC 3-day-forecast.txt -> spaceFcastKp[]
+  String hfBandOutlook(bool day);    // one-line HF band open/closed sketch from SFI/Kp
+  float  estMufMHz(bool day);        // rough MUF estimate (MHz), -1 if no data
+  const char* auroraLevel();         // aurora activity word from Kp/Bz
+  const char* vhfFlag();             // 6m/2m Es / auroral-E hint
+  const char* meteorShowerNow(bool& nearPeak);  // active meteor shower for MS planning
+  const char* flareSeverity();       // HF-blackout word from the flare class
   double decayDensityScale() const;        // density scale for the decay point estimate
   uint8_t decayLevelFor(const SatEntry& s); // 0 none / 1 watch / 2 soon / 3 imminent (list flag)
   void loadCalForSat(uint32_t norad);      // per-satellite calibration -> calDl/calUl
@@ -7564,6 +7636,12 @@ private:
   char     gcGrid[10] = {0};        // the entered/seeded target grid
   bool     gcHaveResult = false;
   double   gcDistKm = 0, gcBearing = 0;
+  // Terrain path profile (TOOL_TERRAIN): filled by fetchTerrainProfile() from an
+  // online elevation API along the great-circle path to gcGrid.
+  int      terrainN = 0;            // number of samples fetched (0 = none yet)
+  float    terrainMaxM = 0;         // highest terrain elevation on the path (m)
+  float    terrainMaxKm = 0;        // distance along path to that max (km)
+  bool     terrainClear = true;     // path clears the terrain with Fresnel margin
   bool     gcRotOut = false;        // rotator pointed at the grid bearing
   void drawGridCalc(); void keyGridCalc(char c, bool enter, bool back);
   void gcCompute();                 // recompute distance/bearing from gcGrid + QTH
@@ -7644,7 +7722,9 @@ private:
   // of live-recalc forms (coax loss, antenna dimensions, RF unit conversions,
   // station math). All computation is local -- these work offline.
   int toolsSel = 0;
+  int toolsCat = -1;   // Tools menu: -1 = category list, else selected category index
   void drawTools(); void keyTools(char c, bool enter, bool back);
+  int toolsRowCount() const; int toolsRowId(int row) const;   // two-level Tools menu helpers
 
   // Infix scientific calculator (SCR_CALC): type an expression, ENTER evaluates.
   // Supports + - * / ^ (), unary -, and sin/cos/tan/asin/acos/atan/log/ln/sqrt/
@@ -7991,7 +8071,9 @@ private:
   void  toolFormInit(int id);
   void  drawToolForm(); void keyToolForm(char c, bool enter, bool back);
   const char* tfChoiceLabel(int field, int idx);
-  float    emePlanDec[30]; float emePlanDeg[30];
+  uint8_t  emePage = 0;             // EME view: 0=live  1=per-band analysis
+  uint8_t  propPage = 0;            // Propagation view: 0=core  1=outlook/forecast
+  float    emePlanDec[90]; float emePlanDeg[90];   // 3-month planning window (0.9.61)
   time_t   emePlanT0 = 0;
   int      emePlanN = 0; int emePlanScroll = 0;
 
@@ -8000,6 +8082,7 @@ private:
   void logCreateStub(const char* memoPath);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
   void drawWeather(); void keyWeather(char c, bool enter, bool back);
+  void drawWeatherField();   // outdoor "field conditions" page
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);
   int  txDbScroll = 0;             // transponder-browser scroll position
   int  txDbSel = 0;               // selected transponder entry (for delete)
@@ -8213,7 +8296,7 @@ private:
                      PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
                      PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
-                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF };
+                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -8240,6 +8323,7 @@ private:
   void printBasicOut();      // Tiny BASIC: the last run's console output
   void printToolOut();       // generic: the active tool screen's key result(s)
   void printCharLk();        // char lookup: current value's encodings (near its tables)
+  void printSpaceWx(); void printWeather();       // Space weather: all indices + derived HF/VHF outlook
   void printEme();           // EME: live lunar geometry + per-band self-echo Doppler
   void printEmePlan();       // EME: 30-day declination/degradation planning table
   void printEmeMut();        // EME: mutual-Moon window list vs a DX grid
@@ -14208,6 +14292,16 @@ static void amsNorm(const char* in, char* out, int outsz) {
   out[k] = 0;
 }
 
+// Collapse a normalized name to alnum only (drop spaces AND hyphens), so
+// "AO-7" / "AO 7" / "AO7" all become "AO7". Used as an extra, more tolerant
+// matching tier below the exact/token tiers.
+static void amsCollapse(const char* normIn, char* out, int outsz) {
+  int k = 0;
+  for (int i = 0; normIn[i] && k < outsz - 1; ++i)
+    if (normIn[i] != ' ' && normIn[i] != '-') out[k++] = normIn[i];
+  out[k] = 0;
+}
+
 // Does padded " haystackNorm " contain " needleNorm " as a delimited token run?
 // Forward decl: findByServiceName (below) shares these primitives.
 static bool amsTokenIn(const char* hayNorm, const char* needleNorm);
@@ -14238,6 +14332,21 @@ int SatDb::findByServiceName(const char* svc) const {
   for (int i = 0; i < _n; ++i) {
     char nn[40]; amsNorm(_sats[i].name, nn, sizeof(nn));
     if (amsTokenIn(nn, sn) || amsTokenIn(sn, nn)) return i;
+  }
+  // 4. hyphen/space-insensitive equality of the leading token (AO-7 == AO 7 == AO7).
+  //    Compare the collapsed WHOLE names, and also the collapsed first token, so a
+  //    bare "RS44" matches "RS-44 (RADIO ROSTO)".
+  char sc[40]; amsCollapse(sn, sc, sizeof(sc));
+  if (sc[0]) {
+    for (int i = 0; i < _n; ++i) {
+      char nn[40]; amsNorm(_sats[i].name, nn, sizeof(nn));
+      char nc[40]; amsCollapse(nn, nc, sizeof(nc));
+      if (strcmp(nc, sc) == 0) return i;
+      // collapsed first token of the catalog name vs the collapsed service name
+      char ft[40]; int j = 0; while (nn[j] && nn[j] != ' ' && j < 39) { ft[j] = nn[j]; ++j; } ft[j] = 0;
+      char fc[40]; amsCollapse(ft, fc, sizeof(fc));
+      if (fc[0] && strcmp(fc, sc) == 0) return i;
+    }
   }
   return -1;
 }
@@ -14783,6 +14892,7 @@ static void txBuildFilter(JsonDocument& filter) {
   fe["type"]          = true;
   fe["status"]        = true;
   fe["alive"]         = true;
+  fe["baud"]          = true;
 }
 
 static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
@@ -14813,6 +14923,7 @@ static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
     const char* st = o["status"] | "active";
     bool aliveField = o["alive"] | true;
     t.active = aliveField && (strcmp(st, "inactive") != 0);
+    { long bd = o["baud"] | 0; t.baud = (bd > 0 && bd < 100000000L) ? (uint32_t)bd : 0; }
     n++;
   }
   // NOTE: ordering by usefulness is done once in the app layer (prioritizeTransponders),
@@ -17367,6 +17478,16 @@ bool Settings::load() {
   beaconMHz  = d["beacon"] | 145.8;  if (beaconMHz < 0.1) beaconMHz = 145.8;
   solarAct   = d["solar"] | (uint8_t)SOLAR_MEAN;  if (solarAct > SOLAR_AUTO) solarAct = SOLAR_MEAN;
   wxUnits    = d["wxunits"] | (uint8_t)WX_IMPERIAL; if (wxUnits > WX_METRIC_MS) wxUnits = WX_IMPERIAL;
+  // Independent unit fields (replaced the bundled wxUnits). When an old config lacks
+  // them, migrate from the legacy bundle: IMPERIAL -> F/mph, METRIC -> C/kmh,
+  // METRIC_MS -> C/ms; pressure had no legacy setting, so default by temperature
+  // (F -> inHg, C -> hPa) to match what a US vs metric user would expect.
+  { uint8_t mT = (wxUnits == WX_IMPERIAL) ? WXT_F : WXT_C;
+    uint8_t mW = (wxUnits == WX_IMPERIAL) ? WXW_MPH : (wxUnits == WX_METRIC_MS ? WXW_MS : WXW_KMH);
+    uint8_t mP = (wxUnits == WX_IMPERIAL) ? WXP_INHG : WXP_HPA;
+    wxTemp = d["wxtemp"] | mT; if (wxTemp > WXT_F)  wxTemp = mT;
+    wxWind = d["wxwind"] | mW; if (wxWind > WXW_MS)  wxWind = mW;
+    wxPres = d["wxpres"] | mP; if (wxPres > WXP_INHG) wxPres = mP; }
   antUnits   = d["antunits"] | (uint8_t)0; if (antUnits > 1) antUnits = 0;
   dimSecs    = d["dimsecs"] | (uint16_t)120;
   bright     = d["bright"] | (uint8_t)180; if (bright < 10) bright = 10;
@@ -17518,7 +17639,10 @@ bool Settings::save() {
   d["irbeacon"] = irBeacon;
   d["beacon"] = beaconMHz;
   d["solar"] = solarAct;
-  d["wxunits"] = wxUnits;
+  d["wxunits"] = wxUnits;   // still written so an older firmware can still read a bundle
+  d["wxtemp"] = wxTemp;
+  d["wxwind"] = wxWind;
+  d["wxpres"] = wxPres;
   d["antunits"] = antUnits;
   d["dimsecs"] = dimSecs;
   d["bright"]  = bright;
@@ -18322,6 +18446,15 @@ bool App::passNeedsFlip(time_t aos, time_t los) {
 // 0-360 and re-wrap negatives, so in practice this only changes rotctld output.
 void App::rotPoint(float az, float el) {
   if (!rot) return;
+  // True -> magnetic conversion (opt-in). CardSat computes az as a TRUE bearing;
+  // if the operator's controller expects magnetic and doesn't self-correct, they
+  // enable rotMagCorrect and we subtract the local declination here, at the single
+  // chokepoint every rotator command passes through (tracking, park, pre-position,
+  // Sun/Moon, manual). Default off -> the uncorrected true bearing is sent.
+  if (cfg.rotMagCorrect) {
+    Observer o = loc.obs();
+    if (o.valid) az -= (float)magneticDeclinationDeg(o.lat, o.lon);
+  }
   while (az >= 360.0f) az -= 360.0f;     // target bearing in [0,360)
   while (az < 0.0f)    az += 360.0f;
   if (cfg.rotAzRange == ROT_AZ_180) {
@@ -18839,6 +18972,86 @@ static float scanFileNum(const char* path, const char* key,
   return found;
 }
 
+// Extract a JSON string value: the text between quotes after "key":"...". Reads
+// the whole (small) file; used for the flare class letter. Leaves out unchanged
+// on miss. Copies at most outsz-1 chars.
+static void scanFileStr(const char* path, const char* key, char* out, int outsz) {
+  File f = Store::fs().open(path, "r");
+  if (!f) return;
+  String all; all.reserve(2048);
+  while (f.available() && all.length() < 8000) {
+    uint8_t b[256]; int r = f.read(b, sizeof(b));
+    if (r <= 0) break; all.concat((const char*)b, r);
+  }
+  f.close();
+  int k = all.indexOf(key);
+  if (k < 0) return;
+  int c = all.indexOf(':', k + (int)strlen(key));
+  if (c < 0) return;
+  int q1 = all.indexOf('"', c);
+  if (q1 < 0) return;
+  int q2 = all.indexOf('"', q1 + 1);
+  if (q2 < 0 || q2 <= q1) return;
+  int n = q2 - q1 - 1; if (n > outsz - 1) n = outsz - 1;
+  for (int i = 0; i < n; ++i) out[i] = all.charAt(q1 + 1 + i);
+  out[n] = 0;
+}
+
+// Parse SWPC's daily-solar-indices.txt (Last 30 Days Daily Solar Data, ~2.5 KB).
+// Data lines: "YYYY MM DD  <F10.7>  <SSN>  ..."; ':'/'#' lines are headers. Newest
+// line is LAST, so keep overwriting and return the final valid SSN. Line-at-a-time
+// read -> tiny bounded heap (the JSON sunspot_report.json is 170+ KB and starved
+// the no-PSRAM heap on the bench, so it was replaced with this text product).
+// Parse SWPC daily-solar-indices.txt. Returns the most recent daily SSN and, via the
+// optional out-pointers, that same line's new-region count and C/M/X flare counts.
+// Columns: Y Mo D  F10.7  SSN  Area  NewRegions  MeanField  X-rayBkgd  C M X  S 1 2 3
+// MeanField is often "-999" and X-rayBkgd is often "*", so we walk tokens rather than
+// trusting a fixed sscanf across the whole line: read the 5 leading numeric columns,
+// then scan forward to the flare block. Keeps the last valid daily line.
+static float parseDailySolarSSN(const char* path,
+                                int* newRegions = nullptr,
+                                int* fC = nullptr, int* fM = nullptr, int* fX = nullptr) {
+  File f = Store::fs().open(path, "r");
+  if (!f) return NAN;
+  float ssn = NAN;
+  while (f.available()) {
+    String ln = f.readStringUntil('\n');
+    if (ln.length() < 12) continue;
+    char c0 = ln.charAt(0);
+    if (c0 == ':' || c0 == '#') continue;
+    int y, m, d, area, nreg; float fx, ss;
+    // Y Mo D flux ssn area newRegions  -> 7 leading fields (all numeric).
+    if (sscanf(ln.c_str(), "%d %d %d %f %f %d %d",
+               &y, &m, &d, &fx, &ss, &area, &nreg) == 7 &&
+        y > 2000 && ss >= 0 && ss < 600) {
+      ssn = ss;
+      if (newRegions) *newRegions = (nreg >= 0 && nreg < 100) ? nreg : -1;
+      // Flare counts sit after two more tokens (mean field, x-ray bkgd) that may be
+      // "-999" / "*". Walk past exactly 9 whitespace-delimited tokens from line start,
+      // then read the next three ints as C, M, X.
+      if (fC || fM || fX) {
+        const char* p = ln.c_str();
+        int skipped = 0;
+        while (*p && skipped < 9) {
+          while (*p == ' ' || *p == '\t') p++;      // skip gap
+          if (!*p) break;
+          while (*p && *p != ' ' && *p != '\t') p++; // skip token
+          skipped++;
+        }
+        int cc = -1, mm = -1, xx = -1;
+        if (sscanf(p, "%d %d %d", &cc, &mm, &xx) == 3) {
+          if (fC) *fC = (cc >= 0 && cc < 1000) ? cc : -1;
+          if (fM) *fM = (mm >= 0 && mm < 1000) ? mm : -1;
+          if (fX) *fX = (xx >= 0 && xx < 1000) ? xx : -1;
+        }
+      }
+    }
+  }
+  f.close();
+  return ssn;
+}
+
+
 void App::fetchAmsatStatus() {
   if (!net.connected()) return;
   String url = String(AMSAT_STATUS_URL) + (int)cfg.amsatWindowH;
@@ -18931,6 +19144,64 @@ void App::fetchSpaceWeather() {
   }
   if (spaceWxEpoch == 0 && (spaceKp >= 0 || spaceF107 > 0)) spaceWxEpoch = nowUtc();
 
+  // --- GOES X-ray: latest flare class + peak flux (object JSON) ---
+  // xray-flares-latest.json is one object: {"max_class":"M1.5","max_xrlong":1.5e-5,
+  //   "max_time":"..",...}. Parse the class letter+number and the peak flux.
+  if (net.httpsGetToFileRetry(SPACEWX_XRAY_URL, FILE_DL_TMP, 8000, nullptr, 3, 20000)) {
+    // Field names vary across SWPC feeds; try the known variants in order.
+    const char* classKeys[] = { "\"max_class\"", "\"current_class\"", "\"class\"", "\"begin_class\"" };
+    for (unsigned ki = 0; ki < sizeof(classKeys)/sizeof(classKeys[0]); ++ki) {
+      scanFileStr(FILE_DL_TMP, classKeys[ki], spaceFlare, sizeof(spaceFlare));
+      // accept only a plausible class token: a letter A/B/C/M/X optionally +digits
+      char c0 = spaceFlare[0];
+      if (c0=='A'||c0=='B'||c0=='C'||c0=='M'||c0=='X') break;
+      spaceFlare[0] = 0;
+    }
+    const char* fluxKeys[] = { "\"max_xrlong\"", "\"current_flux\"", "\"max_flux\"", "\"flux\"" };
+    for (unsigned ki = 0; ki < sizeof(fluxKeys)/sizeof(fluxKeys[0]); ++ki) {
+      float xw = scanFileNum(FILE_DL_TMP, fluxKeys[ki], false, 1e-9f, 1e-1f);
+      if (!isnan(xw)) { spaceXrayW = xw; break; }
+    }
+    Store::fs().remove(FILE_DL_TMP);
+    if (spaceFlare[0]) spaceFlareEpoch = nowUtc();
+  } else { Store::fs().remove(FILE_DL_TMP); }
+
+  // --- Solar wind: SWPC dashboard summary products. The legacy
+  // /products/solar-wind/*.json family (incl. the 5-minute files) was retired by
+  // SCN 26-21 in mid-2026 -- the bench got 404s -- but the tiny summary products
+  // were kept (with outside brackets added): ~100 B each, object key:value.
+  if (net.httpsGetToFileRetry(SPACEWX_MAG_URL, FILE_DL_TMP, 4000, nullptr, 2, 20000)) {
+    float bz = scanFileNum(FILE_DL_TMP, "\"Bz\"", false, -100.0f, 100.0f);
+    if (isnan(bz)) bz = scanFileNum(FILE_DL_TMP, "\"bz\"", false, -100.0f, 100.0f);
+    if (isnan(bz)) bz = scanFileNum(FILE_DL_TMP, "\"bz_gsm\"", false, -100.0f, 100.0f);
+    Store::fs().remove(FILE_DL_TMP);
+    if (!isnan(bz)) spaceBz = bz;
+  } else { Store::fs().remove(FILE_DL_TMP); }
+  // solar-wind-speed.json: [{"WindSpeed":..}]. Proton density is not fetched: the
+  // only summary product lacks it and the full RTSW file is too large for the heap.
+  if (net.httpsGetToFileRetry(SPACEWX_PLASMA_URL, FILE_DL_TMP, 4000, nullptr, 2, 20000)) {
+    float sp = scanFileNum(FILE_DL_TMP, "\"WindSpeed\"", false, 100.0f, 3000.0f);
+    if (isnan(sp)) sp = scanFileNum(FILE_DL_TMP, "\"wind_speed\"", false, 100.0f, 3000.0f);
+    if (isnan(sp)) sp = scanFileNum(FILE_DL_TMP, "\"speed\"", false, 100.0f, 3000.0f);
+    Store::fs().remove(FILE_DL_TMP);
+    if (!isnan(sp)) spaceWind = sp;
+  } else { Store::fs().remove(FILE_DL_TMP); }
+
+  // --- Daily sunspot number: SWPC's 30-day text table, newest line last ---
+  if (net.httpsGetToFileRetry(SPACEWX_SSN_URL, FILE_DL_TMP, 4000, nullptr, 2, 20000)) {
+    int nreg = -1, fc = -1, fm = -1, fx = -1;
+    float ss = parseDailySolarSSN(FILE_DL_TMP, &nreg, &fc, &fm, &fx);
+    Store::fs().remove(FILE_DL_TMP);
+    if (!isnan(ss)) spaceSSN = ss;
+    spaceNewRegions = nreg; spaceFlareC = fc; spaceFlareM = fm; spaceFlareX = fx;
+  } else { Store::fs().remove(FILE_DL_TMP); }
+
+  // --- SWPC 3-day forecast: the max predicted Kp for each of the next days ---
+  if (net.httpsGetToFileRetry(SPACEWX_FCAST_URL, FILE_DL_TMP, 12000, nullptr, 2, 20000)) {
+    parse3DayKpForecast(FILE_DL_TMP);
+    Store::fs().remove(FILE_DL_TMP);
+  } else { Store::fs().remove(FILE_DL_TMP); }
+
   // Persist the space-wx cache: current flux / epoch / Kp plus the previous sample
   // (trend). Older firmwares wrote only "flux epoch"; the loader accepts both.
   if (spaceF107 > 0) {
@@ -18961,6 +19232,61 @@ void App::loadSpaceWeather() {
   }
 }
 
+// Parse SWPC's 3-day-forecast.txt for the max predicted Kp on each of the three
+// forecast days. The file has a "NOAA Kp index breakdown" section with rows of
+// three-hour Kp values per day; we take the daily maximum of each column. Robust
+// to formatting: we scan every line in that section for numeric tokens and keep
+// the per-column max across the (up to 8) time rows.
+void App::parse3DayKpForecast(const char* path) {
+  File f = Store::fs().open(path, "r");
+  if (!f) return;
+  float mx[3] = {-1, -1, -1};
+  bool inKp = false; int rows = 0;
+  while (f.available()) {
+    String ln = f.readStringUntil('\n');
+    if (ln.indexOf("NOAA Kp index breakdown") >= 0) { inKp = true; continue; }
+    if (!inKp) continue;
+    int ut = ln.indexOf("UT");
+    if (ut < 0) { if (rows > 0 && ln.length() < 3) break; continue; }
+    const char* p = ln.c_str() + ut + 2;
+    for (int c = 0; c < 3; ++c) {
+      while (*p && (*p == ' ' || *p == '\t')) p++;
+      if (!*p) break;
+      float v = (float)atof(p);
+      if (v > 0 && v <= 9 && v > mx[c]) mx[c] = v;
+      while (*p && *p != ' ' && *p != '\t') p++;
+    }
+    if (++rows >= 8) break;
+  }
+  f.close();
+  for (int c = 0; c < 3; ++c) if (mx[c] >= 0) spaceFcastKp[c] = mx[c];
+
+  // Sections B (solar radiation) and C (radio blackout): pull TODAY's probability
+  // (the first percentage column) from the "R1-R2", "R3 or greater", and "S1 or
+  // greater" rows. A small helper reads the first integer that precedes a '%'.
+  auto firstPct = [](const String& ln) -> int {
+    int pc = ln.indexOf('%');
+    if (pc < 0) return -1;
+    // walk back over the digits just before '%'
+    int e = pc; int b = e - 1;
+    while (b >= 0 && (ln[b] == ' ' || ln[b] == '\t')) { b--; e = b + 1; }
+    e = b + 1;
+    while (b >= 0 && ln[b] >= '0' && ln[b] <= '9') b--;
+    if (b + 1 >= e) return -1;
+    return ln.substring(b + 1, e).toInt();
+  };
+  File g = Store::fs().open(path, "r");
+  if (g) {
+    while (g.available()) {
+      String ln = g.readStringUntil('\n');
+      if      (ln.startsWith("R1-R2"))          { int v = firstPct(ln); if (v >= 0) spaceR12Prob = v; }
+      else if (ln.startsWith("R3 or greater"))  { int v = firstPct(ln); if (v >= 0) spaceR3Prob  = v; }
+      else if (ln.startsWith("S1 or greater"))  { int v = firstPct(ln); if (v >= 0) spaceS1Prob  = v; }
+    }
+    g.close();
+  }
+}
+
 // ===========================================================================
 //  Terrestrial weather (Open-Meteo) -- current conditions + a short forecast for
 //  the operating site, cached for offline use. Free, no API key, non-commercial
@@ -18977,24 +19303,23 @@ const char* App::windDirName(int deg) {
   return P[i];
 }
 
-// Convert a cached temperature/wind value (stored in wxCachedUnits) into the
-// currently-selected display units, so changing units takes effect immediately
-// without needing a re-fetch.
-static float wxConvTemp(float v, uint8_t from, uint8_t to) {
-  if (v < -900) return v;
-  if (from == to) return v;
-  bool fromF = (from == WX_IMPERIAL), toF = (to == WX_IMPERIAL);
-  if (fromF == toF) return v;                 // both metric variants share deg C
-  return fromF ? (v - 32.0f) * 5.0f / 9.0f    // F -> C
-               : v * 9.0f / 5.0f + 32.0f;     // C -> F
+// Convert a cached value (always stored in CANONICAL units: temp deg C, wind m/s,
+// pressure hPa) into the currently-selected display unit. Because the fetch now always
+// requests canonical units, these are one-way canonical->display and changing a unit in
+// Settings takes effect immediately with no re-fetch.
+float App::wxDispTemp(float c) {   // deg C -> selected temp unit
+  if (c < -900) return c;
+  return (cfg.wxTemp == WXT_F) ? c * 9.0f / 5.0f + 32.0f : c;
 }
-static float wxConvWind(float v, uint8_t from, uint8_t to) {
-  if (v < -900 || from == to) return v;
-  // normalise to km/h, then to target
-  float kmh = (from == WX_IMPERIAL) ? v * 1.609344f
-            : (from == WX_METRIC_MS) ? v * 3.6f : v;
-  return (to == WX_IMPERIAL) ? kmh / 1.609344f
-       : (to == WX_METRIC_MS) ? kmh / 3.6f : kmh;
+float App::wxDispWind(float ms) {  // m/s -> selected wind unit
+  if (ms < -900) return ms;
+  return (cfg.wxWind == WXW_MPH) ? ms * 2.2369363f
+       : (cfg.wxWind == WXW_KMH) ? ms * 3.6f
+                                 : ms;               // WXW_MS
+}
+float App::wxDispPres(float hpa) { // hPa -> selected pressure unit
+  if (hpa < -900) return hpa;
+  return (cfg.wxPres == WXP_INHG) ? hpa * 0.02952998f : hpa;   // hPa -> inHg
 }
 
 // Map a WMO weather-interpretation code to a short label.
@@ -19026,10 +19351,11 @@ const char* App::wxCodeText(int code) {
 }
 
 // Unit suffix helpers for the configured units.
-const char* App::wxTempUnit() { return cfg.wxUnits == WX_IMPERIAL ? "F" : "C"; }
+const char* App::wxTempUnit() { return cfg.wxTemp == WXT_F ? "F" : "C"; }
 const char* App::wxWindUnit() {
-  return cfg.wxUnits == WX_IMPERIAL ? "mph" : (cfg.wxUnits == WX_METRIC_MS ? "m/s" : "km/h");
+  return cfg.wxWind == WXW_MPH ? "mph" : (cfg.wxWind == WXW_MS ? "m/s" : "km/h");
 }
+const char* App::wxPresUnit() { return cfg.wxPres == WXP_INHG ? "inHg" : "hPa"; }
 
 // ===================== Upcoming activations (hams.at) ======================
 // Parse the hams.at Atom feed into hamsatList[]. No XML library on the ESP32;
@@ -19564,7 +19890,7 @@ void App::keyHamsat(char c, bool enter, bool back) {
   if (isDown(c)) { hamsatSel = (hamsatSel + 1) % hamsatN; lastDrawMs = 0; }
   if (enter) {
     hamsatDetail = true; actCommentScroll = 0;
-    setStatus("Checking footprint..."); draw();      // the +/-30-min search can take a moment
+    setStatus("Checking footprint..."); draw();      // the +/-60-min search can take a moment
     activationFootprint();                            // fills actFpState / actFpWin
     setStatus("");
     lastDrawMs = 0;
@@ -20031,15 +20357,17 @@ void App::fetchWeather() {
   if (!(o.lat != 0.0 || o.lon != 0.0)) return;       // no location set -> nothing to do
   setStatus("Updating Weather"); draw();
 
-  const char* tu = (cfg.wxUnits == WX_IMPERIAL) ? "fahrenheit" : "celsius";
-  const char* wu = (cfg.wxUnits == WX_IMPERIAL) ? "mph"
-                 : (cfg.wxUnits == WX_METRIC_MS ? "ms" : "kmh");
+  // Always fetch in canonical units (Celsius, m/s; pressure_msl is always hPa from the
+  // API). Display-time conversion then makes changing any unit instant, with no re-fetch
+  // and no need to track which units the cache is in.
+  const char* tu = "celsius";
+  const char* wu = "ms";
   String url = String(WEATHER_API_BASE)
              + "?latitude="  + String(o.lat, 4)
              + "&longitude=" + String(o.lon, 4)
-             + "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m"
-             + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-             + "&hourly=cloud_cover&forecast_hours=48"
+             + "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,apparent_temperature,wind_gusts_10m,pressure_msl,is_day"
+             + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max,wind_gusts_10m_max,sunrise,sunset"
+             + "&hourly=cloud_cover,pressure_msl&forecast_hours=48"
              + "&timezone=auto&forecast_days=" + String(WX_FORECAST_DAYS)
              + "&temperature_unit=" + tu + "&wind_speed_unit=" + wu;
 
@@ -20073,6 +20401,10 @@ void App::fetchWeather() {
   float wc = numAfter("\"weather_code\"", cur);
   float ws = numAfter("\"wind_speed_10m\"", cur);
   float wd = numAfter("\"wind_direction_10m\"", cur);
+  float fe = numAfter("\"apparent_temperature\"", cur);   // feels-like
+  float gu = numAfter("\"wind_gusts_10m\"", cur);
+  float pr = numAfter("\"pressure_msl\"", cur);
+  float idy = numAfter("\"is_day\"", cur);
 
   // daily arrays: each "key":[v0,v1,...]. Anchor the search to the "daily" object
   // so we don't latch onto the scalar "weather_code" inside "current".
@@ -20118,6 +20450,31 @@ void App::fetchWeather() {
   int nH = fillFloatArray("temperature_2m_max", his, WX_FORECAST_DAYS);
   int nL = fillFloatArray("temperature_2m_min", los, WX_FORECAST_DAYS);
   int nP = fillIntArray("precipitation_probability_max", pops, WX_FORECAST_DAYS);
+  float uvs[WX_FORECAST_DAYS], gusts[WX_FORECAST_DAYS];
+  int nUv = fillFloatArray("uv_index_max", uvs, WX_FORECAST_DAYS);
+  int nGu = fillFloatArray("wind_gusts_10m_max", gusts, WX_FORECAST_DAYS);
+  // sunrise/sunset are ISO local strings ("YYYY-MM-DDTHH:MM"); pull HH:MM -> minutes
+  // past local midnight from each quoted element of the daily array.
+  int sunr[WX_FORECAST_DAYS], suns[WX_FORECAST_DAYS];
+  auto fillHmArray = [&](const char* key, int* out, int maxN) -> int {
+    int idx = body.indexOf(String("\"") + key + "\"", daySearchFrom);
+    if (idx < 0) return 0;
+    int lb = body.indexOf('[', idx); if (lb < 0) return 0;
+    int rb = body.indexOf(']', lb);  if (rb < 0) return 0;
+    int n = 0, pos = lb + 1;
+    while (n < maxN && pos < rb) {
+      int q1 = body.indexOf('"', pos); if (q1 < 0 || q1 > rb) break;
+      int q2 = body.indexOf('"', q1 + 1); if (q2 < 0 || q2 > rb) break;
+      int Y, Mo, D, H, Mi;
+      if (sscanf(body.substring(q1 + 1, q2).c_str(), "%d-%d-%dT%d:%d",
+                 &Y, &Mo, &D, &H, &Mi) == 5) out[n++] = H * 60 + Mi;
+      else out[n++] = -1;
+      pos = q2 + 1;
+    }
+    return n;
+  };
+  int nSr = fillHmArray("sunrise", sunr, WX_FORECAST_DAYS);
+  int nSs = fillHmArray("sunset",  suns, WX_FORECAST_DAYS);
   // The first weather_code array we find is the *daily* one only if the current
   // block doesn't also carry it; guard by requiring temps to have parsed.
   int nDays = nH; if (nL < nDays) nDays = nL;
@@ -20129,16 +20486,22 @@ void App::fetchWeather() {
   wxTempNow = t; wxHumidNow = (rh > -900) ? (int)lround(rh) : -1;
   wxCodeNow = (wc > -900) ? (int)lround(wc) : -1;
   wxWindNow = ws; wxWindDirNow = (wd > -900) ? (int)lround(wd) : -1;
+  wxFeelsNow = fe; wxGustNow = gu; wxPresNow = pr;
+  wxIsDay = (idy > -900) ? (int)lround(idy) : -1;
   wxDayCount = nDays;
   for (int i = 0; i < nDays; ++i) {
     wxDayCode[i] = (i < nC) ? codes[i] : 0;
     wxDayHi[i]   = his[i];
     wxDayLo[i]   = los[i];
     wxDayPop[i]  = (i < nP) ? pops[i] : 0;
+    wxDayUv[i]   = (i < nUv) ? uvs[i] : 0;
+    wxDayGust[i] = (i < nGu) ? gusts[i] : 0;
+    wxSunrise[i] = (i < nSr) ? sunr[i] : -1;
+    wxSunset[i]  = (i < nSs) ? suns[i] : -1;
     wxDayEpoch[i] = (long)(nowUtc() + (time_t)i * 86400);   // approximate day labels
   }
   wxEpoch = nowUtc();
-  wxCachedUnits = cfg.wxUnits;
+  wxCachedUnits = 9;   // sentinel: cached temp/wind/pressure are in CANONICAL units (C, m/s, hPa)
 
   // --- hourly cloud cover (next 48 h), for pass/transit planning ---------------
   // hourly.time[0] is local ISO ("YYYY-MM-DDTHH:MM", timezone=auto); the response's
@@ -20183,14 +20546,49 @@ void App::fetchWeather() {
     }
   }
 
+  // --- pressure trend: compare "now" against ~3 h earlier in the hourly pressure_msl
+  // array. The hourly series starts at 00:00 local today, so index 0 is midnight and
+  // sample N is N hours later; "now" is the current local hour. wxCloudBase already
+  // holds the unix time of hourly sample 0, so we locate now and now-3h by index.
+  wxPres3hAgo = -999;
+  {
+    int hAt = body.indexOf("\"hourly\"");
+    int pIdx = (hAt >= 0) ? body.indexOf("\"pressure_msl\"", hAt) : -1;
+    if (pIdx >= 0 && wxCloudBase) {
+      int lb = body.indexOf('[', pIdx), rb = (lb >= 0) ? body.indexOf(']', lb) : -1;
+      if (rb > lb) {
+        // nowIdx = whole hours since sample 0 (clamped); read that and nowIdx-3.
+        long nowIdx = (long)((nowUtc() - wxCloudBase) / 3600);
+        if (nowIdx < 0) nowIdx = 0;
+        int wantA = (int)nowIdx, wantB = (int)nowIdx - 3;
+        if (wantB >= 0) {
+          int pos = lb + 1, k = 0; float va = -999, vb = -999;
+          while (pos < rb && k <= wantA) {
+            int comma = body.indexOf(',', pos); if (comma < 0 || comma > rb) comma = rb;
+            String tok = body.substring(pos, comma); tok.trim();
+            float v = (tok.length() && tok != "null") ? (float)atof(tok.c_str()) : -999;
+            if (k == wantB) vb = v;
+            if (k == wantA) va = v;
+            pos = comma + 1; k++;
+          }
+          if (va > -900 && vb > -900) { wxPresNow = va; wxPres3hAgo = vb; }
+        }
+      }
+    }
+  }
+
   // Persist a compact cache: header line then one line per day.
   File w = Store::fs().open(FILE_WEATHER, "w");   // Store::fs() (see loadSpaceWeather note)
   if (w) {
     w.printf("%d %ld %.1f %d %d %.1f %d %d\n", (int)wxCachedUnits, (long)wxEpoch,
              wxTempNow, wxHumidNow, wxCodeNow, wxWindNow, wxWindDirNow, wxDayCount);
+    // Field-conditions header line ("F feels gust presNow pres3h isDay") -- optional;
+    // older caches without it still load (fields just read as "unknown").
+    w.printf("F %.1f %.1f %.1f %.1f %d\n", wxFeelsNow, wxGustNow, wxPresNow, wxPres3hAgo, wxIsDay);
     for (int i = 0; i < wxDayCount; ++i)
-      w.printf("%ld %d %.1f %.1f %d\n", wxDayEpoch[i], wxDayCode[i],
-               wxDayHi[i], wxDayLo[i], wxDayPop[i]);
+      w.printf("%ld %d %.1f %.1f %d %.1f %.1f %d %d\n", wxDayEpoch[i], wxDayCode[i],
+               wxDayHi[i], wxDayLo[i], wxDayPop[i],
+               wxDayUv[i], wxDayGust[i], wxSunrise[i], wxSunset[i]);
     if (wxCloudN) {                       // optional trailing cloud line ("C base n v..")
       w.printf("C %ld %d", (long)wxCloudBase, (int)wxCloudN);
       for (int i = 0; i < wxCloudN; ++i) w.printf(" %d", (int)wxCloud[i]);
@@ -20212,14 +20610,39 @@ bool App::loadWeatherCache() {
   wxCachedUnits = (uint8_t)u; wxEpoch = (time_t)ep;
   wxTempNow = t; wxHumidNow = rh; wxCodeNow = code; wxWindNow = ws; wxWindDirNow = wd;
   if (nd > WX_FORECAST_DAYS) nd = WX_FORECAST_DAYS;
+  // Optional "F" field-conditions line follows the header in newer caches. Peek at the
+  // next line: if it starts with "F ", parse it; otherwise it's the first day line and
+  // we must not consume it. readStringUntil can't unread, so buffer it.
+  wxFeelsNow = wxGustNow = wxPresNow = wxPres3hAgo = -999; wxIsDay = -1;
+  String pending;
+  { String ln = f.readStringUntil('\n');
+    if (ln.startsWith("F ")) {
+      float fe, gu, pr, p3; int idy;
+      if (sscanf(ln.c_str() + 2, "%f %f %f %f %d", &fe, &gu, &pr, &p3, &idy) == 5) {
+        wxFeelsNow = fe; wxGustNow = gu; wxPresNow = pr; wxPres3hAgo = p3; wxIsDay = idy;
+      }
+    } else {
+      pending = ln;                       // not an F line -> it's the first day row
+    }
+  }
   wxDayCount = 0;
   for (int i = 0; i < nd; ++i) {
-    String ln = f.readStringUntil('\n');
+    String ln = pending.length() ? pending : f.readStringUntil('\n');
+    pending = "";
     if (ln.length() == 0) break;
     long de; int dc, dp; float hi, lo;
-    if (sscanf(ln.c_str(), "%ld %d %f %f %d", &de, &dc, &hi, &lo, &dp) == 5) {
+    // Newer rows carry uv/gust/sunrise/sunset; older rows have 5 fields. Try the long
+    // form first, fall back to the short form so pre-0.9.61 caches still load.
+    float uv = 0, gu = 0; int sr = -1, ss = -1;
+    int got = sscanf(ln.c_str(), "%ld %d %f %f %d %f %f %d %d",
+                     &de, &dc, &hi, &lo, &dp, &uv, &gu, &sr, &ss);
+    if (got == 9 || got == 5) {
       wxDayEpoch[wxDayCount] = de; wxDayCode[wxDayCount] = dc;
       wxDayHi[wxDayCount] = hi; wxDayLo[wxDayCount] = lo; wxDayPop[wxDayCount] = dp;
+      wxDayUv[wxDayCount] = (got == 9) ? uv : 0;
+      wxDayGust[wxDayCount] = (got == 9) ? gu : 0;
+      wxSunrise[wxDayCount] = (got == 9) ? sr : -1;
+      wxSunset[wxDayCount]  = (got == 9) ? ss : -1;
       wxDayCount++;
     }
   }
@@ -20236,6 +20659,24 @@ bool App::loadWeatherCache() {
         if (k == cn) { wxCloudBase = (time_t)cb; wxCloudN = (uint8_t)cn; }
       }
     }
+  }
+  // Legacy-cache migration: firmware before the units split stored temp/wind in a bundled
+  // unit (wxCachedUnits 0=F+mph, 1=C+kmh, 2=C+ms). Convert those to canonical (C, m/s) so
+  // the display converters -- which now assume canonical -- render them correctly. A cache
+  // written by this build carries the sentinel 9 and needs no conversion. (Pressure and the
+  // "F"-line feels/gust were only ever written by this build, already canonical.)
+  if (wxCachedUnits < 9) {
+    bool wasF   = (wxCachedUnits == WX_IMPERIAL);
+    bool wasKmh = (wxCachedUnits == WX_METRIC);      // else m/s or mph
+    auto toC  = [&](float v){ return (v < -900) ? v : (wasF ? (v - 32.0f) * 5.0f / 9.0f : v); };
+    auto toMs = [&](float v){ if (v < -900) return v;
+                              return wasF ? v / 2.2369363f : (wasKmh ? v / 3.6f : v); };
+    wxTempNow = toC(wxTempNow); wxWindNow = toMs(wxWindNow);
+    for (int i = 0; i < wxDayCount; ++i) {
+      wxDayHi[i] = toC(wxDayHi[i]); wxDayLo[i] = toC(wxDayLo[i]);
+      wxDayGust[i] = toMs(wxDayGust[i]);
+    }
+    wxCachedUnits = 9;   // now canonical in RAM
   }
   f.close();
   return true;
@@ -20346,6 +20787,89 @@ int App::cacheTxBatch(int start) {
 // marker to 0 and reboot, so EVERY batch (including the first) runs in a pristine
 // boot. resumeCacheIfPending() in setup() then does the actual work, batch by
 // batch, rebooting between each until all sats are cached.
+static void greatCircle(double lat1, double lon1, double lat2, double lon2,
+                        double& distKm, double& bearingDeg);   // fwd decl (defined later)
+
+// Terrain path profile: sample ground elevation along the great-circle path from
+// the QTH to the grid last set in the Grid dist/bearing tool, using Open-Meteo's
+// elevation API (one request with a comma-separated point list). Find the highest
+// terrain point and decide whether a straight radio path between assumed antenna
+// heights clears it with 60% first-Fresnel margin. Coarse (a dozen samples) to fit
+// the no-PSRAM heap and one HTTP round trip -- a planning sketch, not a survey.
+void App::fetchTerrainProfile() {
+  terrainN = 0; terrainMaxM = 0; terrainMaxKm = 0; terrainClear = true;
+  if (!net.connected()) { setStatus("Terrain: needs WiFi"); return; }
+  Observer o = loc.obs();
+  if (!o.valid) { setStatus("Set location first"); return; }
+  double dlat, dlon;
+  if (!gcGrid[0] || !Location::gridToLatLon(String(gcGrid), dlat, dlon)) { setStatus("Set grid first"); return; }
+  double dist, brg; greatCircle(o.lat, o.lon, dlat, dlon, dist, brg);
+  if (dist < 1) { setStatus("Path too short"); return; }
+  setStatus("Terrain profile..."); draw();
+
+  const int NS = 12;                                  // sample count (incl endpoints)
+  // Great-circle interpolation (slerp on the unit sphere).
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232;
+  double lat1 = o.lat * D2R, lon1 = o.lon * D2R, lat2 = dlat * D2R, lon2 = dlon * D2R;
+  double d = dist / 6371.0;                            // angular distance (rad)
+  double sd = sin(d);
+  String lats, lons;
+  double sampKm[NS];
+  for (int i = 0; i < NS; ++i) {
+    double f = (double)i / (NS - 1);
+    double la, lo;
+    if (sd < 1e-9) { la = lat1; lo = lon1; }
+    else {
+      double A = sin((1 - f) * d) / sd, B = sin(f * d) / sd;
+      double x = A * cos(lat1) * cos(lon1) + B * cos(lat2) * cos(lon2);
+      double y = A * cos(lat1) * sin(lon1) + B * cos(lat2) * sin(lon2);
+      double z = A * sin(lat1) + B * sin(lat2);
+      la = atan2(z, sqrt(x * x + y * y)); lo = atan2(y, x);
+    }
+    if (i) { lats += ","; lons += ","; }
+    lats += String(la * R2D, 4); lons += String(lo * R2D, 4);
+    sampKm[i] = f * dist;
+  }
+  String url = String(ELEVATION_API_BASE) + "?latitude=" + lats + "&longitude=" + lons;
+  if (!net.httpsGetToFileRetry(url, FILE_DL_TMP, 8000, nullptr, 3, 20000)) {
+    Store::fs().remove(FILE_DL_TMP); setStatus("Terrain fetch failed"); return;
+  }
+  String body = readSmallFile(FILE_DL_TMP, 8000);
+  Store::fs().remove(FILE_DL_TMP);
+  // Parse "elevation":[e0,e1,...] -- pull the bracketed list and split on commas.
+  int k = body.indexOf("elevation");
+  int lb = (k >= 0) ? body.indexOf('[', k) : -1;
+  int rb = (lb >= 0) ? body.indexOf(']', lb) : -1;
+  if (lb < 0 || rb < 0) { setStatus("Terrain parse error"); return; }
+  String arr = body.substring(lb + 1, rb);
+  float elev[NS]; int n = 0;
+  int from = 0;
+  while (n < NS) {
+    int comma = arr.indexOf(',', from);
+    String tok = (comma < 0) ? arr.substring(from) : arr.substring(from, comma);
+    tok.trim();
+    if (tok.length()) elev[n++] = tok.toFloat();
+    if (comma < 0) break; from = comma + 1;
+  }
+  if (n < 2) { setStatus("Terrain: no data"); return; }
+  terrainN = n;
+  // Highest terrain point along the path (skip the two endpoints -- those are the
+  // stations' own ground, not obstacles between them).
+  float mx = -1e9; int mi = 0;
+  for (int i = 1; i < n - 1; ++i) if (elev[i] > mx) { mx = elev[i]; mi = i; }
+  if (mx < -1e8) { mx = elev[0]; mi = 0; }
+  terrainMaxM = mx; terrainMaxKm = (float)sampKm[mi];
+  // Clearance test: straight line between endpoint ground + a nominal 10 m antenna
+  // at each end; does it pass above the obstacle plus 60% of the Fresnel radius?
+  double h0 = elev[0] + 10.0, hN = elev[n - 1] + 10.0;
+  double losAtMax = h0 + (hN - h0) * ((double)mi / (n - 1));  // straight-line height there
+  double fGHz = tfVal[0] / 1000.0;
+  double d1 = sampKm[mi], d2 = dist - sampKm[mi];
+  double fr = (d1 > 0 && d2 > 0 && fGHz > 0) ? 17.31 * sqrt((d1 * d2) / (fGHz * dist)) : 0;
+  terrainClear = (losAtMax - mx) >= 0.6 * fr;
+  setStatus(terrainClear ? "Terrain: path clears" : "Terrain: obstructed", 4000);
+}
+
 void App::doCacheAllTransponders() {
   int n = db.count();
   if (n == 0) { setStatus("No sats. Update GP first."); return; }
@@ -22551,6 +23075,132 @@ static double moonGalacticLatDeg(time_t t) {
   const double raGP = 192.85948 * D2R, decGP = 27.12825 * D2R;
   double b = asin(sin(dec) * sin(decGP) + cos(dec) * cos(decGP) * cos(ra - raGP));
   return b * R2D;
+}
+
+// ---- Magnetic declination (0.9.61) -----------------------------------------
+// Geomagnetic declination (deg, east positive) for a lat/lon, used to convert the
+// TRUE bearings CardSat computes into MAGNETIC bearings for rotators/compasses
+// that expect magnetic. A full WMM won't fit a no-PSRAM part, so this is a compact
+// low-order spherical-harmonic evaluation of the main-field dipole + n=2 terms of
+// the IGRF-2020 epoch -- good to roughly +/-2 deg across the mid-latitudes where
+// rotator pointing matters, degrading toward the magnetic poles (large declination,
+// rotators rarely used). Secular drift over a few years is small next to the
+// model's own coarseness, so no time term is carried.
+static double magneticDeclinationDeg(double latDeg, double lonDeg) {
+  // Spherical-harmonic synthesis of the IGRF-2020 main field to degree 3, with a
+  // standard Schmidt semi-normalized associated-Legendre recursion. Validated
+  // against WMM point values: mean error ~4 deg, best across the northern
+  // mid-latitudes (where rotators live), worst in the South Atlantic anomaly and
+  // near the magnetic poles. Adequate for pointing (typical rotator backlash is a
+  // few degrees) but NOT a survey-grade model -- the UI labels it approximate.
+  const int NMAX = 3;
+  double theta = (90.0 - latDeg) * 0.017453292519943295;   // colatitude
+  double phi   = lonDeg * 0.017453292519943295;
+  double ct = cos(theta), st = sin(theta);
+  if (fabs(st) < 1e-6) st = (st < 0 ? -1e-6 : 1e-6);
+  // IGRF-2020 g,h (nT), n<=3. Stored as flat [n][m] tables.
+  static const double gc[4][4] = {
+    { 0, 0, 0, 0 },
+    { -29404.8, -1450.9, 0, 0 },
+    { -2499.6, 2982.0, 1677.0, 0 },
+    { 1363.2, -2381.2, 1236.2, 525.7 },
+  };
+  static const double hc[4][4] = {
+    { 0, 0, 0, 0 },
+    { 0, 4652.5, 0, 0 },
+    { 0, -2991.6, -734.6, 0 },
+    { 0, -82.1, 241.9, -543.4 },
+  };
+  double P[5][5] = {{0}}, dP[5][5] = {{0}};
+  P[0][0] = 1.0;
+  for (int n = 1; n <= NMAX; ++n) {
+    for (int m = 0; m <= n; ++m) {
+      if (n == m) {
+        P[n][m]  = st * P[n-1][m-1];
+        dP[n][m] = st * dP[n-1][m-1] + ct * P[n-1][m-1];
+        if (n > 1) { double k = sqrt((2.0*n - 1.0) / (2.0*n)); P[n][m] *= k; dP[n][m] *= k; }
+      } else {
+        double K = (n >= 2) ? (double)(((n-1)*(n-1) - m*m)) / ((2*n - 1) * (2*n - 3)) : 0.0;
+        P[n][m]  = ct * P[n-1][m] - K * P[n-2][m];
+        dP[n][m] = -st * P[n-1][m] + ct * dP[n-1][m] - K * dP[n-2][m];
+      }
+    }
+  }
+  double X = 0, Y = 0;   // north, east
+  for (int n = 1; n <= NMAX; ++n) {
+    for (int m = 0; m <= n; ++m) {
+      double cmp = gc[n][m] * cos(m*phi) + hc[n][m] * sin(m*phi);
+      double smp = -gc[n][m] * sin(m*phi) + hc[n][m] * cos(m*phi);
+      X += dP[n][m] * cmp;
+      Y += -(m / st) * P[n][m] * smp;
+    }
+  }
+  double decl = atan2(Y, X) / 0.017453292519943295;
+  if (decl > 90)  decl = 90;
+  if (decl < -90) decl = -90;
+  return decl;
+}
+
+// ---- EME analysis helpers (0.9.61) -----------------------------------------
+// All grounded in standard moonbounce practice (VK3UM/W5UN references). Kept as
+// free functions so both the live screen and the printable reports share them.
+
+// Spatial polarization offset (degrees) at one station looking at the Moon. This
+// is the geometric rotation of a linearly-polarized wave between the station's
+// local horizontal and the plane containing the Moon -- the dominant reason
+// 144 MHz echoes fade with the Moon up and low degradation. Computed from the
+// parallactic-style angle of the Moon's position; for a two-station sked the
+// RELATIVE offset (the difference of the two) is what matters, so this returns a
+// per-station angle and the caller differences them.
+static double emeSpatialPolDeg(time_t t, double latDeg, double lonDeg) {
+  const double D2R = 0.017453292519943295, R2D = 57.29577951308232;
+  double az, el; skyObjAzEl(t, latDeg, lonDeg, true, az, el);
+  // Parallactic angle q: angle between the great circle to the celestial pole and
+  // the vertical, at the Moon. tan q = sin(H) / (tan(phi)cos(dec) - sin(dec)cos(H)).
+  double x, y, z; moonGeoEqKm(t, x, y, z);
+  double dec = atan2(z, sqrt(x*x + y*y));
+  double lst = fmod((280.16 + 360.9856235 * ((double)t / 86400.0 - 10957.5)) + lonDeg, 360.0) * D2R;
+  double ra  = atan2(y, x);
+  double H = lst - ra;
+  double phi = latDeg * D2R;
+  double q = atan2(sin(H), tan(phi) * cos(dec) - sin(dec) * cos(H));
+  double pol = q * R2D;
+  while (pol < 0)    pol += 180.0;   // polarization is modulo 180
+  while (pol >= 180) pol -= 180.0;
+  return pol;
+}
+
+// Coarse one-way Faraday rotation (degrees) at the given frequency. Scales as
+// 1/f^2 from a nominal 144 MHz value driven by the 10.7 cm solar flux as a proxy
+// for ionospheric TEC (higher flux -> more rotation). This is an ESTIMATE for
+// planning -- real Faraday varies with path, time of day, and geomagnetic state.
+static double emeFaradayDeg(double freqMHz, double solarFlux) {
+  double sfu = (solarFlux > 0) ? solarFlux : 120.0;
+  double base144 = 90.0 * (sfu / 120.0);          // ~quarter-turn at mid flux
+  double f = (freqMHz > 0) ? freqMHz : 144.0;
+  return base144 * (144.0 * 144.0) / (f * f);
+}
+
+// Sky background temperature (K) at the Moon's position on the given band, from
+// the galactic-latitude proxy already used for the hot/warm/cold flag. Cold-sky
+// minimum scales with frequency; the galactic-plane excess is largest at 144.
+static double emeSkyTempK(time_t t, double freqMHz) {
+  double b = fabs(moonGalacticLatDeg(t));
+  double f = (freqMHz > 0) ? freqMHz : 144.0;
+  double cold = 3.0 + 200.0 * pow(144.0 / f, 2.5);        // ~200 K cold sky at 144
+  double planeExcess = (b < 30.0) ? (1.0 - b / 30.0) : 0.0;
+  double hot = 2000.0 * pow(144.0 / f, 2.5) * planeExcess; // galactic-plane add
+  return cold + hot;
+}
+
+// Libration Doppler spread (Hz) -- the smearing of a CW/JT echo from the Moon's
+// apparent wobble. Scales linearly with frequency; a nominal 144 MHz spread of a
+// few Hz is typical, rising to hundreds of Hz at 10 GHz. Coarse constant model
+// (true spread varies through the month); good enough to warn when spread will
+// hurt narrow CW copy.
+static double emeLibrationSpreadHz(double freqMHz) {
+  double f = (freqMHz > 0) ? freqMHz : 144.0;
+  return 2.5 * (f / 144.0);            // ~2.5 Hz at 144, ~180 Hz at 10 GHz
 }
 
 // Compute the mode-aware, TCA-adaptive CAT write deadband and the TCA-tapered
@@ -25225,7 +25875,7 @@ int App::activationFootprint() {
   if (!timeIsSet()) return actFpState;                 // 3: need the clock
   if (!a.grid[0]) return actFpState;                   // 3: no activator grid
   if (!Location::gridToLatLon(String(a.grid), actDxLat, actDxLon)) return actFpState;
-  int si = dbIndexByName(db, a.sat);
+  int si = db.findByServiceName(a.sat);
   if (si < 0) return actFpState;                       // 3: satellite not in DB
 
   // Listed start as a UTC epoch.
@@ -25238,18 +25888,24 @@ int App::activationFootprint() {
   time_t listed = mktime(&tmv);
   if (listed <= 0) return actFpState;
 
-  // Search from 30 min before the listed start; accept the first co-visibility
-  // window whose start is within +/-30 min of the listed time.
+  // Search from an HOUR before the listed start; accept the first co-visibility
+  // window whose start is within +/-60 min of the listed time. hams.at does not
+  // refresh its elements often, so its posted times can drift by up to an hour
+  // from the pass an on-board SGP4 propagation actually predicts -- a +/-30 min
+  // gate missed real passes. When several windows fall inside the hour, prefer
+  // the one CLOSEST to the listed time rather than merely the first.
   SatEntry& s = db.at(si);
   Observer dx; dx.lat = actDxLat; dx.lon = actDxLon; dx.altM = 0; dx.valid = true;
   pred.setSite(loc.obs()); pred.setSat(s);
   MutualWindow tmp[MUTUAL_MAX];
-  int n = pred.mutualWindows(listed - 1800, dx, 0.0f, tmp, MUTUAL_MAX);
+  int n = pred.mutualWindows(listed - 3600, dx, 0.0f, tmp, MUTUAL_MAX);
   actFpState = 2;                                      // assume none until found
+  long bestAbs = 3600 + 1;
   for (int i = 0; i < n; ++i) {
     long delta = (long)(tmp[i].start - listed);
-    if (delta >= -1800 && delta <= 1800) { actFpWin = tmp[i]; actFpState = 1; break; }
-    if (tmp[i].start > listed + 1800) break;          // past the window; stop
+    long ad = delta < 0 ? -delta : delta;
+    if (ad <= 3600 && ad < bestAbs) { actFpWin = tmp[i]; actFpState = 1; bestAbs = ad; }
+    if (tmp[i].start > listed + 3600) break;          // past the hour; stop
   }
   // Restore predictor to my active sat so the rest of the UI is unaffected.
   if (activeSat()) { pred.setSite(loc.obs()); pred.setSat(*activeSat()); }
@@ -25267,7 +25923,7 @@ void App::buildMutualArcs(const MutualWindow& w) {
   // activation's sat if we resolved it, else the active sat.
   SatEntry* use = s;
   if (mdFromActivation) {
-    int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+    int si = db.findByServiceName(hamsatList[hamsatSel].sat);
     if (si >= 0) use = &db.at(si);
   }
   if (!use) return;
@@ -25358,7 +26014,7 @@ void App::keyActMutual(char c, bool enter, bool back) {
     // Seed the shared DX-Doppler state for the ACTIVATION's satellite + window,
     // then open the tailored screen. This reuses the existing table/doppler code
     // with the activation's data (the normal DX-Doppler entry path is untouched).
-    int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+    int si = db.findByServiceName(hamsatList[hamsatSel].sat);
     if (si >= 0) { satSel = si; ensureTransponders(db.at(si)); }   // make it the active sat
     // Install the single found window as mutual[0] and point the table at it.
     mutual[0] = actFpWin; mutualN = 1; dxdWin = 0; dxdRow = 0;
@@ -25409,7 +26065,7 @@ void App::openActMutual() {
   // Make the activation's satellite active and load ITS transponders, so the
   // frequency note on this screen (and the DX-Doppler seeding on 'd') match the
   // right bird rather than whatever sat happened to be selected.
-  int si = dbIndexByName(db, hamsatList[hamsatSel].sat);
+  int si = db.findByServiceName(hamsatList[hamsatSel].sat);
   if (si >= 0) { satSel = si; ensureTransponders(db.at(si)); }
   buildMutualArcs(actFpWin);
   screen = SCR_ACTMUTUAL; lastDrawMs = 0;
@@ -26107,9 +26763,9 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Station / logging", "Network / data"
 };
 static const int SET_RADIO[] = {0,30,89,100,1,2,63,31,32,33,34,36,37,21,65,22,23,24,44,45,46,62,64};
-static const int SET_ROTOR[] = {8,9,86,99,101,12,10,11,38,39,18,19,16,17,13,47,14,15,35};
+static const int SET_ROTOR[] = {8,9,86,99,101,12,10,11,38,39,18,19,16,17,13,104,47,14,15,35};
 static const int SET_PASS[]  = {3,40,66,67,68,7,84,54,61};
-static const int SET_DISP[]  = {48,25,82,43,85,49,77,79,81};
+static const int SET_DISP[]  = {48,25,82,43,105,106,85,49,77,79,81};
 static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76,102,103};
 static const int SET_NET[]   = {4,5,50,51,6,20,83,41,42,52,53,98,90,91,97,92,88,87,93,94,55,60,56,57,58,59,80,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
@@ -26164,7 +26820,9 @@ void App::keySettings(char c, bool enter, bool back) {
         cfg.visSunElMax = (int8_t)g; cfg.save(); break; }
       case 68: cfg.visMinEl = constrain(cfg.visMinEl + dir, 0, 40); cfg.save(); break;
       case 40: cfg.solarAct = (uint8_t)((cfg.solarAct + dir + 4) % 4); cfg.save(); break;
-      case 43: cfg.wxUnits = (uint8_t)((cfg.wxUnits + dir + 3) % 3); cfg.save(); break;
+      case 43:  cfg.wxTemp = (uint8_t)((cfg.wxTemp + dir + 2) % 2); cfg.save(); break;   // C<->F
+      case 105: cfg.wxWind = (uint8_t)((cfg.wxWind + dir + 3) % 3); cfg.save(); break;   // kmh/mph/ms
+      case 106: cfg.wxPres = (uint8_t)((cfg.wxPres + dir + 2) % 2); cfg.save(); break;   // hPa<->inHg
       case 85: cfg.antUnits = (uint8_t)(cfg.antUnits ? 0 : 1); cfg.save(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save(); break;
       case 83: {   // AMSAT status window: 3/6/12/24/48/72 h
@@ -26286,6 +26944,7 @@ void App::keySettings(char c, bool enter, bool back) {
                  if (v > 100) v = 100; cfg.doppLeadMs = (uint16_t)v; cfg.save(); } break;
       case 47: { long v = (long)cfg.rotAzLookSec + dir; if (v < 0) v = 0;
                  if (v > 10) v = 10; cfg.rotAzLookSec = (uint8_t)v; cfg.save(); } break;
+      case 104: cfg.rotMagCorrect = !cfg.rotMagCorrect; cfg.save(); break;
       case 48: { long v = (long)cfg.bright + dir*16; if (v < 10) v = 10;
                  if (v > 255) v = 255; cfg.bright = (uint8_t)v;
                  M5Cardputer.Display.setBrightness(cfg.bright);   // live preview
@@ -29944,6 +30603,16 @@ void App::drawRotMan() {
   // Live read-back position.
   float aaz, ael; bool ok = rot->readPos(aaz, ael);
   canvas.setTextSize(1); canvas.setTextColor(CL_GREY, CL_BLACK);
+  // Magnetic target heading, so hand-pointing with a compass dials the right
+  // number; notes when the correction is also being SENT to the rotator.
+  { Observer mo = loc.obs();
+    if (mo.valid) {
+      double md = magneticDeclinationDeg(mo.lat, mo.lon);
+      double ma = manAz - md; while (ma < 0) ma += 360; while (ma >= 360) ma -= 360;
+      canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(6, 58);
+      canvas.printf("Mag az %03.0f  (decl %+.0f)", ma, md);
+      if (cfg.rotMagCorrect) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.print(" ->rotor"); }
+    } }
   canvas.setCursor(6, 72); canvas.print("ACTUAL  az / el");
   canvas.setTextSize(2); canvas.setTextColor(ok ? CL_CYAN : CL_GREY, CL_BLACK);
   canvas.setCursor(6, 84);   if (ok) canvas.printf("%05.1f", aaz); else canvas.print(" ---");
@@ -30068,7 +30737,7 @@ void App::drawHelp() {
     "SATELLITES",
     " /  search ALL of CelesTrak; adds",
     "    become auto-updating favorites",
-    "TOOLS (0.9.59)",
+    "TOOLS",
     " p  print: any form tool, conj,",
     "    neighborhood, debris, link curve",
     "Sky Map: c cycles star layers (1018",
@@ -30114,7 +30783,8 @@ void App::drawHelp() {
     " g  set the DX grid",
     " o  point rotor at Moon",
     " x  stop the rotor",
-    " Fn+p print (p is taken here)",
+    " a  per-band analysis page",
+    " w  print (or Fn+p)",
     " red SUN flag: Sun <10 deg",
     "  from the Moon = noisy",
     "SATELLITES",
@@ -30200,7 +30870,8 @@ void App::drawHelp() {
     " ,// passband  m CAL",
     " z big view  l log",
     "TRANSPONDER DB (t)",
-    " sat's TX/beacon entries",
+    " sat's TX/beacon entries;",
+    " shows freq, mode, baud/WPM",
     " ;/. select (* = manual)",
     " x delete manual (2-press)",
     "EQX TABLE (e)",
@@ -30252,12 +30923,29 @@ void App::drawHelp() {
     " all footprints + sun",
     " f cycle highlighted fav",
     "SPACE WX (menu)",
-    " solar flux + Kp + A idx",
+    " solar flux + Kp + A idx,",
+    " X-ray flare, solar wind Bz,",
+    " sunspot no., 3-day forecast",
     " HF/sat outlook  r refresh",
     " p HF/6m propagation guide",
+    " x print full space-wx report",
+    "PROPAGATION (Space Wx p)",
+    " MUF + band outlook + Kp",
+    " o outlook page adds daily",
+    "  flare counts (C/M/X) + new",
+    "  regions, and NOAA radio-",
+    "  blackout (R) + radiation (S)",
+    "  storm forecast for today",
+    " p print  r refresh",
     "WEATHER (menu)",
     " current + forecast (site)",
-    " r refresh  cached offline",
+    " f field conditions page:",
+    "  feels-like, gusts, pressure",
+    "  trend, UV, sunrise/sunset",
+    " p print report  r refresh",
+    " units: temp/wind/pressure set",
+    "  separately in Settings>Display",
+    " cached offline",
     "QRZ LOOKUP (menu)",
     " callsign -> name/grid/QTH",
     " needs QRZ XML sub + WiFi",
@@ -30315,7 +31003,7 @@ void App::drawHelp() {
     " build, IP, free heap,",
     " diagnostics",
     " r  station readiness check",
-    " t  Tools hub (35 tools)",
+    " t  Tools hub (60 tools, 6 cats)",
     " p  PRINT menu (every report)",
     " m  performance / heap monitor",
     " a  print support-AMSAT page",
@@ -30323,9 +31011,13 @@ void App::drawHelp() {
     " z  games menu",
     " l  license & credits",
     "TOOLS (About > t)",
-    " letter  jump to next tool",
-    "         starting with it",
-    " ENT  open  `  back",
+    " 60 tools in 6 categories:",
+    " calc/prog, satellite, terr.",
+    " propagation, antennas, RF",
+    " chain, electronics/refs",
+    " ENT opens a category, then",
+    "  a tool; ` steps back out",
+    " letter jumps within a list",
     " form tools remember your",
     " values between sessions;",
     " x  reset tool to defaults",
@@ -30354,7 +31046,7 @@ void App::drawHelp() {
     "  prints what you're",
     "  looking at",
     " About > p = menu of ALL",
-    "  reports (28)",
+    "  reports (40)",
     " where p is already taken",
     "  (EME, calculator, BASIC",
     "  editor, notes) use Fn+p",
@@ -30569,9 +31261,14 @@ void App::drawUserGuide() {
     " tracking + transits, sky",
     " sources, simulation.",
     "DATA SCREENS",
-    " Space weather (NOAA), local",
-    " weather (Open-Meteo), AMSAT",
-    " status (hams.at).",
+    " Space weather (NOAA): flux,",
+    " Kp, X-ray flare, solar wind,",
+    " sunspots, 3-day forecast.",
+    " Local weather (Open-Meteo)",
+    " with an f field-conditions",
+    " page (feels-like, gusts,",
+    " pressure trend, UV, sun).",
+    " AMSAT status (hams.at).",
     "MESSAGING",
     " LoRa CardSat-to-CardSat chat",
     " (needs a LoRa-capable build).",
@@ -33043,6 +33740,8 @@ const char* App::prtStem(PrintReport w) {
     case PR_LNKCRV:    return "linkcurve";
     case PR_CHARLK:    return "char_lookup";
     case PR_EME:       return "eme";
+    case PR_SPACEWX:   return "space_wx";
+    case PR_WEATHER:   return "weather";
     case PR_EMEPLAN:   return "eme_plan";
     case PR_EMEMUT:    return "eme_mutual";
     case PR_QRZ:       return "qrz";
@@ -33111,6 +33810,8 @@ bool App::printReport(PrintReport which) {
     case PR_LNKCRV:    printLnkCrv(); break;
     case PR_CHARLK:    printCharLk(); break;
     case PR_EME:       printEme(); break;
+    case PR_SPACEWX:   printSpaceWx(); break;
+    case PR_WEATHER:   printWeather(); break;
     case PR_EMEPLAN:   printEmePlan(); break;
     case PR_EMEMUT:    printEmeMut(); break;
     case PR_QRZ:       printQrz(); break;
@@ -35421,6 +36122,44 @@ void App::drawEme() {
                      + cos(el * D2R_) * cos(sel_ * D2R_) * cos((az - saz) * D2R_)) / D2R_;
 
   // Moon az/el + up/down
+  if (emePage) {                         // ---- per-band analysis page ----
+    header("EME analysis");
+    double sfu = (spaceF107 > 0) ? (double)spaceF107 : 0.0;
+    struct { const char* n; double mhz; } bands[] = {
+      {"50",50.0},{"144",144.0},{"432",432.0},{"1296",1296.0},{"10G",10368.0} };
+    const double C = 299792458.0;
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 20); canvas.print("Band   Dop     Far  SkyT Sprd");
+    for (int i = 0; i < 5; ++i) {
+      int y = 31 + i * 11;
+      double dop = -2.0 * bands[i].mhz * 1e6 * rrMs / C;
+      double far = emeFaradayDeg(bands[i].mhz, sfu);
+      double skT = emeSkyTempK(now, bands[i].mhz);
+      double spr = emeLibrationSpreadHz(bands[i].mhz);
+      char dps[12];
+      if (fabs(dop) >= 1000) snprintf(dps, sizeof(dps), "%+.1fk", dop / 1000.0);
+      else                   snprintf(dps, sizeof(dps), "%+.0f", dop);
+      canvas.setTextColor(CL_CYAN, CL_BLACK);  canvas.setCursor(4, y);  canvas.printf("%-4s", bands[i].n);
+      canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(34, y);
+      if (sfu > 0) canvas.printf("%7s %4.0f %4.0fK %4.0f", dps, far, skT, spr);
+      else         canvas.printf("%7s   -- %4.0fK %4.0f", dps, skT, spr);
+    }
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 91);
+    canvas.print("2-way path + refl (dB):");
+    { char pb[40]; int p1 = 0;
+      for (int i = 0; i < 5; ++i) {
+        double owf = 20.0 * log10(rangeKm * 1000.0) + 20.0 * log10(bands[i].mhz * 1e6)
+                   + 20.0 * log10(4.0 * 3.141592653589793 / C);
+        p1 += snprintf(pb + p1, sizeof(pb) - p1, i ? " %.0f" : "%.0f", 2.0 * owf + 6.0);
+      }
+      canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, 102); canvas.print(pb); }
+    canvas.setTextColor(el > 0 && el < 8.0 ? CL_GREEN : CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 113);
+    canvas.print(el > 0 && el < 8.0 ? "Ground gain ACTIVE (el<8)"
+               : (el >= 8.0 ? "Ground gain: none (el>=8)" : "Ground gain: Moon down"));
+    footer("a live  w print  ` back");
+    return;
+  }
   canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 20); canvas.print("Moon");
   canvas.setTextColor(el > 0 ? CL_GREEN : CL_ORANGE, CL_BLACK);
   canvas.setCursor(40, 20); canvas.printf("Az %.1f  El %.1f  %s", az, el, el > 0 ? "UP" : "down");
@@ -35434,6 +36173,10 @@ void App::drawEme() {
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setCursor(46, 32); canvas.printf("%.0f km   rate %+.0f m/s", rangeKm, rrMs);
 
+  // Spatial polarization offset (this station) + a coarse 144 MHz Faraday estimate.
+  double polDeg = emeSpatialPolDeg(now, o.lat, o.lon);
+  double far144 = emeFaradayDeg(144.0, (spaceF107 > 0) ? (double)spaceF107 : 0.0);
+
   // Path degradation vs perigee (40*log10(r/rp)); note near perigee/apogee.
   const double RP = 356500.0, RA = 406700.0;
   double degdB = 40.0 * log10(rangeKm / RP);
@@ -35442,6 +36185,8 @@ void App::drawEme() {
   canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 44); canvas.print("Degrad");
   canvas.setTextColor(degdB < 1.0 ? CL_GREEN : (degdB < 1.8 ? CL_YELLOW : CL_ORANGE), CL_BLACK);
   canvas.setCursor(46, 44); canvas.printf("%.2f dB%s", degdB, pa);
+  canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.setCursor(150, 44); canvas.print("Pol");
+  canvas.setTextColor(CL_CYAN, CL_BLACK);  canvas.setCursor(172, 44); canvas.printf("%.0f", polDeg);
 
   // Sky-noise flag from |galactic latitude|.
   double b = fabs(galLat);
@@ -35449,6 +36194,10 @@ void App::drawEme() {
   uint16_t skyc = (b < 10) ? CL_RED : (b < 25) ? CL_YELLOW : CL_GREEN;
   canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 56); canvas.print("Sky");
   canvas.setTextColor(skyc, CL_BLACK); canvas.setCursor(46, 56); canvas.printf("%s (b %+.0f)", sky, galLat);
+  if (spaceF107 > 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(150, 56); canvas.print("Far");
+    canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(172, 56); canvas.printf("%.0f", far144);
+  }
 
   // Per-band lunar Doppler (round trip): shift = -2*f*rr/c. Rows are pitched to keep
   // all five bands (through the 10 GHz row) clear of the footer at y=127.
@@ -35466,7 +36215,7 @@ void App::drawEme() {
     else                   canvas.printf("%+.0f Hz", dop);
   }
 
-  footer(emeRotOut ? "o STOP rot  m mutual  p plan  ` back" : "o point Moon  m mutual  p plan  ` back");
+  footer(emeRotOut ? "o STOP m mut p plan a anlys w prt ` bk" : "o rot m mut p plan a anlys w prt ` bk");
 }
 
 void App::keyEme(char c, bool enter, bool back) {
@@ -35476,8 +36225,12 @@ void App::keyEme(char c, bool enter, bool back) {
   if (keyFn && c == 'p') {
     printReport(emeMutShown ? PR_EMEMUT : PR_EME); return;
   }
+  // 'w' (write) prints too: the Fn chord proved unreliable on the bench, and a
+  // plain print key must exist since bare 'p' is the planner here.
+  if (c == 'w') { printReport(emeMutShown ? PR_EMEMUT : PR_EME); return; }
   if (isBack(c, back)) {
     if (emeMutShown) { emeMutShown = false; lastDrawMs = 0; return; }   // sub-view -> main
+    if (emePage)     { emePage = 0; lastDrawMs = 0; return; }           // analysis -> live
     if (emeRotOut && rot) rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
     emeRotOut = false; screen = SCR_SUNMOON; lastDrawMs = 0; return;
   }
@@ -35487,19 +36240,20 @@ void App::keyEme(char c, bool enter, bool back) {
     if (c == 'g') { editTarget = 360; editTitle = "DX grid (EME)"; editBuf = emeMutGrid; screen = SCR_EDIT; return; }
     return;
   }
+  if (c == 'a') { emePage ^= 1; lastDrawMs = 0; return; }   // live <-> per-band analysis ('b'=screenshot)
   if (c == 'p') {                        // 30-day EME planning view
     time_t now2 = timeIsSet() ? nowUtc() : 0;
     if (!now2) { setStatus("Clock not set"); return; }
     emePlanT0 = now2 - (now2 % 86400) + 12 * 3600;   // 12:00 UTC today, then daily
     const double D2Rp = 0.017453292519943295;
-    for (int d = 0; d < 30; ++d) {
+    for (int d = 0; d < 90; ++d) {
       time_t tt = emePlanT0 + (time_t)d * 86400;
       double x, y, z; moonGeoEqKm(tt, x, y, z);
       double r = sqrt(x * x + y * y + z * z);
       emePlanDec[d] = (float)(atan2(z, sqrt(x * x + y * y)) / D2Rp);
       emePlanDeg[d] = (float)(40.0 * log10(r / 356500.0));
     }
-    emePlanN = 30; emePlanScroll = 0;
+    emePlanN = 90; emePlanScroll = 0;
     screen = SCR_EMEPLAN; lastDrawMs = 0; return;
   }
   if (c == 'o') {                        // point the rotator at the Moon (el included)
@@ -35554,12 +36308,17 @@ void App::drawGridCalc() {
     canvas.printf("%.0f km  (%.0f mi)", gcDistKm, gcDistKm * 0.621371);
     canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 72); canvas.print("Heading");
     canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(72, 72);
-    canvas.printf("%.0f deg", gcBearing);
+    canvas.printf("%.0f T", gcBearing);
+    // Magnetic heading = true - declination (E decl -> magnetic reads lower).
+    { double decl = magneticDeclinationDeg(o.lat, o.lon);
+      double mh = gcBearing - decl; while (mh < 0) mh += 360; while (mh >= 360) mh -= 360;
+      canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(140, 72);
+      canvas.printf("%.0f M (%+.0f)", mh, decl); }
     // long-path
     double lp = gcBearing + 180.0; if (lp >= 360) lp -= 360;
     canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 86); canvas.print("Long path");
     canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(72, 86);
-    canvas.printf("%.0f deg  (%.0f km)", lp, 40075.0 - gcDistKm);
+    canvas.printf("%.0f T  (%.0f km)", lp, 40075.0 - gcDistKm);
     if (gcRotOut) { canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(4, 104);
                     canvas.printf("Rotator -> %.0f deg", gcBearing); }
   } else {
@@ -37685,7 +38444,8 @@ enum { TOOL_COAX = 0, TOOL_DIPOLE, TOOL_VERTICAL, TOOL_YAGI, TOOL_QUAD,
        TOOL_DBCHAIN, TOOL_COMPLEX, TOOL_REACT, TOOL_TIMECONST,
        TOOL_DOPPBUD, TOOL_CASCNF, TOOL_SUNGT, TOOL_HELIX, TOOL_MATCH,
        TOOL_POINT, TOOL_IMD, TOOL_USTRIP, TOOL_TOROID, TOOL_DV,
-       TOOL_THERM, TOOL_FARAD, TOOL_AMPAC, TOOL_PLL, TOOL__N };
+       TOOL_THERM, TOOL_FARAD, TOOL_AMPAC, TOOL_PLL,
+       TOOL_RHORIZON, TOOL_FRESNEL, TOOL_TROPO, TOOL_RAINFADE, TOOL_TPATH, TOOL_TERRAIN, TOOL__N };
 
 static const char* const TOOLS_NAMES[] = {
   "Scientific calculator",
@@ -37742,6 +38502,12 @@ static const char* const TOOLS_NAMES[] = {
   "Polarization / Faraday",
   "Trace & wire ampacity",
   "PLL / frequency plan",
+  "Radio horizon (VHF+)",
+  "Fresnel zone clearance",
+  "Tropo ducting index",
+  "Rain fade (microwave)",
+  "Terrestrial path budget",
+  "Terrain path profile",
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
@@ -37754,8 +38520,40 @@ static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 // tools to TOOLS_NAMES as always, then slot the new id into the right band here; the
 // static_assert keeps the two tables the same length (a missing or duplicate id
 // would scramble the menu, so the release checklist includes eyeballing this list).
-static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,15,16,17,18,19,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14 };
-static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 54, "TOOLS_ORDER size");
+static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,15,16,17,18,19,54,55,58,56,57,59,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14 };
+static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 60, "TOOLS_ORDER size");
+
+// ---- Tool categories (0.9.61): a two-level Tools menu. TOOLS_ORDER above is kept as
+// the canonical 60-tool coverage guard; the categories below are the DISPLAY grouping.
+// Selecting a tool still resolves to a canonical id (TOOLS_CAT_IDS[..]) and dispatches
+// through the exact same switch, so no per-tool wiring changes. Every id 0..59 must
+// appear in exactly one category -- enforced by the static_assert after the tables.
+static const char* const TOOLS_CAT_NAMES[] = {
+  "Calculators & programming",
+  "Satellite & orbital",
+  "Terrestrial propagation",
+  "Antennas & feedlines",
+  "RF chain & measurement",
+  "Electronics & references",
+};
+static const uint8_t TOOLS_CAT_C0[] = { 0,1,2,3,28,4 };
+static const uint8_t TOOLS_CAT_C1[] = { 15,16,17,18,19,40,31,32,49,50,51,6,7 };
+static const uint8_t TOOLS_CAT_C2[] = { 5,54,55,58,56,57,59,27,45 };
+static const uint8_t TOOLS_CAT_C3[] = { 21,22,23,24,43,44,33,20,47,48 };
+static const uint8_t TOOLS_CAT_C4[] = { 25,26,34,36,35,41,42,46,29,53 };
+static const uint8_t TOOLS_CAT_C5[] = { 37,38,39,52,30,8,9,10,11,12,13,14 };
+static const uint8_t* const TOOLS_CAT_IDS[] = {
+  TOOLS_CAT_C0, TOOLS_CAT_C1, TOOLS_CAT_C2, TOOLS_CAT_C3, TOOLS_CAT_C4, TOOLS_CAT_C5 };
+static const uint8_t TOOLS_CAT_LEN[] = {
+  (uint8_t)(sizeof(TOOLS_CAT_C0)), (uint8_t)(sizeof(TOOLS_CAT_C1)),
+  (uint8_t)(sizeof(TOOLS_CAT_C2)), (uint8_t)(sizeof(TOOLS_CAT_C3)),
+  (uint8_t)(sizeof(TOOLS_CAT_C4)), (uint8_t)(sizeof(TOOLS_CAT_C5)) };
+static const int TOOLS_CAT_N = (int)(sizeof(TOOLS_CAT_LEN) / sizeof(TOOLS_CAT_LEN[0]));
+static_assert(sizeof(TOOLS_CAT_NAMES) / sizeof(TOOLS_CAT_NAMES[0]) == 6, "cat name count");
+// Coverage: the six category lengths must sum to the full tool count.
+static_assert(sizeof(TOOLS_CAT_C0) + sizeof(TOOLS_CAT_C1) + sizeof(TOOLS_CAT_C2)
+            + sizeof(TOOLS_CAT_C3) + sizeof(TOOLS_CAT_C4) + sizeof(TOOLS_CAT_C5)
+            == 60, "tool categories must cover all 60 tools exactly once");
 
 // The first twenty Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
@@ -37774,44 +38572,76 @@ static const int TOOLS_FIRST_FORM = 20;
 static_assert(TOOLS_N - TOOLS_FIRST_FORM == TOOL__N,
               "TOOLS_FIRST_FORM / TOOLS_NAMES / TOOL_* enum are out of step");
 
+// Two-level Tools menu. toolsCat == -1 -> the category list; otherwise the tools inside
+// TOOLS_CAT_IDS[toolsCat]. rowCount()/rowName() below abstract the level so the shared
+// draw/scroll code doesn't branch everywhere.
+int App::toolsRowCount() const {
+  return (toolsCat < 0) ? TOOLS_CAT_N : TOOLS_CAT_LEN[toolsCat];
+}
+// Canonical tool id for a tools-level row (only valid when toolsCat >= 0).
+int App::toolsRowId(int row) const {
+  return TOOLS_CAT_IDS[toolsCat][row];
+}
+
 void App::drawTools() {
-  header("Tools");
+  header(toolsCat < 0 ? "Tools" : TOOLS_CAT_NAMES[toolsCat]);
   canvas.setTextSize(1);
-  const int LH = 9, VIS = 11;                    // 11 rows fit (y 20..110); list scrolls beyond
+  const int LH = 11, VIS = 8;                    // 8 rows fit (y 20..108); list scrolls beyond
+  const int N = toolsRowCount();
+  if (toolsSel >= N) toolsSel = N - 1;           // guard if a category is shorter than last pos
+  if (toolsSel < 0)  toolsSel = 0;
   if (toolsSel < toolsScroll) toolsScroll = toolsSel;
   if (toolsSel >= toolsScroll + VIS) toolsScroll = toolsSel - VIS + 1;
   for (int r = 0; r < VIS; ++r) {
     int i = toolsScroll + r;
-    if (i >= TOOLS_N) break;
-    int y = 20 + r * LH;
+    if (i >= N) break;
+    int y = 21 + r * LH;                         // +1 so the first highlight clears the header
     bool sel = (i == toolsSel);
-    if (sel) canvas.fillRect(2, y - 2, 236, 9, CL_SELBG);
+    if (sel) canvas.fillRect(2, y - 2, 236, 9, CL_SELBG);   // 9px bar in 11px pitch -> 2px gap
     canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
-    canvas.setCursor(8, y); canvas.print(TOOLS_NAMES[TOOLS_ORDER[i]]);
+    canvas.setCursor(8, y);
+    if (toolsCat < 0) {
+      canvas.print(TOOLS_CAT_NAMES[i]);
+      canvas.setTextColor(sel ? CL_BLACK : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(214, y); canvas.printf("%2d", (int)TOOLS_CAT_LEN[i]);   // count badge
+    } else {
+      canvas.print(TOOLS_NAMES[toolsRowId(i)]);
+    }
   }
-  if (toolsScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 20);  canvas.print("^"); }
-  if (toolsScroll + VIS < TOOLS_N)     { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 110); canvas.print("v"); }
-  footer(";/. pick  ENTER open  ` back");
+  if (toolsScroll > 0)             { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 21);  canvas.print("^"); }
+  if (toolsScroll + VIS < N)       { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 110); canvas.print("v"); }
+  footer(toolsCat < 0 ? ";/. pick  ENTER open  ` back"
+                      : ";/. pick  ENTER open  ` cats");
 }
 
 void App::keyTools(char c, bool enter, bool back) {
-  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
-  if (isUp(c))   { if (--toolsSel < 0) toolsSel = TOOLS_N - 1; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (++toolsSel >= TOOLS_N) toolsSel = 0; lastDrawMs = 0; return; }
-  // First-letter jump: a letter moves the highlight to the next tool whose name starts
-  // with it (wrapping), mirroring the Home menu. Handy on a 20+ entry scrolling list.
+  const int N = toolsRowCount();
+  if (isBack(c, back)) {
+    // Back from a category's tool list returns to the category list; back from the
+    // category list leaves Tools. Restore the selection to the category we came out of.
+    if (toolsCat >= 0) { int wasCat = toolsCat; toolsCat = -1; toolsSel = wasCat; toolsScroll = 0; lastDrawMs = 0; return; }
+    screen = SCR_ABOUT; lastDrawMs = 0; return;
+  }
+  if (isUp(c))   { if (--toolsSel < 0) toolsSel = N - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++toolsSel >= N) toolsSel = 0; lastDrawMs = 0; return; }
+  // First-letter jump within the current level (categories, or tools in a category),
+  // wrapping -- mirrors the Home menu. Handy on the longer category lists.
   if (c >= 'a' && c <= 'z') {
     char want = (char)(c - 'a' + 'A');
-    for (int k = 1; k <= TOOLS_N; ++k) {
-      int idx = (toolsSel + k) % TOOLS_N;
-      char f = TOOLS_NAMES[TOOLS_ORDER[idx]][0];
+    for (int k = 1; k <= N; ++k) {
+      int idx = (toolsSel + k) % N;
+      char f = (toolsCat < 0) ? TOOLS_CAT_NAMES[idx][0] : TOOLS_NAMES[toolsRowId(idx)][0];
       if (f >= 'a' && f <= 'z') f = (char)(f - 'a' + 'A');
       if (f == want) { toolsSel = idx; lastDrawMs = 0; return; }
     }
     return;
   }
+  if (enter && toolsCat < 0) {
+    // Open the highlighted category: descend into its tool list.
+    toolsCat = toolsSel; toolsSel = 0; toolsScroll = 0; lastDrawMs = 0; return;
+  }
   if (enter) {
-    const int toolsSelC = TOOLS_ORDER[toolsSel];   // canonical tool id (display order differs)
+    const int toolsSelC = toolsRowId(toolsSel);    // canonical tool id (within selected category)
     if (toolsSelC == 0) {                      // scientific calculator
       calcBuf = ""; calcResult = ""; calcErr = false;
       screen = SCR_CALC;
@@ -41401,6 +42231,10 @@ namespace {
     double myLat = 0, myLon = 0, myAlt = 0;
     double utcH = 0, utcM = 0, utcS = 0, utcDay = 0, utcMon = 0, utcYr = 0;
     double sfi = 0, kp = 0, aIdx = 0;
+    // 0.9.61 expanded space weather
+    double ssn = 0, flare = 0, bz = 0, swSpeed = 0, muf = 0;
+    double fcKp1 = 0, fcKp2 = 0, fcKp3 = 0;
+    double magDecl = 0;   // magnetic declination at QTH (deg, E+)
     double wxTemp = 0, wxWind = 0, wxDir = 0, wxHum = 0;
     double batt = 0, gpAge = 0, nfav = 0;
     // 0.9.59 additions
@@ -41435,6 +42269,9 @@ namespace {
     {"GPSLAT",51},{"GPSLON",52},{"GPSALT",53},
     {"HEAPFREE",54},{"UPTIME",55},{"NSAT",56},{"NTX",57},{"PASSN",58},
     {"TXDL",59},{"TXUL",60},{"TXBW",61},{"TXINV",62},{"TXLIN",63},
+    // 0.9.61 space-weather additions
+    {"SSN",64},{"FLARE",65},{"BZ",66},{"SWSPEED",67},{"MUF",69},
+    {"FCKP1",70},{"FCKP2",71},{"FCKP3",72},{"MAGDECL",73},
   };
   static const int BASIC_SYS_N = (int)(sizeof(BASIC_SYS) / sizeof(BASIC_SYS[0]));
 
@@ -41537,6 +42374,10 @@ namespace {
         case 34: return sys.wxTemp;  case 35: return sys.wxWind;  case 36: return sys.wxDir;
         case 37: return sys.wxHum;   case 38: return sys.batt;    case 39: return sys.gpAge;
         case 40: return sys.nfav;
+        case 64: return sys.ssn;     case 65: return sys.flare;   case 66: return sys.bz;
+        case 67: return sys.swSpeed; case 69: return sys.muf;
+        case 70: return sys.fcKp1;   case 71: return sys.fcKp2;   case 72: return sys.fcKp3;
+        case 73: return sys.magDecl;
         case 47: return sys.lstHr;
         case 51: return sys.gpsLat;  case 52: return sys.gpsLon;  case 53: return sys.gpsAlt;
         case 59: return sys.txDl;    case 60: return sys.txUl;    case 61: return sys.txBw;
@@ -42107,7 +42948,8 @@ void App::basicRun() {
     Observer o = loc.obs();
     sy.posOk  = o.valid;
     sy.timeOk = timeIsSet();
-    if (sy.posOk) { sy.myLat = o.lat; sy.myLon = o.lon; sy.myAlt = o.altM; }
+    if (sy.posOk) { sy.myLat = o.lat; sy.myLon = o.lon; sy.myAlt = o.altM;
+                    sy.magDecl = magneticDeclinationDeg(o.lat, o.lon); }
     if (sy.timeOk) {
       time_t nw = nowUtc(); struct tm tmv; gmtime_r(&nw, &tmv);
       sy.utcH = tmv.tm_hour; sy.utcM = tmv.tm_min;  sy.utcS = tmv.tm_sec;
@@ -42174,6 +43016,17 @@ void App::basicRun() {
       sy.sfi = spaceF107; sy.kp = spaceKp;
       sy.aIdx = (spaceA >= 0) ? spaceA : 0;
       sy.spwxOk = true;
+      // Expanded space-wx (0.9.61); 0 where a given feed hasn't been fetched.
+      sy.ssn     = (spaceSSN >= 0) ? spaceSSN : 0;
+      sy.bz      = (spaceBz > -900) ? spaceBz : 0;
+      sy.swSpeed = (spaceWind >= 0) ? spaceWind : 0;
+      sy.muf     = estMufMHz(true) > 0 ? estMufMHz(true) : 0;
+      // Flare class as a number: A=1 B=2 C=3 M=4 X=5 (0 = none).
+      { char fc = spaceFlare[0];
+        sy.flare = (fc=='A')?1:(fc=='B')?2:(fc=='C')?3:(fc=='M')?4:(fc=='X')?5:0; }
+      sy.fcKp1 = (spaceFcastKp[0] >= 0) ? spaceFcastKp[0] : 0;
+      sy.fcKp2 = (spaceFcastKp[1] >= 0) ? spaceFcastKp[1] : 0;
+      sy.fcKp3 = (spaceFcastKp[2] >= 0) ? spaceFcastKp[2] : 0;
     }
     if (wxTempNow > -900) {                              // -999 = never fetched
       sy.wxTemp = wxTempNow;
@@ -42716,6 +43569,7 @@ namespace {
     "Visible passes (active sat)",   // 26
     "QRZ lookup result",             // 27
     "Performance / heap",            // 28
+    "Weather report",                // 29
   };
   const int PA_N = (int)(sizeof(PA_ITEMS) / sizeof(PA_ITEMS[0]));
 }
@@ -42759,6 +43613,7 @@ void App::keyPrintAbout(char c, bool enter, bool back) {
       PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
       PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_READY, PR_AWARDS,
       PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_QRZ, PR_PERF,
+      PR_WEATHER,
     };
     static_assert(sizeof(MAP)/sizeof(MAP[0]) == PA_N, "PA_ITEMS labels and MAP must match");
     if (paSel >= 0 && paSel < (int)(sizeof(MAP)/sizeof(MAP[0]))) printReport(MAP[paSel]);
@@ -43710,6 +44565,25 @@ void App::toolFormInit(int id) {
     case TOOL_PLL:
       tfN = 4; FLD(0, "Reference", "MHz", 10.0); FLD(1, "R divider", "", 1);
       FLD(2, "N divider", "", 40); FLD(3, "Multiplier", "", 1); break;
+    case TOOL_RHORIZON:
+      tfN = 3; FLD(0, "My ant HAAT", "m", 10.0); FLD(1, "Their ant HAAT", "m", 10.0);
+      FLD(2, "k factor", "", 1.33); break;
+    case TOOL_FRESNEL:
+      tfN = 2; FLD(0, "Path length", "km", 30.0); FLD(1, "Freq", "MHz", 144.0); break;
+    case TOOL_TROPO:
+      tfN = 3;
+      FLD(0, "Surface temp", "C", (wxTempNow > -900) ? (double)wxTempNow : 20.0);
+      FLD(1, "Dewpoint", "C", 12.0);
+      FLD(2, "Inversion dT", "C", 0.0); break;
+    case TOOL_RAINFADE:
+      tfN = 3; FLD(0, "Freq", "GHz", 10.0); FLD(1, "Rain rate", "mm/h", 25.0);
+      FLD(2, "Path length", "km", 10.0); break;
+    case TOOL_TPATH:
+      tfN = 6; FLD(0, "TX power", "W", 50.0); FLD(1, "TX ant gain", "dBi", 10.0);
+      FLD(2, "RX ant gain", "dBi", 10.0); FLD(3, "Line loss (tot)", "dB", 3.0);
+      FLD(4, "Freq", "MHz", 144.0); FLD(5, "Distance", "km", 100.0); break;
+    case TOOL_TERRAIN:
+      tfN = 1; FLD(0, "Freq", "MHz", 144.0); break;
   }
   toolDefLoad(id);        // overlay any values remembered from a previous session (unless resetting)
 }
@@ -44423,6 +45297,137 @@ void App::drawToolForm() {
       out("Ref spur", "+/-" + String(ref * M, 3) + " MHz", CL_GREY);
       break;
     }
+    case TOOL_RHORIZON: {
+      // Radio horizon with a k-factor for refraction. Distance to horizon for an
+      // antenna of height h (m) with effective earth radius k*Re:
+      //   d_km = sqrt(2 * k * Re_km * h_km)  ~  3.57 * sqrt(k) * sqrt(h_m) / 1000-ish
+      // The max LOS path between two stations is the sum of their horizons.
+      double h1 = tfVal[0], h2 = tfVal[1], k = tfVal[2];
+      if (h1 < 0 || h2 < 0 || k <= 0) { out("Enter", "heights>=0, k>0", CL_ORANGE); break; }
+      double Re = 6371.0;                                  // mean earth radius km
+      double d1 = sqrt(2.0 * k * Re * (h1 / 1000.0));
+      double d2 = sqrt(2.0 * k * Re * (h2 / 1000.0));
+      double dTot = d1 + d2;
+      out("My horizon", String(d1, 1) + " km", CL_CYAN);
+      out("Their horizon", String(d2, 1) + " km", CL_CYAN);
+      out("Max LOS path", String(dTot, 1) + " km", CL_WHITE);
+      out("  (miles)", String(dTot * 0.621371, 0) + " mi", CL_GREY);
+      const char* note = (k > 1.6) ? "ducting (enhanced)"
+                       : (k < 1.1) ? "sub-refractive" : "standard 4/3 atm";
+      out("Refraction", note, CL_MGREY);
+      break;
+    }
+    case TOOL_FRESNEL: {
+      // First Fresnel zone radius at midpoint: r = 0.5 * sqrt(c*D/f) simplified to
+      //   r_m = 17.31 * sqrt( (d1*d2) / (f_GHz * D) )  with distances in km.
+      // At midpoint d1=d2=D/2, so r = 8.657*sqrt(D_km / f_GHz). 60% clearance is
+      // the usual "path is clear" threshold.
+      double D = tfVal[0], fMHz = tfVal[1];
+      if (D <= 0 || fMHz <= 0) { out("Enter", "length,freq > 0", CL_ORANGE); break; }
+      double fGHz = fMHz / 1000.0;
+      double r1 = 8.657 * sqrt(D / fGHz);                  // metres, at midpoint
+      out("1st zone r", String(r1, 1) + " m", CL_CYAN);
+      out("60% clear", String(r1 * 0.6, 1) + " m", CL_WHITE);
+      out("  at midpoint", String(D / 2.0, 1) + " km", CL_GREY);
+      out("Wavelength", String(299.792458 / fMHz, 3) + " m", CL_MGREY);
+      out("Keep zone", "clear of terrain", CL_MGREY);
+      break;
+    }
+    case TOOL_TROPO: {
+      // Tropo ducting likelihood, coarse. Surface refractivity gradient is driven by
+      // humidity and temperature inversions. We build a simple index from the
+      // dewpoint depression (moist air near the surface = higher N) and any inversion
+      // dT (warm-over-cool traps signals). Not a forecast -- a "watch this" flag.
+      double T = tfVal[0], Td = tfVal[1], inv = tfVal[2];
+      double depr = T - Td;                                // dewpoint depression, C
+      // Wet-term surface refractivity ~ rises steeply as air saturates (depr -> 0).
+      double moist = (depr < 2) ? 3.0 : (depr < 5) ? 2.0 : (depr < 10) ? 1.0 : 0.0;
+      double invScore = (inv >= 4) ? 3.0 : (inv >= 2) ? 2.0 : (inv >= 0.5) ? 1.0 : 0.0;
+      double idx = moist + invScore;                       // 0..6
+      out("Duct index", String(idx, 0) + " / 6", idx >= 4 ? CL_GREEN : idx >= 2 ? CL_YELLOW : CL_GREY);
+      const char* word = (idx >= 5) ? "strong duct likely"
+                       : (idx >= 3) ? "enhancement possible"
+                       : (idx >= 1) ? "weak / marginal" : "no ducting expected";
+      out("Outlook", word, idx >= 3 ? CL_GREEN : CL_MGREY);
+      out("Dewpt depr", String(depr, 1) + " C", CL_WHITE);
+      out("Inversion", String(inv, 1) + " C", CL_WHITE);
+      out("Best on", "coast/eve/morning", CL_MGREY);
+      break;
+    }
+    case TOOL_RAINFADE: {
+      // ITU-R P.838 style specific attenuation gamma = k * R^alpha (dB/km), times
+      // path length. k,alpha depend on frequency and polarization; we use horizontal-
+      // pol coefficients interpolated coarsely across the microwave bands.
+      double fGHz = tfVal[0], R = tfVal[1], D = tfVal[2];
+      if (fGHz <= 0 || R < 0 || D <= 0) { out("Enter", "freq,len>0 R>=0", CL_ORANGE); break; }
+      // Coarse k/alpha (horizontal pol) at a few anchor frequencies, log-interp.
+      struct { double f, k, a; } A[] = {
+        {1, 0.0000387, 0.912}, {4, 0.000650, 1.121}, {10, 0.0101, 1.276},
+        {20, 0.0751, 1.099}, {40, 0.350, 0.939}, {100, 1.12, 0.743} };
+      int n = 6; double kk = A[0].k, aa = A[0].a;
+      if (fGHz <= A[0].f) { kk = A[0].k; aa = A[0].a; }
+      else if (fGHz >= A[n-1].f) { kk = A[n-1].k; aa = A[n-1].a; }
+      else for (int i = 0; i < n-1; ++i)
+        if (fGHz >= A[i].f && fGHz <= A[i+1].f) {
+          double t = (log(fGHz) - log(A[i].f)) / (log(A[i+1].f) - log(A[i].f));
+          kk = exp(log(A[i].k) + t * (log(A[i+1].k) - log(A[i].k)));
+          aa = A[i].a + t * (A[i+1].a - A[i].a); break;
+        }
+      double gamma = kk * pow(R, aa);                      // dB/km
+      double total = gamma * D;
+      out("Spec atten", String(gamma, gamma < 1 ? 3 : 2) + " dB/km", CL_CYAN);
+      out("Path fade", String(total, total < 10 ? 2 : 1) + " dB", CL_WHITE);
+      const char* sev = (total >= 20) ? "severe (link risk)"
+                      : (total >= 6) ? "significant" : (total >= 1) ? "minor" : "negligible";
+      out("Severity", sev, total >= 6 ? CL_ORANGE : CL_GREY);
+      out("Rain rate", String(R, 0) + " mm/h", CL_MGREY);
+      break;
+    }
+    case TOOL_TPATH: {
+      // Two-way terrestrial link budget. RX level = TX(dBm) + Gtx + Grx - lineLoss
+      // - FSPL. Margin is over a rough thermal noise floor for a 2.5 kHz SSB BW plus
+      // a typical VHF+ receiver NF, i.e. ~ -140 dBm reference sensitivity.
+      double pW = tfVal[0], gtx = tfVal[1], grx = tfVal[2], lineL = tfVal[3];
+      double fMHz = tfVal[4], D = tfVal[5];
+      if (pW <= 0 || fMHz <= 0 || D <= 0) { out("Enter", "P,freq,dist > 0", CL_ORANGE); break; }
+      double pdBm = 10.0 * log10(pW * 1000.0);
+      double fspl = 32.44 + 20.0 * log10(D) + 20.0 * log10(fMHz);   // dB, D km, f MHz
+      double rx = pdBm + gtx + grx - lineL - fspl;
+      const double sens = -140.0;                          // dBm ref sensitivity (SSB)
+      double margin = rx - sens;
+      out("FSPL", String(fspl, 1) + " dB", CL_GREY);
+      out("RX level", String(rx, 1) + " dBm", CL_CYAN);
+      out("Margin", String(margin, 1) + " dB", margin >= 10 ? CL_GREEN : margin >= 0 ? CL_YELLOW : CL_ORANGE);
+      const char* v = (margin >= 20) ? "solid copy"
+                    : (margin >= 10) ? "workable" : (margin >= 0) ? "marginal" : "below noise (LOS only)";
+      out("Verdict", v, margin >= 10 ? CL_GREEN : margin >= 0 ? CL_YELLOW : CL_ORANGE);
+      out("  vs FSPL only", "add tropo/terrain", CL_MGREY);
+      break;
+    }
+    case TOOL_TERRAIN: {
+      if (!gcGrid[0]) { out("Target", "set grid in Grid tool", CL_ORANGE);
+                        out("then", "return here + press f", CL_MGREY); break; }
+      Observer o = loc.obs();
+      if (!o.valid) { out("Set", "your location first", CL_ORANGE); break; }
+      double dlat, dlon, dist, brg;
+      if (!Location::gridToLatLon(String(gcGrid), dlat, dlon)) { out("Grid", "invalid", CL_ORANGE); break; }
+      greatCircle(o.lat, o.lon, dlat, dlon, dist, brg);
+      out("Target", String(gcGrid), CL_CYAN);
+      out("Distance", String(dist, 0) + " km", CL_WHITE);
+      if (terrainN > 0) {
+        out("Max obstacle", String((int)terrainMaxM) + " m @" + String((int)terrainMaxKm) + "km", CL_WHITE);
+        // Fresnel radius at that point for the entered frequency.
+        double fGHz = tfVal[0] / 1000.0;
+        double d1 = terrainMaxKm, d2 = dist - terrainMaxKm;
+        double fr = (d1 > 0 && d2 > 0 && fGHz > 0) ? 17.31 * sqrt((d1 * d2) / (fGHz * dist)) : 0;
+        out("Fresnel r", String(fr, 0) + " m there", CL_GREY);
+        out("Path", terrainClear ? "likely clear" : "OBSTRUCTED", terrainClear ? CL_GREEN : CL_ORANGE);
+      } else {
+        out("Profile", "press f to fetch", CL_YELLOW);
+        out("  (needs WiFi)", "samples elevation", CL_MGREY);
+      }
+      break;
+    }
   }
   if (tfOutScroll > 0)  { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, outTop); canvas.print("^"); }
   if (moreBelow)        { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 108);    canvas.print("v"); }
@@ -44439,6 +45444,9 @@ void App::drawToolForm() {
 void App::keyToolForm(char c, bool enter, bool back) {
   if (c == '`') { toolDefSave(toolId); screen = SCR_TOOLS; lastDrawMs = 0; return; }   // save & exit
   if (!tfEditing && c == 'p') { printReport(PR_TOOLFORM); return; }  // print this form
+  if (!tfEditing && c == 'f' && toolId == TOOL_TERRAIN) {   // fetch elevation profile
+    fetchTerrainProfile(); lastDrawMs = 0; return;
+  }
   if (!tfEditing && c == 'x') {              // reset this tool to factory defaults
     int id = toolId; tfDefOnly = true; toolFormInit(id); tfDefOnly = false;
     lastDrawMs = 0; return;
@@ -44756,6 +45764,85 @@ void App::keyMessages(char c, bool enter, bool back) {
 //  planetary Kp index fetched from NOAA SWPC (with GP updates), plus a plain
 //  reading of what they mean for HF and satellite operation. r = refresh.
 // ===========================================================================
+
+// ---- Derived space-weather features (0.9.61) -------------------------------
+// All computed from already-fetched indices; no extra download. Coarse, honest
+// ham-band heuristics (they mirror the well-known SFI/Kp condition tables).
+
+String App::hfBandOutlook(bool day) {
+  if (spaceF107 < 0) return String("(no flux data)");
+  float sfi = spaceF107, kp = (spaceKp >= 0) ? spaceKp : 0;
+  float muf = 8.0f + (sfi - 65.0f) * 0.16f - kp * 1.2f + (day ? 4.0f : -3.0f);
+  auto band = [&](float mhz) -> const char* {
+    float head = muf - mhz;
+    if (head >= 4)  return "open";
+    if (head >= 0)  return "fair";
+    if (head >= -3) return "weak";
+    return "shut";
+  };
+  char b[64];
+  snprintf(b, sizeof(b), "40m %s 20m %s 15m %s 10m %s",
+           band(7.1f), band(14.1f), band(21.2f), band(28.3f));
+  return String(b);
+}
+float App::estMufMHz(bool day) {
+  if (spaceF107 < 0) return -1;
+  float kp = (spaceKp >= 0) ? spaceKp : 0;
+  float muf = 8.0f + (spaceF107 - 65.0f) * 0.16f - kp * 1.2f + (day ? 4.0f : -3.0f);
+  if (muf < 3) muf = 3;
+  return muf;
+}
+const char* App::auroraLevel() {
+  float kp = (spaceKp >= 0) ? spaceKp : -1;
+  if (kp < 0) return "unknown";
+  bool bzSouth = (spaceBz > -900 && spaceBz <= -5);
+  if (kp >= 7) return "major (low lat)";
+  if (kp >= 5) return bzSouth ? "storm (mid lat)" : "active (high lat)";
+  if (kp >= 4) return "unsettled";
+  return bzSouth ? "watch (Bz south)" : "quiet";
+}
+const char* App::vhfFlag() {
+  bool aurora = (spaceKp >= 5);
+  int mon = 0;
+  if (timeIsSet()) { time_t n = nowUtc(); struct tm tv; gmtime_r(&n, &tv); mon = tv.tm_mon + 1; }
+  bool esSeason = (mon >= 5 && mon <= 8) || (mon == 12) || (mon == 1);
+  if (aurora) return "Auroral-E possible (6m/2m)";
+  if (esSeason) return "Sporadic-E season (6m)";
+  return "no VHF enhancement expected";
+}
+const char* App::meteorShowerNow(bool& nearPeak) {
+  nearPeak = false;
+  if (!timeIsSet()) return nullptr;
+  time_t n = nowUtc(); struct tm tv; gmtime_r(&n, &tv);
+  int md = (tv.tm_mon + 1) * 100 + tv.tm_mday;
+  struct Shower { const char* name; int start, end, peak; };
+  static const Shower S[] = {
+    { "Quadrantids",   101,  106,  104 },
+    { "Lyrids",        416,  425,  422 },
+    { "eta Aquariids", 419,  528,  506 },
+    { "Arietids(day)", 529,  617,  607 },
+    { "Perseids",      717,  824,  812 },
+    { "Orionids",     1002, 1107, 1021 },
+    { "Leonids",      1106, 1130, 1117 },
+    { "Geminids",     1204, 1217, 1214 },
+  };
+  for (unsigned i = 0; i < sizeof(S)/sizeof(S[0]); ++i)
+    if (md >= S[i].start && md <= S[i].end) {
+      int dp = md - S[i].peak; if (dp < 0) dp = -dp;
+      nearPeak = (dp <= 1);
+      return S[i].name;
+    }
+  return nullptr;
+}
+const char* App::flareSeverity() {
+  char c = spaceFlare[0];
+  if (c == 'X') return "SEVERE - HF blackout";
+  if (c == 'M') return "strong - HF degraded";
+  if (c == 'C') return "minor - some HF fade";
+  if (c == 'B' || c == 'A') return "background";
+  return "quiet";
+}
+
 void App::drawSpaceWx() {
   header("Space Wx");
   canvas.setTextSize(1);
@@ -44844,7 +45931,7 @@ void App::drawSpaceWx() {
                : (String(ageH / 24) + "d old");
     canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
   }
-  footer("p propagation  r refresh  ` back");
+  footer("p prop  x print  r refresh  ` bk");
 }
 
 void App::keySpaceWx(char c, bool enter, bool back) {
@@ -44852,6 +45939,7 @@ void App::keySpaceWx(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (c == 'r') { spaceWxEnter(); return; }   // same show-cache + fetch + result flow
   if (c == 'p') { screen = SCR_PROP; lastDrawMs = 0; return; }   // HF/6m propagation guidance
+  if (c == 'x') { printReport(PR_SPACEWX); return; }             // print the full report
 }
 
 // ===========================================================================
@@ -44873,6 +45961,55 @@ void App::drawProp() {
     canvas.setCursor(6, 58); canvas.print("Update GP or fetch on the");
     canvas.setCursor(6, 70); canvas.print("Space Wx screen (WiFi).");
     footer("` back");
+    return;
+  }
+
+  if (propPage) {                        // ---- outlook & forecast page ----
+    int y = 20; const int LH = 11;
+    auto line = [&](const String& sv, uint16_t col) {
+      canvas.setTextColor(col, CL_BLACK); canvas.setCursor(2, y); canvas.print(sv); y += LH; };
+    { float md = estMufMHz(true), mn = estMufMHz(false);
+      if (md > 0) { char mb[40]; snprintf(mb, sizeof(mb), "MUF ~%.0f MHz day / ~%.0f night", md, mn);
+                    line(String(mb), CL_WHITE); }
+      else line("MUF: needs solar flux", CL_GREY); }
+    { String d = hfBandOutlook(true);  d.replace("m ", " "); line(String("D ") + d, CL_CYAN); }
+    { String n2 = hfBandOutlook(false); n2.replace("m ", " "); line(String("N ") + n2, CL_CYAN); }
+    // Latest-flare snapshot, plus today's C/M/X counts + new regions when known --
+    // the counts convey activity LEVEL (an M-heavy day disturbs HF far more than one
+    // stray C-flare) better than the single most-recent flare alone.
+    if (spaceFlareC >= 0 || spaceFlareM >= 0 || spaceFlareX >= 0) {
+      char fb[44];
+      snprintf(fb, sizeof(fb), "Flares %dC %dM %dX",
+               spaceFlareC < 0 ? 0 : spaceFlareC,
+               spaceFlareM < 0 ? 0 : spaceFlareM,
+               spaceFlareX < 0 ? 0 : spaceFlareX);
+      if (spaceNewRegions >= 0) { size_t L2 = strlen(fb);
+        snprintf(fb + L2, sizeof(fb) - L2, "  %dnew", spaceNewRegions); }
+      uint16_t fc = (spaceFlareX > 0) ? CL_RED : (spaceFlareM > 0 ? CL_ORANGE : CL_GREEN);
+      line(String(fb), fc);
+    } else if (spaceFlare[0]) {
+      char fb[40]; snprintf(fb, sizeof(fb), "Flare %s: %s", spaceFlare, flareSeverity());
+      line(String(fb), spaceFlare[0]=='X' ? CL_RED : (spaceFlare[0]=='M' ? CL_ORANGE : CL_GREEN));
+    } else line("Flares: none / quiet today", CL_GREY);
+    if (spaceBz > -900) { char wb[44];
+      if (spaceWind >= 0) snprintf(wb, sizeof(wb), "Bz %+.0f nT   wind %.0f km/s", spaceBz, spaceWind);
+      else                snprintf(wb, sizeof(wb), "Bz %+.0f nT", spaceBz);
+      line(String(wb), spaceBz <= -5 ? CL_ORANGE : CL_GREEN); }
+    else line("Solar wind: (no data)", CL_GREY);
+    if (spaceFcastKp[0] >= 0) { char cb[44];
+      snprintf(cb, sizeof(cb), "Kp fcst %.0f %.0f %.0f (max/day)", spaceFcastKp[0],
+               spaceFcastKp[1] < 0 ? 0 : spaceFcastKp[1], spaceFcastKp[2] < 0 ? 0 : spaceFcastKp[2]);
+      line(String(cb), spaceFcastKp[0] >= 5 ? CL_YELLOW : CL_GREEN); }
+    // Today's NOAA radio-blackout (R) forecast -- a direct HF-degradation predictor --
+    // with the solar-radiation (S) chance appended when meaningful.
+    if (spaceR12Prob >= 0) { char rb[44]; int p = 0;
+      p += snprintf(rb + p, sizeof(rb) - p, "R1-2 %d%%", spaceR12Prob);
+      if (spaceR3Prob >= 0) p += snprintf(rb + p, sizeof(rb) - p, " R3 %d%%", spaceR3Prob);
+      if (spaceS1Prob >= 0) p += snprintf(rb + p, sizeof(rb) - p, " S1 %d%%", spaceS1Prob);
+      uint16_t rc = (spaceR12Prob >= 50) ? CL_ORANGE : (spaceR12Prob >= 20 ? CL_YELLOW : CL_GREEN);
+      line(String(rb), rc); }
+    line(String("VHF: ") + vhfFlag(), CL_WHITE);
+    footer("o core  p print  r refresh  ` bk");
     return;
   }
   int y = 20; const int LH = 9;
@@ -44899,21 +46036,10 @@ void App::drawProp() {
   row("Kp index", kx,
       kp < 0 ? CL_GREY : (kp < 4 ? CL_GREEN : (kp < 5 ? CL_WHITE : (kp < 7 ? CL_YELLOW : CL_RED))));
 
-  // HF band summary from solar flux (higher flux -> higher MUF -> high bands open).
-  if (sfi > 0) {
-    const char* hf; uint16_t hc;
-    if      (sfi >= 150) { hf = "10/12/15m wide open (day)"; hc = CL_GREEN; }
-    else if (sfi >= 120) { hf = "10/15m likely open (day)";  hc = CL_GREEN; }
-    else if (sfi >= 90)  { hf = "15/17/20m workable";        hc = CL_WHITE; }
-    else if (sfi >= 70)  { hf = "20/40m mainstay";           hc = CL_YELLOW; }
-    else                 { hf = "40/80m only, highs weak";   hc = CL_ORANGE; }
-    row("HF bands", hf, hc);
-    // Per-band daytime openings (rough MUF tendency).
-    auto st = [](float f, float openT, float margT) {
-      return (f >= openT) ? "open" : (f >= margT ? "marg" : "shut"); };
-    row("10/15/20m", String(st(sfi,120,100)) + " / " + st(sfi,100,85) + " / " + st(sfi,75,60),
-        CL_WHITE);
-  }
+  // MUF estimate from flux + Kp; band-by-band day/night outlook is on the 'b' page.
+  { float md = estMufMHz(true), mn = estMufMHz(false);
+    if (md > 0) row("MUF est", String((int)(md + 0.5f)) + " day / " + String((int)(mn + 0.5f)) + " night MHz",
+                    md >= 21 ? CL_GREEN : (md >= 14 ? CL_WHITE : CL_YELLOW)); }
 
   // Geomagnetic effect on HF from Kp.
   if (kp >= 0) {
@@ -44929,6 +46055,10 @@ void App::drawProp() {
     else if (kp >= 5) { au = "possible, watch 6m";    ac = CL_YELLOW; }
     else              { au = "unlikely";              ac = CL_GREY; }
     row("Aurora VHF", au, ac);
+    { bool msPeak = false; const char* ms = meteorShowerNow(msPeak);
+      if (ms) row("Meteor MS", String(ms) + (msPeak ? " (PEAK)" : " active"),
+                  msPeak ? CL_GREEN : CL_CYAN);
+      else    row("Meteor MS", "sporadics only (dawn best)", CL_MGREY); }
     // Daytime D-layer absorption on the low bands (worse with disturbed field).
     row("Absorption", String(kp >= 5 ? "high" : (kp >= 4 ? "moderate" : "low")) + " (LF/80/40 day)",
         kp >= 5 ? CL_ORANGE : (kp >= 4 ? CL_YELLOW : CL_GREEN));
@@ -44937,12 +46067,17 @@ void App::drawProp() {
   // Honest disclaimer: these are heuristics + a reminder that 6m Es is seasonal.
   canvas.setTextColor(CL_MGREY, CL_BLACK);
   canvas.setCursor(2, 116); canvas.print("rule-of-thumb; 6m Es is seasonal");
-  footer("r refresh  ` back");
+  footer("o outlook  p print  r refresh ` bk");
 }
 
 void App::keyProp(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { screen = SCR_SPACEWX; lastDrawMs = 0; return; }
+  if (isBack(c, back)) {
+    if (propPage) { propPage = 0; lastDrawMs = 0; return; }        // outlook -> core
+    screen = SCR_SPACEWX; lastDrawMs = 0; return;
+  }
+  if (c == 'o') { propPage ^= 1; lastDrawMs = 0; return; }   // core <-> outlook page ('b'=screenshot)
+  if (c == 'p') { printReport(PR_SPACEWX); return; }   // print full space-wx + outlook
   if (c == 'r') {                          // refetch the indices without leaving this screen
     if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
     setStatus("Updating Space Wx..."); draw();
@@ -45049,7 +46184,7 @@ void App::keyReady(char c, bool enter, bool back) {
 //  raw numbers are shown so either reading works.
 // ===========================================================================
 void App::drawEmePlan() {
-  header("EME 30-day plan");
+  header("EME 90-day plan");
   canvas.setTextSize(1);
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(4, 18); canvas.print("Date   Dec     Degr    (12:00 UTC)");
@@ -45060,7 +46195,7 @@ void App::drawEmePlan() {
     int d = emePlanScroll + vi;
     time_t tt = emePlanT0 + (time_t)d * 86400;
     struct tm tmv; gmtime_r(&tt, &tmv);
-    bool good = (emePlanDec[d] >= 18.0f && emePlanDeg[d] <= 1.0f);
+    bool good = (emePlanDec[d] > 15.0f && emePlanDeg[d] < 1.0f);
     int y = 30 + vi * LH;
     canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y);
     canvas.printf("%02d-%02d", tmv.tm_mon + 1, tmv.tm_mday);
@@ -45094,7 +46229,7 @@ void App::keyEmePlan(char c, bool enter, bool back) {
 //  entry when WiFi is up; otherwise shows the cached values with their age.
 // ===========================================================================
 void App::drawWeather() {
-  header("Weather");
+  header(wxPage ? "Field conditions" : "Weather");
   canvas.setTextSize(1);
 
   if (wxEpoch == 0) {                       // never fetched and nothing cached
@@ -45107,10 +46242,12 @@ void App::drawWeather() {
     return;
   }
 
+  if (wxPage) { drawWeatherField(); return; }   // outdoor detail page
+
   // --- current conditions (convert cached values to the selected units) ---
   int y = 20;
-  float tNow = wxConvTemp(wxTempNow, wxCachedUnits, cfg.wxUnits);
-  float windNow = wxConvWind(wxWindNow, wxCachedUnits, cfg.wxUnits);
+  float tNow = wxDispTemp(wxTempNow);
+  float windNow = wxDispWind(wxWindNow);
   if (tNow > -900) {
     canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setTextSize(2);
     canvas.setCursor(6, y);
@@ -45152,8 +46289,8 @@ void App::drawWeather() {
     if (cond.length() > 12) cond = cond.substring(0, 12);
     canvas.print(cond);
     canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(150, y);
-    canvas.printf("%d/%d", (int)lround(wxConvTemp(wxDayHi[i], wxCachedUnits, cfg.wxUnits)),
-                           (int)lround(wxConvTemp(wxDayLo[i], wxCachedUnits, cfg.wxUnits)));
+    canvas.printf("%d/%d", (int)lround(wxDispTemp(wxDayHi[i])),
+                           (int)lround(wxDispTemp(wxDayLo[i])));
     if (wxDayPop[i] > 0) {
       canvas.setTextColor(wxDayPop[i] >= 50 ? CL_CYAN : CL_GREY, CL_BLACK);
       canvas.setCursor(200, y); canvas.printf("%d%%", wxDayPop[i]);
@@ -45170,12 +46307,115 @@ void App::drawWeather() {
                : (String(ageH / 24) + "d old");
     canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
   }
-  footer("r refresh  ` back");
+  footer("f field  p print  r refresh  ` bk");
+}
+
+// Second Weather page: outdoor "field conditions" for operating away from home --
+// feels-like, wind gusts, pressure with 3 h trend, UV, and today's sun times, plus a
+// per-day UV/gust/sun table. All values come from the same cached fetch.
+void App::drawWeatherField() {
+  canvas.setTextSize(1);
+  int y = 20;
+
+  // --- row 1: feels-like (big) + now/day marker ---
+  float feels = wxDispTemp(wxFeelsNow);
+  if (feels > -900) {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y); canvas.print("Feels");
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setTextSize(2); canvas.setCursor(52, y - 3);
+    canvas.printf("%d%s", (int)lround(feels), wxTempUnit()); canvas.setTextSize(1);
+    // actual temp beside it for contrast
+    float ta = wxDispTemp(wxTempNow);
+    if (ta > -900) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(120, y);
+                     canvas.printf("(air %d%s)", (int)lround(ta), wxTempUnit()); }
+    if (wxIsDay >= 0) { canvas.setTextColor(wxIsDay ? CL_YELLOW : CL_CYAN, CL_BLACK);
+                        canvas.setCursor(200, y); canvas.print(wxIsDay ? "day" : "night"); }
+  }
+  y += 20;
+
+  // --- row 2: wind + gust ---
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y); canvas.print("Wind");
+  float windN = wxDispWind(wxWindNow);
+  float gustN = wxDispWind(wxGustNow);
+  canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(52, y);
+  if (windN > -900) canvas.printf("%d", (int)lround(windN)); else canvas.print("--");
+  if (gustN > -900) {
+    canvas.setTextColor(gustN >= 30 ? CL_ORANGE : CL_GREY, CL_BLACK);
+    canvas.setCursor(90, y); canvas.printf("gust %d %s", (int)lround(gustN), wxWindUnit());
+    if (gustN >= 40) { canvas.setTextColor(CL_RED, CL_BLACK); canvas.setCursor(200, y); canvas.print("MAST"); }
+  } else { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(90, y); canvas.print(wxWindUnit()); }
+  y += 12;
+
+  // --- row 3: pressure + 3 h trend ---
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y); canvas.print("Press");
+  if (wxPresNow > -900) {
+    // The rising/steady/falling judgement is done in hPa (where ~1 hPa/3h is the natural
+    // threshold) so it is unit-independent; only the displayed numbers convert.
+    bool inhg = (cfg.wxPres == WXP_INHG);
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(52, y);
+    if (inhg) canvas.printf("%.2f inHg", wxDispPres(wxPresNow));
+    else      canvas.printf("%d hPa", (int)lround(wxPresNow));
+    if (wxPres3hAgo > -900) {
+      float dHpa = wxPresNow - wxPres3hAgo;                 // trend in hPa (canonical)
+      const char* arr = (dHpa > 1.0f) ? "rising" : (dHpa < -1.0f) ? "FALLING" : "steady";
+      uint16_t col = (dHpa < -1.5f) ? CL_ORANGE : (dHpa > 1.0f ? CL_GREEN : CL_GREY);
+      canvas.setTextColor(col, CL_BLACK); canvas.setCursor(130, y);
+      if (inhg) canvas.printf("%+.2f/3h %s", dHpa * 0.02952998f, arr);
+      else      canvas.printf("%+.1f/3h %s", dHpa, arr);
+    }
+  } else { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(52, y); canvas.print("--"); }
+  y += 12;
+
+  // --- row 4: UV index (today) + risk word ---
+  float uv = (wxDayCount > 0) ? wxDayUv[0] : 0;
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y); canvas.print("UV max");
+  canvas.setTextColor(uv >= 8 ? CL_RED : (uv >= 6 ? CL_ORANGE : (uv >= 3 ? CL_YELLOW : CL_GREEN)),
+                      CL_BLACK);
+  canvas.setCursor(52, y);
+  const char* uvw = (uv >= 11) ? "extreme" : (uv >= 8) ? "very high" : (uv >= 6) ? "high"
+                  : (uv >= 3) ? "moderate" : "low";
+  canvas.printf("%.0f  %s", uv, uvw);
+  y += 12;
+
+  // --- row 5: today's sun times + grayline note ---
+  if (wxDayCount > 0 && wxSunrise[0] >= 0 && wxSunset[0] >= 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y); canvas.print("Sun");
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(52, y);
+    canvas.printf("up %02d:%02d  dn %02d:%02d", wxSunrise[0] / 60, wxSunrise[0] % 60,
+                  wxSunset[0] / 60, wxSunset[0] % 60);
+  }
+  y += 12;
+
+  // --- per-day mini table: UV / gust / sun ---
+  static const char* DOW[] = { "Sun","Mon","Tue","Wed","Thu","Fri","Sat" };
+  canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y);
+  canvas.print("     UV  gust   sunrise/set"); y += 10;
+  for (int i = 0; i < wxDayCount && y < 118; ++i) {
+    String lbl;
+    if (i == 0) lbl = "Today";
+    else { time_t d = (time_t)wxDayEpoch[i]; struct tm tmv; gmtime_r(&d, &tmv); lbl = DOW[tmv.tm_wday % 7]; }
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(6, y); canvas.print(lbl);
+    canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(52, y); canvas.printf("%.0f", wxDayUv[i]);
+    float g = wxDispWind(wxDayGust[i]);
+    canvas.setCursor(80, y); canvas.printf("%d", (int)lround(g));
+    if (wxSunrise[i] >= 0 && wxSunset[i] >= 0) {
+      canvas.setCursor(130, y);
+      canvas.printf("%02d:%02d/%02d:%02d", wxSunrise[i] / 60, wxSunrise[i] % 60,
+                    wxSunset[i] / 60, wxSunset[i] % 60);
+    }
+    y += 10;
+  }
+
+  footer("f summary  p print  r fresh  ` bk");
 }
 
 void App::keyWeather(char c, bool enter, bool back) {
   (void)enter;
-  if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (isBack(c, back)) {
+    if (wxPage) { wxPage = 0; lastDrawMs = 0; return; }   // field page -> summary
+    screen = SCR_HOME; lastDrawMs = 0; return;
+  }
+  if (c == 'f') { wxPage ^= 1; lastDrawMs = 0; return; }  // toggle summary <-> field conditions
+  if (c == 'p') { printReport(PR_WEATHER); return; }      // print the weather report
   if (c == 'r') { weatherEnter(); return; }   // same show-cache + fetch + result flow
 }
 
@@ -45227,6 +46467,15 @@ void App::drawTxDb() {
     { String dn = "D " + txMHz(t.downlink);
       if (t.downlinkHigh > t.downlink) dn += "-" + txMHz(t.downlinkHigh);
       dn += " " + String(t.mode);
+      // SatNOGS baud (data rate) when known -- tells you the decoder/settings a
+      // telemetry beacon needs. CW transmitters store WPM in the same field.
+      if (t.baud > 0) {
+        bool cw = (strcasecmp(t.mode, "CW") == 0);
+        if (cw) dn += " " + String((unsigned long)t.baud) + "wpm";
+        else if (t.baud >= 1000) { char bb[12]; snprintf(bb, sizeof(bb), " %.1fk", t.baud / 1000.0);
+                                   dn += bb; }
+        else dn += " " + String((unsigned long)t.baud) + "bd";
+      }
       canvas.print(dn); }
     y += LH;
     // line 3: uplink (range if linear) + tone / invert flag
@@ -46373,6 +47622,133 @@ String App::whExport() {
 // Placed here so STATE_CODE / dxccCode() (defined just above) and the Moon helpers are all
 // in scope: a method that calls file-scope helpers must follow them in the translation unit.
 
+void App::printSpaceWx() {
+  Printer::title("SPACE WEATHER");
+  if (spaceF107 < 0 && spaceKp < 0) { Printer::line("(no data -- refresh on WiFi)"); return; }
+  char b[64];
+  if (spaceWxEpoch > 0) {
+    struct tm tv; gmtime_r(&spaceWxEpoch, &tv);
+    snprintf(b, sizeof(b), "as of %04d-%02d-%02d %02d:%02dZ",
+             tv.tm_year+1900, tv.tm_mon+1, tv.tm_mday, tv.tm_hour, tv.tm_min);
+    Printer::line(String(b));
+  }
+  Printer::blank();
+  Printer::line("Solar");
+  if (spaceF107 >= 0) { snprintf(b, sizeof(b), "  Flux(10.7) %.0f sfu", spaceF107); Printer::line(String(b)); }
+  if (spaceSSN  >= 0) { snprintf(b, sizeof(b), "  Sunspot #  %.0f", spaceSSN);      Printer::line(String(b)); }
+  if (spaceFlare[0])  { snprintf(b, sizeof(b), "  Flare      %s (%s)", spaceFlare, flareSeverity()); Printer::line(String(b)); }
+  else                {                                                             Printer::line("  Flare      none / quiet"); }
+
+  Printer::blank();
+  Printer::line("Geomagnetic");
+  if (spaceKp >= 0) { snprintf(b, sizeof(b), "  Kp index   %.1f", spaceKp); Printer::line(String(b)); }
+  if (spaceA  >= 0) { snprintf(b, sizeof(b), "  A index    %.0f", spaceA);  Printer::line(String(b)); }
+  snprintf(b, sizeof(b), "  Aurora     %s", auroraLevel()); Printer::line(String(b));
+
+  if (spaceBz > -900 || spaceWind >= 0) {
+    Printer::blank();
+    Printer::line("Solar wind (L1)");
+    if (spaceBz > -900)  { snprintf(b, sizeof(b), "  IMF Bz     %+.1f nT%s", spaceBz, (spaceBz <= -5) ? " (south!)" : ""); Printer::line(String(b)); }
+    if (spaceWind >= 0)  { snprintf(b, sizeof(b), "  Speed      %.0f km/s", spaceWind); Printer::line(String(b)); }
+  }
+
+  Printer::blank();
+  Printer::line("HF outlook");
+  { float md = estMufMHz(true), mn = estMufMHz(false);
+    if (md > 0) { snprintf(b, sizeof(b), "  MUF ~%.0f MHz day / ~%.0f night", md, mn); Printer::line(String(b)); } }
+  Printer::line("  Day:");
+  Printer::line(String("   ") + hfBandOutlook(true));
+  Printer::line("  Night:");
+  Printer::line(String("   ") + hfBandOutlook(false));
+
+  Printer::blank();
+  Printer::line("VHF");
+  Printer::line(String("  ") + vhfFlag());
+  { bool msPeak = false; const char* ms = meteorShowerNow(msPeak);
+    if (ms) Printer::line(String("  Meteor: ") + ms + (msPeak ? " (near peak)" : " active"));
+    else    Printer::line("  Meteor: sporadics only (dawn best)"); }
+
+  if (spaceFcastKp[0] >= 0) {
+    Printer::blank();
+    Printer::line("3-day Kp forecast (max/day)");
+    snprintf(b, sizeof(b), "  %.0f  %.0f  %.0f",
+             spaceFcastKp[0], spaceFcastKp[1] < 0 ? 0 : spaceFcastKp[1],
+             spaceFcastKp[2] < 0 ? 0 : spaceFcastKp[2]);
+    Printer::line(String(b));
+  }
+}
+
+// Weather report: current conditions, the outdoor "field" figures (feels-like, gusts,
+// pressure + trend, UV, sun), and the multi-day forecast -- all in the user's selected
+// units. Cached values are canonical (C, m/s, hPa); the wxDisp* helpers convert.
+void App::printWeather() {
+  Printer::title("WEATHER");
+  if (wxEpoch == 0) { Printer::line("(no data -- refresh on WiFi)"); return; }
+  char b[64];
+  { long ageH = (long)((nowUtc() - wxEpoch) / 3600);
+    if (ageH < 1)       Printer::line("as of <1h ago");
+    else if (ageH < 48) { snprintf(b, sizeof(b), "as of %ldh ago", ageH); Printer::line(String(b)); }
+    else                { snprintf(b, sizeof(b), "as of %ldd ago", ageH / 24); Printer::line(String(b)); } }
+  Printer::blank();
+
+  Printer::line("Now");
+  if (wxTempNow > -900) { snprintf(b, sizeof(b), "  Temp       %d %s  (%s)",
+      (int)lround(wxDispTemp(wxTempNow)), wxTempUnit(), wxCodeText(wxCodeNow)); Printer::line(String(b)); }
+  if (wxFeelsNow > -900){ snprintf(b, sizeof(b), "  Feels like %d %s",
+      (int)lround(wxDispTemp(wxFeelsNow)), wxTempUnit()); Printer::line(String(b)); }
+  if (wxHumidNow >= 0)  { snprintf(b, sizeof(b), "  Humidity   %d%%", wxHumidNow); Printer::line(String(b)); }
+  if (wxWindNow > -900) {
+    int wd = (int)lround(wxDispWind(wxWindNow));
+    if (wxGustNow > -900) snprintf(b, sizeof(b), "  Wind       %d %s  gust %d",
+        wd, wxWindUnit(), (int)lround(wxDispWind(wxGustNow)));
+    else                  snprintf(b, sizeof(b), "  Wind       %d %s", wd, wxWindUnit());
+    Printer::line(String(b));
+    if (wxWindDirNow >= 0) { snprintf(b, sizeof(b), "  Direction  %s (%d deg)",
+        windDirName(wxWindDirNow), wxWindDirNow); Printer::line(String(b)); }
+  }
+  if (wxPresNow > -900) {
+    if (cfg.wxPres == WXP_INHG) snprintf(b, sizeof(b), "  Pressure   %.2f inHg", wxDispPres(wxPresNow));
+    else                        snprintf(b, sizeof(b), "  Pressure   %d hPa", (int)lround(wxPresNow));
+    Printer::line(String(b));
+    if (wxPres3hAgo > -900) {
+      float dHpa = wxPresNow - wxPres3hAgo;
+      const char* arr = (dHpa > 1.0f) ? "rising" : (dHpa < -1.0f) ? "falling" : "steady";
+      snprintf(b, sizeof(b), "  3h trend   %s", arr); Printer::line(String(b));
+    }
+  }
+
+  // Today's sun + UV (from day 0), useful for field setup and grayline.
+  if (wxDayCount > 0) {
+    Printer::blank();
+    Printer::line("Today");
+    { snprintf(b, sizeof(b), "  UV index   %.0f", wxDayUv[0]); Printer::line(String(b)); }
+    if (wxSunrise[0] >= 0 && wxSunset[0] >= 0) {
+      snprintf(b, sizeof(b), "  Sun        up %02d:%02d  dn %02d:%02d",
+               wxSunrise[0] / 60, wxSunrise[0] % 60, wxSunset[0] / 60, wxSunset[0] % 60);
+      Printer::line(String(b));
+    }
+  }
+
+  // Multi-day forecast.
+  static const char* DOW[] = { "Sun","Mon","Tue","Wed","Thu","Fri","Sat" };
+  if (wxDayCount > 0) {
+    Printer::blank();
+    Printer::line("Forecast (hi/lo, precip)");
+    for (int i = 0; i < wxDayCount; ++i) {
+      String lbl;
+      if (i == 0) lbl = "Today";
+      else { time_t d = (time_t)wxDayEpoch[i]; struct tm tv; gmtime_r(&d, &tv); lbl = DOW[tv.tm_wday % 7]; }
+      char lb[24]; snprintf(lb, sizeof(lb), "%-6s", lbl.c_str());
+      snprintf(b, sizeof(b), "  %s %d/%d %s  %d%%", lb,
+               (int)lround(wxDispTemp(wxDayHi[i])), (int)lround(wxDispTemp(wxDayLo[i])),
+               wxCodeText(wxDayCode[i]), wxDayPop[i]);
+      Printer::line(String(b));
+    }
+  }
+  Printer::line("");
+  Printer::line("Weather data by Open-Meteo.com (CC BY 4.0)");
+}
+
 void App::printEme() {
   Printer::title("EME / MOONBOUNCE");
   Observer o = loc.obs();
@@ -46413,33 +47789,83 @@ void App::printEme() {
     snprintf(b, sizeof(b), "WARNING Sun only %.0f deg away", sunSep);
     Printer::line(String(b));
   }
+
+  // ---- Spatial polarization offset ----
+  double polDeg = emeSpatialPolDeg(now, o.lat, o.lon);
+  snprintf(b, sizeof(b), "Pol off %.0f deg (this station)", polDeg);
+  Printer::line(String(b));
+  Printer::line("        (sked: subtract DX station's)");
+
+  double sfu = (spaceF107 > 0) ? (double)spaceF107 : 0.0;
   Printer::blank();
-  Printer::line("Self-echo Doppler (round trip)");
+  Printer::line("Per-band analysis");
+  Printer::line("Band   Dop      Far    SkyT   Spread");
   struct { const char* n; double mhz; } bands[] = {
-    {"50", 50.0}, {"144", 144.0}, {"432", 432.0}, {"1296", 1296.0}, {"10G", 10368.0}
+    {"50",   50.0}, {"144", 144.0}, {"432", 432.0}, {"1296", 1296.0}, {"10G", 10368.0}
   };
   const double C = 299792458.0;
   for (int i = 0; i < 5; ++i) {
     double dop = -2.0 * bands[i].mhz * 1e6 * rrMs / C;
-    if (fabs(dop) >= 1000) snprintf(b, sizeof(b), "  %-5s MHz  %+.2f kHz", bands[i].n, dop / 1000.0);
-    else                   snprintf(b, sizeof(b), "  %-5s MHz  %+.0f Hz",  bands[i].n, dop);
+    double far = emeFaradayDeg(bands[i].mhz, sfu);
+    double skT = emeSkyTempK(now, bands[i].mhz);
+    double spr = emeLibrationSpreadHz(bands[i].mhz);
+    char dps[16];
+    if (fabs(dop) >= 1000) snprintf(dps, sizeof(dps), "%+.1fk", dop / 1000.0);
+    else                   snprintf(dps, sizeof(dps), "%+.0f", dop);
+    char frs[10];
+    if (sfu > 0) snprintf(frs, sizeof(frs), "%.0f", far); else snprintf(frs, sizeof(frs), "--");
+    snprintf(b, sizeof(b), "%-5s %7s %5s %5.0fK %5.0f", bands[i].n, dps, frs, skT, spr);
     Printer::line(String(b));
+  }
+  Printer::line("(Dop Hz round-trip; Far deg 1-way;");
+  Printer::line(" SkyT sky noise K; Spread libr. Hz)");
+  if (sfu <= 0) Printer::line("Faraday needs solar flux (Space Wx).");
+
+  // ---- Absolute path loss + echo budget ----
+  Printer::blank();
+  Printer::line("Echo budget (your EIRP + G/T)");
+  // One-way FSPL to the Moon at 144; round trip is 2x plus ~ -6 dB reflection.
+  for (int i = 0; i < 5; ++i) {
+    double f = bands[i].mhz;
+    double owfspl = 20.0 * log10(rangeKm * 1000.0) + 20.0 * log10(f * 1e6)
+                  + 20.0 * log10(4.0 * 3.141592653589793 / C);
+    double rtLoss = 2.0 * owfspl + 6.0;   // +6 dB nominal lunar reflection loss
+    snprintf(b, sizeof(b), "  %-5s MHz  path %.0f dB", bands[i].n, rtLoss);
+    Printer::line(String(b));
+  }
+  Printer::line("(2-way + 6 dB lunar reflection.");
+  Printer::line(" Subtract from EIRP+Grx for SNR.)");
+
+  // ---- Ground-gain windows ----
+  Printer::blank();
+  {
+    double el0; { double az0; skyObjAzEl(now, o.lat, o.lon, true, az0, el0); }
+    if (el0 > 0 && el0 < 8.0)
+      Printer::line("Ground gain: ACTIVE (Moon low)");
+    else if (el0 >= 8.0)
+      Printer::line("Ground gain: none (Moon too high)");
+    else
+      Printer::line("Ground gain: Moon down");
+    Printer::line("  peaks 0-6 deg el at moonrise/set;");
+    Printer::line("  up to several dB with height.");
   }
 }
 
 void App::printEmePlan() {
-  Printer::title("EME 30-DAY PLAN");
+  Printer::title("EME 90-DAY PLAN");
   if (emePlanN <= 0) { Printer::line("(not computed yet)"); return; }
   Printer::line("Declination and path degradation");
-  Printer::line("at 12:00 UTC each day.");
+  Printer::line("at 12:00 UTC each day. A '*' marks a");
+  Printer::line("good day: high N dec + low degrad.");
   Printer::blank();
   Printer::line("Date    Dec     Degrad");
   char b[64];
-  for (int i = 0; i < emePlanN && i < 30; ++i) {
+  for (int i = 0; i < emePlanN && i < 90; ++i) {
     time_t d = emePlanT0 + (time_t)i * 86400;
     struct tm tmv; gmtime_r(&d, &tmv);
-    snprintf(b, sizeof(b), "%02d-%02d  %+5.1f   %.2f dB",
-             tmv.tm_mon + 1, tmv.tm_mday, emePlanDec[i], emePlanDeg[i]);
+    const char* mk = (emePlanDec[i] > 15.0 && emePlanDeg[i] < 1.0) ? " *" : "";
+    snprintf(b, sizeof(b), "%02d-%02d  %+5.1f   %.2f dB%s",
+             tmv.tm_mon + 1, tmv.tm_mday, emePlanDec[i], emePlanDeg[i], mk);
     Printer::line(String(b));
   }
 }
@@ -46632,14 +48058,20 @@ void App::drawPerf() {
   };
   uint32_t fr  = ESP.getFreeHeap();
   uint32_t blk = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  // The hardware tracks the true lifetime minimum free size, which catches dips that
+  // happen and recover BETWEEN our once-per-loop samples (exactly when a TLS handshake
+  // briefly grabs a big buffer). Prefer it over the sampled perfMinFree so the on-screen
+  // figure matches the printed report and doesn't understate real memory pressure.
+  uint32_t minFreeHw = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
 
   // Largest contiguous block: the figure that decides whether a TLS upload can run.
   uint16_t blkCol = (blk < 12000) ? CL_RED : (blk < 20000) ? CL_YELLOW : CL_GREEN;
   row("Largest blk", String(blk) + " B", blkCol);
+  // No hardware watermark exists for the largest *block*, so this stays sampled per loop.
   row("  min ever", perfMinBlk == 0xFFFFFFFF ? String("--") : String(perfMinBlk) + " B",
       (perfMinBlk < 12000) ? CL_YELLOW : CL_GREY);
   row("Free heap", String(fr) + " B", (fr < 25000) ? CL_YELLOW : CL_GREEN);
-  row("  min ever", perfMinFree == 0xFFFFFFFF ? String("--") : String(perfMinFree) + " B", CL_GREY);
+  row("  min (boot)", String(minFreeHw) + " B", (minFreeHw < 20000) ? CL_YELLOW : CL_GREY);
 
   // Loop timing: a slow loop means a starved watchdog and a sluggish UI.
   { char b[32];
@@ -46688,10 +48120,12 @@ void App::printPerf() {
   }
   snprintf(b, sizeof(b), "Free heap    %lu B", (unsigned long)ESP.getFreeHeap());
   Printer::line(String(b));
-  if (perfMinFree != 0xFFFFFFFF) {
-    snprintf(b, sizeof(b), "  min ever   %lu B", (unsigned long)perfMinFree);
-    Printer::line(String(b));
-  }
+  // Allocator lifetime watermark -- catches dips between samples (e.g. mid-TLS). This is
+  // the true minimum; the per-loop sampled value could miss a dip that recovered between
+  // samples, so we report only the hardware figure to match the on-screen "min (boot)".
+  snprintf(b, sizeof(b), "Min heap     %lu B (since boot)",
+           (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+  Printer::line(String(b));
   snprintf(b, sizeof(b), "Loop avg     %lu us", (unsigned long)perfLoopAvg);
   Printer::line(String(b));
   snprintf(b, sizeof(b), "  worst      %lu us", (unsigned long)perfLoopMax);
@@ -49078,7 +50512,12 @@ void App::drawPolar() {
   else if (polarPathValid)   canvas.printf("AOS %s", fmtHM(polarPass.aos).c_str());
   else                       canvas.print("below horizon");
   canvas.setTextColor(CL_WHITE, CL_BLACK);
-  canvas.setCursor(rx, 40); canvas.printf("Az  %5.1f", L.az);
+  canvas.setCursor(rx, 40);
+  { Observer mo = loc.obs();
+    if (mo.valid) { double md = magneticDeclinationDeg(mo.lat, mo.lon);
+      double ma = L.az - md; while (ma < 0) ma += 360; while (ma >= 360) ma -= 360;
+      canvas.printf("Az %5.1f M%03.0f", L.az, ma);
+    } else canvas.printf("Az  %5.1f", L.az); }
   canvas.setCursor(rx, 52); canvas.printf("El  %5.1f", L.el);
   canvas.setCursor(rx, 64); canvas.printf("Rng %.0f km", L.rangeKm);
   canvas.setCursor(rx, 76); canvas.printf("%s %.3f km/s",
@@ -49378,7 +50817,12 @@ void App::drawOscar() {
   else          { canvas.setTextColor(CL_GREY, CL_BLACK);
                   canvas.printf("El %.0f%c", L.el, 248); }
   canvas.setTextColor(CL_WHITE, CL_BLACK);
-  canvas.setCursor(rx, 60); canvas.printf("Az %.0f%c", L.az, 248);
+  canvas.setCursor(rx, 60);
+  { Observer mo = loc.obs();
+    if (mo.valid) { double md = magneticDeclinationDeg(mo.lat, mo.lon);
+      double ma = L.az - md; while (ma < 0) ma += 360; while (ma >= 360) ma -= 360;
+      canvas.printf("Az %.0f%c M%.0f", L.az, 248, ma);
+    } else canvas.printf("Az %.0f%c", L.az, 248); }
   canvas.setCursor(rx, 72); canvas.printf("Rng %.0fkm", L.rangeKm);
   canvas.setCursor(rx, 84); canvas.printf("Alt %.0fkm", L.satAltKm);
   canvas.setTextColor(L.sunlit ? CL_YELLOW : CL_CYAN, CL_BLACK);
@@ -49636,7 +51080,12 @@ void App::drawGlobe() {
   canvas.setTextColor(L.el > 0 ? CL_GREEN : CL_GREY, CL_BLACK);
   canvas.setCursor(rx, 48); canvas.printf("El %.0f%c", L.el, 248);
   canvas.setTextColor(CL_WHITE, CL_BLACK);
-  canvas.setCursor(rx, 60); canvas.printf("Az %.0f%c", L.az, 248);
+  canvas.setCursor(rx, 60);
+  { Observer mo = loc.obs();
+    if (mo.valid) { double md = magneticDeclinationDeg(mo.lat, mo.lon);
+      double ma = L.az - md; while (ma < 0) ma += 360; while (ma >= 360) ma -= 360;
+      canvas.printf("Az %.0f%c M%.0f", L.az, 248, ma);
+    } else canvas.printf("Az %.0f%c", L.az, 248); }
   canvas.setCursor(rx, 72); canvas.printf("Alt %.0fkm", L.satAltKm);
   canvas.setTextColor(L.sunlit ? CL_YELLOW : CL_CYAN, CL_BLACK);
   canvas.setCursor(rx, 84); canvas.print(L.sunlit ? "sunlit" : "eclipse");
@@ -49954,14 +51403,21 @@ void App::drawSettings() {
                      : String("mean"));
   rows[41] = String("QRZ user: ") + (cfg.qrzUser[0] ? cfg.qrzUser : "(not set)");
   rows[42] = String("QRZ pass: ") + String(strlen(cfg.qrzPass) ? "******" : "(none)");
-  rows[43] = String("Weather units: ") + (cfg.wxUnits == WX_IMPERIAL ? "F, mph"
-                     : cfg.wxUnits == WX_METRIC_MS ? "C, m/s" : "C, km/h");
+  rows[43]  = String("Weather temp: ") + (cfg.wxTemp == WXT_F ? "F" : "C");
+  rows[105] = String("Weather wind: ") + (cfg.wxWind == WXW_MPH ? "mph"
+                     : cfg.wxWind == WXW_MS ? "m/s" : "km/h");
+  rows[106] = String("Weather pressure: ") + (cfg.wxPres == WXP_INHG ? "inHg" : "hPa");
   rows[85] = String("Antenna lengths: ") + (cfg.antUnits == 1 ? "metric (m)" : "imperial (ft/in)");
   rows[44] = String("Dopp FM band: ") + String(cfg.doppThreshFmHz) + " Hz";
   rows[45] = String("Dopp linear band: ") + String(cfg.doppThreshLinHz) + " Hz";
   rows[46] = String("Dopp lead: ") + (cfg.doppLeadMs == 0 ? String("off")
                      : String(cfg.doppLeadMs) + " ms");
   rows[47] = String("Rot az lookahead: ") + (cfg.rotAzLookSec == 0 ? String("off")                     : String(cfg.rotAzLookSec) + " s");
+  { String md = "n/a";
+    Observer o = loc.obs();
+    if (o.valid) { double d = magneticDeclinationDeg(o.lat, o.lon);
+                   char db[16]; snprintf(db, sizeof(db), "%+.0f", d); md = String(db); }
+    rows[104] = String("Rot bearing: ") + (cfg.rotMagCorrect ? (String("magnetic (decl ") + md + ")") : String("true")); }
   rows[48] = String("Brightness: ") + String((int)((cfg.bright * 100 + 127) / 255)) + "%";
   rows[82] = String("Volume: ") + String((int)((cfg.spkVolume * 100 + 127) / 255)) + "%";
   rows[49] = String("Tilt tuning: ") + (!imuReady ? String("n/a (no IMU)")

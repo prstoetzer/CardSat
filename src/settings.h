@@ -85,12 +85,17 @@ enum SolarActivity : uint8_t {
   SOLAR_AUTO = 3,  // derive density scale from the live F10.7 flux (fetched with GP)
 };
 
-// Units for the terrestrial Weather screen.
+// Units for the terrestrial Weather screen. The legacy WxUnits enum below bundled
+// temperature+wind into one setting; it is retained only to migrate old saved configs
+// into the three independent unit fields (temp / wind / pressure) that replaced it.
 enum WxUnits {
-  WX_IMPERIAL = 0,   // deg F, mph
-  WX_METRIC   = 1,   // deg C, km/h
-  WX_METRIC_MS = 2,  // deg C, m/s
+  WX_IMPERIAL = 0,   // deg F, mph  (legacy bundle)
+  WX_METRIC   = 1,   // deg C, km/h (legacy bundle)
+  WX_METRIC_MS = 2,  // deg C, m/s  (legacy bundle)
 };
+enum WxTempUnit { WXT_C = 0, WXT_F = 1 };                 // temperature
+enum WxWindUnit { WXW_KMH = 0, WXW_MPH = 1, WXW_MS = 2 }; // wind speed
+enum WxPresUnit { WXP_HPA = 0, WXP_INHG = 1 };            // barometric pressure
 
 struct Settings {
   // WiFi
@@ -204,7 +209,10 @@ struct Settings {
                                 // (distinct flash count per event; user-built RX)
   double   beaconMHz  = 145.800; // Doppler-page reference freq (orbital analysis)
   uint8_t  solarAct   = SOLAR_MEAN; // assumed solar activity for the decay estimate
-  uint8_t  wxUnits    = WX_IMPERIAL; // units for the terrestrial Weather screen
+  uint8_t  wxUnits    = WX_IMPERIAL; // legacy bundled units (kept only for config migration)
+  uint8_t  wxTemp     = WXT_F;       // Weather: temperature unit (WxTempUnit)
+  uint8_t  wxWind     = WXW_MPH;     // Weather: wind-speed unit (WxWindUnit)
+  uint8_t  wxPres     = WXP_INHG;    // Weather: pressure unit (WxPresUnit)
   uint8_t  antUnits   = 0;           // antenna/feedline length units in Tools: 0=imperial(ft+in) 1=metric
                                      // NOTE: applies ONLY to antenna/feedline dimensions a ham cuts by
                                      // hand. Orbital distances, altitudes and satellite sizes are ALWAYS
@@ -247,6 +255,12 @@ struct Settings {
   int16_t  rotAzOff    = 0;      // deg added to commanded azimuth (alignment)
   int16_t  rotElOff    = 0;      // deg added to commanded elevation
   uint8_t  rotDeadband = 3;      // deg; suppress smaller moves (anti-chatter)
+  // Send MAGNETIC bearings to the rotator instead of TRUE (default off). Most
+  // rotators are aligned to true north or self-correct, so CardSat sends true by
+  // default; enable only if your controller expects magnetic and does NOT already
+  // apply declination. When on, the local declination is subtracted from every
+  // commanded azimuth (true -> magnetic).
+  bool     rotMagCorrect = false;
   uint16_t rotParkAz   = 0;      // park azimuth on LOS / when disabled
   uint8_t  rotParkEl   = 0;      // park elevation
   bool     rotFlip     = false;  // flip mode (450 az + 0-180 el) for overhead passes

@@ -32,6 +32,7 @@ struct Transponder {
   bool     invert   = false; // inverting linear transponder
   bool     isLinear = false; // true => has a tunable passband (do passband tracking)
   bool     active   = true;  // SatNOGS status==active / alive==true (false => decommissioned/off)
+  uint32_t baud     = 0;     // SatNOGS baud (data rate; CW = WPM). 0 = not specified
   float    toneHz   = 0.0f;  // required FM uplink CTCSS/PL tone (0 = none)
 
   // Downlink passband width in Hz (0 for single-channel / FM).

@@ -499,6 +499,16 @@ static void amsNorm(const char* in, char* out, int outsz) {
   out[k] = 0;
 }
 
+// Collapse a normalized name to alnum only (drop spaces AND hyphens), so
+// "AO-7" / "AO 7" / "AO7" all become "AO7". Used as an extra, more tolerant
+// matching tier below the exact/token tiers.
+static void amsCollapse(const char* normIn, char* out, int outsz) {
+  int k = 0;
+  for (int i = 0; normIn[i] && k < outsz - 1; ++i)
+    if (normIn[i] != ' ' && normIn[i] != '-') out[k++] = normIn[i];
+  out[k] = 0;
+}
+
 // Does padded " haystackNorm " contain " needleNorm " as a delimited token run?
 // Forward decl: findByServiceName (below) shares these primitives.
 static bool amsTokenIn(const char* hayNorm, const char* needleNorm);
@@ -529,6 +539,21 @@ int SatDb::findByServiceName(const char* svc) const {
   for (int i = 0; i < _n; ++i) {
     char nn[40]; amsNorm(_sats[i].name, nn, sizeof(nn));
     if (amsTokenIn(nn, sn) || amsTokenIn(sn, nn)) return i;
+  }
+  // 4. hyphen/space-insensitive equality of the leading token (AO-7 == AO 7 == AO7).
+  //    Compare the collapsed WHOLE names, and also the collapsed first token, so a
+  //    bare "RS44" matches "RS-44 (RADIO ROSTO)".
+  char sc[40]; amsCollapse(sn, sc, sizeof(sc));
+  if (sc[0]) {
+    for (int i = 0; i < _n; ++i) {
+      char nn[40]; amsNorm(_sats[i].name, nn, sizeof(nn));
+      char nc[40]; amsCollapse(nn, nc, sizeof(nc));
+      if (strcmp(nc, sc) == 0) return i;
+      // collapsed first token of the catalog name vs the collapsed service name
+      char ft[40]; int j = 0; while (nn[j] && nn[j] != ' ' && j < 39) { ft[j] = nn[j]; ++j; } ft[j] = 0;
+      char fc[40]; amsCollapse(ft, fc, sizeof(fc));
+      if (fc[0] && strcmp(fc, sc) == 0) return i;
+    }
   }
   return -1;
 }
@@ -1074,6 +1099,7 @@ static void txBuildFilter(JsonDocument& filter) {
   fe["type"]          = true;
   fe["status"]        = true;
   fe["alive"]         = true;
+  fe["baud"]          = true;
 }
 
 static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
@@ -1104,6 +1130,7 @@ static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
     const char* st = o["status"] | "active";
     bool aliveField = o["alive"] | true;
     t.active = aliveField && (strcmp(st, "inactive") != 0);
+    { long bd = o["baud"] | 0; t.baud = (bd > 0 && bd < 100000000L) ? (uint32_t)bd : 0; }
     n++;
   }
   // NOTE: ordering by usefulness is done once in the app layer (prioritizeTransponders),

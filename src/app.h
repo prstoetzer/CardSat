@@ -667,10 +667,28 @@ private:
   time_t   spaceWxEpoch   = 0;      // unix time the F10.7 value was observed/fetched
   float    spaceKp        = -1;     // latest planetary Kp index (0-9, -1 = none)
   float    spaceA         = -1;     // latest running A index (a_running, -1 = none)
+  // --- Expanded space weather (0.9.61) ---
+  float    spaceSSN       = -1;     // daily observed sunspot number (-1 = none)
+  char     spaceFlare[4]  = "";     // latest GOES X-ray flare class, e.g. "M1", "X2", "C5"
+  float    spaceXrayW     = -1;     // that flare's peak flux (W/m^2, -1 = none)
+  time_t   spaceFlareEpoch = 0;     // when that flare peaked (unix)
+  float    spaceBz        = -999;   // solar-wind IMF Bz, GSM (nT; -999 = none)
+  float    spaceWind      = -1;     // solar-wind bulk speed (km/s; -1 = none)
+  float    spaceFcastKp[3] = {-1,-1,-1};  // SWPC 3-day max predicted Kp
+  // Extra space-wx surfaced on the propagation outlook page (0.9.61). All -1 = none.
+  // From daily-solar-indices.txt (the same file the SSN comes from):
+  int      spaceFlareC     = -1;    // C-class flares in the most recent daily line
+  int      spaceFlareM     = -1;    // M-class flares that day
+  int      spaceFlareX     = -1;    // X-class flares that day
+  int      spaceNewRegions = -1;    // new sunspot regions that day
+  // From 3-day-forecast.txt sections B/C (today's column):
+  int      spaceR12Prob    = -1;    // R1-R2 radio blackout probability today (%)
+  int      spaceR3Prob     = -1;    // R3+ radio blackout probability today (%)
+  int      spaceS1Prob     = -1;    // S1+ solar radiation storm probability today (%)
 
   // Terrestrial weather (Open-Meteo), cached for offline use. -999 = no data.
-  float    wxTempNow      = -999;   // current temperature (in cfg.wxUnits)
-  float    wxWindNow      = -999;   // current wind speed (in cfg.wxUnits)
+  float    wxTempNow      = -999;   // current temperature (canonical: deg C)
+  float    wxWindNow      = -999;   // current wind speed (canonical: m/s)
   int      wxWindDirNow   = -1;     // current wind direction (deg, -1 = none)
   int      wxHumidNow     = -1;     // current relative humidity (%, -1 = none)
   int      wxCodeNow      = -1;     // current WMO weather code (-1 = none)
@@ -685,6 +703,17 @@ private:
   int      wxDayPop[WX_FORECAST_DAYS]  = {0};   // per-day precip probability max (%)
   long     wxDayEpoch[WX_FORECAST_DAYS] = {0};  // per-day date (unix, local midnight)
   time_t   wxEpoch        = 0;      // when this weather was fetched (0 = none)
+  uint8_t  wxPage         = 0;      // Weather view: 0 = summary+forecast, 1 = field conditions
+  // --- outdoor "field conditions" page (0.9.61) ---
+  float    wxFeelsNow     = -999;   // current apparent ("feels like") temp (canonical: deg C)
+  float    wxGustNow      = -999;   // current wind gust (canonical: m/s)
+  float    wxPresNow      = -999;   // current mean-sea-level pressure (hPa)
+  float    wxPres3hAgo    = -999;   // pressure 3 h earlier (hPa) -> trend; -999 = unknown
+  int      wxIsDay        = -1;     // 1 = day, 0 = night, -1 = unknown
+  float    wxDayUv[WX_FORECAST_DAYS]   = {0};   // per-day UV index max
+  float    wxDayGust[WX_FORECAST_DAYS] = {0};   // per-day wind gust max (canonical: m/s)
+  int      wxSunrise[WX_FORECAST_DAYS] = {0};   // per-day sunrise, local minutes past midnight (-1 none)
+  int      wxSunset[WX_FORECAST_DAYS]  = {0};   // per-day sunset,  local minutes past midnight (-1 none)
   uint8_t  wxCachedUnits  = 0;      // units the cached values are stored in
   int      spaceScroll    = 0;      // Space Wx screen scroll position
   char     dxGrid[8] = {0};
@@ -1237,15 +1266,27 @@ private:
   void resumeCacheIfPending();             // continue a batched cache run after reboot
   void fetchAmsatStatus();                 // fetch AMSAT OSCAR status, mark active/not-heard
   void fetchSpaceWeather();                // fetch F10.7 solar flux (best-effort, with GP)
-  void fetchWeather();                     // fetch terrestrial weather (Open-Meteo, best-effort)
+  void fetchWeather();
+  void fetchTerrainProfile();   // sample elevation along the path to gcGrid (TOOL_TERRAIN)                     // fetch terrestrial weather (Open-Meteo, best-effort)
   void spaceWxEnter();                     // open Space Wx screen, show cache, fetch if WiFi up
   void weatherEnter();                     // open Weather screen, show cache, fetch if WiFi up
   bool loadWeatherCache();                 // load cached weather from flash on boot
   static const char* wxCodeText(int code); // WMO weather code -> short label
   static const char* windDirName(int deg);  // degrees -> 16-point compass ("" if <0)
-  const char* wxTempUnit();                // "F" or "C" per cfg.wxUnits
-  const char* wxWindUnit();                // "mph" / "km/h" / "m/s" per cfg.wxUnits
+  const char* wxTempUnit();                // "F" or "C" per cfg.wxTemp
+  const char* wxWindUnit();                // "mph" / "km/h" / "m/s" per cfg.wxWind
+  const char* wxPresUnit();                // "hPa" or "inHg" per cfg.wxPres
+  float wxDispTemp(float c);               // canonical deg C -> display temp unit
+  float wxDispWind(float ms);              // canonical m/s   -> display wind unit
+  float wxDispPres(float hpa);             // canonical hPa   -> display pressure unit
   void loadSpaceWeather();                 // load cached F10.7 from flash at boot
+  void parse3DayKpForecast(const char* path);  // SWPC 3-day-forecast.txt -> spaceFcastKp[]
+  String hfBandOutlook(bool day);    // one-line HF band open/closed sketch from SFI/Kp
+  float  estMufMHz(bool day);        // rough MUF estimate (MHz), -1 if no data
+  const char* auroraLevel();         // aurora activity word from Kp/Bz
+  const char* vhfFlag();             // 6m/2m Es / auroral-E hint
+  const char* meteorShowerNow(bool& nearPeak);  // active meteor shower for MS planning
+  const char* flareSeverity();       // HF-blackout word from the flare class
   double decayDensityScale() const;        // density scale for the decay point estimate
   uint8_t decayLevelFor(const SatEntry& s); // 0 none / 1 watch / 2 soon / 3 imminent (list flag)
   void loadCalForSat(uint32_t norad);      // per-satellite calibration -> calDl/calUl
@@ -1372,6 +1413,12 @@ private:
   char     gcGrid[10] = {0};        // the entered/seeded target grid
   bool     gcHaveResult = false;
   double   gcDistKm = 0, gcBearing = 0;
+  // Terrain path profile (TOOL_TERRAIN): filled by fetchTerrainProfile() from an
+  // online elevation API along the great-circle path to gcGrid.
+  int      terrainN = 0;            // number of samples fetched (0 = none yet)
+  float    terrainMaxM = 0;         // highest terrain elevation on the path (m)
+  float    terrainMaxKm = 0;        // distance along path to that max (km)
+  bool     terrainClear = true;     // path clears the terrain with Fresnel margin
   bool     gcRotOut = false;        // rotator pointed at the grid bearing
   void drawGridCalc(); void keyGridCalc(char c, bool enter, bool back);
   void gcCompute();                 // recompute distance/bearing from gcGrid + QTH
@@ -1452,7 +1499,9 @@ private:
   // of live-recalc forms (coax loss, antenna dimensions, RF unit conversions,
   // station math). All computation is local -- these work offline.
   int toolsSel = 0;
+  int toolsCat = -1;   // Tools menu: -1 = category list, else selected category index
   void drawTools(); void keyTools(char c, bool enter, bool back);
+  int toolsRowCount() const; int toolsRowId(int row) const;   // two-level Tools menu helpers
 
   // Infix scientific calculator (SCR_CALC): type an expression, ENTER evaluates.
   // Supports + - * / ^ (), unary -, and sin/cos/tan/asin/acos/atan/log/ln/sqrt/
@@ -1799,7 +1848,9 @@ private:
   void  toolFormInit(int id);
   void  drawToolForm(); void keyToolForm(char c, bool enter, bool back);
   const char* tfChoiceLabel(int field, int idx);
-  float    emePlanDec[30]; float emePlanDeg[30];
+  uint8_t  emePage = 0;             // EME view: 0=live  1=per-band analysis
+  uint8_t  propPage = 0;            // Propagation view: 0=core  1=outlook/forecast
+  float    emePlanDec[90]; float emePlanDeg[90];   // 3-month planning window (0.9.61)
   time_t   emePlanT0 = 0;
   int      emePlanN = 0; int emePlanScroll = 0;
 
@@ -1808,6 +1859,7 @@ private:
   void logCreateStub(const char* memoPath);
   void drawSpaceWx(); void keySpaceWx(char c, bool enter, bool back);
   void drawWeather(); void keyWeather(char c, bool enter, bool back);
+  void drawWeatherField();   // outdoor "field conditions" page
   void drawTxDb();    void keyTxDb(char c, bool enter, bool back);
   int  txDbScroll = 0;             // transponder-browser scroll position
   int  txDbSel = 0;               // selected transponder entry (for delete)
@@ -2021,7 +2073,7 @@ private:
                      PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
                      PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
-                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF };
+                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -2048,6 +2100,7 @@ private:
   void printBasicOut();      // Tiny BASIC: the last run's console output
   void printToolOut();       // generic: the active tool screen's key result(s)
   void printCharLk();        // char lookup: current value's encodings (near its tables)
+  void printSpaceWx(); void printWeather();       // Space weather: all indices + derived HF/VHF outlook
   void printEme();           // EME: live lunar geometry + per-band self-echo Doppler
   void printEmePlan();       // EME: 30-day declination/degradation planning table
   void printEmeMut();        // EME: mutual-Moon window list vs a DX grid

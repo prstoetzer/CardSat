@@ -184,7 +184,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.60";
+static constexpr const char* FW_VERSION = "0.9.61";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -370,9 +370,25 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 // Best-effort: drives the orbital-decay density scale when "Decay solar = auto".
 #define SPACEWX_F107_URL  "https://services.swpc.noaa.gov/json/f107_cm_flux.json"
 #define SPACEWX_KP_URL    "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+// GOES primary X-ray flare summary (object JSON: newest flare with class letter +
+// peak flux). Drives the flare / HF-blackout indicator.
+#define SPACEWX_XRAY_URL  "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-latest.json"
+// Real-time solar wind Bz + speed from the SWPC dashboard summary products.
+// The legacy /products/solar-wind/*.json family was RETIRED by SCN 26-21 (bench
+// 404s, 2026-07); the summary files were kept: ~100 B objects, key:value.
+#define SPACEWX_MAG_URL   "https://services.swpc.noaa.gov/products/summary/solar-wind-mag-field.json"
+#define SPACEWX_PLASMA_URL "https://services.swpc.noaa.gov/products/summary/solar-wind-speed.json"
+// Daily observed sunspot number: SWPC 30-day text table (~2.5 KB). The JSON
+// sunspot_report.json is 170+ KB -- too large for the no-PSRAM heap.
+#define SPACEWX_SSN_URL   "https://services.swpc.noaa.gov/text/daily-solar-indices.txt"
+// SWPC 3-day geomagnetic forecast (max predicted Kp per day). Text product.
+#define SPACEWX_FCAST_URL "https://services.swpc.noaa.gov/text/3-day-forecast.txt"
 // Open-Meteo terrestrial weather (current + multi-day forecast) for the operating
 // site. Free, no key, non-commercial. https://open-meteo.com  Cached for offline use.
 #define WEATHER_API_BASE  "https://api.open-meteo.com/v1/forecast"
+// Open-Meteo elevation API: accepts comma-separated latitude/longitude lists and
+// returns an "elevation":[...] array (metres). Used by the terrain path profiler.
+#define ELEVATION_API_BASE "https://api.open-meteo.com/v1/elevation"
 #define FILE_WEATHER      "/CardSat/weather.txt"   // cached parsed weather
 #define FILE_WEATHER_TMP  "/CardSat/weather.tmp"   // scratch for streamed JSON (low heap)
 #define WX_FORECAST_DAYS  4                          // today + 3 days shown

@@ -149,6 +149,41 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
   overrun), and a sustained session runs without heap issues. Load the web-dashboard
   page and click through its controls: requests route, the page serves. (Behaviour
   identical; this is a heap change.)
+- **Terrestrial tools + declination (0.9.61).** The six terrestrial tools (radio
+  horizon, Fresnel, tropo index, rain fade, terrestrial path budget, terrain profile)
+  compute sane numbers -- the geometry ones were validated in Python against the
+  classic 4.12*sqrt(h) horizon, FSPL, and ITU rain coefficients. On hardware: the
+  terrain profiler needs WiFi and a grid set in Grid dist/bearing, then 'f' fetches
+  Open-Meteo elevation along the path; confirm it returns and the clear/obstructed
+  verdict is reasonable for a known path. For declination: enable "Rot bearing:
+  magnetic" and confirm the rotator command shifts by the shown declination; the Grid
+  tool's T vs M headings should differ by that amount. The declination model is
+  approximate (mean ~4 deg, worse in the South Atlantic anomaly) -- spot-check against
+  a known value (e.g. NOAA's calculator) for your QTH; it is intended for pointing,
+  not survey use. BASIC: `PRINT MAGDECL` returns the QTH declination.
+- **Space weather expansion (0.9.61).** After a WiFi refresh on the Space Wx screen:
+  flare class, solar-wind Bz/speed, sunspot number, HF band grid, VHF flag, and the
+  3-day Kp forecast populate (0 or absent where a feed didn't return). The propagation
+  screen shows the new rows; 'p' there and 'x' on Space Wx both print the full report,
+  fitting the paper. A BASIC one-liner `PRINT SSN, BZ, MUF, FCKP1` returns the values.
+  NOTE ON FIELD NAMES: all five SWPC endpoint URLs are confirmed to exist in the live
+  directory listings (xray-flares-latest.json, mag/plasma-5-minute.json,
+  sunspot_report.json, 3-day-forecast.txt). What could NOT be confirmed against a live
+  sample is the exact JSON *field* names inside each. The parsers are written to try
+  several key-name variants and to validate values (flare class must be A/B/C/M/X;
+  Bz/speed/SSN range-checked), so a wrong key degrades to "absent" rather than garbage.
+  On first hardware refresh, check each value against the SWPC website; if any reads 0
+  when the site shows a value, that feed's key name differs and needs one line added to
+  its variant list (the fetch block names the variants tried).
+- **hams.at pass matching (0.9.61).** Open an activation whose listed time is known
+  to drift: it now finds the footprint window (up to an hour off) where it previously
+  showed "no window near listed time". Activations for sats whose hams.at name differs
+  in dash/space from the catalog (AO-91, RS-44) resolve and tint green as favorites.
+- **EME analysis (0.9.61).** On the EME screen with location + clock set: Pol and Far
+  values appear and change through the day; the printed EME report shows the per-band
+  table (Dop/Far/SkyT/Spread), the path-loss budget, and the ground-gain line, all
+  fitting the paper width. The 90-day planner scrolls a full quarter and marks good
+  days; its print matches. Pol offset reads ~0 near the Moon's meridian transit.
 - **CAT fixed-buffer stores (0.9.60).** Open the CAT monitor during live CI-V
   traffic: hex lines still render (up to 36 chars) with T/R colouring, the ring
   scrolls, nothing truncates oddly. Run the CAT self-test: PASS/FAIL/INFO lines
@@ -503,3 +538,29 @@ src/lora.{h,cpp}        optional LoRa text messaging (Cap LoRa SX1262 via RadioL
 src/radio_profiles.h    per-model address, baud, band-select, capabilities
 tools_make_cheatcard.py generates the printable 4×6 key-reference card (front + back)
 ```
+
+## Bench round 2 (endpoint corrections + UI surfacing)
+
+- **New solar-wind endpoints:** `/products/summary/solar-wind-mag-field.json`
+  (key tried as `Bz`, then `bz`, `bz_gsm`) and `solar-wind-speed.json` (key
+  `WindSpeed`, then `wind_speed`, `speed`). Both are post-SCN-26-21 keepers per
+  NOAA's notice, but the exact key capitalization on the wire needs one bench
+  fetch to confirm. Proton density is removed entirely (no source fits the heap;
+  the unreleased SWDENS BASIC variable is gone too).
+- **New SSN source:** `text/daily-solar-indices.txt`, parsed as the last
+  non-comment line's 5th token (year month day F10.7 SSN). Verify a plausible
+  SSN appears on the Space Wx screen.
+- **Confirmed working on bench round 1:** GOES X-ray flare fetch (451 B) and
+  the 3-day forecast text (1841 B) — no changes made to those paths.
+- **EME 'w' print** on the live and mutual views; **'a'** (EME analysis) and
+  **'o'** (prop outlook) page toggles -- bare 'b' is the global screenshot key, so
+  these screens deliberately avoid it; back key returns from page 2 to page 1.
+- **Magnetic azimuth readouts** (manual rotator, track panel, OSCAR, globe):
+  spot-check M values against NOAA's declination calculator for FM18 (decl is
+  about -10.5 there, i.e. 10.5 W; the screens compute M = true - decl, so M
+  should read ~10.5 higher than true azimuth).
+- **Perf report "Min heap ... since boot"** should read at or below the lowest
+  heap value in any [net] log line from the same session.
+- **Calculator Fn+p print** (tools screen) uses the same Fn chord that failed
+  for EME on the bench — worth one test; if dead it needs its own fallback in
+  a follow-up (bare letters all type into the expression there).

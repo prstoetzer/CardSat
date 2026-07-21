@@ -17,17 +17,15 @@
 #include "config.h"
 
 struct Transponder {
-  // Frequencies are 32-bit unsigned Hz, so the representable ceiling is 2^32-1 =
-  // ~4.294 GHz. This covers every band CardSat tracks (through 23 cm / 1.3 GHz and
-  // the amateur 3.4 GHz allocation) but NOT higher microwave transponders (5.6 GHz
-  // and up). Birds with only >4.29 GHz transponders can't be represented in this
-  // field; a future move to 32-bit kHz would lift the ceiling to ~4.29 THz at 1 kHz
-  // resolution with no extra RAM. See docs/guides/CODE_REFERENCE.md.
+  // Frequencies are freq_t (64-bit) Hz (0.9.62), so microwave transponders above the
+  // old ~4.294 GHz uint32 ceiling -- QO-100 10489.75 MHz, 5.7/10/24 GHz -- are
+  // representable, stored, and displayed. High-edge fields stay absolute (not deltas)
+  // so all readers need only a type change. See docs/design/HIGH_FREQ_SCOPE.md.
   char     desc[40];
-  uint32_t downlink     = 0; // Hz (downlink_low;  0 if none)
-  uint32_t downlinkHigh = 0; // Hz (downlink_high; 0 if single-channel)
-  uint32_t uplink       = 0; // Hz (uplink_low;    0 if none / beacon)
-  uint32_t uplinkHigh   = 0; // Hz (uplink_high;   0 if single-channel)
+  freq_t   downlink     = 0; // Hz (downlink_low;  0 if none)
+  freq_t   downlinkHigh = 0; // Hz (downlink_high; 0 if single-channel)
+  freq_t   uplink       = 0; // Hz (uplink_low;    0 if none / beacon)
+  freq_t   uplinkHigh   = 0; // Hz (uplink_high;   0 if single-channel)
   char     mode[12] = {0};   // e.g. "FM", "USB", "DATA"
   bool     invert   = false; // inverting linear transponder
   bool     isLinear = false; // true => has a tunable passband (do passband tracking)
@@ -49,9 +47,9 @@ struct Transponder {
   // Note: downlink/uplink are uint32 Hz, so they top out at ~4.29 GHz; the higher
   // amateur microwave bands (5/3 cm) cannot be represented in these fields and are
   // therefore not tested here (no bird CardSat tunes reports them in this field).
-  static bool freqIsAmateur(uint32_t hz) {
+  static bool freqIsAmateur(freq_t hz) {
     if (hz == 0) return false;
-    struct Band { uint32_t lo, hi; };
+    struct Band { freq_t lo, hi; };
     static const Band AB[] = {
       {  28000000u,   29700000u},   // 10 m (HF sat downlinks ~29.3-29.5)
       { 144000000u,  148000000u},   // 2 m

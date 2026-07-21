@@ -32,6 +32,7 @@ multi-radio CAT Doppler controller for the M5Stack Cardputer ADV (Icom, Yaesu, K
 8. [Screen map and navigation](#8-screen-map-and-navigation)
 9. [Doppler tuning and the One True Rule](#9-doppler-tuning-and-the-one-true-rule)
 10. [Calibration](#10-calibration)
+10a. [Transverter LO offsets](#10a-transverter-lo-offsets)
 11. [Working a pass, step by step](#11-working-a-pass-step-by-step)
 12. [AOS alarm and deep sleep](#12-aos-alarm-and-deep-sleep)
 13. [Sun, Moon, weather, and reference tools](#13-sun-moon-weather-and-reference-tools)
@@ -180,9 +181,67 @@ As a third option, CardSat can control **any radio Hamlib supports** by talking 
 `rigctld` — set the port to the one your `rigctld` listens on (Hamlib's conventional
 default is **4532**). CardSat is the client — the PC's `rigctld` holds the actual
 serial/USB connection to the rig and CardSat sends it set/read commands, mapping VFO-A
-to the downlink and VFO-B to the uplink. This is handy when the radio is already cabled
-to a shack computer, or for a rig CardSat has no native backend for. It is
-**host-tested only** — verify against your `rigctld` before a pass.
+to the downlink and VFO-B to the uplink. It drives the two legs the way Gpredict does —
+**VFO mode**: it selects the VFO (`set_vfo VFOA`/`VFOB`) and then sends plain
+`set_freq`/`set_mode` on it, rather than the older `set_split_freq` convention that
+makes Hamlib retune the wrong VFO on Icom sat rigs. On connect it probes `chk_vfo`, so a
+`rigctld` started with `--vfo` (which requires the VFO inline on every command) is
+handled automatically. This works with mainstream Hamlib backends and with CardSat's own
+built-in `rigctld` server. This is handy when the radio is already cabled to a shack
+computer, or for a rig CardSat has no native backend for. It is **host-tested only** —
+verify against your `rigctld` before a pass. If your rig is an Icom in sat mode and you
+see the active VFO flicker while tracking, start `rigctld` with `-x 1` (the Hamlib
+`--uplink` switch) to suppress uplink read-back, which reduces VFO switching.
+
+### Two half-duplex radios on one pass — the CardSatDualRig companion
+
+A full-duplex rig (IC-9700, FT-847, TS-2000) transmits and receives at once, so
+CardSat drives it directly. **Half-duplex and receive-only** radios (IC-705, FT-817,
+IC-R8600, TH-D74, …) cannot, so a proper linear-transponder station needs *two* of
+them — one on the downlink, one on the uplink. The **CardSatDualRig** companion
+firmware (in `companion/CardSatDualRig/`, for the M5StickS3) makes that work: it hosts
+the two radios on its own USB port, speaks each one's native CAT, and presents CardSat
+a single `rigctld` server. CardSat steers two VFOs (VFOA = downlink, VFOB = uplink) and
+the Stick fans them out to the two radios. PTT is manual — you key your transmit radio
+by hand. Point CardSat at the Stick with either **rigctl (net)** over Wi-Fi or **rigctl
+(Grove)** below.
+
+### Driving the companion (or any rigctld) over a Grove cable — no Wi-Fi
+
+Set **CAT type → rigctl (Grove)** to run the exact same VFO-mode `rigctld` protocol
+over the Cardputer's **Grove port (G1/G2)** instead of TCP. This is the no-network
+field mode: a single Grove cable from the Cardputer to the Stick carries all radio
+control. Wiring is Cardputer Grove **TX → Stick RX**, **RX ← Stick TX**, and GND↔GND;
+both ends are 3.3 V, so no level shifter. The **Grove baud** (the row that reads "LAN
+port" for the network options) must match the Stick's Grove baud — default **115200**.
+Because rigctl (Grove) claims the Grove UART, it follows the same rule as wired CI-V: a
+**Grove rotator** must move to USB/LAN or the I²C bridge, and it can't share the port
+with a **Grove GPS**. The link is bidirectional, so CardSat can also configure the
+Stick over it (see the companion's `\csdr_*` escape) — no phone or portal needed.
+
+### Configuring the companion from CardSat — Dual-Rig setup screen
+
+Once CAT type is **rigctl (net)** or **rigctl (Grove)** and CardSat can reach the
+Stick, open **Settings → Radio → Dual-Rig setup (Stick)** to set the companion up
+from the Cardputer — no phone, portal, or second screen. On entry CardSat queries the
+Stick and shows two things: the two legs (**DN (RX)** = downlink, **UP (TX)** = uplink),
+each with its radio model, bound USB device, and CI-V address; and the **live USB
+enumeration** — every serial adapter the Stick currently sees, with product name and
+VID:PID. That enumeration is the whole point: with two identical adapters plugged in,
+the only reliable way to say *which* radio is the downlink is to pick it from what the
+Stick actually enumerated, so you bind by the device's own USB serial rather than by a
+guessable port order. Move the cursor with `;`/`.`, change a field with `,`/`/`, and
+press a digit **1–8** to bind that enumerated device to the selected leg. `q` re-queries
+the Stick, `s` saves the whole configuration back to it (persisted to the Stick's
+flash), and `` ` `` returns. The model list is fetched from the Stick, so it always
+matches whatever radios that companion build supports.
+
+The **Dual-Rig setup (Stick)** row in the Radio settings list carries a small
+**link dot** on its right edge — green when the Stick answers, red when it doesn't,
+grey when the check hasn't run or CAT isn't a rigctl type — plus a "linked" / "no
+link" word. It updates while the row is highlighted, so during bring-up you can see
+at a glance whether the Grove (or Wi-Fi) link is alive before opening the screen; a
+green dot means the cable, baud, and `\csdr_*` handshake are all working.
 
 ### CAT over a USB-to-serial adapter (any radio, no level shifter)
 
@@ -536,6 +595,18 @@ while features run and recover afterward; that's normal. Press **`l`** for a **L
 credits** screen — license pointer, no-warranty and hardware disclaimers, credit
 for the outside data sources, and a recommendation to support AMSAT. `` ` `` or
 ENTER returns home.
+
+Press **`k`** for **Calendar export**, which writes standard **iCalendar (`.ics`)**
+files into `/CardSat/Calendars/` for import into a phone or desktop calendar. Pick a
+source — **favorite passes**, the **selected pass** (active satellite's next pass),
+**activations + sked reminders** (from the hams.at feed and your manual entries), **EME
+good days** (the next 90 days' best moonbounce days), or **visible passes + solar
+transits** — and CardSat writes a timestamped file and reports its name. Each event's
+description carries the satellite, frequencies, mode, maximum elevation, rise direction,
+and your station grid and coordinates, so the event is self-explanatory in any calendar
+app. Download the files over WiFi from the web **Files** page ([§18](#18-mobile-web-control)),
+then open or email them to import. All times are written in UTC, which every calendar
+app converts to the viewer's local zone.
 
 ### Charge / Sleep
 
@@ -1352,8 +1423,11 @@ when the radio is on and the rig supports CAT tone, gray otherwise, or
 Controls:
 
 - `m` — switch between **TUNE** and **CAL** modes.
-- `d` — cycle the **Doppler tune mode** (linear birds): FULL One True Rule →
-  downlink-only → uplink-only → hold-both. The passband line shows the active mode.
+- `d` — cycle the **Doppler tune mode** (linear birds): FULL One True Rule (tune the
+  **downlink** knob) → downlink-only → uplink-only → FULL One True Rule on the **uplink**
+  knob → hold-both. The passband line shows the active mode (`FULL` / `DL` / `UL` /
+  `FULLu` / `TUNE`). The two FULL modes differ only in which VFO you turn: use `FULLu`
+  when the uplink rig is the one with the tuning knob (common in a two-radio setup).
 - `l` — **Log QSO** (also on the Polar screen): capture the contact you're working.
 - `i` — **"I heard it"**: submit an **AMSAT status report** for the bird you're
   tracking. Press `i` once to arm (the status line shows what will be sent), and
@@ -1392,7 +1466,16 @@ Controls:
 - `p` — open the **Polar** plot.
 - `a` — open the **point-here arrow**: a big compass arrow to the satellite's
   azimuth with an elevation bar, for aiming a handheld antenna; radio and rotator
-  keep running underneath.
+  keep running underneath. On a board with the IMU (the Cardputer ADV), **`g`**
+  turns on a **pointing aid**: aim the device north and press **`n`** to set the
+  reference, and from then on a **cyan needle** on the compass rose shows where you
+  are physically pointing (tracked by integrating the gyroscope) and a **cyan tick**
+  on the elevation bar shows the device's tilt (from the accelerometer). Rotate until
+  the cyan needle overlaps the green target arrow and tilt until the tick meets the
+  target — the bottom line gives live "Turn L/R, Tilt up/dn" guidance and reads
+  **ON!** when you're within a few degrees of both. The heading is gyro-only (no
+  compass), so it **drifts** over a minute or two; press **`n`** again any time to
+  re-zero north. It's an aid for rough hand-aiming, not a calibrated rotator.
 - `z` — open the **large-font readout** (see below). A quick way to read RX/TX,
   az/el and the AOS/LOS countdown at arm's length; radio and rotator keep running.
 - `y` — toggle **tilt tuning** on/off on the fly (only if the board has the sensor
@@ -2018,6 +2101,8 @@ on-screen key reference. The notable rows:
 | VFO Type | `,`/`/` or ENTER toggle *Main Up/Sub Dn* ↔ *Main Dn/Sub Up* |
 | Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
 | CAT rate | `,`/`/` adjust the CAT update period in 10 ms steps (default 500 ms; soft-floored to what the CAT baud can service) |
+| Downlink LO | ENTER → edit the **downlink transverter** local-oscillator frequency in MHz (`0` = no transverter). CardSat displays the real downlink but sends the rig **real − this** as its IF. See [§10a](#10a-transverter-lo-offsets) |
+| Uplink LO | ENTER → edit the **uplink transverter** local-oscillator frequency in MHz (`0` = no transverter). CardSat displays the real uplink but sends the rig **real − this** as its IF. See [§10a](#10a-transverter-lo-offsets) |
 | CAT delay | `,`/`/` adjust the pause after each command, 0–200 ms in 2 ms steps (default 70 ms; CI-V/Icom only) |
 | Dopp FM band | `,`/`/` the FM-leg write deadband, 0–2000 Hz in 25 Hz steps (default 300 Hz). CardSat only re-sends an FM frequency once Doppler has moved it more than this — FM's wide passband absorbs the rest, so a loose value avoids needless CI-V chatter |
 | Dopp linear band | `,`/`/` the SSB/CW-leg write deadband, 0–1000 Hz in 10 Hz steps (default 50 Hz). Tighter than FM because linear modes need close tracking; near closest approach CardSat tightens this automatically |
@@ -2145,9 +2230,15 @@ On a **linear transponder** you can move through the passband two ways:
   **downlink-only** (`<DL>` — One True Rule on the downlink, uplink left alone),
   **uplink-only** (`<UL>` — only the transmit leg is corrected; handy when an SDR
   or second receiver handles the downlink, and it needs no frequency read-back so
-  it works even on set-only rigs), and back to **hold-both** (`<TUNE>`, device-key
-  tuning). FULL and downlink-only need a rig that reports frequency; the cycle
-  skips them otherwise.
+  it works even on set-only rigs), **FULL on the uplink knob** (`<FULLu>` — the
+  mirror of FULL: turn the **uplink** rig's knob and CardSat reads *that*, works out
+  your passband spot from it, and keeps both legs corrected around it), and back to
+  **hold-both** (`<TUNE>`, device-key tuning). The two FULL modes exist because in a
+  two-radio station the knob you'd naturally reach for isn't always on the downlink
+  rig — if your uplink radio is the one with the good VFO (and the downlink is a
+  receiver you'd rather leave parked), pick `<FULLu>` and tune that. FULL, downlink-
+  only, and uplink-FULL need a rig that reports frequency; the cycle skips them
+  otherwise.
 
 For an **inverting** transponder the uplink moves opposite to the downlink (tune
 the downlink up, the uplink goes down); for a non-inverting one they track
@@ -2162,9 +2253,12 @@ tuning step). The moment it detects a real move it adopts your new spot and then
 off its own Doppler writes to the downlink for a short grace window (~400 ms)** so it
 never tugs against the knob while you're turning — it resumes downlink correction once
 you let go. The uplink isn't connected to your knob, so it **keeps following** your new
-passband point immediately and tracks the move without lag. If tracking ever feels
-slightly sticky or slightly loose for your operating style, the `KNOB_MOVE_SSB_HZ`,
-`KNOB_MOVE_FM_HZ`, and `TUNE_GRACE_MS` constants in the firmware are what to adjust.
+passband point immediately and tracks the move without lag. (In `<FULLu>` the roles are
+mirrored: the **uplink** is the knob it reads and holds off, and the **downlink**
+follows immediately — everything else, including the edge handling below, works the same
+way.) If tracking ever feels slightly sticky or slightly loose for your operating style,
+the `KNOB_MOVE_SSB_HZ`, `KNOB_MOVE_FM_HZ`, and `TUNE_GRACE_MS` constants in the firmware
+are what to adjust.
 
 If you turn the knob **past either edge of the passband**, CardSat holds you at the
 edge (it can't operate you outside the transponder) and a flashing red **"OUT OF
@@ -2272,6 +2366,64 @@ the tone off):
 Both files live on the microSD card if one is present, otherwise in the device's
 internal flash. If a satellite has no line in `calib.txt`, the global calibration
 from **Settings** is used.
+
+---
+
+## 10a. Transverter LO offsets
+
+The supported radios tune up to the 1.2 GHz (23 cm) band. To work a satellite whose
+uplink or downlink is on a **microwave** band — 2.4 GHz (13 cm), 5.6 GHz (C), 10 GHz
+(X/3 cm), and up — you use a **transverter**: an external converter that shifts a lower
+**IF** band your rig *can* tune up to the real microwave band on transmit, and back down
+on receive. The rig stays on, say, 2 m or 70 cm; the transverter does the rest.
+
+CardSat drives this with two settings under **Settings → Radio**:
+
+- **Downlink LO** — the local-oscillator frequency of your **receive** transverter, in MHz.
+- **Uplink LO** — the local-oscillator frequency of your **transmit** transverter, in MHz.
+
+Enter each as the LO in MHz; enter `0` (or clear the field) for a leg that has no
+transverter. The relationship a transverter enforces is:
+
+```
+real on-air frequency  =  rig IF frequency  +  LO
+rig IF frequency       =  real on-air frequency  −  LO
+```
+
+So if your 10 GHz downlink converter has a **10368 MHz LO** and the satellite's real
+downlink is **10489.550 MHz**, the rig tunes an IF of **121.550 MHz** (2 m). You tell
+CardSat the *real* frequencies (from the transponder data — nothing to convert by hand),
+set **Downlink LO = 10368**, and CardSat:
+
+- **displays** the real 10489.550 MHz downlink on the Track screen,
+- applies **Doppler** to that real frequency, and
+- sends the rig **10489.550 − 10368 = 121.550 MHz** (plus Doppler) as its dial.
+
+The order matters and CardSat gets it right: **Doppler is applied to the real frequency
+first, and the LO is subtracted last.** Doppler scales with frequency, so the shift on a
+10 GHz downlink is roughly 70× larger than it would be on a 144 MHz IF — correcting the IF
+directly would under-correct by that ratio and walk you out of the passband. CardSat always
+computes the real-frequency Doppler, then converts to the IF.
+
+The two legs are independent, which is exactly what split-band microwave satellites need.
+For a QO-100-style bird (2.4 GHz up, 10 GHz down) you set the uplink LO for the 13 cm
+up-converter and the downlink LO for the 3 cm down-converter; the rig works a comfortable
+2 m/70 cm IF on both legs while CardSat shows the microwave dial.
+
+On the **Track** screen, the **DN** and **UP** labels show a trailing **`x`** on any leg
+that currently has a transverter LO set (**DNx**, **UPx**). It's a reminder that the number
+shown is the *real* on-air frequency and the rig itself is sitting on the IF. The web page
+and `/api/status` report the rig's **IF** read-back for the commanded frequencies (that's
+what the radio actually returns); add the LO to recover the real frequency.
+
+> Any residual LO error (a transverter whose LO is slightly off its nominal value) shows up
+> as a fixed frequency offset and can be trimmed with the ordinary per-satellite or global
+> [calibration](#10-calibration) — the calibration offset is applied in the same path.
+
+> **Not yet hardware-verified end to end.** The LO transform and the microwave-band math are
+> exercised by the repository's orbit-audit harness, but neither bench radio used to develop
+> CardSat operates above 1.2 GHz, so the full path through a real transverter has not been
+> confirmed on hardware. If you run this with a transverter, reports are very welcome.
 
 ---
 

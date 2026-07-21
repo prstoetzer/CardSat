@@ -31,12 +31,12 @@ public:
   bool ready() const override { return _stream != nullptr; }
   bool sendRaw(const uint8_t* b, size_t n) override;
 
-  bool setMainFreq(uint32_t hz) override { return setVfoFreq("FB", hz); } // uplink/TX
-  bool setSubFreq (uint32_t hz) override { return setVfoFreq("FA", hz); } // downlink/RX
+  bool setMainFreq(freq_t hz) override { return setVfoFreq("FB", hz); } // uplink/TX
+  bool setSubFreq (freq_t hz) override { return setVfoFreq("FA", hz); } // downlink/RX
   bool setMainMode(RigMode m)   override { return setModeKw(m); }
   bool setSubMode (RigMode m)   override { return setModeKw(m); }
-  bool readSubFreq(uint32_t& hzOut) override;
-  bool readMainFreq(uint32_t& hzOut) override { (void)hzOut; return false; }
+  bool readSubFreq(freq_t& hzOut) override;
+  bool readMainFreq(freq_t& hzOut) override { (void)hzOut; return false; }
   bool enableSatMode(bool)      override { return false; } // operator-set on radio
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override {}
@@ -59,7 +59,7 @@ private:
 
   void   drainStale();                 // bounded RX flush (never spins)
   bool   sendCmd(const String& cmd);
-  bool   setVfoFreq(const char* vfo, uint32_t hz);
+  bool   setVfoFreq(const char* vfo, freq_t hz);
   bool   setModeKw(RigMode m);
   static char modeDigit(RigMode m);
 };

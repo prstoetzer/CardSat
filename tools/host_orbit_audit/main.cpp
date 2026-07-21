@@ -78,12 +78,12 @@ int main(int argc, char** argv) {
 
   // ---- D: Doppler + round-trip hold invariants over pass 1 ----
   printf("== DOPPLER ==\n");
-  const uint32_t DL = 435500000u, UL = 145900000u;   // inverting V/U style pair
+  const freq_t DL = 435500000u, UL = 145900000u;   // inverting V/U style pair
   double worstOTR = 0, worstFD = 0, worstFU = 0;
   if (np > 0) for (time_t t = pp[0].aos; t <= pp[0].los; t += 15) {
     double rr = pred.rangeRateAt((double)t);
     double beta = rr * 1000.0 / 299792458.0;
-    uint32_t rx, tx;
+    freq_t rx, tx;
     Predictor::dopplerFreqs(DL, UL, rr, 0, 0, rx, tx);
     // OTR: bird frame -- ground rx corresponds to emitted rx/(1-beta) == DL; heard tx*(1-beta) == UL
     double e1 = fabs((double)rx / (1.0 - beta) - (double)DL);
@@ -91,14 +91,14 @@ int main(int argc, char** argv) {
     if (e1 > worstOTR) worstOTR = e1;
     if (e2 > worstOTR) worstOTR = e2;
     // Fixed-downlink hold: simulate inverting transponder K = DL+UL
-    uint32_t txH = Predictor::uplinkForFixedDownlink(DL, UL, true, rr, 0, 0);
+    freq_t txH = Predictor::uplinkForFixedDownlink(DL, UL, true, rr, 0, 0);
     double heard = (double)txH * (1.0 - beta);
     double emit  = (double)(DL + UL) - heard;
     double gnd   = emit * (1.0 - beta);
     double eFD = fabs(gnd - (double)DL);
     if (eFD > worstFD) worstFD = eFD;
     // Fixed-uplink hold: park TX at UL
-    uint32_t rxH = Predictor::downlinkForFixedUplink(DL, UL, true, rr, 0, 0);
+    freq_t rxH = Predictor::downlinkForFixedUplink(DL, UL, true, rr, 0, 0);
     double heard2 = (double)UL * (1.0 - beta);
     double emit2  = (double)(DL + UL) - heard2;
     double gnd2   = emit2 * (1.0 - beta);
@@ -106,6 +106,40 @@ int main(int argc, char** argv) {
     if (eFU > worstFU) worstFU = eFU;
   }
   printf("worstOTR_Hz=%.3f worstFixedDL_Hz=%.3f worstFixedUL_Hz=%.3f\n", worstOTR, worstFD, worstFU);
+
+  // ---- D1b: HIGH-BAND (>4.29 GHz) widening + transverter-LO round-trip ----
+  // Verifies freq_t carries a 10 GHz downlink without truncation, that Doppler is
+  // applied to the REAL frequency, and that a transverter LO recovers the real value:
+  //   IF = realDoppler - LO ; realBack = IF + LO ; realBack must equal realDoppler.
+  printf("== HIGHBAND ==\n");
+  {
+    const freq_t DLx = 10489550000ull;   // 10.489550 GHz (QO-100-style downlink)
+    const freq_t ULx = 2400050000ull;    // 2.400050 GHz  (13 cm uplink)
+    const freq_t LOd = 10368000000ull;   // 3cm down-converter LO -> ~121.55 MHz IF
+    const freq_t LOu = 2256000000ull;    // 13cm up-converter LO  -> ~144.05 MHz IF
+    // Confirm no truncation on storage.
+    bool storeOk = (DLx == 10489550000ull) && (ULx == 2400050000ull);
+    double worstHB = 0; bool ifSubGHz = true; freq_t maxIf = 0;
+    if (np > 0) for (time_t t = pp[0].aos; t <= pp[0].los; t += 15) {
+      double rr = pred.rangeRateAt((double)t);
+      double beta = rr * 1000.0 / 299792458.0;
+      freq_t rxR, txR;
+      Predictor::dopplerFreqs(DLx, ULx, rr, 0, 0, rxR, txR);   // REAL Doppler-tuned freqs
+      // OTR check at 10 GHz: emitted rxR/(1-beta) should equal DLx.
+      double e = fabs((double)rxR / (1.0 - beta) - (double)DLx);
+      if (e > worstHB) worstHB = e;
+      // Transverter boundary: subtract LO to get the IF, add it back to recover real.
+      freq_t ifDl = (rxR > LOd) ? rxR - LOd : rxR;
+      freq_t ifUl = (txR > LOu) ? txR - LOu : txR;
+      if (ifDl > maxIf) maxIf = ifDl;
+      if (ifUl > maxIf) maxIf = ifUl;
+      if (ifDl > 1300000000ull || ifUl > 1300000000ull) ifSubGHz = false;  // must stay < 1.3 GHz
+      freq_t backDl = ifDl + LOd, backUl = ifUl + LOu;
+      if (backDl != rxR || backUl != txR) worstHB = 1e12;   // round-trip must be exact
+    }
+    printf("store_ok=%d worstOTR10G_Hz=%.3f if_subGHz=%d maxIF_Hz=%llu\n",
+           storeOk ? 1 : 0, worstHB, ifSubGHz ? 1 : 0, (unsigned long long)maxIf);
+  }
 
   // ---- D2: lookFor vs look, sample-by-sample over pass 1 ----
   printf("== LOOKFOR ==\n");

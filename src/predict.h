@@ -100,10 +100,10 @@ public:
   // Doppler-corrected radio frequencies for the current geometry.
   //   rxHz: tune the receiver here to hear a downlink of dlNominal
   //   txHz: transmit here so the satellite receives ulNominal
-  static void dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
+  static void dopplerFreqs(freq_t dlNominal, freq_t ulNominal,
                            double rangeRateKmS,
                            int32_t calDlHz, int32_t calUlHz,
-                           uint32_t& rxHz, uint32_t& txHz);
+                           freq_t& rxHz, freq_t& txHz);
 
   // Full-duplex uplink when the operator HOLDS THE DOWNLINK on a fixed receive
   // frequency (so they keep hearing their own signal at the same spot) instead of
@@ -113,7 +113,7 @@ public:
   // your uplink. dlOp/ulOp are the satellite-frame operating pair from
   // passbandFreqs (so `invert` matches the transponder). Returns the transmit
   // frequency (incl. calUl) that parks the ground downlink at dlOp+calDl.
-  static uint32_t uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
+  static freq_t uplinkForFixedDownlink(freq_t dlOp, freq_t ulOp,
                                          bool invert, double rangeRateKmS,
                                          int32_t calDlHz, int32_t calUlHz);
 
@@ -123,7 +123,7 @@ public:
   // the fixed uplink Doppler-shifted, then its emitted downlink is Doppler-shifted
   // again on the way down). dlOp/ulOp are the satellite-frame pair from
   // passbandFreqs so `invert` matches the transponder.
-  static uint32_t downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
+  static freq_t downlinkForFixedUplink(freq_t dlOp, freq_t ulOp,
                                          bool invert, double rangeRateKmS,
                                          int32_t calDlHz, int32_t calUlHz);
 
@@ -133,7 +133,7 @@ public:
   // the uplink moves opposite to the downlink; for non-inverting it tracks it.
   // Single-channel transponders ignore the offset (dlOp=downlink, ulOp=uplink).
   static void passbandFreqs(const Transponder& t, int32_t pbOffsetHz,
-                            uint32_t& dlOp, uint32_t& ulOp);
+                            freq_t& dlOp, freq_t& ulOp);
 
   // Fill up to `maxN` upcoming passes starting from `from` (unix UTC).
   int  predictPasses(time_t from, float minEl, PassPredict* out, int maxN,

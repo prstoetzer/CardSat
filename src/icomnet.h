@@ -45,12 +45,12 @@ public:
   // sends keepalives, drains both sockets, re-auths, and reconnects on loss.
   void service() override;
 
-  bool setMainFreq(uint32_t hz) override;        // uplink (TX) on MAIN
-  bool setSubFreq (uint32_t hz) override;        // downlink (RX) on SUB
+  bool setMainFreq(freq_t hz) override;        // uplink (TX) on MAIN
+  bool setSubFreq (freq_t hz) override;        // downlink (RX) on SUB
   bool setMainMode(RigMode m)   override;
   bool setSubMode (RigMode m)   override;
-  bool readSubFreq(uint32_t& hzOut) override;
-  bool readMainFreq(uint32_t& hzOut) override;
+  bool readSubFreq(freq_t& hzOut) override;
+  bool readMainFreq(freq_t& hzOut) override;
   bool readPtt(bool& tx) override;
   bool enableSatMode(bool on)   override;
   bool setCtcss(bool on, float toneHz) override;
@@ -148,12 +148,12 @@ private:
 
   // CI-V helpers (mirror CivRig, but wrapped in the serial UDP packet)
   static CivMode toCiv(RigMode m);
-  static void    freqToBcd(uint32_t hz, uint8_t out[5]);
+  static void    freqToBcd(freq_t hz, uint8_t out[5]);
   void selBand(bool sub);
   bool sendCivPayload(const uint8_t* pl, size_t pllen);
-  bool setFreqNet(bool sub, uint32_t hz);
+  bool setFreqNet(bool sub, freq_t hz);
   bool setModeNet(bool sub, CivMode m, uint8_t filter = 0x01);
-  bool readFreqNet(bool sub, uint32_t& hzOut);
+  bool readFreqNet(bool sub, freq_t& hzOut);
 
   // Obfuscated credential (Icom passcode substitution) -> 16 bytes.
   static void passcode(const char* s, uint8_t out[16]);

@@ -22,20 +22,27 @@ enum Screen : uint8_t {
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
+  SCR_CALEXPORT,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
   SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
-  SCR_KESSLER, SCR_QTHPRE
+  SCR_KESSLER, SCR_QTHPRE,
+  SCR_DUALRIG
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
 enum TuneMode : uint8_t {
   TM_HOLD = 0,   // hold the passband; Doppler-correct BOTH legs (device-key tuning)
-  TM_FULL,       // One True Rule: rig knob = passband, correct BOTH legs
+  TM_FULL,       // One True Rule: rig knob = passband (reads DOWNLINK), correct BOTH legs
   TM_DL,         // One True Rule on the downlink only (uplink left untouched)
   TM_UL,         // Doppler-correct the uplink only (downlink left untouched)
+  TM_FULL_UL,    // One True Rule but the operator tunes the UPLINK: reads the uplink
+                 // VFO, recovers the passband point from it, corrects BOTH legs. The
+                 // mirror of TM_FULL, for dual-radio setups where the uplink rig is
+                 // the one with the knob. MUST stay last (the 'd' cycle uses TM_COUNT).
 };
+static constexpr uint8_t TM_COUNT = TM_FULL_UL + 1;  // number of tune modes (cycle wrap)
 
 // One upcoming (or in-progress) pass for a favorite, used by the schedule view.
 struct SchedEntry {
@@ -98,6 +105,37 @@ private:
   Location  loc;
   Predictor pred;
   Rig*      rig = nullptr;   // active CAT backend (Icom/Yaesu/Kenwood)
+
+  // ---- Dual-Rig setup screen (SCR_DUALRIG) ----------------------------------
+  // Configures the CardSatDualRig companion over the active rigctl transport (net
+  // or Grove) via its \csdr_* escape. Holds the last query result so the screen
+  // can be edited offline and pushed with one save.
+  static constexpr int DR_MAX_DEV   = 8;     // devices shown from the Stick
+  static constexpr int DR_MAX_MODEL = 40;    // model-catalogue entries from the Stick
+  struct DrDevice { char product[24]; char serial[20]; char vidpid[12]; int addr; };
+  struct DrModel  { int id; char name[14]; bool rxOnly; };
+  // Heap-allocated on entering SCR_DUALRIG and freed by drFree() from the
+  // screen-transition hook in loop() -- so the ~1.3 KB of device+model tables is
+  // not resident for the whole session (same lifecycle as the memo/BASIC buffers).
+  DrDevice* drDev   = nullptr; int drDevN = 0;
+  DrModel*  drModel = nullptr; int drModelN = 0;
+  // Editable per-leg selection (index 0 = downlink, 1 = uplink).
+  int   drModelId[2]  = { -1, -1 };          // Stick model id, -1 = none
+  int   drCiv[2]      = { 0, 0 };            // CI-V address (0 = default)
+  char  drSerial[2][20] = { "", "" };        // assigned device serial ("" = none)
+  int   drSel = 0;                           // cursor: 0..5 across the 6 editable fields
+  int   drScroll = 0;                        // device-list scroll
+  bool  drLoaded = false;                    // a query has populated the state
+  String drStatus;                           // last transport result / hint
+  bool  drAlloc();                           // allocate drDev/drModel (on screen entry)
+  void  drFree();                            // release them (screen-transition hook)
+  void  drQuery();                           // pull \csdr_get + \csdr_models
+  void  drSave();                            // push \csdr_set ... save=1
+  int   drModelIdx(int id) const;            // catalogue index for a model id (-1)
+  // At-a-glance link status for the Settings row, so bring-up is a glance not a
+  // query. 0 = unknown (grey), 1 = linked (green), 2 = no link (red).
+  uint8_t drLink = 0; uint32_t drLinkMs = 0;
+  void  drPingLink();                        // throttled \csdr_get ping; sets drLink
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
   VoiceMemo memo;            // SD-card voice memo recorder ('v' on Track family)
   IrBeacon  irBeacon;        // IR pass-alert beacon (distinct flash count per event)
@@ -372,7 +410,7 @@ private:
   int32_t   dxdPbOff  = 0;            // passband operating offset (Hz up from downlink low)
   int       dxdRow    = 0;            // scroll position (top visible 30 s step)
   int       dxdWin    = 0;            // which mutual window index this table is for
-  uint32_t  dxdAnchorHz = 0;         // fixed-mode target dial freq (Hz); re-applied on transponder change (0 = none)
+  freq_t    dxdAnchorHz = 0;         // fixed-mode target dial freq (Hz); re-applied on transponder change (0 = none)
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
   void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
@@ -752,7 +790,21 @@ private:
   void planSeedDefaults();             // fill grid/time from current site & clock
   void drawPlanner(); void keyPlanner(char c, bool enter, bool back);
   void drawPlanDetail(); void keyPlanDetail(char c, bool enter, bool back);
-  String exportRovePlan();             // write the survey to a formatted .txt; returns path
+  String exportRovePlan();
+  // Calendar (.ics) export (0.9.62). Each returns the written path ("" on failure).
+  String icsExportFavPasses();
+  String icsExportSelectedPass();
+  String icsExportActivations();
+  String icsExportEmeWindows();
+  String icsExportVisual();
+  // ICS building helpers.
+  File   icsBegin(const char* stem, String& outPath);
+  void   icsClose(File& f);
+  void   icsWriteEvent(File& f, time_t start, time_t end, const String& summary,
+                       const String& description, const String& location, const String& uidTag);
+  void   icsWriteFolded(File& f, const String& line);
+  String icsPassDesc(SatEntry* s, float maxEl, float azAos, freq_t dnHz, freq_t upHz, const char* modeTxt);
+  void   icsActiveFreqs(freq_t& dn, freq_t& up, String& modeOut);
   // planner input form: which field is being edited
   int      planField = 0;              // 0=grid 1=date 2=time 3=window 4=[compute]
   int      planDetailIdx = 0;          // which PlanRow the detail screen is showing
@@ -954,8 +1006,8 @@ private:
   bool     cwMode   = false;      // linear bird: force CW on both legs (toggle 'm');
                                   // per-session, reset on every transponder change
                                   // holds a constant frequency AT THE SATELLITE
-  uint32_t lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
-  uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
+  freq_t   lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
+  freq_t   lastUlHz  = 0;         // last uplink dial commanded (send guard)
   uint8_t  uplinkDeferTicks = 0;  // suppress the uplink write for N ticks after a downlink write/knob
                                   // move (OscarWatch "defer uplink after dial move"); lets the SUB
                                   // read + downlink settle before the bus is used for the MAIN uplink
@@ -1057,7 +1109,7 @@ private:
   };
   LineBuf     rigdBuf{120}, rotdBuf{120}, webdBuf{200}, webdReqLine{200};
   uint8_t     rigdVfo = 0;         // 0 = downlink (VFOA/RX), 1 = uplink (VFOB/TX)
-  uint32_t    rigdLastSub = 0, rigdLastMain = 0;  // last freq set (get_freq fallback)
+  freq_t      rigdLastSub = 0, rigdLastMain = 0;  // last freq set (get_freq fallback)
   RigMode     rigdSubMode = RM_USB, rigdMainMode = RM_LSB;
   // rotctld TCP server (item 4): a networked PC drives the wired rotator.
   WiFiServer* rotd = nullptr;
@@ -1191,11 +1243,32 @@ private:
     }
     return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN;
   }
-  bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }
-  bool rigSetUplinkFreq  (uint32_t hz) { return dlOnSub() ? rig->setMainFreq(hz) : rig->setSubFreq(hz); }
+  // --- Transverter LO boundary (0.9.62) -------------------------------------
+  // CardSat computes and displays the REAL on-air frequency (Doppler is applied to
+  // the real frequency upstream of here). If a transverter LO is configured for the
+  // leg, the value actually sent to the rig is the IF = real - LO, and a value read
+  // back from the rig is real = IF + LO. Doing the subtraction HERE, at the single
+  // choke-point, guarantees Doppler was already applied to the real frequency (never
+  // to the IF -- Dopplering the IF would under-correct by the real/IF ratio, ~70x at
+  // 10 GHz on a 144 MHz IF). LO = 0 means no transverter: pass the real freq through.
+  freq_t dlRealToIf(freq_t real) const {
+    return (cfg.xvtrDlHz && real > cfg.xvtrDlHz) ? (real - cfg.xvtrDlHz) : real;
+  }
+  freq_t ulRealToIf(freq_t real) const {
+    return (cfg.xvtrUlHz && real > cfg.xvtrUlHz) ? (real - cfg.xvtrUlHz) : real;
+  }
+  freq_t dlIfToReal(freq_t iff) const {
+    return cfg.xvtrDlHz ? (iff + cfg.xvtrDlHz) : iff;
+  }
+  freq_t ulIfToReal(freq_t iff) const {
+    return cfg.xvtrUlHz ? (iff + cfg.xvtrUlHz) : iff;
+  }
+  bool rigSetDownlinkFreq(freq_t hz) { freq_t f = dlRealToIf(hz); return dlOnSub() ? rig->setSubFreq(f)  : rig->setMainFreq(f); }
+  bool rigSetUplinkFreq  (freq_t hz) { freq_t f = ulRealToIf(hz); return dlOnSub() ? rig->setMainFreq(f) : rig->setSubFreq(f); }
   void rigSetDownlinkMode(RigMode m)   { if (dlOnSub()) rig->setSubMode(m);  else rig->setMainMode(m); }
   void rigSetUplinkMode  (RigMode m)   { if (dlOnSub()) rig->setMainMode(m); else rig->setSubMode(m); }
-  bool rigReadDownlinkFreq(uint32_t& h){ return dlOnSub() ? rig->readSubFreq(h) : rig->readMainFreq(h); }
+  bool rigReadDownlinkFreq(freq_t& h){ bool ok = dlOnSub() ? rig->readSubFreq(h) : rig->readMainFreq(h); if (ok) h = dlIfToReal(h); return ok; }
+  bool rigReadUplinkFreq  (freq_t& h){ bool ok = dlOnSub() ? rig->readMainFreq(h) : rig->readSubFreq(h); if (ok) h = ulIfToReal(h); return ok; }
   void rigSelectDownlink()             { if (dlOnSub()) rig->selectSubBand();  else rig->selectMainBand(); }
   void rigSelectUplink()               { if (dlOnSub()) rig->selectMainBand(); else rig->selectSubBand(); }
   // Drive the downlink dial, but only when it actually moved (don't re-send the
@@ -1207,19 +1280,35 @@ private:
   // defer the uplink write so the SUB read + downlink settle first -- the
   // OscarWatch "defer uplink after a dial move" rule, important on slow single-
   // wire Main/Sub rigs like the IC-821).
-  bool driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
-    uint32_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
+  bool driveDownlink(freq_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
+    freq_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
     if (lastRxSet && d < threshHz) return false;         // within deadband: already there
     if (!rigSetDownlinkFreq(rx)) return false;
-    uint32_t back;
+    freq_t back;
     lastRxSet = (readback && rig->canReadFreq() && rigReadDownlinkFreq(back)) ? back : rx;
+    return true;
+  }
+  // Uplink drive for TM_FULL_UL (One True Rule on the uplink knob): the mirror of
+  // driveDownlink. Unlike driveUplink()/driveUplinkDeferred(), it (a) reads the
+  // accepted uplink back into lastUlHz so the rig's tuning-step rounding can't later
+  // look like an operator knob move, and (b) leaves the active band on the UPLINK
+  // (rigSelectUplink) because here the uplink IS the followed knob -- yanking focus
+  // back to the downlink would fight the operator on single-VFO-focus rigs. Only used
+  // by the TM_FULL_UL branch; every other mode keeps its existing uplink path.
+  bool driveUplinkOtr(freq_t tx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
+    freq_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
+    if (lastUlHz && d < threshHz) return false;          // within deadband: already there
+    if (!rigSetUplinkFreq(tx)) return false;
+    freq_t back;
+    lastUlHz = (readback && rig->canReadFreq() && rigReadUplinkFreq(back)) ? back : tx;
+    rigSelectUplink();                                   // keep the operator on the uplink VFO
     return true;
   }
   // Drive the uplink dial only when it moved; then leave the active band on the
   // downlink so the operator's knob/read stays on RX. No read-back (the uplink
   // knob is never followed).
-  void driveUplink(uint32_t tx, uint32_t threshHz = FREQ_GUARD_HZ) {
-    uint32_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
+  void driveUplink(freq_t tx, uint32_t threshHz = FREQ_GUARD_HZ) {
+    freq_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
     if (lastUlHz && d < threshHz) return;
     if (rigSetUplinkFreq(tx)) { lastUlHz = tx; rigSelectDownlink(); }
   }
@@ -1230,7 +1319,7 @@ private:
   // guarantees that during a fast Doppler slew (downlink writing every tick) the
   // uplink still services every other tick instead of starving. `ulEnabled` is
   // the caller's drvUL && t.uplink condition.
-  void driveUplinkDeferred(uint32_t tx, uint32_t threshHz, bool dlMoved, bool ulEnabled) {
+  void driveUplinkDeferred(freq_t tx, uint32_t threshHz, bool dlMoved, bool ulEnabled) {
     bool deferred = (uplinkDeferTicks > 0);
     if (uplinkDeferTicks > 0) uplinkDeferTicks--;
     bool drove = false;
@@ -1500,7 +1589,18 @@ private:
   // station math). All computation is local -- these work offline.
   int toolsSel = 0;
   int toolsCat = -1;   // Tools menu: -1 = category list, else selected category index
+  int    calSel = 0;             // Calendar-export screen cursor (0..5)
+  String calStatus;              // last export result line ("" = none)
+  // Hand-pointing aids on the arrow screen (0.9.62): after the operator points north,
+  // integrate the BMI270 gyro's yaw rate to a relative heading and use the accelerometer
+  // as an elevation level. Gyro-only heading drifts, so re-zeroing north is one key.
+  bool     ptAidOn = false;      // pointing-aid overlay active on SCR_ARROW
+  bool     ptNorthSet = false;   // operator has zeroed the heading reference at north
+  float    ptHeading = 0;        // integrated heading from north, degrees (0..360)
+  uint32_t ptLastMs = 0;         // last gyro-integration timestamp (millis)
+  float    ptElNow = -999;       // current device pitch from the accelerometer (deg)
   void drawTools(); void keyTools(char c, bool enter, bool back);
+  void drawCalExport(); void keyCalExport(char c, bool enter, bool back);
   int toolsRowCount() const; int toolsRowId(int row) const;   // two-level Tools menu helpers
 
   // Infix scientific calculator (SCR_CALC): type an expression, ENTER evaluates.
@@ -2034,6 +2134,7 @@ private:
   void drawTechHelp();  void keyTechHelp(char c, bool enter, bool back);
   void drawLearn();     void keyLearn(char c, bool enter, bool back);
   void drawArrow();     void keyArrow(char c, bool enter, bool back);
+  void updatePointingAid();   // gyro-heading + accel-pitch update for the arrow-screen aid
   void drawOverhead();  void keyOverhead(char c, bool enter, bool back);
   void scanOverhead();  // synchronous all-DB above-horizon snapshot
   void drawGame();      void keyGame(char c, bool enter, bool back);  // "Zap the Sats"
@@ -2132,6 +2233,8 @@ private:
   void keyCatTest(char c, bool enter, bool back);
   void enterCatMon();                       // open the monitor, claim the trace sink
   void drawCatMon();
+  void drawDualRig();
+  void keyDualRig(char c, bool enter, bool back);
   void keyCatMon(char c, bool enter, bool back);
   void catMonPush(const char* dir, const uint8_t* b, size_t n);  // append a trace line
   void catMonSendHex(const String& hex);    // parse "FE FE 4C..." and transmit

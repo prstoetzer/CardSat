@@ -184,7 +184,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.61";
+static constexpr const char* FW_VERSION = "0.9.62";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -238,6 +238,13 @@ static constexpr uint16_t YAESU_ADC_MS    = 6;     // single-shot settle for 250
 // ---------------------------------------------------------------------------
 static constexpr int   MAX_SATS        = 150;  // sats held in RAM from GP data
 static constexpr int   MAX_TX_PER_SAT  = 64;   // transmitters held for active sat (e.g. ISS has ~49 on SatNOGS)
+
+// Frequency type (0.9.62). Widened from uint32_t (ceiling ~4.294 GHz) to 64-bit so
+// microwave satellite transponders -- QO-100's 10489.75 MHz downlink, 5.7/10/24 GHz --
+// are representable, stored, and displayed. The CAT wire encoders still take whatever
+// their protocol needs (CI-V 5-BCD-byte = 10 digits; Yaesu IF is sub-GHz), converting at
+// the boundary. See docs/design/HIGH_FREQ_SCOPE.md.
+typedef uint64_t freq_t;
 
 // ---- USB-host CAT (CAT_USB) ------------------------------------------------
 // ON by default since 0.9.59 -- like LoRa, ship every feature. It was opt-in
@@ -318,6 +325,7 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 // ---------------------------------------------------------------------------
 #define DATA_DIR     "/CardSat"               // all data/config lives in this folder
 #define AUDIO_DIR    "/CardSat/audio"         // voice memos (SD card only)
+#define CALENDAR_DIR "/CardSat/Calendars"     // exported .ics calendar files (0.9.62)
 // Voice-memo capture (SD-card-only feature; PDM mic via M5Unified into a WAV).
 static constexpr uint32_t MEMO_SAMPLE_HZ  = 16000;  // 16 kHz mono
 static constexpr uint32_t MEMO_MAX_SECS   = 30;     // hard cap per memo

@@ -35,13 +35,13 @@ public:
   bool ready() const override { return _stream != nullptr; }
   bool sendRaw(const uint8_t* b, size_t n) override;
 
-  bool setMainFreq(uint32_t hz) override { return setFreq(0x21, hz); } // SAT TX
-  bool setSubFreq (uint32_t hz) override { _lastSubHz = hz;            // SAT RX
+  bool setMainFreq(freq_t hz) override { return setFreq(0x21, hz); } // SAT TX
+  bool setSubFreq (freq_t hz) override { _lastSubHz = hz;            // SAT RX
                                            return setFreq(0x11, hz); }
   bool setMainMode(RigMode m)   override { return setMode(0x27, m); }  // SAT TX
   bool setSubMode (RigMode m)   override { return setMode(0x17, m); }  // SAT RX
-  bool readSubFreq(uint32_t& hzOut) override;          // FT-847 only (0x13)
-  bool readMainFreq(uint32_t& hzOut) override { (void)hzOut; return false; }
+  bool readSubFreq(freq_t& hzOut) override;          // FT-847 only (0x13)
+  bool readMainFreq(freq_t& hzOut) override { (void)hzOut; return false; }
   bool enableSatMode(bool)      override { return false; }             // operator-set
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override {}                            // n/a
@@ -62,13 +62,13 @@ private:
   Stream*    _stream = nullptr;
   RadioModel _model;
   uint16_t   _postMs;          // inter-command delay (FT-736R needs more)
-  uint32_t   _lastSubHz = 0;   // last downlink we commanded (wrong-VFO guard)
+  freq_t     _lastSubHz = 0;   // last downlink we commanded (wrong-VFO guard)
 
   void   drainStale();               // bounded, -1-safe RX flush (never spins)
   bool   send(const uint8_t cmd[5]);
-  bool   setFreq(uint8_t opcode, uint32_t hz);
+  bool   setFreq(uint8_t opcode, freq_t hz);
   bool   setMode(uint8_t opcode, RigMode m);
   static uint8_t modeCode(RigMode m);
-  static void    freqToBcd(uint32_t hz, uint8_t out[4]);
+  static void    freqToBcd(freq_t hz, uint8_t out[4]);
   static uint32_t bcdToFreq(const uint8_t in[4]);   // big-endian BCD * 10 Hz
 };

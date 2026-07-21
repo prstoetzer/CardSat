@@ -76,20 +76,27 @@ protected:
 public:
 
   // Independent downlink (Sub/RX) and uplink (Main/TX) control.
-  virtual bool setMainFreq(uint32_t hz) = 0;   // uplink (TX)
-  virtual bool setSubFreq (uint32_t hz) = 0;   // downlink (RX)
+  virtual bool setMainFreq(freq_t hz) = 0;   // uplink (TX)
+  virtual bool setSubFreq (freq_t hz) = 0;   // downlink (RX)
   virtual bool setMainMode(RigMode m)   = 0;
   virtual bool setSubMode (RigMode m)   = 0;
 
   // Read the downlink (Sub/RX) frequency. Returns false if unsupported.
-  virtual bool readSubFreq(uint32_t& hzOut) = 0;
-  virtual bool readMainFreq(uint32_t& hzOut) = 0;
+  virtual bool readSubFreq(freq_t& hzOut) = 0;
+  virtual bool readMainFreq(freq_t& hzOut) = 0;
 
   // Read the rig's PTT/transmit state into tx. Returns false if the backend
   // can't report it (the default), in which case the caller must not assume
   // anything about transmit state. The Doppler loop uses this to skip the
   // downlink knob read while transmitting (a rig often reports the TX VFO then).
   virtual bool readPtt(bool& tx) { (void)tx; return false; }
+
+  // Send a raw control line to the backend and return one reply line ("" if
+  // unsupported/failed). Used by the Dual-Rig setup screen to talk to the
+  // CardSatDualRig companion's \csdr_* config escape over whichever rigctl
+  // transport is active (net or Grove). No-op on wire-level backends -- only the
+  // rigctl backends carry a line protocol a companion can answer.
+  virtual String vendorLine(const String& line) { (void)line; return String(); }
 
   // Toggle the rig's own satellite mode. Icom: actively forced OFF (we drive
   // MAIN/SUB ourselves). Yaesu/Kenwood: no-op -- their full-duplex/sat mode is
@@ -108,7 +115,7 @@ public:
   // operator sets the band pair up on the radio. mainHz/subHz are the actual
   // frequencies whose bands should be placed on MAIN/SUB respectively.
   // UNTESTED on hardware -- see canAssignBand() and the CivRig implementation.
-  virtual bool assignBands(uint32_t mainHz, uint32_t subHz) {
+  virtual bool assignBands(freq_t mainHz, freq_t subHz) {
     (void)mainHz; (void)subHz; return false;
   }
 
@@ -152,9 +159,10 @@ float ctcssToneHz(int index);
 
 // rigctld (Hamlib "NET rigctl") TCP CLIENT. CardSat drives a radio attached to
 // a rigctld server elsewhere on the LAN (default port 4532). To carry both legs
-// of a satellite QSO over one link it uses Hamlib split semantics: the downlink
-// (Sub/RX) is the main VFO (F/f set/get_freq, M set_mode) and the uplink
-// (Main/TX) is the split/TX VFO (I/i set/get_split_freq, X set_split_mode).
+// of a satellite QSO over one link it uses Hamlib VFO mode: the downlink (Sub/RX)
+// rides VFOA and the uplink (Main/TX) rides VFOB, each steered with plain
+// set_freq/set_mode after a set_vfo -- the portable convention gpredict and the
+// Hamlib backends use (set_split_freq makes Hamlib tune the wrong VFO on Icoms).
 // The socket opens lazily and reconnects (throttled) so a missing server never
 // hangs the Doppler loop. Model-agnostic: the remote rigctld owns the radio.
 class RigctlRig : public Rig {
@@ -163,12 +171,12 @@ public:
   void begin(uint32_t, int, int, int) override { _lastTry = 0; ensure(); }
   bool ready() const override { return _ok; }
   void service() override { ensure(); }
-  bool setMainFreq(uint32_t hz) override;   // uplink   -> set_split_freq
-  bool setSubFreq (uint32_t hz) override;   // downlink -> set_freq
-  bool setMainMode(RigMode m)   override;   // uplink   -> set_split_mode
-  bool setSubMode (RigMode m)   override;   // downlink -> set_mode
-  bool readSubFreq (uint32_t& hzOut) override;   // get_freq
-  bool readMainFreq(uint32_t& hzOut) override;   // get_split_freq
+  bool setMainFreq(freq_t hz) override;   // uplink   -> VFOB set_freq
+  bool setSubFreq (freq_t hz) override;   // downlink -> VFOA set_freq
+  bool setMainMode(RigMode m)   override;   // uplink   -> VFOB set_mode
+  bool setSubMode (RigMode m)   override;   // downlink -> VFOA set_mode
+  bool readSubFreq (freq_t& hzOut) override;   // VFOA get_freq
+  bool readMainFreq(freq_t& hzOut) override;   // VFOB get_freq
   bool readPtt(bool& tx) override;               // get_ptt
   bool enableSatMode(bool) override { return false; }  // remote rig is operator-configured
   void selectSubBand()  override {}
@@ -177,15 +185,63 @@ public:
   bool hasSatMode()  const override { return false; }
   bool selVerified() const override { return _ok; }
   const char* name() const override { return "rigctl"; }
-private:
+  // Raw \csdr_* / rigctl line passthrough for the Dual-Rig setup screen. Sends one
+  // line (newline appended if missing) and returns the single reply line. Inherited
+  // unchanged by RigctlGroveRig, so it automatically uses the Grove transport there.
+  String vendorLine(const String& line) override {
+    return xchg(line.endsWith("\n") ? line : line + "\n");
+  }
+protected:
+  // ---- transport boundary --------------------------------------------------
+  // The VFO-mode protocol (below) is transport-agnostic: it only ever calls these
+  // four primitives, so a subclass that overrides them speaks the identical
+  // protocol over a different wire. The base drives a TCP socket (rigctld over the
+  // network); RigctlGroveRig overrides them to drive the Grove UART instead. Keeping
+  // ONE copy of the command logic is deliberate -- the VFO-mode fix must never drift
+  // between the two transports.
+  virtual bool   linkOpen();                         // ensure the link is up; sets _ok
+  virtual void   linkClose();                        // drop/reset the link
+  virtual size_t linkWrite(const uint8_t* d, size_t n);
+  virtual int    linkRead();                         // one byte, or -1 if none ready
+
+  // ---- shared state + protocol (inherited unchanged by the Grove variant) ----
   String     _host;
   uint16_t   _port;
   bool       _ok = false;
-  WiFiClient _c;
+  WiFiClient _c;                          // used only by the base (TCP) transport
   uint32_t   _lastTry = 0;
-  bool   ensure();                       // (re)connect if needed; updates _ok
+  int    _vfo = -1;        // server's currently-selected VFO: 0=A (downlink), 1=B (uplink), -1=unknown
+  bool   _vfoMode = false; // server was started with --vfo (VFO travels inline on each command)
+  bool   _probed = false;  // \chk_vfo probe done since the link last came up
+  bool   ensure();                       // bring the link up + probe once; updates _ok
+  void   probeVfoMode();                 // one-shot \chk_vfo probe (shared by all transports)
+  String readLine(uint32_t timeoutMs);   // read one reply line from linkRead()
   String xchg(const String& tx);         // send one line, return one reply line ("" on fail)
+  void   selectVfo(bool sub);            // pre-select downlink(A)/uplink(B) VFO on currVFO servers
+  String cmd(char c, bool sub, const String& body = "");  // build a line; VFO inline in --vfo mode
+  static const char* vfoTok(bool sub);   // "VFOA" (downlink) / "VFOB" (uplink)
   static const char* modeName(RigMode m);
+};
+
+// rigctl over the Grove UART (G1/G2) instead of TCP: same VFO-mode protocol, wired
+// transport. This is CardSat driving the CardSatDualRig companion (or any rigctld
+// speaking device) over a Grove cable with no Wi-Fi. Claims UART1 like wired CI-V,
+// so it shares the Grove mutual-exclusion rules. The host/port members are unused.
+class RigctlGroveRig : public RigctlRig {
+public:
+  RigctlGroveRig(uint32_t baud) : RigctlRig("", 0), _baud(baud) {}
+  void begin(uint32_t, int rx, int tx, int) override;   // opens the Grove UART
+  const char* name() const override { return "rigctl-grove"; }
+protected:
+  bool   linkOpen() override;
+  void   linkClose() override;
+  size_t linkWrite(const uint8_t* d, size_t n) override;
+  int    linkRead() override;
+private:
+  HardwareSerial* _serial = nullptr;    // Serial1 on G1/G2; owned elsewhere (static)
+  uint32_t _baud;
+  int      _rx = -1, _tx = -1;
+  bool     _open = false;
 };
 
 // Construct the backend for a model. Caller owns the returned pointer.

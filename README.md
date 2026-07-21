@@ -23,6 +23,25 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.62:** **the microwave bands, and two radios working as one.** Frequencies
+> and Doppler are now **64-bit** — the old 4.29 GHz ceiling is gone, so C/X/Ku downlinks and
+> 10 GHz QO-100-style birds track and display correctly — and new **transverter LO** offsets
+> let a 1.2 GHz rig work 2.4/10 GHz through an up/down-converter. A **dual-radio** path lands:
+> the **CardSatDualRig** companion (M5StickS3) turns two half-duplex/RX radios into one
+> full-duplex station over a Hamlib `rigctld` server; CardSat drives it over **rigctl (net)**
+> or the new **rigctl (Grove)** cable transport and configures it from an on-device **Dual-Rig
+> setup** screen that shows the Stick's live USB enumeration; and a mirror **`<FULLu>`**
+> tune mode follows the **uplink** knob for setups where that's the radio with the dial. Plus
+> **calendar (.ics) export**, a documented **`/api/status`** JSON contract, and a
+> gyro/accelerometer **hand-pointing aid**.
+>
+> ⚠️ **Two areas ship untested on hardware:** the **transverter/microwave** path and the whole
+> **dual-radio** path (companion, Grove rigctl, Dual-Rig screen, `<FULLu>`). Both compile
+> clean and are verified against the code and specs, but need the hardware they're for (a
+> transverter; two live radios on a Grove-tethered Stick) to confirm — treat first use as
+> verification. Everything else runs on the Cardputer as before.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.62.md)**.
+
 > **New in v0.9.61:** **space weather that reads like an operating picture — and a station
 > that works the terrestrial bands too.** Solar flux and Kp grow into a full suite: **GOES
 > X-ray flares**, **real-time solar wind (Bz + speed)**, **sunspot number**, a **band-by-band
@@ -340,6 +359,12 @@ internal data across an upgrade; a full `CardSat_Merged.bin` flash erases it.
 Building from source (Arduino IDE single-file `CardSat.ino`, or PlatformIO) and the
 complete flashing/upgrade detail are in **[docs/BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md)**
 (and the step-by-step **[docs/guides/ARDUINO_SETUP.md](docs/guides/ARDUINO_SETUP.md)**).
+
+> **This WIP build ships a prebuilt binary** in **[`firmware/`](firmware/)** —
+> `CardSat-merged.bin` (flash at `0x0`) plus the individual bootloader/partition/app
+> images and a flashing guide with exact offsets and checksums. See
+> [`firmware/README.md`](firmware/README.md). The companion Stick firmware has its own
+> prebuilt binary under [`companion/CardSatDualRig/firmware/`](companion/CardSatDualRig/firmware/).
 
 ## Quick start
 

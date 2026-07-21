@@ -116,6 +116,50 @@ Response object fields:
 | `hold` | string MHz | Manual calculator: the **held** leg frequency (parked, no Doppler) |
 | `tune` | string MHz | Manual calculator: the **tuned** leg frequency (Doppler-corrected) |
 
+**Stable extension (0.9.62).** The following fields were added as a documented, stable
+contract for external tooling. New integrations should prefer these; the keys above grew
+organically for the built-in panel and may change.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ver` | string | Firmware version (e.g. `"0.9.62"`) |
+| `utc` | number | Current time, Unix seconds UTC (`0` if clock unset) |
+| `lat` / `lon` | number\|null | Observer latitude °N / longitude °E |
+| `grid` | string | Maidenhead grid locator (or `""`) |
+| `locsrc` | string | `"gps"`, `"manual"`, or `"none"` |
+| `rangeKm` | number\|null | Slant range, km |
+| `rangeRate` | number\|null | Range rate, km/s (positive = receding) |
+| `vis` | bool | Satellite sunlit **and** observer-dark **and** above horizon |
+| `aos` / `tca` / `los` | number\|null | Next/in-progress pass acquisition / closest approach / loss, Unix seconds |
+| `maxEl` | number\|null | That pass's maximum elevation, ° |
+| `azAos` / `azLos` | number\|null | Azimuth at rise / set, ° |
+| `riseDir` | string | Rise direction as a compass point (e.g. `"NW"`) |
+| `rxRead` / `txRead` | string MHz | Rig **read-back** downlink / uplink frequency (vs the commanded `rx`/`tx`). When a **transverter LO** is configured (Settings → Radio), these are the rig's **IF** dial as the radio reports it; add the configured LO to recover the real on-air frequency. The `rx`/`tx` panel keys and the Track display already show the real frequency. |
+| `catRead` | bool | Rig answered a frequency read this cycle |
+| `rotEnable` | bool | Rotator configured/enabled |
+| `rotAz` / `rotEl` | number\|null | Rotator **actual** (read-back) az / el |
+| `rotTgtAz` / `rotTgtEl` | number\|null | Rotator **commanded** target az / el |
+| `sys` | object | Subsystem status (see below) |
+
+The `sys` object:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `radio` | bool | Radio CAT output engaged |
+| `catProto` | string | Active CAT backend name (`"icom"`, `"yaesu"`, `"kenwood"`, `"rigctl"`, `"none"`, …) |
+| `gps` | string | `"fix"`, `"nofix"`, or `"off"` |
+| `gpsSats` | number | Satellites used in the last GPS fix |
+| `sd` | bool | Running from an SD card |
+| `wifi` | string | `"up"` or `"down"` |
+| `ip` | string | IPv4 address when connected, else `""` |
+| `rssi` | number | Wi-Fi RSSI, dBm |
+| `batt` | number\|null | Battery level, percent |
+| `charging` | bool | Battery charging |
+| `heapFree` / `heapMin` / `heapBlk` | number | Free heap now / minimum since boot / largest free block, bytes |
+
+Fields are additive across firmware versions: new keys may appear, but the ones above keep
+their names, types, and meanings.
+
 ### `GET /api/sats`
 The selectable-satellite list. **Favorites first**; if no favorites are marked, falls back to
 the catalog. Capped at **60** entries.

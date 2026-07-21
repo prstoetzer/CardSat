@@ -76,9 +76,11 @@ bool KenwoodRig::sendCmd(const String& cmd) {
   return true;
 }
 
-bool KenwoodRig::setVfoFreq(const char* vfo, uint32_t hz) {
-  char buf[20];
-  snprintf(buf, sizeof(buf), "%s%011lu;", vfo, (unsigned long)hz);
+bool KenwoodRig::setVfoFreq(const char* vfo, freq_t hz) {
+  char buf[24];
+  // Kenwood ASCII frequency is 11 digits. CardSat only sends this rig a sub-GHz IF
+  // (transverter LO offset handles higher bands), so 11 digits is always ample.
+  snprintf(buf, sizeof(buf), "%s%011llu;", vfo, (unsigned long long)hz);
   return sendCmd(buf);
 }
 
@@ -88,7 +90,7 @@ bool KenwoodRig::setModeKw(RigMode m) {
   return sendCmd(buf);
 }
 
-bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
+bool KenwoodRig::readSubFreq(freq_t& hzOut) {
   if (!_stream || !RADIOS[_model].canReadFreq) return false;
   drainStale();                                    // bounded (never spins)
   sendCmd("FA;");                                  // query VFO A (downlink)
@@ -122,7 +124,7 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
   if (rx.length()) catTrace("RX", (const uint8_t*)rx.c_str(), rx.length());
   int i = rx.indexOf("FA");
   if (i >= 0 && (int)rx.length() >= i + 13) {       // "FA" + 11 digits
-    uint32_t hz = 0; bool ok = false;
+    freq_t hz = 0; bool ok = false;
     for (int k = i + 2; k < i + 13; ++k) {
       char c = rx[k];
       if (c < '0' || c > '9') { ok = false; break; }
@@ -131,7 +133,7 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
     if (ok) {
       hzOut = hz;
 #if KW_DEBUG
-      Serial.printf("[CAT] VFO-A (downlink) read: %lu Hz\n", (unsigned long)hz);
+      Serial.printf("[CAT] VFO-A (downlink) read: %llu Hz\n", (unsigned long long)hz);
 #endif
       return true;
     }

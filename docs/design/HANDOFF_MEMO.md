@@ -171,6 +171,26 @@ If any gate fails, fix before compiling. The gates are fast; run them freely.
 - Footer text budget: **≤39 chars** at the 6-px glyph width; centering uses
   `x = (240 - len*6)/2`.
 - Icom LAN support is **IC-9700 only** (not IC-705/7610/785x).
+- **Frequencies are `freq_t` (= `uint64_t`, typedef in `config.h`) as of 0.9.62.** The old
+  `uint32_t` ceiling (4.294 GHz) silently truncated microwave-band birds. Any NEW code that
+  holds, passes, or returns an on-air frequency uses `freq_t`, not `uint32_t` — a `uint32_t`
+  local bound to a `freq_t&` is a compile error, which is the intended tripwire. Print with
+  `%llu`/`(unsigned long long)`. IF-side locals inside a single CAT backend (Yaesu 4-byte
+  BCD, Kenwood ASCII) may stay `uint32_t` because the value on the wire is definitionally
+  sub-GHz (see next point), but their public signatures are `freq_t`.
+- **rigctl client uses VFO mode, not split (0.9.62).** The `RigctlRig` backend steers
+  the two legs with `set_vfo VFOA`(downlink)/`VFOB`(uplink) + plain `set_freq`/`set_mode`,
+  probing `\chk_vfo` on connect to detect a `--vfo` server (VFO inline per command).
+  It does NOT use `set_split_freq`/`I`/`i`/`X` -- that convention makes Hamlib retune the
+  wrong VFO on Icom sat rigs and fails against VFO-model servers (CardSat's own rigctld
+  server + the Stick). Keep client and server on the VFO model if either changes.
+- **Transverter LO (0.9.62): the CAT wire never carries >1.2 GHz.** Supported rigs top out
+  at 1.2 GHz; microwave bands are reached via a transverter. `cfg.xvtrDlHz`/`cfg.xvtrUlHz`
+  (Hz, 0 = none) are subtracted at the **single choke-point** in `app.h`
+  (`rigSetDownlinkFreq`/`rigSetUplinkFreq` apply `real − LO`; `rigReadDownlinkFreq` applies
+  `IF + LO`). **Doppler is applied to the real frequency upstream, LO subtracted last** —
+  never Doppler the IF. The rigctld-server `get_freq` reads the rig IF directly by design
+  (exposes the actual dial to an external, possibly-transverter-aware client).
 - Documentation claims must be **grounded in actual source** — verify every technical
   statement against the code before writing it. Fictional API methods have been caught
   this way; don't add to them.

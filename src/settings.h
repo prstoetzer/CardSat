@@ -29,7 +29,13 @@ enum CatType : uint8_t {
   CAT_WIRED = 0,   // CI-V over the TTL UART (default)
   CAT_NET   = 1,   // Icom LAN (RS-BA1 UDP): control 50001 + serial 50002
   CAT_RIGCTL = 2,  // rigctld (Hamlib NET rigctl) client: drive a remote rig over TCP
-  CAT_USB   = 3,   // USB<->serial adapter (FTDI/CP210x/CH34x) on the USB-C port.
+  CAT_RIGCTL_GROVE = 3,  // rigctld client over the Grove UART (G1/G2), no Wi-Fi:
+                   // drives the CardSatDualRig companion (two half-duplex/RX radios)
+                   // over a Grove cable. Same VFO-mode protocol as CAT_RIGCTL; claims
+                   // UART1 like wired CI-V, so it shares the Grove exclusion rules.
+                   // catPort is reused as the Grove baud (default 115200). Always
+                   // selectable (no compile flag) -- it uses the on-board UART.
+  CAT_USB   = 4,   // USB<->serial adapter (FTDI/CP210x/CH34x) on the USB-C port.
                    // Works for ANY wire-level protocol (CI-V/Yaesu/Kenwood): the
                    // transport is swapped, the dialect is unchanged. Only present
                    // when built with CARDSAT_HAS_USBCAT=1 (the default since
@@ -39,9 +45,9 @@ enum CatType : uint8_t {
 // selectable when the feature is compiled in, so a build without it behaves
 // exactly as before -- the operator cannot land on an unimplemented transport.
 #if CARDSAT_HAS_USBCAT
-static constexpr uint8_t CAT_TYPE_N = 4;
+static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), USB, rigctl(Grove)
 #else
-static constexpr uint8_t CAT_TYPE_N = 3;
+static constexpr uint8_t CAT_TYPE_N = 4;   // Wired, LAN, rigctl(net), rigctl(Grove)
 #endif
 
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
@@ -231,6 +237,17 @@ struct Settings {
   // Calibration (persisted oscillator offsets, Hz)
   int32_t  calDlHz = 0;
   int32_t  calUlHz = 0;
+  // Transverter local-oscillator offsets (0.9.62), Hz. A transverter lets a rig that
+  // only tunes a lower IF band work a much higher band: the rig tunes IF = real - LO,
+  // and the transverter mixes that up to the real on-air frequency. CardSat stores,
+  // tracks, Doppler-corrects and DISPLAYS the real frequency; only the value sent to
+  // the rig (and read back from it) crosses the LO boundary. Per-leg because split-band
+  // microwave work often uses a different transverter up vs down (e.g. QO-100: 2.4 GHz
+  // up / 10 GHz down). 0 = no transverter on that leg (drive the rig at the real freq).
+  // The supported rigs top out at 1.2 GHz, so this is how they reach the microwave sat
+  // bands at all. See docs/design/TRANSVERTER_SCOPE.md.
+  freq_t   xvtrDlHz = 0;     // downlink transverter LO (real downlink - this = rig IF)
+  freq_t   xvtrUlHz = 0;     // uplink transverter LO   (real uplink   - this = rig IF)
   // Rotator (GS-232 over an I2C->UART bridge, or rotctld over TCP)
   bool     rotEnable   = false;
   uint8_t  rotType     = ROT_GS232;  // GS-232 (bridge) or rotctld (network)

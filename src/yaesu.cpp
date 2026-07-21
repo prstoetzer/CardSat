@@ -68,8 +68,11 @@ uint8_t YaesuRig::modeCode(RigMode m) {
 }
 
 // Big-endian BCD, 10 Hz resolution, 4 bytes (8 digits of hz/10).
-void YaesuRig::freqToBcd(uint32_t hz, uint8_t out[4]) {
-  uint32_t f = hz / 10;                          // 10 Hz units
+void YaesuRig::freqToBcd(freq_t hz, uint8_t out[4]) {
+  // Yaesu 4-byte BCD holds 8 digits of 10-Hz units (~1 GHz max). CardSat only ever
+  // sends this rig a sub-GHz IF (the supported rigs top out at 1.2 GHz; higher bands
+  // go through a transverter LO offset), so the value always fits.
+  uint32_t f = (uint32_t)(hz / 10);              // 10 Hz units
   out[0] = (uint8_t)((((f/10000000)%10)<<4) | ((f/1000000)%10));
   out[1] = (uint8_t)((((f/100000)%10)<<4)   | ((f/10000)%10));
   out[2] = (uint8_t)((((f/1000)%10)<<4)     | ((f/100)%10));
@@ -102,7 +105,7 @@ bool YaesuRig::send(const uint8_t cmd[5]) {
   return true;
 }
 
-bool YaesuRig::setFreq(uint8_t opcode, uint32_t hz) {
+bool YaesuRig::setFreq(uint8_t opcode, freq_t hz) {
   uint8_t cmd[5];
   freqToBcd(hz, cmd);          // P1..P4 = BCD frequency
   cmd[4] = opcode;             // 0x11 = SAT RX, 0x21 = SAT TX
@@ -126,7 +129,7 @@ uint32_t YaesuRig::bcdToFreq(const uint8_t in[4]) {
 // BCD frequency bytes (10 Hz units) + 1 mode byte. Only firmware-updated FT-847s
 // can read at all (early units stay silent -> we time out and return false). The
 // FT-736R has no read path (canReadFreq is false for it).
-bool YaesuRig::readSubFreq(uint32_t& hzOut) {
+bool YaesuRig::readSubFreq(freq_t& hzOut) {
   if (!_stream || !RADIOS[_model].canReadFreq) return false;
   drainStale();                                                 // flush stale bytes
   const uint8_t cmd[5] = { 0x00, 0x00, 0x00, 0x00, 0x13 };      // read SAT-RX

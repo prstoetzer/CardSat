@@ -77,7 +77,7 @@ FRONT = [
   "<b>v</b> 10-day chart &middot; <b>V</b> visible-pass list &middot; <b>i</b> illum &middot; <b>g</b> grids &middot; <b>w</b> US states &middot; <b>e</b> DXCC &middot; <b>p</b> print"),
  ("TRACK (sel)",
   "<b>`</b> exits to previous screen &amp; KEEPS radio/rotator tracking (green RAD/ROT/R+R in header); <b>r</b>/<b>o</b> to stop. "
-  "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/hold) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
+  "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/FULLu/hold; FULLu=OTR on uplink knob) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
   "<b>c</b> CTCSS &middot; <b>N</b> sat note &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>a</b> point-here arrow &middot; <b>z</b> big readout &middot; "
   "<b>y</b> tilt on/off (ADV) &middot; "
   "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>i</b>&times;2 report Heard (AMSAT) &middot; after LOS <b>q</b> (60s) deep-sleep to next pass &middot; <b>ENTER</b> save cal"),

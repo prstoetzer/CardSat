@@ -138,6 +138,8 @@ bool Settings::load() {
   morseSwap  = d["morseswap"]| false;   // Morse Meteors: swap dot/dash keys
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
+  xvtrDlHz   = d["xvtrdl"] | (freq_t)0;   // transverter LO offsets (0 = none)
+  xvtrUlHz   = d["xvtrul"] | (freq_t)0;
   rotEnable  = d["roten"]  | false;
   rotType    = d["rottype"]| (uint8_t)ROT_GS232;
   // Clamp to the LAST defined type, not ROT_PST. The old bound was ROT_PST (2),
@@ -271,6 +273,7 @@ bool Settings::save() {
   d["catdly"] = catDelayMs;
   d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
+  d["xvtrdl"]= xvtrDlHz; d["xvtrul"] = xvtrUlHz;
   d["vispass"] = visPasses; d["vissun"] = visSunElMax; d["visel"] = visMinEl;
   d["aosalarm"] = aosAlarm;
   d["irbeacon"] = irBeacon;

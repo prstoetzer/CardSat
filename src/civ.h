@@ -27,18 +27,18 @@ public:
   // Raw byte write for the serial-terminal diagnostic.
   bool sendRaw(const uint8_t* b, size_t n) override;
 
-  bool setMainFreq(uint32_t hz) override;        // uplink (TX) on MAIN
-  bool setSubFreq (uint32_t hz) override;        // downlink (RX) on SUB
+  bool setMainFreq(freq_t hz) override;        // uplink (TX) on MAIN
+  bool setSubFreq (freq_t hz) override;        // downlink (RX) on SUB
   bool setMainMode(RigMode m)   override;
   bool setSubMode (RigMode m)   override;
-  bool readSubFreq(uint32_t& hzOut) override;
-  bool readMainFreq(uint32_t& hzOut) override;
+  bool readSubFreq(freq_t& hzOut) override;
+  bool readMainFreq(freq_t& hzOut) override;
   bool readPtt(bool& tx) override;
   bool enableSatMode(bool on)   override;
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override { selectSub(); }
   void selectMainBand()         override { selectMain(); }
-  bool assignBands(uint32_t mainHz, uint32_t subHz) override;
+  bool assignBands(freq_t mainHz, freq_t subHz) override;
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
@@ -62,17 +62,17 @@ private:
   int8_t     _pttRead = -1;   // -1 unknown, 0 unsupported (stop polling), 1 supported
   uint8_t    _pttFails = 0;   // consecutive read misses before marking unsupported
   uint8_t    _pinMode = 0;    // 0 separate TX/RX, 1 single-pin on tx, 2 single-pin on rx
-  uint32_t   _lastMainHz = 0; // last frequency we COMMANDED on MAIN (uplink)
-  uint32_t   _lastSubHz  = 0; // last frequency we COMMANDED on SUB  (downlink)
+  freq_t     _lastMainHz = 0; // last frequency we COMMANDED on MAIN (uplink)
+  freq_t     _lastSubHz  = 0; // last frequency we COMMANDED on SUB  (downlink)
 
   void   selectMain();
   void   selectSub();
   bool   sendFrame(const uint8_t* payload, size_t len);
-  bool   setFreqCiv(bool sub, uint32_t hz);
+  bool   setFreqCiv(bool sub, freq_t hz);
   bool   setModeCiv(bool sub, CivMode m, uint8_t filter = 0x01);
-  bool   readFreqCiv(bool sub, uint32_t& hzOut);
+  bool   readFreqCiv(bool sub, freq_t& hzOut);
   static CivMode toCiv(RigMode m);
-  static void freqToBcd(uint32_t hz, uint8_t out[5]);
+  static void freqToBcd(freq_t hz, uint8_t out[5]);
   void   drainStale();                        // bounded RX flush (never spins)
   bool   drainEcho(uint32_t timeoutMs = 60);  // CI-V is a shared bus: read back
 };

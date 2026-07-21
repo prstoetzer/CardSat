@@ -64,7 +64,7 @@ CivMode IcomNetRig::toCiv(RigMode m) {
     default:     return CIV_USB;
   }
 }
-void IcomNetRig::freqToBcd(uint32_t hz, uint8_t out[5]) {
+void IcomNetRig::freqToBcd(freq_t hz, uint8_t out[5]) {
   for (int i = 0; i < 5; ++i) {
     uint8_t lo = hz % 10; hz /= 10;
     uint8_t hi = hz % 10; hz /= 10;
@@ -408,7 +408,7 @@ void IcomNetRig::selBand(bool sub) {
   const RadioProfile& p = RADIOS[_model];
   if (p.selLen) sendCivPayload(sub ? p.selSub : p.selMain, p.selLen);
 }
-bool IcomNetRig::setFreqNet(bool sub, uint32_t hz) {
+bool IcomNetRig::setFreqNet(bool sub, freq_t hz) {
   selBand(sub);
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
   return sendCivPayload(pl, 6);
@@ -418,7 +418,7 @@ bool IcomNetRig::setModeNet(bool sub, CivMode m, uint8_t filter) {
   uint8_t pl[3] = { 0x06, (uint8_t)m, filter };
   return sendCivPayload(pl, 3);
 }
-bool IcomNetRig::readFreqNet(bool sub, uint32_t& hzOut) {
+bool IcomNetRig::readFreqNet(bool sub, freq_t& hzOut) {
   if (_state != NS_CONNECTED || !RADIOS[_model].canReadFreq) return false;
   selBand(sub);
   while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); }  // drain stale
@@ -437,10 +437,10 @@ bool IcomNetRig::readFreqNet(bool sub, uint32_t& hzOut) {
         const uint8_t* f = buf + 21;
         if (f[0] == 0xFE && f[1] == 0xFE && f[2] == 0xE0 && f[3] == _addr &&
             f[4] == 0x03 && f[10] == 0xFD) {
-          uint32_t hz = 0;
+          freq_t hz = 0;
           for (int k = 9; k >= 5; --k) hz = hz * 100 + (f[k] >> 4) * 10 + (f[k] & 0x0F);
           hzOut = hz;
-          NLOG("[NET CI-V] %s freq %lu Hz\n", sub ? "SUB" : "MAIN", (unsigned long)hz);
+          NLOG("[NET CI-V] %s freq %llu Hz\n", sub ? "SUB" : "MAIN", (unsigned long long)hz);
           return true;
         }
       }
@@ -450,12 +450,12 @@ bool IcomNetRig::readFreqNet(bool sub, uint32_t& hzOut) {
 }
 
 // --- Rig interface ---------------------------------------------------------
-bool IcomNetRig::setMainFreq(uint32_t hz) { return setFreqNet(false, hz); }
-bool IcomNetRig::setSubFreq (uint32_t hz) { return setFreqNet(true,  hz); }
+bool IcomNetRig::setMainFreq(freq_t hz) { return setFreqNet(false, hz); }
+bool IcomNetRig::setSubFreq (freq_t hz) { return setFreqNet(true,  hz); }
 bool IcomNetRig::setMainMode(RigMode m)   { return setModeNet(false, toCiv(m)); }
 bool IcomNetRig::setSubMode (RigMode m)   { return setModeNet(true,  toCiv(m)); }
-bool IcomNetRig::readSubFreq (uint32_t& hzOut) { return readFreqNet(true,  hzOut); }
-bool IcomNetRig::readMainFreq(uint32_t& hzOut) { return readFreqNet(false, hzOut); }
+bool IcomNetRig::readSubFreq (freq_t& hzOut) { return readFreqNet(true,  hzOut); }
+bool IcomNetRig::readMainFreq(freq_t& hzOut) { return readFreqNet(false, hzOut); }
 
 // Read PTT/transmit state via CI-V 0x1C 0x00 over the serial stream. Reply CI-V
 // frame: FE FE E0 <addr> 1C 00 <00=RX|01=TX> FD. Rigs that don't answer get

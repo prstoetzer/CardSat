@@ -19,15 +19,15 @@ static void civDecode(const uint8_t* b, size_t n) {
   uint8_t cmd = b[4];
   switch (cmd) {
     case 0x03:
-      if (n >= 11) { uint32_t hz = 0;
+      if (n >= 11) { freq_t hz = 0;
         for (int k = 9; k >= 5; --k) hz = hz*100 + (b[k]>>4)*10 + (b[k]&0x0F);
-        Serial.printf("  read-freq -> %lu Hz", (unsigned long)hz); }
+        Serial.printf("  read-freq -> %llu Hz", (unsigned long long)hz); }
       else Serial.print("  read-freq req");
       break;
     case 0x05:
-      if (n >= 10) { uint32_t hz = 0;
+      if (n >= 10) { freq_t hz = 0;
         for (int k = 9; k >= 5; --k) hz = hz*100 + (b[k]>>4)*10 + (b[k]&0x0F);
-        Serial.printf("  set-freq %lu Hz", (unsigned long)hz); }
+        Serial.printf("  set-freq %llu Hz", (unsigned long long)hz); }
       break;
     case 0x06: { const char* m = "?";
       if (n > 5) switch (b[5]) { case 0:m="LSB";break; case 1:m="USB";break;
@@ -163,7 +163,7 @@ CivMode CivRig::toCiv(RigMode m) {
 }
 
 // --- BCD: 1 Hz resolution, 5 bytes, least-significant pair first ----------
-void CivRig::freqToBcd(uint32_t hz, uint8_t out[5]) {
+void CivRig::freqToBcd(freq_t hz, uint8_t out[5]) {
   for (int i = 0; i < 5; ++i) {
     uint8_t lo = hz % 10; hz /= 10;
     uint8_t hi = hz % 10; hz /= 10;
@@ -286,7 +286,7 @@ void CivRig::selectSub() {
 // Map a frequency to the Icom CI-V band code used by the "07 D2" band-selection
 // command: 0x01 = 144 MHz, 0x02 = 430/440 MHz, 0x03 = 1.2 GHz. Returns 0 for a
 // frequency outside those amateur VHF/UHF bands (caller skips the assignment).
-static uint8_t civBandCode(uint32_t hz) {
+static uint8_t civBandCode(freq_t hz) {
   if (hz >= 144000000UL && hz <= 148000000UL) return 0x01;   // 2 m
   if (hz >= 430000000UL && hz <= 450000000UL) return 0x02;   // 70 cm
   if (hz >= 1240000000UL && hz <= 1300000000UL) return 0x03; // 23 cm
@@ -302,7 +302,7 @@ static uint8_t civBandCode(uint32_t hz) {
 // radio. The frame format (07 D2 00 = main, 07 D2 01 = sub; band codes
 // 01/02/03) is taken from the IC-9700 CI-V Reference Guide. It is sent once at
 // CAT-engage, never per-tick, so a wrong frame cannot spam the bus.
-bool CivRig::assignBands(uint32_t mainHz, uint32_t subHz) {
+bool CivRig::assignBands(freq_t mainHz, freq_t subHz) {
   if (!RADIOS[_model].canAssignBand) return false;
   uint8_t mb = civBandCode(mainHz);
   uint8_t sb = civBandCode(subHz);
@@ -318,7 +318,7 @@ bool CivRig::assignBands(uint32_t mainHz, uint32_t subHz) {
   // (now-corrected) selMain = 07 D1 then 03. Fired once at engage.
   // *** UNTESTED ON HARDWARE *** (author has no IC-910).
   if (_model == RIG_IC910) {
-    uint32_t mainNow = 0;
+    freq_t mainNow = 0;
     if (!readMainFreq(mainNow) || !mainNow) {
       if (CIV_DEBUG) Serial.println("[CAT] 910 assignBands: MAIN read failed, no swap");
       return false;                               // can't tell -> don't guess
@@ -343,14 +343,14 @@ bool CivRig::assignBands(uint32_t mainHz, uint32_t subHz) {
   ok &= sendFrame(main, 4);
   ok &= sendFrame(sub,  4);
   if (CIV_DEBUG) {
-    Serial.printf("[CAT] assignBands: MAIN<-band%02X (%lu Hz) SUB<-band%02X (%lu Hz) %s\n",
-                  mb, (unsigned long)mainHz, sb, (unsigned long)subHz,
+    Serial.printf("[CAT] assignBands: MAIN<-band%02X (%llu Hz) SUB<-band%02X (%llu Hz) %s\n",
+                  mb, (unsigned long long)mainHz, sb, (unsigned long long)subHz,
                   ok ? "sent" : "FAILED");
   }
   return ok;
 }
 
-bool CivRig::setFreqCiv(bool sub, uint32_t hz) {
+bool CivRig::setFreqCiv(bool sub, freq_t hz) {
   sub ? selectSub() : selectMain();
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
   bool ok = sendFrame(pl, 6);
@@ -366,8 +366,8 @@ bool CivRig::setModeCiv(bool sub, CivMode m, uint8_t filter) {
   return sendFrame(pl, 3);
 }
 
-bool CivRig::setMainFreq(uint32_t hz) { return setFreqCiv(false, hz); }
-bool CivRig::setSubFreq (uint32_t hz) { return setFreqCiv(true,  hz); }
+bool CivRig::setMainFreq(freq_t hz) { return setFreqCiv(false, hz); }
+bool CivRig::setSubFreq (freq_t hz) { return setFreqCiv(true,  hz); }
 bool CivRig::setMainMode(RigMode m)   { return setModeCiv(false, toCiv(m)); }
 bool CivRig::setSubMode (RigMode m)   { return setModeCiv(true,  toCiv(m)); }
 
@@ -406,8 +406,8 @@ bool CivRig::setCtcss(bool on, float toneHz) {
   return sendFrame(off, 3);
 }
 
-bool CivRig::readSubFreq (uint32_t& hzOut) { return readFreqCiv(true,  hzOut); }
-bool CivRig::readMainFreq(uint32_t& hzOut) { return readFreqCiv(false, hzOut); }
+bool CivRig::readSubFreq (freq_t& hzOut) { return readFreqCiv(true,  hzOut); }
+bool CivRig::readMainFreq(freq_t& hzOut) { return readFreqCiv(false, hzOut); }
 
 // Read PTT/transmit state via CI-V "read transceiver status" (0x1C 0x00).
 // Reply: FE FE E0 <addr> 1C 00 <00=RX|01=TX> FD. Rigs that don't support it stay
@@ -465,8 +465,8 @@ bool CivRig::readPtt(bool& tx) {
 // COMMANDED on that band rather than failing outright. The boolean return tells
 // the caller whether the value is fresh (true) or a fallback/none (false); hzOut
 // is always left at the best estimate we have.
-bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
-  uint32_t lastSet = sub ? _lastSubHz : _lastMainHz;
+bool CivRig::readFreqCiv(bool sub, freq_t& hzOut) {
+  freq_t lastSet = sub ? _lastSubHz : _lastMainHz;
   if (lastSet) hzOut = lastSet;                     // default to last-commanded
   if (!_stream) return false;
   if (!RADIOS[_model].canReadFreq) return false;    // set-only rig
@@ -508,13 +508,13 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
   for (size_t i = 0; i + 10 < bn; ++i) {
     if (buf[i] == 0xFE && buf[i+1] == 0xFE && buf[i+2] == 0xE0 &&
         buf[i+3] == _addr && buf[i+4] == 0x03 && buf[i+10] == 0xFD) {
-      uint32_t hz = 0;
+      freq_t hz = 0;
       for (int k = 9; k >= 5; --k)
         hz = hz * 100 + (buf[i+k] >> 4) * 10 + (buf[i+k] & 0x0F);
       hzOut = hz;
       if (sub) _lastSubHz = hz; else _lastMainHz = hz;   // keep the cache current
 #if CIV_DEBUG
-      Serial.printf("[CI-V] %s freq read: %lu Hz\n", sub ? "SUB" : "MAIN", (unsigned long)hz);
+      Serial.printf("[CI-V] %s freq read: %llu Hz\n", sub ? "SUB" : "MAIN", (unsigned long long)hz);
 #endif
       return true;
     }

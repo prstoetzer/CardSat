@@ -48,9 +48,15 @@ FRONT = [
   "<b>FT-847</b> 57600 &middot; <b>FT-736R</b> 4800 &middot; <b>TS-790</b> 4800 &middot; <b>TS-2000</b> 57600."),
  ("CAT TRANSPORTS (pick in Settings)",
   "<b>Wired</b> TTL UART CI-V (single or separate pin) &middot; <b>Icom LAN</b> RS-BA1 UDP 50001/50002 (IC-9700) &middot; "
-  "<b>rigctld</b> Hamlib NET TCP &middot; <b>USB</b> adapter on USB-C (default-on since 0.9.59): "
+  "<b>rigctl (net)</b> Hamlib NET TCP (VFOA=DL/B=UL) &middot; <b>rigctl (Grove)</b> same protocol over Grove G1/G2, no Wi-Fi (port row = baud) &middot; "
+  "<b>USB</b> adapter on USB-C (default-on since 0.9.59): "
   "FTDI 0403, CP210x 10c4, CH34x 1a86, PL2303 067b, any CDC-ACM. USB device strings lead with "
   "<b>#N</b> = device address = the id explicit binding stores (tells identical adapters apart)."),
+ ("DUAL-RIG + TRANSVERTER (0.9.62)",
+  "<b>CardSatDualRig</b> (M5StickS3 companion): two half-duplex/RX radios as one full-duplex station over a rigctld server; "
+  "drive via rigctl (net/Grove). <b>Settings&rarr;Radio&rarr;Dual-Rig setup</b> shows the Stick's live USB enumeration to bind a device per leg (link dot red/green). "
+  "<b>d</b> gains <b>FULLu</b> = One True Rule on the UPLINK knob. <b>Transverter LO</b>: Downlink/Uplink LO (MHz) drive a microwave up/down-converter "
+  "(rig on IF = real&minus;LO; DN/UP show <b>x</b>). Both paths <b>UNTESTED on hardware</b> &mdash; verify."),
  ("ROTATORS",
   "Serial protocols: <b>GS-232A/B</b>, <b>Easycomm I/II/III</b>, <b>SPID Rot2Prog</b> — each over the "
   "<b>I2C bridge</b> (SC16IS750), <b>Grove G1/G2</b>, or a <b>USB adapter</b> (Rot wire setting). "

@@ -320,10 +320,10 @@ double Predictor::betaAngleDeg(time_t t, double inclDeg, double raanDeg) {
   return asin(d) / DEG;                                   // beta = 90 - angle(n,Sun)
 }
 
-void Predictor::dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
+void Predictor::dopplerFreqs(freq_t dlNominal, freq_t ulNominal,
                              double rangeRateKmS,
                              int32_t calDlHz, int32_t calUlHz,
-                             uint32_t& rxHz, uint32_t& txHz) {
+                             freq_t& rxHz, freq_t& txHz) {
   double rr = rangeRateKmS * 1000.0;       // m/s, +ve receding
   double beta = rr / C_LIGHT;
 
@@ -333,11 +333,11 @@ void Predictor::dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
   double tx = (ulNominal ? ((double)ulNominal / (1.0 - beta)) : 0.0);
   if (ulNominal) tx += (double)calUlHz;
 
-  rxHz = (uint32_t)llround(rx);
-  txHz = (uint32_t)llround(tx);
+  rxHz = (freq_t)llround(rx);
+  txHz = (freq_t)llround(tx);
 }
 
-uint32_t Predictor::uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
+freq_t Predictor::uplinkForFixedDownlink(freq_t dlOp, freq_t ulOp,
                                            bool invert, double rangeRateKmS,
                                            int32_t calDlHz, int32_t calUlHz) {
   if (ulOp == 0) return 0;
@@ -359,10 +359,10 @@ uint32_t Predictor::uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
   double fulSat = invert ? ((double)ulOp - delta) : ((double)ulOp + delta);
   double tx = fulSat / oneMinusBeta + (double)calUlHz;
   if (tx < 0) tx = 0;
-  return (uint32_t)llround(tx);
+  return (freq_t)llround(tx);
 }
 
-uint32_t Predictor::downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
+freq_t Predictor::downlinkForFixedUplink(freq_t dlOp, freq_t ulOp,
                                            bool invert, double rangeRateKmS,
                                            int32_t calDlHz, int32_t calUlHz) {
   double beta = rangeRateKmS * 1000.0 / C_LIGHT;   // +ve receding
@@ -370,7 +370,7 @@ uint32_t Predictor::downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
   if (oneMinusBeta == 0.0) oneMinusBeta = 1e-12;    // guard (never physical)
   // No uplink (downlink-only bird): just the plain Doppler-shifted downlink.
   if (ulOp == 0)
-    return (uint32_t)llround((double)dlOp * oneMinusBeta + (double)calDlHz);
+    return (freq_t)llround((double)dlOp * oneMinusBeta + (double)calDlHz);
 
   // The operator parks TX at the ground frequency ulOp+calUl; the bird hears that
   // Doppler-shifted to Ful_sat.
@@ -383,11 +383,11 @@ uint32_t Predictor::downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
   // That emit is Doppler-shifted again on the way down; add downlink calibration.
   double rx = fdlSat * oneMinusBeta + (double)calDlHz;
   if (rx < 0) rx = 0;
-  return (uint32_t)llround(rx);
+  return (freq_t)llround(rx);
 }
 
 void Predictor::passbandFreqs(const Transponder& t, int32_t pbOffsetHz,
-                              uint32_t& dlOp, uint32_t& ulOp) {
+                              freq_t& dlOp, freq_t& ulOp) {
   // No tunable downlink passband -> single channel; ignore the offset.
   uint32_t dlBw = t.bandwidth();
   if (!t.isLinear || dlBw == 0) {

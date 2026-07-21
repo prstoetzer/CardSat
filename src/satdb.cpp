@@ -1113,10 +1113,10 @@ static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
     strncpy(t.desc, d, sizeof(t.desc)-1); t.desc[sizeof(t.desc)-1]=0;
     const char* m = o["mode"] | "";
     strncpy(t.mode, m, sizeof(t.mode)-1); t.mode[sizeof(t.mode)-1]=0;
-    t.downlink     = o["downlink_low"]   | 0u;
-    t.downlinkHigh = o["downlink_high"]  | 0u;
-    t.uplink       = o["uplink_low"]      | 0u;
-    t.uplinkHigh   = o["uplink_high"]     | 0u;
+    t.downlink     = o["downlink_low"]   | (freq_t)0;
+    t.downlinkHigh = o["downlink_high"]  | (freq_t)0;
+    t.uplink       = o["uplink_low"]      | (freq_t)0;
+    t.uplinkHigh   = o["uplink_high"]     | (freq_t)0;
     t.invert       = o["invert"]          | false;
     if (t.downlink == 0 && t.uplink == 0) continue;   // nothing to tune -> skip
 

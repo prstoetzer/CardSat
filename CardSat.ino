@@ -384,7 +384,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.61";
+static constexpr const char* FW_VERSION = "0.9.62";
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.
@@ -438,6 +438,13 @@ static constexpr uint16_t YAESU_ADC_MS    = 6;     // single-shot settle for 250
 // ---------------------------------------------------------------------------
 static constexpr int   MAX_SATS        = 150;  // sats held in RAM from GP data
 static constexpr int   MAX_TX_PER_SAT  = 64;   // transmitters held for active sat (e.g. ISS has ~49 on SatNOGS)
+
+// Frequency type (0.9.62). Widened from uint32_t (ceiling ~4.294 GHz) to 64-bit so
+// microwave satellite transponders -- QO-100's 10489.75 MHz downlink, 5.7/10/24 GHz --
+// are representable, stored, and displayed. The CAT wire encoders still take whatever
+// their protocol needs (CI-V 5-BCD-byte = 10 digits; Yaesu IF is sub-GHz), converting at
+// the boundary. See docs/design/HIGH_FREQ_SCOPE.md.
+typedef uint64_t freq_t;
 
 // ---- USB-host CAT (CAT_USB) ------------------------------------------------
 // ON by default since 0.9.59 -- like LoRa, ship every feature. It was opt-in
@@ -518,6 +525,7 @@ static constexpr int   ILLUM_ROWS      = 80;   // illumination raster rows (orbi
 // ---------------------------------------------------------------------------
 #define DATA_DIR     "/CardSat"               // all data/config lives in this folder
 #define AUDIO_DIR    "/CardSat/audio"         // voice memos (SD card only)
+#define CALENDAR_DIR "/CardSat/Calendars"     // exported .ics calendar files (0.9.62)
 // Voice-memo capture (SD-card-only feature; PDM mic via M5Unified into a WAV).
 static constexpr uint32_t MEMO_SAMPLE_HZ  = 16000;  // 16 kHz mono
 static constexpr uint32_t MEMO_MAX_SECS   = 30;     // hard cap per memo
@@ -1005,20 +1013,27 @@ protected:
 public:
 
   // Independent downlink (Sub/RX) and uplink (Main/TX) control.
-  virtual bool setMainFreq(uint32_t hz) = 0;   // uplink (TX)
-  virtual bool setSubFreq (uint32_t hz) = 0;   // downlink (RX)
+  virtual bool setMainFreq(freq_t hz) = 0;   // uplink (TX)
+  virtual bool setSubFreq (freq_t hz) = 0;   // downlink (RX)
   virtual bool setMainMode(RigMode m)   = 0;
   virtual bool setSubMode (RigMode m)   = 0;
 
   // Read the downlink (Sub/RX) frequency. Returns false if unsupported.
-  virtual bool readSubFreq(uint32_t& hzOut) = 0;
-  virtual bool readMainFreq(uint32_t& hzOut) = 0;
+  virtual bool readSubFreq(freq_t& hzOut) = 0;
+  virtual bool readMainFreq(freq_t& hzOut) = 0;
 
   // Read the rig's PTT/transmit state into tx. Returns false if the backend
   // can't report it (the default), in which case the caller must not assume
   // anything about transmit state. The Doppler loop uses this to skip the
   // downlink knob read while transmitting (a rig often reports the TX VFO then).
   virtual bool readPtt(bool& tx) { (void)tx; return false; }
+
+  // Send a raw control line to the backend and return one reply line ("" if
+  // unsupported/failed). Used by the Dual-Rig setup screen to talk to the
+  // CardSatDualRig companion's \csdr_* config escape over whichever rigctl
+  // transport is active (net or Grove). No-op on wire-level backends -- only the
+  // rigctl backends carry a line protocol a companion can answer.
+  virtual String vendorLine(const String& line) { (void)line; return String(); }
 
   // Toggle the rig's own satellite mode. Icom: actively forced OFF (we drive
   // MAIN/SUB ourselves). Yaesu/Kenwood: no-op -- their full-duplex/sat mode is
@@ -1037,7 +1052,7 @@ public:
   // operator sets the band pair up on the radio. mainHz/subHz are the actual
   // frequencies whose bands should be placed on MAIN/SUB respectively.
   // UNTESTED on hardware -- see canAssignBand() and the CivRig implementation.
-  virtual bool assignBands(uint32_t mainHz, uint32_t subHz) {
+  virtual bool assignBands(freq_t mainHz, freq_t subHz) {
     (void)mainHz; (void)subHz; return false;
   }
 
@@ -1081,9 +1096,10 @@ float ctcssToneHz(int index);
 
 // rigctld (Hamlib "NET rigctl") TCP CLIENT. CardSat drives a radio attached to
 // a rigctld server elsewhere on the LAN (default port 4532). To carry both legs
-// of a satellite QSO over one link it uses Hamlib split semantics: the downlink
-// (Sub/RX) is the main VFO (F/f set/get_freq, M set_mode) and the uplink
-// (Main/TX) is the split/TX VFO (I/i set/get_split_freq, X set_split_mode).
+// of a satellite QSO over one link it uses Hamlib VFO mode: the downlink (Sub/RX)
+// rides VFOA and the uplink (Main/TX) rides VFOB, each steered with plain
+// set_freq/set_mode after a set_vfo -- the portable convention gpredict and the
+// Hamlib backends use (set_split_freq makes Hamlib tune the wrong VFO on Icoms).
 // The socket opens lazily and reconnects (throttled) so a missing server never
 // hangs the Doppler loop. Model-agnostic: the remote rigctld owns the radio.
 class RigctlRig : public Rig {
@@ -1092,12 +1108,12 @@ public:
   void begin(uint32_t, int, int, int) override { _lastTry = 0; ensure(); }
   bool ready() const override { return _ok; }
   void service() override { ensure(); }
-  bool setMainFreq(uint32_t hz) override;   // uplink   -> set_split_freq
-  bool setSubFreq (uint32_t hz) override;   // downlink -> set_freq
-  bool setMainMode(RigMode m)   override;   // uplink   -> set_split_mode
-  bool setSubMode (RigMode m)   override;   // downlink -> set_mode
-  bool readSubFreq (uint32_t& hzOut) override;   // get_freq
-  bool readMainFreq(uint32_t& hzOut) override;   // get_split_freq
+  bool setMainFreq(freq_t hz) override;   // uplink   -> VFOB set_freq
+  bool setSubFreq (freq_t hz) override;   // downlink -> VFOA set_freq
+  bool setMainMode(RigMode m)   override;   // uplink   -> VFOB set_mode
+  bool setSubMode (RigMode m)   override;   // downlink -> VFOA set_mode
+  bool readSubFreq (freq_t& hzOut) override;   // VFOA get_freq
+  bool readMainFreq(freq_t& hzOut) override;   // VFOB get_freq
   bool readPtt(bool& tx) override;               // get_ptt
   bool enableSatMode(bool) override { return false; }  // remote rig is operator-configured
   void selectSubBand()  override {}
@@ -1106,15 +1122,63 @@ public:
   bool hasSatMode()  const override { return false; }
   bool selVerified() const override { return _ok; }
   const char* name() const override { return "rigctl"; }
-private:
+  // Raw \csdr_* / rigctl line passthrough for the Dual-Rig setup screen. Sends one
+  // line (newline appended if missing) and returns the single reply line. Inherited
+  // unchanged by RigctlGroveRig, so it automatically uses the Grove transport there.
+  String vendorLine(const String& line) override {
+    return xchg(line.endsWith("\n") ? line : line + "\n");
+  }
+protected:
+  // ---- transport boundary --------------------------------------------------
+  // The VFO-mode protocol (below) is transport-agnostic: it only ever calls these
+  // four primitives, so a subclass that overrides them speaks the identical
+  // protocol over a different wire. The base drives a TCP socket (rigctld over the
+  // network); RigctlGroveRig overrides them to drive the Grove UART instead. Keeping
+  // ONE copy of the command logic is deliberate -- the VFO-mode fix must never drift
+  // between the two transports.
+  virtual bool   linkOpen();                         // ensure the link is up; sets _ok
+  virtual void   linkClose();                        // drop/reset the link
+  virtual size_t linkWrite(const uint8_t* d, size_t n);
+  virtual int    linkRead();                         // one byte, or -1 if none ready
+
+  // ---- shared state + protocol (inherited unchanged by the Grove variant) ----
   String     _host;
   uint16_t   _port;
   bool       _ok = false;
-  WiFiClient _c;
+  WiFiClient _c;                          // used only by the base (TCP) transport
   uint32_t   _lastTry = 0;
-  bool   ensure();                       // (re)connect if needed; updates _ok
+  int    _vfo = -1;        // server's currently-selected VFO: 0=A (downlink), 1=B (uplink), -1=unknown
+  bool   _vfoMode = false; // server was started with --vfo (VFO travels inline on each command)
+  bool   _probed = false;  // \chk_vfo probe done since the link last came up
+  bool   ensure();                       // bring the link up + probe once; updates _ok
+  void   probeVfoMode();                 // one-shot \chk_vfo probe (shared by all transports)
+  String readLine(uint32_t timeoutMs);   // read one reply line from linkRead()
   String xchg(const String& tx);         // send one line, return one reply line ("" on fail)
+  void   selectVfo(bool sub);            // pre-select downlink(A)/uplink(B) VFO on currVFO servers
+  String cmd(char c, bool sub, const String& body = "");  // build a line; VFO inline in --vfo mode
+  static const char* vfoTok(bool sub);   // "VFOA" (downlink) / "VFOB" (uplink)
   static const char* modeName(RigMode m);
+};
+
+// rigctl over the Grove UART (G1/G2) instead of TCP: same VFO-mode protocol, wired
+// transport. This is CardSat driving the CardSatDualRig companion (or any rigctld
+// speaking device) over a Grove cable with no Wi-Fi. Claims UART1 like wired CI-V,
+// so it shares the Grove mutual-exclusion rules. The host/port members are unused.
+class RigctlGroveRig : public RigctlRig {
+public:
+  RigctlGroveRig(uint32_t baud) : RigctlRig("", 0), _baud(baud) {}
+  void begin(uint32_t, int rx, int tx, int) override;   // opens the Grove UART
+  const char* name() const override { return "rigctl-grove"; }
+protected:
+  bool   linkOpen() override;
+  void   linkClose() override;
+  size_t linkWrite(const uint8_t* d, size_t n) override;
+  int    linkRead() override;
+private:
+  HardwareSerial* _serial = nullptr;    // Serial1 on G1/G2; owned elsewhere (static)
+  uint32_t _baud;
+  int      _rx = -1, _tx = -1;
+  bool     _open = false;
 };
 
 // Construct the backend for a model. Caller owns the returned pointer.
@@ -1162,18 +1226,18 @@ public:
   // Raw byte write for the serial-terminal diagnostic.
   bool sendRaw(const uint8_t* b, size_t n) override;
 
-  bool setMainFreq(uint32_t hz) override;        // uplink (TX) on MAIN
-  bool setSubFreq (uint32_t hz) override;        // downlink (RX) on SUB
+  bool setMainFreq(freq_t hz) override;        // uplink (TX) on MAIN
+  bool setSubFreq (freq_t hz) override;        // downlink (RX) on SUB
   bool setMainMode(RigMode m)   override;
   bool setSubMode (RigMode m)   override;
-  bool readSubFreq(uint32_t& hzOut) override;
-  bool readMainFreq(uint32_t& hzOut) override;
+  bool readSubFreq(freq_t& hzOut) override;
+  bool readMainFreq(freq_t& hzOut) override;
   bool readPtt(bool& tx) override;
   bool enableSatMode(bool on)   override;
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override { selectSub(); }
   void selectMainBand()         override { selectMain(); }
-  bool assignBands(uint32_t mainHz, uint32_t subHz) override;
+  bool assignBands(freq_t mainHz, freq_t subHz) override;
 
   bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
   bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
@@ -1197,17 +1261,17 @@ private:
   int8_t     _pttRead = -1;   // -1 unknown, 0 unsupported (stop polling), 1 supported
   uint8_t    _pttFails = 0;   // consecutive read misses before marking unsupported
   uint8_t    _pinMode = 0;    // 0 separate TX/RX, 1 single-pin on tx, 2 single-pin on rx
-  uint32_t   _lastMainHz = 0; // last frequency we COMMANDED on MAIN (uplink)
-  uint32_t   _lastSubHz  = 0; // last frequency we COMMANDED on SUB  (downlink)
+  freq_t     _lastMainHz = 0; // last frequency we COMMANDED on MAIN (uplink)
+  freq_t     _lastSubHz  = 0; // last frequency we COMMANDED on SUB  (downlink)
 
   void   selectMain();
   void   selectSub();
   bool   sendFrame(const uint8_t* payload, size_t len);
-  bool   setFreqCiv(bool sub, uint32_t hz);
+  bool   setFreqCiv(bool sub, freq_t hz);
   bool   setModeCiv(bool sub, CivMode m, uint8_t filter = 0x01);
-  bool   readFreqCiv(bool sub, uint32_t& hzOut);
+  bool   readFreqCiv(bool sub, freq_t& hzOut);
   static CivMode toCiv(RigMode m);
-  static void freqToBcd(uint32_t hz, uint8_t out[5]);
+  static void freqToBcd(freq_t hz, uint8_t out[5]);
   void   drainStale();                        // bounded RX flush (never spins)
   bool   drainEcho(uint32_t timeoutMs = 60);  // CI-V is a shared bus: read back
 };
@@ -1251,13 +1315,13 @@ public:
   bool ready() const override { return _stream != nullptr; }
   bool sendRaw(const uint8_t* b, size_t n) override;
 
-  bool setMainFreq(uint32_t hz) override { return setFreq(0x21, hz); } // SAT TX
-  bool setSubFreq (uint32_t hz) override { _lastSubHz = hz;            // SAT RX
+  bool setMainFreq(freq_t hz) override { return setFreq(0x21, hz); } // SAT TX
+  bool setSubFreq (freq_t hz) override { _lastSubHz = hz;            // SAT RX
                                            return setFreq(0x11, hz); }
   bool setMainMode(RigMode m)   override { return setMode(0x27, m); }  // SAT TX
   bool setSubMode (RigMode m)   override { return setMode(0x17, m); }  // SAT RX
-  bool readSubFreq(uint32_t& hzOut) override;          // FT-847 only (0x13)
-  bool readMainFreq(uint32_t& hzOut) override { (void)hzOut; return false; }
+  bool readSubFreq(freq_t& hzOut) override;          // FT-847 only (0x13)
+  bool readMainFreq(freq_t& hzOut) override { (void)hzOut; return false; }
   bool enableSatMode(bool)      override { return false; }             // operator-set
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override {}                            // n/a
@@ -1278,14 +1342,14 @@ private:
   Stream*    _stream = nullptr;
   RadioModel _model;
   uint16_t   _postMs;          // inter-command delay (FT-736R needs more)
-  uint32_t   _lastSubHz = 0;   // last downlink we commanded (wrong-VFO guard)
+  freq_t     _lastSubHz = 0;   // last downlink we commanded (wrong-VFO guard)
 
   void   drainStale();               // bounded, -1-safe RX flush (never spins)
   bool   send(const uint8_t cmd[5]);
-  bool   setFreq(uint8_t opcode, uint32_t hz);
+  bool   setFreq(uint8_t opcode, freq_t hz);
   bool   setMode(uint8_t opcode, RigMode m);
   static uint8_t modeCode(RigMode m);
-  static void    freqToBcd(uint32_t hz, uint8_t out[4]);
+  static void    freqToBcd(freq_t hz, uint8_t out[4]);
   static uint32_t bcdToFreq(const uint8_t in[4]);   // big-endian BCD * 10 Hz
 };
 
@@ -1324,12 +1388,12 @@ public:
   bool ready() const override { return _stream != nullptr; }
   bool sendRaw(const uint8_t* b, size_t n) override;
 
-  bool setMainFreq(uint32_t hz) override { return setVfoFreq("FB", hz); } // uplink/TX
-  bool setSubFreq (uint32_t hz) override { return setVfoFreq("FA", hz); } // downlink/RX
+  bool setMainFreq(freq_t hz) override { return setVfoFreq("FB", hz); } // uplink/TX
+  bool setSubFreq (freq_t hz) override { return setVfoFreq("FA", hz); } // downlink/RX
   bool setMainMode(RigMode m)   override { return setModeKw(m); }
   bool setSubMode (RigMode m)   override { return setModeKw(m); }
-  bool readSubFreq(uint32_t& hzOut) override;
-  bool readMainFreq(uint32_t& hzOut) override { (void)hzOut; return false; }
+  bool readSubFreq(freq_t& hzOut) override;
+  bool readMainFreq(freq_t& hzOut) override { (void)hzOut; return false; }
   bool enableSatMode(bool)      override { return false; } // operator-set on radio
   bool setCtcss(bool on, float toneHz) override;
   void selectSubBand()          override {}
@@ -1352,7 +1416,7 @@ private:
 
   void   drainStale();                 // bounded RX flush (never spins)
   bool   sendCmd(const String& cmd);
-  bool   setVfoFreq(const char* vfo, uint32_t hz);
+  bool   setVfoFreq(const char* vfo, freq_t hz);
   bool   setModeKw(RigMode m);
   static char modeDigit(RigMode m);
 };
@@ -1615,12 +1679,12 @@ public:
   // sends keepalives, drains both sockets, re-auths, and reconnects on loss.
   void service() override;
 
-  bool setMainFreq(uint32_t hz) override;        // uplink (TX) on MAIN
-  bool setSubFreq (uint32_t hz) override;        // downlink (RX) on SUB
+  bool setMainFreq(freq_t hz) override;        // uplink (TX) on MAIN
+  bool setSubFreq (freq_t hz) override;        // downlink (RX) on SUB
   bool setMainMode(RigMode m)   override;
   bool setSubMode (RigMode m)   override;
-  bool readSubFreq(uint32_t& hzOut) override;
-  bool readMainFreq(uint32_t& hzOut) override;
+  bool readSubFreq(freq_t& hzOut) override;
+  bool readMainFreq(freq_t& hzOut) override;
   bool readPtt(bool& tx) override;
   bool enableSatMode(bool on)   override;
   bool setCtcss(bool on, float toneHz) override;
@@ -1718,12 +1782,12 @@ private:
 
   // CI-V helpers (mirror CivRig, but wrapped in the serial UDP packet)
   static CivMode toCiv(RigMode m);
-  static void    freqToBcd(uint32_t hz, uint8_t out[5]);
+  static void    freqToBcd(freq_t hz, uint8_t out[5]);
   void selBand(bool sub);
   bool sendCivPayload(const uint8_t* pl, size_t pllen);
-  bool setFreqNet(bool sub, uint32_t hz);
+  bool setFreqNet(bool sub, freq_t hz);
   bool setModeNet(bool sub, CivMode m, uint8_t filter = 0x01);
-  bool readFreqNet(bool sub, uint32_t& hzOut);
+  bool readFreqNet(bool sub, freq_t& hzOut);
 
   // Obfuscated credential (Icom passcode substitution) -> 16 bytes.
   static void passcode(const char* s, uint8_t out[16]);
@@ -1846,17 +1910,15 @@ void     freeRotator(Rotator* r);
 // ===========================================================================
 
 struct Transponder {
-  // Frequencies are 32-bit unsigned Hz, so the representable ceiling is 2^32-1 =
-  // ~4.294 GHz. This covers every band CardSat tracks (through 23 cm / 1.3 GHz and
-  // the amateur 3.4 GHz allocation) but NOT higher microwave transponders (5.6 GHz
-  // and up). Birds with only >4.29 GHz transponders can't be represented in this
-  // field; a future move to 32-bit kHz would lift the ceiling to ~4.29 THz at 1 kHz
-  // resolution with no extra RAM. See docs/guides/CODE_REFERENCE.md.
+  // Frequencies are freq_t (64-bit) Hz (0.9.62), so microwave transponders above the
+  // old ~4.294 GHz uint32 ceiling -- QO-100 10489.75 MHz, 5.7/10/24 GHz -- are
+  // representable, stored, and displayed. High-edge fields stay absolute (not deltas)
+  // so all readers need only a type change. See docs/design/HIGH_FREQ_SCOPE.md.
   char     desc[40];
-  uint32_t downlink     = 0; // Hz (downlink_low;  0 if none)
-  uint32_t downlinkHigh = 0; // Hz (downlink_high; 0 if single-channel)
-  uint32_t uplink       = 0; // Hz (uplink_low;    0 if none / beacon)
-  uint32_t uplinkHigh   = 0; // Hz (uplink_high;   0 if single-channel)
+  freq_t   downlink     = 0; // Hz (downlink_low;  0 if none)
+  freq_t   downlinkHigh = 0; // Hz (downlink_high; 0 if single-channel)
+  freq_t   uplink       = 0; // Hz (uplink_low;    0 if none / beacon)
+  freq_t   uplinkHigh   = 0; // Hz (uplink_high;   0 if single-channel)
   char     mode[12] = {0};   // e.g. "FM", "USB", "DATA"
   bool     invert   = false; // inverting linear transponder
   bool     isLinear = false; // true => has a tunable passband (do passband tracking)
@@ -1878,9 +1940,9 @@ struct Transponder {
   // Note: downlink/uplink are uint32 Hz, so they top out at ~4.29 GHz; the higher
   // amateur microwave bands (5/3 cm) cannot be represented in these fields and are
   // therefore not tested here (no bird CardSat tunes reports them in this field).
-  static bool freqIsAmateur(uint32_t hz) {
+  static bool freqIsAmateur(freq_t hz) {
     if (hz == 0) return false;
-    struct Band { uint32_t lo, hi; };
+    struct Band { freq_t lo, hi; };
     static const Band AB[] = {
       {  28000000u,   29700000u},   // 10 m (HF sat downlinks ~29.3-29.5)
       { 144000000u,  148000000u},   // 2 m
@@ -2411,10 +2473,10 @@ public:
   // Doppler-corrected radio frequencies for the current geometry.
   //   rxHz: tune the receiver here to hear a downlink of dlNominal
   //   txHz: transmit here so the satellite receives ulNominal
-  static void dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
+  static void dopplerFreqs(freq_t dlNominal, freq_t ulNominal,
                            double rangeRateKmS,
                            int32_t calDlHz, int32_t calUlHz,
-                           uint32_t& rxHz, uint32_t& txHz);
+                           freq_t& rxHz, freq_t& txHz);
 
   // Full-duplex uplink when the operator HOLDS THE DOWNLINK on a fixed receive
   // frequency (so they keep hearing their own signal at the same spot) instead of
@@ -2424,7 +2486,7 @@ public:
   // your uplink. dlOp/ulOp are the satellite-frame operating pair from
   // passbandFreqs (so `invert` matches the transponder). Returns the transmit
   // frequency (incl. calUl) that parks the ground downlink at dlOp+calDl.
-  static uint32_t uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
+  static freq_t uplinkForFixedDownlink(freq_t dlOp, freq_t ulOp,
                                          bool invert, double rangeRateKmS,
                                          int32_t calDlHz, int32_t calUlHz);
 
@@ -2434,7 +2496,7 @@ public:
   // the fixed uplink Doppler-shifted, then its emitted downlink is Doppler-shifted
   // again on the way down). dlOp/ulOp are the satellite-frame pair from
   // passbandFreqs so `invert` matches the transponder.
-  static uint32_t downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
+  static freq_t downlinkForFixedUplink(freq_t dlOp, freq_t ulOp,
                                          bool invert, double rangeRateKmS,
                                          int32_t calDlHz, int32_t calUlHz);
 
@@ -2444,7 +2506,7 @@ public:
   // the uplink moves opposite to the downlink; for non-inverting it tracks it.
   // Single-channel transponders ignore the offset (dlOp=downlink, ulOp=uplink).
   static void passbandFreqs(const Transponder& t, int32_t pbOffsetHz,
-                            uint32_t& dlOp, uint32_t& ulOp);
+                            freq_t& dlOp, freq_t& ulOp);
 
   // Fill up to `maxN` upcoming passes starting from `from` (unix UTC).
   int  predictPasses(time_t from, float minEl, PassPredict* out, int maxN,
@@ -2493,7 +2555,13 @@ enum CatType : uint8_t {
   CAT_WIRED = 0,   // CI-V over the TTL UART (default)
   CAT_NET   = 1,   // Icom LAN (RS-BA1 UDP): control 50001 + serial 50002
   CAT_RIGCTL = 2,  // rigctld (Hamlib NET rigctl) client: drive a remote rig over TCP
-  CAT_USB   = 3,   // USB<->serial adapter (FTDI/CP210x/CH34x) on the USB-C port.
+  CAT_RIGCTL_GROVE = 3,  // rigctld client over the Grove UART (G1/G2), no Wi-Fi:
+                   // drives the CardSatDualRig companion (two half-duplex/RX radios)
+                   // over a Grove cable. Same VFO-mode protocol as CAT_RIGCTL; claims
+                   // UART1 like wired CI-V, so it shares the Grove exclusion rules.
+                   // catPort is reused as the Grove baud (default 115200). Always
+                   // selectable (no compile flag) -- it uses the on-board UART.
+  CAT_USB   = 4,   // USB<->serial adapter (FTDI/CP210x/CH34x) on the USB-C port.
                    // Works for ANY wire-level protocol (CI-V/Yaesu/Kenwood): the
                    // transport is swapped, the dialect is unchanged. Only present
                    // when built with CARDSAT_HAS_USBCAT=1 (the default since
@@ -2503,9 +2571,9 @@ enum CatType : uint8_t {
 // selectable when the feature is compiled in, so a build without it behaves
 // exactly as before -- the operator cannot land on an unimplemented transport.
 #if CARDSAT_HAS_USBCAT
-static constexpr uint8_t CAT_TYPE_N = 4;
+static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), USB, rigctl(Grove)
 #else
-static constexpr uint8_t CAT_TYPE_N = 3;
+static constexpr uint8_t CAT_TYPE_N = 4;   // Wired, LAN, rigctl(net), rigctl(Grove)
 #endif
 
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
@@ -2695,6 +2763,17 @@ struct Settings {
   // Calibration (persisted oscillator offsets, Hz)
   int32_t  calDlHz = 0;
   int32_t  calUlHz = 0;
+  // Transverter local-oscillator offsets (0.9.62), Hz. A transverter lets a rig that
+  // only tunes a lower IF band work a much higher band: the rig tunes IF = real - LO,
+  // and the transverter mixes that up to the real on-air frequency. CardSat stores,
+  // tracks, Doppler-corrects and DISPLAYS the real frequency; only the value sent to
+  // the rig (and read back from it) crosses the LO boundary. Per-leg because split-band
+  // microwave work often uses a different transverter up vs down (e.g. QO-100: 2.4 GHz
+  // up / 10 GHz down). 0 = no transverter on that leg (drive the rig at the real freq).
+  // The supported rigs top out at 1.2 GHz, so this is how they reach the microwave sat
+  // bands at all. See docs/design/TRANSVERTER_SCOPE.md.
+  freq_t   xvtrDlHz = 0;     // downlink transverter LO (real downlink - this = rig IF)
+  freq_t   xvtrUlHz = 0;     // uplink transverter LO   (real uplink   - this = rig IF)
   // Rotator (GS-232 over an I2C->UART bridge, or rotctld over TCP)
   bool     rotEnable   = false;
   uint8_t  rotType     = ROT_GS232;  // GS-232 (bridge) or rotctld (network)
@@ -2809,20 +2888,27 @@ enum Screen : uint8_t {
   SCR_PASSPOLAR, SCR_MUTUAL, SCR_WIFISCAN, SCR_ABOUT, SCR_LOG, SCR_LOGENTRY,
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
+  SCR_CALEXPORT,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
   SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
-  SCR_KESSLER, SCR_QTHPRE
+  SCR_KESSLER, SCR_QTHPRE,
+  SCR_DUALRIG
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
 enum TuneMode : uint8_t {
   TM_HOLD = 0,   // hold the passband; Doppler-correct BOTH legs (device-key tuning)
-  TM_FULL,       // One True Rule: rig knob = passband, correct BOTH legs
+  TM_FULL,       // One True Rule: rig knob = passband (reads DOWNLINK), correct BOTH legs
   TM_DL,         // One True Rule on the downlink only (uplink left untouched)
   TM_UL,         // Doppler-correct the uplink only (downlink left untouched)
+  TM_FULL_UL,    // One True Rule but the operator tunes the UPLINK: reads the uplink
+                 // VFO, recovers the passband point from it, corrects BOTH legs. The
+                 // mirror of TM_FULL, for dual-radio setups where the uplink rig is
+                 // the one with the knob. MUST stay last (the 'd' cycle uses TM_COUNT).
 };
+static constexpr uint8_t TM_COUNT = TM_FULL_UL + 1;  // number of tune modes (cycle wrap)
 
 // One upcoming (or in-progress) pass for a favorite, used by the schedule view.
 struct SchedEntry {
@@ -6322,6 +6408,37 @@ private:
   Location  loc;
   Predictor pred;
   Rig*      rig = nullptr;   // active CAT backend (Icom/Yaesu/Kenwood)
+
+  // ---- Dual-Rig setup screen (SCR_DUALRIG) ----------------------------------
+  // Configures the CardSatDualRig companion over the active rigctl transport (net
+  // or Grove) via its \csdr_* escape. Holds the last query result so the screen
+  // can be edited offline and pushed with one save.
+  static constexpr int DR_MAX_DEV   = 8;     // devices shown from the Stick
+  static constexpr int DR_MAX_MODEL = 40;    // model-catalogue entries from the Stick
+  struct DrDevice { char product[24]; char serial[20]; char vidpid[12]; int addr; };
+  struct DrModel  { int id; char name[14]; bool rxOnly; };
+  // Heap-allocated on entering SCR_DUALRIG and freed by drFree() from the
+  // screen-transition hook in loop() -- so the ~1.3 KB of device+model tables is
+  // not resident for the whole session (same lifecycle as the memo/BASIC buffers).
+  DrDevice* drDev   = nullptr; int drDevN = 0;
+  DrModel*  drModel = nullptr; int drModelN = 0;
+  // Editable per-leg selection (index 0 = downlink, 1 = uplink).
+  int   drModelId[2]  = { -1, -1 };          // Stick model id, -1 = none
+  int   drCiv[2]      = { 0, 0 };            // CI-V address (0 = default)
+  char  drSerial[2][20] = { "", "" };        // assigned device serial ("" = none)
+  int   drSel = 0;                           // cursor: 0..5 across the 6 editable fields
+  int   drScroll = 0;                        // device-list scroll
+  bool  drLoaded = false;                    // a query has populated the state
+  String drStatus;                           // last transport result / hint
+  bool  drAlloc();                           // allocate drDev/drModel (on screen entry)
+  void  drFree();                            // release them (screen-transition hook)
+  void  drQuery();                           // pull \csdr_get + \csdr_models
+  void  drSave();                            // push \csdr_set ... save=1
+  int   drModelIdx(int id) const;            // catalogue index for a model id (-1)
+  // At-a-glance link status for the Settings row, so bring-up is a glance not a
+  // query. 0 = unknown (grey), 1 = linked (green), 2 = no link (red).
+  uint8_t drLink = 0; uint32_t drLinkMs = 0;
+  void  drPingLink();                        // throttled \csdr_get ping; sets drLink
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
   VoiceMemo memo;            // SD-card voice memo recorder ('v' on Track family)
   IrBeacon  irBeacon;        // IR pass-alert beacon (distinct flash count per event)
@@ -6596,14 +6713,14 @@ private:
   int32_t   dxdPbOff  = 0;            // passband operating offset (Hz up from downlink low)
   int       dxdRow    = 0;            // scroll position (top visible 30 s step)
   int       dxdWin    = 0;            // which mutual window index this table is for
-  uint32_t  dxdAnchorHz = 0;         // fixed-mode target dial freq (Hz); re-applied on transponder change (0 = none)
+  freq_t    dxdAnchorHz = 0;         // fixed-mode target dial freq (Hz); re-applied on transponder change (0 = none)
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
   void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
   void dxdStepAnchorDial(int dir);   // step the anchored dial by 1 kHz (fixed modes)
   void dxdReanchorToStored();        // re-apply dxdAnchorHz to the current transponder after a change
-  void dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
-                   uint32_t& dxRx, uint32_t& dxTx);  // core per-step calculator
+  void dxDoppFreqs(time_t t, freq_t& myRx, freq_t& myTx,
+                   freq_t& dxRx, freq_t& dxTx);  // core per-step calculator
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
   // dome, off the Sun/Moon screen. For antenna pointing and RF-source reference.
   int       skySel = 0;               // highlighted object index
@@ -6976,7 +7093,21 @@ private:
   void planSeedDefaults();             // fill grid/time from current site & clock
   void drawPlanner(); void keyPlanner(char c, bool enter, bool back);
   void drawPlanDetail(); void keyPlanDetail(char c, bool enter, bool back);
-  String exportRovePlan();             // write the survey to a formatted .txt; returns path
+  String exportRovePlan();
+  // Calendar (.ics) export (0.9.62). Each returns the written path ("" on failure).
+  String icsExportFavPasses();
+  String icsExportSelectedPass();
+  String icsExportActivations();
+  String icsExportEmeWindows();
+  String icsExportVisual();
+  // ICS building helpers.
+  File   icsBegin(const char* stem, String& outPath);
+  void   icsClose(File& f);
+  void   icsWriteEvent(File& f, time_t start, time_t end, const String& summary,
+                       const String& description, const String& location, const String& uidTag);
+  void   icsWriteFolded(File& f, const String& line);
+  String icsPassDesc(SatEntry* s, float maxEl, float azAos, freq_t dnHz, freq_t upHz, const char* modeTxt);
+  void   icsActiveFreqs(freq_t& dn, freq_t& up, String& modeOut);
   // planner input form: which field is being edited
   int      planField = 0;              // 0=grid 1=date 2=time 3=window 4=[compute]
   int      planDetailIdx = 0;          // which PlanRow the detail screen is showing
@@ -7177,8 +7308,8 @@ private:
   bool     cwMode   = false;      // linear bird: force CW on both legs (toggle 'm');
                                   // per-session, reset on every transponder change
                                   // holds a constant frequency AT THE SATELLITE
-  uint32_t lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
-  uint32_t lastUlHz  = 0;         // last uplink dial commanded (send guard)
+  freq_t   lastRxSet = 0;         // downlink dial the rig is on (read-back): knob detect + send guard
+  freq_t   lastUlHz  = 0;         // last uplink dial commanded (send guard)
   uint8_t  uplinkDeferTicks = 0;  // suppress the uplink write for N ticks after a downlink write/knob
                                   // move (OscarWatch "defer uplink after dial move"); lets the SUB
                                   // read + downlink settle before the bus is used for the MAIN uplink
@@ -7280,7 +7411,7 @@ private:
   };
   LineBuf     rigdBuf{120}, rotdBuf{120}, webdBuf{200}, webdReqLine{200};
   uint8_t     rigdVfo = 0;         // 0 = downlink (VFOA/RX), 1 = uplink (VFOB/TX)
-  uint32_t    rigdLastSub = 0, rigdLastMain = 0;  // last freq set (get_freq fallback)
+  freq_t      rigdLastSub = 0, rigdLastMain = 0;  // last freq set (get_freq fallback)
   RigMode     rigdSubMode = RM_USB, rigdMainMode = RM_LSB;
   // rotctld TCP server (item 4): a networked PC drives the wired rotator.
   WiFiServer* rotd = nullptr;
@@ -7414,11 +7545,32 @@ private:
     }
     return cfg.vfoType == VFO_MAIN_UP_SUB_DOWN;
   }
-  bool rigSetDownlinkFreq(uint32_t hz) { return dlOnSub() ? rig->setSubFreq(hz)  : rig->setMainFreq(hz); }
-  bool rigSetUplinkFreq  (uint32_t hz) { return dlOnSub() ? rig->setMainFreq(hz) : rig->setSubFreq(hz); }
+  // --- Transverter LO boundary (0.9.62) -------------------------------------
+  // CardSat computes and displays the REAL on-air frequency (Doppler is applied to
+  // the real frequency upstream of here). If a transverter LO is configured for the
+  // leg, the value actually sent to the rig is the IF = real - LO, and a value read
+  // back from the rig is real = IF + LO. Doing the subtraction HERE, at the single
+  // choke-point, guarantees Doppler was already applied to the real frequency (never
+  // to the IF -- Dopplering the IF would under-correct by the real/IF ratio, ~70x at
+  // 10 GHz on a 144 MHz IF). LO = 0 means no transverter: pass the real freq through.
+  freq_t dlRealToIf(freq_t real) const {
+    return (cfg.xvtrDlHz && real > cfg.xvtrDlHz) ? (real - cfg.xvtrDlHz) : real;
+  }
+  freq_t ulRealToIf(freq_t real) const {
+    return (cfg.xvtrUlHz && real > cfg.xvtrUlHz) ? (real - cfg.xvtrUlHz) : real;
+  }
+  freq_t dlIfToReal(freq_t iff) const {
+    return cfg.xvtrDlHz ? (iff + cfg.xvtrDlHz) : iff;
+  }
+  freq_t ulIfToReal(freq_t iff) const {
+    return cfg.xvtrUlHz ? (iff + cfg.xvtrUlHz) : iff;
+  }
+  bool rigSetDownlinkFreq(freq_t hz) { freq_t f = dlRealToIf(hz); return dlOnSub() ? rig->setSubFreq(f)  : rig->setMainFreq(f); }
+  bool rigSetUplinkFreq  (freq_t hz) { freq_t f = ulRealToIf(hz); return dlOnSub() ? rig->setMainFreq(f) : rig->setSubFreq(f); }
   void rigSetDownlinkMode(RigMode m)   { if (dlOnSub()) rig->setSubMode(m);  else rig->setMainMode(m); }
   void rigSetUplinkMode  (RigMode m)   { if (dlOnSub()) rig->setMainMode(m); else rig->setSubMode(m); }
-  bool rigReadDownlinkFreq(uint32_t& h){ return dlOnSub() ? rig->readSubFreq(h) : rig->readMainFreq(h); }
+  bool rigReadDownlinkFreq(freq_t& h){ bool ok = dlOnSub() ? rig->readSubFreq(h) : rig->readMainFreq(h); if (ok) h = dlIfToReal(h); return ok; }
+  bool rigReadUplinkFreq  (freq_t& h){ bool ok = dlOnSub() ? rig->readMainFreq(h) : rig->readSubFreq(h); if (ok) h = ulIfToReal(h); return ok; }
   void rigSelectDownlink()             { if (dlOnSub()) rig->selectSubBand();  else rig->selectMainBand(); }
   void rigSelectUplink()               { if (dlOnSub()) rig->selectMainBand(); else rig->selectSubBand(); }
   // Drive the downlink dial, but only when it actually moved (don't re-send the
@@ -7430,19 +7582,35 @@ private:
   // defer the uplink write so the SUB read + downlink settle first -- the
   // OscarWatch "defer uplink after a dial move" rule, important on slow single-
   // wire Main/Sub rigs like the IC-821).
-  bool driveDownlink(uint32_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
-    uint32_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
+  bool driveDownlink(freq_t rx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
+    freq_t d = (rx > lastRxSet) ? rx - lastRxSet : lastRxSet - rx;
     if (lastRxSet && d < threshHz) return false;         // within deadband: already there
     if (!rigSetDownlinkFreq(rx)) return false;
-    uint32_t back;
+    freq_t back;
     lastRxSet = (readback && rig->canReadFreq() && rigReadDownlinkFreq(back)) ? back : rx;
+    return true;
+  }
+  // Uplink drive for TM_FULL_UL (One True Rule on the uplink knob): the mirror of
+  // driveDownlink. Unlike driveUplink()/driveUplinkDeferred(), it (a) reads the
+  // accepted uplink back into lastUlHz so the rig's tuning-step rounding can't later
+  // look like an operator knob move, and (b) leaves the active band on the UPLINK
+  // (rigSelectUplink) because here the uplink IS the followed knob -- yanking focus
+  // back to the downlink would fight the operator on single-VFO-focus rigs. Only used
+  // by the TM_FULL_UL branch; every other mode keeps its existing uplink path.
+  bool driveUplinkOtr(freq_t tx, bool readback, uint32_t threshHz = FREQ_GUARD_HZ) {
+    freq_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
+    if (lastUlHz && d < threshHz) return false;          // within deadband: already there
+    if (!rigSetUplinkFreq(tx)) return false;
+    freq_t back;
+    lastUlHz = (readback && rig->canReadFreq() && rigReadUplinkFreq(back)) ? back : tx;
+    rigSelectUplink();                                   // keep the operator on the uplink VFO
     return true;
   }
   // Drive the uplink dial only when it moved; then leave the active band on the
   // downlink so the operator's knob/read stays on RX. No read-back (the uplink
   // knob is never followed).
-  void driveUplink(uint32_t tx, uint32_t threshHz = FREQ_GUARD_HZ) {
-    uint32_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
+  void driveUplink(freq_t tx, uint32_t threshHz = FREQ_GUARD_HZ) {
+    freq_t d = (tx > lastUlHz) ? tx - lastUlHz : lastUlHz - tx;
     if (lastUlHz && d < threshHz) return;
     if (rigSetUplinkFreq(tx)) { lastUlHz = tx; rigSelectDownlink(); }
   }
@@ -7453,7 +7621,7 @@ private:
   // guarantees that during a fast Doppler slew (downlink writing every tick) the
   // uplink still services every other tick instead of starving. `ulEnabled` is
   // the caller's drvUL && t.uplink condition.
-  void driveUplinkDeferred(uint32_t tx, uint32_t threshHz, bool dlMoved, bool ulEnabled) {
+  void driveUplinkDeferred(freq_t tx, uint32_t threshHz, bool dlMoved, bool ulEnabled) {
     bool deferred = (uplinkDeferTicks > 0);
     if (uplinkDeferTicks > 0) uplinkDeferTicks--;
     bool drove = false;
@@ -7723,7 +7891,18 @@ private:
   // station math). All computation is local -- these work offline.
   int toolsSel = 0;
   int toolsCat = -1;   // Tools menu: -1 = category list, else selected category index
+  int    calSel = 0;             // Calendar-export screen cursor (0..5)
+  String calStatus;              // last export result line ("" = none)
+  // Hand-pointing aids on the arrow screen (0.9.62): after the operator points north,
+  // integrate the BMI270 gyro's yaw rate to a relative heading and use the accelerometer
+  // as an elevation level. Gyro-only heading drifts, so re-zeroing north is one key.
+  bool     ptAidOn = false;      // pointing-aid overlay active on SCR_ARROW
+  bool     ptNorthSet = false;   // operator has zeroed the heading reference at north
+  float    ptHeading = 0;        // integrated heading from north, degrees (0..360)
+  uint32_t ptLastMs = 0;         // last gyro-integration timestamp (millis)
+  float    ptElNow = -999;       // current device pitch from the accelerometer (deg)
   void drawTools(); void keyTools(char c, bool enter, bool back);
+  void drawCalExport(); void keyCalExport(char c, bool enter, bool back);
   int toolsRowCount() const; int toolsRowId(int row) const;   // two-level Tools menu helpers
 
   // Infix scientific calculator (SCR_CALC): type an expression, ENTER evaluates.
@@ -8257,6 +8436,7 @@ private:
   void drawTechHelp();  void keyTechHelp(char c, bool enter, bool back);
   void drawLearn();     void keyLearn(char c, bool enter, bool back);
   void drawArrow();     void keyArrow(char c, bool enter, bool back);
+  void updatePointingAid();   // gyro-heading + accel-pitch update for the arrow-screen aid
   void drawOverhead();  void keyOverhead(char c, bool enter, bool back);
   void scanOverhead();  // synchronous all-DB above-horizon snapshot
   void drawGame();      void keyGame(char c, bool enter, bool back);  // "Zap the Sats"
@@ -8355,6 +8535,8 @@ private:
   void keyCatTest(char c, bool enter, bool back);
   void enterCatMon();                       // open the monitor, claim the trace sink
   void drawCatMon();
+  void drawDualRig();
+  void keyDualRig(char c, bool enter, bool back);
   void keyCatMon(char c, bool enter, bool back);
   void catMonPush(const char* dir, const uint8_t* b, size_t n);  // append a trace line
   void catMonSendHex(const String& hex);    // parse "FE FE 4C..." and transmit
@@ -9647,9 +9829,13 @@ RigMode Rig::modeFromString(const String& s) {
 
 Rig* makeRig(RadioModel model, uint8_t catType, const char* host,
              uint16_t port, const char* user, const char* pass) {
-  if (catType == 2) {                     // rigctld client: model-agnostic
+  if (catType == 2) {                     // rigctld client (TCP): model-agnostic
     (void)user; (void)pass;
     return new RigctlRig(host, port);
+  }
+  if (catType == 3) {                     // rigctld client over the Grove UART (no Wi-Fi)
+    (void)host; (void)user; (void)pass;
+    return new RigctlGroveRig(port ? port : 115200);   // reuse catPort as the Grove baud
   }
   // Icom LAN (RS-BA1 UDP) network CAT: only for CI-V models; catType 1 = CAT_NET.
   if (catType == 1 && RADIOS[model].proto == PROTO_CIV)
@@ -9693,18 +9879,54 @@ float ctcssToneHz(int index) {
 // ---------------------------------------------------------------------------
 //  RigctlRig - rigctld (Hamlib NET rigctl) TCP client backend
 // ---------------------------------------------------------------------------
-bool RigctlRig::ensure() {
+// ---- base (TCP) transport primitives --------------------------------------
+bool RigctlRig::linkOpen() {
   if (_c.connected()) { _ok = true; return true; }
   uint32_t now = millis();
   if (_lastTry && (now - _lastTry) < 3000) { _ok = false; return false; }   // throttle retries
   _lastTry = now; _c.stop();
   if (WiFi.status() != WL_CONNECTED || _host.length() == 0) { _ok = false; return false; }
   _ok = _c.connect(_host.c_str(), _port, 1500);
-  if (_ok) {                              // enable split so the uplink leg (I/X) works
-    _c.print("S 1 VFOB\n");
-    uint32_t t = millis();
-    while (_c.available() && (millis() - t) < 50) _c.read();    // drain the RPRT ack
+  if (_ok) _probed = false;                 // fresh connection -> re-probe VFO mode
+  return _ok;
+}
+void   RigctlRig::linkClose() { _c.stop(); }
+size_t RigctlRig::linkWrite(const uint8_t* d, size_t n) { return _c.write(d, n); }
+int    RigctlRig::linkRead() { return _c.read(); }
+
+// ---- shared protocol (transport-agnostic) ---------------------------------
+// Read one non-empty reply line via the transport's linkRead(). "" on timeout.
+String RigctlRig::readLine(uint32_t timeoutMs) {
+  String line; uint32_t t = millis();
+  while ((millis() - t) < timeoutMs) {
+    int ch = linkRead();
+    if (ch < 0) { delay(2); continue; }
+    if (ch == '\n' || ch == '\r') { if (line.length()) break; else continue; }
+    line += (char)ch;
   }
+  return line;
+}
+
+// One-shot VFO-mode handshake, shared by every transport. We steer the two legs by
+// selecting a VFO and then issuing plain set_freq/set_mode on it (downlink = VFOA,
+// uplink = VFOB) -- what gpredict and mainstream Hamlib backends expect for a duplex
+// sat rig, and far more portable than set_split_freq (which makes Hamlib tune the
+// wrong VFO on Icoms). Works against any rigctld, including CardSat's own server and
+// the CardSatDualRig companion. Probe \chk_vfo: a server started with --vfo answers
+// "CHKVFO 1" and then wants the VFO inline on every command; otherwise we pre-select
+// with V and send bare commands on currVFO.
+void RigctlRig::probeVfoMode() {
+  _vfo = -1; _vfoMode = false;
+  const char* q = "\\chk_vfo\n";
+  linkWrite((const uint8_t*)q, strlen(q));
+  String r = readLine(300);
+  if (r.indexOf("CHKVFO 1") >= 0) _vfoMode = true;
+  _probed = true;
+}
+
+bool RigctlRig::ensure() {
+  if (!linkOpen()) return false;
+  if (!_probed) probeVfoMode();
   return _ok;
 }
 
@@ -9721,35 +9943,83 @@ const char* RigctlRig::modeName(RigMode m) {
 String RigctlRig::xchg(const String& tx) {
   if (!ensure()) return "";
   uint32_t t0 = millis();
-  while (_c.available() && (millis() - t0) < 20) _c.read();      // drain stale reply
-  if (_c.write((const uint8_t*)tx.c_str(), tx.length()) != tx.length()) {
-    _ok = false; _c.stop(); return "";
+  while (linkRead() >= 0 && (millis() - t0) < 20) { }           // drain stale reply
+  if (linkWrite((const uint8_t*)tx.c_str(), tx.length()) != tx.length()) {
+    _ok = false; linkClose(); return "";
   }
-  String line; t0 = millis();
-  while ((millis() - t0) < 400) {
-    int ch = _c.read();
-    if (ch < 0) { delay(2); continue; }
-    if (ch == '\n' || ch == '\r') { if (line.length()) break; else continue; }
-    line += (char)ch;
-  }
-  return line;
+  return readLine(400);
 }
 
-bool RigctlRig::setSubFreq (uint32_t hz) { return xchg("F " + String(hz) + "\n") == "RPRT 0"; }
-bool RigctlRig::setMainFreq(uint32_t hz) { return xchg("I " + String(hz) + "\n") == "RPRT 0"; }
-bool RigctlRig::setSubMode (RigMode m)   { return xchg(String("M ") + modeName(m) + " 0\n") == "RPRT 0"; }
-bool RigctlRig::setMainMode(RigMode m)   { return xchg(String("X ") + modeName(m) + " 0\n") == "RPRT 0"; }
+// ===========================================================================
+//  RigctlGroveRig - the same VFO-mode protocol over the Grove UART (G1/G2).
+//  Serial1 is shared with wired CI-V / Grove GPS / Grove rotator; the caller's
+//  mutual-exclusion rules guarantee only one owner at a time.
+// ===========================================================================
+void RigctlGroveRig::begin(uint32_t, int rx, int tx, int) {
+  _rx = rx; _tx = tx; _lastTry = 0; _probed = false; _open = false;
+  linkOpen();
+}
+bool RigctlGroveRig::linkOpen() {
+  if (_open) { _ok = true; return true; }
+  if (!_serial) _serial = &Serial1;
+  _serial->begin(_baud, SERIAL_8N1, _rx, _tx);
+  _open = true; _ok = true; _probed = false;
+  return true;
+}
+void RigctlGroveRig::linkClose() {
+  if (_serial && _open) _serial->end();
+  _open = false; _ok = false;
+}
+size_t RigctlGroveRig::linkWrite(const uint8_t* d, size_t n) {
+  if (!_serial || !_open) return 0;
+  return _serial->write(d, n);
+}
+int RigctlGroveRig::linkRead() {
+  if (!_serial || !_open) return -1;
+  return _serial->read();
+}
 
-bool RigctlRig::readSubFreq(uint32_t& hzOut) {
-  String r = xchg("f\n");
+// Downlink is VFOA, uplink is VFOB. (The operator picks which band each VFO holds
+// in the rig's own sat/duplex setup; we only need two consistent VFOs to steer.)
+const char* RigctlRig::vfoTok(bool sub) { return sub ? "VFOA" : "VFOB"; }
+
+// Make sub's VFO the target of the next bare command. In --vfo servers the VFO
+// travels inline on each command instead (see cmd()), so this is a no-op there.
+void RigctlRig::selectVfo(bool sub) {
+  if (_vfoMode) return;
+  int want = sub ? 0 : 1;
+  if (_vfo == want) return;
+  if (xchg(String("V ") + vfoTok(sub) + "\n") == "RPRT 0") _vfo = want;
+  else _vfo = -1;
+}
+
+// Assemble a command line, inserting the VFO token inline when the server runs in
+// --vfo mode. body is the value(s) after the command letter, if any.
+String RigctlRig::cmd(char c, bool sub, const String& body) {
+  String s; s += c;
+  if (_vfoMode)      { s += ' '; s += vfoTok(sub); }
+  if (body.length()) { s += ' '; s += body; }
+  s += '\n';
+  return s;
+}
+
+bool RigctlRig::setSubFreq (freq_t hz) { selectVfo(true);  return xchg(cmd('F', true,  String((unsigned long long)hz))) == "RPRT 0"; }
+bool RigctlRig::setMainFreq(freq_t hz) { selectVfo(false); return xchg(cmd('F', false, String((unsigned long long)hz))) == "RPRT 0"; }
+bool RigctlRig::setSubMode (RigMode m) { selectVfo(true);  return xchg(cmd('M', true,  String(modeName(m)) + " 0")) == "RPRT 0"; }
+bool RigctlRig::setMainMode(RigMode m) { selectVfo(false); return xchg(cmd('M', false, String(modeName(m)) + " 0")) == "RPRT 0"; }
+
+bool RigctlRig::readSubFreq(freq_t& hzOut) {
+  selectVfo(true);
+  String r = xchg(cmd('f', true));
   if (r.length() == 0 || r.startsWith("RPRT")) return false;
-  hzOut = (uint32_t)strtoul(r.c_str(), nullptr, 10);
+  hzOut = (freq_t)strtoull(r.c_str(), nullptr, 10);
   return hzOut > 0;
 }
-bool RigctlRig::readMainFreq(uint32_t& hzOut) {
-  String r = xchg("i\n");
+bool RigctlRig::readMainFreq(freq_t& hzOut) {
+  selectVfo(false);
+  String r = xchg(cmd('f', false));
   if (r.length() == 0 || r.startsWith("RPRT")) return false;
-  hzOut = (uint32_t)strtoul(r.c_str(), nullptr, 10);
+  hzOut = (freq_t)strtoull(r.c_str(), nullptr, 10);
   return hzOut > 0;
 }
 bool RigctlRig::readPtt(bool& tx) {
@@ -9778,15 +10048,15 @@ static void civDecode(const uint8_t* b, size_t n) {
   uint8_t cmd = b[4];
   switch (cmd) {
     case 0x03:
-      if (n >= 11) { uint32_t hz = 0;
+      if (n >= 11) { freq_t hz = 0;
         for (int k = 9; k >= 5; --k) hz = hz*100 + (b[k]>>4)*10 + (b[k]&0x0F);
-        Serial.printf("  read-freq -> %lu Hz", (unsigned long)hz); }
+        Serial.printf("  read-freq -> %llu Hz", (unsigned long long)hz); }
       else Serial.print("  read-freq req");
       break;
     case 0x05:
-      if (n >= 10) { uint32_t hz = 0;
+      if (n >= 10) { freq_t hz = 0;
         for (int k = 9; k >= 5; --k) hz = hz*100 + (b[k]>>4)*10 + (b[k]&0x0F);
-        Serial.printf("  set-freq %lu Hz", (unsigned long)hz); }
+        Serial.printf("  set-freq %llu Hz", (unsigned long long)hz); }
       break;
     case 0x06: { const char* m = "?";
       if (n > 5) switch (b[5]) { case 0:m="LSB";break; case 1:m="USB";break;
@@ -9922,7 +10192,7 @@ CivMode CivRig::toCiv(RigMode m) {
 }
 
 // --- BCD: 1 Hz resolution, 5 bytes, least-significant pair first ----------
-void CivRig::freqToBcd(uint32_t hz, uint8_t out[5]) {
+void CivRig::freqToBcd(freq_t hz, uint8_t out[5]) {
   for (int i = 0; i < 5; ++i) {
     uint8_t lo = hz % 10; hz /= 10;
     uint8_t hi = hz % 10; hz /= 10;
@@ -10045,7 +10315,7 @@ void CivRig::selectSub() {
 // Map a frequency to the Icom CI-V band code used by the "07 D2" band-selection
 // command: 0x01 = 144 MHz, 0x02 = 430/440 MHz, 0x03 = 1.2 GHz. Returns 0 for a
 // frequency outside those amateur VHF/UHF bands (caller skips the assignment).
-static uint8_t civBandCode(uint32_t hz) {
+static uint8_t civBandCode(freq_t hz) {
   if (hz >= 144000000UL && hz <= 148000000UL) return 0x01;   // 2 m
   if (hz >= 430000000UL && hz <= 450000000UL) return 0x02;   // 70 cm
   if (hz >= 1240000000UL && hz <= 1300000000UL) return 0x03; // 23 cm
@@ -10061,7 +10331,7 @@ static uint8_t civBandCode(uint32_t hz) {
 // radio. The frame format (07 D2 00 = main, 07 D2 01 = sub; band codes
 // 01/02/03) is taken from the IC-9700 CI-V Reference Guide. It is sent once at
 // CAT-engage, never per-tick, so a wrong frame cannot spam the bus.
-bool CivRig::assignBands(uint32_t mainHz, uint32_t subHz) {
+bool CivRig::assignBands(freq_t mainHz, freq_t subHz) {
   if (!RADIOS[_model].canAssignBand) return false;
   uint8_t mb = civBandCode(mainHz);
   uint8_t sb = civBandCode(subHz);
@@ -10077,7 +10347,7 @@ bool CivRig::assignBands(uint32_t mainHz, uint32_t subHz) {
   // (now-corrected) selMain = 07 D1 then 03. Fired once at engage.
   // *** UNTESTED ON HARDWARE *** (author has no IC-910).
   if (_model == RIG_IC910) {
-    uint32_t mainNow = 0;
+    freq_t mainNow = 0;
     if (!readMainFreq(mainNow) || !mainNow) {
       if (CIV_DEBUG) Serial.println("[CAT] 910 assignBands: MAIN read failed, no swap");
       return false;                               // can't tell -> don't guess
@@ -10102,14 +10372,14 @@ bool CivRig::assignBands(uint32_t mainHz, uint32_t subHz) {
   ok &= sendFrame(main, 4);
   ok &= sendFrame(sub,  4);
   if (CIV_DEBUG) {
-    Serial.printf("[CAT] assignBands: MAIN<-band%02X (%lu Hz) SUB<-band%02X (%lu Hz) %s\n",
-                  mb, (unsigned long)mainHz, sb, (unsigned long)subHz,
+    Serial.printf("[CAT] assignBands: MAIN<-band%02X (%llu Hz) SUB<-band%02X (%llu Hz) %s\n",
+                  mb, (unsigned long long)mainHz, sb, (unsigned long long)subHz,
                   ok ? "sent" : "FAILED");
   }
   return ok;
 }
 
-bool CivRig::setFreqCiv(bool sub, uint32_t hz) {
+bool CivRig::setFreqCiv(bool sub, freq_t hz) {
   sub ? selectSub() : selectMain();
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
   bool ok = sendFrame(pl, 6);
@@ -10125,8 +10395,8 @@ bool CivRig::setModeCiv(bool sub, CivMode m, uint8_t filter) {
   return sendFrame(pl, 3);
 }
 
-bool CivRig::setMainFreq(uint32_t hz) { return setFreqCiv(false, hz); }
-bool CivRig::setSubFreq (uint32_t hz) { return setFreqCiv(true,  hz); }
+bool CivRig::setMainFreq(freq_t hz) { return setFreqCiv(false, hz); }
+bool CivRig::setSubFreq (freq_t hz) { return setFreqCiv(true,  hz); }
 bool CivRig::setMainMode(RigMode m)   { return setModeCiv(false, toCiv(m)); }
 bool CivRig::setSubMode (RigMode m)   { return setModeCiv(true,  toCiv(m)); }
 
@@ -10165,8 +10435,8 @@ bool CivRig::setCtcss(bool on, float toneHz) {
   return sendFrame(off, 3);
 }
 
-bool CivRig::readSubFreq (uint32_t& hzOut) { return readFreqCiv(true,  hzOut); }
-bool CivRig::readMainFreq(uint32_t& hzOut) { return readFreqCiv(false, hzOut); }
+bool CivRig::readSubFreq (freq_t& hzOut) { return readFreqCiv(true,  hzOut); }
+bool CivRig::readMainFreq(freq_t& hzOut) { return readFreqCiv(false, hzOut); }
 
 // Read PTT/transmit state via CI-V "read transceiver status" (0x1C 0x00).
 // Reply: FE FE E0 <addr> 1C 00 <00=RX|01=TX> FD. Rigs that don't support it stay
@@ -10224,8 +10494,8 @@ bool CivRig::readPtt(bool& tx) {
 // COMMANDED on that band rather than failing outright. The boolean return tells
 // the caller whether the value is fresh (true) or a fallback/none (false); hzOut
 // is always left at the best estimate we have.
-bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
-  uint32_t lastSet = sub ? _lastSubHz : _lastMainHz;
+bool CivRig::readFreqCiv(bool sub, freq_t& hzOut) {
+  freq_t lastSet = sub ? _lastSubHz : _lastMainHz;
   if (lastSet) hzOut = lastSet;                     // default to last-commanded
   if (!_stream) return false;
   if (!RADIOS[_model].canReadFreq) return false;    // set-only rig
@@ -10267,7 +10537,7 @@ bool CivRig::readFreqCiv(bool sub, uint32_t& hzOut) {
   for (size_t i = 0; i + 10 < bn; ++i) {
     if (buf[i] == 0xFE && buf[i+1] == 0xFE && buf[i+2] == 0xE0 &&
         buf[i+3] == _addr && buf[i+4] == 0x03 && buf[i+10] == 0xFD) {
-      uint32_t hz = 0;
+      freq_t hz = 0;
       for (int k = 9; k >= 5; --k)
         hz = hz * 100 + (buf[i+k] >> 4) * 10 + (buf[i+k] & 0x0F);
       hzOut = hz;
@@ -10358,8 +10628,11 @@ uint8_t YaesuRig::modeCode(RigMode m) {
 }
 
 // Big-endian BCD, 10 Hz resolution, 4 bytes (8 digits of hz/10).
-void YaesuRig::freqToBcd(uint32_t hz, uint8_t out[4]) {
-  uint32_t f = hz / 10;                          // 10 Hz units
+void YaesuRig::freqToBcd(freq_t hz, uint8_t out[4]) {
+  // Yaesu 4-byte BCD holds 8 digits of 10-Hz units (~1 GHz max). CardSat only ever
+  // sends this rig a sub-GHz IF (the supported rigs top out at 1.2 GHz; higher bands
+  // go through a transverter LO offset), so the value always fits.
+  uint32_t f = (uint32_t)(hz / 10);              // 10 Hz units
   out[0] = (uint8_t)((((f/10000000)%10)<<4) | ((f/1000000)%10));
   out[1] = (uint8_t)((((f/100000)%10)<<4)   | ((f/10000)%10));
   out[2] = (uint8_t)((((f/1000)%10)<<4)     | ((f/100)%10));
@@ -10392,7 +10665,7 @@ bool YaesuRig::send(const uint8_t cmd[5]) {
   return true;
 }
 
-bool YaesuRig::setFreq(uint8_t opcode, uint32_t hz) {
+bool YaesuRig::setFreq(uint8_t opcode, freq_t hz) {
   uint8_t cmd[5];
   freqToBcd(hz, cmd);          // P1..P4 = BCD frequency
   cmd[4] = opcode;             // 0x11 = SAT RX, 0x21 = SAT TX
@@ -10416,7 +10689,7 @@ uint32_t YaesuRig::bcdToFreq(const uint8_t in[4]) {
 // BCD frequency bytes (10 Hz units) + 1 mode byte. Only firmware-updated FT-847s
 // can read at all (early units stay silent -> we time out and return false). The
 // FT-736R has no read path (canReadFreq is false for it).
-bool YaesuRig::readSubFreq(uint32_t& hzOut) {
+bool YaesuRig::readSubFreq(freq_t& hzOut) {
   if (!_stream || !RADIOS[_model].canReadFreq) return false;
   drainStale();                                                 // flush stale bytes
   const uint8_t cmd[5] = { 0x00, 0x00, 0x00, 0x00, 0x13 };      // read SAT-RX
@@ -10573,9 +10846,11 @@ bool KenwoodRig::sendCmd(const String& cmd) {
   return true;
 }
 
-bool KenwoodRig::setVfoFreq(const char* vfo, uint32_t hz) {
-  char buf[20];
-  snprintf(buf, sizeof(buf), "%s%011lu;", vfo, (unsigned long)hz);
+bool KenwoodRig::setVfoFreq(const char* vfo, freq_t hz) {
+  char buf[24];
+  // Kenwood ASCII frequency is 11 digits. CardSat only sends this rig a sub-GHz IF
+  // (transverter LO offset handles higher bands), so 11 digits is always ample.
+  snprintf(buf, sizeof(buf), "%s%011llu;", vfo, (unsigned long long)hz);
   return sendCmd(buf);
 }
 
@@ -10585,7 +10860,7 @@ bool KenwoodRig::setModeKw(RigMode m) {
   return sendCmd(buf);
 }
 
-bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
+bool KenwoodRig::readSubFreq(freq_t& hzOut) {
   if (!_stream || !RADIOS[_model].canReadFreq) return false;
   drainStale();                                    // bounded (never spins)
   sendCmd("FA;");                                  // query VFO A (downlink)
@@ -10619,7 +10894,7 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
   if (rx.length()) catTrace("RX", (const uint8_t*)rx.c_str(), rx.length());
   int i = rx.indexOf("FA");
   if (i >= 0 && (int)rx.length() >= i + 13) {       // "FA" + 11 digits
-    uint32_t hz = 0; bool ok = false;
+    freq_t hz = 0; bool ok = false;
     for (int k = i + 2; k < i + 13; ++k) {
       char c = rx[k];
       if (c < '0' || c > '9') { ok = false; break; }
@@ -10628,7 +10903,7 @@ bool KenwoodRig::readSubFreq(uint32_t& hzOut) {
     if (ok) {
       hzOut = hz;
 #if KW_DEBUG
-      Serial.printf("[CAT] VFO-A (downlink) read: %lu Hz\n", (unsigned long)hz);
+      Serial.printf("[CAT] VFO-A (downlink) read: %llu Hz\n", (unsigned long long)hz);
 #endif
       return true;
     }
@@ -11259,7 +11534,7 @@ CivMode IcomNetRig::toCiv(RigMode m) {
     default:     return CIV_USB;
   }
 }
-void IcomNetRig::freqToBcd(uint32_t hz, uint8_t out[5]) {
+void IcomNetRig::freqToBcd(freq_t hz, uint8_t out[5]) {
   for (int i = 0; i < 5; ++i) {
     uint8_t lo = hz % 10; hz /= 10;
     uint8_t hi = hz % 10; hz /= 10;
@@ -11603,7 +11878,7 @@ void IcomNetRig::selBand(bool sub) {
   const RadioProfile& p = RADIOS[_model];
   if (p.selLen) sendCivPayload(sub ? p.selSub : p.selMain, p.selLen);
 }
-bool IcomNetRig::setFreqNet(bool sub, uint32_t hz) {
+bool IcomNetRig::setFreqNet(bool sub, freq_t hz) {
   selBand(sub);
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
   return sendCivPayload(pl, 6);
@@ -11613,7 +11888,7 @@ bool IcomNetRig::setModeNet(bool sub, CivMode m, uint8_t filter) {
   uint8_t pl[3] = { 0x06, (uint8_t)m, filter };
   return sendCivPayload(pl, 3);
 }
-bool IcomNetRig::readFreqNet(bool sub, uint32_t& hzOut) {
+bool IcomNetRig::readFreqNet(bool sub, freq_t& hzOut) {
   if (_state != NS_CONNECTED || !RADIOS[_model].canReadFreq) return false;
   selBand(sub);
   while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); }  // drain stale
@@ -11632,10 +11907,10 @@ bool IcomNetRig::readFreqNet(bool sub, uint32_t& hzOut) {
         const uint8_t* f = buf + 21;
         if (f[0] == 0xFE && f[1] == 0xFE && f[2] == 0xE0 && f[3] == _addr &&
             f[4] == 0x03 && f[10] == 0xFD) {
-          uint32_t hz = 0;
+          freq_t hz = 0;
           for (int k = 9; k >= 5; --k) hz = hz * 100 + (f[k] >> 4) * 10 + (f[k] & 0x0F);
           hzOut = hz;
-          NLOG("[NET CI-V] %s freq %lu Hz\n", sub ? "SUB" : "MAIN", (unsigned long)hz);
+          NLOG("[NET CI-V] %s freq %llu Hz\n", sub ? "SUB" : "MAIN", (unsigned long long)hz);
           return true;
         }
       }
@@ -11645,12 +11920,12 @@ bool IcomNetRig::readFreqNet(bool sub, uint32_t& hzOut) {
 }
 
 // --- Rig interface ---------------------------------------------------------
-bool IcomNetRig::setMainFreq(uint32_t hz) { return setFreqNet(false, hz); }
-bool IcomNetRig::setSubFreq (uint32_t hz) { return setFreqNet(true,  hz); }
+bool IcomNetRig::setMainFreq(freq_t hz) { return setFreqNet(false, hz); }
+bool IcomNetRig::setSubFreq (freq_t hz) { return setFreqNet(true,  hz); }
 bool IcomNetRig::setMainMode(RigMode m)   { return setModeNet(false, toCiv(m)); }
 bool IcomNetRig::setSubMode (RigMode m)   { return setModeNet(true,  toCiv(m)); }
-bool IcomNetRig::readSubFreq (uint32_t& hzOut) { return readFreqNet(true,  hzOut); }
-bool IcomNetRig::readMainFreq(uint32_t& hzOut) { return readFreqNet(false, hzOut); }
+bool IcomNetRig::readSubFreq (freq_t& hzOut) { return readFreqNet(true,  hzOut); }
+bool IcomNetRig::readMainFreq(freq_t& hzOut) { return readFreqNet(false, hzOut); }
 
 // Read PTT/transmit state via CI-V 0x1C 0x00 over the serial stream. Reply CI-V
 // frame: FE FE E0 <addr> 1C 00 <00=RX|01=TX> FD. Rigs that don't answer get
@@ -14906,10 +15181,10 @@ static int txFillFromDoc(JsonDocument& doc, Transponder* out, int maxN) {
     strncpy(t.desc, d, sizeof(t.desc)-1); t.desc[sizeof(t.desc)-1]=0;
     const char* m = o["mode"] | "";
     strncpy(t.mode, m, sizeof(t.mode)-1); t.mode[sizeof(t.mode)-1]=0;
-    t.downlink     = o["downlink_low"]   | 0u;
-    t.downlinkHigh = o["downlink_high"]  | 0u;
-    t.uplink       = o["uplink_low"]      | 0u;
-    t.uplinkHigh   = o["uplink_high"]     | 0u;
+    t.downlink     = o["downlink_low"]   | (freq_t)0;
+    t.downlinkHigh = o["downlink_high"]  | (freq_t)0;
+    t.uplink       = o["uplink_low"]      | (freq_t)0;
+    t.uplinkHigh   = o["uplink_high"]     | (freq_t)0;
     t.invert       = o["invert"]          | false;
     if (t.downlink == 0 && t.uplink == 0) continue;   // nothing to tune -> skip
 
@@ -17064,10 +17339,10 @@ double Predictor::betaAngleDeg(time_t t, double inclDeg, double raanDeg) {
   return asin(d) / DEG;                                   // beta = 90 - angle(n,Sun)
 }
 
-void Predictor::dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
+void Predictor::dopplerFreqs(freq_t dlNominal, freq_t ulNominal,
                              double rangeRateKmS,
                              int32_t calDlHz, int32_t calUlHz,
-                             uint32_t& rxHz, uint32_t& txHz) {
+                             freq_t& rxHz, freq_t& txHz) {
   double rr = rangeRateKmS * 1000.0;       // m/s, +ve receding
   double beta = rr / C_LIGHT;
 
@@ -17077,11 +17352,11 @@ void Predictor::dopplerFreqs(uint32_t dlNominal, uint32_t ulNominal,
   double tx = (ulNominal ? ((double)ulNominal / (1.0 - beta)) : 0.0);
   if (ulNominal) tx += (double)calUlHz;
 
-  rxHz = (uint32_t)llround(rx);
-  txHz = (uint32_t)llround(tx);
+  rxHz = (freq_t)llround(rx);
+  txHz = (freq_t)llround(tx);
 }
 
-uint32_t Predictor::uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
+freq_t Predictor::uplinkForFixedDownlink(freq_t dlOp, freq_t ulOp,
                                            bool invert, double rangeRateKmS,
                                            int32_t calDlHz, int32_t calUlHz) {
   if (ulOp == 0) return 0;
@@ -17103,10 +17378,10 @@ uint32_t Predictor::uplinkForFixedDownlink(uint32_t dlOp, uint32_t ulOp,
   double fulSat = invert ? ((double)ulOp - delta) : ((double)ulOp + delta);
   double tx = fulSat / oneMinusBeta + (double)calUlHz;
   if (tx < 0) tx = 0;
-  return (uint32_t)llround(tx);
+  return (freq_t)llround(tx);
 }
 
-uint32_t Predictor::downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
+freq_t Predictor::downlinkForFixedUplink(freq_t dlOp, freq_t ulOp,
                                            bool invert, double rangeRateKmS,
                                            int32_t calDlHz, int32_t calUlHz) {
   double beta = rangeRateKmS * 1000.0 / C_LIGHT;   // +ve receding
@@ -17114,7 +17389,7 @@ uint32_t Predictor::downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
   if (oneMinusBeta == 0.0) oneMinusBeta = 1e-12;    // guard (never physical)
   // No uplink (downlink-only bird): just the plain Doppler-shifted downlink.
   if (ulOp == 0)
-    return (uint32_t)llround((double)dlOp * oneMinusBeta + (double)calDlHz);
+    return (freq_t)llround((double)dlOp * oneMinusBeta + (double)calDlHz);
 
   // The operator parks TX at the ground frequency ulOp+calUl; the bird hears that
   // Doppler-shifted to Ful_sat.
@@ -17127,11 +17402,11 @@ uint32_t Predictor::downlinkForFixedUplink(uint32_t dlOp, uint32_t ulOp,
   // That emit is Doppler-shifted again on the way down; add downlink calibration.
   double rx = fdlSat * oneMinusBeta + (double)calDlHz;
   if (rx < 0) rx = 0;
-  return (uint32_t)llround(rx);
+  return (freq_t)llround(rx);
 }
 
 void Predictor::passbandFreqs(const Transponder& t, int32_t pbOffsetHz,
-                              uint32_t& dlOp, uint32_t& ulOp) {
+                              freq_t& dlOp, freq_t& ulOp) {
   // No tunable downlink passband -> single channel; ignore the offset.
   uint32_t dlBw = t.bandwidth();
   if (!t.isLinear || dlBw == 0) {
@@ -17501,6 +17776,8 @@ bool Settings::load() {
   morseSwap  = d["morseswap"]| false;   // Morse Meteors: swap dot/dash keys
   calDlHz    = d["caldl"] | 0;
   calUlHz    = d["calul"] | 0;
+  xvtrDlHz   = d["xvtrdl"] | (freq_t)0;   // transverter LO offsets (0 = none)
+  xvtrUlHz   = d["xvtrul"] | (freq_t)0;
   rotEnable  = d["roten"]  | false;
   rotType    = d["rottype"]| (uint8_t)ROT_GS232;
   // Clamp to the LAST defined type, not ROT_PST. The old bound was ROT_PST (2),
@@ -17634,6 +17911,7 @@ bool Settings::save() {
   d["catdly"] = catDelayMs;
   d["dpfm"] = doppThreshFmHz; d["dplin"] = doppThreshLinHz; d["dplead"] = doppLeadMs;
   d["minel"]= minPassEl;  d["caldl"]= calDlHz; d["calul"] = calUlHz;
+  d["xvtrdl"]= xvtrDlHz; d["xvtrul"] = xvtrUlHz;
   d["vispass"] = visPasses; d["vissun"] = visSunElMax; d["visel"] = visMinEl;
   d["aosalarm"] = aosAlarm;
   d["irbeacon"] = irBeacon;
@@ -17756,12 +18034,12 @@ static String fmtClock(time_t t) {
 //   < 1000 MHz : maxDigits decimals (e.g. 145.99700)
 //   < 10000    : 3 decimals        (e.g. 1296.500)
 //   < 100000   : 1 decimal         (e.g. 10489.5 ... 99999.5)
-static String fmtMHzN(uint32_t hz, int maxDigits) {
-  double m = hz / 1e6;
+static String fmtMHzN(freq_t hz, int maxDigits) {
+  double m = (double)hz / 1e6;
   int dp = (m < 1000.0) ? maxDigits : (m < 10000.0) ? 3 : 1;
   char b[20]; snprintf(b, sizeof(b), "%.*f", dp, m); return String(b);
 }
-static String fmtMHz(uint32_t hz) { return fmtMHzN(hz, 5); }
+static String fmtMHz(freq_t hz) { return fmtMHzN(hz, 5); }
 
 // Escape a string for safe inclusion inside a JSON double-quoted value. Sat and
 // transponder names come straight from catalog/SatNOGS data and can contain
@@ -18350,9 +18628,10 @@ const char* App::rotTransportConflict() const {
   if (cfg.rotType == ROT_YAESU) return nullptr;                          // I2C direct
   if (cfg.rotTransport == ROT_XPORT_GROVE) {
     // CAT_WIRED means the rig backend opens UART1 on G1/G2 in begin(), whatever
-    // the protocol (CI-V, Yaesu, Kenwood all do). USB/LAN CAT leave Grove free,
+    // the protocol (CI-V, Yaesu, Kenwood all do). CAT_RIGCTL_GROVE claims the same
+    // UART1 (rigctl over the Grove cable). USB/LAN/rigctl-net CAT leave Grove free,
     // which is exactly the combination this transport is for.
-    if (cfg.catType == CAT_WIRED)
+    if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE)
       return "Grove rotator needs CAT on USB or LAN";
     // The Grove GPS options are the SAME two pins (config.h GpsSource).
     if (cfg.gpsSource == GPS_SRC_GROVE_9600 || cfg.gpsSource == GPS_SRC_GROVE_115K)
@@ -18724,7 +19003,7 @@ void App::serviceTiltTune() {
   if (trackMode != 0) return;                            // TUNE mode only
   // On Track/Big the FULL/DL modes are driven by the rig knob, so tilt must not
   // fight them. The Manual screen has no radio, so this guard doesn't apply there.
-  if (onTrack && (tuneMode == TM_FULL || tuneMode == TM_DL)) return;
+  if (onTrack && (tuneMode == TM_FULL || tuneMode == TM_DL || tuneMode == TM_FULL_UL)) return;
   if (activeTxCount <= 0) return;
   Transponder& t = activeTx[curTx];
   if (!t.isLinear || t.bandwidth() == 0) return;
@@ -21547,10 +21826,10 @@ void App::rigdHandleLine(const String& lineIn) {
   arg.trim();
   switch (cmd) {
     case 'f': {                                  // get_freq
-      uint32_t hz = 0;
+      freq_t hz = 0;
       bool ok = rig && (rigdVfo == 1 ? rig->readMainFreq(hz) : rig->readSubFreq(hz));
       if (!ok) hz = (rigdVfo == 1) ? rigdLastMain : rigdLastSub;
-      rigdCli.printf("%lu\n", (unsigned long)hz);
+      rigdCli.printf("%llu\n", (unsigned long long)hz);
     } break;
     case 'F': {                                  // set_freq <hz>
       uint32_t hz = (uint32_t)strtoul(arg.c_str(), nullptr, 10);
@@ -22559,21 +22838,22 @@ void App::webdSendFilesPage() {
 void App::webdSendStatusJson() {
   SatEntry* s = activeSat();
   LiveLook L = (s && timeIsSet()) ? pred.look(nowUtc()) : LiveLook();
-  uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+  freq_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
   if (s && activeTxCount > 0) {
     Transponder& t = activeTx[curTx];
     Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
     Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
   }
   const char* mtag = (tuneMode == TM_FULL) ? "FULL" : (tuneMode == TM_DL) ? "DL"
-                   : (tuneMode == TM_UL) ? "UL" : (trackMode == 0 ? "TUNE" : "CAL");
+                   : (tuneMode == TM_UL) ? "UL" : (tuneMode == TM_FULL_UL) ? "FULLu"
+                   : (trackMode == 0 ? "TUNE" : "CAL");
 
   // Manual-mode legs: the HOLD leg (parked nominal, no Doppler) and the TUNE leg
   // (Doppler-corrected, round-trip on a linear bird) -- the same numbers the
   // on-device Manual calculator shows, so the web page can offer manual tuning.
   bool haveUp = (ulOp != 0);
   bool fixUp  = haveUp && manFixUp;
-  uint32_t holdHz = 0, tuneHz = 0;
+  freq_t holdHz = 0, tuneHz = 0;
   if (s && activeTxCount > 0) {
     Transponder& t = activeTx[curTx];
     bool linear = t.isLinear && t.bandwidth() > 0;
@@ -22641,7 +22921,89 @@ void App::webdSendStatusJson() {
   // Live step sizes (Hz) so the web UI can show the current tuning/cal increment
   // and cycle it (the 's' cmd toggles tuneStep in Track, calStep is the cal nudge).
   j += "\"tstep\":"; j += (long)tuneStep; j += ",";
-  j += "\"cstep\":"; j += (long)calStep;
+  j += "\"cstep\":"; j += (long)calStep; j += ",";
+
+  // --- Stable machine-readable extension (0.9.62). Everything below is documented in
+  // docs/interfaces/API_STATUS.md and is intended to be a stable contract for external
+  // tooling; the keys above grew organically for the built-in web panel. ---
+  // Firmware + UTC + observer.
+  j += "\"ver\":\""; j += FW_VERSION; j += "\",";
+  j += "\"utc\":"; j += (long)(timeIsSet() ? nowUtc() : 0); j += ",";   // unix seconds, 0 = clock unset
+  { Observer o = loc.obs();
+    j += "\"lat\":"; j += (o.valid ? String(o.lat, 5) : String("null")); j += ",";
+    j += "\"lon\":"; j += (o.valid ? String(o.lon, 5) : String("null")); j += ",";
+    j += "\"grid\":\""; j += (o.valid ? jsonEsc(Location::toGrid(o.lat, o.lon).c_str()) : String("")); j += "\",";
+    j += "\"locsrc\":\""; j += (!o.valid ? "none" : (o.fromGps ? "gps" : "manual")); j += "\","; }
+  // Live look geometry (range + range-rate join the az/el already emitted above).
+  j += "\"rangeKm\":"; j += (s && timeIsSet() ? String(L.rangeKm, 1) : String("null")); j += ",";
+  j += "\"rangeRate\":"; j += (s && timeIsSet() ? String(L.rangeRate, 4) : String("null")); j += ",";  // km/s, + receding
+  j += "\"vis\":"; j += ((s && timeIsSet() && L.visible) ? "true" : "false"); j += ",";
+  // Next/in-progress pass for the active sat: AOS/TCA/LOS (unix), max elevation, rise az.
+  { PassPredict pp;
+    bool hp = false;
+    if (s && timeIsSet()) { pred.setSite(loc.obs()); hp = (pred.predictPasses(nowUtc() - 1200, cfg.minPassEl, &pp, 1) >= 1); }
+    if (hp) {
+      j += "\"aos\":"; j += (long)pp.aos; j += ",";
+      j += "\"tca\":"; j += (long)pp.tca; j += ",";
+      j += "\"los\":"; j += (long)pp.los; j += ",";
+      j += "\"maxEl\":"; j += String(pp.maxEl, 1); j += ",";
+      j += "\"azAos\":"; j += String(pp.azAos, 0); j += ",";
+      j += "\"azLos\":"; j += String(pp.azLos, 0); j += ",";
+      j += "\"riseDir\":\""; j += windDirName((int)(pp.azAos + 0.5)); j += "\",";
+    } else {
+      j += "\"aos\":null,\"tca\":null,\"los\":null,\"maxEl\":null,\"azAos\":null,\"azLos\":null,\"riseDir\":\"\",";
+    }
+  }
+  // Commanded vs read-back radio frequency. "rx"/"tx" above are the *computed* Doppler-
+  // corrected targets (what CardSat commands); rxRead/txRead are what the rig reports.
+  { freq_t rRx = 0, rTx = 0; bool haveRead = false;
+    if (radioOut && rig && rig->canReadFreq()) {
+      // Read both VFOs RAW (no transverter LO conversion): rxRead/txRead report the
+      // rig's actual dial, which is the IF when a transverter is configured. The real
+      // on-air frequency is the rx/tx panel keys above; add the LO to recover it. Using
+      // the raw read here keeps rxRead and txRead in the same reference frame (the wire).
+      bool gotRx = dlOnSub() ? rig->readSubFreq(rRx) : rig->readMainFreq(rRx);   // downlink VFO
+      bool gotTx = dlOnSub() ? rig->readMainFreq(rTx) : rig->readSubFreq(rTx);   // uplink   VFO
+      haveRead = gotRx || gotTx;
+      if (!gotRx) rRx = 0;
+      if (!gotTx) rTx = 0;
+    }
+    j += "\"rxRead\":\""; j += (rRx ? fmtMHz(rRx) : String("--.-----")); j += "\",";
+    j += "\"txRead\":\""; j += (rTx ? fmtMHz(rTx) : String("--.-----")); j += "\",";
+    j += "\"catRead\":"; j += (haveRead ? "true" : "false"); j += ","; }
+  // Rotator: enabled, actual read-back position, and current commanded target. The
+  // target during tracking is the live sat az/el; in the manual rotator screen it is
+  // manAz/manEl. rotAz/rotEl are null when no rotator or no read-back.
+  { j += "\"rotEnable\":"; j += (cfg.rotEnable ? "true" : "false"); j += ",";
+    float aaz = 0, ael = 0; bool rok = (cfg.rotEnable && rot && rot->readPos(aaz, ael));
+    j += "\"rotAz\":"; j += (rok ? String(aaz, 1) : String("null")); j += ",";
+    j += "\"rotEl\":"; j += (rok ? String(ael, 1) : String("null")); j += ",";
+    bool trk = rotOut;                          // rotator actively tracking the sat
+    float taz = trk ? (float)L.az : manAz, tel = trk ? (float)L.el : manEl;
+    bool haveTgt = cfg.rotEnable && (trk ? (s && timeIsSet()) : true);
+    j += "\"rotTgtAz\":"; j += (haveTgt ? String(taz, 1) : String("null")); j += ",";
+    j += "\"rotTgtEl\":"; j += (haveTgt ? String(tel, 1) : String("null")); j += ","; }
+  // System status block.
+  j += "\"sys\":{";
+  j += "\"radio\":"; j += (radioOut ? "true" : "false"); j += ",";
+  j += "\"catProto\":\""; j += (rig ? rig->name() : "none"); j += "\",";
+  { bool gf = loc.gpsHasFix();
+    j += "\"gps\":\""; j += (cfg.useGps ? (gf ? "fix" : "nofix") : "off"); j += "\",";
+    j += "\"gpsSats\":"; j += (int)loc.gpsSats(); j += ","; }
+  j += "\"sd\":"; j += (Store::onSD() ? "true" : "false"); j += ",";
+  { bool wc = net.connected();
+    j += "\"wifi\":\""; j += (wc ? "up" : "down"); j += "\",";
+    j += "\"ip\":\""; j += (wc ? WiFi.localIP().toString() : String("")); j += "\",";
+    j += "\"rssi\":"; j += (wc ? (long)WiFi.RSSI() : (long)0); j += ","; }
+  { int bl = M5.Power.getBatteryLevel();
+    // isCharging() returns a tri-state enum (charging / discharging / unknown).
+    bool chg = (M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging);
+    j += "\"batt\":"; j += (bl >= 0 ? String(bl) : String("null")); j += ",";
+    j += "\"charging\":"; j += (chg ? "true" : "false"); j += ","; }
+  j += "\"heapFree\":"; j += (long)ESP.getFreeHeap(); j += ",";
+  j += "\"heapMin\":"; j += (long)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT); j += ",";
+  j += "\"heapBlk\":"; j += (long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  j += "}";
   j += "}";
   webdCli.print(j);
 }
@@ -23450,6 +23812,9 @@ void App::loop() {
     // Leaving the voice-memo browser: its directory listing is ~6.6 KB and is
     // rebuilt on every entry, so nothing needs it to survive.
     if (from == SCR_MEMOS && screen != SCR_MEMOS) memoFree();
+    // Leaving the Dual-Rig setup screen: its device+model tables (~1.3 KB) are
+    // rebuilt on every entry, so nothing needs them to survive.
+    if (from == SCR_DUALRIG && screen != SCR_DUALRIG) drFree();
     lastScreenSeen = screen;
   }
   // Memory telemetry: when the screen changes and tracing is on, log the heap so the
@@ -23600,7 +23965,7 @@ void App::loop() {
         { struct timeval tv; gettimeofday(&tv, nullptr);
           L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6); }
         Transponder& t = activeTx[curTx];
-        uint32_t dlOp, ulOp, rx, tx;
+        freq_t dlOp, ulOp, rx, tx;
         // Mode-aware, TCA-adaptive write deadband (1,2) + TCA-tapered lead (3).
         // centerHz = higher leg, used for the slew estimate. Lead-adjust the
         // range rate that feeds the Doppler correction.
@@ -23612,15 +23977,17 @@ void App::loop() {
                                                  nowSec, &leadRr);
         bool otr   = (tuneMode == TM_FULL || tuneMode == TM_DL) &&
                      t.isLinear && rig->canReadFreq();
-        bool drvDL = (tuneMode != TM_UL);   // downlink driven in FULL/DL/HOLD
-        bool drvUL = (tuneMode != TM_DL);   // uplink driven in FULL/UL/HOLD
+        bool otrUl = (tuneMode == TM_FULL_UL) &&
+                     t.isLinear && rig->canReadFreq() && t.uplink != 0;
+        bool drvDL = (tuneMode != TM_UL);   // downlink driven in FULL/DL/HOLD/FULL_UL
+        bool drvUL = (tuneMode != TM_DL);   // uplink driven in FULL/UL/HOLD/FULL_UL
         if (otr) {
           // ---- One True Rule (KB5MU): hold a constant frequency AT THE
           // SATELLITE while the operator tunes the rig's knob. Read the downlink
           // the operator is on, back out Doppler to recover their chosen spot in
           // the passband, then Doppler-correct BOTH legs around that fixed
           // satellite frequency. Let go of the knob and nothing drifts.
-          uint32_t rxNow; bool txNow = false;
+          freq_t rxNow; bool txNow = false;
 #if CARDSAT_HAS_USBCAT
           if (tickTrace) { UsbSerial::markStage(UsbSerial::USBCAT_STAGE_TICK_PTT); draw(); }
 #endif
@@ -23679,6 +24046,55 @@ void App::loop() {
           // every other tick instead of starving. Drives on a knob move so the
           // uplink follows the new passband point right away.
           driveUplinkDeferred(tx, threshHz, (dlWrote || knobMoved), drvUL && t.uplink);
+        } else if (otrUl) {
+          // ---- One True Rule, UPLINK knob (mirror of the downlink OTR above).
+          // For dual-radio setups where the uplink rig is the one with the dial:
+          // read the uplink the operator is on, back out uplink Doppler to recover
+          // their chosen spot in the passband, then Doppler-correct BOTH legs around
+          // that fixed satellite point. The downlink follows; let go and nothing
+          // drifts. Same grace-window logic, but here it is the UPLINK write that is
+          // held off while tuning (the downlink is not the operator's knob, so it
+          // follows immediately -- suppressing it would just make it lag the uplink).
+          freq_t ulNow; bool txNow = false;
+          bool transmitting = rig->readPtt(txNow) && txNow;
+          if (lastUlHz == 0) lastKnobMoveMs = 0;    // re-sync clears any stale grace window
+          // Unlike the downlink case we can read the uplink VFO whether or not we are
+          // transmitting (it is the TX VFO), so PTT does not force a skip here. Skip
+          // only on (re)sync (lastUlHz==0): push our point instead of adopting the dial.
+          if (lastUlHz != 0 && rigReadUplinkFreq(ulNow)) {
+            double beta = L.rangeRate * 1000.0 / 299792458.0;
+            uint32_t dHz = (ulNow > lastUlHz) ? ulNow - lastUlHz : lastUlHz - ulNow;
+            if (dHz > knobMoveThreshHz(t)) {
+              // Ground TX -> satellite-heard uplink: ulSat = (ulNow - calUl)*(1-beta),
+              // the inverse of dopplerFreqs' tx = ulNominal/(1-beta) + calUl.
+              double ulSat = ((double)ulNow - (double)calUl) * (1.0 - beta);
+              // Recover the passband offset with the SAME inversion sense as
+              // passbandFreqs: non-invert ulOp = uplink + off ; invert ulOp =
+              // uplink + ulBw - off. ulBw falls back to the downlink bandwidth when
+              // the uplink top edge is unknown, exactly as passbandFreqs assumes.
+              int32_t bw   = (int32_t)t.bandwidth();
+              uint32_t ulBw = (t.uplinkHigh > t.uplink) ? (t.uplinkHigh - t.uplink)
+                                                        : (uint32_t)bw;
+              int32_t off = t.invert
+                          ? (int32_t)llround((double)t.uplink + (double)ulBw - ulSat)
+                          : (int32_t)llround(ulSat - (double)t.uplink);
+              if (off < 0)       { pbOobDir = (t.invert ? +1 : -1); pbOobUntilMs = ms + PB_OOB_BANNER_MS; off = 0; }
+              else if (off > bw) { pbOobDir = (t.invert ? -1 : +1); pbOobUntilMs = ms + PB_OOB_BANNER_MS; off = bw; }
+              else               { pbOobDir = 0;  pbOobUntilMs = 0; }
+              pbOffset = off;                       // new fixed satellite point
+              lastKnobMoveMs = ms;                  // open the tuning-grace window
+            }
+          }
+          Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
+          Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
+          bool tuningNow = (lastKnobMoveMs != 0 && (ms - lastKnobMoveMs) < TUNE_GRACE_MS);
+          // Downlink follows the adopted point immediately (it is not the knob).
+          (void)(drvDL && t.downlink && driveDownlink(rx, false, threshHz));
+          // The UPLINK is the operator's knob: hold its write off while tuning (we
+          // already adopted the new point above); otherwise track Doppler, reading
+          // the accepted freq back so rounding can't later look like a knob move.
+          if (!tuningNow) { if (drvUL && t.uplink) driveUplinkOtr(tx, !transmitting, threshHz); }
+          else            lastUlHz = ulNow;         // keep the reference fresh while tuning
         } else {
           Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
           Predictor::dopplerFreqs(dlOp, ulOp, leadRr, calDl, calUl, rx, tx);
@@ -23708,7 +24124,7 @@ void App::loop() {
     if (catMonActive && catMonPoll && !radioOut && rig && rig->ready() &&
         rig->canReadFreq() && ms - catMonLastPollMs >= CATMON_POLL_MS) {
       catMonLastPollMs = ms;
-      uint32_t hz;
+      freq_t hz;
       (void)rigReadDownlinkFreq(hz);   // result unused; the trace taps show TX+RX
     }
     // Rotator pointing (independent of radio output). Rotators are slow, so
@@ -24115,6 +24531,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_AMSRPT: keyAmsRpt(c, enter, back); break;
     case SCR_AMSRPICK: keyAmsRpick(c, enter, back); break;
     case SCR_TOOLS: keyTools(c, enter, back); break;
+    case SCR_CALEXPORT: keyCalExport(c, enter, back); break;
     case SCR_CALC: keyCalc(c, enter, back); break;
     case SCR_PCALC: keyPCalc(c, enter, back); break;
     case SCR_CHARLK: keyCharLk(c, enter, back); break;
@@ -24195,6 +24612,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_AWARDLIST:keyAwardList(c, enter, back); break;
     case SCR_CATTEST:  keyCatTest(c, enter, back); break;
     case SCR_CATMON:   keyCatMon(c, enter, back); break;
+    case SCR_DUALRIG:  keyDualRig(c, enter, back); break;
     case SCR_CHARGE:   keyCharge(c, enter, back); break;
     case SCR_ORBIT:    keyOrbit(c, enter, back); break;
     case SCR_SIM:      keySim(c, enter, back); break;
@@ -25365,17 +25783,18 @@ void App::keyTrack(char c, bool enter, bool back) {
     if (!linear) setStatus("Tune modes: linear birds only");
     else {
       bool canRead = rig && rig->canReadFreq();
-      do { tuneMode = (TuneMode)((tuneMode + 1) & 3); }   // FULL/DL need knob read
-      while (!canRead && (tuneMode == TM_FULL || tuneMode == TM_DL));
+      do { tuneMode = (TuneMode)((tuneMode + 1) % TM_COUNT); }   // FULL/DL/FULL_UL need knob read
+      while (!canRead && (tuneMode == TM_FULL || tuneMode == TM_DL || tuneMode == TM_FULL_UL));
       lastRxSet = 0; lastUlHz = 0;                    // re-sync both legs to the knob
       setStatus(tuneMode == TM_FULL ? "Tune: FULL knob=passband (OTR)"
               : tuneMode == TM_DL   ? "Tune: downlink only (OTR)"
               : tuneMode == TM_UL   ? "Tune: uplink only"
+              : tuneMode == TM_FULL_UL ? "Tune: FULL uplink knob=passband (OTR)"
                                     : "Tune: hold both legs");
     }
   }
 
-  if (trackMode == 0 && linear && tuneMode != TM_FULL && tuneMode != TM_DL) {
+  if (trackMode == 0 && linear && tuneMode != TM_FULL && tuneMode != TM_DL && tuneMode != TM_FULL_UL) {
     // ---- TUNE mode: move within the transponder passband via device keys ----
     int32_t bw = (int32_t)activeTx[curTx].bandwidth();
     if (isLeft(c))  pbOffset -= tuneStep;            // tune down in passband
@@ -25468,7 +25887,7 @@ void App::keyTrack(char c, bool enter, bool back) {
       // only (need both legs to know both bands); fired once at engage, never per
       // tick. No-op on every other radio. UNTESTED on hardware.
       if (rig && rig->canAssignBand() && activeTxCount > 0) {
-        uint32_t up = activeTx[curTx].uplink, dn = activeTx[curTx].downlink;
+        freq_t up = activeTx[curTx].uplink, dn = activeTx[curTx].downlink;
         if (up && dn) {
           uint32_t mainHz = dlOnSub() ? up : dn;   // MAIN carries uplink in Main-Up/Sub-Dn
           uint32_t subHz  = dlOnSub() ? dn : up;
@@ -26135,9 +26554,9 @@ void App::dxdStepAnchorDial(int dir) {
   if (!tp.isLinear || tp.bandwidth() == 0) return;     // FM/single-channel: nothing to step
 
   time_t tRef = mutual[dxdWin].start;                  // anchored dial is defined here
-  uint32_t mRx, mTx, dRx, dTx;
+  freq_t mRx, mTx, dRx, dTx;
   dxDoppFreqs(tRef, mRx, mTx, dRx, dTx);
-  uint32_t dial = (dxdAnchor == 0) ? mRx : (dxdAnchor == 1) ? mTx
+  freq_t dial = (dxdAnchor == 0) ? mRx : (dxdAnchor == 1) ? mTx
                 : (dxdAnchor == 2) ? dRx : dTx;
   if (dial == 0) { setStatus("Step: anchor has no TX"); return; }
 
@@ -26168,12 +26587,12 @@ void App::dxdStepAnchorToHz(uint32_t targetHz) {
   Transponder& tp = activeTx[curTx];
   if (!tp.isLinear || tp.bandwidth() == 0) return;     // FM/single-channel: nothing to converge
   time_t tRef = mutual[dxdWin].start;
-  uint32_t mRx, mTx, dRx, dTx;
+  freq_t mRx, mTx, dRx, dTx;
   int32_t  bw = (int32_t)tp.bandwidth();
   bool anchorIsTx = (dxdAnchor == 1 || dxdAnchor == 3);
   for (int pass = 0; pass < 6; ++pass) {
     dxDoppFreqs(tRef, mRx, mTx, dRx, dTx);
-    uint32_t dial = (dxdAnchor == 0) ? mRx : (dxdAnchor == 1) ? mTx
+    freq_t dial = (dxdAnchor == 0) ? mRx : (dxdAnchor == 1) ? mTx
                   : (dxdAnchor == 2) ? dRx : dTx;
     if (dial == 0) return;
     int32_t diff = (int32_t)((int64_t)targetHz - (int64_t)dial);
@@ -26214,15 +26633,15 @@ void App::dxdReanchorToStored() {
 
 // Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
 // Core per-step calculator. Fills the four dial frequencies (Hz) at time t.
-void App::dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
-                      uint32_t& dxRx, uint32_t& dxTx) {
+void App::dxDoppFreqs(time_t t, freq_t& myRx, freq_t& myTx,
+                      freq_t& dxRx, freq_t& dxTx) {
   myRx = myTx = dxRx = dxTx = 0;
   SatEntry* s = activeSat();
   if (!s) return;
   Transponder& tp = activeTx[curTx];
 
   // Operating point in the passband (satellite frame), before Doppler.
-  uint32_t dlOp, ulOp;
+  freq_t dlOp, ulOp;
   Predictor::passbandFreqs(tp, dxdPbOff, dlOp, ulOp);
 
   // Range-rate for each station at t (km/s). Switch the predictor site, sample,
@@ -26343,7 +26762,7 @@ void App::drawDxDopp() {
     if (step >= nSteps) break;
     time_t t = w.start + (time_t)step * 30;
     if (t > w.end) t = w.end;
-    uint32_t mRx, mTx, dRx, dTx;
+    freq_t mRx, mTx, dRx, dTx;
     dxDoppFreqs(t, mRx, mTx, dRx, dTx);
     int yMe = firstY + (r * 2)     * rowH;
     int yDx = firstY + (r * 2 + 1) * rowH;
@@ -26762,7 +27181,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Passes / alerts", "Display / sound",
   "Station / logging", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,89,100,1,2,63,31,32,33,34,36,37,21,65,22,23,24,44,45,46,62,64};
+static const int SET_RADIO[] = {0,30,109,89,100,1,2,63,107,108,31,32,33,34,36,37,21,65,22,23,24,44,45,46,62,64};
 static const int SET_ROTOR[] = {8,9,86,99,101,12,10,11,38,39,18,19,16,17,13,104,47,14,15,35};
 static const int SET_PASS[]  = {3,40,66,67,68,7,84,54,61};
 static const int SET_DISP[]  = {48,25,82,43,105,106,85,49,77,79,81};
@@ -26990,7 +27409,16 @@ void App::keySettings(char c, bool enter, bool back) {
       case 6: setStatus(connectWifiCfg() ? "WiFi OK" : "WiFi FAIL");
               break;
       case 62: runCatTest(); break;
+      case 107: editTarget = 223; editTitle = "Downlink LO MHz (0=off)";
+                editBuf = cfg.xvtrDlHz ? fmtMHz(cfg.xvtrDlHz) : String("");
+                screen = SCR_EDIT; break;
+      case 108: editTarget = 224; editTitle = "Uplink LO MHz (0=off)";
+                editBuf = cfg.xvtrUlHz ? fmtMHz(cfg.xvtrUlHz) : String("");
+                screen = SCR_EDIT; break;
       case 64: enterCatMon(); break;   // open the CAT serial terminal/monitor
+      case 109: drSel = 0; drScroll = 0; drStatus = "";        // configure the Dual-Rig companion
+                if (!drAlloc()) { setStatus("Out of memory"); break; }
+                screen = SCR_DUALRIG; lastDrawMs = 0; drQuery(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save();
               setStatus(cfg.aosAlarm ? "AOS alarm on" : "AOS alarm off"); break;
       case 83: {   // AMSAT status window (cycle forward on ENTER)
@@ -27114,7 +27542,8 @@ void App::keySettings(char c, bool enter, bool back) {
                editTitle = (cfg.catType == CAT_RIGCTL) ? "rigctld host (IP)" : "Radio LAN host (IP)";
                editBuf = cfg.catHost; screen = SCR_EDIT; break;
       case 32: editTarget = 211;
-               editTitle = (cfg.catType == CAT_RIGCTL) ? "rigctld port" : "Radio LAN port";
+               editTitle = (cfg.catType == CAT_RIGCTL_GROVE) ? "Grove baud"
+                         : (cfg.catType == CAT_RIGCTL) ? "rigctld port" : "Radio LAN port";
                editBuf = String(cfg.catPort); screen = SCR_EDIT; break;
       case 33: editTarget = 208; editTitle = "Radio LAN user";
                editBuf = cfg.catUser; screen = SCR_EDIT; break;
@@ -27231,6 +27660,18 @@ void App::keyEdit(char c, bool enter, bool back) {
         else setStatus("Lon must be -180..180");
       } break;
       case 200: cfg.civAddr = (uint8_t)strtol(editBuf.c_str(), nullptr, 16); break;
+      case 223: {                                 // downlink transverter LO (MHz -> Hz)
+        String v = editBuf; v.trim();
+        double mhz = v.toDouble();
+        cfg.xvtrDlHz = (mhz > 0.0) ? (freq_t)llround(mhz * 1e6) : 0;
+        setStatus(cfg.xvtrDlHz ? (String("DL LO ") + fmtMHz(cfg.xvtrDlHz) + " MHz") : String("DL transverter off"));
+      } break;
+      case 224: {                                 // uplink transverter LO (MHz -> Hz)
+        String v = editBuf; v.trim();
+        double mhz = v.toDouble();
+        cfg.xvtrUlHz = (mhz > 0.0) ? (freq_t)llround(mhz * 1e6) : 0;
+        setStatus(cfg.xvtrUlHz ? (String("UL LO ") + fmtMHz(cfg.xvtrUlHz) + " MHz") : String("UL transverter off"));
+      } break;
       case 250: catMonSendHex(editBuf); break;   // CAT monitor: transmit typed hex
       case 260: {                                 // per-satellite operating note
         SatEntry* s = activeSat();
@@ -27934,6 +28375,7 @@ void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'r') { screen = SCR_READY; lastDrawMs = 0; return; }
   if (c == 'm') { screen = SCR_PERF;  lastDrawMs = 0; return; }   // performance monitor                 // station readiness
   if (c == 't') { screen = SCR_TOOLS; lastDrawMs = 0; return; }    // Tools hub (keeps last selection)
+  if (c == 'k') { calSel = 0; calStatus = ""; screen = SCR_CALEXPORT; lastDrawMs = 0; return; }   // Calendar (.ics) export
   if (c == 'p') { paSel = 0; screen = SCR_PRINTABOUT; lastDrawMs = 0; return; }   // Print submenu (all reports)
   if (c == 'a') { printReport(PR_AMSAT);  return; }   // print the "support AMSAT" page
   if (c == 'c') { printReport(PR_OPCARD); return; }   // print the operator contact card
@@ -28048,7 +28490,7 @@ void App::seedQsoSatDefaults() {
     strncpy(qso.mode, t.isLinear ? "SSB" : (t.mode[0] ? t.mode : "FM"),
             sizeof(qso.mode) - 1); qso.mode[sizeof(qso.mode) - 1] = 0;
     int32_t off = (t.isLinear && t.bandwidth() > 0) ? (int32_t)(t.bandwidth() / 2) : 0;
-    uint32_t dl, ul; Predictor::passbandFreqs(t, off, dl, ul);
+    freq_t dl, ul; Predictor::passbandFreqs(t, off, dl, ul);
     qso.dlHz = dl; qso.ulHz = ul;
   }
 }
@@ -28079,7 +28521,7 @@ void App::beginQso() {
     LiveLook L = pred.look(nowUtc());
     struct timeval tv; gettimeofday(&tv, nullptr);
     L.rangeRate = pred.rangeRateAt((double)tv.tv_sec + tv.tv_usec * 1e-6);
-    uint32_t dlOp, ulOp, rx, tx;
+    freq_t dlOp, ulOp, rx, tx;
     Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
     Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
     qso.dlHz = rx; qso.ulHz = tx;
@@ -30156,6 +30598,7 @@ void App::draw() {
     case SCR_AMSRPT: drawAmsRpt(); break;
     case SCR_AMSRPICK: drawAmsRpick(); break;
     case SCR_TOOLS: drawTools(); break;
+    case SCR_CALEXPORT: drawCalExport(); break;
     case SCR_CALC: drawCalc(); break;
     case SCR_PCALC: drawPCalc(); break;
     case SCR_CHARLK: drawCharLk(); break;
@@ -30236,6 +30679,7 @@ void App::draw() {
     case SCR_AWARDLIST:drawAwardList(); break;
     case SCR_CATTEST:  drawCatTest(); break;
     case SCR_CATMON:   drawCatMon(); break;
+    case SCR_DUALRIG:  drawDualRig(); break;
     case SCR_CHARGE:   drawCharge(); break;
     case SCR_ORBIT:    drawOrbit(); break;
     case SCR_SIM:      drawSim(); break;
@@ -30864,6 +31308,26 @@ void App::drawHelp() {
     " large RX/TX + az/el;",
     " radio+rotator keep going",
     " ,// tune  t TX  z/` back",
+    "POINT HERE (Track > a)",
+    " arrow to the sat az + an",
+    " elevation bar. On the ADV,",
+    " g toggles a pointing aid:",
+    " aim north, press n to set,",
+    " then a cyan needle = where",
+    " you point (gyro) and a cyan",
+    " tick = your tilt (accel).",
+    " Turn/tilt to match target.",
+    " Gyro drifts -- press n to",
+    " re-zero north when it does.",
+    "CALENDAR EXPORT (About > k)",
+    " writes .ics files to",
+    " /CardSat/Calendars for fav",
+    " passes, the selected pass,",
+    " activations/skeds, EME good",
+    " days, and visible passes +",
+    " transits. Download them via",
+    " the web Files page, import",
+    " into a phone/PC calendar.",
     "MANUAL MODE (f, no radio)",
     " read Doppler, tune by hand",
     " u swap HOLD/TUNE leg",
@@ -31004,6 +31468,7 @@ void App::drawHelp() {
     " diagnostics",
     " r  station readiness check",
     " t  Tools hub (60 tools, 6 cats)",
+    " k  export calendars (.ics)",
     " p  PRINT menu (every report)",
     " m  performance / heap monitor",
     " a  print support-AMSAT page",
@@ -32129,6 +32594,42 @@ void App::keyLearn(char c, bool enter, bool back) {
 //  plus an elevation bar, for hand-aiming a portable antenna. 'a' from Track.
 //  Reuses the active sat's live look. Radio/rotator keep running underneath.
 // ===========================================================================
+// Pointing-aid IMU update (0.9.62). Called each draw while the aid is active on the
+// arrow screen. Integrates the BMI270 gyro's vertical-axis (yaw) rate into a relative
+// heading from the operator-set north reference, and reads the accelerometer to get the
+// device's pitch as an elevation level. Gyro-only heading DRIFTS (no magnetometer
+// fusion), so the operator re-zeroes north with a key when it wanders.
+void App::updatePointingAid() {
+  if (!imuReady) return;
+  uint32_t now = millis();
+  float gx = 0, gy = 0, gz = 0;
+  if (M5.Imu.getGyro(&gx, &gy, &gz)) {                 // deg/s about each body axis
+    if (ptNorthSet && ptLastMs != 0) {
+      float dt = (now - ptLastMs) / 1000.0f;
+      if (dt > 0.5f) dt = 0.5f;                        // ignore long gaps (just switched in)
+      // The Cardputer is held screen-up in landscape; yaw about the vertical axis is the
+      // device Z gyro. Integrate it into the heading. A small dead-band rejects sensor
+      // bias so a stationary device doesn't creep.
+      float rate = gz;
+      if (fabsf(rate) < 0.6f) rate = 0.0f;             // ~0.6 deg/s bias dead-band
+      ptHeading += rate * dt;
+      while (ptHeading < 0)    ptHeading += 360.0f;
+      while (ptHeading >= 360) ptHeading -= 360.0f;
+    }
+  }
+  ptLastMs = now;
+  // Elevation level from the accelerometer: pitch = angle of the device's pointing axis
+  // above horizontal. With the device held to aim along its top edge, tilting it up
+  // moves gravity between the Y and Z components; atan2 gives a clean pitch angle.
+  float ax = 0, ay = 0, az = 0;
+  if (M5.Imu.getAccel(&ax, &ay, &az)) {
+    static float pf = 0;
+    float pitch = atan2f(-ay, sqrtf(ax * ax + az * az)) * 57.2957795f;
+    pf += 0.25f * (pitch - pf);                        // light low-pass
+    ptElNow = pf;
+  }
+}
+
 void App::drawArrow() {
   SatEntry* s = activeSat();
   header(s ? (String("Point: ") + s->name) : String("Point here"));
@@ -32142,6 +32643,7 @@ void App::drawArrow() {
   LiveLook L = pred.look(nowUtc());
 
   // --- Compass rose on the left: arrow points to the satellite azimuth ---
+  if (ptAidOn) updatePointingAid();     // integrate gyro heading + read accel pitch, before drawing
   const int cx = 62, cy = 72, R = 40;
   canvas.drawCircle(cx, cy, R, CL_DGREY);
   canvas.drawCircle(cx, cy, R / 2, CL_DGREY);
@@ -32216,12 +32718,75 @@ void App::drawArrow() {
   } else {
     canvas.setTextColor(CL_GREY, CL_BLACK);  canvas.print("below hzn");
   }
-  footer("` back  (radio/rotor keep running)");
+
+  // --- Pointing aid overlay (0.9.62) ---------------------------------------
+  // When active, the operator points the device north and presses SET; from then on the
+  // gyro-integrated heading marks where they are physically pointing (a cyan needle on
+  // the rose), and the accelerometer gives an elevation level (a cyan tick on the bar).
+  // They rotate until the cyan needle overlaps the green target arrow, and tilt until the
+  // elevation tick meets the target fill. Everything is relative to the north they set.
+  if (ptAidOn && imuReady) {
+    if (!ptNorthSet) {
+      // Prompt to establish north.
+      canvas.fillRect(0, 116, 240, 11, CL_BLACK);
+      canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 117);
+      canvas.print("Aim NORTH, press n to set ref");
+    } else {
+      // Cyan needle on the rose at the current gyro heading.
+      double hth = ptHeading * 0.017453292519943295;
+      double hsx = sin(hth), hcy = -cos(hth);
+      int hTipX = cx + (int)lround(hsx * (R - 4));
+      int hTipY = cy + (int)lround(hcy * (R - 4));
+      canvas.drawLine(cx, cy, hTipX, hTipY, CL_CYAN);
+      canvas.fillCircle(hTipX, hTipY, 2, CL_CYAN);
+      // Azimuth error (target minus current), shortest way round.
+      float azErr = (float)L.az - ptHeading;
+      while (azErr > 180)  azErr -= 360;
+      while (azErr < -180) azErr += 360;
+      // Elevation level tick on the bar at the device pitch.
+      if (ptElNow > -900) {
+        float ec = ptElNow; if (ec < 0) ec = 0; if (ec > 90) ec = 90;
+        int ty = bBot - (int)lround((bBot - bTop) * (ec / 90.0f));
+        canvas.drawFastHLine(bx - 4, ty, bW + 8, CL_CYAN);
+        canvas.fillTriangle(bx - 4, ty - 2, bx - 4, ty + 2, bx, ty, CL_CYAN);
+      }
+      float elErr = (ptElNow > -900) ? ((float)L.el - ptElNow) : 0.0f;
+      // Bottom line: turn/tilt guidance. Green when both within tolerance.
+      canvas.fillRect(0, 116, 240, 11, CL_BLACK);
+      bool azOk = fabsf(azErr) <= 5.0f, elOk = fabsf(elErr) <= 5.0f;
+      canvas.setCursor(6, 117);
+      canvas.setTextColor((azOk && elOk) ? CL_GREEN : CL_CYAN, CL_BLACK);
+      char b[40];
+      const char* aDir = (azErr > 0) ? "R" : "L";
+      const char* eDir = (elErr > 0) ? "up" : "dn";
+      snprintf(b, sizeof(b), "Turn %s%.0f  Tilt %s%.0f%s",
+               aDir, fabsf(azErr), eDir, fabsf(elErr), (azOk && elOk) ? "  ON!" : "");
+      canvas.print(b);
+    }
+  }
+
+  if (!ptAidOn)
+    footer(imuReady ? "g pointing aid   ` back"
+                    : "` back  (radio/rotor keep running)");
+  else
+    footer(ptNorthSet ? "n re-set north  g off  ` back"
+                      : "n set north  g off  ` back");
 }
 
 void App::keyArrow(char c, bool enter, bool back) {
-  (void)c; (void)enter;
+  (void)enter;
   if (isBack(c, back)) { screen = SCR_TRACK; lastDrawMs = 0; return; }
+  if (c == 'g') {                        // toggle the pointing aid
+    if (!imuReady) { setStatus("No IMU on this board"); return; }
+    ptAidOn = !ptAidOn;
+    if (ptAidOn) { ptNorthSet = false; ptHeading = 0; ptLastMs = 0; ptElNow = -999; }
+    lastDrawMs = 0; return;
+  }
+  if (c == 'n' && ptAidOn) {             // (re)set the north heading reference
+    ptNorthSet = true; ptHeading = 0; ptLastMs = millis();
+    setStatus("North set");
+    lastDrawMs = 0; return;
+  }
 }
 
 // ===========================================================================
@@ -33135,7 +33700,7 @@ void App::printDxDopp() {
   // step every 30 s across the window (cap rows so a long pass stays on one slip)
   int step = 30, rows = 0, maxRows = 40;
   for (time_t t = w.start; t <= w.end && rows < maxRows; t += step, ++rows) {
-    uint32_t myRx, myTx, dxRx, dxTx;
+    freq_t myRx, myTx, dxRx, dxTx;
     dxDoppFreqs(t, myRx, myTx, dxRx, dxTx);
     char r[48];
     snprintf(r, sizeof(r), "%s %.4f %.4f", fmtHM(t).c_str(), myRx / 1e6, myTx / 1e6);
@@ -34448,7 +35013,7 @@ void App::runCatTest() {
   {
     bool ok = rig->setSubFreq(TEST_DL);
     if (ok && rig->canReadFreq()) {
-      uint32_t back = 0;
+      freq_t back = 0;
       if (rig->readSubFreq(back)) {
         uint32_t d = back > TEST_DL ? back - TEST_DL : TEST_DL - back;
         catStep("Downlink set+read", d <= TOL,
@@ -34465,7 +35030,7 @@ void App::runCatTest() {
   {
     bool ok = rig->setMainFreq(TEST_UL);
     if (ok && rig->canReadFreq()) {
-      uint32_t back = 0;
+      freq_t back = 0;
       if (rig->readMainFreq(back)) {
         uint32_t d = back > TEST_UL ? back - TEST_UL : TEST_UL - back;
         catStep("Uplink set+read", d <= TOL,
@@ -34637,6 +35202,247 @@ void App::keyCatMon(char c, bool enter, bool back) {
   if (isUp(c))   { if (catMonScroll < catMonCount) catMonScroll++; lastDrawMs = 0; }
   if (isDown(c)) { if (catMonScroll > 0) catMonScroll--; lastDrawMs = 0; }
 }
+
+// ===========================================================================
+//  SCR_DUALRIG -- configure the CardSatDualRig companion from CardSat
+//  Talks to the Stick over whatever rigctl transport is active (rigctl-net or
+//  rigctl-Grove) using its \csdr_* escape: one JSON line per query. Lets the
+//  operator see the Stick's live USB enumeration and bind a device to each leg
+//  (the downlink RX and the uplink TX radio), pick the model, and set a CI-V
+//  address -- then push it all with one save. Requires an engaged rigctl backend
+//  (rig != null and a vendorLine that isn't a no-op).
+// ===========================================================================
+
+// Pull one object's field out of a JSON array element. `obj` is a single {...}.
+static String drField(const String& obj, const char* key) {
+  return jsonField(obj, key);   // reuse the shared extractor (handles str + num)
+}
+
+int App::drModelIdx(int id) const {
+  for (int i = 0; i < drModelN; ++i) if (drModel[i].id == id) return i;
+  return -1;
+}
+
+// Allocate the device + model tables for SCR_DUALRIG. Heap-on-demand: called on
+// entering the screen, released by drFree() from the transition hook in loop().
+// Returns false (and sets drStatus) if the heap can't give us the ~1.3 KB.
+bool App::drAlloc() {
+  if (!drDev)   drDev   = new (std::nothrow) DrDevice[DR_MAX_DEV];
+  if (!drModel) drModel = new (std::nothrow) DrModel[DR_MAX_MODEL];
+  if (!drDev || !drModel) { drFree(); drStatus = "Out of memory"; return false; }
+  return true;
+}
+
+// Release the device + model tables. Called from the screen-transition hook in
+// loop() when SCR_DUALRIG is left, so no exit path (incl. Fn+h to Help) can leak it.
+void App::drFree() {
+  delete[] drDev;   drDev   = nullptr;
+  delete[] drModel; drModel = nullptr;
+  drDevN = 0; drModelN = 0;
+}
+
+// Throttled one-shot link check for the Settings row: a single \csdr_get, no
+// parsing. Cheap enough to fire when the row is highlighted; the throttle keeps a
+// dead TCP link (which can block on connect) from hitching the menu every frame.
+void App::drPingLink() {
+  uint32_t now = millis();
+  if (drLinkMs && (now - drLinkMs) < 2500) return;          // rate-limit
+  drLinkMs = now;
+  if (!rig || (cfg.catType != CAT_RIGCTL && cfg.catType != CAT_RIGCTL_GROVE)) {
+    drLink = 0; return;                                      // not applicable -> grey
+  }
+  String r = rig->vendorLine("\\csdr_get");
+  drLink = (r.length() && r.indexOf("downlink") >= 0) ? 1 : 2;
+}
+
+// Query the Stick: current config (\csdr_get) + the model catalogue (\csdr_models).
+void App::drQuery() {
+  drLoaded = false; drDevN = 0; drModelN = 0;
+  if (!drDev || !drModel) { if (!drAlloc()) return; }   // tables must exist to parse into
+  if (!rig) { drStatus = "No CAT backend"; return; }
+  if (cfg.catType != CAT_RIGCTL && cfg.catType != CAT_RIGCTL_GROVE) {
+    drStatus = "Set CAT type to rigctl (net/Grove)"; return;
+  }
+  String st = rig->vendorLine("\\csdr_get");
+  if (st.length() == 0 || st.indexOf("downlink") < 0) {
+    drLink = 2; drLinkMs = millis();        // no reply -> red on the Settings row too
+    drStatus = "No reply from Stick"; return;
+  }
+  // ---- legs ----
+  auto readLeg = [&](const char* key, int idx) {
+    int k = st.indexOf(String("\"") + key + "\"");
+    if (k < 0) return;
+    int b = st.indexOf('{', k); if (b < 0) return;
+    int e = st.indexOf('}', b); if (e < 0) return;
+    String o = st.substring(b, e + 1);
+    String m = drField(o, "model"); drModelId[idx] = m.length() ? m.toInt() : -1;
+    drCiv[idx] = drField(o, "civ").toInt();
+    String s = drField(o, "serial");
+    strncpy(drSerial[idx], s.c_str(), sizeof(drSerial[idx]) - 1);
+    drSerial[idx][sizeof(drSerial[idx]) - 1] = 0;
+  };
+  readLeg("downlink", 0);
+  readLeg("uplink",   1);
+  // ---- devices (array under "devices") ----
+  int dk = st.indexOf("\"devices\"");
+  if (dk >= 0) {
+    int a = st.indexOf('[', dk), z = st.indexOf(']', a);
+    if (a >= 0 && z > a) {
+      String arr = st.substring(a + 1, z);
+      int p = 0;
+      while (p < (int)arr.length() && drDevN < DR_MAX_DEV) {
+        int b = arr.indexOf('{', p); if (b < 0) break;
+        int e = arr.indexOf('}', b); if (e < 0) break;
+        String o = arr.substring(b, e + 1);
+        DrDevice& d = drDev[drDevN];
+        strncpy(d.product, drField(o, "product").c_str(), sizeof(d.product) - 1); d.product[sizeof(d.product)-1]=0;
+        strncpy(d.serial,  drField(o, "serial").c_str(),  sizeof(d.serial)  - 1); d.serial[sizeof(d.serial)-1]=0;
+        strncpy(d.vidpid,  drField(o, "vidpid").c_str(),  sizeof(d.vidpid)  - 1); d.vidpid[sizeof(d.vidpid)-1]=0;
+        d.addr = drField(o, "addr").toInt();
+        drDevN++;
+        p = e + 1;
+      }
+    }
+  }
+  // ---- model catalogue ----
+  String ml = rig->vendorLine("\\csdr_models");
+  if (ml.length() && ml.indexOf('{') >= 0) {
+    int p = 0;
+    while (p < (int)ml.length() && drModelN < (int)(sizeof(drModel)/sizeof(drModel[0]))) {
+      int b = ml.indexOf('{', p); if (b < 0) break;
+      int e = ml.indexOf('}', b); if (e < 0) break;
+      String o = ml.substring(b, e + 1);
+      DrModel& m = drModel[drModelN];
+      m.id = drField(o, "id").toInt();
+      strncpy(m.name, drField(o, "name").c_str(), sizeof(m.name) - 1); m.name[sizeof(m.name)-1]=0;
+      m.rxOnly = drField(o, "rxOnly") == "true";
+      drModelN++;
+      p = e + 1;
+    }
+  }
+  drLoaded = true;
+  drLink = 1; drLinkMs = millis();          // a successful query IS a good link
+  drStatus = String(drDevN) + " device" + (drDevN==1?"":"s") + " enumerated";
+}
+
+// Push the edited config back to the Stick and save it to NVS.
+void App::drSave() {
+  if (!rig) { drStatus = "No CAT backend"; return; }
+  auto modelName = [&](int idx) -> String {
+    int mi = drModelIdx(drModelId[idx]);
+    return mi >= 0 ? String(drModel[mi].name) : String("(none)");
+  };
+  (void)modelName;
+  String cmd = "\\csdr_set";
+  cmd += " dl_model=" + String(drModelId[0]);
+  cmd += " dl_civ="   + String(drCiv[0], HEX);
+  cmd += " dl_serial=" + String(drSerial[0]);
+  cmd += " ul_model=" + String(drModelId[1]);
+  cmd += " ul_civ="   + String(drCiv[1], HEX);
+  cmd += " ul_serial=" + String(drSerial[1]);
+  cmd += " save=1";
+  String r = rig->vendorLine(cmd);
+  drStatus = (r.indexOf("RPRT 0") >= 0) ? "Saved to Stick" : ("Save failed: " + r);
+}
+
+void App::drawDualRig() {
+  header("Dual-Rig setup (Stick)");
+  canvas.setTextSize(1);
+  const char* xport = (cfg.catType == CAT_RIGCTL_GROVE) ? "Grove"
+                    : (cfg.catType == CAT_RIGCTL) ? "net" : "n/a";
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, 18);
+  canvas.printf("Link: rigctl %s   %s", xport, drLoaded ? "(loaded)" : "(not queried)");
+
+  // Two legs, each: model + assigned device + CI-V. Fields index 0..5.
+  const char* legName[2] = { "DN (RX)", "UP (TX)" };
+  int y = 32;
+  for (int L = 0; L < 2; ++L) {
+    int mi = drModelIdx(drModelId[L]);
+    String mn = mi >= 0 ? String(drModel[mi].name) : String("(none)");
+    // device label for this leg's serial
+    String dl = "(none)";
+    for (int i = 0; i < drDevN; ++i)
+      if (drSerial[L][0] && strcmp(drDev[i].serial, drSerial[L]) == 0) { dl = drDev[i].product; break; }
+    if (drSerial[L][0] && dl == "(none)") dl = String("#") + drSerial[L] + " (absent)";
+
+    // row: model
+    int f = L * 3;
+    auto rowc = [&](int field){ if (field == drSel) { canvas.setTextColor(CL_BLACK, CL_SELBG); }
+                                else canvas.setTextColor(CL_WHITE, CL_BLACK); };
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, y); canvas.print(legName[L]);
+    rowc(f + 0); canvas.fillRect(58, y - 2, 176, 10, (f+0==drSel)?CL_SELBG:CL_BLACK);
+    rowc(f + 0); canvas.setCursor(60, y); canvas.printf("Rig: %s", mn.c_str());
+    y += 11;
+    rowc(f + 1); canvas.fillRect(58, y - 2, 176, 10, (f+1==drSel)?CL_SELBG:CL_BLACK);
+    rowc(f + 1); canvas.setCursor(60, y); canvas.printf("Dev: %s", dl.c_str());
+    y += 11;
+    rowc(f + 2); canvas.fillRect(58, y - 2, 176, 10, (f+2==drSel)?CL_SELBG:CL_BLACK);
+    rowc(f + 2); canvas.setCursor(60, y);
+    if (drCiv[L]) canvas.printf("CI-V: %02X", drCiv[L]); else canvas.print("CI-V: default");
+    y += 13;
+  }
+
+  // Device list
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, y); canvas.print("Enumerated USB devices:"); y += 11;
+  if (drDevN == 0) { canvas.setCursor(10, y); canvas.print(drLoaded ? "(none seen)" : "press q to query"); }
+  const int VIS = 3;
+  for (int r = 0; r < VIS && drScroll + r < drDevN; ++r) {
+    int i = drScroll + r;
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(10, y + r * 10);
+    canvas.printf("%d %-12s %s", i + 1, drDev[i].product, drDev[i].vidpid);
+  }
+
+  // status line
+  canvas.setTextColor(CL_GREEN, CL_BLACK);
+  canvas.setCursor(6, 120); canvas.print(drStatus.length() ? drStatus : String("q query  <>change  1-8 assign  s save"));
+  footer("q qry <>chg 1-8 dev s save ` bk");
+}
+
+void App::keyDualRig(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { setSel = 0; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
+  if (c == 'q') { setStatus("Querying Stick..."); draw(); drQuery(); lastDrawMs = 0; return; }
+  if (c == 's') { drSave(); lastDrawMs = 0; return; }
+  if (isUp(c))   { if (drSel > 0) drSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (drSel < 5) drSel++; lastDrawMs = 0; return; }
+
+  int leg = drSel / 3, field = drSel % 3;
+  // assign a device by number 1..8 to the selected leg (works on either leg field)
+  if (c >= '1' && c <= '8') {
+    int i = c - '1';
+    if (i < drDevN) { strncpy(drSerial[leg], drDev[i].serial, sizeof(drSerial[leg]) - 1);
+                      drSerial[leg][sizeof(drSerial[leg])-1]=0;
+                      drStatus = String("Assigned ") + drDev[i].product + " -> " + (leg?"UP":"DN"); }
+    lastDrawMs = 0; return;
+  }
+  // left/right change the selected field
+  int dir = isLeft(c) ? -1 : isRight(c) ? 1 : 0;
+  if (dir == 0) return;
+  if (field == 0) {                       // cycle model
+    if (drModelN == 0) { drStatus = "Query first (q)"; lastDrawMs = 0; return; }
+    int mi = drModelIdx(drModelId[leg]);
+    mi = (mi < 0) ? (dir > 0 ? 0 : drModelN - 1) : (mi + dir + drModelN) % drModelN;
+    drModelId[leg] = drModel[mi].id;
+  } else if (field == 1) {                // cycle assigned device (incl. none)
+    // build order: none, dev0..devN-1
+    int cur = -1;
+    for (int i = 0; i < drDevN; ++i) if (drSerial[leg][0] && strcmp(drDev[i].serial, drSerial[leg])==0){cur=i;break;}
+    int slots = drDevN + 1;               // slot 0 = none
+    int s = (cur < 0 ? 0 : cur + 1);
+    s = (s + dir + slots) % slots;
+    if (s == 0) drSerial[leg][0] = 0;
+    else { strncpy(drSerial[leg], drDev[s-1].serial, sizeof(drSerial[leg])-1); drSerial[leg][sizeof(drSerial[leg])-1]=0; }
+  } else {                                // CI-V address nudge
+    int v = drCiv[leg] + dir;
+    if (v < 0) v = 0xFF; if (v > 0xFF) v = 0;
+    drCiv[leg] = v;
+  }
+  lastDrawMs = 0;
+}
+
 
 // Parse a string of hex byte tokens ("FE FE 4C E0 03 FD", spaces optional) and
 // transmit the bytes verbatim on the current CAT port via the backend's raw write.
@@ -38921,7 +39727,7 @@ void App::drawTxplan() {
     canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(4, 37);
     canvas.printf("  %%      downlink      uplink %s", t.invert ? "INV" : "");
     for (int k = 0; k <= 10; ++k) {
-      uint32_t dl, ul;
+      freq_t dl, ul;
       Predictor::passbandFreqs(t, (int32_t)((int64_t)bw * k / 10), dl, ul);
       int y = 47 + k * 7;
       canvas.setTextColor((k == 5) ? CL_CYAN : CL_WHITE, CL_BLACK);
@@ -39059,7 +39865,7 @@ void App::txplanPrint() {
   } else {
     Printer::line("  %     downlink        uplink");
     for (int k = 0; k <= 10; ++k) {
-      uint32_t dl, ul;
+      freq_t dl, ul;
       Predictor::passbandFreqs(t, (int32_t)((int64_t)bw * k / 10), dl, ul);
       char b[48];
       snprintf(b, sizeof(b), "%3d   %-12s  %-12s", k * 10,
@@ -46424,7 +47230,7 @@ void App::keyWeather(char c, bool enter, bool back) {
 //  transponder/beacon entry for the selected satellite from the on-device
 //  catalog (SatNOGS-sourced) in an easy-to-scan up/down/mode/tone layout.
 // ===========================================================================
-static String txMHz(uint32_t hz) {
+static String txMHz(freq_t hz) {
   if (hz == 0) return String("-");
   char b[16]; snprintf(b, sizeof(b), "%.4f", hz / 1.0e6); return String(b);
 }
@@ -47491,6 +48297,371 @@ static void dxccCode(int idx, char* out) {
 // The state/DXCC lists are recomputed per pass at export time (footprint enumeration) --
 // cleaner than storing 28 x (stateBits+dxccBits) in RAM, and export is a one-shot action.
 // Returns the written path (empty on failure).
+// ===========================================================================
+//  Calendar export (0.9.62): generate standard RFC 5545 iCalendar (.ics) files
+//  into /CardSat/Calendars/, downloadable from the web file portal and importable
+//  into any phone/desktop calendar. Six sources: favorite passes, the selected
+//  single pass, sked reminders, hams.at activations, EME Moon windows, and visual
+//  passes / solar transits. Every event's DESCRIPTION carries satellite,
+//  frequencies, mode, max elevation, rise direction, and the station location.
+//
+//  All times are emitted as UTC (the trailing 'Z' form), which every calendar app
+//  converts to the viewer's local zone. Files are self-contained VCALENDARs.
+// ===========================================================================
+
+// Escape a string for an ICS TEXT value: backslash, semicolon, comma, and newlines.
+static String icsEsc(const String& in) {
+  String o; o.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); ++i) {
+    char c = in[i];
+    if (c == '\\' || c == ';' || c == ',') { o += '\\'; o += c; }
+    else if (c == '\n') o += "\\n";
+    else if (c == '\r') { /* drop */ }
+    else o += c;
+  }
+  return o;
+}
+
+// Format a unix UTC time as an ICS UTC timestamp: 20260720T143000Z.
+static String icsWhen(time_t t) {
+  struct tm tv; gmtime_r(&t, &tv);
+  char b[20];
+  snprintf(b, sizeof(b), "%04d%02d%02dT%02d%02d%02dZ",
+           tv.tm_year + 1900, tv.tm_mon + 1, tv.tm_mday, tv.tm_hour, tv.tm_min, tv.tm_sec);
+  return String(b);
+}
+
+// Emit one VEVENT. Long lines are folded at 72 octets per RFC 5545 (a CRLF followed
+// by a single space) via icsWriteFolded. uidTag makes the UID stable-ish per event.
+void App::icsWriteEvent(File& f, time_t start, time_t end, const String& summary,
+                        const String& description, const String& location,
+                        const String& uidTag) {
+  f.print("BEGIN:VEVENT\r\n");
+  // UID: <tag>-<start>@cardsat.local  -- deterministic so re-import updates rather
+  // than duplicates in most calendar apps.
+  { String uid = uidTag + "-" + String((unsigned long)start) + "@cardsat.local";
+    icsWriteFolded(f, String("UID:") + uid); }
+  icsWriteFolded(f, String("DTSTAMP:") + icsWhen(nowUtc() ? nowUtc() : start));
+  icsWriteFolded(f, String("DTSTART:") + icsWhen(start));
+  icsWriteFolded(f, String("DTEND:") + icsWhen(end));
+  icsWriteFolded(f, String("SUMMARY:") + icsEsc(summary));
+  if (description.length()) icsWriteFolded(f, String("DESCRIPTION:") + icsEsc(description));
+  if (location.length())    icsWriteFolded(f, String("LOCATION:") + icsEsc(location));
+  f.print("END:VEVENT\r\n");
+}
+
+// Write a content line, folding at 72 octets (CRLF + space continuation).
+void App::icsWriteFolded(File& f, const String& line) {
+  const int LIM = 72;
+  int n = line.length();
+  if (n <= LIM) { f.print(line); f.print("\r\n"); return; }
+  int i = 0; bool first = true;
+  while (i < n) {
+    int take = first ? LIM : (LIM - 1);       // continuation lines lose 1 col to the space
+    if (take > n - i) take = n - i;
+    if (!first) f.print(" ");
+    f.print(line.substring(i, i + take));
+    f.print("\r\n");
+    i += take; first = false;
+  }
+}
+
+// Open a new .ics file in the calendar dir with a VCALENDAR header. Returns the open
+// File (caller writes events then calls icsClose). Path is returned via outPath.
+File App::icsBegin(const char* stem, String& outPath) {
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists("/CardSat")) fsx.mkdir("/CardSat");
+  if (!fsx.exists(CALENDAR_DIR)) fsx.mkdir(CALENDAR_DIR);
+  char path[72]; struct tm tv; time_t c = nowUtc() ? nowUtc() : 0; gmtime_r(&c, &tv);
+  snprintf(path, sizeof(path), "%s/%s_%04d%02d%02d_%02d%02d.ics",
+           CALENDAR_DIR, stem, tv.tm_year + 1900, tv.tm_mon + 1, tv.tm_mday,
+           tv.tm_hour, tv.tm_min);
+  outPath = String(path);
+  File f = fsx.open(path, "w");
+  if (!f) return f;
+  f.print("BEGIN:VCALENDAR\r\n");
+  f.print("VERSION:2.0\r\n");
+  f.print("PRODID:-//CardSat//" ); f.print(FW_VERSION); f.print("//EN\r\n");
+  f.print("CALSCALE:GREGORIAN\r\n");
+  f.print("METHOD:PUBLISH\r\n");
+  return f;
+}
+void App::icsClose(File& f) { f.print("END:VCALENDAR\r\n"); f.close(); }
+
+// Build the standard DESCRIPTION string for a pass of satellite `s`: satellite,
+// frequencies (the selected transponder's nominal downlink/uplink), mode, max
+// elevation, rise direction, and the station grid+lat/lon.
+String App::icsPassDesc(SatEntry* s, float maxEl, float azAos, freq_t dnHz, freq_t upHz,
+                        const char* modeTxt) {
+  String d;
+  if (s) { d += "Satellite: "; d += s->name; d += " (NORAD "; d += (unsigned long)s->norad; d += ")\n"; }
+  if (dnHz) { d += "Downlink: "; d += fmtMHz(dnHz); d += " MHz"; if (modeTxt && *modeTxt) { d += " "; d += modeTxt; } d += "\n"; }
+  if (upHz) { d += "Uplink: ";   d += fmtMHz(upHz); d += " MHz\n"; }
+  d += "Max elevation: "; d += String(maxEl, 0); d += " deg\n";
+  d += "Rise: "; d += windDirName((int)(azAos + 0.5)); d += " ("; d += String(azAos, 0); d += " deg)\n";
+  Observer o = loc.obs();
+  if (o.valid) {
+    d += "Station: "; d += Location::toGrid(o.lat, o.lon);
+    d += " ("; d += String(o.lat, 3); d += ", "; d += String(o.lon, 3); d += ")";
+  }
+  return d;
+}
+
+// Nominal downlink/uplink for the active satellite's currently-selected transponder
+// (no Doppler; the calendar is a plan, not a live tune). 0 if none.
+void App::icsActiveFreqs(freq_t& dn, freq_t& up, String& modeOut) {
+  dn = up = 0; modeOut = "";
+  SatEntry* s = activeSat();
+  if (s && activeTxCount > 0) {
+    Transponder& t = activeTx[curTx];
+    Predictor::passbandFreqs(t, 0, dn, up);
+    modeOut = String(t.mode);
+  }
+}
+
+// ---- Source 1: favorite passes (the all-favorites schedule) ----
+String App::icsExportFavPasses() {
+  if (!Store::ready()) return String();
+  if (schedN == 0) buildSchedule();            // ensure we have passes
+  if (schedN == 0) return String();
+  String path; File f = icsBegin("favpasses", path);
+  if (!f) return String();
+  int wrote = 0;
+  for (int i = 0; i < schedN; ++i) {
+    SchedEntry& e = sched[i];
+    if (e.aos == 0 || e.los <= e.aos) continue;
+    int dbIdx = db.indexOfNorad(e.norad);
+    SatEntry* s = (dbIdx >= 0) ? &db.at(dbIdx) : nullptr;
+    // Per-sat nominal freqs: load that sat's first two-way/beacon transponder cheaply
+    // from cache if present; otherwise omit freqs. To stay light we only fill freqs for
+    // the active sat (its transponders are already in RAM); others get name+geometry.
+    freq_t dn = 0, up = 0; String md = "";
+    if (s && activeSat() && s->norad == activeSat()->norad) icsActiveFreqs(dn, up, md);
+    String desc = icsPassDesc(s, e.maxEl, 0.0f, dn, up, md.c_str());
+    String summ = String(s ? s->name : "Satellite") + " pass (el " + String(e.maxEl, 0) + ")";
+    Observer o = loc.obs();
+    icsWriteEvent(f, e.aos, e.los, summ, desc,
+                  o.valid ? Location::toGrid(o.lat, o.lon) : String(""),
+                  String("fav") + String((unsigned long)e.norad));
+    if (++wrote >= 64) break;                   // safety cap
+  }
+  icsClose(f);
+  if (wrote == 0) { Store::fs().remove(path.c_str()); return String(); }
+  return path;
+}
+
+// ---- Source 2: the selected single pass (active sat, next pass) ----
+String App::icsExportSelectedPass() {
+  if (!Store::ready()) return String();
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet()) return String();
+  pred.setSite(loc.obs());
+  PassPredict pp;
+  if (pred.predictPasses(nowUtc() - 1200, cfg.minPassEl, &pp, 1) < 1) return String();
+  String path; File f = icsBegin("pass", path);
+  if (!f) return String();
+  freq_t dn = 0, up = 0; String md = ""; icsActiveFreqs(dn, up, md);
+  String desc = icsPassDesc(s, pp.maxEl, pp.azAos, dn, up, md.c_str());
+  String summ = String(s->name) + " pass (el " + String(pp.maxEl, 0) + ")";
+  Observer o = loc.obs();
+  icsWriteEvent(f, pp.aos, pp.los, summ, desc,
+                o.valid ? Location::toGrid(o.lat, o.lon) : String(""),
+                String("pass") + String((unsigned long)s->norad));
+  icsClose(f);
+  return path;
+}
+
+// ---- Source 3 + 4: sked reminders and hams.at activations ----
+// Both live in hamsatList[] (feed activations + merged user skeds). We emit every
+// activation with a parseable date/time as an event; the activator callsign, mode,
+// and frequency text go into the description.
+String App::icsExportActivations() {
+  if (!Store::ready() || hamsatN == 0) return String();
+  String path; File f = icsBegin("activations", path);
+  if (!f) return String();
+  int wrote = 0;
+  for (int i = 0; i < hamsatN; ++i) {
+    Activation& a = hamsatList[i];
+    // Compose start/end unix from date + HH:MM:SS UTC.
+    struct tm ts = {0}; int Y, Mo, D, h, m, sec = 0;
+    if (sscanf(a.date, "%d-%d-%d", &Y, &Mo, &D) != 3) continue;
+    if (sscanf(a.start, "%d:%d:%d", &h, &m, &sec) < 2) continue;
+    ts.tm_year = Y - 1900; ts.tm_mon = Mo - 1; ts.tm_mday = D;
+    ts.tm_hour = h; ts.tm_min = m; ts.tm_sec = sec;
+    time_t start = mktime(&ts);   // TZ is UTC (set in main), so this is a UTC epoch
+    time_t end = start + 15 * 60;               // default 15-min window
+    { struct tm te = {0}; int h2, m2, s2 = 0;
+      if (sscanf(a.end, "%d:%d:%d", &h2, &m2, &s2) >= 2) {
+        te = ts; te.tm_hour = h2; te.tm_min = m2; te.tm_sec = s2;
+        time_t e2 = mktime(&te);
+        if (e2 > start) end = e2;
+      } }
+    String desc;
+    desc += "Satellite: "; desc += a.sat; desc += "\n";
+    if (a.call[0]) { desc += "Activator: "; desc += a.call; desc += "\n"; }
+    if (a.grid[0]) { desc += "Grid: "; desc += a.grid; desc += "\n"; }
+    if (a.mode[0]) { desc += "Mode: "; desc += a.mode; desc += "\n"; }
+    if (a.freq[0]) { desc += "Frequency: "; desc += a.freq; desc += "\n"; }
+    if (a.comment[0]) { desc += a.comment; }
+    String summ = String(a.sat);
+    if (a.call[0]) { summ += " - "; summ += a.call; }
+    icsWriteEvent(f, start, end, summ, desc, String(a.grid),
+                  String("act") + String(i));
+    if (++wrote >= 40) break;
+  }
+  icsClose(f);
+  if (wrote == 0) { Store::fs().remove(path.c_str()); return String(); }
+  return path;
+}
+
+// ---- Source 5: EME Moon windows (best moonbounce days, next 90 days) ----
+// Uses the same Moon-declination + distance-degradation model as the EME planning
+// screen: a "good" EME day is high northern declination with low distance degradation.
+// We emit an all-day event for each good day so the operator can plan skeds ahead.
+String App::icsExportEmeWindows() {
+  if (!Store::ready() || !timeIsSet()) return String();
+  String path; File f = icsBegin("eme", path);
+  if (!f) return String();
+  Observer o = loc.obs();
+  int wrote = 0;
+  const double D2R = 0.017453292519943295;
+  time_t t0 = nowUtc() - (nowUtc() % 86400) + 12 * 3600;   // 12:00 UTC today, then daily
+  for (int d = 0; d < 90; ++d) {
+    time_t tt = t0 + (time_t)d * 86400;
+    double x, y, z; moonGeoEqKm(tt, x, y, z);
+    double r = sqrt(x * x + y * y + z * z);
+    float dec  = (float)(atan2(z, sqrt(x * x + y * y)) / D2R);   // Moon declination (deg)
+    float degr = (float)(40.0 * log10(r / 356500.0));            // distance degradation (dB)
+    bool good = (dec > 15.0f && degr < 1.0f);                    // same rule as the plan screen
+    if (!good) continue;
+    // All-day event for that UTC day: DTSTART/DTEND at 00:00 give calendars an all-day
+    // block. We keep the timed form (00:00Z..24:00Z) for simplicity and portability.
+    time_t dayStart = tt - 12 * 3600;                           // back to 00:00 UTC of that day
+    time_t dayEnd = dayStart + 86400;
+    String desc;
+    desc += "Good EME (moonbounce) day.\n";
+    desc += "Moon declination: "; desc += String(dec, 1); desc += " deg (high north favours long common windows)\n";
+    desc += "Distance degradation: "; desc += String(degr, 1); desc += " dB (near perigee = lower loss)\n";
+    if (o.valid) { desc += "Station: "; desc += Location::toGrid(o.lat, o.lon); }
+    String summ = String("EME good day (dec ") + String(dec, 0) + " deg, " + String(degr, 1) + " dB)";
+    icsWriteEvent(f, dayStart, dayEnd, summ, desc,
+                  o.valid ? Location::toGrid(o.lat, o.lon) : String(""),
+                  String("eme") + String((unsigned long)dayStart));
+    if (++wrote >= 90) break;
+  }
+  icsClose(f);
+  if (wrote == 0) { Store::fs().remove(path.c_str()); return String(); }
+  return path;
+}
+
+// ---- Source 6: visual passes + solar transits (active sat) ----
+// Visual passes: the next passes for the active sat that visEvalPass() rates visible.
+// Solar transits: the Sun-crossing events the transit scan found.
+String App::icsExportVisual() {
+  if (!Store::ready() || !timeIsSet()) return String();
+  SatEntry* s = activeSat();
+  String path; File f = icsBegin("visual", path);
+  if (!f) return String();
+  int wrote = 0;
+  Observer o = loc.obs();
+  // Visible passes for the active sat over the next several days.
+  if (s) {
+    pred.setSite(o);
+    PassPredict pp[12];
+    int n = pred.predictPasses(nowUtc(), cfg.minPassEl, pp, 12);
+    for (int i = 0; i < n; ++i) {
+      bool vis = false;
+      uint8_t why = visEvalPass(pp[i].aos, pp[i].los, pp[i].maxEl, vis);
+      (void)why;
+      if (!vis) continue;
+      freq_t dn = 0, up = 0; String md = ""; icsActiveFreqs(dn, up, md);
+      String desc = icsPassDesc(s, pp[i].maxEl, pp[i].azAos, dn, up, md.c_str());
+      desc += "\nVisible pass (sunlit satellite, dark sky).";
+      String summ = String(s->name) + " VISIBLE pass (el " + String(pp[i].maxEl, 0) + ")";
+      icsWriteEvent(f, pp[i].aos, pp[i].los, summ, desc,
+                    o.valid ? Location::toGrid(o.lat, o.lon) : String(""),
+                    String("vis") + String((unsigned long)s->norad) + "-" + String(i));
+      if (++wrote >= 40) break;
+    }
+  }
+  // Solar transits found by the transit scanner (body 0 = Sun), if it has run.
+  for (int i = 0; i < transitN && wrote < 60; ++i) {
+    TransitHit& te = transitHits[i];
+    if (te.body != 0) continue;                  // Sun transits only (skip Moon)
+    time_t start = te.t - 2, end = te.t + 2;     // transits are ~1-2 s; pad to a visible block
+    String desc;
+    desc += "Solar transit of "; desc += (s ? s->name : "satellite"); desc += "\n";
+    desc += (te.central ? "Central transit (crosses the Sun's disc)\n" : "Near miss (conjunction)\n");
+    desc += "Separation: "; desc += String(te.sepDeg, 2); desc += " deg\n";
+    desc += "Sun elevation: "; desc += String(te.bodyEl, 0); desc += " deg\n";
+    if (o.valid) { desc += "Station: "; desc += Location::toGrid(o.lat, o.lon); }
+    String summ = String(s ? s->name : "Satellite") + " SOLAR TRANSIT";
+    icsWriteEvent(f, start, end, summ, desc,
+                  o.valid ? Location::toGrid(o.lat, o.lon) : String(""),
+                  String("tr") + String(i));
+    ++wrote;
+  }
+  icsClose(f);
+  if (wrote == 0) { Store::fs().remove(path.c_str()); return String(); }
+  return path;
+}
+
+// The Calendar-export screen (SCR_CALEXPORT, reached with 'k' on About): a short menu
+// of the export types. ENTER writes the .ics into /CardSat/Calendars/ and reports the
+// path; the files are then downloadable from the web file portal.
+static const char* const CAL_ITEMS[] = {
+  "Favorite passes",
+  "Selected pass (active sat)",
+  "Activations + sked reminders",
+  "EME good days (90-day)",
+  "Visible passes + transits",
+};
+static const int CAL_N = (int)(sizeof(CAL_ITEMS) / sizeof(CAL_ITEMS[0]));
+
+void App::drawCalExport() {
+  header("Calendar export (.ics)");
+  canvas.setTextSize(1);
+  for (int i = 0; i < CAL_N; ++i) {
+    int y = 24 + i * 13;
+    bool sel = (i == calSel);
+    if (sel) { canvas.fillRect(2, y - 2, 236, 11, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(8, y); canvas.print(CAL_ITEMS[i]);
+  }
+  canvas.setTextColor(calStatus.length() ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 100);
+  if (calStatus.length()) canvas.print(calStatus);
+  else                    canvas.print("Writes to /CardSat/Calendars/");
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 112); canvas.print("Download via the web Files page.");
+  footer(";/. pick  ENTER export  ` back");
+}
+
+void App::keyCalExport(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_ABOUT; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--calSel < 0) calSel = CAL_N - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++calSel >= CAL_N) calSel = 0; lastDrawMs = 0; return; }
+  if (enter) {
+    if (!Store::ready()) { calStatus = "No filesystem available"; lastDrawMs = 0; return; }
+    setStatus("Exporting...");
+    String path;
+    switch (calSel) {
+      case 0: path = icsExportFavPasses();    break;
+      case 1: path = icsExportSelectedPass(); break;
+      case 2: path = icsExportActivations();  break;
+      case 3: path = icsExportEmeWindows();   break;
+      case 4: path = icsExportVisual();       break;
+    }
+    if (path.length()) {
+      int slash = path.lastIndexOf('/');
+      calStatus = String("Wrote ") + (slash >= 0 ? path.substring(slash + 1) : path);
+    } else {
+      calStatus = "Nothing to export (no data)";
+    }
+    lastDrawMs = 0; return;
+  }
+}
+
 String App::exportRovePlan() {
   if (!Store::ready() || planN == 0) return String();
   fs::FS& fsx = Store::fs();
@@ -49919,7 +51090,7 @@ void App::drawTrack() {
   } else {
     Transponder& t = activeTx[curTx];
     bool linear = t.isLinear && t.bandwidth() > 0;
-    uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+    freq_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
     Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
     Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
 
@@ -49929,16 +51100,18 @@ void App::drawTrack() {
                   linear ? "[LIN] " : "", t.desc);
 
     // DN/UP show the operating (passband) frequency; RX/TX are Doppler-tuned.
+    // A trailing 'x' on DN/UP flags that a transverter LO is active on that leg, so
+    // the real frequency shown here is reached via an IF on the rig (see Settings).
     canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, 56);
-    canvas.printf("DN %s", fmtMHz(dlOp).c_str());
+    canvas.printf("DN%s %s", cfg.xvtrDlHz ? "x" : " ", fmtMHz(dlOp).c_str());
     canvas.setTextColor(CL_GREEN, CL_BLACK);
     canvas.setCursor(120, 56);
     canvas.printf("RX %s", fmtMHz(rx).c_str());
 
     canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(4, 67);
-    if (ulOp) canvas.printf("UP %s", fmtMHz(ulOp).c_str());
+    if (ulOp) canvas.printf("UP%s %s", cfg.xvtrUlHz ? "x" : " ", fmtMHz(ulOp).c_str());
     else      canvas.print("UP  (rx only)");
     if (ulOp) {
       canvas.setTextColor(CL_ORANGE, CL_BLACK);
@@ -49955,6 +51128,7 @@ void App::drawTrack() {
         case TM_FULL: col = CL_ORANGE; tag = "<FULL>"; break;
         case TM_DL:   col = CL_ORANGE; tag = "<DL>";   break;
         case TM_UL:   col = CL_ORANGE; tag = "<UL>";   break;
+        case TM_FULL_UL: col = CL_ORANGE; tag = "<FULLu>"; break;
         default:      col = (trackMode == 0 ? CL_CYAN : CL_GREY);
                       tag = (trackMode == 0 ? "<TUNE>" : ""); break;
       }
@@ -50031,7 +51205,7 @@ void App::drawBig() {
 
   // Big-screen frequency string: 4 decimals (10 Hz) keeps even L-band birds inside
   // the panel at the large font, e.g. "145.9970" / "1296.5000".
-  auto fmtBig = [](uint32_t hz) { return fmtMHzN(hz, 4); };
+  auto fmtBig = [](freq_t hz) { return fmtMHzN(hz, 4); };
 
   // --- name + radio/rotator/tilt state badges (small) ---
   canvas.setTextSize(1);
@@ -50047,7 +51221,7 @@ void App::drawBig() {
   }
 
   // --- RX / TX in the largest font that fits (size 4) ---
-  uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+  freq_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
   if (activeTxCount > 0) {
     Transponder& t = activeTx[curTx];
     Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
@@ -50084,6 +51258,7 @@ void App::drawBig() {
     const char* mtag = (tuneMode == TM_FULL) ? "FULL"
                      : (tuneMode == TM_DL)   ? "DL"
                      : (tuneMode == TM_UL)   ? "UL"
+                     : (tuneMode == TM_FULL_UL) ? "FULLu"
                      : (trackMode == 0 ? "TUNE" : "CAL");
     canvas.setTextColor(CL_ORANGE, CL_BLACK);
     canvas.setCursor(4, 118);
@@ -50165,7 +51340,7 @@ void App::drawManual() {
 
   Transponder& t = activeTx[curTx];
   bool linear = t.isLinear && t.bandwidth() > 0;
-  uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+  freq_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
   Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
   Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
 
@@ -50187,7 +51362,7 @@ void App::drawManual() {
 
   // Row helper: label, value, and whether this is the fixed (HOLD) leg or the
   // derived (TUNE->) leg. Fixed = white/HOLD, derived = green/TUNE>.
-  auto legRow = [&](int y, const char* leg, uint32_t hz, bool fixed) {
+  auto legRow = [&](int y, const char* leg, freq_t hz, bool fixed) {
     canvas.setTextColor(fixed ? CL_WHITE : CL_GREEN, CL_BLACK);
     canvas.setCursor(4, y);
     canvas.printf("%s %s", leg, fmtMHz(hz).c_str());
@@ -50277,7 +51452,7 @@ void App::drawManualBig() {
   if (!s) { canvas.setTextSize(2); canvas.setTextColor(CL_GREY, CL_BLACK);
             canvas.setCursor(6, 56); canvas.print("No satellite"); return; }
 
-  auto fmtBig = [](uint32_t hz) { return fmtMHzN(hz, 4); };
+  auto fmtBig = [](freq_t hz) { return fmtMHzN(hz, 4); };
 
   LiveLook L = timeIsSet() ? pred.look(nowUtc()) : LiveLook();
 
@@ -50300,7 +51475,7 @@ void App::drawManualBig() {
 
   Transponder& t = activeTx[curTx];
   bool linear = t.isLinear && t.bandwidth() > 0;
-  uint32_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
+  freq_t dlOp = 0, ulOp = 0, rx = 0, tx = 0;
   Predictor::passbandFreqs(t, pbOffset, dlOp, ulOp);
   Predictor::dopplerFreqs(dlOp, ulOp, L.rangeRate, calDl, calUl, rx, tx);
   bool haveUp = (ulOp != 0);
@@ -51378,15 +52553,18 @@ void App::drawSettings() {
   rows[28] = String("Restore config+favs");
   rows[29] = String("Reset all data (erase)");
   rows[30] = String("CAT type: ") + (cfg.catType == CAT_USB ? "USB serial"
+                     : cfg.catType == CAT_RIGCTL_GROVE ? "rigctl (Grove)"
                      : cfg.catType == CAT_RIGCTL ? "rigctl (net)"
                      : cfg.catType == CAT_NET ? "Icom LAN" : "Wired CI-V");
   {
     String h = cfg.catHost[0] ? String(cfg.catHost) : String("(not set)");
     if (h.length() > 17) h = "..." + h.substring(h.length() - 14);
     rows[31] = (cfg.catType == CAT_USB) ? String("Host: n/a (USB)")
+             : (cfg.catType == CAT_RIGCTL_GROVE) ? String("Host: n/a (Grove)")
              : String(cfg.catType == CAT_RIGCTL ? "rigctld host: " : "LAN host: ") + h;
   }
   rows[32] = (cfg.catType == CAT_USB) ? String("Port: n/a (USB)")
+           : (cfg.catType == CAT_RIGCTL_GROVE) ? (String("Grove baud: ") + String(cfg.catPort))
            : String(cfg.catType == CAT_RIGCTL ? "rigctld port: " : "LAN port: ") + String(cfg.catPort);
   rows[33] = String("LAN user: ") + (cfg.catUser[0] ? cfg.catUser : "(not set)");
   rows[34] = String("LAN pass: ") + String(strlen(cfg.catPass) ? "******" : "(none)");
@@ -51407,6 +52585,10 @@ void App::drawSettings() {
   rows[105] = String("Weather wind: ") + (cfg.wxWind == WXW_MPH ? "mph"
                      : cfg.wxWind == WXW_MS ? "m/s" : "km/h");
   rows[106] = String("Weather pressure: ") + (cfg.wxPres == WXP_INHG ? "inHg" : "hPa");
+  rows[107] = String("Downlink LO: ") + (cfg.xvtrDlHz ? (fmtMHz(cfg.xvtrDlHz) + " MHz") : String("off"));
+  rows[108] = String("Uplink LO: ")   + (cfg.xvtrUlHz ? (fmtMHz(cfg.xvtrUlHz) + " MHz") : String("off"));
+  rows[109] = String("Dual-Rig setup (Stick) >") +
+              (drLink == 1 ? "  linked" : drLink == 2 ? "  no link" : "");
   rows[85] = String("Antenna lengths: ") + (cfg.antUnits == 1 ? "metric (m)" : "imperial (ft/in)");
   rows[44] = String("Dopp FM band: ") + String(cfg.doppThreshFmHz) + " Hz";
   rows[45] = String("Dopp linear band: ") + String(cfg.doppThreshLinHz) + " Hz";
@@ -51480,6 +52662,8 @@ void App::drawSettings() {
   const int len = SET_CAT_LEN[setCat];
   const int VIS = 9;
   int scroll = (setSel >= VIS) ? (setSel - VIS + 1) : 0;
+  // If the Dual-Rig row is highlighted, refresh its link indicator (throttled).
+  if (SET_CAT_ROWS[setCat][setSel] == 109) drPingLink();
   for (int v = 0; v < VIS && (scroll + v) < len; ++v) {
     int idx = scroll + v;
     int ai  = SET_CAT_ROWS[setCat][idx];
@@ -51489,6 +52673,12 @@ void App::drawSettings() {
                          canvas.setTextColor(CL_BLACK, danger ? CL_RED : CL_SELBG); }
     else                 canvas.setTextColor(danger ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(rows[ai]);
+    // Dual-Rig setup row: a red/green/grey dot at the right edge so link state
+    // reads at a glance, before opening the screen. Grey = n/a or not yet checked.
+    if (ai == 109) {
+      uint8_t dot = (drLink == 1) ? CL_GREEN : (drLink == 2) ? CL_RED : CL_GREY;
+      canvas.fillCircle(230, y + 4, 3, dot);
+    }
   }
   { int _id = SET_CAT_ROWS[setCat][setSel];
     if (_id == 4 || _id == 50) footer(",/ change  ENT edit  s scan  ` back");

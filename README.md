@@ -23,6 +23,16 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.63:** **BASIC that behaves, and a lighter, steadier device.** The on-device
+> Tiny BASIC gets a round of hardware-tested fixes: graphics programs hold their frame until
+> you press a key, a `SATSEL` catalogue scan no longer overflows the stack or aborts on a
+> decayed satellite, and there's a **file browser** (Fn+l) for loading programs. Under the
+> hood, a systematic memory campaign returns about **17.9 KB** of permanent RAM by allocating
+> screen-scoped buffers on demand, and the drawing canvas moves out of the heap so the free
+> block stays steady through LoTW / Cloudlog uploads instead of collapsing — both of which
+> matter on the no-PSRAM ESP32-S3.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.63.md)**.
+
 > **New in v0.9.62:** **the microwave bands, and two radios working as one.** Frequencies
 > and Doppler are now **64-bit** — the old 4.29 GHz ceiling is gone, so C/X/Ku downlinks and
 > 10 GHz QO-100-style birds track and display correctly — and new **transverter LO** offsets
@@ -289,7 +299,7 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 *(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
 unchanged since. Several features added since — rove planner, workable horizon, target
 search, on-device printing, the Files page's multi-select — are not pictured yet; a
-screenshot refresh is planned. The current firmware is v0.9.61.)*
+screenshot refresh is planned. The current firmware is v0.9.63.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#22-screen-by-screen-reference).

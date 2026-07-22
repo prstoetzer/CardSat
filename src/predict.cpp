@@ -69,7 +69,10 @@ bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3
     for (int i = 0; i < 68; ++i) { char c = l1[i];
       if (c >= '0' && c <= '9') sum += c - '0'; else if (c == '-') sum += 1; }
     l1[68] = '0' + (sum % 10); }
-  Sgp4 fp;
+  // static: an Sgp4 carries a full elsetrec (hundreds of bytes). Keeping it off the
+  // stack matters because this is the deepest frame before SGP4's own large frames.
+  // Safe here: single-threaded, and fp.init() fully re-initialises it every call.
+  static Sgp4 fp;
   if (!fp.init((char*)"FIT", l1, l2)) return false;     // now always re-parses (line 1 differs)
   if (fp.satrec.error != 0) return false;
   double tsince = (unixSec - s.epochUnix) / 60.0;       // minutes since element epoch

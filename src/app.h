@@ -28,7 +28,7 @@ enum Screen : uint8_t {
   SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
   SCR_KESSLER, SCR_QTHPRE,
-  SCR_DUALRIG
+  SCR_DUALRIG, SCR_BASICFILES
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -189,9 +189,14 @@ private:
   // (and Arduino String's never-freed-on-reassign buffers) were a mid-heap-hole
   // source. A flat char[][] costs the same static RAM and allocates nothing.
   static const int CATTEST_W = 56;
-  char     catLines[CATTEST_MAX][CATTEST_W] = {};
+  // Heap-on-demand: the CAT self-test log (~2.7 KB) is needed only while its one-shot
+  // results screen (SCR_CATTEST) is open. Allocated by runCatTest(), freed by
+  // catTestFree() from the screen-transition hook in loop(). catCount is 0 whenever the
+  // pointer is null, so draw never dereferences a freed block.
+  char     (*catLines)[CATTEST_W] = nullptr;   // -> [CATTEST_MAX][CATTEST_W]
   int      catCount  = 0;        // number of result lines filled
   int      catScroll = 0;        // scroll offset on the results screen
+  void     catTestFree();        // release catLines (transition hook)
 
   // CAT serial terminal/monitor (SCR_CATMON): a small ring buffer of the most
   // recent raw CAT frames (TX/RX hex), filled by the catTraceSink hook. Read-only
@@ -233,8 +238,16 @@ private:
 
   // live polar ground-track arc (current pass, or next pass if not up now)
   PassPredict polarPass;
-  float    polarAz[POLAR_PTS];
-  float    polarEl[POLAR_PTS];
+  // Heap-on-demand: the polar-arc sample buffers (~0.4 KB) are used only by the polar
+  // screen (SCR_POLAR). Both writers (buildPolarPath / buildPolarForPass) run only when
+  // entering SCR_POLAR, drawPolar is the only reader, and there is no off-screen/serial
+  // reader -- so they allocate on build and free on leaving the screen (polarFree() from
+  // the transition hook). polarPathValid is forced false whenever the buffers are null,
+  // so drawPolar (guarded on polarPathValid) never touches a freed block.
+  float    *polarAz = nullptr;   // -> [POLAR_PTS]
+  float    *polarEl = nullptr;   // -> [POLAR_PTS]
+  bool     polarAlloc();         // ensure the arc buffers exist (called by the builders)
+  void     polarFree();          // release them (transition hook)
   bool     polarPathValid = false;
 
   // mutual-window (co-visibility) results for a remote DX grid
@@ -309,16 +322,29 @@ private:
   // EQX table (equatorial crossings, ascending node) for OSCARLOCATOR use.
   // 3-day window; an AO-7-class orbit gives ~37 crossings, higher orbits fewer.
   static const int EQX_MAX = 64;
-  time_t   eqxT[EQX_MAX];         // unix UTC of each ascending-node crossing
-  float    eqxLonW[EQX_MAX];      // sub-longitude in West-positive degrees (0..360)
+  // Heap-on-demand: the equator-crossing table (~0.75 KB) is used only by SCR_EQX and by
+  // printEqx(); printEqx() now rebuilds via buildEqx() before reading, so a serial "print
+  // eqx" from any screen still works. Allocated by buildEqx(), freed on leaving SCR_EQX.
+  // eqxN is forced 0 when the buffers are null, and draw/print guard on eqxN.
+  time_t   *eqxT = nullptr;       // -> [EQX_MAX] unix UTC of each node crossing
+  float    *eqxLonW = nullptr;    // -> [EQX_MAX] sub-longitude West-positive (0..360)
   int      eqxN = 0;
+  bool     eqxAlloc();            // ensure the table exists (called by buildEqx)
+  void     eqxFree();             // release it (transition hook)
   int      eqxScroll = 0;
   bool     eqxDescending = false;  // false = ascending node (EQX), true = descending node
 
   // 60-day illumination (DK3WN illum-style). Raster: cols = days, rows = orbit
   // phase; a set bit means the satellite is in eclipse at that (day, phase).
-  uint8_t  illumBits[ILLUM_DAYS][(ILLUM_ROWS + 7) / 8];
+  // Heap-on-demand: the illumination raster (~0.6 KB) is used only by SCR_ILLUM and by
+  // printIllum(), which rebuilds via buildIllum() before reading -- so a serial "print
+  // illum" from any screen still works. Allocated by buildIllum(), freed on leaving
+  // SCR_ILLUM. illumValid is forced false when the buffer is null, and both drawIllum and
+  // printIllum guard on illumValid, so a freed block is never read.
+  uint8_t  (*illumBits)[(ILLUM_ROWS + 7) / 8] = nullptr;  // -> [ILLUM_DAYS][RB]
   bool     illumValid     = false;
+  bool     illumAlloc();   // ensure the raster exists (called by buildIllum)
+  void     illumFree();    // release it (transition hook)
   int      illumDayOff    = 0;      // illumination raster start offset from today, in DAYS (>=0)
   // Orbital analysis screen (off Satellites), multi-page
   int      orbitPage = 0;
@@ -978,9 +1004,13 @@ private:
 
   // WiFi scan (Settings -> WiFi SSID -> 's')
   static const int MAX_WIFI_AP = 16;
-  WifiAp   wifiAp[MAX_WIFI_AP];
+  // Heap-on-demand (~0.7 KB, only while SCR_WIFISCAN is open). Allocated by the scan;
+  // freed on leaving the screen. wifiApCount is 0 when the pointer is null.
+  WifiAp   *wifiAp = nullptr;      // -> [MAX_WIFI_AP] scan results
   int      wifiApCount = 0;
   int      wifiSel = 0;
+  bool     wifiApAlloc();          // ensure the results array exists (called by the scan)
+  void     wifiApFree();           // release it (transition hook)
 
   // tracking / doppler
   bool     radioOut = false;      // are we sending freqs to the rig?
@@ -1143,8 +1173,21 @@ private:
   int      logSel = 0;            // selected field on the log-entry screen
   int      logMenuSel = 0;        // selected row on the Log menu
   Screen   logReturn = SCR_HOME;  // screen to return to after entry
-  PendingQso logRecs[LOG_VIEW_MAX]; // recent log entries loaded for view/edit
-  int      logFileRows[LOG_VIEW_MAX]; // file data-row index for each logRecs[] entry
+  // Heap-on-demand (the QSO-log view cache is ~8.9 KB and is only needed while the log
+  // list is open or a log print runs). Allocated by loadLog() -- which every consumer
+  // (SCR_LOGLIST entry, edit-commit refresh, and printLog) calls first -- and freed by
+  // logViewFree() from the screen-transition hook when SCR_LOGLIST is left. logRecN is 0
+  // whenever the pointers are null, so draw/key/print never dereference a freed block.
+  // The edit screen doesn't keep this cache alive: keyLogList copies the selected record
+  // into `qso` and its on-disk row into logEditFileRow before opening SCR_LOGENTRY, so
+  // the cache can be released during editing and the save/delete still target the right
+  // file row.
+  PendingQso *logRecs = nullptr;    // -> [LOG_VIEW_MAX] recent entries loaded for view/edit
+  int      *logFileRows = nullptr;  // -> [LOG_VIEW_MAX] file data-row index per logRecs[]
+  int      logEditFileRow = -1;     // on-disk row of the entry being edited (copied out of
+                                    //   logFileRows[] before the cache is released)
+  bool     logViewAlloc();          // ensure logRecs/logFileRows exist (called by loadLog)
+  void     logViewFree();           // release them (transition hook)
                                       // (parallel array; survives the date sort)
   int      logRecN = 0;           // number loaded
   int      logFirstIdx = 0;       // file data-row index of logRecs[0]
@@ -1561,8 +1604,12 @@ private:
   // selected bird, fetched on demand from reports.php, plus a distinct-grid
   // count -- a footprint-activity read the summary count can't give.
   struct AmsRpt { char call[12]; char grid[8]; uint8_t st; time_t t; };
-  AmsRpt   amsRpt[24];
+  // Heap-on-demand (~0.75 KB, only while SCR_AMSRPT is open). Allocated by
+  // fetchAmsatReports(); freed on leaving the screen. amsRptN is 0 when the pointer is null.
+  AmsRpt   *amsRpt = nullptr;      // -> [24] recent individual reports
   int      amsRptN = 0; int amsRptScroll = 0; int amsRptGrids = 0;
+  bool     amsRptAlloc();          // ensure the array exists (called by fetchAmsatReports)
+  void     amsRptFree();           // release it (transition hook)
   char     amsRptFor[14] = "";
   void fetchAmsatReports(const char* apiName);
   void drawAmsRpt(); void keyAmsRpt(char c, bool enter, bool back);
@@ -1679,6 +1726,25 @@ private:
   bool  basFileOpen = false;         // FOPEN file currently open
   File  basFile;                     // the one BASIC output file
   bool  basGfxHold = false;          // a SHOWed frame is on screen; next key clears it
+  uint32_t basGfxHoldMs = 0;         // millis() the hold began; ignore keys briefly after so
+                                     //   the Fn+r that launched the run (still held / auto-
+                                     //   repeating / released on the next scan) can't dismiss
+                                     //   the frame the instant it appears
+  // Fn+l file browser (SCR_BASICFILES): a picker for the *.bas files under /CardSat/basic
+  // so the operator can choose a program instead of typing its name.
+  static constexpr int BAS_FILES_MAX = 64;
+  // Heap-on-demand (like the Dual-Rig tables): a fixed 64x20 member array would sit in
+  // .bss for the whole session for a screen that is open only briefly. Instead the list
+  // (~1.3 KB) is allocated by basFilesScan() when Fn+l opens the browser and released by
+  // basFilesFree() from the screen-transition hook in loop(). basFileN is 0 whenever the
+  // pointer is null, so draw/key never dereference a freed table.
+  char  (*basFileList)[20] = nullptr;     // -> [BAS_FILES_MAX][20] base names (no .bas)
+  int   basFileN = 0, basFileSel = 0, basFileTop = 0;
+  bool  basFileConfirmDel = false;        // 'd' armed a delete on the selected row
+  void  basFilesScan();                   // allocate (if needed) + populate the list
+  void  basFilesFree();                   // release the list (transition hook)
+  void  drawBasicFiles();
+  void  keyBasicFiles(char c, bool enter, bool back);
   // KESSLER (0.9.60): the two-player GORILLAS.BAS tribute. All game state lives in
   // one heap-allocated struct that exists only while the screen is open -- the
   // no-PSRAM RAM discipline for rarely-used features. Physics are GORILLAS'own
@@ -1910,8 +1976,12 @@ private:
   // pick as a favorite. Adds persist to FILE_CTX so every GP update re-fetches their
   // elements from CelesTrak (courtesy-throttled) -- see refreshCtExtras. Results are held
   // as slim rows; the full entry is re-streamed from the cached result file on add.
-  CtRow  ctsRows[CTS_MAX];
+  // Heap-on-demand (~0.8 KB, only while SCR_CTSEARCH is open). Allocated by ctSearchRun();
+  // freed on leaving the screen. ctsN is 0 when the pointer is null.
+  CtRow  *ctsRows = nullptr;       // -> [CTS_MAX] streamed search hits
   int    ctsN = 0, ctsTotal = 0, ctsSel = 0, ctsScroll = 0;
+  bool   ctsRowsAlloc();           // ensure the rows array exists (called by ctSearchRun)
+  void   ctsRowsFree();            // release it (transition hook)
   // Universal form-tool printing (0.9.59, all 34 form tools for one refactor):
   // when tfEmit is set, drawToolForm's field loop and out() lambda tee every line
   // to Printer::line instead of the canvas -- no buffering, no per-tool code.
@@ -2076,9 +2146,15 @@ private:
   static const int NOTES_LIST_MAX = 64;   // files listed in the browser
   static const int NOTE_NAME_MAX  = 32;   // filename length (without path/.txt)
   static const int NOTE_BUF_MAX   = 4096; // max note size held/edited in RAM
-  char     noteList[NOTES_LIST_MAX][NOTE_NAME_MAX]; // base names (no dir, no .txt)
-  time_t   noteTime[NOTES_LIST_MAX];                 // each note's last-write time
+  // Heap-on-demand (browser list ~2.6 KB, only needed while SCR_NOTES is open). Allocated
+  // by buildNoteList(); freed on leaving SCR_NOTES. The editor works from noteName/noteBuf
+  // (copied in noteEditOpen before the switch), so the list can be released while editing.
+  // printNote() reads noteBuf, not this list, so a print report never needs it.
+  char     (*noteList)[NOTE_NAME_MAX] = nullptr;   // -> [NOTES_LIST_MAX][NOTE_NAME_MAX]
+  time_t   *noteTime = nullptr;                     // -> [NOTES_LIST_MAX] last-write times
   int      noteListN = 0;          // files found
+  bool     noteListAlloc();        // ensure the list exists (called by buildNoteList)
+  void     noteListFree();         // release it (transition hook)
   int      noteSel = 0;            // browser cursor
   int      noteScroll = 0;         // browser scroll offset
   bool     noteConfirmDel = false; // two-step delete confirmation in the browser

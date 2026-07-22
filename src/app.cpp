@@ -315,7 +315,25 @@ void App::setup() {
   // the sprite is still created exactly once at boot.
   static const int CANVAS_DEPTH = 4;   // 4 or 8 (see note above)
   canvas.setColorDepth(CANVAS_DEPTH);
+  // Canvas backing store. createSprite() would malloc ~16.2 KB from the heap at boot, and
+  // because it's never freed (freeCanvasForTls is a no-op), that block sits permanently in
+  // the middle of the DRAM heap -- a fixed wall that splits the free space into a region
+  // below it and a region above it, capping the largest contiguous free block (the figure
+  // that gates TLS handshakes). Backing the sprite with a STATIC buffer instead moves those
+  // 16.2 KB out of the heap and into .bss below _heap_start, so the two heap regions the
+  // sprite used to separate can merge into one larger contiguous block. The buffer is
+  // marked Preallocated inside LGFX, so deleteSprite()/release() never try to free it.
+  // M5Cardputer is a fixed 240x135 panel, so the size is a compile-time constant. Set
+  // CANVAS_STATIC 0 to fall back to the old heap allocation.
+  #define CANVAS_STATIC 1
+#if CANVAS_STATIC
+  static const int CW = 240, CH = 135;                 // M5Cardputer panel (fixed)
+  static const int CANVAS_ROWBYTES = CW * CANVAS_DEPTH / 8;   // 4bpp -> 120 B/row
+  static uint8_t canvasBuf[CANVAS_ROWBYTES * CH] __attribute__((aligned(4)));  // 16,200 B in .bss
+  canvas.setBuffer(canvasBuf, CW, CH, CANVAS_DEPTH);
+#else
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
+#endif
   canvas.createPalette(CL_PALETTE, CL_PALETTE_N);
   canvas.setTextWrap(false);
   M5Cardputer.Display.setBrightness(SCREEN_BRIGHT);
@@ -2302,7 +2320,19 @@ static void noteLocate(const NoteVRow* rows, int nrows, int cur, int& row, int& 
   row = nrows - 1; col = rows[row].end - rows[row].start;
 }
 
+bool App::noteListAlloc() {
+  if (!noteList) noteList = new (std::nothrow) char[NOTES_LIST_MAX][NOTE_NAME_MAX];
+  if (!noteTime) noteTime = new (std::nothrow) time_t[NOTES_LIST_MAX];
+  if (!noteList || !noteTime) { noteListFree(); return false; }
+  return true;
+}
+void App::noteListFree() {
+  delete[] noteList; noteList = nullptr;
+  delete[] noteTime; noteTime = nullptr;
+  noteListN = 0;
+}
 void App::buildNoteList() {
+  if (!noteListAlloc()) { noteListN = 0; setStatus("Out of memory"); return; }
   noteListN = Notes::list(noteList, noteTime, NOTES_LIST_MAX, NOTE_NAME_MAX);
   if (noteSel >= noteListN) noteSel = noteListN > 0 ? noteListN - 1 : 0;
 }
@@ -5740,6 +5770,29 @@ void App::loop() {
     // Leaving the Dual-Rig setup screen: its device+model tables (~1.3 KB) are
     // rebuilt on every entry, so nothing needs them to survive.
     if (from == SCR_DUALRIG && screen != SCR_DUALRIG) drFree();
+    // Leaving the BASIC file browser: its ~1.3 KB list is rebuilt on every entry.
+    if (from == SCR_BASICFILES && screen != SCR_BASICFILES) basFilesFree();
+    // Leaving the CAT self-test results: its ~2.7 KB log is rebuilt on every run.
+    if (from == SCR_CATTEST && screen != SCR_CATTEST) catTestFree();
+    // Leaving the polar screen: its ~0.4 KB arc buffers are rebuilt on every entry.
+    if (from == SCR_POLAR && screen != SCR_POLAR) polarFree();
+    // Leaving the QSO log list: its ~8.9 KB view cache is rebuilt by loadLog() on every
+    // entry (and by printLog). The edit screen has already copied out qso + logEditFileRow.
+    if (from == SCR_LOGLIST && screen != SCR_LOGLIST) logViewFree();
+    // Leaving the illumination / equator-crossing screens: both caches (~0.6 KB / ~0.75 KB)
+    // are rebuilt on entry (and by their print reports), so nothing needs them to survive.
+    if (from == SCR_ILLUM && screen != SCR_ILLUM) illumFree();
+    if (from == SCR_EQX   && screen != SCR_EQX)   eqxFree();
+    // Simple single-screen list buffers (rebuilt on every entry): Notes browser, Wi-Fi
+    // scan, CelesTrak search, per-sat AMSAT reports. The Notes editor keeps its own
+    // noteName/noteBuf, so releasing the browser list while editing is fine. Notes and
+    // CelesTrak reach the shared text editor (SCR_EDIT) for a new-note name / search query
+    // and return; excluding SCR_EDIT keeps their list alive across that prompt so a cancel
+    // doesn't land on an empty screen.
+    if (from == SCR_NOTES    && screen != SCR_NOTES    && screen != SCR_EDIT) noteListFree();
+    if (from == SCR_WIFISCAN && screen != SCR_WIFISCAN) wifiApFree();
+    if (from == SCR_CTSEARCH && screen != SCR_CTSEARCH && screen != SCR_EDIT) ctsRowsFree();
+    if (from == SCR_AMSRPT   && screen != SCR_AMSRPT)   amsRptFree();
     lastScreenSeen = screen;
   }
   // Memory telemetry: when the screen changes and tracing is on, log the heap so the
@@ -6474,6 +6527,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_GRAPH:   keyGraph(c, enter, back); break;
     case SCR_BASIC:    keyBasic(c, enter, back); break;
     case SCR_BASICRUN: keyBasicRun(c, enter, back); break;
+    case SCR_BASICFILES: keyBasicFiles(c, enter, back); break;
     case SCR_PERF:     keyPerf(c, enter, back); break;
     case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
     case SCR_FOXTEXT: keyFoxText(c, enter, back); break;
@@ -8951,8 +9005,20 @@ void App::keyVisList(char c, bool enter, bool back) {
 // ===========================================================================
 //  60-day illumination (DK3WN "illum"): date x orbit-phase sun/shadow raster
 // ===========================================================================
+// Allocate the illumination raster on demand. Returns false (raster stays invalid) if the
+// heap can't spare ~0.6 KB. Called by buildIllum().
+bool App::illumAlloc() {
+  if (!illumBits) illumBits = new (std::nothrow) uint8_t[ILLUM_DAYS][(ILLUM_ROWS + 7) / 8];
+  return illumBits != nullptr;
+}
+// Release the illumination raster (transition hook, on leaving SCR_ILLUM).
+void App::illumFree() {
+  delete[] illumBits; illumBits = nullptr; illumValid = false;
+}
+
 void App::buildIllum() {
   illumValid = false;
+  if (!illumAlloc()) { setStatus("Out of memory"); return; }
   SatEntry* s = activeSat();
   if (!s || !timeIsSet() || s->meanMotion <= 0) return;
   building = true;
@@ -9544,12 +9610,15 @@ void App::keyEdit(char c, bool enter, bool back) {
       } break;
       case 781: {                                   // Tiny BASIC: save under a name
         String v = editBuf; v.trim();
-        if (v.length()) { basicName = v; basicSave(); }
-      } break;
+        if (v.length()) { basicName = v; basicSave(); }   // basicSave() sets its own status
+        screen = SCR_BASIC; lastDrawMs = 0; return;        // don't fall through to "Saved"
+      }
       case 782: {                                   // Tiny BASIC: load by name
         String v = editBuf; v.trim();
-        if (v.length()) basicLoad(v.c_str());
-      } break;
+        if (v.length()) basicLoad(v.c_str());              // basicLoad() sets "Loaded <name>"
+        else setStatus("Load cancelled");
+        screen = SCR_BASIC; lastDrawMs = 0; return;        // don't fall through to "Saved"
+      }
       case 784: {                                   // QTH preset name
         strncpy(cfg.qthName[qpSel], editBuf.c_str(), sizeof(cfg.qthName[qpSel]) - 1);
         cfg.qthName[qpSel][13] = 0;
@@ -9682,7 +9751,8 @@ void App::keyEdit(char c, bool enter, bool back) {
         char nm[NOTE_NAME_MAX];
         strncpy(nm, editBuf.c_str(), sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
         if (!Notes::sanitizeName(nm, sizeof(nm))) {
-          setStatus("Bad name"); screen = SCR_NOTES; lastDrawMs = 0; return;
+          setStatus("Bad name"); buildNoteList();   // rebuild: the browser list was released
+          screen = SCR_NOTES; lastDrawMs = 0; return;
         }
         if (noteIsNew && Notes::exists(nm)) {        // don't silently clobber on 'new'
           setStatus("Name exists - pick another");
@@ -11894,7 +11964,7 @@ void App::keyLogEntry(char c, bool enter, bool back) {
   if (isDown(c)) logSel = (logSel + 1) % LF;
   if (c == 'x' && logEditIdx >= 0) {           // delete this entry (two-press)
     if (!logDelArm) { logDelArm = true; setStatus("Press x again to delete"); return; }
-    bool ok = rewriteLog(logFileRow(logEditIdx), nullptr, true);
+    bool ok = rewriteLog(logEditFileRow, nullptr, true);   // captured before cache release
     setStatus(ok ? "QSO deleted" : "Delete failed");
     logDelArm = false; logEditIdx = -1;
     if (ok) loadLog();
@@ -11904,7 +11974,7 @@ void App::keyLogEntry(char c, bool enter, bool back) {
     if (!qso.call[0]) { setStatus("Call required to log"); return; }
     // qso.uploaded is saved as-is: editing any content field already cleared it (so the
     // QSO re-uploads), and the LoTW/Cloudlog rows let the operator override that choice.
-    bool ok = (logEditIdx >= 0) ? rewriteLog(logFileRow(logEditIdx), &qso, false)
+    bool ok = (logEditIdx >= 0) ? rewriteLog(logEditFileRow, &qso, false)   // captured scalar
                                 : saveQso();
     setStatus(ok ? (logEditIdx >= 0 ? "QSO updated" : "QSO logged") : "Log write failed");
     if (ok && logReturn == SCR_LOGLIST) loadLog();
@@ -11962,8 +12032,27 @@ void App::keyLogEntry(char c, bool enter, bool back) {
   }
 }
 
+// Allocate the QSO-log view cache on demand. Returns false (and leaves logRecN 0) if the
+// heap can't give us the ~8.9 KB. Called by loadLog(), which every consumer runs first.
+bool App::logViewAlloc() {
+  if (!logRecs)     logRecs     = new (std::nothrow) PendingQso[LOG_VIEW_MAX];
+  if (!logFileRows) logFileRows = new (std::nothrow) int[LOG_VIEW_MAX];
+  if (!logRecs || !logFileRows) { logViewFree(); return false; }
+  return true;
+}
+
+// Release the QSO-log view cache. Called from the screen-transition hook in loop() when
+// SCR_LOGLIST is left. logRecN -> 0 so nothing reads the freed block; the edit screen
+// already copied what it needs (qso + logEditFileRow) before this fires.
+void App::logViewFree() {
+  delete[] logRecs;     logRecs = nullptr;
+  delete[] logFileRows; logFileRows = nullptr;
+  logRecN = 0;
+}
+
 void App::loadLog() {
   logRecN = 0;
+  if (!logViewAlloc()) { setStatus("Out of memory"); return; }
   int total = qsoCount();
   logFirstIdx = (total > LOG_VIEW_MAX) ? total - LOG_VIEW_MAX : 0;
   logListSel = 0;
@@ -12073,6 +12162,8 @@ void App::keyLogList(char c, bool enter, bool back) {
   if (enter) {
     qso = logRecs[logListSel];
     logEditIdx = logListSel;
+    logEditFileRow = logFileRow(logListSel);   // capture on-disk row NOW; the view cache
+                                               //   is released when we leave SCR_LOGLIST
     logReturn = SCR_LOGLIST;
     logSel = 0; logDelArm = false;
     screen = SCR_LOGENTRY;
@@ -12106,6 +12197,12 @@ bool App::drawOobBanner() {
 
 void App::draw() {
   if (canvasFreed) return;   // sprite freed for a TLS fetch; nothing to draw to
+  // A BASIC program that ended with SHOW leaves its frame on the DISPLAY and asks us
+  // to hold it until the next key. draw() clears the offscreen canvas and re-pushes it
+  // every tick, which would instantly black out that frame -- so while the hold is up,
+  // leave the display completely alone (don't clear, don't push). keyBasicRun() drops
+  // the hold on the next keypress, after which normal drawing resumes.
+  if (basGfxHold && screen == SCR_BASICRUN) return;
   canvas.fillScreen(CL_BLACK);
   switch (screen) {
     case SCR_HOME:     drawHome(); break;
@@ -12173,6 +12270,7 @@ void App::draw() {
     case SCR_GRAPH:   drawGraph(); break;
     case SCR_BASIC:    drawBasic(); break;
     case SCR_BASICRUN: drawBasicRun(); break;
+    case SCR_BASICFILES: drawBasicFiles(); break;
     case SCR_PERF:     drawPerf(); break;
     case SCR_FOXANAT: drawFoxAnat(); break;
     case SCR_FOXTEXT: drawFoxText(); break;
@@ -14822,22 +14920,53 @@ void App::runSerialCommand(const char* cmd) {
     Serial.printf("heap: free %u, min-ever %u, largest block %u\n",
                   (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    // Per-capability breakdown. The largest-free-block ceiling is a property of a specific
+    // internal DRAM region, so 8BIT (general) vs INTERNAL vs DMA can differ; this shows
+    // which pool caps the big contiguous block.
+    {
+      multi_heap_info_t hi;
+      heap_caps_get_info(&hi, MALLOC_CAP_8BIT);
+      Serial.printf("  8BIT    : free %u  largest %u  min-ever %u  free-blocks %u\n",
+                    (unsigned)hi.total_free_bytes, (unsigned)hi.largest_free_block,
+                    (unsigned)hi.minimum_free_bytes, (unsigned)hi.free_blocks);
+      heap_caps_get_info(&hi, MALLOC_CAP_INTERNAL);
+      Serial.printf("  INTERNAL: free %u  largest %u  min-ever %u  free-blocks %u\n",
+                    (unsigned)hi.total_free_bytes, (unsigned)hi.largest_free_block,
+                    (unsigned)hi.minimum_free_bytes, (unsigned)hi.free_blocks);
+      heap_caps_get_info(&hi, MALLOC_CAP_DMA);
+      Serial.printf("  DMA     : free %u  largest %u  min-ever %u  free-blocks %u\n",
+                    (unsigned)hi.total_free_bytes, (unsigned)hi.largest_free_block,
+                    (unsigned)hi.minimum_free_bytes, (unsigned)hi.free_blocks);
+    }
     Serial.printf("sizeof: SatEntry %u, SatDb %u, PassPredict %u, Transponder %u, MemoEntry %u, App %u\n",
                   (unsigned)sizeof(SatEntry), (unsigned)sizeof(SatDb),
                   (unsigned)sizeof(PassPredict), (unsigned)sizeof(Transponder),
                   (unsigned)sizeof(VoiceMemo::MemoEntry), (unsigned)sizeof(App));
-    Serial.println(F("resident arrays (always-allocated, refactor candidates):"));
-    Serial.printf("  catalog _sats[%d]        = %u B\n", MAX_SATS, (unsigned)(sizeof(SatEntry) * MAX_SATS));
-    Serial.printf("  favs[%d]+view[%d]        = %u B\n", MAX_SATS, MAX_SATS,
+    // Truly always-resident buffers inside App (heap-on-demand ones are NOT listed here --
+    // they only exist while their screen is open; see "heap-on-demand" below).
+    Serial.println(F("resident arrays (always allocated in App):"));
+    Serial.printf("  catalog _sats[%d]      = %u B\n", MAX_SATS, (unsigned)(sizeof(SatEntry) * MAX_SATS));
+    Serial.printf("  favs[%d]+view[%d]      = %u B\n", MAX_SATS, MAX_SATS,
                   (unsigned)((sizeof(uint32_t) + sizeof(int)) * MAX_SATS));
-    Serial.printf("  passScratch[%d]         = %u B (merged; was 2 arrays)\n", VIS_PASS_MAX,
+    Serial.printf("  passScratch[%d]       = %u B\n", VIS_PASS_MAX,
                   (unsigned)(sizeof(PassPredict) * VIS_PASS_MAX));
-    Serial.printf("  memos[%d]               = %u B (heap; only on its screen)\n",
-                  MEMO_LIST_MAX,
-                  (unsigned)(sizeof(VoiceMemo::MemoEntry) * MEMO_LIST_MAX));
-    Serial.printf("  activeTx[%d]            = %u B\n", MAX_TX_PER_SAT,
+    Serial.printf("  activeTx[%d]          = %u B\n", MAX_TX_PER_SAT,
                   (unsigned)(sizeof(Transponder) * MAX_TX_PER_SAT));
+    Serial.printf("  canvas 240x135 @4bpp = %u B (now STATIC .bss, was heap)\n", (unsigned)(240 * 135 / 2));
+    // Buffers converted to heap-on-demand this cycle: 0 B resident, allocated only while the
+    // owning screen is open (freed by the screen-transition hook). ~19 KB no longer permanent.
+    Serial.println(F("heap-on-demand (0 B until their screen opens):"));
+    Serial.printf("  logRecs+logFileRows[%d] ~%u B (QSO log)\n", LOG_VIEW_MAX,
+                  (unsigned)((sizeof(PendingQso) + sizeof(int)) * LOG_VIEW_MAX));
+    Serial.printf("  memos[%d]              ~%u B (voice memos)\n", MEMO_LIST_MAX,
+                  (unsigned)(sizeof(VoiceMemo::MemoEntry) * MEMO_LIST_MAX));
+    Serial.println(F("  + catLines, noteList, ctsRows, amsRpt, wifiAp, illumBits, eqxT, polar"));
     Serial.printf("catalog loaded: %d / %d\n", db.count(), MAX_SATS);
+    // NOTE: heap_caps_dump() walks the whole heap with allocation locked and prints one
+    // line PER BLOCK (hundreds of them). Over USB serial that holds the lock long enough to
+    // trip the interrupt watchdog -> panic. So we DON'T dump every block; the per-cap
+    // summary above (free / largest / free-blocks, in each capability view) is the safe
+    // equivalent and already shows what caps the largest contiguous block.
   } else if (is("memtrace")) {
     memTrace = !memTrace;
     if (memTrace) { lastMemScreen = screen; memTraceMinBlk = 0xFFFFFFFF; }
@@ -15272,9 +15401,10 @@ void App::printEqx() {
   SatEntry* s = activeSat();
   Printer::title(eqxDescending ? "DESCENDING NODES" : "EQUATOR CROSSINGS");
   if (!s) { Printer::line("No active satellite."); return; }
+  buildEqx();   // rebuild the table (the on-screen cache may be freed / never built here)
   Printer::line(String(s->name));
   Printer::blank();
-  if (eqxN == 0) { Printer::line("(none computed)"); return; }
+  if (eqxN == 0) { Printer::line("(none computed)"); if (screen != SCR_EQX) eqxFree(); return; }
   Printer::line("TIME (UTC)        LON");
   for (int i = 0; i < eqxN; ++i) {
     float lonW = eqxLonW[i];
@@ -15285,6 +15415,8 @@ void App::printEqx() {
   }
   Printer::blank();
   Printer::line(String(eqxN) + " crossings. Lon +E.");
+  if (screen != SCR_EQX) eqxFree();   // serial "print eqx" off-screen: the transition hook
+                                      //   won't fire for SCR_EQX, so release the rebuild here
 }
 
 void App::printAllPasses() {
@@ -15525,7 +15657,7 @@ void App::printIllum() {
   if (!printActiveHint()) return;
   SatEntry* s = activeSat();
   buildIllum();
-  if (!illumValid) { Printer::line("No orbit/illumination data."); return; }
+  if (!illumValid) { Printer::line("No orbit/illumination data."); if (screen != SCR_ILLUM) illumFree(); return; }
   Printer::line(String(s->name) + "  #" + String(s->norad));
   char b[56];
   snprintf(b, sizeof(b), "Orbit period ~%.0f min", illumPeriodMin);  Printer::line(String(b));
@@ -15569,6 +15701,8 @@ void App::printIllum() {
   Printer::blank();
   Printer::wrap("100% = full sun that orbit; lower values mean a longer eclipse "
                 "(battery-only) fraction each orbit.");
+  if (screen != SCR_ILLUM) illumFree();   // serial "print illum" off-screen: release the
+                                          //   rebuilt raster here (no SCR_ILLUM transition)
 }
 
 // ---- 10-day pass progression (mirrors SCR_VIS) ----------------------------------
@@ -16528,10 +16662,16 @@ void App::keyGGrid(char c, bool enter, bool back) {
 
 void App::catLog(const String& line) {
   Serial.print("[CAT-TEST] "); Serial.println(line);     // echo to serial monitor
-  if (catCount < CATTEST_MAX) {
+  if (catLines && catCount < CATTEST_MAX) {
     strncpy(catLines[catCount], line.c_str(), CATTEST_W - 1);
     catLines[catCount][CATTEST_W - 1] = 0; catCount++;
   }
+}
+
+// Release the CAT self-test log. Called from the screen-transition hook in loop() when
+// SCR_CATTEST is left, so no exit path leaks the ~2.7 KB.
+void App::catTestFree() {
+  delete[] catLines; catLines = nullptr; catCount = 0; catScroll = 0;
 }
 
 void App::catStep(const String& name, bool ok, const String& detail) {
@@ -16543,6 +16683,8 @@ void App::catStep(const String& name, bool ok, const String& detail) {
 
 void App::runCatTest() {
   catCount = 0; catScroll = 0; catPass = 0; catFail = 0;
+  if (!catLines) catLines = new (std::nothrow) char[CATTEST_MAX][CATTEST_W];
+  if (!catLines) { setStatus("Out of memory"); return; }   // catCount stays 0 -> safe
 
   if (!rig || !rig->ready()) {
     catLog("Radio not ready.");
@@ -18041,8 +18183,24 @@ void App::keyOrbit(char c, bool enter, bool back) {
 //  Covers a rolling 3-day window from now, computed on-device from the selected
 //  sat's GP elements (no network needed). Modeled on AO-7_OSCARLOCATOR (N8HM).
 // ===========================================================================
+// Allocate the equator-crossing table on demand. Returns false (table stays empty) if the
+// heap can't spare ~0.75 KB. Called by buildEqx().
+bool App::eqxAlloc() {
+  if (!eqxT)     eqxT     = new (std::nothrow) time_t[EQX_MAX];
+  if (!eqxLonW)  eqxLonW  = new (std::nothrow) float[EQX_MAX];
+  if (!eqxT || !eqxLonW) { eqxFree(); return false; }
+  return true;
+}
+// Release the equator-crossing table (transition hook, on leaving SCR_EQX).
+void App::eqxFree() {
+  delete[] eqxT;    eqxT = nullptr;
+  delete[] eqxLonW; eqxLonW = nullptr;
+  eqxN = 0;
+}
+
 void App::buildEqx() {
   eqxN = 0; eqxScroll = 0;
+  if (!eqxAlloc()) { setStatus("Out of memory"); return; }
   SatEntry* s = activeSat();
   if (!s || !timeIsSet() || s->meanMotion <= 0) return;
   setStatus(eqxDescending ? "Computing crossings (desc)..." : "Computing EQX table...");
@@ -20482,8 +20640,15 @@ static time_t isoZToUnix(const char* iso) {
   return (time_t)days * 86400 + (long)H * 3600 + (long)Mi * 60 + Se;
 }
 
+bool App::amsRptAlloc() {
+  if (!amsRpt) amsRpt = new (std::nothrow) AmsRpt[24];
+  return amsRpt != nullptr;
+}
+void App::amsRptFree() { delete[] amsRpt; amsRpt = nullptr; amsRptN = 0; }
+
 void App::fetchAmsatReports(const char* apiName) {
   amsRptN = 0; amsRptGrids = 0;
+  if (!amsRptAlloc()) { setStatus("Out of memory"); return; }
   strncpy(amsRptFor, apiName, sizeof(amsRptFor) - 1); amsRptFor[sizeof(amsRptFor) - 1] = 0;
   if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); return; }
   String nm;                                       // percent-encode the API name
@@ -22379,6 +22544,12 @@ void App::ctxTsSave(uint32_t lastQ, uint32_t qHash, uint32_t lastRef) {
   f.close();
 }
 
+bool App::ctsRowsAlloc() {
+  if (!ctsRows) ctsRows = new (std::nothrow) CtRow[CTS_MAX];
+  return ctsRows != nullptr;
+}
+void App::ctsRowsFree() { delete[] ctsRows; ctsRows = nullptr; ctsN = 0; }
+
 void App::ctSearchRun() {
   String q = ctsBuf; q.trim();
   if (!q.length()) { setStatus("Type a name or NORAD number"); return; }
@@ -22421,6 +22592,7 @@ void App::ctSearchRun() {
     ctxTsSave(timeIsSet() ? (uint32_t)nowUtc() : 0, h, lastRef);
   }
 
+  if (!ctsRowsAlloc()) { ctsN = 0; setStatus("Out of memory"); return; }
   CtParseCtx ctx{ ctsRows, 0, CTS_MAX };
   ctsTotal = SatDb::streamGpFileEntries(CTQ_PATH, ctRowSink, &ctx);
   ctsN = ctx.n; ctsSel = 0; ctsScroll = 0;
@@ -25000,7 +25172,9 @@ namespace {
         if (!satselCb) { err = "SATSEL unavailable"; return -1; }
         if (--satselLeft < 0) { err = "SATSEL limit (2000/run)"; return -1; }
         double o[13];
-        if (!satselCb(host, (int)iv, o)) { err = "bad sat index"; return -1; }
+        if (!satselCb(host, (int)iv, o)) { err = "bad sat index"; return -1; }  // bad INDEX only
+        if (o[0] <= -998.0) { sys.satOk = false; return -1; }   // valid index, no fix/dead TLE:
+                                                                //   SATOK=0 so the program branches
         sys.satAz = o[0]; sys.satEl = o[1]; sys.satRng = o[2]; sys.satRR = o[3];
         sys.satLat = o[4]; sys.satLon = o[5]; sys.satAlt = o[6]; sys.satSun = o[7];
         sys.satInc = o[8]; sys.satEcc = o[9]; sys.satRaan = o[10]; sys.satMM = o[11];
@@ -25135,13 +25309,20 @@ namespace {
 
 bool App::basHookSatsel(void* self, int idx, double out[13]) {
   App& a = *static_cast<App*>(self);
-  if (idx < 0 || idx >= a.db.count()) return false;
+  // Only a genuinely out-of-range index is a program error (halt). A valid index whose
+  // satellite just can't be propagated right now -- no position/time fix, or a decayed /
+  // stale TLE that SGP4 rejects -- is a SOFT failure: return true but flag it with an az
+  // sentinel (-999) so the interpreter sets SATOK=0 and the program can skip it. This is
+  // what lets a catalogue scan (FOR I=0 TO NSAT-1 : SATSEL I : IF SATOK=0 ...) survive a
+  // dead bird instead of aborting on it.
+  if (idx < 0 || idx >= a.db.count()) return false;                 // real error -> halt
+  out[0] = -999.0;                                                  // default: soft-fail sentinel
   Observer o = a.loc.obs();
-  if (!o.valid || !timeIsSet()) return false;
+  if (!o.valid || !timeIsSet()) return true;                        // no fix -> SATOK=0, continue
   SatEntry& e = a.db.at(idx);
   float az, el, rg, rr, la, lo, al; bool su;
   a.pred.setSite(o);
-  if (!a.pred.lookFor(e, a.nowUtc(), az, el, rg, rr, la, lo, al, su)) return false;
+  if (!a.pred.lookFor(e, a.nowUtc(), az, el, rg, rr, la, lo, al, su)) return true;  // dead TLE -> SATOK=0
   out[0] = az; out[1] = el; out[2] = rg; out[3] = rr;
   out[4] = la; out[5] = lo; out[6] = al; out[7] = su ? 1 : 0;
   out[8] = e.incl; out[9] = e.ecc; out[10] = e.raan; out[11] = e.meanMotion;
@@ -25207,7 +25388,7 @@ void App::basHookGfx(void* self, int op, double pa, double pb, double pc, double
             canvas.setCursor((int)pa, (int)pb);
             if (s) canvas.print(s);
             break;
-    case 5: canvas.pushSprite(0, 0); a.basGfxHold = true; break;                // SHOW
+    case 5: canvas.pushSprite(0, 0); a.basGfxHold = true; a.basGfxHoldMs = millis(); break;  // SHOW
   }
 }
 
@@ -25413,6 +25594,14 @@ void App::basicFree() {
   basicOut.~String(); new (static_cast<void*>(&basicOut)) String();
   basicErr.~String(); new (static_cast<void*>(&basicErr)) String();
   basicOutScroll = 0;
+  // The program text is normally KEPT so leaving BASIC to check something and coming back
+  // doesn't lose it. But if there's no program (empty buffer, e.g. after Fn+n), there's
+  // nothing to preserve -- release basicBuf's capacity too so it doesn't hold ~KBs of stale
+  // heap for the rest of the session. Same destruct+placement-new: `= ""` frees nothing.
+  if (basicBuf.length() == 0) {
+    basicBuf.~String();  new (static_cast<void*>(&basicBuf))  String();
+    basicName.~String(); new (static_cast<void*>(&basicName)) String();
+  }
 }
 
 // ---- Generic tool-result printing ----------------------------------------------
@@ -25514,6 +25703,84 @@ bool App::basicLoad(const char* base) {
   return true;
 }
 
+// ---- Fn+l file browser (SCR_BASICFILES) -----------------------------------
+// Populate basFileList with the *.bas base names under /CardSat/basic, so the
+// operator can pick a program from a list instead of typing its name.
+void App::basFilesScan() {
+  basFileN = 0; basFileSel = 0; basFileTop = 0; basFileConfirmDel = false;
+  if (!basFileList) basFileList = new (std::nothrow) char[BAS_FILES_MAX][20];
+  if (!basFileList) { setStatus("Out of memory"); return; }   // basFileN stays 0 -> safe
+  fs::FS& fsx = Store::fs();
+  if (!fsx.exists(BASIC_DIR)) return;
+  File d = fsx.open(BASIC_DIR);
+  if (!d || !d.isDirectory()) return;
+  for (File f = d.openNextFile(); f && basFileN < BAS_FILES_MAX; f = d.openNextFile()) {
+    if (f.isDirectory()) continue;
+    const char* nm = f.name();
+    const char* base = strrchr(nm, '/'); base = base ? base + 1 : nm;
+    int len = (int)strlen(base);
+    if (len < 5 || strcasecmp(base + len - 4, ".bas") != 0) continue;   // *.bas only
+    int keep = len - 4; if (keep > 19) keep = 19;
+    strncpy(basFileList[basFileN], base, keep); basFileList[basFileN][keep] = 0;
+    basFileN++;
+  }
+}
+
+// Release the browser list. Called from the screen-transition hook in loop() when
+// SCR_BASICFILES is left, so no exit path can leak the ~1.3 KB. basFileN -> 0 keeps
+// draw/key from touching the freed block if either runs before the next scan.
+void App::basFilesFree() {
+  delete[] basFileList; basFileList = nullptr;
+  basFileN = 0; basFileSel = 0; basFileTop = 0; basFileConfirmDel = false;
+}
+
+void App::drawBasicFiles() {
+  header("Load BASIC program");
+  canvas.setTextSize(1);
+  if (basFileN == 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(10, 40); canvas.print("No saved programs.");
+    canvas.setCursor(10, 52); canvas.print("Write one, then Fn+s to save.");
+    footer("` back");
+    return;
+  }
+  const int VIS = 9, LH = 11;
+  if (basFileSel < basFileTop) basFileTop = basFileSel;
+  if (basFileSel >= basFileTop + VIS) basFileTop = basFileSel - VIS + 1;
+  for (int r = 0; r < VIS && basFileTop + r < basFileN; ++r) {
+    int i = basFileTop + r; int y = 20 + r * LH;
+    if (i == basFileSel) { canvas.fillRect(0, y - 1, 240, LH, CL_SELBG);
+                           canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else                   canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, y); canvas.print(basFileList[i]);
+  }
+  if (basFileTop > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 20); canvas.print("^"); }
+  if (basFileTop + VIS < basFileN) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 108); canvas.print("v"); }
+  if (basFileConfirmDel) footer("d again=delete  other=cancel");
+  else                   footer(";/. pick  ENTER load  d delete  ` back");
+}
+
+void App::keyBasicFiles(char c, bool enter, bool back) {
+  if (isBack(c, back)) { basFileConfirmDel = false; screen = SCR_BASIC; lastDrawMs = 0; return; }
+  if (basFileN == 0) return;
+  if (basFileConfirmDel) {                       // a delete is armed: 'd' confirms, anything else cancels
+    if (c == 'd') {
+      String path = String(BASIC_DIR) + "/" + basFileList[basFileSel] + ".bas";
+      if (Store::fs().remove(path)) setStatus(String("Deleted ") + basFileList[basFileSel]);
+      else setStatus("Delete failed");
+      basFilesScan();
+    } else { basFileConfirmDel = false; setStatus("Delete cancelled"); }
+    lastDrawMs = 0; return;
+  }
+  if (enter) {                                   // load the selected program, back to editor
+    basicLoad(basFileList[basFileSel]);          // sets "Loaded <name>"
+    screen = SCR_BASIC; lastDrawMs = 0; return;
+  }
+  if (c == 'd') { basFileConfirmDel = true; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (basFileSel > 0) basFileSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (basFileSel < basFileN - 1) basFileSel++; lastDrawMs = 0; return; }
+}
+
 void App::drawBasic() {
   header("Tiny BASIC");
   canvas.setTextSize(1);
@@ -25544,7 +25811,7 @@ void App::drawBasic() {
       canvas.fillRect(cx, y, 2, 8, CL_CYAN);
     }
   }
-  footer("Fn+r run  Fn+s save  Fn+h help  ` exit");
+  footer("Fn+r run  s save  l load  n new  h help  ` exit");
 }
 
 void App::keyBasic(char c, bool enter, bool back) {
@@ -25562,9 +25829,11 @@ void App::keyBasic(char c, bool enter, bool back) {
         screen = SCR_EDIT; lastDrawMs = 0; return; }
       basicSave(); lastDrawMs = 0; return;
     }
-    if (c == 'l') { editTarget = 782; editTitle = "Load program name"; editBuf = "";
-      screen = SCR_EDIT; lastDrawMs = 0; return; }
-    if (c == 'n') { basicBuf = ""; basicName = ""; basicCur = 0; basicTopLine = 0;
+    if (c == 'l') { basFilesScan(); screen = SCR_BASICFILES; lastDrawMs = 0; return; }  // pick from a list
+    if (c == 'n') {                          // NEW: clear AND release the buffers' capacity
+      basicBuf.~String();  new (static_cast<void*>(&basicBuf))  String();
+      basicName.~String(); new (static_cast<void*>(&basicName)) String();
+      basicCur = 0; basicTopLine = 0;
       setStatus("New program"); lastDrawMs = 0; return; }
     // cursor movement (matches the note editor): ,// left/right, ;/. up/down a line.
     if (c == ',') { if (basicCur > 0) basicCur--; lastDrawMs = 0; return; }
@@ -25628,7 +25897,13 @@ void App::drawBasicRun() {
 
 void App::keyBasicRun(char c, bool enter, bool back) {
   (void)enter;
-  if (basGfxHold) { basGfxHold = false; lastDrawMs = 0; return; }   // any key: to console
+  if (basGfxHold) {
+    // Swallow the launch key: Fn+r runs synchronously, so the key is often still down (or
+    // its release/auto-repeat lands) on the very next scan after SHOW. Ignore keys for a
+    // short settle window; a genuine press after that dismisses the held frame to the console.
+    if (millis() - basGfxHoldMs < 450) return;
+    basGfxHold = false; lastDrawMs = 0; return;
+  }
   if (isBack(c, back)) { screen = SCR_BASIC; lastDrawMs = 0; return; }
   if (c == 'p') { printReport(PR_BASICOUT); return; }   // p: print the output
   if (isUp(c))   { if (--basicOutScroll < 0) basicOutScroll = 0; lastDrawMs = 0; return; }
@@ -33181,8 +33456,26 @@ void App::drawPolarArc(int cx, int cy, int R, const float* az, const float* el, 
 
 // Sample the current pass (or the next one, if not currently up) for the live
 // polar arc. Rebuilt on entry and whenever the cached pass has ended.
+// Allocate the polar-arc sample buffers on demand. Returns false (and leaves the path
+// invalid) if the heap can't give us the ~0.4 KB. Called by both builders.
+bool App::polarAlloc() {
+  if (!polarAz) polarAz = new (std::nothrow) float[POLAR_PTS];
+  if (!polarEl) polarEl = new (std::nothrow) float[POLAR_PTS];
+  if (!polarAz || !polarEl) { polarFree(); return false; }
+  return true;
+}
+
+// Release the polar-arc buffers. Called from the screen-transition hook in loop() when
+// SCR_POLAR is left. Forces polarPathValid false so drawPolar can't read the freed block.
+void App::polarFree() {
+  delete[] polarAz; polarAz = nullptr;
+  delete[] polarEl; polarEl = nullptr;
+  polarPathValid = false;
+}
+
 void App::buildPolarPath() {
   polarPathValid = false;
+  if (!polarAlloc()) return;
   SatEntry* s = activeSat();
   if (!s || !timeIsSet()) return;
   pred.setSite(loc.obs());
@@ -33207,6 +33500,7 @@ void App::buildPolarPath() {
 // next live pass. Sets activeSat's predictor and samples the given AOS..LOS window.
 void App::buildPolarForPass(uint32_t norad, time_t aos, time_t los) {
   polarPathValid = false;
+  if (!polarAlloc()) return;
   if (!timeIsSet()) return;
   int dbIdx = db.indexOfNorad(norad);
   if (dbIdx < 0) return;
@@ -34268,10 +34562,17 @@ void App::drawSettings() {
     else                       footer(",/ change  ENT edit  ` back"); }
 }
 
+bool App::wifiApAlloc() {
+  if (!wifiAp) wifiAp = new (std::nothrow) WifiAp[MAX_WIFI_AP];
+  return wifiAp != nullptr;
+}
+void App::wifiApFree() { delete[] wifiAp; wifiAp = nullptr; wifiApCount = 0; }
+
 void App::startWifiScan(bool forSecond) {
   wifiScan2 = forSecond;
   setStatus("Scanning WiFi...");
   draw();                                   // show the notice before the blocking scan
+  if (!wifiApAlloc()) { wifiApCount = 0; setStatus("Out of memory"); return; }
   wifiApCount = net.scanWifi(wifiAp, MAX_WIFI_AP);
   wifiSel = 0;
   screen = SCR_WIFISCAN;

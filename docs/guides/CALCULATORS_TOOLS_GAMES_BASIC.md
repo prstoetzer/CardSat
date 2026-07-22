@@ -337,7 +337,12 @@ coordinates are screen pixels.
 Each of these samples the live state at the moment it's called:
 
 - **`SATSEL i`** — select catalog satellite *i* and run SGP4 for it (host-verified
-  accurate). The read-outs below then refer to it.
+  accurate). The read-outs below then refer to it. A *bad index* (`i` outside
+  `0 .. NSAT-1`) stops the program, but a valid index whose satellite can't be
+  propagated right now — no position/time fix, or a decayed / stale element set that
+  SGP4 rejects — is not fatal: it sets `SATOK` to 0 and the program keeps running, so a
+  catalogue scan can skip dead birds. The idiom is `SATSEL I : IF SATOK = 0 THEN GOTO
+  <skip>` before reading any `SAT*` value.
 - **`TXSEL i`** — select a transponder.
 - **Selected-satellite position:** `SATAZ`, `SATEL` (az/el, degrees), `SATLAT`,
   `SATLON` (sub-point), `SATRANGE` (km), `SATRR` (range rate, km/s — feed it to the

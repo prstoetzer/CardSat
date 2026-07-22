@@ -1,17 +1,17 @@
 # CardSat — precompiled firmware (M5Cardputer ADV)
 
 Prebuilt binaries for the **M5Stack Cardputer ADV** (ESP32-S3FN8, 8 MB flash, no PSRAM),
-firmware **v0.9.62 (WIP)**. Flash these if you just want to run this build without
+firmware **v0.9.63**. Flash these if you just want to run this build without
 compiling. Source is the rest of this repo; `CardSat.ino` is the monolithic sketch.
 
 Built with: arduino-cli + `esp32:esp32@3.2.1`, FQBN
 `esp32:esp32:esp32s3:PartitionScheme=huge_app,CDCOnBoot=cdc`, M5Cardputer library.
 No `build.extra_flags` (that would break the HWCDC serial console). Flash usage at
-build time: 2,891,378 bytes (91%); static RAM 157,432 bytes (48%).
+build time: 2,896,726 bytes (92%); static RAM 156,944 bytes (47%).
 
 Checksums (MD5):
-- `CardSat-merged.bin`  5497a9d11cb07d321ba2e440068be0de
-- `CardSat-app.bin`     4db550b3ad8db31f0c050370be013795
+- `CardSat-merged.bin`  ee111bdb56a9e97952e818451b435643
+- `CardSat-app.bin`     377175a82cfc1873f6d259c85c93966d
 
 > This is a **work-in-progress** build. The dual-radio companion path, the Grove
 > rigctl link, the `<FULLu>` uplink-knob tune mode, **and the transverter/microwave

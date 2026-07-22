@@ -183,15 +183,14 @@ bool LoraRadio::sendRaw(const uint8_t* data, size_t len) {
   rfSwitchTx();
   int st = g_radio->transmit((uint8_t*)data, len);  // blocking
   rfSwitchRx();
-  listen();
-  // DIO1 fires on BOTH RX-done and TX-done into the same g_irqFired flag. The
-  // transmit() we just did raised TX-done, so the flag is now set even though no
-  // packet was received. Clear it AFTER re-arming receive, or the next poll() would
-  // treat this TX-done as an incoming packet and read stale bytes out of the radio's
-  // buffer -- which surfaced as our own just-sent message "echoing" back (often with
-  // leftover text from a previous message appended). startReceive() above also clears
-  // the SX1262's hardware IRQ status; this clears our software latch to match.
+  // DIO1 fires on BOTH RX-done and TX-done into the same g_irqFired flag. The transmit()
+  // we just did raised TX-done, so the flag is now set even though no packet was received.
+  // M21: clear the software latch BEFORE re-arming receive. If we rearmed first and cleared
+  // afterwards (the old order), a real packet arriving in that window would set the flag and
+  // then be erased by the clear -- a dropped RX. Clearing first discards only the TX-done;
+  // any genuine RX after startReceive() then sets the flag and is kept.
   g_irqFired = false;
+  listen();             // startReceive(): also clears the SX1262's hardware IRQ status
   Store::remount();     // restore the SD bus after RadioLib reconfigured SPI
   return (st == RADIOLIB_ERR_NONE);
 }

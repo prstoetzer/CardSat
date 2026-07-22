@@ -65,7 +65,7 @@ host runs in **run mode as well as config mode**, CardSat can enumerate
 (`\csdr_devices`) and reassign radios live over Grove without forcing the Stick into
 AP/portal mode.
 
-**What's left is only the CardSat side** (not built here): a Cardputer "Dual-Rig
+**The CardSat side is implemented** (since v0.9.62): a Cardputer "Dual-Rig
 setup" screen that (1) sends `\csdr_get` and parses the JSON to show current
 assignments and the device list, (2) lets the operator pick models/addresses/bauds,
 and (3) sends `\csdr_set … save=1`. Over Grove this reuses the Grove rigctl transport

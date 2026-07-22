@@ -25,6 +25,7 @@ class Location {
 public:
   // Start a NMEA GPS on the given UART/pins (LoRa+GPS cap or external module).
   void beginGps(int uartNum, int rxPin, int txPin, uint32_t baud);
+  void endGps();   // H18: release the GPS UART (end+delete); call before restart / on disable
   // Feed bytes from the GPS; call frequently from loop(). Updates obs if a fix
   // is available. Returns true when a new fix was just parsed.
   bool pollGps();

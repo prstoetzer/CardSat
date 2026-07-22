@@ -461,7 +461,10 @@ int Predictor::mutualWindows(time_t from, const Observer& dx, float minEl,
   // My passes bound the search (a mutual window can only occur while I can see
   // the bird), so scan inside each of my passes out to the day horizon. Heap-
   // allocate the pass buffer: 10 days of a busy LEO is too large for the stack.
-  PassPredict* mine = new PassPredict[MUTUAL_PASS_SCAN];
+  // M31: nothrow + null-check -- on low contiguous heap, degrade to "no windows"
+  // rather than dereferencing a null pointer.
+  PassPredict* mine = new (std::nothrow) PassPredict[MUTUAL_PASS_SCAN];
+  if (!mine) return 0;
   int np = predictPasses(from, minEl, mine, MUTUAL_PASS_SCAN,
                          from + (time_t)MUTUAL_HORIZON_DAYS * 86400);
 

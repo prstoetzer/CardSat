@@ -132,6 +132,14 @@ static RigMode modeFromToken(const String& tok) {
     return MODE_DATA;
   return MODE_USB;
 }
+// M3: whether a mode token is one we actually recognize, so the rigctl handler can reject an
+// unknown mode with RPRT -1 rather than silently coercing it to USB.
+static bool modeTokenValid(const String& tok) {
+  String t = tok; t.trim(); t.toUpperCase();
+  return t == "LSB" || t == "USB" || t == "CW" || t == "CWR" || t == "FM" || t == "FMN" ||
+         t == "WFM" || t == "AM" || t == "PKTUSB" || t == "PKTLSB" || t == "PKTFM" ||
+         t == "DATA" || t == "USB-D" || t == "RTTY";
+}
 static const char* modeToken(RigMode m) {
   switch (m) {
     case MODE_LSB: return "LSB"; case MODE_USB: return "USB";
@@ -212,7 +220,7 @@ static RadioPort* portForAddr(uint8_t a) {
   return nullptr;
 }
 
-static bool gTrace = true;
+static bool gTrace = false;   // M14: CAT byte tracing off by default (timing/heap); runtime-settable
 static void traceCat(const char* tag, const RadioPort& p, const uint8_t* d, size_t n) {
   if (!gTrace) return;
   Serial.printf("[%s %s] ", p.legName, tag);
@@ -272,11 +280,35 @@ static bool civSetMode(RadioPort& p, RigMode m) {
   return catSend(p, fr, sizeof(fr));
 }
 static bool civReadFreq(RadioPort& p, uint64_t& hz) {
+  // H8: if a set just happened, let its echo/ACK settle before we clear RX and issue the
+  // read -- otherwise a late frame from the set can be flushed or mistaken for the read's
+  // reply. A few ms plus a baud-derived frame time is enough (bounded so we never stall).
+  if (p.lastSetMs) {
+    uint32_t frameMs = p.baud ? (uint32_t)((16UL * 10UL * 1000UL) / p.baud) + 3 : 8;
+    if (frameMs > 40) frameMs = 40;
+    while ((millis() - p.lastSetMs) < frameMs) delay(1);
+  }
   p.rx.clear();
   uint8_t q[6] = { 0xFE,0xFE, p.civAddr, 0xE0, 0x03, 0xFD };
   if (!catSend(p, q, sizeof(q))) return false;
-  uint8_t buf[64];
-  size_t n = catDrain(p, buf, sizeof(buf), 180, 0xFD);
+  // H6: a CI-V interface commonly ECHOES the query before the radio's reply, so both frames
+  // share the same 0xFD terminator. Draining only up to the first 0xFD returns the echo and
+  // misses the answer. Collect bytes until a short quiet interval (or a hard deadline), then
+  // scan ALL complete frames for the read-frequency reply, ignoring the transmitted echo.
+  uint8_t buf[96]; size_t n = 0;
+  uint32_t t0 = millis(), lastRx = millis();
+  while ((millis() - t0) < 220 && n < sizeof(buf)) {
+    int c = p.rx.pop();
+    if (c < 0) {
+      if (n > 0 && (millis() - lastRx) > 20) break;   // quiet after some data -> done
+      delay(1); continue;
+    }
+    buf[n++] = (uint8_t)c;
+    lastRx = millis();
+  }
+  if (n) traceCat("RX", p, buf, n);
+  // Scan for FE FE E0 <addr> 03 <5 bytes> FD. The query echo is FE FE <addr> E0 03 FD
+  // (to-radio direction, and only 6 bytes), so it won't match this 11-byte reply pattern.
   for (size_t i = 0; i + 11 <= n; i++) {
     if (buf[i]==0xFE && buf[i+1]==0xFE && buf[i+2]==0xE0 &&
         buf[i+3]==p.civAddr && buf[i+4]==0x03 && buf[i+10]==0xFD) {
@@ -420,6 +452,7 @@ static bool radioSetFreq(RadioPort& p, uint64_t hz) {
     case CAT_KENWOOD_HT: ok = kwHtSetFreq(p, hz); break;
   }
   if (ok) p.lastFreq = hz;
+  if (ok) p.lastSetMs = millis();   // H8: mark the set so a following read can let it settle
   return ok;
 }
 static bool radioSetMode(RadioPort& p, RigMode m) {
@@ -455,6 +488,24 @@ static uint64_t radioReadFreq(RadioPort& p) {
     if (ok) { p.lastFreq = hz; return hz; }
   }
   return p.lastFreq;
+}
+
+// H7: like radioReadFreq() but reports whether the LIVE read actually succeeded, so the
+// rigctl 'f'/'i' handlers can return an error instead of a believable stale setpoint. This
+// is what CardSat's <FULL>/<FULLu> knob-following relies on to detect a dial that moved --
+// a cached value read back forever would make a dead/powered-off radio look responsive.
+static bool radioReadFreqChecked(RadioPort& p, uint64_t& out) {
+  if (p.bound && p.online) {
+    uint64_t hz = 0; bool ok = false;
+    switch (p.prof->family) {
+      case CAT_CIV:        ok = civReadFreq(p, hz);  break;
+      case CAT_YAESU_BIN:  ok = yBinReadFreq(p, hz); break;
+      case CAT_YAESU_TXT:  ok = yTxtReadFreq(p, hz); break;
+      case CAT_KENWOOD_HT: ok = kwHtReadFreq(p, hz); break;
+    }
+    if (ok) { p.lastFreq = hz; out = hz; return true; }
+  }
+  return false;
 }
 
 // =============================================================================
@@ -503,6 +554,33 @@ static void bindDevice(const EspUsbHostDeviceInfo& info) {
   tryOrder(gUp);
 }
 
+// H3 helper: bind an already-enumerated device (from gSeen) to a leg, using the same
+// serial-pin-first / slot-order-second preference as bindDevice(). Used by
+// reconfigureAndRebind() after a live config change.
+static void bindSeen(const SeenDevice& d) {
+  const char* ser = d.serial[0] ? d.serial : "";
+  auto tryPin = [&](RadioPort& p) -> bool {
+    if (!p.assigned() || p.bound) return false;
+    if (p.leg->usbSerial[0] && ser[0] && strcmp(p.leg->usbSerial, ser) == 0) {
+      p.bound = true; p.addr = d.address;
+      gUsb.setSerialBaudRate(p.baud, p.addr);
+      Serial.printf("[USB] re-pinned %s (serial %s) -> %s\n", p.prof->name, ser, p.legName);
+      return true;
+    }
+    return false;
+  };
+  if (tryPin(gDown) || tryPin(gUp)) return;
+  auto tryOrder = [&](RadioPort& p) -> bool {
+    if (!p.assigned() || p.bound || p.leg->usbSerial[0]) return false;
+    p.bound = true; p.addr = d.address;
+    gUsb.setSerialBaudRate(p.baud, p.addr);
+    Serial.printf("[USB] re-bound %s (addr %u) -> %s\n", p.prof->name, d.address, p.legName);
+    return true;
+  };
+  if (tryOrder(gDown)) return;
+  tryOrder(gUp);
+}
+
 static void onUsbConnected(const EspUsbHostDeviceInfo& info) {
   Serial.printf("[USB] up: addr %u VID %04X PID %04X hub=%d '%s' ser '%s'\n",
                 info.address, info.vid, info.pid, info.isHub,
@@ -523,6 +601,29 @@ static void onUsbSerialData(const EspUsbHostSerialData& d) {
 static void pollRadioOnline() {
   if (gDown.bound) gDown.online = gUsb.serialReady(gDown.addr);
   if (gUp.bound)   gUp.online   = gUsb.serialReady(gUp.addr);
+}
+
+// H3: atomically apply a live config change and rebind USB radios. A plain applyLegConfig()
+// only updates profile/baud/civ pointers -- it leaves the old radios bound to their old legs,
+// never re-runs setSerialBaudRate for a changed baud, and never drains stale RX. That let a
+// live \csdr_set (save=1 without reboot=1) swap serials or change baud while the physical
+// radios stayed on their previous legs. This clears both ports, re-resolves the effective
+// profiles, and rebinds every still-present device against the new serial pins / slot order.
+static void bindSeen(const SeenDevice& d);
+static void reconfigureAndRebind() {
+  // 1) drop both bindings and clear per-port runtime state.
+  for (RadioPort* p : { &gDown, &gUp }) {
+    p->bound = false; p->online = false; p->addr = ESP_USB_HOST_ANY_ADDRESS;
+    p->rx.clear(); p->lastFreq = 0;
+  }
+  // 2) re-resolve profile / baud / CI-V address from the (possibly changed) config.
+  applyLegConfig();
+  // 3) rebind against the live device registry: serial-pinned legs first (handled inside
+  //    bindSeen via the same preference order), then enumeration/slot order.
+  for (const SeenDevice& d : gSeen) {
+    if (!d.used || d.isHub) continue;
+    bindSeen(d);
+  }
 }
 
 // =============================================================================
@@ -580,7 +681,7 @@ static void handleRigctlLine(RigctlSession& s, const String& lineIn) {
       else if (k == "reboot") doReboot = v.toInt() != 0;
       else applyConfigKV(k, v);
     }
-    applyLegConfig();
+    reconfigureAndRebind();            // H3: apply live + rebind USB radios atomically
     if (doSave) saveConfig();
     io.print("RPRT 0\n");
     if (doReboot) { delay(200); ESP.restart(); }
@@ -592,17 +693,27 @@ static void handleRigctlLine(RigctlSession& s, const String& lineIn) {
   arg.trim();
 
   switch (c) {
-    case 'F': { uint64_t hz = strtoull(arg.c_str(), nullptr, 10);
+    case 'F': { char* end = nullptr; uint64_t hz = strtoull(arg.c_str(), &end, 10);
+                // M3: reject an unparseable / zero frequency instead of setting 0 Hz.
+                if (!arg.length() || hz == 0) { rprt(-1); break; }
                 rprt(radioSetFreq(s.cur(), hz) ? 0 : -1); } break;
-    case 'f': io.printf("%llu\n", (unsigned long long)radioReadFreq(s.cur())); break;
-    case 'I': { uint64_t hz = strtoull(arg.c_str(), nullptr, 10);
+    case 'f': { uint64_t hz = 0;
+                // H7: report a real read failure (RPRT -1) rather than printing a stale cache.
+                if (radioReadFreqChecked(s.cur(), hz)) io.printf("%llu\n", (unsigned long long)hz);
+                else rprt(-1); } break;
+    case 'I': { char* end = nullptr; uint64_t hz = strtoull(arg.c_str(), &end, 10);
+                if (!arg.length() || hz == 0) { rprt(-1); break; }
                 rprt(radioSetFreq(gUp, hz) ? 0 : -1); } break;
-    case 'i': io.printf("%llu\n", (unsigned long long)radioReadFreq(gUp)); break;
+    case 'i': { uint64_t hz = 0;
+                if (radioReadFreqChecked(gUp, hz)) io.printf("%llu\n", (unsigned long long)hz);
+                else rprt(-1); } break;
 
     case 'M': { String tok = arg; int sp = tok.indexOf(' '); if (sp>=0) tok = tok.substring(0,sp);
+                if (!modeTokenValid(tok)) { rprt(-1); break; }   // M3: reject unknown mode
                 rprt(radioSetMode(s.cur(), modeFromToken(tok)) ? 0 : -1); } break;
     case 'm': { RigMode md = s.cur().lastMode; io.printf("%s\n%ld\n", modeToken(md), modePassband(md)); } break;
     case 'X': { String tok = arg; int sp = tok.indexOf(' '); if (sp>=0) tok = tok.substring(0,sp);
+                if (!modeTokenValid(tok)) { rprt(-1); break; }   // M3: reject unknown mode
                 rprt(radioSetMode(gUp, modeFromToken(tok)) ? 0 : -1); } break;
     case 'x': io.printf("%s\n%ld\n", modeToken(gUp.lastMode), modePassband(gUp.lastMode)); break;
 
@@ -625,11 +736,19 @@ static void handleRigctlLine(RigctlSession& s, const String& lineIn) {
 static void pumpSession(RigctlSession& s) {
   if (!s.io) return;
   int guard = 0;
-  while (s.io->available() && guard++ < 512) {
+  while (s.io->available() && guard++ < 1024) {
     char ch = (char)s.io->read();
     if (ch == '\r') continue;
-    if (ch == '\n') { handleRigctlLine(s, s.line); s.line = ""; }
-    else if (s.line.length() < 128) s.line += ch;
+    if (ch == '\n') {
+      // M4: if the line overflowed, DON'T apply a truncated (possibly valid-prefix) command --
+      // report an error and drop it. A full \csdr_set with two serials + credentials can be
+      // long, so the cap is generous; anything past it is treated as a framing problem.
+      if (s.overflow) { if (s.io) s.io->print("RPRT -1\n"); s.overflow = false; }
+      else handleRigctlLine(s, s.line);
+      s.line = "";
+    }
+    else if (s.line.length() < 250) s.line += ch;
+    else s.overflow = true;                     // remember we dropped bytes on this line
   }
 }
 
@@ -643,7 +762,9 @@ static void serviceTcp() {
   if (!gTcpClient || !gTcpClient.connected()) {
     WiFiClient nc = gTcp.available();
     if (nc) { gTcpClient = nc; gTcpClient.setNoDelay(true);
-              gTcpSess.io = &gTcpClient; gTcpSess.line = ""; }
+              // M6: reset the full session for a new client, not just the line buffer, so a
+              // fresh client doesn't inherit the previous one's selected VFO / wantClose.
+              gTcpSess.io = &gTcpClient; gTcpSess.line = ""; gTcpSess.vfo = 0; gTcpSess.wantClose = false; gTcpSess.overflow = false; }
   }
   if (gTcpClient && gTcpClient.connected()) {
     gTcpSess.io = &gTcpClient; pumpSession(gTcpSess);
@@ -666,7 +787,29 @@ static void serviceGrove() {
 static WebServer gWeb(80);
 static DNSServer gDns;
 static bool      gConfigMode = false;
+static bool      gCfgBtnReleased = false;   // H5: Button A must be released before config-mode reboot arms
 static String    gApSsid;
+
+// M5: escape a string for embedding in JSON. USB product/serial and network strings can
+// contain quotes, backslashes, or control characters that would otherwise produce invalid
+// JSON and confuse CardSat's object-scanning parser.
+static String jsonEscape(const char* s) {
+  String o; if (!s) return o;
+  for (const char* p = s; *p; ++p) {
+    unsigned char c = (unsigned char)*p;
+    switch (c) {
+      case '"':  o += "\\\""; break;
+      case '\\': o += "\\\\"; break;
+      case '\n': o += "\\n";  break;
+      case '\r': o += "\\r";  break;
+      case '\t': o += "\\t";  break;
+      default:
+        if (c < 0x20) { char b[7]; snprintf(b, sizeof(b), "\\u%04x", c); o += b; }
+        else o += (char)c;
+    }
+  }
+  return o;
+}
 
 // Build the model <option> list (shared by the web form and GET /api/models).
 static String modelOptionsJson() {
@@ -690,8 +833,8 @@ static String devicesJson() {
     j += "{\"addr\":"; j += d.address;
     char vp[16]; snprintf(vp, sizeof(vp), "%04X:%04X", d.vid, d.pid);
     j += ",\"vidpid\":\""; j += vp;
-    j += "\",\"product\":\""; j += d.product;
-    j += "\",\"serial\":\""; j += d.serial; j += "\"}";
+    j += "\",\"product\":\""; j += jsonEscape(d.product);   // M5: escape user-controlled strings
+    j += "\",\"serial\":\""; j += jsonEscape(d.serial); j += "\"}";
   }
   j += "]";
   return j;
@@ -701,7 +844,7 @@ static String legJson(const LegConfig& L) {
   j += "\"model\":"; j += (L.model == 0xFF ? -1 : (int)L.model);
   j += ",\"civ\":"; j += L.civAddr;
   j += ",\"baud\":"; j += L.baud;
-  j += ",\"serial\":\""; j += L.usbSerial; j += "\"}";
+  j += ",\"serial\":\""; j += jsonEscape(L.usbSerial); j += "\"}";   // M5: escape
   return j;
 }
 static String statusJson() {
@@ -711,6 +854,10 @@ static String statusJson() {
   j += "\"sta_ip\":\""; j += (WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString() : String("")); j += "\",";
   j += "\"tcpPort\":"; j += gCfg.tcpPort; j += ",";
   j += "\"wifiOn\":"; j += gCfg.wifiOn ? "true":"false"; j += ",";
+  // H1: surface the stored SSID (never the password) so the portal can show what's set and
+  // leave the field blank = unchanged. Password is intentionally never returned.
+  j += "\"ssid\":\""; j += jsonEscape(gCfg.ssid); j += "\",";
+  j += "\"hasPass\":"; j += (gCfg.pass[0] ? "true":"false"); j += ",";
   j += "\"groveBaud\":"; j += gCfg.groveBaud; j += ",";
   j += "\"downlink\":"; j += legJson(gCfg.downlink); j += ",";
   j += "\"uplink\":"; j += legJson(gCfg.uplink); j += ",";
@@ -739,18 +886,41 @@ static void applyLegArgs(LegConfig& L, const String& pfx) {
 // recognized. This is the one place config keys are defined; both the HTTP handler
 // and the rigctl \csdr_set escape funnel through it.
 static bool applyConfigKV(const String& key, const String& val) {
+  // H11: the \csdr_set escape splits tokens on spaces, so CardSat percent-encodes a serial
+  // containing a space (or %). Decode it here so the pin round-trips intact. (HTTP form args
+  // are already decoded by the web server, so this only matters for the serial token.)
+  auto pctDecode = [](const String& in) -> String {
+    String o; for (int i = 0; i < (int)in.length(); ++i) {
+      if (in[i] == '%' && i + 2 < (int)in.length()) {
+        auto hex = [](char c) -> int {
+          if (c >= '0' && c <= '9') return c - '0';
+          if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+          if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+          return -1;
+        };
+        int hi = hex(in[i+1]), lo = hex(in[i+2]);
+        if (hi >= 0 && lo >= 0) { o += (char)((hi << 4) | lo); i += 2; continue; }
+      }
+      o += in[i];
+    }
+    return o;
+  };
   auto legKV = [&](LegConfig& L, const char* suffix) -> bool {
     if (key.endsWith(suffix)) {
       String s = suffix;
       if (s == "_model")  { int m = val.toInt(); L.model = (m < 0 || m >= RIG_MODEL_COUNT) ? 0xFF : (uint8_t)m; return true; }
       if (s == "_civ")    { L.civAddr = (uint8_t)strtol(val.c_str(), nullptr, 16); return true; }
       if (s == "_baud")   { L.baud = (uint32_t)val.toInt(); return true; }
-      if (s == "_serial") { strncpy(L.usbSerial, val.c_str(), sizeof(L.usbSerial)-1); L.usbSerial[sizeof(L.usbSerial)-1]=0; return true; }
+      if (s == "_serial") { String d = pctDecode(val); strncpy(L.usbSerial, d.c_str(), sizeof(L.usbSerial)-1); L.usbSerial[sizeof(L.usbSerial)-1]=0; return true; }
     }
     return false;
   };
-  if (key == "ssid")      { strncpy(gCfg.ssid, val.c_str(), sizeof(gCfg.ssid)-1); gCfg.ssid[sizeof(gCfg.ssid)-1]=0; return true; }
-  if (key == "pass")      { strncpy(gCfg.pass, val.c_str(), sizeof(gCfg.pass)-1); gCfg.pass[sizeof(gCfg.pass)-1]=0; return true; }
+  // H1: an EMPTY ssid/pass means "keep the stored value" rather than wiping saved Wi-Fi
+  // credentials. The portal never round-trips the password and initializes SSID blank, so a
+  // plain save (to change a radio assignment) used to erase the home network. Only overwrite
+  // when a non-empty value is supplied. (Clearing creds is a deliberate separate action.)
+  if (key == "ssid")      { if (val.length()) { strncpy(gCfg.ssid, val.c_str(), sizeof(gCfg.ssid)-1); gCfg.ssid[sizeof(gCfg.ssid)-1]=0; } return true; }
+  if (key == "pass")      { if (val.length()) { strncpy(gCfg.pass, val.c_str(), sizeof(gCfg.pass)-1); gCfg.pass[sizeof(gCfg.pass)-1]=0; } return true; }
   if (key == "tcpport")   { gCfg.tcpPort = (uint16_t)val.toInt(); return true; }
   if (key == "wifi")      { gCfg.wifiOn = val.toInt() != 0; return true; }
   if (key == "grovebaud") { gCfg.groveBaud = (uint32_t)val.toInt(); return true; }
@@ -765,8 +935,9 @@ static bool applyConfigKV(const String& key, const String& val) {
 //   dl_model, dl_civ(hex), dl_baud, dl_serial,  ul_model, ul_civ, ul_baud, ul_serial,
 //   save(1) to persist, reboot(1) to restart into run mode.
 static void handleApiConfig() {
-  if (gWeb.hasArg("ssid")) { strncpy(gCfg.ssid, gWeb.arg("ssid").c_str(), sizeof(gCfg.ssid)-1); gCfg.ssid[sizeof(gCfg.ssid)-1]=0; }
-  if (gWeb.hasArg("pass")) { strncpy(gCfg.pass, gWeb.arg("pass").c_str(), sizeof(gCfg.pass)-1); gCfg.pass[sizeof(gCfg.pass)-1]=0; }
+  // H1: only overwrite Wi-Fi credentials when a non-empty value is supplied (see applyConfigKV).
+  if (gWeb.hasArg("ssid") && gWeb.arg("ssid").length()) { strncpy(gCfg.ssid, gWeb.arg("ssid").c_str(), sizeof(gCfg.ssid)-1); gCfg.ssid[sizeof(gCfg.ssid)-1]=0; }
+  if (gWeb.hasArg("pass") && gWeb.arg("pass").length()) { strncpy(gCfg.pass, gWeb.arg("pass").c_str(), sizeof(gCfg.pass)-1); gCfg.pass[sizeof(gCfg.pass)-1]=0; }
   if (gWeb.hasArg("tcpport"))   gCfg.tcpPort   = (uint16_t)gWeb.arg("tcpport").toInt();
   if (gWeb.hasArg("wifi"))      gCfg.wifiOn    = gWeb.arg("wifi").toInt() != 0;
   if (gWeb.hasArg("grovebaud")) gCfg.groveBaud = (uint32_t)gWeb.arg("grovebaud").toInt();
@@ -776,7 +947,7 @@ static void handleApiConfig() {
   bool doSave   = gWeb.hasArg("save")   && gWeb.arg("save").toInt()   != 0;
   bool doReboot = gWeb.hasArg("reboot") && gWeb.arg("reboot").toInt() != 0;
   if (doSave) saveConfig();
-  applyLegConfig();                      // re-resolve effective profiles live
+  reconfigureAndRebind();                // H3: re-resolve profiles AND rebind USB radios live
 
   gWeb.send(200, "application/json", statusJson());
   if (doReboot) { delay(300); ESP.restart(); }
@@ -833,27 +1004,42 @@ async function refresh(){
  document.getElementById('status').textContent='mode: '+s.mode+(s.sta_ip?('  IP '+s.sta_ip):'')+'  AP '+s.ap;
  let d=document.getElementById('devs');d.innerHTML='';
  let serSels=[document.getElementById('dl_serial'),document.getElementById('ul_serial')];
+ // Remember each leg's currently-chosen serial so rebuilding the dropdown doesn't drop it.
+ let want={dl:s.downlink.serial||'',ul:s.uplink.serial||''};
+ let sel0={dl:serSels[0].value,ul:serSels[1].value};
  serSels.forEach(sel=>{sel.innerHTML='';sel.appendChild(opt('','(any, by plug order)'))});
  if(!s.devices.length)d.textContent='none yet - plug the radios into the hub';
+ let present={};
  s.devices.forEach(x=>{
    let e=document.createElement('div');e.className='dev';
    e.textContent='addr '+x.addr+'  '+x.vidpid+'  '+(x.product||'')+(x.serial?('  ser:'+x.serial):'  (no serial)');
    d.appendChild(e);
-   if(x.serial)serSels.forEach(sel=>sel.appendChild(opt(x.serial,(x.product||x.vidpid)+' ['+x.serial+']')));
+   if(x.serial){present[x.serial]=1;serSels.forEach(sel=>sel.appendChild(opt(x.serial,(x.product||x.vidpid)+' ['+x.serial+']')));}
  });
+ // H2: a configured serial that is temporarily absent must remain a selectable option,
+ // otherwise saving would silently clear the pin. Add it back marked "not present".
+ ['dl','ul'].forEach((p,i)=>{let cur=sel0[p]||want[p];
+   if(cur && !present[cur]) serSels[i].appendChild(opt(cur,cur+' (not present)'));});
  // fill scalar fields once
  if(!window._init){
-   ssid.value=''; tcpport.value=s.tcpPort; grovebaud.value=s.groveBaud; wifi.value=s.wifiOn?1:0;
+   ssid.value=''; if(s.ssid)ssid.placeholder=s.ssid+(s.hasPass?' (leave blank = unchanged)':'');
+   tcpport.value=s.tcpPort; grovebaud.value=s.groveBaud; wifi.value=s.wifiOn?1:0;
    window._init=true;
  }
  setLeg('dl',s.downlink);setLeg('ul',s.uplink);
 }
 function setLeg(p,L){
- let m=document.getElementById(p+'_model');
- if(L.model>=0)m.value=L.model;
- if(document.activeElement.id!=p+'_civ')document.getElementById(p+'_civ').value=L.civ?L.civ.toString(16):'';
- if(document.activeElement.id!=p+'_baud')document.getElementById(p+'_baud').value=L.baud||'';
- if(L.serial)document.getElementById(p+'_serial').value=L.serial;
+ // H2: seed each editable leg field only ONCE (first paint). After that the 2 s poll must
+ // not clobber what the operator is typing/selecting. Restore the chosen serial dropdown
+ // value on every poll (its <option> list was just rebuilt) without overwriting a new pick.
+ if(!window['_leg_'+p]){
+   let m=document.getElementById(p+'_model'); if(L.model>=0)m.value=L.model;
+   document.getElementById(p+'_civ').value=L.civ?L.civ.toString(16):'';
+   document.getElementById(p+'_baud').value=L.baud||'';
+   window['_leg_'+p]=1;
+ }
+ let ss=document.getElementById(p+'_serial');
+ if(document.activeElement!=ss){ if([...ss.options].some(o=>o.value==(L.serial||''))) ss.value=L.serial||''; }
 }
 async function loadModels(){
  models=await (await fetch('/api/models')).json();
@@ -863,9 +1049,11 @@ async function loadModels(){
 }
 async function save(reboot){
  let fd=new URLSearchParams(new FormData(document.getElementById('f')));
- fd.set('save',reboot?1:1);if(reboot)fd.set('reboot',1);
+ // M2: both buttons persist to NVS; the difference is only whether we also reboot into run
+ // mode. "Apply" saves + rebinds live (no restart); "Save & reboot" saves then restarts.
+ fd.set('save',1);if(reboot)fd.set('reboot',1);
  let r=await fetch('/api/config',{method:'POST',body:fd});
- let s=await r.json();alert(reboot?'Saved. Rebooting into run mode.':'Applied.');
+ let s=await r.json();alert(reboot?'Saved. Rebooting into run mode.':'Saved & applied live.');
 }
 loadModels().then(refresh);setInterval(refresh,2000);
 </script></body></html>
@@ -1033,24 +1221,32 @@ void loop() {
   if (gConfigMode) {
     gDns.processNextRequest();
     gWeb.handleClient();
-    // (radios keep enumerating via the USB host task; gSeen updates live)
+    // H4: also service the rigctl/config transports in config mode, so CardSat can run
+    // \csdr_get / \csdr_models / \csdr_set over Grove (or TCP) to configure a first-boot
+    // Stick with no phone -- exactly the workflow the firmware README advertises. (The USB
+    // host task keeps enumerating radios into gSeen the whole time.)
+    serviceTcp();
+    serviceGrove();
     if (millis() - gLastDraw > 400) { gLastDraw = millis(); drawConfig(); }
-    // In config mode, a long press of Button A reboots (into run mode if saved).
-    if (M5.BtnA.pressedFor(1500)) { delay(150); ESP.restart(); }
+    // H5: the button that TRIGGERED config mode is often still held on the next loop. Require
+    // a release first, so entering config mode via long-press can't immediately reboot. Arm
+    // the reboot only after the button has been seen released once.
+    if (!M5.BtnA.isPressed()) gCfgBtnReleased = true;
+    if (gCfgBtnReleased && M5.BtnA.pressedFor(1500)) { delay(150); ESP.restart(); }
     return;
   }
 
   // --- run mode ---
   static uint32_t lastWifiTry = 0;
-  if (gCfg.wifiOn && WiFi.status() != WL_CONNECTED && millis() - lastWifiTry > 4000) {
-    lastWifiTry = millis(); WiFi.begin(gCfg.ssid, gCfg.pass);
+  if (gCfg.wifiOn && gCfg.ssid[0] && WiFi.status() != WL_CONNECTED && millis() - lastWifiTry > 4000) {
+    lastWifiTry = millis(); WiFi.begin(gCfg.ssid, gCfg.pass);   // M15: don't retry with a blank SSID
   }
   pollRadioOnline();
   serviceTcp();
   serviceGrove();
 
   // Long-press Button A -> return to config mode (no reboot needed).
-  if (M5.BtnA.pressedFor(1500)) enterConfigMode();
+  if (M5.BtnA.pressedFor(1500)) { gCfgBtnReleased = false; enterConfigMode(); }
 
   if (millis() - gLastDraw > 300) { gLastDraw = millis(); drawRun(); }
 }

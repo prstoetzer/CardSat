@@ -1,22 +1,29 @@
 # CardSat — precompiled firmware (M5Cardputer ADV)
 
 Prebuilt binaries for the **M5Stack Cardputer ADV** (ESP32-S3FN8, 8 MB flash, no PSRAM),
-firmware **v0.9.63**. Flash these if you just want to run this build without
+firmware **v0.9.64**. Flash these if you just want to run this build without
 compiling. Source is the rest of this repo; `CardSat.ino` is the monolithic sketch.
 
 Built with: arduino-cli + `esp32:esp32@3.2.1`, FQBN
 `esp32:esp32:esp32s3:PartitionScheme=huge_app,CDCOnBoot=cdc`, M5Cardputer library.
 No `build.extra_flags` (that would break the HWCDC serial console). Flash usage at
-build time: 2,896,726 bytes (92%); static RAM 156,944 bytes (47%).
+build time: 2,911,728 bytes (92%); static RAM 156,936 bytes (47%).
 
 Checksums (MD5):
-- `CardSat-merged.bin`  ee111bdb56a9e97952e818451b435643
-- `CardSat-app.bin`     377175a82cfc1873f6d259c85c93966d
+- `CardSat-merged.bin`  8e03605b0886757bea53429e37b5e53f
+- `CardSat-app.bin`     ae4ea8928ed17bacf6d6ba14a78594cf
+- `CardSat-bootloader.bin`  c7f9b41acfaba802c7e74ae639a9a162
+- `CardSat-partitions.bin`  70007348574201233bc0cb17155e9d12
 
-> This is a **work-in-progress** build. The dual-radio companion path, the Grove
-> rigctl link, the `<FULLu>` uplink-knob tune mode, **and the transverter/microwave
-> (LO-offset) path** are **not yet hardware-tested end to end** — treat first bring-up
-> as verification.
+> This is a **testing release**. v0.9.64 overhauled the USB-control lifecycle (USB CAT and
+> USB rotators release their memory when turned off), added two-adapter USB radio+rotator with
+> a **None** option, and went through three rounds of security/lifecycle auditing plus a
+> dedicated Dual-Rig audit: storage writes are now transactional (config/notes/caches survive
+> an interrupted write), downloads reject truncation, GPS/voice-memo/rig lifecycles were
+> tightened, and the CardSatDualRig Grove path had three release-blocking bugs fixed (UART
+> pins, 115200 baud, model parsing). The **two-adapter USB** path, the **dual-radio companion**
+> (both TCP and Grove rigctl), and the transverter/microwave (LO-offset) paths are implemented
+> but remain first-bring-up items that benefit most from hardware testing.
 
 ## Easiest: one file at 0x0 (esptool)
 

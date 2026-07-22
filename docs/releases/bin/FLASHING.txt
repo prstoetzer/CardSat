@@ -1,12 +1,15 @@
-CardSat v0.9.61 — flashable binaries
+CardSat v0.9.61 — flashable binaries (ARCHIVED / HISTORICAL)
+
+  >>> These are OLD v0.9.61 images kept for reference. For the CURRENT release,
+  >>> use the binaries in the repository's /firmware/ directory instead.
 
 CardSat-0_9_61-merged.bin  -- single-image full flash (easiest). Write to 0x0:
     esptool.py --chip esp32s3 write_flash 0x0 CardSat-0_9_61-merged.bin
 
 Component images (advanced / OTA):
-    CardSat.ino.bootloader.bin   -> 0x0
-    CardSat.ino.partitions.bin   -> 0x8000
-    CardSat-0_9_61.bin           -> 0x10000   (the app; also the OTA artifact)
+    CardSat-0_9_61-bootloader.bin   -> 0x0
+    CardSat-0_9_61-partitions.bin   -> 0x8000
+    CardSat-0_9_61.bin              -> 0x10000   (the app; also the OTA artifact)
 
 FQBN: esp32:esp32:esp32s3  PartitionScheme=huge_app  CDCOnBoot=cdc
 Target: M5Stack Cardputer ADV (ESP32-S3FN8, 8 MB flash, no PSRAM)

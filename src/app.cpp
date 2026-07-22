@@ -296,6 +296,16 @@ void App::setup() {
   M5.Imu.begin();
   imuReady = M5.Imu.isEnabled();
   Serial.begin(115200);             // diagnostics on the USB serial monitor
+  // Unused Bluetooth memory: CardSat has no BLE, so main.cpp overrides btInUse()->false,
+  // which makes initArduino() release the BT controller memory before setup() runs (~3.8 KB
+  // of baseline heap recovered on hardware). We do NOT also call esp_bt_mem_release() here --
+  // it returns ESP_FAIL because the controller region is already gone, and the Bluedroid host
+  // memory in this precompiled core isn't separately reclaimable. Just report the result.
+#if CARDSAT_RELEASE_BT
+  Serial.printf("[bt] controller released (no BLE)  heap free %u  largest %u\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+#endif
   M5Cardputer.Display.setRotation(1);
   // 4bpp palette canvas: ~16 KB sprite (vs 32 KB at 8bpp, 64 KB at 16bpp). The
   // smaller footprint lifts the largest contiguous free block so the BearSSL TLS
@@ -571,8 +581,20 @@ void App::setup() {
 void App::applyRadioFromCfg() {
   RadioModel m = (RadioModel)cfg.radioModel;
   uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[m].defaultBaud;
+#if CARDSAT_HAS_USBCAT
+  // If USB CAT is live on the OLD rig, tear it down before we delete that rig. The reconciler
+  // only (re)attaches when it sees USB not-active, so without this an active session would keep
+  // the old transport bound while the new rig object never gets a stream -- CAT silently dies
+  // or binds the wrong adapter after a model/baud/CI-V/adapter change (H7). Dropping the stream
+  // first, then end(), leaves the reconciler to rebuild cleanly against the new rig next pass.
+  const bool usbWasActive = UsbSerial::active();
+  if (usbWasActive) {
+    if (rig) rig->setExternalStream(nullptr);   // drop the dangling pointer before end()
+    UsbSerial::end();                           // frees/rebinds on the next reconciler pass
+  }
+#endif
   if (rig) { delete rig; rig = nullptr; }
-  rig = makeRig(m, cfg.catType, cfg.catHost, cfg.catPort, cfg.catUser, cfg.catPass);
+  rig = makeRig(m, cfg.catType, cfg.catHost, cfg.catPort, cfg.catUser, cfg.catPass, cfg.catGroveBaud);
   if (!rig) return;
   // CI-V wiring mode must be set before begin() (it decides one-pin vs two-pin
   // UART setup). Only meaningful for wired CI-V; a no-op on Yaesu/Kenwood/LAN.
@@ -623,6 +645,27 @@ void App::yieldGroveIfTaken(const char* who) {
   cfg.save();
   applyRotatorFromCfg();
   setStatus(String("Rotator moved to I2C bridge (") + who + " took Grove)", 5000);
+}
+
+// H10: enforce the direct Grove CAT <-> Grove GPS conflict. Both would open UART1 on the
+// same G1/G2 pins, but yieldGroveIfTaken() only rescues the ROTATOR. The just-selected
+// claimant ('who') wins and the other Grove user is turned off, with a clear message --
+// so the two peripherals can never initialize the same pins at once.
+bool App::groveCatVsGpsArbitrate(const char* who) {
+  bool catGrove = (cfg.catType == CAT_RIGCTL_GROVE);
+  bool gpsGrove = cfg.useGps &&
+                  (cfg.gpsSource == GPS_SRC_GROVE_9600 || cfg.gpsSource == GPS_SRC_GROVE_115K);
+  if (!(catGrove && gpsGrove)) return false;    // no direct conflict
+  if (!strcmp(who, "CAT")) {
+    // CAT just claimed Grove: disable Grove GPS (radio control takes precedence).
+    cfg.useGps = false; cfg.save(); loc.endGps();
+    setStatus("Grove GPS off (CAT took Grove)", 5000);
+  } else {
+    // GPS just claimed Grove while Grove CAT is active: turn GPS back off -- CAT keeps Grove.
+    cfg.useGps = false; cfg.save(); loc.endGps();
+    setStatus("Grove GPS conflicts with Grove CAT", 5000);
+  }
+  return true;
 }
 
 // Cycle a USB adapter selection through what the host has ENUMERATED, storing the
@@ -678,7 +721,15 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio) {
   // it while cycling is what makes it "greyed out" rather than hidden. Hiding it
   // would be worse -- an operator looking for the adapter they can see plugged in
   // would think CardSat had lost it, instead of learning it is the radio's.
-  const char* taken = isRadio ? cfg.rotUsbKey : cfg.catUsbKey;
+  // Gate on the other port actually USING USB *and being enabled*: a stale catUsbKey/
+  // rotUsbKey left over from a previous config must NOT block this port when the other
+  // side isn't a USB device at all, or is set to None. rotUsesUsb() already folds in the
+  // rotator's enable/None/transport check; the radio side must exclude RIG_NONE too, so a
+  // "no radio" config with catType still on USB doesn't reserve the radio's old adapter.
+  const bool otherUsesUsb = isRadio
+      ? rotUsesUsb()
+      : (cfg.catType == CAT_USB && (RadioModel)cfg.radioModel != RIG_NONE);
+  const char* taken = otherUsesUsb ? (isRadio ? cfg.rotUsbKey : cfg.catUsbKey) : "";
 
   // Current index: 0 = Auto, 1..n = adapter[i-1]
   int cur = 0;
@@ -690,17 +741,32 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio) {
   // list where EVERY adapter is taken lands back on Auto rather than spinning.
   const int slots = (int)n + 1;
   const int step  = (dir >= 0) ? 1 : -1;
+  bool skippedTaken = false;
   for (int tries = 0; tries < slots; ++tries) {
     cur = (cur + step + slots) % slots;
     if (cur == 0) break;                                       // Auto is always free
     const char* k = UsbSerial::serialDeviceKey(cur - 1);
-    if (!(taken[0] && strcmp(k, taken) == 0)) break;            // free: take it
+    if (taken[0] && strcmp(k, taken) == 0) { skippedTaken = true; continue; }
+    break;                                                     // free: take it
   }
 
   if (cur == 0) key[0] = 0;                                     // Auto
   else          snprintf(key, keyLen, "%s", UsbSerial::serialDeviceKey(cur - 1));
   cfg.save();
+  // If we could only land on Auto because the sole adapter belongs to the other
+  // port, say so -- otherwise the selector looks broken ("won't leave Auto").
+  if (cur == 0 && skippedTaken)
+    setStatus(isRadio ? "Only adapter is the rotator's" : "Only adapter is the radio's", 4000);
   if (!isRadio) applyRotatorFromCfg();   // a rotator key change must re-bind
+#if CARDSAT_HAS_USBCAT
+  else {
+    // A radio adapter-key change must also re-bind: push the new key to the CAT layer and,
+    // if USB CAT is live, force a rebuild so the active radio moves to the newly chosen
+    // adapter instead of staying on the old one until a manual off/on cycle (H7).
+    UsbSerial::catConfigure(cfg.catUsbKey);
+    if (UsbSerial::active()) applyRadioFromCfg();   // tears down + reconciler re-attaches
+  }
+#endif
 #else
   (void)key; (void)keyLen; (void)dir; (void)isRadio;
   setStatus("USB CAT not in this build", 3000);
@@ -742,43 +808,56 @@ void App::applyRotatorFromCfg() {
     // into its stops.
     const char* why = rotTransportConflict();
     if (why) { setStatus(why, 5000); return; }
-    // Tell the USB port which adapter is the rotator's before it binds.
+    // A USB rotator brings the USB host up, which is expensive and (like the radio)
+    // should NOT happen just because you left Settings. Defer it: leave rot null and
+    // let the 'o' toggle in Track build+engage it on first press. Non-USB transports
+    // (Grove/bridge/network) are cheap to open here, so they still build eagerly.
     if (rotUsesUsb()) {
-#if CARDSAT_HAS_USBCAT
-      UsbSerial::rotConfigure(cfg.rotUsbKey, cfg.rotBaud);
-#else
-      setStatus("USB rotator needs a USB-host build", 5000);
+      // rot stays nullptr; the 'o' handler calls makeRotator() when the operator engages.
       return;
-#endif
     }
-#if CARDSAT_HAS_USBCAT
-    // Paint BEFORE the call, for the same reason USB CAT does: a USB rotator
-    // brings the host up on this task, and if that blocks, draw() never runs
-    // again -- the screen would freeze showing whatever was there before.
-    if (rotUsesUsb()) { setStatus("USB rotator: starting..."); draw(); }
-#endif
     rot = makeRotator(cfg.rotType, cfg.rotTransport, cfg.rotBaud, cfg.rotHost, cfg.rotPort);
     if (!rot) {
-#if CARDSAT_HAS_USBCAT
-      if (rotUsesUsb())
-        setStatus(String("USB rotator: ") + UsbSerial::rotLastError(), 5000);
-      else
-#endif
       setStatus("Rotator: no link on that transport", 5000);
       return;
     }
   }
   if (rot) rot->begin();
-#if CARDSAT_HAS_USBCAT
-  // Success gets a line too. The rotator used to report only failures, so a
-  // working USB rotator was silent while a working radio announced itself --
-  // and "nothing happened" is indistinguishable from "it did not try".
-  if (rot && rotUsesUsb() && UsbSerial::rotActive())
-    setStatus(String("USB rotator: ") + UsbSerial::rotDeviceName(), 3000);
-#endif
 }
 
-// Decide whether a pass should be tracked "flipped" (elevation 0-180, azimuth
+// The message shown when the rotator can't be engaged, tuned to the transport so the
+// operator knows what to fix. Used by every screen that toggles the rotator.
+const char* App::rotNotReadyMsg() const {
+  if (!cfg.rotEnable) return "Rotator: enable in Settings";
+  if (rotUsesUsb())   return "USB rotator: not found (replug/re-select)";
+  return cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
+       : cfg.rotType == ROT_NET  ? "Rotator: no rotctl link"
+                                 : "Rotator: bridge not found";
+}
+
+// Build-and-engage the rotator on demand, so engaging it is a deliberate act (like the
+// radio's 'r' toggle) rather than a side effect of leaving Settings. A USB rotator is built
+// lazily here on the FIRST engage from ANY screen (Track / Sun-Moon / EME / Grid-bearing),
+// because bringing the USB host up is expensive and must not happen just because config was
+// applied. Non-USB rotators were already built in applyRotatorFromCfg(); this just (re)opens
+// their link. Returns true only when the rotator is ready to take pointing commands.
+bool App::ensureRotatorReady() {
+  if (!cfg.rotEnable) return false;
+#if CARDSAT_HAS_USBCAT
+  if (!rot && rotUsesUsb()) {                 // deferred USB rotator: build + engage now
+    const char* why = rotTransportConflict();
+    if (why) { setStatus(why, 5000); return false; }
+    UsbSerial::rotConfigure(cfg.rotUsbKey, cfg.rotBaud);
+    setStatus("USB rotator: starting...");    // host bring-up can block; paint first
+    draw();
+    rot = makeRotator(cfg.rotType, cfg.rotTransport, cfg.rotBaud, cfg.rotHost, cfg.rotPort);
+    if (!rot) { setStatus(String("USB rotator: ") + UsbSerial::rotLastError(), 5000); return false; }
+  }
+#endif
+  if (!rot) return false;
+  if (!rot->ready()) rot->begin();            // (re)establish the link/bridge on demand
+  return rot->ready();
+}
 // +180) so the rapid azimuth swing of a high/overhead pass is moved onto the
 // faster elevation axis instead of forcing a ~360 deg slew across the rotator's
 // azimuth stop. Mirrors Gpredict's is_flipped_pass: sample the az track across
@@ -808,6 +887,23 @@ bool App::passNeedsFlip(time_t aos, time_t los) {
 // rotator whose azimuth axis is centred on North and runs -180..+180, re-express
 // the bearing in that range (e.g. 270 -> -90). GS-232 controllers are natively
 // 0-360 and re-wrap negatives, so in practice this only changes rotctld output.
+// Park the rotator, then (for a USB rotator only) release the USB host so an idle rotator
+// doesn't hold ~12 KB. Called from every "rotator OFF" path (Track 'o', Sun/Moon, EME,
+// Grid). Non-USB transports (network/Grove) are kept engaged when parked -- their link is
+// cheap to hold and expensive to rebuild, and there's no shared USB PHY at stake. A USB
+// rotator re-engages on the next turn-on via ensureRotatorReady(), symmetric with USB CAT
+// releasing its host on radio-off. The park command is written and flushed synchronously
+// before the port is freed, so the rotator actually reaches park.
+void App::parkAndReleaseRotator() {
+  rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);   // park first (synchronous write)
+  rotParked = true;
+#if CARDSAT_HAS_USBCAT
+  if (rot && rotUsesUsb()) {
+    freeRotator(rot); rot = nullptr;    // ~UsbRotStream -> rotEnd(): releases port + host
+  }
+#endif
+}
+
 void App::rotPoint(float az, float el) {
   if (!rot) return;
   // True -> magnetic conversion (opt-in). CardSat computes az as a TRUE bearing;
@@ -846,6 +942,32 @@ void App::rotPoint(float az, float el) {
 //   normal USB downlink. Exception: if either leg is HF (< 30 MHz) the
 //   convention is USB up and USB down. FM / single-channel birds use the
 //   transponder's own mode on both legs.
+// Post-connect radio engagement: satellite mode, MAIN/SUB band assignment, transponder
+// modes, and the per-cycle read budget. Runs only when the rig is actually ready, so it is
+// safe to call at the moment of engage (wired/LAN/rigctl -- ready immediately) AND from the
+// USB reconciler once the transport attaches (USB CAT -- ready one loop later). Idempotent:
+// running it twice applies the same state. This is the single place engagement state is set,
+// so a deferred-connect transport can't skip it (H6) and every transport initializes the same.
+void App::initializeEngagedRig() {
+  if (!rig || !rig->ready()) return;             // USB not attached yet -> reconciler retries
+  // Satellite mode: a receive-only transponder (beacon/telemetry) turns it OFF and tunes the
+  // downlink on MAIN; a two-way transponder follows the Sat Mode setting.
+  rig->enableSatMode(cfg.satMode && !txReceiveOnly());
+  // MAIN/SUB band assignment on rigs that support it (IC-9100/9700), two-way transponders only.
+  if (rig->canAssignBand() && activeTxCount > 0) {
+    freq_t up = activeTx[curTx].uplink, dn = activeTx[curTx].downlink;
+    if (up && dn) {
+      uint32_t mainHz = dlOnSub() ? up : dn;     // MAIN carries uplink in Main-Up/Sub-Dn
+      uint32_t subHz  = dlOnSub() ? dn : up;
+      rig->assignBands(mainHz, subHz);
+    }
+  }
+  if (activeTxCount > 0) applyTransponderModes(activeTx[curTx]);
+  lastDoppMs = 0; lastRxSet = 0; lastUlHz = 0; uplinkDeferTicks = 0;   // re-sync tracking cleanly
+  // Bound how long any single CAT read may block the cooperative loop.
+  rig->setReadBudgetMs((uint16_t)constrain((int)effectiveCatRateMs() / 4, 60, 200));
+}
+
 void App::applyTransponderModes(const Transponder& t) {
   if (!rig || !rig->ready()) return;
   // Set the UPLINK (MAIN) leg first, then the DOWNLINK (SUB) leg, so the radio is
@@ -4341,10 +4463,11 @@ void App::usbStageTrampoline(UsbSerial::Stage s) {
   }
 
   // ---- and to the SD card ------------------------------------------------------
-  // The console CANNOT be used to diagnose this: engaging USB CAT tears the console
-  // down by design (both need the S3's one USB PHY), and getting the console back
-  // requires a reboot, which un-engages USB CAT. The two states are mutually
-  // exclusive, so no amount of timing gets a live console during a USB CAT freeze.
+  // The console cannot be relied on to diagnose a USB CAT freeze: engaging USB CAT tears
+  // the console down (both the HWCDC console and the USB host sit behind the S3's one USB
+  // PHY, so the console must release it before the host can take it). Since 2.4.1's end()
+  // actually releases the host, consoleUp() re-inits HWCDC on disengage -- but a freeze
+  // DURING engage never reaches disengage, so mid-engage the console is gone regardless.
   //
   // The card has none of that coupling. Each stage is appended and FLUSHED before
   // the call it announces, so a freeze leaves its name as the last line in the file
@@ -5616,8 +5739,16 @@ void App::loop() {
   // The cost being managed: while up, this holds the IDF host stack, its daemon task
   // and transfer buffers -- and the USB CDC console, which is the same OTG controller.
   // Both come back the moment the radio is disengaged.
-  if (cfg.catType == CAT_USB) {
-    const bool want = radioOut && rig;
+  // Run this block if CAT is USB, OR if a USB CAT session is still active and must be torn
+  // down because the radio was switched AWAY from USB (or to None). Without the second
+  // condition, changing catType away from USB skipped the whole reconciler and left USB CAT
+  // engaged -- which held the host, kept the console down, and made the rotator refuse the
+  // radio's old adapter with "That adapter is the radio's" long after the radio stopped
+  // using it.
+  if (cfg.catType == CAT_USB || UsbSerial::active()) {
+    // want is only ever true for an actual USB radio. If catType is no longer USB, want is
+    // false, so the teardown branch below fires and releases the stale session.
+    const bool want = (cfg.catType == CAT_USB) && radioOut && rig;
     if (want && !UsbSerial::active()) {
       uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[(RadioModel)cfg.radioModel].defaultBaud;
       // Yaesu CAT is 8N2; CI-V and Kenwood are 8N1. The adapter must be told, because
@@ -5683,6 +5814,12 @@ void App::loop() {
         UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_DELAY);
         rig->setCmdDelay(cfg.catDelayMs);
         UsbSerial::markStage(UsbSerial::USBCAT_STAGE_ENGAGED);
+        // The rig is now attached and ready. Run engagement init HERE, because the 'r'
+        // handler ran it before this attach (when rig->ready() was false) and it no-op'd.
+        // Without this call a USB rig would start Doppler writes still in its previous modes
+        // / sat-mode / band arrangement (H6). Only when the operator actually wants tracking
+        // (radioOut and not merely a diagnostic tool holding the transport up).
+        if (radioOut && !catToolEngaged) initializeEngagedRig();
         usbTickTrace = true;          // narrate the first tick, then stop
         // NO loop-task watchdog here. It was armed at engage to catch a begin()
         // that never returned -- but that span is now watched precisely by
@@ -5774,6 +5911,22 @@ void App::loop() {
     if (from == SCR_BASICFILES && screen != SCR_BASICFILES) basFilesFree();
     // Leaving the CAT self-test results: its ~2.7 KB log is rebuilt on every run.
     if (from == SCR_CATTEST && screen != SCR_CATTEST) catTestFree();
+    // Leaving a CAT tool (self-test or monitor): if the tool itself engaged USB CAT (set
+    // radioOut to bring the transport up), turn it back off so the reconciler tears the host
+    // down. Only when the TOOL engaged it -- if the radio was already on from Track, leave it.
+    if ((from == SCR_CATTEST || from == SCR_CATMON) &&
+        screen != SCR_CATTEST && screen != SCR_CATMON && catToolEngaged) {
+      radioOut = false;
+      catToolEngaged = false;
+    }
+    // Leaving the manual rotator screen: it engages a USB rotator on entry (ensureRotatorReady).
+    // If no tracking flag is active (the manual screen was the only user), park + release the
+    // USB host so it doesn't stay held. If a background track is running (rotOut/smOut/etc),
+    // leave it -- that owner still needs the rotator.
+    if (from == SCR_ROTMAN && screen != SCR_ROTMAN &&
+        !rotOut && !smOut && !emeRotOut && !gcRotOut) {
+      parkAndReleaseRotator();
+    }
     // Leaving the polar screen: its ~0.4 KB arc buffers are rebuilt on every entry.
     if (from == SCR_POLAR && screen != SCR_POLAR) polarFree();
     // Leaving the QSO log list: its ~8.9 KB view cache is rebuilt by loadLog() on every
@@ -5909,12 +6062,15 @@ void App::loop() {
   if ((radioOut || rotOut) && trackedNorad != 0) {
     SatEntry* as = activeSat();
     if (as && as->norad != trackedNorad) {
-      if (rotOut && rot) { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); rotParked = true; }
+      if (rotOut) parkAndReleaseRotator();   // forced stop: park + release USB host
       radioOut = false; rotOut = false; trackedNorad = 0;
       setStatus("Tracking stopped (satellite changed)");
     }
   }
-  if (radioOut && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
+  // catToolEngaged means the CAT self-test/monitor raised radioOut only to hold the USB
+  // transport up for diagnostics -- NOT to track. Exclude it here so opening a CAT tool
+  // never starts writing Doppler frequencies/modes to the radio for the active satellite.
+  if (radioOut && !catToolEngaged && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
       lastDoppMs = ms;
 #if CARDSAT_HAS_USBCAT
       // Trace the FIRST tick only, and only over USB CAT. The bench froze right
@@ -6099,7 +6255,11 @@ void App::loop() {
     // monitor is silent unless tracking happens to be sending. Skipped while the
     // Doppler service is actively writing (radioOut) so the two don't collide, and
     // only when the backend can actually read.
-    if (catMonActive && catMonPoll && !radioOut && rig && rig->ready() &&
+    // Skipped while the Doppler service is actively writing (radioOut from Track) so the two
+    // don't collide -- UNLESS the monitor engaged CAT itself (catToolEngaged), in which case
+    // radioOut is true only to hold the USB transport up and there's no tracking writer to
+    // collide with, so the heartbeat must run or a USB monitor with no active pass is silent.
+    if (catMonActive && catMonPoll && (!radioOut || catToolEngaged) && rig && rig->ready() &&
         rig->canReadFreq() && ms - catMonLastPollMs >= CATMON_POLL_MS) {
       catMonLastPollMs = ms;
       freq_t hz;
@@ -6349,9 +6509,16 @@ void App::loop() {
 // antenna. Safe to call when nothing is engaged (it just does nothing visible then).
 void App::stopAllControl() {
   bool wasEngaged = radioOut || rotOut || smOut || emeRotOut || gcRotOut;
+  // Ownership from the actual rotator, not just the tracking flags: the Manual Control
+  // screen engages a rotator with every tracking flag clear, so a flags-only test would
+  // miss it and leave the USB host held. rot!=null (built + engaged) is the real signal.
+  bool rotWasEngaged = rotOut || smOut || emeRotOut || gcRotOut || (rot && rot->ready());
   radioOut = false;
   rotOut = false; smOut = false; emeRotOut = false; gcRotOut = false;
   trackedNorad = 0;
+  // Park + release the USB rotator's host (radioOut=false lets the reconciler drop USB CAT
+  // next loop; the rotator has no reconciler, so release it here). No-op for non-USB.
+  if (rotWasEngaged) parkAndReleaseRotator();
   if (wasEngaged) {
     beep(660, 80);                       // audible confirmation
     setStatus("All control stopped", 3000);
@@ -7851,34 +8018,18 @@ void App::keyTrack(char c, bool enter, bool back) {
     screen = SCR_EDIT; return;
   }
   if (c == 'r') {                                    // toggle radio output
+    // No radio configured (Radio: None -> rig is null): there's nothing to turn on, so
+    // don't flip radioOut or claim "Radio ON". Mirrors the rotator's "enable in Settings".
+    if (!rig && !radioOut) { setStatus("Radio: set a model in Settings"); return; }
     radioOut = !radioOut;
     if (radioOut) {
       { SatEntry* ts = activeSat(); trackedNorad = ts ? ts->norad : 0; }  // lock tracking to this bird
-      // Command the rig's satellite mode (a no-op on rigs without one). A
-      // receive-only transponder (beacon/telemetry, no uplink) turns satellite
-      // mode OFF and tunes the downlink on MAIN; a two-way transponder turns it on
-      // per the Sat Mode setting. Which physical VFO carries up/downlink otherwise
-      // follows the VFO Type setting (see the rigSet*/rigSelect* helpers).
-      if (rig) rig->enableSatMode(cfg.satMode && !txReceiveOnly());
-      // On rigs that can assign MAIN/SUB bands over CAT (IC-9100/9700), put the
-      // correct band on each VFO once, now, so the uplink/downlink land on the
-      // right bands without the operator pre-arranging them. Two-way transponders
-      // only (need both legs to know both bands); fired once at engage, never per
-      // tick. No-op on every other radio. UNTESTED on hardware.
-      if (rig && rig->canAssignBand() && activeTxCount > 0) {
-        freq_t up = activeTx[curTx].uplink, dn = activeTx[curTx].downlink;
-        if (up && dn) {
-          uint32_t mainHz = dlOnSub() ? up : dn;   // MAIN carries uplink in Main-Up/Sub-Dn
-          uint32_t subHz  = dlOnSub() ? dn : up;
-          rig->assignBands(mainHz, subHz);
-        }
-      }
-      if (activeTxCount > 0) applyTransponderModes(activeTx[curTx]);
-      lastDoppMs = 0; lastRxSet = 0; lastUlHz = 0; uplinkDeferTicks = 0;   // re-sync tracking cleanly
-      // Bound how long any single CAT read may block the cooperative loop, so a
-      // laggy rig (especially the LAN backend) degrades to "no knob update this
-      // cycle" instead of stalling the UI/rotator. ~3 reads fit in one cycle.
-      if (rig) rig->setReadBudgetMs((uint16_t)constrain((int)effectiveCatRateMs() / 4, 60, 200));
+      // Post-connect initialization: sat mode, MAIN/SUB band assignment, transponder modes,
+      // and the read budget. For a USB CAT rig the transport isn't attached yet (the loop()
+      // reconciler does that next pass), so rig->ready() is false here and initializeEngagedRig()
+      // no-ops; the reconciler calls it again once the stream is attached. Wired/LAN/rigctl rigs
+      // are ready immediately, so it runs now. Idempotent, so running it twice is harmless.
+      initializeEngagedRig();
       setStatus("Radio ON");
     } else {
       if (rig && rig->ready() && rig->hasTone() && toneApplied > 0) {
@@ -7890,14 +8041,9 @@ void App::keyTrack(char c, bool enter, bool back) {
     }
   }
   if (c == 'o') {                                    // toggle rotator pointing
-    if (!cfg.rotEnable || !rot) setStatus("Rotator: enable in Settings");
+    if (!ensureRotatorReady()) setStatus(rotNotReadyMsg());
     else {
-      if (!rot->ready()) rot->begin();   // (re)establish the link/bridge on demand
-      if (!rot->ready())
-        setStatus(cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
-                  : cfg.rotType == ROT_NET ? "Rotator: no rotctl link"
-                                           : "Rotator: bridge not found");
-      else {
+      {
         rotOut = !rotOut;
         if (rotOut) {
           { SatEntry* ts = activeSat(); trackedNorad = ts ? ts->norad : 0; }  // lock tracking to this bird
@@ -7906,8 +8052,7 @@ void App::keyTrack(char c, bool enter, bool back) {
           lastUnwrappedAz = -999.0f; rotParked = false; rotFlipUntil = 0;
           setStatus("Rotator ON");
         } else {
-          rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
-          rotParked = true; setStatus("Rotator OFF (parked)");
+          parkAndReleaseRotator(); setStatus("Rotator OFF (parked)");
         }
       }
     }
@@ -9124,15 +9269,22 @@ void App::keyLocation(char c, bool enter, bool back) {
   if (c == 'q') { qpSel = 0; screen = SCR_QTHPRE; lastDrawMs = 0; return; }  // presets
   if (c == 'p') {                       // toggle GPS use
     cfg.useGps = !cfg.useGps; cfg.save();
-    if (cfg.useGps) startGps();
+    if (cfg.useGps) {
+      // H10: turning GPS on while it's a Grove source and Grove CAT is active must not open
+      // a second UART on G1/G2; arbitrate first (may switch GPS back off).
+      if (!groveCatVsGpsArbitrate("GPS")) startGps();
+    } else {
+      loc.endGps();                     // H18: release the UART when disabling GPS
+    }
     setStatus(cfg.useGps ? "GPS enabled" : "GPS off");
   }
   if (c == 's') {                       // cycle GPS source
     cfg.gpsSource = (cfg.gpsSource + 1) % GPS_SRC_COUNT;
     yieldGroveIfTaken("GPS");
     cfg.save();
-    if (cfg.useGps) startGps();         // re-open on the new port/baud
-    setStatus(String("GPS: ") + GPS_PROFILES[cfg.gpsSource].name);
+    // H10: if the new source is Grove and Grove CAT is active, GPS yields (it gets disabled).
+    if (!groveCatVsGpsArbitrate("GPS") && cfg.useGps) startGps();   // re-open on the new port/baud
+    setStatus(String("GPS: ") + GPS_PROFILES[cfg.gpsSource % GPS_SRC_COUNT].name);
   }
   if (c == 'e') { editTarget = 100; editTitle = "Latitude (deg)";
                   editBuf = String(cfg.lat, 5); screen = SCR_EDIT; }
@@ -9173,7 +9325,7 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Station / logging", "Network / data"
 };
 static const int SET_RADIO[] = {0,30,109,89,100,1,2,63,107,108,31,32,33,34,36,37,21,65,22,23,24,44,45,46,62,64};
-static const int SET_ROTOR[] = {8,9,86,99,101,12,10,11,38,39,18,19,16,17,13,104,47,14,15,35};
+static const int SET_ROTOR[] = {9,86,99,101,12,10,11,38,39,18,19,16,17,13,104,47,14,15,35};
 static const int SET_PASS[]  = {3,40,66,67,68,7,84,54,61};
 static const int SET_DISP[]  = {48,25,82,43,105,106,85,49,77,79,81};
 static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76,102,103};
@@ -9273,8 +9425,8 @@ void App::keySettings(char c, bool enter, bool back) {
       case 61: { int v = ((int)cfg.msgNotify + dir + 3) % 3;
                  cfg.msgNotify = (uint8_t)v; cfg.save(); } break;
       case 80: cfg.autoPosReply = !cfg.autoPosReply; cfg.save(); break;
-      case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
-      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 8) % 8);
+      case 9: cfg.rotType = (uint8_t)((cfg.rotType + dir + 9) % 9);   // 9th type = None
+              cfg.rotEnable = (cfg.rotType != ROT_NONE);   // None disables; any type enables
               cfg.save(); applyRotatorFromCfg(); break;
       // Rot wire: which transport a SERIAL rotator protocol runs on. Cycling it
       // re-applies immediately so a conflict (Grove already taken by CAT or GPS)
@@ -9334,10 +9486,22 @@ void App::keySettings(char c, bool enter, bool back) {
                  cfg.save(); lastInputMs = millis(); } break;
       case 30: cfg.catType = (uint8_t)((cfg.catType + dir + CAT_TYPE_N) % CAT_TYPE_N);
                yieldGroveIfTaken("CAT");
+               groveCatVsGpsArbitrate("CAT");   // H10: disable Grove GPS if CAT took Grove
                cfg.save(); applyRadioFromCfg(); break;
-      case 32: { long p = (long)cfg.catPort + dir; if (p < 1) p = 65535;
-                 if (p > 65535) p = 1; cfg.catPort = (uint16_t)p;
-                 cfg.save(); applyRadioFromCfg(); } break;
+      case 32:
+        if (cfg.catType == CAT_RIGCTL_GROVE) {
+          // C2: cycle the supported Grove UART rates rather than treating catPort as baud.
+          static const uint32_t GBAUD[] = { 9600, 19200, 38400, 57600, 115200 };
+          int gi = 0; for (int k = 0; k < 5; ++k) if (GBAUD[k] == cfg.catGroveBaud) { gi = k; break; }
+          gi = (gi + dir + 5) % 5;
+          cfg.catGroveBaud = GBAUD[gi];
+          cfg.save(); applyRadioFromCfg();
+        } else {
+          long p = (long)cfg.catPort + dir; if (p < 1) p = 65535;
+          if (p > 65535) p = 1; cfg.catPort = (uint16_t)p;
+          cfg.save(); applyRadioFromCfg();
+        }
+        break;
       case 36: cfg.rigdEnable = !cfg.rigdEnable; cfg.save(); break;
       case 37: { long p = (long)cfg.rigdPort + dir; if (p < 1) p = 65535;
                  if (p > 65535) p = 1; cfg.rigdPort = (uint16_t)p; cfg.save(); } break;
@@ -9454,7 +9618,6 @@ void App::keySettings(char c, bool enter, bool back) {
                setStatus(cfg.autoPosReply ? "Auto position reply ON" : "Auto position reply off"); break;
       case 11: editTarget = 206; editTitle = "Net rotator port";
                editBuf = String(cfg.rotPort); screen = SCR_EDIT; break;
-      case 8: cfg.rotEnable = !cfg.rotEnable; cfg.save(); applyRotatorFromCfg(); break;
       case 10: editTarget = 205; editTitle = "Net rotator host (IP)";
                editBuf = cfg.rotHost; screen = SCR_EDIT; break;
       case 20: gpSrcSel = 0; gpSrcScroll = 0; screen = SCR_GPSRC; lastDrawMs = 0; break;
@@ -9535,13 +9698,19 @@ void App::keySettings(char c, bool enter, bool back) {
       case 32: editTarget = 211;
                editTitle = (cfg.catType == CAT_RIGCTL_GROVE) ? "Grove baud"
                          : (cfg.catType == CAT_RIGCTL) ? "rigctld port" : "Radio LAN port";
-               editBuf = String(cfg.catPort); screen = SCR_EDIT; break;
+               editBuf = String(cfg.catType == CAT_RIGCTL_GROVE ? cfg.catGroveBaud : (uint32_t)cfg.catPort);
+               screen = SCR_EDIT; break;
       case 33: editTarget = 208; editTitle = "Radio LAN user";
                editBuf = cfg.catUser; screen = SCR_EDIT; break;
       case 34: editTarget = 209; editTitle = "Radio LAN password";
                editBuf = cfg.catPass; screen = SCR_EDIT; break;
       case 35: {                              // manual rotator control screen
         rotOut = false; smOut = false;        // manual takes over from auto-track
+        // Surface the real reason if the rotator won't engage (USB enumeration, adapter
+        // conflict, out of RAM) rather than silently opening on park coordinates and
+        // implying "enable it in Settings" when it IS enabled but failed to come up.
+        bool rok = ensureRotatorReady();       // build+engage a deferred USB rotator on demand
+        if (!rok) setStatus(rotNotReadyMsg(), 4000);
         float a, e;
         if (rot && rot->readPos(a, e)) { manAz = a; manEl = e; }
         else { manAz = (float)cfg.rotParkAz; manEl = (float)cfg.rotParkEl; }
@@ -9856,9 +10025,20 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.catPass[sizeof(cfg.catPass)-1] = 0;
                 cfg.save(); applyRadioFromCfg();
                 screen = SCR_SETTINGS; setStatus("Saved"); return;
-      case 211: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
-                  cfg.catPort = (uint16_t)p; cfg.save(); applyRadioFromCfg();
-                  screen = SCR_SETTINGS; setStatus("Saved"); return; }
+      case 211:
+        if (cfg.catType == CAT_RIGCTL_GROVE) {
+          // C2: snap typed Grove baud to the nearest supported UART rate.
+          long b = editBuf.toInt();
+          const uint32_t GBAUD[] = { 9600, 19200, 38400, 57600, 115200 };
+          uint32_t best = 115200; long bestd = 1L << 30;
+          for (uint32_t g : GBAUD) { long dd = labs((long)g - b); if (dd < bestd) { bestd = dd; best = g; } }
+          cfg.catGroveBaud = best; cfg.save(); applyRadioFromCfg();
+          screen = SCR_SETTINGS; setStatus(String("Grove baud: ") + String(best)); return;
+        } else {
+          long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
+          cfg.catPort = (uint16_t)p; cfg.save(); applyRadioFromCfg();
+          screen = SCR_SETTINGS; setStatus("Saved"); return;
+        }
 
       // ---- mutual co-visibility vs a DX grid ----
       case 330: computeMutual(editBuf); return;
@@ -14529,7 +14709,7 @@ void App::drawOverhead() {
   }
   // Count + scroll indicator.
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(4, 120);
+  canvas.setCursor(4, 116);
   canvas.printf("%d up / %d scanned", ovhN, ovhScanned);
   footer("r rescan  ;/. scroll  ` back");
 }
@@ -14935,6 +15115,14 @@ void App::runSerialCommand(const char* cmd) {
                     (unsigned)hi.minimum_free_bytes, (unsigned)hi.free_blocks);
       heap_caps_get_info(&hi, MALLOC_CAP_DMA);
       Serial.printf("  DMA     : free %u  largest %u  min-ever %u  free-blocks %u\n",
+                    (unsigned)hi.total_free_bytes, (unsigned)hi.largest_free_block,
+                    (unsigned)hi.minimum_free_bytes, (unsigned)hi.free_blocks);
+      // 32BIT includes memory usable only via aligned 32-bit access (e.g. spare IRAM), which
+      // 8BIT can't hand out. If its largest block is bigger than 8BIT's ~31.7 KB, there's a
+      // larger word-addressable region we could use for word-aligned buffers (NOT byte
+      // streams / strings / TLS / floats). Diagnostic only.
+      heap_caps_get_info(&hi, MALLOC_CAP_32BIT);
+      Serial.printf("  32BIT   : free %u  largest %u  min-ever %u  free-blocks %u\n",
                     (unsigned)hi.total_free_bytes, (unsigned)hi.largest_free_block,
                     (unsigned)hi.minimum_free_bytes, (unsigned)hi.free_blocks);
     }
@@ -16652,12 +16840,18 @@ void App::keyGGrid(char c, bool enter, bool back) {
 //
 //  Exercises every CAT function the active backend exposes and reports a
 //  PASS/FAIL/INFO line for each, both on the device screen (SCR_CATTEST) and on
-//  the serial monitor at 115200. It is deliberately NON-DESTRUCTIVE:
-//    * It never keys the transmitter (PTT is only READ, never set).
-//    * It saves the dial state, drives test values, then restores the dial and
-//      re-syncs the Doppler send-guards so normal tracking resumes cleanly.
-//  Frequency-set "PASS" means the rig accepted the command; where read-back is
-//  supported it additionally confirms the value came back within tolerance.
+//  the serial monitor at 115200. It never keys the transmitter (PTT is only READ,
+//  never set), so it is safe to run off-air.
+//
+//  It is NOT fully state-preserving, and should be treated as a BENCH TEST:
+//    * It sets both VFOs to test frequencies and only restores them if CardSat had
+//      cached non-zero dial values (lastRxSet / lastUlHz) -- a cold test may leave the
+//      rig on the test frequencies.
+//    * It changes downlink/uplink MODES, toggles satellite mode (left OFF), and briefly
+//      enables CTCSS (left OFF) -- it does NOT read back and restore the rig's prior
+//      modes, sat-mode state, tone state/frequency, or selected VFO.
+//  After a run, re-engage tracking (Track 'r') or reselect the transponder to put the
+//  rig back into a known operating state. The on-screen output leads with this warning.
 // ===========================================================================
 
 void App::catLog(const String& line) {
@@ -16687,14 +16881,31 @@ void App::runCatTest() {
   if (!catLines) { setStatus("Out of memory"); return; }   // catCount stays 0 -> safe
 
   if (!rig || !rig->ready()) {
-    catLog("Radio not ready.");
-    catLog("Turn CAT on (Track 'r')");
-    catLog("or check CAT type/wiring.");
+    // A USB CAT radio only opens its transport when engaged (loop() reconciler ties
+    // USB-up to radioOut). If that's why the rig isn't ready, request engagement and
+    // tell the operator to re-run once it's up -- the reconciler brings USB CAT up on
+    // the next loop. CI-V/LAN wires are always live, so a not-ready there is real.
+    if (cfg.catType == CAT_USB && rig && !radioOut) {
+      radioOut = true;
+      catToolEngaged = true;            // WE turned it on; leaving the tool turns it back off
+      catLog("USB CAT: starting...");
+      catLog("Re-run test in a moment.");
+    } else if (!rig) {
+      catLog("No radio configured.");
+      catLog("Set a radio model in");
+      catLog("Settings to run this test.");
+    } else {
+      catLog("Radio not ready.");
+      catLog("Turn CAT on (Track 'r')");
+      catLog("or check CAT type/wiring.");
+    }
     screen = SCR_CATTEST; lastDrawMs = 0;
     return;
   }
 
   catLog(String("Rig: ") + rig->name());
+  catLog("Bench test - changes dial/modes.");
+  catLog("Re-engage 'r' after to restore.");
   catLog(String("Addr 0x") + String(rig->address(), HEX) +
          "  read=" + (rig->canReadFreq() ? "Y" : "N") +
          " sat=" + (rig->hasSatMode() ? "Y" : "N") +
@@ -16854,6 +17065,11 @@ void App::enterCatMon() {
   catMonActive = true;
   catMonLastPollMs = 0;                     // poll immediately on first service tick
   catTraceSink = &App::catMonTrampoline;   // start capturing
+  // A USB CAT radio only brings its transport up when engaged (the loop() reconciler
+  // ties USB-up to radioOut). Request engagement so the monitor has a live link to
+  // watch; the reconciler brings USB CAT up on the next loop and polling begins once
+  // rig->ready(). CI-V/LAN wires are always live, so this is a harmless no-op there.
+  if (cfg.catType == CAT_USB && rig && !radioOut) { radioOut = true; catToolEngaged = true; }
   screen = SCR_CATMON; lastDrawMs = 0;
 }
 
@@ -16977,6 +17193,7 @@ void App::drQuery() {
     String o = st.substring(b, e + 1);
     String m = drField(o, "model"); drModelId[idx] = m.length() ? m.toInt() : -1;
     drCiv[idx] = drField(o, "civ").toInt();
+    drBaud[idx] = (uint32_t)drField(o, "baud").toInt();   // H14: per-leg CAT baud (0 = default)
     String s = drField(o, "serial");
     strncpy(drSerial[idx], s.c_str(), sizeof(drSerial[idx]) - 1);
     drSerial[idx][sizeof(drSerial[idx]) - 1] = 0;
@@ -17006,9 +17223,14 @@ void App::drQuery() {
   }
   // ---- model catalogue ----
   String ml = rig->vendorLine("\\csdr_models");
+  int drModelParsed = 0;
   if (ml.length() && ml.indexOf('{') >= 0) {
     int p = 0;
-    while (p < (int)ml.length() && drModelN < (int)(sizeof(drModel)/sizeof(drModel[0]))) {
+    // C3: bound the loop with DR_MAX_MODEL, the real array capacity. The previous bound
+    // sizeof(drModel)/sizeof(drModel[0]) took sizeof of the DrModel* POINTER (4 on ESP32)
+    // over sizeof(DrModel) -> 0, so the loop never ran: zero models parsed while the code
+    // still reported a loaded, green link.
+    while (p < (int)ml.length() && drModelN < DR_MAX_MODEL) {
       int b = ml.indexOf('{', p); if (b < 0) break;
       int e = ml.indexOf('}', b); if (e < 0) break;
       String o = ml.substring(b, e + 1);
@@ -17016,9 +17238,18 @@ void App::drQuery() {
       m.id = drField(o, "id").toInt();
       strncpy(m.name, drField(o, "name").c_str(), sizeof(m.name) - 1); m.name[sizeof(m.name)-1]=0;
       m.rxOnly = drField(o, "rxOnly") == "true";
-      drModelN++;
+      drModelN++; drModelParsed++;
       p = e + 1;
     }
+  }
+  // C3: an empty or unparseable catalogue is a query FAILURE, not a good link. Don't set
+  // drLoaded / a green link when no models came back -- that masked the failure and left
+  // both legs showing "(none)" with no way to select a model.
+  if (drModelParsed == 0) {
+    drLoaded = false;
+    drLink = 2; drLinkMs = millis();        // 2 = failed
+    drStatus = "No models from companion";
+    return;
   }
   drLoaded = true;
   drLink = 1; drLinkMs = millis();          // a successful query IS a good link
@@ -17033,13 +17264,24 @@ void App::drSave() {
     return mi >= 0 ? String(drModel[mi].name) : String("(none)");
   };
   (void)modelName;
+  // H11: the \csdr_set protocol splits tokens on spaces, so a USB serial containing a space
+  // would be truncated at the first space. Percent-encode space (and % itself) so such a
+  // serial round-trips intact; the companion decodes it in applyConfigKV.
+  auto encSerial = [](const char* s) -> String {
+    String o; for (const char* p = s; *p; ++p) {
+      if (*p == '%') o += "%25"; else if (*p == ' ') o += "%20"; else o += *p;
+    }
+    return o;
+  };
   String cmd = "\\csdr_set";
   cmd += " dl_model=" + String(drModelId[0]);
   cmd += " dl_civ="   + String(drCiv[0], HEX);
-  cmd += " dl_serial=" + String(drSerial[0]);
+  cmd += " dl_baud="  + String(drBaud[0]);   // H14: 0 = model default on the companion
+  cmd += " dl_serial=" + encSerial(drSerial[0]);
   cmd += " ul_model=" + String(drModelId[1]);
   cmd += " ul_civ="   + String(drCiv[1], HEX);
-  cmd += " ul_serial=" + String(drSerial[1]);
+  cmd += " ul_baud="  + String(drBaud[1]);
+  cmd += " ul_serial=" + encSerial(drSerial[1]);
   cmd += " save=1";
   String r = rig->vendorLine(cmd);
   drStatus = (r.indexOf("RPRT 0") >= 0) ? "Saved to Stick" : ("Save failed: " + r);
@@ -17048,57 +17290,90 @@ void App::drSave() {
 void App::drawDualRig() {
   header("Dual-Rig setup (Stick)");
   canvas.setTextSize(1);
+
+  // Link status line (y=18). Kept short so it never reaches the battery/clock.
   const char* xport = (cfg.catType == CAT_RIGCTL_GROVE) ? "Grove"
                     : (cfg.catType == CAT_RIGCTL) ? "net" : "n/a";
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setCursor(6, 18);
-  canvas.printf("Link: rigctl %s   %s", xport, drLoaded ? "(loaded)" : "(not queried)");
+  canvas.printf("rigctl %s  %s", xport, drLoaded ? "loaded" : "not queried");
 
-  // Two legs, each: model + assigned device + CI-V. Fields index 0..5.
-  const char* legName[2] = { "DN (RX)", "UP (TX)" };
-  int y = 32;
+  // Two legs. Each leg has FOUR editable fields (Rig / Dev / CI-V / baud) but only THREE
+  // display rows: CI-V and baud share the third row to fit the 135 px screen. The leg name
+  // is inlined on the Rig row (no separate banner), so a leg is 3 rows = 30 px and both legs
+  // fit in y=30..96, leaving room for the device reference and a clear status line.
+  const char* legName[2] = { "DN", "UP" };
+  int y = 30;
   for (int L = 0; L < 2; ++L) {
     int mi = drModelIdx(drModelId[L]);
     String mn = mi >= 0 ? String(drModel[mi].name) : String("(none)");
-    // device label for this leg's serial
     String dl = "(none)";
     for (int i = 0; i < drDevN; ++i)
       if (drSerial[L][0] && strcmp(drDev[i].serial, drSerial[L]) == 0) { dl = drDev[i].product; break; }
-    if (drSerial[L][0] && dl == "(none)") dl = String("#") + drSerial[L] + " (absent)";
+    if (drSerial[L][0] && dl == "(none)") dl = String("#") + drSerial[L] + " absent";
 
-    // row: model
-    int f = L * 3;
-    auto rowc = [&](int field){ if (field == drSel) { canvas.setTextColor(CL_BLACK, CL_SELBG); }
-                                else canvas.setTextColor(CL_WHITE, CL_BLACK); };
-    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, y); canvas.print(legName[L]);
-    rowc(f + 0); canvas.fillRect(58, y - 2, 176, 10, (f+0==drSel)?CL_SELBG:CL_BLACK);
-    rowc(f + 0); canvas.setCursor(60, y); canvas.printf("Rig: %s", mn.c_str());
-    y += 11;
-    rowc(f + 1); canvas.fillRect(58, y - 2, 176, 10, (f+1==drSel)?CL_SELBG:CL_BLACK);
-    rowc(f + 1); canvas.setCursor(60, y); canvas.printf("Dev: %s", dl.c_str());
-    y += 11;
-    rowc(f + 2); canvas.fillRect(58, y - 2, 176, 10, (f+2==drSel)?CL_SELBG:CL_BLACK);
-    rowc(f + 2); canvas.setCursor(60, y);
-    if (drCiv[L]) canvas.printf("CI-V: %02X", drCiv[L]); else canvas.print("CI-V: default");
-    y += 13;
+    int f = L * 4;   // H14: 4 fields per leg
+    auto field = [&](int fi, const String& label){
+      bool sel = (fi == drSel);
+      canvas.fillRect(6, y - 1, 228, 10, sel ? CL_SELBG : CL_BLACK);
+      canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(10, y); canvas.print(label);
+      y += 10;
+    };
+    // Leg tag on the Rig row keeps the two legs visually grouped without a banner.
+    field(f + 0, String(legName[L]) + " Rig: " + mn);
+    field(f + 1, String("   Dev: ") + dl);
+    // Third row carries BOTH CI-V (field f+2) and baud (field f+3). Highlight the whole row
+    // when either sub-field is selected, and mark which one with a '>' caret.
+    {
+      bool selCiv  = (f + 2 == drSel);
+      bool selBaud = (f + 3 == drSel);
+      bool sel = selCiv || selBaud;
+      String civS = drCiv[L] ? (String(drCiv[L] < 16 ? "0" : "") + String(drCiv[L], HEX)) : String("def");
+      String baudS = drBaud[L] ? String(drBaud[L]) : String("def");
+      String row = String("   ") + (selCiv ? ">" : " ") + "CIV:" + civS +
+                   "  " + (selBaud ? ">" : " ") + "baud:" + baudS;
+      canvas.fillRect(6, y - 1, 228, 10, sel ? CL_SELBG : CL_BLACK);
+      canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(10, y); canvas.print(row);
+      y += 10;
+    }
+    y += 3;   // gap between legs
   }
 
-  // Device list
+  // Device reference (numbered, for the 1-8 assign keys). Only what fits above the
+  // status line gets drawn; the count tells the operator if more exist. When there's
+  // no status message, the list may extend into that row.
+  const int listBottom = drStatus.length() ? 115 : 125;
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, y); canvas.print("Enumerated USB devices:"); y += 11;
-  if (drDevN == 0) { canvas.setCursor(10, y); canvas.print(drLoaded ? "(none seen)" : "press q to query"); }
-  const int VIS = 3;
-  for (int r = 0; r < VIS && drScroll + r < drDevN; ++r) {
-    int i = drScroll + r;
-    canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(10, y + r * 10);
-    canvas.printf("%d %-12s %s", i + 1, drDev[i].product, drDev[i].vidpid);
+  canvas.setCursor(6, y);
+  if (drDevN == 0) {
+    canvas.print(drLoaded ? "USB devices: none seen" : "USB devices: press q to query");
+    y += 10;
+  } else {
+    canvas.printf("USB devices (%d):", drDevN);
+    y += 10;
+    for (int r = 0; drScroll + r < drDevN && y + 8 <= listBottom; ++r) {
+      int i = drScroll + r;
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(10, y);
+      canvas.printf("%d %-12.12s %s", i + 1, drDev[i].product, drDev[i].vidpid);
+      y += 10;
+    }
+    // If more devices exist than rows shown, hint that the list scrolls.
+    if (drScroll + 1 < drDevN && y + 8 > listBottom) {
+      canvas.setTextColor(CL_DGREY, CL_BLACK);
+      canvas.setCursor(10, y > listBottom ? listBottom - 8 : y); canvas.print("...more");
+    }
   }
 
-  // status line
-  canvas.setTextColor(CL_GREEN, CL_BLACK);
-  canvas.setCursor(6, 120); canvas.print(drStatus.length() ? drStatus : String("q query  <>change  1-8 assign  s save"));
-  footer("q qry <>chg 1-8 dev s save ` bk");
+  // Status line: a transient message when present, else nothing (the key hints live
+  // in the footer, so this no longer competes for space). Fixed just above the footer.
+  if (drStatus.length()) {
+    canvas.setTextColor(CL_GREEN, CL_BLACK);
+    canvas.setCursor(6, 118); canvas.print(drStatus);
+  }
+  footer("q qry  <>chg  1-8 dev  s save  ` bk");
 }
 
 void App::keyDualRig(char c, bool enter, bool back) {
@@ -17107,9 +17382,9 @@ void App::keyDualRig(char c, bool enter, bool back) {
   if (c == 'q') { setStatus("Querying Stick..."); draw(); drQuery(); lastDrawMs = 0; return; }
   if (c == 's') { drSave(); lastDrawMs = 0; return; }
   if (isUp(c))   { if (drSel > 0) drSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (drSel < 5) drSel++; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (drSel < 7) drSel++; lastDrawMs = 0; return; }
 
-  int leg = drSel / 3, field = drSel % 3;
+  int leg = drSel / 4, field = drSel % 4;   // H14: 4 fields per leg (model, device, civ, baud)
   // assign a device by number 1..8 to the selected leg (works on either leg field)
   if (c >= '1' && c <= '8') {
     int i = c - '1';
@@ -17135,10 +17410,16 @@ void App::keyDualRig(char c, bool enter, bool back) {
     s = (s + dir + slots) % slots;
     if (s == 0) drSerial[leg][0] = 0;
     else { strncpy(drSerial[leg], drDev[s-1].serial, sizeof(drSerial[leg])-1); drSerial[leg][sizeof(drSerial[leg])-1]=0; }
-  } else {                                // CI-V address nudge
+  } else if (field == 2) {                // CI-V address nudge
     int v = drCiv[leg] + dir;
     if (v < 0) v = 0xFF; if (v > 0xFF) v = 0;
     drCiv[leg] = v;
+  } else {                                // H14: cycle per-leg CAT baud (0 = model default)
+    static const uint32_t DRB[] = { 0, 4800, 9600, 19200, 38400, 57600, 115200 };
+    const int NB = 7;
+    int ci = 0; for (int k = 0; k < NB; ++k) if (DRB[k] == drBaud[leg]) { ci = k; break; }
+    ci = (ci + dir + NB) % NB;
+    drBaud[leg] = DRB[ci];
   }
   lastDrawMs = 0;
 }
@@ -17219,7 +17500,12 @@ int App::batteryPercent() {
 // blank the backlight, and mark the screen asleep. We deliberately do NOT enter
 // deep sleep so any key wakes instantly and WiFi can stay up for a heap reset.
 void App::enterChargeMode() {
+  // Actual ownership, not just tracking flags: Manual Control engages a rotator with all
+  // flags clear (see stopAllControl). rot!=null && ready() catches that case.
+  bool rotWasEngaged = rotOut || smOut || emeRotOut || gcRotOut || (rot && rot->ready());
   radioOut = false; rotOut = false;                  // no tracking while charging
+  smOut = false; emeRotOut = false; gcRotOut = false;
+  if (rotWasEngaged) parkAndReleaseRotator();        // park + free the USB rotator host
   chargeWoke = false; chargeWokeMs = 0;
   M5Cardputer.Display.setBrightness(0);
   screenAsleep = true;
@@ -18535,17 +18821,17 @@ void App::drawSunMoon() {
 void App::keySunMoon(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) {
-    if (smOut && rot) rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);   // park on exit
+    if (smOut) parkAndReleaseRotator();   // park + release USB host on exit
     smOut = false; screen = SCR_HOME; lastDrawMs = 0; return;
   }
   if (isUp(c) || isDown(c)) { smSel ^= 1; lastAzCmd = lastElCmd = -999.0f; lastDrawMs = 0; return; }
   if (c == 'g') { smGraphic = !smGraphic; lastDrawMs = 0; return; }
   if (c == 'o') {
-    if (!rot || !rot->ready()) { setStatus("Rotator not ready"); return; }
+    if (!ensureRotatorReady()) { setStatus(rotNotReadyMsg()); return; }
     smOut = !smOut; lastAzCmd = lastElCmd = -999.0f;
     if (smOut) { rotOut = false; emeRotOut = false; gcRotOut = false;  // Sun/Moon takes the rotator
                  setStatus(smSel ? "Tracking Moon" : "Tracking Sun"); }
-    else { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); setStatus("Rotator OFF (parked)"); }
+    else { parkAndReleaseRotator(); setStatus("Rotator OFF (parked)"); }
     lastDrawMs = 0; return;
   }
   if (c == 'x') { if (rot) rot->stop(); smOut = false; lastDrawMs = 0; return; }
@@ -18752,7 +19038,7 @@ void App::keyEme(char c, bool enter, bool back) {
   if (isBack(c, back)) {
     if (emeMutShown) { emeMutShown = false; lastDrawMs = 0; return; }   // sub-view -> main
     if (emePage)     { emePage = 0; lastDrawMs = 0; return; }           // analysis -> live
-    if (emeRotOut && rot) rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+    if (emeRotOut) parkAndReleaseRotator();   // park + release USB host on exit
     emeRotOut = false; screen = SCR_SUNMOON; lastDrawMs = 0; return;
   }
   if (emeMutShown) {
@@ -18778,10 +19064,10 @@ void App::keyEme(char c, bool enter, bool back) {
     screen = SCR_EMEPLAN; lastDrawMs = 0; return;
   }
   if (c == 'o') {                        // point the rotator at the Moon (el included)
-    if (!rot || !rot->ready()) { setStatus("Rotator not ready"); return; }
+    if (!ensureRotatorReady()) { setStatus(rotNotReadyMsg()); return; }
     emeRotOut = !emeRotOut;
     if (emeRotOut) { rotOut = false; smOut = false; gcRotOut = false; setStatus("Pointing at Moon"); }
-    else { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); setStatus("Rotator OFF (parked)"); }
+    else { parkAndReleaseRotator(); setStatus("Rotator OFF (parked)"); }
     lastDrawMs = 0; return;
   }
   if (c == 'x') { if (rot) rot->stop(); emeRotOut = false; lastDrawMs = 0; return; }
@@ -18853,19 +19139,19 @@ void App::drawGridCalc() {
 void App::keyGridCalc(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) {
-    if (gcRotOut && rot) rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl);
+    if (gcRotOut) parkAndReleaseRotator();   // park + release USB host on exit
     gcRotOut = false; screen = SCR_HOME; lastDrawMs = 0; return;
   }
   if (c == 'g') { editTarget = 350; editTitle = "Target grid"; editBuf = gcGrid; screen = SCR_EDIT; return; }
   if (c == 'q') { editTarget = 351; editTitle = "Callsign"; editBuf = ""; screen = SCR_EDIT; return; }
   if (c == 'o') {                        // point rotator at the bearing (terrestrial: el 0)
     if (!gcHaveResult) { setStatus("Compute a bearing first"); return; }
-    if (!rot || !rot->ready()) { setStatus("Rotator not ready"); return; }
+    if (!ensureRotatorReady()) { setStatus(rotNotReadyMsg()); return; }
     gcRotOut = !gcRotOut;
     if (gcRotOut) { rotOut = false; smOut = false; emeRotOut = false;
                     float a = (float)gcBearing + cfg.rotAzOff; while (a >= 360) a -= 360; while (a < 0) a += 360;
                     rotPoint(a, 0.0f); setStatus("Rotator pointed at grid"); }
-    else { rotPoint((float)cfg.rotParkAz, (float)cfg.rotParkEl); setStatus("Rotator OFF (parked)"); }
+    else { parkAndReleaseRotator(); setStatus("Rotator OFF (parked)"); }
     lastDrawMs = 0; return;
   }
   if (c == 'x') { if (rot) rot->stop(); gcRotOut = false; lastDrawMs = 0; return; }
@@ -21266,7 +21552,7 @@ void App::drawNeigh() {
     if (ovl) canvas.print("OVLP");
     else     { String g = String((int)neighGap[i]) + "km"; canvas.print(g); }
   }
-  canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, 120);
+  canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, 116);
   canvas.printf("%d in band  (TLE ~km accuracy)", neighN);
   footer(";/. scroll ENTER pair  p prt  `bk");
 }
@@ -22046,7 +22332,7 @@ void App::drawKessler() {
     canvas.print(fb);
     if (K.net && K.turn != K.mePlayer) {
       canvas.setTextColor(CL_ORANGE, CL_BLACK);
-      canvas.setCursor(72, 122); canvas.print("waiting for peer's shot");
+      canvas.setCursor(72, 116); canvas.print("waiting for peer's shot");
       footer("LoRa: peer is aiming");
     } else {
       footer(K.net ? "LoRa: your shot  digits ,/. ENTER"
@@ -28770,7 +29056,7 @@ void App::drawReady() {
                           : String("NOT SET"),
       cfg.ssid[0] ? (net.connected() ? CL_GREEN : CL_WHITE) : CL_YELLOW);
   // Radio + rotator (informational: both defaults are valid configurations)
-  row("Radio CAT", cfg.catType == CAT_WIRED ? "CI-V wired" : "network (LAN)", CL_WHITE);
+  row("Radio CAT", catTypeName(), CL_WHITE);
   // Rotator: protocol + WIRE + link state. The old row said "GS-232" or
   // "other/rotctld" and nothing else -- with a USB adapter and no radio engaged
   // that told the operator nothing about whether the link was up, which adapter
@@ -30952,7 +31238,7 @@ void App::printReady() {
   Printer::line(String("WiFi      ") + (cfg.ssid[0] ? (net.connected() ? String(cfg.ssid) + " (up)"
                                                                        : String(cfg.ssid))
                                                     : String("NOT SET")));
-  Printer::line(String("Radio CAT ") + (cfg.catType == CAT_WIRED ? "CI-V wired" : "network (LAN)"));
+  Printer::line(String("Radio CAT ") + catTypeName());
   Printer::line(String("Rotator   ") + (cfg.rotType == ROT_GS232 ? "GS-232" : "other/rotctld"));
   Printer::line(String("SD card   ") + (Store::onSD() ? "present" : "none (memos off)"));
   Printer::line(String("Callsign  ") + (cfg.myCall[0] ? String(cfg.myCall) : String("NOT SET")));
@@ -34323,7 +34609,6 @@ void App::drawSettings() {
   { const char* mn = (cfg.msgNotify == 0) ? "off" : (cfg.msgNotify == 2) ? "banner+beep" : "banner";
     rows[61] = String("Msg notify: ") + mn; }
   rows[80] = String("Auto position reply: ") + (cfg.autoPosReply ? "on" : "off");
-  rows[8]  = String("Rotator: ") + (cfg.rotEnable ? "on" : "off");
   {
     // Rot wire: only meaningful for the serial protocols -- the network backends
     // carry their own socket and ROT_YAESU is I2C-direct, so say so rather than
@@ -34381,7 +34666,8 @@ void App::drawSettings() {
                                 : "off");
     rows[101] = rows[100];
   }
-  rows[9]  = String("Rot type: ") + (cfg.rotType == ROT_PST ? "PstRotator (net)"
+  rows[9]  = String("Rotator: ") + (cfg.rotType == ROT_NONE ? "None"
+                     : cfg.rotType == ROT_PST ? "PstRotator (net)"
                      : cfg.rotType == ROT_NET ? "rotctl (net)"
                      : cfg.rotType == ROT_YAESU ? "Yaesu (direct)"
                      : cfg.rotType == ROT_EASYCOMM1 ? "Easycomm I"
@@ -34409,7 +34695,9 @@ void App::drawSettings() {
   rows[19] = String("Rot el range: ") + (cfg.rotFlip ? "180 deg (flip)" : "90 deg");
   rows[20] = String("GP source: ") + gpSourceLabel();
   rows[21] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
-                                ? "Main Up/Sub Dn" : "Main Dn/Sub Up");
+                                ? "Main Up/Sub Dn" : "Main Dn/Sub Up")
+             + ((cfg.catType == CAT_RIGCTL || cfg.catType == CAT_RIGCTL_GROVE)
+                ? " (fixed: DualRig)" : "");   // H9: layout is forced for the companion backends
   { const char* rv = (cfg.rxOnlyVfo == RXO_MAIN) ? "Main"
                    : (cfg.rxOnlyVfo == RXO_SUB)  ? "Sub" : "Follow VFO";
     rows[65] = String("Beacon/RX-only DL: ") + rv; }
@@ -34441,7 +34729,7 @@ void App::drawSettings() {
              : String(cfg.catType == CAT_RIGCTL ? "rigctld host: " : "LAN host: ") + h;
   }
   rows[32] = (cfg.catType == CAT_USB) ? String("Port: n/a (USB)")
-           : (cfg.catType == CAT_RIGCTL_GROVE) ? (String("Grove baud: ") + String(cfg.catPort))
+           : (cfg.catType == CAT_RIGCTL_GROVE) ? (String("Grove baud: ") + String(cfg.catGroveBaud))
            : String(cfg.catType == CAT_RIGCTL ? "rigctld port: " : "LAN port: ") + String(cfg.catPort);
   rows[33] = String("LAN user: ") + (cfg.catUser[0] ? cfg.catUser : "(not set)");
   rows[34] = String("LAN pass: ") + String(strlen(cfg.catPass) ? "******" : "(none)");

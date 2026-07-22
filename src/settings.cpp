@@ -7,6 +7,31 @@
 #include "storage.h"
 #include <ArduinoJson.h>
 
+// M17: clamp the values that are used as array subscripts or fed to math/hardware, so a
+// hand-edited, partially-corrupted, or future-version config can't drive an out-of-range
+// index or a non-finite coordinate into the predictor, displays, or radio libraries. This
+// is deliberately focused on the crash/garbage-risk fields; it is safe to call after load,
+// restore, and migration. Enums that makeRig / pickers already range-check are left alone.
+void Settings::validate() {
+  // Array-index enum: GPS_PROFILES[gpsSource] is indexed unguarded on at least one path.
+  if (gpsSource >= GPS_SRC_COUNT) gpsSource = GPS_SRC_CAP1262;
+  // C2: Grove rigctl baud must be one of the supported UART rates; snap anything else to the
+  // 115200 companion default so a hand-edited/corrupt value can't misconfigure Serial1.
+  switch (catGroveBaud) {
+    case 9600: case 19200: case 38400: case 57600: case 115200: break;
+    default: catGroveBaud = 115200; break;
+  }
+  // Physical coordinates feed SGP4 and the Maidenhead math. Reject non-finite and clamp.
+  if (!isfinite(lat) || lat < -90.0  || lat > 90.0)  lat = 0.0;
+  if (!isfinite(lon) || lon < -180.0 || lon > 180.0) lon = 0.0;
+  if (!isfinite(altM) || altM < -500.0 || altM > 9000.0) altM = 0.0;
+  // Per-QTH presets are indexed by the preset picker; clamp the same way.
+  for (int i = 0; i < 5; ++i) {
+    if (!isfinite(qthLat[i]) || qthLat[i] < -90.0  || qthLat[i] > 90.0)  qthLat[i] = 0.0;
+    if (!isfinite(qthLon[i]) || qthLon[i] < -180.0 || qthLon[i] > 180.0) qthLon[i] = 0.0;
+  }
+}
+
 bool Settings::load() {
   File f = Store::fs().open(FILE_CFG, "r");
   if (!f) {
@@ -30,8 +55,8 @@ bool Settings::load() {
     return false;                    // do NOT let the caller overwrite a real file
   }
 
-  strncpy(ssid, d["ssid"] | "", sizeof(ssid)-1);
-  strncpy(pass, d["pass"] | "", sizeof(pass)-1);
+  strncpy(ssid, d["ssid"] | "", sizeof(ssid)-1); ssid[sizeof(ssid)-1]=0;   // M16: terminate
+  strncpy(pass, d["pass"] | "", sizeof(pass)-1); pass[sizeof(pass)-1]=0;   // M16: terminate
   strncpy(ssid2, d["ssid2"] | "", sizeof(ssid2)-1); ssid2[sizeof(ssid2)-1]=0;
   strncpy(pass2, d["pass2"] | "", sizeof(pass2)-1); pass2[sizeof(pass2)-1]=0;
   strncpy(gpUrl, d["gpurl"] | AMSAT_GP_URL, sizeof(gpUrl)-1); gpUrl[sizeof(gpUrl)-1]=0;
@@ -86,11 +111,18 @@ bool Settings::load() {
 #if CARDSAT_HAS_USBCAT
   if (catType > CAT_USB) catType = CAT_WIRED;
 #else
-  if (catType > CAT_RIGCTL) catType = CAT_WIRED;   // CAT_USB not built: fall back
+  // CAT_USB not built: only that one value is invalid. CAT_RIGCTL_GROVE (3) is a
+  // valid no-USB transport (rigctl over the Grove UART), so clamping at > CAT_RIGCTL
+  // (2) wrongly discarded a saved Grove config. Reset ONLY CAT_USB to wired.
+  if (catType == CAT_USB || catType > CAT_RIGCTL_GROVE) catType = CAT_WIRED;
 #endif
   strncpy(catHost, d["cathost"] | "", sizeof(catHost)-1); catHost[sizeof(catHost)-1]=0;
   catPort    = d["catport"] | (uint16_t)50001;
   if (catPort == 0) catPort = 50001;
+  // C2: Grove baud is its own field. Migration: if a pre-catgbaud config is loaded, the
+  // key is absent -> default 115200 (the companion default) rather than inheriting the
+  // uint16_t catPort as a baud. validate() further clamps to the supported UART set.
+  catGroveBaud = d["catgbaud"] | (uint32_t)115200;
   strncpy(catUser, d["catuser"] | "", sizeof(catUser)-1); catUser[sizeof(catUser)-1]=0;
   strncpy(catPass, d["catpass"] | "", sizeof(catPass)-1); catPass[sizeof(catPass)-1]=0;
   vfoType    = d["vfotype"] | (uint8_t)VFO_MAIN_UP_SUB_DOWN;
@@ -142,11 +174,15 @@ bool Settings::load() {
   xvtrUlHz   = d["xvtrul"] | (freq_t)0;
   rotEnable  = d["roten"]  | false;
   rotType    = d["rottype"]| (uint8_t)ROT_GS232;
-  // Clamp to the LAST defined type, not ROT_PST. The old bound was ROT_PST (2),
-  // written before ROT_YAESU(3), ROT_EASYCOMM1..3(4-6) and ROT_SPID(7) existed --
-  // so every config using one of those was silently reset to GS-232 on load, and
-  // the Settings screen would show GS-232 no matter what the user picked.
-  if (rotType > ROT_SPID) rotType = ROT_GS232;
+  // Clamp to the LAST defined type. The old bound was ROT_PST (2), written before
+  // ROT_YAESU(3), ROT_EASYCOMM1..3(4-6), ROT_SPID(7) and ROT_NONE(8) existed -- so
+  // every config using one of those was silently reset to GS-232 on load.
+  if (rotType > ROT_NONE) rotType = ROT_GS232;
+  // Migrate the legacy separate on/off flag into the type: the "Rotator: on/off" row
+  // was replaced by a "None" entry in the type selector. A config saved with the
+  // rotator disabled becomes ROT_NONE; otherwise rotEnable is derived from the type.
+  if (!rotEnable) rotType = ROT_NONE;
+  rotEnable = (rotType != ROT_NONE);
   rotTransport = d["rotxport"] | (uint8_t)ROT_XPORT_BRIDGE;
   for (int i = 0; i < 5; ++i) {                  // QTH presets q0n/q0a/q0o/q0h ..
     char k[6];
@@ -220,6 +256,7 @@ bool Settings::load() {
                 (unsigned long)loraBwHz, (int)loraTxDbm,
                 (int)d["lorasf"].is<uint8_t>());
 #endif
+  validate();   // M17: clamp array-index enums + coordinates before anything uses them
   return true;
 }
 
@@ -265,6 +302,7 @@ bool Settings::save() {
   d["rig"]  = radioModel; d["addr"] = civAddr; d["baud"] = civBaud;
   d["civpin"] = civPinMode;
   d["cattype"] = catType; d["cathost"] = catHost; d["catport"] = catPort;
+  d["catgbaud"] = catGroveBaud;
   d["catusbkey"] = catUsbKey;
   d["conslog"] = consoleLog;
   d["catuser"] = catUser; d["catpass"] = catPass;
@@ -317,15 +355,19 @@ bool Settings::save() {
   d["autopos"]=autoPosReply;
   d["aoslead"]=aosLeadMin;
   d["amsatwin"]=amsatWindowH;
-  File f = Store::fs().open(FILE_CFG, "w");
-  if (!f) return false;
-  size_t wrote = serializeJson(d, f);
-  f.close();
+  // H19: transactional save. Serialize to a String first (config is a few KB), then commit
+  // via the atomic replace helper: temp-write -> verify -> rotate live to backup -> promote.
+  // A power loss or short write can no longer truncate config.json into malformed JSON --
+  // the previous good config always survives. serializeJson returning 0 (nothing serialized)
+  // is treated as a failure so an empty file can't overwrite a valid one.
+  String out;
+  size_t wrote = serializeJson(d, out);
 #ifdef CARDSAT_CFG_DEBUG
   // Diagnostic: report the serialized size and the SF value committed, so a
   // partial/failed write (size 0 or short) or a wrong SF is visible on serial.
-  Serial.printf("[cfg] save: wrote %u bytes to %s, sf=%u\n",
+  Serial.printf("[cfg] save: serialized %u bytes for %s, sf=%u\n",
                 (unsigned)wrote, FILE_CFG, loraSf);
 #endif
-  return wrote > 0;
+  if (wrote == 0) return false;
+  return Store::writeFileAtomic(FILE_CFG, (const uint8_t*)out.c_str(), out.length());
 }

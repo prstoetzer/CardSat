@@ -21,4 +21,7 @@ namespace Store {
   bool   onSD();             // true if we fell back to the SD card
   bool   formatInternal();   // wipe internal LittleFS (factory reset); never the SD
   size_t freeBytes();        // approx free space on the active FS (large if on SD)
+  // Transactional whole-file replace: temp-write -> verify -> rotate -> promote -> restore
+  // on failure. The previous good file survives any interrupted/short write. (H13/H19/M29/M32)
+  bool   writeFileAtomic(const char* path, const uint8_t* data, size_t len);
 }

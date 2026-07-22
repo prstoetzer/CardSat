@@ -184,7 +184,14 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.63";
+static constexpr const char* FW_VERSION = "0.9.64";
+
+// Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
+// Set to 0 to keep BT reserved for a future BLE-printer build. Used by main.cpp (btInUse
+// override -> controller release) and App::setup() (Bluedroid host release + measurement).
+#ifndef CARDSAT_RELEASE_BT
+#define CARDSAT_RELEASE_BT 1
+#endif
 // Auto-refresh GP at boot when even the freshest cached element set is older.
 static constexpr double  GP_STALE_DAYS = 7.0;
 // Display backlight level used for normal (awake) operation.

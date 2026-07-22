@@ -25,6 +25,10 @@ bool exists(const char* base) {
 
 int list(char out[][32], time_t* times, int max, int nameCap) {
   if (max <= 0) return 0;
+  // M28: the row width is fixed at 32 by the signature; clamp nameCap so a caller that
+  // passes a larger value can never make the copies/terminators below write past a row.
+  if (nameCap > 32) nameCap = 32;
+  if (nameCap < 1)  nameCap = 1;
   if (!ensureDir()) return 0;
   fs::FS& fsx = Store::fs();
   File dir = fsx.open(NOTES_DIR);
@@ -102,13 +106,9 @@ bool write(const char* base, const String& text) {
   if (!ensureDir()) return false;
   char path[96];
   pathFor(base, path, sizeof(path));
-  fs::FS& fsx = Store::fs();
-  File f = fsx.open(path, "w");          // truncates/creates
-  if (!f) return false;
-  size_t len = text.length();
-  size_t wrote = (len > 0) ? f.write((const uint8_t*)text.c_str(), len) : 0;
-  f.close();
-  return wrote == len;
+  // M29: transactional write -- the previous note survives a short write or power loss
+  // instead of being truncated the moment saving begins.
+  return Store::writeFileAtomic(path, (const uint8_t*)text.c_str(), text.length());
 }
 
 bool remove(const char* base) {

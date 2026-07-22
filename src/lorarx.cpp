@@ -16,6 +16,11 @@
 enum { C_BLK=0, C_WHT=1, C_GRN=2, C_RED=3, C_YEL=4, C_CYN=5, C_ORG=6, C_GRY=7 };
 
 // SX1262 LoRa bandwidth ladder (Hz) for stepping on the config/monitor screens.
+// M20: SX1262 usable LoRa range ~150-960 MHz. One place for the bounds so typed entry,
+// the ',' / '/' keys, and the config-row adjust all clamp identically.
+static const long LRX_FREQ_MIN_KHZ = 150000;
+static const long LRX_FREQ_MAX_KHZ = 960000;
+
 static const uint32_t BW_TABLE[] = {
   7800, 10400, 15600, 20800, 31250, 41700, 62500, 125000, 250000, 500000
 };
@@ -48,8 +53,8 @@ void LoraRxMon::setFreqMHz(const String& mhz) {
   if (f <= 0) return;                       // ignore blank / unparseable
   long khz = (long)llround(f * 1000.0);
   // SX1262 usable LoRa range ~150-960 MHz; clamp to keep the radio happy.
-  if (khz < 150000) khz = 150000;
-  if (khz > 960000) khz = 960000;
+  if (khz < LRX_FREQ_MIN_KHZ) khz = LRX_FREQ_MIN_KHZ;
+  if (khz > LRX_FREQ_MAX_KHZ) khz = LRX_FREQ_MAX_KHZ;
   _freqKHz = (uint32_t)khz;
   persist();
   if (_page == PAGE_MONITOR && _listening) applyRadio();
@@ -150,9 +155,11 @@ void LoraRxMon::key(char c, bool enter, bool back) {
   if (c == ';') { if (_scroll < _ringUsed - 1) _scroll++; return; }  // older
   if (c == '.') { if (_scroll > 0) _scroll--; return; }              // newer
   // Live parameter tweak (re-applies to the radio immediately).
+  // M20: clamp to the same SX1262 usable range as typed entry (150-960 MHz) so the
+  // ',' / '/' keys can't drive _freqKHz below the floor or without an upper bound.
   bool changed = false;
-  if (c == ',') { if (_freqKHz > 1) { _freqKHz -= (_freqStepHz / 1000); if (_freqKHz < 1) _freqKHz = 1; changed = true; } }
-  else if (c == '/') { _freqKHz += (_freqStepHz / 1000); changed = true; }
+  if (c == ',') { if (_freqKHz > LRX_FREQ_MIN_KHZ) { long f = (long)_freqKHz - (_freqStepHz / 1000); if (f < LRX_FREQ_MIN_KHZ) f = LRX_FREQ_MIN_KHZ; _freqKHz = (uint32_t)f; changed = true; } }
+  else if (c == '/') { long f = (long)_freqKHz + (_freqStepHz / 1000); if (f > LRX_FREQ_MAX_KHZ) f = LRX_FREQ_MAX_KHZ; _freqKHz = (uint32_t)f; changed = true; }
   else if (c == 'f') {   // cycle frequency step
     _freqStepHz = (_freqStepHz >= 1000000) ? 1000
                 : (_freqStepHz >= 100000)  ? 1000000
@@ -173,7 +180,8 @@ void LoraRxMon::adjust(int dir) {
     case ROW_FREQ: {
       long step = (long)(_freqStepHz / 1000);       // kHz
       long f = (long)_freqKHz + dir * step;
-      if (f < 1) f = 1;
+      if (f < LRX_FREQ_MIN_KHZ) f = LRX_FREQ_MIN_KHZ;   // M20: same range as typed entry
+      if (f > LRX_FREQ_MAX_KHZ) f = LRX_FREQ_MAX_KHZ;
       _freqKHz = (uint32_t)f;
       break;
     }

@@ -9,8 +9,8 @@ Built with: arduino-cli + `esp32:esp32@3.2.1`, board `esp32:esp32:esp32s3`,
 PSRAM=enabled`, and `-DESP_USB_HOST_MAX_DEVICES=4 -DCORE_DEBUG_LEVEL=1`.
 
 Checksums (MD5):
-- `CardSatDualRig-merged.bin`  575db648439b347b88e773fbaa522a74
-- `CardSatDualRig-app.bin`     ac3ad7c0cd39e2982b10da490987f9e5
+- `CardSatDualRig-merged.bin`  0a2a34584abf2bdde61ddc12e05963a5
+- `CardSatDualRig-app.bin`     2c090e72c89d6b7cb9c64b4e3d04213e
 
 ## Easiest: one file at 0x0 (esptool)
 

@@ -88,7 +88,10 @@ and to set the clock.
 - **A supported transceiver** in one of three CAT families:
   - **Icom CI-V** — IC-820, IC-821, IC-910, IC-970, IC-9100, IC-9700;
   - **Yaesu** — FT-847, FT-736R;
-  - **Kenwood** — TS-790, TS-2000.
+  - **Kenwood** — TS-790, TS-2000;
+  - **None** — no radio. Select this to run CardSat as a pure tracker / rotator
+    controller; all CAT features become inactive and the radio can't be turned on from
+    the Track screen.
 - **A CAT interface suited to that radio.** The ESP32-S3 pins are **not** 5 V
   tolerant — never connect CAT directly. **Icom:** a 3.3 V-safe CI-V interface
   (one-transistor circuit or a ready-made board). **Kenwood:** a **MAX3232** RS-232
@@ -238,14 +241,14 @@ matches whatever radios that companion build supports.
 
 The **Dual-Rig setup (Stick)** row in the Radio settings list carries a small
 **link dot** on its right edge — green when the Stick answers, red when it doesn't,
-grey when the check hasn't run or CAT isn't a rigctl type — plus a "linked" / "no
+gray when the check hasn't run or CAT isn't a rigctl type — plus a "linked" / "no
 link" word. It updates while the row is highlighted, so during bring-up you can see
 at a glance whether the Grove (or Wi-Fi) link is alive before opening the screen; a
 green dot means the cable, baud, and `\csdr_*` handshake are all working.
 
 ### CAT over a USB-to-serial adapter (any radio, no level shifter)
 
-A fourth option: plug a **USB↔serial adapter** into the Cardputer's **USB-C port**
+Another option: plug a **USB↔serial adapter** into the Cardputer's **USB-C port**
 and set **CAT type → USB serial**. This swaps only the transport — the CI-V, Yaesu,
 and Kenwood protocol encoders are unchanged — so it works for **every radio in the
 table**, and for the pre-USB rigs (IC-821, TS-790, FT-847…) it replaces the
@@ -261,17 +264,20 @@ the status line distinguishes `No USB device detected` (nothing there) from
 
 Two things to know before engaging:
 
-1. **The serial console goes away for the session.** The ESP32-S3 has one USB PHY;
-   engaging USB CAT (or a USB rotator) claims it, and the console does not come
-   back until reboot. Diagnostics move to disk: `/CardSat/Logs/usb.log` records
-   every engage/bind/failure automatically, and **Settings → Station / logging →
-   `Console to file`** can mirror the whole console to `console.log` (see
-   [§16](#16-radio-specific-notes)). If you want CAT *and* a live console, run the
-   radio on Grove or LAN instead.
+1. **The serial console goes away while USB is engaged.** The ESP32-S3 has one USB PHY;
+   engaging USB CAT (or a USB rotator) claims it, and the console drops for as long as the
+   USB device is engaged. Since v0.9.64 the console is reinitialized when you disengage
+   (the host releases the PHY), so turning USB CAT off should bring a serial terminal back
+   — but while it's engaged there's no console. Diagnostics move to disk regardless:
+   `/CardSat/Logs/usb.log` records every engage/bind/failure automatically, and
+   **Settings → Station / logging → `Console to file`** can mirror the whole console to
+   `console.log` (see [§16](#16-radio-specific-notes)). If you want CAT *and* a live
+   console at the same time, run the radio on Grove or LAN instead.
 2. **Build availability.** USB CAT is **on by default** (since 0.9.59) — in the
    prebuilt release binaries and in source builds alike. Building from source
-   therefore requires the **EspUsbHost** library (**v2.3.1+** compiles clean
-   against arduino-esp32 3.2.1; only older copies need a one-line patch); see
+   therefore requires the **EspUsbHost** library (**v2.4.1** is what the current
+   release is built against and is recommended; v2.3.1+ also compiles clean against
+   arduino-esp32 3.2.1); see
    **[docs/BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md)**, which also covers
    compiling it out (`CARDSAT_HAS_USBCAT 0` — no library needed then). A build
    without it simply doesn't offer *USB serial* in the CAT type row.
@@ -322,13 +328,13 @@ PlatformIO. Two binaries are published with each release:
 
 | File | Use it with | Notes |
 |---|---|---|
-| `CardSat.bin` | **Launcher** (bmorcelli/Launcher) | App-only image; Launcher writes the partition table and bootloader, so this file is **only** usable through Launcher — it cannot be flashed on its own. |
-| `CardSat_Merged.bin` | **M5Burner**, or a **direct flash** (esptool / web flasher) | Complete standalone image (bootloader + partition table + app + empty filesystem), written at offset `0x0`. |
+| `CardSat-app.bin` | **Launcher** (bmorcelli/Launcher) | App-only image; Launcher writes the partition table and bootloader, so this file is **only** usable through Launcher — it cannot be flashed on its own. |
+| `CardSat-merged.bin` | **M5Burner**, or a **direct flash** (esptool / web flasher) | Complete standalone image (bootloader + partition table + app + empty filesystem), written at offset `0x0`. |
 
 Both prebuilt binaries are built **with USB CAT included** — *USB serial* appears in
 the CAT type row out of the box. (Source builds have it on by default too; see below.)
 
-### Install with Launcher (`CardSat.bin`)
+### Install with Launcher (`CardSat-app.bin`)
 
 [Launcher](https://github.com/bmorcelli/Launcher) by bmorcelli is a firmware
 launcher for the Cardputer (and many other ESP32 boards) that installs and runs
@@ -336,17 +342,17 @@ binaries from a microSD card, over-the-air, or through its WebUI — and builds 
 right partition layout for each app automatically. It must already be installed on
 the device (see its repository for how to flash Launcher itself).
 
-1. Copy **`CardSat.bin`** to the Launcher binaries folder on the device's microSD
+1. Copy **`CardSat-app.bin`** to the Launcher binaries folder on the device's microSD
    card (or push it via Launcher's WebUI / OTA favorites).
 2. On the device, start **Launcher**, browse to **CardSat**, and install/run it.
    Launcher writes the appropriate partition scheme and the app for you.
-3. `CardSat.bin` is an app-only image with no standalone bootloader or partition
+3. `CardSat-app.bin` is an app-only image with no standalone bootloader or partition
    table, so it works **only** through Launcher. To flash without Launcher, use the
    merged image below.
 
-### Install with M5Burner, or direct flash (`CardSat_Merged.bin`)
+### Install with M5Burner, or direct flash (`CardSat-merged.bin`)
 
-`CardSat_Merged.bin` is a **complete image** — bootloader, partition table,
+`CardSat-merged.bin` is a **complete image** — bootloader, partition table,
 application, and the empty LittleFS filesystem combined, written at offset `0x0`.
 Use it with **M5Burner** (add it as a custom firmware and burn), for a fresh
 device, to recover one in an unknown state, or whenever you are not using Launcher.
@@ -355,11 +361,11 @@ To flash it directly with **esptool** (replace the port with yours):
 
 ```
 esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
-  write_flash 0x0 CardSat_Merged.bin
+  write_flash 0x0 CardSat-merged.bin
 ```
 
 Or with the web **ESP Tool** (<https://espressif.github.io/esptool-js/>): connect
-the Cardputer over USB, set chip to **ESP32-S3**, add `CardSat_Merged.bin` at
+the Cardputer over USB, set chip to **ESP32-S3**, add `CardSat-merged.bin` at
 address **`0x0`**, and flash.
 
 Hold the device's reset/boot as your tool instructs if it does not enter download
@@ -415,12 +421,12 @@ internally in LittleFS.
 
 | Method (no SD card) | File | Effect on internal saved data |
 |---|---|---|
-| **Launcher** (recommended for upgrades) | `CardSat.bin` | **Preserved.** Launcher replaces only the application partition, leaving the LittleFS filesystem intact, so settings, notes, favorites, and cached elements survive the update. |
-| **M5Burner / direct flash at `0x0`** | `CardSat_Merged.bin` | **Erased.** The merged image carries a fresh empty filesystem, so flashing it at `0x0` overwrites internally-stored data. You'll reconfigure and run **Update** again. |
+| **Launcher** (recommended for upgrades) | `CardSat-app.bin` | **Preserved.** Launcher replaces only the application partition, leaving the LittleFS filesystem intact, so settings, notes, favorites, and cached elements survive the update. |
+| **M5Burner / direct flash at `0x0`** | `CardSat-merged.bin` | **Erased.** The merged image carries a fresh empty filesystem, so flashing it at `0x0` overwrites internally-stored data. You'll reconfigure and run **Update** again. |
 
 In short, your settings carry over if **either** an **SD card** is present (regardless
-of how you flash) **or** you upgrade with **Launcher** (`CardSat.bin`). Data is only
-lost when it was stored **internally** *and* you do a full `CardSat_Merged.bin` flash.
+of how you flash) **or** you upgrade with **Launcher** (`CardSat-app.bin`). Data is only
+lost when it was stored **internally** *and* you do a full `CardSat-merged.bin` flash.
 
 If you do land on a clean slate, plan to set up again: re-enter your **location/grid**,
 your **radio (CAT) and rotator** settings, any **calibration**, then run **Update** once
@@ -484,6 +490,8 @@ screenshotted**. (`Fn`+`shift`+`b` still types a capital B.)
      See `docs/interfaces/CIV_SINGLE_PIN.md` and mind the level cautions before wiring.
    - **CAT serial monitor** — opens a live diagnostic that shows raw CAT traffic
      (TX in cyan, RX in green) as hex, for any wired protocol (CI-V, Yaesu, Kenwood).
+     For a **USB CAT** radio it brings the USB transport up on entry so there's a live
+     link to watch, and drops it again on exit if the monitor was what engaged it.
      While open it **actively polls the rig** (~once per 700 ms) by reading the
      downlink frequency, so you always see live traffic — your read request as TX and
      the radio's reply as RX — making it a real bench check of the CAT link with no
@@ -2096,7 +2104,7 @@ on-screen key reference. The notable rows:
 | Save & test WiFi | ENTER → connect and report OK/FAIL (tries the primary network, then the second if set) |
 | AOS alarm | `,`/`/` or ENTER toggle on/off |
 | IR pass beacon | `,`/`/` or ENTER toggle on/off — also flash the built-in IR LED on each pass alert, with a distinct flash count per event (see [§12](#12-aos-alarm-and-deep-sleep)). SD not required; off by default |
-| Rotator (+ type / host / port / baud / ranges / offsets / deadband / park / pre-point) | `,`/`/` adjust, ENTER edits host/port. **Rot type** cycles **GS-232 → rotctl (net) → PstRotator → Yaesu (direct) → Easycomm I → Easycomm II → Easycomm III → SPID Rot2Prog**; see [§17](#17-antenna-rotator-gs-232-easycomm-spid-rotctl-pstrotator-yaesu-direct-rotctld-server) |
+| Rotator (+ type / host / port / baud / ranges / offsets / deadband / park / pre-point) | `,`/`/` adjust, ENTER edits host/port. **Rotator** type cycles **None → GS-232 → rotctl (net) → PstRotator → Yaesu (direct) → Easycomm I → Easycomm II → Easycomm III → SPID Rot2Prog** — select **None** if you have no rotator (this replaces the old separate on/off row); see [§17](#17-antenna-rotator-gs-232-easycomm-spid-rotctl-pstrotator-yaesu-direct-rotctld-server) |
 | GP source | ENTER → **source picker**: AMSAT (default), any CelesTrak JSON-PP category (Amateur Radio listed first), or **Custom URL…** — see [§14](#14-gp-age-and-accuracy) |
 | VFO Type | `,`/`/` or ENTER toggle *Main Up/Sub Dn* ↔ *Main Dn/Sub Up* |
 | Sat mode | `,`/`/` or ENTER toggle the rig's satellite mode on/off |
@@ -2119,9 +2127,21 @@ on-screen key reference. The notable rows:
 | Backup config+favs → SD | ENTER → copy config + favorites to `config.bak` / `favs.bak` |
 | Restore config+favs | ENTER → restore them from the backup files |
 | **Reset all data** | ENTER → type **ERASE** to wipe everything (red row) |
-| CAT type (+ host / port / user / pass) | `,`/`/` cycle **Wired CI-V** → **Icom LAN** → **rigctl (net)** → **USB serial** (absent only in builds with USB CAT compiled out; see [§3](#3-connecting-your-radio)). Icom LAN drives the **IC-9700** over RS-BA1 (see [§3](#3-connecting-your-radio)); **rigctl** drives a radio attached to a remote Hamlib **rigctld** server over TCP (set host/port to your rigctld; Hamlib's conventional port is 4532). Under *Radio / CAT*. |
+| CAT type (+ host / port / user / pass) | `,`/`/` cycle **Wired CI-V** → **Icom LAN** → **rigctl (net)** → **rigctl (Grove)** → **USB serial** (USB serial absent only in builds with USB CAT compiled out; see [§3](#3-connecting-your-radio)). Icom LAN drives the **IC-9700** over RS-BA1 (see [§3](#3-connecting-your-radio)); **rigctl** drives a radio attached to a remote Hamlib **rigctld** server over TCP (set host/port to your rigctld; Hamlib's conventional port is 4532). Under *Radio / CAT*. |
 | Rot wire | `,`/`/` cycle the serial-rotator transport: **I2C bridge** (default) → **Grove G1/G2** → **USB adapter**. Applies to GS-232/Easycomm/SPID; independent of **Rot type**. Grove needs CAT on USB/LAN and GPS off Grove — CardSat enforces the one-Grove-port rule both ways. See [§17](#17-antenna-rotator-gs-232-easycomm-spid-rotctl-pstrotator-yaesu-direct-rotctld-server). Under *Rotator*. |
-| Radio USB / Rot USB | `,`/`/` pick which USB adapter each port uses when more than one is plugged in (**Auto** = the only adapter that is not the other port's). Each menu skips the other port's pick. Selections persist by adapter serial number where one is reported, else VID:PID + address. Under *Radio / CAT* and *Rotator*. |
+| Radio USB / Rot USB | `,`/`/` pick which USB adapter each port uses when more than one is plugged in (**Auto** = the only adapter that is not the other port's). Each menu skips the other port's pick — but only while that other port is *actually* a USB device (a radio set to CI-V/LAN/None, or a rotator set to a non-USB type or None, no longer reserves an adapter). Selections persist by adapter serial number where one is reported, else VID:PID + address. Under *Radio / CAT* and *Rotator*. |
+
+> **Radio and rotator over USB at the same time (v0.9.64).** With two USB-serial adapters
+> plugged in, you can assign the radio to one and the rotator to the other, and run both at
+> once over CardSat's single USB host — set each port's adapter in its **Radio USB** / **Rot
+> USB** row. The engage order doesn't matter: whichever you turn on second waits for its own
+> adapter to enumerate before reporting a problem — reliably so when each adapter has a unique
+> serial number; serial-less adapters (many CH340 clones, identical pairs) are keyed by USB
+> address, so re-check the selections after a reboot, hub change, or replug. With only one
+> adapter present the two ports can't share it, and the picker says which port owns it. Turning
+> either port off (or leaving its screen, or **stop-all**, or entering charge mode) releases
+> that device and frees the
+> memory it held; each re-engages on demand when you turn it back on.
 | Scan USB adapters | ENTER brings the USB host up and enumerates adapters (shows "n seen" after). A deliberate keypress: it **closes the serial console for the session**. Present in both *Radio / CAT* and *Rotator*. |
 | Rigctld server (+ port) | `,`/`/` enable a **rigctld server** so a PC (Gpredict, WSJT-X, a logger) drives the radio through CardSat over TCP (default 4532); VFOA=downlink, VFOB=uplink. Under *Radio / CAT*. |
 | Rotctld server (+ port) | `,`/`/` enable a **rotctld server** so a PC (Gpredict, …) drives **whichever rotator CardSat is configured for** through CardSat over TCP (default 4533). Under *Rotator*. |
@@ -3261,10 +3281,10 @@ CardSat prints **every CAT frame it sends** to the serial monitor at **115200
 baud**, decoded, with the radio's reply where the protocol provides one. Connect
 over USB, open a serial monitor at 115200, and you'll see traffic like:
 
-> **If you drive the radio over USB, the console is gone.** Engaging USB CAT (or a USB
-> rotator) claims the S3's one USB PHY, and it does not come back until reboot — so there
-> is no serial monitor to watch. Two ways round it: run the radio on **Grove** and keep
-> the console, or turn on **Settings → Station / logging → `Console to file`** and read the trace from
+> **If you drive the radio over USB, the console drops while engaged.** Engaging USB CAT (or a USB
+> rotator) claims the S3's one USB PHY, so there is no serial monitor to watch while it's
+> engaged (since v0.9.64 the console returns when you disengage). Two ways round it: run the
+> radio on **Grove** and keep the console, or turn on **Settings → Station / logging → `Console to file`** and read the trace from
 > `/CardSat/Logs/console.log` afterwards (web files portal, or pull the card). See
 > *Logs on disk* below.
 
@@ -3348,16 +3368,26 @@ survive a freeze always does.
 ### CAT self-test
 
 **Settings → Radio / CAT → Run CAT self-test** exercises the whole CAT link in one
-shot, on the device, with no satellite pass needed. It needs the radio turned on first
-(start CAT output with `r` on Track). The test sets and reads back the **downlink** and
-**uplink** frequencies, sets the **downlink/uplink modes**, sends a **band select**,
-toggles **sat mode**, and probes **PTT read** and **CTCSS** — reporting each step as
-`[PASS]`, `[FAIL]`, or `[INFO]` (the latter for things a given radio doesn't support
-over CAT, like sat-mode commands on the older rigs or PTT read where the protocol has
+shot, on the device, with no satellite pass needed. For a wired (CI-V/LAN) radio it runs
+straight away; for a **USB CAT** radio that isn't already engaged, it brings USB CAT up
+itself and asks you to re-run once the transport is live (a moment later). Leaving the
+test turns USB CAT back off again if the test was what engaged it. The test sets and reads
+back the **downlink** and **uplink** frequencies, sets the **downlink/uplink modes**, sends
+a **band select**, toggles **sat mode**, and probes **PTT read** and **CTCSS** — reporting
+each step as `[PASS]`, `[FAIL]`, or `[INFO]` (the latter for things a given radio doesn't
+support over CAT, like sat-mode commands on the older rigs or PTT read where the protocol has
 none). `;`/`.` scroll the results, `` ` `` exits. It's the quickest way to confirm a
 new radio, address, baud, and wiring are all correct before a pass — a `[FAIL]` on the
 set+read lines points straight at a CI-V address / baud / wiring problem, while
 `[INFO] … not supported` lines are normal and just reflect that radio's capabilities.
+
+> **It's a bench test, not a fully state-preserving check.** The self-test sets both VFOs
+> to test frequencies, changes the downlink/uplink modes, toggles satellite mode (left off),
+> and briefly enables CTCSS (left off). It restores the frequencies only if CardSat had
+> cached non-zero dial values, and it does **not** restore the prior modes, sat-mode state,
+> tone, or selected VFO. After running it, re-engage tracking (**`r`** on Track) or reselect
+> the transponder to put the rig back into a known operating state. It never keys the
+> transmitter, so it's safe to run off-air.
 
 ---
 
@@ -3375,7 +3405,9 @@ LOS. The `rotctld` and `rigctld` servers have **no authentication** — run them
 trusted LAN only.
 
 CardSat can drive an az/el antenna rotator through one of several interchangeable
-backends, chosen in Settings with **Rot type**:
+backends, chosen in Settings with the **Rotator** type selector (set it to **None** if
+you have no rotator — this is the default, and replaces the separate on/off row used in
+earlier versions):
 
 - **GS-232** — a directly-attached controller speaking the **Yaesu GS-232A/B**
   protocol (a Yaesu G-5500 with a GS-232B, a SPID controller in GS-232 mode, or any
@@ -5729,7 +5761,7 @@ later. Line numbers are also the targets for `GOTO`/`GOSUB`/`IF … THEN`.
 | `SATSEL expr` | **Re-snapshot the `SAT*` names** (geometry + elements) for satellite number `expr` in the list (0-based). One SGP4 run per call, budgeted at **2,000 per program**; the pass names (`AOSIN` `LOSIN` `PASSEL` `PASSAOS…`) always refer to the run-start active satellite. |
 | `TXSEL expr` | Snapshot transponder `expr` (0-based) of the **active** satellite into `TXDL` `TXUL` `TXBW` `TXINV` `TXLIN` (`NTX` tells you how many are loaded). |
 | `LPRINT …` | `PRINT`, but the line goes to the **configured report sinks** (printer / serial / file) — same grammar as `PRINT`. Sinks open on the first `LPRINT` and close when the run ends; with no sink configured it halts with `no print output`. |
-| `CLS` / `PSET x,y[,c]` / `LINE x1,y1,x2,y2[,c]` / `CIRCLE x,y,r[,c]` / `TEXT x,y,"s"` / `SHOW` | **Canvas graphics.** Draw on the 240×135 screen (colors 0–9: black, white, red, green, blue, yellow, cyan, orange, grey, dark green; default white), then `SHOW` pushes the frame. A `SHOW`ed frame **stays on screen after the run** until you press a key. `TEXT` also takes an expression instead of a string. |
+| `CLS` / `PSET x,y[,c]` / `LINE x1,y1,x2,y2[,c]` / `CIRCLE x,y,r[,c]` / `TEXT x,y,"s"` / `SHOW` | **Canvas graphics.** Draw on the 240×135 screen (colors 0–9: black, white, red, green, blue, yellow, cyan, orange, gray, dark green; default white), then `SHOW` pushes the frame. A `SHOW`ed frame **stays on screen after the run** until you press a key. `TEXT` also takes an expression instead of a string. |
 | `FOPEN "name"` / `FPRINT …` / `FCLOSE` | **Gated file logging** (off by default — Settings → Station/logging → *BASIC file write*). Appends lines to `/CardSat/basic/<name>` (plain names only, no paths). The file closes automatically at run end. |
 | `FILES` | List the programs and logs in `/CardSat/basic/` to the console. |
 

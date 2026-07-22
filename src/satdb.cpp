@@ -1160,10 +1160,10 @@ static String txPath(uint32_t norad) {
 String SatDb::txCachePath(uint32_t norad) { return txPath(norad); }
 
 bool SatDb::saveTxCache(uint32_t norad, const String& json) {
-  File f = Store::fs().open(txPath(norad), "w");
-  if (!f) return false;
-  f.print(json); f.close();
-  return true;
+  // M32: transactional write so a failed/interrupted refresh can't destroy the last
+  // known-good transmitter cache for this satellite.
+  String p = txPath(norad);
+  return Store::writeFileAtomic(p.c_str(), (const uint8_t*)json.c_str(), json.length());
 }
 
 int SatDb::loadTxCache(uint32_t norad, Transponder* out, int maxN) {

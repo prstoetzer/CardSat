@@ -194,6 +194,7 @@ namespace UsbSerial {
   // re-engaging would just hit ESP_ERR_INVALID_STATE (259) again, so begin()
   // refuses and says so. Cleared only by a reboot.
   bool        hostReleased();
+  bool        hostTeardownStuck();   // M2: end() timed out; reboot required to reuse USB
   // Why the last uninstall was refused, when it was. Valid after a failed
   // finishUninstall: clients/devices still registered per usb_host_lib_info(),
   // how many drain polls ran, the union of event flags seen, and

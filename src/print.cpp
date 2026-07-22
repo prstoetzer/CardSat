@@ -542,10 +542,16 @@ String probeCapabilities(const char* host, uint16_t port) {
   if (!buf) { cli.stop(); return String("no RAM for probe"); }
   size_t blen = 0;
   uint32_t t0 = millis();
-  while (cli.connected() && (millis() - t0) < 6000 && blen < bufCap) {
+  // M34: continue while connected OR data is still buffered -- some stacks report
+  // disconnected while unread response bytes remain, and stopping on connected() alone
+  // would treat a complete-but-closed reply as empty ("unknown" capabilities).
+  while ((cli.connected() || cli.available()) && (millis() - t0) < 6000 && blen < bufCap) {
     while (cli.available() && blen < bufCap) { buf[blen++] = (uint8_t)cli.read(); t0 = millis(); }
     delay(5);
   }
+  // M34: note when the probe filled its cap, so a truncated read isn't mistaken for an
+  // authoritative "format not supported" negative.
+  bool probeCapped = (blen >= bufCap);
   cli.stop();
 
   // Search the raw bytes for each format token (binary-safe substring search).
@@ -566,7 +572,10 @@ String probeCapabilities(const char* host, uint16_t port) {
   if (has("PCL") || has("pcl")) out += "PCL ";
   free(buf);                                     // token scan done; buf unused below
   if (out.length() == 0) {
-    // Connected but no recognizable formats found (or empty reply).
+    // Connected but no recognizable formats found (or empty reply). If the probe hit its
+    // byte cap (M34), say so -- the format list may simply have been beyond the cap, so
+    // "unknown" here is not an authoritative "unsupported".
+    if (probeCapped) return String("formats unknown (probe truncated)");
     return blen ? String("connected; formats unknown") : String("no reply");
   }
   out.trim();

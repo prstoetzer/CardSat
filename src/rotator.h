@@ -149,7 +149,10 @@ public:
 private:
   Stream* _s;
   bool    _ok = false;
-  void    puts_(const char* s) { if (_s) _s->print(s); }
+  // M27: a fully-failed write (0 of >0 bytes) means the transport is gone (bridge
+  // unplugged, USB host down, stream full); drop _ok so ready() reflects it and tracking
+  // stops believing commands land. Partial writes are rare on these short frames.
+  void    puts_(const char* s) { if (!_s) return; size_t n = strlen(s); if (n && _s->write((const uint8_t*)s, n) == 0) _ok = false; }
   int     getc_()              { return (_s && _s->available()) ? _s->read() : -1; }
   void    flushIn()            { if (_s) while (_s->available()) _s->read(); }
 };
@@ -178,7 +181,7 @@ public:
   }
 private:
   Stream* _s; uint8_t _ver; bool _ok = false;
-  void puts_(const char* s) { if (_s) _s->print(s); }
+  void puts_(const char* s) { if (!_s) return; size_t n = strlen(s); if (n && _s->write((const uint8_t*)s, n) == 0) _ok = false; }  // M27: drop _ok on a dead transport
   int  getc_()              { return (_s && _s->available()) ? _s->read() : -1; }
   void flushIn()            { if (_s) while (_s->available()) _s->read(); }
 };
@@ -203,7 +206,7 @@ public:
 private:
   Stream* _s; bool _ok = false;
   static constexpr int RES = 1;            // pulses/degree (whole-degree control)
-  void putb_(uint8_t b) { if (_s) _s->write(b); }
+  void putb_(uint8_t b) { if (_s && _s->write(b) == 0) _ok = false; }  // M27: dead transport -> not ready
   int  getb_(uint32_t toMs);               // blocking-with-timeout read
   void flushIn()        { if (_s) while (_s->available()) _s->read(); }
 };

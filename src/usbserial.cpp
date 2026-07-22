@@ -69,6 +69,8 @@ namespace {
   // a feature the operator never engages.
   EspUsbHost*          s_host   = nullptr;
   EspUsbHostCdcSerial* s_cdc    = nullptr;
+  EspUsbHostCdcSerial* s_rotCdc = nullptr;   // rotator CDC port (shared host); declared here
+                                             //   so CAT end() can check it for shared teardown
   bool                 s_active = false;
   bool                 s_bound  = false;   // a serial device enumerated
   bool                 s_sawDev = false;   // ANY device enumerated (see begin())
@@ -116,24 +118,14 @@ namespace {
   // may still be installed -- a re-engage then reboots the device and takes SD and
   // WiFi with it (observed on the bench). Latch it and refuse instead.
   bool s_hostReleased = true;
+  // M2: set when end()/rotEnd() timed out with USB tasks still alive. The host object is
+  // retained (deleting it would be a use-after-free) and re-engage is blocked until a reboot.
+  bool s_hostTeardownStuck = false;
 
   // Stack high-water marks, sampled by end() while the tasks are still alive and
   // idle (see snapshotHeadroom()). Cached because the ONLY safe time to read them
   // is before teardown starts, while the only useful time to REPORT them is after
   // -- from a stage callback that does slow SD I/O.
-  // What was still holding the IDF stack when uninstall was refused (filled by
-  // finishUninstall via usb_host_lib_info). Reported in the failure message: the
-  // two counters name the cause -- a client that never deregistered, or a device
-  // that was never freed.
-  int s_stuckClients = -1;
-  int s_stuckDevices = -1;
-  // Drain forensics, reported on failure: how many polls we made, the union of
-  // every event flag we saw, and what device_free_all() said. If uninstall still
-  // refuses, these three plus the client/device counts say WHY -- rather than
-  // leaving another round of guessing about a path only the bench can run.
-  int      s_drainPolls  = -1;
-  uint32_t s_drainFlags  = 0;
-  int      s_freeAllErr  = 0;
 
   uint32_t s_hostHeadroom   = 0;
   uint32_t s_clientHeadroom = 0;
@@ -201,67 +193,6 @@ namespace {
   // by this point the daemon is dead and cannot race us. If the library DID manage
   // its own uninstall, p_host_lib_obj is already NULL and both calls return
   // INVALID_STATE harmlessly, which is why this is safe to run unconditionally.
-  bool finishUninstall() {
-    // Follow the IDF's DOCUMENTED teardown handshake, not just a flag drain.
-    // usb_host_uninstall() requires process_pending_flags == 0 && lib_event_flags == 0
-    // && flags.val == 0 (usb_host.c:585-588) -- and flags.val includes num_clients
-    // (803/859). So draining events alone is not enough while a device is attached:
-    // usb_host_device_free_all() may return ESP_ERR_NOT_FINISHED, and the header is
-    // explicit that the caller must then pump usb_host_lib_handle_events() until the
-    // USB_HOST_LIB_EVENT_FLAGS_ALL_FREE flag arrives (usb_host.h:338). The earlier
-    // version stopped as soon as an events poll came back empty, so with a rig still
-    // plugged in the devices were never confirmed free, flags.val stayed non-zero,
-    // and BOTH the library's uninstall and ours were refused -- the stack stayed
-    // installed, ~11 KB stayed allocated, and the next engage got 259.
-    //
-    // Order per the header: free devices -> pump events until ALL_FREE -> uninstall.
-    // Everything is bounded; a wedged stack must never spin the main loop.
-    s_freeAllErr = usb_host_device_free_all();   // NOT_FINISHED is expected/normal
-
-    // Pump until uninstall actually succeeds. Do NOT break on ALL_FREE and do NOT
-    // gate the uninstall attempt on ev == 0: handle_events() CONSUMES the flags as
-    // it reports them (it clears lib_event_flags at line 669 whether or not the
-    // caller looks), so the flag that unblocks uninstall can be reported on one
-    // poll while a later one is still pending. The only reliable test of "are the
-    // preconditions clear now" is to CALL usb_host_uninstall() and look at its
-    // return -- so call it on every pass. The previous version broke out on the
-    // first ALL_FREE and only tried uninstall when a poll came back empty, which
-    // is why it could fall through with flags still set.
-    const uint32_t t0 = millis();
-    s_drainPolls = 0;
-    while (millis() - t0 < 800) {
-      uint32_t ev = 0;
-      esp_err_t e = usb_host_lib_handle_events(0, &ev);
-      s_drainPolls++;
-      s_drainFlags |= ev;                          // remember everything we saw
-      if (e == ESP_ERR_INVALID_STATE) return true; // library already gone: done
-      if (usb_host_uninstall() == ESP_OK) return true;   // preconditions clear
-      delay(5);
-    }
-
-    esp_err_t u = usb_host_uninstall();
-    if (u == ESP_OK) return true;
-
-    // u == ESP_ERR_INVALID_STATE is AMBIGUOUS and must not be read as success.
-    // usb_host_uninstall() returns it for two completely different reasons
-    // (usb_host.c:584-588): the library is already gone (p_host_lib_obj == NULL --
-    // success), OR it is still installed with flags that are not clear (failure).
-    // Treating both as success is what made the bench log say
-    // "DISENGAGED: stack released=yes" while the stack was in fact still installed
-    // and 8.6 KB still allocated -- the log was reporting this bug, not the truth,
-    // and the next engage got 259.
-    //
-    // usb_host_lib_info() is the discriminator: it is guarded ONLY by
-    // p_host_lib_obj != NULL (usb_host.c:695-700), so INVALID_STATE from IT means
-    // the library really is uninstalled. If it succeeds, the library is still
-    // there -- and it hands back the two counters that block uninstall, which is
-    // exactly what the caller needs to log.
-    usb_host_lib_info_t info = {};
-    if (usb_host_lib_info(&info) == ESP_ERR_INVALID_STATE) return true;  // truly gone
-    s_stuckClients = info.num_clients;
-    s_stuckDevices = info.num_devices;
-    return false;                        // still installed: say so honestly
-  }
 
   // Sample both stacks' high-water marks. MUST be called before teardown starts:
   // uxTaskGetStackHighWaterMark walks a live TCB, and reading one mid-deletion
@@ -378,6 +309,7 @@ namespace {
   // rotator commands down the same port: precisely the misbind the explicit-
   // address work exists to prevent, walking in through the unguarded door.
   int catPickAdapter();
+  bool waitForAdapterKey(const char* key, uint32_t ms);  // dual-USB: await a nominated adapter
 
   uint8_t  s_catAddress = 0xff;      // the adapter the RADIO bound
   uint8_t  s_rotAddress = 0xff;      // the adapter the ROTATOR bound
@@ -455,16 +387,15 @@ namespace {
 
 bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   if (s_active) return s_bound;
+  // M2: a prior teardown timed out with tasks still alive. Re-engaging over that would race
+  // the live tasks and usb_host_install() would refuse (259). Refuse cleanly until a reboot.
+  if (s_hostTeardownStuck) { setErr("USB host stuck - reboot to reuse USB"); return false; }
   s_err[0] = 0; s_dev[0] = 0; s_sawDev = false;
 
-  // ---- Reuse a resident host, or build one the first time ----------------------
-  // end() no longer destroys the host (see the note there: its end() frees nothing
-  // and deleting under live tasks corrupts the heap). So a re-engage finds the host
-  // already running: rebind the CDC port and we are done -- no 20 KB allocation, no
-  // console dance, no enumeration wait. Fast AND safe, which the destroy/recreate
-  // cycle never managed to be.
-  // The host may already be up because a USB ROTATOR started it -- in which case
-  // s_host is live but s_cdc has never existed. Create just the missing CAT port
+  // ---- Reuse a live host, or build one the first time --------------------------
+  // Under 2.4.1 a normal disengage releases the host, so most engages build fresh. But the
+  // host may still be up because a USB ROTATOR started it (shared host, two adapters) -- in
+  // which case s_host is live but s_cdc has never existed. Create just the missing CAT port
   // and fall into the rebind path; allocating a second EspUsbHost over the top of
   // a live one leaks it AND guarantees 259 from usb_host_install().
   if (s_host && !s_cdc) {
@@ -472,16 +403,28 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     if (!s_cdc) { setErr("Out of RAM for CAT port"); return false; }
   }
   if (s_host && s_cdc) {
+    // Any failure below must not leave a half-bound CAT port on a shared host. rollbackCat()
+    // drops the CAT port (and releases the host only if no rotator owns it), leaving a clean
+    // not-active state so the next engage starts fresh instead of seeing a poisoned s_cdc.
+    auto rollbackCat = [&]() {
+      if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
+      if (s_host && !s_rotCdc) {
+        s_host->end(); delete s_host; s_host = nullptr;
+        s_hostReleased = true; consoleUp();
+      }
+      s_active = false; s_bound = false; s_catAddress = 0xff;
+      stage(USBCAT_STAGE_NONE);
+    };
     // Re-pin on every rebind: the adapter may have been unplugged and replugged
     // at a new address while we were disengaged.
     if (s_serDevN > 0) {
       int pick = catPickAdapter();
-      if (pick < 0) return false;      // catPickAdapter() set the error
+      if (pick < 0) { rollbackCat(); return false; }   // catPickAdapter() set the error
       s_catAddress = s_serDev[pick].address;
       s_cdc->setAddress(s_catAddress);
     }
     stage(USBCAT_STAGE_BIND);
-    if (!s_cdc->begin(baud)) { setErr("USB rebind failed"); return false; }
+    if (!s_cdc->begin(baud)) { setErr("USB rebind failed"); rollbackCat(); return false; }
     EspUsbHostSerialConfig cfg;
     cfg.baud = baud; cfg.dataBits = dataBits;
     cfg.parity = (EspUsbHostSerialParity)parity;
@@ -490,7 +433,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     stage(USBCAT_STAGE_BIND_DTR);  s_cdc->setDtr(true);
     stage(USBCAT_STAGE_BIND_RTS);  s_cdc->setRts(true);
     stage(USBCAT_STAGE_BIND_DONE);
-    if (!s_cdc->connected()) { setErr("No USB device detected"); return false; }
+    if (!s_cdc->connected()) { setErr("No USB device detected"); rollbackCat(); return false; }
     s_active = true; s_bound = true;
     stage(USBCAT_STAGE_NONE);
     return true;
@@ -541,6 +484,11 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   // serial + audio) presents more than a plain cable; the library binds the serial
   // side by itself.
   stage(USBCAT_STAGE_CALLBACK);
+  // Fresh host generation: clear the adapter registry so onDev repopulates it from THIS
+  // host's enumeration. Without this, entries from a prior host session survive (stale
+  // addresses/keys), and a device given a reused address could be rejected as a duplicate
+  // or a scan could return devices that are no longer attached.
+  s_serDevN = 0; s_sawDev = false;
   s_host->onDeviceConnected(&onDev);   // records the device AND the adapter list
 
   // Order matters. The console must go down BEFORE the host claims the PHY (they
@@ -587,13 +535,13 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   EspUsbHostConfig hostCfg;
   hostCfg.taskCore = 0;                // PRO_CPU: away from loopTask, watched by TWDT
   hostCfg.taskStackSize = kTaskStack;  // both tasks; size from the END_CDC headroom log
-  // Stack sizing: kTaskStack feeds BOTH library tasks -- 16.4 KB of the ~46 KB an
-  // engage costs (measured, docs/design/USBCAT_MEMORY.md). Held at the library's
-  // 8192 default deliberately: shrinking a stack on a guess trades a clean OOM
-  // for a stack overflow, which is far worse to diagnose. The END_CDC stage logs
-  // both tasks' high-water marks to the SD (usbStageTrampoline), so the next
-  // bench disengage produces the number to size kTaskStack from. Every 1 KB cut
-  // returns 2 KB of heap.
+  // Stack sizing: kTaskStack (4096) feeds BOTH library tasks -- reduced from the
+  // library's 8192 default after the END_CDC high-water-mark logs showed headroom.
+  // Shrinking a stack on a guess would trade a clean OOM for a stack overflow (far
+  // worse to diagnose), so this was cut against measured high-water data, not a guess.
+  // The END_CDC stage still logs both tasks' high-water marks to SD
+  // (usbStageTrampoline), so a fresh bench disengage re-validates the 4096 figure.
+  // Every 1 KB cut returns 2 KB of heap; do not reduce further without new data.
   if (!s_host->begin(hostCfg)) {       // internally waits <= 1 s for its own task
     // Report WHY, not just THAT. The library records the failing esp_err_t and the
     // two causes need completely different fixes: ESP_ERR_NO_MEM means the host task
@@ -610,18 +558,16 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     //
     // But delete the OBJECTS is not the same as release the STACK. "begin() failed"
     // does NOT mean usb_host_install() failed: the daemon installs first, then
-    // registers a client, allocates transfers, and so on -- and EVERY one of those
-    // later failure paths calls usb_host_uninstall() and IGNORES ITS RETURN, the
-    // same defect as its shutdown path (see finishUninstall). So a begin() that got
-    // PAST install and failed after it leaves the stack installed, our objects go
-    // away, and the NEXT engage hits p_host_lib_obj != NULL -> 259. That is the
-    // bench's "259 on a fresh boot, stopped at HOST_BEGIN" report: the 259 was not
-    // this engage's install failing, it was the PREVIOUS failed engage's stack
-    // never being released. Drain and uninstall here exactly as end() does; the
-    // daemon has already self-deleted by this point (running_ = false is what
-    // begin() just observed), so nothing races us, and if install genuinely never
-    // happened both calls return INVALID_STATE harmlessly.
-    const bool freed = finishUninstall();
+    // registers a client, allocates transfers, and so on. In 2.4.1 the daemon owns
+    // its own teardown -- on any post-install failure it runs the ALL_FREE handshake
+    // and uninstalls with the return checked, and end() blocks until that completes.
+    // So call end() here exactly as the disengage path does: it either fully releases
+    // the stack or reports (via a still-set taskHandle_/lastError) that it could not,
+    // and 2.4.1's begin() refuses to start over an incomplete shutdown rather than
+    // returning 259 mid-operation. The daemon has already observed running_ = false by
+    // this point; if install never happened, end() early-returns harmlessly.
+    s_host->end();
+    const bool freed = (s_host->lastError() != ESP_ERR_TIMEOUT);
     delete s_cdc;  s_cdc  = nullptr;
     delete s_host; s_host = nullptr;
     s_hostReleased = freed;
@@ -684,9 +630,10 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     char msg[64];
     if (s_sawDev) snprintf(msg, sizeof(msg), "Not a known serial adapter: %s", s_dev);
     else          snprintf(msg, sizeof(msg), "%s", "No USB device detected");
-    // The host DID start, so it owns the PHY -- keep it resident (end() no longer
-    // destroys it) and just leave the port unbound. A retry after plugging the
-    // adapter in then rebinds in milliseconds instead of re-allocating 20 KB.
+    // The host DID start, so it owns the PHY. Leave it up with the port unbound so a
+    // retry after plugging the adapter in rebinds in milliseconds instead of re-allocating
+    // ~20 KB. (This is a deliberate keep-alive for the immediate retry case, distinct from
+    // a normal disengage, which does release the host via end() under 2.4.1.)
     disarmFreezeWatchdog();
     if (s_cdc) s_cdc->end();
     s_active = false; s_bound = false;
@@ -713,7 +660,21 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   // behaviour.
   if (s_serDevN > 0) {
     int pick = catPickAdapter();
-    if (pick < 0) return false;        // catPickAdapter() set the error
+    if (pick < 0) {
+      // H2 rollback: catPickAdapter() failed AFTER s_active was set and the watchdog was
+      // armed. Returning here bare would leave s_active=true (poisoning the next engage's
+      // active() check) and the freeze watchdog armed (able to reboot a later healthy op).
+      // Fully unwind: disarm, drop the port, release the host if no rotator owns it.
+      disarmFreezeWatchdog();
+      if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
+      if (s_host && !s_rotCdc) {
+        s_host->end(); delete s_host; s_host = nullptr;
+        s_hostReleased = true; consoleUp();
+      }
+      s_active = false; s_bound = false; s_catAddress = 0xff;
+      stage(USBCAT_STAGE_NONE);
+      return false;                    // catPickAdapter() already set the error text
+    }
     s_catAddress = s_serDev[pick].address;
     s_cdc->setAddress(s_catAddress);
   }
@@ -747,51 +708,61 @@ void end() {
 
   snapshotHeadroom();          // while both tasks are alive (see the note there)
 
-  // ---- The host stays resident. This is a measured decision, not caution. -------
-  // fix29 through fix36 tried to tear the IDF host stack down on every disengage.
-  // It cannot be done from outside this library. The bench diag that settled it:
-  //     clients=1 devices=1 polls=160 flags=0x00 freeAll=259
-  // -- the client was never deregistered and its device never closed, so
-  // usb_host_device_free_all() refused (it needs num_clients == 0) and
-  // usb_host_uninstall() refused after it. 160 event polls saw flags=0x00: there
-  // was nothing to drain. The cause is EspUsbHost::end()'s own ordering -- it kills
-  // the CLIENT task first, then lets the daemon run a cleanup
-  // (releaseInterfaces / usb_host_device_close / usb_host_client_deregister) whose
-  // every call is client-scoped and needs the client's event queue serviced. That
-  // queue is already dead. The order is inside the library, clientHandle_ is
-  // private, and there is no public hook to release the device ourselves.
+  // ---- Full teardown via EspUsbHost 2.4.1's fixed end() ------------------------
+  // History: fix28-fix36 could not tear the IDF host stack down from outside the old
+  // library, because its end() killed the CLIENT task first and then ran client-scoped
+  // cleanup (releaseInterfaces / device_close / client_deregister) on a dead event queue,
+  // leaving the stack installed -> 259 on re-engage. So 0.9.58 shipped a "resident host":
+  // detach the CDC port, never stop the host, hold ~11.8 KB until reboot.
   //
-  // So: do not stop the host, and do not delete the objects. Detach the CDC port
-  // and leave the stack up. A re-engage rebinds through the fast path at the top of
-  // begin() -- no allocation, no console dance, no enumeration wait, and no 259.
+  // EspUsbHost 2.4.1 fixes the ordering: end() signals the daemon, then the daemon drains
+  // the client's in-flight transfers, closes devices, deregisters the client, pumps
+  // library events until USB_HOST_LIB_EVENT_FLAGS_ALL_FREE, and calls usb_host_uninstall()
+  // WITH its return checked -- the exact handshake we used to hand-roll in finishUninstall().
+  // end() runs on THIS (main-loop) task, refuses if called from a USB task, and blocks up to
+  // 3 s for the daemon to finish; on timeout it leaves the tasks alive rather than freeing
+  // in-flight transfers (safe fallback, no crash). So it is safe to call here and it either
+  // fully releases or cleanly reports it did not.
   //
-  // The cost is ~11.8 KB held from the first engage until reboot. It is bounded
-  // (one host, ever), visible (the About screen shows it), and small next to what
-  // Tier 1 returned. The alternative -- destroy and recreate -- was tried for eight
-  // revisions and produced, in order: a heap corruption, an IDLE0 panic, a
-  // use-after-free in the rig layer, and a permanently wedged stack. This is the
-  // design fix28 had; the evidence says it was right.
-  //
-  // Rotator note: Paul's constraint is radio OR rotator over USB, never both, so a
-  // single resident host serves every configuration this hardware will run. If both
-  // ever needed to be live at once, they would share this one host object (it has
-  // 4 device slots via build_opt.h) rather than each installing a stack.
+  // Order: detach the CDC port, stop+uninstall the host, then delete the objects. begin()'s
+  // 2.4.1 guard (it refuses to start over taskHandle_/clientHandle_ that are not null)
+  // protects a re-engage from racing an incomplete shutdown, which is the wedge s_hostReleased
+  // used to guard by hand; we keep s_hostReleased as a belt-and-suspenders latch anyway.
   stage(USBCAT_STAGE_END_CDC);
-  if (s_cdc) s_cdc->end();     // detach the port; the host keeps running
+  if (s_cdc) s_cdc->end();     // detach the CDC port first
+  delete s_cdc;  s_cdc  = nullptr;
 
+  // The host is SHARED with the USB rotator. Only tear it down when no port remains --
+  // otherwise a live rotator would lose its host out from under it. Radio and rotator CAN
+  // both be on USB at once (two adapters, each bound to its own device address), so this
+  // guard is load-bearing, not just defensive: with the rotator still up, CAT disengage
+  // must leave the host (and thus the rotator's port) running.
   stage(USBCAT_STAGE_END_HOST);
-  // Deliberately NOT s_host->end(). See above: it cannot complete its own cleanup,
-  // and forcing it leaves the stack installed with a live client -- strictly worse
-  // than leaving it running, because then even a rebind is refused.
+  if (s_host && !s_rotCdc) {
+    s_host->end();             // 2.4.1: drains client, deregisters, uninstalls, frees
+    // M2: end() can TIME OUT (3 s) and, per the library, leave its tasks alive rather than
+    // free in-flight transfers. Deleting the object then would be a use-after-free, and
+    // restoring the console would claim the PHY before release is confirmed. On timeout,
+    // RETAIN the host, latch reboot-required, and leave the console down so nothing races
+    // the still-live tasks. A later engage is blocked by begin()'s non-null-handle guard.
+    if (s_host->lastError() == ESP_ERR_TIMEOUT) {
+      s_hostTeardownStuck = true;      // block re-engage; only a reboot clears this
+      s_hostReleased = false;
+      setErr("USB host stuck - reboot to reuse USB");
+      s_active = false; s_bound = false; s_dev[0] = 0; s_catAddress = 0xff;
+      stage(USBCAT_STAGE_END_DONE);
+      return;                          // do NOT delete s_host, do NOT consoleUp()
+    }
+    delete s_host; s_host = nullptr;
+    consoleUp();               // host released the PHY -> the serial console can return
+  }
 
   s_active = false;
   s_bound  = false;
   s_dev[0] = 0;
-  s_hostReleased = true;       // the host is healthy and rebindable, not wedged
-
-  // The console cannot come back: the host still owns the PHY. That is the honest
-  // trade for a re-engage that works, and it matches the shipped 0.9.58 behaviour
-  // operators already have. Say so rather than silently leaving a dead port.
+  s_catAddress = 0xff;         // forget the bound adapter: a later rotator engage must not
+                              // exclude an address the radio no longer holds (ANY_ADDRESS)
+  s_hostReleased = true;       // stack released (or still held by the rotator, which is fine)
   stage(USBCAT_STAGE_END_DONE);
 }
 
@@ -864,22 +835,24 @@ namespace {
   // The adapter the user nominated as the rotator (a serialDeviceKey), and the
   // rotator's line speed. Both pushed in by the app from settings before rotBegin().
 
-  EspUsbHostCdcSerial* s_rotCdc    = nullptr;
   bool                 s_rotActive = false;
   char                 s_rotDev[48] = {0};
   char                 s_rotErr[72] = {0};
 
   void setRotErr(const char* m) { snprintf(s_rotErr, sizeof(s_rotErr), "%s", m); }
 
-  // Bring the host up for a ROTATOR-ONLY configuration (no USB CAT). Same host,
-  // same slots, same resident lifetime as CAT's begin() -- just without binding a
-  // radio CDC. Whoever gets here first (radio or rotator) pays the ~11.8 KB and
-  // the console; the second one finds the host already up and just binds a port.
+  // Bring the host up for a ROTATOR-ONLY configuration (no USB CAT). Same host and
+  // slots as CAT's begin() -- just without binding a radio CDC. Whoever gets here first
+  // (radio or rotator) pays the ~11.8 KB and the console; the second one finds the host
+  // already up and just binds a port. The host is released when the LAST owner disengages
+  // (see end()/rotEnd()), not held for the whole session.
   bool hostUpForRotator() {
     if (s_host) return true;                    // already up (CAT, or a prior rotator)
+    if (s_hostTeardownStuck) return false;      // M2: prior teardown timed out; reboot needed
     if (!s_hostReleased) return false;          // a failed engage left a stack installed
     s_host = new (std::nothrow) EspUsbHost;
     if (!s_host) return false;
+    s_serDevN = 0; s_sawDev = false;            // fresh host: clear stale adapter registry
     s_host->onDeviceConnected(&onDev);          // same tracking as CAT
     consoleDown();                              // the host is about to claim the PHY
     EspUsbHostConfig hostCfg;
@@ -887,8 +860,8 @@ namespace {
     hostCfg.taskStackSize = kTaskStack;
     if (!s_host->begin(hostCfg)) {
       const int e = s_host->lastError();
+      s_host->end();            // 2.4.1: daemon runs its own ALL_FREE uninstall
       delete s_host; s_host = nullptr;
-      finishUninstall();                        // never leave a stack installed
       consoleUp();
       char m[64]; snprintf(m, sizeof(m), "USB host would not start (err %d)", e);
       setRotErr(m);
@@ -927,6 +900,17 @@ uint8_t scanAdapters() {
     rotTrace(b);
   }
   if (s_serDevN == 0) rotTrace("scan: no adapters found");
+  // A scan is a TEMPORARY owner: if neither CAT nor the rotator has a bound port, the host
+  // was brought up solely to enumerate, so release it now rather than holding ~11.8 KB and
+  // the console for the rest of the session. If either port is live (a scan while engaged),
+  // leave the host up -- it belongs to that owner.
+  if (s_host && !s_cdc && !s_rotCdc) {
+    rotTrace("scan: releasing temporary host");
+    s_host->end();
+    delete s_host; s_host = nullptr;
+    s_hostReleased = true;
+    consoleUp();               // scan-only host released the PHY -> console can return
+  }
   return s_serDevN;
 }
 
@@ -945,6 +929,10 @@ namespace {
 int catPickAdapter() {
   int pick = -1;
   if (s_catWantKey[0]) {
+    // Dual-USB: the radio's adapter may enumerate AFTER the rotator's (if the rotator
+    // brought the host up first), so wait for this specific key before deciding it's
+    // missing. Order of engaging radio vs rotator must not matter.
+    waitForAdapterKey(s_catWantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (strcmp(s_serDev[i].key, s_catWantKey) == 0) { pick = i; break; }
     if (pick < 0) { setErr("Radio adapter not found (replug/re-select)"); return -1; }
@@ -968,6 +956,26 @@ int catPickAdapter() {
     return -1;
   }
   return pick;
+}
+
+// Wait (bounded) for a SPECIFICALLY NOMINATED adapter key to enumerate. In a dual-USB
+// setup (radio on one adapter, rotator on another) the two devices enumerate in an
+// arbitrary order, and the host bring-up wait only blocks until the FIRST device appears
+// -- which may be the other port's. Without this, engaging the second port could look for
+// its adapter before the callback had registered it and fail with "not found", purely on
+// enumeration order. Returns true once the key is present (or immediately if key is empty
+// -- "auto" adapters have nothing specific to wait for). The onDev callback keeps filling
+// s_serDev on the host task while we spin, so this observes new arrivals.
+bool waitForAdapterKey(const char* key, uint32_t ms) {
+  if (!key || !key[0]) return true;
+  const uint32_t t0 = millis();
+  for (;;) {
+    for (uint8_t i = 0; i < s_serDevN; ++i)
+      if (strcmp(s_serDev[i].key, key) == 0) return true;
+    if (millis() - t0 >= ms) return false;
+    delay(25);
+    feedFreezeWatchdog();
+  }
 }
 }  // namespace
 
@@ -1002,6 +1010,9 @@ bool rotBegin() {
   // two -- that is the misbind this whole path exists to prevent.
   int pick = -1;
   if (s_rotWantKey[0]) {
+    // Dual-USB: the rotator's adapter may enumerate AFTER the radio's, so wait for
+    // this specific key before deciding it's missing -- order must not matter.
+    waitForAdapterKey(s_rotWantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (strcmp(s_serDev[i].key, s_rotWantKey) == 0) { pick = i; break; }
     if (pick < 0) {
@@ -1059,6 +1070,18 @@ bool rotBegin() {
   s_rotCdc->setConfig(cfg);
   s_rotCdc->setDtr(true);
   s_rotCdc->setRts(true);
+  // Wait for the CDC interface to finish coming up, exactly as the CAT path does. The
+  // adapter needs time to enumerate its endpoints and the class driver to attach; checking
+  // connected() immediately (as this used to) fails on a slower adapter even though the
+  // port is fine. connected() reflects USB CDC readiness, NOT whether a rotator answered --
+  // so this must not depend on a device being wired to the far end of the serial line.
+  {
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 2500 && !s_rotCdc->connected()) {
+      delay(20);
+      feedFreezeWatchdog();
+    }
+  }
   if (!s_rotCdc->connected()) {
     delete s_rotCdc; s_rotCdc = nullptr;
     setRotErr("Rotator adapter not responding");
@@ -1077,17 +1100,31 @@ void rotEnd() {
   s_rotActive = false;
   s_rotAddress = 0xff;
   s_rotDev[0] = 0;
-  // The host stays up, exactly as it does for CAT (see end()).
+  // Shared host: tear it down only when CAT isn't still using it (symmetric with end()).
+  if (s_host && !s_cdc) {
+    rotTrace("rot: releasing host");
+    s_host->end();             // 2.4.1: full drain/deregister/uninstall
+    // M2: same timeout handling as end() -- on a stuck teardown, retain the host, latch
+    // reboot-required, and leave the console down rather than deleting under live tasks.
+    if (s_host->lastError() == ESP_ERR_TIMEOUT) {
+      rotTrace("rot: host teardown TIMED OUT - reboot needed");
+      s_hostTeardownStuck = true;
+      s_hostReleased = false;
+      return;                  // do NOT delete s_host, do NOT consoleUp()
+    }
+    delete s_host; s_host = nullptr;
+    s_hostReleased = true;
+    consoleUp();               // host released the PHY -> serial console can return
+  }
 }
 
 bool     hostReleased()           { return s_hostReleased; }
+bool     hostTeardownStuck()      { return s_hostTeardownStuck; }
 String   uninstallDiag() {
-  if (s_stuckClients < 0 && s_drainPolls < 0) return String();
-  char b[112];
-  snprintf(b, sizeof(b), "clients=%d devices=%d polls=%d flags=0x%02lX freeAll=%d",
-           s_stuckClients, s_stuckDevices, s_drainPolls,
-           (unsigned long)s_drainFlags, s_freeAllErr);
-  return String(b);
+  // EspUsbHost 2.4.1 performs the drain/deregister/uninstall handshake itself and logs
+  // any failure via ESP_LOG. We no longer hand-roll it, so there is no extra forensic
+  // string to surface here; the About screen falls back to hostReleased()/lastError().
+  return String();
 }
 uint32_t hostHeadroomSnapshot()   { return s_hostHeadroom; }
 uint32_t clientHeadroomSnapshot() { return s_clientHeadroom; }

@@ -19,6 +19,17 @@
 // SGP4 from a much shallower stack and was always fine.)
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
+// CardSat uses no Bluetooth. The precompiled Arduino core (Bluedroid enabled) leaves the BT
+// controller memory RESERVED unless btInUse() returns false -- its default weak version
+// returns true, so we're currently paying for a BT stack we never touch. Overriding it to
+// false makes initArduino() release the controller memory (ESP_BT_MODE_BTDM) at boot, before
+// setup() runs. Set CARDSAT_RELEASE_BT 0 to keep BT memory reserved (e.g. a future BLE-printer
+// build). CARDSAT_RELEASE_BT is defined in config.h (default 1); set 0 there to keep BT
+// reserved. This is the controller half; the Bluedroid host half is released in App::setup().
+#if CARDSAT_RELEASE_BT
+extern "C" bool btInUse() { return false; }
+#endif
+
 static App app;
 
 void setup() {

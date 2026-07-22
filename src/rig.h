@@ -189,8 +189,23 @@ public:
   // line (newline appended if missing) and returns the single reply line. Inherited
   // unchanged by RigctlGroveRig, so it automatically uses the Grove transport there.
   String vendorLine(const String& line) override {
-    return xchg(line.endsWith("\n") ? line : line + "\n");
+    // H12: \csdr_models / \csdr_get can return >1 KB of JSON. At low Grove baud the reply
+    // alone can exceed the default 400 ms (e.g. ~1.4 s for the model catalogue at 9600).
+    // Give a baud-aware deadline for these large vendor replies so they don't time out;
+    // ordinary short RPRT commands keep the default.
+    String l = line.endsWith("\n") ? line : line + "\n";
+    uint32_t baud = linkBaud();
+    uint32_t replyMs = 400;
+    if (baud && (line.indexOf("csdr_models") >= 0 || line.indexOf("csdr_get") >= 0 ||
+                 line.indexOf("csdr_status") >= 0)) {
+      // ~2 KB budget at this baud (bytes*10 bits / baud), plus headroom, min 2 s.
+      uint32_t ms = (uint32_t)((2048UL * 10UL * 1000UL) / baud) + 500;
+      replyMs = ms < 2000 ? 2000 : ms;
+    }
+    return xchg(l, replyMs);
   }
+  // Effective UART baud of this transport, or 0 for the network path (no framing delay).
+  virtual uint32_t linkBaud() const { return 0; }
 protected:
   // ---- transport boundary --------------------------------------------------
   // The VFO-mode protocol (below) is transport-agnostic: it only ever calls these
@@ -213,10 +228,11 @@ protected:
   int    _vfo = -1;        // server's currently-selected VFO: 0=A (downlink), 1=B (uplink), -1=unknown
   bool   _vfoMode = false; // server was started with --vfo (VFO travels inline on each command)
   bool   _probed = false;  // \chk_vfo probe done since the link last came up
+  uint8_t _failStreak = 0; // M22: consecutive empty replies; closes the link past a threshold
   bool   ensure();                       // bring the link up + probe once; updates _ok
   void   probeVfoMode();                 // one-shot \chk_vfo probe (shared by all transports)
   String readLine(uint32_t timeoutMs);   // read one reply line from linkRead()
-  String xchg(const String& tx);         // send one line, return one reply line ("" on fail)
+  String xchg(const String& tx, uint32_t replyMs = 400);   // send one line, return one reply line ("" on fail)
   void   selectVfo(bool sub);            // pre-select downlink(A)/uplink(B) VFO on currVFO servers
   String cmd(char c, bool sub, const String& body = "");  // build a line; VFO inline in --vfo mode
   static const char* vfoTok(bool sub);   // "VFOA" (downlink) / "VFOB" (uplink)
@@ -230,7 +246,9 @@ protected:
 class RigctlGroveRig : public RigctlRig {
 public:
   RigctlGroveRig(uint32_t baud) : RigctlRig("", 0), _baud(baud) {}
-  void begin(uint32_t, int rx, int tx, int) override;   // opens the Grove UART
+  ~RigctlGroveRig() override { linkClose(); }   // M8: release Serial1 when the backend is deleted
+  uint32_t linkBaud() const override { return _baud; }   // H12: for baud-aware vendor timeouts
+  void begin(uint32_t, int uartNum, int rxPin, int txPin) override;   // opens the Grove UART (rx=arg3, tx=arg4)
   const char* name() const override { return "rigctl-grove"; }
 protected:
   bool   linkOpen() override;
@@ -248,7 +266,8 @@ private:
 // catType 0 = wired CI-V/CAT (UART); 1 = Icom LAN (network) for CI-V models, in
 // which case host/port/user/pass configure the RS-BA1 UDP connection.
 Rig* makeRig(RadioModel model, uint8_t catType = 0, const char* host = "",
-             uint16_t port = 50001, const char* user = "", const char* pass = "");
+             uint16_t port = 50001, const char* user = "", const char* pass = "",
+             uint32_t groveBaud = 115200);   // C2: Grove baud (32-bit; catPort can't hold 115200)
 
 // CAT serial trace sink. When set (by the serial-terminal screen), every backend
 // reports each raw CAT frame it sends or receives here: dir is "TX" or "RX", b/n

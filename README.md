@@ -23,9 +23,18 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.64:** **USB control that lets go.** Turning a USB CAT radio or USB rotator off
+> now actually frees the ~12 KB it was holding (thanks to a library upgrade), rather than only
+> on reboot — and every "off" path, on every screen, releases the device. Radio and rotator can
+> both run over USB on two adapters, in either engage order. Both the radio model list and the
+> rotator type selector gained an explicit **None**, so CardSat runs cleanly as a pure
+> tracker/rotator controller. The Dual-Rig setup screen was redrawn to fit the display without
+> overlapping text.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.64.md)**.
+
 > **New in v0.9.63:** **BASIC that behaves, and a lighter, steadier device.** The on-device
 > Tiny BASIC gets a round of hardware-tested fixes: graphics programs hold their frame until
-> you press a key, a `SATSEL` catalogue scan no longer overflows the stack or aborts on a
+> you press a key, a `SATSEL` catalog scan no longer overflows the stack or aborts on a
 > decayed satellite, and there's a **file browser** (Fn+l) for loading programs. Under the
 > hood, a systematic memory campaign returns about **17.9 KB** of permanent RAM by allocating
 > screen-scoped buffers on demand, and the drawing canvas moves out of the heap so the free
@@ -299,7 +308,7 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 *(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
 unchanged since. Several features added since — rove planner, workable horizon, target
 search, on-device printing, the Files page's multi-select — are not pictured yet; a
-screenshot refresh is planned. The current firmware is v0.9.63.)*
+screenshot refresh is planned. The current firmware is v0.9.64.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#22-screen-by-screen-reference).
@@ -354,8 +363,8 @@ Two prebuilt binaries ship with each release — no toolchain required:
 
 | File | Use with | Notes |
 |---|---|---|
-| `CardSat.bin` | **[Launcher](https://github.com/bmorcelli/Launcher)** | App-only image; Launcher writes the partition table/bootloader. **Preserves saved data** on upgrade. |
-| `CardSat_Merged.bin` | **M5Burner** / direct flash (esptool / web flasher) at `0x0` | Complete standalone image; carries an empty filesystem. |
+| `CardSat-app.bin` | **[Launcher](https://github.com/bmorcelli/Launcher)** | App-only image; Launcher writes the partition table/bootloader. **Preserves saved data** on upgrade. |
+| `CardSat-merged.bin` | **M5Burner** / direct flash (esptool / web flasher) at `0x0` | Complete standalone image; carries an empty filesystem. |
 
 Both binaries include **USB CAT** — *USB serial* is in the CAT type row out of the
 box (and USB CAT is on by default in source builds too, since 0.9.59).
@@ -363,14 +372,14 @@ box (and USB CAT is on by default in source builds too, since 0.9.59).
 **Your settings live on the microSD card when one is inserted** (CardSat prefers SD,
 under `/CardSat`, and falls back to internal flash otherwise). Flashing never touches
 the SD card — so with a card in, your configuration **survives any flash**, including a
-full merged flash. Without a card, use **Launcher** (`CardSat.bin`) to keep your
-internal data across an upgrade; a full `CardSat_Merged.bin` flash erases it.
+full merged flash. Without a card, use **Launcher** (`CardSat-app.bin`) to keep your
+internal data across an upgrade; a full `CardSat-merged.bin` flash erases it.
 
 Building from source (Arduino IDE single-file `CardSat.ino`, or PlatformIO) and the
 complete flashing/upgrade detail are in **[docs/BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md)**
 (and the step-by-step **[docs/guides/ARDUINO_SETUP.md](docs/guides/ARDUINO_SETUP.md)**).
 
-> **This WIP build ships a prebuilt binary** in **[`firmware/`](firmware/)** —
+> **This testing release ships a prebuilt binary** in **[`firmware/`](firmware/)** —
 > `CardSat-merged.bin` (flash at `0x0`) plus the individual bootloader/partition/app
 > images and a flashing guide with exact offsets and checksums. See
 > [`firmware/README.md`](firmware/README.md). The companion Stick firmware has its own

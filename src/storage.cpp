@@ -101,4 +101,47 @@ bool formatInternal() {
   return LittleFS.format();
 }
 
+// Transactional whole-file write (H13/H14/H19/M29/M32 building block). Writes the new
+// contents to "<path>.tmp", verifies the full byte count and close, then rotates the live
+// file to "<path>.bak", promotes the temp to live, and removes the backup. On ANY failure
+// the live file is left untouched (or restored from backup), so an interrupted or short
+// write can never destroy the previous good file. Returns true only on a fully committed
+// replacement.
+bool writeFileAtomic(const char* path, const uint8_t* data, size_t len) {
+  if (!path || !path[0]) return false;
+  if (!ready()) return false;
+  fs::FS& f = fs();
+
+  char tmp[112], bak[112];
+  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+  snprintf(bak, sizeof(bak), "%s.bak", path);
+
+  // 1) write the new contents to the temp file and verify.
+  {
+    File w = f.open(tmp, "w");
+    if (!w) return false;
+    size_t wrote = (len > 0) ? w.write(data, len) : 0;
+    w.close();
+    if (wrote != len) { f.remove(tmp); return false; }   // short write: discard temp, keep live
+  }
+
+  // 2) rotate the current live file to backup (if one exists).
+  bool hadLive = f.exists(path);
+  if (hadLive) {
+    if (f.exists(bak)) f.remove(bak);
+    if (!f.rename(path, bak)) { f.remove(tmp); return false; }   // couldn't back up: keep live
+  }
+
+  // 3) promote temp -> live. On failure, restore the backup so we never end up with no file.
+  if (!f.rename(tmp, path)) {
+    if (hadLive) f.rename(bak, path);   // put the original back
+    f.remove(tmp);
+    return false;
+  }
+
+  // 4) committed: drop the backup.
+  if (hadLive) f.remove(bak);
+  return true;
+}
+
 } // namespace Store

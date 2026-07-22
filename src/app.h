@@ -112,7 +112,7 @@ private:
   // can be edited offline and pushed with one save.
   static constexpr int DR_MAX_DEV   = 8;     // devices shown from the Stick
   static constexpr int DR_MAX_MODEL = 40;    // model-catalogue entries from the Stick
-  struct DrDevice { char product[24]; char serial[20]; char vidpid[12]; int addr; };
+  struct DrDevice { char product[24]; char serial[24]; char vidpid[12]; int addr; };   // H11: serial 24 to match companion
   struct DrModel  { int id; char name[14]; bool rxOnly; };
   // Heap-allocated on entering SCR_DUALRIG and freed by drFree() from the
   // screen-transition hook in loop() -- so the ~1.3 KB of device+model tables is
@@ -122,7 +122,8 @@ private:
   // Editable per-leg selection (index 0 = downlink, 1 = uplink).
   int   drModelId[2]  = { -1, -1 };          // Stick model id, -1 = none
   int   drCiv[2]      = { 0, 0 };            // CI-V address (0 = default)
-  char  drSerial[2][20] = { "", "" };        // assigned device serial ("" = none)
+  uint32_t drBaud[2]  = { 0, 0 };            // H14: per-leg CAT baud (0 = model default)
+  char  drSerial[2][24] = { "", "" };        // H11: assigned device serial (24 to match companion; "" = none)
   int   drSel = 0;                           // cursor: 0..5 across the 6 editable fields
   int   drScroll = 0;                        // device-list scroll
   bool  drLoaded = false;                    // a query has populated the state
@@ -210,6 +211,9 @@ private:
   int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
   bool     catMonActive = false;        // true while the screen owns the trace sink
   bool     catMonPoll   = true;         // actively poll the rig so there's live traffic
+  bool     catToolEngaged = false;      // the CAT self-test/monitor turned radioOut on itself
+                                        // (USB CAT); leaving the tool must turn it back off,
+                                        // but ONLY if the tool -- not Track -- engaged it.
   uint32_t catMonLastPollMs = 0;        // millis() of the last monitor poll
   static constexpr uint32_t CATMON_POLL_MS = 700;  // monitor heartbeat read interval
   int      catPass   = 0;        // tally for the summary line
@@ -1243,22 +1247,45 @@ private:
   void webdSendFileList(const String& path);   // GET /api/files?dir=... (JSON dir listing)
   void webdSendFile(const String& path);       // GET /api/file?path=... (stream a download)
   void applyRotatorFromCfg();
+  bool ensureRotatorReady();          // build-on-demand + engage; true when ready to point
+  const char* rotNotReadyMsg() const; // transport-tuned "can't engage" message
   const char* rotTransportConflict() const;   // nullptr = transport is free
   // True only when the rotTransport wire setting actually applies AND is USB: the
   // serial protocols run over a chosen transport, but ROT_NET/ROT_PST carry their own
   // socket and ROT_YAESU is I2C-direct, so for those rotTransport is meaningless and a
   // stale ROT_XPORT_USB value must NOT drive the USB host or its "starting" status.
+  // Single source of truth for the CAT-transport label, matching the Settings row wording.
+  // Used by the About screen and the printed setup report so no path can mislabel USB,
+  // rigctl-TCP, or rigctl-Grove as "network (LAN)".
+  const char* catTypeName() const {
+    switch (cfg.catType) {
+      case CAT_USB:          return "USB serial";
+      case CAT_RIGCTL_GROVE: return "rigctl (Grove)";
+      case CAT_RIGCTL:       return "rigctl (net)";
+      case CAT_NET:          return "Icom LAN";
+      default:               return "CI-V wired";
+    }
+  }
   bool        rotUsesUsb() const {
-    return cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
-           cfg.rotType != ROT_YAESU && cfg.rotTransport == ROT_XPORT_USB;
+    // Must be ENABLED (a real type, not None) AND on the USB transport. Without the
+    // rotEnable check, a rotator set to None but with rotTransport still == USB would
+    // report true -- reserving its USB adapter and blocking the radio from using it,
+    // and trying to build a USB rotator that shouldn't exist.
+    return cfg.rotEnable &&
+           cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+           cfg.rotType != ROT_YAESU && cfg.rotType != ROT_NONE &&
+           cfg.rotTransport == ROT_XPORT_USB;
   }
   void        yieldGroveIfTaken(const char* who);  // CAT/GPS just claimed Grove
+  bool        groveCatVsGpsArbitrate(const char* who);  // H10: disable the losing Grove CAT/GPS claimant
   void        scanUsbAdapters();
   void        cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio);
   String      usbAdapterLabel(const char* key) const;
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
+  void parkAndReleaseRotator();        // park, then free a USB rotator's host (~12 KB) when off
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
+  void initializeEngagedRig();  // post-connect engage init (sat mode, bands, modes, budget)
   // Compute the per-tick CAT write deadband (mode-aware, adaptively tightened
   // near TCA) and the TCA-tapered predictive lead range rate. `rrNow` is the
   // instantaneous range rate (km/s); `centerHz` the higher of the two leg freqs
@@ -1277,6 +1304,12 @@ private:
     return activeTxCount > 0 && activeTx[curTx].uplink == 0 && activeTx[curTx].downlink != 0;
   }
   bool dlOnSub() const {
+    // H9: the rigctl backends (Grove + TCP to the CardSatDualRig companion) hardwire
+    // VFOA = downlink and VFOB = uplink on the companion side. The general Main/Sub VFO
+    // layout setting must NOT swap them here, or "Main Dn/Sub Up" would send downlink
+    // commands to the uplink radio and vice versa -- the opposite physical radios. Force
+    // the companion-correct mapping (downlink on Sub -> VFOA) for these backends.
+    if (cfg.catType == CAT_RIGCTL || cfg.catType == CAT_RIGCTL_GROVE) return true;
     if (txReceiveOnly()) {                            // receive-only (beacon/telemetry)
       switch (cfg.rxOnlyVfo) {
         case RXO_MAIN: return false;                 // force downlink to MAIN (legacy)

@@ -19,7 +19,8 @@ lives on the 8 MB-PSRAM StickS3, off the no-PSRAM Cardputer.
 - **Wi-Fi / TCP** — CardSat's `rigctl (net)` CAT type points at the Stick's IP:port.
 - **Grove UART** — a Grove cable between the Cardputer and the Stick carries the same
   rigctld text protocol, no Wi-Fi. The Stick side is implemented; the CardSat side is
-  scoped in `CARDSAT_INTEGRATION_SCOPE.md` (not yet built into CardSat).
+  scoped in `CARDSAT_INTEGRATION_SCOPE.md` and implemented in CardSat since v0.9.62
+  (Dual-Rig setup screen + rigctl Grove/TCP backend).
 
 ## Runtime configuration — no compile-time flags
 
@@ -54,12 +55,13 @@ POST /api/config     ssid, pass, tcpport, wifi(0|1), grovebaud,
 POST /api/reboot
 ```
 
-Example (assign an IC-R30 receiver at CI-V 0x9C to the downlink and an FT-818 to the
+Example (assign an IC-R30 receiver (model 9) at CI-V 0x9C to the downlink and an FT-818
+(model 17) to the
 uplink, then save & reboot):
 
 ```
 curl "http://192.168.4.1/api/config" \
-  --data "dl_model=9&dl_civ=9C&ul_model=11&save=1&reboot=1"
+  --data "dl_model=9&dl_civ=9C&ul_model=17&save=1&reboot=1"
 ```
 
 (Model ids come from `GET /api/models`.)

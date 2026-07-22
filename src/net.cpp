@@ -178,11 +178,16 @@ bool Net::connected() { return WiFi.status() == WL_CONNECTED; }
 
 int Net::scanWifi(WifiAp* out, int maxAps) {
   if (!out || maxAps <= 0) return 0;
+  // M33: a scan requires dropping the current association. Remember whether we were
+  // connected so we can rejoin afterwards -- otherwise opening the scan silently kills
+  // web control, rigctl/rotctl clients, and printer sessions until something else happens
+  // to reconnect.
+  bool wasConnected = (WiFi.status() == WL_CONNECTED);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();                        // drop any association for a clean scan
   delay(50);
   int n = WiFi.scanNetworks();              // blocking, a few seconds
-  if (n < 0) { WiFi.scanDelete(); return -1; }
+  if (n < 0) { WiFi.scanDelete(); if (wasConnected) rejoinAfterScan(); return -1; }
   int count = 0;
   for (int i = 0; i < n; ++i) {
     String s = WiFi.SSID(i);
@@ -203,12 +208,21 @@ int Net::scanWifi(WifiAp* out, int maxAps) {
     count++;
   }
   WiFi.scanDelete();                        // free the scan result buffer
+  if (wasConnected) rejoinAfterScan();      // M33: restore the association the scan dropped
   for (int i = 1; i < count; ++i) {         // insertion sort, strongest first
     WifiAp key = out[i]; int j = i - 1;
     while (j >= 0 && out[j].rssi < key.rssi) { out[j + 1] = out[j]; --j; }
     out[j + 1] = key;
   }
   return count;
+}
+
+// M33: kick off a reconnect to the remembered network after a scan dropped the
+// association. Non-blocking -- the station rejoins in the background over the next
+// seconds; callers that need it up should poll connected() as they already do.
+void Net::rejoinAfterScan() {
+  if (lastSsid_.length()) WiFi.begin(lastSsid_.c_str(), lastPass_.c_str());
+  else                    WiFi.begin();   // fall back to NVS-stored credentials
 }
 
 void Net::syncTimeNtp() {
@@ -614,6 +628,23 @@ bool Net::httpsGetToFile(const String& url, const char* path,
       lastDlErr = DownloadError::ShortRead;
       return false;
     }
+    // H12: the loop also exits when total reaches maxBytes. If we hit the cap WITHOUT a
+    // definitive end (chunked terminal 0-chunk, or non-chunked full Content-Length), the
+    // body was truncated -- do NOT report success, or a JSON/GP feed capped exactly at the
+    // limit would be parsed/promoted as if complete. Reject as BodyTooLarge.
+    if (total >= maxBytes && !done && !(!chunked && len > 0 && total >= (size_t)len)) {
+      lastErr = "body exceeded cap (" + String((unsigned)maxBytes) + ")";
+      lastDlErr = DownloadError::BodyTooLarge;
+      return false;
+    }
+    // H12: a chunked response is only complete once its terminal zero-length chunk arrived
+    // (which sets done). If the stream stalled/closed mid-chunk, treat it as a short read
+    // rather than success.
+    if (chunked && !done) {
+      lastErr = "chunked stream incomplete";
+      lastDlErr = DownloadError::ShortRead;
+      return false;
+    }
     lastDlErr = DownloadError::None;
     return true;   // success on this hop
   }
@@ -692,40 +723,35 @@ bool Net::fetchGpToFile(const String& url, const char* path) {
     return false;
   }
 
-  // Atomic-ish promotion: remove the live file, then rename the temp into place. (fs
-  // rename won't overwrite an existing target on LittleFS, hence the remove first.)
-  if (fs.exists(path)) fs.remove(path);
+  // H14: promote WITHOUT a window where there's no live catalog. Rename the live file to a
+  // backup first, then promote the temp; if the promote fails, restore the backup so a rename
+  // failure can't leave CardSat with no GP data. (LittleFS rename won't overwrite an existing
+  // target, so each step clears its destination first.)
+  String bak = String(path) + ".bak";
+  bool hadLive = fs.exists(path);
+  if (hadLive) {
+    if (fs.exists(bak.c_str())) fs.remove(bak.c_str());
+    if (!fs.rename(path, bak.c_str())) {
+      // Couldn't back up the live catalog: leave it in place, discard the temp, and report.
+      if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
+      lastErr = "promote failed (live kept)"; lastDlErr = DownloadError::WriteFailed;
+      return false;
+    }
+  }
   if (!fs.rename(tmp.c_str(), path)) {
-    // Rename failed after a good download: keep the temp so the data isn't lost, and
-    // report it. The caller still has no live catalog, but nothing good was destroyed
-    // that wasn't already removed; the temp holds the fresh data for recovery.
-    lastErr = "promote failed (temp kept)"; lastDlErr = DownloadError::WriteFailed;
+    // Promote failed: restore the previous catalog from backup so we're never left with none.
+    if (hadLive) fs.rename(bak.c_str(), path);
+    if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
+    lastErr = "promote failed (old restored)"; lastDlErr = DownloadError::WriteFailed;
     return false;
   }
+  if (hadLive) fs.remove(bak.c_str());   // committed: drop the backup
   return true;
 }
 
-// DEPRECATED -- DO NOT CALL. Reads the entire GP catalog (~400 KB) into a single
-// RAM String, which cannot fit on this no-PSRAM heap and reproduces the upload/download
-// heap-exhaustion failures cured in 0.9.41. Kept only so the symbol resolves; every
-// caller MUST use fetchGpToFile() (streams to flash). See docs/design/STREAMING_TLS.md.
-bool Net::fetchGp(const String& url, String& out) {
-  // GP/OMM JSON can be a few hundred KB for the full amateur list; cap higher
-  // than the old TLE text. MAX_SATS still bounds what we actually store.
-  return httpsGet(url, out, 400000);
-}
-
-// DEPRECATED -- DO NOT CALL. Reads a full transmitter list (up to ~200 KB) into a RAM
-// String; the String reader also silently drops chunks under TLS heap pressure (it
-// advances its byte count even when concat() fails to grow). Every caller MUST use
-// fetchSatnogsTransmittersToFile() (streams to flash). See docs/design/STREAMING_TLS.md.
-bool Net::fetchSatnogsTransmitters(uint32_t norad, String& out) {
-  String url = String(SATNOGS_TX_URL) + String((unsigned long)norad);
-  // Busy birds return large transmitter lists (the ISS has ~49); allow ample room
-  // so the JSON body isn't truncated mid-object, which would fail the parse and
-  // leave the satellite with no transponders.
-  return httpsGet(url, out, 200000);
-}
+// M35: the deprecated whole-response fetchGp() and fetchSatnogsTransmitters() were removed
+// (they allocated 200-400 KB RAM Strings that can't fit this no-PSRAM heap). Use the
+// streaming ...ToFile() variants below. See docs/design/STREAMING_TLS.md.
 
 bool Net::fetchSatnogsTransmittersToFile(uint32_t norad, const char* path) {
   String url = String(SATNOGS_TX_URL) + String((unsigned long)norad);
@@ -733,7 +759,32 @@ bool Net::fetchSatnogsTransmittersToFile(uint32_t norad, const char* path) {
   // byte count even when concat() failed to grow the buffer under TLS heap
   // pressure, silently dropping chunks and corrupting large lists. 200 KB is
   // ample for the busiest sat (the ISS, ~54 transmitters).
-  return httpsGetToFile(url, path, 200000, nullptr);
+  //
+  // H13: download to a sibling temp and promote only on success, so a connection
+  // failure/stall/short write during refresh can't destroy the last known-good cache
+  // (offline operation must never get worse because the user tried to update).
+  fs::FS& fs = Store::fs();
+  String tmp = String(path) + ".tmp";
+  if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
+  size_t got = 0;
+  if (!httpsGetToFile(url, tmp.c_str(), 200000, &got) || got == 0) {
+    if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());   // keep the old cache
+    return false;
+  }
+  // Promote without a no-cache window: rotate live -> backup, temp -> live, restore on fail.
+  String bak = String(path) + ".bak";
+  bool hadLive = fs.exists(path);
+  if (hadLive) {
+    if (fs.exists(bak.c_str())) fs.remove(bak.c_str());
+    if (!fs.rename(path, bak.c_str())) { fs.remove(tmp.c_str()); return false; }
+  }
+  if (!fs.rename(tmp.c_str(), path)) {
+    if (hadLive) fs.rename(bak.c_str(), path);
+    fs.remove(tmp.c_str());
+    return false;
+  }
+  if (hadLive) fs.remove(bak.c_str());
+  return true;
 }
 
 // POST a (small) file as multipart/form-data. Built for the LoTW .tq8 upload:

@@ -576,7 +576,13 @@ void YaesuRotator::outWrite(uint8_t bits) {
   uint8_t port = YAESU_OUT_ACTIVE_LOW ? (uint8_t)~bits : bits;
   Wire1.beginTransmission(YAESU_OUT_ADDR);
   Wire1.write(port);
-  Wire1.endTransmission();
+  // M25: honour the I2C result. If the expander didn't ACK, the motor/stop command
+  // did NOT reach the hardware -- mark the backend not-ready so the controller stops
+  // believing a command (including allStop) succeeded. Still record _out so a later
+  // successful write can converge, but don't paper over a dead bus.
+  if (Wire1.endTransmission() != 0) {
+    _ok = false;
+  }
   _out = bits;
 }
 
@@ -587,6 +593,10 @@ bool YaesuRotator::cnt2deg(int32_t c, int c0, int cF, float dmax, float& outDeg)
 }
 
 bool YaesuRotator::point(float az, float el) {
+  // M26: don't accept a target while the backend isn't ready or isn't calibrated --
+  // returning true here would let tracking believe the antenna is being commanded when
+  // the I2C expander/ADC is absent or the endpoints were never learned.
+  if (!_ok) return false;
   if (az < 0) az = 0; if (az > (float)_azFull) az = (float)_azFull;
   if (el < 0) el = 0; if (el > 180.0f) el = 180.0f;
   _tAz = az; _tEl = el; _have = true; _stallMs = millis();

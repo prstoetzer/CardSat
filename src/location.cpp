@@ -11,9 +11,23 @@ static TinyGPSPlus    gps;
 static HardwareSerial* gpsSerial = nullptr;
 
 void Location::beginGps(int uartNum, int rxPin, int txPin, uint32_t baud) {
+  endGps();                              // H18: release any prior UART before re-opening,
+                                         // so repeated toggles/source changes don't leak the
+                                         // HardwareSerial or leave an old driver installed.
   gpsSerial = new HardwareSerial(uartNum);
   gpsSerial->begin(baud, SERIAL_8N1, rxPin, txPin);
   _gpsOn = true;
+}
+
+// Release the GPS UART: end the driver, delete the object, clear state. Safe to call when
+// GPS was never started (no-op) and before every restart / on disable.
+void Location::endGps() {
+  if (gpsSerial) {
+    gpsSerial->end();
+    delete gpsSerial;
+    gpsSerial = nullptr;
+  }
+  _gpsOn = false;
 }
 
 bool Location::pollGps() {
@@ -126,14 +140,19 @@ void Location::setManual(double lat, double lon, double altM) {
 // Maidenhead grid -> lat/lon (centre of the square). Accepts 4 or 6 chars.
 bool Location::gridToLatLon(const String& gridIn, double& latOut, double& lonOut) {
   String g = gridIn; g.trim(); g.toUpperCase();
-  if (g.length() < 4) return false;
+  // M18: accept EXACTLY 4 or 6 characters (8-char extended locators aren't supported),
+  // and validate the subsquare letters, not just the field/square.
+  if (g.length() != 4 && g.length() != 6) return false;
   if (g[0] < 'A' || g[0] > 'R' || g[1] < 'A' || g[1] > 'R') return false;
   if (g[2] < '0' || g[2] > '9' || g[3] < '0' || g[3] > '9') return false;
+  if (g.length() == 6) {
+    if (g[4] < 'A' || g[4] > 'X' || g[5] < 'A' || g[5] > 'X') return false;
+  }
   double lon = (g[0] - 'A') * 20.0 - 180.0;
   double lat = (g[1] - 'A') * 10.0 - 90.0;
   lon += (g[2] - '0') * 2.0;
   lat += (g[3] - '0') * 1.0;
-  if (g.length() >= 6) {
+  if (g.length() == 6) {
     lon += (g[4] - 'A') * (2.0 / 24.0) + (1.0 / 24.0);
     lat += (g[5] - 'A') * (1.0 / 24.0) + (0.5 / 24.0);
   } else {
@@ -150,6 +169,14 @@ bool Location::setFromGrid(const String& gridIn) {
 }
 
 String Location::toGrid(double lat, double lon) {
+  // M19: guard the Maidenhead math against inputs that would index outside the
+  // alphabet. Reject non-finite values, and clamp to the valid ranges so exact
+  // +90 / +180 (and anything slightly out of range) can't produce stray glyphs.
+  if (!isfinite(lat) || !isfinite(lon)) return String("----");
+  if (lat >  89.99999) lat =  89.99999;   // keep below +90 (field 'R' row)
+  if (lat < -90.0)     lat = -90.0;
+  while (lon >= 180.0) lon -= 360.0;       // fold the dateline into [-180, 180)
+  while (lon < -180.0) lon += 360.0;
   lon += 180.0; lat += 90.0;
   char g[7];
   g[0] = 'A' + (int)(lon / 20.0);

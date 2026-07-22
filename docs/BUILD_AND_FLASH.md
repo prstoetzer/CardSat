@@ -10,10 +10,10 @@ Two binaries ship with each release:
 
 | File | Use it with | Notes |
 |---|---|---|
-| `CardSat.bin` | **[Launcher](https://github.com/bmorcelli/Launcher)** (bmorcelli) | App-only image; **only** works through Launcher, which writes the bootloader/partition table itself. Cannot be flashed standalone. |
-| `CardSat_Merged.bin` | **M5Burner**, or **direct flash** (esptool / web flasher) | Complete standalone image (bootloader + partition table + app + empty LittleFS) at `0x0`. |
+| `CardSat-app.bin` | **[Launcher](https://github.com/bmorcelli/Launcher)** (bmorcelli) | App-only image; **only** works through Launcher, which writes the bootloader/partition table itself. Cannot be flashed standalone. |
+| `CardSat-merged.bin` | **M5Burner**, or **direct flash** (esptool / web flasher) | Complete standalone image (bootloader + partition table + app + empty LittleFS) at `0x0`. |
 
-**Launcher:** copy `CardSat.bin` to Launcher's bin folder on the microSD (or use
+**Launcher:** copy `CardSat-app.bin` to Launcher's bin folder on the microSD (or use
 its WebUI/OTA), then start Launcher and pick **CardSat** — it builds the right
 partition layout and installs the app. The file has no standalone bootloader, so it
 runs only through Launcher.
@@ -21,12 +21,12 @@ runs only through Launcher.
 Both binaries are built with **USB CAT included** — *USB serial* is in the CAT
 type row out of the box (it is on by default in source too; see below).
 
-**M5Burner / direct flash:** use `CardSat_Merged.bin`. In M5Burner, add it as a
+**M5Burner / direct flash:** use `CardSat-merged.bin`. In M5Burner, add it as a
 custom firmware and burn. To flash directly:
 
 ```
 esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
-  write_flash 0x0 CardSat_Merged.bin
+  write_flash 0x0 CardSat-merged.bin
 ```
 
 or the web flasher at <https://espressif.github.io/esptool-js/> (chip **ESP32-S3**,
@@ -49,12 +49,12 @@ case, where data lives in the internal LittleFS partition.
 
 | Method (no SD card) | File | Internal saved data |
 |---|---|---|
-| **Launcher** (recommended for upgrades) | `CardSat.bin` | **Preserved.** Launcher replaces only the app partition, so settings/notes/favorites and cached elements in LittleFS survive the update. |
-| **M5Burner / direct flash at `0x0`** | `CardSat_Merged.bin` | **Erased.** The merged image includes a fresh empty LittleFS, so a full flash wipes internally-stored data — you'll re-enter station settings and run **Update** again. |
+| **Launcher** (recommended for upgrades) | `CardSat-app.bin` | **Preserved.** Launcher replaces only the app partition, so settings/notes/favorites and cached elements in LittleFS survive the update. |
+| **M5Burner / direct flash at `0x0`** | `CardSat-merged.bin` | **Erased.** The merged image includes a fresh empty LittleFS, so a full flash wipes internally-stored data — you'll re-enter station settings and run **Update** again. |
 
 So for a routine version bump, the easiest path is either: keep an **SD card** in (your
-config persists no matter how you flash), or use **Launcher** with `CardSat.bin` (which
-preserves the internal LittleFS data too). A full `CardSat_Merged.bin` flash only erases
+config persists no matter how you flash), or use **Launcher** with `CardSat-app.bin` (which
+preserves the internal LittleFS data too). A full `CardSat-merged.bin` flash only erases
 data when it was stored **internally** (no SD card).
 
 If you do end up on a clean slate (merged flash with no SD card), reconfigure: set your
@@ -93,7 +93,8 @@ under **Tools**:
 | USB CDC On Boot | **Enabled** |
 
 The default ~1.25 MB app partition is too small and the build fails with *"Sketch
-too big"*; the 3 MB "Huge APP" layout fits with room to spare and provides the
+too big"*; the 3 MB "Huge APP" layout fits (the app is ~92.9% of it as of 0.9.64,
+so headroom is limited but sufficient — see the size note below) and provides the
 1 MB SPIFFS region that LittleFS uses for cached data.
 
 ### USB CAT (`CAT_USB`) — on by default since 0.9.59
@@ -103,13 +104,15 @@ USB-C port instead of the G1/G2 UART and its level shifter. It shipped opt-in in
 0.9.58, was **bench-proven on an IC-821 + FTDI adapter** (engage, disengage,
 re-engage, and Doppler tracking over many cycles), and is **part of the default build
 since 0.9.59**. That makes **EspUsbHost** (TANAKA Masayuki) a required library —
-**v2.3.1 or later, which compiles clean with no patch** (the `peripheral_map` fix
-this section used to require landed upstream in v2.3.1; the note below is kept for
-stale ≤2.3.0 copies). Verified end-to-end: CardSat 0.9.59 compiles against a
-pristine v2.3.2 checkout on arduino-esp32 3.2.1 (85% of the 3 MB app partition),
-and the v2.3.0 → v2.3.2 diff was audited — the entire API surface CardSat uses is
-unchanged (classes, config structs, enum values, task names, `end()` semantics,
-the `ESP_USB_HOST_MAX_DEVICES` mechanism), and the behavioral changes are
+**v2.4.1 or later**. v0.9.64's USB teardown depends on 2.4.1's `end()` completing the
+full drain / deregister / free-all / uninstall handshake so a disengaged host actually
+releases its memory; 2.3.x compiles clean (the `peripheral_map` fix landed upstream in
+v2.3.1) but keeps the host resident on `end()`, which would reproduce the retained-RAM
+and re-engage failures this release fixes. Verified end-to-end: CardSat 0.9.64 compiles
+and runs its USB teardown against v2.4.1 on arduino-esp32 3.2.1 (~92% of the 3 MB app
+partition), and the v2.3.0 → v2.4.1 diff was audited — the entire API surface CardSat
+uses is unchanged (classes, config structs, enum values, task names), and the
+behavioral change that matters is `end()` now actually releasing the host, plus
 improvements on CardSat's paths: transfer-error recovery on unplug is now deferred
 to the client task so a disconnected adapter is released instead of re-submitted
 to, and serial-endpoint binding is pinned to the recorded CDC-data / vendor
@@ -153,8 +156,8 @@ this section.
 > Without it the default build fails; either apply the patch or build with
 > `CARDSAT_HAS_USBCAT` set to `0` (see *Building without USB CAT* below).
 
-**Arduino IDE** — one step: install **EspUsbHost** (TANAKA Masayuki, **v2.3.1 or
-later** — current Library Manager serves v2.3.2) from **Library Manager**. No
+**Arduino IDE** — one step: install **EspUsbHost** (TANAKA Masayuki, **v2.4.1 or
+later** — required for v0.9.64's USB teardown) from **Library Manager**. No
 patch. `CARDSAT_HAS_USBCAT` is already `1` in `CardSat.ino`, and the repo already
 ships the **`build_opt.h`** the `.ino` build needs (it carries
 `-mtext-section-literals` and `-DESP_USB_HOST_MAX_DEVICES=4`).

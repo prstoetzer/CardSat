@@ -85,6 +85,9 @@ enum RadioModel : uint8_t {
   RIG_FT736R,
   RIG_TS790,
   RIG_TS2000,
+  RIG_NONE,     // No radio. CardSat runs as a pure tracker/rotator controller: makeRig()
+                // returns nullptr, so all CAT features become no-ops (the code already
+                // guards every rig use with a null check).
   RIG_COUNT
 };
 
@@ -150,4 +153,7 @@ static const RadioProfile RADIOS[RIG_COUNT] = {
   // Kenwood: ASCII CAT over RS-232 (needs a MAX3232-class level interface).
   { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, false, 0x00, false },
   { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00, false },
+  // RIG_NONE: placeholder so RADIOS[RIG_NONE] is a valid dereference (the name is shown
+  // in Settings). makeRig() returns nullptr for it, so none of the other fields are used.
+  { "None",     PROTO_CIV,    0x00,  9600,  {0,0,0},       {0,0,0},        0,  false,false,0x00, 0x00, false,false, 0x00, false },
 };

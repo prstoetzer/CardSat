@@ -111,7 +111,10 @@ bool VoiceMemo::start(const char* satName) {
   }
 
   _file = fsx.open(_path, "w");
-  if (!_file) { _err = "open failed"; _state = ERROR; return false; }
+  if (!_file) {
+    free(_recBuf); _recBuf = nullptr;   // H16: don't leak the 4 KB capture buffer
+    _err = "open failed"; _state = ERROR; return false;
+  }
 
   // The mic and speaker share I2S: stop the speaker, then start the mic.
   // NOTE: on the Cardputer ADV the ES8311 mic only works when CardSat is built
@@ -127,6 +130,7 @@ bool VoiceMemo::start(const char* satName) {
   if (!M5.Mic.begin()) {
     _file.close(); fsx.remove(_path);
     if (_spkWasOn) M5Cardputer.Speaker.begin();
+    free(_recBuf); _recBuf = nullptr;   // H16: don't leak the 4 KB capture buffer
     _err = "mic start failed"; _state = ERROR; return false;
   }
 
@@ -218,15 +222,23 @@ void VoiceMemo::finalize(bool ok) {
     // (audible samples present on disk, but silent playback). Reopen "r+",
     // overwrite the 44-byte header, done.
     if (ok && _path[0]) {
+      // M38: a header-patch failure must NOT still report "saved" -- a file with a
+      // zero data-length header plays as empty. Verify reopen + seek + full write,
+      // and demote ok to false (discarding the file below) if any step fails.
+      bool patched = false;
       uint8_t h[44];
       buildWavHeader(h, _dataBytes);
       File pf = Store::fs().open(_path, "r+");
       if (pf) {
-        pf.seek(0);
-        pf.write(h, sizeof(h));
+        bool sk = pf.seek(0);
+        size_t wr = pf.write(h, sizeof(h));
         pf.close();
-      } else {
-        Serial.println("[memo] WARN: could not reopen to patch WAV header");
+        patched = sk && (wr == sizeof(h));
+      }
+      if (!patched) {
+        Serial.println("[memo] WARN: WAV header patch failed -- discarding memo");
+        _err = "WAV finalize failed";
+        ok = false;                    // fall through to the remove() below
       }
     }
   }

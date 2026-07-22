@@ -1,11 +1,41 @@
-import re, sys
-sys.path.insert(0,'/home/claude/cardsat')
-import mirror_tool
-src=open('src/app.cpp').read()
+#!/usr/bin/env python3
+"""Audit key handlers for duplicate `if (c == 'x')` guards within one handler.
+
+Self-contained: resolves paths relative to the repo root and vendors the small
+brace-matcher it needs, so it runs in a clean checkout with no developer-local
+helper on sys.path.
+"""
+import re, os
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def body_by_sig(src, sig):
+    """Return the { ... } body of the function whose definition starts with `sig`,
+    matched by brace counting from the opening brace after the signature."""
+    i = src.find(sig)
+    if i < 0:
+        return ""
+    b = src.find('{', i)
+    if b < 0:
+        return ""
+    depth = 0
+    j = b
+    while j < len(src):
+        c = src[j]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return src[b:j+1]
+        j += 1
+    return ""
+
+src=open(os.path.join(ROOT,'src','app.cpp')).read()
 handlers=re.findall(r'void App::(key\w+)\(', src)
 real=[]
 for h in handlers:
-    body=mirror_tool.body_by_sig(src,'void App::'+h+'(')
+    body=body_by_sig(src,'void App::'+h+'(')
     if not body: continue
     # Only count lines that are an actual IF-guard on the key: start with 'if (c == '
     guards={}

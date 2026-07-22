@@ -108,6 +108,7 @@ struct RadioPort {
   bool     online  = false;
   RxRing   rx;
   uint64_t lastFreq = 0;
+  uint32_t lastSetMs = 0;      // H8: millis() of the last set, so a read can let it settle
   RigMode  lastMode = MODE_USB;
   bool     ptt = false;
   const char* legName = "?";
@@ -123,6 +124,7 @@ struct RigctlSession {
   Stream* io = nullptr;
   int     vfo = 0;                 // 0 = VFOA (downlink), 1 = VFOB (uplink)
   String  line;
+  bool    overflow = false;        // M4: set when a line exceeded the buffer; drop it, don't apply
   bool    wantClose = false;       // set by the 'q' command (TCP transport acts on it)
   RadioPort& cur() { return vfo == 1 ? gUp : gDown; }
   const char* vfoTok() { return vfo == 1 ? "VFOB" : "VFOA"; }

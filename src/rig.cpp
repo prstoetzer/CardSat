@@ -2,6 +2,7 @@
 //  rig.cpp  -  Rig factory + shared helpers
 // ===========================================================================
 #include "rig.h"
+#include "settings.h"   // CatType enum (avoid raw catType magic numbers)
 #include "civ.h"
 #include "icomnet.h"
 #include "yaesu.h"
@@ -28,23 +29,27 @@ RigMode Rig::modeFromString(const String& s) {
 }
 
 Rig* makeRig(RadioModel model, uint8_t catType, const char* host,
-             uint16_t port, const char* user, const char* pass) {
-  if (catType == 2) {                     // rigctld client (TCP): model-agnostic
+             uint16_t port, const char* user, const char* pass,
+             uint32_t groveBaud) {
+  if (model == RIG_NONE) return nullptr;   // no radio: CardSat runs as a tracker only
+  // M24: nothrow allocation throughout. On low contiguous heap, return nullptr so the
+  // caller (which already null-checks rig) reports "radio not ready" instead of crashing.
+  if (catType == CAT_RIGCTL) {            // rigctld client (TCP): model-agnostic
     (void)user; (void)pass;
-    return new RigctlRig(host, port);
+    return new (std::nothrow) RigctlRig(host, port);
   }
-  if (catType == 3) {                     // rigctld client over the Grove UART (no Wi-Fi)
-    (void)host; (void)user; (void)pass;
-    return new RigctlGroveRig(port ? port : 115200);   // reuse catPort as the Grove baud
+  if (catType == CAT_RIGCTL_GROVE) {      // rigctld client over the Grove UART (no Wi-Fi)
+    (void)host; (void)port; (void)user; (void)pass;
+    return new (std::nothrow) RigctlGroveRig(groveBaud ? groveBaud : 115200);   // C2: dedicated 32-bit baud
   }
-  // Icom LAN (RS-BA1 UDP) network CAT: only for CI-V models; catType 1 = CAT_NET.
-  if (catType == 1 && RADIOS[model].proto == PROTO_CIV)
-    return new IcomNetRig(model, host, port, user, pass);
+  // Icom LAN (RS-BA1 UDP) network CAT: only for CI-V models.
+  if (catType == CAT_NET && RADIOS[model].proto == PROTO_CIV)
+    return new (std::nothrow) IcomNetRig(model, host, port, user, pass);
   switch (RADIOS[model].proto) {
-    case PROTO_YAESU:   return new YaesuRig(model);
-    case PROTO_KENWOOD: return new KenwoodRig(model);
+    case PROTO_YAESU:   return new (std::nothrow) YaesuRig(model);
+    case PROTO_KENWOOD: return new (std::nothrow) KenwoodRig(model);
     case PROTO_CIV:
-    default:            return new CivRig(model);
+    default:            return new (std::nothrow) CivRig(model);
   }
 }
 
@@ -87,7 +92,7 @@ bool RigctlRig::linkOpen() {
   _lastTry = now; _c.stop();
   if (WiFi.status() != WL_CONNECTED || _host.length() == 0) { _ok = false; return false; }
   _ok = _c.connect(_host.c_str(), _port, 1500);
-  if (_ok) _probed = false;                 // fresh connection -> re-probe VFO mode
+  if (_ok) { _probed = false; _failStreak = 0; }   // fresh connection -> re-probe, clear streak
   return _ok;
 }
 void   RigctlRig::linkClose() { _c.stop(); }
@@ -140,14 +145,25 @@ const char* RigctlRig::modeName(RigMode m) {
 }
 
 // Send one command line; return the first non-empty reply line ("" on failure).
-String RigctlRig::xchg(const String& tx) {
+String RigctlRig::xchg(const String& tx, uint32_t replyMs) {
   if (!ensure()) return "";
   uint32_t t0 = millis();
   while (linkRead() >= 0 && (millis() - t0) < 20) { }           // drain stale reply
   if (linkWrite((const uint8_t*)tx.c_str(), tx.length()) != tx.length()) {
     _ok = false; linkClose(); return "";
   }
-  return readLine(400);
+  String r = readLine(replyMs);
+  // M22: a silent peer returns "" here. Left unchecked, _ok stays true and every Doppler
+  // tick pays the full 400 ms timeout while the UI still shows the rig engaged. Count
+  // consecutive empty replies and, past a small threshold, mark not-ready and close the
+  // link so ready() tells the truth and ensure() must re-establish (and re-probe) it.
+  if (r.length() == 0) {
+    if (_failStreak < 255) _failStreak++;
+    if (_failStreak >= 3) { _ok = false; linkClose(); }
+  } else {
+    _failStreak = 0;                          // a real reply: the peer is alive
+  }
+  return r;
 }
 
 // ===========================================================================
@@ -155,15 +171,42 @@ String RigctlRig::xchg(const String& tx) {
 //  Serial1 is shared with wired CI-V / Grove GPS / Grove rotator; the caller's
 //  mutual-exclusion rules guarantee only one owner at a time.
 // ===========================================================================
-void RigctlGroveRig::begin(uint32_t, int rx, int tx, int) {
-  _rx = rx; _tx = tx; _lastTry = 0; _probed = false; _open = false;
+void RigctlGroveRig::begin(uint32_t, int /*uartNum*/, int rxPin, int txPin) {
+  // C1: the base Rig::begin contract is (baud, uartNum, rxPin, txPin). Capture the pins
+  // from args 3 and 4 -- an earlier signature named args 2/3 rx/tx, which stored uartNum
+  // as _rx and rxPin as _tx (both GPIO 1) and dropped the real txPin, so the Grove cable
+  // ran RX and TX on the same pin.
+  _rx = rxPin; _tx = txPin; _lastTry = 0; _probed = false; _open = false;
   linkOpen();
 }
 bool RigctlGroveRig::linkOpen() {
-  if (_open) { _ok = true; return true; }
+  // M7: opening Serial1 always "succeeds" at the driver level, so an ABSENT companion used
+  // to be marked ready forever -- each command then paid a full timeout and the UART was
+  // never closed. Now: open the UART once, probe for a live companion, and only stay ready
+  // if it answered. On no answer, close and back off so we don't hammer the bus / hitch the
+  // UI. ensure() re-probes on the next attempt after the backoff.
+  if (_open) return _ok;                        // already up: keep whatever readiness we have
+  uint32_t now = millis();
+  if (_lastTry && (now - _lastTry) < 3000) { _ok = false; return false; }   // backoff after a failed probe
+  _lastTry = now;
   if (!_serial) _serial = &Serial1;
   _serial->begin(_baud, SERIAL_8N1, _rx, _tx);
-  _open = true; _ok = true; _probed = false;
+  _open = true; _probed = false;
+  // Lightweight liveness probe: a rigctld/companion answers \dump_state or \chk_vfo. If we
+  // get any reply line, treat the link as up; otherwise close and let the backoff apply.
+  uint32_t t0 = millis();
+  while (linkRead() >= 0 && (millis() - t0) < 20) { }   // drain
+  const char* q = "\\chk_vfo\n";
+  _serial->write((const uint8_t*)q, strlen(q));
+  String r = readLine(400);
+  if (r.length() == 0) {
+    // No companion on the Grove UART: don't pretend to be ready.
+    _serial->end(); _open = false; _ok = false;
+    return false;
+  }
+  if (r.indexOf("CHKVFO 1") >= 0) _vfoMode = true;
+  _probed = true;                               // probe already done here
+  _ok = true; _failStreak = 0;
   return true;
 }
 void RigctlGroveRig::linkClose() {

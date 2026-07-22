@@ -66,9 +66,11 @@ public:
                            int attempts = 3, uint32_t firstByteMs = 0);
 
   // Convenience wrappers.
-  bool fetchGp(const String& url, String& out);    // AMSAT GP/OMM JSON array
+  // M35: fetchGp() removed -- it read the whole ~400 KB GP catalog into a RAM String,
+  // which cannot fit this no-PSRAM heap. Use fetchGpToFile() (streams to flash).
   bool fetchGpToFile(const String& url, const char* path);  // GP -> cache file
-  bool fetchSatnogsTransmitters(uint32_t norad, String& out);
+  // M35: fetchSatnogsTransmitters() removed -- whole-response String reader; use
+  // fetchSatnogsTransmittersToFile() (streams to flash).
   bool fetchSatnogsTransmittersToFile(uint32_t norad, const char* path);  // tx -> cache file
 
   // POST a file as multipart/form-data (used for the LoTW .tq8 upload). Reads
@@ -129,6 +131,7 @@ public:
     WriteFailed,     // filesystem write error mid-stream
     ShortRead,       // fewer bytes than the declared Content-Length
     EmptyBody,       // 200 with no body
+    BodyTooLarge,    // H12: hit the maxBytes cap before a declared length / terminal chunk
     TooManyRedirects
   };
   DownloadError lastDlErr = DownloadError::None;
@@ -145,6 +148,7 @@ public:
   int  failedResets = 0;                        // consecutive hard resets that didn't recover
   void noteConnResult(int code);               // update counter; auto-reset at threshold
   bool hardResetWifi();                         // disconnect(true) + reconnect; flush pool
+  void rejoinAfterScan();                        // M33: reconnect after a Wi-Fi scan drops STA
   bool recoverExhausted = false;                // set when hard resets keep failing; the
                                                 // app prompts the user for a reboot
   static int  RECOVER_AFTER;                    // failures before a hard reset (default 3)

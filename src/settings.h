@@ -45,7 +45,7 @@ enum CatType : uint8_t {
 // selectable when the feature is compiled in, so a build without it behaves
 // exactly as before -- the operator cannot land on an unimplemented transport.
 #if CARDSAT_HAS_USBCAT
-static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), USB, rigctl(Grove)
+static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), rigctl(Grove), USB
 #else
 static constexpr uint8_t CAT_TYPE_N = 4;   // Wired, LAN, rigctl(net), rigctl(Grove)
 #endif
@@ -61,6 +61,9 @@ enum RotType : uint8_t {
   ROT_EASYCOMM2 = 5,  // Easycomm II (decimal ASCII) via the bridge
   ROT_EASYCOMM3 = 6,  // Easycomm III (II grammar + velocity) via the bridge
   ROT_SPID      = 7,  // SPID Rot2Prog (MD-01/02) binary via the bridge
+  ROT_NONE      = 8,  // No rotator. Replaces the old separate rotEnable on/off row:
+                      // selecting None is how the operator says "I have no rotator".
+                      // rotEnable is derived from this (rotType != ROT_NONE).
 };
 
 // Which wire a SERIAL rotator protocol runs on (settings: rotTransport).
@@ -188,6 +191,9 @@ struct Settings {
   bool     consoleLog = false;
   char     catHost[40] = "";    // radio IP / hostname (catType = CAT_NET)
   uint16_t catPort     = 50001; // RS-BA1 control port (serial = +1, audio = +2)
+  // C2: Grove rigctl baud is its own 32-bit field (catPort is uint16_t and can't hold
+  // 115200). Default matches the CardSatDualRig companion. Validated to a UART set below.
+  uint32_t catGroveBaud = 115200;
   char     catUser[24] = "";    // radio Network User1 id
   char     catPass[24] = "";    // radio Network User1 password
   // (CI-V is TTL serial only.) VFO roles + whether to command the rig's own
@@ -249,8 +255,9 @@ struct Settings {
   freq_t   xvtrDlHz = 0;     // downlink transverter LO (real downlink - this = rig IF)
   freq_t   xvtrUlHz = 0;     // uplink transverter LO   (real uplink   - this = rig IF)
   // Rotator (GS-232 over an I2C->UART bridge, or rotctld over TCP)
-  bool     rotEnable   = false;
-  uint8_t  rotType     = ROT_GS232;  // GS-232 (bridge) or rotctld (network)
+  bool     rotEnable   = false;      // derived from rotType (rotType != ROT_NONE); kept
+                                     // for the many guards that read it. Set on load/cycle.
+  uint8_t  rotType     = ROT_NONE;   // None by default; selecting a type enables the rotator
   // WHICH WIRE the serial protocols above run on. Separate from rotType on
   // purpose: protocol and transport are independent, so 3 protocols x 3
   // transports needs 3+3 settings rather than 9 enum values -- and every rotType
@@ -345,4 +352,5 @@ struct Settings {
 
   bool load();
   bool save();
+  void validate();   // M17: clamp array-index enums + physical values into safe ranges
 };

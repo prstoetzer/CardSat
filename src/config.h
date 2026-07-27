@@ -87,6 +87,12 @@ static constexpr double C_LIGHT = 299792458.0;
 // send ceiling (with margin for multipart headers/tail). POSTs larger than this stall
 // mid-body on-device and must be batched. Applies to LoTW and Cloudlog uploads.
 #define SAFE_UPLOAD_BODY   5000
+// APRS-IS: plain TCP, no TLS. Port 14580 is the user-defined filter port on the core
+// and most tier-2 servers; the rotate hostname round-robins across the pool so one
+// dead server is not a dead feature. Receive-only (passcode -1), so nothing is ever
+// transmitted from this device onto APRS-IS.
+#define APRSIS_HOST        "rotate.aprs2.net"
+#define APRSIS_PORT        14580
 // hams.at upcoming satellite activations (Atom feed of scheduled rove/activations).
 #define HAMSAT_FEED_URL    "https://hams.at/feeds/upcoming_alerts"
 #define FILE_HAMSAT  "/CardSat/hamsat.dat"   // cached parsed activations (binary, survives reboot)
@@ -184,7 +190,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.64";
+static constexpr const char* FW_VERSION = "0.9.66";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build. Used by main.cpp (btInUse
@@ -341,6 +347,9 @@ static constexpr int      MEMO_AC_GAIN     = 8;     // gain on DC-blocked AC sig
 static constexpr int      MEMO_LIST_MAX    = 64;    // max memos shown in the browser
 static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samples)
 #define FILE_GP      "/CardSat/gp.json"       // cached GP/OMM download (JSON array)
+#define FILE_AO7OBS  "/CardSat/ao7obs.csv"    // AO-7 observation cache: extends the fit
+                                              // baseline past the API's 30-day window
+#define FILE_AO7TMP  "/CardSat/ao7obs.tmp"    // staging file for the atomic rewrite
 #define FILE_CFG     "/CardSat/config.json"
 #define FILE_TXCACHE "/CardSat/tx_%lu.json"   // %lu = norad id
 #define FILE_CALIB   "/CardSat/calib.txt"     // per-sat calibration: "norad dl ul" lines

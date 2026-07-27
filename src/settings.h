@@ -149,6 +149,20 @@ struct Settings {
   // on-device LoTW upload rather than something to do in addition.
   char     clUrl[80]  = "";   // base URL of the Cloudlog instance (https://... or http://...)
   char     clKey[40]  = "";   // Cloudlog API key (read-write)
+  // ---- Nearby & DX live feeds -------------------------------------------------
+  // APRS is a live APRS-IS socket, not a fetch: aprs.fi's API cannot do an area
+  // search at all (it is documented as querying named stations only, no wildcard),
+  // which is why the old key-based station list never returned anything. The range
+  // below is passed straight through as the APRS-IS server-side r/lat/lon/dist
+  // filter, which already takes kilometres.
+  int      aprsRangeKm = 150; // APRS-IS r/ filter radius for "heard near me"
+  char     dxcUrl[96] = "";   // DX spot JSON feed (an aggregator; blank = feature off)
+  // ADS-B: the API BASE only. The request path is built from the current QTH and
+  // adsbRangeKm, so moving station does not mean hand-editing a URL. adsb.lol is
+  // keyless, open-data and ADSBExchange-compatible; a LAN tar1090 also works if
+  // its base is given here.
+  char     adsbUrl[96] = "https://api.adsb.lol";
+  int      adsbRangeKm = 50;  // radar plot outer ring, and the ADS-B query radius
   char     clStation[8] = ""; // station_profile_id (numeric, from the Cloudlog UI)
   // Location
   double   lat = 0.0, lon = 0.0, altM = 0.0;

@@ -723,29 +723,15 @@ bool Net::fetchGpToFile(const String& url, const char* path) {
     return false;
   }
 
-  // H14: promote WITHOUT a window where there's no live catalog. Rename the live file to a
-  // backup first, then promote the temp; if the promote fails, restore the backup so a rename
-  // failure can't leave CardSat with no GP data. (LittleFS rename won't overwrite an existing
-  // target, so each step clears its destination first.)
-  String bak = String(path) + ".bak";
-  bool hadLive = fs.exists(path);
-  if (hadLive) {
-    if (fs.exists(bak.c_str())) fs.remove(bak.c_str());
-    if (!fs.rename(path, bak.c_str())) {
-      // Couldn't back up the live catalog: leave it in place, discard the temp, and report.
-      if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
-      lastErr = "promote failed (live kept)"; lastDlErr = DownloadError::WriteFailed;
-      return false;
-    }
-  }
-  if (!fs.rename(tmp.c_str(), path)) {
-    // Promote failed: restore the previous catalog from backup so we're never left with none.
-    if (hadLive) fs.rename(bak.c_str(), path);
+  // H14: promote WITHOUT a window where there's no live catalog, via the single shared
+  // rotate/promote/restore primitive. It leaves the live catalog in place if the backup
+  // step fails and restores it if the promote fails; we only clear the temp and set the
+  // error text on failure here.
+  if (!Store::promoteFileTransactionally(path, tmp.c_str())) {
     if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
-    lastErr = "promote failed (old restored)"; lastDlErr = DownloadError::WriteFailed;
+    lastErr = "promote failed (live kept)"; lastDlErr = DownloadError::WriteFailed;
     return false;
   }
-  if (hadLive) fs.remove(bak.c_str());   // committed: drop the backup
   return true;
 }
 
@@ -771,19 +757,11 @@ bool Net::fetchSatnogsTransmittersToFile(uint32_t norad, const char* path) {
     if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());   // keep the old cache
     return false;
   }
-  // Promote without a no-cache window: rotate live -> backup, temp -> live, restore on fail.
-  String bak = String(path) + ".bak";
-  bool hadLive = fs.exists(path);
-  if (hadLive) {
-    if (fs.exists(bak.c_str())) fs.remove(bak.c_str());
-    if (!fs.rename(path, bak.c_str())) { fs.remove(tmp.c_str()); return false; }
-  }
-  if (!fs.rename(tmp.c_str(), path)) {
-    if (hadLive) fs.rename(bak.c_str(), path);
-    fs.remove(tmp.c_str());
+  // Promote without a no-cache window via the shared rotate/promote/restore primitive.
+  if (!Store::promoteFileTransactionally(path, tmp.c_str())) {
+    if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
     return false;
   }
-  if (hadLive) fs.remove(bak.c_str());
   return true;
 }
 

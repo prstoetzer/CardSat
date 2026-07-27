@@ -287,6 +287,12 @@ static constexpr double C_LIGHT = 299792458.0;
 // send ceiling (with margin for multipart headers/tail). POSTs larger than this stall
 // mid-body on-device and must be batched. Applies to LoTW and Cloudlog uploads.
 #define SAFE_UPLOAD_BODY   5000
+// APRS-IS: plain TCP, no TLS. Port 14580 is the user-defined filter port on the core
+// and most tier-2 servers; the rotate hostname round-robins across the pool so one
+// dead server is not a dead feature. Receive-only (passcode -1), so nothing is ever
+// transmitted from this device onto APRS-IS.
+#define APRSIS_HOST        "rotate.aprs2.net"
+#define APRSIS_PORT        14580
 // hams.at upcoming satellite activations (Atom feed of scheduled rove/activations).
 #define HAMSAT_FEED_URL    "https://hams.at/feeds/upcoming_alerts"
 #define FILE_HAMSAT  "/CardSat/hamsat.dat"   // cached parsed activations (binary, survives reboot)
@@ -384,7 +390,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.64";
+static constexpr const char* FW_VERSION = "0.9.66";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build.
@@ -540,6 +546,9 @@ static constexpr int      MEMO_AC_GAIN     = 8;     // gain on DC-blocked AC sig
 static constexpr int      MEMO_LIST_MAX    = 64;    // max memos shown in the browser
 static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samples)
 #define FILE_GP      "/CardSat/gp.json"       // cached GP/OMM download (JSON array)
+#define FILE_AO7OBS  "/CardSat/ao7obs.csv"    // AO-7 observation cache: extends the fit
+                                              // baseline past the API's 30-day window
+#define FILE_AO7TMP  "/CardSat/ao7obs.tmp"    // staging file for the atomic rewrite
 #define FILE_CFG     "/CardSat/config.json"
 #define FILE_TXCACHE "/CardSat/tx_%lu.json"   // %lu = norad id
 #define FILE_CALIB   "/CardSat/calib.txt"     // per-sat calibration: "norad dl ul" lines
@@ -640,6 +649,13 @@ namespace Store {
   // Transactional whole-file replace: temp-write -> verify -> rotate -> promote -> restore
   // on failure. The previous good file survives any interrupted/short write. (H13/H19/M29/M32)
   bool   writeFileAtomic(const char* path, const uint8_t* data, size_t len);
+  // Promote an already-written, already-validated temp file into place transactionally:
+  // rotate live->'<live>.bak', rename temp->live, and restore the backup if the promote
+  // fails, so there is never a window with no live file. The single owner of the
+  // rotate/promote/restore sequence shared by writeFileAtomic(), the GP-catalog promote,
+  // and the transmitter-cache refresh. Does NOT remove tmp on the early back-up-failure
+  // path (caller may retry); DOES remove tmp on a promote failure after restoring live.
+  bool   promoteFileTransactionally(const char* live, const char* tmp);
 }
 // ===== inlined from src/logstore.h (capped console/USB logging) =====
 // ===========================================================================
@@ -2717,6 +2733,20 @@ struct Settings {
   // on-device LoTW upload rather than something to do in addition.
   char     clUrl[80]  = "";   // base URL of the Cloudlog instance (https://... or http://...)
   char     clKey[40]  = "";   // Cloudlog API key (read-write)
+  // ---- Nearby & DX live feeds -------------------------------------------------
+  // APRS is a live APRS-IS socket, not a fetch: aprs.fi's API cannot do an area
+  // search at all (it is documented as querying named stations only, no wildcard),
+  // which is why the old key-based station list never returned anything. The range
+  // below is passed straight through as the APRS-IS server-side r/lat/lon/dist
+  // filter, which already takes kilometres.
+  int      aprsRangeKm = 150; // APRS-IS r/ filter radius for "heard near me"
+  char     dxcUrl[96] = "";   // DX spot JSON feed (an aggregator; blank = feature off)
+  // ADS-B: the API BASE only. The request path is built from the current QTH and
+  // adsbRangeKm, so moving station does not mean hand-editing a URL. adsb.lol is
+  // keyless, open-data and ADSBExchange-compatible; a LAN tar1090 also works if
+  // its base is given here.
+  char     adsbUrl[96] = "https://api.adsb.lol";
+  int      adsbRangeKm = 50;  // radar plot outer ring, and the ADS-B query radius
   char     clStation[8] = ""; // station_profile_id (numeric, from the Cloudlog UI)
   // Location
   double   lat = 0.0, lon = 0.0, altM = 0.0;
@@ -2941,9 +2971,13 @@ enum Screen : uint8_t {
   SCR_CALEXPORT,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICREF, SCR_PERF,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
   SCR_KESSLER, SCR_QTHPRE,
+  // "Nearby & DX" hub and its live terrestrial feeds. These are fetch-and-browse views
+  // of what is on the air / in the air around the operator right now, as distinct from
+  // the satellite-centric screens above.
+  SCR_NEARBY, SCR_APRS, SCR_APRSDET, SCR_DXC, SCR_ADSB,
   SCR_DUALRIG, SCR_BASICFILES
 };
 
@@ -6481,7 +6515,12 @@ private:
   int   drSel = 0;                           // cursor: 0..5 across the 6 editable fields
   int   drScroll = 0;                        // device-list scroll
   bool  drLoaded = false;                    // a query has populated the state
-  String drStatus;                           // last transport result / hint
+  // Status-line members below are fixed buffers, not Arduino String: a String member of
+  // the global App object keeps its heap block alive for the life of the program once
+  // assigned (String never returns a buffer on reassignment), and each such long-lived
+  // block is a permanent fragmentation anchor in the no-PSRAM heap. Overlong messages
+  // truncate safely via strlcpy/snprintf, which is fine for one-line status text.
+  char drStatus[64] = {0};                   // last transport result / hint
   bool  drAlloc();                           // allocate drDev/drModel (on screen entry)
   void  drFree();                            // release them (screen-transition hook)
   void  drQuery();                           // pull \csdr_get + \csdr_models
@@ -7801,6 +7840,31 @@ private:
   void parse3DayKpForecast(const char* path);  // SWPC 3-day-forecast.txt -> spaceFcastKp[]
   String hfBandOutlook(bool day);    // one-line HF band open/closed sketch from SFI/Kp
   float  estMufMHz(bool day);        // rough MUF estimate (MHz), -1 if no data
+  // MINIMUF-3.5 MUF-to-regions table (SCR_MUF) and world map (SCR_MUFMAP), both off
+  // Space Wx. mufSSN() gives the sunspot number the model wants, from spaceSSN or, if
+  // that is absent, derived from the 10.7 cm flux via the TD-201 Figure-2 relationship.
+  void   drawMuf();    void keyMuf(char c, bool enter, bool back);
+  void   drawMufMap(); void keyMufMap(char c, bool enter, bool back);
+  double mufSSN();                   // sunspot number for the model (-1 if no solar data)
+  int    mufSel = 0, mufScroll = 0;  // region-table cursor and viewport
+  // Orbital-zones transit tool (SCR_SAA), off the orbital-analysis screen. Propagates
+  // the selected satellite forward and reports when it enters/exits distinctive orbital
+  // regions: the South Atlantic Anomaly, Earth's shadow (eclipse), the polar caps, and
+  // the inner/outer Van Allen belts. SAA is a geographic model; the belts use a
+  // centered-dipole L-shell with an altitude gate. Zones and the model are approximate.
+  enum ZoneId { ZONE_SAA = 0, ZONE_ECLIPSE, ZONE_POLAR, ZONE_INNER, ZONE_OUTER, ZONE_N };
+  struct ZoneWin { time_t enter; time_t exit; };   // one transit window (exit==0: still in at horizon)
+  void   drawSaa();   void keySaa(char c, bool enter, bool back);
+  void   saaCompute();                               // (re)run the forward scan for the current zone
+  bool   zoneContains(int zone, double lat, double lonE, double altKm, bool sunlit);
+  static double lShellAt(double latDeg, double lonEDeg, double altKm);  // centered-dipole McIlwain L
+  int      saaZone = ZONE_SAA;      // selected zone
+  int      saaScroll = 0;           // window-list viewport
+  ZoneWin  saaWin[16];              // upcoming transit windows
+  int      saaWinN = 0;
+  bool     saaInNow = false;        // in the selected zone right now
+  double   saaCurL = 0;             // current L-shell (for the status line)
+  bool     saaComputed = false;
   const char* auroraLevel();         // aurora activity word from Kp/Bz
   const char* vhfFlag();             // 6m/2m Es / auroral-E hint
   const char* meteorShowerNow(bool& nearPeak);  // active meteor shower for MS planning
@@ -8023,7 +8087,7 @@ private:
   int toolsSel = 0;
   int toolsCat = -1;   // Tools menu: -1 = category list, else selected category index
   int    calSel = 0;             // Calendar-export screen cursor (0..5)
-  String calStatus;              // last export result line ("" = none)
+  char calStatus[64] = {0};      // last export result line ("" = none)
   // Hand-pointing aids on the arrow screen (0.9.62): after the operator points north,
   // integrate the BMI270 gyro's yaw rate to a relative heading and use the accelerometer
   // as an elevation level. Gyro-only heading drifts, so re-zeroing north is one key.
@@ -8077,7 +8141,7 @@ private:
   String basicName;                 // loaded/saved base name (no dir/.bas)
   String basicOut;                  // console output from the last run
   int    basicOutScroll = 0;        // console scroll (first visible row)
-  String basicErr;                  // run error (empty = ok / not run)
+  char basicErr[96] = {0};          // run error (empty = ok / not run)
   void drawBasic();    void keyBasic(char c, bool enter, bool back);
   void drawBasicRun(); void keyBasicRun(char c, bool enter, bool back);
   void basicInit();                 // open the editor (seed a sample on first use)
@@ -8271,7 +8335,9 @@ private:
   // Radio math reference (SCR_MATHREF): a scrolling cheat sheet distilled from the ARRL
   // Radio Mathematics supplement -- dB table, AC RMS/peak factors, constants, formulas.
   int mathRefScroll = 0;
+  int basicRefScroll = 0;   // SCR_BASICREF (BASIC tutorial + reference) scroll
   void drawMathRef(); void keyMathRef(char c, bool enter, bool back);
+  void drawBasicRef(); void keyBasicRef(char c, bool enter, bool back);
   // State-vector -> GP-element fitter (SCR_GPFIT). Enter an epoch and a TEME state vector
   // (r km, v km/s); a differential-correction fit against CardSat's own SGP4 recovers the
   // GP mean elements, which can be saved as a manual satellite. Heap-flat: a few 6-vectors
@@ -8346,7 +8412,210 @@ private:
   // Link margin vs elevation: M(el) = M0 + [FSPL(range at 0 deg) - FSPL(range at el)].
   double lcAlt = 500, lcF = 435.5, lcM0 = 6.0;
   int    lcSel = 0; bool lcEdit = false; String lcBuf;
+
+  // Orbital thermal analysis tool (SCR_THERMAL). Single-node lumped-parameter model
+  // over one orbit, driven by the analytic eclipse fraction (beta + betaStar) so it
+  // needs no propagation and works for custom orbits with no catalogue entry. Orbit
+  // fields (alt/incl/raan) default from the active satellite but are user-editable;
+  // the rest are spacecraft properties with per-U defaults.
+  double thAlt = 500;    // orbit altitude (km)          [orbit]
+  double thIncl = 51.6;  // inclination (deg)            [orbit]
+  double thRaan = 0;     // RAAN (deg)                   [orbit]
+  double thMass = 1.3;   // mass (kg)                    [craft]
+  double thAlpha = 0.6;  // solar absorptivity (0..1)    [craft]
+  double thEps = 0.8;    // IR emissivity (0..1)         [craft]
+  double thPwr = 1.0;    // internal dissipation (W)     [craft]
+  int    thU = 1;        // form factor U (1/2/3/6) -> areas
+  int    thAtt = 0;      // 0 = tumbling (area-avg), 1 = sun-pointing (fixed face)
+  int    thSel = 0;      // selected row
+  bool   thEdit = false; String thBuf;
+  // computed results (filled by computeThermal())
+  double thTmin = 0, thTmax = 0, thTmean = 0, thTsun = 0, thTecl = 0;
+  double thBeta = 0, thEclFrac = 0; bool thValid = false;
+
+  // AO-7 mode-switch estimator (SCR_AO7). AO-7 runs on solar power only; in continuous
+  // sunlight an onboard ~24 h timer alternates Mode A (145 up / 29 down) and Mode B
+  // (435 up / 145 down). The mode is NOT tied to calendar day parity (that was true only
+  // when AO-7 was actively commanded); the free-running timer's switch instant drifts
+  // against UTC, so it must be derived purely from the timestamps of listener reports.
+  // The tool checks continuous sunlight, then fetches a long window of AMSAT reports for
+  // the two mode-tagged names, finds every A<->B boundary the reports bracket, and fits
+  // the switch instants to a linear cadence (switch_k = t0 + k*period) to recover the
+  // period + phase and project the current/next mode.
+  // ===========================================================================
+  //  "Nearby & DX" hub (SCR_NEARBY) and its three live terrestrial feeds. All three
+  //  follow the same discipline as the satellite fetches: bounded fixed arrays (no
+  //  heap growth), streamed/one-shot parsing, on-demand refresh only -- never polled.
+  // ===========================================================================
+  int    nearSel = 0;                  // hub cursor
+
+  // ---- APRS stations heard via APRS-IS (SCR_APRS / SCR_APRSDET) -------------
+  // A live socket, not a fetch. aprs.fi's API is documented as querying NAMED
+  // stations only and explicitly does not support wildcard/area search, so the old
+  // key-based "stations near me" request could never have returned anything no
+  // matter how the response was parsed -- it was missing the one mandatory
+  // parameter and sending three that do not exist. APRS-IS instead accepts a
+  // server-side r/lat/lon/dist filter on the login line and streams matching
+  // packets, so this screen shows what has been HEARD since the socket opened.
+  //
+  // That is deliberately the same semantics as the LoRa roster (SCR_LORAROSTER) and
+  // as a Kenwood's station list: "heard recently, nearby", not a database snapshot.
+  // Fixed stations beacon every 10-30 min, so the list fills over minutes.
+  //
+  // Lifetime: socket AND record array are created on entering the screen and
+  // destroyed on leaving, so neither costs permanent .bss and the array is
+  // heap-on-demand for free. EVERY draw path must tolerate aprsSta == nullptr --
+  // the screen is reachable before allocation and after a failed one.
+  static const int APRS_MAX = 250;   // 250 * 36 B = 9,000 B, heap-on-demand
+  struct AprsSta {
+    char     call[12];
+    float    lat, lon;
+    float    distKm, brg;
+    uint32_t heardMs;                  // millis() this station was last heard
+    char     sym;                      // APRS symbol code (single char, coarse type hint)
+  };
+  AprsSta* aprsSta = nullptr;          // APRS_MAX records; null whenever the screen is closed
+  int    aprsN = 0, aprsSel = 0, aprsScroll = 0;
+  char   aprsStatus[64] = {0};         // "" = a list is shown; else why it isn't
+  char   aprsCenter[8]  = {0};         // grid the filter is centred on ("" = own location)
+  WiFiClient* aprsis = nullptr;        // APRS-IS socket; null unless the screen is open
+  LineBuf  aprsBuf{256};               // TNC2 line assembly (info fields run long)
+  uint32_t aprsOpenMs = 0;             // millis() the socket connected (0 = not connected)
+  uint32_t aprsPktSeen = 0;            // position packets accepted since connect
+
+  // ---- DX cluster spots (SCR_DXC) -------------------------------------------
+  // Band is derived from the spot frequency via the same table the band-plan screen
+  // uses, so "by band" filtering needs no second frequency->band mapping.
+  static const int DXC_MAX = 250;    // 250 * 40 B = 10,000 B, heap-on-demand
+  struct DxSpot {
+    double freqKhz;
+    char   dx[12];                     // spotted callsign
+    char   de[12];                     // spotter
+    int    ageMin;
+    int8_t band;                       // index into DXC_BANDS, -1 = unclassified
+  };
+  // Heap-on-demand, exactly as aprsSta[] is: allocated when the screen needs it and
+  // released on the way out, so a CardSat that never opens this screen pays nothing.
+  // EVERY path that touches dxcSpot must tolerate nullptr -- draw, key, print and the
+  // parser are all reachable before allocation and after a failed one.
+  DxSpot* dxcSpot = nullptr;
+  int    dxcN = 0, dxcSel = 0, dxcScroll = 0;
+  int    dxcBandFilter = -1;           // -1 = all bands, else index into DXC_BANDS
+  int    dxcBandFilterPrev = -1;       // cycle cursor for the 'b' band-step key
+  char   dxcStatus[64] = {0};
+  bool   dxcBusy = false;
+
+  // ---- ADS-B aircraft (SCR_ADSB) --------------------------------------------
+  // Plotted on the existing polar renderer with the radius axis remapped from
+  // elevation to RANGE, so the same grid/arc helpers the pass plots use are reused.
+  static const int ADSB_MAX = 250;   // 250 * 36 B = 9,000 B, heap-on-demand
+  struct Aircraft {
+    char   ident[10];                  // flight/callsign, else the ICAO hex
+    float  lat, lon;
+    float  distKm, brg;
+    int    altFt;
+    int    trackDeg;                   // ground track (heading), -1 unknown
+  };
+  Aircraft* adsbAc = nullptr;        // heap-on-demand; see dxcSpot above
+  int    adsbN = 0, adsbSel = 0;
+  char   adsbStatus[64] = {0};
+  bool   adsbBusy = false;
+  bool   adsbScatter = false;          // overlay the aircraft-scatter usefulness test
+  double adsbScatterBrg = 0;           // great-circle bearing to the scatter target
+  char   adsbTgtGrid[8] = {0};         // target grid for the scatter geometry ("" = off)
+
+  int    ao7Idx = -1;            // catalogue index of AO-7 (NORAD 7530), -1 if absent
+  int    ao7Phase = 0;          // 0 idle, 1 fetched/analyzed, 2 no-sunlight, 3 error
+  bool   ao7ContSun = false;    // true = continuous sunlight (24 h timer free-running)
+  double ao7Beta = 0, ao7EclFrac = 0;
+  // Observation store: one entry per usable report. Parallel arrays (no struct) to stay
+  // heap-free -- fixed .bss, small. ao7ObsMode packs TWO things per entry:
+  //   bit 0 : mode      0 = Mode A (V/a), 1 = Mode B (U/v)
+  //   bit 1 : polarity  0 = positive ("Heard": that mode WAS active)
+  //                     1 = negative ("Not Heard", horizon-gated: that mode was NOT active)
+  // Raised from 200: a full 30-day window is roughly 430 Mode-B + 150 Mode-A reports, and
+  // negatives now count too, so 200 truncated badly. Each fetched mode also gets its own
+  // half of the array (AO7_MAXOBS/2) -- previously both modes shared one running counter
+  // and, because Mode A is fetched first, Mode B was starved of slots and the sample was
+  // silently biased toward A.
+  static const int AO7_MAXOBS = 300;
+  static const int AO7_PERMODE = AO7_MAXOBS / 2;   // per-mode fetch cap (newest kept)
+  static const int AO7_WINDOW_DAYS = 30;   // fetch window (days). The AMSAT reports API
+                                           // caps hours at 720 (30 days) -- confirmed against
+                                           // the published API spec -- so 30 days is the
+                                           // longest supported window, and a longer window
+                                           // captures more A/B switch boundaries for the fit.
+  time_t ao7ObsT[AO7_MAXOBS];    // report time (unix UTC), refined to the 15-min sub-slot
+  uint8_t ao7ObsMode[AO7_MAXOBS];// packed mode|polarity -- see the bit table above
+  int    ao7NObs = 0;            // number of stored observations (raw fetch, unfiltered)
+  int    ao7NA = 0, ao7NB = 0;   // per-mode counts WITHIN the illuminated window used by
+                                 // the fit (recomputed in ao7Estimate; not the raw fetch)
+  // Bracketed switch instants (midpoint of an adjacent A/B pair) and the linear fit.
+  int    ao7NSwitch = 0;         // boundaries used by the CHOSEN fit (see ao7UsedRecent)
+  int    ao7NSwitchAll = 0;      // total boundaries found within the illuminated window
+  double ao7PeriodS = 0;         // fitted timer period (s); ~86400 expected
+  double ao7T0 = 0;              // fitted reference switch instant (unix, from the fit)
+  // Phase uncertainty, NOT a least-squares residual any more: the half-width of the
+  // contiguous t0 band around the optimum where the agreement score stays within one
+  // Heard-vote of the best. That is a directly meaningful "the switch is somewhere in
+  // +/- this" figure, where the old boundary-fit RMS was only an indirect proxy.
+  double ao7FitRmsS = 0;         // phase uncertainty half-width (s)
+  double ao7AgreePct = 0;        // % of weighted evidence the chosen fit explains
+  int    ao7NPos = 0, ao7NNeg = 0;  // positive / negative observations inside the window
+  int    ao7CacheN = 0;          // observations merged in from the on-disk cache
+  bool   ao7Trunc = false;       // API hit its record cap -- window shorter than requested
+  int    ao7ModeNow = -1;        // 0 = A, 1 = B, -1 = unknown
+  long   ao7ToSwitchS = 0;       // seconds until the next switch (from the fit)
+  time_t ao7NextSwitchT = 0;     // unix instant of the next switch
+  time_t ao7SinceT = 0;          // start of the illuminated window actually used by the fit
+  int    ao7ExclN = 0;           // reports excluded as pre-illumination (older than ao7SinceT)
+  bool   ao7UsedRecent = false;  // true if a recency-limited subset fit beat the full-window fit
+  // All 14 assignments to this are string literals, so it holds a pointer into flash
+  // rather than an Arduino String. A String member of the global App object keeps a
+  // heap block alive for the life of the program once assigned (and Arduino String
+  // never returns a buffer to the heap on reassignment), which on a no-PSRAM part is
+  // pure permanent loss for what is only ever a fixed message.
+  const char* ao7Note = "";      // short status/explanation line (flash literal)
   void   drawLnkCrv(); void keyLnkCrv(char c, bool enter, bool back);
+  void   drawThermal(); void keyThermal(char c, bool enter, bool back);
+  void   computeThermal();   // run the single-node model into th* result fields
+  void   printThermal();
+  // ---- Nearby & DX hub + live terrestrial feeds ----
+  void   drawNearby(); void keyNearby(char c, bool enter, bool back);
+  void   drawAprs();   void keyAprs(char c, bool enter, bool back);
+  void   drawAprsDet();void keyAprsDet(char c, bool enter, bool back);
+  void   aprsStart();                    // allocate records + open the filtered socket
+  void   aprsStop();                     // close socket, free records (leaving the screen)
+  void   aprsRestart();                  // reopen with a new filter centre
+  void   serviceAprsIs();                // pump the socket from loop(); no-op when closed
+  void   aprsHandleLine(const char* ln); // one TNC2 line -> upsert, or ignore
+  void   aprsUpsert(const char* call, double lat, double lon, char sym);
+  // Position decode is a pure function of the packet text, so it is host-testable
+  // without a radio or a socket: see tools/host_aprs/. Covers uncompressed,
+  // base-91 compressed and MIC-E.
+  static bool aprsDecodeLine(const char* line, char* callOut, size_t cap,
+                             double& lat, double& lon, char& symCode);
+  void   drawDxc();    void keyDxc(char c, bool enter, bool back);
+  void   fetchDxc();                     // DX spot JSON feed
+  static int dxcBandOf(double freqKhz);  // frequency -> DXC_BANDS index (-1 = none)
+  void   drawAdsb();   void keyAdsb(char c, bool enter, bool back);
+  void   fetchAdsb();                    // ADS-B aircraft JSON (LAN receiver or web)
+  // Feed record stores are heap-on-demand (see the array declarations below).
+  // alloc returns false and sets the screen's own status line on OOM; free is safe
+  // to call when nothing is allocated. Each alloc releases the OTHER two feeds
+  // first, which is what bounds the peak at one array rather than three.
+  bool   dxcAlloc();   void dxcFree();
+  bool   adsbAlloc();  void adsbFree();
+  void   feedsFreeExcept(int keepScreen);  // release every feed store but one
+  void   drawAo7(); void keyAo7(char c, bool enter, bool back);
+  void   ao7CheckSunlight();     // fill ao7ContSun / ao7Beta / ao7EclFrac
+  void   fetchAo7Reports();      // fetch mode-tagged reports, stream-parse, then estimate
+  time_t ao7IlluminationSinceT();// most recent continuous-full-sun start, via propagation
+  bool   ao7SiteElevOk(const char* grid, time_t t, double minEl, Predictor& p);
+  int    ao7LoadObsCache();      // merge cached observations in; returns how many were added
+  void   ao7SaveObsCache();      // persist the merged observation set (atomic rewrite)
+  void   ao7Estimate();          // boundary finder + drift fit -> ao7Fit*/ao7ModeNow
+  void   printAo7();
 
   // Debris-group screen: fetch a CelesTrak group TLE to a temp file, keep the
   // objects sharing the active bird's altitude band, and coarse-screen each for
@@ -8373,6 +8642,14 @@ private:
   // to Printer::line instead of the canvas -- no buffering, no per-tool code.
   bool   tfEmit = false;
   void   printToolForm(); void printConj(); void printNeigh();
+  // Nearby & DX feed reports. printDxc/printAdsb self-build (fetch when the list is
+  // empty) the way printPassPolar and printAwards do, so a report is never silently
+  // blank just because its screen was not visited first. printAprs cannot: its data
+  // is a live listen, not a fetch, so it prints what has actually been heard.
+  void   printAprs();     void printDxc();  void printAdsb();
+  void   adsbUpdateScatter();   // recompute scatter bearing from grid+QTH (fetch-independent)
+  void   printMuf();      // MINIMUF-3.5 MUF-to-regions report
+  void   printSaa();      // orbital-zones transit report
   void   printDebGrp();   void printLnkCrv();
   String ctsBuf;                        // last query text (editor round-trips through it)
   uint32_t ctsLastQueryMs = 0;          // 10 s interactive spacing (millis; survives clockless boots)
@@ -8442,7 +8719,7 @@ private:
   int    lotwPending = 0;          // un-uploaded sat QSOs counted on entry
   int    lotwTotal = 0;            // total sat QSOs in the log (for re-send mode)
   int    lotwLastSent = 0;         // signed/accepted from the last attempt
-  String lotwStatus;               // last result/error line shown on the screen
+  char lotwStatus[80] = {0};       // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
   bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
   bool   lotwMoreBatches = false;  // set by a batch that has QSOs left; the top-level caller
@@ -8484,7 +8761,7 @@ private:
   void resumeCloudlogIfPending();           // setup(): if marker set, upload in a clean boot
   int  clPending = 0;              // QSOs not yet sent to Cloudlog (bit 0x2 unset)
   int  clTotal = 0;                // total sat QSOs in the log (for re-send mode)
-  String clStatus;                 // last result/error line shown on the screen
+  char clStatus[80] = {0};         // last result/error line shown on the screen
   bool clBusy = false;             // an upload is in progress (suppress re-entry)
   bool clResend = false;           // include QSOs already sent to Cloudlog (opt-in)
   bool clMoreBatches = false;      // set by a batch with QSOs left; the top-level caller loops
@@ -8521,7 +8798,7 @@ private:
   static const int USERSKED_MAX = 12;
   Activation userSked[USERSKED_MAX];   // persisted manual entries
   int    userSkedN = 0;
-  String hamsatStatus;            // status/error line ("" when a list is shown)
+  char hamsatStatus[64] = {0};    // status/error line ("" when a list is shown)
   void drawHamsat();   void keyHamsat(char c, bool enter, bool back);
   void fetchHamsat();              // download + parse the feed (WiFi)
   int  parseHamsat(const String& xml);  // fill hamsatList[]; returns count
@@ -8636,10 +8913,13 @@ private:
                      PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
                      PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
-                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER };
+                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER, PR_SUNMOON, PR_BASICREF, PR_THERMAL, PR_AO7,
+                     PR_APRS, PR_DXC, PR_ADSB, PR_MUF, PR_SAA };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
+  void printSunMoon();       // Sun & Moon: current az/el + next rise/set
+  void printBasicRef();      // the Tiny BASIC command/function/system-data reference
   void printTicket();        // outreach pass ticket for the active satellite
   void printSatCard();       // active satellite: transponders + next passes
   void printKeps();          // active satellite: Keplerian elements (nostalgia)
@@ -8709,7 +8989,23 @@ private:
   void keyCharge(char c, bool enter, bool back);
   int  batteryPercent();        // voltage-curve % (more accurate than raw level)
   bool     chargeWoke = false;  // true briefly after a keypress wakes the screen
+  bool     chargeNeedWake = false; // panel is asleep and the next paint must wake it AFTER
+                                   // pushing content, so the LCD lights up already showing
+                                   // the battery readout instead of flashing black first
   uint32_t chargeWokeMs = 0;    // when the wake happened (auto-blank after a few s)
+  bool     chargeWifiWasUp = false;  // was WiFi associated when we parked? restore only then
+  // Battery-voltage trend for charge inference. M5Unified's getBatteryVoltage() returns 0
+  // on the Cardputer ADV (its public ADC path fails there) and its isCharging() has no case
+  // for the ADV's pmic_adc, so both the voltage readout and any charge state must come from
+  // reading the battery ADC (GPIO10) directly, like bmorcelli/Launcher does. Charging is
+  // inferred from a rising voltage trend over ~30 s, since the ADV exposes no charger line.
+  int      batteryMilliVolts();     // GPIO10 * divider, mV (0 if unreadable)
+  bool     batteryCharging();       // inferred from the voltage trend
+  int      battTrendMv = 0;         // smoothed reference voltage for the trend
+  uint32_t battTrendMs = 0;         // last trend sample time
+  int8_t   battChargeState = -1;    // -1 unknown, 0 discharging, 1 charging (latched)
+
+                                // lets the woken refresh skip an unchanged redraw
   // Append one result line: echo to Serial and store for the on-screen list.
   void catLog(const String& line);
   void catStep(const String& name, bool ok, const String& detail = String());
@@ -8869,22 +9165,35 @@ bool writeFileAtomic(const char* path, const uint8_t* data, size_t len) {
     if (wrote != len) { f.remove(tmp); return false; }   // short write: discard temp, keep live
   }
 
-  // 2) rotate the current live file to backup (if one exists).
-  bool hadLive = f.exists(path);
+  // 2-4) rotate live->backup, promote temp->live, restore-on-failure, drop backup.
+  // Shared with the GP and transmitter-cache promotions so the delicate restore logic
+  // lives in exactly one place.
+  return promoteFileTransactionally(path, tmp);
+}
+
+// The rotate/promote/restore core, factored out of writeFileAtomic() so the download
+// promotions in net.cpp and the context-file rewrite in satdb.cpp use the identical,
+// once-audited sequence instead of hand-copied variants. 'tmp' must already hold the
+// fully written, verified new contents; 'live' is the destination path. LittleFS rename
+// refuses to overwrite an existing target, so every step clears its destination first.
+bool promoteFileTransactionally(const char* live, const char* tmp) {
+  if (!live || !live[0] || !tmp || !tmp[0]) return false;
+  if (!ready()) return false;
+  fs::FS& f = fs();
+  char bak[112];
+  snprintf(bak, sizeof(bak), "%s.bak", live);
+
+  bool hadLive = f.exists(live);
   if (hadLive) {
     if (f.exists(bak)) f.remove(bak);
-    if (!f.rename(path, bak)) { f.remove(tmp); return false; }   // couldn't back up: keep live
+    if (!f.rename(live, bak)) return false;   // couldn't back up: leave live + temp for caller
   }
-
-  // 3) promote temp -> live. On failure, restore the backup so we never end up with no file.
-  if (!f.rename(tmp, path)) {
-    if (hadLive) f.rename(bak, path);   // put the original back
+  if (!f.rename(tmp, live)) {
+    if (hadLive) f.rename(bak, live);          // promote failed: put the original back
     f.remove(tmp);
     return false;
   }
-
-  // 4) committed: drop the backup.
-  if (hadLive) f.remove(bak);
+  if (hadLive) f.remove(bak);                  // committed: drop the backup
   return true;
 }
 
@@ -9251,6 +9560,17 @@ namespace Printer {
 
   void line(const String& s);          // one line to every active sink
   void wrap(const String& s);          // hard-wrap at each sink's width
+  // ---- narrow-paper layout helpers (0.9.65) --------------------------------
+  // Reports lay out columns for the widest active sink but must not shear on a
+  // 32-col 58 mm receipt. These centralize the "stack it when narrow" logic so
+  // individual reports don't each re-implement an if(wide) branch.
+  bool narrow();                       // true when the widest sink is <= 32 cols
+  // label + value on one line when it fits cols(), else value on an indented
+  // continuation line -- so key/value reports never wrap mid-value.
+  void kv(const String& label, const String& value);
+  // a columnar row: fields joined by single spaces when they fit cols(), else
+  // each field on its own line, later fields indented two spaces. n <= 8.
+  void colrow(const String* fields, int n);
   void blank();
   void title(const String& s);         // emphasized/centered where the format allows
   void rule();                         // a row of '-' at each sink's width
@@ -9878,6 +10198,46 @@ void line(const String& s) {
 }
 
 void wrap(const String& s) { line(s); }   // line() already per-sink wraps
+
+// ---- narrow-paper layout helpers (0.9.65) ---------------------------------
+// narrow(): the widest active sink is a 32-col (58 mm) receipt or tighter. cols()
+// returns 0 only when no sink is open; treat that as "not narrow" so a preview with
+// no sink keeps the wide layout.
+bool narrow() { int c = cols(); return c > 0 && c <= 32; }
+
+// kv(): "label value" on one line when it fits the narrowest concern (cols()),
+// otherwise the label on its own line and the value indented on the next. This is
+// what keeps key/value reports (conjunction miss/rel, link-margin, orbit facts)
+// from wrapping in the middle of a number on 58 mm paper.
+void kv(const String& label, const String& value) {
+  int c = cols();
+  // one space between label and value; fits if the whole thing is within cols()
+  if (c <= 0 || (int)(label.length() + 1 + value.length()) <= c) {
+    line(label + " " + value);
+  } else {
+    line(label);
+    line("  " + value);
+  }
+}
+
+// colrow(): join fields with single spaces when the row fits cols(); otherwise
+// stack them, indenting every field after the first by two spaces so a wrapped
+// record stays visually grouped. Bounded at 8 fields.
+void colrow(const String* fields, int n) {
+  if (n < 1) return;
+  if (n > 8) n = 8;
+  int c = cols();
+  int total = 0;
+  for (int i = 0; i < n; ++i) total += (int)fields[i].length() + (i ? 1 : 0);
+  if (c <= 0 || total <= c) {
+    String r = fields[0];
+    for (int i = 1; i < n; ++i) { r += ' '; r += fields[i]; }
+    line(r);
+  } else {
+    line(fields[0]);
+    for (int i = 1; i < n; ++i) line("  " + fields[i]);
+  }
+}
 
 void blank() {
   if (s_pOK) {
@@ -13340,6 +13700,31 @@ namespace {
     // Deliberately no delay/wait here: a headless CardSat has no host attached and
     // must not stall the main loop waiting for one.
   }
+
+  // Release the shared host when NEITHER port still owns it, restoring the console.
+  // Every FAILED engage funnels through here so that "the adapter is not plugged in"
+  // costs nothing lasting: before this existed, a failed engage left the host object,
+  // the IDF stack, both USB tasks and the console down until reboot -- roughly 20 KB
+  // held for a device that was never there, and the operator's serial port gone with
+  // it. A SUCCESSFUL engage never calls this; end()/rotEnd() own that path.
+  //
+  // The M2 timeout rule is the same one end() and rotEnd() follow, and for the same
+  // reason: on ESP_ERR_TIMEOUT the library leaves its tasks alive rather than freeing
+  // in-flight transfers, so deleting the object would be a use-after-free and
+  // restoring the console would claim the PHY before release is confirmed. Retain,
+  // latch reboot-required, stay quiet.
+  void releaseHostIfIdle() {
+    if (!s_host || s_cdc || s_rotCdc) return;   // someone still owns it
+    s_host->end();                              // 2.4.1: drain, deregister, uninstall
+    if (s_host->lastError() == ESP_ERR_TIMEOUT) {
+      s_hostTeardownStuck = true;
+      s_hostReleased = false;
+      return;                                   // do NOT delete, do NOT consoleUp()
+    }
+    delete s_host; s_host = nullptr;
+    s_hostReleased = true;
+    consoleUp();
+  }
 }
 
 bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
@@ -13365,10 +13750,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // not-active state so the next engage starts fresh instead of seeing a poisoned s_cdc.
     auto rollbackCat = [&]() {
       if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
-      if (s_host && !s_rotCdc) {
-        s_host->end(); delete s_host; s_host = nullptr;
-        s_hostReleased = true; consoleUp();
-      }
+      releaseHostIfIdle();   // M2-safe: retains the host if end() times out
       s_active = false; s_bound = false; s_catAddress = 0xff;
       stage(USBCAT_STAGE_NONE);
     };
@@ -13587,12 +13969,20 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     char msg[64];
     if (s_sawDev) snprintf(msg, sizeof(msg), "Not a known serial adapter: %s", s_dev);
     else          snprintf(msg, sizeof(msg), "%s", "No USB device detected");
-    // The host DID start, so it owns the PHY -- keep it resident (end() no longer
-    // destroys it) and just leave the port unbound. A retry after plugging the
-    // adapter in then rebinds in milliseconds instead of re-allocating 20 KB.
+    // This used to be a deliberate keep-alive: the host was left up with the port
+    // unbound so that plugging the adapter in and retrying would rebind in
+    // milliseconds instead of re-allocating ~20 KB. That reasoning was written when
+    // end() could not actually release the stack, so keeping it cost nothing that
+    // was recoverable anyway. Under 2.4.1 it does release, and the trade inverted:
+    // the common case is not "retry in five seconds", it is a cable that is not
+    // plugged in at all, or a rig that is switched off -- after which the host, the
+    // IDF stack, both USB tasks and the serial console stayed gone until reboot for
+    // a device that never existed. Release it; a later retry pays a one-off ~1 s
+    // re-allocation, which is the right price for not leaking on the failure case.
     disarmFreezeWatchdog();
-    if (s_cdc) s_cdc->end();
-    s_active = false; s_bound = false;
+    if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
+    releaseHostIfIdle();               // no-op if a USB rotator still holds the host
+    s_active = false; s_bound = false; s_catAddress = 0xff;
     setErr(msg);
     stage(USBCAT_STAGE_NONE);
     return false;
@@ -13623,10 +14013,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
       // Fully unwind: disarm, drop the port, release the host if no rotator owns it.
       disarmFreezeWatchdog();
       if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
-      if (s_host && !s_rotCdc) {
-        s_host->end(); delete s_host; s_host = nullptr;
-        s_hostReleased = true; consoleUp();
-      }
+      releaseHostIfIdle();   // M2-safe: retains the host if end() times out
       s_active = false; s_bound = false; s_catAddress = 0xff;
       stage(USBCAT_STAGE_NONE);
       return false;                    // catPickAdapter() already set the error text
@@ -13855,6 +14242,14 @@ uint8_t scanAdapters() {
     rotTrace(b);
   }
   if (s_serDevN == 0) rotTrace("scan: no adapters found");
+  // A scan is a TEMPORARY owner: if neither CAT nor the rotator has a bound port, the host
+  // was brought up solely to enumerate, so release it now rather than holding ~11.8 KB and
+  // the console for the rest of the session. If either port is live (a scan while engaged),
+  // leave the host up -- it belongs to that owner.
+  if (s_host && !s_cdc && !s_rotCdc) {
+    rotTrace("scan: releasing temporary host");
+    releaseHostIfIdle();       // M2-safe; restores the console when the PHY is really free
+  }
   return s_serDevN;
 }
 
@@ -13952,6 +14347,13 @@ bool rotBegin() {
   // Pick the adapter. If the user nominated one (rotUsbKey), find it by key; if
   // not, and exactly one serial adapter is present, use it. Never guess between
   // two -- that is the misbind this whole path exists to prevent.
+  //
+  // EVERY failure exit from here down must call releaseHostIfIdle(). rotBegin() can
+  // START the host itself (hostUpForRotator() above, the rotator-only configuration),
+  // and a bare `return false` after that left the host object, the IDF stack, both USB
+  // tasks and the serial console down until reboot -- for a rotator that was never
+  // plugged in. releaseHostIfIdle() is a no-op when USB CAT still holds the host, so
+  // a rotator that fails to bind can never take the radio's transport down with it.
   int pick = -1;
   if (s_rotWantKey[0]) {
     // Dual-USB: the rotator's adapter may enumerate AFTER the radio's, so wait for
@@ -13963,10 +14365,12 @@ bool rotBegin() {
       setRotErr("Rotator adapter not found (replug/re-select)");
       char b[96]; snprintf(b, sizeof(b), "rot: want key=%s but no adapter matches", s_rotWantKey);
       rotTrace(b); rotTrace(s_rotErr);
+      releaseHostIfIdle();
       return false;
     }
   } else if (s_serDevN == 0) {
-    setRotErr("No USB serial adapter detected"); rotTrace(s_rotErr); return false;
+    setRotErr("No USB serial adapter detected"); rotTrace(s_rotErr);
+    releaseHostIfIdle(); return false;
   } else {
     // No nominated adapter: take the first the RADIO is not driving. Mirror of
     // catPickAdapter(), deliberately -- the two ports differ only in which one
@@ -13983,6 +14387,7 @@ bool rotBegin() {
       setRotErr(s_serDevN == 1 ? "Only adapter is the radio's"
                                : "Pick the rotator adapter in Settings");
       rotTrace(s_rotErr);
+      releaseHostIfIdle();
       return false;
     }
     if (s_serDevN == 1) rotTrace("rot: one adapter present, using it");
@@ -13990,14 +14395,16 @@ bool rotBegin() {
 
   // Nominated or not, never take the radio's wire.
   if (s_active && s_cdc && s_serDev[pick].address == s_catAddress) {
-    setRotErr("That adapter is the radio's"); rotTrace(s_rotErr); return false;
+    setRotErr("That adapter is the radio's"); rotTrace(s_rotErr);
+    releaseHostIfIdle(); return false;
   }
   { char b[80]; snprintf(b, sizeof(b), "rot: binding addr=%u baud=%lu",
                          (unsigned)s_serDev[pick].address, (unsigned long)s_rotBaud);
     rotTrace(b); }
 
   s_rotCdc = new (std::nothrow) EspUsbHostCdcSerial(*s_host);
-  if (!s_rotCdc) { setRotErr("Out of RAM for rotator port"); rotTrace(s_rotErr); return false; }
+  if (!s_rotCdc) { setRotErr("Out of RAM for rotator port"); rotTrace(s_rotErr);
+                   releaseHostIfIdle(); return false; }
   // THE critical call: bind this port to ONE device. Without it the port is
   // ANY_ADDRESS and races the CAT port for the first adapter in devices_.
   s_rotCdc->setAddress(s_serDev[pick].address);
@@ -14005,6 +14412,7 @@ bool rotBegin() {
     delete s_rotCdc; s_rotCdc = nullptr;
     setRotErr("Rotator port would not open");
     rotTrace(s_rotErr);
+    releaseHostIfIdle();
     return false;
   }
   rotTrace("rot: port open");
@@ -14030,6 +14438,7 @@ bool rotBegin() {
     delete s_rotCdc; s_rotCdc = nullptr;
     setRotErr("Rotator adapter not responding");
     rotTrace(s_rotErr);
+    releaseHostIfIdle();
     return false;
   }
   snprintf(s_rotDev, sizeof(s_rotDev), "%s", s_serDev[pick].label);
@@ -14660,9 +15069,18 @@ bool SatDb::removeCtExtra(uint32_t norad) {
   }
   f.close(); w.close();
   if (!removed) { Store::fs().remove(tmp); return false; }
-  Store::fs().remove(FILE_CTX);
-  if (kept == 0) { Store::fs().remove(tmp); return true; }
-  Store::fs().rename(tmp, FILE_CTX);
+  // kept == 0 means the last entry was the one removed: no context file should remain.
+  // Retire the live file (and any stale backup) rather than leaving an empty catalog.
+  if (kept == 0) {
+    char bak[112]; snprintf(bak, sizeof(bak), "%s.bak", FILE_CTX);
+    Store::fs().remove(tmp);
+    Store::fs().remove(FILE_CTX);
+    Store::fs().remove(bak);
+    return true;
+  }
+  // Otherwise promote the rewritten temp transactionally so a failed rename can't leave
+  // the device with no context catalog (previously: remove(live) then rename, a real gap).
+  if (!Store::promoteFileTransactionally(FILE_CTX, tmp)) { Store::fs().remove(tmp); return false; }
   return true;
 }
 
@@ -16456,29 +16874,15 @@ bool Net::fetchGpToFile(const String& url, const char* path) {
     return false;
   }
 
-  // H14: promote WITHOUT a window where there's no live catalog. Rename the live file to a
-  // backup first, then promote the temp; if the promote fails, restore the backup so a rename
-  // failure can't leave CardSat with no GP data. (LittleFS rename won't overwrite an existing
-  // target, so each step clears its destination first.)
-  String bak = String(path) + ".bak";
-  bool hadLive = fs.exists(path);
-  if (hadLive) {
-    if (fs.exists(bak.c_str())) fs.remove(bak.c_str());
-    if (!fs.rename(path, bak.c_str())) {
-      // Couldn't back up the live catalog: leave it in place, discard the temp, and report.
-      if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
-      lastErr = "promote failed (live kept)"; lastDlErr = DownloadError::WriteFailed;
-      return false;
-    }
-  }
-  if (!fs.rename(tmp.c_str(), path)) {
-    // Promote failed: restore the previous catalog from backup so we're never left with none.
-    if (hadLive) fs.rename(bak.c_str(), path);
+  // H14: promote WITHOUT a window where there's no live catalog, via the single shared
+  // rotate/promote/restore primitive. It leaves the live catalog in place if the backup
+  // step fails and restores it if the promote fails; we only clear the temp and set the
+  // error text on failure here.
+  if (!Store::promoteFileTransactionally(path, tmp.c_str())) {
     if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
-    lastErr = "promote failed (old restored)"; lastDlErr = DownloadError::WriteFailed;
+    lastErr = "promote failed (live kept)"; lastDlErr = DownloadError::WriteFailed;
     return false;
   }
-  if (hadLive) fs.remove(bak.c_str());   // committed: drop the backup
   return true;
 }
 
@@ -16504,19 +16908,11 @@ bool Net::fetchSatnogsTransmittersToFile(uint32_t norad, const char* path) {
     if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());   // keep the old cache
     return false;
   }
-  // Promote without a no-cache window: rotate live -> backup, temp -> live, restore on fail.
-  String bak = String(path) + ".bak";
-  bool hadLive = fs.exists(path);
-  if (hadLive) {
-    if (fs.exists(bak.c_str())) fs.remove(bak.c_str());
-    if (!fs.rename(path, bak.c_str())) { fs.remove(tmp.c_str()); return false; }
-  }
-  if (!fs.rename(tmp.c_str(), path)) {
-    if (hadLive) fs.rename(bak.c_str(), path);
-    fs.remove(tmp.c_str());
+  // Promote without a no-cache window via the shared rotate/promote/restore primitive.
+  if (!Store::promoteFileTransactionally(path, tmp.c_str())) {
+    if (fs.exists(tmp.c_str())) fs.remove(tmp.c_str());
     return false;
   }
-  if (hadLive) fs.remove(bak.c_str());
   return true;
 }
 
@@ -18042,6 +18438,13 @@ int Predictor::predictPasses(time_t from, float minEl, PassPredict* out, int max
 // is deliberately focused on the crash/garbage-risk fields; it is safe to call after load,
 // restore, and migration. Enums that makeRig / pickers already range-check are left alone.
 void Settings::validate() {
+  // Feed radii. aprsRangeKm becomes an APRS-IS r/ filter (servers cap the radius
+  // anyway) and adsbRangeKm becomes a nautical-mile conversion in a URL path, so
+  // neither may be zero or negative.
+  if (aprsRangeKm < 1)    aprsRangeKm = 1;
+  if (aprsRangeKm > 2000) aprsRangeKm = 2000;
+  if (adsbRangeKm < 1)    adsbRangeKm = 1;
+  if (adsbRangeKm > 500)  adsbRangeKm = 500;
   // Array-index enum: GPS_PROFILES[gpsSource] is indexed unguarded on at least one path.
   if (gpsSource >= GPS_SRC_COUNT) gpsSource = GPS_SRC_CAP1262;
   // C2: Grove rigctl baud must be one of the supported UART rates; snap anything else to the
@@ -18059,6 +18462,27 @@ void Settings::validate() {
     if (!isfinite(qthLat[i]) || qthLat[i] < -90.0  || qthLat[i] > 90.0)  qthLat[i] = 0.0;
     if (!isfinite(qthLon[i]) || qthLon[i] < -180.0 || qthLon[i] > 180.0) qthLon[i] = 0.0;
   }
+
+  // M20: LoRa radio parameters. A hand-edited or corrupt config.json must not push the
+  // SX1262 outside its usable range or select an unsupported bandwidth. Bounds mirror the
+  // LRX_FREQ_MIN/MAX_KHZ and BW_TABLE authorities in lorarx.cpp; kept in sync by comment
+  // since those are file-static there.
+  if (loraRegion > 2) loraRegion = 0;                                   // 0=US 1=EU 2=JP
+  if (loraFreqKHz < 150000UL) loraFreqKHz = 150000UL;                   // SX1262 low edge
+  if (loraFreqKHz > 960000UL) loraFreqKHz = 960000UL;                   // SX1262 high edge
+  if (loraSf < 7)  loraSf = 7;                                          // valid SF 7..12
+  if (loraSf > 12) loraSf = 12;
+  {
+    // Snap bandwidth to the nearest supported ladder value; default 125 kHz if unrecognized.
+    static const uint32_t BW_OK[] = { 7800, 10400, 15600, 20800, 31250,
+                                      41700, 62500, 125000, 250000, 500000 };
+    bool found = false;
+    for (uint32_t v : BW_OK) if (loraBwHz == v) { found = true; break; }
+    if (!found) loraBwHz = 125000UL;
+  }
+  if (loraTxDbm < -9) loraTxDbm = -9;                                   // SX1262 PA floor
+  if (loraTxDbm > 22) loraTxDbm = 22;                                   // SX1262 PA ceiling
+  if (msgNotify > 2) msgNotify = 1;                                     // 0=off 1=banner 2=+beep
 }
 
 bool Settings::load() {
@@ -18271,6 +18695,12 @@ bool Settings::load() {
     for (uint8_t x : ok) if (aosLeadMin == x) v = true;
     if (!v) aosLeadMin = 0; }                 // snap a stray value back to a valid step
   amsatWindowH = d["amsatwin"] | (uint8_t)24;
+  // Nearby & DX feeds. These were added to the struct and to the editors but never
+  // to save()/load(), so every edit was discarded at reboot while appearing to work.
+  aprsRangeKm = d["aprsrng"] | 150;
+  strncpy(dxcUrl,  d["dxcurl"]  | "", sizeof(dxcUrl)-1);  dxcUrl[sizeof(dxcUrl)-1]=0;
+  strncpy(adsbUrl, d["adsburl"] | "https://api.adsb.lol", sizeof(adsbUrl)-1); adsbUrl[sizeof(adsbUrl)-1]=0;
+  adsbRangeKm = d["adsbrng"] | 50;
   { const uint8_t ok[] = {3,6,12,24,48,72}; bool v = false;
     for (uint8_t x : ok) if (amsatWindowH == x) v = true;
     if (!v) amsatWindowH = 24; }
@@ -18305,6 +18735,8 @@ void Settings::loraApplyRegion(uint8_t region) {
 }
 
 bool Settings::save() {
+  validate();   // M17/M20: clamp any out-of-range edit before it is persisted, so the
+                // in-memory state and the written config.json are both always valid.
   JsonDocument d;
   d["ssid"] = ssid;  d["pass"] = pass;
   d["ssid2"] = ssid2; d["pass2"] = pass2;
@@ -18384,6 +18816,8 @@ bool Settings::save() {
   d["autopos"]=autoPosReply;
   d["aoslead"]=aosLeadMin;
   d["amsatwin"]=amsatWindowH;
+  d["aprsrng"]=aprsRangeKm;
+  d["dxcurl"]=dxcUrl; d["adsburl"]=adsbUrl; d["adsbrng"]=adsbRangeKm;
   // H19: transactional save. Serialize to a String first (config is a few KB), then commit
   // via the atomic replace helper: temp-write -> verify -> rotate live to backup -> promote.
   // A power loss or short write can no longer truncate config.json into malformed JSON --
@@ -18443,6 +18877,14 @@ static bool isBack(char c, bool del);
 
 // --- small time helpers ----------------------------------------------------
 static bool timeIsSet() { time_t t = time(nullptr); return t > 1700000000; }
+// M36: wrap-safe deadline test. `now`/`deadline` are millis() values; comparing them
+// directly (now < deadline) misbehaves for ~25 days after the ~49.7-day millis() rollover,
+// because the counter wraps to 0 while a stored deadline still holds a large pre-wrap value.
+// The signed difference stays correct as long as the two are within ~24.8 days of each other,
+// which every CardSat UI deadline is. timeReached(now, d) == "now is at or past d".
+static inline bool timeReached(uint32_t now, uint32_t deadline) {
+  return (int32_t)(now - deadline) >= 0;
+}
 
 static String fmtHM(time_t t) {
   struct tm tmv; gmtime_r(&t, &tmv);
@@ -20513,7 +20955,7 @@ void App::keySkedEntry(char c, bool enter, bool back) {
 }
 
 void App::fetchHamsat() {
-  if (!net.connected()) { hamsatStatus = "No WiFi - connect in Settings"; return; }
+  if (!net.connected()) { strlcpy(hamsatStatus, "No WiFi - connect in Settings", sizeof(hamsatStatus)); return; }
   // In-progress indicator on the shared bottom status bar (like Weather / Space Wx),
   // keeping the cached list visible underneath while it refreshes.
   setStatus("Updating Activations"); draw();
@@ -20522,16 +20964,16 @@ void App::fetchHamsat() {
     Store::fs().remove(FILE_DL_TMP);
     // Keep any cached list visible (the bottom bar reports the failure); only take over
     // the body with an error if there's nothing cached to show.
-    if (hamsatN == 0) hamsatStatus = "Feed fetch failed (" + net.lastErr + ")";
+    if (hamsatN == 0) snprintf(hamsatStatus, sizeof(hamsatStatus), "Feed fetch failed (%s)", net.lastErr.c_str());
     return;
   }
   String body = readSmallFile(FILE_DL_TMP, 60000);
   Store::fs().remove(FILE_DL_TMP);
-  if (body.length() == 0) { if (hamsatN == 0) hamsatStatus = "Empty feed response"; return; }
+  if (body.length() == 0) { if (hamsatN == 0) strlcpy(hamsatStatus, "Empty feed response", sizeof(hamsatStatus)); return; }
   int n = parseHamsat(body);
   if (n > 0) saveHamsatCache();    // cache the FEED ONLY (before merge) so user entries aren't duplicated next load
   mergeUserSked();                 // then add the user's manual entries for display
-  hamsatStatus = (n || userSkedN) ? "" : "No upcoming activations";
+  strlcpy(hamsatStatus, (n || userSkedN) ? "" : "No upcoming activations", sizeof(hamsatStatus));
   hamsatSel = 0; hamsatScroll = 0; hamsatDetail = false;
 }
 
@@ -20542,7 +20984,7 @@ void App::hamsatEnter() {
   // their own file.) This keeps re-entry idempotent -- no duplicated manual entries.
   hamsatN = 0; loadHamsatCache();
   mergeUserSked();                         // include the user's manual entries
-  hamsatStatus = "";                       // body stays clean; progress goes on the bar
+  hamsatStatus[0] = 0;                     // body stays clean; progress goes on the bar
   screen = SCR_HAMSAT; lastDrawMs = 0; draw();   // cached list (or empty state) on screen now
   if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
   int before = hamsatN;
@@ -20586,7 +21028,7 @@ void App::drawHamsat() {
   canvas.setTextSize(1);
 
   // Status line (fetching / error / empty) takes over the body when set.
-  if (hamsatStatus.length()) {
+  if (hamsatStatus[0]) {
     canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.setCursor(6, 60);
     String s = hamsatStatus; if (s.length() > 38) s = s.substring(0, 38);
@@ -20636,11 +21078,19 @@ void App::drawHamsat() {
         canvas.setTextColor(CL_YELLOW, CL_BLACK);
         canvas.print("No footprint near listed time");
         break;
+      case 4:
+        canvas.setTextColor(CL_YELLOW, CL_BLACK);
+        canvas.printf("Bad feed date/time: %.10s %.8s", a.date, a.start);
+        break;
+      case 5:
+        canvas.setTextColor(CL_YELLOW, CL_BLACK);
+        canvas.printf("Bad activator grid: %.9s", a.grid);
+        break;
       default:
         canvas.setTextColor(CL_GREY, CL_BLACK);
         canvas.print(!timeIsSet() ? "Footprint: set clock first"
                    : !a.grid[0]   ? "Footprint: no activator grid"
-                                  : "Footprint: sat not in your list");
+                                  : "Footprint: sat not in catalog");
         break;
     }
 
@@ -24402,7 +24852,8 @@ void App::loop() {
     // program's output can be the full 6 KB cap, and holding it for the rest of the
     // session starves the big contiguous block a TLS upload needs.
     if ((from == SCR_BASIC || from == SCR_BASICRUN) &&
-        screen != SCR_BASIC && screen != SCR_BASICRUN && screen != SCR_EDIT) {
+        screen != SCR_BASIC && screen != SCR_BASICRUN && screen != SCR_EDIT &&
+        screen != SCR_BASICREF) {
       basicFree();
     }
     // Leaving the voice-memo browser: its directory listing is ~6.6 KB and is
@@ -24461,12 +24912,29 @@ void App::loop() {
   }
   // While parked on the Charge / Sleep screen WiFi is powered off and the CPU is
   // down-clocked, so the network/radio services below are both pointless and (for the
-  // WiFi ones) operating on a downed stack. Skip them there; the keyboard read further
-  // down still runs, so a keypress wakes instantly. This keeps the park near-idle.
+  // WiFi ones) operating on a downed stack. Skip them there. When parked-dark the loop
+  // light-sleeps the SoC between ~1 s battery samples (see end of loop()); the keyboard
+  // is polled right after each wake, so a keypress wakes it within ~1 s. This keeps the
+  // park near-idle.
   bool parked = (screen == SCR_CHARGE);
   if (!parked) {
     if (rig) rig->service();  // net CAT (Icom LAN): advance connect + keepalives
     if (rot) rot->service();  // self-driven rotators (Yaesu direct) run their loop here
+    // APRS-IS is only alive while its screen is open, so this is a null check in
+    // every other state. Placed with the other socket services for the same reason
+    // they are here: all of them must run after the fetch-depth gate is settled.
+    if (screen == SCR_APRS || screen == SCR_APRSDET) serviceAprsIs();
+    else if (aprsis) aprsStop();          // any other route out of the screen
+    // Same safety net for the two fetch-based feeds -- their key handlers free on the
+    // way out, this catches any route that does not go through them. One difference
+    // from APRS matters: these records are a COMPLETED FETCH, not a live listen, so
+    // they must survive a round trip through a screen that comes back here. Both 'h'
+    // (help, from any screen) and the ADS-B scatter-grid editor (target 901) leave and
+    // return, and freeing under either would silently discard the fetch the operator is
+    // still looking at -- APRS gets away with the blunt rule only because aprsRestart()
+    // reopens the socket on the way back.
+    if ((dxcSpot || adsbAc) && screen != SCR_DXC && screen != SCR_ADSB &&
+        screen != SCR_EDIT && screen != SCR_HELP) { dxcFree(); adsbFree(); }
     serviceRigctld();         // rigctld TCP server: let a PC drive the rig via CardSat
     serviceRotctld();         // rotctld TCP server: let a PC drive the wired rotator
     serviceWebd();            // mobile web control page (opt-in, over the WiFi LAN)
@@ -24568,7 +25036,10 @@ void App::loop() {
       setStatus("Tracking stopped (satellite changed)");
     }
   }
-  if (radioOut && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
+  // catToolEngaged means the CAT self-test/monitor raised radioOut only to hold the USB
+  // transport up for diagnostics -- NOT to track. Exclude it here so opening a CAT tool
+  // never starts writing Doppler frequencies/modes to the radio for the active satellite.
+  if (radioOut && !catToolEngaged && rig && rig->ready() && ms - lastDoppMs >= effectiveCatRateMs()) {
       lastDoppMs = ms;
 #if CARDSAT_HAS_USBCAT
       // Trace the FIRST tick only, and only over USB CAT. The bench froze right
@@ -24919,7 +25390,13 @@ void App::loop() {
              (screen == SCR_KESSLER && kessAnimating())) {
     if (ms - lastDrawMs > 66) { lastDrawMs = ms; draw(); }   // ~15 fps: Learn + KESSLER flight/anim
   } else if (screen == SCR_PASSES || screen == SCR_HOME ||
-             screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE) {
+             screen == SCR_SCHEDULE || screen == SCR_PASSDETAIL || screen == SCR_SKYGLANCE ||
+             screen == SCR_APRS || screen == SCR_APRSDET) {
+    // APRS-IS is a LIVE LISTEN: serviceAprsIs() folds packets into aprsSta[] from
+    // loop(), so without a cadence here the list only appeared to grow when a key
+    // was pressed -- the data was already there, unpainted. 1 Hz also ticks the
+    // "Listening Ns..." counter and the per-station age column, both of which are
+    // seconds/minutes-resolution, so nothing finer is needed.
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }  // live clock / countdown
   } else if (screen == SCR_WEATHER || screen == SCR_SPACEWX || screen == SCR_HAMSAT ||
              screen == SCR_MESSAGES || screen == SCR_SATLIST || screen == SCR_GPFIT) {
@@ -24927,7 +25404,7 @@ void App::loop() {
     // ("... updated/failed", or "Sent" on the Messages screen) sits on the bottom status
     // bar; repaint while it's visible, then once more right after it times out so the
     // cleared bar is painted exactly once -- after which this branch goes quiet again.
-    bool banner = status.length() && millis() < statusUntil;
+    bool banner = status.length() && !timeReached(millis(), statusUntil);
     if (banner) { if (ms - lastDrawMs > 300) { lastDrawMs = ms; draw(); } }
     else if (status.length()) { status = ""; lastDrawMs = ms; draw(); }  // expired: clear + repaint once
   }
@@ -24943,16 +25420,16 @@ void App::loop() {
   // static screen (which only repaints on a keypress) could otherwise leave an expired
   // banner painted until the next key. Clearing it here -- on any screen, once its time
   // is up -- guarantees every banner disappears after its timeout, then repaints once.
-  if (status.length() && millis() >= statusUntil) { status = ""; lastDrawMs = ms; draw(); }
+  if (status.length() && timeReached(millis(), statusUntil)) { status = ""; lastDrawMs = ms; draw(); }
 
   // While an AOS alarm is flashing or counting down, animate on any screen.
   long dt = (nextAos && timeIsSet()) ? (long)(nextAos - nowUtc()) : 999999;
-  bool alarmActive = (millis() < aosFlashUntil) || (cfg.aosAlarm && dt <= 60 && dt > -2);
+  bool alarmActive = (!timeReached(millis(), aosFlashUntil)) || (cfg.aosAlarm && dt <= 60 && dt > -2);
   if (alarmActive && ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
 
   // While the out-of-passband banner is up, repaint fast enough on the Track-family
   // screens to animate the ~2 Hz flash (the 500 ms live cadence would alias it).
-  if (millis() < pbOobUntilMs &&
+  if (!timeReached(millis(), pbOobUntilMs) &&
       (screen == SCR_TRACK || screen == SCR_BIG || screen == SCR_MANUAL ||
        screen == SCR_MANUALBIG) &&
       ms - lastDrawMs > 120) { lastDrawMs = ms; draw(); }
@@ -24970,14 +25447,15 @@ void App::loop() {
   if (screen == SCR_GGRID && gState == 1 && ms - lastDrawMs > 200) { lastDrawMs = ms; draw(); }
 
   // Charge / Sleep screen: while awake (just woken), refresh battery once a
-  // second, then auto-blank ~5 s after the wake to return to the dark idle.
+  // second, then auto-blank 10 s after the wake to return to the dark idle.
   if (screen == SCR_CHARGE && chargeWoke) {
     if (ms - lastDrawMs > 1000) { lastDrawMs = ms; draw(); }
-    if (millis() - chargeWokeMs > 5000) {
+    if (millis() - chargeWokeMs > 10000) {   // 10 s woken window, then back to dark idle
       chargeWoke = false;
-      M5Cardputer.Display.setBrightness(0);
-      screenAsleep = true;
-      lastDrawMs = 0;                              // force the dark redraw
+      M5Cardputer.Display.sleep();                 // backlight 0 then SLPIN (dark before power-down)
+      screenAsleep = true;                         // panel is off again
+      chargeNeedWake = false;
+      lastDrawMs = 0;
     }
   }
 
@@ -24992,6 +25470,25 @@ void App::loop() {
   } else if (alarmActive) {                    // an AOS alarm wakes the display
     M5Cardputer.Display.setBrightness(cfg.bright);
     screenAsleep = false;
+  }
+
+  // Parked-dark idle (Charge / Sleep screen, panel asleep, not in the woken window).
+  //
+  // An earlier revision light-slept the SoC here on a 250 ms timer. That is removed: on
+  // this board the backlight is driven by an LEDC PWM channel, and LEDC stops clocking
+  // across esp_light_sleep_start(), so the pin state is not guaranteed to be held for the
+  // sleep interval -- which showed up as the screen visibly blinking several times a
+  // second while parked, and made waking feel glitchy. Combined with the full-screen
+  // sprite push that used to run on every dark draw, that was the reported flicker.
+  //
+  // What actually saves the power here is the stuff that is now switched fully off: the
+  // WiFi PHY, the LCD panel itself (SLPIN via Display.sleep(), not merely brightness 0),
+  // the IMU, the speaker, and the 240->80 MHz clock drop. That is the same combination
+  // Launcher uses for its charge mode on this hardware. A plain delay() yields to the
+  // scheduler and idles the core between keyboard polls without touching LEDC or the
+  // display bus, and keeps ESC responsive.
+  if (parked && screenAsleep && !chargeWoke) {
+    delay(50);
   }
 }
 
@@ -25169,6 +25666,9 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_QRZGRID: keyQrzGrid(c, enter, back); break;
     case SCR_BANDPLAN: keyBandPlan(c, enter, back); break;
     case SCR_PROP: keyProp(c, enter, back); break;
+    case SCR_MUF: keyMuf(c, enter, back); break;
+    case SCR_MUFMAP: keyMufMap(c, enter, back); break;
+    case SCR_SAA: keySaa(c, enter, back); break;
     case SCR_READY: keyReady(c, enter, back); break;
     case SCR_EMEPLAN: keyEmePlan(c, enter, back); break;
     case SCR_AMSRPT: keyAmsRpt(c, enter, back); break;
@@ -25200,6 +25700,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_PRINTABOUT: keyPrintAbout(c, enter, back); break;
     case SCR_ORBITZOO: keyOrbitZoo(c, enter, back); break;
     case SCR_MATHREF: keyMathRef(c, enter, back); break;
+    case SCR_BASICREF: keyBasicRef(c, enter, back); break;
     case SCR_PLANNER: keyPlanner(c, enter, back); break;
     case SCR_PLANDETAIL: keyPlanDetail(c, enter, back); break;
     case SCR_GPFIT: keyGpFit(c, enter, back); break;
@@ -25214,6 +25715,13 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_NEIGH:  keyNeigh(c, enter, back); break;
     case SCR_TXPLAN: keyTxplan(c, enter, back); break;
     case SCR_LNKCRV: keyLnkCrv(c, enter, back); break;
+    case SCR_THERMAL: keyThermal(c, enter, back); break;
+    case SCR_NEARBY:  keyNearby(c, enter, back); break;
+    case SCR_APRS:    keyAprs(c, enter, back); break;
+    case SCR_APRSDET: keyAprsDet(c, enter, back); break;
+    case SCR_DXC:     keyDxc(c, enter, back); break;
+    case SCR_ADSB:    keyAdsb(c, enter, back); break;
+    case SCR_AO7:     keyAo7(c, enter, back); break;
     case SCR_DEBGRP: keyDebGrp(c, enter, back); break;
     case SCR_CTSEARCH: keyCtSearch(c, enter, back); break;
     case SCR_KESSLER: keyKessler(c, enter, back); break;
@@ -25338,7 +25846,7 @@ void App::keyHome(char c, bool enter, bool back) {
       case 9: buildAmsatStatusView(); amStatSel = 0; amStatScroll = 0; screen = SCR_AMSATSTAT; lastDrawMs = 0; break;
       case 10: weatherEnter(); break; // local terrestrial weather (open-meteo)
       case 11: gcRotOut = false; screen = SCR_GRIDCALC; lastDrawMs = 0; break;   // grid distance/bearing
-      case 12: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+      case 12: nearSel = 0; screen = SCR_NEARBY; lastDrawMs = 0; break;   // Nearby & DX hub
       case 13: screen = SCR_LOCATION; break;
       case 14: screen = SCR_UPDATE; break;
       case 15: setSel = 0; setCat = -1; screen = SCR_SETTINGS; break;
@@ -26378,14 +26886,14 @@ void App::keyPassDetail(char c, bool enter, bool back) {
 }
 
 void App::keyTrack(char c, bool enter, bool back) {
-  if (c == 'q' && millis() < losPromptUntil) {   // post-LOS handoff: sleep to next pass
+  if (c == 'q' && !timeReached(millis(), losPromptUntil)) {   // post-LOS handoff: sleep to next pass
     losPromptUntil = 0; sleepUntilNextPass(); return;
   }
   if (c == 'i') {                                // "I heard it": one-key AMSAT report
     SatEntry* s2 = activeSat();
     if (!s2) return;
     int idx = satSel;
-    if (millis() < rptArmUntil && rptArmName[0]) {           // second tap: send
+    if (!timeReached(millis(), rptArmUntil) && rptArmName[0]) {           // second tap: send
       rptArmUntil = 0;
       postAmsatReport(rptArmName, "Heard");
       return;
@@ -26909,24 +27417,45 @@ bool App::parseActivationFreq(const Activation& a) {
 // Run the +/-30-min mutual-window search for the selected activation. Fills
 // actFpWin with the window nearest the listed start, sets actDxLat/Lon, and
 // returns actFpState: 1 = have window, 2 = none near listed time, 3 = can't
-// (no grid / sat not in DB / clock unset).
+// (no grid / sat not in DB / clock unset), 4 = feed date/time unparseable,
+// 5 = activator grid unusable. States 4 and 5 exist because every one of these
+// failures used to return 3, and the drawing code rendered 3 as "sat not in
+// catalog" -- sending the operator hunting for a satellite that was there all along.
 int App::activationFootprint() {
   actFpState = 3; actCommentScroll = 0;
   const Activation& a = hamsatList[hamsatSel];
   if (!timeIsSet()) return actFpState;                 // 3: need the clock
   if (!a.grid[0]) return actFpState;                   // 3: no activator grid
-  if (!Location::gridToLatLon(String(a.grid), actDxLat, actDxLon)) return actFpState;
+  // A grid-line activation lists TWO grids ("EM12/EM13", "EM12, EM13"). The whole
+  // string fails gridToLatLon, and because that failure used to share state 3 with
+  // "satellite not in DB", the screen reported a satellite problem for a perfectly
+  // ordinary rove. Take the first token: the two are adjacent by definition, so
+  // either one places the activator well inside a mutual-visibility footprint. This
+  // also survives Activation::grid[10] truncation -- "EM12aa/EM13aa" stores as
+  // "EM12aa/EM" and the first token is still intact.
+  char g1[10]; size_t gi = 0;
+  for (const char* s = a.grid; *s && gi < sizeof(g1) - 1; ++s) {
+    if (*s == '/' || *s == ',' || *s == ' ' || *s == ';') break;
+    g1[gi++] = *s;
+  }
+  g1[gi] = 0;
+  actFpState = 5;                                      // 5: grid unusable (NOT a sat problem)
+  if (!gi || !Location::gridToLatLon(String(g1), actDxLat, actDxLon)) return actFpState;
+  actFpState = 3;                                      // back to 3 for the DB lookup below
   int si = db.findByServiceName(a.sat);
-  if (si < 0) return actFpState;                       // 3: satellite not in DB
+  if (si < 0) return actFpState;                       // 3: satellite genuinely not in DB
 
-  // Listed start as a UTC epoch.
+  // Listed start as a UTC epoch. State 4 (not 3) for every failure from here down:
+  // these are feed date/time problems, and reporting them as "sat not in your list"
+  // sent the operator hunting for a satellite that was in the list all along.
+  actFpState = 4;
   if (strlen(a.date) < 10 || !a.start[0]) return actFpState;
   struct tm tmv; memset(&tmv, 0, sizeof(tmv));
   int Y=0,Mo=0,D=0,h=0,m=0,sec=0;
   if (sscanf(a.date, "%d-%d-%d", &Y,&Mo,&D) != 3) return actFpState;
   if (sscanf(a.start, "%d:%d:%d", &h,&m,&sec) < 2) return actFpState;
   tmv.tm_year=Y-1900; tmv.tm_mon=Mo-1; tmv.tm_mday=D; tmv.tm_hour=h; tmv.tm_min=m; tmv.tm_sec=sec;
-  time_t listed = mktime(&tmv);
+  time_t listed = mktime(&tmv);   // TZ is UTC0 (set in begin()), so this is a UTC epoch
   if (listed <= 0) return actFpState;
 
   // Search from an HOUR before the listed start; accept the first co-visibility
@@ -27827,7 +28356,7 @@ static const int SET_ROTOR[] = {9,86,99,101,12,10,11,38,39,18,19,16,17,13,104,47
 static const int SET_PASS[]  = {3,40,66,67,68,7,84,54,61};
 static const int SET_DISP[]  = {48,25,82,43,105,106,85,49,77,79,81};
 static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76,102,103};
-static const int SET_NET[]   = {4,5,50,51,6,20,83,41,42,52,53,98,90,91,97,92,88,87,93,94,55,60,56,57,58,59,80,27,28,29};
+static const int SET_NET[]   = {4,5,50,51,6,20,83,41,42,52,53,98,90,91,97,92,88,87,93,94,55,60,56,57,58,59,80,111,112,113,114,27,28,29};
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
                                                     SET_DISP, SET_LOG, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -28069,7 +28598,7 @@ void App::keySettings(char c, bool enter, bool back) {
                 editBuf = cfg.xvtrUlHz ? fmtMHz(cfg.xvtrUlHz) : String("");
                 screen = SCR_EDIT; break;
       case 64: enterCatMon(); break;   // open the CAT serial terminal/monitor
-      case 109: drSel = 0; drScroll = 0; drStatus = "";        // configure the Dual-Rig companion
+      case 109: drSel = 0; drScroll = 0; drStatus[0] = 0;        // configure the Dual-Rig companion
                 if (!drAlloc()) { setStatus("Out of memory"); break; }
                 screen = SCR_DUALRIG; lastDrawMs = 0; drQuery(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save();
@@ -28156,6 +28685,14 @@ void App::keySettings(char c, bool enter, bool back) {
         break; }
       case 42: editTarget = 215; editTitle = "QRZ password";
                editBuf = cfg.qrzPass; screen = SCR_EDIT; break;
+      case 111: cfg.aprsRangeKm += 50; if (cfg.aprsRangeKm > 600) cfg.aprsRangeKm = 50;
+                cfg.save(); break;
+      case 112: editTarget = 903; editTitle = "DX spot feed URL (JSON or CSV)";
+                editBuf = cfg.dxcUrl; screen = SCR_EDIT; break;
+      case 113: editTarget = 904; editTitle = "ADS-B JSON source URL";
+                editBuf = cfg.adsbUrl; screen = SCR_EDIT; break;
+      case 114: cfg.adsbRangeKm += 50; if (cfg.adsbRangeKm > 500) cfg.adsbRangeKm = 50;
+                cfg.save(); break;
       case 69: lotwPickEnter(LP_DXCC); break;   // DXCC entity picker (full list, subdiv-bearing first)
       case 70: editTarget = 221; editTitle = "LoTW CQ zone";
                editBuf = cfg.lotwCqz; screen = SCR_EDIT; break;
@@ -28220,6 +28757,12 @@ void App::keySettings(char c, bool enter, bool back) {
 }
 
 static Screen editHome(int t) {
+  // These MUST come before the "t >= 720 -> SCR_SKEDENTRY" catch-all below. The Nearby &
+  // DX targets were numbered in the 900s and fell straight into it, so committing (or
+  // cancelling) any of them dumped the operator into the new-activation editor.
+  if (t == 900) return SCR_APRS;                 // APRS centre grid
+  if (t == 901) return SCR_ADSB;                 // ADS-B scatter target grid
+  if (t >= 903 && t <= 904) return SCR_SETTINGS; // feed URLs
   if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
   if (t == 704 || t == 705) return SCR_MESSAGES;  // LoRa sked-send date/time prompts (cancel)
   if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
@@ -28372,6 +28915,32 @@ void App::keyEdit(char c, bool enter, bool back) {
                   while (u.length() && u.charAt(u.length()-1) == '/') u.remove(u.length()-1);
                   strncpy(cfg.clUrl, u.c_str(), sizeof(cfg.clUrl)-1);
                   cfg.clUrl[sizeof(cfg.clUrl)-1] = 0; } break;
+      case 903: strncpy(cfg.dxcUrl, editBuf.c_str(), sizeof(cfg.dxcUrl)-1);
+                cfg.dxcUrl[sizeof(cfg.dxcUrl)-1] = 0; cfg.save(); break;
+      case 904: strncpy(cfg.adsbUrl, editBuf.c_str(), sizeof(cfg.adsbUrl)-1);
+                cfg.adsbUrl[sizeof(cfg.adsbUrl)-1] = 0; cfg.save(); break;
+      // Both of these used to strncpy whatever was typed, with no validation at all,
+      // so a typo was accepted and only discovered at draw time. Every other grid
+      // editor (103, 104, 350, 370, 770) validates through gridToLatLon first and
+      // rejects on failure without storing. Blank is meaningful for both: it means
+      // "use my own location" / "target off", so it clears rather than failing.
+      case 900: { String g = editBuf; g.trim(); g.toUpperCase();
+                  double dlat, dlon;
+                  if (!g.length()) { aprsCenter[0] = 0; aprsRestart(); }
+                  else if (Location::gridToLatLon(g, dlat, dlon)) {
+                    strncpy(aprsCenter, g.c_str(), sizeof(aprsCenter)-1);
+                    aprsCenter[sizeof(aprsCenter)-1] = 0; aprsRestart();
+                  } else setStatus("Bad grid (e.g. FM18lw)");
+                  screen = SCR_APRS; } break;
+      case 901: { String g = editBuf; g.trim(); g.toUpperCase();
+                  double dlat, dlon;
+                  if (!g.length()) adsbTgtGrid[0] = 0;
+                  else if (Location::gridToLatLon(g, dlat, dlon)) {
+                    strncpy(adsbTgtGrid, g.c_str(), sizeof(adsbTgtGrid)-1);
+                    adsbTgtGrid[sizeof(adsbTgtGrid)-1] = 0;
+                  } else setStatus("Bad grid (e.g. FM18lw)");
+                  adsbUpdateScatter();               // update the overlay now, not on next fetch
+                  screen = SCR_ADSB; } break;
       case 226: strncpy(cfg.clKey, editBuf.c_str(), sizeof(cfg.clKey)-1);
                 cfg.clKey[sizeof(cfg.clKey)-1] = 0; break;
       case 227: strncpy(cfg.clStation, editBuf.c_str(), sizeof(cfg.clStation)-1);
@@ -28898,7 +29467,8 @@ void App::keyEdit(char c, bool enter, bool back) {
         editTarget == 350 || editTarget == 351 || editTarget == 360 ||
         editTarget == 370 ||
         editTarget == 721 || editTarget == 723 || editTarget == 729 || editTarget == 760 ||
-        editTarget == 770) {
+        editTarget == 770 || editTarget == 726 ||   // 726 = sked mode (FM/SSB/CW)
+        editTarget == 900 || editTarget == 901) {   // APRS center / ADS-B scatter grids
       if      (c >= 'a' && c <= 'z') c -= 32;   // uppercase by default ...
       else if (c >= 'A' && c <= 'Z') c += 32;   // ... with shift for lowercase
     }
@@ -29048,7 +29618,7 @@ void App::keyAbout(char c, bool enter, bool back) {
   if (c == 'r') { screen = SCR_READY; lastDrawMs = 0; return; }
   if (c == 'm') { screen = SCR_PERF;  lastDrawMs = 0; return; }   // performance monitor                 // station readiness
   if (c == 't') { screen = SCR_TOOLS; lastDrawMs = 0; return; }    // Tools hub (keeps last selection)
-  if (c == 'k') { calSel = 0; calStatus = ""; screen = SCR_CALEXPORT; lastDrawMs = 0; return; }   // Calendar (.ics) export
+  if (c == 'k') { calSel = 0; calStatus[0] = 0; screen = SCR_CALEXPORT; lastDrawMs = 0; return; }   // Calendar (.ics) export
   if (c == 'p') { paSel = 0; screen = SCR_PRINTABOUT; lastDrawMs = 0; return; }   // Print submenu (all reports)
   if (c == 'a') { printReport(PR_AMSAT);  return; }   // print the "support AMSAT" page
   if (c == 'c') { printReport(PR_OPCARD); return; }   // print the operator contact card
@@ -29863,7 +30433,7 @@ void App::keyLog(char c, bool enter, bool back) {
 // Counts the un-uploaded QSOs and opens the LoTW screen. Sat QSOs only (CardSat
 // logs are all satellite QSOs; PROP_MODE=SAT is emitted for every record).
 void App::lotwEnter() {
-  lotwBusy = false; lotwLastSent = 0; lotwStatus = "";
+  lotwBusy = false; lotwLastSent = 0; lotwStatus[0] = 0;
   lotwPending = 0; lotwTotal = 0;
   if (Store::fs().exists(FILE_LOG)) {
     File f = Store::fs().open(FILE_LOG, "r");
@@ -29908,7 +30478,7 @@ void App::drawLotw() {
     canvas.printf("Un-uploaded QSOs: %d", lotwPending);
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (lotwStatus.length()) {
+  if (lotwStatus[0]) {
     canvas.setCursor(6, y); y += 12;
     // clip to the screen width
     String s = lotwStatus; if (s.length() > 38) s = s.substring(0, 38);
@@ -29930,7 +30500,7 @@ void App::keyLotw(char c, bool enter, bool back) {
     if (enter) { lotwRebootPrompt = false; lotwRebootUpload(); return; }
     if (isBack(c, back)) {
       lotwRebootPrompt = false;
-      lotwStatus = "Upload cancelled - QSOs still pending";
+      strlcpy(lotwStatus, "Upload cancelled - QSOs still pending", sizeof(lotwStatus));
       lastDrawMs = 0; draw(); return;
     }
     return;   // ignore other keys while the prompt is up
@@ -29941,7 +30511,7 @@ void App::keyLotw(char c, bool enter, bool back) {
   // previous upload didn't actually post (e.g. a format LoTW didn't accept) and the
   // QSOs need to be sent again. Only meaningful if there are any QSOs at all.
   if (c == 'a' && lotwTotal > 0) {
-    lotwResend = !lotwResend; lotwStatus = ""; lastDrawMs = 0; return;
+    lotwResend = !lotwResend; lotwStatus[0] = 0; lastDrawMs = 0; return;
   }
   int toSend = lotwResend ? lotwTotal : lotwPending;
   if (c == 'u' && Store::ready() && Lotw::credentialPresent() && toSend > 0) {
@@ -30247,7 +30817,7 @@ void App::keyLotwSub(char c, bool enter, bool back) {
 // upload -- mark those QSOs uploaded so they aren't sent again.
 void App::doLotwUpload(const String& keyPass) {
   lotwBusy = true; lastDrawMs = 0;
-  lotwStatus = "Collecting QSOs..."; draw();
+  strlcpy(lotwStatus, "Collecting QSOs...", sizeof(lotwStatus)); draw();
 
   // Gather QSOs into a heap array. Normally only un-uploaded ones; in re-send mode
   // (user opted in) include QSOs already marked uploaded too. Capped to keep the
@@ -30258,7 +30828,7 @@ void App::doLotwUpload(const String& keyPass) {
   // batch (which runs in a fresh boot -- see the RTC batch state and continueLotwBatch).
   const int CAP = LOTW_BATCH_QSOS;
   PendingQso* batch = (PendingQso*)malloc(sizeof(PendingQso) * CAP);
-  if (!batch) { lotwStatus = "Out of memory"; lotwBusy = false; return; }
+  if (!batch) { strlcpy(lotwStatus, "Out of memory", sizeof(lotwStatus)); lotwBusy = false; return; }
   int n = 0;
   int skipRemaining = lotwResend ? (int)g_lotwResendSkip : 0;  // resend: skip already-sent batches
   if (Store::fs().exists(FILE_LOG)) {
@@ -30276,7 +30846,7 @@ void App::doLotwUpload(const String& keyPass) {
       f.close();
     }
   }
-  if (n == 0) { free(batch); lotwStatus = "Nothing to upload"; lotwBusy = false; return; }
+  if (n == 0) { free(batch); strlcpy(lotwStatus, "Nothing to upload", sizeof(lotwStatus)); lotwBusy = false; return; }
 
   LotwStation st;
   st.call = cfg.myCall;
@@ -30309,7 +30879,7 @@ void App::doLotwUpload(const String& keyPass) {
   // framing so it needs no working memory, and the TLS upload fits the same
   // contiguous block the other HTTPS fetches use -- so the drawing sprite stays
   // resident throughout and the screen keeps updating normally.
-  lotwStatus = "Signing " + String(n) + " QSOs..."; draw();
+  snprintf(lotwStatus, sizeof(lotwStatus), "Signing %d QSOs...", n); draw();
   Serial.printf("[lotw] signing %d QSOs (heap free %u, largest %u)\n",
                 n, (unsigned)ESP.getFreeHeap(),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -30318,11 +30888,11 @@ void App::doLotwUpload(const String& keyPass) {
   bool built = Lotw::buildTq8(batch, n, st, keyPass, err, &gz);
   free(batch);
   if (!built) {
-    lotwStatus = "Sign failed: " + err; lotwBusy = false; lastDrawMs = 0; return;
+    snprintf(lotwStatus, sizeof(lotwStatus), "Sign failed: %s", err.c_str()); lotwBusy = false; lastDrawMs = 0; return;
   }
 
   // POST the staged .tq8 to LoTW.
-  lotwStatus = "Uploading (" + String((unsigned)gz) + " B)..."; draw();
+  snprintf(lotwStatus, sizeof(lotwStatus), "Uploading (%u B)...", (unsigned)gz); draw();
   String resp;
   bool posted = net.httpsPostMultipart(LOTW_UPLOAD_URL, "upfile",
                                        LOTW_TQ8_OUT, "cardsat.tq8",
@@ -30345,12 +30915,12 @@ void App::doLotwUpload(const String& keyPass) {
     // reply a reboot won't fix.
     if (net.lastCode < 0) {
       lotwRebootPrompt = true;
-      lotwStatus = (net.lastCode == Net::HEAP_ABORT_CODE)
+      strlcpy(lotwStatus, (net.lastCode == Net::HEAP_ABORT_CODE)
                  ? "Low memory after fetches. Reboot to upload? ENT=yes  `=no"
-                 : "Connect failed. Reboot to upload? ENT=yes  `=no";
+                 : "Connect failed. Reboot to upload? ENT=yes  `=no", sizeof(lotwStatus));
       lotwBusy = false; lastDrawMs = 0; draw(); return;
     }
-    lotwStatus = "Upload failed: " + net.lastErr;
+    snprintf(lotwStatus, sizeof(lotwStatus), "Upload failed: %s", net.lastErr.c_str());
     lotwBusy = false; lastDrawMs = 0; draw(); return;
   }
 
@@ -30371,7 +30941,7 @@ void App::doLotwUpload(const String& keyPass) {
     if (lotwResend) {
       // Re-send mode: the QSOs were already flagged uploaded; nothing new to flag.
       lotwLastSent = accepted;
-      lotwStatus = "Re-sent " + String(n) + ", queued " + String(accepted);
+      snprintf(lotwStatus, sizeof(lotwStatus), "Re-sent %d, queued %d", n, accepted);
       // Advance the resend cursor by the QSOs sent this batch. If more remain beyond the
       // cursor, continue in a fresh boot (carrying the cursor + passphrase in RTC).
       int sentSoFar = (int)g_lotwResendSkip + n;
@@ -30381,7 +30951,7 @@ void App::doLotwUpload(const String& keyPass) {
       if (remainAfter > 0) {
         g_lotwResendSkip = (uint16_t)sentSoFar;   // advance the cursor for the next batch
         lotwResend = true;
-        lotwStatus = "Batch sent; " + String(remainAfter) + " left...";
+        snprintf(lotwStatus, sizeof(lotwStatus), "Batch sent; %d left...", remainAfter);
         lotwMoreBatches = true;   // top-level loop re-invokes doLotwUpload (no recursion)
         lotwBusy = false; lastDrawMs = 0; draw();
         return;
@@ -30394,7 +30964,7 @@ void App::doLotwUpload(const String& keyPass) {
       lotwLastSent = accepted;
       // "Accepted" here means LoTW queued the file for processing; per-QSO results are
       // determined server-side afterward (check your LoTW account).
-      lotwStatus = "Queued " + String(accepted) + " at LoTW";
+      snprintf(lotwStatus, sizeof(lotwStatus), "Queued %d at LoTW", accepted);
       lotwPending -= marked; if (lotwPending < 0) lotwPending = 0;
       // More un-uploaded QSOs than this batch could hold? Continue in a fresh boot: the
       // .tq8 body must stay under the send ceiling AND a second TLS handshake can't run
@@ -30404,14 +30974,14 @@ void App::doLotwUpload(const String& keyPass) {
                     marked, CAP, remainAfter);
       if (remainAfter > 0) {
         lotwResend = false;
-        lotwStatus = "Batch sent; " + String(remainAfter) + " left...";
+        snprintf(lotwStatus, sizeof(lotwStatus), "Batch sent; %d left...", remainAfter);
         lotwMoreBatches = true;   // top-level loop re-invokes doLotwUpload (no recursion)
         lotwBusy = false; lastDrawMs = 0; draw();
         return;
       }
     }
   } else {
-    lotwStatus = "Server rejected upload";
+    strlcpy(lotwStatus, "Server rejected upload", sizeof(lotwStatus));
   }
   lotwBusy = false; lastDrawMs = 0;
   draw();   // repaint with the final result: SCR_LOTW is static, so the loop won't
@@ -30501,7 +31071,7 @@ void App::resumeLotwIfPending() {
   lotwEnter();                                 // counts pending + sets screen = SCR_LOTW
   screen = SCR_LOTW; lastDrawMs = 0; draw();
   if (!net.connected() && !connectWifiCfg()) {
-    lotwStatus = "WiFi failed (upload after reboot)"; lastDrawMs = 0; draw(); return;
+    strlcpy(lotwStatus, "WiFi failed (upload after reboot)", sizeof(lotwStatus)); lastDrawMs = 0; draw(); return;
   }
   int toSend = lotwResend ? lotwTotal : lotwPending;
   if (Store::ready() && Lotw::credentialPresent() && toSend > 0) {
@@ -30509,7 +31079,7 @@ void App::resumeLotwIfPending() {
     editTarget = 230; editTitle = "Key password (blank=none)";
     editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; draw();
   } else {
-    lotwStatus = "Nothing to upload"; lastDrawMs = 0; draw();
+    strlcpy(lotwStatus, "Nothing to upload", sizeof(lotwStatus)); lastDrawMs = 0; draw();
   }
 }
 
@@ -30680,7 +31250,7 @@ static String jsonField(const String& json, const char* key) {
 // Count QSOs not yet sent to Cloudlog (bit 0x2 unset) and the total, then open the
 // Cloudlog screen.
 void App::cloudlogEnter() {
-  clBusy = false; clStatus = "";
+  clBusy = false; clStatus[0] = 0;
   clPending = 0; clTotal = 0;
   if (Store::fs().exists(FILE_LOG)) {
     File f = Store::fs().open(FILE_LOG, "r");
@@ -30719,7 +31289,7 @@ void App::drawCloudlog() {
   else          canvas.printf("Not yet sent: %d", clPending);
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (clStatus.length()) {
+  if (clStatus[0]) {
     canvas.setCursor(6, y); y += 12;
     String s = clStatus; if (s.length() > 38) s = s.substring(0, 38);
     canvas.print(s);
@@ -30741,14 +31311,14 @@ void App::keyCloudlog(char c, bool enter, bool back) {
     if (enter) { clRebootPrompt = false; cloudlogRebootUpload(clResend, clResendSkip); return; }
     if (isBack(c, back)) {
       clRebootPrompt = false;
-      clStatus = "Upload cancelled - QSOs still pending";
+      strlcpy(clStatus, "Upload cancelled - QSOs still pending", sizeof(clStatus));
       lastDrawMs = 0; draw(); return;
     }
     return;   // ignore any other key while the prompt is up
   }
   if (isBack(c, back)) { screen = SCR_LOG; lastDrawMs = 0; return; }
   if (clBusy) return;
-  if (c == 'a' && clTotal > 0) { clResend = !clResend; clStatus = ""; lastDrawMs = 0; return; }
+  if (c == 'a' && clTotal > 0) { clResend = !clResend; clStatus[0] = 0; lastDrawMs = 0; return; }
   int toSend = clResend ? clTotal : clPending;
   bool haveCfg = cfg.clUrl[0] && cfg.clKey[0] && cfg.clStation[0];
   if (c == 'u' && haveCfg && toSend > 0) {
@@ -30763,10 +31333,10 @@ void App::keyCloudlog(char c, bool enter, bool back) {
 void App::doCloudlogUpload() {
   clBusy = true; lastDrawMs = 0;
   if (!net.connected()) {
-    clStatus = "Connecting WiFi..."; draw();
-    if (!connectWifiCfg()) { clStatus = "WiFi failed"; clBusy = false; lastDrawMs = 0; draw(); return; }
+    strlcpy(clStatus, "Connecting WiFi...", sizeof(clStatus)); draw();
+    if (!connectWifiCfg()) { strlcpy(clStatus, "WiFi failed", sizeof(clStatus)); clBusy = false; lastDrawMs = 0; draw(); return; }
   }
-  clStatus = "Collecting QSOs..."; draw();
+  strlcpy(clStatus, "Collecting QSOs...", sizeof(clStatus)); draw();
 
   // ONE upload, ONE handshake. The JSON body is written to a temp file on Store::fs()
   // (SD when present, else internal LittleFS -- so this keeps Cloudlog working without
@@ -30784,7 +31354,7 @@ void App::doCloudlogUpload() {
   {
     String tmp = FILE_CLOUDLOG_TMP;
     File out = Store::fs().open(tmp.c_str(), "w");
-    if (!out) { clStatus = "Temp file open failed"; clBusy = false; lastDrawMs = 0; draw(); return; }
+    if (!out) { strlcpy(clStatus, "Temp file open failed", sizeof(clStatus)); clBusy = false; lastDrawMs = 0; draw(); return; }
 
     // Fixed prefix with the escaped key + station profile id.
     { String pre; pre.reserve(96);
@@ -30839,10 +31409,10 @@ void App::doCloudlogUpload() {
 
   if (n == 0) {
     Store::fs().remove(FILE_CLOUDLOG_TMP);
-    clStatus = "Nothing to upload"; clBusy = false; lastDrawMs = 0; draw(); return;
+    strlcpy(clStatus, "Nothing to upload", sizeof(clStatus)); clBusy = false; lastDrawMs = 0; draw(); return;
   }
 
-  clStatus = "Uploading " + String(n) + " QSO(s)..."; draw();
+  snprintf(clStatus, sizeof(clStatus), "Uploading %d QSO(s)...", n); draw();
   String url = String(cfg.clUrl) + "/index.php/api/qso";
   String resp;
   bool ok = net.httpsPostJsonFile(url, FILE_CLOUDLOG_TMP, resp);
@@ -30854,14 +31424,14 @@ void App::doCloudlogUpload() {
     // Negative code = transport/connect failure -> reboot-to-clean-heap is the cure.
     if (net.lastCode < 0) {
       clRebootPrompt = true;
-      clStatus = (net.lastCode == Net::HEAP_ABORT_CODE)
+      strlcpy(clStatus, (net.lastCode == Net::HEAP_ABORT_CODE)
                ? "Low memory after fetches. Reboot to upload? ENT=yes  `=no"
-               : "Connect failed. Reboot to upload? ENT=yes  `=no";
+               : "Connect failed. Reboot to upload? ENT=yes  `=no", sizeof(clStatus));
       clBusy = false; lastDrawMs = 0; draw(); return;
     }
     String reason = jsonField(resp, "reason");
-    clStatus = reason.length() ? ("Failed: " + reason)
-                               : ("Upload failed: " + net.lastErr);
+    if (reason.length()) snprintf(clStatus, sizeof(clStatus), "Failed: %s", reason.c_str());
+    else snprintf(clStatus, sizeof(clStatus), "Upload failed: %s", net.lastErr.c_str());
     clBusy = false; lastDrawMs = 0; draw(); return;
   }
 
@@ -30871,7 +31441,7 @@ void App::doCloudlogUpload() {
     if (!clResend) {
       int marked = markLogUploaded(n, 0x2);
       clPending -= marked; if (clPending < 0) clPending = 0;
-      clStatus = "Uploaded " + String(n) + ", imported " + String(imported);
+      snprintf(clStatus, sizeof(clStatus), "Uploaded %d, imported %d", n, imported);
       // More un-uploaded QSOs than this size-bounded batch could hold? Continue in a
       // fresh boot (one handshake per session on this no-PSRAM part). Cloudlog needs no
       // passphrase, so the existing one-shot reboot marker is enough. Gate on "any
@@ -30883,13 +31453,13 @@ void App::doCloudlogUpload() {
       if (clRemain > 0) {
         // Continue iteratively (top-level loop re-invokes), NOT recursively -- the same
         // per-batch TLS frame that overflowed the stack on the LoTW path applies here.
-        clStatus = "Batch done; " + String(clRemain) + " left...";
+        snprintf(clStatus, sizeof(clStatus), "Batch done; %d left...", clRemain);
         clMoreBatches = true;
         clBusy = false; lastDrawMs = 0; draw();
         return;
       }
     } else {
-      clStatus = "Re-sent " + String(n) + ", imported " + String(imported);
+      snprintf(clStatus, sizeof(clStatus), "Re-sent %d, imported %d", n, imported);
       // Advance the resend cursor; continue in a fresh boot if more logged QSOs remain.
       int sentSoFar = clResendSkip + n;
       int remainAfter = clTotal - sentSoFar;   // resend covers ALL logged QSOs
@@ -30897,7 +31467,7 @@ void App::doCloudlogUpload() {
                     n, CL_BATCH_QSOS, sentSoFar, clTotal, remainAfter);
       if (remainAfter > 0) {
         clResendSkip = sentSoFar;   // advance the resend cursor for the next batch
-        clStatus = "Batch done; " + String(remainAfter) + " left...";
+        snprintf(clStatus, sizeof(clStatus), "Batch done; %d left...", remainAfter);
         clMoreBatches = true;
         clBusy = false; lastDrawMs = 0; draw();
         return;
@@ -30906,7 +31476,8 @@ void App::doCloudlogUpload() {
     }
   } else {
     String reason = jsonField(resp, "reason");
-    clStatus = reason.length() ? ("Rejected: " + reason) : "Server rejected upload";
+    if (reason.length()) snprintf(clStatus, sizeof(clStatus), "Rejected: %s", reason.c_str());
+    else strlcpy(clStatus, "Server rejected upload", sizeof(clStatus));
   }
   clBusy = false; lastDrawMs = 0;
   draw();   // repaint with the final result: SCR_CLOUDLOG is static, so the loop won't
@@ -30947,7 +31518,7 @@ void App::resumeCloudlogIfPending() {
   cloudlogEnter();                             // counts pending + sets screen = SCR_CLOUDLOG
   screen = SCR_CLOUDLOG; lastDrawMs = 0; draw();
   if (!net.connected() && !connectWifiCfg()) {
-    clStatus = "WiFi failed (upload after reboot)"; lastDrawMs = 0; draw(); return;
+    strlcpy(clStatus, "WiFi failed (upload after reboot)", sizeof(clStatus)); lastDrawMs = 0; draw(); return;
   }
   clResend = (rf != 0);
   clResendSkip = cur;                          // resend cursor for this continued run
@@ -30957,7 +31528,7 @@ void App::resumeCloudlogIfPending() {
     int guard = 0;
     do { clMoreBatches = false; doCloudlogUpload(); } while (clMoreBatches && ++guard < 1000);
   }
-  else { clResendSkip = 0; clStatus = "Nothing to upload"; lastDrawMs = 0; draw(); }
+  else { clResendSkip = 0; strlcpy(clStatus, "Nothing to upload", sizeof(clStatus)); lastDrawMs = 0; draw(); }
 }
 
 void App::drawLogEntry() {
@@ -31228,7 +31799,7 @@ void App::footer(const String& t) {
 // for a moment (the downlink is being pulled back to the edge meanwhile). Returns
 // true while it's showing so the live screens can repaint to keep it animating.
 bool App::drawOobBanner() {
-  if (millis() >= pbOobUntilMs || pbOobDir == 0) return false;
+  if (timeReached(millis(), pbOobUntilMs) || pbOobDir == 0) return false;
   bool on = ((millis() / 250) & 1);                 // ~2 Hz flash
   canvas.fillRect(0, 114, 240, 11, on ? CL_RED : CL_BLACK);
   if (on) {
@@ -31293,6 +31864,9 @@ void App::draw() {
     case SCR_QRZGRID: drawQrzGrid(); break;
     case SCR_BANDPLAN: drawBandPlan(); break;
     case SCR_PROP: drawProp(); break;
+    case SCR_MUF: drawMuf(); break;
+    case SCR_MUFMAP: drawMufMap(); break;
+    case SCR_SAA: drawSaa(); break;
     case SCR_READY: drawReady(); break;
     case SCR_EMEPLAN: drawEmePlan(); break;
     case SCR_AMSRPT: drawAmsRpt(); break;
@@ -31324,6 +31898,7 @@ void App::draw() {
     case SCR_PRINTABOUT: drawPrintAbout(); break;
     case SCR_ORBITZOO: drawOrbitZoo(); break;
     case SCR_MATHREF: drawMathRef(); break;
+    case SCR_BASICREF: drawBasicRef(); break;
     case SCR_PLANNER: drawPlanner(); break;
     case SCR_PLANDETAIL: drawPlanDetail(); break;
     case SCR_GPFIT: drawGpFit(); break;
@@ -31338,6 +31913,13 @@ void App::draw() {
     case SCR_NEIGH:  drawNeigh(); break;
     case SCR_TXPLAN: drawTxplan(); break;
     case SCR_LNKCRV: drawLnkCrv(); break;
+    case SCR_THERMAL: drawThermal(); break;
+    case SCR_NEARBY:  drawNearby(); break;
+    case SCR_APRS:    drawAprs(); break;
+    case SCR_APRSDET: drawAprsDet(); break;
+    case SCR_DXC:     drawDxc(); break;
+    case SCR_ADSB:    drawAdsb(); break;
+    case SCR_AO7:     drawAo7(); break;
     case SCR_DEBGRP: drawDebGrp(); break;
     case SCR_CTSEARCH: drawCtSearch(); break;
     case SCR_KESSLER: drawKessler(); break;
@@ -31396,7 +31978,7 @@ void App::draw() {
     case SCR_GPSRC:    drawGpSrc(); break;
   }
   // transient status
-  if (status.length() && millis() < statusUntil) {
+  if (status.length() && !timeReached(millis(), statusUntil)) {
     canvas.fillRect(0, 114, 240, 11, CL_DGREEN);
     canvas.setTextColor(CL_WHITE, CL_DGREEN);
     canvas.setTextSize(1);
@@ -31405,7 +31987,7 @@ void App::draw() {
   }
   // AOS alarm overlay (drawn on top of any screen)
   long dt = (nextAos && timeIsSet()) ? (long)(nextAos - nowUtc()) : 999999;
-  if (millis() < aosFlashUntil) {
+  if (!timeReached(millis(), aosFlashUntil)) {
     bool on = ((millis() / 400) & 1);              // blink
     canvas.fillRect(20, 46, 200, 44, on ? CL_RED : CL_BLACK);
     canvas.drawRect(20, 46, 200, 44, CL_WHITE);
@@ -31423,7 +32005,7 @@ void App::draw() {
   // Sked-reminder overlay (user-set, from an activation): its own flash + banner,
   // drawn on top of any screen and distinct from the favorites AOS alarm.
   long skDt = (skedAt && timeIsSet()) ? (long)(skedAt - nowUtc()) : 999999;
-  if (millis() < skedFlashUntil) {
+  if (!timeReached(millis(), skedFlashUntil)) {
     bool on = ((millis() / 400) & 1);
     canvas.fillRect(20, 46, 200, 44, on ? CL_BLUE : CL_BLACK);
     canvas.drawRect(20, 46, 200, 44, CL_WHITE);
@@ -34501,7 +35083,8 @@ void App::printTargetHits() {
   if (tsHitN == 0) { Printer::line("(no results -- run a search first)"); return; }
   Printer::line("Chances to work the target:");
   Printer::blank();
-  Printer::line("SAT       INSIDE(UTC)   MIN elMax");
+  Printer::line(Printer::narrow() ? "SAT       IN(UTC) MIN elMx"
+                                  : "SAT       INSIDE(UTC)   MIN elMax");
   for (int i = 0; i < tsHitN; ++i) {
     HitRow& h = tsHits[i];
     int idx = db.indexOfNorad(h.norad);
@@ -34520,8 +35103,24 @@ void App::printPassPolar() {
   Printer::title("PASS SKY TRACK");
   if (!s) { Printer::line("No active satellite."); return; }
   Printer::line(String(s->name));
-  // pdAz/pdEl were sampled for the pass being viewed (buildPassDetail). Filter to the
-  // above-horizon points and hand them to the ASCII plotter.
+  // pdAz/pdEl are normally filled by buildPassDetail() when the pass-detail screen is
+  // opened. Reached from About > Print, that has usually never run, so the arrays are
+  // empty and the chart came out blank. Self-build the next pass here rather than
+  // printing nothing: predict the active satellite's next pass and sample it.
+  if (!pdValid) {
+    if (!timeIsSet()) { Printer::line("Clock not set -- no pass to plot."); return; }
+    PassPredict pp;
+    pred.setSite(loc.obs());
+    if (!pred.setSat(*s) ||
+        pred.predictPasses(nowUtc(), cfg.minPassEl, &pp, 1) < 1) {
+      Printer::line("No upcoming pass found.");
+      Printer::line("(none above the minimum");
+      Printer::line(" elevation in the search window)");
+      return;
+    }
+    buildPassDetail(pp);            // fills pdAz/pdEl/pdSunlit + pdPass, sets pdValid
+    if (!pdValid) { Printer::line("Could not sample the pass."); return; }
+  }
   Printer::blank();
   printPolarAscii(pdAz, pdEl, PD_SAMPLES, "*");
   Printer::blank();
@@ -34565,30 +35164,32 @@ void App::printOrbit() {
 
   // --- Keplerian elements (permanent, from the element set) ---
   Printer::line("-- Elements --");
-  snprintf(b, sizeof(b), "Inclination  %.4f deg", s->incl);      Printer::line(String(b));
-  snprintf(b, sizeof(b), "Eccentricity %.7f", s->ecc);           Printer::line(String(b));
-  snprintf(b, sizeof(b), "RAAN         %.4f deg", s->raan);       Printer::line(String(b));
-  snprintf(b, sizeof(b), "Arg perigee  %.4f deg", s->argp);      Printer::line(String(b));
-  snprintf(b, sizeof(b), "Mean anomaly %.4f deg", s->ma);        Printer::line(String(b));
-  snprintf(b, sizeof(b), "Mean motion  %.8f rev/day", s->meanMotion); Printer::line(String(b));
-  snprintf(b, sizeof(b), "B*           %.6f", s->bstar);         Printer::line(String(b));
-  snprintf(b, sizeof(b), "Rev at epoch %ld", (long)s->revAtEpoch); Printer::line(String(b));
+  // kv() keeps the value from wrapping mid-number on a 58 mm receipt (mean motion
+  // at 8 decimals + " rev/day" is the widest line here).
+  snprintf(b, sizeof(b), "%.4f deg", s->incl);          Printer::kv("Inclination", b);
+  snprintf(b, sizeof(b), "%.7f", s->ecc);               Printer::kv("Eccentricity", b);
+  snprintf(b, sizeof(b), "%.4f deg", s->raan);          Printer::kv("RAAN", b);
+  snprintf(b, sizeof(b), "%.4f deg", s->argp);          Printer::kv("Arg perigee", b);
+  snprintf(b, sizeof(b), "%.4f deg", s->ma);            Printer::kv("Mean anomaly", b);
+  snprintf(b, sizeof(b), "%.8f rev/day", s->meanMotion); Printer::kv("Mean motion", b);
+  snprintf(b, sizeof(b), "%.6f", s->bstar);             Printer::kv("B*", b);
+  snprintf(b, sizeof(b), "%ld", (long)s->revAtEpoch);   Printer::kv("Rev at epoch", b);
   Printer::blank();
 
   // --- Derived geometry (permanent shape of the orbit) ---
   Printer::line("-- Orbit geometry --");
-  snprintf(b, sizeof(b), "Period       %.2f min", periodMin);    Printer::line(String(b));
-  snprintf(b, sizeof(b), "SMA (a)      %.1f km", a);             Printer::line(String(b));
-  snprintf(b, sizeof(b), "Apogee alt   %.1f km", orbApoKm);      Printer::line(String(b));
-  snprintf(b, sizeof(b), "Perigee alt  %.1f km", orbPeriKm);     Printer::line(String(b));
+  snprintf(b, sizeof(b), "%.2f min", periodMin);        Printer::kv("Period", b);
+  snprintf(b, sizeof(b), "%.1f km", a);                 Printer::kv("SMA (a)", b);
+  snprintf(b, sizeof(b), "%.1f km", orbApoKm);          Printer::kv("Apogee alt", b);
+  snprintf(b, sizeof(b), "%.1f km", orbPeriKm);         Printer::kv("Perigee alt", b);
   // Footprint diameters (widest simultaneous view => longest possible QSO span).
   auto fpDia = [&](double h) -> double { return (h > 0) ? 2.0 * RE * acos(RE / (RE + h)) : 0.0; };
-  snprintf(b, sizeof(b), "Footprint apo %.0f km dia", fpDia(orbApoKm)); Printer::line(String(b));
-  snprintf(b, sizeof(b), "Footprint per %.0f km dia", fpDia(orbPeriKm)); Printer::line(String(b));
+  snprintf(b, sizeof(b), "%.0f km dia", fpDia(orbApoKm)); Printer::kv("Footprint apo", b);
+  snprintf(b, sizeof(b), "%.0f km dia", fpDia(orbPeriKm)); Printer::kv("Footprint per", b);
   // Orbital speed at apogee/perigee (vis-viva; geometry, not a live position).
   double vApo = (a > 0) ? sqrt(MU * (2.0 / (a * (1 + s->ecc)) - 1.0 / a)) : 0.0;
   double vPer = (a > 0) ? sqrt(MU * (2.0 / (a * (1 - s->ecc)) - 1.0 / a)) : 0.0;
-  snprintf(b, sizeof(b), "Speed apo/per %.3f / %.3f km/s", vApo, vPer); Printer::line(String(b));
+  snprintf(b, sizeof(b), "%.3f / %.3f km/s", vApo, vPer); Printer::kv("Speed apo/per", b);
   Printer::blank();
 
   // --- Nodal dynamics (J2 secular rates; a function of the orbit, not the clock) ---
@@ -34600,8 +35201,8 @@ void App::printOrbit() {
     double Odot = -1.5 * nRad * J2 * ReP2 * ci * DPD;              // node regression deg/day
     double Wdot = 0.75 * nRad * J2 * ReP2 * (5 * ci * ci - 1) * DPD; // apsidal deg/day
     Printer::line("-- Nodal dynamics --");
-    snprintf(b, sizeof(b), "Node drift   %+.3f deg/day", Odot);   Printer::line(String(b));
-    snprintf(b, sizeof(b), "Perig drift  %+.3f deg/day", Wdot);   Printer::line(String(b));
+    snprintf(b, sizeof(b), "%+.3f deg/day", Odot);   Printer::kv("Node drift", b);
+    snprintf(b, sizeof(b), "%+.3f deg/day", Wdot);   Printer::kv("Perig drift", b);
     Printer::line(String("Sun-synchronous: ") + ((fabs(Odot - 0.98565) < 0.05) ? "yes" : "no"));
     // Local time of the ascending node. Unlike the drift rates above this is NOT a pure
     // property of the orbit: it is (RAAN - RA_sun)/15 + 12, so it moves as the node
@@ -34933,7 +35534,7 @@ void App::printBasicOut() {
   Printer::title("BASIC OUTPUT");
   if (basicName.length()) Printer::line(basicName);
   Printer::blank();
-  if (basicOut.length() == 0 && basicErr.length() == 0) { Printer::line("(not run yet)"); return; }
+  if (basicOut.length() == 0 && !basicErr[0]) { Printer::line("(not run yet)"); return; }
   int i = 0, n = basicOut.length(); String ln;
   while (i < n) {
     char c = basicOut[i++];
@@ -34942,7 +35543,7 @@ void App::printBasicOut() {
     else if (ln.length() < 200) ln += c;
   }
   if (ln.length()) Printer::wrap(ln);
-  if (basicErr.length()) { Printer::blank(); Printer::wrap(String("? ") + basicErr); }
+  if (basicErr[0]) { Printer::blank(); Printer::wrap(String("? ") + basicErr); }
 }
 
 
@@ -35061,6 +35662,15 @@ const char* App::prtStem(PrintReport w) {
     case PR_DXCCLIST:  return "workable_dxcc";
     case PR_VISLIST:   return "visible_passes";
     case PR_PERF:      return "performance";
+    case PR_SUNMOON:   return "sun_moon";
+    case PR_BASICREF:  return "basic_reference";
+    case PR_THERMAL:   return "orbital_thermal";
+    case PR_AO7:       return "ao7_mode_switch";
+    case PR_APRS:      return "aprs_heard";
+    case PR_MUF:       return "muf_regions";
+    case PR_SAA:       return "orbital_zones";
+    case PR_DXC:       return "dx_spots";
+    case PR_ADSB:      return "aircraft";
   }
   return "report";
 }
@@ -35131,6 +35741,15 @@ bool App::printReport(PrintReport which) {
     case PR_DXCCLIST:  printDxccList(); break;
     case PR_VISLIST:   printVisList(); break;
     case PR_PERF:      printPerf(); break;
+    case PR_SUNMOON:   printSunMoon(); break;
+    case PR_BASICREF:  printBasicRef(); break;
+    case PR_THERMAL:   printThermal(); break;
+    case PR_AO7:       printAo7(); break;
+    case PR_APRS:      printAprs(); break;
+    case PR_MUF:       printMuf(); break;
+    case PR_SAA:       printSaa(); break;
+    case PR_DXC:       printDxc(); break;
+    case PR_ADSB:      printAdsb(); break;
   }
   Printer::feedCut();
   Printer::end();
@@ -36010,7 +36629,7 @@ int App::drModelIdx(int id) const {
 bool App::drAlloc() {
   if (!drDev)   drDev   = new (std::nothrow) DrDevice[DR_MAX_DEV];
   if (!drModel) drModel = new (std::nothrow) DrModel[DR_MAX_MODEL];
-  if (!drDev || !drModel) { drFree(); drStatus = "Out of memory"; return false; }
+  if (!drDev || !drModel) { drFree(); strlcpy(drStatus, "Out of memory", sizeof(drStatus)); return false; }
   return true;
 }
 
@@ -36040,14 +36659,14 @@ void App::drPingLink() {
 void App::drQuery() {
   drLoaded = false; drDevN = 0; drModelN = 0;
   if (!drDev || !drModel) { if (!drAlloc()) return; }   // tables must exist to parse into
-  if (!rig) { drStatus = "No CAT backend"; return; }
+  if (!rig) { strlcpy(drStatus, "No CAT backend", sizeof(drStatus)); return; }
   if (cfg.catType != CAT_RIGCTL && cfg.catType != CAT_RIGCTL_GROVE) {
-    drStatus = "Set CAT type to rigctl (net/Grove)"; return;
+    strlcpy(drStatus, "Set CAT type to rigctl (net/Grove)", sizeof(drStatus)); return;
   }
   String st = rig->vendorLine("\\csdr_get");
   if (st.length() == 0 || st.indexOf("downlink") < 0) {
     drLink = 2; drLinkMs = millis();        // no reply -> red on the Settings row too
-    drStatus = "No reply from Stick"; return;
+    strlcpy(drStatus, "No reply from Stick", sizeof(drStatus)); return;
   }
   // ---- legs ----
   auto readLeg = [&](const char* key, int idx) {
@@ -36113,17 +36732,17 @@ void App::drQuery() {
   if (drModelParsed == 0) {
     drLoaded = false;
     drLink = 2; drLinkMs = millis();        // 2 = failed
-    drStatus = "No models from companion";
+    strlcpy(drStatus, "No models from companion", sizeof(drStatus));
     return;
   }
   drLoaded = true;
   drLink = 1; drLinkMs = millis();          // a successful query IS a good link
-  drStatus = String(drDevN) + " device" + (drDevN==1?"":"s") + " enumerated";
+  snprintf(drStatus, sizeof(drStatus), "%d device%s enumerated", drDevN, drDevN==1?"":"s");
 }
 
 // Push the edited config back to the Stick and save it to NVS.
 void App::drSave() {
-  if (!rig) { drStatus = "No CAT backend"; return; }
+  if (!rig) { strlcpy(drStatus, "No CAT backend", sizeof(drStatus)); return; }
   auto modelName = [&](int idx) -> String {
     int mi = drModelIdx(drModelId[idx]);
     return mi >= 0 ? String(drModel[mi].name) : String("(none)");
@@ -36149,7 +36768,8 @@ void App::drSave() {
   cmd += " ul_serial=" + encSerial(drSerial[1]);
   cmd += " save=1";
   String r = rig->vendorLine(cmd);
-  drStatus = (r.indexOf("RPRT 0") >= 0) ? "Saved to Stick" : ("Save failed: " + r);
+  if (r.indexOf("RPRT 0") >= 0) strlcpy(drStatus, "Saved to Stick", sizeof(drStatus));
+  else snprintf(drStatus, sizeof(drStatus), "Save failed: %s", r.c_str());
 }
 
 void App::drawDualRig() {
@@ -36209,7 +36829,7 @@ void App::drawDualRig() {
   // Device reference (numbered, for the 1-8 assign keys). Only what fits above the
   // status line gets drawn; the count tells the operator if more exist. When there's
   // no status message, the list may extend into that row.
-  const int listBottom = drStatus.length() ? 115 : 125;
+  const int listBottom = drStatus[0] ? 115 : 125;
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(6, y);
   if (drDevN == 0) {
@@ -36234,11 +36854,11 @@ void App::drawDualRig() {
 
   // Status line: a transient message when present, else nothing (the key hints live
   // in the footer, so this no longer competes for space). Fixed just above the footer.
-  if (drStatus.length()) {
+  if (drStatus[0]) {
     canvas.setTextColor(CL_GREEN, CL_BLACK);
     canvas.setCursor(6, 118); canvas.print(drStatus);
   }
-  footer("q qry  <>chg  1-8 dev  s save  ` bk");
+  footer("q qry <>fld 1-8 dev [] list s save ` bk");
 }
 
 void App::keyDualRig(char c, bool enter, bool back) {
@@ -36248,6 +36868,13 @@ void App::keyDualRig(char c, bool enter, bool back) {
   if (c == 's') { drSave(); lastDrawMs = 0; return; }
   if (isUp(c))   { if (drSel > 0) drSel--; lastDrawMs = 0; return; }
   if (isDown(c)) { if (drSel < 7) drSel++; lastDrawMs = 0; return; }
+  // The enumerated-device list is informational and can be longer than the rows that
+  // fit, and drawDualRig() already draws a "...more" hint when it is truncated -- but
+  // nothing advanced drScroll, so that hint pointed at devices the operator could not
+  // reach. [ ] is the same scroll convention the calculator footer uses; , and / are
+  // taken here by field cycling (they are isLeft/isRight).
+  if (c == '[') { if (drScroll > 0) --drScroll;            lastDrawMs = 0; return; }
+  if (c == ']') { if (drScroll + 1 < drDevN) ++drScroll;   lastDrawMs = 0; return; }
 
   int leg = drSel / 4, field = drSel % 4;   // H14: 4 fields per leg (model, device, civ, baud)
   // assign a device by number 1..8 to the selected leg (works on either leg field)
@@ -36255,14 +36882,14 @@ void App::keyDualRig(char c, bool enter, bool back) {
     int i = c - '1';
     if (i < drDevN) { strncpy(drSerial[leg], drDev[i].serial, sizeof(drSerial[leg]) - 1);
                       drSerial[leg][sizeof(drSerial[leg])-1]=0;
-                      drStatus = String("Assigned ") + drDev[i].product + " -> " + (leg?"UP":"DN"); }
+                      snprintf(drStatus, sizeof(drStatus), "Assigned %s -> %s", drDev[i].product, leg?"UP":"DN"); }
     lastDrawMs = 0; return;
   }
   // left/right change the selected field
   int dir = isLeft(c) ? -1 : isRight(c) ? 1 : 0;
   if (dir == 0) return;
   if (field == 0) {                       // cycle model
-    if (drModelN == 0) { drStatus = "Query first (q)"; lastDrawMs = 0; return; }
+    if (drModelN == 0) { strlcpy(drStatus, "Query first (q)", sizeof(drStatus)); lastDrawMs = 0; return; }
     int mi = drModelIdx(drModelId[leg]);
     mi = (mi < 0) ? (dir > 0 ? 0 : drModelN - 1) : (mi + dir + drModelN) % drModelN;
     drModelId[leg] = drModel[mi].id;
@@ -36331,12 +36958,47 @@ void App::catMonSendHex(const String& hex) {
 // LiPo discharge curve tracks reality better, especially in the flat 3.6-3.9 V
 // region. Voltage is clamped to a single 3.0-4.2 V cell. Falls back to the raw
 // level if voltage is unavailable.
-int App::batteryPercent() {
-  int mv = M5Cardputer.Power.getBatteryVoltage();   // mV, single cell
-  if (mv <= 0) {                                     // no voltage -> raw gauge
-    int lvl = M5Cardputer.Power.getBatteryLevel();
-    return (lvl < 0) ? -1 : (lvl > 100 ? 100 : lvl);
+// Battery terminal voltage in mV. M5Unified's public getBatteryVoltage() returns 0 on the
+// Cardputer ADV (its oneshot ADC path fails there even though getBatteryLevel() works via a
+// separate internal read), so we read the battery ADC pin directly the way bmorcelli/Launcher
+// does: GPIO10 through a 2:1 divider. Averaged over a few samples to steady the last digit.
+int App::batteryMilliVolts() {
+  const int BAT_ADC_PIN = 10;          // Cardputer / Cardputer ADV battery sense (2:1 divider)
+  long acc = 0; int n = 0;
+  for (int i = 0; i < 8; ++i) { int m = analogReadMilliVolts(BAT_ADC_PIN); if (m > 0) { acc += m; ++n; } }
+  if (!n) return 0;
+  return (int)(acc / n) * 2;           // undo the divider
+}
+
+// Infer charge state from the voltage trend, because the ADV exposes no charger-status line
+// that M5Unified can read (its isCharging() has no pmic_adc case and returns a fixed value).
+// A slow EMA reference is compared to the live reading every ~30 s: a clear rise latches
+// "charging", a clear fall latches "discharging"; small changes hold the last verdict so the
+// readout doesn't flicker on ADC noise.
+bool App::batteryCharging() {
+  int mv = batteryMilliVolts();
+  if (mv <= 0) return battChargeState == 1;
+  uint32_t now = millis();
+  if (battTrendMv == 0) { battTrendMv = mv; battTrendMs = now; return false; }
+  if (now - battTrendMs >= 30000) {                  // evaluate every 30 s
+    int delta = mv - battTrendMv;
+    if (delta >  20) battChargeState = 1;            // rising >20 mV/30s -> charging
+    else if (delta < -20) battChargeState = 0;       // falling -> on battery
+    // small |delta|: hold the previous latched state
+    battTrendMv += delta / 4;                        // ease the reference toward the reading
+    battTrendMs = now;
   }
+  return battChargeState == 1;
+}
+
+int App::batteryPercent() {
+  // Prefer M5Unified's getBatteryLevel(): on the ADV this uses a working internal ADC read
+  // (the same value the About screen shows, which is accurate), whereas getBatteryVoltage()
+  // returns 0. Fall back to our own GPIO10 voltage + LiPo curve only if the level is n/a.
+  int lvl = M5.Power.getBatteryLevel();
+  if (lvl >= 0) return lvl > 100 ? 100 : lvl;
+  int mv = batteryMilliVolts();
+  if (mv <= 0) return -1;
   // Piecewise LiPo curve (open-circuit-ish), monotonic, 3.30 V=0% .. 4.20 V=100%.
   static const struct { int mv; int pct; } C[] = {
     {4200,100},{4150,95},{4110,90},{4080,85},{4020,80},{3980,75},{3950,70},
@@ -36366,6 +37028,11 @@ int App::batteryPercent() {
 // blank the backlight, and mark the screen asleep. We deliberately do NOT enter
 // deep sleep so any key wakes instantly and WiFi can stay up for a heap reset.
 void App::enterChargeMode() {
+  // Capture whether WiFi is up BEFORE anything below tears it down. This must be the first
+  // thing we do: the WiFi.disconnect(true)+WIFI_OFF further down would make a later
+  // net.connected() read false, so the exit path would never know to reconnect (the bug
+  // that kept WiFi from coming back after charge mode).
+  chargeWifiWasUp = net.connected();
   // Actual ownership, not just tracking flags: Manual Control engages a rotator with all
   // flags clear (see stopAllControl). rot!=null && ready() catches that case.
   bool rotWasEngaged = rotOut || smOut || emeRotOut || gcRotOut || (rot && rot->ready());
@@ -36373,32 +37040,74 @@ void App::enterChargeMode() {
   smOut = false; emeRotOut = false; gcRotOut = false;
   if (rotWasEngaged) parkAndReleaseRotator();        // park + free the USB rotator host
   chargeWoke = false; chargeWokeMs = 0;
-  M5Cardputer.Display.setBrightness(0);
+  chargeNeedWake = false;
+  // Real panel sleep for the power saving: Display.sleep() drops the backlight to 0 and THEN
+  // issues SLPIN (M5GFX order), so the panel goes dark before it powers down -- no visible
+  // transition on the way into sleep. The FLASH was only ever on the way OUT: M5GFX's
+  // wakeup() does SLPOUT and then restores brightness, lighting up stale panel RAM for a
+  // frame before fresh content lands. drawCharge()'s wake sequence below sleep-outs and
+  // redraws with the backlight held at 0, raising it only after the new frame is pushed, so
+  // the re-init is never seen. That gives full SLPIN power-down AND a smooth wake.
+  M5Cardputer.Display.sleep();                       // backlight 0 then SLPIN (panel powers down)
   screenAsleep = true;
   // Minimal-power park: this screen only needs to wake on a keypress and show the
   // charge state, so shut down the big consumers. The WiFi radio is the largest
   // draw -- turn it fully off (not just disconnect) -- and drop the CPU clock right
   // down. A keypress still wakes instantly (the keyboard is polled by
-  // M5Cardputer.update(), which is unaffected). Both are restored on exit.
+  // M5Cardputer.update(), which is unaffected). All of this is restored on exit.
   WiFi.disconnect(true);                             // drop association + power down the PHY
   WiFi.mode(WIFI_OFF);
-  setCpuFrequencyMhz(80);                            // 240 -> 80 MHz (~3x less core power)
+  // 80 MHz matches Launcher's charge-mode clock on this same hardware. An earlier
+  // revision used 40 MHz for a little more saving, but 80 MHz is the value proven on
+  // the Cardputer and leaves the peripheral clocks in a well-tested state (Launcher
+  // has previously had to fix "random restarts when dimming screen", so the
+  // conservative, known-good clock is worth more here than the last few mA).
+  // keyCharge() restores 240 MHz BEFORE WiFi comes back.
+  setCpuFrequencyMhz(80);                            // 240 -> 80 MHz core
+  // Quiet the other always-on consumers while parked-dark. Each is independently
+  // gated and restored on exit; tracking is already stopped so none is in use.
+  if (imuReady) M5.Imu.sleep();                      // suspend the BMI270 accelerometer
+  // Speaker down THROUGH the on-demand audio bookkeeping, not around it. Ending the
+  // speaker while leaving audioUp true would desync the ownership flag: audioAcquire()
+  // would later see audioUp and skip its begin(), handing out a speaker that is not
+  // running. Match setup()'s baseline exactly.
+  if (M5Cardputer.Speaker.isEnabled()) M5Cardputer.Speaker.end();  // release the I2S speaker
+  audioUp = false; audioReleaseAt = 0;
+  // (chargeWifiWasUp was captured at the top, before the WiFi teardown above -- capturing
+  // it here would read false because the radio is already off.)
   lastDrawMs = 0;
 }
 
 void App::drawCharge() {
-  // When asleep, keep the panel dark and cheap: clear to black, no backlight.
-  if (screenAsleep && !chargeWoke) {
-    canvas.fillSprite(CL_BLACK);
-    canvas.pushSprite(0, 0);
-    return;
-  }
-  // Woken (or first entry): show battery status, then auto-blank after ~5 s.
-  canvas.fillSprite(CL_BLACK);
-  bool charging = M5Cardputer.Power.isCharging();
+  // Panel asleep: do NOTHING. The old code cleared and pushed a full 240x135 sprite on
+  // every draw while dark -- a ~64 KB SPI burst to a panel nobody can see, which both
+  // wasted power and was half the visible flicker. There is nothing to show, so don't
+  // touch the bus at all.
+  if (screenAsleep && !chargeWoke) return;
+  // Woken (or first entry): show battery status. The loop auto-blanks this window
+  // after 10 s to return to the dark idle.
+  bool charging = batteryCharging();     // inferred from voltage trend (ADV has no charger line)
   int  pct = batteryPercent();
-  int  mv  = M5Cardputer.Power.getBatteryVoltage();
+  int  mv  = batteryMilliVolts();        // GPIO10 direct; M5's getBatteryVoltage() reads 0 on ADV
 
+  // Bucket the percentage to 2% so the on-screen number is steady despite ADC jitter (the
+  // ADV's getBatteryLevel() wobbles +/-1%). We repaint every tick regardless -- draw() clears
+  // and pushes the canvas each second no matter what, so NOT painting here just yields a blank
+  // frame (the "shows for 1 s then blanks" bug); painting fresh content every tick is atomic
+  // and flicker-free.
+  int shown = (pct < 0) ? -1 : (pct / 2) * 2;
+
+  // Smooth wake: sleep the panel OUT while the backlight is still off, so its re-init and any
+  // stale GRAM are invisible. Setting brightness to 0 first makes M5GFX wakeup()'s internal
+  // setBrightness(_brightness) restore to 0 (a no-op) rather than lighting up the old frame --
+  // which was the flash. The backlight is raised at the very end, after the new frame is in.
+  if (chargeNeedWake) {
+    M5Cardputer.Display.setBrightness(0);            // _brightness := 0 so wakeup() stays dark
+    M5Cardputer.Display.wakeup();                    // SLPOUT (panel awake, still dark)
+    screenAsleep = false;                            // panel is genuinely lit for the window now
+  }
+
+  canvas.fillSprite(CL_BLACK);
   canvas.setTextColor(CL_CYAN, CL_BLACK);
   canvas.setTextSize(1);
   canvas.setCursor(6, 6); canvas.print("Charge / Sleep");
@@ -36407,13 +37116,13 @@ void App::drawCharge() {
   const int bx = 70, by = 40, bw = 100, bh = 44;
   canvas.drawRect(bx, by, bw, bh, CL_WHITE);
   canvas.fillRect(bx + bw, by + 14, 5, bh - 28, CL_WHITE);   // terminal nub
-  int fill = (pct < 0) ? 0 : (pct * (bw - 4)) / 100;
-  uint16_t col = charging ? CL_GREEN : (pct > 50 ? CL_GREEN : (pct > 20 ? CL_YELLOW : CL_RED));
+  int fill = (shown < 0) ? 0 : (shown * (bw - 4)) / 100;
+  uint16_t col = charging ? CL_GREEN : (shown > 50 ? CL_GREEN : (shown > 20 ? CL_YELLOW : CL_RED));
   if (fill > 0) canvas.fillRect(bx + 2, by + 2, fill, bh - 4, col);
 
   canvas.setTextColor(CL_WHITE, CL_BLACK);
   canvas.setTextSize(2);
-  String p = (pct < 0) ? String("--") : String(pct);
+  String p = (shown < 0) ? String("--") : String(shown);
   canvas.setCursor(120 - (int)(p.length() + 1) * 6, by + bh / 2 - 7);
   canvas.print(p); canvas.print("%");
 
@@ -36428,20 +37137,40 @@ void App::drawCharge() {
   canvas.setCursor(6, 112); canvas.print("ENT redraw");
   canvas.setCursor(6, 122); canvas.print("ESC exit to menu");
   canvas.pushSprite(0, 0);
+  // Backlight up LAST, once the fresh frame is in GRAM -- this is the moment the panel becomes
+  // visible, and it shows the new content directly with no intervening stale frame.
+  if (chargeNeedWake) { M5Cardputer.Display.setBrightness(cfg.bright); chargeNeedWake = false; }
 }
 
 void App::keyCharge(char c, bool enter, bool back) {
   // ESC/back always exits to the home menu and restores the backlight.
   if (isBack(c, back)) {
-    setCpuFrequencyMhz(240);                         // restore full clock
-    connectWifiCfg();                                // bring WiFi back up (was powered off)
-    M5Cardputer.Display.setBrightness(cfg.bright);
-    screenAsleep = false; chargeWoke = false;
+    setCpuFrequencyMhz(240);                         // restore full clock (before WiFi)
+    if (imuReady) M5.Imu.begin();                    // wake the accelerometer back up
+    // Deliberately NOT Speaker.begin(). Audio is on-demand on this build: setup() ends
+    // the speaker to establish an off baseline, because its ~8 KB of I2S/DMA buffers sit
+    // in the contiguous block TLS handshakes need. Re-arming it here did three wrong
+    // things at once -- it resident-ed 8 KB nothing had asked for, it bypassed
+    // audioAcquire()'s USB-CAT/largest-free-block refusal, and it left audioUp FALSE
+    // while the speaker was really up, so the release path would never take it back
+    // down. audioAcquire() brings it up when an alarm, game or memo actually needs it.
+    // Full radio re-init, NOT a bare connect(): the charge screen powered the PHY down
+    // with WIFI_OFF, and reconnecting without the OFF->STA->begin cycle (with its settle
+    // delay) can reassociate yet leave the stack degraded -- hardResetWifi() is the tree's
+    // proven recovery for exactly this "PHY was powered down by the charge screen" case.
+    if (chargeWifiWasUp) net.hardResetWifi();          // only if it was up before we parked
+    screenAsleep = false; chargeWoke = false; chargeNeedWake = false;
     homeSel = 17; screen = SCR_HOME; lastDrawMs = 0;
+    M5Cardputer.Display.setBrightness(0);            // keep dark so wakeup()'s restore is a no-op
+    M5Cardputer.Display.wakeup();                    // SLPOUT (panel awake, still dark)
+    draw();                                          // stage the home screen into GRAM while dark
+    M5Cardputer.Display.setBrightness(cfg.bright);   // reveal it -- no stale frame
     return;
   }
-  // Any other key wakes the screen to show status for a few seconds.
-  M5Cardputer.Display.setBrightness(cfg.bright);
+  // Any other key wakes the screen to show status for a few seconds. The actual panel
+  // wake happens at the END of the next drawCharge(), once content is staged -- see
+  // chargeNeedWake -- so the display never lights up on a black frame.
+  chargeNeedWake = true;
   chargeWoke = true; chargeWokeMs = millis();
   lastDrawMs = 0;
 }
@@ -37321,6 +38050,7 @@ void App::keyOrbit(char c, bool enter, bool back) {
   if (isRight(c)) { if (++orbitPage > 10) orbitPage = 0; lastDrawMs = 0; return; }
   if (isLeft(c))  { if (--orbitPage < 0) orbitPage = 10; lastDrawMs = 0; return; }
   if (c == 'r')   { buildOrbit(); lastDrawMs = 0; return; }
+  if (c == 'z')   { saaComputed = false; saaScroll = 0; screen = SCR_SAA; lastDrawMs = 0; return; }  // orbital-zones transits
   if (c == 'f' && orbitPage == 4) {                   // edit Doppler-page beacon freq
     editTarget = 210; editTitle = "Beacon freq (MHz)";
     editBuf = String(cfg.beaconMHz, 3); screen = SCR_EDIT; lastDrawMs = 0; return;
@@ -37681,7 +38411,53 @@ void App::drawSunMoon() {
                   : (elv[smSel] <= 0 ? (smSel ? "MOON set (parked)" : "SUN set (parked)")
                                      : (smSel ? "tracking MOON" : "tracking SUN"));
   canvas.printf("Rotator: %s", rs);
-  footer(";/. pick g o rot s sky t x stop  ` bk");
+  footer(";/. pick g o rot s sky t x p prt  ` bk");
+}
+
+void App::printSunMoon() {
+  Printer::title("SUN / MOON");
+  Observer o = loc.obs();
+  if (!o.valid)     { Printer::line("Set your location first."); return; }
+  if (!timeIsSet()) { Printer::line("Clock not set (NTP/GPS)."); return; }
+  time_t now = nowUtc();
+  Printer::line("Station " + Location::toGrid(o.lat, o.lon));
+  Printer::line("At " + fmtMDHM(now) + " UTC");
+  Printer::blank();
+
+  // Forward rise/set search on skyObjAzEl(): step 5 min out to 48 h and catch the
+  // first horizon crossing each way. Same propagation the live screen samples, so
+  // the printed figures agree with what's on the display.
+  auto riseSet = [&](bool moon, time_t& rise, time_t& set) {
+    rise = 0; set = 0;
+    double a0, e0; skyObjAzEl(now, o.lat, o.lon, moon, a0, e0);
+    bool prevUp = e0 > 0; double pa, pe;
+    const time_t STEP = 300, END = now + (time_t)48 * 3600;
+    for (time_t t = now + STEP; t <= END; t += STEP) {
+      skyObjAzEl(t, o.lat, o.lon, moon, pa, pe);
+      bool up = pe > 0;
+      if (up && !prevUp && !rise) rise = t;      // crossed upward
+      if (!up && prevUp && !set)  set  = t;      // crossed downward
+      prevUp = up;
+      if (rise && set) break;
+    }
+  };
+
+  static const char* nm[2] = { "SUN", "MOON" };
+  for (int i = 0; i < 2; ++i) {
+    bool moon = (i == 1);
+    double az, el; skyObjAzEl(now, o.lat, o.lon, moon, az, el);
+    Printer::line(nm[i]);
+    char v[24];
+    snprintf(v, sizeof(v), "%.1f deg", az);  Printer::kv("  Azimuth", v);
+    snprintf(v, sizeof(v), "%.1f deg", el);  Printer::kv("  Elevation", v);
+    Printer::kv("  Status", el > 0 ? "above horizon" : "below horizon");
+    time_t rise, set; riseSet(moon, rise, set);
+    Printer::kv("  Next rise", rise ? (fmtMDHM(rise) + "Z") : String("none in 48h"));
+    Printer::kv("  Next set",  set  ? (fmtMDHM(set)  + "Z") : String("none in 48h"));
+    if (i == 0) Printer::blank();
+  }
+  Printer::blank();
+  Printer::line("Az/el topocentric. Times UTC.");
 }
 
 void App::keySunMoon(char c, bool enter, bool back) {
@@ -37691,6 +38467,7 @@ void App::keySunMoon(char c, bool enter, bool back) {
     smOut = false; screen = SCR_HOME; lastDrawMs = 0; return;
   }
   if (isUp(c) || isDown(c)) { smSel ^= 1; lastAzCmd = lastElCmd = -999.0f; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_SUNMOON); return; }
   if (c == 'g') { smGraphic = !smGraphic; lastDrawMs = 0; return; }
   if (c == 'o') {
     if (!ensureRotatorReady()) { setStatus(rotNotReadyMsg()); return; }
@@ -40188,6 +40965,8 @@ static const char* const TOOLS_NAMES[] = {
   "Rain fade (microwave)",
   "Terrestrial path budget",
   "Terrain path profile",
+  "Orbital thermal (cubesat)",
+  "AO-7 mode switch",
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
@@ -40200,8 +40979,8 @@ static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 // tools to TOOLS_NAMES as always, then slot the new id into the right band here; the
 // static_assert keeps the two tables the same length (a missing or duplicate id
 // would scramble the menu, so the release checklist includes eyeballing this list).
-static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,15,16,17,18,19,54,55,58,56,57,59,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14 };
-static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 60, "TOOLS_ORDER size");
+static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,15,16,17,18,19,54,55,58,56,57,59,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14,60,61 };
+static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 62, "TOOLS_ORDER size");
 
 // ---- Tool categories (0.9.61): a two-level Tools menu. TOOLS_ORDER above is kept as
 // the canonical 60-tool coverage guard; the categories below are the DISPLAY grouping.
@@ -40217,7 +40996,7 @@ static const char* const TOOLS_CAT_NAMES[] = {
   "Electronics & references",
 };
 static const uint8_t TOOLS_CAT_C0[] = { 0,1,2,3,28,4 };
-static const uint8_t TOOLS_CAT_C1[] = { 15,16,17,18,19,40,31,32,49,50,51,6,7 };
+static const uint8_t TOOLS_CAT_C1[] = { 15,16,17,18,19,40,31,32,49,50,51,6,7,60,61 };
 static const uint8_t TOOLS_CAT_C2[] = { 5,54,55,58,56,57,59,27,45 };
 static const uint8_t TOOLS_CAT_C3[] = { 21,22,23,24,43,44,33,20,47,48 };
 static const uint8_t TOOLS_CAT_C4[] = { 25,26,34,36,35,41,42,46,29,53 };
@@ -40233,7 +41012,7 @@ static_assert(sizeof(TOOLS_CAT_NAMES) / sizeof(TOOLS_CAT_NAMES[0]) == 6, "cat na
 // Coverage: the six category lengths must sum to the full tool count.
 static_assert(sizeof(TOOLS_CAT_C0) + sizeof(TOOLS_CAT_C1) + sizeof(TOOLS_CAT_C2)
             + sizeof(TOOLS_CAT_C3) + sizeof(TOOLS_CAT_C4) + sizeof(TOOLS_CAT_C5)
-            == 60, "tool categories must cover all 60 tools exactly once");
+            == 62, "tool categories must cover all 62 tools exactly once");
 
 // The first twenty Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
@@ -40249,7 +41028,11 @@ static const int TOOLS_FIRST_FORM = 20;
 // standalone ones) must exactly match the size of the form enum (TOOL_COAX..TOOL__N).
 // If a tool is added to TOOLS_NAMES without updating the enum (or vice versa), or the
 // standalone/form split moves, this fails the build instead of mis-indexing at runtime.
-static_assert(TOOLS_N - TOOLS_FIRST_FORM == TOOL__N,
+// The forms occupy canonical ids TOOLS_FIRST_FORM..(TOOLS_FIRST_FORM+TOOL__N-1). Two
+// trailing standalone tools (orbital thermal id 60, AO-7 mode switch id 61) are appended
+// AFTER the forms and dispatched by explicit id checks before the form fallthrough, so
+// they are not forms: the form block is [FIRST_FORM, TOOLS_N-2), hence the +2 here.
+static_assert(TOOLS_N - TOOLS_FIRST_FORM == TOOL__N + 2,
               "TOOLS_FIRST_FORM / TOOLS_NAMES / TOOL_* enum are out of step");
 
 // Two-level Tools menu. toolsCat == -1 -> the category list; otherwise the tools inside
@@ -40363,6 +41146,13 @@ void App::keyTools(char c, bool enter, bool back) {
       lcSel = 0; lcEdit = false; screen = SCR_LNKCRV;
     } else if (toolsSelC == 19) {               // debris group screen
       dgState = 0; dgScroll = 0; screen = SCR_DEBGRP;
+    } else if (toolsSelC == 60) {               // orbital thermal (cubesat)
+      thSel = 0; thEdit = false; screen = SCR_THERMAL;
+    } else if (toolsSelC == 61) {               // AO-7 mode-switch estimator
+      ao7Idx = db.indexOfNorad(7530);           // resolve AO-7 (NORAD 7530); -1 if absent
+      ao7Phase = 0; ao7Note = "";
+      ao7CheckSunlight();                        // prime the sunlight verdict for the screen
+      screen = SCR_AO7;
     } else {                                   // one of the live-recalc forms
       toolFormInit(toolsSelC - TOOLS_FIRST_FORM);   // form id = CANONICAL index - standalone count (display order differs)
       screen = SCR_TOOLFORM;
@@ -40382,6 +41172,9 @@ void App::keyTools(char c, bool enter, bool back) {
 // ===========================================================================
 
 // Apogee/perigee altitude (km) from mean motion + eccentricity.
+static inline double clampd(double v, double lo, double hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
 static void satBandKm(const SatEntry& s, double& peri, double& apo) {
   const double MU = 398600.4418, RE = 6378.137;
   double nr = s.meanMotion * 6.283185307179586 / 86400.0;
@@ -40638,11 +41431,13 @@ void App::printConj() {
   if (conjN == 0) Printer::line("No approach < 800 km in 6 h.");
   for (int i = 0; i < conjN; ++i) {
     struct tm tv; time_t tt = conjT[i]; gmtime_r(&tt, &tv);
-    char b[64];
-    snprintf(b, sizeof(b), "%02d:%02d:%02dz  miss %.1f km  rel %.2f km/s",
-             tv.tm_hour, tv.tm_min, tv.tm_sec,
-             (double)conjMiss[i], (double)conjRvel[i]);
-    Printer::line(b);
+    // time / miss distance / relative speed: joined wide, stacked narrow.
+    char tm_[16], miss[24], rel[24];
+    snprintf(tm_,  sizeof(tm_),  "%02d:%02d:%02dz", tv.tm_hour, tv.tm_min, tv.tm_sec);
+    snprintf(miss, sizeof(miss), "miss %.1f km", (double)conjMiss[i]);
+    snprintf(rel,  sizeof(rel),  "rel %.2f km/s", (double)conjRvel[i]);
+    String fields[3] = { String(tm_), String(miss), String(rel) };
+    Printer::colrow(fields, 3);
   }
   Printer::line("");
   Printer::line("Public GP elements: awareness only,");
@@ -40655,26 +41450,38 @@ void App::printNeigh() {
   double pA, aA; satBandKm(*A, pA, aA);
   Printer::title("Orbital neighborhood");
   char b[72];
-  snprintf(b, sizeof(b), "%.14s  band %.0f-%.0f km  i%.1f",
-           A->name, pA, aA, (double)A->incl);
-  Printer::line(b);
+  snprintf(b, sizeof(b), "band %.0f-%.0f km  i%.1f", pA, aA, (double)A->incl);
+  Printer::kv(String(A->name).substring(0, 14), String(b));
   Printer::line("");
   for (int i = 0; i < neighN; ++i) {
     SatEntry& B = db.at(neighIdx[i]);
     double pB, aB; satBandKm(B, pB, aB);
     double gap = (pB > aA) ? (pB - aA) : ((pA > aB) ? (pA - aB) : 0.0);
-    snprintf(b, sizeof(b), "%-14.14s %5.0f-%-5.0f i%5.1f  %s%.0fkm",
-             B.name, pB, aB, (double)B.incl, gap > 0 ? "gap " : "OVLP ", gap);
-    Printer::line(b);
+    // Columns: name / band / inclination / gap-or-overlap. colrow() joins them on
+    // wide paper and stacks them (indented) on a 58 mm receipt so nothing shears.
+    char band[24], inc[12], gp[20];
+    snprintf(band, sizeof(band), "%.0f-%.0f km", pB, aB);
+    snprintf(inc,  sizeof(inc),  "i%5.1f", (double)B.incl);
+    snprintf(gp,   sizeof(gp),   "%s%.0fkm", gap > 0 ? "gap " : "OVLP ", gap);
+    String fields[4] = { String(B.name).substring(0, 14), String(band),
+                         String(inc), String(gp) };
+    Printer::colrow(fields, 4);
   }
 }
 
 void App::printLnkCrv() {
   Printer::title("Link margin vs elevation");
   char b[64];
-  snprintf(b, sizeof(b), "Alt %.0f km  %.1f MHz  margin@0deg %.1f dB",
-           lcAlt, lcF, lcM0);
-  Printer::line(b);
+  // Three facts (altitude / frequency / margin at horizon) join on wide paper and
+  // stack on a 58 mm receipt rather than wrapping mid-number.
+  {
+    char alt[20], frq[20], mg[24];
+    snprintf(alt, sizeof(alt), "Alt %.0f km", lcAlt);
+    snprintf(frq, sizeof(frq), "%.1f MHz", lcF);
+    snprintf(mg,  sizeof(mg),  "margin@0deg %.1f dB", lcM0);
+    String hf[3] = { String(alt), String(frq), String(mg) };
+    Printer::colrow(hf, 3);
+  }
   Printer::line("");
   // Margin vs elevation: M(el) = M0 + 20*log10(range(0)/range(el)) -- the same
   // slant-range model drawLnkCrv plots.
@@ -41342,7 +42149,7 @@ void App::drawKessler() {
   }
 
   if (K.phase == 3) {                                  // explosion rings
-    uint32_t left = (K.animUntil > millis()) ? (K.animUntil - millis()) : 0;
+    uint32_t left = !timeReached(millis(), K.animUntil) ? (K.animUntil - millis()) : 0;
     int r = (K.impKind ? 12 : 6) - (int)(left / (K.impKind ? 140 : 90));
     if (r > 0) {
       canvas.drawCircle(K.impX, K.impY, r, CL_RED);
@@ -41460,6 +42267,2001 @@ void App::keyLnkCrv(char c, bool enter, bool back) {
   }
   (void)enter;
 }
+// ===========================================================================
+//  Orbital thermal analysis (SCR_THERMAL) -- single-node lumped-parameter model
+// ===========================================================================
+// First-order educational cubesat thermal model. A single isothermal node balances
+// absorbed solar + albedo + Earth-IR + internal power against radiative cooling to
+// space, around one orbit. The orbital environment (beta angle, eclipse fraction) is
+// analytic -- beta from inclination/RAAN/epoch via Predictor::betaAngleDeg(), eclipse
+// fraction from the cylindrical-shadow geometry (eclipsed when |beta| < betaStar,
+// betaStar = acos(RE/(RE+h))) -- so no propagation is needed and a custom orbit with no
+// catalogue entry works exactly like a real one. Orbit inputs default from the active
+// satellite; every input is user-editable. NOT a flight thermal analysis; clearly
+// labelled first-order in the UI and on the printout.
+void App::computeThermal() {
+  thValid = false;
+  const double RE = 6378.137;                 // km
+  const double SIGMA = 5.670374419e-8;        // Stefan-Boltzmann W/m^2/K^4
+  const double S0 = 1361.0;                   // solar constant W/m^2
+  const double ALB = 0.30;                    // Earth albedo (bond)
+  const double EIR = 237.0;                   // Earth IR emission W/m^2
+  const double CP = 900.0;                    // J/kg/K, aluminium-dominated bus
+
+  double h = thAlt; if (h < 100) h = 100;     // km, guard
+  double m = thMass; if (m <= 0) m = 0.1;
+  double a = clampd(thAlpha, 0.05, 1.0);
+  double e = clampd(thEps, 0.05, 1.0);
+  double P = thPwr; if (P < 0) P = 0;
+
+  // Areas from the U form factor. A U is 0.1 x 0.1 x 0.1 m; a stack of N U's is
+  // 0.1 x 0.1 x (0.1*N). Total external area and a representative projected area.
+  int U = thU; if (U < 1) U = 1;
+  double side = 0.1;                          // m
+  double lenZ = 0.1 * U;                      // m (long axis)
+  double aEnd = side * side;                  // 0.01 m^2 end face
+  double aLong = side * lenZ;                 // long face
+  double aTot = 2.0 * aEnd + 4.0 * aLong;     // total radiating area m^2
+  // Projected area facing the Sun: sun-pointing uses the largest single face; tumbling
+  // uses the convex-body average projected area = aTot/4.
+  double aSun = (thAtt == 1) ? fmax(aEnd, aLong) : aTot / 4.0;
+  double aEarth = aTot / 4.0;                 // area seeing Earth (avg), similar footing
+
+  // Earth view factor from altitude (fraction of the hemisphere Earth subtends).
+  double Re_r = RE / (RE + h);
+  double Fearth = Re_r * Re_r;                // ~ (RE/(RE+h))^2, nadir view factor
+
+  // Beta angle + eclipse fraction (analytic cylindrical shadow).
+  time_t now = timeIsSet() ? nowUtc() : 1700000000;   // epoch drives Sun position
+  thBeta = pred.betaAngleDeg(now, thIncl, thRaan);
+  double betaStar = acos(clampd(Re_r, -1.0, 1.0)) * 57.2957795;   // deg
+  double fe;
+  if (fabs(thBeta) >= betaStar) fe = 0.0;     // continuous sunlight: no eclipse
+  else {
+    // fraction of the orbit in shadow for a circular orbit at this beta:
+    double cb = cos(thBeta * 0.01745329252);
+    double arg = 0.0;
+    if (cb > 1e-6) {
+      double num = sqrt(fmax(0.0, 1.0 - Re_r * Re_r)) / cb;   // = sqrt(h(2RE+h))/(RE+h)/cos b
+      arg = clampd(num, -1.0, 1.0);
+    }
+    fe = acos(arg) / 3.141592653589793;       // fraction (0..~0.4)
+  }
+  thEclFrac = fe;
+
+  // Equilibrium node temperature for a given "sunlit" flag (1 in sun, 0 in eclipse):
+  //   e*sigma*aTot*T^4 = a*S0*aSun*sun + a*ALB*S0*aEarth*Fearth*sun + e*EIR*aEarth*Fearth + P
+  auto Teq = [&](double sun) -> double {
+    double Qin = a * S0 * aSun * sun
+               + a * ALB * S0 * aEarth * Fearth * sun
+               + e * EIR * aEarth * Fearth
+               + P;
+    double denom = e * SIGMA * aTot;
+    if (denom <= 0) return 0;
+    return pow(Qin / denom, 0.25);            // K
+  };
+
+  double Tsun = Teq(1.0);                      // full-sun equilibrium
+  double Tecl = Teq(0.0);                      // eclipse equilibrium
+  thTsun = Tsun - 273.15;
+  thTecl = Tecl - 273.15;
+
+  // Transient min/max: integrate the node over one orbit with the duty cycle set by
+  // fe, starting from the sunlit equilibrium, to capture the real (damped) swing rather
+  // than the two asymptotes. Period from altitude (circular): P = 2pi*sqrt(a^3/mu).
+  const double MU = 398600.4418;
+  double aKm = RE + h;
+  double periodS = 2.0 * 3.141592653589793 * sqrt(aKm * aKm * aKm / MU);
+  double C = m * CP;                          // J/K
+  double eclStart = periodS * (1.0 - fe);     // sunlit portion first, then eclipse
+  double T = Tsun;                             // start hot
+  double tmin = T, tmax = T;
+  // two orbits to settle onto the periodic cycle; small fixed step
+  int NST = 240;
+  double dt = periodS / NST;
+  for (int orbit = 0; orbit < 2; ++orbit) {
+    double tt = 0;
+    for (int k = 0; k < NST; ++k, tt += dt) {
+      double sun = (tt < eclStart) ? 1.0 : 0.0;
+      double Qin = a * S0 * aSun * sun
+                 + a * ALB * S0 * aEarth * Fearth * sun
+                 + e * EIR * aEarth * Fearth + P;
+      double Qout = e * SIGMA * aTot * T * T * T * T;
+      T += (Qin - Qout) / C * dt;
+      if (T < 3) T = 3;                        // deep-space floor guard
+      if (orbit == 1) { if (T < tmin) tmin = T; if (T > tmax) tmax = T; }
+    }
+  }
+  thTmin = tmin - 273.15;
+  thTmax = tmax - 273.15;
+  thTmean = 0.5 * (thTmin + thTmax);
+  thValid = true;
+}
+
+void App::drawThermal() {
+  header("Orbital thermal (cubesat)");
+  canvas.setTextSize(1);
+  computeThermal();
+
+  static const char* U_S[] = { "1U", "2U", "3U", "6U" };
+  int uIdx = (thU == 6) ? 3 : (thU == 3 ? 2 : (thU == 2 ? 1 : 0));
+
+  // Left column: editable inputs. Right column: results.
+  const int X = 6; int y = 22; const int LH = 10;
+  auto row = [&](int idx, const char* label, const String& val) {
+    bool sel = (thSel == idx);
+    canvas.setTextColor(sel ? CL_BLACK : CL_MGREY, sel ? CL_CYAN : CL_BLACK);
+    canvas.setCursor(X, y); canvas.printf("%-9s", label);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_CYAN : CL_BLACK);
+    if (thEdit && sel) canvas.print(thBuf + "_"); else canvas.print(val);
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    y += LH;
+  };
+  auto n2 = [](double v, int dp){ char b[20]; snprintf(b, sizeof(b), "%.*f", dp, v); return String(b); };
+  row(0, "Alt km",  n2(thAlt, 0));
+  row(1, "Incl",    n2(thIncl, 1));
+  row(2, "RAAN",    n2(thRaan, 1));
+  row(3, "Mass kg", n2(thMass, 2));
+  row(4, "alpha",   n2(thAlpha, 2));
+  row(5, "epsilon", n2(thEps, 2));
+  row(6, "Pwr W",   n2(thPwr, 1));
+  row(7, "Size",    String(U_S[uIdx]));
+  row(8, "Attitude", thAtt == 1 ? String("sun-point") : String("tumbling"));
+
+  // Results column (right).
+  int rx = 150, ry = 22;
+  canvas.setTextColor(CL_ORANGE, CL_BLACK); canvas.setCursor(rx, ry); canvas.print("RESULTS"); ry += LH;
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  if (thValid) {
+    canvas.setCursor(rx, ry); canvas.printf("hot  %+.0fC", thTmax); ry += LH;
+    canvas.setCursor(rx, ry); canvas.printf("cold %+.0fC", thTmin); ry += LH;
+    canvas.setCursor(rx, ry); canvas.printf("mean %+.0fC", thTmean); ry += LH;
+    canvas.setCursor(rx, ry); canvas.printf("swing %.0fC", thTmax - thTmin); ry += LH;
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    canvas.setCursor(rx, ry); canvas.printf("beta %+.0f", thBeta); ry += LH;
+    canvas.setCursor(rx, ry);
+    if (thEclFrac <= 0) canvas.print("full sun!"); else canvas.printf("ecl %.0f%%", thEclFrac * 100);
+    ry += LH;
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(rx, ry); canvas.print("first-order"); ry += LH;
+    canvas.setCursor(rx, ry); canvas.print("estimate");
+  }
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  footer(";/. row  edit#  x sat  p prt  ` bk");
+}
+
+void App::keyThermal(char c, bool enter, bool back) {
+  const int NROWS = 9;
+  if (thEdit) {
+    if ((c >= '0' && c <= '9') || c == '.' || c == '-') { thBuf += c; lastDrawMs = 0; return; }
+    if (isBack(c, back)) { thEdit = false; thBuf = ""; lastDrawMs = 0; return; }
+    if (enter) {
+      double v = thBuf.toFloat();
+      switch (thSel) {
+        case 0: if (v >= 100 && v <= 40000) thAlt = v; break;
+        case 1: if (v >= 0 && v <= 180) thIncl = v; break;
+        case 2: thRaan = fmod(v, 360.0); if (thRaan < 0) thRaan += 360.0; break;
+        case 3: if (v > 0) thMass = v; break;
+        case 4: if (v > 0 && v <= 1.0) thAlpha = v; break;
+        case 5: if (v > 0 && v <= 1.0) thEps = v; break;
+        case 6: if (v >= 0) thPwr = v; break;
+      }
+      thEdit = false; thBuf = ""; lastDrawMs = 0; return;
+    }
+    return;
+  }
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_THERMAL); return; }
+  if (isUp(c))   { thSel = (thSel + NROWS - 1) % NROWS; lastDrawMs = 0; return; }
+  if (isDown(c)) { thSel = (thSel + 1) % NROWS; lastDrawMs = 0; return; }
+  // Size + attitude rows cycle on enter rather than numeric edit.
+  if (enter && thSel == 7) { int u[4] = {1,2,3,6}; int i = (thU==6?3:(thU==3?2:(thU==2?1:0))); thU = u[(i+1)%4]; lastDrawMs = 0; return; }
+  if (enter && thSel == 8) { thAtt = !thAtt; lastDrawMs = 0; return; }
+  // 'x': load orbit fields from the active satellite.
+  if (c == 'x') {
+    SatEntry* A = activeSat();
+    if (A && A->meanMotion > 0) {
+      double p, ap; satBandKm(*A, p, ap);
+      thAlt = 0.5 * (p + ap); thIncl = A->incl; thRaan = A->raan;
+    }
+    lastDrawMs = 0; return;
+  }
+  if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
+    if (thSel <= 6) { thEdit = true; thBuf = String(c); lastDrawMs = 0; }
+    return;
+  }
+  (void)enter;
+}
+
+void App::printThermal() {
+  Printer::title("ORBITAL THERMAL (cubesat)");
+  computeThermal();
+  if (!thValid) { Printer::line("Model did not converge."); return; }
+  static const char* U_S[] = { "1U", "2U", "3U", "6U" };
+  int uIdx = (thU == 6) ? 3 : (thU == 3 ? 2 : (thU == 2 ? 1 : 0));
+  char b[40];
+  Printer::line("-- Orbit --");
+  snprintf(b, sizeof(b), "%.0f km", thAlt);   Printer::kv("Altitude", b);
+  snprintf(b, sizeof(b), "%.1f deg", thIncl); Printer::kv("Inclination", b);
+  snprintf(b, sizeof(b), "%.1f deg", thRaan); Printer::kv("RAAN", b);
+  snprintf(b, sizeof(b), "%+.1f deg", thBeta); Printer::kv("Beta angle", b);
+  if (thEclFrac <= 0) Printer::kv("Eclipse", "none (full sun)");
+  else { snprintf(b, sizeof(b), "%.0f%% of orbit", thEclFrac * 100); Printer::kv("Eclipse", b); }
+  Printer::blank();
+  Printer::line("-- Spacecraft --");
+  Printer::kv("Size", U_S[uIdx]);
+  snprintf(b, sizeof(b), "%.2f kg", thMass);  Printer::kv("Mass", b);
+  snprintf(b, sizeof(b), "%.2f", thAlpha);    Printer::kv("Absorptivity", b);
+  snprintf(b, sizeof(b), "%.2f", thEps);      Printer::kv("Emissivity", b);
+  snprintf(b, sizeof(b), "%.1f W", thPwr);    Printer::kv("Internal pwr", b);
+  Printer::kv("Attitude", thAtt == 1 ? "sun-pointing" : "tumbling");
+  Printer::blank();
+  Printer::line("-- Node temperature --");
+  snprintf(b, sizeof(b), "%+.0f C", thTmax);  Printer::kv("Hot case", b);
+  snprintf(b, sizeof(b), "%+.0f C", thTmin);  Printer::kv("Cold case", b);
+  snprintf(b, sizeof(b), "%+.0f C", thTmean); Printer::kv("Mean", b);
+  snprintf(b, sizeof(b), "%.0f C", thTmax - thTmin); Printer::kv("Orbit swing", b);
+  Printer::blank();
+  Printer::line("First-order single-node model:");
+  Printer::line("area-averaged, no conduction,");
+  Printer::line("fixed optical props. Educational");
+  Printer::line("estimate, not flight analysis.");
+}
+// ===========================================================================
+//  AO-7 mode-switch estimator (SCR_AO7)
+// ===========================================================================
+// AO-7 (NORAD 7530, listed AO-07/AO-7) runs on solar power only. In continuous
+// sunlight a 24 h timer alternates Mode A (145 up / 29 down) and Mode B (435 up /
+// 145 down); through eclipse seasons the timer resets on each power-up so the mode
+// tracks the illumination cycle instead. The estimator (1) tests continuous sunlight
+// by sampling sunlitAt() over one orbit, and (2) if continuous, fetches a month of
+// AMSAT status reports for the two mode-tagged names -- confirmed against the AMSAT
+// status API name list as "AO-7[A]" and "AO-7[B]" -- and estimates the daily switch
+// time from when reports shift between the modes. Honest about thin data: report
+// counts are shown and the estimate is labelled as derived from listener reports.
+
+// Sample one orbit; ao7ContSun = true only if sunlit at every sample.
+void App::ao7CheckSunlight() {
+  ao7ContSun = false; ao7Beta = 0; ao7EclFrac = 0;
+  if (ao7Idx < 0) return;
+  SatEntry& s = db.at(ao7Idx);
+  if (!pred.setSat(s)) return;
+  time_t now = timeIsSet() ? nowUtc() : 1700000000;
+  ao7Beta = pred.betaAngleDeg(now, s.incl, s.raan);
+  double mm = s.meanMotion; if (mm <= 0) return;
+  double periodS = 86400.0 / mm;
+  int N = 120, ecl = 0;
+  for (int k = 0; k < N; ++k) {
+    time_t t = now + (time_t)(periodS * k / N);
+    if (!pred.sunlitAt(t)) ecl++;
+  }
+  ao7EclFrac = (double)ecl / N;
+  ao7ContSun = (ecl == 0);
+  SatEntry* a = activeSat(); if (a) pred.setSat(*a);   // restore propagator for tracking
+}
+
+// Fetch a long window of AO-7 reports for both mode-tagged names and store each
+// Heard/Telemetry report as a (time, mode) observation for the cadence fit below.
+time_t App::ao7IlluminationSinceT() {
+  if (ao7Idx < 0) return 0;
+  SatEntry& s = db.at(ao7Idx);
+  if (!pred.setSat(s)) return 0;
+  double mm = s.meanMotion;
+  time_t now = timeIsSet() ? nowUtc() : 0;
+  if (mm <= 0 || now == 0) { SatEntry* a = activeSat(); if (a) pred.setSat(*a); return 0; }
+  double periodS = 86400.0 / mm;
+  // Walk back well PAST the fetch window. The cache's whole purpose is a baseline longer
+  // than the API's 30 days, and the fit's own cutoff is this function's return value --
+  // so stopping the walk at the fetch window silently capped the baseline at 30 days:
+  // sinceT defaulted to (now - 30 d), ao7Estimate() excluded everything older, and
+  // ao7SaveObsCache() then pruned it from disk. AO-7's continuous-sun seasons run for
+  // months; 200 days covers them. Cost: ~4,800 sunlitAt() calls (~2 s) once per manual
+  // fetch, and only in deep continuous sun -- in or near eclipse season the first
+  // non-full day breaks the walk within a few iterations. AO7_WINDOW_DAYS still bounds
+  // the FETCH (an API property); this bounds the ANALYSIS (an orbit property).
+  const int LOOKBACK_DAYS = 200;
+  time_t lookLimit = now - (time_t)LOOKBACK_DAYS * 86400;
+  const int SAMP = 24;                  // samples across one orbit per day-check
+  time_t sinceT = lookLimit;            // default: sunlit through the whole lookback
+  for (time_t day = now; day >= lookLimit; day -= 86400) {
+    bool full = true;
+    for (int k = 0; k < SAMP; ++k) {
+      time_t t = day + (time_t)(periodS * k / SAMP);
+      if (!pred.sunlitAt(t)) { full = false; break; }
+    }
+    if (!full) { sinceT = day + 86400; break; }   // eclipsing day found -> boundary is the next day
+  }
+  SatEntry* a = activeSat(); if (a) pred.setSat(*a);   // restore propagator for tracking
+  return sinceT;
+}
+
+// ===========================================================================
+//  "Nearby & DX" (SCR_NEARBY): a hub for the live TERRESTRIAL feeds -- what is on
+//  the air and in the air around the operator right now. This is deliberately kept
+//  off the satellite screens: they answer "where is the bird", these answer "who
+//  else is out there". QRZ lookup lives here too, since it is the same question
+//  asked about one specific callsign.
+//
+//  Shared discipline across all three feeds, matching the satellite fetches:
+//    * record stores are heap-on-demand with hard caps, one feed resident at a
+//      time (see dxcAlloc/adsbAlloc/aprsStart and feedsFreeExcept);
+//    * the two HTTP feeds fetch ONLY on an explicit keypress ('f'), never polled --
+//      they are third-party services with rate limits. APRS is the exception by
+//      design: it is a live APRS-IS listen, opened with the screen and closed on
+//      leaving it;
+//    * distance and bearing recomputed locally with greatCircle() rather than
+//      trusted from the feed, so every bearing in the firmware agrees;
+//    * a status line explains an empty list instead of showing a blank screen.
+// ===========================================================================
+namespace {
+  const char* const NEARBY_ITEMS[] = {
+    "APRS heard near me",
+    "DX cluster spots",
+    "ADS-B aircraft radar",
+    "QRZ callsign lookup",
+  };
+  const int NEARBY_N = (int)(sizeof(NEARBY_ITEMS) / sizeof(NEARBY_ITEMS[0]));
+
+  // Band edges in kHz, HF through microwave. Used to classify DX spots; the labels
+  // are what the band filter cycles through.
+  struct DxBand { const char* name; double lo, hi; };
+  const DxBand DXC_BANDS[] = {
+    {"160m",   1800,     2000},    {"80m",    3500,     4000},
+    {"60m",    5330,     5410},    {"40m",    7000,     7300},
+    {"30m",   10100,    10150},    {"20m",   14000,    14350},
+    {"17m",   18068,    18168},    {"15m",   21000,    21450},
+    {"12m",   24890,    24990},    {"10m",   28000,    29700},
+    {"6m",    50000,    54000},    {"4m",    70000,    70500},
+    {"2m",   144000,   148000},    {"1.25m",222000,   225000},
+    {"70cm", 420000,   450000},    {"33cm", 902000,   928000},
+    {"23cm",1240000,  1300000},    {"13cm",2300000,  2450000},
+    {"9cm", 3300000,  3500000},    {"5cm", 5650000,  5925000},
+    {"3cm",10000000, 10500000},    {"1.2cm",24000000,24250000},
+    {"6mm", 47000000, 47200000},   {"4mm", 76000000, 81500000},
+  };
+  const int DXC_NBANDS = (int)(sizeof(DXC_BANDS) / sizeof(DXC_BANDS[0]));
+}
+
+int App::dxcBandOf(double freqKhz) {
+  for (int i = 0; i < DXC_NBANDS; ++i)
+    if (freqKhz >= DXC_BANDS[i].lo && freqKhz <= DXC_BANDS[i].hi) return i;
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
+//  Nearby & DX feed reports (item 11).
+// ---------------------------------------------------------------------------
+void App::printAprs() {
+  Printer::title("APRS heard nearby");
+  char hdr[64];
+  snprintf(hdr, sizeof(hdr), "%s, %d km radius",
+           aprsCenter[0] ? aprsCenter : "own QTH", cfg.aprsRangeKm);
+  Printer::kv("Center", String(hdr));
+  // Deliberately NOT self-building: this list comes from a live APRS-IS listen, so
+  // "empty" means nothing has beaconed yet, not that a fetch was skipped. Printing
+  // how long the socket has been open makes an empty sheet interpretable.
+  if (aprsis && aprsOpenMs)
+    Printer::kv("Listening", String((unsigned long)((millis() - aprsOpenMs) / 1000UL)) + " s");
+  if (!aprsSta || aprsN == 0) {
+    Printer::line("");
+    Printer::line("(no stations heard yet)");
+    return;
+  }
+  Printer::line("");
+  for (int i = 0; i < aprsN; ++i) {
+    const AprsSta& a = aprsSta[i];
+    char km[16], brg[12], age[14];
+    snprintf(km,  sizeof(km),  "%.0f km", (double)a.distKm);
+    snprintf(brg, sizeof(brg), "%03.0f deg", (double)a.brg);
+    snprintf(age, sizeof(age), "%lum ago", (unsigned long)((millis() - a.heardMs) / 60000UL));
+    String fields[4] = { String(a.call), String(km), String(brg), String(age) };
+    Printer::colrow(fields, 4);
+  }
+}
+
+namespace {
+  struct MufRegion { const char* name; double lat; double lon; }; // lon: west positive
+  // West longitude positive, matching minimufMHz(). Chosen to spread the compass and
+  // the distance range from a mid-northern QTH: near neighbours, the major DX centres,
+  // and a couple of deep-DX/antipodal checks.
+  // West longitude positive, matching minimufMHz(). 24 centres chosen to spread the
+  // compass and distance range and to break out the paths a DX operator actually
+  // distinguishes: the two Americas coasts and their tropics, the Caribbean, the poles
+  // (trans-polar to Asia is a real northern-hemisphere path), the Pacific (Hawaii and
+  // Oceania, not just Australia), and Japan vs China vs South/SE Asia separately.
+  // Short (< ~800 km) and antipodal rows are included but the model is weakest there.
+  const MufRegion MUF_REGIONS[] = {
+    { "W Europe",     50.0,   -5.0 },   // London/Paris
+    { "E Europe",     52.0,  -21.0 },   // Warsaw
+    { "Scandinavia",  60.0,  -18.0 },   // Oslo/Stockholm
+    { "Iceland",      64.0,   22.0 },   // Reykjavik (NW path)
+    { "Mediterranean",40.0,  -15.0 },   // Rome
+    { "W Africa",     10.0,    2.0 },   // Lagos/Accra
+    { "N Africa",     30.0,   -5.0 },   // Algeria/Tunisia
+    { "E Africa",      1.0,  -37.0 },   // Nairobi
+    { "S Africa",    -26.0,  -28.0 },   // Johannesburg
+    { "Middle East",  30.0,  -45.0 },   // Riyadh
+    { "Russia/C Asia",55.0,  -83.0 },   // Novosibirsk
+    { "S Asia",       20.0,  -78.0 },   // India
+    { "China",        35.0, -116.0 },   // Beijing
+    { "Japan",        36.0, -140.0 },   // Tokyo
+    { "SE Asia",       1.0, -104.0 },   // Singapore
+    { "Oceania",     -18.0, -178.0 },   // Fiji/Pacific
+    { "Australia",   -34.0, -151.0 },   // Sydney
+    { "N America E",  40.0,   74.0 },   // New York
+    { "N America W",  37.0,  122.0 },   // San Francisco
+    { "Caribbean",    18.0,   66.0 },   // Puerto Rico
+    { "C America",    15.0,   90.0 },   // Guatemala
+    { "S America N",   4.0,   74.0 },   // Bogota
+    { "S America S", -34.0,   58.0 },   // Buenos Aires
+    { "Arctic",       80.0,    0.0 },   // over-the-pole reference
+  };
+  const int MUF_REGION_N = sizeof(MUF_REGIONS)/sizeof(MUF_REGIONS[0]);
+
+  // Colour a MUF value: red (low, <10), amber (10-17), green (17-24), cyan (high, >24).
+  uint16_t mufColour(double m) {
+    if (m < 10) return CL_RED;
+    if (m < 17) return CL_YELLOW;
+    if (m < 24) return CL_GREEN;
+    return CL_CYAN;
+  }
+  // Best "workable" band label from a MUF (rule of thumb: work up to ~0.85*MUF).
+  const char* mufBand(double m) {
+    double w = 0.85 * m;
+    if (w >= 28) return "10m";
+    if (w >= 24) return "12m";
+    if (w >= 21) return "15m";
+    if (w >= 18) return "17m";
+    if (w >= 14) return "20m";
+    if (w >= 10) return "30m";
+    if (w >= 7)  return "40m";
+    return "80m";
+  }
+}
+
+// MUF-to-regions report. Self-building: recomputes the table so the sheet is complete
+// even if the screen was never opened (same reasoning as printPassPolar/printAwards).
+void App::printMuf() {
+  Printer::title("MUF to world regions");
+  Observer o = loc.obs();
+  double ssn = mufSSN();
+  if (!o.valid || !timeIsSet() || ssn < 0) {
+    Printer::line("");
+    Printer::line(!o.valid ? "(no QTH set)" :
+                  !timeIsSet() ? "(no UTC yet)" : "(no solar data - refresh Space Wx)");
+    return;
+  }
+  time_t now = nowUtc(); struct tm tv; gmtime_r(&now, &tv);
+  int mon = tv.tm_mon + 1, day = tv.tm_mday; double ut = tv.tm_hour + tv.tm_min / 60.0;
+  const double D2R = 0.017453292519943295;
+  double qLatR = o.lat * D2R, qLonR = -o.lon * D2R;
+  { char hb[64]; snprintf(hb, sizeof(hb), "SSN %d, %02d:%02dz (MINIMUF-3.5)",
+                          (int)lround(ssn), tv.tm_hour, tv.tm_min);
+    Printer::kv("Conditions", String(hb)); }
+  Printer::kv("Workable", "up to ~0.85 x MUF");
+  Printer::line("");
+  for (int i = 0; i < MUF_REGION_N; ++i) {
+    const MufRegion& rg = MUF_REGIONS[i];
+    double m = minimufMHz(qLatR, qLonR, rg.lat * D2R, rg.lon * D2R, mon, day, ut, ssn);
+    double distKm, brg; greatCircle(o.lat, o.lon, rg.lat, -rg.lon, distKm, brg);
+    char muf[12], bd[16], br[12];
+    snprintf(muf, sizeof(muf), "%.1f MHz", m);
+    snprintf(bd,  sizeof(bd),  "%s", mufBand(m));
+    snprintf(br,  sizeof(br),  "%03.0f/%.0fkm", (double)brg, distKm);
+    String fields[4] = { String(rg.name), String(muf), String(bd), String(br) };
+    Printer::colrow(fields, 4);
+  }
+}
+
+// Orbital-zones transit report. Self-building: runs the scan for the current zone so the
+// sheet is complete even if the screen was never opened.
+void App::printSaa() {
+  Printer::title("Orbital zone transits");
+  SatEntry* s = activeSat();
+  if (!s) { Printer::line(""); Printer::line("(no satellite selected)"); return; }
+  if (!saaComputed) saaCompute();
+  Printer::kv("Satellite", String(s->name));
+  Printer::kv("Zone", String(zoneName(saaZone)));
+  if (!timeIsSet()) { Printer::line(""); Printer::line("(no UTC yet)"); return; }
+  Printer::kv("Now", saaInNow ? "in zone" : "outside");
+  Printer::line("");
+  if (saaWinN == 0) { Printer::line("(no transits in the scan window)"); return; }
+  for (int i = 0; i < saaWinN; ++i) {
+    char en[10], ex[16], du[16];
+    strlcpy(en, fmtHM(saaWin[i].enter).c_str(), sizeof(en));
+    if (saaWin[i].exit == 0) { strlcpy(ex, "in@horizon", sizeof(ex)); strlcpy(du, "-", sizeof(du)); }
+    else {
+      strlcpy(ex, fmtHM(saaWin[i].exit).c_str(), sizeof(ex));
+      long dur = (long)(saaWin[i].exit - saaWin[i].enter);
+      snprintf(du, sizeof(du), "%ldm%02lds", dur/60, dur%60);
+    }
+    String fields[3] = { String(en), String(ex), String(du) };
+    Printer::colrow(fields, 3);
+  }
+}
+
+void App::printDxc() {
+  // Self-build: a report should not be blank merely because its screen was never
+  // opened. Same reasoning as the printPassPolar/printAwards audit.
+  if (dxcN == 0) fetchDxc();
+  Printer::title("DX cluster spots");
+  if (!dxcSpot || dxcN == 0) {
+    Printer::line(dxcStatus[0] ? dxcStatus : "(no spots)");
+    return;
+  }
+  if (dxcBandFilter >= 0 && dxcBandFilter < DXC_NBANDS)
+    Printer::kv("Band filter", String(DXC_BANDS[dxcBandFilter].name));
+  Printer::line("");
+  for (int i = 0; i < dxcN; ++i) {
+    const DxSpot& s = dxcSpot[i];
+    if (dxcBandFilter >= 0 && s.band != dxcBandFilter) continue;
+    char frq[18], age[14];
+    snprintf(frq, sizeof(frq), "%.1f", s.freqKhz);
+    if (s.ageMin >= 0) snprintf(age, sizeof(age), "%dm", s.ageMin);
+    else               strlcpy(age, "-", sizeof(age));
+    const char* bn = (s.band >= 0 && s.band < DXC_NBANDS) ? DXC_BANDS[s.band].name : "";
+    String fields[5] = { String(frq), String(s.dx), String(bn),
+                         String("de ") + s.de, String(age) };
+    Printer::colrow(fields, 5);
+  }
+}
+
+void App::printAdsb() {
+  if (adsbN == 0) fetchAdsb();
+  Printer::title("Aircraft overhead");
+  Printer::kv("Range", String(cfg.adsbRangeKm) + " km");
+  if (!adsbAc || adsbN == 0) {
+    Printer::line("");
+    Printer::line(adsbStatus[0] ? adsbStatus : "(no aircraft)");
+    return;
+  }
+  if (adsbTgtGrid[0]) Printer::kv("Scatter target", String(adsbTgtGrid));
+  Printer::line("");
+  for (int i = 0; i < adsbN; ++i) {
+    const Aircraft& a = adsbAc[i];
+    char km[16], brg[12], alt[16], trk[12];
+    snprintf(km,  sizeof(km),  "%.0f km", (double)a.distKm);
+    snprintf(brg, sizeof(brg), "%03.0f deg", (double)a.brg);
+    snprintf(alt, sizeof(alt), "%d ft", a.altFt);
+    if (a.trackDeg >= 0) snprintf(trk, sizeof(trk), "trk %03d", a.trackDeg);
+    else                 strlcpy(trk, "trk -", sizeof(trk));
+    String fields[5] = { String(a.ident), String(km), String(brg), String(alt), String(trk) };
+    Printer::colrow(fields, 5);
+  }
+}
+
+void App::drawNearby() {
+  header("Nearby & DX");
+  canvas.setTextSize(1);
+  for (int i = 0; i < NEARBY_N; ++i) {
+    int y = 26 + i * 12;
+    bool sel = (i == nearSel);
+    if (sel) { canvas.fillRect(0, y - 1, 240, 12, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(8, y + 1); canvas.print(NEARBY_ITEMS[i]);
+  }
+  // Flag anything that needs configuring before it can work, so the user finds out
+  // here rather than after opening the screen and getting an error.
+  // Hint sits directly under the last menu row (rows end at 26+3*12+12 = 74), not down
+  // at 118 where it collided with the footer baseline. Indent matches the rows above.
+  canvas.setTextColor(CL_DGREY, CL_BLACK); canvas.setCursor(8, 86);
+  if (!cfg.myCall[0])       canvas.print("APRS: set callsign in Settings");
+  else if (!cfg.dxcUrl[0])  canvas.print("DX: set feed URL in Settings");
+  else if (!cfg.adsbUrl[0]) canvas.print("ADS-B: set source in Settings");
+  else                      canvas.print("Live terrestrial feeds");
+  footer("ENTER open  ;/. move  ` back");
+}
+
+void App::keyNearby(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--nearSel < 0) nearSel = NEARBY_N - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++nearSel >= NEARBY_N) nearSel = 0;    lastDrawMs = 0; return; }
+  if (enter) {
+    switch (nearSel) {
+      case 0: screen = SCR_APRS; aprsStart(); lastDrawMs = 0; break;
+      case 1: dxcSel = 0; dxcScroll = 0; screen = SCR_DXC;  fetchDxc();  lastDrawMs = 0; break;
+      case 2: adsbSel = 0; screen = SCR_ADSB; fetchAdsb(); lastDrawMs = 0; break;
+      case 3: qrzHaveResult = false; qrzScroll = 0; screen = SCR_QRZ; lastDrawMs = 0; break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  APRS.fi stations (SCR_APRS list, SCR_APRSDET bearing detail)
+// ---------------------------------------------------------------------------
+// MIC-E destination character -> latitude digit plus the two flag bits it carries.
+// '0'-'9' digit with message bit 0; 'A'-'J' and 'P'-'Y' digit 0-9 with bit 1;
+// 'K','L','Z' are position ambiguity (treated as 0).
+//
+// NOTE for anyone auditing this against www.aprs.org/aprs12/mic-e-examples.txt:
+// that document says TOCALL "ABCDEF" decodes to latitude 1234.56N. It does not --
+// under the mapping above it is 0123.45. The document is illustrative, not a
+// conformance vector. This decoder is pinned to published parser output instead;
+// tools/host_aprs/aprs_parse_test.sh runs the vectors. Do not "correct" it.
+static bool miceDestDigit(char c, int& digit, int& bit) {
+  if (c >= '0' && c <= '9') { digit = c - '0'; bit = 0; return true; }
+  if (c >= 'A' && c <= 'J') { digit = c - 'A'; bit = 1; return true; }
+  if (c >= 'P' && c <= 'Y') { digit = c - 'P'; bit = 1; return true; }
+  if (c == 'K' || c == 'L' || c == 'Z') { digit = 0; bit = (c == 'L') ? 0 : 1; return true; }
+  return false;
+}
+
+// MIC-E: latitude and both hemisphere flags live in the AX.25 DESTINATION; longitude,
+// course and speed are offset-by-28 bytes at the head of the info field. The +100
+// longitude offset flag is the trap -- ignoring it puts every European mobile in the
+// Atlantic.
+static bool aprsDecodeMicE(const char* dest, const char* info,
+                           double& lat, double& lon, char& symCode) {
+  if (strlen(dest) < 6 || strlen(info) < 9) return false;
+  int d[6], b[6];
+  for (int i = 0; i < 6; ++i) if (!miceDestDigit(dest[i], d[i], b[i])) return false;
+
+  lat = (d[0] * 10 + d[1]) + ((d[2] * 10 + d[3]) + (d[4] * 10 + d[5]) / 100.0) / 60.0;
+  if (!b[3]) lat = -lat;                       // dest char 4 bit: 1 = North
+
+  const unsigned char* u = (const unsigned char*)info;
+  int lonDeg = u[1] - 28;
+  if (b[4]) lonDeg += 100;                     // dest char 5 bit: +100 degrees
+  if (lonDeg >= 180 && lonDeg <= 189)      lonDeg -= 80;
+  else if (lonDeg >= 190 && lonDeg <= 199) lonDeg -= 190;
+  int lonMin = u[2] - 28; if (lonMin >= 60) lonMin -= 60;
+  int lonHun = u[3] - 28;
+  lon = lonDeg + (lonMin + lonHun / 100.0) / 60.0;
+  if (b[5]) lon = -lon;                        // dest char 6 bit: 1 = West
+
+  symCode = (char)u[7];
+  return (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180);
+}
+
+// Uncompressed: DDMM.hhN/DDDMM.hhW$  (the table char sits BETWEEN lat and lon).
+static bool aprsDecodeUncompressed(const char* s, double& lat, double& lon, char& symCode) {
+  if (strlen(s) < 19) return false;
+  char buf[8];
+  memcpy(buf, s, 2);      buf[2] = 0; double latDeg = atof(buf);
+  memcpy(buf, s + 2, 5);  buf[5] = 0; double latMin = atof(buf);
+  char ns = s[7];
+  memcpy(buf, s + 9, 3);  buf[3] = 0; double lonDeg = atof(buf);
+  memcpy(buf, s + 12, 5); buf[5] = 0; double lonMin = atof(buf);
+  char ew = s[17];
+  symCode = s[18];
+  if ((ns != 'N' && ns != 'S') || (ew != 'E' && ew != 'W')) return false;
+  lat = latDeg + latMin / 60.0; if (ns == 'S') lat = -lat;
+  lon = lonDeg + lonMin / 60.0; if (ew == 'W') lon = -lon;
+  return true;
+}
+
+// Compressed: /YYYYXXXX$csT -- base-91, table char FIRST, symbol after the eight
+// position bytes. Told apart from uncompressed by a non-digit lead byte.
+static bool aprsDecodeCompressed(const char* s, double& lat, double& lon, char& symCode) {
+  if (strlen(s) < 13) return false;
+  for (int i = 1; i <= 8; ++i) if (s[i] < '!' || s[i] > '{') return false;
+  long y = 0, x = 0;
+  for (int i = 1; i <= 4; ++i) y = y * 91 + (s[i] - 33);
+  for (int i = 5; i <= 8; ++i) x = x * 91 + (s[i] - 33);
+  symCode = s[9];
+  lat =   90.0 - (double)y / 380926.0;
+  lon = -180.0 + (double)x / 190463.0;
+  return (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180);
+}
+
+// Full TNC2 line: SRCCALL>DEST,path:info. Returns false for every packet carrying no
+// position (messages, telemetry, status, bulletins, server comments) -- the common
+// case on a busy feed, so the reject path stays cheap.
+bool App::aprsDecodeLine(const char* line, char* callOut, size_t cap,
+                         double& lat, double& lon, char& symCode) {
+  const char* gt = strchr(line, '>');
+  if (!gt) return false;
+  const char* colon = strchr(gt, ':');
+  if (!colon) return false;
+  size_t cl = (size_t)(gt - line);
+  if (cl == 0 || cl >= cap) return false;
+  memcpy(callOut, line, cl); callOut[cl] = 0;
+
+  char dest[16] = {0};
+  const char* de = gt + 1;
+  size_t dl = 0;
+  while (de[dl] && de[dl] != ',' && de[dl] != ':' && dl < sizeof(dest) - 1) { dest[dl] = de[dl]; ++dl; }
+  dest[dl] = 0;
+
+  const char* info = colon + 1;
+  if (!*info) return false;
+  char t = info[0];
+  if (t == '`' || t == '\'' || t == 0x1C || t == 0x1D)
+    return aprsDecodeMicE(dest, info, lat, lon, symCode);
+  if (t == '!' || t == '=' || t == '/' || t == '@') {
+    const char* body = info + 1;
+    if (t == '/' || t == '@') {                 // 7-byte timestamp precedes the position
+      if (strlen(body) < 7) return false;
+      body += 7;
+    }
+    if (body[0] >= '0' && body[0] <= '9') return aprsDecodeUncompressed(body, lat, lon, symCode);
+    return aprsDecodeCompressed(body, lat, lon, symCode);
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+//  APRS-IS socket lifecycle. Modelled on serviceRigctld()/serviceWebd(): allocated
+//  on demand, polled from loop(), and torn down whenever an outbound fetch needs the
+//  heap. The difference is that this one dials out instead of listening.
+// ---------------------------------------------------------------------------
+void App::aprsStop() {
+  if (aprsis) { aprsis->stop(); delete aprsis; aprsis = nullptr; }
+  if (aprsSta) { free(aprsSta); aprsSta = nullptr; }
+  aprsBuf.clear();
+  aprsN = 0; aprsSel = 0; aprsScroll = 0; aprsOpenMs = 0;
+}
+
+void App::aprsStart() {
+  aprsStop();
+  feedsFreeExcept(SCR_APRS);   // drop any DX-cluster / ADS-B records still held
+  aprsStatus[0] = 0; aprsPktSeen = 0;
+  // APRS-IS requires a callsign on the login line even for a receive-only session.
+  if (!cfg.myCall[0]) { strlcpy(aprsStatus, "Set callsign in Settings", sizeof(aprsStatus)); return; }
+
+  double clat, clon;
+  if (aprsCenter[0]) {
+    if (!Location::gridToLatLon(String(aprsCenter), clat, clon)) {
+      strlcpy(aprsStatus, "Bad grid square", sizeof(aprsStatus)); return;
+    }
+  } else {
+    Observer o = loc.obs();
+    if (!o.valid) { strlcpy(aprsStatus, "No location set", sizeof(aprsStatus)); return; }
+    clat = o.lat; clon = o.lon;
+  }
+  if (!net.connected() && !connectWifiCfg()) {
+    strlcpy(aprsStatus, "WiFi failed", sizeof(aprsStatus)); return;
+  }
+
+  // Allocate the records BEFORE dialling: a failed allocation should not leave a
+  // live socket with nowhere to put what it receives.
+  aprsSta = (AprsSta*)calloc(APRS_MAX, sizeof(AprsSta));
+  if (!aprsSta) { strlcpy(aprsStatus, "Out of memory", sizeof(aprsStatus)); return; }
+
+  aprsis = new WiFiClient();
+  if (!aprsis) { free(aprsSta); aprsSta = nullptr;
+                 strlcpy(aprsStatus, "Out of memory", sizeof(aprsStatus)); return; }
+  setStatus("Connecting to APRS-IS");
+  if (!aprsis->connect(APRSIS_HOST, APRSIS_PORT, 8000)) {
+    delete aprsis; aprsis = nullptr; free(aprsSta); aprsSta = nullptr;
+    strlcpy(aprsStatus, "APRS-IS connect failed", sizeof(aprsStatus)); return;
+  }
+  aprsis->setNoDelay(true);
+  // Filter on the login line -- the documented preferred method, and it means the
+  // server starts filtering before the first packet rather than after a round trip.
+  // Passcode -1 is receive-only: nothing this device sends can reach APRS-IS.
+  char login[180];
+  snprintf(login, sizeof(login),
+           "user %s pass -1 vers CardSat %s filter r/%.4f/%.4f/%d\r\n",
+           cfg.myCall, FW_VERSION, clat, clon, cfg.aprsRangeKm);
+  aprsis->print(login);
+  aprsBuf.clear();
+  aprsOpenMs = millis();
+}
+
+// Called only from edit target 900, which always returns to SCR_APRS. The loop pump
+// closes the socket while the edit screen is up (any screen outside SCR_APRS/DET
+// tears it down), so this must reopen unconditionally -- an earlier version tested
+// "aprsis != nullptr" here, which by that point is always false.
+void App::aprsRestart() { aprsStart(); }
+
+void App::serviceAprsIs() {
+  if (!aprsis) return;
+  // Same rule the three TCP servers follow: give the heap back during an outbound
+  // TLS fetch rather than competing with the handshake for contiguous blocks.
+  if (netFetchActive()) { aprsStop(); strlcpy(aprsStatus, "Paused during fetch", sizeof(aprsStatus)); return; }
+  if (!aprsis->connected()) {
+    aprsStop();
+    strlcpy(aprsStatus, "APRS-IS disconnected (f to retry)", sizeof(aprsStatus));
+    return;
+  }
+  // available() is bounded per tick so a busy feed cannot starve the UI. > 0 rather
+  // than truthiness on principle: a closed stream returning -1 would spin forever.
+  int guard = 0;
+  while (aprsis->available() > 0 && guard++ < 512) {
+    char ch = (char)aprsis->read();
+    if (ch == '\r') continue;
+    if (ch == '\n') { aprsHandleLine(aprsBuf.c_str()); aprsBuf.clear(); }
+    else aprsBuf.push(ch);
+  }
+}
+
+void App::aprsHandleLine(const char* ln) {
+  if (!ln || !*ln) return;
+  if (ln[0] == '#') return;              // server banner / keepalive comment
+  char call[16];
+  double lat, lon; char sym = '/';
+  if (!aprsDecodeLine(ln, call, sizeof(call), lat, lon, sym)) return;
+  ++aprsPktSeen;
+  aprsUpsert(call, lat, lon, sym);
+}
+
+// Keyed by callsign, newest-heard wins -- the same shape as rosterUpsert() for the
+// LoRa roster, so "heard" means one thing across the firmware. When full, the
+// FARTHEST station is evicted: this is a proximity view, so distance is the right
+// thing to lose, not age.
+void App::aprsUpsert(const char* call, double lat, double lon, char sym) {
+  if (!aprsSta || !call || !*call) return;
+  Observer o = loc.obs();
+  double refLat = o.lat, refLon = o.lon;
+  if (aprsCenter[0]) {
+    double clat, clon;
+    if (Location::gridToLatLon(String(aprsCenter), clat, clon)) { refLat = clat; refLon = clon; }
+  } else if (!o.valid) return;
+
+  double dist = 0, brg = 0;
+  greatCircle(refLat, refLon, lat, lon, dist, brg);
+
+  int slot = -1;
+  for (int i = 0; i < aprsN; ++i)
+    if (!strncmp(aprsSta[i].call, call, sizeof(aprsSta[i].call) - 1)) { slot = i; break; }
+  if (slot < 0) {
+    if (aprsN < APRS_MAX) slot = aprsN++;
+    else {
+      int worst = 0;
+      for (int i = 1; i < aprsN; ++i) if (aprsSta[i].distKm > aprsSta[worst].distKm) worst = i;
+      if (aprsSta[worst].distKm <= dist) return;     // everything held is nearer
+      slot = worst;
+    }
+  }
+  AprsSta& a = aprsSta[slot];
+  strlcpy(a.call, call, sizeof(a.call));
+  a.lat = (float)lat; a.lon = (float)lon;
+  a.distKm = (float)dist; a.brg = (float)brg;
+  a.heardMs = millis();
+  a.sym = sym;
+
+  // Remember which station the operator is looking at BEFORE the sort reorders the array,
+  // so we can keep aprsSel pointed at the same callsign afterwards. Otherwise the nearest-
+  // first sort shuffles records under a fixed index and the list cursor / bearing detail
+  // jump to whatever station happens to land in that slot when a packet arrives.
+  char selCall[16] = {0};
+  if (aprsSel >= 0 && aprsSel < aprsN) strlcpy(selCall, aprsSta[aprsSel].call, sizeof(selCall));
+
+  // Keep the list nearest-first. Insertion sort over <= 20 records, run once per
+  // accepted packet, is cheaper than re-sorting the whole array on every draw.
+  for (int i = 1; i < aprsN; ++i) {
+    AprsSta k = aprsSta[i]; int j = i - 1;
+    while (j >= 0 && aprsSta[j].distKm > k.distKm) { aprsSta[j + 1] = aprsSta[j]; j--; }
+    aprsSta[j + 1] = k;
+  }
+
+  // Re-point the selection to follow its callsign across the reorder.
+  if (selCall[0]) {
+    for (int i = 0; i < aprsN; ++i)
+      if (!strncmp(aprsSta[i].call, selCall, sizeof(selCall) - 1)) { aprsSel = i; break; }
+  }
+  if (aprsSel >= aprsN) aprsSel = aprsN - 1;
+  if (aprsSel < 0) aprsSel = 0;
+}
+
+void App::drawAprs() {
+  char h[40];
+  snprintf(h, sizeof(h), "APRS %s %dkm", aprsCenter[0] ? aprsCenter : "here", cfg.aprsRangeKm);
+  header(h);
+  canvas.setTextSize(1);
+  if (aprsStatus[0]) {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(6, 40); canvas.print(aprsStatus);
+    footer("f reconnect  g grid  ` back");
+    return;
+  }
+  // Null array is a reachable state, not an error: the screen draws before
+  // aprsStart() allocates and after a failed allocation frees.
+  if (!aprsSta || aprsN == 0) {
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(6, 40);
+    if (!aprsis) canvas.print("Not connected - f to retry");
+    else {
+      // Say what is actually happening. This is a live listen, so an empty list a
+      // few seconds in is normal, not a failure -- fixed stations beacon every
+      // 10-30 min and the list fills over minutes.
+      canvas.printf("Listening %lus...", (unsigned long)((millis() - aprsOpenMs) / 1000));
+      canvas.setCursor(6, 54);
+      canvas.print("Stations appear as they beacon");
+    }
+    footer("f reconnect  g grid  ` back");
+    return;
+  }
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(6, 18); canvas.print("call         km    brg   age");
+  const int ROWS = 8;
+  if (aprsSel < aprsScroll) aprsScroll = aprsSel;
+  if (aprsSel >= aprsScroll + ROWS) aprsScroll = aprsSel - ROWS + 1;
+  for (int r = 0; r < ROWS && aprsScroll + r < aprsN; ++r) {
+    int i = aprsScroll + r, y = 30 + r * 11;
+    bool sel = (i == aprsSel);
+    if (sel) { canvas.fillRect(0, y - 1, 240, 11, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
+    const AprsSta& a = aprsSta[i];
+    canvas.setCursor(6, y);
+    // Age from heardMs, the same way the LoRa roster does it.
+    unsigned long ageMin = (millis() - a.heardMs) / 60000UL;
+    canvas.printf("%-11s %4.0f  %3.0f  %3lum", a.call, a.distKm, a.brg, ageMin);
+  }
+  footer("ENTER bearing  f reconn  g grid  p print");
+}
+
+void App::keyAprs(char c, bool enter, bool back) {
+  // Leaving the hub closes the socket and frees the records. The grid prompt also
+  // closes it (the loop pump only keeps it alive on SCR_APRS/SCR_APRSDET); edit
+  // target 900 reopens on the way back via aprsRestart().
+  if (isBack(c, back)) { aprsStop(); screen = SCR_NEARBY; lastDrawMs = 0; return; }
+  if (c == 'f') { aprsStart(); lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_APRS); return; }
+  if (c == 'g') {                          // re-center on a target grid ("" = own location)
+    editTarget = 900; editTitle = "APRS center grid (blank = here)";
+    editBuf = String(aprsCenter);
+    screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+  if (!aprsSta || aprsN == 0) return;
+  if (isUp(c))   { if (--aprsSel < 0) aprsSel = aprsN - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++aprsSel >= aprsN) aprsSel = 0;    lastDrawMs = 0; return; }
+  if (enter) { screen = SCR_APRSDET; lastDrawMs = 0; return; }
+}
+
+// North-up bearing rose to one station -- the same presentation the LoRa peer compass
+// uses, so a bearing means the same thing everywhere in the firmware.
+void App::drawAprsDet() {
+  if (!aprsSta || aprsSel < 0 || aprsSel >= aprsN) { screen = SCR_APRS; return; }
+  const AprsSta& a = aprsSta[aprsSel];
+  header("APRS station");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(6, 20); canvas.print(a.call);
+
+  const int cx = 178, cy = 74, R = 44;
+  canvas.drawCircle(cx, cy, R, CL_DGREY);
+  canvas.drawCircle(cx, cy, R / 2, CL_DGREY);
+  canvas.setTextColor(CL_DGREY, CL_BLACK);
+  canvas.setCursor(cx - 3, cy - R - 9); canvas.print("N");
+  canvas.setCursor(cx + R + 3, cy - 3);  canvas.print("E");
+  canvas.setCursor(cx - 3, cy + R + 3);  canvas.print("S");
+  canvas.setCursor(cx - R - 9, cy - 3);  canvas.print("W");
+  double rad = a.brg * 0.017453292519943295;
+  int px = cx + (int)(sin(rad) * R), py = cy - (int)(cos(rad) * R);
+  canvas.drawLine(cx, cy, px, py, CL_GREEN);
+  canvas.fillCircle(px, py, 3, CL_GREEN);
+
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(6, 40); canvas.printf("Bearing %.0f deg", a.brg);
+  canvas.setCursor(6, 52);
+  if (a.distKm < 10) canvas.printf("Range   %.1f km", a.distKm);
+  else               canvas.printf("Range   %.0f km", a.distKm);
+  canvas.setCursor(6, 64); canvas.printf("Lat %.3f", a.lat);
+  canvas.setCursor(6, 76); canvas.printf("Lon %.3f", a.lon);
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(6, 90);
+  canvas.printf("Heard %lum ago", (unsigned long)((millis() - a.heardMs) / 60000UL));
+  canvas.setCursor(6, 102); canvas.printf("Symbol '%c'", a.sym);
+  footer("` back");
+}
+
+void App::keyAprsDet(char c, bool enter, bool back) {
+  if (isBack(c, back) || enter) { screen = SCR_APRS; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--aprsSel < 0) aprsSel = aprsN - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++aprsSel >= aprsN) aprsSel = 0;    lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  DX cluster spots (SCR_DXC)
+// ---------------------------------------------------------------------------
+//  Deliberately an HTTP/JSON aggregator rather than a classic Telnet cluster node.
+//  A Telnet feed is a persistent, open-ended socket that must be polled from loop()
+//  and parsed as an unbounded line stream -- a genuinely different architecture from
+//  every other network feature here, all of which are bounded one-shot fetches. The
+//  aggregator fits the existing shape exactly. The URL is a setting so the operator
+//  picks their own source rather than the firmware hard-coding someone's service.
+// ---------------------------------------------------------------------------
+// Feed record stores. All three feed screens (APRS / DX cluster / ADS-B) keep their
+// records on the heap and only while their screen is in use, so none of them costs
+// permanent .bss. Only one feed screen can be open at a time, so each alloc releases
+// the other two first: that -- not the individual cap -- is what bounds the peak at a
+// single array (10,000 B worst case, the DX one) instead of the sum of all three.
+//
+// The records are the ONLY thing that grew. Both HTTP feeds already stream: the
+// response goes to FILE_DL_TMP and is parsed a block at a time through a small
+// Scratch lease, so raising the caps adds nothing to the transient cost of a fetch.
+void App::feedsFreeExcept(int keepScreen) {
+  if (keepScreen != SCR_APRS && keepScreen != SCR_APRSDET) aprsStop();
+  if (keepScreen != SCR_DXC)  dxcFree();
+  if (keepScreen != SCR_ADSB) adsbFree();
+}
+
+bool App::dxcAlloc() {
+  if (dxcSpot) return true;
+  feedsFreeExcept(SCR_DXC);
+  dxcSpot = (DxSpot*)calloc(DXC_MAX, sizeof(DxSpot));
+  if (!dxcSpot) { strlcpy(dxcStatus, "Out of memory", sizeof(dxcStatus)); return false; }
+  return true;
+}
+
+void App::dxcFree() {
+  if (dxcSpot) { free(dxcSpot); dxcSpot = nullptr; }
+  dxcN = 0; dxcSel = 0; dxcScroll = 0;
+}
+
+bool App::adsbAlloc() {
+  if (adsbAc) return true;
+  feedsFreeExcept(SCR_ADSB);
+  adsbAc = (Aircraft*)calloc(ADSB_MAX, sizeof(Aircraft));
+  if (!adsbAc) { strlcpy(adsbStatus, "Out of memory", sizeof(adsbStatus)); return false; }
+  return true;
+}
+
+void App::adsbFree() {
+  if (adsbAc) { free(adsbAc); adsbAc = nullptr; }
+  adsbN = 0; adsbSel = 0;
+  adsbScatter = false;              // the bearing overlay describes records we no longer hold
+}
+
+void App::fetchDxc() {
+  dxcN = 0; dxcSel = 0; dxcScroll = 0; dxcStatus[0] = 0;
+  if (!dxcAlloc()) return;          // sets dxcStatus itself
+  if (!cfg.dxcUrl[0]) { strlcpy(dxcStatus, "No feed URL (Settings > Network)", sizeof(dxcStatus)); return; }
+  if (!net.connected() && !connectWifiCfg()) { strlcpy(dxcStatus, "WiFi failed", sizeof(dxcStatus)); return; }
+  dxcBusy = true; setStatus("Fetching DX spots"); draw();
+  bool ok = net.httpsGetToFileRetry(String(cfg.dxcUrl), FILE_DL_TMP, 200000, nullptr, 2);
+  dxcBusy = false;
+  if (!ok) { snprintf(dxcStatus, sizeof(dxcStatus), "Fetch failed (%s)", net.lastErr.c_str()); return; }
+
+  File f = Store::fs().open(FILE_DL_TMP, "r");
+  if (!f) { strlcpy(dxcStatus, "Read failed", sizeof(dxcStatus)); return; }
+  static const size_t OBJ_MAX = 512;
+  Scratch::Lease lease("dxc", OBJ_MAX);
+  char* obj = (char*)lease.p;
+  if (!obj) { f.close(); Store::fs().remove(FILE_DL_TMP); strlcpy(dxcStatus, "Out of memory", sizeof(dxcStatus)); return; }
+
+  // Sniff the payload: the most useful free, no-registration spot feed (HamQTH's
+  // dxc_csv.php) is caret-delimited TEXT, not JSON --
+  //   Call^Frequency^Date/Time^Spotter^Comment^LoTW^eQSL^Continent^Band^Country
+  // Requiring JSON would have shut the operator out of the one source that needs no
+  // account at all, so both shapes are accepted and chosen by the first real character.
+  {
+    int first = -1;
+    while (f.available()) { int ch = f.peek(); if (ch=='\n'||ch=='\r'||ch==' '||ch=='\t') { f.read(); continue; } first = ch; break; }
+    if (first != '[' && first != '{') {
+      time_t now = timeIsSet() ? nowUtc() : 0; (void)now;
+      char line[200];
+      while (f.available() && dxcN < DXC_MAX) {
+        size_t len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+        if (len == 0) continue;
+        line[len] = 0;
+        // Split on '^'; fields 0=call 1=freq 2=date/time 3=spotter (others ignored).
+        char* fld[6] = {nullptr,nullptr,nullptr,nullptr,nullptr,nullptr};
+        int nf = 0; char* p2 = line; fld[nf++] = p2;
+        while (*p2 && nf < 6) { if (*p2 == '^') { *p2 = 0; fld[nf++] = p2 + 1; } ++p2; }
+        if (nf < 2 || !fld[0] || !fld[0][0]) continue;
+        double khz = atof(fld[1] ? fld[1] : "0");
+        if (khz <= 0) continue;
+        DxSpot& sp = dxcSpot[dxcN];
+        sp.freqKhz = khz;
+        strlcpy(sp.dx, fld[0], sizeof(sp.dx));
+        strlcpy(sp.de, (nf > 3 && fld[3]) ? fld[3] : "", sizeof(sp.de));
+        sp.band = (int8_t)dxcBandOf(khz);
+        sp.ageMin = -1;                 // this feed carries a formatted date, not an epoch
+        dxcN++;
+      }
+      f.close(); Store::fs().remove(FILE_DL_TMP);
+      if (dxcN == 0) strlcpy(dxcStatus, "No spots parsed (CSV)", sizeof(dxcStatus));
+      return;
+    }
+  }
+
+  time_t now = timeIsSet() ? nowUtc() : 0;
+  uint8_t rd[256];
+  size_t oi = 0; int depth = 0;
+  bool inStr = false, esc = false, collecting = false, started = false;
+  int avail;
+  while ((avail = f.read(rd, sizeof(rd))) > 0 && dxcN < DXC_MAX) {
+    for (int i = 0; i < avail && dxcN < DXC_MAX; ++i) {
+      char c = (char)rd[i];
+      if (!started) { if (c == '[' || c == '{') started = true; if (c != '[') continue; continue; }
+      if (!collecting) { if (c == '{') { collecting = true; depth = 1; inStr = esc = false; oi = 0; obj[oi++] = c; } continue; }
+      bool over = (oi >= OBJ_MAX - 1);
+      if (!over) obj[oi++] = c;
+      if (inStr) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == '"') inStr = false; }
+      else if (c == '"') inStr = true;
+      else if (c == '{') ++depth;
+      else if (c == '}') {
+        if (--depth == 0) {
+          collecting = false;
+          if (!over) {
+            obj[oi] = 0; String one(obj);
+            auto fld = [&](const char* k) -> String {
+              int a = one.indexOf(String("\"") + k + "\"");
+              if (a < 0) return String();
+              int c1 = one.indexOf(':', a); if (c1 < 0) return String();
+              int q1 = one.indexOf('"', c1);
+              int cm = one.indexOf(',', c1); int br = one.indexOf('}', c1);
+              int endNum = (cm >= 0 && (br < 0 || cm < br)) ? cm : br;
+              if (q1 >= 0 && (endNum < 0 || q1 < endNum)) {
+                int q2 = one.indexOf('"', q1 + 1);
+                return (q2 > q1) ? one.substring(q1 + 1, q2) : String();
+              }
+              return one.substring(c1 + 1, endNum < 0 ? one.length() : endNum);
+            };
+            // Field names vary between aggregators; accept the common spellings.
+            String fq = fld("frequency"); if (!fq.length()) fq = fld("freq");
+            String dx = fld("dxcall");    if (!dx.length()) dx = fld("dx");
+            String de = fld("spotter");   if (!de.length()) de = fld("de");
+            String tm = fld("time");      if (!tm.length()) tm = fld("timestamp");
+            double khz = fq.toDouble();
+            if (khz > 0 && dx.length()) {
+              DxSpot& s = dxcSpot[dxcN];
+              s.freqKhz = khz;
+              strlcpy(s.dx, dx.c_str(), sizeof(s.dx));
+              strlcpy(s.de, de.c_str(), sizeof(s.de));
+              s.band = (int8_t)dxcBandOf(khz);
+              long ts = (long)tm.toInt();
+              s.ageMin = (now && ts > 100000) ? (int)((now - (time_t)ts) / 60) : -1;
+              dxcN++;
+            }
+          }
+          oi = 0;
+        }
+      }
+    }
+  }
+  f.close(); Store::fs().remove(FILE_DL_TMP);
+  if (dxcN == 0) strlcpy(dxcStatus, "No spots parsed from feed", sizeof(dxcStatus));
+}
+
+void App::drawDxc() {
+  char h[40];
+  snprintf(h, sizeof(h), "DX spots  %s",
+           dxcBandFilter < 0 ? "all bands" : DXC_BANDS[dxcBandFilter].name);
+  header(h);
+  canvas.setTextSize(1);
+  if (dxcStatus[0]) {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(6, 40); canvas.print(dxcStatus);
+    footer("f fetch  n band  p print");
+    return;
+  }
+  if (!dxcSpot || dxcN == 0) {          // null = never fetched, or freed on the way out
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(6, 40); canvas.print("Press f to fetch spots");
+    footer("f fetch  n band  p print");
+    return;
+  }
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(6, 18); canvas.print("DX          freq kHz  band  de");
+  const int ROWS = 8;
+  // Keep the cursor on a visible row. The clamp must run against dxcSel's ORDINAL
+  // among the visible rows, not against dxcSel itself: dxcScroll counts filtered
+  // positions while dxcSel is an index into the unfiltered array, and with a band
+  // filter active the two diverge.
+  int selOrd = 0;
+  for (int i = 0; i < dxcN && i < dxcSel; ++i)
+    if (dxcBandFilter < 0 || dxcSpot[i].band == dxcBandFilter) ++selOrd;
+  if (selOrd < dxcScroll)         dxcScroll = selOrd;
+  if (selOrd >= dxcScroll + ROWS) dxcScroll = selOrd - ROWS + 1;
+  // Walk the filtered subset, keeping the cursor on a visible row.
+  int shown = 0, firstVis = -1;
+  for (int i = 0; i < dxcN; ++i) {
+    if (dxcBandFilter >= 0 && dxcSpot[i].band != dxcBandFilter) continue;
+    if (firstVis < 0) firstVis = i;
+    if (shown >= dxcScroll && shown < dxcScroll + ROWS) {
+      int r = shown - dxcScroll, y = 30 + r * 11;
+      bool sel = (i == dxcSel);
+      if (sel) { canvas.fillRect(0, y - 1, 240, 11, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
+      else       canvas.setTextColor(CL_WHITE, CL_BLACK);
+      const DxSpot& s = dxcSpot[i];
+      canvas.setCursor(6, y);
+      canvas.printf("%-10s %9.1f %5s %-6s", s.dx, s.freqKhz,
+                    s.band >= 0 ? DXC_BANDS[s.band].name : "-", s.de);
+    }
+    shown++;
+  }
+  if (shown == 0) {
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(6, 46); canvas.print("No spots on this band");
+  }
+  footer("f fetch  n band  p print");
+}
+
+void App::keyDxc(char c, bool enter, bool back) {
+  if (isBack(c, back)) { dxcFree(); screen = SCR_NEARBY; lastDrawMs = 0; return; }
+  if (c == 'f') { fetchDxc(); lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_DXC); return; }
+  if (c == 'n') {
+    // 'n' (next band), NOT 'b' -- 'b' is the global screenshot hotkey and must keep
+    // working on every screen.
+    // Cycle "all bands" -> each band that actually HAS a spot -> back to all. Skipping
+    // empty bands matters: there are 24 bands here and a given fetch typically touches
+    // a handful, so stepping through empty ones would feel broken.
+    dxcBandFilter = -1;
+    for (int cand = /*start after current*/ 0; cand < DXC_NBANDS; ++cand) {
+      if (cand <= dxcBandFilterPrev) continue;
+      bool any = false;
+      for (int i = 0; i < dxcN && !any; ++i) if (dxcSpot[i].band == cand) any = true;
+      if (any) { dxcBandFilter = cand; break; }
+    }
+    dxcBandFilterPrev = dxcBandFilter;      // -1 wraps the next press back to the start
+    dxcSel = 0; dxcScroll = 0;
+    for (int i = 0; i < dxcN; ++i)          // park the cursor on a visible row
+      if (dxcBandFilter < 0 || dxcSpot[i].band == dxcBandFilter) { dxcSel = i; break; }
+    lastDrawMs = 0; return;
+  }
+  if (!dxcSpot || dxcN == 0) return;
+  auto visible = [&](int i) { return dxcBandFilter < 0 || dxcSpot[i].band == dxcBandFilter; };
+  if (isUp(c))   { for (int i = dxcSel - 1; i >= 0; --i) if (visible(i)) { dxcSel = i; break; } lastDrawMs = 0; return; }
+  if (isDown(c)) { for (int i = dxcSel + 1; i < dxcN; ++i) if (visible(i)) { dxcSel = i; break; } lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  ADS-B aircraft radar (SCR_ADSB)
+// ---------------------------------------------------------------------------
+//  Reuses the satellite pass polar renderer with the radius axis remapped from
+//  ELEVATION to RANGE: same grid, same angular convention (north up, clockwise),
+//  different radial meaning. Aircraft beyond the configured range are drawn on the
+//  outer ring rather than clipped away, so "there is traffic out there, just far"
+//  is still visible.
+//
+//  Aircraft scatter: with a target grid set, the bearing to that target is drawn as
+//  a line and aircraft close to that great-circle path are highlighted -- those are
+//  the ones geometrically able to support a scatter contact. This is a first-order
+//  screen (bearing proximity), not a full forward-scatter geometry solution.
+// ---------------------------------------------------------------------------
+void App::fetchAdsb() {
+  adsbN = 0; adsbSel = 0; adsbStatus[0] = 0;
+  if (!adsbAlloc()) return;         // sets adsbStatus itself
+  if (!cfg.adsbUrl[0]) { strlcpy(adsbStatus, "No source URL (Settings > Network)", sizeof(adsbStatus)); return; }
+  Observer o = loc.obs();
+  if (!o.valid) { strlcpy(adsbStatus, "No location set", sizeof(adsbStatus)); return; }
+  if (!net.connected() && !connectWifiCfg()) { strlcpy(adsbStatus, "WiFi failed", sizeof(adsbStatus)); return; }
+  adsbBusy = true; setStatus("Fetching aircraft"); draw();
+  // cfg.adsbUrl is the API BASE. The query is built here from the live QTH and
+  // adsbRangeKm so the operator never hand-edits coordinates into a URL. adsb.lol's
+  // path takes NAUTICAL MILES -- passing kilometres straight in would silently
+  // request a ring 1.85x too big. Trailing slashes on the base are tolerated.
+  char base[100]; strlcpy(base, cfg.adsbUrl, sizeof(base));
+  size_t bl = strlen(base);
+  while (bl && base[bl-1] == '/') base[--bl] = 0;
+  int nm = (int)lround(cfg.adsbRangeKm / 1.852);
+  if (nm < 1) nm = 1;
+  char url[200];
+  snprintf(url, sizeof(url), "%s/v2/lat/%.4f/lon/%.4f/dist/%d", base, o.lat, o.lon, nm);
+  bool ok = net.httpsGetToFileRetry(String(url), FILE_DL_TMP, 200000, nullptr, 2);
+  adsbBusy = false;
+  if (!ok) { snprintf(adsbStatus, sizeof(adsbStatus), "Fetch failed (%s)", net.lastErr.c_str()); return; }
+
+  File f = Store::fs().open(FILE_DL_TMP, "r");
+  if (!f) { strlcpy(adsbStatus, "Read failed", sizeof(adsbStatus)); return; }
+  static const size_t OBJ_MAX = 640;
+  Scratch::Lease lease("adsb", OBJ_MAX);
+  char* obj = (char*)lease.p;
+  if (!obj) { f.close(); Store::fs().remove(FILE_DL_TMP); strlcpy(adsbStatus, "Out of memory", sizeof(adsbStatus)); return; }
+
+  uint8_t rd[256];
+  size_t oi = 0; int depth = 0;
+  bool inStr = false, esc = false, collecting = false;
+  // EVERY real ADS-B source wraps its list in an outer object -- readsb/tar1090 and
+  // dump1090 emit {"now":...,"aircraft":[...]}, and the ADSBExchange-compatible
+  // aggregators (adsb.lol, adsb.fi, airplanes.live) emit {"ac":[...]}. Collecting from
+  // the first '{' therefore swallowed the whole document as one object, overflowed the
+  // scratch buffer and yielded ZERO aircraft from every source. Wait for the array key.
+  int kAc = 0, kAircraft = 0; bool inArray = false;
+  static const char* K1 = "\"ac\"";
+  static const char* K2 = "\"aircraft\"";
+  int avail;
+  // NOTE: no "&& adsbN < ADSB_MAX" here. Stopping at the first N records in FILE order
+  // and only then sorting by distance meant the kept set depended on the feed's ordering
+  // -- if it isn't distance-sorted, whole compass sectors could be missing (reported as
+  // "no aircraft to my east"). The whole response is now scanned and the nearest
+  // ADSB_MAX are retained, which is order-independent.
+  while ((avail = f.read(rd, sizeof(rd))) > 0) {
+    for (int i = 0; i < avail; ++i) {
+      char c = (char)rd[i];
+      if (!inArray) {
+        if (c == K1[kAc]) { if (!K1[++kAc]) inArray = true; } else kAc = (c == K1[0]) ? 1 : 0;
+        if (c == K2[kAircraft]) { if (!K2[++kAircraft]) inArray = true; } else kAircraft = (c == K2[0]) ? 1 : 0;
+        continue;
+      }
+      if (!collecting) { if (c == '{') { collecting = true; depth = 1; inStr = esc = false; oi = 0; obj[oi++] = c; } continue; }
+      bool over = (oi >= OBJ_MAX - 1);
+      if (!over) obj[oi++] = c;
+      if (inStr) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == '"') inStr = false; }
+      else if (c == '"') inStr = true;
+      else if (c == '{') ++depth;
+      else if (c == '}') {
+        if (--depth == 0) {
+          collecting = false;
+          if (!over) {
+            obj[oi] = 0; String one(obj);
+            auto fld = [&](const char* k) -> String {
+              int a = one.indexOf(String("\"") + k + "\"");
+              if (a < 0) return String();
+              int c1 = one.indexOf(':', a); if (c1 < 0) return String();
+              int q1 = one.indexOf('"', c1);
+              int cm = one.indexOf(',', c1); int br = one.indexOf('}', c1);
+              int endNum = (cm >= 0 && (br < 0 || cm < br)) ? cm : br;
+              if (q1 >= 0 && (endNum < 0 || q1 < endNum)) {
+                int q2 = one.indexOf('"', q1 + 1);
+                return (q2 > q1) ? one.substring(q1 + 1, q2) : String();
+              }
+              return one.substring(c1 + 1, endNum < 0 ? one.length() : endNum);
+            };
+            // dump1090/tar1090 "aircraft.json" naming, with common alternates.
+            String la = fld("lat"), lo = fld("lon");
+            if (!lo.length()) lo = fld("lng");
+            if (!la.length() || !lo.length()) { oi = 0; continue; }
+            double alat = la.toDouble(), alon = lo.toDouble();
+            if (alat == 0 && alon == 0) { oi = 0; continue; }
+            String id = fld("flight"); if (!id.length()) id = fld("callsign");
+            if (!id.length()) id = fld("hex"); if (!id.length()) id = fld("icao");
+            String al = fld("alt_baro"); if (!al.length()) al = fld("altitude");
+            if (!al.length()) al = fld("alt");
+            String tr = fld("track"); if (!tr.length()) tr = fld("heading");
+            double d, b; greatCircle(o.lat, o.lon, alat, alon, d, b);
+            int slot = -1;
+            if (adsbN < ADSB_MAX) slot = adsbN++;
+            else {                       // full: evict the farthest, if this one is nearer
+              int far = 0;
+              for (int k = 1; k < adsbN; ++k) if (adsbAc[k].distKm > adsbAc[far].distKm) far = k;
+              if ((float)d < adsbAc[far].distKm) slot = far;
+            }
+            if (slot >= 0) {
+              Aircraft& a = adsbAc[slot];
+              id.trim();
+              strlcpy(a.ident, id.length() ? id.c_str() : "?", sizeof(a.ident));
+              a.lat = (float)alat; a.lon = (float)alon;
+              a.distKm = (float)d; a.brg = (float)b;
+              a.altFt = (int)al.toInt();
+              a.trackDeg = tr.length() ? (int)tr.toInt() : -1;
+            }
+          }
+          oi = 0;
+        }
+      }
+    }
+  }
+  f.close(); Store::fs().remove(FILE_DL_TMP);
+
+  for (int i = 1; i < adsbN; ++i) {                 // nearest first
+    Aircraft k = adsbAc[i]; int j = i - 1;
+    while (j >= 0 && adsbAc[j].distKm > k.distKm) { adsbAc[j + 1] = adsbAc[j]; j--; }
+    adsbAc[j + 1] = k;
+  }
+  if (adsbN == 0) strlcpy(adsbStatus, "No aircraft in the feed", sizeof(adsbStatus));
+
+  // Scatter target bearing, if a target grid is set.
+  adsbUpdateScatter();
+}
+
+// Recompute the scatter-target bearing from the current grid + QTH. Split out of fetchAdsb
+// so setting the target grid updates the overlay immediately, rather than only on the next
+// fetch (the old behaviour: the indicator changed only after leaving and re-entering).
+void App::adsbUpdateScatter() {
+  adsbScatter = false;
+  if (!adsbTgtGrid[0]) return;
+  Observer o = loc.obs();
+  if (!o.valid) return;
+  double tlat, tlon;
+  if (Location::gridToLatLon(String(adsbTgtGrid), tlat, tlon)) {
+    double d, b; greatCircle(o.lat, o.lon, tlat, tlon, d, b);
+    adsbScatterBrg = b; adsbScatter = true;
+  }
+}
+
+void App::drawAdsb() {
+  char h[40];
+  snprintf(h, sizeof(h), "Aircraft  %d km", cfg.adsbRangeKm);
+  header(h);
+  canvas.setTextSize(1);
+  if (adsbStatus[0]) {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(6, 40); canvas.print(adsbStatus);
+    footer("f fetch  t target  p print");
+    return;
+  }
+  const int cx = 176, cy = 74, R = 46;
+  canvas.drawCircle(cx, cy, R, CL_DGREY);
+  canvas.drawCircle(cx, cy, (R * 2) / 3, CL_DGREY);
+  canvas.drawCircle(cx, cy, R / 3, CL_DGREY);
+  canvas.setTextColor(CL_DGREY, CL_BLACK);
+  canvas.setCursor(cx - 3, cy - R - 9); canvas.print("N");
+  canvas.setCursor(cx + R + 3, cy - 3);  canvas.print("E");
+  canvas.setCursor(cx - 3, cy + R + 3);  canvas.print("S");
+  canvas.setCursor(cx - R - 9, cy - 3);  canvas.print("W");
+
+  // Scatter path first, so aircraft draw on top of it.
+  if (adsbScatter) {
+    double rad = adsbScatterBrg * 0.017453292519943295;
+    canvas.drawLine(cx, cy, cx + (int)(sin(rad) * R), cy - (int)(cos(rad) * R), CL_ORANGE);
+  }
+  const double cap = (cfg.adsbRangeKm > 0) ? cfg.adsbRangeKm : 50;
+  for (int i = 0; adsbAc && i < adsbN; ++i) {
+    const Aircraft& a = adsbAc[i];
+    double frac = a.distKm / cap;
+    bool beyond = (frac > 1.0);
+    if (beyond) frac = 1.0;
+    double rad = a.brg * 0.017453292519943295;
+    int px = cx + (int)(sin(rad) * R * frac), py = cy - (int)(cos(rad) * R * frac);
+    // Highlight aircraft near the scatter path: within ~15 deg of the target bearing
+    // is the first-order test for "could bounce a signal that way".
+    bool useful = false;
+    if (adsbScatter) {
+      double d = fabs(a.brg - adsbScatterBrg);
+      if (d > 180) d = 360 - d;
+      useful = (d <= 15.0);
+    }
+    uint16_t col = (i == adsbSel) ? CL_WHITE : (useful ? CL_ORANGE : (beyond ? CL_DGREY : CL_GREEN));
+    canvas.fillCircle(px, py, (i == adsbSel) ? 3 : 2, col);
+  }
+
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(6, 20); canvas.printf("%d aircraft", adsbN);
+  if (adsbN > 0 && adsbSel >= 0 && adsbSel < adsbN) {
+    const Aircraft& a = adsbAc[adsbSel];
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(6, 34); canvas.print(a.ident);
+    canvas.setTextColor(CL_MGREY, CL_BLACK);
+    canvas.setCursor(6, 46); canvas.printf("%.0f km  %.0f deg", a.distKm, a.brg);
+    canvas.setCursor(6, 58); canvas.printf("%d ft", a.altFt);
+    if (a.trackDeg >= 0) { canvas.setCursor(6, 70); canvas.printf("track %d", a.trackDeg); }
+  }
+  if (adsbScatter) {
+    canvas.setTextColor(CL_ORANGE, CL_BLACK);
+    canvas.setCursor(6, 86); canvas.printf("scatter %s", adsbTgtGrid);
+    canvas.setCursor(6, 98); canvas.printf("brg %.0f deg", adsbScatterBrg);
+  }
+  footer("f fetch  t tgt  p print  ;/. sel");
+}
+
+void App::keyAdsb(char c, bool enter, bool back) {
+  if (isBack(c, back)) { adsbFree(); screen = SCR_NEARBY; lastDrawMs = 0; return; }
+  if (c == 'f') { fetchAdsb(); lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_ADSB); return; }
+  if (c == 't') { editTarget = 901; editTitle = "Scatter target grid (blank = off)";
+                  editBuf = String(adsbTgtGrid);
+                  screen = SCR_EDIT; lastDrawMs = 0; return; }
+  if (!adsbAc || adsbN == 0) return;
+  if (isUp(c))   { if (--adsbSel < 0) adsbSel = adsbN - 1; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++adsbSel >= adsbN) adsbSel = 0;    lastDrawMs = 0; return; }
+}
+
+// Was AO-7 actually workable from `grid` at time `t`? Used two ways:
+//   * as a sanity filter on "Heard" reports (a Heard filed when the satellite was below
+//     that grid's horizon is mis-filed, and would otherwise fabricate a false boundary);
+//   * as the gate that makes "Not Heard" usable at all -- a negative only means "that
+//     mode was not active" if the satellite was well up for that station in the first
+//     place; otherwise it just means they couldn't see it.
+// Takes the propagator by reference and leaves its SITE moved; the caller restores it.
+bool App::ao7SiteElevOk(const char* grid, time_t t, double minEl, Predictor& p) {
+  if (!grid || !grid[0]) return false;
+  double glat = 0, glon = 0;
+  if (!Location::gridToLatLon(String(grid), glat, glon)) return false;
+  Observer o; o.lat = glat; o.lon = glon; o.altM = 0; o.valid = true;
+  p.setSite(o);
+  LiveLook L = p.look(t);
+  return L.el >= minEl;
+}
+
+int App::ao7LoadObsCache() {
+  if (!Store::ready()) return 0;
+  File f = Store::fs().open(FILE_AO7OBS, "r");
+  if (!f) return 0;
+  time_t now = timeIsSet() ? nowUtc() : 0;
+  int added = 0;
+  char line[48];
+  while (f.available() && ao7NObs < AO7_MAXOBS) {
+    size_t len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+    if (len == 0) continue;
+    line[len] = 0;
+    if (line[0] == '#') continue;                       // header/comment
+    char* comma = strchr(line, ',');
+    if (!comma) continue;
+    *comma = 0;
+    time_t t = (time_t)strtoul(line, nullptr, 10);
+    int    m = (int)strtol(comma + 1, nullptr, 10);
+    if (t <= 0 || m < 0 || m > 3) continue;
+    if (now && t > now + 3600) continue;                // clock skew guard
+    bool dup = false;                                   // exact (time, packed-mode) match
+    for (int i = 0; i < ao7NObs; ++i)
+      if (ao7ObsT[i] == t && ao7ObsMode[i] == (uint8_t)m) { dup = true; break; }
+    if (dup) continue;
+    ao7ObsT[ao7NObs] = t; ao7ObsMode[ao7NObs] = (uint8_t)m; ao7NObs++;
+    if (m & 0x02) ao7NNeg++; else ao7NPos++;
+    added++;
+  }
+  f.close();
+  return added;
+}
+
+void App::ao7SaveObsCache() {
+  if (!Store::ready() || ao7NObs <= 0) return;
+  File f = Store::fs().open(FILE_AO7TMP, "w");
+  if (!f) return;
+  f.println("# CardSat AO-7 observation cache v1: unixtime,packedmode(bit0=mode,bit1=negative)");
+  // Only keep what is still inside the current illuminated window -- older entries can
+  // never contribute again (ao7Estimate would filter them anyway) and would grow the file
+  // without bound across seasons.
+  for (int i = 0; i < ao7NObs; ++i) {
+    if (ao7SinceT > 0 && ao7ObsT[i] < ao7SinceT) continue;
+    f.printf("%lu,%u\n", (unsigned long)ao7ObsT[i], (unsigned)ao7ObsMode[i]);
+  }
+  f.close();
+  Store::promoteFileTransactionally(FILE_AO7OBS, FILE_AO7TMP);
+}
+
+void App::fetchAo7Reports() {
+  ao7NObs = 0; ao7NA = 0; ao7NB = 0; ao7NPos = 0; ao7NNeg = 0;
+  ao7NSwitch = 0; ao7Note = ""; ao7CacheN = 0; ao7Trunc = false;
+  ao7ModeNow = -1; ao7ToSwitchS = 0; ao7NextSwitchT = 0;
+  ao7PeriodS = 0; ao7T0 = 0; ao7FitRmsS = 0; ao7AgreePct = 0;
+  if (!net.connected() && !connectWifiCfg()) { ao7Phase = 3; ao7Note = "WiFi failed"; return; }
+
+  time_t now = timeIsSet() ? nowUtc() : 0;
+  if (now == 0) { ao7Phase = 3; ao7Note = "Clock not set"; return; }
+  time_t oldest = now - (time_t)AO7_WINDOW_DAYS * 86400;
+
+  // The horizon gating below moves the propagator's site and satellite around, so park
+  // the tracking state and restore it once at the end.
+  if (ao7Idx < 0) ao7Idx = db.indexOfNorad(7530);
+  bool geoOk = false;
+  if (ao7Idx >= 0) geoOk = pred.setSat(db.at(ao7Idx));
+
+  // Two separate server-side-filtered requests (see the scope doc): the API's per-request
+  // record cap applies to the whole response, so asking per mode puts the entire budget on
+  // AO-7 instead of diluting it across every satellite in the feed. Each mode also gets its
+  // own half of the observation array -- sharing one counter starved whichever mode was
+  // fetched second (Mode B), biasing the sample.
+  auto fetchOneMode = [&](const char* apiName, uint8_t mode) -> int {
+    String nm;                                  // percent-encode the name for the URL
+    for (const char* p = apiName; *p; ++p) {
+      char ch = *p;
+      if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+          (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == '_' || ch == '~') nm += ch;
+      else { char eb[4]; snprintf(eb, sizeof(eb), "%%%02X", (unsigned char)ch); nm += eb; }
+    }
+    String url = String(AMSAT_REPORTS_URL) + nm
+               + "&hours=" + String(AO7_WINDOW_DAYS * 24) + "&limit=500";
+    if (!net.httpsGetToFileRetry(url, FILE_DL_TMP, 200000, nullptr, 2)) return -1;
+    File f = Store::fs().open(FILE_DL_TMP, "r");
+    if (!f) return -1;
+
+    static const size_t OBJ_MAX = 512;          // one report object is ~250 bytes
+    Scratch::Lease objLease("ao7", OBJ_MAX);    // transient arena, freed at scope end
+    char* obj = (char*)objLease.p;
+    if (!obj) { f.close(); Store::fs().remove(FILE_DL_TMP); return -1; }
+
+    // Per-mode slot window: [base, base + AO7_PERMODE). Responses arrive newest-first, so
+    // filling forward and stopping at the cap keeps the NEWEST reports, which is the right
+    // half to keep when the window overflows.
+    const int base = (int)mode * AO7_PERMODE;
+    int slot = base;
+    const int slotEnd = base + AO7_PERMODE;
+
+    uint8_t rd[256];
+    size_t oi = 0;
+    int  depth = 0;
+    bool inStr = false, esc = false, collecting = false, started = false;
+    int avail, counted = 0, seen = 0;
+    while ((avail = f.read(rd, sizeof(rd))) > 0 && slot < slotEnd) {
+      for (int i = 0; i < avail && slot < slotEnd; ++i) {
+        char c = (char)rd[i];
+        if (!started) { if (c == '[') started = true; continue; }
+        if (!collecting) {                      // between objects: wait for '{'
+          if (c == '{') { collecting = true; depth = 1; inStr = false; esc = false; oi = 0; obj[oi++] = c; }
+          continue;
+        }
+        bool overflow = (oi >= OBJ_MAX - 1);
+        if (!overflow) obj[oi++] = c;
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c == '\\') esc = true;
+          else if (c == '"')  inStr = false;
+        } else if (c == '"') inStr = true;
+        else if (c == '{')   ++depth;
+        else if (c == '}') {
+          if (--depth == 0) {                   // object complete
+            collecting = false;
+            if (!overflow) {
+              obj[oi] = 0;
+              String one(obj);                  // small: one report record only
+              auto fld = [&](const char* k) -> String {
+                int i2 = one.indexOf(String("\"") + k + "\"");
+                if (i2 < 0) return String();
+                int c1 = one.indexOf(':', i2); int q1 = one.indexOf('"', c1); int q2 = one.indexOf('"', q1 + 1);
+                if (q1 < 0 || q2 < 0) return String();
+                return one.substring(q1 + 1, q2);
+              };
+              auto num = [&](const char* k, int dflt) -> int {
+                int i2 = one.indexOf(String("\"") + k + "\"");
+                if (i2 < 0) return dflt;
+                int c1 = one.indexOf(':', i2);
+                if (c1 < 0) return dflt;
+                return (int)strtol(one.c_str() + c1 + 1, nullptr, 10);
+              };
+              String rp = fld("report"), ra = fld("reported_time"), gs = fld("grid_square");
+              time_t rt = isoZToUnix(ra.c_str());
+              if (rt > 0) ++seen;
+              // 15-minute resolution. Every reported_time comes back normalised to HH:30,
+              // but each record also carries the quarter-hour slot it was filed in -- the
+              // API's own de-duplication key is (satellite, callsign, hour, 15-minute
+              // period). Rebuilding hour-start + period*15min + 7.5min centres the
+              // observation in its true slot and cuts the quantisation from +/-30 min to
+              // +/-7.5 min, which is a 4x reduction in the noise floor of the whole fit.
+              int per = num("period", -1);
+              if (rt > 0 && per >= 0 && per <= 3) rt = (rt - (rt % 3600)) + per * 900 + 450;
+
+              bool heard    = rp.startsWith("Heard");
+              // "Telemetry Only" stays excluded: the beacon is audible independently of
+              // which transponder is switched in, so it is not mode evidence.
+              bool notHeard = rp.startsWith("Not Heard");
+
+              if (rt >= oldest && rt <= now + 3600 && (heard || notHeard) && slot < slotEnd) {
+                bool keep = false; uint8_t packed = mode;
+                if (heard) {
+                  // Lenient: only throw out a Heard if the satellite was clearly below
+                  // that grid's horizon (mis-filed). Grid squares are coarse, and from
+                  // 1450 km the footprint is large, so a small negative margin is right.
+                  keep = !geoOk || !gs.length() || ao7SiteElevOk(gs.c_str(), rt, -2.0, pred);
+                  if (keep) ao7NPos++;
+                } else {
+                  // Strict: a negative is only meaningful if the pass was a solid one.
+                  // Requires geometry -- without it we cannot tell "not transmitting"
+                  // from "not visible", so the report is dropped rather than guessed at.
+                  keep = geoOk && gs.length() && ao7SiteElevOk(gs.c_str(), rt, 10.0, pred);
+                  if (keep) { packed |= 0x02; ao7NNeg++; }
+                }
+                if (keep) { ao7ObsT[slot] = rt; ao7ObsMode[slot] = packed; slot++; counted++; }
+              }
+            }
+            oi = 0;
+          }
+        }
+      }
+    }
+    f.close(); Store::fs().remove(FILE_DL_TMP);
+    // The response carries no "there is more" flag, and the API exposes only `since` (a
+    // LOWER bound) -- there is no `before`/`until`, so paging further back is simply not
+    // expressible. What we CAN do is notice that the cap was reached, so the window we
+    // actually analysed is shorter than the 30 days requested, and say so rather than
+    // quietly presenting a truncated baseline as a full one. The on-disk cache below is
+    // the real answer to this: it accumulates history across runs.
+    if (seen >= 500) ao7Trunc = true;
+    // Compact this mode's block down to the front of its slot window is unnecessary --
+    // the merge pass below walks both blocks by their real counts.
+    return counted;
+  };
+
+  int cA = fetchOneMode("AO-7_[V/a]", 0);   // Mode A
+  int cB = fetchOneMode("AO-7_[U/v]", 1);   // Mode B
+
+  // Restore the propagator to the operator's own site and the tracked satellite: the
+  // horizon gating above walked it across every reporter's grid square.
+  pred.setSite(loc.obs());
+  { SatEntry* a = activeSat(); if (a) pred.setSat(*a); }
+
+  if (cA < 0 && cB < 0) { ao7Phase = 3; ao7Note = "Fetch failed (network/API)"; return; }
+
+  // Collapse the two per-mode slot blocks into one contiguous run.
+  int n = 0;
+  for (int m = 0; m < 2; ++m) {
+    int b = m * AO7_PERMODE, cnt = (m == 0) ? (cA > 0 ? cA : 0) : (cB > 0 ? cB : 0);
+    for (int i = 0; i < cnt; ++i) {
+      if (n != b + i) { ao7ObsT[n] = ao7ObsT[b + i]; ao7ObsMode[n] = ao7ObsMode[b + i]; }
+      n++;
+    }
+  }
+  ao7NObs = n;
+
+  ao7CacheN = ao7LoadObsCache();     // extend the baseline with anything held from before
+  if (ao7NObs == 0) { ao7Phase = 1; ao7Note = "No AO-7 reports in the window"; return; }
+  ao7Estimate();
+  ao7SaveObsCache();                 // persist the merged set for the next run
+  ao7Phase = 1;
+}
+
+// Estimate the timer's period + phase from the reports. The mode is NOT tied to calendar
+// day parity, so the cadence is derived from the data alone.
+//
+// The objective is MODE AGREEMENT, not a least-squares fit to bracketed switch instants.
+// The old approach turned each adjacent opposite-mode pair into one "switch happened near
+// here" point and fitted a line through those: on real data that reduced ~35 usable
+// reports to 4 points and threw away everything else. In particular the long confirmed
+// single-mode runs BETWEEN boundaries carried no weight at all, so nothing stopped the
+// fitted period/phase from putting a predicted switch in the middle of a stretch where
+// the mode was repeatedly confirmed unchanged. Scoring candidates by how much of the
+// evidence they explain uses every report, enforces those runs implicitly, and degrades
+// gracefully when one report is wrong (a single mis-vote instead of a corrupted point).
+//
+// Steps: exclude pre-illumination reports -> sort -> coarse grid search over (period,
+// phase, parity) -> local refinement -> phase-uncertainty band -> project.
+void App::ao7Estimate() {
+  ao7NSwitch = 0; ao7NSwitchAll = 0; ao7PeriodS = 0; ao7T0 = 0; ao7FitRmsS = 0;
+  ao7ModeNow = -1; ao7ToSwitchS = 0; ao7NextSwitchT = 0; ao7ExclN = 0; ao7UsedRecent = false;
+  ao7NA = 0; ao7NB = 0; ao7AgreePct = 0;
+  if (ao7NObs == 0) { ao7Note = "No reports in window"; return; }
+
+  // 1. insertion-sort observations by time (N <= 300, fine).
+  for (int i = 1; i < ao7NObs; ++i) {
+    time_t kt = ao7ObsT[i]; uint8_t km = ao7ObsMode[i]; int j = i - 1;
+    while (j >= 0 && ao7ObsT[j] > kt) { ao7ObsT[j + 1] = ao7ObsT[j]; ao7ObsMode[j + 1] = ao7ObsMode[j]; j--; }
+    ao7ObsT[j + 1] = kt; ao7ObsMode[j + 1] = km;
+  }
+
+  // 2. illumination-window cutoff: drop everything older than the current continuous-sun
+  //    stretch (before that the timer resets each orbit, so the phase is meaningless).
+  ao7SinceT = ao7IlluminationSinceT();
+  int startIdx = 0;
+  if (ao7SinceT > 0)
+    while (startIdx < ao7NObs && ao7ObsT[startIdx] < ao7SinceT) ++startIdx;
+  ao7ExclN = startIdx;
+  if (startIdx >= ao7NObs) { ao7Note = "No reports since illumination began"; return; }
+
+  const int N0 = startIdx, N1 = ao7NObs;          // usable range [N0, N1)
+  ao7NA = 0; ao7NB = 0; ao7NPos = 0; ao7NNeg = 0;
+  for (int i = N0; i < N1; ++i) {
+    if (ao7ObsMode[i] & 0x02) ao7NNeg++; else ao7NPos++;
+    if ((ao7ObsMode[i] & 0x01) == 0) ao7NA++; else ao7NB++;
+  }
+  if (ao7NPos == 0) { ao7ModeNow = -1; ao7Note = "No positive reports to fit"; return; }
+
+  // 3. weighted agreement score for one candidate (period P, phase t0, parity flip).
+  //    A "Heard" of mode m says the mode at that instant WAS m; a horizon-gated
+  //    "Not Heard" of mode m says it was NOT m -- i.e. it votes for the other mode, but
+  //    more weakly, since a station can miss an active transponder for local reasons
+  //    (antenna, QRM, operator) while the converse is not true. W_NEG is what keeps a
+  //    single spurious negative from dragging the fit while still letting a consistent
+  //    body of negatives tighten a long gap.
+  const double W_POS = 1.0, W_NEG = 0.35;
+  double wTotal = 0;
+  for (int i = N0; i < N1; ++i) wTotal += (ao7ObsMode[i] & 0x02) ? W_NEG : W_POS;
+
+  auto score = [&](double P, double t0, int flip) -> double {
+    double sc = 0;
+    for (int i = N0; i < N1; ++i) {
+      double k = floor(((double)ao7ObsT[i] - t0) / P);
+      int predMode = (((long)k) & 1) ^ flip;
+      int obsMode  = ao7ObsMode[i] & 0x01;
+      if (ao7ObsMode[i] & 0x02) { if (predMode != obsMode) sc += W_NEG; }   // negative
+      else                      { if (predMode == obsMode) sc += W_POS; }   // positive
+    }
+    return sc;
+  };
+
+  // 4. coarse search. The period range is domain-plausible for AO-7's timer (an earlier
+  //    fixed ~24 h assumption aliased badly against real data that turned out to be
+  //    ~19.5 h). t0 only needs to sweep one period; parity is the second half of the
+  //    phase space and is cheaper to enumerate than to double the t0 sweep.
+  const double PMIN = 12.0 * 3600.0, PMAX = 30.0 * 3600.0;
+  const double PSTEP_C = 300.0, TSTEP_C = 1800.0;      // coarse: 5 min period, 30 min phase
+  const double PSTEP_F = 30.0,  TSTEP_F = 60.0;        // fine:  30 s period, 1 min phase
+  const double tRef = (double)ao7ObsT[N0];
+
+  double bestP = PMIN, bestT0 = tRef, bestSc = -1; int bestFlip = 0;
+  for (double P = PMIN; P <= PMAX; P += PSTEP_C) {
+    for (double off = 0; off < P; off += TSTEP_C) {
+      double t0 = tRef + off;
+      for (int flip = 0; flip < 2; ++flip) {
+        double sc = score(P, t0, flip);
+        if (sc > bestSc) { bestSc = sc; bestP = P; bestT0 = t0; bestFlip = flip; }
+      }
+    }
+  }
+
+  // 5. local refinement around the coarse optimum -- removes the grid quantisation from
+  //    both the period and the phase, which is what the coarse step alone would leave as
+  //    an irreducible error floor.
+  {
+    double p0 = bestP, s0 = bestT0; int f0 = bestFlip;
+    for (double P = p0 - PSTEP_C; P <= p0 + PSTEP_C; P += PSTEP_F) {
+      if (P < PMIN || P > PMAX) continue;
+      for (double t0 = s0 - TSTEP_C; t0 <= s0 + TSTEP_C; t0 += TSTEP_F) {
+        double sc = score(P, t0, f0);
+        if (sc > bestSc) { bestSc = sc; bestP = P; bestT0 = t0; }
+      }
+    }
+  }
+  ao7PeriodS = bestP; ao7T0 = bestT0;
+  ao7AgreePct = (wTotal > 0) ? (100.0 * bestSc / wTotal) : 0;
+
+  // 6. phase uncertainty: how far can t0 move before the fit stops explaining the data as
+  //    well? Sweep out from the optimum until the score drops by more than one Heard-vote
+  //    and take the half-width of that plateau. This is a real "the switch is somewhere in
+  //    +/- this" figure, unlike the old boundary-fit RMS which only measured how well four
+  //    derived midpoints happened to line up.
+  {
+    const double TOL = W_POS;                       // one positive report's worth
+    double lo = 0, hi = 0;
+    for (double d = TSTEP_F; d <= bestP / 2; d += TSTEP_F) {
+      if (score(bestP, bestT0 - d, bestFlip) < bestSc - TOL) break;
+      lo = d;
+    }
+    for (double d = TSTEP_F; d <= bestP / 2; d += TSTEP_F) {
+      if (score(bestP, bestT0 + d, bestFlip) < bestSc - TOL) break;
+      hi = d;
+    }
+    ao7FitRmsS = 0.5 * (lo + hi);
+  }
+
+  // 7. boundary count, kept for the display and as a data-density signal. These no longer
+  //    drive the fit -- they are evidence ABOUT it -- so the old "reject brackets wider
+  //    than X" rule is gone; every observed mode change is counted.
+  int ns = 0;
+  int lastPosIdx = -1;
+  for (int i = N0; i < N1; ++i) {
+    if (ao7ObsMode[i] & 0x02) continue;                       // positives only
+    if (lastPosIdx >= 0 && (ao7ObsMode[i] & 0x01) != (ao7ObsMode[lastPosIdx] & 0x01)) ns++;
+    lastPosIdx = i;
+  }
+  ao7NSwitch = ns; ao7NSwitchAll = ns;
+
+  // 8. project the next switch and the current mode straight from the fitted phase --
+  //    no stepping from the last observation, since the fit itself now encodes the mode
+  //    at every instant.
+  time_t now = timeIsSet() ? nowUtc() : (time_t)bestT0;
+  double kNow = floor(((double)now - bestT0) / bestP);
+  ao7NextSwitchT = (time_t)(bestT0 + (kNow + 1.0) * bestP);
+  time_t prevSwitchT = (time_t)(bestT0 + kNow * bestP);
+  ao7ToSwitchS = (long)(ao7NextSwitchT - now); if (ao7ToSwitchS < 0) ao7ToSwitchS = 0;
+  ao7ModeNow = (((long)kNow) & 1) ^ bestFlip;
+
+  // Near a predicted switch the mode is genuinely uncertain: use the measured phase
+  // uncertainty (floored at 15 min, the resolution the reports themselves carry).
+  double margin = ao7FitRmsS > 900.0 ? ao7FitRmsS : 900.0;
+  long toPrev = (long)(now - prevSwitchT);
+  bool nearBoundary = (ao7ToSwitchS < margin) || (toPrev < margin);
+
+  if (nearBoundary)                      ao7Note = "Near a switch: mode uncertain now";
+  else if (ns < 2 || ao7NPos < 6)        ao7Note = "Low confidence (few reports)";
+  else if (ao7AgreePct < 75.0)           ao7Note = "Reports disagree; estimate approximate";
+  else if (ao7Trunc)                     ao7Note = "Window truncated by API record cap";
+  else if (ao7FitRmsS > 0.10 * bestP)    ao7Note = "Phase loosely constrained";
+  else                                   ao7Note = "Estimate from report timestamps";
+}
+
+void App::drawAo7() {
+  header("AO-7 mode switch");
+  canvas.setTextSize(1);
+  const int X = 6; int y = 22; const int LH = 11;
+
+  if (ao7Idx < 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(X, y);
+    canvas.print("AO-7 not in catalogue.");
+    canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(X, y + LH);
+    canvas.print("Load GP data incl. NORAD 7530.");
+    footer("` back");
+    return;
+  }
+
+  // Sunlight verdict (always shown; cheap to recompute).
+  canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(X, y);
+  canvas.printf("Beta %+.0f  Eclipse %.0f%%", ao7Beta, ao7EclFrac * 100); y += LH;
+  canvas.setTextColor(ao7ContSun ? CL_GREEN : CL_ORANGE, CL_BLACK); canvas.setCursor(X, y);
+  if (ao7ContSun) canvas.print("Continuous sunlight: timer ON"); 
+  else            canvas.print("Eclipsing: mode follows power");
+  y += LH + 2;
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+
+  if (!ao7ContSun) {
+    canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(X, y);
+    canvas.print("24h timer resets each orbit;"); y += LH;
+    canvas.setCursor(X, y); canvas.print("no fixed daily switch now."); y += LH;
+    footer("f fetch anyway  ` back");
+    return;
+  }
+
+  if (ao7Phase == 0) {
+    canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(X, y);
+    canvas.print("Press f to fetch a month of"); y += LH;
+    canvas.setCursor(X, y); canvas.print("AMSAT reports and estimate."); y += LH;
+    footer("f fetch  p print  ` back");
+    return;
+  }
+  if (ao7Phase == 3) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(X, y);
+    canvas.print((ao7Note && *ao7Note) ? ao7Note : "Error");
+    footer("f retry  ` back");
+    return;
+  }
+
+  // Phase 1: results.
+  if (ao7ModeNow >= 0) {
+    canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(X, y);
+    canvas.printf("Now: Mode %s", ao7ModeNow == 0 ? "A (V/a 145/29)" : "B (U/v 435/145)");
+    y += LH;
+    long h = ao7ToSwitchS / 3600, m = (ao7ToSwitchS % 3600) / 60;
+    canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(X, y);
+    if (ao7NextSwitchT) {
+      struct tm tv; gmtime_r(&ao7NextSwitchT, &tv);
+      canvas.printf("Switch ~%ldh%02ldm (%02d:%02dZ)", h, m, tv.tm_hour, tv.tm_min);
+    } else canvas.printf("Next switch in ~%ldh%02ldm", h, m);
+    y += LH;
+  }
+  // Fit summary on one line: period, boundary count (used/total when a recency-limited
+  // subset was preferred), obs used, residual.
+  canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(X, y);
+  if (ao7PeriodS > 0)
+    canvas.printf("P%.2fh %.0f%% +-%.0fm n%d", ao7PeriodS / 3600.0, ao7AgreePct,
+                   ao7FitRmsS / 60.0, ao7NSwitch);
+  else
+    canvas.printf("obs %d  A%d/B%d", ao7NA + ao7NB, ao7NA, ao7NB);
+  y += LH;
+  // Illumination window actually used, and how many older reports were excluded.
+  if (ao7SinceT) {
+    struct tm sv; gmtime_r(&ao7SinceT, &sv);
+    canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(X, y);
+    canvas.printf("%02d/%02d +%d-%d%s%s", sv.tm_mon + 1, sv.tm_mday, ao7NPos, ao7NNeg,
+                   ao7CacheN ? " c" : "", ao7Trunc ? " T" : "");
+    y += LH;
+  }
+  canvas.setTextColor(CL_DGREY, CL_BLACK); canvas.setCursor(X, y);
+  canvas.print(ao7Note);
+  footer("f refresh  p print  ` back");
+}
+
+void App::keyAo7(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == 'f') {
+    ao7CheckSunlight();
+    setStatus("AO-7 reports..."); draw();
+    fetchAo7Reports();
+    status = "";
+    lastDrawMs = 0; return;
+  }
+  if (c == 'p') { printReport(PR_AO7); return; }
+  (void)enter;
+}
+
+void App::printAo7() {
+  Printer::title("AO-7 MODE SWITCH");
+  if (ao7Idx < 0) { Printer::line("AO-7 (NORAD 7530) not loaded."); return; }
+  char b[40];
+  snprintf(b, sizeof(b), "%+.0f deg", ao7Beta); Printer::kv("Beta angle", b);
+  snprintf(b, sizeof(b), "%.0f%%", ao7EclFrac * 100); Printer::kv("Eclipse frac", b);
+  Printer::kv("Sunlight", ao7ContSun ? "continuous (timer on)" : "eclipsing each orbit");
+  Printer::blank();
+  if (!ao7ContSun) {
+    Printer::line("AO-7 is eclipsing each orbit, so");
+    Printer::line("the 24h timer resets on power-up");
+    Printer::line("and mode follows illumination,");
+    Printer::line("not a fixed daily switch.");
+    return;
+  }
+  if (ao7Phase != 1) { Printer::line("No estimate yet (press f)."); return; }
+  Printer::line("-- Estimate (report timestamps) --");
+  if (ao7ModeNow >= 0) {
+    Printer::kv("Mode now", ao7ModeNow == 0 ? "A (V/a 145up/29dn)" : "B (U/v 435up/145dn)");
+    long h = ao7ToSwitchS / 3600, m = (ao7ToSwitchS % 3600) / 60;
+    snprintf(b, sizeof(b), "~%ldh%02ldm", h, m); Printer::kv("Next switch in", b);
+    if (ao7NextSwitchT) {
+      struct tm tv; gmtime_r(&ao7NextSwitchT, &tv);
+      snprintf(b, sizeof(b), "%02d:%02d UTC %02d/%02d", tv.tm_hour, tv.tm_min, tv.tm_mon + 1, tv.tm_mday);
+      Printer::kv("Next switch at", b);
+    }
+  }
+  Printer::blank();
+  Printer::line("-- Timer fit --");
+  if (ao7SinceT) {
+    struct tm sv; gmtime_r(&ao7SinceT, &sv);
+    snprintf(b, sizeof(b), "%02d/%02d", sv.tm_mon + 1, sv.tm_mday);
+    Printer::kv("Illuminated since", b);
+    if (ao7ExclN > 0) { snprintf(b, sizeof(b), "%d (before illum.)", ao7ExclN); Printer::kv("Excluded", b); }
+  }
+  if (ao7PeriodS > 0) { snprintf(b, sizeof(b), "%.2f h", ao7PeriodS / 3600.0); Printer::kv("Period", b); }
+  snprintf(b, sizeof(b), "%.1f%% of evidence", ao7AgreePct); Printer::kv("Agreement", b);
+  if (ao7FitRmsS > 0) { snprintf(b, sizeof(b), "+/-%.0f min", ao7FitRmsS / 60.0); Printer::kv("Phase unc.", b); }
+  snprintf(b, sizeof(b), "%d", ao7NSwitch); Printer::kv("Mode changes", b);
+  snprintf(b, sizeof(b), "%d heard, %d not-heard", ao7NPos, ao7NNeg); Printer::kv("Evidence", b);
+  snprintf(b, sizeof(b), "A%d / B%d", ao7NA, ao7NB); Printer::kv("Per mode", b);
+  if (ao7CacheN > 0) { snprintf(b, sizeof(b), "%d from cache", ao7CacheN); Printer::kv("Baseline", b); }
+  if (ao7Trunc) Printer::line("NOTE: API record cap reached --");
+  if (ao7Trunc) Printer::line("window shorter than 30 days.");
+  Printer::blank();
+  Printer::line(ao7Note);
+  Printer::blank();
+  Printer::line("Estimate only, from listener");
+  Printer::line("reports. AO-7's timer is not");
+  Printer::line("commanded and reports are sparse;");
+  Printer::line("a longer window sharpens the fit.");
+}
+
+
 
 // ---- Debris-group screen ------------------------------------------------------
 namespace {
@@ -42168,7 +44970,7 @@ void App::drawCalc() {
     canvas.setCursor(4, 106); canvas.print("const c kB Re mu g0 sfx p n u m k M G T");
   }
   if (calcEngNota) { canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(210, 96); canvas.print("ENG"); }
-  footer("' fns  \ eng  [ ] scroll  Fn+h help");
+  footer("' fns  \\ eng  [ ] scroll  Fn+h help");
 }
 
 void App::keyCalc(char c, bool enter, bool back) {
@@ -43989,10 +46791,20 @@ namespace {
     String out;
     String err;
     int    gosubStack[BASIC_GOSUB_MAX]; int gosubSP = 0;
-    struct ForRec { int var; double limit, step; int lineIdx; };
+    struct ForRec { int var; double limit, step; int lineIdx; const char* bodyP; };
     ForRec forStack[BASIC_FOR_MAX]; int forSP = 0;
     long   stmts = 0;
+    int    depth = 0;                           // expression recursion depth (see atom)
     const char* p = nullptr;                    // expression cursor
+    const char* forResumeP = nullptr;           // NEXT -> resume same-line FOR body here
+    // The FOR header is followed either by ':' (more statements on this line) or by end
+    // of line. Return a pointer past a single leading ':' + spaces so the caller can test
+    // "is there really a body on this line".
+    static const char* skipToColonBody(const char* q) {
+      while (*q == ' ' || *q == '\t') ++q;
+      if (*q == ':') { ++q; while (*q == ' ' || *q == '\t') ++q; }
+      return q;
+    }
     double* arr = nullptr; int arrN = 0;        // the one @() array (DIM @(n), n<=256)
     int    dataLineIdx = 0;                     // DATA read cursor: line index...
     const char* dataP = nullptr;                //   ...and position inside its value list
@@ -44083,8 +46895,23 @@ namespace {
       else if (*p == '/') { ++p; double d = power(); v = (d != 0) ? v / d : 0; }
       else if (kwb("MOD")) { double d = power(); v = (d != 0) ? fmod(v, d) : 0; } else break; } return v; }
     double power() { double v = unary(); ws(); if (*p == '^') { ++p; v = pow(v, power()); } return v; }
-    double unary() { ws(); if (*p == '-') { ++p; return -unary(); } if (*p == '+') { ++p; return unary(); } return atom(); }
-    double atom() { ws();
+    double unary() { DepthGuard dg(this); if (!dg.ok) return 0;
+      ws(); if (*p == '-') { ++p; return -unary(); } if (*p == '+') { ++p; return unary(); } return atom(); }
+    // Depth-guarded: every path that can recurse (parenthes, unary sign, NOT, and every
+    // function argument) funnels through atom() or unary(), so counting here bounds the
+    // whole expression grammar. 48 nested terms is far beyond any real program and
+    // costs ~15 KB of stack at ~5 frames x ~64 B per level -- the margin that matters,
+    // since a 4 KB line of '(' would otherwise demand megabytes against the 16 KB loop
+    // task stack and hard-fault the device.
+    struct DepthGuard {
+      BasicVM* v; bool ok;
+      DepthGuard(BasicVM* vm) : v(vm), ok(++vm->depth <= 48) {
+        if (!ok && vm->err.isEmpty()) vm->err = "expression too deep";
+      }
+      ~DepthGuard() { --v->depth; }
+    };
+    double atom() { DepthGuard dg(this); if (!dg.ok) return 0;
+      ws();
       const double D2R = 0.017453292519943295;
       if (*p == '(') { ++p; double v = expr(); ws(); if (*p == ')') ++p; else err = "paren"; return v; }
       if (*p == '@') {                            // the one array: @(index)
@@ -44131,7 +46958,12 @@ namespace {
         // previously-valid program changes meaning.
         { int slen = 0; uint8_t sid = basicSysMatch(p, slen);
           if (sid) { p += slen; return sysValue(sid); } }
-        // single-letter variable
+        // single-letter variable. Re-check isalpha: the guard on entry to this block
+        // held at the identifier's first char, but a function keyword matched without
+        // its '(' (ABS 5 / a bare trailing SIN) has advanced p since -- possibly onto
+        // a digit or the NUL, where v-'A' would index far outside vars[] and ++p on
+        // NUL would walk out of the line entirely.
+        if (!isalpha((unsigned char)*p)) { err = "syntax"; return 0; }
         char v = toupper((unsigned char)*p); ++p;
         // guard: a two-letter identifier we don't know is an error, not a var
         if (isalpha((unsigned char)*p)) { err = "unknown name"; return 0; }
@@ -44144,7 +46976,8 @@ namespace {
     // IF-condition grammar: OR-of ANDs of (optionally NOT-ed) relations. Word operators
     // are boundary-checked (kwb) so single-letter variables can't be eaten. Both sides
     // are always evaluated (no short-circuit) -- simple, and side-effect-free here.
-    double lnot() { ws(); if (kwb("NOT")) return (lnot() == 0) ? 1 : 0; return relation(); }
+    double lnot() { DepthGuard dg(this); if (!dg.ok) return 0;
+      ws(); if (kwb("NOT")) return (lnot() == 0) ? 1 : 0; return relation(); }
     double land() { double v = lnot(); for (;;) { ws();
       if (kwb("AND")) { double r = lnot(); v = (v != 0 && r != 0) ? 1 : 0; } else break; } return v; }
     double lor()  { double v = land(); for (;;) { ws();
@@ -44195,7 +47028,9 @@ namespace {
         if (*p == '"') { ++p; while (*p && *p != '"') out += *p++; if (*p == '"') ++p; emitted = true; suppressNL = false; }
         else if (*p == ',') { out += "  "; ++p; suppressNL = true; sawSep = true; }
         else if (*p == ';') { ++p; suppressNL = true; sawSep = true; }
-        else { double v = expr(); printNum(v); emitted = true; suppressNL = false; if (!err.isEmpty()) return; }
+        else { double v = expr(); if (!err.isEmpty()) return;   // check BEFORE printing --
+               // emitLine() already does; printing first appended a bogus 0 to the output
+               printNum(v); emitted = true; suppressNL = false; }
       }
       // Newline unless the statement ended with a ',' or ';'. A bare PRINT (nothing at
       // all -- no items and no separator) always emits a blank line.
@@ -44212,6 +47047,7 @@ namespace {
         if (i < 0 || i >= arrN) { err = "@ index"; return -1; }
         arr[i] = val; return -1;
       }
+      if (!isalpha((unsigned char)*p)) { err = "var A-Z"; return -1; }   // LET 5=1 must not index vars[-12]
       char v = toupper((unsigned char)*p); ++p; ws(); if (*p == '=') ++p; vars[v-'A'] = expr(); return -1; }
 
     // Pull the next DATA value (numbers only, comma-separated, optional sign) scanning
@@ -44244,10 +47080,10 @@ namespace {
       }
     }
 
-    // Execute one line; -1 fall-through, >=0 jump to line index, -999 END.
-    int execLine(const char* text, int curIdx) {
-      p = text; ws();
-      if (isdigit((unsigned char)*p)) { strtol(p, (char**)&p, 10); ws(); }   // skip line number
+    // Execute the ONE statement at p (line number already skipped by execLine).
+    // -1 fall-through, >=0 jump to line index, -999 END. Does not touch ':'.
+    int execStmt(int curIdx) {
+      ws();
       if (*p == 0) return -1;
       if (kw("REM")) return -1;
       if (kw("END")) return -999;
@@ -44258,16 +47094,13 @@ namespace {
         double cond = lor(); ws();
         kw("THEN"); ws();
         if (cond != 0) {
+          // Bare line number after THEN is an implicit GOTO (IF X THEN 90). Every other
+          // consequent is a full statement, so delegate to execStmt rather than keeping a
+          // hand-picked subset here -- the old subset omitted TEXT/LINE/CIRCLE/GOSUB/CLS,
+          // so "IF C=3 THEN TEXT ..." fell through to assign() and reported "unknown name".
           if (isdigit((unsigned char)*p)) { int ln = (int)strtol(p, (char**)&p, 10);
             int idx = findLine(ln); if (idx < 0) { err = "no line " + String(ln); return -1; } return idx; }
-          // inline statement after THEN
-          if (kw("PRINT")) { printStmt(); return -1; }
-          if (*p == '?') { ++p; printStmt(); return -1; }
-          if (kw("LET")) return assign();
-          if (kw("GOTO")) { ws(); int ln = (int)strtol(p, (char**)&p, 10);
-            int idx = findLine(ln); if (idx < 0) err = "no line " + String(ln); return idx; }
-          if (*p == '@') return assign();
-          if (isalpha((unsigned char)*p)) return assign();
+          return execStmt(curIdx);
         }
         return -1;
       }
@@ -44278,18 +47111,29 @@ namespace {
         if (gosubSP >= BASIC_GOSUB_MAX) { err = "GOSUB too deep"; return -1; }
         gosubStack[gosubSP++] = curIdx + 1; return idx; }
       if (kw("RETURN")) { if (gosubSP <= 0) { err = "RETURN w/o GOSUB"; return -1; } return gosubStack[--gosubSP]; }
-      if (kw("FOR")) { ws(); char v = toupper((unsigned char)*p); ++p; ws(); if (*p == '=') ++p;
+      if (kw("FOR")) { ws();
+        if (!isalpha((unsigned char)*p)) { err = "FOR var A-Z"; return -1; }
+        char v = toupper((unsigned char)*p); ++p; ws(); if (*p == '=') ++p;
         double start = expr(); ws(); kw("TO"); double lim = expr(); ws(); double step = 1;
         if (kw("STEP")) step = expr();
         vars[v-'A'] = start;
         if (forSP >= BASIC_FOR_MAX) { err = "FOR too deep"; return -1; }
-        forStack[forSP++] = { v - 'A', lim, step, curIdx }; return -1; }
+        forStack[forSP++] = { v - 'A', lim, step, curIdx, p }; return -1; }
       if (kw("NEXT")) { ws();
         if (forSP <= 0) { err = "NEXT w/o FOR"; return -1; }
         ForRec& f = forStack[forSP - 1];
         vars[f.var] += f.step;
         bool cont = (f.step >= 0) ? (vars[f.var] <= f.limit) : (vars[f.var] >= f.limit);
-        if (cont) return f.lineIdx + 1; else { forSP--; return -1; }
+        if (!cont) { forSP--; return -1; }
+        // Resume the loop body. If the body began mid-line (a same-line
+        // "FOR..:..:NEXT"), the next statement after the FOR header is on THIS line, so
+        // hand the cursor back to the line runner rather than jumping to the following
+        // line and skipping it. forResumeP carries the position; -998 asks execLine to
+        // continue from it.
+        ws();
+        bool bodyOnThisLine = (f.bodyP && *f.bodyP && *skipToColonBody(f.bodyP) != 0);
+        if (bodyOnThisLine) { forResumeP = f.bodyP; return -998; }
+        return f.lineIdx + 1;
       }
       if (kw("DIM")) {                           // DIM @(n) -- the one numeric array
         ws(); if (*p == '@') ++p; else { err = "DIM @(n)"; return -1; }
@@ -44425,8 +47269,30 @@ namespace {
       err = "syntax"; return -1;
     }
 
+    // Execute a whole line, honouring ':' as a statement separator (the tutorial and the
+    // manual both document it, e.g. "40 FOR I=1 TO 3: PRINT I: NEXT"). Only a fall-through
+    // statement continues to the next: a GOTO/GOSUB/IF-jump (>=0), END (-999) or error
+    // consumes the remainder of the line, so "10 GOTO 90 : PRINT X" never prints and a
+    // taken IF does not run statements meant for the not-taken path. A colon inside a
+    // string or after REM is never seen here -- REM returns before we look, and printStmt/
+    // emitLine consume their own quoted text.
+    int execLine(const char* text, int curIdx) {
+      p = text; ws();
+      if (isdigit((unsigned char)*p)) { strtol(p, (char**)&p, 10); ws(); }   // skip line number
+      for (;;) {
+        int r = execStmt(curIdx);
+        if (r == -998) {                           // same-line FOR body resume (NEXT looped)
+          p = skipToColonBody(forResumeP); forResumeP = nullptr; continue;
+        }
+        if (r != -1 || !err.isEmpty()) return r;   // jump/END/error: abandon rest of line
+        ws();
+        if (*p != ':') return -1;                  // end of line
+        ++p;                                       // consume ':' and run the next statement
+      }
+    }
+
     void run() {
-      out = ""; err = ""; gosubSP = forSP = 0; stmts = 0;
+      out = ""; err = ""; gosubSP = forSP = 0; stmts = 0; depth = 0;
       for (int i = 0; i < 26; ++i) vars[i] = 0;
       int pc = 0;
       while (pc >= 0 && pc < nLines) {
@@ -44624,11 +47490,11 @@ void App::basicRun() {
   // called from the editor and console exits. A runaway program fills this buffer to the
   // cap, and on this no-PSRAM board a permanently-held 6 KB is enough to starve the
   // contiguous allocation a TLS handshake needs (LoTW/Cloudlog upload).
-  basicErr = ""; basicOut = ""; basicOutScroll = 0;
+  basicErr[0] = 0; basicOut = ""; basicOutScroll = 0;
   BasicVM* vm = new (std::nothrow) BasicVM();
-  if (!vm) { basicErr = "out of memory"; return; }
+  if (!vm) { strlcpy(basicErr, "out of memory", sizeof(basicErr)); return; }
   String* work = new (std::nothrow) String();
-  if (!work) { delete vm; basicErr = "out of memory"; return; }
+  if (!work) { delete vm; strlcpy(basicErr, "out of memory", sizeof(basicErr)); return; }
   vm->host = this;                              // host hooks (see app.h comment)
   vm->satselCb = &App::basHookSatsel;
   vm->txselCb  = &App::basHookTxsel;
@@ -44735,9 +47601,9 @@ void App::basicRun() {
     sy.nfav = favN;
   }
   String perr;
-  if (!basicParse(*vm, basicBuf, *work, perr)) { basicErr = perr; }
-  else if (vm->nLines == 0) { basicErr = "no numbered lines"; }
-  else { vm->run(); basicOut = vm->out; basicErr = vm->err; }
+  if (!basicParse(*vm, basicBuf, *work, perr)) { strlcpy(basicErr, perr.c_str(), sizeof(basicErr)); }
+  else if (vm->nLines == 0) { strlcpy(basicErr, "no numbered lines", sizeof(basicErr)); }
+  else { vm->run(); basicOut = vm->out; strlcpy(basicErr, vm->err.c_str(), sizeof(basicErr)); }
   if (vm->lprUsed)  basHookLpr(this, nullptr, 2);       // close the report sinks
   if (basFileOpen) { basFile.close(); basFileOpen = false; }  // and the FOPEN file
   delete work; delete vm;
@@ -44763,7 +47629,7 @@ void App::basicFree() {
   // buffer. This is why a runaway program used to hold ~6 KB for the rest of the session and
   // starve the contiguous block a TLS upload needs.
   basicOut.~String(); new (static_cast<void*>(&basicOut)) String();
-  basicErr.~String(); new (static_cast<void*>(&basicErr)) String();
+  basicErr[0] = 0;   // fixed buffer now -- no heap to release
   basicOutScroll = 0;
   // The program text is normally KEPT so leaving BASIC to check something and coming back
   // doesn't lose it. But if there's no program (empty buffer, e.g. after Fn+n), there's
@@ -44842,7 +47708,7 @@ void App::basicInit() {
   // no example is pre-populated). basicBuf persists across visits within a session.
   basicCur = basicBuf.length();
   basicTopLine = 0;
-  basicErr = "";
+  basicErr[0] = 0;
 }
 
 bool App::basicSave() {
@@ -44869,7 +47735,7 @@ bool App::basicLoad(const char* base) {
   basicBuf = "";
   while (f.available() && basicBuf.length() < BASIC_PROG_MAX) basicBuf += (char)f.read();
   f.close();
-  basicName = base; basicCur = 0; basicTopLine = 0; basicErr = "";
+  basicName = base; basicCur = 0; basicTopLine = 0; basicErr[0] = 0;
   setStatus(String("Loaded ") + base);
   return true;
 }
@@ -44982,7 +47848,7 @@ void App::drawBasic() {
       canvas.fillRect(cx, y, 2, 8, CL_CYAN);
     }
   }
-  footer("Fn+r run  s save  l load  n new  h help  ` exit");
+  footer("Fn+r run s/l/n  h help  Fn+t ref  ` exit");
 }
 
 void App::keyBasic(char c, bool enter, bool back) {
@@ -44995,6 +47861,7 @@ void App::keyBasic(char c, bool enter, bool back) {
       basicOutScroll = 0; screen = SCR_BASICRUN; lastDrawMs = 0; return;
     }
     if (c == 'p') { printReport(PR_BASICLIST); return; }   // Fn+p: print the listing
+    if (c == 't') { basicRefScroll = 0; screen = SCR_BASICREF; lastDrawMs = 0; return; }  // Fn+t: tutorial/reference
     if (c == 's') {                          // SAVE (prompt for a name if unnamed)
       if (basicName.length() == 0) { editTarget = 781; editTitle = "Program name"; editBuf = "";
         screen = SCR_EDIT; lastDrawMs = 0; return; }
@@ -45046,7 +47913,7 @@ void App::drawBasicRun() {
   header("BASIC output");
   canvas.setTextSize(1);
   String body = basicOut;
-  if (basicErr.length()) body += (body.length() && body[body.length()-1] != '\n' ? "\n" : "") + String("? ") + basicErr;
+  if (basicErr[0]) body += (body.length() && body[body.length()-1] != '\n' ? "\n" : "") + String("? ") + basicErr;
   if (body.length() == 0) body = "(no output)";
   NoteVRow rows[256];
   int nrows = noteWrap(body, rows, 256);
@@ -45057,7 +47924,7 @@ void App::drawBasicRun() {
     int idx = basicOutScroll + r; int y = 20 + r * LH;
     String seg = body.substring(rows[idx].start, rows[idx].end);
     // error line in red
-    bool errLine = basicErr.length() && idx == nrows - 1;
+    bool errLine = basicErr[0] && idx == nrows - 1;
     canvas.setTextColor(errLine ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(seg);
   }
@@ -45488,6 +48355,155 @@ void App::keyMathRef(char c, bool enter, bool back) {
   if (isUp(c))   { if (--mathRefScroll < 0) mathRefScroll = 0; lastDrawMs = 0; return; }
   if (isDown(c)) { ++mathRefScroll; lastDrawMs = 0; return; }
 }
+
+// ---------------------------------------------------------------------------
+//  Tiny BASIC tutorial + reference (SCR_BASICREF): a scrolling cheat sheet
+//  reachable with Fn+t from the editor. Statements, functions, operators, and
+//  the read-only system-data names -- grounded in the interpreter's own keyword
+//  and BASIC_SYS tables and the MANUAL Tiny BASIC section. Static flash text,
+//  same idiom as MATHREF (~zero heap). '#' = section header, '~' = dim note.
+// ---------------------------------------------------------------------------
+namespace {
+  const char* const BASICREF[] = {
+    "#TUTORIAL",
+    " A program is numbered lines, run",
+    " in order. Number by 10s so you",
+    " can insert 15 between 10 and 20.",
+    " 26 vars A-Z hold numbers.",
+    "~Try this:",
+    "   10 LET A = 7",
+    "   20 PRINT \"AZ=\"; SATAZ",
+    "   30 IF A > 5 THEN PRINT \"BIG\"",
+    "   40 FOR I=1 TO 3: PRINT I: NEXT",
+    " Fn+r runs it, s saves, l loads.",
+    " ? is short for PRINT. : joins",
+    " statements on one line.",
+    " System names (SATAZ, UTCH, ...)",
+    " read live data - see below.",
+    "#STATEMENTS",
+    " LET v=e   (LET optional)",
+    " PRINT / ?  e.g. PRINT A;\" \";B",
+    " IF c THEN line# | statement",
+    " GOTO n     GOSUB n .. RETURN",
+    " FOR v=a TO b [STEP s] .. NEXT v",
+    " ON e GOTO n1,n2,..",
+    " REM comment      END stops",
+    " DIM @(n)  one array, n<=256",
+    " DATA / READ x,@(i) / RESTORE",
+    "#RADIO / OUTPUT",
+    " SATSEL e  reselect sat (0-based)",
+    " TXSEL e   pick transponder",
+    " LPRINT .. to printer/serial/file",
+    " FOPEN\"nm\"/FPRINT../FCLOSE (gated)",
+    " FILES  list /CardSat/basic",
+    "#GRAPHICS (240x135, then SHOW)",
+    " CLS            clear canvas",
+    " PSET x,y[,c]   plot a point",
+    " LINE x1,y1,x2,y2[,c]",
+    " CIRCLE x,y,r[,c]",
+    " TEXT x,y,\"s\" (or expr)",
+    " SHOW           push the frame",
+    "~colors 0-9: blk wht red grn blu",
+    "~yel cyn org gry dkgrn",
+    "#FUNCTIONS",
+    " ABS INT SGN SQR EXP LOG",
+    " SIN COS TAN ATN  (DEGREES)",
+    " MIN(a,b) MAX(a,b) RND",
+    "~RND gives 0..1; INT(RND*6)+1",
+    "#OPERATORS",
+    " ^  then * /  MOD  then + -",
+    " = < > <= >= <>  compare",
+    " AND OR NOT   ( ) to group",
+    "#SYSTEM DATA (read-only names)",
+    " Snapshot at Fn+r; frozen per run.",
+    " Reading missing data HALTS - use",
+    " the *OK flags to branch instead.",
+    "#  Satellite (active)",
+    " SATAZ SATEL   az/el deg",
+    " SATRNG km  SATRR km/s (+away)",
+    " SATLAT SATLON  subpoint",
+    " SATALT km   SATSUN 1=sunlit",
+    "#  Elements",
+    " SATINC SATECC SATRAAN",
+    " SATMM mean motion  SATNOR NORAD",
+    "#  Next pass",
+    " AOSIN min to AOS (neg=up now)",
+    " LOSIN  PASSEL peak el  PASSVIS",
+    "#  Pass table (k=1..PASSN)",
+    " PASSN  count (up to 8)",
+    " PASSAOS(k) PASSLOS(k) minutes",
+    " PASSMAX(k) peak elevation",
+    "#  Sun / Moon",
+    " SUNAZ SUNEL MOONAZ MOONEL",
+    "#  Your station",
+    " MYLAT MYLON MYALT",
+    "#  Clock (UTC)",
+    " UTCH UTCM UTCS",
+    " UTCDAY UTCMON UTCYR",
+    " LSTHR local sidereal, hours",
+    "#  Space weather",
+    " SFI  KP  AINDEX",
+    " SSN FLARE BZ SWSPEED MUF",
+    " FCKP1 FCKP2 FCKP3 forecast Kp",
+    "#  Weather (your units)",
+    " WXTEMP WXWIND WXDIR WXHUM",
+    " MAGDECL mag declination degE",
+    "#  Transponder (after TXSEL)",
+    " TXDL TXUL Hz  TXBW passband",
+    " TXINV 1=invert  TXLIN 1=linear",
+    "#  GPS (branch on GPSOK)",
+    " GPSSATS GPSSPD  always safe",
+    " GPSLAT GPSLON GPSALT  need fix",
+    "#  Device",
+    " BATT %  GPAGE days  NFAV",
+    " HEAPFREE bytes  UPTIME s",
+    " NSAT loaded  NTX transponders",
+    "#  Availability flags (1/0)",
+    " SATOK TIMEOK POSOK WXOK",
+    " SPWXOK PASSOK GPSOK",
+    "~~Full guide: MANUAL Tiny BASIC",
+  };
+  const int BASICREF_N = (int)(sizeof(BASICREF) / sizeof(BASICREF[0]));
+}
+
+void App::drawBasicRef() {
+  header("Tiny BASIC reference");
+  canvas.setTextSize(1);
+  const int rows = 11, LH = 9;
+  if (basicRefScroll < 0) basicRefScroll = 0;
+  if (basicRefScroll > BASICREF_N - rows) basicRefScroll = (BASICREF_N > rows) ? BASICREF_N - rows : 0;
+  int y = 20;
+  for (int r = 0; r < rows && basicRefScroll + r < BASICREF_N; ++r) {
+    const char* s = BASICREF[basicRefScroll + r];
+    if (s[0] == '#') { canvas.setTextColor(CL_GREEN, CL_BLACK); canvas.setCursor(4, y); canvas.print(s + 1); }
+    else if (s[0] == '~') { canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, y); canvas.print(s + 1); }
+    else { canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y); canvas.print(s); }
+    y += LH;
+  }
+  if (basicRefScroll > 0)                { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 20);  canvas.print("^"); }
+  if (basicRefScroll + rows < BASICREF_N) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 112); canvas.print("v"); }
+  footer(";/. scroll  p print  ` back");
+}
+
+void App::keyBasicRef(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_BASIC; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--basicRefScroll < 0) basicRefScroll = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { ++basicRefScroll; lastDrawMs = 0; return; }
+  if (c == 'p') { printReport(PR_BASICREF); return; }   // print the reference
+}
+// Print the Tiny BASIC reference: stream the on-device BASICREF[] table, dropping
+// the '#'/'~' colour markers. Printer::line() per-sink wraps, so long reference
+// lines fold correctly on 58 mm paper without any special handling here.
+void App::printBasicRef() {
+  Printer::title("TINY BASIC REFERENCE");
+  for (int i = 0; i < BASICREF_N; ++i) {
+    const char* s = BASICREF[i];
+    if (s[0] == '#') { Printer::blank(); Printer::line(s + 1); Printer::rule(); }
+    else if (s[0] == '~') Printer::line(s + 1);
+    else Printer::line(s);
+  }
+}
+
 
 // ===========================================================================
 //  State-vector -> GP-element fitter (SCR_GPFIT)
@@ -47575,12 +50591,478 @@ String App::hfBandOutlook(bool day) {
            band(7.1f), band(14.1f), band(21.2f), band(28.3f));
   return String(b);
 }
+// ---------------------------------------------------------------------------
+//  MINIMUF-3.5 (NOSC Technical Document 201, Rose & Martin, 26 Oct 1978).
+//  A simplified single-hop HF MUF model: given path endpoints, date/UT and a
+//  sunspot number, it returns the maximum usable frequency in MHz.
+//
+//  Faithful transcription of the published BASIC (TD-201 lines 1000-1740),
+//  cross-checked against DXSpider's perl/Minimuf.pm (derived from the NOSC C
+//  source) to resolve three points the archived scan rendered ambiguously: the
+//  deep-night test is cos(L0+Y2) <= -0.26; the daylight-length numerator is
+//  (-0.26 + sin(Y2)*sin(Y3)), a PLUS not a multiply; and the decay constant is
+//  9.7*C0^9.6 (up-arrow = exponentiation). With those, the model reproduces
+//  TD-201's Figure-1 24-hour verification table to 0.16 MHz RMS -- see
+//  tools/host_muf/. Lat/lon in RADIANS, west longitude positive; month 1-12,
+//  day 1-31, ut 0-23, ssn the sunspot number.
+//
+//  ~4 MHz RMS against real ionosphere, best on 800-8000 km one/two-hop paths;
+//  an F-region approximation that ignores sporadic-E.
+static double minimufMHz(double L1, double W1, double L2, double W2,
+                         int M0, int D6, double T5, double S9) {
+  const double PIC = 3.141593, P0C = 1.570796;
+  double K1,K6,K8,K9,G0,G8,J9,M9,P,Q,A,C0,T,T4,T9,Y1,Y2,Y3,ft,gt,dist;
+  auto SGN = [](double x){ return x>0?1.0:(x<0?-1.0:0.0); };
+  auto CLAMP1 = [](double x){ return x<-1?-1.0:(x>1?1.0:x); };
+
+  ft = sin(L1)*sin(L2)+cos(L1)*cos(L2)*cos(W2-W1);
+  dist = acos(CLAMP1(ft));
+  K6 = 1.59*dist; if (K6 < 1) K6 = 1;
+  P = sin(L2); Q = cos(L2);
+  A = (sin(L1)-P*cos(dist))/(Q*sin(dist));
+  Y1 = 0.0172*(10+(M0-1)*30.4+D6);
+  Y2 = 0.409*cos(Y1);
+  ft = 2.5*dist/K6; if (ft > P0C) ft = P0C; ft = sin(ft);
+  M9 = 1+2.5*ft*sqrt(ft);
+  J9 = 100;
+  for (K1 = 1.0/(2*K6); K1 <= 1-1.0/(2*K6)+1e-12; K1 += fabs(0.9999-1.0/K6)) {
+    gt = dist*K1;
+    ft = P*cos(gt)+Q*sin(gt)*A;
+    ft = CLAMP1(ft);
+    Y3 = P0C-acos(ft);
+    ft = (cos(gt)-ft*P)/(Q*sqrt(1-ft*ft));
+    ft = CLAMP1(ft);
+    ft = W2+SGN(sin(W1-W2))*acos(ft);
+    if (ft < 0) ft += 2*PIC;
+    if (ft >= 2*PIC) ft -= 2*PIC;
+    ft = 3.82*ft+12+0.13*(sin(Y1)+1.2*sin(2*Y1));
+    K8 = ft-12*(1+SGN(ft-24))*SGN(fabs(ft-24));
+    if (cos(Y3+Y2) <= -0.26) {
+      K9 = 0; G0 = 0;
+    } else {
+      ft = (-0.26+sin(Y2)*sin(Y3))/(cos(Y2)*cos(Y3)+0.001);
+      K9 = 12-atan(ft/sqrt(fabs(1-ft*ft)))*7.639437;
+      T  = K8-K9/2+12*(1-SGN(K8-K9/2))*SGN(fabs(K8-K9/2));
+      T4 = K8+K9/2-12*(1+SGN(K8+K9/2-24))*SGN(fabs(K8+K9/2-24));
+      C0 = fabs(cos(Y3+Y2));
+      T9 = 9.7*pow(C0,9.6); if (T9 < 0.1) T9 = 0.1;
+      G8 = PIC*T9/K9;
+      if ((T4<T && (T5-T4)*(T-T5)>0.0) || (T4>=T && (T5-T)*(T4-T5)<=0)) {
+        ft = T5+12*(1+SGN(T4-T5))*SGN(fabs(T4-T5));
+        ft = (T4-ft)/2;
+        G0 = C0*(G8*(exp(-K9/T9)+1))*exp(ft)/(1+G8*G8);
+      } else {
+        ft = T5+12*(1+SGN(T-T5))*SGN(fabs(T-T5));
+        gt = PIC*(ft-T)/K9;
+        ft = (T-ft)/T9;
+        G0 = C0*(sin(gt)+G8*(exp(ft)-cos(gt)))/(1+G8*G8);
+        ft = C0*(G8*(exp(-K9/T9)+1))*exp((K9-24)/2)/(1+G8*G8);
+        if (G0 < ft) G0 = ft;
+      }
+    }
+    ft = (1+S9/250)*M9*sqrt(6+58*sqrt(G0));
+    ft *= 1-0.1*exp((K9-24)/3);
+    ft *= 1+0.1*(1-SGN(L1)*SGN(L2));
+    ft *= 1-0.1*(1+SGN(fabs(sin(Y3))-cos(Y3)));
+    if (ft < J9) J9 = ft;
+  }
+  return J9 < 2 ? 2 : (J9 > 32 ? 32 : J9);
+}
+// ===========================================================================
+//  Orbital-zones transit tool (SCR_SAA). Propagates the selected satellite forward
+//  and lists when it enters/exits distinctive orbital regions.
+//
+//  Zone models (all approximate, no published verification vector exists):
+//   - South Atlantic Anomaly: an axis-aligned geographic ellipse in east-positive
+//     longitude, centred ~27S 53W with a slow westward drift, approximating the
+//     commonly-drawn SAA outline (elevated trapped-proton flux) at LEO. There is no
+//     sharp edge; intensity is highest near the centre and grows with altitude.
+//   - Eclipse: the satellite is in Earth's shadow (the predictor's cylindrical-shadow
+//     sunlit flag) -- matters for power and thermal.
+//   - Polar: geographic |latitude| >= 60 deg.
+//   - Inner / outer Van Allen belts: centred-dipole McIlwain L-shell in range AND
+//     altitude above the ~1000 km atmospheric-loss floor, so LEO satellites (whose only
+//     belt exposure is the SAA) do not register. The belts are an L-shell phenomenon,
+//     not geographic; the SAA is the inner belt reaching down to LEO because the real
+//     (eccentric) field is offset, which a centred dipole cannot reproduce -- hence the
+//     SAA is modelled geographically and the belts by L-shell. Inner: 1.2<=L<=2.5.
+//     Outer: 3<=L<=7 (the slot region between them is excluded).
+// ===========================================================================
+
+// Centred-dipole McIlwain L: L = (r/RE) / cos^2(magnetic latitude), with the geomagnetic
+// dipole north pole at ~2020 epoch. latDeg/lonEDeg are the geographic sub-point
+// (east-positive longitude), altKm the satellite altitude.
+double App::lShellAt(double latDeg, double lonEDeg, double altKm) {
+  const double RE = 6371.0, D2R = 0.017453292519943295;
+  const double poleLat = 80.65, poleLon = -72.68;
+  double s = sin(latDeg*D2R)*sin(poleLat*D2R)
+           + cos(latDeg*D2R)*cos(poleLat*D2R)*cos((lonEDeg - poleLon)*D2R);
+  if (s >  1) s =  1; if (s < -1) s = -1;             // sin(magnetic latitude)
+  double cos2 = 1.0 - s*s;                             // cos^2(magnetic latitude)
+  if (cos2 < 1e-6) cos2 = 1e-6;                         // guard near the magnetic poles
+  return (RE + altKm) / RE / cos2;
+}
+
+// Is the sub-point (lat, east-lon, altKm; sunlit flag) inside the given zone?
+bool App::zoneContains(int zone, double lat, double lonE, double altKm, bool sunlit) {
+  switch (zone) {
+    case ZONE_SAA: {
+      // Ellipse centred ~27S, 53W with ~0.3 deg/yr westward drift from 2025.0.
+      double yrs = 0;
+      if (timeIsSet()) { time_t n = nowUtc(); struct tm tv; gmtime_r(&n, &tv);
+                         yrs = (tv.tm_year + 1900 + tv.tm_yday/365.0) - 2025.0; }
+      double cLat = -27.0, cLon = -53.0 - 0.30*yrs, aLat = 25.0, aLon = 55.0;
+      double dLon = lonE - cLon;
+      while (dLon < -180) dLon += 360; while (dLon > 180) dLon -= 360;
+      double u = (lat - cLat)/aLat, v = dLon/aLon;
+      return u*u + v*v <= 1.0;
+    }
+    case ZONE_ECLIPSE: return !sunlit;
+    case ZONE_POLAR:   return fabs(lat) >= 60.0;
+    case ZONE_INNER: { double L = lShellAt(lat, lonE, altKm);
+                       return altKm >= 1000.0 && L >= 1.2 && L <= 2.5; }
+    case ZONE_OUTER: { double L = lShellAt(lat, lonE, altKm);
+                       return altKm >= 1000.0 && L >= 3.0 && L <= 7.0; }
+  }
+  return false;
+}
+
+static const char* zoneName(int z) {
+  switch (z) {
+    case 0: return "South Atlantic Anomaly";
+    case 1: return "Eclipse (Earth shadow)";
+    case 2: return "Polar region (>60 deg)";
+    case 3: return "Inner Van Allen belt";
+    case 4: return "Outer Van Allen belt";
+  }
+  return "";
+}
+static const char* zoneShort(int z) {
+  switch (z) { case 0: return "SAA"; case 1: return "Eclipse"; case 2: return "Polar";
+               case 3: return "Inner belt"; case 4: return "Outer belt"; }
+  return "";
+}
+
+// Forward scan: propagate the selected satellite and collect enter/exit windows for the
+// current zone over the next few orbits. One-shot (runs on entry and on zone/refresh),
+// mirrors the pass-finder's SGP4 loop; refines each crossing by bisection to a few sec.
+void App::saaCompute() {
+  saaWinN = 0; saaInNow = false; saaCurL = 0; saaComputed = true;
+  SatEntry* s = activeSat();
+  if (!s || !timeIsSet()) return;
+  pred.setSat(*s);
+  time_t now = nowUtc();
+
+  double mm = s->meanMotion;                          // rev/day
+  double periodSec = (mm > 0) ? 86400.0 / mm : 5700.0;
+  double windowSec = 4.0 * periodSec;
+  if (windowSec > 36.0*3600.0) windowSec = 36.0*3600.0;   // cap (GEO would be days)
+  if (windowSec < 3.0*3600.0)  windowSec = 3.0*3600.0;
+  double stepSec = periodSec / 200.0;
+  if (stepSec < 30)  stepSec = 30;
+  if (stepSec > 300) stepSec = 300;
+
+  auto inAt = [&](time_t t)->bool {
+    LiveLook L = pred.look(t);
+    double lon = L.subLon; while (lon < -180) lon += 360; while (lon > 180) lon -= 360;
+    return zoneContains(saaZone, L.subLat, lon, L.satAltKm, L.sunlit);
+  };
+
+  // Current status + current L for the header.
+  { LiveLook L0 = pred.look(now);
+    double lon = L0.subLon; while (lon < -180) lon += 360; while (lon > 180) lon -= 360;
+    saaInNow = zoneContains(saaZone, L0.subLat, lon, L0.satAltKm, L0.sunlit);
+    saaCurL  = lShellAt(L0.subLat, lon, L0.satAltKm); }
+
+  // Bisect a boolean crossing between ta (state a) and tb (state !a) to ~2 s.
+  auto refine = [&](time_t ta, time_t tb)->time_t {
+    bool sa = inAt(ta);
+    while (tb - ta > 2) { time_t tm = ta + (tb - ta)/2;
+      if (inAt(tm) == sa) ta = tm; else tb = tm; }
+    return tb;
+  };
+
+  bool prev = inAt(now);
+  time_t curEnter = prev ? now : 0;
+  time_t prevT = now;
+  for (double dt = stepSec; dt <= windowSec + 1 && saaWinN < 16; dt += stepSec) {
+    time_t t = now + (time_t)dt;
+    bool in = inAt(t);
+    if (in != prev) {
+      time_t cross = refine(prevT, t);
+      if (in)  curEnter = cross;                       // entered the zone
+      else {                                           // exited
+        saaWin[saaWinN].enter = curEnter;
+        saaWin[saaWinN].exit  = cross;
+        saaWinN++; curEnter = 0;
+      }
+      prev = in;
+    }
+    prevT = t;
+  }
+  if (prev && curEnter && saaWinN < 16) {              // still inside at the horizon
+    saaWin[saaWinN].enter = curEnter; saaWin[saaWinN].exit = 0; saaWinN++;
+  }
+}
+
+void App::drawSaa() {
+  SatEntry* s = activeSat();
+  header("Orbital zones");
+  canvas.setTextSize(1);
+  if (!s) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("No satellite selected.");
+    footer("` back");
+    return;
+  }
+  if (!saaComputed) saaCompute();
+
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  canvas.setCursor(4, 22); canvas.print(s->name);
+  canvas.setTextColor(CL_CYAN, CL_BLACK);
+  canvas.setCursor(4, 34); canvas.print(zoneName(saaZone));
+
+  if (!timeIsSet()) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(4, 48); canvas.print("No UTC yet -- cannot propagate.");
+    footer("z zone  ` back");
+    return;
+  }
+  { char sb[48];
+    snprintf(sb, sizeof(sb), "Now: %s   L=%.1f", saaInNow ? "IN ZONE" : "outside", saaCurL);
+    canvas.setTextColor(saaInNow ? CL_GREEN : CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 48); canvas.print(sb); }
+
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, 62);
+  if (saaWinN == 0) {
+    canvas.print(saaZone >= ZONE_INNER ? "No transits (LEO? see SAA)" : "No transits in next orbits");
+  } else {
+    canvas.print("enter    exit     dur");
+    const int ROWS = 5, TOP = 74, ROWH = 11;
+    if (saaScroll > saaWinN - ROWS) saaScroll = saaWinN - ROWS;
+    if (saaScroll < 0) saaScroll = 0;
+    for (int r = 0; r < ROWS && saaScroll + r < saaWinN; ++r) {
+      int i = saaScroll + r;
+      int y = TOP + r*ROWH;
+      char rb[64];
+      String en = fmtHM(saaWin[i].enter);
+      if (saaWin[i].exit == 0) {
+        snprintf(rb, sizeof(rb), "%s    (in at horizon)", en.c_str());
+      } else {
+        String ex = fmtHM(saaWin[i].exit);
+        long dur = (long)(saaWin[i].exit - saaWin[i].enter);
+        snprintf(rb, sizeof(rb), "%s   %s   %ldm%02lds",
+                 en.c_str(), ex.c_str(), dur/60, dur%60);
+      }
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(4, y); canvas.print(rb);
+    }
+  }
+  footer("z zone  ; . scroll  x print  ` bk");
+}
+
+void App::keySaa(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_ORBIT; lastDrawMs = 0; return; }
+  if (c == 'z') { saaZone = (saaZone + 1) % ZONE_N; saaScroll = 0; saaCompute(); lastDrawMs = 0; return; }
+  if (c == 'r') { saaCompute(); lastDrawMs = 0; return; }
+  if (isUp(c))   { if (saaScroll > 0) saaScroll--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (saaScroll < saaWinN - 1) saaScroll++; lastDrawMs = 0; return; }
+  if (c == 'x') { printReport(PR_SAA); return; }
+}
+
 float App::estMufMHz(bool day) {
   if (spaceF107 < 0) return -1;
   float kp = (spaceKp >= 0) ? spaceKp : 0;
   float muf = 8.0f + (spaceF107 - 65.0f) * 0.16f - kp * 1.2f + (day ? 4.0f : -3.0f);
   if (muf < 3) muf = 3;
   return muf;
+}
+
+// ===========================================================================
+//  MINIMUF-3.5 MUF-to-regions (SCR_MUF table + SCR_MUFMAP map), off Space Wx.
+//  Runs the verified minimufMHz() model from the QTH to a fixed set of world DX
+//  regions for the current UT, giving a "what's the path MUF right now" read that
+//  the single-number Space Wx MUF cannot. The regions are representative centres,
+//  not exhaustive; the model is F-region only and best on 800-8000 km paths, so
+//  the very short and antipodal rows are shown but flagged in the reference.
+// ===========================================================================
+
+
+// Sunspot number for the model. Prefer the observed SSN; otherwise derive it from the
+// 10.7 cm flux using the TD-201 Figure-2 relationship, the common linear inverse
+// SSN = (F10.7 - 63.75) / 0.9 (clamped >= 0). Returns -1 when no solar data at all.
+double App::mufSSN() {
+  if (spaceSSN >= 0) return spaceSSN;
+  if (spaceF107 > 0) { double s = (spaceF107 - 63.75) / 0.9; return s < 0 ? 0 : s; }
+  return -1;
+}
+
+void App::drawMuf() {
+  header("MUF to regions");
+  canvas.setTextSize(1);
+  Observer o = loc.obs();
+  double ssn = mufSSN();
+  if (!o.valid || !timeIsSet() || ssn < 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44);
+    canvas.print(!o.valid   ? "Need QTH (set location)" :
+                 !timeIsSet()? "Need UTC (no time yet)"  :
+                               "No solar data (refresh Space Wx)");
+    footer("` back");
+    return;
+  }
+
+  time_t now = nowUtc(); struct tm tv; gmtime_r(&now, &tv);
+  int mon = tv.tm_mon + 1, day = tv.tm_mday; double ut = tv.tm_hour + tv.tm_min / 60.0;
+  const double D2R = 0.017453292519943295;
+  double qLatR = o.lat * D2R, qLonR = -o.lon * D2R;   // obs.lon is east-positive; model wants west-positive
+
+  // Header line: SSN and UT so the operator can see what drove the numbers.
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  { char hb[64]; snprintf(hb, sizeof(hb), "SSN %d   %02d:%02dz   up to ~0.85xMUF",
+                          (int)lround(ssn), tv.tm_hour, tv.tm_min);
+    canvas.setCursor(4, 26); canvas.print(hb); }
+
+  const int ROWS = 8, ROWH = 11, TOP = 38;
+  if (mufSel < 0) mufSel = 0;
+  if (mufSel >= MUF_REGION_N) mufSel = MUF_REGION_N - 1;
+  if (mufSel < mufScroll) mufScroll = mufSel;
+  if (mufSel >= mufScroll + ROWS) mufScroll = mufSel - ROWS + 1;
+
+  for (int r = 0; r < ROWS && mufScroll + r < MUF_REGION_N; ++r) {
+    int i = mufScroll + r;
+    const MufRegion& rg = MUF_REGIONS[i];
+    double lat2R = rg.lat * D2R, lon2R = rg.lon * D2R;
+    double m = minimufMHz(qLatR, qLonR, lat2R, lon2R, mon, day, ut, ssn);
+    double distKm, brg; greatCircle(o.lat, o.lon, rg.lat, -rg.lon, distKm, brg);
+    int y = TOP + r * ROWH;
+    bool sel = (i == mufSel);
+    if (sel) canvas.fillRect(0, y - 1, 240, ROWH, CL_SELBG);
+    canvas.setTextColor(sel ? CL_WHITE : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(4, y);   canvas.print(rg.name);
+    // bearing + distance
+    char db[24]; snprintf(db, sizeof(db), "%03d\xF8 %5.0fkm", (int)lround(brg), distKm);
+    canvas.setCursor(104, y); canvas.print(db);
+    // MUF value, coloured
+    canvas.setTextColor(mufColour(m), sel ? CL_SELBG : CL_BLACK);
+    char mb[16]; snprintf(mb, sizeof(mb), "%4.1f %s", m, mufBand(m));
+    canvas.setCursor(184, y); canvas.print(mb);
+  }
+  footer("; . move  k map  x print  ` bk");
+}
+
+void App::keyMuf(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_SPACEWX; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (mufSel > 0) mufSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (mufSel < MUF_REGION_N - 1) mufSel++; lastDrawMs = 0; return; }
+  if (c == 'k')  { screen = SCR_MUFMAP; lastDrawMs = 0; return; }
+  if (c == 'x')  { printReport(PR_MUF); return; }
+}
+
+void App::drawMufMap() {
+  header("MUF map");
+  const int MX = 0, MY = 16, MW = 240, MH = 100;      // leave a strip for the legend
+  const uint16_t GRID = CL_MGREY;
+  const double centerLon = (double)cfg.mapCenterLon;
+  canvas.fillRect(MX, MY, MW, MH, CL_BLACK);
+
+  Observer o = loc.obs();
+  double ssn = mufSSN();
+  if (!o.valid || !timeIsSet() || ssn < 0) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("Need QTH, UTC and solar data");
+    footer("` back");
+    return;
+  }
+
+  // Coastline (same public-domain outline and seam handling as the world map).
+  { int px = 0, py = 0; double pds = 0; bool pen = false;
+    for (int i = 0; i + 1 < COAST_N; i += 2) {
+      int lo = COAST[i], la = COAST[i + 1];
+      if (lo == 999) { pen = false; continue; }
+      double ds = mapShiftLon(lo, centerLon);
+      int x = mapLonToX(lo, centerLon, MX, MW);
+      int y = MY + (int)lround((90.0 - la) / 180.0 * MH);
+      if (pen && fabs(ds - pds) < 180.0) canvas.drawLine(px, py, x, y, CL_DGREEN);
+      px = x; py = y; pds = ds; pen = true;
+    }
+  }
+  for (int lon = -180; lon < 180; lon += 60) {
+    int x = mapLonToX(lon, centerLon, MX, MW);
+    canvas.drawLine(x, MY, x, MY + MH - 1, lon == 0 ? CL_DGREEN : GRID);
+  }
+  { int y = MY + 90 * MH / 180; canvas.drawLine(MX, y, MX + MW - 1, y, CL_DGREEN); }
+  canvas.drawRect(MX, MY, MW, MH, GRID);
+
+  time_t now = nowUtc(); struct tm tv; gmtime_r(&now, &tv);
+  int mon = tv.tm_mon + 1, day = tv.tm_mday; double ut = tv.tm_hour + tv.tm_min / 60.0;
+  const double D2R = 0.017453292519943295;
+  double qLatR = o.lat * D2R, qLonR = -o.lon * D2R;
+
+  // Region markers, coloured by MUF band. With two dozen regions, printing a number
+  // at every dot would overlap (Europe alone stacks several), so the dots carry the
+  // band by colour and only the SELECTED region's exact MUF is printed, once, below --
+  // step the selection with ;/. to read each in place. The selected dot gets a white
+  // ring so it is findable among the cluster.
+  if (mufSel < 0) mufSel = 0;
+  if (mufSel >= MUF_REGION_N) mufSel = MUF_REGION_N - 1;
+  double selMuf = 0; int selX = -1, selY = -1; const char* selName = "";
+  for (int i = 0; i < MUF_REGION_N; ++i) {
+    const MufRegion& rg = MUF_REGIONS[i];
+    double m = minimufMHz(qLatR, qLonR, rg.lat * D2R, rg.lon * D2R, mon, day, ut, ssn);
+    int x = mapLonToX(-rg.lon, centerLon, MX, MW);      // region lon is west-positive; map wants east-positive
+    int y = MY + (int)lround((90.0 - rg.lat) / 180.0 * MH);
+    if (x < MX || x >= MX + MW || y < MY || y >= MY + MH) continue;
+    canvas.fillCircle(x, y, 2, mufColour(m));
+    canvas.drawCircle(x, y, 2, CL_BLACK);
+    if (i == mufSel) { selMuf = m; selX = x; selY = y; selName = rg.name; }
+  }
+  // Ring + leader for the selected region.
+  if (selX >= 0) {
+    canvas.drawCircle(selX, selY, 4, CL_WHITE);
+    canvas.drawCircle(selX, selY, 5, CL_BLACK);
+  }
+
+  // QTH cross.
+  { int qx = mapLonToX(o.lon, centerLon, MX, MW);
+    int qy = MY + (int)lround((90.0 - o.lat) / 180.0 * MH);
+    canvas.drawLine(qx - 3, qy, qx + 3, qy, CL_WHITE);
+    canvas.drawLine(qx, qy - 3, qx, qy + 3, CL_WHITE); }
+
+  // Selected-region readout, top-left over a dark bar for legibility over the map.
+  if (selX >= 0) {
+    char rb[40];
+    snprintf(rb, sizeof(rb), "%s: %.1f MHz %s", selName, selMuf, mufBand(selMuf));
+    int w = (int)strlen(rb) * 6 + 4;
+    if (w > MW - 2) w = MW - 2;
+    canvas.fillRect(MX + 1, MY + 1, w, 10, CL_BLACK);
+    canvas.setTextColor(mufColour(selMuf), CL_BLACK);
+    canvas.setCursor(MX + 3, MY + 2); canvas.print(rb);
+  }
+
+  // Legend strip.
+  canvas.setTextSize(1);
+  int ly = MY + MH + 3;
+  struct { uint16_t c; const char* t; } leg[] = {
+    { CL_RED, "<10" }, { CL_YELLOW, "10-17" }, { CL_GREEN, "17-24" }, { CL_CYAN, ">24" } };
+  int lx = 4;
+  for (auto& L : leg) {
+    canvas.fillCircle(lx + 2, ly + 3, 2, L.c);
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(lx + 8, ly); canvas.print(L.t);
+    lx += 58;
+  }
+  footer("; . region  ` back to table");
+}
+
+void App::keyMufMap(char c, bool enter, bool back) {
+  (void)enter;
+  if (isBack(c, back)) { screen = SCR_MUF; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (mufSel > 0) mufSel--; lastDrawMs = 0; return; }   // step the readout
+  if (isDown(c)) { if (mufSel < MUF_REGION_N - 1) mufSel++; lastDrawMs = 0; return; }
 }
 const char* App::auroraLevel() {
   float kp = (spaceKp >= 0) ? spaceKp : -1;
@@ -47721,7 +51203,7 @@ void App::drawSpaceWx() {
                : (String(ageH / 24) + "d old");
     canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
   }
-  footer("p prop  x print  r refresh  ` bk");
+  footer("p prop m muf x print r refr ` bk");
 }
 
 void App::keySpaceWx(char c, bool enter, bool back) {
@@ -47729,6 +51211,7 @@ void App::keySpaceWx(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_HOME; lastDrawMs = 0; return; }
   if (c == 'r') { spaceWxEnter(); return; }   // same show-cache + fetch + result flow
   if (c == 'p') { screen = SCR_PROP; lastDrawMs = 0; return; }   // HF/6m propagation guidance
+  if (c == 'm') { mufSel = 0; mufScroll = 0; screen = SCR_MUF; lastDrawMs = 0; return; }  // MUF-to-regions
   if (c == 'x') { printReport(PR_SPACEWX); return; }             // print the full report
 }
 
@@ -49612,9 +53095,9 @@ void App::drawCalExport() {
     else       canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(8, y); canvas.print(CAL_ITEMS[i]);
   }
-  canvas.setTextColor(calStatus.length() ? CL_GREEN : CL_GREY, CL_BLACK);
+  canvas.setTextColor(calStatus[0] ? CL_GREEN : CL_GREY, CL_BLACK);
   canvas.setCursor(6, 100);
-  if (calStatus.length()) canvas.print(calStatus);
+  if (calStatus[0]) canvas.print(calStatus);
   else                    canvas.print("Writes to /CardSat/Calendars/");
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(6, 112); canvas.print("Download via the web Files page.");
@@ -49626,7 +53109,7 @@ void App::keyCalExport(char c, bool enter, bool back) {
   if (isUp(c))   { if (--calSel < 0) calSel = CAL_N - 1; lastDrawMs = 0; return; }
   if (isDown(c)) { if (++calSel >= CAL_N) calSel = 0; lastDrawMs = 0; return; }
   if (enter) {
-    if (!Store::ready()) { calStatus = "No filesystem available"; lastDrawMs = 0; return; }
+    if (!Store::ready()) { strlcpy(calStatus, "No filesystem available", sizeof(calStatus)); lastDrawMs = 0; return; }
     setStatus("Exporting...");
     String path;
     switch (calSel) {
@@ -49638,9 +53121,9 @@ void App::keyCalExport(char c, bool enter, bool back) {
     }
     if (path.length()) {
       int slash = path.lastIndexOf('/');
-      calStatus = String("Wrote ") + (slash >= 0 ? path.substring(slash + 1) : path);
+      snprintf(calStatus, sizeof(calStatus), "Wrote %s", (slash >= 0 ? path.substring(slash + 1) : path).c_str());
     } else {
-      calStatus = "Nothing to export (no data)";
+      strlcpy(calStatus, "Nothing to export (no data)", sizeof(calStatus));
     }
     lastDrawMs = 0; return;
   }
@@ -50095,6 +53578,11 @@ void App::printReady() {
 
 void App::printAwards() {
   Printer::title("AWARDS");
+  // Self-build like printOrbit does: the aw* counters are filled by buildAwards() when the
+  // Awards screen is opened. Reached from About > Print without visiting that screen they
+  // would all still be zero, so the sheet printed "QSOs 0 / Grids 0 / ..." regardless of
+  // what is actually in the log -- wrong rather than merely empty. Rescan first.
+  buildAwards();
   char b[64];
   snprintf(b, sizeof(b), "QSOs        %d", awQsoTotal);   Printer::line(String(b));
   snprintf(b, sizeof(b), "Grids       %d", awGridN);      Printer::line(String(b));
@@ -51736,7 +55224,7 @@ void App::keyGpSrc(char c, bool enter, bool back) {
 // World Map (both answer "where are the birds right now"), and "Weather" -- a
 // ground-site concern -- now opens the station column. Keep the bands when adding.
 const char* const HOME_ITEMS[] = { "Satellites", "Next Passes (favs)", "Passes (sel)",
-                        "Track (sel)", "World Map", "Overhead now", "Sun / Moon", "Space Wx", "Activations", "AMSAT status", "Weather", "Grid dist/bearing", "QRZ Lookup", "Location", "Update",
+                        "Track (sel)", "World Map", "Overhead now", "Sun / Moon", "Space Wx", "Activations", "AMSAT status", "Weather", "Grid dist/bearing", "Nearby & DX", "Location", "Update",
                         "Settings", "Log", "Messages", "About", "Charge / Sleep" };
 static_assert(sizeof(HOME_ITEMS) / sizeof(HOME_ITEMS[0]) == 20,
               "Home menu item count must match keyHome's N");
@@ -53390,7 +56878,7 @@ void App::drawSettings() {
   // 99-element array -- undefined behaviour that showed up as "the new settings
   // rows have no label" and was quietly constructing String objects on whatever
   // followed on the stack. check_settings_rows.py now enforces this bound.
-  const int N = 110;         // highest index used: 101 (scan rows)
+  const int N = 120;         // highest index used: 114 (Nearby & DX feed rows)
   String rows[N];
   rows[0]  = String("Radio: ") + RADIOS[cfg.radioModel].name;
   rows[1]  = String("CI-V addr: ") + String(cfg.civAddr, HEX);
@@ -53652,6 +57140,11 @@ void App::drawSettings() {
   rows[75] = String("Cloudlog key: ") + String(strlen(cfg.clKey) ? "******" : "(none)");
   rows[76] = String("Cloudlog station ID: ") + (cfg.clStation[0] ? cfg.clStation : "(not set)");
   rows[78] = String("LoTW IOTA: ") + (cfg.lotwIota[0] ? cfg.lotwIota : "(not set)");
+  // ---- Nearby & DX live feeds ----
+  rows[111] = String("APRS range: ") + String(cfg.aprsRangeKm) + " km";
+  rows[112] = String("DX spot feed: ") + (cfg.dxcUrl[0] ? cfg.dxcUrl : "(not set)");
+  rows[113] = String("ADS-B API base: ") + (cfg.adsbUrl[0] ? cfg.adsbUrl : "(not set)");
+  rows[114] = String("ADS-B range: ") + String(cfg.adsbRangeKm) + " km";
   // ---- render: the category list, or the selected category's rows ----
   if (setCat < 0) {
     for (int v = 0; v < SET_CAT_N; ++v) {

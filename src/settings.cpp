@@ -13,6 +13,13 @@
 // is deliberately focused on the crash/garbage-risk fields; it is safe to call after load,
 // restore, and migration. Enums that makeRig / pickers already range-check are left alone.
 void Settings::validate() {
+  // Feed radii. aprsRangeKm becomes an APRS-IS r/ filter (servers cap the radius
+  // anyway) and adsbRangeKm becomes a nautical-mile conversion in a URL path, so
+  // neither may be zero or negative.
+  if (aprsRangeKm < 1)    aprsRangeKm = 1;
+  if (aprsRangeKm > 2000) aprsRangeKm = 2000;
+  if (adsbRangeKm < 1)    adsbRangeKm = 1;
+  if (adsbRangeKm > 500)  adsbRangeKm = 500;
   // Array-index enum: GPS_PROFILES[gpsSource] is indexed unguarded on at least one path.
   if (gpsSource >= GPS_SRC_COUNT) gpsSource = GPS_SRC_CAP1262;
   // C2: Grove rigctl baud must be one of the supported UART rates; snap anything else to the
@@ -30,6 +37,27 @@ void Settings::validate() {
     if (!isfinite(qthLat[i]) || qthLat[i] < -90.0  || qthLat[i] > 90.0)  qthLat[i] = 0.0;
     if (!isfinite(qthLon[i]) || qthLon[i] < -180.0 || qthLon[i] > 180.0) qthLon[i] = 0.0;
   }
+
+  // M20: LoRa radio parameters. A hand-edited or corrupt config.json must not push the
+  // SX1262 outside its usable range or select an unsupported bandwidth. Bounds mirror the
+  // LRX_FREQ_MIN/MAX_KHZ and BW_TABLE authorities in lorarx.cpp; kept in sync by comment
+  // since those are file-static there.
+  if (loraRegion > 2) loraRegion = 0;                                   // 0=US 1=EU 2=JP
+  if (loraFreqKHz < 150000UL) loraFreqKHz = 150000UL;                   // SX1262 low edge
+  if (loraFreqKHz > 960000UL) loraFreqKHz = 960000UL;                   // SX1262 high edge
+  if (loraSf < 7)  loraSf = 7;                                          // valid SF 7..12
+  if (loraSf > 12) loraSf = 12;
+  {
+    // Snap bandwidth to the nearest supported ladder value; default 125 kHz if unrecognized.
+    static const uint32_t BW_OK[] = { 7800, 10400, 15600, 20800, 31250,
+                                      41700, 62500, 125000, 250000, 500000 };
+    bool found = false;
+    for (uint32_t v : BW_OK) if (loraBwHz == v) { found = true; break; }
+    if (!found) loraBwHz = 125000UL;
+  }
+  if (loraTxDbm < -9) loraTxDbm = -9;                                   // SX1262 PA floor
+  if (loraTxDbm > 22) loraTxDbm = 22;                                   // SX1262 PA ceiling
+  if (msgNotify > 2) msgNotify = 1;                                     // 0=off 1=banner 2=+beep
 }
 
 bool Settings::load() {
@@ -242,6 +270,12 @@ bool Settings::load() {
     for (uint8_t x : ok) if (aosLeadMin == x) v = true;
     if (!v) aosLeadMin = 0; }                 // snap a stray value back to a valid step
   amsatWindowH = d["amsatwin"] | (uint8_t)24;
+  // Nearby & DX feeds. These were added to the struct and to the editors but never
+  // to save()/load(), so every edit was discarded at reboot while appearing to work.
+  aprsRangeKm = d["aprsrng"] | 150;
+  strncpy(dxcUrl,  d["dxcurl"]  | "", sizeof(dxcUrl)-1);  dxcUrl[sizeof(dxcUrl)-1]=0;
+  strncpy(adsbUrl, d["adsburl"] | "https://api.adsb.lol", sizeof(adsbUrl)-1); adsbUrl[sizeof(adsbUrl)-1]=0;
+  adsbRangeKm = d["adsbrng"] | 50;
   { const uint8_t ok[] = {3,6,12,24,48,72}; bool v = false;
     for (uint8_t x : ok) if (amsatWindowH == x) v = true;
     if (!v) amsatWindowH = 24; }
@@ -276,6 +310,8 @@ void Settings::loraApplyRegion(uint8_t region) {
 }
 
 bool Settings::save() {
+  validate();   // M17/M20: clamp any out-of-range edit before it is persisted, so the
+                // in-memory state and the written config.json are both always valid.
   JsonDocument d;
   d["ssid"] = ssid;  d["pass"] = pass;
   d["ssid2"] = ssid2; d["pass2"] = pass2;
@@ -355,6 +391,8 @@ bool Settings::save() {
   d["autopos"]=autoPosReply;
   d["aoslead"]=aosLeadMin;
   d["amsatwin"]=amsatWindowH;
+  d["aprsrng"]=aprsRangeKm;
+  d["dxcurl"]=dxcUrl; d["adsburl"]=adsbUrl; d["adsbrng"]=adsbRangeKm;
   // H19: transactional save. Serialize to a String first (config is a few KB), then commit
   // via the atomic replace helper: temp-write -> verify -> rotate live to backup -> promote.
   // A power loss or short write can no longer truncate config.json into malformed JSON --

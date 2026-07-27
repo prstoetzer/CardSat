@@ -1236,6 +1236,38 @@ The pages:
 > one continuous horizon-long "pass". Verified against Skyfield in the host audit
 > harness (Molniya crossing accuracy ≤ 0.04°, coverage 194/194 samples).
 
+#### Orbital-zone transits (`z`)
+
+From the orbital-analysis screen, press **`z`** for an **orbital-zone transit tool**: it
+propagates the selected satellite forward over the next few orbits and lists when it **enters and
+leaves distinctive orbital regions**, with the entry and exit times and the duration of each
+transit, plus a live **in/out status** and the current magnetic **L-shell** value. Press **`z`**
+to cycle the zone, **`;`** / **`.`** to scroll the window list, **`r`** to recompute, **`x`** to
+print, and **`` ` ``** to return.
+
+The five zones:
+
+- **South Atlantic Anomaly** — the region where the inner radiation belt dips down to
+  low-Earth-orbit altitudes because the geomagnetic field is offset from Earth's center. It is a
+  real operational concern: satellites crossing it see elevated radiation, single-event upsets, and
+  detector background, and many spacecraft safe sensitive instruments through it. Modeled as the
+  commonly-drawn geographic outline, corrected for the slow westward drift.
+- **Eclipse** — the satellite in Earth's shadow, from the same geometric shadow test the
+  Illumination screen uses. Matters for power budgeting and thermal cycling.
+- **Polar region** — passes above 60° latitude.
+- **Inner** and **outer Van Allen belts** — for **higher-orbit** satellites. Unlike the SAA and
+  the other zones, the belts are not geographic: they are organized by magnetic **L-shell**, and
+  CardSat computes L from a centered-dipole model with an **altitude floor**, so a low-Earth-orbit
+  bird correctly shows **no belt transits** (at LEO altitude the belts' particles are scoured away
+  except in the SAA, which is the separate zone above), while a **GTO, Molniya, or geostationary**
+  bird shows the belt crossings as it climbs. QO-100 at GEO reads as sitting in the **outer belt**
+  continuously.
+
+Every zone here is an approximation — none of these regions has a sharp physical edge, the SAA
+drifts and varies with altitude, and the belts use a centered dipole rather than the full
+geomagnetic field. The membership logic is pinned by a host-test harness against known points and
+orbits, but treat the results as planning-grade, not a radiation-dose calculation.
+
 ### Next Passes (schedule)
 
 One merged list of the next pass for **every favorite**, soonest first. Each row
@@ -2742,6 +2774,34 @@ forecast is a direct HF-degradation predictor. Press **`r`** to refetch the indi
 leaving the screen; **`` ` ``** returns (outlook page → core page → Space Wx). As on the Space Wx screen itself, these are **climatological rules of thumb,
 not a real-time model** — the screen says as much — and **6 m sporadic-E**, the dominant
 summer opening, is *seasonal* and is not predicted by these indices.
+
+#### HF MUF to world regions (`m`)
+
+Press **`m`** on the Space Wx screen for a **maximum-usable-frequency prediction** from your
+QTH to two dozen world DX regions, computed for the current UT from the observed solar activity.
+Where the propagation guide (`p`) gives a single day/night MUF from a heuristic, this runs a real
+single-hop ionospheric model on the actual great-circle path to each region, so you can see *which
+way* the bands are open right now:
+
+- Each row lists the region, its **bearing and great-circle distance** from your station, the
+  **path MUF** in MHz, and the **best workable band** (the rule of thumb is to work up to about
+  0.85 x MUF), color-coded from red (low) through amber and green to cyan (high). Scroll the
+  24-region list with **`;`** / **`.`**.
+- Press **`k`** for a **world map**: the same regions plotted as MUF-colored dots on a coastline,
+  with your QTH marked by a cross. Step the selected region with **`;`** / **`.`** to read its
+  exact MUF and band in the top-left readout; the selection follows you between the table and the
+  map. Press **`` ` ``** to return to the table.
+- Press **`x`** to print the MUF-to-regions report.
+
+The engine is **MINIMUF-3.5** (U.S. Naval Ocean Systems Center Technical Document 201, Rose &
+Martin, 1978), a compact single-hop MUF model. CardSat's implementation reproduces TD-201's own
+published 24-hour verification table to **0.16 MHz RMS**. It is an **F-region model** and is most
+accurate on **800-8000 km, one- to two-hop paths** (about 4 MHz RMS against the real ionosphere);
+it does not model **sporadic-E**, so summer 6 m and short-skip openings are outside its scope. The
+model needs a **sunspot number**, which CardSat takes from the observed SSN when the feed provides
+one and otherwise derives from the 10.7 cm flux -- so refresh **Space Wx** first if the screen says
+there's no solar data. Like the rest of the propagation tools, treat it as a planning cue: it is a
+climatological path model, not a real-time observation.
 
 ### Weather
 
@@ -6116,7 +6176,7 @@ the no-interactive-programs rule stands; that is precisely why it lives in firmw
 
 | Screen | Keys |
 |---|---|
-| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `k` OSCARLOCATOR · `3` 3D globe · `2` sat-to-sat visibility · `o` orbital analysis · `y` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · `s` AMSAT status roster · `L` share GP over LoRa · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports · colored down-arrow = decaying orbit (yellow watch / orange decaying / red imminent) |
+| **Satellites** | `f` favorite · `v` favorites-only · `n` new GP sat · `x` delete manual sat (2-press) · `e` EQX table (OSCARLOCATOR) · `k` OSCARLOCATOR · `3` 3D globe · `2` sat-to-sat visibility · `o` orbital analysis (then `z` orbital-zone transits) · `y` simulation · `t` transponder database · `d` 10-day overview · `i` illumination · `s` AMSAT status roster · `L` share GP over LoRa · ENTER passes · right-edge AMSAT mark: filled dot = heard, filled square = telemetry only, ring = not heard, none = no reports · colored down-arrow = decaying orbit (yellow watch / orange decaying / red imminent) |
 | **Orbital analysis** | `,`/`/` page (Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / Pass outlook / Orbit position / Phys / Explore) · Info: footprint diameter now/apogee/perigee (= longest possible QSO) + decay estimate & solar-bracket range · Live: az/el/range/Doppler, mean anomaly/phase, sunlit/eclipse + **eclipse depth** (deg; >0 = in shadow) · Next pass: slant ranges + path delay + peak eclipse depth · Doppler: `f` set beacon freq, peak shift + max range-rate · Nodal: J2 node/perigee drift, sun-sync, LTAN, repeat track, longest pass · Sun/Beta: solar beta angle, full-sun vs eclipsed, eclipse %/orbit, next transition · Pass outlook: 7-day pass count/>30° count/longest/avg gap + the best upcoming pass (elevation, when, duration) · Orbit position: mean/true anomaly, argument of latitude, time to perigee/apogee, RAAN, rev number · Phys: orbital velocity now + apo/peri spread, launch year/number + years in orbit (from the COSPAR ID) · Explore: what-if sandbox — `;`/`.` pick apogee/perigee/inclination, type a value, `x` reseeds from the tracked sat; derived orbit recomputes live · `r` recompute · **`p` print report** · `` ` `` back |
 | **Simulation** | `,`/`/` step time · `;`/`.` step size · `m` world-map view (sub-point + footprint at the simulated time) · `x` reset to now · `` ` `` back |
 | **Next Passes** | ENTER track · `m` world map · `t` sky-at-a-glance timeline · `p` rove planner · `w` workable horizon · `s` target search · `r` refresh · `P` print all favorites' passes · `z` deep-sleep until AOS |
@@ -6151,13 +6211,14 @@ the no-interactive-programs rule stands; that is precisely why it lives in firmw
 | **Settings** | `,`/`/` change · ENTER edit/toggle · `s` scan WiFi (on SSID row) · (Reset = type ERASE) |
 | **GP source** | pick **AMSAT** / any **CelesTrak** JSON-PP category (Amateur Radio first) / **Custom URL** · `;`/`.` move · `{`/`}` page · ENTER select |
 | **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · `s` sky sources (radio sources/planets) · `t` Sun/Moon transit finder · `e` EME / moonbounce · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
-| **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labeled & color-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Space Wx" bar + result · also refreshes with Update · `p` HF/6m propagation guide · `r` refresh · `` ` `` back |
+| **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labeled & color-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Space Wx" bar + result · also refreshes with Update · `p` HF/6m propagation guide · `m` MUF to world regions (`k` map) · `r` refresh · `` ` `` back |
 | **Weather** (main menu) | terrestrial current conditions + multi-day forecast for the operating site from Open-Meteo · current temp/sky/wind/humidity then per-day hi/lo & precip chance · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Weather" bar + result · also refreshes with Update · `r` refresh · cached offline · `` ` `` back |
 | **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network / data) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
 | **EME / moonbounce** (Sun/Moon → `e`) | self-echo Doppler per band (50/144/432/1296/10368, topocentric) · range + rate · degradation vs perigee · galactic sky-noise flag · red SUN flag <10° · `p` 30-day plan (dec + degr, `;`/`.` scroll) · `m` mutual-Moon window vs DX grid (`g` grid, `;`/`.` select) · `o` point rotator at Moon · `x` stop · `a` per-band analysis page · `w` print · `` ` `` back |
 | **Grid dist/bearing** (main menu) | great-circle distance + heading to a Maidenhead grid (short/long path, km/mi) · `g` grid · `q` QRZ→grid lookup · `o` point rotator at bearing (el 0) · `x` stop · `` ` `` back |
 | **QRZ → grid** (Grid dist/bearing → `q`) | resolve a callsign to its grid · `c` callsign · ENTER use grid in the calculator · `` ` `` back |
 | **HF/6m propagation** (Space Wx → `p`) | band guidance from solar flux + Kp: HF conditions, 10/15/20 m open/marg/shut, geomagnetic, auroral VHF, absorption · rule-of-thumb (6 m Es seasonal) · `r` refetch · `` ` `` back |
+| **MUF to regions** (Space Wx → `m`) | MINIMUF-3.5 path MUF from QTH to 24 world DX regions: bearing, distance, MUF, best band, color-coded · `;`/`.` scroll · `k` world map (colored dots, `;`/`.` step region) · `x` print · `` ` `` back |
 | **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
 | **About** | build/version, IP, free heap and diagnostics (read-only) · `t` Tools hub · `p` Print submenu · `r` station readiness checklist · `l` license · `z` games |

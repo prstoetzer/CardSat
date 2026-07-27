@@ -78,6 +78,17 @@ namespace Printer {
 
   void line(const String& s);          // one line to every active sink
   void wrap(const String& s);          // hard-wrap at each sink's width
+  // ---- narrow-paper layout helpers (0.9.65) --------------------------------
+  // Reports lay out columns for the widest active sink but must not shear on a
+  // 32-col 58 mm receipt. These centralize the "stack it when narrow" logic so
+  // individual reports don't each re-implement an if(wide) branch.
+  bool narrow();                       // true when the widest sink is <= 32 cols
+  // label + value on one line when it fits cols(), else value on an indented
+  // continuation line -- so key/value reports never wrap mid-value.
+  void kv(const String& label, const String& value);
+  // a columnar row: fields joined by single spaces when they fit cols(), else
+  // each field on its own line, later fields indented two spaces. n <= 8.
+  void colrow(const String* fields, int n);
   void blank();
   void title(const String& s);         // emphasized/centered where the format allows
   void rule();                         // a row of '-' at each sink's width

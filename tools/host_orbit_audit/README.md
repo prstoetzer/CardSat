@@ -25,3 +25,14 @@ Run: `tools/host_orbit_audit/build.sh [path-to-Sgp4-lib/src]`
 Needs g++, python3 + `pip install skyfield sgp4`, and network (TLE via
 CelesTrak with an AMSAT `nasabare.txt` fallback; DE421 via curl, cached beside
 the script). `sample_run.txt` is a captured harness output.
+
+## Wrap-safe timing unit test (M36)
+
+`wrap_test.sh` is a small, network-free companion. It extracts the real
+`timeReached(now, deadline)` helper verbatim from `src/app.cpp` and asserts the
+signed-difference deadline comparison stays correct across the ~49.7-day
+`millis()` rollover — the boundary where a naive `now < deadline` comparison
+misfires for ~25 days. Because the helper is pulled from the shipped source at
+run time, the test can't drift from the firmware.
+
+Run: `tools/host_orbit_audit/wrap_test.sh`  (needs only g++ and python3).

@@ -92,6 +92,11 @@ struct Stream : public Print {
   virtual int read()      { return -1; }
   virtual int peek()      { return -1; }
   virtual void flush()    {}
+  // Declaring write(uint8_t) here HIDES every other Print::write overload for
+  // anything calling through a Stream& -- including write(const uint8_t*, size_t),
+  // which the real Arduino Print exposes and which usbserial.cpp calls. Without
+  // this using-declaration the gate rejects code that compiles on the device.
+  using Print::write;
   size_t write(uint8_t) override { return 1; }
 };
 // Minimal Arduino String: enough to type-check the diagnostic accessors.

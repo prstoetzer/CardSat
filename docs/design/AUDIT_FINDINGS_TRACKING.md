@@ -124,14 +124,39 @@ Other round-2 fixes this cycle:
   `_ok` on a fully-failed write, so `ready()` reflects a disconnected bridge / full stream
   instead of tracking believing commands land.
 
+### Fixed in v0.9.65 (corrective pass — code- and compile-verified, not yet hardware-tested)
+
+Three of the deferred items were completed in the v0.9.65 cycle. All edits are mirrored
+`src/`↔`.ino`, all nine gates pass, and the firmware compiles clean.
+
+- **Storage transactionality (H12, H13, H14, H19, M29, M32) — DONE.** The rotate/promote/
+  restore sequence is now owned by a single shared primitive,
+  `Store::promoteFileTransactionally(live, tmp)` (temp is pre-written+verified by the caller;
+  it rotates live→`.bak`, promotes temp→live, and restores the backup on a failed promote so
+  there is never a no-live-file window). `writeFileAtomic()` (config save, note writes, tx
+  cache) and both download promotions in `net.cpp` (GP catalog, transmitter cache) now route
+  through it, replacing three hand-copied variants. **Also fixed a latent bug this surfaced:**
+  `SatDb`'s context-file rewrite (`satdb.cpp`) previously did a bare `remove(live)` then
+  `rename(tmp, live)` with no backup — a real no-catalog window on a failed rename; it now
+  promotes transactionally, and the "last entry removed" case cleanly retires the live file
+  plus any stale backup. The remaining validation this item wanted — **power-cut
+  fault-injection on hardware** — is still outstanding.
+- **Input/boundary validation (M16–M20) — DONE (the validation-centralization half).**
+  `Settings::validate()` gained the missing LoRa clamps: region (0–2), frequency
+  (150–960 MHz, mirroring the `lorarx.cpp` M20 authorities), spreading factor (7–12),
+  bandwidth (snapped to the supported ladder), TX power (−9…+22 dBm), and message-notify mode.
+  `validate()` now also runs at the **start of `save()`**, so an out-of-range edit is clamped
+  before it is persisted — not only caught on the next load (load/restore/migration were
+  already covered, migration running inside `load()`). The Wi-Fi SSID/pass NUL-termination
+  (M16) and the LoRa RX-frequency bound (M20 edit-path) had already landed in v0.9.64.
+- **Wrap-safe timing (M36) — DONE.** Added `timeReached(now, deadline)` using signed-difference
+  arithmetic (`(int32_t)(now - deadline) >= 0`) and converted all 11 absolute
+  `millis() < untilMs` deadline comparisons in `app.cpp` (status banner, AOS/sked flash,
+  playback-OOB banner, LOS handoff prompt, repeater-arm double-tap, keps animation). A wrap
+  unit test covering the rollover boundary was added to `tools/host_orbit_audit/`.
+
 ### Deferred to the corrective pass (round 2)
 
-- **Storage transactionality (H12, H13, H14, H19, M29, M32).** A single validated
-  `replaceFileTransactionally()` helper (temp write → validate → rotate → promote →
-  restore-on-failure) should back GP promotion, transmitter-cache writes, config save, and
-  note writes. This is a cross-cutting change touching `net.cpp`, `satdb.cpp`,
-  `settings.cpp`, and `notes.cpp`, and needs power-cut fault-injection testing. Highest
-  priority for the next pass.
 - **SD remount recovery (H11).** Separate the selected backend from mount health so a
   transient SD failure after LoRa activity can retry SD instead of latching to an unmounted
   LittleFS. Needs hardware fault-injection.
@@ -143,9 +168,6 @@ Other round-2 fixes this cycle:
   M5Unified `playRaw()` ownership contract confirmed on hardware.
 - **GPS teardown (H18).** Add `endGps()` that ends+deletes the `HardwareSerial` before every
   restart and on disable. Hardware-validate against Grove pin sharing.
-- **Input/boundary validation (M16–M20).** Centralize `Settings::validate()` (enum ranges,
-  coordinates, grid subsquares, LoRa region/freq/SF/BW bounds) called after load, restore,
-  migration, and edit; fix Wi-Fi SSID/pass NUL-termination; bound LoRa RX frequency.
 - **Backend health honesty (M22–M27, M39).** Distinguish transport-open from
   device-responding for rigctl and the serial/direct rotator backends; check I2C and stream
   write results; verify Kenwood MAIN/SUB mode writes on hardware.
@@ -154,9 +176,6 @@ Other round-2 fixes this cycle:
   per-line open/flush cost; Wi-Fi scan disconnect restoration; IPP drain-after-close;
   removing/guarding the deprecated whole-response `net` APIs; converting long foreground
   operations to cooperative jobs.
-- **Wrap-safe timing (M36).** Replace absolute `millis() < deadline` comparisons with signed
-  `timeBefore(now, deadline)` helpers across the cited sites. Mechanical but wide; worth a
-  focused pass with a wrap unit test.
 
 ## Notes
 

@@ -125,22 +125,35 @@ bool writeFileAtomic(const char* path, const uint8_t* data, size_t len) {
     if (wrote != len) { f.remove(tmp); return false; }   // short write: discard temp, keep live
   }
 
-  // 2) rotate the current live file to backup (if one exists).
-  bool hadLive = f.exists(path);
+  // 2-4) rotate live->backup, promote temp->live, restore-on-failure, drop backup.
+  // Shared with the GP and transmitter-cache promotions so the delicate restore logic
+  // lives in exactly one place.
+  return promoteFileTransactionally(path, tmp);
+}
+
+// The rotate/promote/restore core, factored out of writeFileAtomic() so the download
+// promotions in net.cpp and the context-file rewrite in satdb.cpp use the identical,
+// once-audited sequence instead of hand-copied variants. 'tmp' must already hold the
+// fully written, verified new contents; 'live' is the destination path. LittleFS rename
+// refuses to overwrite an existing target, so every step clears its destination first.
+bool promoteFileTransactionally(const char* live, const char* tmp) {
+  if (!live || !live[0] || !tmp || !tmp[0]) return false;
+  if (!ready()) return false;
+  fs::FS& f = fs();
+  char bak[112];
+  snprintf(bak, sizeof(bak), "%s.bak", live);
+
+  bool hadLive = f.exists(live);
   if (hadLive) {
     if (f.exists(bak)) f.remove(bak);
-    if (!f.rename(path, bak)) { f.remove(tmp); return false; }   // couldn't back up: keep live
+    if (!f.rename(live, bak)) return false;   // couldn't back up: leave live + temp for caller
   }
-
-  // 3) promote temp -> live. On failure, restore the backup so we never end up with no file.
-  if (!f.rename(tmp, path)) {
-    if (hadLive) f.rename(bak, path);   // put the original back
+  if (!f.rename(tmp, live)) {
+    if (hadLive) f.rename(bak, live);          // promote failed: put the original back
     f.remove(tmp);
     return false;
   }
-
-  // 4) committed: drop the backup.
-  if (hadLive) f.remove(bak);
+  if (hadLive) f.remove(bak);                  // committed: drop the backup
   return true;
 }
 

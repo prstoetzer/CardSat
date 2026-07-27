@@ -24,4 +24,11 @@ namespace Store {
   // Transactional whole-file replace: temp-write -> verify -> rotate -> promote -> restore
   // on failure. The previous good file survives any interrupted/short write. (H13/H19/M29/M32)
   bool   writeFileAtomic(const char* path, const uint8_t* data, size_t len);
+  // Promote an already-written, already-validated temp file into place transactionally:
+  // rotate live->'<live>.bak', rename temp->live, and restore the backup if the promote
+  // fails, so there is never a window with no live file. The single owner of the
+  // rotate/promote/restore sequence shared by writeFileAtomic(), the GP-catalog promote,
+  // and the transmitter-cache refresh. Does NOT remove tmp on the early back-up-failure
+  // path (caller may retry); DOES remove tmp on a promote failure after restoring live.
+  bool   promoteFileTransactionally(const char* live, const char* tmp);
 }

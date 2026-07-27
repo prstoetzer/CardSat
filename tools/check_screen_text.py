@@ -26,6 +26,7 @@ CHECKS = [
     ("Fox primer",          'static const char* const FOXTEXT_LINES[] = {', 38),
     ("Sim intro",           'static const char* const CSIM_LINES[] = {', 38),
     ("Print submenu",       'const char* const PA_ITEMS[] = {', 39),
+    ("BASIC reference",      'const char* const BASICREF[] = {', 39),
 ]
 bad = 0
 for label, anchor, budget in CHECKS:

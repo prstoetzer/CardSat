@@ -25,9 +25,13 @@ enum Screen : uint8_t {
   SCR_CALEXPORT,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_PERF,
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICREF, SCR_PERF,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
   SCR_KESSLER, SCR_QTHPRE,
+  // "Nearby & DX" hub and its live terrestrial feeds. These are fetch-and-browse views
+  // of what is on the air / in the air around the operator right now, as distinct from
+  // the satellite-centric screens above.
+  SCR_NEARBY, SCR_APRS, SCR_APRSDET, SCR_DXC, SCR_ADSB,
   SCR_DUALRIG, SCR_BASICFILES
 };
 
@@ -127,7 +131,12 @@ private:
   int   drSel = 0;                           // cursor: 0..5 across the 6 editable fields
   int   drScroll = 0;                        // device-list scroll
   bool  drLoaded = false;                    // a query has populated the state
-  String drStatus;                           // last transport result / hint
+  // Status-line members below are fixed buffers, not Arduino String: a String member of
+  // the global App object keeps its heap block alive for the life of the program once
+  // assigned (String never returns a buffer on reassignment), and each such long-lived
+  // block is a permanent fragmentation anchor in the no-PSRAM heap. Overlong messages
+  // truncate safely via strlcpy/snprintf, which is fine for one-line status text.
+  char drStatus[64] = {0};                   // last transport result / hint
   bool  drAlloc();                           // allocate drDev/drModel (on screen entry)
   void  drFree();                            // release them (screen-transition hook)
   void  drQuery();                           // pull \csdr_get + \csdr_models
@@ -446,8 +455,8 @@ private:
   void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
   void dxdStepAnchorDial(int dir);   // step the anchored dial by 1 kHz (fixed modes)
   void dxdReanchorToStored();        // re-apply dxdAnchorHz to the current transponder after a change
-  void dxDoppFreqs(time_t t, uint32_t& myRx, uint32_t& myTx,
-                   uint32_t& dxRx, uint32_t& dxTx);  // core per-step calculator
+  void dxDoppFreqs(time_t t, freq_t& myRx, freq_t& myTx,
+                   freq_t& dxRx, freq_t& dxTx);  // core per-step calculator
   // Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
   // dome, off the Sun/Moon screen. For antenna pointing and RF-source reference.
   int       skySel = 0;               // highlighted object index
@@ -1448,6 +1457,31 @@ private:
   void parse3DayKpForecast(const char* path);  // SWPC 3-day-forecast.txt -> spaceFcastKp[]
   String hfBandOutlook(bool day);    // one-line HF band open/closed sketch from SFI/Kp
   float  estMufMHz(bool day);        // rough MUF estimate (MHz), -1 if no data
+  // MINIMUF-3.5 MUF-to-regions table (SCR_MUF) and world map (SCR_MUFMAP), both off
+  // Space Wx. mufSSN() gives the sunspot number the model wants, from spaceSSN or, if
+  // that is absent, derived from the 10.7 cm flux via the TD-201 Figure-2 relationship.
+  void   drawMuf();    void keyMuf(char c, bool enter, bool back);
+  void   drawMufMap(); void keyMufMap(char c, bool enter, bool back);
+  double mufSSN();                   // sunspot number for the model (-1 if no solar data)
+  int    mufSel = 0, mufScroll = 0;  // region-table cursor and viewport
+  // Orbital-zones transit tool (SCR_SAA), off the orbital-analysis screen. Propagates
+  // the selected satellite forward and reports when it enters/exits distinctive orbital
+  // regions: the South Atlantic Anomaly, Earth's shadow (eclipse), the polar caps, and
+  // the inner/outer Van Allen belts. SAA is a geographic model; the belts use a
+  // centered-dipole L-shell with an altitude gate. Zones and the model are approximate.
+  enum ZoneId { ZONE_SAA = 0, ZONE_ECLIPSE, ZONE_POLAR, ZONE_INNER, ZONE_OUTER, ZONE_N };
+  struct ZoneWin { time_t enter; time_t exit; };   // one transit window (exit==0: still in at horizon)
+  void   drawSaa();   void keySaa(char c, bool enter, bool back);
+  void   saaCompute();                               // (re)run the forward scan for the current zone
+  bool   zoneContains(int zone, double lat, double lonE, double altKm, bool sunlit);
+  static double lShellAt(double latDeg, double lonEDeg, double altKm);  // centered-dipole McIlwain L
+  int      saaZone = ZONE_SAA;      // selected zone
+  int      saaScroll = 0;           // window-list viewport
+  ZoneWin  saaWin[16];              // upcoming transit windows
+  int      saaWinN = 0;
+  bool     saaInNow = false;        // in the selected zone right now
+  double   saaCurL = 0;             // current L-shell (for the status line)
+  bool     saaComputed = false;
   const char* auroraLevel();         // aurora activity word from Kp/Bz
   const char* vhfFlag();             // 6m/2m Es / auroral-E hint
   const char* meteorShowerNow(bool& nearPeak);  // active meteor shower for MS planning
@@ -1670,7 +1704,7 @@ private:
   int toolsSel = 0;
   int toolsCat = -1;   // Tools menu: -1 = category list, else selected category index
   int    calSel = 0;             // Calendar-export screen cursor (0..5)
-  String calStatus;              // last export result line ("" = none)
+  char calStatus[64] = {0};      // last export result line ("" = none)
   // Hand-pointing aids on the arrow screen (0.9.62): after the operator points north,
   // integrate the BMI270 gyro's yaw rate to a relative heading and use the accelerometer
   // as an elevation level. Gyro-only heading drifts, so re-zeroing north is one key.
@@ -1724,7 +1758,7 @@ private:
   String basicName;                 // loaded/saved base name (no dir/.bas)
   String basicOut;                  // console output from the last run
   int    basicOutScroll = 0;        // console scroll (first visible row)
-  String basicErr;                  // run error (empty = ok / not run)
+  char basicErr[96] = {0};          // run error (empty = ok / not run)
   void drawBasic();    void keyBasic(char c, bool enter, bool back);
   void drawBasicRun(); void keyBasicRun(char c, bool enter, bool back);
   void basicInit();                 // open the editor (seed a sample on first use)
@@ -1918,7 +1952,9 @@ private:
   // Radio math reference (SCR_MATHREF): a scrolling cheat sheet distilled from the ARRL
   // Radio Mathematics supplement -- dB table, AC RMS/peak factors, constants, formulas.
   int mathRefScroll = 0;
+  int basicRefScroll = 0;   // SCR_BASICREF (BASIC tutorial + reference) scroll
   void drawMathRef(); void keyMathRef(char c, bool enter, bool back);
+  void drawBasicRef(); void keyBasicRef(char c, bool enter, bool back);
   // State-vector -> GP-element fitter (SCR_GPFIT). Enter an epoch and a TEME state vector
   // (r km, v km/s); a differential-correction fit against CardSat's own SGP4 recovers the
   // GP mean elements, which can be saved as a manual satellite. Heap-flat: a few 6-vectors
@@ -1993,7 +2029,210 @@ private:
   // Link margin vs elevation: M(el) = M0 + [FSPL(range at 0 deg) - FSPL(range at el)].
   double lcAlt = 500, lcF = 435.5, lcM0 = 6.0;
   int    lcSel = 0; bool lcEdit = false; String lcBuf;
+
+  // Orbital thermal analysis tool (SCR_THERMAL). Single-node lumped-parameter model
+  // over one orbit, driven by the analytic eclipse fraction (beta + betaStar) so it
+  // needs no propagation and works for custom orbits with no catalogue entry. Orbit
+  // fields (alt/incl/raan) default from the active satellite but are user-editable;
+  // the rest are spacecraft properties with per-U defaults.
+  double thAlt = 500;    // orbit altitude (km)          [orbit]
+  double thIncl = 51.6;  // inclination (deg)            [orbit]
+  double thRaan = 0;     // RAAN (deg)                   [orbit]
+  double thMass = 1.3;   // mass (kg)                    [craft]
+  double thAlpha = 0.6;  // solar absorptivity (0..1)    [craft]
+  double thEps = 0.8;    // IR emissivity (0..1)         [craft]
+  double thPwr = 1.0;    // internal dissipation (W)     [craft]
+  int    thU = 1;        // form factor U (1/2/3/6) -> areas
+  int    thAtt = 0;      // 0 = tumbling (area-avg), 1 = sun-pointing (fixed face)
+  int    thSel = 0;      // selected row
+  bool   thEdit = false; String thBuf;
+  // computed results (filled by computeThermal())
+  double thTmin = 0, thTmax = 0, thTmean = 0, thTsun = 0, thTecl = 0;
+  double thBeta = 0, thEclFrac = 0; bool thValid = false;
+
+  // AO-7 mode-switch estimator (SCR_AO7). AO-7 runs on solar power only; in continuous
+  // sunlight an onboard ~24 h timer alternates Mode A (145 up / 29 down) and Mode B
+  // (435 up / 145 down). The mode is NOT tied to calendar day parity (that was true only
+  // when AO-7 was actively commanded); the free-running timer's switch instant drifts
+  // against UTC, so it must be derived purely from the timestamps of listener reports.
+  // The tool checks continuous sunlight, then fetches a long window of AMSAT reports for
+  // the two mode-tagged names, finds every A<->B boundary the reports bracket, and fits
+  // the switch instants to a linear cadence (switch_k = t0 + k*period) to recover the
+  // period + phase and project the current/next mode.
+  // ===========================================================================
+  //  "Nearby & DX" hub (SCR_NEARBY) and its three live terrestrial feeds. All three
+  //  follow the same discipline as the satellite fetches: bounded fixed arrays (no
+  //  heap growth), streamed/one-shot parsing, on-demand refresh only -- never polled.
+  // ===========================================================================
+  int    nearSel = 0;                  // hub cursor
+
+  // ---- APRS stations heard via APRS-IS (SCR_APRS / SCR_APRSDET) -------------
+  // A live socket, not a fetch. aprs.fi's API is documented as querying NAMED
+  // stations only and explicitly does not support wildcard/area search, so the old
+  // key-based "stations near me" request could never have returned anything no
+  // matter how the response was parsed -- it was missing the one mandatory
+  // parameter and sending three that do not exist. APRS-IS instead accepts a
+  // server-side r/lat/lon/dist filter on the login line and streams matching
+  // packets, so this screen shows what has been HEARD since the socket opened.
+  //
+  // That is deliberately the same semantics as the LoRa roster (SCR_LORAROSTER) and
+  // as a Kenwood's station list: "heard recently, nearby", not a database snapshot.
+  // Fixed stations beacon every 10-30 min, so the list fills over minutes.
+  //
+  // Lifetime: socket AND record array are created on entering the screen and
+  // destroyed on leaving, so neither costs permanent .bss and the array is
+  // heap-on-demand for free. EVERY draw path must tolerate aprsSta == nullptr --
+  // the screen is reachable before allocation and after a failed one.
+  static const int APRS_MAX = 250;   // 250 * 36 B = 9,000 B, heap-on-demand
+  struct AprsSta {
+    char     call[12];
+    float    lat, lon;
+    float    distKm, brg;
+    uint32_t heardMs;                  // millis() this station was last heard
+    char     sym;                      // APRS symbol code (single char, coarse type hint)
+  };
+  AprsSta* aprsSta = nullptr;          // APRS_MAX records; null whenever the screen is closed
+  int    aprsN = 0, aprsSel = 0, aprsScroll = 0;
+  char   aprsStatus[64] = {0};         // "" = a list is shown; else why it isn't
+  char   aprsCenter[8]  = {0};         // grid the filter is centred on ("" = own location)
+  WiFiClient* aprsis = nullptr;        // APRS-IS socket; null unless the screen is open
+  LineBuf  aprsBuf{256};               // TNC2 line assembly (info fields run long)
+  uint32_t aprsOpenMs = 0;             // millis() the socket connected (0 = not connected)
+  uint32_t aprsPktSeen = 0;            // position packets accepted since connect
+
+  // ---- DX cluster spots (SCR_DXC) -------------------------------------------
+  // Band is derived from the spot frequency via the same table the band-plan screen
+  // uses, so "by band" filtering needs no second frequency->band mapping.
+  static const int DXC_MAX = 250;    // 250 * 40 B = 10,000 B, heap-on-demand
+  struct DxSpot {
+    double freqKhz;
+    char   dx[12];                     // spotted callsign
+    char   de[12];                     // spotter
+    int    ageMin;
+    int8_t band;                       // index into DXC_BANDS, -1 = unclassified
+  };
+  // Heap-on-demand, exactly as aprsSta[] is: allocated when the screen needs it and
+  // released on the way out, so a CardSat that never opens this screen pays nothing.
+  // EVERY path that touches dxcSpot must tolerate nullptr -- draw, key, print and the
+  // parser are all reachable before allocation and after a failed one.
+  DxSpot* dxcSpot = nullptr;
+  int    dxcN = 0, dxcSel = 0, dxcScroll = 0;
+  int    dxcBandFilter = -1;           // -1 = all bands, else index into DXC_BANDS
+  int    dxcBandFilterPrev = -1;       // cycle cursor for the 'b' band-step key
+  char   dxcStatus[64] = {0};
+  bool   dxcBusy = false;
+
+  // ---- ADS-B aircraft (SCR_ADSB) --------------------------------------------
+  // Plotted on the existing polar renderer with the radius axis remapped from
+  // elevation to RANGE, so the same grid/arc helpers the pass plots use are reused.
+  static const int ADSB_MAX = 250;   // 250 * 36 B = 9,000 B, heap-on-demand
+  struct Aircraft {
+    char   ident[10];                  // flight/callsign, else the ICAO hex
+    float  lat, lon;
+    float  distKm, brg;
+    int    altFt;
+    int    trackDeg;                   // ground track (heading), -1 unknown
+  };
+  Aircraft* adsbAc = nullptr;        // heap-on-demand; see dxcSpot above
+  int    adsbN = 0, adsbSel = 0;
+  char   adsbStatus[64] = {0};
+  bool   adsbBusy = false;
+  bool   adsbScatter = false;          // overlay the aircraft-scatter usefulness test
+  double adsbScatterBrg = 0;           // great-circle bearing to the scatter target
+  char   adsbTgtGrid[8] = {0};         // target grid for the scatter geometry ("" = off)
+
+  int    ao7Idx = -1;            // catalogue index of AO-7 (NORAD 7530), -1 if absent
+  int    ao7Phase = 0;          // 0 idle, 1 fetched/analyzed, 2 no-sunlight, 3 error
+  bool   ao7ContSun = false;    // true = continuous sunlight (24 h timer free-running)
+  double ao7Beta = 0, ao7EclFrac = 0;
+  // Observation store: one entry per usable report. Parallel arrays (no struct) to stay
+  // heap-free -- fixed .bss, small. ao7ObsMode packs TWO things per entry:
+  //   bit 0 : mode      0 = Mode A (V/a), 1 = Mode B (U/v)
+  //   bit 1 : polarity  0 = positive ("Heard": that mode WAS active)
+  //                     1 = negative ("Not Heard", horizon-gated: that mode was NOT active)
+  // Raised from 200: a full 30-day window is roughly 430 Mode-B + 150 Mode-A reports, and
+  // negatives now count too, so 200 truncated badly. Each fetched mode also gets its own
+  // half of the array (AO7_MAXOBS/2) -- previously both modes shared one running counter
+  // and, because Mode A is fetched first, Mode B was starved of slots and the sample was
+  // silently biased toward A.
+  static const int AO7_MAXOBS = 300;
+  static const int AO7_PERMODE = AO7_MAXOBS / 2;   // per-mode fetch cap (newest kept)
+  static const int AO7_WINDOW_DAYS = 30;   // fetch window (days). The AMSAT reports API
+                                           // caps hours at 720 (30 days) -- confirmed against
+                                           // the published API spec -- so 30 days is the
+                                           // longest supported window, and a longer window
+                                           // captures more A/B switch boundaries for the fit.
+  time_t ao7ObsT[AO7_MAXOBS];    // report time (unix UTC), refined to the 15-min sub-slot
+  uint8_t ao7ObsMode[AO7_MAXOBS];// packed mode|polarity -- see the bit table above
+  int    ao7NObs = 0;            // number of stored observations (raw fetch, unfiltered)
+  int    ao7NA = 0, ao7NB = 0;   // per-mode counts WITHIN the illuminated window used by
+                                 // the fit (recomputed in ao7Estimate; not the raw fetch)
+  // Bracketed switch instants (midpoint of an adjacent A/B pair) and the linear fit.
+  int    ao7NSwitch = 0;         // boundaries used by the CHOSEN fit (see ao7UsedRecent)
+  int    ao7NSwitchAll = 0;      // total boundaries found within the illuminated window
+  double ao7PeriodS = 0;         // fitted timer period (s); ~86400 expected
+  double ao7T0 = 0;              // fitted reference switch instant (unix, from the fit)
+  // Phase uncertainty, NOT a least-squares residual any more: the half-width of the
+  // contiguous t0 band around the optimum where the agreement score stays within one
+  // Heard-vote of the best. That is a directly meaningful "the switch is somewhere in
+  // +/- this" figure, where the old boundary-fit RMS was only an indirect proxy.
+  double ao7FitRmsS = 0;         // phase uncertainty half-width (s)
+  double ao7AgreePct = 0;        // % of weighted evidence the chosen fit explains
+  int    ao7NPos = 0, ao7NNeg = 0;  // positive / negative observations inside the window
+  int    ao7CacheN = 0;          // observations merged in from the on-disk cache
+  bool   ao7Trunc = false;       // API hit its record cap -- window shorter than requested
+  int    ao7ModeNow = -1;        // 0 = A, 1 = B, -1 = unknown
+  long   ao7ToSwitchS = 0;       // seconds until the next switch (from the fit)
+  time_t ao7NextSwitchT = 0;     // unix instant of the next switch
+  time_t ao7SinceT = 0;          // start of the illuminated window actually used by the fit
+  int    ao7ExclN = 0;           // reports excluded as pre-illumination (older than ao7SinceT)
+  bool   ao7UsedRecent = false;  // true if a recency-limited subset fit beat the full-window fit
+  // All 14 assignments to this are string literals, so it holds a pointer into flash
+  // rather than an Arduino String. A String member of the global App object keeps a
+  // heap block alive for the life of the program once assigned (and Arduino String
+  // never returns a buffer to the heap on reassignment), which on a no-PSRAM part is
+  // pure permanent loss for what is only ever a fixed message.
+  const char* ao7Note = "";      // short status/explanation line (flash literal)
   void   drawLnkCrv(); void keyLnkCrv(char c, bool enter, bool back);
+  void   drawThermal(); void keyThermal(char c, bool enter, bool back);
+  void   computeThermal();   // run the single-node model into th* result fields
+  void   printThermal();
+  // ---- Nearby & DX hub + live terrestrial feeds ----
+  void   drawNearby(); void keyNearby(char c, bool enter, bool back);
+  void   drawAprs();   void keyAprs(char c, bool enter, bool back);
+  void   drawAprsDet();void keyAprsDet(char c, bool enter, bool back);
+  void   aprsStart();                    // allocate records + open the filtered socket
+  void   aprsStop();                     // close socket, free records (leaving the screen)
+  void   aprsRestart();                  // reopen with a new filter centre
+  void   serviceAprsIs();                // pump the socket from loop(); no-op when closed
+  void   aprsHandleLine(const char* ln); // one TNC2 line -> upsert, or ignore
+  void   aprsUpsert(const char* call, double lat, double lon, char sym);
+  // Position decode is a pure function of the packet text, so it is host-testable
+  // without a radio or a socket: see tools/host_aprs/. Covers uncompressed,
+  // base-91 compressed and MIC-E.
+  static bool aprsDecodeLine(const char* line, char* callOut, size_t cap,
+                             double& lat, double& lon, char& symCode);
+  void   drawDxc();    void keyDxc(char c, bool enter, bool back);
+  void   fetchDxc();                     // DX spot JSON feed
+  static int dxcBandOf(double freqKhz);  // frequency -> DXC_BANDS index (-1 = none)
+  void   drawAdsb();   void keyAdsb(char c, bool enter, bool back);
+  void   fetchAdsb();                    // ADS-B aircraft JSON (LAN receiver or web)
+  // Feed record stores are heap-on-demand (see the array declarations below).
+  // alloc returns false and sets the screen's own status line on OOM; free is safe
+  // to call when nothing is allocated. Each alloc releases the OTHER two feeds
+  // first, which is what bounds the peak at one array rather than three.
+  bool   dxcAlloc();   void dxcFree();
+  bool   adsbAlloc();  void adsbFree();
+  void   feedsFreeExcept(int keepScreen);  // release every feed store but one
+  void   drawAo7(); void keyAo7(char c, bool enter, bool back);
+  void   ao7CheckSunlight();     // fill ao7ContSun / ao7Beta / ao7EclFrac
+  void   fetchAo7Reports();      // fetch mode-tagged reports, stream-parse, then estimate
+  time_t ao7IlluminationSinceT();// most recent continuous-full-sun start, via propagation
+  bool   ao7SiteElevOk(const char* grid, time_t t, double minEl, Predictor& p);
+  int    ao7LoadObsCache();      // merge cached observations in; returns how many were added
+  void   ao7SaveObsCache();      // persist the merged observation set (atomic rewrite)
+  void   ao7Estimate();          // boundary finder + drift fit -> ao7Fit*/ao7ModeNow
+  void   printAo7();
 
   // Debris-group screen: fetch a CelesTrak group TLE to a temp file, keep the
   // objects sharing the active bird's altitude band, and coarse-screen each for
@@ -2020,6 +2259,14 @@ private:
   // to Printer::line instead of the canvas -- no buffering, no per-tool code.
   bool   tfEmit = false;
   void   printToolForm(); void printConj(); void printNeigh();
+  // Nearby & DX feed reports. printDxc/printAdsb self-build (fetch when the list is
+  // empty) the way printPassPolar and printAwards do, so a report is never silently
+  // blank just because its screen was not visited first. printAprs cannot: its data
+  // is a live listen, not a fetch, so it prints what has actually been heard.
+  void   printAprs();     void printDxc();  void printAdsb();
+  void   adsbUpdateScatter();   // recompute scatter bearing from grid+QTH (fetch-independent)
+  void   printMuf();      // MINIMUF-3.5 MUF-to-regions report
+  void   printSaa();      // orbital-zones transit report
   void   printDebGrp();   void printLnkCrv();
   String ctsBuf;                        // last query text (editor round-trips through it)
   uint32_t ctsLastQueryMs = 0;          // 10 s interactive spacing (millis; survives clockless boots)
@@ -2089,7 +2336,7 @@ private:
   int    lotwPending = 0;          // un-uploaded sat QSOs counted on entry
   int    lotwTotal = 0;            // total sat QSOs in the log (for re-send mode)
   int    lotwLastSent = 0;         // signed/accepted from the last attempt
-  String lotwStatus;               // last result/error line shown on the screen
+  char lotwStatus[80] = {0};       // last result/error line shown on the screen
   bool   lotwBusy = false;         // an upload is in progress (suppress re-entry)
   bool   lotwResend = false;       // include ALREADY-uploaded QSOs too (opt-in re-upload)
   bool   lotwMoreBatches = false;  // set by a batch that has QSOs left; the top-level caller
@@ -2131,7 +2378,7 @@ private:
   void resumeCloudlogIfPending();           // setup(): if marker set, upload in a clean boot
   int  clPending = 0;              // QSOs not yet sent to Cloudlog (bit 0x2 unset)
   int  clTotal = 0;                // total sat QSOs in the log (for re-send mode)
-  String clStatus;                 // last result/error line shown on the screen
+  char clStatus[80] = {0};         // last result/error line shown on the screen
   bool clBusy = false;             // an upload is in progress (suppress re-entry)
   bool clResend = false;           // include QSOs already sent to Cloudlog (opt-in)
   bool clMoreBatches = false;      // set by a batch with QSOs left; the top-level caller loops
@@ -2168,7 +2415,7 @@ private:
   static const int USERSKED_MAX = 12;
   Activation userSked[USERSKED_MAX];   // persisted manual entries
   int    userSkedN = 0;
-  String hamsatStatus;            // status/error line ("" when a list is shown)
+  char hamsatStatus[64] = {0};    // status/error line ("" when a list is shown)
   void drawHamsat();   void keyHamsat(char c, bool enter, bool back);
   void fetchHamsat();              // download + parse the feed (WiFi)
   int  parseHamsat(const String& xml);  // fill hamsatList[]; returns count
@@ -2283,10 +2530,13 @@ private:
                      PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
                      PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
-                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER };
+                     PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER, PR_SUNMOON, PR_BASICREF, PR_THERMAL, PR_AO7,
+                     PR_APRS, PR_DXC, PR_ADSB, PR_MUF, PR_SAA };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
+  void printSunMoon();       // Sun & Moon: current az/el + next rise/set
+  void printBasicRef();      // the Tiny BASIC command/function/system-data reference
   void printTicket();        // outreach pass ticket for the active satellite
   void printSatCard();       // active satellite: transponders + next passes
   void printKeps();          // active satellite: Keplerian elements (nostalgia)
@@ -2356,7 +2606,23 @@ private:
   void keyCharge(char c, bool enter, bool back);
   int  batteryPercent();        // voltage-curve % (more accurate than raw level)
   bool     chargeWoke = false;  // true briefly after a keypress wakes the screen
+  bool     chargeNeedWake = false; // panel is asleep and the next paint must wake it AFTER
+                                   // pushing content, so the LCD lights up already showing
+                                   // the battery readout instead of flashing black first
   uint32_t chargeWokeMs = 0;    // when the wake happened (auto-blank after a few s)
+  bool     chargeWifiWasUp = false;  // was WiFi associated when we parked? restore only then
+  // Battery-voltage trend for charge inference. M5Unified's getBatteryVoltage() returns 0
+  // on the Cardputer ADV (its public ADC path fails there) and its isCharging() has no case
+  // for the ADV's pmic_adc, so both the voltage readout and any charge state must come from
+  // reading the battery ADC (GPIO10) directly, like bmorcelli/Launcher does. Charging is
+  // inferred from a rising voltage trend over ~30 s, since the ADV exposes no charger line.
+  int      batteryMilliVolts();     // GPIO10 * divider, mV (0 if unreadable)
+  bool     batteryCharging();       // inferred from the voltage trend
+  int      battTrendMv = 0;         // smoothed reference voltage for the trend
+  uint32_t battTrendMs = 0;         // last trend sample time
+  int8_t   battChargeState = -1;    // -1 unknown, 0 discharging, 1 charging (latched)
+
+                                // lets the woken refresh skip an unchanged redraw
   // Append one result line: echo to Serial and store for the on-screen list.
   void catLog(const String& line);
   void catStep(const String& name, bool ok, const String& detail = String());

@@ -123,10 +123,13 @@ FRONT = [
 BACK = [
  ("SPACE WX (menu)",
   "Solar 10.7cm flux + planetary Kp + A index + aurora likelihood (from Kp), labeled "
-  "&amp; color-coded, with HF/sat operating outlook &amp; data age &middot; <b>p</b> HF/6m propagation &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
+  "&amp; color-coded, with HF/sat operating outlook &amp; data age &middot; <b>p</b> HF/6m propagation &middot; <b>m</b> MUF to world regions &middot; <b>r</b> refresh (WiFi) &middot; <b>`</b> back"),
  ("HF/6m PROPAGATION (Space Wx &rarr; p)",
   "Turns solar flux + Kp into band guidance: HF conditions (10/15/20m open/marg/shut), geomagnetic effect, "
   "auroral-VHF likelihood (6m/2m, beam N), D-layer absorption. Rule-of-thumb &middot; <b>r</b> refresh &middot; <b>`</b> back"),
+ ("MUF TO REGIONS (Space Wx &rarr; m)",
+  "MINIMUF-3.5 path MUF from your QTH to 24 world DX regions: bearing, distance, MUF, best band, color-coded. "
+  "F-region model, best 800-8000km &middot; <b>;</b>/<b>.</b> scroll &middot; <b>k</b> world map (colored dots) &middot; <b>x</b> print &middot; <b>`</b> back"),
  ("WEATHER (menu)",
   "Current conditions + multi-day forecast for your site (Open-Meteo). "
   "Refreshes on entry (WiFi) &amp; with Update. Units in Settings &middot; "
@@ -146,7 +149,10 @@ BACK = [
   "<b>U</b>=uplink+tone/inv line. Ordered two-way &gt; amateur &gt; active; inactive dimmed &amp; <b>(off)</b>. <b>;</b>/<b>.</b> select (* = manual) &middot; <b>x</b> del manual (2x) &middot; <b>`</b> back"),
  ("ORBITAL ANALYSIS",
   "<b>,</b>/<b>/</b> 11 pages: Info / Live / Next pass / Ground track / Doppler / Nodal / Sun-Beta / "
-  "Pass outlook / Orbit position / Phys (velocity + launch date/age) / Explore (what-if apo/peri/incl sandbox, <b>x</b> reseed) &middot; <b>r</b> recompute &middot; Doppler <b>f</b> sets beacon freq"),
+  "Pass outlook / Orbit position / Phys (velocity + launch date/age) / Explore (what-if apo/peri/incl sandbox, <b>x</b> reseed) &middot; <b>r</b> recompute &middot; <b>z</b> orbital-zone transits &middot; Doppler <b>f</b> sets beacon freq"),
+ ("ORBITAL ZONES (Orbital &rarr; z)",
+  "When the sat transits distinctive regions, w/ enter/exit times + duration + live in/out + L-shell. "
+  "<b>z</b> cycle zone: <b>SAA</b> / <b>Eclipse</b> / <b>Polar</b> (&gt;60&deg;) / <b>Inner</b> &amp; <b>Outer Van Allen belts</b> (L-shell, higher orbits) &middot; <b>;</b>/<b>.</b> scroll &middot; <b>x</b> print &middot; <b>`</b> back"),
  ("SIMULATION",
   "<b>,</b>/<b>/</b> step time &middot; <b>;</b>/<b>.</b> step size &middot; "
   "<b>m</b> world-map view (sub-point + footprint) &middot; "

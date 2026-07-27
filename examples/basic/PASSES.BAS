@@ -32,6 +32,7 @@
 640 GOSUB 700
 650 REM print elevation bar: one * per 10 degrees
 660 LET N = INT(M / 10)
+665 IF N = 0 THEN GOTO 695
 670 FOR J = 1 TO N
 680 PRINT "*";
 690 NEXT J

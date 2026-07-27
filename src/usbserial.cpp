@@ -383,6 +383,31 @@ namespace {
     // Deliberately no delay/wait here: a headless CardSat has no host attached and
     // must not stall the main loop waiting for one.
   }
+
+  // Release the shared host when NEITHER port still owns it, restoring the console.
+  // Every FAILED engage funnels through here so that "the adapter is not plugged in"
+  // costs nothing lasting: before this existed, a failed engage left the host object,
+  // the IDF stack, both USB tasks and the console down until reboot -- roughly 20 KB
+  // held for a device that was never there, and the operator's serial port gone with
+  // it. A SUCCESSFUL engage never calls this; end()/rotEnd() own that path.
+  //
+  // The M2 timeout rule is the same one end() and rotEnd() follow, and for the same
+  // reason: on ESP_ERR_TIMEOUT the library leaves its tasks alive rather than freeing
+  // in-flight transfers, so deleting the object would be a use-after-free and
+  // restoring the console would claim the PHY before release is confirmed. Retain,
+  // latch reboot-required, stay quiet.
+  void releaseHostIfIdle() {
+    if (!s_host || s_cdc || s_rotCdc) return;   // someone still owns it
+    s_host->end();                              // 2.4.1: drain, deregister, uninstall
+    if (s_host->lastError() == ESP_ERR_TIMEOUT) {
+      s_hostTeardownStuck = true;
+      s_hostReleased = false;
+      return;                                   // do NOT delete, do NOT consoleUp()
+    }
+    delete s_host; s_host = nullptr;
+    s_hostReleased = true;
+    consoleUp();
+  }
 }
 
 bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
@@ -408,10 +433,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // not-active state so the next engage starts fresh instead of seeing a poisoned s_cdc.
     auto rollbackCat = [&]() {
       if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
-      if (s_host && !s_rotCdc) {
-        s_host->end(); delete s_host; s_host = nullptr;
-        s_hostReleased = true; consoleUp();
-      }
+      releaseHostIfIdle();   // M2-safe: retains the host if end() times out
       s_active = false; s_bound = false; s_catAddress = 0xff;
       stage(USBCAT_STAGE_NONE);
     };
@@ -630,13 +652,20 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     char msg[64];
     if (s_sawDev) snprintf(msg, sizeof(msg), "Not a known serial adapter: %s", s_dev);
     else          snprintf(msg, sizeof(msg), "%s", "No USB device detected");
-    // The host DID start, so it owns the PHY. Leave it up with the port unbound so a
-    // retry after plugging the adapter in rebinds in milliseconds instead of re-allocating
-    // ~20 KB. (This is a deliberate keep-alive for the immediate retry case, distinct from
-    // a normal disengage, which does release the host via end() under 2.4.1.)
+    // This used to be a deliberate keep-alive: the host was left up with the port
+    // unbound so that plugging the adapter in and retrying would rebind in
+    // milliseconds instead of re-allocating ~20 KB. That reasoning was written when
+    // end() could not actually release the stack, so keeping it cost nothing that
+    // was recoverable anyway. Under 2.4.1 it does release, and the trade inverted:
+    // the common case is not "retry in five seconds", it is a cable that is not
+    // plugged in at all, or a rig that is switched off -- after which the host, the
+    // IDF stack, both USB tasks and the serial console stayed gone until reboot for
+    // a device that never existed. Release it; a later retry pays a one-off ~1 s
+    // re-allocation, which is the right price for not leaking on the failure case.
     disarmFreezeWatchdog();
-    if (s_cdc) s_cdc->end();
-    s_active = false; s_bound = false;
+    if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
+    releaseHostIfIdle();               // no-op if a USB rotator still holds the host
+    s_active = false; s_bound = false; s_catAddress = 0xff;
     setErr(msg);
     stage(USBCAT_STAGE_NONE);
     return false;
@@ -667,10 +696,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
       // Fully unwind: disarm, drop the port, release the host if no rotator owns it.
       disarmFreezeWatchdog();
       if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
-      if (s_host && !s_rotCdc) {
-        s_host->end(); delete s_host; s_host = nullptr;
-        s_hostReleased = true; consoleUp();
-      }
+      releaseHostIfIdle();   // M2-safe: retains the host if end() times out
       s_active = false; s_bound = false; s_catAddress = 0xff;
       stage(USBCAT_STAGE_NONE);
       return false;                    // catPickAdapter() already set the error text
@@ -906,10 +932,7 @@ uint8_t scanAdapters() {
   // leave the host up -- it belongs to that owner.
   if (s_host && !s_cdc && !s_rotCdc) {
     rotTrace("scan: releasing temporary host");
-    s_host->end();
-    delete s_host; s_host = nullptr;
-    s_hostReleased = true;
-    consoleUp();               // scan-only host released the PHY -> console can return
+    releaseHostIfIdle();       // M2-safe; restores the console when the PHY is really free
   }
   return s_serDevN;
 }
@@ -1008,6 +1031,13 @@ bool rotBegin() {
   // Pick the adapter. If the user nominated one (rotUsbKey), find it by key; if
   // not, and exactly one serial adapter is present, use it. Never guess between
   // two -- that is the misbind this whole path exists to prevent.
+  //
+  // EVERY failure exit from here down must call releaseHostIfIdle(). rotBegin() can
+  // START the host itself (hostUpForRotator() above, the rotator-only configuration),
+  // and a bare `return false` after that left the host object, the IDF stack, both USB
+  // tasks and the serial console down until reboot -- for a rotator that was never
+  // plugged in. releaseHostIfIdle() is a no-op when USB CAT still holds the host, so
+  // a rotator that fails to bind can never take the radio's transport down with it.
   int pick = -1;
   if (s_rotWantKey[0]) {
     // Dual-USB: the rotator's adapter may enumerate AFTER the radio's, so wait for
@@ -1019,10 +1049,12 @@ bool rotBegin() {
       setRotErr("Rotator adapter not found (replug/re-select)");
       char b[96]; snprintf(b, sizeof(b), "rot: want key=%s but no adapter matches", s_rotWantKey);
       rotTrace(b); rotTrace(s_rotErr);
+      releaseHostIfIdle();
       return false;
     }
   } else if (s_serDevN == 0) {
-    setRotErr("No USB serial adapter detected"); rotTrace(s_rotErr); return false;
+    setRotErr("No USB serial adapter detected"); rotTrace(s_rotErr);
+    releaseHostIfIdle(); return false;
   } else {
     // No nominated adapter: take the first the RADIO is not driving. Mirror of
     // catPickAdapter(), deliberately -- the two ports differ only in which one
@@ -1039,6 +1071,7 @@ bool rotBegin() {
       setRotErr(s_serDevN == 1 ? "Only adapter is the radio's"
                                : "Pick the rotator adapter in Settings");
       rotTrace(s_rotErr);
+      releaseHostIfIdle();
       return false;
     }
     if (s_serDevN == 1) rotTrace("rot: one adapter present, using it");
@@ -1046,14 +1079,16 @@ bool rotBegin() {
 
   // Nominated or not, never take the radio's wire.
   if (s_active && s_cdc && s_serDev[pick].address == s_catAddress) {
-    setRotErr("That adapter is the radio's"); rotTrace(s_rotErr); return false;
+    setRotErr("That adapter is the radio's"); rotTrace(s_rotErr);
+    releaseHostIfIdle(); return false;
   }
   { char b[80]; snprintf(b, sizeof(b), "rot: binding addr=%u baud=%lu",
                          (unsigned)s_serDev[pick].address, (unsigned long)s_rotBaud);
     rotTrace(b); }
 
   s_rotCdc = new (std::nothrow) EspUsbHostCdcSerial(*s_host);
-  if (!s_rotCdc) { setRotErr("Out of RAM for rotator port"); rotTrace(s_rotErr); return false; }
+  if (!s_rotCdc) { setRotErr("Out of RAM for rotator port"); rotTrace(s_rotErr);
+                   releaseHostIfIdle(); return false; }
   // THE critical call: bind this port to ONE device. Without it the port is
   // ANY_ADDRESS and races the CAT port for the first adapter in devices_.
   s_rotCdc->setAddress(s_serDev[pick].address);
@@ -1061,6 +1096,7 @@ bool rotBegin() {
     delete s_rotCdc; s_rotCdc = nullptr;
     setRotErr("Rotator port would not open");
     rotTrace(s_rotErr);
+    releaseHostIfIdle();
     return false;
   }
   rotTrace("rot: port open");
@@ -1086,6 +1122,7 @@ bool rotBegin() {
     delete s_rotCdc; s_rotCdc = nullptr;
     setRotErr("Rotator adapter not responding");
     rotTrace(s_rotErr);
+    releaseHostIfIdle();
     return false;
   }
   snprintf(s_rotDev, sizeof(s_rotDev), "%s", s_serDev[pick].label);

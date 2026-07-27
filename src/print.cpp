@@ -622,6 +622,46 @@ void line(const String& s) {
 
 void wrap(const String& s) { line(s); }   // line() already per-sink wraps
 
+// ---- narrow-paper layout helpers (0.9.65) ---------------------------------
+// narrow(): the widest active sink is a 32-col (58 mm) receipt or tighter. cols()
+// returns 0 only when no sink is open; treat that as "not narrow" so a preview with
+// no sink keeps the wide layout.
+bool narrow() { int c = cols(); return c > 0 && c <= 32; }
+
+// kv(): "label value" on one line when it fits the narrowest concern (cols()),
+// otherwise the label on its own line and the value indented on the next. This is
+// what keeps key/value reports (conjunction miss/rel, link-margin, orbit facts)
+// from wrapping in the middle of a number on 58 mm paper.
+void kv(const String& label, const String& value) {
+  int c = cols();
+  // one space between label and value; fits if the whole thing is within cols()
+  if (c <= 0 || (int)(label.length() + 1 + value.length()) <= c) {
+    line(label + " " + value);
+  } else {
+    line(label);
+    line("  " + value);
+  }
+}
+
+// colrow(): join fields with single spaces when the row fits cols(); otherwise
+// stack them, indenting every field after the first by two spaces so a wrapped
+// record stays visually grouped. Bounded at 8 fields.
+void colrow(const String* fields, int n) {
+  if (n < 1) return;
+  if (n > 8) n = 8;
+  int c = cols();
+  int total = 0;
+  for (int i = 0; i < n; ++i) total += (int)fields[i].length() + (i ? 1 : 0);
+  if (c <= 0 || total <= c) {
+    String r = fields[0];
+    for (int i = 1; i < n; ++i) { r += ' '; r += fields[i]; }
+    line(r);
+  } else {
+    line(fields[0]);
+    for (int i = 1; i < n; ++i) line("  " + fields[i]);
+  }
+}
+
 void blank() {
   if (s_pOK) {
     if (isRaster()) { rasterPush(String("")); }

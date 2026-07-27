@@ -23,6 +23,18 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.66:** **HF propagation, orbital radiation zones, and a charge screen that
+> works.** From Space Wx, press **`m`** for a maximum-usable-frequency prediction from your QTH
+> to two dozen world DX regions — with a color-coded world map — built on the verified
+> MINIMUF-3.5 model. Select a satellite and press **`o`** then **`z`** for an orbital-zone
+> transit tool: when your bird passes through the **South Atlantic Anomaly**, into **eclipse**,
+> over the **poles**, or through the **inner/outer Van Allen belts** (by magnetic L-shell, for
+> higher orbits). The charge/sleep screen now reads the battery correctly on the ADV, infers
+> charging from the voltage trend, and wakes without flashing; WiFi comes back after charge
+> mode; the APRS/DX/ADS-B feeds fetch on entry and refresh in place; and Tiny BASIC's
+> `IF … THEN` handles every statement.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.66.md)**.
+
 > **New in v0.9.64:** **USB control that lets go.** Turning a USB CAT radio or USB rotator off
 > now actually frees the ~12 KB it was holding (thanks to a library upgrade), rather than only
 > on reboot — and every "off" path, on every screen, releases the device. Radio and rotator can

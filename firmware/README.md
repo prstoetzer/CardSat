@@ -1,29 +1,33 @@
 # CardSat — precompiled firmware (M5Cardputer ADV)
 
 Prebuilt binaries for the **M5Stack Cardputer ADV** (ESP32-S3FN8, 8 MB flash, no PSRAM),
-firmware **v0.9.64**. Flash these if you just want to run this build without
+firmware **v0.9.66**. Flash these if you just want to run this build without
 compiling. Source is the rest of this repo; `CardSat.ino` is the monolithic sketch.
 
 Built with: arduino-cli + `esp32:esp32@3.2.1`, FQBN
 `esp32:esp32:esp32s3:PartitionScheme=huge_app,CDCOnBoot=cdc`, M5Cardputer library.
 No `build.extra_flags` (that would break the HWCDC serial console). Flash usage at
-build time: 2,911,728 bytes (92%); static RAM 156,936 bytes (47%).
+build time: 2,990,734 bytes (95.07%); static RAM 161,344 bytes (49%).
+
+The flash percentage is only meaningful beside the library versions it was built
+with: M5Cardputer 1.1.1, M5GFX 0.2.26, M5Unified 0.2.19, ESP_SSLClient 3.1.3,
+ArduinoJson 7.4.3, TinyGPSPlus 1.0.3, RadioLib 7.7.1, Sgp4 1.0.3, EspUsbHost 2.4.1.
 
 Checksums (MD5):
-- `CardSat-merged.bin`  8e03605b0886757bea53429e37b5e53f
-- `CardSat-app.bin`     ae4ea8928ed17bacf6d6ba14a78594cf
+- `CardSat-merged.bin`  9222c2136858727f59f5bbaa55d48ef4
+- `CardSat-app.bin`     a00199cd27b7535e80647f7bb300609f
 - `CardSat-bootloader.bin`  c7f9b41acfaba802c7e74ae639a9a162
 - `CardSat-partitions.bin`  70007348574201233bc0cb17155e9d12
 
-> This is a **testing release**. v0.9.64 overhauled the USB-control lifecycle (USB CAT and
-> USB rotators release their memory when turned off), added two-adapter USB radio+rotator with
-> a **None** option, and went through three rounds of security/lifecycle auditing plus a
-> dedicated Dual-Rig audit: storage writes are now transactional (config/notes/caches survive
-> an interrupted write), downloads reject truncation, GPS/voice-memo/rig lifecycles were
-> tightened, and the CardSatDualRig Grove path had three release-blocking bugs fixed (UART
-> pins, 115200 baud, model parsing). The **two-adapter USB** path, the **dual-radio companion**
-> (both TCP and Grove rigctl), and the transverter/microwave (LO-offset) paths are implemented
-> but remain first-bring-up items that benefit most from hardware testing.
+> **v0.9.66** adds an **HF MUF-to-regions** predictor (verified MINIMUF-3.5 model) and an
+> **orbital-zone transit** tool (South Atlantic Anomaly, eclipse, polar, and the inner/outer
+> Van Allen belts by magnetic L-shell), and fixes the charge/sleep battery read and wake
+> flashing, WiFi resume after charge mode, live-feed fetch/refresh, and Tiny BASIC `IF … THEN`.
+> Gate-checked (18 gates incl. two new physics harnesses). The **Van Allen belt behavior on a
+> high-orbit satellite** is the main item to confirm on hardware. Earlier-release items that
+> remain first-bring-up (two-adapter USB, the dual-radio companion over TCP and Grove rigctl,
+> and the transverter/microwave LO-offset paths) are unchanged and still benefit from hardware
+> testing.
 
 ## Easiest: one file at 0x0 (esptool)
 

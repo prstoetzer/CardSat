@@ -293,9 +293,18 @@ bool SatDb::removeCtExtra(uint32_t norad) {
   }
   f.close(); w.close();
   if (!removed) { Store::fs().remove(tmp); return false; }
-  Store::fs().remove(FILE_CTX);
-  if (kept == 0) { Store::fs().remove(tmp); return true; }
-  Store::fs().rename(tmp, FILE_CTX);
+  // kept == 0 means the last entry was the one removed: no context file should remain.
+  // Retire the live file (and any stale backup) rather than leaving an empty catalog.
+  if (kept == 0) {
+    char bak[112]; snprintf(bak, sizeof(bak), "%s.bak", FILE_CTX);
+    Store::fs().remove(tmp);
+    Store::fs().remove(FILE_CTX);
+    Store::fs().remove(bak);
+    return true;
+  }
+  // Otherwise promote the rewritten temp transactionally so a failed rename can't leave
+  // the device with no context catalog (previously: remove(live) then rename, a real gap).
+  if (!Store::promoteFileTransactionally(FILE_CTX, tmp)) { Store::fs().remove(tmp); return false; }
   return true;
 }
 

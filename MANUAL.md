@@ -2842,6 +2842,11 @@ those is a per-day table of UV, peak gust, and sun times for the forecast days. 
 it comes from the same cached fetch, so the page works offline too. Press **`f`** again
 (or `` ` ``) to return to the summary.
 
+Sun times, and the hourly cloud/pressure series behind the trend, are reported in
+**UTC**, labeled as such — consistent with every other clock in CardSat. (Through
+0.9.66 the weather fetch requested the site's local timezone, so these read in local
+time while the rest of the app was UTC; 0.9.67 fixed that.)
+
 *Weather data by Open-Meteo.com, licensed under CC BY 4.0.*
 
 The same fetch now also pulls **hourly cloud cover for the next 48 hours**. It is not
@@ -5284,6 +5289,42 @@ engine underneath; they differ only in the direction of the question.
   Simulator** intro — AMSAT's desktop satellite for hands-on learning (kits at the
   AMSAT Store; cubesatsim.com); `` ` `` back.
 
+### Telnet client
+
+- **Purpose** — a line-oriented network terminal for reaching another host on
+  a trusted LAN from the handheld: a rotator controller, an APRS TNC, a
+  DX-cluster node, or any raw-TCP/Telnet service. It is intentionally **not** a
+  full VT100 emulator — remote ANSI/CSI/OSC escape sequences are stripped rather
+  than interpreted, and output is drawn as a scrolling character grid. Shells,
+  directory listings, config edits and log reads are readable; full-screen TUIs
+  (vi, top, tmux) are not the target.
+- **Reached from** — Tools (`t` from Home or About) → **Calculators &
+  programming** → **Telnet client**.
+- **Shows** — a list of up to **ten saved connections** (label, host:port), each
+  stored on the SD card (or internal flash if no card). A plaintext-trust banner
+  reminds you that Telnet carries no encryption and no login.
+- **Keys (connection list)** — `a` add · `e` edit · `d` delete · **ENTER** open
+  the highlighted connection · `` ` `` back. Add/edit walks a short guided chain:
+  **label → host → port → output mode** (1 = screen, 2 = printer, 3 = both;
+  defaults to screen only).
+- **Keys (terminal)** — **type to send**; **ENTER** sends the line as CR LF.
+  **`Ctrl`+key** sends a control character (Ctrl-C/D/Z, etc.). **`Fn`+`;`/`.`/`,`/`/`**
+  send arrow keys, **`Fn`+`1`..`0`** send F1–F10, and **`Fn`+`` ` ``** sends Escape —
+  all to the remote host. **`Opt`** is the local layer: **`Opt`+`;`/`.`** scroll
+  the buffer (about 40 rows of history), **`Opt`+`c`** clear, **`Opt`+`r`**
+  reconnect, **`Opt`+`1`/`2`/`3`** set output to screen / printer / both, and
+  **`Opt`+`` ` ``** exit. While the terminal is open, no `Fn` combo reaches a
+  CardSat global (no help, no screenshot, no emergency-stop) — the only exit is
+  **`Opt`+`` ` ``**.
+- **Printing** — when the output mode includes the printer, sanitized lines
+  stream to the printer configured in **Settings → Network** through every sink
+  **except IPP/raster** (a live line stream can't rasterize a page, so IPP
+  transport and the PWG/URF raster formats fall back to screen-only with a
+  notice). **`Opt`+`2`/`3`** open the printer on demand mid-session.
+- **Security** — Telnet is **plaintext and unauthenticated**. Use it only on
+  networks you trust. An SSH client was designed alongside this and shelved on
+  memory grounds; see the release notes for 0.9.67.
+
 ### About
 
 - **Purpose** — build and diagnostic information, and the doorway to the Tools
@@ -6168,7 +6209,7 @@ the no-interactive-programs rule stands; that is precisely why it lives in firmw
 ## 23. Key reference (cheat sheet)
 
 > A **printable version** of this reference is included as
-> `CardSat_CheatCard_4x6.pdf` — a **4×6** landscape index card, front and back
+> `CardSat_CheatCard_5x7.pdf` — a **5×7** landscape index card, front and back
 > (two pages). Print at actual size; the front covers operating and the back
 > covers setup and tools. Regenerate it with `python3 tools_make_cheatcard.py`.
 
@@ -6220,6 +6261,9 @@ the no-interactive-programs rule stands; that is precisely why it lives in firmw
 | **HF/6m propagation** (Space Wx → `p`) | band guidance from solar flux + Kp: HF conditions, 10/15/20 m open/marg/shut, geomagnetic, auroral VHF, absorption · rule-of-thumb (6 m Es seasonal) · `r` refetch · `` ` `` back |
 | **MUF to regions** (Space Wx → `m`) | MINIMUF-3.5 path MUF from QTH to 24 world DX regions: bearing, distance, MUF, best band, color-coded · `;`/`.` scroll · `k` world map (colored dots, `;`/`.` step region) · `x` print · `` ` `` back |
 | **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
+| **DX cluster** (Nearby & DX → DX spots) | live DX-cluster spots: each shows DX call, frequency, band, and **spotter (de)**, with the spot **comment** on a second line beneath · `;`/`.` step spot-to-spot (skips comment lines) · `f` fetch · `n` step bands that have spots · `p` print · `` ` `` back |
+| **Telnet client** (Tools → Calc & prog → Telnet) | connection list: `a` add · `e` edit · `d` delete · ENTER open · setup walks label → host → port → output (screen/printer/both) · plaintext + unauthenticated, trusted LANs only |
+| **Telnet terminal** (open a connection) | **type to send** · ENTER sends line (CR LF) · **Ctrl+key** control chars (Ctrl-C/D/Z…) · **Fn+`;`/`.`/`,`/`/`** arrows · **Fn+`1`..`0`** F1–F10 · **Fn+`` ` ``** Escape (all to the remote) · **Opt+`;`/`.`** scroll buffer · **Opt+`c`** clear · **Opt+`r`** reconnect · **Opt+`1`/`2`/`3`** output screen/printer/both · **Opt+`` ` ``** exit · no Fn combo reaches a CardSat global here; exit is Opt+`` ` `` only |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
 | **About** | build/version, IP, free heap and diagnostics (read-only) · `t` Tools hub · `p` Print submenu · `r` station readiness checklist · `l` license · `z` games |
 | **Printing** (contextual) | `p` prints the current screen's report on the printable screens (Passes day-sheet, Mutual, DX Doppler, EQX, Target-search, Pass detail/polar, **Orbital analysis, Illumination, 10-day passes, 6-hour timeline**) · `P` prints all-favorite passes from the schedule · `Fn`+`p` prints the note in the note editor · About → `p` opens a Print submenu listing **every** report; About → `a` Support-AMSAT card; About → `c` operator contact card · **tools:** `p` prints on the programmer calc / graphing calc / location converter / char lookup / BASIC console, and (0.9.59) on **every form tool** (all 34 — inputs + the complete output list) and the **conjunction / neighborhood / debris-group / link-margin** screens; `Fn`+`p` on the scientific calc and BASIC editor (where plain `p` types) |

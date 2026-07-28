@@ -190,7 +190,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.66";
+static constexpr const char* FW_VERSION = "0.9.67";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build. Used by main.cpp (btInUse
@@ -357,6 +357,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_TOOLDEF "/CardSat/tooldef.txt"   // per-form-tool saved field values (one line per tool id)
 #define FILE_NOTES   "/CardSat/notes.txt"     // per-sat operating notes: "norad<TAB>text" lines
 #define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
+#define FILE_TELNET  "/CardSat/telnet.txt"    // saved Telnet connections (one per line: label|host|port|user)
 #define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
 #define FILE_CTX     "/CardSat/ctx.json"      // CelesTrak-sourced extra favorites (one OMM object/line);
                                               // refreshed from CelesTrak on GP updates, unlike FILE_MGP

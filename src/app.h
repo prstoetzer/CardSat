@@ -32,7 +32,13 @@ enum Screen : uint8_t {
   // of what is on the air / in the air around the operator right now, as distinct from
   // the satellite-centric screens above.
   SCR_NEARBY, SCR_APRS, SCR_APRSDET, SCR_DXC, SCR_ADSB,
-  SCR_DUALRIG, SCR_BASICFILES
+  SCR_DUALRIG, SCR_BASICFILES,
+  // Telnet client (Tools > Calculators & programming). SCR_TELNET is the connection
+  // list / config screen; SCR_TELNETTERM is the modal full-screen terminal. SSH was
+  // scoped alongside this but shelved on memory grounds for 0.9.67 (see
+  // docs/design/TELNET_SHIPPED_SSH_SHELVED_0_9_67.md) -- the terminal is transport-
+  // agnostic so SSH is a later drop-in behind a heap guard.
+  SCR_TELNET, SCR_TELNETTERM
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -1173,6 +1179,12 @@ private:
   bool netCooldownOk();           // true if a new update cycle may start; else sets a "wait Ns" status
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     keyFn = false;         // Fn modifier state for the current keypress
+  // Full modifier snapshot for the current keypress, captured only while the Telnet
+  // terminal is active (it needs Ctrl/Opt and the raw HID codes that handleKey()'s
+  // char-based path discards). keyHid holds up to 6 HID usage codes from this press.
+  bool     keyCtrl = false, keyOpt = false, keyAlt = false, keyTab = false, keySpace = false;
+  uint8_t  keyHid[6] = {0};
+  uint8_t  keyHidN = 0;
                                   // (read by the notes editor for cursor moves)
   bool     screenAsleep = false;  // backlight blanked for power saving
   bool     lastGpsFix  = false;   // for Location-screen auto-refresh
@@ -2103,11 +2115,17 @@ private:
   // ---- DX cluster spots (SCR_DXC) -------------------------------------------
   // Band is derived from the spot frequency via the same table the band-plan screen
   // uses, so "by band" filtering needs no second frequency->band mapping.
-  static const int DXC_MAX = 250;    // 250 * 40 B = 10,000 B, heap-on-demand
+  static const int DXC_MAX = 200;    // 200 * ~72 B = ~14 KB, heap-on-demand. Lowered from
+                                     // 250 when the 30-byte comment field was added: the
+                                     // single calloc must fit the largest contiguous block
+                                     // (~31 KB on this no-PSRAM part), and ~14 KB keeps a
+                                     // safe margin while still holding far more spots than a
+                                     // typical fetch returns.
   struct DxSpot {
     double freqKhz;
     char   dx[12];                     // spotted callsign
     char   de[12];                     // spotter
+    char   cmt[30];                    // spot comment (mode/report/notes), "" if none
     int    ageMin;
     int8_t band;                       // index into DXC_BANDS, -1 = unclassified
   };
@@ -2140,6 +2158,61 @@ private:
   bool   adsbScatter = false;          // overlay the aircraft-scatter usefulness test
   double adsbScatterBrg = 0;           // great-circle bearing to the scatter target
   char   adsbTgtGrid[8] = {0};         // target grid for the scatter geometry ("" = off)
+
+  // ---- Telnet client (SCR_TELNET / SCR_TELNETTERM) --------------------------
+  // A line-oriented network terminal for reaching another host in the field (a
+  // rotator controller, APRS box, DX-cluster node, or any raw-TCP/Telnet service).
+  // Deliberately NOT a VT100 emulator: remote ANSI/CSI/OSC escapes are sanitized
+  // away (telAnsi state machine) and output is drawn as a scrolling character grid.
+  // SSH was scoped with this but shelved for 0.9.67 on memory grounds; the session
+  // seam (telConnect/telService/telSendBytes/telDisconnect) is transport-agnostic so
+  // SSH can slot in later behind a heap guard. Saved connections live in a small
+  // line-based file on Store::fs() (SD if present, else LittleFS), same convention
+  // as the other FILE_* stores. Passwords are NOT used for Telnet (no auth); the
+  // struct carries a user field only for a future SSH transport and for label use.
+  struct TelHost {
+    char label[20];     // display name in the connection list
+    char host[64];      // hostname or IP
+    uint16_t port;      // default 23
+    uint8_t prnCols;    // printer columns for this connection's paper output (24..64)
+    uint8_t outMode;    // 1 screen, 2 printer, 3 both (bitmask: bit0 screen, bit1 printer)
+  };
+  static const int TEL_MAX = 10;         // up to ten saved connections
+  // Heap-on-demand, like dxcSpot/adsbAc/aprsSta: the connection list and the terminal
+  // session buffers are allocated only while the Telnet screens are open and freed on
+  // the way out, so a CardSat that never opens Telnet pays nothing in .bss. EVERY path
+  // that touches these must tolerate nullptr (draw, key, service, and the parser are all
+  // reachable before allocation and after a failed one). Two lifetimes:
+  //   telHost[]  -- the saved connection list: allocated on entering SCR_TELNET, freed
+  //                 when leaving both Telnet screens (telListFree).
+  //   telSess    -- the live session buffers (grid + printer line): allocated in
+  //                 telOpenSession, freed in telDisconnect (telSessFree).
+  static const int TEL_COLS = 39;        // 6px font -> 240/6 = 40, keep 1 col margin
+  static const int TEL_ROWS = 11;        // VISIBLE body rows between header (y=16) and footer
+  static const int TEL_SCROLLBACK = 40;  // total buffered rows (scrollback history)
+  struct TelSession {
+    char   grid[TEL_SCROLLBACK][TEL_COLS]; // ring of text rows; the bottom TEL_ROWS are
+                                           // "live", earlier rows are scrollback history
+    char   prnLine[80];                  // partial printer-line assembly buffer
+  };
+  TelHost* telHost = nullptr;            // heap: [TEL_MAX] connection records
+  TelSession* telSess = nullptr;         // heap: live terminal buffers (grid + printer line)
+  int    telN = 0;                       // number of saved connections
+  int    telSel = 0;                     // cursor in the connection list
+  int    telEditIdx = -1;                // connection being added/edited (-1 = none)
+  TelHost telEdit;                       // scratch record while editing (small, stays resident)
+  char   telStatus[64] = {0};            // one-line status on the config screen
+  int    telRow = 0, telCol = 0;         // write cursor within the scrollback buffer
+  int    telScrollUp = 0;                // rows scrolled UP from live (0 = pinned to bottom)
+  bool   telPendCR = false;              // saw a lone CR; overwrite the line if no LF
+  uint8_t telAnsi = 0;                   // sanitizer state: 0 normal 1 esc 2 csi 3 osc 4 osc-esc
+  bool    telConnected = false;
+  WiFiClient telClient;                  // plain TCP transport (small handle; socket freed on stop())
+  uint8_t telOutMode = 3;               // active output mode for the live session
+  bool    telPrnOpen = false;            // Printer::begin() succeeded for this session
+  int     telPrnLen = 0;
+  uint32_t telPrnLastMs = 0;             // for idle flush of a prompt with no newline
+  uint32_t telLastRxMs = 0;
 
   int    ao7Idx = -1;            // catalogue index of AO-7 (NORAD 7530), -1 if absent
   int    ao7Phase = 0;          // 0 idle, 1 fetched/analyzed, 2 no-sunlight, 3 error
@@ -2217,6 +2290,32 @@ private:
   static int dxcBandOf(double freqKhz);  // frequency -> DXC_BANDS index (-1 = none)
   void   drawAdsb();   void keyAdsb(char c, bool enter, bool back);
   void   fetchAdsb();                    // ADS-B aircraft JSON (LAN receiver or web)
+  // ---- Telnet client ----
+  void   drawTelnet();     void keyTelnet(char c, bool enter, bool back);
+  void   drawTelnetTerm(); void keyTelnetTerm(char c, bool enter, bool back);
+  bool   telListAlloc();                 // heap-alloc the connection list (idempotent)
+  void   telListFree();                  // free the connection list
+  bool   telSessAlloc();                 // heap-alloc the live session buffers (idempotent)
+  void   telSessFree();                  // free the live session buffers
+  void   telLoad();                      // read saved connections from Store::fs()
+  void   telSave();                      // write saved connections to Store::fs()
+  void   telStartEdit(int idx);          // populate telEdit for add(idx<0)/edit(idx)
+  void   telCommitEdit();                // validate + store telEdit into telHost[]
+  void   telDeleteSel();                 // remove the selected connection
+  void   telOpenSession(int idx);        // enter the terminal for connection idx
+  bool   telConnect();                   // open the TCP socket (transport seam)
+  void   telDisconnect();                // close socket + printer sink
+  void   telService();                   // pump incoming bytes (call from the modal loop)
+  void   telSendBytes(const uint8_t* d, size_t n);   // keyboard -> remote
+  void   telRemoteByte(uint8_t c);       // sanitize + route one received byte
+  void   telGridPutByte(uint8_t c);      // one printable byte onto the screen grid
+  void   telGridNewline();               // advance a row, scroll on overflow
+  void   telPrnByte(uint8_t c);          // one byte into the partial printer line
+  void   telPrnFlush();                  // stream the partial line via Printer::line()
+  bool   telPrnSinkOpen();               // open the printer sink on demand (RAW9100 only);
+                                         // returns false + sets telStatus if unavailable
+  void   telPrnSinkClose();              // flush + close the printer sink
+  void   telTermInput();                 // read the keyboard in the modal terminal loop
   // Feed record stores are heap-on-demand (see the array declarations below).
   // alloc returns false and sets the screen's own status line on OOM; free is safe
   // to call when nothing is allocated. Each alloc releases the OTHER two feeds

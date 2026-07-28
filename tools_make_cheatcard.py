@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CardSat 4x6 index-card key-reference generator (landscape, front + back).
+# CardSat 5x7 index-card key-reference generator (landscape, front + back).
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame,
@@ -8,7 +8,7 @@ from reportlab.lib.styles import ParagraphStyle
 from pypdf import PdfReader
 import os, re
 
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CardSat_CheatCard_4x6.pdf")
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CardSat_CheatCard_5x7.pdf")
 
 # Pull the firmware version from src/config.h so the card never goes stale.
 def _fw_version():
@@ -22,7 +22,7 @@ def _fw_version():
         pass
     return "0.0.0"
 FW_VER = _fw_version()
-PAGE_W, PAGE_H = 6 * inch, 4 * inch            # 432 x 288 pt (landscape 4x6)
+PAGE_W, PAGE_H = 7 * inch, 5 * inch            # 504 x 360 pt (landscape 5x7)
 ACCENT    = colors.HexColor('#0B7A3B')
 ACCENT_DK = colors.HexColor('#064F26')
 RULE      = colors.HexColor('#D7D7D7')
@@ -203,7 +203,7 @@ BACK = [
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (55): scientific/graphing/programmer calculators, <b>Tiny BASIC</b> (0.9.59: SATSEL/LPRINT/gfx; no INPUT), <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b>, Q-codes/phonetics/RST, CTCSS; <b>0.9.59 sat/build tools</b>: conjunction screener, orbital neighborhood, transponder planner, link-margin curve, debris-group screen, Doppler budget, cascade NF/G&sol;T, sun-noise G&sol;T, helix, L&sol;Pi&sol;T match, pointing loss, IMD, microstrip Z0, toroid, delta-v, thermal, Faraday, ampacity, PLL plan &middot; <b>p</b> <b>Print</b>: 29 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens + all form tools, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (55): scientific/graphing/programmer calculators, <b>Tiny BASIC</b> (0.9.59: SATSEL/LPRINT/gfx; no INPUT), <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b>, Q-codes/phonetics/RST, CTCSS, <b>Telnet</b> (0.9.67: LAN terminal, 10 saved hosts, opt. printing); <b>0.9.59 sat/build tools</b>: conjunction screener, orbital neighborhood, transponder planner, link-margin curve, debris-group screen, Doppler budget, cascade NF/G&sol;T, sun-noise G&sol;T, helix, L&sol;Pi&sol;T match, pointing loss, IMD, microstrip Z0, toroid, delta-v, thermal, Faraday, ampacity, PLL plan &middot; <b>p</b> <b>Print</b>: 29 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens + all form tools, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
 ]
 
 

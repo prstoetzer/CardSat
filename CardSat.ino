@@ -390,7 +390,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.66";
+static constexpr const char* FW_VERSION = "0.9.67";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build.
@@ -556,6 +556,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_TOOLDEF "/CardSat/tooldef.txt"   // per-form-tool saved field values (one line per tool id)
 #define FILE_NOTES   "/CardSat/notes.txt"     // per-sat operating notes: "norad<TAB>text" lines
 #define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
+#define FILE_TELNET  "/CardSat/telnet.txt"    // saved Telnet connections (one per line: label|host|port|user)
 #define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
 #define FILE_CTX     "/CardSat/ctx.json"      // CelesTrak-sourced extra favorites (one OMM object/line);
                                               // refreshed from CelesTrak on GP updates, unlike FILE_MGP
@@ -2978,7 +2979,13 @@ enum Screen : uint8_t {
   // of what is on the air / in the air around the operator right now, as distinct from
   // the satellite-centric screens above.
   SCR_NEARBY, SCR_APRS, SCR_APRSDET, SCR_DXC, SCR_ADSB,
-  SCR_DUALRIG, SCR_BASICFILES
+  SCR_DUALRIG, SCR_BASICFILES,
+  // Telnet client (Tools > Calculators & programming). SCR_TELNET is the connection
+  // list / config screen; SCR_TELNETTERM is the modal full-screen terminal. SSH was
+  // scoped alongside this but shelved on memory grounds for 0.9.67 (see
+  // docs/design/TELNET_SHIPPED_SSH_SHELVED_0_9_67.md) -- the terminal is transport-
+  // agnostic so SSH is a later drop-in behind a heap guard.
+  SCR_TELNET, SCR_TELNETTERM
 };
 
 // Doppler tune mode (cycled with 'd' on the Track screen, linear birds).
@@ -7556,6 +7563,12 @@ private:
   bool netCooldownOk();           // true if a new update cycle may start; else sets a "wait Ns" status
   uint32_t lastInputMs = 0;       // last keypress -- drives the screen-sleep timer
   bool     keyFn = false;         // Fn modifier state for the current keypress
+  // Full modifier snapshot for the current keypress, captured only while the Telnet
+  // terminal is active (it needs Ctrl/Opt and the raw HID codes that handleKey()'s
+  // char-based path discards). keyHid holds up to 6 HID usage codes from this press.
+  bool     keyCtrl = false, keyOpt = false, keyAlt = false, keyTab = false, keySpace = false;
+  uint8_t  keyHid[6] = {0};
+  uint8_t  keyHidN = 0;
                                   // (read by the notes editor for cursor moves)
   bool     screenAsleep = false;  // backlight blanked for power saving
   bool     lastGpsFix  = false;   // for Location-screen auto-refresh
@@ -8486,11 +8499,17 @@ private:
   // ---- DX cluster spots (SCR_DXC) -------------------------------------------
   // Band is derived from the spot frequency via the same table the band-plan screen
   // uses, so "by band" filtering needs no second frequency->band mapping.
-  static const int DXC_MAX = 250;    // 250 * 40 B = 10,000 B, heap-on-demand
+  static const int DXC_MAX = 200;    // 200 * ~72 B = ~14 KB, heap-on-demand. Lowered from
+                                     // 250 when the 30-byte comment field was added: the
+                                     // single calloc must fit the largest contiguous block
+                                     // (~31 KB on this no-PSRAM part), and ~14 KB keeps a
+                                     // safe margin while still holding far more spots than a
+                                     // typical fetch returns.
   struct DxSpot {
     double freqKhz;
     char   dx[12];                     // spotted callsign
     char   de[12];                     // spotter
+    char   cmt[30];                    // spot comment (mode/report/notes), "" if none
     int    ageMin;
     int8_t band;                       // index into DXC_BANDS, -1 = unclassified
   };
@@ -8523,6 +8542,61 @@ private:
   bool   adsbScatter = false;          // overlay the aircraft-scatter usefulness test
   double adsbScatterBrg = 0;           // great-circle bearing to the scatter target
   char   adsbTgtGrid[8] = {0};         // target grid for the scatter geometry ("" = off)
+
+  // ---- Telnet client (SCR_TELNET / SCR_TELNETTERM) --------------------------
+  // A line-oriented network terminal for reaching another host in the field (a
+  // rotator controller, APRS box, DX-cluster node, or any raw-TCP/Telnet service).
+  // Deliberately NOT a VT100 emulator: remote ANSI/CSI/OSC escapes are sanitized
+  // away (telAnsi state machine) and output is drawn as a scrolling character grid.
+  // SSH was scoped with this but shelved for 0.9.67 on memory grounds; the session
+  // seam (telConnect/telService/telSendBytes/telDisconnect) is transport-agnostic so
+  // SSH can slot in later behind a heap guard. Saved connections live in a small
+  // line-based file on Store::fs() (SD if present, else LittleFS), same convention
+  // as the other FILE_* stores. Passwords are NOT used for Telnet (no auth); the
+  // struct carries a user field only for a future SSH transport and for label use.
+  struct TelHost {
+    char label[20];     // display name in the connection list
+    char host[64];      // hostname or IP
+    uint16_t port;      // default 23
+    uint8_t prnCols;    // printer columns for this connection's paper output (24..64)
+    uint8_t outMode;    // 1 screen, 2 printer, 3 both (bitmask: bit0 screen, bit1 printer)
+  };
+  static const int TEL_MAX = 10;         // up to ten saved connections
+  // Heap-on-demand, like dxcSpot/adsbAc/aprsSta: the connection list and the terminal
+  // session buffers are allocated only while the Telnet screens are open and freed on
+  // the way out, so a CardSat that never opens Telnet pays nothing in .bss. EVERY path
+  // that touches these must tolerate nullptr (draw, key, service, and the parser are all
+  // reachable before allocation and after a failed one). Two lifetimes:
+  //   telHost[]  -- the saved connection list: allocated on entering SCR_TELNET, freed
+  //                 when leaving both Telnet screens (telListFree).
+  //   telSess    -- the live session buffers (grid + printer line): allocated in
+  //                 telOpenSession, freed in telDisconnect (telSessFree).
+  static const int TEL_COLS = 39;        // 6px font -> 240/6 = 40, keep 1 col margin
+  static const int TEL_ROWS = 11;        // VISIBLE body rows between header (y=16) and footer
+  static const int TEL_SCROLLBACK = 40;  // total buffered rows (scrollback history)
+  struct TelSession {
+    char   grid[TEL_SCROLLBACK][TEL_COLS]; // ring of text rows; the bottom TEL_ROWS are
+                                           // "live", earlier rows are scrollback history
+    char   prnLine[80];                  // partial printer-line assembly buffer
+  };
+  TelHost* telHost = nullptr;            // heap: [TEL_MAX] connection records
+  TelSession* telSess = nullptr;         // heap: live terminal buffers (grid + printer line)
+  int    telN = 0;                       // number of saved connections
+  int    telSel = 0;                     // cursor in the connection list
+  int    telEditIdx = -1;                // connection being added/edited (-1 = none)
+  TelHost telEdit;                       // scratch record while editing (small, stays resident)
+  char   telStatus[64] = {0};            // one-line status on the config screen
+  int    telRow = 0, telCol = 0;         // write cursor within the scrollback buffer
+  int    telScrollUp = 0;                // rows scrolled UP from live (0 = pinned to bottom)
+  bool   telPendCR = false;              // saw a lone CR; overwrite the line if no LF
+  uint8_t telAnsi = 0;                   // sanitizer state: 0 normal 1 esc 2 csi 3 osc 4 osc-esc
+  bool    telConnected = false;
+  WiFiClient telClient;                  // plain TCP transport (small handle; socket freed on stop())
+  uint8_t telOutMode = 3;               // active output mode for the live session
+  bool    telPrnOpen = false;            // Printer::begin() succeeded for this session
+  int     telPrnLen = 0;
+  uint32_t telPrnLastMs = 0;             // for idle flush of a prompt with no newline
+  uint32_t telLastRxMs = 0;
 
   int    ao7Idx = -1;            // catalogue index of AO-7 (NORAD 7530), -1 if absent
   int    ao7Phase = 0;          // 0 idle, 1 fetched/analyzed, 2 no-sunlight, 3 error
@@ -8600,6 +8674,32 @@ private:
   static int dxcBandOf(double freqKhz);  // frequency -> DXC_BANDS index (-1 = none)
   void   drawAdsb();   void keyAdsb(char c, bool enter, bool back);
   void   fetchAdsb();                    // ADS-B aircraft JSON (LAN receiver or web)
+  // ---- Telnet client ----
+  void   drawTelnet();     void keyTelnet(char c, bool enter, bool back);
+  void   drawTelnetTerm(); void keyTelnetTerm(char c, bool enter, bool back);
+  bool   telListAlloc();                 // heap-alloc the connection list (idempotent)
+  void   telListFree();                  // free the connection list
+  bool   telSessAlloc();                 // heap-alloc the live session buffers (idempotent)
+  void   telSessFree();                  // free the live session buffers
+  void   telLoad();                      // read saved connections from Store::fs()
+  void   telSave();                      // write saved connections to Store::fs()
+  void   telStartEdit(int idx);          // populate telEdit for add(idx<0)/edit(idx)
+  void   telCommitEdit();                // validate + store telEdit into telHost[]
+  void   telDeleteSel();                 // remove the selected connection
+  void   telOpenSession(int idx);        // enter the terminal for connection idx
+  bool   telConnect();                   // open the TCP socket (transport seam)
+  void   telDisconnect();                // close socket + printer sink
+  void   telService();                   // pump incoming bytes (call from the modal loop)
+  void   telSendBytes(const uint8_t* d, size_t n);   // keyboard -> remote
+  void   telRemoteByte(uint8_t c);       // sanitize + route one received byte
+  void   telGridPutByte(uint8_t c);      // one printable byte onto the screen grid
+  void   telGridNewline();               // advance a row, scroll on overflow
+  void   telPrnByte(uint8_t c);          // one byte into the partial printer line
+  void   telPrnFlush();                  // stream the partial line via Printer::line()
+  bool   telPrnSinkOpen();               // open the printer sink on demand (RAW9100 only);
+                                         // returns false + sets telStatus if unavailable
+  void   telPrnSinkClose();              // flush + close the printer sink
+  void   telTermInput();                 // read the keyboard in the modal terminal loop
   // Feed record stores are heap-on-demand (see the array declarations below).
   // alloc returns false and sets the screen's own status line on OOM; free is safe
   // to call when nothing is allocated. Each alloc releases the OTHER two feeds
@@ -21678,7 +21778,7 @@ void App::fetchWeather() {
              + "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,apparent_temperature,wind_gusts_10m,pressure_msl,is_day"
              + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max,wind_gusts_10m_max,sunrise,sunset"
              + "&hourly=cloud_cover,pressure_msl&forecast_hours=48"
-             + "&timezone=auto&forecast_days=" + String(WX_FORECAST_DAYS)
+             + "&timezone=GMT&forecast_days=" + String(WX_FORECAST_DAYS)
              + "&temperature_unit=" + tu + "&wind_speed_unit=" + wu;
 
   // Open-Meteo's response for this query is small (~2-3 KB). Stream it to the
@@ -21763,7 +21863,8 @@ void App::fetchWeather() {
   float uvs[WX_FORECAST_DAYS], gusts[WX_FORECAST_DAYS];
   int nUv = fillFloatArray("uv_index_max", uvs, WX_FORECAST_DAYS);
   int nGu = fillFloatArray("wind_gusts_10m_max", gusts, WX_FORECAST_DAYS);
-  // sunrise/sunset are ISO local strings ("YYYY-MM-DDTHH:MM"); pull HH:MM -> minutes
+  // sunrise/sunset are ISO strings ("YYYY-MM-DDTHH:MM"); with timezone=GMT they are UTC,
+  // consistent with the rest of CardSat (which is UTC throughout). Pull HH:MM -> minutes
   // past local midnight from each quoted element of the daily array.
   int sunr[WX_FORECAST_DAYS], suns[WX_FORECAST_DAYS];
   auto fillHmArray = [&](const char* key, int* out, int maxN) -> int {
@@ -21814,8 +21915,9 @@ void App::fetchWeather() {
   wxCachedUnits = 9;   // sentinel: cached temp/wind/pressure are in CANONICAL units (C, m/s, hPa)
 
   // --- hourly cloud cover (next 48 h), for pass/transit planning ---------------
-  // hourly.time[0] is local ISO ("YYYY-MM-DDTHH:MM", timezone=auto); the response's
-  // top-level utc_offset_seconds converts it to unix UTC. Values land in wxCloud[]
+  // hourly.time[0] is ISO ("YYYY-MM-DDTHH:MM"); with timezone=GMT it is already UTC, so
+  // utc_offset_seconds is 0 and the conversion below is a no-op (kept so an older cache
+  // or a reverted timezone still resolves correctly). Values land in wxCloud[]
   // as whole percent; anything malformed just leaves wxCloudN = 0 (feature off).
   wxCloudN = 0; wxCloudBase = 0;
   {
@@ -21857,9 +21959,10 @@ void App::fetchWeather() {
   }
 
   // --- pressure trend: compare "now" against ~3 h earlier in the hourly pressure_msl
-  // array. The hourly series starts at 00:00 local today, so index 0 is midnight and
-  // sample N is N hours later; "now" is the current local hour. wxCloudBase already
-  // holds the unix time of hourly sample 0, so we locate now and now-3h by index.
+  // array. The hourly series starts at 00:00 UTC today (timezone=GMT), so index 0 is
+  // midnight UTC and sample N is N hours later. This block is timezone-agnostic anyway:
+  // wxCloudBase holds the unix (UTC) time of hourly sample 0, and nowIdx is derived from
+  // nowUtc()-wxCloudBase, so we locate now and now-3h by index regardless of labeling.
   wxPres3hAgo = -999;
   {
     int hAt = body.indexOf("\"hourly\"");
@@ -24862,6 +24965,16 @@ void App::loop() {
     // Leaving the Dual-Rig setup screen: its device+model tables (~1.3 KB) are
     // rebuilt on every entry, so nothing needs them to survive.
     if (from == SCR_DUALRIG && screen != SCR_DUALRIG) drFree();
+    // Leaving the Telnet terminal by any path closes the socket and printer sink
+    // (telDisconnect also frees the ~0.5 KB session buffers via telSessFree).
+    if (from == SCR_TELNETTERM && screen != SCR_TELNETTERM) telDisconnect();
+    // Leaving the Telnet tool ENTIRELY (both the connection list and the terminal): free
+    // the ~1.1 KB connection list. Kept resident while moving between the two Telnet
+    // screens, freed once neither is active -- same shape as the Tiny BASIC free above.
+    if ((from == SCR_TELNET || from == SCR_TELNETTERM) &&
+        screen != SCR_TELNET && screen != SCR_TELNETTERM && screen != SCR_EDIT) {
+      telListFree();
+    }
     // Leaving the BASIC file browser: its ~1.3 KB list is rebuilt on every entry.
     if (from == SCR_BASICFILES && screen != SCR_BASICFILES) basFilesFree();
     // Leaving the CAT self-test results: its ~2.7 KB log is rebuilt on every run.
@@ -25007,6 +25120,11 @@ void App::loop() {
     auto ks = M5Cardputer.Keyboard.keysState();
     char c = ks.word.empty() ? 0 : ks.word.front();
     keyFn = ks.fn;          // Fn held? read by the notes editor for cursor moves
+    // Full modifier snapshot for the Telnet terminal (which needs Ctrl/Opt and raw HID
+    // codes the char path discards). Cheap: a few bool copies and up to six bytes.
+    keyCtrl = ks.ctrl; keyOpt = ks.opt; keyAlt = ks.alt; keyTab = ks.tab; keySpace = ks.space;
+    keyHidN = 0;
+    for (uint8_t hid : ks.hid_keys) { if (keyHidN < 6) keyHid[keyHidN++] = hid; }
     lastInputMs = millis();
     if (screen == SCR_CHARGE) {                // charge mode handles its own keys
       handleKey(c, ks.enter, ks.del);          // (wakes/blanks/exits internally)
@@ -25413,6 +25531,12 @@ void App::loop() {
   // Repaint on a brisk cadence while it's active so the RX indicator, packet
   // counter, and newest-frame hexdump stay live.
   if (screen == SCR_LORARX && ms - lastDrawMs > 200) { lastDrawMs = ms; draw(); }
+  // Telnet terminal: pump incoming bytes every loop, and repaint the grid at ~10 fps
+  // while data is arriving (or on a slower cadence otherwise, to keep the cursor live).
+  if (screen == SCR_TELNETTERM) {
+    telService();
+    if (ms - lastDrawMs > 100) { lastDrawMs = ms; draw(); }
+  }
 #endif
 
   // Global banner-expiry sweep. Every transient status banner is set via setStatus()
@@ -25599,14 +25723,24 @@ void App::handleKey(char c, bool enter, bool back) {
                             screen != SCR_LOTWSUB &&
                             screen != SCR_TOOLS && screen != SCR_DXLK &&
                             screen != SCR_CHARLK &&
+                            screen != SCR_TELNETTERM &&  // live terminal: every printable
+                                                         // letter (incl. h/b) goes to the
+                                                         // remote; Fn+h/Fn+b still reach help
+                                                         // and screenshot.
                             screen != SCR_GRAPH);   // 0.9.59: grapher claims bare 'b'
                                                     // (table view) -- Fn+b screenshots
   // Fn+b / Fn+h reach the globals from every screen that claims bare letters -- both the
   // text-entry screens and the first-letter-jump / type-to-search lists.
   // Lowercase only: Fn+shift+b / Fn+shift+h must still type a capital B / H in the
   // editors, and the shifted forms are never needed to reach a global.
-  if (c == 'b' && (lettersFree || keyFn)) { takeScreenshot(); return; }
-  if (c == 'h' && (lettersFree || keyFn) && screen != SCR_HELP) {
+  // The live Telnet terminal OWNS the Fn layer: Fn+key combos are sent to the remote
+  // host (arrows, F-keys, Escape), and NONE may leak to a CardSat global. So the terminal
+  // is excluded from Fn+b (screenshot) and Fn+h (help) here, and from the Fn+Back
+  // emergency-stop below. This also fixes a real bug: Fn+h left the terminal for Help,
+  // which freed the session buffers, and returning could not cleanly re-establish them
+  // (surfaced as an out-of-memory warning). The terminal's only exit is Opt+`.
+  if (c == 'b' && (lettersFree || keyFn) && screen != SCR_TELNETTERM) { takeScreenshot(); return; }
+  if (c == 'h' && (lettersFree || keyFn) && screen != SCR_HELP && screen != SCR_TELNETTERM) {
     helpReturn = screen; helpScroll = 0; screen = SCR_HELP; lastDrawMs = 0; return;
   }
   // Global emergency stop: Fn+Back (backtick or Del) disengages radio + rotator control
@@ -25619,7 +25753,9 @@ void App::handleKey(char c, bool enter, bool back) {
   // exits rather than deleting, so the emergency stop is safe to keep there.
   const bool textEditor = (screen == SCR_EDIT || screen == SCR_NOTEEDIT ||
                            screen == SCR_BASIC || screen == SCR_CALC);
-  if (keyFn && isBack(c, back) && !textEditor) {
+  // The Telnet terminal is also excluded: Fn+` there is Escape-to-remote, not an
+  // emergency stop, and no Fn combo may reach a CardSat global from the terminal.
+  if (keyFn && isBack(c, back) && !textEditor && screen != SCR_TELNETTERM) {
     stopAllControl(); return;
   }
   switch (screen) {
@@ -25721,6 +25857,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_APRSDET: keyAprsDet(c, enter, back); break;
     case SCR_DXC:     keyDxc(c, enter, back); break;
     case SCR_ADSB:    keyAdsb(c, enter, back); break;
+    case SCR_TELNET:     keyTelnet(c, enter, back); break;
+    case SCR_TELNETTERM: keyTelnetTerm(c, enter, back); break;
     case SCR_AO7:     keyAo7(c, enter, back); break;
     case SCR_DEBGRP: keyDebGrp(c, enter, back); break;
     case SCR_CTSEARCH: keyCtSearch(c, enter, back); break;
@@ -28763,6 +28901,9 @@ static Screen editHome(int t) {
   if (t == 900) return SCR_APRS;                 // APRS centre grid
   if (t == 901) return SCR_ADSB;                 // ADS-B scatter target grid
   if (t >= 903 && t <= 904) return SCR_SETTINGS; // feed URLs
+  if (t >= 910 && t <= 914) return SCR_TELNET;   // Telnet connection fields (label/host/port/
+                                                 // output-mode; 913 unused) -- MUST precede
+                                                 // the t>=720 catch-all below
   if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
   if (t == 704 || t == 705) return SCR_MESSAGES;  // LoRa sked-send date/time prompts (cancel)
   if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
@@ -28919,6 +29060,30 @@ void App::keyEdit(char c, bool enter, bool back) {
                 cfg.dxcUrl[sizeof(cfg.dxcUrl)-1] = 0; cfg.save(); break;
       case 904: strncpy(cfg.adsbUrl, editBuf.c_str(), sizeof(cfg.adsbUrl)-1);
                 cfg.adsbUrl[sizeof(cfg.adsbUrl)-1] = 0; cfg.save(); break;
+      // Telnet connection fields land in the scratch record telEdit, then CHAIN to the
+      // next field's editor: label(910) -> host(911) -> port(912) -> output-mode(914) ->
+      // commit. Each case stores its value and immediately opens the next prompt, so the
+      // whole record is entered in one guided pass; the last field calls telCommitEdit()
+      // and returns to the connection list. (These `return` before the generic tail.)
+      // (913 was the old "user" field -- removed: Telnet has no authentication.)
+      case 910: { String s = editBuf; s.trim();
+                  strlcpy(telEdit.label, s.c_str(), sizeof(telEdit.label));
+                  editTarget = 911; editTitle = "Host or IP"; editBuf = String(telEdit.host);
+                  screen = SCR_EDIT; lastDrawMs = 0; return; }
+      case 911: { String s = editBuf; s.trim();
+                  strlcpy(telEdit.host, s.c_str(), sizeof(telEdit.host));
+                  editTarget = 912; editTitle = "Port (default 23)";
+                  editBuf = String((unsigned)(telEdit.port ? telEdit.port : 23));
+                  screen = SCR_EDIT; lastDrawMs = 0; return; }
+      case 912: { int p = editBuf.toInt(); if (p < 1 || p > 65535) p = 23;
+                  telEdit.port = (uint16_t)p;
+                  editTarget = 914; editTitle = "Output 1=screen 2=printer 3=both";
+                  editBuf = String((unsigned)(telEdit.outMode ? telEdit.outMode : 1));
+                  screen = SCR_EDIT; lastDrawMs = 0; return; }
+      case 914: { int m = editBuf.toInt(); if (m < 1 || m > 3) m = 1;  // default screen only
+                  telEdit.outMode = (uint8_t)m;
+                  telCommitEdit();
+                  screen = SCR_TELNET; lastDrawMs = 0; return; }
       // Both of these used to strncpy whatever was typed, with no validation at all,
       // so a typo was accepted and only discovered at draw time. Every other grid
       // editor (103, 104, 350, 370, 770) validates through gridToLatLon first and
@@ -31919,6 +32084,8 @@ void App::draw() {
     case SCR_APRSDET: drawAprsDet(); break;
     case SCR_DXC:     drawDxc(); break;
     case SCR_ADSB:    drawAdsb(); break;
+    case SCR_TELNET:     drawTelnet(); break;
+    case SCR_TELNETTERM: drawTelnetTerm(); break;
     case SCR_AO7:     drawAo7(); break;
     case SCR_DEBGRP: drawDebGrp(); break;
     case SCR_CTSEARCH: drawCtSearch(); break;
@@ -32477,6 +32644,12 @@ void App::drawHelp() {
     "GRAPHING CALC",
     " 2 Y2  t trace  z/Z zeros/isect",
     " m marks+integral  b table  c CSV",
+    "TELNET (Tools > Calc & prog)",
+    " type sends; ENTER = send line",
+    " Ctrl+key control; Fn+;./,/ arrows",
+    " Fn+1..0 F-keys; Fn+` Escape",
+    " Opt+;/. scroll; Opt+c clear",
+    " Opt+r reconnect; Opt+` exit",
     "HELP TOPICS (from this screen)",
     " g  glossary & math",
     " m  user guide",
@@ -32789,6 +32962,44 @@ void App::drawHelp() {
     "  h/b are Fn+h / Fn+b",
     " 4KB max, 200 lines;",
     " runaway loops self-halt",
+    "TELNET CLIENT",
+    " (Tools > Calculators &",
+    "  programming > Telnet)",
+    " A line-oriented terminal",
+    " for a rotator box, APRS",
+    " box, DX node, or any raw-",
+    " TCP host on a trusted LAN.",
+    " Plaintext + no auth: LANs",
+    " you trust only. (SSH does",
+    " not fit this board's RAM.)",
+    " Saves up to 10 connections.",
+    " a add  e edit  d del",
+    " setup asks label, host,",
+    "  port, and output",
+    "  (screen/printer/both)",
+    " ENT open the highlighted",
+    "  connection",
+    " In the terminal:",
+    "  type to send; ENTER sends",
+    "  the line (CR LF)",
+    "  Ctrl+key = Ctrl-C/D/Z etc",
+    "  Fn+;./,/ = arrow keys",
+    "  Fn+1..0  = F1..F10",
+    "  Fn+`     = Escape",
+    "  Opt+;    scroll back",
+    "  Opt+.    scroll forward",
+    "  Opt+c    clear screen",
+    "  Opt+r    reconnect",
+    "  Opt+1/2/3 out: screen /",
+    "   printer / both",
+    "  Opt+`    exit",
+    " Fn combos all go to the",
+    "  remote, so help and",
+    "  screenshot are off here;",
+    "  exit is Opt+` only.",
+    " Printer output uses your",
+    "  configured printer, every",
+    "  sink except IPP/raster.",
     "PRINTING",
     " p on a report screen",
     "  prints what you're",
@@ -33016,7 +33227,25 @@ void App::drawUserGuide() {
     " with an f field-conditions",
     " page (feels-like, gusts,",
     " pressure trend, UV, sun).",
+    " Weather times are UTC, like",
+    " the rest of CardSat.",
     " AMSAT status (hams.at).",
+    "NEARBY & DX (live feeds)",
+    " (Home > Nearby & DX)",
+    " Fetch-and-browse views of",
+    " what's on the air around you:",
+    " APRS heard near me, DX",
+    " cluster spots, ADS-B radar.",
+    " Set the feed URLs/keys in",
+    " Settings > Network.",
+    " DX cluster: f fetch, n step",
+    " through the bands that have",
+    " spots. Each spot shows the",
+    " DX call, freq, band and the",
+    " spotter (de), with the spot",
+    " COMMENT on the line beneath.",
+    " Scrolling steps spot-to-spot",
+    " (it skips the comment line).",
     "MESSAGING",
     " LoRa CardSat-to-CardSat chat",
     " (needs a LoRa-capable build).",
@@ -34141,7 +34370,10 @@ void App::drawOverhead() {
     return;
   }
 
-  const int ROWS = 9;
+  // 8 visible rows, not 9: with pitch 10 starting at y=30, a 9th row lands at y=110 and
+  // its glyph descenders collided with the "N up / M scanned" count line at y=116. Eight
+  // rows end at y=100, leaving the count line and the y=127 footer clear.
+  const int ROWS = 8;
   if (ovhScroll > ovhN - ROWS) ovhScroll = ovhN - ROWS;
   if (ovhScroll < 0) ovhScroll = 0;
   for (int r = 0; r < ROWS && (ovhScroll + r) < ovhN; ++r) {
@@ -40967,6 +41199,7 @@ static const char* const TOOLS_NAMES[] = {
   "Terrain path profile",
   "Orbital thermal (cubesat)",
   "AO-7 mode switch",
+  "Telnet client",
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
@@ -40979,8 +41212,8 @@ static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 // tools to TOOLS_NAMES as always, then slot the new id into the right band here; the
 // static_assert keeps the two tables the same length (a missing or duplicate id
 // would scramble the menu, so the release checklist includes eyeballing this list).
-static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,15,16,17,18,19,54,55,58,56,57,59,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14,60,61 };
-static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 62, "TOOLS_ORDER size");
+static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,62,15,16,17,18,19,54,55,58,56,57,59,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14,60,61 };
+static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 63, "TOOLS_ORDER size");
 
 // ---- Tool categories (0.9.61): a two-level Tools menu. TOOLS_ORDER above is kept as
 // the canonical 60-tool coverage guard; the categories below are the DISPLAY grouping.
@@ -40995,7 +41228,7 @@ static const char* const TOOLS_CAT_NAMES[] = {
   "RF chain & measurement",
   "Electronics & references",
 };
-static const uint8_t TOOLS_CAT_C0[] = { 0,1,2,3,28,4 };
+static const uint8_t TOOLS_CAT_C0[] = { 0,1,2,3,62,28,4 };
 static const uint8_t TOOLS_CAT_C1[] = { 15,16,17,18,19,40,31,32,49,50,51,6,7,60,61 };
 static const uint8_t TOOLS_CAT_C2[] = { 5,54,55,58,56,57,59,27,45 };
 static const uint8_t TOOLS_CAT_C3[] = { 21,22,23,24,43,44,33,20,47,48 };
@@ -41012,7 +41245,7 @@ static_assert(sizeof(TOOLS_CAT_NAMES) / sizeof(TOOLS_CAT_NAMES[0]) == 6, "cat na
 // Coverage: the six category lengths must sum to the full tool count.
 static_assert(sizeof(TOOLS_CAT_C0) + sizeof(TOOLS_CAT_C1) + sizeof(TOOLS_CAT_C2)
             + sizeof(TOOLS_CAT_C3) + sizeof(TOOLS_CAT_C4) + sizeof(TOOLS_CAT_C5)
-            == 62, "tool categories must cover all 62 tools exactly once");
+            == 63, "tool categories must cover all 63 tools exactly once");
 
 // The first twenty Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
@@ -41028,11 +41261,11 @@ static const int TOOLS_FIRST_FORM = 20;
 // standalone ones) must exactly match the size of the form enum (TOOL_COAX..TOOL__N).
 // If a tool is added to TOOLS_NAMES without updating the enum (or vice versa), or the
 // standalone/form split moves, this fails the build instead of mis-indexing at runtime.
-// The forms occupy canonical ids TOOLS_FIRST_FORM..(TOOLS_FIRST_FORM+TOOL__N-1). Two
-// trailing standalone tools (orbital thermal id 60, AO-7 mode switch id 61) are appended
-// AFTER the forms and dispatched by explicit id checks before the form fallthrough, so
-// they are not forms: the form block is [FIRST_FORM, TOOLS_N-2), hence the +2 here.
-static_assert(TOOLS_N - TOOLS_FIRST_FORM == TOOL__N + 2,
+// The forms occupy canonical ids TOOLS_FIRST_FORM..(TOOLS_FIRST_FORM+TOOL__N-1). Three
+// trailing standalone tools (orbital thermal id 60, AO-7 mode switch id 61, Telnet client
+// id 62) are appended AFTER the forms and dispatched by explicit id checks before the form
+// fallthrough, so they are not forms: the form block is [FIRST_FORM, TOOLS_N-3), hence +3.
+static_assert(TOOLS_N - TOOLS_FIRST_FORM == TOOL__N + 3,
               "TOOLS_FIRST_FORM / TOOLS_NAMES / TOOL_* enum are out of step");
 
 // Two-level Tools menu. toolsCat == -1 -> the category list; otherwise the tools inside
@@ -41153,6 +41386,10 @@ void App::keyTools(char c, bool enter, bool back) {
       ao7Phase = 0; ao7Note = "";
       ao7CheckSunlight();                        // prime the sunlight verdict for the screen
       screen = SCR_AO7;
+    } else if (toolsSelC == 62) {               // Telnet client (standalone screen)
+      telStatus[0] = 0;
+      if (telListAlloc()) { telLoad(); telSel = 0; }   // heap-on-demand connection list
+      screen = SCR_TELNET;
     } else {                                   // one of the live-recalc forms
       toolFormInit(toolsSelC - TOOLS_FIRST_FORM);   // form id = CANONICAL index - standalone count (display order differs)
       screen = SCR_TOOLFORM;
@@ -42803,6 +43040,7 @@ void App::printDxc() {
     String fields[5] = { String(frq), String(s.dx), String(bn),
                          String("de ") + s.de, String(age) };
     Printer::colrow(fields, 5);
+    if (s.cmt[0]) Printer::line(String("  ") + s.cmt);   // comment on an indented line
   }
 }
 
@@ -43314,7 +43552,10 @@ void App::fetchDxc() {
 
   // Sniff the payload: the most useful free, no-registration spot feed (HamQTH's
   // dxc_csv.php) is caret-delimited TEXT, not JSON --
-  //   Call^Frequency^Date/Time^Spotter^Comment^LoTW^eQSL^Continent^Band^Country
+  //   Spotter^Frequency^DX^Comment^Date/Time^LoTW^eQSL^Continent^Band^Country
+  //   (LIVE wire order, confirmed via the Country column which always matches the DX in
+  //   field 2. HamQTH's dev page lists "Call^Frequency^Date/Time^Spotter^..." which is
+  //   wrong on two counts: the spotter is first and the spotted DX is field 2.)
   // Requiring JSON would have shut the operator out of the one source that needs no
   // account at all, so both shapes are accepted and chosen by the first real character.
   {
@@ -43327,17 +43568,25 @@ void App::fetchDxc() {
         size_t len = f.readBytesUntil('\n', line, sizeof(line) - 1);
         if (len == 0) continue;
         line[len] = 0;
-        // Split on '^'; fields 0=call 1=freq 2=date/time 3=spotter (others ignored).
-        char* fld[6] = {nullptr,nullptr,nullptr,nullptr,nullptr,nullptr};
+        // Split on '^'. The LIVE dxc_csv.php column order, verified against the feed's
+        // own COUNTRY column as ground truth (the country always matches field 2, the
+        // SPOTTED station), is:
+        //   0=SPOTTER 1=freq 2=DX(spotted) 3=comment 4=date/time 5=LoTW 6=eQSL 7=cont 8=band 9=country
+        // This is NOT what HamQTH's developer page documents ("Call^Frequency^Date/Time^
+        // Spotter^...") -- on the wire the SPOTTER comes first and the spotted DX is field
+        // 2. (An earlier fix had these two reversed, showing the spotter as the DX; the
+        // country column disambiguates it beyond doubt.) So: dx = field 2, de = field 0.
+        char* fld[7] = {nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr};
         int nf = 0; char* p2 = line; fld[nf++] = p2;
-        while (*p2 && nf < 6) { if (*p2 == '^') { *p2 = 0; fld[nf++] = p2 + 1; } ++p2; }
-        if (nf < 2 || !fld[0] || !fld[0][0]) continue;
+        while (*p2 && nf < 7) { if (*p2 == '^') { *p2 = 0; fld[nf++] = p2 + 1; } ++p2; }
+        if (nf < 3 || !fld[2] || !fld[2][0]) continue;   // need at least spotter, freq, DX
         double khz = atof(fld[1] ? fld[1] : "0");
         if (khz <= 0) continue;
         DxSpot& sp = dxcSpot[dxcN];
         sp.freqKhz = khz;
-        strlcpy(sp.dx, fld[0], sizeof(sp.dx));
-        strlcpy(sp.de, (nf > 3 && fld[3]) ? fld[3] : "", sizeof(sp.de));
+        strlcpy(sp.dx, fld[2], sizeof(sp.dx));                              // field 2 = spotted DX
+        strlcpy(sp.de, fld[0] ? fld[0] : "", sizeof(sp.de));               // field 0 = spotter
+        strlcpy(sp.cmt, (nf > 3 && fld[3]) ? fld[3] : "", sizeof(sp.cmt));  // field 3 = comment
         sp.band = (int8_t)dxcBandOf(khz);
         sp.ageMin = -1;                 // this feed carries a formatted date, not an epoch
         dxcN++;
@@ -43386,12 +43635,14 @@ void App::fetchDxc() {
             String dx = fld("dxcall");    if (!dx.length()) dx = fld("dx");
             String de = fld("spotter");   if (!de.length()) de = fld("de");
             String tm = fld("time");      if (!tm.length()) tm = fld("timestamp");
+            String cm = fld("comment");   if (!cm.length()) cm = fld("cmt");
             double khz = fq.toDouble();
             if (khz > 0 && dx.length()) {
               DxSpot& s = dxcSpot[dxcN];
               s.freqKhz = khz;
               strlcpy(s.dx, dx.c_str(), sizeof(s.dx));
               strlcpy(s.de, de.c_str(), sizeof(s.de));
+              strlcpy(s.cmt, cm.c_str(), sizeof(s.cmt));
               s.band = (int8_t)dxcBandOf(khz);
               long ts = (long)tm.toInt();
               s.ageMin = (now && ts > 100000) ? (int)((now - (time_t)ts) / 60) : -1;
@@ -43427,30 +43678,48 @@ void App::drawDxc() {
   }
   canvas.setTextColor(CL_MGREY, CL_BLACK);
   canvas.setCursor(6, 18); canvas.print("DX          freq kHz  band  de");
-  const int ROWS = 8;
-  // Keep the cursor on a visible row. The clamp must run against dxcSel's ORDINAL
-  // among the visible rows, not against dxcSel itself: dxcScroll counts filtered
-  // positions while dxcSel is an index into the unfiltered array, and with a band
-  // filter active the two diverge.
+  // Two lines per spot: the spot line, then a comment line beneath it. The cursor steps
+  // spot-to-spot (dxcSel/dxcScroll count SPOTS, not display lines), so scrolling skips
+  // the comment lines -- pressing down advances one whole spot. ROWS = SPOTS visible.
+  // Three spots (not four) with a 28px block gives real breathing room between a spot's
+  // comment and the next spot, which four cramped 21px blocks did not.
+  const int ROWS = 3;                    // 3 spots x 28px = 84px of body (y=30..114)
+  const int BLK  = 28;                   // spot line (y), comment (y+11), 11px gap to next
   int selOrd = 0;
   for (int i = 0; i < dxcN && i < dxcSel; ++i)
     if (dxcBandFilter < 0 || dxcSpot[i].band == dxcBandFilter) ++selOrd;
   if (selOrd < dxcScroll)         dxcScroll = selOrd;
   if (selOrd >= dxcScroll + ROWS) dxcScroll = selOrd - ROWS + 1;
-  // Walk the filtered subset, keeping the cursor on a visible row.
   int shown = 0, firstVis = -1;
   for (int i = 0; i < dxcN; ++i) {
     if (dxcBandFilter >= 0 && dxcSpot[i].band != dxcBandFilter) continue;
     if (firstVis < 0) firstVis = i;
     if (shown >= dxcScroll && shown < dxcScroll + ROWS) {
-      int r = shown - dxcScroll, y = 30 + r * 11;
+      int r = shown - dxcScroll, y = 30 + r * BLK;
       bool sel = (i == dxcSel);
-      if (sel) { canvas.fillRect(0, y - 1, 240, 11, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
-      else       canvas.setTextColor(CL_WHITE, CL_BLACK);
       const DxSpot& s = dxcSpot[i];
+      // Selection: a thin accent bar down the left edge rather than a full-width block,
+      // so both text lines stay high-contrast (white on black) and legible. The spot
+      // line also brightens to cyan when selected.
+      if (sel) canvas.fillRect(0, y - 2, 3, BLK - 3, CL_SELBG);
+      // ---- spot line: DX  freq  band  de ----
+      canvas.setTextColor(sel ? CL_CYAN : CL_WHITE, CL_BLACK);
       canvas.setCursor(6, y);
-      canvas.printf("%-10s %9.1f %5s %-6s", s.dx, s.freqKhz,
+      canvas.printf("%-10s %9.1f %5s de %-6s", s.dx, s.freqKhz,
                     s.band >= 0 ? DXC_BANDS[s.band].name : "-", s.de);
+      // ---- comment line: a small drawn lead-in triangle then the comment, in a steady
+      // mid-grey that reads clearly on black; omitted entirely (blank line) when there is
+      // no comment. The triangle is drawn (not a font glyph) so it renders identically
+      // regardless of the built-in font's extended-character coverage. ----
+      if (s.cmt[0]) {
+        int ty = y + 11;
+        canvas.fillTriangle(9, ty, 9, ty + 6, 13, ty + 3, CL_DGREEN);   // "->" lead-in
+        canvas.setTextColor(CL_MGREY, CL_BLACK);
+        canvas.setCursor(18, ty);
+        char cbuf[40];
+        snprintf(cbuf, sizeof(cbuf), "%.36s", s.cmt);
+        canvas.print(cbuf);
+      }
     }
     shown++;
   }
@@ -43720,6 +43989,635 @@ void App::keyAdsb(char c, bool enter, bool back) {
   if (!adsbAc || adsbN == 0) return;
   if (isUp(c))   { if (--adsbSel < 0) adsbSel = adsbN - 1; lastDrawMs = 0; return; }
   if (isDown(c)) { if (++adsbSel >= adsbN) adsbSel = 0;    lastDrawMs = 0; return; }
+}
+
+// ===========================================================================
+//  Telnet client (SCR_TELNET config list + SCR_TELNETTERM modal terminal)
+// ---------------------------------------------------------------------------
+//  A line-oriented network terminal for reaching another host from the field:
+//  a rotator controller, an APRS box, a DX-cluster node, or any raw-TCP/Telnet
+//  service on a trusted network. It is deliberately NOT a VT100 emulator --
+//  remote ANSI/CSI/OSC escapes are stripped (telRemoteByte state machine) and
+//  the output is drawn as a scrolling fixed character grid. Output can also
+//  stream to the operator's configured printer, sanitized line by line, through
+//  every Printer sink EXCEPT IPP/raster (a live line stream cannot rasterize a
+//  page). SSH was scoped alongside this but shelved for 0.9.67 on memory grounds
+//  (docs/design/TELNET_SHIPPED_SSH_SHELVED_0_9_67.md); the transport seam here
+//  (telConnect/telService/telSendBytes/telDisconnect) is transport-agnostic, so
+//  an SSH transport can slot in later behind a runtime heap guard.
+// ===========================================================================
+
+bool App::telListAlloc() {
+  if (telHost) return true;
+  telHost = (TelHost*)calloc(TEL_MAX, sizeof(TelHost));
+  if (!telHost) { strlcpy(telStatus, "Out of memory", sizeof(telStatus)); return false; }
+  return true;
+}
+
+void App::telListFree() {
+  if (telHost) { free(telHost); telHost = nullptr; }
+  telN = 0; telSel = 0; telEditIdx = -1;
+}
+
+bool App::telSessAlloc() {
+  if (telSess) return true;
+  telSess = (TelSession*)calloc(1, sizeof(TelSession));
+  if (!telSess) { strlcpy(telStatus, "Out of memory", sizeof(telStatus)); return false; }
+  memset(telSess->grid, ' ', sizeof(telSess->grid));
+  return true;
+}
+
+void App::telSessFree() {
+  if (telSess) { free(telSess); telSess = nullptr; }
+  telRow = telCol = 0; telAnsi = 0; telPrnLen = 0; telPendCR = false; telScrollUp = 0;
+}
+
+void App::telLoad() {
+  telN = 0;
+  if (!telHost) return;                   // caller allocates the list first (telListAlloc)
+  File f = Store::fs().open(FILE_TELNET, "r");
+  if (!f) return;
+  char line[160];
+  while (f.available() && telN < TEL_MAX) {
+    size_t len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+    if (len == 0) continue;
+    line[len] = 0;
+    // strip a trailing CR (files authored on other platforms)
+    if (len && line[len - 1] == '\r') line[--len] = 0;
+    if (len == 0) continue;
+    // Fields are '|'-separated. Current format (5 fields):
+    //   label|host|port|prnCols|outMode
+    // A pre-0.9.67 file may still carry a 6th "user" field between port and prnCols:
+    //   label|host|port|user|prnCols|outMode   (user is dropped -- Telnet has no auth).
+    // The field count tells the two apart, so old saved files still load.
+    char* fld[6] = {nullptr,nullptr,nullptr,nullptr,nullptr,nullptr};
+    int nf = 0; char* p = line; fld[nf++] = p;
+    while (*p && nf < 6) { if (*p == '|') { *p = 0; fld[nf++] = p + 1; } ++p; }
+    if (nf < 2 || !fld[0][0] || !fld[1][0]) continue;   // need at least label + host
+    bool legacy = (nf >= 6);                            // 6-field rows carry the old user field
+    int iCols = legacy ? 4 : 3;                         // prnCols index shifts by the dropped field
+    int iMode = legacy ? 5 : 4;
+    TelHost& h = telHost[telN];
+    memset(&h, 0, sizeof(h));
+    strlcpy(h.label, fld[0], sizeof(h.label));
+    strlcpy(h.host,  fld[1], sizeof(h.host));
+    h.port    = (nf > 2 && fld[2][0]) ? (uint16_t)atoi(fld[2]) : 23;
+    if (h.port == 0) h.port = 23;
+    h.prnCols = (nf > iCols && fld[iCols][0]) ? (uint8_t)atoi(fld[iCols]) : 32;
+    if (h.prnCols < 24) h.prnCols = 24; if (h.prnCols > 64) h.prnCols = 64;
+    h.outMode = (nf > iMode && fld[iMode][0]) ? (uint8_t)atoi(fld[iMode]) : 1;  // absent -> screen only
+    if (h.outMode < 1 || h.outMode > 3) h.outMode = 1;
+    telN++;
+  }
+  f.close();
+}
+
+void App::telSave() {
+  File f = Store::fs().open(FILE_TELNET, "w");
+  if (!f) { strlcpy(telStatus, "Save failed (no filesystem)", sizeof(telStatus)); return; }
+  for (int i = 0; i < telN; ++i) {
+    const TelHost& h = telHost[i];
+    f.printf("%s|%s|%u|%u|%u\n", h.label, h.host, (unsigned)h.port,
+             (unsigned)h.prnCols, (unsigned)h.outMode);
+  }
+  f.close();
+}
+
+void App::telStartEdit(int idx) {
+  telEditIdx = idx;
+  if (telHost && idx >= 0 && idx < telN) {
+    telEdit = telHost[idx];
+  } else {
+    memset(&telEdit, 0, sizeof(telEdit));
+    telEdit.port = 23; telEdit.prnCols = 32; telEdit.outMode = 1;  // default: screen only
+                                                                    // (printer is opt-in via Opt+2/3)
+  }
+}
+
+void App::telCommitEdit() {
+  if (!telHost) return;                            // list not allocated (shouldn't happen)
+  // Trim/validate. A record needs a host; a blank label defaults to the host.
+  if (!telEdit.host[0]) { strlcpy(telStatus, "Host required", sizeof(telStatus)); return; }
+  if (!telEdit.label[0]) strlcpy(telEdit.label, telEdit.host, sizeof(telEdit.label));
+  if (telEdit.port == 0) telEdit.port = 23;
+  if (telEdit.prnCols < 24) telEdit.prnCols = 24;
+  if (telEdit.prnCols > 64) telEdit.prnCols = 64;
+  if (telEdit.outMode < 1 || telEdit.outMode > 3) telEdit.outMode = 1;
+  if (telEditIdx >= 0 && telEditIdx < telN) {
+    telHost[telEditIdx] = telEdit;                 // update in place
+  } else if (telN < TEL_MAX) {
+    telHost[telN++] = telEdit;                     // append
+    telSel = telN - 1;
+  } else {
+    strlcpy(telStatus, "List full (10 max)", sizeof(telStatus)); return;
+  }
+  telSave();
+  telEditIdx = -1;
+  strlcpy(telStatus, "Saved", sizeof(telStatus));
+}
+
+void App::telDeleteSel() {
+  if (!telHost || telSel < 0 || telSel >= telN) return;
+  for (int i = telSel; i < telN - 1; ++i) telHost[i] = telHost[i + 1];
+  telN--;
+  if (telSel >= telN) telSel = telN - 1;
+  if (telSel < 0) telSel = 0;
+  telSave();
+  strlcpy(telStatus, "Deleted", sizeof(telStatus));
+}
+
+// ---- transport seam (plain TCP for Telnet) --------------------------------
+
+bool App::telConnect() {
+  if (telSel < 0 || telSel >= telN) return false;
+  if (WiFi.status() != WL_CONNECTED) {
+    strlcpy(telStatus, "WiFi not connected", sizeof(telStatus)); return false;
+  }
+  const TelHost& h = telHost[telSel];
+  telClient.stop();
+  // 6 s connect timeout; keep the UI responsive by not blocking longer.
+  if (!telClient.connect(h.host, h.port, 6000)) {
+    telClient.stop();
+    strlcpy(telStatus, "Connect failed", sizeof(telStatus));
+    return false;
+  }
+  telClient.setNoDelay(true);
+  telConnected = true;
+  telLastRxMs = millis();
+  return true;
+}
+
+void App::telDisconnect() {
+  telClient.stop();
+  telConnected = false;
+  telPrnSinkClose();                      // flush + close the printer sink
+  telSessFree();                          // release the grid + printer-line buffers
+}
+
+void App::telSendBytes(const uint8_t* d, size_t n) {
+  if (!telConnected || !telClient.connected() || n == 0) return;
+  telClient.write(d, n);
+}
+
+// ---- screen grid ----------------------------------------------------------
+
+void App::telGridNewline() {
+  if (!telSess) return;
+  telCol = 0;
+  if (++telRow >= TEL_SCROLLBACK) {
+    // buffer full: scroll the WHOLE ring up one row, keeping TEL_SCROLLBACK-1 rows of
+    // history plus a fresh blank bottom row.
+    memmove(telSess->grid[0], telSess->grid[1], (size_t)(TEL_SCROLLBACK - 1) * TEL_COLS);
+    memset(telSess->grid[TEL_SCROLLBACK - 1], ' ', TEL_COLS);
+    telRow = TEL_SCROLLBACK - 1;
+  }
+  // New output snaps the view back to the live bottom (unless the user is scrolled up,
+  // in which case we hold their position by aging the offset with the scroll -- but cap
+  // it so it can never point above the buffer).
+  if (telScrollUp > 0) { if (++telScrollUp > TEL_SCROLLBACK - TEL_ROWS) telScrollUp = TEL_SCROLLBACK - TEL_ROWS; }
+}
+
+void App::telGridPutByte(uint8_t c) {
+  if (!telSess) return;
+  if (c == '\r') { telCol = 0; return; }
+  if (c == '\n') { telGridNewline(); return; }
+  if (c == '\b' || c == 0x7F) {
+    if (telCol > 0) { --telCol; telSess->grid[telRow][telCol] = ' '; }
+    return;
+  }
+  if (c == '\t') { uint8_t sp = 4 - (telCol % 4); while (sp--) telGridPutByte(' '); return; }
+  if (c < 0x20) return;
+  if (c > 0x7E) c = '?';
+  if (telCol >= TEL_COLS) telGridNewline();
+  telSess->grid[telRow][telCol++] = (char)c;
+}
+
+// ---- printer line assembly (streams via Printer::line(), no IPP/raster) ----
+
+void App::telPrnFlush() {
+  if (!telPrnOpen || !telSess) { telPrnLen = 0; return; }
+  // trim trailing spaces
+  while (telPrnLen > 0 && telSess->prnLine[telPrnLen - 1] == ' ') --telPrnLen;
+  telSess->prnLine[telPrnLen] = 0;
+  Printer::line(String(telSess->prnLine));
+  telPrnLen = 0;
+  telPrnLastMs = millis();
+}
+
+void App::telPrnByte(uint8_t c) {
+  if (!telPrnOpen || !telSess) return;
+  const int CAP = (int)sizeof(telSess->prnLine) - 1;
+  if (c == '\r') return;                        // handled by newline; ignore lone CR here
+  if (c == '\n') { telPrnFlush(); return; }
+  if (c == '\b' || c == 0x7F) { if (telPrnLen > 0) --telPrnLen; return; }
+  if (c == '\t') { uint8_t sp = 4 - (telPrnLen % 4); while (sp-- && telPrnLen < CAP) telSess->prnLine[telPrnLen++] = ' '; return; }
+  if (c < 0x20) return;
+  if (c > 0x7E) c = '?';
+  int cols = (telHost && telSel >= 0 && telSel < telN) ? telHost[telSel].prnCols : 32;
+  if (cols > CAP) cols = CAP;
+  if (telPrnLen >= cols) telPrnFlush();
+  telSess->prnLine[telPrnLen++] = (char)c;
+  telPrnLastMs = millis();
+}
+
+// ---- ANSI sanitizer: one received byte -> screen grid + printer line -------
+//  A compact state machine that DROPS escape sequences (CSI/OSC/two-byte ESC)
+//  rather than interpreting them, so the line-oriented outputs never show raw
+//  control garbage. Same shape as the reference sketch's processRemoteByte.
+
+void App::telRemoteByte(uint8_t c) {
+  switch (telAnsi) {
+    case 0:  // NORMAL
+      if (c == 0x1B) { telAnsi = 1; }
+      else if (c == 0x9B) { telAnsi = 2; }          // 8-bit CSI
+      else {
+        if (telOutMode & 0x01) telGridPutByte(c);
+        if (telOutMode & 0x02) telPrnByte(c);
+      }
+      break;
+    case 1:  // ESCAPE
+      if (c == '[') telAnsi = 2;                     // CSI
+      else if (c == ']' || c == 'P' || c == '^' || c == '_') telAnsi = 3;  // OSC/DCS/PM/APC
+      else telAnsi = 0;                              // two-byte escape: drop the final
+      break;
+    case 2:  // CSI -- ends on a final byte 0x40..0x7E
+      if (c >= 0x40 && c <= 0x7E) telAnsi = 0;
+      break;
+    case 3:  // OSC/string -- ends on BEL, or ESC \ (ST)
+      if (c == 0x07) telAnsi = 0;
+      else if (c == 0x1B) telAnsi = 4;
+      break;
+    case 4:  // OSC + ESC seen
+      telAnsi = (c == '\\') ? 0 : 3;
+      break;
+    default: telAnsi = 0; break;
+  }
+}
+
+void App::telService() {
+  if (!telConnected) return;
+  if (!telClient.connected()) {
+    // remote closed
+    if (telPrnLen > 0) telPrnFlush();
+    telClient.stop();
+    telConnected = false;
+    // note it on the grid
+    const char* msg = "\r\n[connection closed]\r\n";
+    telAnsi = 0; for (const char* p = msg; *p; ++p) telRemoteByte((uint8_t)*p);
+    return;
+  }
+  // Bound work per pass so the keyboard stays responsive.
+  uint8_t buf[128];
+  for (int pass = 0; pass < 6 && telClient.available(); ++pass) {
+    int n = telClient.read(buf, sizeof(buf));
+    if (n <= 0) break;
+    for (int i = 0; i < n; ++i) telRemoteByte(buf[i]);
+    telLastRxMs = millis();
+  }
+  // Idle-flush a partial printer line that looks like a prompt (no trailing newline).
+  if (telPrnOpen && telPrnLen > 0 && (millis() - telPrnLastMs) > 800) telPrnFlush();
+}
+
+// ---- printer sink, opened on demand -----------------------------------------
+//  Opening the sink is factored out of telOpenSession so the Opt+2 / Opt+3 mode keys
+//  can start printing mid-session (previously the sink was only ever opened at session
+//  start, so toggling to a printer mode later did nothing). Every sink EXCEPT IPP/raster
+//  is allowed: a live line stream can't rasterize a page, so IPP transport and the
+//  PWG/URF raster formats are refused (screen still works).
+
+bool App::telPrnSinkOpen() {
+  if (telPrnOpen) return true;                    // already open
+  if (!cfg.printerHost[0]) { strlcpy(telStatus, "No printer set (Settings>Network)", sizeof(telStatus)); return false; }
+  bool isRaster = (cfg.printFormat == Printer::FMT_PWG_RASTER ||
+                   cfg.printFormat == Printer::FMT_URF_RASTER);
+  if (cfg.printTransport == Printer::IPP || isRaster) {
+    strlcpy(telStatus, "Printer is IPP/raster - paper off", sizeof(telStatus));
+    return false;
+  }
+  Printer::Sinks sk;
+  sk.host        = cfg.printerHost;
+  sk.port        = cfg.printerPort;
+  sk.printerCols = (telSel >= 0 && telSel < telN && telHost) ? telHost[telSel].prnCols : 32;
+  sk.format      = cfg.printFormat;              // ESC/POS, text, PCL, PostScript, ESC/P2, Star, ZPL
+  sk.transport   = Printer::RAW9100;             // always raw for the live stream
+  sk.toSerial    = cfg.printToSerial;
+  sk.toFile      = false;                        // no per-session log file (would grow unbounded)
+  sk.fileTitle   = "telnet";
+  telPrnOpen = Printer::begin(sk);
+  if (!telPrnOpen) { strlcpy(telStatus, "Printer connect failed", sizeof(telStatus)); return false; }
+  telPrnLen = 0;
+  return true;
+}
+
+void App::telPrnSinkClose() {
+  if (telPrnLen > 0) telPrnFlush();
+  if (telPrnOpen) { Printer::end(); telPrnOpen = false; }
+}
+
+// ---- open a session (the modal terminal) ----------------------------------
+
+void App::telOpenSession(int idx) {
+  if (!telHost || idx < 0 || idx >= telN) return;
+  telSel = idx;
+  // Memory guard: Telnet itself is cheap, but refuse if the box is already starved
+  // so we never wedge on a socket alloc. (SSH will use a much higher floor here.)
+  uint32_t blk = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (blk < 12000) {
+    strlcpy(telStatus, "Low memory - close other screens", sizeof(telStatus));
+    return;
+  }
+  // Allocate the live session buffers on demand (grid + printer line). telSessAlloc
+  // space-fills the grid; refuse the session cleanly if the alloc fails.
+  if (!telSessAlloc()) return;             // sets telStatus on failure
+  // reset terminal state
+  telRow = telCol = 0; telPendCR = false; telAnsi = 0; telScrollUp = 0;
+  telPrnLen = 0; telPrnLastMs = 0;
+  telOutMode = telHost[idx].outMode;
+
+  // Open the printer sink if this connection wants paper AND a printer is configured.
+  telPrnOpen = false;
+  if (telOutMode & 0x02) {
+    if (!telPrnSinkOpen()) {                      // sets telStatus, falls back to screen
+      telOutMode &= 0x01; if (telOutMode == 0) telOutMode = 1;
+    }
+  }
+
+  screen = SCR_TELNETTERM; lastDrawMs = 0;
+  draw();                                        // show the terminal (connecting banner)
+  if (!telConnect()) {
+    const char* m = "[connect failed]\r\n";
+    telAnsi = 0; for (const char* p = m; *p; ++p) telRemoteByte((uint8_t)*p);
+  } else {
+    const char* m = "[connected]\r\n";
+    telAnsi = 0; for (const char* p = m; *p; ++p) telRemoteByte((uint8_t)*p);
+  }
+  lastDrawMs = 0;
+}
+
+// ---- terminal keyboard input (modal): Ctrl/Fn -> remote, Opt -> local ------
+//  Called from keyTelnetTerm via the captured keyCtrl/keyOpt/keyHid snapshot.
+
+void App::telTermInput() {
+  // (unused hook retained for symmetry; input is handled inline in keyTelnetTerm)
+}
+
+// ---------------------------------------------------------------------------
+//  Config screen (SCR_TELNET): list of saved connections + add/edit/delete/open.
+// ---------------------------------------------------------------------------
+
+void App::drawTelnet() {
+  header("Telnet client");
+  canvas.setTextSize(1);
+  if (!telHost) {                        // list not allocated (alloc failed on entry)
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(6, 44); canvas.print("Out of memory");
+    footer("` back");
+    return;
+  }
+
+  // Trust banner: Telnet is plaintext and unauthenticated. Same honesty as the other
+  // network features. Kept short so it doesn't run edge-to-edge; the full note is in the
+  // manual. (36 chars fits inside 240px with a margin.)
+  canvas.setTextColor(CL_ORANGE, CL_BLACK);
+  canvas.setCursor(4, 26);
+  canvas.print("Plaintext - use on trusted LANs");
+
+  if (telN == 0) {
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(6, 52); canvas.print("No connections saved.");
+    canvas.setCursor(6, 66); canvas.print("Press 'a' to add one.");
+    if (telStatus[0]) { canvas.setTextColor(CL_YELLOW, CL_BLACK);
+                        canvas.setCursor(6, 92); canvas.print(telStatus); }
+    footer("a add   ` back");
+    return;
+  }
+
+  // Column header, then the connection rows. Rows run y=52.. at an 11px pitch; six fit
+  // above the y=115 status line with the y=127 footer clear beneath.
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, 40); canvas.print("Label          Host:port");
+  const int ROWS = 6;
+  int top = telSel - ROWS + 1; if (top < 0) top = 0;
+  for (int r = 0; r < ROWS && (top + r) < telN; ++r) {
+    int i = top + r, y = 52 + r * 11;
+    bool sel = (i == telSel);
+    if (sel) { canvas.fillRect(0, y - 1, 240, 11, CL_SELBG); canvas.setTextColor(CL_BLACK, CL_SELBG); }
+    else       canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(4, y);
+    // Label capped at 13 chars, then host:port. Host is truncated with an ellipsis if
+    // the whole field would overflow 39 columns, so a long host can't shear the row.
+    char hp[48];
+    snprintf(hp, sizeof(hp), "%-13.13s %.20s:%u", telHost[i].label, telHost[i].host,
+             (unsigned)telHost[i].port);
+    hp[39] = 0;                                    // hard clip to the 39-col text width
+    canvas.print(hp);
+  }
+  // A "more below/above" hint when the list is longer than the window.
+  if (telN > ROWS) {
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(220, 40);
+    canvas.printf("%d/%d", telSel + 1, telN);
+  }
+  if (telStatus[0]) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.setCursor(4, 118); canvas.print(telStatus);
+  }
+  footer("ENT open  a add  e edit  d del  ` back");
+}
+
+void App::keyTelnet(char c, bool enter, bool back) {
+  if (isBack(c, back)) { telStatus[0] = 0; screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (!telHost) return;                            // list not allocated: only Back works
+  if (c == 'a') {                                  // add
+    telStartEdit(-1);
+    editTarget = 910; editTitle = "Label"; editBuf = ""; screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+  if (telN == 0) return;
+  if (enter) { telOpenSession(telSel); return; }
+  if (c == 'e') {                                  // edit selected
+    telStartEdit(telSel);
+    editTarget = 910; editTitle = "Label"; editBuf = String(telEdit.label);
+    screen = SCR_EDIT; lastDrawMs = 0; return;
+  }
+  if (c == 'd') { telDeleteSel(); lastDrawMs = 0; return; }
+  if (isUp(c))   { if (--telSel < 0) telSel = telN - 1; telStatus[0] = 0; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (++telSel >= telN) telSel = 0;    telStatus[0] = 0; lastDrawMs = 0; return; }
+}
+
+// ---------------------------------------------------------------------------
+//  Terminal screen (SCR_TELNETTERM).
+// ---------------------------------------------------------------------------
+
+void App::drawTelnetTerm() {
+  if (!telHost || telSel < 0 || telSel >= telN) {  // session lost its connection record
+    header("Telnet"); footer("` back"); return;
+  }
+  const TelHost& h = telHost[telSel];
+  char ht[40];
+  snprintf(ht, sizeof(ht), "%.20s %s", h.label,
+           telConnected ? "" : "(offline)");
+  header(ht);
+  canvas.setTextSize(1);
+
+  // The character grid (heap-allocated for the session; guard against a null session).
+  // The visible window is TEL_ROWS rows ending at the live write row, shifted up by
+  // telScrollUp when the user has scrolled back into history.
+  canvas.setTextColor(CL_WHITE, CL_BLACK);
+  int winTop = 0;
+  if (telSess) {
+    int bottomVis = telRow - telScrollUp;          // buffer row shown on the last visible line
+    winTop = bottomVis - (TEL_ROWS - 1);
+    if (winTop < 0) winTop = 0;
+    for (int r = 0; r < TEL_ROWS; ++r) {
+      int br = winTop + r;                          // buffer row for this visible line
+      canvas.setCursor(2, 18 + r * 9);
+      char rowbuf[TEL_COLS + 1];
+      if (br >= 0 && br < TEL_SCROLLBACK) { memcpy(rowbuf, telSess->grid[br], TEL_COLS); rowbuf[TEL_COLS] = 0; }
+      else rowbuf[0] = 0;
+      canvas.print(rowbuf);
+    }
+    // Input cursor: a solid block at the write position, drawn only when the view is
+    // pinned to the live bottom (no cursor while scrolled back into history). Blink at
+    // ~2 Hz so it reads as a cursor, not a character.
+    if (telScrollUp == 0 && telConnected) {
+      int cy = telRow - winTop;                     // visible row of the write cursor
+      if (cy >= 0 && cy < TEL_ROWS && telCol >= 0 && telCol < TEL_COLS) {
+        if ((millis() / 500) & 1) {
+          canvas.fillRect(2 + telCol * 6, 18 + cy * 9 - 1, 6, 9, CL_WHITE);
+          // draw the underlying char in inverse so it stays legible under the block
+          char cc = telSess->grid[telRow][telCol];
+          if (cc >= 0x20 && cc <= 0x7E) {
+            canvas.setTextColor(CL_BLACK, CL_WHITE);
+            canvas.setCursor(2 + telCol * 6, 18 + cy * 9);
+            canvas.printf("%c", cc);
+            canvas.setTextColor(CL_WHITE, CL_BLACK);
+          }
+        }
+      }
+    }
+  }
+
+  // Footer legend: local controls are Opt+key; Opt+` exits. Show a scrollback marker
+  // when the user is not pinned to the live bottom.
+  const char* om = (telOutMode == 1) ? "scr" : (telOutMode == 2) ? "prn" : "scr+prn";
+  char fb[64];
+  if (telScrollUp > 0)
+    snprintf(fb, sizeof(fb), "Opt+v/^ scroll (-%d)  Opt+`=exit", telScrollUp);
+  else
+    snprintf(fb, sizeof(fb), "Opt+`=exit Opt+c=clr out:%s", om);
+  footer(fb);
+}
+
+void App::keyTelnetTerm(char c, bool enter, bool back) {
+  // This handler runs from handleKey with the captured modifier snapshot in
+  // keyCtrl/keyOpt/keyFn/keyHid. Priority: local (Opt) > Fn-mapped keys > Ctrl > text.
+
+  // ---- LOCAL controls (Opt+key). Not sent to the remote. ----
+  if (keyOpt) {
+    if (c == '`' || back) {                        // Opt+` exits the session
+      telDisconnect();
+      screen = SCR_TELNET; lastDrawMs = 0; return;
+    }
+    char lc = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    switch (lc) {
+      case 'c':                                    // clear screen
+        if (telSess) memset(telSess->grid, ' ', sizeof(telSess->grid));
+        telRow = telCol = 0; telScrollUp = 0; lastDrawMs = 0; return;
+      case 'r':                                    // reconnect
+        telClient.stop(); telConnected = false;
+        if (telConnect()) { const char* m = "[reconnected]\r\n"; telAnsi = 0;
+                            for (const char* p = m; *p; ++p) telRemoteByte((uint8_t)*p); }
+        lastDrawMs = 0; return;
+      // Output mode. Opt+2 / Opt+3 open the printer sink on demand (so you can start
+      // printing partway through a session); Opt+1 closes it. If the printer can't be
+      // opened, telPrnSinkOpen() sets telStatus and we stay on screen-only.
+      case '1': telPrnSinkClose(); telOutMode = 1; lastDrawMs = 0; return;
+      case '2':
+        if (telPrnSinkOpen()) telOutMode = 2; else telOutMode = 1;
+        lastDrawMs = 0; return;
+      case '3':
+        if (telPrnSinkOpen()) telOutMode = 3; else telOutMode = 1;
+        lastDrawMs = 0; return;
+    }
+    // Scrollback: Opt+; scrolls UP into history, Opt+. scrolls DOWN toward live. (The
+    // bare ';' / '.' keys are CardSat's up/down; Fn+arrows are reserved for the remote,
+    // so Opt+;/. is the local scroll pair.) Cap at how much history actually exists.
+    if (lc == ';' || c == ';') {                   // scroll up (older)
+      int maxUp = telRow - (TEL_ROWS - 1); if (maxUp < 0) maxUp = 0;
+      if (maxUp > TEL_SCROLLBACK - TEL_ROWS) maxUp = TEL_SCROLLBACK - TEL_ROWS;
+      if (telScrollUp < maxUp) { telScrollUp++; lastDrawMs = 0; }
+      return;
+    }
+    if (lc == '.' || c == '.') {                   // scroll down (newer)
+      if (telScrollUp > 0) { telScrollUp--; lastDrawMs = 0; }
+      return;
+    }
+    return;                                        // swallow other Opt combos
+  }
+
+  if (!telConnected) {
+    // Only the exit path works when offline.
+    if (isBack(c, back)) { telDisconnect(); screen = SCR_TELNET; lastDrawMs = 0; return; }
+    return;
+  }
+
+  // Any key that goes to the remote snaps the view back to the live bottom, so the
+  // operator sees their own echo and the response rather than staying in history.
+  telScrollUp = 0;
+
+  // ---- Fn-mapped keys -> remote (arrows, ESC, F1..F10) via raw HID codes ----
+  if (keyFn && keyHidN > 0) {
+    for (int i = 0; i < keyHidN; ++i) {
+      switch (keyHid[i]) {
+        case 0x33: telSendBytes((const uint8_t*)"\x1B[A", 3); return;  // Up
+        case 0x36: telSendBytes((const uint8_t*)"\x1B[D", 3); return;  // Left
+        case 0x37: telSendBytes((const uint8_t*)"\x1B[B", 3); return;  // Down
+        case 0x38: telSendBytes((const uint8_t*)"\x1B[C", 3); return;  // Right
+        case 0x35: telSendBytes((const uint8_t*)"\x1B", 1);   return;  // Escape (Fn+`)
+        case 0x1E: telSendBytes((const uint8_t*)"\x1BOP", 3); return;  // F1
+        case 0x1F: telSendBytes((const uint8_t*)"\x1BOQ", 3); return;  // F2
+        case 0x20: telSendBytes((const uint8_t*)"\x1BOR", 3); return;  // F3
+        case 0x21: telSendBytes((const uint8_t*)"\x1BOS", 3); return;  // F4
+        case 0x22: telSendBytes((const uint8_t*)"\x1B[15~", 5); return; // F5
+        case 0x23: telSendBytes((const uint8_t*)"\x1B[17~", 5); return; // F6
+        case 0x24: telSendBytes((const uint8_t*)"\x1B[18~", 5); return; // F7
+        case 0x25: telSendBytes((const uint8_t*)"\x1B[19~", 5); return; // F8
+        case 0x26: telSendBytes((const uint8_t*)"\x1B[20~", 5); return; // F9
+        case 0x27: telSendBytes((const uint8_t*)"\x1B[21~", 5); return; // F10
+      }
+    }
+    return;                                        // swallow other Fn combos
+  }
+
+  // ---- Ctrl+key -> control byte (Ctrl-C/D/Z etc.) ----
+  if (keyCtrl && c) {
+    char lc = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    uint8_t v = 0;
+    if (lc >= 'a' && lc <= 'z') v = (uint8_t)(lc - 'a' + 1);
+    else switch (c) {
+      case ' ': case '@': v = 0x00; break;
+      case '[': case '{': v = 0x1B; break;
+      case '\\': case '|': v = 0x1C; break;
+      case ']': case '}': v = 0x1D; break;
+      case '^': v = 0x1E; break;
+      case '-': case '_': v = 0x1F; break;
+      case '?': v = 0x7F; break;
+      default: v = 0xFF; break;
+    }
+    if (v != 0xFF) { telSendBytes(&v, 1); return; }
+  }
+
+  // ---- Enter / Del / Tab ----
+  // Send CR LF on Enter, per RFC 1123 3.3.1 (CR LF is the recommended default for a
+  // User Telnet end-of-line). A bare CR left many servers waiting for the LF, so a
+  // single Enter appeared to do nothing until a second keypress -- the "press Enter
+  // twice" bug. CR LF submits the line on one press.
+  if (enter) { telSendBytes((const uint8_t*)"\r\n", 2); return; }
+  if (back)  { uint8_t bs = 0x7F; telSendBytes(&bs, 1); return; }   // DEL for a PTY
+  if (keyTab) { uint8_t t = '\t'; telSendBytes(&t, 1); return; }
+
+  // ---- plain printable character -> remote ----
+  if (c >= 0x20 && c <= 0x7E) { uint8_t b = (uint8_t)c; telSendBytes(&b, 1); }
 }
 
 // Was AO-7 actually workable from `grid` at time `t`? Used two ways:
@@ -51653,7 +52551,7 @@ void App::drawWeatherField() {
   if (wxDayCount > 0 && wxSunrise[0] >= 0 && wxSunset[0] >= 0) {
     canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(6, y); canvas.print("Sun");
     canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(52, y);
-    canvas.printf("up %02d:%02d  dn %02d:%02d", wxSunrise[0] / 60, wxSunrise[0] % 60,
+    canvas.printf("up %02d:%02d  dn %02d:%02d UTC", wxSunrise[0] / 60, wxSunrise[0] % 60,
                   wxSunset[0] / 60, wxSunset[0] % 60);
   }
   y += 12;
@@ -53361,7 +54259,7 @@ void App::printWeather() {
     Printer::line("Today");
     { snprintf(b, sizeof(b), "  UV index   %.0f", wxDayUv[0]); Printer::line(String(b)); }
     if (wxSunrise[0] >= 0 && wxSunset[0] >= 0) {
-      snprintf(b, sizeof(b), "  Sun        up %02d:%02d  dn %02d:%02d",
+      snprintf(b, sizeof(b), "  Sun        up %02d:%02d  dn %02d:%02d UTC",
                wxSunrise[0] / 60, wxSunrise[0] % 60, wxSunset[0] / 60, wxSunset[0] % 60);
       Printer::line(String(b));
     }

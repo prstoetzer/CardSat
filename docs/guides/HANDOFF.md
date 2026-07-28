@@ -126,7 +126,7 @@ box, bang-bang loop built in app.cpp with live calibration).
 The docs were **reorganized and reviewed extensively** in the most recent sessions. A new
 session must understand the current layout before editing docs.
 
-**Repo root holds only:** `README.md`, `MANUAL.md`, `CardSat_CheatCard_4x6.pdf`,
+**Repo root holds only:** `README.md`, `MANUAL.md`, `CardSat_CheatCard_5x7.pdf`,
 `CardSat_Manual.pdf`. Everything else lives under **`docs/`**:
 
 ```

@@ -23,6 +23,18 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.67:** **a Telnet client, and DX spots that read right.** From Tools ›
+> Calculators & programming, open **Telnet** for a line-oriented terminal to a rotator box, APRS
+> box, DX-cluster node, or any raw-TCP host on a trusted LAN — up to **10 saved connections**,
+> scrollback, a blinking input cursor, and optional live printing to your receipt printer. Type
+> to send; **Ctrl+key**, **Fn+arrows/F-keys/Esc** go to the remote; **Opt** is the local layer
+> (scroll, clear, reconnect, output mode, exit). The **DX cluster** now shows each spot's
+> **comment** on a second line, and the **spotter** and **spotted DX** are shown the right way
+> round (they were swapped). Weather times are now **UTC** like the rest of the app, and the
+> **Overhead-now** list no longer overlaps its count line. (An SSH client was designed and
+> **shelved on memory grounds** — Telnet needs no large contiguous heap block; SSH does.)
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.67.md)**.
+
 > **New in v0.9.66:** **HF propagation, orbital radiation zones, and a charge screen that
 > works.** From Space Wx, press **`m`** for a maximum-usable-frequency prediction from your QTH
 > to two dozen world DX regions — with a color-coded world map — built on the verified
@@ -437,7 +449,7 @@ See **[MANUAL.md](MANUAL.md)** for the complete guide.
 | **[docs/DEVELOPMENT_METHOD.md](docs/DEVELOPMENT_METHOD.md)** | How CardSat was built (AI-assisted, hardware-verified) and why that fits the amateur-radio tradition. |
 | **[docs/design/](docs/design/)** | Design/scope notes for current and proposed features. |
 | **[docs/releases/](docs/releases/)** | Per-version release notes. |
-| **[CardSat_CheatCard_4x6.pdf](CardSat_CheatCard_4x6.pdf)** | Printable 4×6 key-reference card (front: operating, back: setup). |
+| **[CardSat_CheatCard_5x7.pdf](CardSat_CheatCard_5x7.pdf)** | Printable 5×7 key-reference card (front: operating, back: setup). |
 | **[CardSat_RefCard_4x6.pdf](CardSat_RefCard_4x6.pdf)** | Printable 4×6 reference card — radio & rotator support, data sources & courtesy limits, the file map, all calculator functions, the full BASIC language & system names. |
 | **[CardSat_Manual.pdf](CardSat_Manual.pdf)** | PDF build of the manual. |
 

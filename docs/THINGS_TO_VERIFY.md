@@ -536,7 +536,7 @@ src/voicememo.{h,cpp}   SD-card voice memo recorder + playback (ADV ES8311 mic v
 src/irbeacon.{h,cpp}    optional IR-LED pass beacon (38 kHz carrier, per-event flash counts)
 src/lora.{h,cpp}        optional LoRa text messaging (Cap LoRa SX1262 via RadioLib; CARDSAT_HAS_LORA)
 src/radio_profiles.h    per-model address, baud, band-select, capabilities
-tools_make_cheatcard.py generates the printable 4×6 key-reference card (front + back)
+tools_make_cheatcard.py generates the printable 5×7 key-reference card (front + back)
 ```
 
 ## Bench round 2 (endpoint corrections + UI surfacing)

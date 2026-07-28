@@ -150,3 +150,29 @@ add; low glamour, occasionally exactly what's needed at the bench.
   **2 (cascade NF/G/T), 1 (Doppler budget), 6 (conjunction screener)** — the
   first two are the most-asked station questions, the third is the signature
   capability nothing else pocket-sized has.
+
+## GO / BtnA (GPIO0) hardware button — future work (noted 0.9.67)
+
+The physical GO button (`M5Cardputer.BtnA`, GPIO0) is currently unread by CardSat. It's a
+strong UX asset because it is EYES-FREE and can be context-aware — valuable mid-pass when the
+operator's hands are on a radio and antenna. Proposed design (a physical button should not just
+duplicate a keystroke; its value is doing the right thing for the current screen without looking):
+
+- **Single click = "do the obvious thing here" (context-sensitive):**
+  - Track / Big / Polar: toggle radio tracking engage/disengage (today's `r`) — the core mid-pass
+    action, eyes-free.
+  - Home / Schedule: jump straight into tracking the soonest pass (`nextAos` bird).
+  - List screens: act as ENTER (open the selection).
+- **Double click = global emergency stop:** disengage radio + rotator and park (today's Fn+Back).
+  The single highest-safety use — a fast, physical, look-free stop when a rotator is slewing wrong.
+  If only ONE thing is wired, this is the one.
+- **Hold (~1 s) = global convenience:** screenshot to SD (today's `b`), or AOS-alarm snooze/ack.
+
+API is free to read: `M5Cardputer.update()` already runs every loop; `BtnA` exposes
+`wasClicked / wasDoubleClicked / wasHold / pressedFor(ms)`.
+
+Caveats: GPIO0 is the boot-strap pin — runtime use is fine, but never bind "hold at power-on"
+(that enters download mode). Add on-device help + a one-line hint for discoverability. Use
+double-click (not single) for the destructive stop so a stray bump can't halt the rotator. Every
+binding must keep its keyboard equivalent (button = convenience/safety, never the only path).
+Consider a Settings toggle to disable the button if it gets bumped.

@@ -85,7 +85,8 @@ FRONT = [
   "<b>ctq.json/ctx.json</b> search results / extras (+<b>ctx.ts, gp.ts</b> courtesy timestamps) &middot; "
   "<b>basic/</b> programs &amp; gated logs &middot; <b>plot.csv</b> grapher CSV mode &middot; <b>Reports/</b> printed reports &middot; "
   "<b>Logs/</b> QSO log &middot; <b>RovePlans/</b> &middot; <b>Screenshots/</b> &middot; <b>calib.txt</b> per-sat cal &middot; "
-  "<b>lotw_sats.csv</b> LoTW name overrides &middot; <b>audio/</b> voice memos."),
+  "<b>lotw_sats.csv</b> LoTW name overrides &middot; <b>audio/</b> voice memos &middot; "
+  "<b>telnet.txt</b> saved Telnet connections (0.9.67; label|host|port|prnCols|outMode)."),
 ]
 
 BACK = [

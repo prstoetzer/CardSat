@@ -216,7 +216,7 @@ directory and its 16 MB ephemeris out of the package.
 
 - **Manual PDF:** `bash tools/build_manual.sh` → `CardSat_Manual.pdf` (~152 pp). Stamps
   the version on the cover automatically. `cp` it to `docs/CardSat_Manual.pdf`.
-- **Cheat card:** `python3 tools_make_cheatcard.py` → `CardSat_CheatCard_4x6.pdf`.
+- **Cheat card:** `python3 tools_make_cheatcard.py` → `CardSat_CheatCard_5x7.pdf`.
   **MUST stay 2 pages** (the script prints the page count; if it grew, trim content).
   `cp` to `docs/`.
 - **Reference card:** `python3 tools_make_refcard.py` → `CardSat_RefCard_4x6.pdf`.

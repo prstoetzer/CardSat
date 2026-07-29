@@ -83,7 +83,7 @@
 // The class must be DEFINED here, not forward-declared: `Serial.print(...)` needs
 // a complete type at every call site, and a forward declaration gives
 // "'CardSatSerialTee' has incomplete type" at all ~181 of them. So the tee is
-// declared inline here and its behaviour lives in consolelog.cpp.
+// declared inline here and its behavior lives in consolelog.cpp.
 #ifndef CARDSAT_NO_CONSOLE_LOG
 namespace ConsoleLog {
   // Byte sink: consolelog.cpp decides whether to buffer it. Kept out of line so
@@ -155,8 +155,6 @@ extern ConsoleLog::Tee CardSatSerialTee;
 #include <esp_sleep.h>
 #include <esp_heap_caps.h>
 #include <esp_core_dump.h>   // read the panic backtrace back on the next boot
-#include <usb/usb_host.h>   // usb_host_lib_unblock(): the escape hatch EspUsbHost omits
-#include <esp_timer.h>      // one-shot unblock poke for USB teardown (usbserial end())
 #include <esp_system.h>  // esp_reset_reason() for validating RTC-held batch state
 #include <esp_task_wdt.h>  // USB CAT freeze watchdog: TWDT user subscription
 // LoTW multi-batch upload state, persisted in RTC RAM across the DELIBERATE
@@ -390,7 +388,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.67";
+static constexpr const char* FW_VERSION = "0.9.68";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build.
@@ -556,7 +554,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_TOOLDEF "/CardSat/tooldef.txt"   // per-form-tool saved field values (one line per tool id)
 #define FILE_NOTES   "/CardSat/notes.txt"     // per-sat operating notes: "norad<TAB>text" lines
 #define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
-#define FILE_TELNET  "/CardSat/telnet.txt"    // saved Telnet connections (one per line: label|host|port|user)
+#define FILE_TELNET  "/CardSat/telnet.txt"    // saved Telnet connections (one per line: label|host|port|prnCols|outMode; legacy 6-field rows with a user field still load)
 #define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
 #define FILE_CTX     "/CardSat/ctx.json"      // CelesTrak-sourced extra favorites (one OMM object/line);
                                               // refreshed from CelesTrak on GP updates, unlike FILE_MGP
@@ -611,7 +609,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 // site. Free, no key, non-commercial. https://open-meteo.com  Cached for offline use.
 #define WEATHER_API_BASE  "https://api.open-meteo.com/v1/forecast"
 // Open-Meteo elevation API: accepts comma-separated latitude/longitude lists and
-// returns an "elevation":[...] array (metres). Used by the terrain path profiler.
+// returns an "elevation":[...] array (meters). Used by the terrain path profiler.
 #define ELEVATION_API_BASE "https://api.open-meteo.com/v1/elevation"
 #define FILE_WEATHER      "/CardSat/weather.txt"   // cached parsed weather
 #define FILE_WEATHER_TMP  "/CardSat/weather.tmp"   // scratch for streamed JSON (low heap)
@@ -757,7 +755,7 @@ bool clear(Log which);
 //
 //  ---- Cost, and why it is buffered -----------------------------------------
 //  Logstore::line() is open+write+flush+close per call: ~6 ms on LittleFS
-//  (modelled -- the bench will supply the real constant; every line is
+//  (modeled -- the bench will supply the real constant; every line is
 //  timestamped, so the log profiles itself). CardSat ships CIV_DEBUG=1, so
 //  Doppler tracking emits ~8 console lines/sec. Unbuffered that is ~48 ms/s of
 //  BLOCKING flash I/O on loopTask -- the same task that runs Doppler, the UI,
@@ -966,6 +964,99 @@ static const RadioProfile RADIOS[RIG_COUNT] = {
   { "None",     PROTO_CIV,    0x00,  9600,  {0,0,0},       {0,0,0},        0,  false,false,0x00, 0x00, false,false, 0x00, false },
 };
 
+// ===========================================================================
+//  Dual-rig LEG catalog (CAT_DUAL) -- the CardSatDualRig companion's radio set,
+//  absorbed into the main firmware (DUALRIG_MAINFW_INTEGRATION_SCOPE.md, Model A).
+//
+//  These are the half-duplex transceivers and receive-only radios that pair up as
+//  a downlink + uplink leg. They are driven with PLAIN single-VFO CAT (one freq,
+//  one mode -- no MAIN/SUB, no satellite mode), which is why they live in their
+//  own table instead of RADIOS[]: the RadioProfile machinery above is all about
+//  MAIN/SUB band access on full-duplex sat rigs and does not apply here.
+//
+//  Four CAT dialects cover every leg radio (same families as the companion):
+//    LEGF_CIV   Icom binary CI-V, addressed          (cmd 05 freq, 06 mode, 03 read)
+//    LEGF_YBIN  Yaesu "old" 5-byte binary CAT        (4-byte BCD @10 Hz + opcode)
+//    LEGF_YTXT  Yaesu "new" ASCII CAT                (FA/MD ';'-terminated)
+//    LEGF_KWHT  Kenwood TH-D74/D75 handheld CAT      (FQ<band>,<Hz> + CR; Band B)
+//
+//  Table data (names, dialects, default bauds, CI-V addresses, RX-only flags) is
+//  ported verbatim from companion/CardSatDualRig (RADIO_TABLE[]), which is the
+//  bench-validated source of truth for these radios.
+//
+//  hasLan: the radio has native Icom network CAT that CardSat's IcomNetRig can
+//  target (same RS-BA1-family UDP protocol the IC-9700 path speaks). Set for the
+//  IC-705 (the requested + supported LAN target, over the radio's own Wi-Fi) and
+//  the IC-905 (same protocol family per Icom's docs -- UNTESTED on hardware).
+// ===========================================================================
+enum LegFamily : uint8_t { LEGF_CIV, LEGF_YBIN, LEGF_YTXT, LEGF_KWHT };
+
+enum LegModel : uint8_t {
+  // --- Icom CI-V transceivers ---
+  LEG_IC705 = 0, LEG_IC905, LEG_IC7100, LEG_IC7000, LEG_IC706MK2G, LEG_IC275, LEG_IC475,
+  // --- Icom CI-V receivers (RX only) ---
+  LEG_ICR10, LEG_ICR20, LEG_ICR30,
+  LEG_ICR7000, LEG_ICR7100, LEG_ICR8500, LEG_ICR8600, LEG_ICR9000, LEG_ICR9500,
+  // --- Yaesu old binary ---
+  LEG_FT817, LEG_FT818, LEG_FT857, LEG_FT897, LEG_FT100,
+  // --- Yaesu receiver (old-binary CAT family) ---
+  LEG_VR5000,
+  // --- Yaesu new ASCII ---
+  LEG_FT991, LEG_FT991A, LEG_FTX1,
+  // --- Kenwood handhelds (all-mode receiver on Band B, RX only) ---
+  LEG_THD74, LEG_THD75,
+  LEG_NONE,      // leg unassigned; makeLegRig() returns nullptr
+  LEG_COUNT
+};
+
+struct LegProfile {
+  const char* name;
+  LegFamily   family;
+  uint32_t    baud;      // default CAT baud (0 in cfg = use this)
+  uint8_t     civAddr;   // default CI-V bus address (LEGF_CIV only; 0 otherwise)
+  bool        rxOnly;    // receive-only: warn if assigned to the uplink leg
+  bool        hasLan;    // Icom network CAT available as a leg transport
+};
+
+// Order MUST match LegModel. Data ported from the companion's RADIO_TABLE[].
+static const LegProfile LEG_RADIOS[LEG_COUNT] = {
+  //  name           family     baud   addr  rxOnly lan
+  { "IC-705",      LEGF_CIV,  19200, 0xA4, false, true  },
+  { "IC-905",      LEGF_CIV,  19200, 0xAC, false, true  },
+  { "IC-7100",     LEGF_CIV,  19200, 0x88, false, false },
+  { "IC-7000",     LEGF_CIV,  19200, 0x70, false, false },
+  { "IC-706MKIIG", LEGF_CIV,   9600, 0x58, false, false },
+  { "IC-275",      LEGF_CIV,   9600, 0x10, false, false },
+  { "IC-475",      LEGF_CIV,   9600, 0x14, false, false },
+  { "IC-R10",      LEGF_CIV,   9600, 0x52, true,  false },
+  { "IC-R20",      LEGF_CIV,   9600, 0x6C, true,  false },
+  { "IC-R30",      LEGF_CIV,   9600, 0x9C, true,  false },
+  { "IC-R7000",    LEGF_CIV,   1200, 0x08, true,  false },
+  { "IC-R7100",    LEGF_CIV,   9600, 0x34, true,  false },
+  { "IC-R8500",    LEGF_CIV,   9600, 0x4A, true,  false },
+  { "IC-R8600",    LEGF_CIV,  19200, 0x96, true,  false },
+  { "IC-R9000",    LEGF_CIV,   1200, 0x2A, true,  false },
+  { "IC-R9500",    LEGF_CIV,  19200, 0x72, true,  false },
+  { "FT-817",      LEGF_YBIN,  9600, 0x00, false, false },
+  { "FT-818",      LEGF_YBIN,  9600, 0x00, false, false },
+  { "FT-857",      LEGF_YBIN,  9600, 0x00, false, false },
+  { "FT-897",      LEGF_YBIN,  9600, 0x00, false, false },
+  { "FT-100",      LEGF_YBIN,  9600, 0x00, false, false },
+  // VR-5000: Yaesu 5-byte family; opcodes close to the FT-817's but VERIFY on
+  // hardware (carried over from the companion's own caveat).
+  { "VR-5000",     LEGF_YBIN,  9600, 0x00, true,  false },
+  { "FT-991",      LEGF_YTXT, 38400, 0x00, false, false },
+  { "FT-991A",     LEGF_YTXT, 38400, 0x00, false, false },
+  { "FTX-1",       LEGF_YTXT, 38400, 0x00, false, false },
+  { "TH-D74",      LEGF_KWHT,  9600, 0x00, true,  false },
+  { "TH-D75",      LEGF_KWHT,  9600, 0x00, true,  false },
+  { "None",        LEGF_CIV,   9600, 0x00, false, false },
+};
+
+// Which physical bus a dual-rig leg rides. One Grove UART and one USB CAT port
+// exist, so two legs may not share either; Wi-Fi (LAN) is shareable.
+enum LegBus : uint8_t { LEGBUS_GROVE = 0, LEGBUS_USB = 1, LEGBUS_LAN = 2, LEGBUS_N = 3 };
+
 
 // =========================================================================
 //  rig.h
@@ -1007,11 +1098,13 @@ public:
 
   // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
   // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
-  void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
+  // Virtual so the DualRig composite can forward pacing to both of its legs.
+  virtual void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
   // Upper bound (ms) on how long a single blocking CAT read may wait, so slow
   // I/O (especially the LAN backend) can't stall the cooperative main loop.
   // 0 = use the backend's built-in default. Set from the CAT cycle rate at engage.
-  void setReadBudgetMs(uint16_t ms) { readBudgetMs = ms; }
+  // Virtual for the same DualRig forwarding reason as setCmdDelay().
+  virtual void setReadBudgetMs(uint16_t ms) { readBudgetMs = ms; }
 
   // ---- External transport (USB-serial) --------------------------------------
   // Supply a ready-made Stream for the wire-level backends to talk through,
@@ -1159,7 +1252,7 @@ public:
   // unchanged by RigctlGroveRig, so it automatically uses the Grove transport there.
   String vendorLine(const String& line) override {
     // H12: \csdr_models / \csdr_get can return >1 KB of JSON. At low Grove baud the reply
-    // alone can exceed the default 400 ms (e.g. ~1.4 s for the model catalogue at 9600).
+    // alone can exceed the default 400 ms (e.g. ~1.4 s for the model catalog at 9600).
     // Give a baud-aware deadline for these large vendor replies so they don't time out;
     // ordinary short RPRT commands keep the default.
     String l = line.endsWith("\n") ? line : line + "\n";
@@ -1230,6 +1323,132 @@ private:
   int      _rx = -1, _tx = -1;
   bool     _open = false;
 };
+
+// ===========================================================================
+//  Dual-rig (CAT_DUAL): plain single-VFO leg backends + the DualRig composite
+// ===========================================================================
+//
+//  A dual-rig setup is two half-duplex (or receive-only) radios -- one on the
+//  downlink, one on the uplink -- presented to the rest of the firmware as ONE
+//  full-duplex Rig. Ported from the CardSatDualRig companion per
+//  docs/design/DUALRIG_MAINFW_INTEGRATION_SCOPE.md (Model A): the leg radios,
+//  their four CAT dialects, and the two-leg driver now live here; the external
+//  companion remains supported through the rigctl backends above.
+//
+//  Legs are driven with PLAIN CAT -- one frequency, one mode, no MAIN/SUB and no
+//  satellite mode -- so they get their own small backend rather than reusing the
+//  sat-rig classes. PTT is NEVER commanded: the operator keys the uplink radio
+//  by hand (the same contract the companion honors).
+
+// Pure wire-frame builders for the four leg dialects. Pure functions (no I/O, no
+// state) so the host harness (tools/host_dualrig) byte-verifies them against the
+// companion's bench-validated output. Return the frame length written to out
+// (<= cap), or 0 if the family/params can't be encoded.
+size_t legBuildFreqFrame(LegFamily fam, uint8_t civAddr, uint64_t hz,
+                         uint8_t* out, size_t cap);
+size_t legBuildModeFrame(LegFamily fam, uint8_t civAddr, RigMode m,
+                         uint8_t* out, size_t cap);
+size_t legBuildReadFreqFrame(LegFamily fam, uint8_t civAddr,
+                             uint8_t* out, size_t cap);
+// Parse a read-frequency reply for the family from a raw RX buffer (which may
+// contain an interface echo before the answer). Returns true + hz on success.
+bool   legParseFreqReply(LegFamily fam, uint8_t civAddr,
+                         const uint8_t* buf, size_t n, uint64_t& hz);
+
+// One dual-rig LEG: any LEG_RADIOS[] radio with plain single-VFO CAT over a
+// Stream (the Grove UART, or a USB<->serial adapter via setExternalStream).
+// setMain*/setSub* both land on the radio's one VFO -- the DualRig above it only
+// ever calls the pair that matches the leg's role, so the duplication is free.
+class PlainCatRig : public Rig {
+public:
+  PlainCatRig(LegModel m, uint8_t civAddr, uint32_t baud);
+  void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
+  bool ready() const override { return _stream != nullptr; }
+  bool setMainFreq(freq_t hz) override { return sendFreq(hz); }
+  bool setSubFreq (freq_t hz) override { return sendFreq(hz); }
+  bool setMainMode(RigMode m)   override { return sendMode(m); }
+  bool setSubMode (RigMode m)   override { return sendMode(m); }
+  bool readSubFreq (freq_t& hzOut) override { return readFreq(hzOut); }
+  bool readMainFreq(freq_t& hzOut) override { return readFreq(hzOut); }
+  bool enableSatMode(bool) override { return false; }   // no sat mode on leg radios
+  void selectSubBand()  override {}
+  void selectMainBand() override {}
+  bool canReadFreq() const override;
+  bool hasSatMode()  const override { return false; }
+  bool selVerified() const override { return true; }
+  const char* name() const override { return LEG_RADIOS[_model].name; }
+  void    setAddress(uint8_t a) override { _addr = a; }
+  uint8_t address() const override { return _addr; }
+  bool    sendRaw(const uint8_t* b, size_t n) override;   // serial-terminal diagnostics
+  void    setExternalStream(Stream* s) override { extStream = s; _stream = s; }
+private:
+  bool sendFreq(freq_t hz);
+  bool sendMode(RigMode m);
+  bool readFreq(freq_t& hzOut);
+  bool sendFrame(const uint8_t* b, size_t n);
+  LegModel _model;
+  uint8_t  _addr;                     // CI-V bus address (LEGF_CIV only)
+  uint32_t _baud;
+  Stream*  _stream = nullptr;
+  uint32_t _lastSetMs = 0;            // H8 echo-settle before a read (CIV family)
+};
+
+// The composite: owns a downlink leg and an uplink leg (any mix of PlainCatRig /
+// IcomNetRig-in-plain-mode on distinct buses) and routes the app's full-duplex
+// Rig calls to the matching leg. The rest of the firmware -- engage, Doppler,
+// calibration, UI -- drives this exactly like any single full-duplex rig.
+class DualRig : public Rig {
+public:
+  // Takes ownership of both legs. usbLeg: -1 = neither leg is USB, 0/1 = that
+  // one leg is, 2 = BOTH legs are USB (dual-USB CAT, through a hub). A USB leg's
+  // begin() is deferred until the reconciler attaches its CDC stream -- via
+  // setExternalStream() for a single USB leg (same lifecycle as CAT_USB
+  // single-rig) or setLegExternalStream() per leg when there are two.
+  DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud);
+  ~DualRig() override;
+  void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
+  bool ready() const override;
+  void service() override;
+  void setCmdDelay(uint16_t ms) override;
+  void setReadBudgetMs(uint16_t ms) override;
+  void setExternalStream(Stream* s) override;   // single-USB attach; nullptr detaches ALL USB legs
+  void setLegExternalStream(int leg, Stream* s);  // per-leg attach/detach (dual-USB CAT)
+  bool setMainFreq(freq_t hz) override;         // uplink leg
+  bool setSubFreq (freq_t hz) override;         // downlink leg
+  bool setMainMode(RigMode m)   override;
+  bool setSubMode (RigMode m)   override;
+  bool readSubFreq (freq_t& hzOut) override;    // downlink leg
+  bool readMainFreq(freq_t& hzOut) override;    // uplink leg
+  bool readPtt(bool& tx) override;              // uplink leg (skip knob-read while TX)
+  bool enableSatMode(bool) override { return false; }
+  void selectSubBand()  override {}
+  void selectMainBand() override {}
+  bool canReadFreq() const override;
+  bool hasSatMode()  const override { return false; }
+  bool selVerified() const override { return true; }
+  const char* name() const override { return _nameBuf; }
+  Rig* downLeg() const { return _down; }        // status surfaces (per-leg readouts)
+  Rig* upLeg()   const { return _up; }
+  int  usbLeg()  const { return _usbLeg; }
+private:
+  Rig*     _down;                     // downlink (RX) leg
+  Rig*     _up;                       // uplink (TX) leg
+  int      _usbLeg;                   // -1 / 0 (down) / 1 (up) / 2 (both)
+  bool     legIsUsb(int L) const { return _usbLeg == L || _usbLeg == 2; }
+  bool     _usbBegun[2] = { false, false };  // per-leg: begin() ran after stream attach
+  uint32_t _baud[2];                  // per-leg CAT baud (0 already resolved by factory)
+  char     _nameBuf[28];
+};
+
+// Build one leg from its config tuple, or nullptr (LEG_NONE / bad params / OOM).
+Rig* makeLegRig(uint8_t legModel, uint8_t bus, uint8_t civAddr, uint32_t baud,
+                const char* host, uint16_t port, const char* user, const char* pass);
+// Build the CAT_DUAL composite from the cfg leg arrays (index 0 = downlink,
+// 1 = uplink). Returns nullptr if EITHER leg fails to construct -- half a dual
+// rig silently tracking one leg is worse than a clear "radio not ready".
+Rig* makeDualRig(const uint8_t model[2], const uint8_t bus[2], const uint8_t civ[2],
+                 const uint32_t baud[2], const char host[2][40], const uint16_t port[2],
+                 const char user[2][24], const char pass[2][24]);
 
 // Construct the backend for a model. Caller owns the returned pointer.
 // catType 0 = wired CI-V/CAT (UART); 1 = Icom LAN (network) for CI-V models, in
@@ -1427,7 +1646,7 @@ private:
 //  uplink (TX) on VFO B (FB). The rig's own satellite / split mode and the
 //  uplink/downlink BANDS are selected by the operator on the radio (CAT can't
 //  switch bands on these rigs); CardSat Doppler-tunes within that setup. On the
-//  TS-2000 in particular, verify the VFO-A/B vs main/sub-band behaviour for your
+//  TS-2000 in particular, verify the VFO-A/B vs main/sub-band behavior for your
 //  firmware. The TS-790 supports a subset of these commands.
 // ===========================================================================
 
@@ -1724,6 +1943,20 @@ public:
       _ctlPort(port ? port : 50001), _user(user), _pass(pass) {
     snprintf(_nameBuf, sizeof(_nameBuf), "%s/LAN", RADIOS[m].name);
   }
+  // Dual-rig LEG constructor (CAT_DUAL): plain single-VFO network CAT for a
+  // LEG_RADIOS[] radio -- the IC-705 over its own Wi-Fi being the flagship. No
+  // MAIN/SUB band selects, no satellite mode; just cmd 05/06/03 on the one VFO.
+  // The UDP transport, auth handshake and keepalives are identical to the
+  // IC-9700 path (same RS-BA1-family protocol; see the banner above), so the
+  // whole connection state machine is reused unchanged. _model is parked on
+  // RIG_NONE, whose profile row is all-zeros -- selBand() no-ops on selLen == 0
+  // and every capability that reads RADIOS[_model] is overridden below.
+  IcomNetRig(uint8_t civAddr, const char* legName, const char* host, uint16_t port,
+             const char* user, const char* pass)
+    : _model(RIG_NONE), _addr(civAddr), _host(host),
+      _ctlPort(port ? port : 50001), _user(user), _pass(pass), _plain(true) {
+    snprintf(_nameBuf, sizeof(_nameBuf), "%s/LAN", legName ? legName : "leg");
+  }
   ~IcomNetRig() override;
 
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
@@ -1745,10 +1978,10 @@ public:
   void selectSubBand()          override { if (ready()) selBand(true); }
   void selectMainBand()         override { if (ready()) selBand(false); }
 
-  bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
-  bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
-  bool hasTone()     const override { return RADIOS[_model].hasTone; }
-  bool selVerified() const override { return RADIOS[_model].selVerified; }
+  bool canReadFreq() const override { return _plain ? true  : RADIOS[_model].canReadFreq; }
+  bool hasSatMode()  const override { return _plain ? false : RADIOS[_model].hasSatMode; }
+  bool hasTone()     const override { return _plain ? false : RADIOS[_model].hasTone; }
+  bool selVerified() const override { return _plain ? true  : RADIOS[_model].selVerified; }
   const char* name() const override { return _nameBuf; }
 
   void    setAddress(uint8_t a) override { _addr = a; }
@@ -1770,6 +2003,7 @@ private:
 
   RadioModel _model;
   uint8_t    _addr;
+  bool       _plain = false;   // dual-rig leg mode: plain single-VFO CAT, no selects
   String     _host;
   uint16_t   _ctlPort;
   String     _user, _pass;
@@ -2156,7 +2390,7 @@ public:
                                  void (*sink)(const SatEntry&, void*), void* ctx);
 
   // Reconstruct a TLE line-pair from a satellite's GP elements (69 chars each,
-  // checksummed). Only used to initialise the SGP4 propagator. Returns false
+  // checksummed). Only used to initialize the SGP4 propagator. Returns false
   // on a malformed entry.
   static bool gpToTle(const SatEntry& s, char l1[72], char l2[72]);
 
@@ -2202,7 +2436,7 @@ private:
 struct Observer {
   double lat = 0.0;     // degrees +N
   double lon = 0.0;     // degrees +E
-  double altM = 0.0;    // metres
+  double altM = 0.0;    // meters
   bool   valid = false;
   bool   fromGps = false;
 };
@@ -2226,7 +2460,7 @@ public:
   bool pollGps();
 
   void setManual(double lat, double lon, double altM);
-  bool setFromGrid(const String& grid);    // Maidenhead -> lat/lon (centre)
+  bool setFromGrid(const String& grid);    // Maidenhead -> lat/lon (center)
 
   const Observer& obs() const { return _obs; }
   bool gpsHasFix() const { return _hasFix; }
@@ -2240,7 +2474,7 @@ public:
   const GpsSat& gpsView(int i) const { return _view[i]; }
 
   static String toGrid(double lat, double lon);  // 6-char Maidenhead
-  // Maidenhead -> lat/lon (square centre) without mutating any Location.
+  // Maidenhead -> lat/lon (square center) without mutating any Location.
   static bool gridToLatLon(const String& grid, double& lat, double& lon);
 
 private:
@@ -2406,7 +2640,7 @@ public:
   // adjacent free blocks merge -- the last resort before declining the handshake.
   // Gated so it only fires when really needed and never twice in quick succession.
   //
-  // TO DISABLE: set TLS_WIFI_CYCLE = false (reverts to passive-wait-only behaviour).
+  // TO DISABLE: set TLS_WIFI_CYCLE = false (reverts to passive-wait-only behavior).
   // See docs/design/HEAP_WIFI_CYCLE.md.
   static bool     TLS_WIFI_CYCLE;               // master enable for the proactive cycle
   static uint32_t WIFI_CYCLE_MIN_GAP_MS;        // min gap between proactive cycles
@@ -2422,7 +2656,7 @@ public:
   // to release its LAN listener sockets (rigctld/rotctld/web) for the duration of
   // the fetch -- on the socket-limited, no-PSRAM ESP32-S3 those listeners (plus a
   // kept-alive browser tab) can otherwise starve the outbound HTTPS connect and
-  // it gets refused. Set once at startup; leaving it null disables the behaviour.
+  // it gets refused. Set once at startup; leaving it null disables the behavior.
   // Guarding here (the single choke point) covers every fetch -- GP, weather,
   // space weather, AMSAT, transponders, QRZ -- without per-call-site discipline.
   static void (*onTlsBusy)(bool busy);
@@ -2474,7 +2708,7 @@ public:
 
   // Propagate an EXPLICIT satellite's GP elements to unix time `t` and return the
   // raw TEME position (km) and velocity (km/s). This is the forward model used by the
-  // state-vector -> GP-element fitter. Returns false if the elements don't initialise.
+  // state-vector -> GP-element fitter. Returns false if the elements don't initialize.
   bool temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]);
 
   // Full topocentric look for an ARBITRARY satellite entry at time t, computed with a
@@ -2510,7 +2744,7 @@ public:
 
   // Range rate (km/s, +ve receding) at a FRACTIONAL unix time, taken from the
   // SGP4 velocity vector (the method Gpredict/sgp4sdp4 use) rather than by
-  // differencing slant range. Exact and not quantised to whole seconds.
+  // differencing slant range. Exact and not quantized to whole seconds.
   double rangeRateAt(double unixSec);
 
   // Lightweight: just az/el (degrees) for the current site at time t.
@@ -2561,7 +2795,7 @@ public:
 
   // Linear-transponder passband tracking. Given a tuning offset measured in Hz
   // up from the downlink passband bottom, return the *operating* downlink and
-  // uplink centre frequencies (before Doppler). For an inverting transponder
+  // uplink center frequencies (before Doppler). For an inverting transponder
   // the uplink moves opposite to the downlink; for non-inverting it tracks it.
   // Single-channel transponders ignore the offset (dlOp=downlink, ulOp=uplink).
   static void passbandFreqs(const Transponder& t, int32_t pbOffsetHz,
@@ -2604,7 +2838,7 @@ enum VfoType : uint8_t {
 // mid-pass. This setting makes the choice explicit.
 enum RxOnlyVfo : uint8_t {
   RXO_FOLLOW = 0,   // use the same downlink VFO as full transponders (per vfoType)
-  RXO_MAIN   = 1,   // force receive-only downlink to MAIN (legacy behaviour)
+  RXO_MAIN   = 1,   // force receive-only downlink to MAIN (legacy behavior)
   RXO_SUB    = 2,   // force receive-only downlink to SUB
 };
 
@@ -2625,15 +2859,28 @@ enum CatType : uint8_t {
                    // transport is swapped, the dialect is unchanged. Only present
                    // when built with CARDSAT_HAS_USBCAT=1 (the default since
                    // 0.9.59); see usbserial.h.
+  CAT_DUAL  = 5,   // TWO radios driven natively: a downlink leg + an uplink leg,
+                   // each any radio from the LEG_RADIOS[] catalog on its own
+                   // transport (Grove serial, USB adapter, or Icom LAN -- the
+                   // IC-705 over its own Wi-Fi being the flagship LAN leg).
+                   // CardSat composes them into one full-duplex rig (DualRig);
+                   // configure the legs on the Dual-Rig screen. Absorbs the
+                   // CardSatDualRig companion's radio catalog + CAT dialects
+                   // (DUALRIG_MAINFW_INTEGRATION_SCOPE.md, Model A). The external
+                   // companion path (rigctl net/Grove) remains fully supported.
 };
 // How many CAT transports the Settings row cycles through. CAT_USB is only
 // selectable when the feature is compiled in, so a build without it behaves
 // exactly as before -- the operator cannot land on an unimplemented transport.
+// CAT_DUAL is always selectable: its Grove and LAN leg buses need no compile
+// flag, and the USB leg bus is simply not offered in a build without USB CAT.
 #if CARDSAT_HAS_USBCAT
-static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), rigctl(Grove), USB
+static constexpr uint8_t CAT_TYPE_N = 6;   // Wired, LAN, rigctl(net), rigctl(Grove), USB, Dual
 #else
-static constexpr uint8_t CAT_TYPE_N = 4;   // Wired, LAN, rigctl(net), rigctl(Grove)
+static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), rigctl(Grove), Dual
 #endif
+// NOTE (non-USB build): the enum VALUE CAT_DUAL is still 5 while the row cycles
+// 0..4; the Settings row maps slot 4 -> CAT_DUAL when USB CAT is compiled out.
 
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
 // rotctld server reached over TCP (CardSat is the client).
@@ -2665,7 +2912,7 @@ static constexpr uint8_t ROT_XPORT_N = 3;
 // Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
 enum RotAzRange : uint8_t {
   ROT_AZ_360 = 0,  // 0..360 deg, 0=North, 180=South (default)
-  ROT_AZ_180 = 1,  // -180..+180 deg, centred on 0=North
+  ROT_AZ_180 = 1,  // -180..+180 deg, centered on 0=North
   ROT_AZ_450 = 2,  // 0..450 deg, 90 deg overlap to avoid cable-wrap at North
 };
 
@@ -2739,7 +2986,7 @@ struct Settings {
   // search at all (it is documented as querying named stations only, no wildcard),
   // which is why the old key-based station list never returned anything. The range
   // below is passed straight through as the APRS-IS server-side r/lat/lon/dist
-  // filter, which already takes kilometres.
+  // filter, which already takes kilometers.
   int      aprsRangeKm = 150; // APRS-IS r/ filter radius for "heard near me"
   char     dxcUrl[96] = "";   // DX spot JSON feed (an aggregator; blank = feature off)
   // ADS-B: the API BASE only. The request path is built from the current QTH and
@@ -2800,6 +3047,21 @@ struct Settings {
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
   uint8_t  rxOnlyVfo  = RXO_FOLLOW;   // downlink VFO for receive-only (beacon) entries
   bool     satMode    = false;
+  // ---- Dual-rig legs (catType = CAT_DUAL). Index 0 = downlink (RX), 1 = uplink (TX).
+  // Each leg is a LEG_RADIOS[] radio on its own bus. civ/baud 0 = the leg table's
+  // default. Host/port/user/pass are PER LEG so two LAN radios can coexist
+  // (scope Phase 2); the USB leg reuses catUsbKey-style adapter pinning.
+  uint8_t  dualModel[2]  = { LEG_NONE, LEG_NONE };
+  uint8_t  dualBus[2]    = { LEGBUS_GROVE, LEGBUS_GROVE };
+  uint8_t  dualCiv[2]    = { 0, 0 };
+  uint32_t dualBaud[2]   = { 0, 0 };
+  char     dualHost[2][40] = { "", "" };
+  uint16_t dualPort[2]   = { 50001, 50001 };
+  char     dualUser[2][24] = { "", "" };
+  char     dualPass[2][24] = { "", "" };
+  char     dualUsbKey[2][40] = { "", "" };  // per-leg USB adapter pins. With BOTH legs
+                                  // on USB (through a hub) each leg should be nominated;
+                                  // "" = Auto (bindable only when the pick is unambiguous).
   uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
   uint16_t catDelayMs = 70;    // pause after each CAT command before the next (ms)
   // Doppler CAT write deadband + predictive lead (tunable; see app.h DOPP_* defaults)
@@ -2916,7 +3178,7 @@ struct Settings {
   // Region presets pick a legal amateur LoRa frequency/bandwidth for the operator:
   //   0 = US  : 33cm amateur band (902-928 MHz). 70cm in the US is held to 100 kHz
   //             occupied bandwidth, so 33cm is the home for 125 kHz LoRa. Default
-  //             906.875 MHz, clear of the busy 915 MHz ISM centre.
+  //             906.875 MHz, clear of the busy 915 MHz ISM center.
   //   1 = EU  : 70cm amateur band (430-440 MHz). LoRa-APRS standard 433.775 MHz.
   //   2 = JP  : 430 MHz amateur band (430-440 MHz). Japan's 920 MHz band is ISM,
   //             not amateur, so amateur LoRa belongs on 430 MHz. Default 431.000.
@@ -4285,7 +4547,7 @@ static const int CNTY_OR_N = 36;
 static const SubdivEntry CNTY_PA[] = {
   {"Adams","Adams"},{"Allegheny","Allegheny"},{"Armstrong","Armstrong"},{"Beaver","Beaver"},
   {"Bedford","Bedford"},{"Berks","Berks"},{"Blair","Blair"},{"Bradford","Bradford"},{"Bucks","Bucks"},
-  {"Butler","Butler"},{"Cambria","Cambria"},{"Cameron","Cameron"},{"Carbon","Carbon"},{"Centre","Centre"},
+  {"Butler","Butler"},{"Cambria","Cambria"},{"Cameron","Cameron"},{"Carbon","Carbon"},{"Center","Center"},
   {"Chester","Chester"},{"Clarion","Clarion"},{"Clearfield","Clearfield"},{"Clinton","Clinton"},
   {"Columbia","Columbia"},{"Crawford","Crawford"},{"Cumberland","Cumberland"},{"Dauphin","Dauphin"},
   {"Delaware","Delaware"},{"Elk","Elk"},{"Erie","Erie"},{"Fayette","Fayette"},{"Forest","Forest"},
@@ -6021,7 +6283,7 @@ private:
 //     ESP32-S3 "has a small number of USB host channels" which "composite devices,
 //     hubs, audio ... can exhaust quickly". We bind only the serial interface and
 //     never claim audio (CardSat has no use for rig audio). Whether that is enough
-//     on a real composite rig is UNVERIFIED -- see usbLastError().
+//     on a real composite rig is UNVERIFIED -- see lastError().
 //
 //  ---- FEASIBILITY / REVERSIBILITY ----------------------------------------------
 //  The whole feature is behind CARDSAT_HAS_USBCAT. Compile it out and CardSat is
@@ -6040,17 +6302,14 @@ namespace UsbSerial {
   // lastError() if the host will not start or no serial device enumerates.
   bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
 
-  // Detach the CDC port and stop CAT. The IDF host stack and the ~11.8 KB host
-  // object STAY RESIDENT until reboot, by design: EspUsbHost cannot release its
-  // client (checked v2.3.0 and unchanged through v2.3.2: end() kills the client
-  // task before running client-scoped
-  // cleanup), so a real teardown leaves the stack installed with a live client --
-  // and then even a rebind is refused. Bench-proven over eight revisions; the full
-  // account is in end() in the .cpp. Consequences the caller must know:
-  //   * A re-engage is FAST and reliable -- it rebinds the resident host.
-  //   * The USB CDC console does NOT come back (the host still owns the PHY).
-  //   * The RAM is not returned until reboot. One host, ever, so it is bounded.
-  // Safe to call when not started.
+  // Detach CAT-A's CDC port and, when no other port (CAT-B, rotator) still holds
+  // the shared host, fully tear the host down: EspUsbHost 2.4.1+'s fixed end()
+  // drains, deregisters and uninstalls the IDF stack (checked against the pinned
+  // 2.5.2), the object is freed, and the serial console returns. (The old
+  // "resident host until reboot" design was the pre-2.4.1 library's limitation;
+  // its history lives in end() in the .cpp.) On the M2 timeout path the host is
+  // retained, reboot-required is latched, and the console stays down. Safe to
+  // call when not started.
   void end();
 
   bool    active();          // is the host up and a device bound?
@@ -6249,6 +6508,25 @@ namespace UsbSerial {
   uint8_t     serialDeviceCount();
   const char* serialDeviceLabel(uint8_t i);   // "FTDI FT232R 0403:6001 #A50285BI"
   const char* serialDeviceKey(uint8_t i);     // stable id to persist (see .cpp)
+
+  // ---- Second CAT port (CAT-B): two USB radios on the shared host --------------
+  // Dual-USB CAT (CAT_DUAL with BOTH legs on USB, through a hub): CAT-A is
+  // begin()/stream() above, CAT-B is this trio, shaped like the rotator port. The
+  // host has 4 device slots (build_opt.h: hub + 2 adapters + root) and 4 CDC
+  // slots, so three bound ports (CAT-A + CAT-B + rotator) fit structurally -- but
+  // dual-CAT plus a USB ROTATOR is refused at the app level: three CDCs behind a
+  // hub presses the S3's 8 host channels, and that combination has no bench
+  // story. Adapter assignment follows the same rule as CAT+rotator: with two
+  // radio adapters BOTH should be nominated (each leg's key); an un-nominated
+  // CAT-B binds only when exactly one adapter is free after CAT-A/rotator
+  // exclusions -- never a guess between two.
+  void        cat2Configure(const char* key);
+  bool        cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
+  void        cat2End();          // release CAT-B (host stays while any port remains)
+  bool        cat2Active();
+  Stream*     cat2Stream();       // nullptr unless cat2Active()
+  const char* cat2DeviceName();
+  const char* cat2LastError();
 }
 
 #endif  // CARDSAT_HAS_USBCAT
@@ -6506,7 +6784,7 @@ private:
   // or Grove) via its \csdr_* escape. Holds the last query result so the screen
   // can be edited offline and pushed with one save.
   static constexpr int DR_MAX_DEV   = 8;     // devices shown from the Stick
-  static constexpr int DR_MAX_MODEL = 40;    // model-catalogue entries from the Stick
+  static constexpr int DR_MAX_MODEL = 40;    // model-catalog entries from the Stick
   struct DrDevice { char product[24]; char serial[24]; char vidpid[12]; int addr; };   // H11: serial 24 to match companion
   struct DrModel  { int id; char name[14]; bool rxOnly; };
   // Heap-allocated on entering SCR_DUALRIG and freed by drFree() from the
@@ -6532,9 +6810,9 @@ private:
   void  drFree();                            // release them (screen-transition hook)
   void  drQuery();                           // pull \csdr_get + \csdr_models
   void  drSave();                            // push \csdr_set ... save=1
-  int   drModelIdx(int id) const;            // catalogue index for a model id (-1)
+  int   drModelIdx(int id) const;            // catalog index for a model id (-1)
   // At-a-glance link status for the Settings row, so bring-up is a glance not a
-  // query. 0 = unknown (grey), 1 = linked (green), 2 = no link (red).
+  // query. 0 = unknown (gray), 1 = linked (green), 2 = no link (red).
   uint8_t drLink = 0; uint32_t drLinkMs = 0;
   void  drPingLink();                        // throttled \csdr_get ping; sets drLink
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
@@ -6605,7 +6883,7 @@ private:
   static const int CATMON_MAX = 64;     // ring-buffer depth (lines)
   static const int CATMON_W   = 40;     // per-line chars (draw shows 36); no heap
   char     catMonLines[CATMON_MAX][CATMON_W] = {};
-  bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (colour), false = RX
+  bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (color), false = RX
   int      catMonHead = 0;              // next write index (ring)
   int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
   int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
@@ -6773,6 +7051,12 @@ private:
   double   orbDecayDays = -1;       // rough days-to-reentry (-1 n/a, 1e9 stable)
   double   orbDecayLo = -1;         // low-density (solar-min) bound: longer life
   double   orbDecayHi = -1;         // high-density (solar-max) bound: shorter life
+  uint8_t  orbDecaySrc = 0;         // which anchor produced orbDecayDays:
+                                    // 0 none, 1 observed n-dot, 2 B* (see
+                                    // estimateDecayDays). The solar bracket is
+                                    // meaningful only for the B* path -- the
+                                    // solar scale cancels out of an anchored
+                                    // estimate, so bracketing it would be theatre.
   // Apogee/perigee shown on the Info page, sampled from the SAME perturbed predictor
   // that produces the live altitude (geocentric, over one orbit), so the displayed
   // Altitude is always within [perigee, apogee]. A mean-element apogee (a(1+e)-RE) can
@@ -6809,8 +7093,8 @@ private:
   int      memoScroll = 0;          // scroll offset
   bool      memoConfirmDel = false; // true while a delete confirmation is pending
   // OSCARLOCATOR polar view (SCR_OSCAR): live azimuthal-equidistant plot.
-  // oscarMode: 0 = QTH-centred (your station at disc centre), 1 = polar (N or S
-  // pole at centre, chosen automatically from the satellite's hemisphere).
+  // oscarMode: 0 = QTH-centered (your station at disc center), 1 = polar (N or S
+  // pole at center, chosen automatically from the satellite's hemisphere).
   int       oscarMode = 0;
   // Cached OSCARLOCATOR ground-track arc: one full orbital period of sub-points
   // (lat/lon), sampled once and held static, so the arc covers the whole disc
@@ -6824,11 +7108,11 @@ private:
   time_t    oscarArcAos = 0, oscarArcLos = 0;  // AOS/LOS within the track (for markers)
   uint32_t  oscarArcTriedMs = 0;     // millis() of last build attempt (throttle retries)
   // 3D globe view (SCR_GLOBE): orthographic wireframe Earth that auto-follows the
-  // selected satellite (the globe rotates to keep its sub-point centred), with a
-  // day/night terminator and all favourites plotted. Arrow keys nudge the view
+  // selected satellite (the globe rotates to keep its sub-point centered), with a
+  // day/night terminator and all favorites plotted. Arrow keys nudge the view
   // away from the follow point; a key re-snaps to auto-follow.
-  double    globeViewLat = 0, globeViewLon = 0;  // current centre of the visible disc (deg)
-  bool      globeFollow = true;       // true = re-centre on the selected sat each frame
+  double    globeViewLat = 0, globeViewLon = 0;  // current center of the visible disc (deg)
+  bool      globeFollow = true;       // true = re-center on the selected sat each frame
   void drawGlobe();
   void keyGlobe(char c, bool enter, bool back);
   // DX Doppler table (SCR_DXDOPP): predicted RX/TX for BOTH my station and the DX
@@ -6843,7 +7127,7 @@ private:
   freq_t    dxdAnchorHz = 0;         // fixed-mode target dial freq (Hz); re-applied on transponder change (0 = none)
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
-  void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
+  void dxdCenterPassband();          // center dxdPbOff on the selected linear transponder
   void dxdStepAnchorDial(int dir);   // step the anchored dial by 1 kHz (fixed modes)
   void dxdReanchorToStored();        // re-apply dxdAnchorHz to the current transponder after a change
   void dxDoppFreqs(time_t t, freq_t& myRx, freq_t& myTx,
@@ -7068,7 +7352,7 @@ private:
   uint8_t  gInvType[GAME_INV];      // which sprite (0..2) per invader
   int      gInvAliveN = 0;          // remaining invaders
   int      gShotX[GAME_SHOTS], gShotY[GAME_SHOTS];   // player shots; y<0 = inactive
-  int      gGunX = 0;               // gun centre x
+  int      gGunX = 0;               // gun center x
   int      gScore = 0, gLives = 0, gLevel = 0;
   uint8_t  gState = 0;              // 0 attract, 1 playing, 2 win-wave, 3 game over
   uint32_t gStepMs = 0;             // last formation step (millis)
@@ -7087,7 +7371,7 @@ private:
   uint8_t  gpPhase = 0;            // 0 rising to window, 1 in window, 2 leaving
   int      gpMisses = 0;
   uint32_t gpArcMs = 0;
-  // Rotor Runner: slew a crosshair (tilt/keys) to keep a moving sat centred.
+  // Rotor Runner: slew a crosshair (tilt/keys) to keep a moving sat centered.
   float    grSatX = 0, grSatY = 0, grSatVX = 0, grSatVY = 0;   // sat pos/vel (px)
   float    grCurX = 0, grCurY = 0;                     // crosshair pos (px)
   uint32_t grOnMs = 0, grLastMs = 0;
@@ -7274,8 +7558,8 @@ private:
   // Inverse of the workable horizon: pick ONE target (US state / DXCC / grid) and find every
   // pass on any favorite over HORIZON_DAYS during which it is workable. Keeps per-pass TIMING
   // (a small .bss hit list), not a union. The membership test is one shared pointInFootprint()
-  // per sample against the target's representative point (bbox centre for state/DXCC polygons,
-  // the point coord for DXCC point-entities, the locator centre for grids) -- far cheaper than
+  // per sample against the target's representative point (bbox center for state/DXCC polygons,
+  // the point coord for DXCC point-entities, the locator center for grids) -- far cheaper than
   // filling a bitset, so this search is snappier than the union sweep. Zero heap allocation.
   enum TsPhase { TS_PICK, TS_RUNNING, TS_DONE, TS_CANCEL };
   static const int TS_HIT_MAX = 40;
@@ -7345,7 +7629,7 @@ private:
   void drawRoveView();  void keyRoveView(char c, bool enter, bool back);
   // "Sky at a glance": a horizontal timeline of upcoming passes for all favorites
   // over the next SKY_HOURS. One row per favorite that has a pass in the window;
-  // each bar is one pass, coloured by peak elevation. Fixed-size (.bss), no heap.
+  // each bar is one pass, colored by peak elevation. Fixed-size (.bss), no heap.
   static const int SKY_ROWS = 12;      // favorites shown (rows)
   static const int SKY_BARS = 60;      // total passes drawn across all rows
   static const int SKY_HOURS = 6;      // timeline span (hours)
@@ -7681,10 +7965,25 @@ private:
            cfg.rotType != ROT_YAESU && cfg.rotType != ROT_NONE &&
            cfg.rotTransport == ROT_XPORT_USB;
   }
+  // CAT bus-ownership predicates, dual-rig aware. Every "does CAT own the Grove
+  // UART / the USB CAT port" check routes through these, so a CAT_DUAL leg on a
+  // bus claims it exactly as the equivalent single-rig transport would.
+  bool        catUsesGroveWire() const {
+    if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE) return true;
+    return cfg.catType == CAT_DUAL &&
+           (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_GROVE);
+  }
+  bool        catUsesUsb() const {
+    if (cfg.catType == CAT_USB) return (RadioModel)cfg.radioModel != RIG_NONE;
+    if (cfg.catType != CAT_DUAL) return false;
+    return (cfg.dualBus[0] == LEGBUS_USB && cfg.dualModel[0] != LEG_NONE) ||
+           (cfg.dualBus[1] == LEGBUS_USB && cfg.dualModel[1] != LEG_NONE);
+  }
   void        yieldGroveIfTaken(const char* who);  // CAT/GPS just claimed Grove
   bool        groveCatVsGpsArbitrate(const char* who);  // H10: disable the losing Grove CAT/GPS claimant
   void        scanUsbAdapters();
-  void        cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio);
+  void        cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio,
+                              const char* alsoTaken = nullptr);   // 2nd excluded key (dual-USB)
   String      usbAdapterLabel(const char* key) const;
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
@@ -7714,7 +8013,11 @@ private:
     // layout setting must NOT swap them here, or "Main Dn/Sub Up" would send downlink
     // commands to the uplink radio and vice versa -- the opposite physical radios. Force
     // the companion-correct mapping (downlink on Sub -> VFOA) for these backends.
-    if (cfg.catType == CAT_RIGCTL || cfg.catType == CAT_RIGCTL_GROVE) return true;
+    // CAT_DUAL is the same shape natively: the DualRig composite hardwires
+    // Sub = the downlink leg and Main = the uplink leg, so the mapping is
+    // forced here for exactly the reason it is for the companion.
+    if (cfg.catType == CAT_RIGCTL || cfg.catType == CAT_RIGCTL_GROVE ||
+        cfg.catType == CAT_DUAL) return true;
     if (txReceiveOnly()) {                            // receive-only (beacon/telemetry)
       switch (cfg.rxOnlyVfo) {
         case RXO_MAIN: return false;                 // force downlink to MAIN (legacy)
@@ -7871,12 +8174,35 @@ private:
   void   saaCompute();                               // (re)run the forward scan for the current zone
   bool   zoneContains(int zone, double lat, double lonE, double altKm, bool sunlit);
   static double lShellAt(double latDeg, double lonEDeg, double altKm);  // centered-dipole McIlwain L
+
+  // ---- IGRF-14 field model + trapped-particle shell geometry -------------------
+  // The Van Allen tests use McIlwain (L, B/B0) from the real field, not altitude:
+  // a belt is a flux tube, and its field lines reach low altitude at high magnetic
+  // latitude, so no altitude floor can separate "in the belt" from "beneath it".
+  // B/B0 measures displacement from the shell's magnetic equator, which is what
+  // actually tracks trapped flux. Cutoff below; 3.0 ~ |magnetic latitude| <= 30 deg.
+  static constexpr float ZONE_BRATIO_MAX = 3.0f;
+  struct ShellInfo {
+    float bSat = 0;      // |B| at the satellite (nT)
+    float b0 = 0;        // |B| at the field line's minimum -- the shell's equator
+    float shellL = 0;    // that minimum's geocentric radius in Earth radii (= L)
+    float bRatio = 1;    // bSat / b0
+  };
+  static void igrfField(float rKm, float colatDeg, float lonEDeg, float yrs,
+                        float& Br, float& Bt, float& Bp);
+  static void igrfVec(const float p[3], float yrs, float b[3]);
+  float igrfYears();          // non-static: reads the clock via nowUtc()/timeIsSet()
+  ShellInfo shellAt(double latDeg, double lonEDeg, double altKm);
+  static bool maybeInBelt(double latDeg, double lonEDeg, double altKm);
   int      saaZone = ZONE_SAA;      // selected zone
   int      saaScroll = 0;           // window-list viewport
   ZoneWin  saaWin[16];              // upcoming transit windows
   int      saaWinN = 0;
   bool     saaInNow = false;        // in the selected zone right now
   double   saaCurL = 0;             // current L-shell (for the status line)
+  double   saaCurBR = 1;            // current B/B0 -- displacement from the shell's
+                                    // magnetic equator, the belt test's second
+                                    // coordinate (1 = at the equator of the shell)
   bool     saaComputed = false;
   const char* auroraLevel();         // aurora activity word from Kp/Bz
   const char* vhfFlag();             // 6m/2m Es / auroral-E hint
@@ -8363,7 +8689,7 @@ private:
   int    gpfField = 0;                 // 0=epoch 1..3=r 4..6=v 7=[solve]
   bool   gpfSolved = false;
   bool   gpfConverged = false;
-  double gpfResidM = 0;                // final position residual, metres
+  double gpfResidM = 0;                // final position residual, meters
   SatEntry gpfResult;                  // fitted GP elements
   void gpfInit();
   bool gpfSolve();                     // returns true on convergence; fills gpfResult
@@ -8428,7 +8754,7 @@ private:
 
   // Orbital thermal analysis tool (SCR_THERMAL). Single-node lumped-parameter model
   // over one orbit, driven by the analytic eclipse fraction (beta + betaStar) so it
-  // needs no propagation and works for custom orbits with no catalogue entry. Orbit
+  // needs no propagation and works for custom orbits with no catalog entry. Orbit
   // fields (alt/incl/raan) default from the active satellite but are user-editable;
   // the rest are spacecraft properties with per-U defaults.
   double thAlt = 500;    // orbit altitude (km)          [orbit]
@@ -8472,7 +8798,7 @@ private:
   // packets, so this screen shows what has been HEARD since the socket opened.
   //
   // That is deliberately the same semantics as the LoRa roster (SCR_LORAROSTER) and
-  // as a Kenwood's station list: "heard recently, nearby", not a database snapshot.
+  // as a Kenwood rig's station list: "heard recently, nearby", not a database snapshot.
   // Fixed stations beacon every 10-30 min, so the list fills over minutes.
   //
   // Lifetime: socket AND record array are created on entering the screen and
@@ -8490,7 +8816,7 @@ private:
   AprsSta* aprsSta = nullptr;          // APRS_MAX records; null whenever the screen is closed
   int    aprsN = 0, aprsSel = 0, aprsScroll = 0;
   char   aprsStatus[64] = {0};         // "" = a list is shown; else why it isn't
-  char   aprsCenter[8]  = {0};         // grid the filter is centred on ("" = own location)
+  char   aprsCenter[8]  = {0};         // grid the filter is centered on ("" = own location)
   WiFiClient* aprsis = nullptr;        // APRS-IS socket; null unless the screen is open
   LineBuf  aprsBuf{256};               // TNC2 line assembly (info fields run long)
   uint32_t aprsOpenMs = 0;             // millis() the socket connected (0 = not connected)
@@ -8520,7 +8846,7 @@ private:
   DxSpot* dxcSpot = nullptr;
   int    dxcN = 0, dxcSel = 0, dxcScroll = 0;
   int    dxcBandFilter = -1;           // -1 = all bands, else index into DXC_BANDS
-  int    dxcBandFilterPrev = -1;       // cycle cursor for the 'b' band-step key
+  int    dxcBandFilterPrev = -1;       // cycle cursor for the 'n' band-step key
   char   dxcStatus[64] = {0};
   bool   dxcBusy = false;
 
@@ -8598,7 +8924,7 @@ private:
   uint32_t telPrnLastMs = 0;             // for idle flush of a prompt with no newline
   uint32_t telLastRxMs = 0;
 
-  int    ao7Idx = -1;            // catalogue index of AO-7 (NORAD 7530), -1 if absent
+  int    ao7Idx = -1;            // catalog index of AO-7 (NORAD 7530), -1 if absent
   int    ao7Phase = 0;          // 0 idle, 1 fetched/analyzed, 2 no-sunlight, 3 error
   bool   ao7ContSun = false;    // true = continuous sunlight (24 h timer free-running)
   double ao7Beta = 0, ao7EclFrac = 0;
@@ -8660,7 +8986,7 @@ private:
   void   drawAprsDet();void keyAprsDet(char c, bool enter, bool back);
   void   aprsStart();                    // allocate records + open the filtered socket
   void   aprsStop();                     // close socket, free records (leaving the screen)
-  void   aprsRestart();                  // reopen with a new filter centre
+  void   aprsRestart();                  // reopen with a new filter center
   void   serviceAprsIs();                // pump the socket from loop(); no-op when closed
   void   aprsHandleLine(const char* ln); // one TNC2 line -> upsert, or ignore
   void   aprsUpsert(const char* call, double lat, double lon, char sym);
@@ -8980,7 +9306,7 @@ private:
   void gameReset(bool full);   // (re)start: full=new game, else next wave
   void gameStep();             // advance one formation step + shots
 
-  // Games menu + the six mini-games. Each is draw + key + a reset; all fixed-size.
+  // Games menu + the seven mini-games. Each is draw + key + a reset; all fixed-size.
   void drawGamesMenu(); void keyGamesMenu(char c, bool enter, bool back);
   void beep(uint16_t freq, uint16_t ms);       // on-demand speaker beep (acquires + schedules release)
   void sfx(uint16_t freq, uint16_t ms);        // gated game sound (cfg.gameSound)
@@ -9076,6 +9402,8 @@ private:
   void enterCatMon();                       // open the monitor, claim the trace sink
   void drawCatMon();
   void drawDualRig();
+  void drawDualRigLocal();                 // CAT_DUAL: native two-leg editor
+  void keyDualRigLocal(char c, bool enter, bool back);
   void keyDualRig(char c, bool enter, bool back);
   void keyCatMon(char c, bool enter, bool back);
   void catMonPush(const char* dir, const uint8_t* b, size_t n);  // append a trace line
@@ -9120,7 +9448,7 @@ private:
   void keyLog(char c, bool enter, bool back);
   void keyLogEntry(char c, bool enter, bool back);
   void beginQso();                // snapshot auto fields, open the entry screen
-  void seedQsoSatDefaults();      // fill qso sat/mode + non-Doppler centre/nominal freqs
+  void seedQsoSatDefaults();      // fill qso sat/mode + non-Doppler center/nominal freqs
   bool saveQso();                 // append the pending QSO to the CSV log
   int  qsoCount();                // number of logged QSOs
   bool exportAdif();              // write ADIF from the CSV log
@@ -10553,6 +10881,423 @@ float ctcssToneHz(int index) {
 }
 
 // ---------------------------------------------------------------------------
+//  Dual-rig legs (CAT_DUAL): dialect frame builders, PlainCatRig, DualRig
+// ---------------------------------------------------------------------------
+//  Ported from companion/CardSatDualRig (the bench-validated encoders): CI-V
+//  plain set (cmd 05/06/03), Yaesu 5-byte binary (opcode 01/07/03), Yaesu ASCII
+//  (FA/MD0x), Kenwood TH-D7x (FQ/MD on Band B -- the handheld's all-mode SSB/CW
+//  receiver lives on Band B only, Band A is FM/DV). The builders are PURE so
+//  tools/host_dualrig can byte-verify them without hardware.
+
+// -- BCD helpers (leg-local; civ.cpp has its own file-static copies) ----------
+static void legCivPackFreq(uint64_t hz, uint8_t out[5]) {
+  for (int i = 0; i < 5; i++) {
+    uint8_t lo = hz % 10; hz /= 10;
+    uint8_t hi = hz % 10; hz /= 10;
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+}
+static uint64_t legCivUnpackFreq(const uint8_t* b) {
+  uint64_t hz = 0;
+  for (int i = 4; i >= 0; i--) hz = hz * 100 + (b[i] >> 4) * 10 + (b[i] & 0x0F);
+  return hz;
+}
+static void legYBinPackFreq(uint64_t hz, uint8_t out[4]) {
+  uint32_t f = (uint32_t)(hz / 10);                       // Yaesu binary is 10 Hz units
+  out[0] = (uint8_t)((((f/10000000)%10)<<4) | ((f/1000000)%10));
+  out[1] = (uint8_t)((((f/100000)%10)<<4)   | ((f/10000)%10));
+  out[2] = (uint8_t)((((f/1000)%10)<<4)     | ((f/100)%10));
+  out[3] = (uint8_t)((((f/10)%10)<<4)       | (f%10));
+}
+static uint64_t legYBinUnpackFreq(const uint8_t* b) {
+  uint64_t f = 0;
+  for (int i = 0; i < 4; i++) f = f * 100 + (b[i] >> 4) * 10 + (b[i] & 0x0F);
+  return f * 10ULL;
+}
+// -- per-family mode bytes (RigMode -> wire). CardSat has no CWR mode, so the
+//    companion's CWR rows are unreachable here and intentionally not carried. --
+static uint8_t legCivModeByte(RigMode m) {
+  switch (m) { case RM_LSB: return 0x00; case RM_USB: return 0x01;
+               case RM_AM:  return 0x02; case RM_CW:  return 0x03;
+               case RM_FM:  return 0x05; case RM_DATA: return 0x01;
+               default: return 0x01; }
+}
+static uint8_t legYBinModeByte(RigMode m) {
+  switch (m) { case RM_LSB: return 0x00; case RM_USB: return 0x01;
+               case RM_CW:  return 0x02; case RM_AM:  return 0x04;
+               case RM_FM:  return 0x08; case RM_DATA: return 0x0A;
+               default: return 0x01; }
+}
+static char legYTxtModeDigit(RigMode m) {
+  switch (m) { case RM_LSB: return '1'; case RM_USB: return '2';
+               case RM_CW:  return '3'; case RM_FM:  return '4';
+               case RM_AM:  return '5'; case RM_DATA: return 'C';
+               default: return '2'; }
+}
+static const char LEG_KWHT_BAND = '1';   // Band B = the all-mode (SSB/CW/AM) receiver
+static char legKwHtModeDigit(RigMode m) {
+  switch (m) { case RM_FM: return '0'; case RM_AM: return '2';
+               case RM_LSB: return '3'; case RM_USB: return '4';
+               case RM_CW: return '5';  case RM_DATA: return '1'; /* DV */
+               default: return '4'; }
+}
+
+size_t legBuildFreqFrame(LegFamily fam, uint8_t civAddr, uint64_t hz,
+                         uint8_t* out, size_t cap) {
+  switch (fam) {
+    case LEGF_CIV: {
+      if (cap < 11) return 0;
+      uint8_t f[5]; legCivPackFreq(hz, f);
+      const uint8_t fr[11] = { 0xFE,0xFE, civAddr, 0xE0, 0x05,
+                               f[0],f[1],f[2],f[3],f[4], 0xFD };
+      memcpy(out, fr, 11); return 11;
+    }
+    case LEGF_YBIN: {
+      if (cap < 5) return 0;
+      uint8_t f[4]; legYBinPackFreq(hz, f);
+      out[0]=f[0]; out[1]=f[1]; out[2]=f[2]; out[3]=f[3]; out[4]=0x01; return 5;
+    }
+    case LEGF_YTXT: {
+      int n = snprintf((char*)out, cap, "FA%09llu;", (unsigned long long)hz);
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+    case LEGF_KWHT: {
+      int n = snprintf((char*)out, cap, "FQ%c,%010llu\r",
+                       LEG_KWHT_BAND, (unsigned long long)hz);
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+  }
+  return 0;
+}
+
+size_t legBuildModeFrame(LegFamily fam, uint8_t civAddr, RigMode m,
+                         uint8_t* out, size_t cap) {
+  switch (fam) {
+    case LEGF_CIV: {
+      if (cap < 8) return 0;
+      const uint8_t fr[8] = { 0xFE,0xFE, civAddr, 0xE0, 0x06,
+                              legCivModeByte(m), 0x01, 0xFD };
+      memcpy(out, fr, 8); return 8;
+    }
+    case LEGF_YBIN: {
+      if (cap < 5) return 0;
+      out[0]=legYBinModeByte(m); out[1]=0; out[2]=0; out[3]=0; out[4]=0x07; return 5;
+    }
+    case LEGF_YTXT: {
+      int n = snprintf((char*)out, cap, "MD0%c;", legYTxtModeDigit(m));
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+    case LEGF_KWHT: {
+      int n = snprintf((char*)out, cap, "MD%c,%c\r", LEG_KWHT_BAND, legKwHtModeDigit(m));
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+  }
+  return 0;
+}
+
+size_t legBuildReadFreqFrame(LegFamily fam, uint8_t civAddr,
+                             uint8_t* out, size_t cap) {
+  switch (fam) {
+    case LEGF_CIV: {
+      if (cap < 6) return 0;
+      const uint8_t q[6] = { 0xFE,0xFE, civAddr, 0xE0, 0x03, 0xFD };
+      memcpy(out, q, 6); return 6;
+    }
+    case LEGF_YBIN: {
+      if (cap < 5) return 0;
+      out[0]=0; out[1]=0; out[2]=0; out[3]=0; out[4]=0x03; return 5;
+    }
+    case LEGF_YTXT: {
+      if (cap < 4) return 0;
+      memcpy(out, "FA;", 3); return 3;
+    }
+    case LEGF_KWHT: {
+      int n = snprintf((char*)out, cap, "FQ%c\r", LEG_KWHT_BAND);
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+  }
+  return 0;
+}
+
+bool legParseFreqReply(LegFamily fam, uint8_t civAddr,
+                       const uint8_t* buf, size_t n, uint64_t& hz) {
+  switch (fam) {
+    case LEGF_CIV:
+      // Reply: FE FE E0 <addr> 03 <5 BCD> FD. The 6-byte query echo a CI-V
+      // interface commonly returns can't match this 11-byte pattern (H6).
+      for (size_t i = 0; i + 11 <= n; i++) {
+        if (buf[i]==0xFE && buf[i+1]==0xFE && buf[i+2]==0xE0 &&
+            buf[i+3]==civAddr && buf[i+4]==0x03 && buf[i+10]==0xFD) {
+          hz = legCivUnpackFreq(&buf[i+5]);
+          return hz > 0;
+        }
+      }
+      return false;
+    case LEGF_YBIN:
+      // 4 BCD bytes + mode; the companion takes the first 5 bytes after an RX
+      // clear (this family's adapters do not echo the binary command).
+      if (n < 5) return false;
+      hz = legYBinUnpackFreq(buf);
+      return hz > 0;
+    case LEGF_YTXT:
+      for (size_t i = 0; i + 12 <= n; i++) {
+        if (buf[i]=='F' && buf[i+1]=='A') {
+          uint64_t v = 0; bool ok = true;
+          for (int k = 2; k < 11; k++) {
+            char c = (char)buf[i+k];
+            if (c < '0' || c > '9') { ok = false; break; }
+            v = v*10 + (uint64_t)(c - '0');
+          }
+          if (ok) { hz = v; return hz > 0; }
+        }
+      }
+      return false;
+    case LEGF_KWHT:
+      // Expect "FQ<band>,<digits>"; accept >= 6 digits.
+      for (size_t i = 0; i + 4 <= n; i++) {
+        if (buf[i]=='F' && buf[i+1]=='Q') {
+          size_t j = i + 2;
+          while (j < n && buf[j] != ',') j++;
+          j++;
+          uint64_t v = 0; int digits = 0;
+          while (j < n && buf[j] >= '0' && buf[j] <= '9') {
+            v = v*10 + (uint64_t)(buf[j]-'0'); j++; digits++;
+          }
+          if (digits >= 6) { hz = v; return hz > 0; }
+        }
+      }
+      return false;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+//  PlainCatRig
+// ---------------------------------------------------------------------------
+PlainCatRig::PlainCatRig(LegModel m, uint8_t civAddr, uint32_t baud)
+  : _model(m),
+    _addr(civAddr ? civAddr : LEG_RADIOS[m].civAddr),
+    _baud(baud ? baud : LEG_RADIOS[m].baud) {}
+
+void PlainCatRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
+  (void)uartNum;
+  if (baud) _baud = baud;
+  if (extStream) { _stream = extStream; return; }   // USB leg: adapter already open
+  // Grove leg: plain 8N1 TTL on G1/G2, same UART claim as the other Grove CAT
+  // paths (the CAT_DUAL conflict guard has already ensured we're the only Grove
+  // claimant). Serial1 is the shared on-board UART object, as in RigctlGroveRig.
+  Serial1.begin(_baud, SERIAL_8N1, rxPin, txPin);
+  _stream = &Serial1;
+}
+
+bool PlainCatRig::canReadFreq() const {
+  // All four families implement a read; the VR-5000's is UNVERIFIED on hardware
+  // (companion caveat) but attempting it is harmless -- a silent radio just
+  // returns false and the Doppler loop skips knob-follow that cycle.
+  return true;
+}
+
+bool PlainCatRig::sendFrame(const uint8_t* b, size_t n) {
+  if (!_stream || !n) return false;
+  catTrace("TX", b, n);
+  size_t w = _stream->write(b, n);
+  _stream->flush();
+  if (cmdDelayMs) delay(cmdDelayMs);
+  return w == n;
+}
+
+bool PlainCatRig::sendRaw(const uint8_t* b, size_t n) { return sendFrame(b, n); }
+
+bool PlainCatRig::sendFreq(freq_t hz) {
+  uint8_t fr[24];
+  size_t n = legBuildFreqFrame(LEG_RADIOS[_model].family, _addr, hz, fr, sizeof(fr));
+  bool ok = sendFrame(fr, n);
+  if (ok) _lastSetMs = millis();
+  return ok;
+}
+
+bool PlainCatRig::sendMode(RigMode m) {
+  uint8_t fr[16];
+  size_t n = legBuildModeFrame(LEG_RADIOS[_model].family, _addr, m, fr, sizeof(fr));
+  bool ok = sendFrame(fr, n);
+  if (ok) _lastSetMs = millis();
+  return ok;
+}
+
+bool PlainCatRig::readFreq(freq_t& hzOut) {
+  if (!_stream) return false;
+  const LegFamily fam = LEG_RADIOS[_model].family;
+  // H8: let a just-sent set's echo/ACK settle before clearing RX for the read.
+  if (_lastSetMs) {
+    uint32_t frameMs = _baud ? (uint32_t)((16UL * 10UL * 1000UL) / _baud) + 3 : 8;
+    if (frameMs > 40) frameMs = 40;
+    while ((millis() - _lastSetMs) < frameMs) delay(1);
+  }
+  while (_stream->available() > 0) _stream->read();  // clear stale RX (>0: closed CDC returns -1)
+  uint8_t q[8];
+  size_t qn = legBuildReadFreqFrame(fam, _addr, q, sizeof(q));
+  if (!qn) return false;
+  catTrace("TX", q, qn);
+  if (_stream->write(q, qn) != qn) return false;
+  _stream->flush();
+  // Collect until a stop byte / quiet interval / deadline, then parse. The CIV
+  // family needs the quiet-interval collect (H6: interface echo shares the 0xFD
+  // terminator with the reply); the ASCII families stop on their terminator.
+  const uint32_t deadline = readBudgetMs ? readBudgetMs : 220;
+  int stopByte = (fam == LEGF_YTXT) ? ';' : (fam == LEGF_KWHT) ? '\r' : -1;
+  uint8_t buf[96]; size_t n = 0;
+  uint32_t t0 = millis(), lastRx = millis();
+  while ((millis() - t0) < deadline && n < sizeof(buf)) {
+    int c = (_stream->available() > 0) ? _stream->read() : -1;
+    if (c < 0) {
+      if (n > 0 && fam == LEGF_CIV && (millis() - lastRx) > 20) break;
+      if (n >= 5 && fam == LEGF_YBIN && (millis() - lastRx) > 20) break;
+      delay(1); continue;
+    }
+    buf[n++] = (uint8_t)c; lastRx = millis();
+    if (stopByte >= 0 && c == stopByte && n > 3) break;
+  }
+  if (n) catTrace("RX", buf, n);
+  uint64_t hz = 0;
+  if (!legParseFreqReply(fam, _addr, buf, n, hz)) return false;
+  hzOut = (freq_t)hz;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  DualRig
+// ---------------------------------------------------------------------------
+DualRig::DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud)
+  : _down(down), _up(up), _usbLeg(usbLeg) {
+  _baud[0] = downBaud; _baud[1] = upBaud;
+  snprintf(_nameBuf, sizeof(_nameBuf), "Dual %s+%s",
+           _down ? _down->name() : "?", _up ? _up->name() : "?");
+}
+
+DualRig::~DualRig() {
+  // The legs cache extStream copies (see the fix31 note on setExternalStream in
+  // rig.h); the engage teardown clears the stream through us BEFORE UsbSerial
+  // dies, exactly as for a single CAT_USB rig, so plain delete is safe here.
+  delete _down; delete _up;
+}
+
+void DualRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
+  (void)baud;
+  // Begin every leg except the USB one(s) -- a USB leg starts when the reconciler
+  // attaches its CDC stream (setExternalStream / setLegExternalStream below),
+  // mirroring the single-rig CAT_USB lifecycle. LAN legs ignore the UART args.
+  if (_down && !legIsUsb(0)) _down->begin(_baud[0], uartNum, rxPin, txPin);
+  if (_up   && !legIsUsb(1)) _up->begin(_baud[1], uartNum, rxPin, txPin);
+}
+
+bool DualRig::ready() const {
+  return _down && _up && _down->ready() && _up->ready();
+}
+
+void DualRig::service() {
+  if (_down) _down->service();
+  if (_up)   _up->service();
+}
+
+void DualRig::setCmdDelay(uint16_t ms) {
+  Rig::setCmdDelay(ms);
+  if (_down) _down->setCmdDelay(ms);
+  if (_up)   _up->setCmdDelay(ms);
+}
+
+void DualRig::setReadBudgetMs(uint16_t ms) {
+  Rig::setReadBudgetMs(ms);
+  if (_down) _down->setReadBudgetMs(ms);
+  if (_up)   _up->setReadBudgetMs(ms);
+}
+
+// Per-leg attach: the dual-USB reconciler binds each leg to its OWN CDC stream
+// (CAT-A for the downlink, CAT-B for the uplink). First attach begins the leg;
+// detach (nullptr) resets so the next attach begins it again.
+void DualRig::setLegExternalStream(int leg, Stream* s) {
+  if (leg < 0 || leg > 1 || !legIsUsb(leg)) return;
+  Rig* L = (leg == 0) ? _down : _up;
+  if (!L) return;
+  L->setExternalStream(s);
+  if (s && !_usbBegun[leg]) {
+    L->begin(_baud[leg], -1, -1, -1);
+    _usbBegun[leg] = true;
+  }
+  if (!s) _usbBegun[leg] = false;
+}
+
+void DualRig::setExternalStream(Stream* s) {
+  Rig::setExternalStream(s);
+  if (_usbLeg < 0) return;
+  if (s) {
+    // A single stream can only serve a SINGLE USB leg. With two, the reconciler
+    // must use setLegExternalStream() per leg; a blanket non-null attach here
+    // would put both radios on one wire, so it is deliberately ignored.
+    if (_usbLeg == 0 || _usbLeg == 1) setLegExternalStream(_usbLeg, s);
+    return;
+  }
+  // nullptr = teardown: detach EVERY USB leg (fix31 rule -- clear each backend's
+  // cached copy before the Stream dies), whether there are one or two.
+  if (legIsUsb(0)) setLegExternalStream(0, nullptr);
+  if (legIsUsb(1)) setLegExternalStream(1, nullptr);
+}
+
+bool DualRig::setMainFreq(freq_t hz) { return _up   ? _up->setMainFreq(hz)   : false; }
+bool DualRig::setSubFreq (freq_t hz) { return _down ? _down->setSubFreq(hz)  : false; }
+bool DualRig::setMainMode(RigMode m) { return _up   ? _up->setMainMode(m)    : false; }
+bool DualRig::setSubMode (RigMode m) { return _down ? _down->setSubMode(m)   : false; }
+bool DualRig::readSubFreq (freq_t& hzOut) { return _down ? _down->readSubFreq(hzOut)  : false; }
+bool DualRig::readMainFreq(freq_t& hzOut) { return _up   ? _up->readMainFreq(hzOut)   : false; }
+bool DualRig::readPtt(bool& tx) { return _up ? _up->readPtt(tx) : false; }
+bool DualRig::canReadFreq() const { return _down && _down->canReadFreq(); }
+
+// ---------------------------------------------------------------------------
+//  Leg + composite factories
+// ---------------------------------------------------------------------------
+Rig* makeLegRig(uint8_t legModel, uint8_t bus, uint8_t civAddr, uint32_t baud,
+                const char* host, uint16_t port, const char* user, const char* pass) {
+  if (legModel >= LEG_NONE) return nullptr;
+  const LegProfile& lp = LEG_RADIOS[legModel];
+  const uint8_t  addr = civAddr ? civAddr : lp.civAddr;
+  const uint32_t bd   = baud    ? baud    : lp.baud;
+  if (bus == LEGBUS_LAN) {
+    // Icom network CAT leg (the IC-705 over its own Wi-Fi being the flagship).
+    // Only the CI-V family has this transport, and only LAN-capable models offer
+    // it in the UI; both are re-checked here so a stale config can't build a
+    // nonsense backend.
+    if (lp.family != LEGF_CIV || !lp.hasLan || !host || !host[0]) return nullptr;
+    return new (std::nothrow) IcomNetRig(addr, lp.name, host, port ? port : 50001,
+                                         user ? user : "", pass ? pass : "");
+  }
+  // Grove serial or USB adapter leg: the plain-CAT backend over a Stream. For a
+  // USB leg the stream is attached later by the reconciler (extStream), exactly
+  // like single-rig CAT_USB.
+  return new (std::nothrow) PlainCatRig((LegModel)legModel, addr, bd);
+}
+
+Rig* makeDualRig(const uint8_t model[2], const uint8_t bus[2], const uint8_t civ[2],
+                 const uint32_t baud[2], const char host[2][40], const uint16_t port[2],
+                 const char user[2][24], const char pass[2][24]) {
+  // Physical-bus conflicts (two Grove legs, two USB legs) are refused by the
+  // settings UI and re-checked by the engage path; this factory only builds.
+  Rig* down = makeLegRig(model[0], bus[0], civ[0], baud[0],
+                         host[0], port[0], user[0], pass[0]);
+  Rig* up   = makeLegRig(model[1], bus[1], civ[1], baud[1],
+                         host[1], port[1], user[1], pass[1]);
+  if (!down || !up) { delete down; delete up; return nullptr; }
+  int usbLeg = -1;
+  if (bus[0] == LEGBUS_USB && bus[1] == LEGBUS_USB) usbLeg = 2;   // dual-USB CAT
+  else if (bus[0] == LEGBUS_USB) usbLeg = 0;
+  else if (bus[1] == LEGBUS_USB) usbLeg = 1;
+  const LegProfile& d = LEG_RADIOS[model[0]];
+  const LegProfile& u = LEG_RADIOS[model[1]];
+  DualRig* dr = new (std::nothrow) DualRig(down, up, usbLeg,
+      baud[0] ? baud[0] : d.baud, baud[1] ? baud[1] : u.baud);
+  if (!dr) { delete down; delete up; return nullptr; }
+  return dr;
+}
+
+// ---------------------------------------------------------------------------
 //  RigctlRig - rigctld (Hamlib NET rigctl) TCP client backend
 // ---------------------------------------------------------------------------
 // ---- base (TCP) transport primitives --------------------------------------
@@ -10937,7 +11682,7 @@ bool CivRig::sendFrame(const uint8_t* payload, size_t len) {
 // any stream that produces bytes as fast as they are consumed -- which a USB serial
 // adapter can, and a UART generally cannot. Both call sites want "clear what is
 // there now", not "read until the end of time", so a cap is a faithful fix and not
-// a behaviour change: 512 bytes is far more than any CI-V frame or echo (longest is
+// a behavior change: 512 bytes is far more than any CI-V frame or echo (longest is
 // ~11 bytes), and the time bound catches a stream that is merely fast.
 void CivRig::drainStale() {
   if (!_stream) return;
@@ -11679,7 +12424,7 @@ static constexpr uint8_t SC_DLH   = 0x01;   // divisor high (when LCR[7]=1)
 //  BridgeStream -- SC16IS750/752 I2C->UART bridge as an Arduino Stream
 // ---------------------------------------------------------------------------
 //  One copy of the register plumbing that Gs232Rotator, EasycommRotator and
-//  SpidRotator each used to carry privately. Behaviour is byte-for-byte what
+//  SpidRotator each used to carry privately. Behavior is byte-for-byte what
 //  they did: same soft reset, same divisor maths, same scratchpad presence test,
 //  same 50 ms THR-empty guard so a stalled bridge can never hang the loop.
 void BridgeStream::wreg(uint8_t reg, uint8_t val) {
@@ -11752,7 +12497,7 @@ int BridgeStream::peek() {
 // ---------------------------------------------------------------------------
 //  UsbRotStream -- the rotator's USB<->serial adapter as a Stream
 // ---------------------------------------------------------------------------
-//  All the hard parts (resident host, device binding, slot rules) live in
+//  All the hard parts (shared-host lifecycle, device binding, slot rules) live in
 //  usbserial.cpp; this is a forwarding shim so the rotator backends see a Stream
 //  like any other.
 UsbRotStream::~UsbRotStream() {
@@ -12589,6 +13334,7 @@ bool IcomNetRig::sendCivPayload(const uint8_t* pl, size_t pllen) {
   return true;
 }
 void IcomNetRig::selBand(bool sub) {
+  if (_plain) return;                     // leg mode: one VFO, nothing to select
   const RadioProfile& p = RADIOS[_model];
   if (p.selLen) sendCivPayload(sub ? p.selSub : p.selMain, p.selLen);
 }
@@ -12603,7 +13349,8 @@ bool IcomNetRig::setModeNet(bool sub, CivMode m, uint8_t filter) {
   return sendCivPayload(pl, 3);
 }
 bool IcomNetRig::readFreqNet(bool sub, freq_t& hzOut) {
-  if (_state != NS_CONNECTED || !RADIOS[_model].canReadFreq) return false;
+  if (_state != NS_CONNECTED) return false;
+  if (!_plain && !RADIOS[_model].canReadFreq) return false;
   selBand(sub);
   while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); }  // drain stale
   uint8_t pl[1] = { 0x03 };
@@ -12742,7 +13489,7 @@ void YaesuRotator::outWrite(uint8_t bits) {
   uint8_t port = YAESU_OUT_ACTIVE_LOW ? (uint8_t)~bits : bits;
   Wire1.beginTransmission(YAESU_OUT_ADDR);
   Wire1.write(port);
-  // M25: honour the I2C result. If the expander didn't ACK, the motor/stop command
+  // M25: honor the I2C result. If the expander didn't ACK, the motor/stop command
   // did NOT reach the hardware -- mark the backend not-ready so the controller stops
   // believing a command (including allStop) succeeded. Still record _out so a later
   // successful write can converge, but don't paper over a dead bus.
@@ -13319,7 +14066,7 @@ bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume)
     _err = "Out of RAM";
     return false;
   }
-  bool cancelled = false;
+  bool canceled = false;
   for (;;) {
     size_t got = f.read((uint8_t*)pbuf, MEMO_PLAY_SAMPLES * sizeof(int16_t));
     if (got < 2) break;                       // EOF
@@ -13327,13 +14074,13 @@ bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume)
     // Wait for the previous block to finish so we don't overrun the channel.
     while (M5Cardputer.Speaker.isPlaying()) {
       M5.delay(1);
-      if (cancelPoll && cancelPoll()) { cancelled = true; break; }
+      if (cancelPoll && cancelPoll()) { canceled = true; break; }
     }
-    if (cancelled) break;
+    if (canceled) break;
     M5Cardputer.Speaker.playRaw(pbuf, nsamp, rate, false, 1, 0);
   }
-  // Let the final block finish unless cancelled.
-  if (!cancelled) {
+  // Let the final block finish unless canceled.
+  if (!canceled) {
     while (M5Cardputer.Speaker.isPlaying()) {
       M5.delay(1);
       if (cancelPoll && cancelPoll()) break;
@@ -13488,6 +14235,8 @@ namespace {
   EspUsbHostCdcSerial* s_cdc    = nullptr;
   EspUsbHostCdcSerial* s_rotCdc = nullptr;   // rotator CDC port (shared host); declared here
                                              //   so CAT end() can check it for shared teardown
+  EspUsbHostCdcSerial* s_cdc2   = nullptr;   // CAT-B: the second radio's CDC (dual-USB CAT),
+                                             //   same shared-host rules as the rotator port
   bool                 s_active = false;
   bool                 s_bound  = false;   // a serial device enumerated
   bool                 s_sawDev = false;   // ANY device enumerated (see begin())
@@ -13567,10 +14316,11 @@ namespace {
   const uint32_t kTaskStack = 4096;
 
   // (The teardown poke timer was removed in fix37. It woke the daemon out of
-  // usb_host_lib_handle_events(portMAX_DELAY) so its cleanup could run -- but that
-  // cleanup can never complete: EspUsbHost::end() kills the CLIENT task first, and
-  // every call in the daemon's cleanup path is client-scoped. Waking the daemon
-  // only got it far enough to fail. See the note in end().)
+  // usb_host_lib_handle_events(portMAX_DELAY) so its cleanup could run -- but under
+  // the OLD (pre-2.4.1) library that cleanup could never complete: its end() killed
+  // the CLIENT task first, and every call in the daemon's cleanup path was
+  // client-scoped. Waking the daemon only got it far enough to fail. See the note
+  // in end().)
 
   // Task-by-name lookups that cannot assert. Two traps in one, both from the
   // FreeRTOS source: (1) xTaskGetHandle() configASSERTs strlen(name) <
@@ -13586,30 +14336,29 @@ namespace {
     return xTaskGetHandle(q);
   }
 
-  // ---- Why the library's own uninstall does not stick (the 259) -----------------
-  // Bench, fix32: teardown freed its memory and the tasks exited, yet a re-engage
-  // failed with ESP_ERR_INVALID_STATE (259) from usb_host_install() -- the IDF host
-  // stack was still installed. Cause, from the two sources side by side:
+  // ---- Why the OLD library's uninstall did not stick (the 259) -- HISTORY --------
+  // Bench, fix32, against the pre-2.4.1 library: teardown freed its memory and the
+  // tasks exited, yet a re-engage failed with ESP_ERR_INVALID_STATE (259) from
+  // usb_host_install() -- the IDF host stack was still installed. Cause, from the
+  // two sources side by side:
   //
   //   * usb_host_uninstall() REFUSES unless process_pending_flags, lib_event_flags
   //     and flags.val are all zero (IDF v5.4 usb_host.c:585-588).
   //   * Only usb_host_lib_handle_events() clears them (line 647 / 669) and it is
   //     also what clears the handling_events flag (line 666).
-  //   * EspUsbHost's taskLoop() calls usb_host_uninstall() and IGNORES ITS RETURN,
-  //     then self-deletes. So the failure is silent: the task vanishes (our wait
-  //     passes, the heap comes back) while the stack stays installed.
+  //   * That library's taskLoop() called usb_host_uninstall() and IGNORED ITS
+  //     RETURN, then self-deleted. So the failure was silent: the task vanished
+  //     (our wait passed, the heap came back) while the stack stayed installed.
   //
-  // Our own poke is what dirties the flags: usb_host_lib_unblock() sets a pending
-  // flag to wake the daemon, the daemon sees !running_ and leaves the loop WITHOUT
-  // another handle_events() call, so that flag is never cleared. The daemon's
-  // uninstall then fails on the very flag we set to get it out.
-  //
-  // So finish the job here, after the tasks are gone: poll handle_events(0) until
-  // it reports nothing left (that clears all three fields), then uninstall
-  // ourselves. Both are legal from any task -- neither checks caller identity, and
-  // by this point the daemon is dead and cannot race us. If the library DID manage
-  // its own uninstall, p_host_lib_obj is already NULL and both calls return
-  // INVALID_STATE harmlessly, which is why this is safe to run unconditionally.
+  // Our own wake poke was what dirtied the flags, and finishUninstall() -- a
+  // hand-rolled "poll usb_host_lib_handle_events(0) until it reports nothing left,
+  // then usb_host_uninstall() ourselves" pass -- finished the job. Both the poke
+  // and the finisher were removed (fix37) when the library grew a correct end():
+  // 2.4.1+ performs that exact handshake internally, and the pinned 2.5.2
+  // (source-checked) splits it into releaseClientResources() /
+  // uninstallHostLibrary() with the uninstall result checked and logged. The
+  // mechanism stays recorded here because it explains end()'s ordering rules below
+  // and will matter again if the library is ever swapped.
 
   // Sample both stacks' high-water marks. MUST be called before teardown starts:
   // uxTaskGetStackHighWaterMark walks a live TCB, and reading one mid-deletion
@@ -13727,9 +14476,11 @@ namespace {
   // address work exists to prevent, walking in through the unguarded door.
   int catPickAdapter();
   bool waitForAdapterKey(const char* key, uint32_t ms);  // dual-USB: await a nominated adapter
+  int  cat2PickAdapter();                                // CAT-B's adapter choice (dual-USB CAT)
 
   uint8_t  s_catAddress = 0xff;      // the adapter the RADIO bound
   uint8_t  s_rotAddress = 0xff;      // the adapter the ROTATOR bound
+  uint8_t  s_cat2Address = 0xff;     // the adapter the SECOND radio (CAT-B) bound
   char     s_catWantKey[40] = {0};   // adapter the user nominated as the RADIO
   char     s_rotWantKey[40] = {0};   // adapter the user nominated as the ROTATOR
   uint32_t s_rotBaud        = 9600;  // rotator line speed (app pushes from settings)
@@ -13814,8 +14565,8 @@ namespace {
   // restoring the console would claim the PHY before release is confirmed. Retain,
   // latch reboot-required, stay quiet.
   void releaseHostIfIdle() {
-    if (!s_host || s_cdc || s_rotCdc) return;   // someone still owns it
-    s_host->end();                              // 2.4.1: drain, deregister, uninstall
+    if (!s_host || s_cdc || s_cdc2 || s_rotCdc) return;   // someone still owns it
+    s_host->end();                              // 2.4.1+: drain, deregister, uninstall
     if (s_host->lastError() == ESP_ERR_TIMEOUT) {
       s_hostTeardownStuck = true;
       s_hostReleased = false;
@@ -13835,7 +14586,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   s_err[0] = 0; s_dev[0] = 0; s_sawDev = false;
 
   // ---- Reuse a live host, or build one the first time --------------------------
-  // Under 2.4.1 a normal disengage releases the host, so most engages build fresh. But the
+  // Under 2.4.1+ a normal disengage releases the host, so most engages build fresh. But the
   // host may still be up because a USB ROTATOR started it (shared host, two adapters) -- in
   // which case s_host is live but s_cdc has never existed. Create just the missing CAT port
   // and fall into the rebind path; allocating a second EspUsbHost over the top of
@@ -13997,12 +14748,12 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     //
     // But delete the OBJECTS is not the same as release the STACK. "begin() failed"
     // does NOT mean usb_host_install() failed: the daemon installs first, then
-    // registers a client, allocates transfers, and so on. In 2.4.1 the daemon owns
+    // registers a client, allocates transfers, and so on. In 2.4.1+ the daemon owns
     // its own teardown -- on any post-install failure it runs the ALL_FREE handshake
     // and uninstalls with the return checked, and end() blocks until that completes.
     // So call end() here exactly as the disengage path does: it either fully releases
     // the stack or reports (via a still-set taskHandle_/lastError) that it could not,
-    // and 2.4.1's begin() refuses to start over an incomplete shutdown rather than
+    // and 2.4.1+'s begin() refuses to start over an incomplete shutdown rather than
     // returning 259 mid-operation. The daemon has already observed running_ = false by
     // this point; if install never happened, end() early-returns harmlessly.
     s_host->end();
@@ -14065,7 +14816,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // 0x1a86, PL2303 0x067b, each with a fixed PID set. Vendor bridges are
     // interface class 0xFF with no standard descriptor, so there is nothing to
     // detect BY -- the library must know them by ID. A clone with an unlisted PID
-    // enumerates fine and is simply not recognised.
+    // enumerates fine and is simply not recognized.
     char msg[64];
     if (s_sawDev) snprintf(msg, sizeof(msg), "Not a known serial adapter: %s", s_dev);
     else          snprintf(msg, sizeof(msg), "%s", "No USB device detected");
@@ -14073,7 +14824,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // unbound so that plugging the adapter in and retrying would rebind in
     // milliseconds instead of re-allocating ~20 KB. That reasoning was written when
     // end() could not actually release the stack, so keeping it cost nothing that
-    // was recoverable anyway. Under 2.4.1 it does release, and the trade inverted:
+    // was recoverable anyway. Under 2.4.1+ it does release, and the trade inverted:
     // the common case is not "retry in five seconds", it is a cable that is not
     // plugged in at all, or a rig that is switched off -- after which the host, the
     // IDF stack, both USB tasks and the serial console stayed gone until reboot for
@@ -14100,10 +14851,10 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   // adapter ALSO plugged in it is the whole ballgame: findSerialDevice(ANY)
   // returns devices_[first-with-bulk-OUT], so two ANY-bound CDC ports both grab
   // the same adapter and the radio's Doppler writes can land on the rotator --
-  // and "first" is enumeration order, which can change across a replug. Honour
+  // and "first" is enumeration order, which can change across a replug. Honor
   // the user's nominated radio adapter if there is one; otherwise take the first
   // enumerated serial device, which is exactly the historical single-adapter
-  // behaviour.
+  // behavior.
   if (s_serDevN > 0) {
     int pick = catPickAdapter();
     if (pick < 0) {
@@ -14151,7 +14902,7 @@ void end() {
 
   snapshotHeadroom();          // while both tasks are alive (see the note there)
 
-  // ---- Full teardown via EspUsbHost 2.4.1's fixed end() ------------------------
+  // ---- Full teardown via EspUsbHost's fixed end() (2.4.1+, pinned 2.5.2) --------
   // History: fix28-fix36 could not tear the IDF host stack down from outside the old
   // library, because its end() killed the CLIENT task first and then ran client-scoped
   // cleanup (releaseInterfaces / device_close / client_deregister) on a dead event queue,
@@ -14168,7 +14919,7 @@ void end() {
   // fully releases or cleanly reports it did not.
   //
   // Order: detach the CDC port, stop+uninstall the host, then delete the objects. begin()'s
-  // 2.4.1 guard (it refuses to start over taskHandle_/clientHandle_ that are not null)
+  // 2.4.1+ guard (it refuses to start over taskHandle_/clientHandle_ that are not null)
   // protects a re-engage from racing an incomplete shutdown, which is the wedge s_hostReleased
   // used to guard by hand; we keep s_hostReleased as a belt-and-suspenders latch anyway.
   stage(USBCAT_STAGE_END_CDC);
@@ -14181,8 +14932,8 @@ void end() {
   // guard is load-bearing, not just defensive: with the rotator still up, CAT disengage
   // must leave the host (and thus the rotator's port) running.
   stage(USBCAT_STAGE_END_HOST);
-  if (s_host && !s_rotCdc) {
-    s_host->end();             // 2.4.1: drains client, deregisters, uninstalls, frees
+  if (s_host && !s_rotCdc && !s_cdc2) {
+    s_host->end();             // 2.4.1+: drains client, deregisters, uninstalls, frees
     // M2: end() can TIME OUT (3 s) and, per the library, leave its tasks alive rather than
     // free in-flight transfers. Deleting the object then would be a use-after-free, and
     // restoring the console would claim the PHY before release is confirmed. On timeout,
@@ -14284,6 +15035,14 @@ namespace {
 
   void setRotErr(const char* m) { snprintf(s_rotErr, sizeof(s_rotErr), "%s", m); }
 
+  // ---- CAT-B (second radio) bookkeeping, shaped exactly like the rotator's ----
+  bool                 s_cat2Active = false;
+  char                 s_cat2Dev[48] = {0};
+  char                 s_cat2Err[72] = {0};
+  char                 s_cat2WantKey[40] = {0};
+
+  void setErr2(const char* m) { snprintf(s_cat2Err, sizeof(s_cat2Err), "%s", m); }
+
   // Bring the host up for a ROTATOR-ONLY configuration (no USB CAT). Same host,
   // same slots, same resident lifetime as CAT's begin() -- just without binding a
   // radio CDC. Whoever gets here first (radio or rotator) pays the ~11.8 KB and
@@ -14302,7 +15061,7 @@ namespace {
     hostCfg.taskStackSize = kTaskStack;
     if (!s_host->begin(hostCfg)) {
       const int e = s_host->lastError();
-      s_host->end();            // 2.4.1: daemon runs its own ALL_FREE uninstall
+      s_host->end();            // 2.4.1+: daemon runs its own ALL_FREE uninstall
       delete s_host; s_host = nullptr;
       consoleUp();
       char m[64]; snprintf(m, sizeof(m), "USB host would not start (err %d)", e);
@@ -14321,6 +15080,79 @@ void catConfigure(const char* key) {
   snprintf(s_catWantKey, sizeof(s_catWantKey), "%s", key ? key : "");
 }
 
+// ---- CAT-B: the second radio's CDC port (dual-USB CAT) ------------------------
+// Shaped like the rotator port: bind one more CDC on the shared host, to ONE
+// nominated adapter, with the same shared-teardown rules. The line settings come
+// from the SECOND leg's radio (its own baud; 8N2 for old-binary Yaesu), because
+// the two radios need not match.
+void cat2Configure(const char* key) {
+  snprintf(s_cat2WantKey, sizeof(s_cat2WantKey), "%s", key ? key : "");
+}
+
+bool cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
+  if (s_cat2Active && s_cdc2) return true;
+  s_cat2Err[0] = 0;
+  if (!s_host) {
+    // Order of engaging the two CAT ports must not matter (same rule as the
+    // rotator): whoever gets here first starts the bare host. hostUpForRotator()
+    // is exactly that starter -- the name predates a second CAT port.
+    if (!hostUpForRotator()) { setErr2("USB host would not start"); return false; }
+  }
+  int pick = cat2PickAdapter();
+  if (pick < 0) { releaseHostIfIdle(); return false; }   // error text already set
+  s_cdc2 = new (std::nothrow) EspUsbHostCdcSerial(*s_host);
+  if (!s_cdc2) { setErr2("Out of RAM for 2nd CAT port"); releaseHostIfIdle(); return false; }
+  // THE critical call, exactly as for the rotator: bind this port to ONE device
+  // address so it can never race CAT-A for the first adapter in devices_.
+  s_cat2Address = s_serDev[pick].address;
+  s_cdc2->setAddress(s_cat2Address);
+  if (!s_cdc2->begin(baud)) {
+    delete s_cdc2; s_cdc2 = nullptr; s_cat2Address = 0xff;
+    setErr2("2nd CAT port would not open");
+    releaseHostIfIdle();
+    return false;
+  }
+  EspUsbHostSerialConfig cfg;
+  cfg.baud     = baud;
+  cfg.dataBits = dataBits;
+  cfg.parity   = (EspUsbHostSerialParity)parity;
+  cfg.stopBits = (EspUsbHostSerialStopBits)stopBits;
+  s_cdc2->setConfig(cfg);
+  s_cdc2->setDtr(true);
+  s_cdc2->setRts(true);
+  // Bounded wait for the CDC interface to come up, exactly as CAT-A and the
+  // rotator do -- connected() reflects USB readiness, not the radio answering.
+  {
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 2500 && !s_cdc2->connected()) {
+      delay(20);
+      feedFreezeWatchdog();
+    }
+  }
+  if (!s_cdc2->connected()) {
+    delete s_cdc2; s_cdc2 = nullptr; s_cat2Address = 0xff;
+    setErr2("2nd radio adapter not responding");
+    releaseHostIfIdle();
+    return false;
+  }
+  snprintf(s_cat2Dev, sizeof(s_cat2Dev), "%s", s_serDev[pick].label);
+  s_cat2Active = true;
+  return true;
+}
+
+void cat2End() {
+  if (s_cdc2) { s_cdc2->end(); delete s_cdc2; s_cdc2 = nullptr; }
+  s_cat2Active = false;
+  s_cat2Address = 0xff;
+  s_cat2Dev[0] = 0;
+  releaseHostIfIdle();   // M2-safe; no-op while CAT-A or the rotator still owns it
+}
+
+bool    cat2Active()      { return s_cat2Active && s_cdc2; }
+Stream* cat2Stream()      { return cat2Active() ? s_cdc2 : nullptr; }
+const char* cat2DeviceName() { return s_cat2Dev; }
+const char* cat2LastError()  { return s_cat2Err; }
+
 void rotConfigure(const char* key, uint32_t baud) {
   snprintf(s_rotWantKey, sizeof(s_rotWantKey), "%s", key ? key : "");
   s_rotBaud = baud ? baud : 9600;
@@ -14329,7 +15161,7 @@ void rotConfigure(const char* key, uint32_t baud) {
 uint8_t scanAdapters() {
   // hostUpForRotator() IS a scan: it brings the host up, registers onDev and
   // waits for enumeration. The name is historical (the rotator was the first
-  // caller); the behaviour is exactly what a scan needs, so reuse it rather than
+  // caller); the behavior is exactly what a scan needs, so reuse it rather than
   // write a second copy of the host bring-up that could drift from it.
   rotTrace("scan: adapters");
   if (!hostUpForRotator()) { rotTrace("scan: host would not start"); return 0; }
@@ -14376,11 +15208,12 @@ int catPickAdapter() {
       if (strcmp(s_serDev[i].key, s_catWantKey) == 0) { pick = i; break; }
     if (pick < 0) { setErr("Radio adapter not found (replug/re-select)"); return -1; }
   } else {
-    // No nominated adapter: take the first one the ROTATOR is not using. With a
-    // single adapter and the rotator on it, that leaves none -- which is the
-    // honest answer, not a silent double-bind.
+    // No nominated adapter: take the first one neither the ROTATOR nor CAT-B is
+    // using. With a single adapter and another port on it, that leaves none --
+    // which is the honest answer, not a silent double-bind.
     for (uint8_t i = 0; i < s_serDevN; ++i) {
       if (rotActive() && s_serDev[i].address == s_rotAddress) continue;
+      if (s_cdc2 && s_serDev[i].address == s_cat2Address) continue;
       pick = i; break;
     }
     if (pick < 0) {
@@ -14389,10 +15222,47 @@ int catPickAdapter() {
       return -1;
     }
   }
-  // Nominated or not, never take the rotator's wire.
+  // Nominated or not, never take the rotator's or CAT-B's wire.
   if (rotActive() && s_serDev[pick].address == s_rotAddress) {
     setErr("That adapter is the rotator's");
     return -1;
+  }
+  if (s_cdc2 && s_serDev[pick].address == s_cat2Address) {
+    setErr("That adapter is the 2nd radio's");
+    return -1;
+  }
+  return pick;
+}
+
+// CAT-B's adapter selection: same order, same refusals as catPickAdapter(), with
+// the exclusion set widened to BOTH other ports (CAT-A and the rotator). An
+// un-nominated CAT-B binds only when the exclusions leave exactly one candidate.
+int cat2PickAdapter() {
+  int pick = -1;
+  if (s_cat2WantKey[0]) {
+    waitForAdapterKey(s_cat2WantKey, 2500);
+    for (uint8_t i = 0; i < s_serDevN; ++i)
+      if (strcmp(s_serDev[i].key, s_cat2WantKey) == 0) { pick = i; break; }
+    if (pick < 0) { setErr2("2nd radio adapter not found (replug/re-select)"); return -1; }
+  } else {
+    int free = -1, freeN = 0;
+    for (uint8_t i = 0; i < s_serDevN; ++i) {
+      if (s_active && s_cdc && s_serDev[i].address == s_catAddress) continue;
+      if (rotActive() && s_serDev[i].address == s_rotAddress) continue;
+      free = i; freeN++;
+    }
+    if (freeN == 1) pick = free;                 // unambiguous: take the one left over
+    else {
+      setErr2(freeN == 0 ? "No free adapter for 2nd radio"
+                         : "Nominate the 2nd radio's adapter");
+      return -1;
+    }
+  }
+  if (s_active && s_cdc && s_serDev[pick].address == s_catAddress) {
+    setErr2("That adapter is the radio's"); return -1;
+  }
+  if (rotActive() && s_serDev[pick].address == s_rotAddress) {
+    setErr2("That adapter is the rotator's"); return -1;
   }
   return pick;
 }
@@ -14481,6 +15351,7 @@ bool rotBegin() {
     // of for a second adapter to plug in.
     for (uint8_t i = 0; i < s_serDevN; ++i) {
       if (s_active && s_cdc && s_serDev[i].address == s_catAddress) continue;
+      if (s_cdc2 && s_serDev[i].address == s_cat2Address) continue;
       pick = i; break;
     }
     if (pick < 0) {
@@ -14493,9 +15364,13 @@ bool rotBegin() {
     if (s_serDevN == 1) rotTrace("rot: one adapter present, using it");
   }
 
-  // Nominated or not, never take the radio's wire.
+  // Nominated or not, never take either radio's wire.
   if (s_active && s_cdc && s_serDev[pick].address == s_catAddress) {
     setRotErr("That adapter is the radio's"); rotTrace(s_rotErr);
+    releaseHostIfIdle(); return false;
+  }
+  if (s_cdc2 && s_serDev[pick].address == s_cat2Address) {
+    setRotErr("That adapter is the 2nd radio's"); rotTrace(s_rotErr);
     releaseHostIfIdle(); return false;
   }
   { char b[80]; snprintf(b, sizeof(b), "rot: binding addr=%u baud=%lu",
@@ -14553,10 +15428,10 @@ void rotEnd() {
   s_rotActive = false;
   s_rotAddress = 0xff;
   s_rotDev[0] = 0;
-  // Shared host: tear it down only when CAT isn't still using it (symmetric with end()).
-  if (s_host && !s_cdc) {
+  // Shared host: tear it down only when neither CAT port still uses it (symmetric with end()).
+  if (s_host && !s_cdc && !s_cdc2) {
     rotTrace("rot: releasing host");
-    s_host->end();             // 2.4.1: full drain/deregister/uninstall
+    s_host->end();             // 2.4.1+: full drain/deregister/uninstall
     // M2: same timeout handling as end() -- on a stuck teardown, retain the host, latch
     // reboot-required, and leave the console down rather than deleting under live tasks.
     if (s_host->lastError() == ESP_ERR_TIMEOUT) {
@@ -14574,7 +15449,7 @@ void rotEnd() {
 bool     hostReleased()           { return s_hostReleased; }
 bool     hostTeardownStuck()      { return s_hostTeardownStuck; }
 String   uninstallDiag() {
-  // EspUsbHost 2.4.1 performs the drain/deregister/uninstall handshake itself and logs
+  // EspUsbHost 2.4.1+ performs the drain/deregister/uninstall handshake itself and logs
   // any failure via ESP_LOG. We no longer hand-roll it, so there is no extra forensic
   // string to surface here; the About screen falls back to hostReleased()/lastError().
   return String();
@@ -15843,7 +16718,7 @@ int SatDb::loadGpFromFilePreferring(const char* path, const uint32_t* favs, int 
 }
 
 // ===========================================================================
-//  GP elements -> TLE line-pair (only to initialise the SGP4 propagator)
+//  GP elements -> TLE line-pair (only to initialize the SGP4 propagator)
 // ===========================================================================
 //  Field layout follows the canonical NORAD two-line spec. This is host-tested
 //  by round-tripping the elements back through spec column offsets and by
@@ -16213,7 +17088,7 @@ void Location::setManual(double lat, double lon, double altM) {
   _obs.valid = true; _obs.fromGps = false;
 }
 
-// Maidenhead grid -> lat/lon (centre of the square). Accepts 4 or 6 chars.
+// Maidenhead grid -> lat/lon (center of the square). Accepts 4 or 6 chars.
 bool Location::gridToLatLon(const String& gridIn, double& latOut, double& lonOut) {
   String g = gridIn; g.trim(); g.toUpperCase();
   // M18: accept EXACTLY 4 or 6 characters (8-char extended locators aren't supported),
@@ -16232,7 +17107,7 @@ bool Location::gridToLatLon(const String& gridIn, double& latOut, double& lonOut
     lon += (g[4] - 'A') * (2.0 / 24.0) + (1.0 / 24.0);
     lat += (g[5] - 'A') * (1.0 / 24.0) + (0.5 / 24.0);
   } else {
-    lon += 1.0; lat += 0.5;   // centre of the 2x1 deg square
+    lon += 1.0; lat += 0.5;   // center of the 2x1 deg square
   }
   latOut = lat; lonOut = lon;
   return true;
@@ -16347,7 +17222,7 @@ uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session 
 uint32_t Net::TLS_MIN_BLOCK  = 28000;   // below the ~31.7 KB resident block; catches real OOM
 
 // --- 0.9.41 proactive WiFi-cycle defrag (see net.h / docs/design/HEAP_WIFI_CYCLE.md) ---
-// Set TLS_WIFI_CYCLE=false to revert to the passive-wait-only reclaim behaviour.
+// Set TLS_WIFI_CYCLE=false to revert to the passive-wait-only reclaim behavior.
 bool     Net::TLS_WIFI_CYCLE      = true;   // enable the last-resort WiFi cycle
 uint32_t Net::WIFI_CYCLE_MIN_GAP_MS = 30000; // don't cycle more than once per 30 s
 
@@ -16356,7 +17231,7 @@ uint32_t Net::WIFI_CYCLE_MIN_GAP_MS = 30000; // don't cycle more than once per 3
 // once fds wedge and connect() starts returning -1.
 bool Net::hardResetWifi() {
   Serial.println("[net] hard WiFi reset (full radio re-init)");
-  // Fully re-initialise the radio rather than reconnect() the old association. On
+  // Fully re-initialize the radio rather than reconnect() the old association. On
   // this part, after the PHY has been powered down (here, or by the charge-screen
   // WIFI_OFF), a bare reconnect() can reassociate (IP/RSSI look fine) yet leave the
   // stack in a degraded state where every outbound connect() returns -1 -- the
@@ -17947,7 +18822,7 @@ bool Predictor::setSat(SatEntry& s) {
   return _haveSat;
 }
 
-// Forward model for the state-vector -> GP fitter: initialise SGP4 from a candidate
+// Forward model for the state-vector -> GP fitter: initialize SGP4 from a candidate
 // SatEntry's GP elements and propagate to `unixSec`, returning the TEME state. Uses a
 // LOCAL Sgp4 object so it never disturbs the live tracking propagator (_sat).
 bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]) {
@@ -17971,7 +18846,7 @@ bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3
     l1[68] = '0' + (sum % 10); }
   // static: an Sgp4 carries a full elsetrec (hundreds of bytes). Keeping it off the
   // stack matters because this is the deepest frame before SGP4's own large frames.
-  // Safe here: single-threaded, and fp.init() fully re-initialises it every call.
+  // Safe here: single-threaded, and fp.init() fully re-initializes it every call.
   static Sgp4 fp;
   if (!fp.init((char*)"FIT", l1, l2)) return false;     // now always re-parses (line 1 differs)
   if (fp.satrec.error != 0) return false;
@@ -18048,7 +18923,7 @@ bool Predictor::lookFor(SatEntry& s, time_t t, float& az, float& el, float& rang
 
 // Range rate from the SGP4 velocity vector at a fractional instant -- the
 // method Gpredict uses (sgp4sdp4 converts ECI position+velocity straight to
-// observer-centred range rate). Far cleaner near TCA than differencing slant
+// observer-centered range rate). Far cleaner near TCA than differencing slant
 // range, and evaluated at the exact time rather than the nearest whole second.
 // This Hopperpop build uses the older Vallado propagator signature
 // sgp4(whichconst, satrec, tsince_min, r[3], v[3]); pass WGS72 (the constant set
@@ -18677,6 +19552,36 @@ bool Settings::load() {
   // uint16_t catPort as a baud. validate() further clamps to the supported UART set.
   catGroveBaud = d["catgbaud"] | (uint32_t)115200;
   strncpy(catUser, d["catuser"] | "", sizeof(catUser)-1); catUser[sizeof(catUser)-1]=0;
+  // Dual-rig legs (CAT_DUAL). Missing keys leave the "no legs assigned" defaults.
+  for (int L = 0; L < 2; ++L) {
+    const char* K = L ? "u" : "d";           // key suffix: d = downlink, u = uplink
+    char k[16];
+    snprintf(k, sizeof(k), "dl%smodel", K); dualModel[L] = d[k] | (uint8_t)LEG_NONE;
+    if (dualModel[L] >= LEG_COUNT) dualModel[L] = LEG_NONE;
+    snprintf(k, sizeof(k), "dl%sbus",  K);  dualBus[L]  = d[k] | (uint8_t)LEGBUS_GROVE;
+    if (dualBus[L] >= LEGBUS_N) dualBus[L] = LEGBUS_GROVE;
+    snprintf(k, sizeof(k), "dl%sciv",  K);  dualCiv[L]  = d[k] | (uint8_t)0;
+    snprintf(k, sizeof(k), "dl%sbaud", K);  dualBaud[L] = d[k] | (uint32_t)0;
+    snprintf(k, sizeof(k), "dl%shost", K);
+    strncpy(dualHost[L], d[k] | "", sizeof(dualHost[L])-1); dualHost[L][sizeof(dualHost[L])-1]=0;
+    snprintf(k, sizeof(k), "dl%sport", K);  dualPort[L] = d[k] | (uint16_t)50001;
+    snprintf(k, sizeof(k), "dl%suser", K);
+    strncpy(dualUser[L], d[k] | "", sizeof(dualUser[L])-1); dualUser[L][sizeof(dualUser[L])-1]=0;
+    snprintf(k, sizeof(k), "dl%spass", K);
+    strncpy(dualPass[L], d[k] | "", sizeof(dualPass[L])-1); dualPass[L][sizeof(dualPass[L])-1]=0;
+  }
+  strncpy(dualUsbKey[0], d["dlusbkeyd"] | "", sizeof(dualUsbKey[0])-1); dualUsbKey[0][sizeof(dualUsbKey[0])-1]=0;
+  strncpy(dualUsbKey[1], d["dlusbkeyu"] | "", sizeof(dualUsbKey[1])-1); dualUsbKey[1][sizeof(dualUsbKey[1])-1]=0;
+  // Legacy (0.9.68 development): a single "dlusbkey" served the then-single USB leg.
+  // Migrate it onto whichever leg is on the USB bus (downlink wins a tie).
+  if (!dualUsbKey[0][0] && !dualUsbKey[1][0]) {
+    const char* legacy = d["dlusbkey"] | "";
+    if (legacy[0]) {
+      int L = (dualBus[0] == LEGBUS_USB) ? 0 : (dualBus[1] == LEGBUS_USB) ? 1 : 0;
+      strncpy(dualUsbKey[L], legacy, sizeof(dualUsbKey[L])-1);
+      dualUsbKey[L][sizeof(dualUsbKey[L])-1]=0;
+    }
+  }
   strncpy(catPass, d["catpass"] | "", sizeof(catPass)-1); catPass[sizeof(catPass)-1]=0;
   vfoType    = d["vfotype"] | (uint8_t)VFO_MAIN_UP_SUB_DOWN;
   rxOnlyVfo  = d["rxovfo"]  | (uint8_t)RXO_FOLLOW;
@@ -18867,6 +19772,19 @@ bool Settings::save() {
   d["catusbkey"] = catUsbKey;
   d["conslog"] = consoleLog;
   d["catuser"] = catUser; d["catpass"] = catPass;
+  for (int L = 0; L < 2; ++L) {                      // dual-rig legs (CAT_DUAL)
+    const char* K = L ? "u" : "d";
+    char k[16];
+    snprintf(k, sizeof(k), "dl%smodel", K); d[k] = dualModel[L];
+    snprintf(k, sizeof(k), "dl%sbus",  K);  d[k] = dualBus[L];
+    snprintf(k, sizeof(k), "dl%sciv",  K);  d[k] = dualCiv[L];
+    snprintf(k, sizeof(k), "dl%sbaud", K);  d[k] = dualBaud[L];
+    snprintf(k, sizeof(k), "dl%shost", K);  d[k] = dualHost[L];
+    snprintf(k, sizeof(k), "dl%sport", K);  d[k] = dualPort[L];
+    snprintf(k, sizeof(k), "dl%suser", K);  d[k] = dualUser[L];
+    snprintf(k, sizeof(k), "dl%spass", K);  d[k] = dualPass[L];
+  }
+  d["dlusbkeyd"] = dualUsbKey[0]; d["dlusbkeyu"] = dualUsbKey[1];
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
   d["rxovfo"] = rxOnlyVfo;
   d["catdly"] = catDelayMs;
@@ -18945,20 +19863,20 @@ bool Settings::save() {
 // ===========================================================================
 
 // Palette indices. The display canvas is a palette sprite (4bpp since 0.9.53;
-// depth set by CANVAS_DEPTH in App::setup, colours unchanged) -- on a
+// depth set by CANVAS_DEPTH in App::setup, colors unchanged) -- on a
 // palette sprite M5GFX/LGFX uses the value passed to fill/draw as a PALETTE
-// INDEX, not as a 16-bit colour (a 16-bit colour would be truncated to a bogus
+// INDEX, not as a 16-bit color (a 16-bit color would be truncated to a bogus
 // index). So the CL_* names below are indices into CL_PALETTE[], and every
 // existing canvas.fill/draw(..., CL_x) call passes the right index unchanged.
-// CL_PALETTE[] holds the real RGB565 colours, installed via createPalette() at
-// startup. Indices 11/12 are the dim greys used for grid/axis lines that were
+// CL_PALETTE[] holds the real RGB565 colors, installed via createPalette() at
+// startup. Indices 11/12 are the dim grays used for grid/axis lines that were
 // previously raw 565 literals (0x2104/0x18E3 -> CL_DGREY, 0x4208 -> CL_MGREY).
 enum : uint8_t {
   CL_BLACK = 0, CL_WHITE = 1, CL_GREEN = 2, CL_RED = 3,
   CL_YELLOW = 4, CL_CYAN = 5, CL_ORANGE = 6, CL_GREY = 7,
   CL_BLUE = 8, CL_DGREEN = 9, CL_SELBG = 10, CL_DGREY = 11, CL_MGREY = 12
 };
-// Parallel table of the real 16-bit 565 colours, indexed by the CL_* values.
+// Parallel table of the real 16-bit 565 colors, indexed by the CL_* values.
 // CL_SELBG: a calmer medium forest green for the selection bar (pure green
 // glares and blooms thin glyphs with black text). Order MUST match the enum.
 static const uint16_t CL_PALETTE[] = {
@@ -19077,7 +19995,7 @@ static String fmtCountdown(long s) {
 // so deep-space orbits are already propagated CORRECTLY, with no work on CardSat's
 // part. Verified by compiling that library and driving an AO-40-class HEO through
 // CardSat's exact path (gpToTle -> Sgp4::init -> twoline2rv -> sgp4init): method
-// 'd', resonance initialised, propagates clean.
+// 'd', resonance initialized, propagates clean.
 //
 // Kept purely as a LABEL: a deep-space orbit behaves so unlike a LEO pass (a GEO
 // bird simply sits there) that naming the model is useful. NOT a warning -- an
@@ -19219,12 +20137,12 @@ void App::setup() {
   // smaller footprint lifts the largest contiguous free block so the BearSSL TLS
   // handshake fits with the sprite KEPT allocated -- we never delete/recreate it
   // (a freed sprite block does not reliably return on this M5GFX/IDF combo, which
-  // froze the screen). Colours come from CL_PALETTE via the index scheme (see the
+  // froze the screen). Colors come from CL_PALETTE via the index scheme (see the
   // CL_* enum); createPalette installs them. Depth is set by CANVAS_DEPTH below.
-  // Display sprite colour depth. 4bpp = 16-colour palette sprite = ~16.2 KB
+  // Display sprite color depth. 4bpp = 16-color palette sprite = ~16.2 KB
   // (240x135/2), vs 32 KB at 8bpp. Our palette has 13 entries (CL_BLACK..CL_MGREY),
-  // well inside 4bpp's 16-colour limit, so every CL_* index and CL_PALETTE entry is
-  // used unchanged -- colours are byte-for-byte identical, only the per-pixel storage
+  // well inside 4bpp's 16-color limit, so every CL_* index and CL_PALETTE entry is
+  // used unchanged -- colors are byte-for-byte identical, only the per-pixel storage
   // halves. Halving this resident block lifts the largest contiguous free region
   // (the figure that gates TLS handshakes) by ~16 KB. To REVERT: set CANVAS_DEPTH
   // back to 8 (nothing else needs to change). Do NOT delete/recreate the sprite at
@@ -19462,7 +20380,7 @@ void App::setup() {
   if (timeIsSet() && favN) buildSchedule();
 
   // If we woke from the deep-sleep-until-pass timer, jump to the schedule so
-  // the imminent pass is front and centre (the AOS alarm will sound shortly).
+  // the imminent pass is front and center (the AOS alarm will sound shortly).
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
     if (favN && timeIsSet()) { buildSchedule(); schedSel = 0; screen = SCR_SCHEDULE; }
   }
@@ -19496,6 +20414,47 @@ void App::applyRadioFromCfg() {
   }
 #endif
   if (rig) { delete rig; rig = nullptr; }
+  if (cfg.catType == CAT_DUAL) {
+    // Native dual rig: two legs composed into one full-duplex Rig (DualRig).
+    // Physical-bus conflicts are refused HERE, at the single choke point every
+    // config path funnels through, so a stale or hand-edited config can never
+    // put two legs on one wire (the matrix in DUALRIG_MAINFW_INTEGRATION_SCOPE.md).
+    const bool aG = cfg.dualBus[0] == LEGBUS_GROVE, bG = cfg.dualBus[1] == LEGBUS_GROVE;
+    const bool aU = cfg.dualBus[0] == LEGBUS_USB,   bU = cfg.dualBus[1] == LEGBUS_USB;
+    if (aG && bG) { setStatus("Dual: both legs on Grove - one UART", 5000); return; }
+    if (aU && bU) {
+      // Dual-USB CAT (Phase 3): two radios on the one PHY through a hub -- CAT-A
+      // for the downlink, CAT-B for the uplink, each bound to its own adapter.
+      // Heap headroom for the second port was confirmed by the hardware owner;
+      // enumeration behavior is on the bench matrix. Two hard limits stay:
+      if (rotUsesUsb()) {
+        // Three CDCs behind a hub presses the S3's 8 host channels and has no
+        // bench story -- refuse the combination rather than mis-enumerate.
+        setStatus("Dual USB + USB rotator: move rotator off USB", 6000); return;
+      }
+      if (cfg.dualUsbKey[0][0] && cfg.dualUsbKey[1][0] &&
+          strcmp(cfg.dualUsbKey[0], cfg.dualUsbKey[1]) == 0) {
+        setStatus("Dual USB: legs share one adapter - renominate", 6000); return;
+      }
+    }
+#if !CARDSAT_HAS_USBCAT
+    if (aU || bU) { setStatus("Dual: no USB CAT in this build", 5000); return; }
+#endif
+    if (cfg.dualModel[1] < LEG_NONE && LEG_RADIOS[cfg.dualModel[1]].rxOnly)
+      setStatus("Dual: uplink leg is RX-only", 4000);   // warn, don't refuse
+    rig = makeDualRig(cfg.dualModel, cfg.dualBus, cfg.dualCiv, cfg.dualBaud,
+                      cfg.dualHost, cfg.dualPort, cfg.dualUser, cfg.dualPass);
+    if (!rig) { setStatus("Dual: legs not configured", 4000); return; }
+    rig->setCmdDelay(cfg.catDelayMs);
+#if CARDSAT_HAS_USBCAT
+    // A USB leg starts like single-rig CAT_USB: the reconciler in loop() opens
+    // the adapter and attaches the stream when the radio is engaged; DualRig
+    // then begins that leg on attach. Non-USB legs begin right here.
+    if (aU || bU) { return; }
+#endif
+    rig->begin(0, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
+    return;
+  }
   rig = makeRig(m, cfg.catType, cfg.catHost, cfg.catPort, cfg.catUser, cfg.catPass, cfg.catGroveBaud);
   if (!rig) return;
   // CI-V wiring mode must be set before begin() (it decides one-pin vs two-pin
@@ -19554,7 +20513,9 @@ void App::yieldGroveIfTaken(const char* who) {
 // claimant ('who') wins and the other Grove user is turned off, with a clear message --
 // so the two peripherals can never initialize the same pins at once.
 bool App::groveCatVsGpsArbitrate(const char* who) {
-  bool catGrove = (cfg.catType == CAT_RIGCTL_GROVE);
+  bool catGrove = (cfg.catType == CAT_RIGCTL_GROVE) ||
+                  (cfg.catType == CAT_DUAL &&
+                   (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_GROVE));
   bool gpsGrove = cfg.useGps &&
                   (cfg.gpsSource == GPS_SRC_GROVE_9600 || cfg.gpsSource == GPS_SRC_GROVE_115K);
   if (!(catGrove && gpsGrove)) return false;    // no direct conflict
@@ -19614,13 +20575,14 @@ void App::scanUsbAdapters() {
 #endif
 }
 
-void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio) {
+void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio,
+                          const char* alsoTaken) {
 #if CARDSAT_HAS_USBCAT
   const uint8_t n = UsbSerial::serialDeviceCount();
   if (n == 0) { setStatus("Scan USB adapters first", 4000); return; }
 
   // The OTHER port's adapter is shown in the list but never selectable: skipping
-  // it while cycling is what makes it "greyed out" rather than hidden. Hiding it
+  // it while cycling is what makes it "grayed out" rather than hidden. Hiding it
   // would be worse -- an operator looking for the adapter they can see plugged in
   // would think CardSat had lost it, instead of learning it is the radio's.
   // Gate on the other port actually USING USB *and being enabled*: a stale catUsbKey/
@@ -19628,10 +20590,19 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio) {
   // side isn't a USB device at all, or is set to None. rotUsesUsb() already folds in the
   // rotator's enable/None/transport check; the radio side must exclude RIG_NONE too, so a
   // "no radio" config with catType still on USB doesn't reserve the radio's old adapter.
-  const bool otherUsesUsb = isRadio
-      ? rotUsesUsb()
-      : (cfg.catType == CAT_USB && (RadioModel)cfg.radioModel != RIG_NONE);
-  const char* taken = otherUsesUsb ? (isRadio ? cfg.rotUsbKey : cfg.catUsbKey) : "";
+  // Up to TWO keys can be excluded now: the rotator picker must skip BOTH radio
+  // legs' adapters in a dual-USB config, and a dual leg's picker skips the OTHER
+  // leg's (passed in as alsoTaken by the Dual-Rig screen).
+  const char* taken  = "";
+  const char* taken2 = alsoTaken ? alsoTaken : "";
+  if (isRadio) {                           // radio-side picker: exclude the rotator's
+    if (rotUsesUsb()) taken = cfg.rotUsbKey;
+  } else if (catUsesUsb()) {               // rotator picker: exclude the radio leg(s)
+    if (cfg.catType == CAT_DUAL) {
+      if (cfg.dualBus[0] == LEGBUS_USB) taken  = cfg.dualUsbKey[0];
+      if (cfg.dualBus[1] == LEGBUS_USB) taken2 = cfg.dualUsbKey[1];
+    } else taken = cfg.catUsbKey;
+  }
 
   // Current index: 0 = Auto, 1..n = adapter[i-1]
   int cur = 0;
@@ -19648,7 +20619,8 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio) {
     cur = (cur + step + slots) % slots;
     if (cur == 0) break;                                       // Auto is always free
     const char* k = UsbSerial::serialDeviceKey(cur - 1);
-    if (taken[0] && strcmp(k, taken) == 0) { skippedTaken = true; continue; }
+    if ((taken[0]  && strcmp(k, taken)  == 0) ||
+        (taken2[0] && strcmp(k, taken2) == 0)) { skippedTaken = true; continue; }
     break;                                                     // free: take it
   }
 
@@ -19684,7 +20656,7 @@ const char* App::rotTransportConflict() const {
     // the protocol (CI-V, Yaesu, Kenwood all do). CAT_RIGCTL_GROVE claims the same
     // UART1 (rigctl over the Grove cable). USB/LAN/rigctl-net CAT leave Grove free,
     // which is exactly the combination this transport is for.
-    if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE)
+    if (catUsesGroveWire())
       return "Grove rotator needs CAT on USB or LAN";
     // The Grove GPS options are the SAME two pins (config.h GpsSource).
     if (cfg.gpsSource == GPS_SRC_GROVE_9600 || cfg.gpsSource == GPS_SRC_GROVE_115K)
@@ -19765,7 +20737,7 @@ bool App::ensureRotatorReady() {
 // +180) so the rapid azimuth swing of a high/overhead pass is moved onto the
 // faster elevation axis instead of forcing a ~360 deg slew across the rotator's
 // azimuth stop. Mirrors Gpredict's is_flipped_pass: sample the az track across
-// the pass, normalise into the configured az window, and flip if it jumps more
+// the pass, normalize into the configured az window, and flip if it jumps more
 // than 180 deg between samples. Only meaningful for 0-180 deg elevation rotators
 // (rotFlip); the 450 deg overlap range avoids the same discontinuity differently.
 bool App::passNeedsFlip(time_t aos, time_t los) {
@@ -19788,7 +20760,7 @@ bool App::passNeedsFlip(time_t aos, time_t los) {
 
 // Send a commanded bearing to the active rotator, applying the configured
 // azimuth-range convention. CardSat computes az as 0-360 (0=North); for a
-// rotator whose azimuth axis is centred on North and runs -180..+180, re-express
+// rotator whose azimuth axis is centered on North and runs -180..+180, re-express
 // the bearing in that range (e.g. 270 -> -90). GS-232 controllers are natively
 // 0-360 and re-wrap negatives, so in practice this only changes rotctld output.
 // Park the rotator, then (for a USB rotator only) release the USB host so an idle rotator
@@ -19822,7 +20794,7 @@ void App::rotPoint(float az, float el) {
   while (az >= 360.0f) az -= 360.0f;     // target bearing in [0,360)
   while (az < 0.0f)    az += 360.0f;
   if (cfg.rotAzRange == ROT_AZ_180) {
-    if (az > 180.0f) az -= 360.0f;        // centre on North: [-180,+180]
+    if (az > 180.0f) az -= 360.0f;        // center on North: [-180,+180]
   } else if (cfg.rotAzRange == ROT_AZ_450) {
     // 90 deg overlap: a bearing <=90 is also reachable as +360 (360..450 region).
     // Pick whichever representation is nearer the last commanded position, so a
@@ -23125,7 +24097,7 @@ tr.pclk{cursor:pointer}tr.pclk:active td{background:#283040}tr.psel td{backgroun
 <div class="card span2"><div class="tools">
 <input id="search" placeholder="filter..." style="flex:1;min-width:120px">
 <select id="sat" style="flex:2;min-width:150px"></select>
-<button id="fav" class="flt" title="favourite">&#9734;</button>
+<button id="fav" class="flt" title="favorite">&#9734;</button>
 <button id="go" class="flt">Track</button></div></div>
 <div class="cols">
 <div class="card live">
@@ -24059,7 +25031,7 @@ void App::webdSendStatusJson() {
   j += "\"cstep\":"; j += (long)calStep; j += ",";
 
   // --- Stable machine-readable extension (0.9.62). Everything below is documented in
-  // docs/interfaces/API_STATUS.md and is intended to be a stable contract for external
+  // docs/interfaces/WEB_API.md ("Stable extension") and is intended to be a stable contract for external
   // tooling; the keys above grew organically for the built-in web panel. ---
   // Firmware + UTC + observer.
   j += "\"ver\":\""; j += FW_VERSION; j += "\",";
@@ -24211,7 +25183,7 @@ void App::webdSendPassesJson() {
   webdCli.print(F("]}"));
 }
 
-// GET /api/orbit -- the orbital-analysis numbers, the same values the nine
+// GET /api/orbit -- the orbital-analysis numbers, the same values the
 // on-device Orbit pages show, as one JSON object. buildOrbit() populates the
 // member fields (decay, ascending node, pass-window stats, next-pass sunlit
 // fraction); the per-page scalars below re-derive from the elements with the
@@ -24276,7 +25248,7 @@ void App::webdSendOrbitJson() {
     if (!pred.sunlitAt(now + (time_t)((double)period * k / Necl))) ecl++;
   double fEcl = Necl ? (double)ecl / Necl : 0.0;
 
-  // Orbit position: true anomaly via equation of centre, time to peri/apo.
+  // Orbit position: true anomaly via equation of center, time to peri/apo.
   double periodS = (mm > 0) ? 86400.0 / mm : 0.0, e = s->ecc, M = maNow * D2R;
   double nu = M + (2*e - 0.25*e*e*e) * sin(M) + 1.25*e*e * sin(2*M)
             + (13.0/12.0)*e*e*e * sin(3*M);
@@ -24397,7 +25369,7 @@ bool App::webdSelectSat(uint32_t norad) {
 }
 
 // GET /api/tx -- the transponder list for the active satellite, plus the current
-// index, so the web radio panel can show a labelled dropdown and select by index.
+// index, so the web radio panel can show a labeled dropdown and select by index.
 void App::webdSendTxJson() {
   webdCli.print(F("HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n"
                   "Connection:close\r\n\r\n"));
@@ -24802,15 +25774,34 @@ void App::loop() {
   // engaged -- which held the host, kept the console down, and made the rotator refuse the
   // radio's old adapter with "That adapter is the radio's" long after the radio stopped
   // using it.
-  if (cfg.catType == CAT_USB || UsbSerial::active()) {
-    // want is only ever true for an actual USB radio. If catType is no longer USB, want is
+  if (catUsesUsb() || UsbSerial::active()) {
+    // want is only ever true for an actual USB radio (single-rig CAT_USB, or a
+    // CAT_DUAL leg whose bus is USB). If neither holds any longer, want is
     // false, so the teardown branch below fires and releases the stale session.
-    const bool want = (cfg.catType == CAT_USB) && radioOut && rig;
+    const bool want = catUsesUsb() && radioOut && rig;
+    // Which radio is on the adapter decides the line settings. For CAT_DUAL it is
+    // the USB LEG's profile (LEG_RADIOS), not the single-rig radioModel; the old
+    // Yaesu 5-byte binary family is the 8N2 one in both catalogs.
+    const int dLeg = (cfg.catType == CAT_DUAL)
+                       ? (cfg.dualBus[0] == LEGBUS_USB ? 0
+                          : cfg.dualBus[1] == LEGBUS_USB ? 1 : -1) : -1;
+    // Dual-USB CAT: both legs on USB. CAT-A (begin/stream) carries the DOWNLINK
+    // (dLeg lands on 0 above); CAT-B (cat2*) carries the uplink, brought up right
+    // after CAT-A engages, and re-tried below if its adapter shows up late.
+    const bool dualBoth = (cfg.catType == CAT_DUAL) &&
+                          cfg.dualBus[0] == LEGBUS_USB && cfg.dualBus[1] == LEGBUS_USB;
     if (want && !UsbSerial::active()) {
-      uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[(RadioModel)cfg.radioModel].defaultBaud;
-      // Yaesu CAT is 8N2; CI-V and Kenwood are 8N1. The adapter must be told, because
-      // the protocol backend cannot -- it only has a Stream (see yaesu.cpp begin()).
-      const bool yaesu = (RADIOS[(RadioModel)cfg.radioModel].proto == PROTO_YAESU);
+      uint32_t baud; bool yaesu;
+      if (dLeg >= 0) {
+        const LegProfile& lp = LEG_RADIOS[cfg.dualModel[dLeg]];
+        baud  = cfg.dualBaud[dLeg] ? cfg.dualBaud[dLeg] : lp.baud;
+        yaesu = (lp.family == LEGF_YBIN);
+      } else {
+        baud  = cfg.civBaud ? cfg.civBaud : RADIOS[(RadioModel)cfg.radioModel].defaultBaud;
+        // Yaesu CAT is 8N2; CI-V and Kenwood are 8N1. The adapter must be told, because
+        // the protocol backend cannot -- it only has a Stream (see yaesu.cpp begin()).
+        yaesu = (RADIOS[(RadioModel)cfg.radioModel].proto == PROTO_YAESU);
+      }
       // Paint BEFORE the call, not after. UsbSerial::begin() runs on this task, so
       // if it blocks, loop() never comes back and draw() never runs again -- the
       // screen freezes showing whatever was last painted ("Radio ON"), which is
@@ -24840,8 +25831,13 @@ void App::loop() {
                     (unsigned long)(millis() / 1000));
           Logstore::raw(Logstore::LOG_USB, "# CardSat USB CAT engage trace");
           Logstore::rawf(Logstore::LOG_USB, "# radio=%s baud=%lu civaddr=0x%02X catdelay=%u",
-                    RADIOS[(RadioModel)cfg.radioModel].name, (unsigned long)baud,
-                    (unsigned)(cfg.civAddr ? cfg.civAddr : RADIOS[(RadioModel)cfg.radioModel].civAddr),
+                    dLeg >= 0 ? LEG_RADIOS[cfg.dualModel[dLeg]].name
+                              : RADIOS[(RadioModel)cfg.radioModel].name,
+                    (unsigned long)baud,
+                    dLeg >= 0
+                      ? (unsigned)(cfg.dualCiv[dLeg] ? cfg.dualCiv[dLeg]
+                                                     : LEG_RADIOS[cfg.dualModel[dLeg]].civAddr)
+                      : (unsigned)(cfg.civAddr ? cfg.civAddr : RADIOS[(RadioModel)cfg.radioModel].civAddr),
                     (unsigned)cfg.catDelayMs);
           Logstore::rawf(Logstore::LOG_USB, "# heap=%lu largest=%lu",
                     (unsigned long)ESP.getFreeHeap(),
@@ -24852,7 +25848,7 @@ void App::loop() {
 #endif
       // Which adapter is the radio's. Empty = "the only one that is not the
       // rotator's"; with two adapters the user nominates each in Settings.
-      UsbSerial::catConfigure(cfg.catUsbKey);
+      UsbSerial::catConfigure(dLeg >= 0 ? cfg.dualUsbKey[dLeg] : cfg.catUsbKey);
       if (UsbSerial::begin(baud, 8, 0 /*none*/, yaesu ? 2 /*2 stop*/ : 0 /*1 stop*/)) {
         // Each step announces itself for the same reason begin()'s do: this all runs
         // on the loop task, so a hang here freezes the screen on the last paint. The
@@ -24861,16 +25857,41 @@ void App::loop() {
         // not distinguish "hung on the last library call" from "hung anywhere after
         // begin() returned". These stages remove that ambiguity.
         UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_STREAM);
-        rig->setExternalStream(UsbSerial::stream());
+        if (dLeg >= 0)
+          static_cast<DualRig*>(rig)->setLegExternalStream(dLeg, UsbSerial::stream());
+        else
+          rig->setExternalStream(UsbSerial::stream());
         UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_BEGIN);
         rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);   // skips UART setup
-        if (RADIOS[(RadioModel)cfg.radioModel].proto == PROTO_CIV) {
+        // Single-rig CI-V gets its bus address (re)applied here; a CAT_DUAL USB
+        // leg already carries its address from makeLegRig(), so skip it.
+        if (dLeg < 0 && RADIOS[(RadioModel)cfg.radioModel].proto == PROTO_CIV) {
           UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_ADDR);
           rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[(RadioModel)cfg.radioModel].civAddr);
         }
         UsbSerial::markStage(UsbSerial::USBCAT_STAGE_RIG_DELAY);
         rig->setCmdDelay(cfg.catDelayMs);
         UsbSerial::markStage(UsbSerial::USBCAT_STAGE_ENGAGED);
+        // Dual-USB CAT: bring the SECOND leg's port (CAT-B, the uplink) up on the
+        // now-running host, BEFORE the engagement init below -- the composite is
+        // not ready() until both legs have their streams, so init would no-op on
+        // half a rig. A CAT-B failure is reported and retried by the throttled
+        // branch further down (adapter plugged late, transient bind miss).
+        if (dualBoth) {
+          const LegProfile& l2 = LEG_RADIOS[cfg.dualModel[1]];
+          const uint32_t b2 = cfg.dualBaud[1] ? cfg.dualBaud[1] : l2.baud;
+          UsbSerial::cat2Configure(cfg.dualUsbKey[1]);
+          if (UsbSerial::cat2Begin(b2, 8, 0, (l2.family == LEGF_YBIN) ? 2 : 0)) {
+            static_cast<DualRig*>(rig)->setLegExternalStream(1, UsbSerial::cat2Stream());
+            if (Store::ready())
+              Logstore::rawf(Logstore::LOG_USB, "# CAT-B up: %s baud=%lu (%s)",
+                             l2.name, (unsigned long)b2, UsbSerial::cat2DeviceName());
+          } else {
+            setStatus(String("2nd USB radio: ") + UsbSerial::cat2LastError(), 6000);
+            if (Store::ready())
+              Logstore::rawf(Logstore::LOG_USB, "# CAT-B FAILED: %s", UsbSerial::cat2LastError());
+          }
+        }
         // The rig is now attached and ready. Run engagement init HERE, because the 'r'
         // handler ran it before this attach (when rig->ready() was false) and it no-op'd.
         // Without this call a USB rig would start Doppler writes still in its previous modes
@@ -24891,7 +25912,7 @@ void App::loop() {
         // (task-wdt), task=IDLE1" while uploading to LoTW with the radio engaged --
         // IDLE1 starved because loopTask was busy doing exactly what it was asked
         // to do. The watchdog could not tell a TLS upload from a hang, and its only
-        // remaining catch was false positives on healthy behaviour.
+        // remaining catch was false positives on healthy behavior.
         setStatus(String("USB CAT: ") + UsbSerial::deviceName(), 3000);
       } else {
         // Do not silently pretend to be tracking a radio that is not there.
@@ -24922,8 +25943,30 @@ void App::loop() {
         }
 #endif
       }
+    } else if (want && UsbSerial::active() && dualBoth && !UsbSerial::cat2Active()) {
+      // Dual-USB CAT-B retry: CAT-A is up but the uplink leg's port is not
+      // (adapter plugged in late, or a transient bind failure). Throttled so a
+      // missing adapter costs one bounded attempt every few seconds, not one per
+      // loop pass; each attempt's error text lands on the status bar via the
+      // engage branch above having already reported once.
+      static uint32_t s_cat2LastTry = 0;
+      if (millis() - s_cat2LastTry >= 3000) {
+        s_cat2LastTry = millis();
+        const LegProfile& l2 = LEG_RADIOS[cfg.dualModel[1]];
+        const uint32_t b2 = cfg.dualBaud[1] ? cfg.dualBaud[1] : l2.baud;
+        UsbSerial::cat2Configure(cfg.dualUsbKey[1]);
+        if (UsbSerial::cat2Begin(b2, 8, 0, (l2.family == LEGF_YBIN) ? 2 : 0)) {
+          static_cast<DualRig*>(rig)->setLegExternalStream(1, UsbSerial::cat2Stream());
+          if (radioOut && !catToolEngaged) initializeEngagedRig();  // both legs now attached
+          setStatus(String("2nd USB radio up: ") + UsbSerial::cat2DeviceName(), 4000);
+          if (Store::ready())
+            Logstore::rawf(Logstore::LOG_USB, "# CAT-B up (retry): %s", UsbSerial::cat2DeviceName());
+        }
+      }
     } else if (!want && UsbSerial::active()) {
-      if (rig) rig->setExternalStream(nullptr);   // drop the pointer BEFORE the Stream dies
+      if (rig) rig->setExternalStream(nullptr);   // drop the pointers BEFORE the Streams die
+                                                  // (DualRig clears EVERY USB leg on nullptr)
+      UsbSerial::cat2End();                        // CAT-B first: host must outlive its ports
       UsbSerial::end();                            // frees the host stack; console returns
       // Record the teardown's RESULT. A disengage that fails to release the IDF
       // stack is invisible at the UI (the heap even looks fine) and only surfaces
@@ -25165,7 +26208,7 @@ void App::loop() {
       // the screen kept the engage message and told us nothing further. usbTickTrace
       // is cleared once a tick completes, so this costs one pass and then stops
       // touching the status line.
-      const bool tickTrace = (cfg.catType == CAT_USB) && usbTickTrace;
+      const bool tickTrace = catUsesUsb() && usbTickTrace;
 #else
       const bool tickTrace = false;
 #endif
@@ -26234,8 +27277,8 @@ void App::keySchedule(char c, bool enter, bool back) {
 
 // ===========================================================================
 //  "Sky at a glance" -- a horizontal timeline of upcoming passes for ALL
-//  favourites over the next SKY_HOURS. Time runs left to right; each favourite
-//  with a pass in the window gets a row, and every pass is a bar coloured by
+//  favorites over the next SKY_HOURS. Time runs left to right; each favorite
+//  with a pass in the window gets a row, and every pass is a bar colored by
 //  peak elevation (green >= 30 deg, yellow below) -- the same convention as the
 //  Overhead-now screen. Reuses the existing pass predictor; all state is
 //  fixed-size (.bss), no heap.
@@ -26255,7 +27298,7 @@ void App::buildSkyGlance() {
     SatEntry& s = db.at(idx);
     if (!pred.setSat(s)) continue;
 
-    // Collect this favourite's passes in the window (including one in progress).
+    // Collect this favorite's passes in the window (including one in progress).
     PassPredict pp[6];
     int n = pred.predictPasses(skyStart, cfg.minPassEl, pp, 6, winEnd);
     if (n <= 0) continue;
@@ -26333,7 +27376,7 @@ void App::drawSkyGlance() {
     return;
   }
 
-  // One row per favourite with a pass; draw its bars.
+  // One row per favorite with a pass; draw its bars.
   for (int r = 0; r < skyRowN; ++r) {
     int ry = y0 + r * rowH;
     canvas.setTextColor(CL_WHITE, CL_BLACK);
@@ -26350,7 +27393,7 @@ void App::drawSkyGlance() {
     int x2 = axisX + (int)(axisW * (b - skyStart) / span);
     int w = (x2 - x1 < 2) ? 2 : x2 - x1;
     int ry = y0 + bar.row * rowH;
-    uint16_t col = (bar.maxEl >= 30.0f) ? CL_GREEN : CL_YELLOW;   // Overhead-now colours
+    uint16_t col = (bar.maxEl >= 30.0f) ? CL_GREEN : CL_YELLOW;   // Overhead-now colors
     canvas.fillRect(x1, ry, w, rowH - 2, col);
     if (bar.vis) {                          // visually observable: white tick on the bar
       canvas.drawFastVLine(x1 + w / 2, ry, rowH - 2, CL_WHITE);
@@ -26953,7 +27996,7 @@ void App::keySatList(char c, bool enter, bool back) {
     onTransponderChanged();
     if (logPickSat) {            // chose a satellite for a log entry
       logPickSat = false;
-      seedQsoSatDefaults();      // sat + mode + non-Doppler centre/nominal freqs
+      seedQsoSatDefaults();      // sat + mode + non-Doppler center/nominal freqs
       if (logEditIdx >= 0) qso.uploaded = 0;   // changing the sat re-arms upload
       logSel = 0; screen = SCR_LOGENTRY; lastDrawMs = 0; return;
     }
@@ -27425,7 +28468,7 @@ void App::keyMutual(char c, bool enter, bool back) {
     if (c == 'd') {                          // Doppler table for this window (direct)
       if (!activeSat()) { setStatus("No satellite"); return; }
       dxdWin = mutualSel; dxdRow = 0; dxdAnchorHz = 0;   // no activation anchor on this path
-      dxdCenterPassband();                   // start at the centre of a linear passband
+      dxdCenterPassband();                   // start at the center of a linear passband
       dxdReturn = SCR_MUTUAL;
       screen = SCR_DXDOPP; lastDrawMs = 0;
       return;
@@ -27811,12 +28854,12 @@ void App::keyActDopp(char c, bool enter, bool back) {
 //  is one of: my RX, my TX, DX RX, DX TX.
 // ===========================================================================
 
-// Set the DX Doppler passband operating point to the centre of the currently
+// Set the DX Doppler passband operating point to the center of the currently
 // selected transponder. For a linear (tunable-passband) transponder that is the
 // middle of the downlink passband (bandwidth/2 from the low edge); for an FM or
 // single-channel transponder there is no passband to offset, so it is 0. This
 // mirrors onTransponderChanged() so the DX Doppler table opens on the same
-// nominal channel the on-device tracker would centre on.
+// nominal channel the on-device tracker would center on.
 void App::dxdCenterPassband() {
   if (activeTxCount > 0) {
     Transponder& t = activeTx[curTx];
@@ -28649,10 +29692,25 @@ void App::keySettings(char c, bool enter, bool back) {
                  for (int i=0;i<5;i++) if (opts[i]==cfg.dimSecs) idx=i;
                  idx = (idx + dir + 5) % 5; cfg.dimSecs = opts[idx];
                  cfg.save(); lastInputMs = millis(); } break;
-      case 30: cfg.catType = (uint8_t)((cfg.catType + dir + CAT_TYPE_N) % CAT_TYPE_N);
+      case 30: {
+               // Cycle an explicit slot list: the non-USB build must still reach
+               // CAT_DUAL (enum value 5) even though CAT_USB (4) is absent, so the
+               // row cannot cycle raw enum values 0..CAT_TYPE_N-1 any more.
+#if CARDSAT_HAS_USBCAT
+               static const uint8_t CT_ORDER[CAT_TYPE_N] =
+                 { CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE, CAT_USB, CAT_DUAL };
+#else
+               static const uint8_t CT_ORDER[CAT_TYPE_N] =
+                 { CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE, CAT_DUAL };
+#endif
+               int ci = 0;
+               for (int k = 0; k < CAT_TYPE_N; ++k)
+                 if (CT_ORDER[k] == cfg.catType) { ci = k; break; }
+               ci = (ci + dir + CAT_TYPE_N) % CAT_TYPE_N;
+               cfg.catType = CT_ORDER[ci];
                yieldGroveIfTaken("CAT");
                groveCatVsGpsArbitrate("CAT");   // H10: disable Grove GPS if CAT took Grove
-               cfg.save(); applyRadioFromCfg(); break;
+               cfg.save(); applyRadioFromCfg(); } break;
       case 32:
         if (cfg.catType == CAT_RIGCTL_GROVE) {
           // C2: cycle the supported Grove UART rates rather than treating catPort as baud.
@@ -28736,8 +29794,13 @@ void App::keySettings(char c, bool enter, bool back) {
                 editBuf = cfg.xvtrUlHz ? fmtMHz(cfg.xvtrUlHz) : String("");
                 screen = SCR_EDIT; break;
       case 64: enterCatMon(); break;   // open the CAT serial terminal/monitor
-      case 109: drSel = 0; drScroll = 0; drStatus[0] = 0;        // configure the Dual-Rig companion
-                if (!drAlloc()) { setStatus("Out of memory"); break; }
+      case 109: drSel = 0; drScroll = 0; drStatus[0] = 0;
+                // CAT_DUAL opens the NATIVE leg editor: no companion to query, and
+                // none of the ~1.3 KB device/model tables to allocate. (Querying
+                // anyway just stalled on a \csdr_get nobody answers and reported
+                // "No reply from Stick" on a screen with no Stick in it.)
+                if (cfg.catType == CAT_DUAL) { screen = SCR_DUALRIG; lastDrawMs = 0; break; }
+                if (!drAlloc()) { setStatus("Out of memory"); break; }   // companion path
                 screen = SCR_DUALRIG; lastDrawMs = 0; drQuery(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save();
               setStatus(cfg.aosAlarm ? "AOS alarm on" : "AOS alarm off"); break;
@@ -28862,9 +29925,20 @@ void App::keySettings(char c, bool enter, bool back) {
       } break;
       case 29: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
-      case 30: cfg.catType = (uint8_t)((cfg.catType + 1) % CAT_TYPE_N);
+      case 30: {
+#if CARDSAT_HAS_USBCAT
+               static const uint8_t CT_ORDER[CAT_TYPE_N] =
+                 { CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE, CAT_USB, CAT_DUAL };
+#else
+               static const uint8_t CT_ORDER[CAT_TYPE_N] =
+                 { CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE, CAT_DUAL };
+#endif
+               int ci = 0;
+               for (int k = 0; k < CAT_TYPE_N; ++k)
+                 if (CT_ORDER[k] == cfg.catType) { ci = k; break; }
+               cfg.catType = CT_ORDER[(ci + 1) % CAT_TYPE_N];
                yieldGroveIfTaken("CAT");
-               cfg.save(); applyRadioFromCfg(); break;
+               cfg.save(); applyRadioFromCfg(); } break;
       case 31: editTarget = 207;
                editTitle = (cfg.catType == CAT_RIGCTL) ? "rigctld host (IP)" : "Radio LAN host (IP)";
                editBuf = cfg.catHost; screen = SCR_EDIT; break;
@@ -28897,13 +29971,25 @@ void App::keySettings(char c, bool enter, bool back) {
 static Screen editHome(int t) {
   // These MUST come before the "t >= 720 -> SCR_SKEDENTRY" catch-all below. The Nearby &
   // DX targets were numbered in the 900s and fell straight into it, so committing (or
-  // cancelling) any of them dumped the operator into the new-activation editor.
-  if (t == 900) return SCR_APRS;                 // APRS centre grid
+  // canceling) any of them dumped the operator into the new-activation editor.
+  if (t == 900) return SCR_APRS;                 // APRS center grid
   if (t == 901) return SCR_ADSB;                 // ADS-B scatter target grid
   if (t >= 903 && t <= 904) return SCR_SETTINGS; // feed URLs
   if (t >= 910 && t <= 914) return SCR_TELNET;   // Telnet connection fields (label/host/port/
                                                  // output-mode; 913 unused) -- MUST precede
                                                  // the t>=720 catch-all below
+  if (t >= 920 && t <= 931) return SCR_DUALRIG;  // dual-rig leg fields (CI-V/baud/host/port/
+                                                 // user/pass) -- SAME trap as the 900s above:
+                                                 // canceling one fell into t>=720 and landed
+                                                 // the operator in the new-activation editor
+  // Same shadowing trap as the 900s: these all sat BELOW a broad catch-all, so
+  // canceling them teleported the operator somewhere unrelated (found by
+  // tools/audit_edit_home.py, which now enforces this ordering).
+  if (t == 760) return SCR_TGTSEARCH;   // target-search grid  (was shadowed by t>=720)
+  if (t == 784) return SCR_QTHPRE;      // QTH preset name     (fell into t>=720)
+  if (t == 701 || t == 702) return SCR_SETTINGS;  // LoRa freq / TX power (fell into t>=500)
+  if (t == 350) return SCR_GRIDCALC;    // grid-calculator target grid (fell into t>=320)
+  if (t == 360) return SCR_EME;         // EME DX grid                 (fell into t>=320)
   if (t == 700) return SCR_MESSAGES;    // LoRa message compose (cancel)
   if (t == 704 || t == 705) return SCR_MESSAGES;  // LoRa sked-send date/time prompts (cancel)
   if (t == 710) return SCR_NOTES;       // note name prompt (cancel -> browser)
@@ -28919,7 +30005,6 @@ static Screen editHome(int t) {
   if (t >= 500) return SCR_LOGENTRY;    // QSO log field edit
   if (t >= 380 && t <= 387) return SCR_GPFIT;     // state-vector -> GP fitter fields
   if (t >= 370 && t <= 373) return SCR_PLANNER;   // rove planner form fields
-  if (t == 760) return SCR_TGTSEARCH;             // target-search grid field
   if (t == 340) return SCR_TRACK;       // CTCSS tone override
   if (t >= 400) return SCR_SETTINGS;    // reset confirmation
   if (t >= 320) return SCR_PASSES;      // manual transponder
@@ -28967,7 +30052,7 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 782: {                                   // Tiny BASIC: load by name
         String v = editBuf; v.trim();
         if (v.length()) basicLoad(v.c_str());              // basicLoad() sets "Loaded <name>"
-        else setStatus("Load cancelled");
+        else setStatus("Load canceled");
         screen = SCR_BASIC; lastDrawMs = 0; return;        // don't fall through to "Saved"
       }
       case 784: {                                   // QTH preset name
@@ -29243,6 +30328,44 @@ void App::keyEdit(char c, bool enter, bool back) {
       case 206: { long p = editBuf.toInt(); if (p < 1) p = 1; if (p > 65535) p = 65535;
                   cfg.rotPort = (uint16_t)p; cfg.save(); applyRotatorFromCfg();
                   screen = SCR_SETTINGS; setStatus("Saved"); return; }
+
+      // ---- Dual-rig leg fields (SCR_DUALRIG local mode; 92x DN=+0, UP=+1) ----
+      // All commits return to the Dual-Rig screen (not Settings) and re-apply the
+      // radio config so a live composite picks the change up immediately.
+      case 920: case 921: {
+        long v = strtol(editBuf.c_str(), nullptr, 16);
+        cfg.dualCiv[editTarget - 920] = (uint8_t)((v < 0 || v > 0xFF) ? 0 : v);
+        cfg.save(); applyRadioFromCfg();
+        screen = SCR_DUALRIG; setStatus("Saved"); return; }
+      case 922: case 923: {
+        long v = editBuf.toInt();
+        cfg.dualBaud[editTarget - 922] = (v < 0 || v > 1000000) ? 0 : (uint32_t)v;
+        cfg.save(); applyRadioFromCfg();
+        screen = SCR_DUALRIG; setStatus("Saved"); return; }
+      case 924: case 925: {
+        int L = editTarget - 924;
+        strncpy(cfg.dualHost[L], editBuf.c_str(), sizeof(cfg.dualHost[L])-1);
+        cfg.dualHost[L][sizeof(cfg.dualHost[L])-1] = 0;
+        cfg.save(); applyRadioFromCfg();
+        screen = SCR_DUALRIG; setStatus("Saved"); return; }
+      case 926: case 927: {
+        long v = editBuf.toInt();
+        cfg.dualPort[editTarget - 926] =
+            (v < 1 || v > 65535) ? 50001 : (uint16_t)v;
+        cfg.save(); applyRadioFromCfg();
+        screen = SCR_DUALRIG; setStatus("Saved"); return; }
+      case 928: case 929: {
+        int L = editTarget - 928;
+        strncpy(cfg.dualUser[L], editBuf.c_str(), sizeof(cfg.dualUser[L])-1);
+        cfg.dualUser[L][sizeof(cfg.dualUser[L])-1] = 0;
+        cfg.save(); applyRadioFromCfg();
+        screen = SCR_DUALRIG; setStatus("Saved"); return; }
+      case 930: case 931: {
+        int L = editTarget - 930;
+        strncpy(cfg.dualPass[L], editBuf.c_str(), sizeof(cfg.dualPass[L])-1);
+        cfg.dualPass[L][sizeof(cfg.dualPass[L])-1] = 0;
+        cfg.save(); applyRadioFromCfg();
+        screen = SCR_DUALRIG; setStatus("Saved"); return; }
 
       // ---- Icom LAN (network CAT) host / user / password / port ----
       case 207: strncpy(cfg.catHost, editBuf.c_str(), sizeof(cfg.catHost)-1);
@@ -29554,7 +30677,7 @@ void App::keyEdit(char c, bool enter, bool back) {
       // ---- factory reset confirmation ----
       case 400: {
         if (editBuf == "ERASE") { factoryReset(); return; }  // formats + reboots
-        setStatus("Reset cancelled");
+        setStatus("Reset canceled");
         screen = SCR_SETTINGS; return;
       }
 
@@ -29885,7 +31008,7 @@ static bool parseQsoCsv(const String& line, PendingQso& q) {
   return true;
 }
 
-// Fill qso.sat / qso.mode and the *non-Doppler* default frequencies (the centre
+// Fill qso.sat / qso.mode and the *non-Doppler* default frequencies (the center
 // of a linear transponder's passband, or the nominal downlink/uplink for an FM /
 // single-channel bird) from the currently active satellite + transponder. Used
 // for manual log entries; leaves dl/ul at 0 if the sat has no transponders.
@@ -29907,7 +31030,7 @@ void App::seedQsoSatDefaults() {
 // invoked while actively working a pass (from the Track/Polar screen, clock set),
 // the frequencies are the live Doppler-corrected values. Otherwise -- e.g. "New
 // QSO entry" from the Log menu -- the satellite, frequencies, time and date all
-// start as editable defaults (non-Doppler centre/nominal), so a QSO can be logged
+// start as editable defaults (non-Doppler center/nominal), so a QSO can be logged
 // after the fact. Radio control, if engaged, keeps running.
 void App::beginQso() {
   logReturn = screen;
@@ -30665,7 +31788,7 @@ void App::keyLotw(char c, bool enter, bool back) {
     if (enter) { lotwRebootPrompt = false; lotwRebootUpload(); return; }
     if (isBack(c, back)) {
       lotwRebootPrompt = false;
-      strlcpy(lotwStatus, "Upload cancelled - QSOs still pending", sizeof(lotwStatus));
+      strlcpy(lotwStatus, "Upload canceled - QSOs still pending", sizeof(lotwStatus));
       lastDrawMs = 0; draw(); return;
     }
     return;   // ignore other keys while the prompt is up
@@ -31476,7 +32599,7 @@ void App::keyCloudlog(char c, bool enter, bool back) {
     if (enter) { clRebootPrompt = false; cloudlogRebootUpload(clResend, clResendSkip); return; }
     if (isBack(c, back)) {
       clRebootPrompt = false;
-      strlcpy(clStatus, "Upload cancelled - QSOs still pending", sizeof(clStatus));
+      strlcpy(clStatus, "Upload canceled - QSOs still pending", sizeof(clStatus));
       lastDrawMs = 0; draw(); return;
     }
     return;   // ignore any other key while the prompt is up
@@ -32203,7 +33326,7 @@ void App::draw() {
 //  lat/lon grid, with the home QTH marked. Reached with 'm' from Next Passes
 //  (all favs). Sunlit sats are yellow, eclipsed cyan. Refreshed on the 500 ms
 //  live cadence. The basemap is a 30-degree graticule (equator + prime meridian
-//  emphasised), not a coastline -- accurate and compact for the 240px screen.
+//  emphasized), not a coastline -- accurate and compact for the 240px screen.
 // ---------------------------------------------------------------------------
 static const int16_t COAST[] = {
   // NAmerica
@@ -32306,11 +33429,11 @@ static void greatCircle(double lat1, double lon1, double lat2, double lon2,
 void App::drawWorldMap() {
   header("World Map");
   const int MX = 0, MY = 16, MW = 240, MH = 108;     // map rect (y 16..124)
-  const uint16_t GRID = CL_MGREY;                      // dim grey graticule
+  const uint16_t GRID = CL_MGREY;                      // dim gray graticule
   const double centerLon = (double)cfg.mapCenterLon; // 0 = classic 0-centered view
   canvas.fillRect(MX, MY, MW, MH, CL_BLACK);
 
-  // Day/night terminator: shade the night hemisphere a dim blue-grey before the
+  // Day/night terminator: shade the night hemisphere a dim blue-gray before the
   // coastline and graticule are drawn on top. A point (lat,lon) is in daylight
   // when its angular distance to the sub-solar point is < 90 deg, i.e.
   //   sin(lat)sin(Slat) + cos(lat)cos(Slat)cos(lon-Slon) >= 0.
@@ -32325,7 +33448,7 @@ void App::drawWorldMap() {
     double sS = sin(slat * D2R), cS = cos(slat * D2R);
     for (int x = MX; x < MX + MW; x += 2) {
       // Column x -> longitude (inverse of mapLonToX): d = x/MW*360 - 180, then
-      // un-shift by the map centre.
+      // un-shift by the map center.
       double d = ((double)(x - MX) / MW) * 360.0 - 180.0;
       double lon = d + centerLon;
       double clonTerm = cos((lon - slon) * D2R);
@@ -32353,7 +33476,7 @@ void App::drawWorldMap() {
     }
   }
 
-  // Graticule every 30 deg; emphasise the equator and the prime meridian.
+  // Graticule every 30 deg; emphasize the equator and the prime meridian.
   for (int lon = -180; lon < 180; lon += 30) {
     int x = mapLonToX(lon, centerLon, MX, MW);
     if (x > MX + MW - 1) x = MX + MW - 1; if (x < MX) x = MX;
@@ -32556,8 +33679,8 @@ void App::keyRotMan(char c, bool enter, bool back) {
 
 // ---------------------------------------------------------------------------
 //  GPS data + GNSS sky plot. Left: fix state, used/in-view counts, position.
-//  Right: a polar sky plot (zenith at centre, horizon at the rim, North up) of
-//  every satellite reported in view, coloured by signal strength (C/No).
+//  Right: a polar sky plot (zenith at center, horizon at the rim, North up) of
+//  every satellite reported in view, colored by signal strength (C/No).
 // ---------------------------------------------------------------------------
 void App::drawGps() {
   header("GPS");
@@ -32605,7 +33728,7 @@ void App::drawGps() {
                  : (s.snr >  0)  ? CL_ORANGE : CL_GREY;
     canvas.fillCircle(x, yy, 2, col);
   }
-  footer("` back   green=strong grey=weak");
+  footer("` back   green=strong gray=weak");
 }
 
 void App::keyGps(char c, bool enter, bool back) {
@@ -32663,7 +33786,10 @@ void App::drawHelp() {
     " f  frequencies / band plan",
     "HOME",
     " ENT  open selected item",
-    " (menu scrolls)",
+    " 2-column grid (no scrolling)",
+    " ,//  hop columns",
+    " any letter jumps to the next",
+    "  matching item (repeat cycles)",
     "SUN / MOON",
     " ;/. pick Sun or Moon",
     " o rotor track  x stop",
@@ -32708,10 +33834,10 @@ void App::drawHelp() {
     " AMSAT: dot=heard",
     "  sq=telemetry  ring=no",
     "ORBIT ANALYSIS",
-    " ,// flip pages (9)",
+    " ,// flip pages (11)",
     " info/live/pass/trk/dop/",
     "  nodal/sun-beta/outlook/",
-    "  orbit-pos",
+    "  orbit-pos/phys/explore",
     " info: footprint=max QSO",
     " dop: f beacon freq",
     " nodal: J2 drift, LTAN,",
@@ -32838,7 +33964,7 @@ void App::drawHelp() {
     " speed, course, grid live",
     "GPS SKY PLOT",
     " GNSS sats by az/el",
-    " green=strong  grey=weak",
+    " green=strong  gray=weak",
     "WORLD MAP",
     " all footprints + sun",
     " f cycle highlighted fav",
@@ -32866,7 +33992,25 @@ void App::drawHelp() {
     " units: temp/wind/pressure set",
     "  separately in Settings>Display",
     " cached offline",
-    "QRZ LOOKUP (menu)",
+    " times shown in UTC",
+    "NEARBY & DX (Home)",
+    " live-feeds hub: APRS heard,",
+    " DX cluster, ADS-B, QRZ",
+    "APRS HEARD (live APRS-IS)",
+    " listens while screen is open",
+    " needs your callsign (Settings)",
+    " g center grid  p print",
+    " ENT bearing detail  f restart",
+    "DX CLUSTER SPOTS",
+    " f fetch  n next band w/ spots",
+    " comment shown under each spot",
+    " p print  ;/. step spots",
+    "ADS-B RADAR",
+    " polar radar, range as radius",
+    " f fetch  t scatter target grid",
+    " p print  needs source URL",
+    "  (Settings > Network)",
+    "QRZ LOOKUP (Nearby & DX)",
     " callsign -> name/grid/QTH",
     " needs QRZ XML sub + WiFi",
     " ENT look up a callsign",
@@ -32907,6 +34051,16 @@ void App::drawHelp() {
     "NETWORK RADIO (rigctl)",
     " CAT type=rigctl drives a",
     " remote rig over rigctld",
+    "DUAL RIG (2 radios)",
+    " CAT type=Dual: downlink +",
+    " uplink radios driven",
+    " natively (27-radio list)",
+    " legs: Grove / USB / LAN",
+    " both legs USB ok (hub,",
+    "  nominate adapters: a)",
+    " IC-705 LAN = its own WiFi",
+    " set legs on Dual-Rig scrn",
+    " PTT stays manual",
     "UPDATE",
     " k GP+clock  a cache TX",
     " w WiFi connect only",
@@ -32923,7 +34077,7 @@ void App::drawHelp() {
     " build, IP, free heap,",
     " diagnostics",
     " r  station readiness check",
-    " t  Tools hub (60 tools, 6 cats)",
+    " t  Tools hub (63 tools, 6 cats)",
     " k  export calendars (.ics)",
     " p  PRINT menu (every report)",
     " m  performance / heap monitor",
@@ -32932,7 +34086,7 @@ void App::drawHelp() {
     " z  games menu",
     " l  license & credits",
     "TOOLS (About > t)",
-    " 60 tools in 6 categories:",
+    " 63 tools in 6 categories:",
     " calc/prog, satellite, terr.",
     " propagation, antennas, RF",
     " chain, electronics/refs",
@@ -33004,8 +34158,9 @@ void App::drawHelp() {
     " p on a report screen",
     "  prints what you're",
     "  looking at",
-    " About > p = menu of ALL",
-    "  reports (40)",
+    " About > p = menu of 30",
+    "  reports; feed + tool reports",
+    "  print from their own screens",
     " where p is already taken",
     "  (EME, calculator, BASIC",
     "  editor, notes) use Fn+p",
@@ -33590,7 +34745,7 @@ void App::drawTechHelp() {
     " cross-polarization fades.",
     "FEEDLINE TIPS",
     " Keep coax SHORT on UHF - 70 cm",
-    " loss adds up fast. A few metres",
+    " loss adds up fast. A few meters",
     " of good cable (RG-58 is okay",
     " short; LMR-240/RG-8X better) is",
     " fine for a handheld setup.",
@@ -34170,12 +35325,12 @@ void App::drawArrow() {
   double az = L.az;
   double th = az * 0.017453292519943295;   // radians
   double sx = sin(th), cy_ = -cos(th);      // unit vector (x right, y up-screen)
-  // Tip near the rim, tail near the centre.
+  // Tip near the rim, tail near the center.
   int tipX = cx + (int)lround(sx * (R - 4));
   int tipY = cy + (int)lround(cy_ * (R - 4));
   int tailX = cx - (int)lround(sx * (R - 16));
   int tailY = cy - (int)lround(cy_ * (R - 16));
-  // Above the horizon = bright green arrow; below = dim grey (not workable).
+  // Above the horizon = bright green arrow; below = dim gray (not workable).
   uint16_t aCol = (L.el >= 0.0) ? CL_GREEN : CL_DGREY;
   // Shaft.
   canvas.drawLine(tailX, tailY, tipX, tipY, aCol);
@@ -34188,7 +35343,7 @@ void App::drawArrow() {
   int hx2 = tipX + (int)lround(sin(qth) * 10.0);
   int hy2 = tipY + (int)lround(-cos(qth) * 10.0);
   canvas.fillTriangle(tipX, tipY, hx1, hy1, hx2, hy2, aCol);
-  // Centre dot = you.
+  // Center dot = you.
   canvas.fillCircle(cx, cy, 2, CL_WHITE);
 
   // --- Elevation bar on the right: 0 at bottom, 90 at top ---
@@ -34379,7 +35534,7 @@ void App::drawOverhead() {
   for (int r = 0; r < ROWS && (ovhScroll + r) < ovhN; ++r) {
     int i = ovhScroll + r;
     int y = 30 + r * 10;
-    // Elevation colour: high = green (easy/overhead), low = yellow (near horizon).
+    // Elevation color: high = green (easy/overhead), low = yellow (near horizon).
     uint16_t col = (ovhEl[i] >= 30.0f) ? CL_GREEN : CL_YELLOW;
     canvas.setTextColor(col, CL_BLACK);
     canvas.setCursor(4, y);
@@ -34419,7 +35574,7 @@ static const int GAME_INVW   = 22;     // satellite sprite extent
 static const int GAME_INVH   = 12;
 static const int GAME_GUNW   = 20;
 
-// Draw one satellite sprite at top-left (x,y). Three flavours so the formation
+// Draw one satellite sprite at top-left (x,y). Three flavors so the formation
 // looks like a mix of birds: 0 = cubesat (body + 2 panels), 1 = drum/AO-style
 // (round body + panels), 2 = dish-sat (body + a little dish). Free functions so
 // they carry no method overhead; they draw onto the shared canvas passed in.
@@ -34446,7 +35601,7 @@ static void gameDrawSat(M5Canvas& cv, int x, int y, int type) {
 }
 
 // Draw the ham-op gun (head, torso) holding an arrow antenna pointing up. cx is
-// the gun centre, base sits on GAME_BOT.
+// the gun center, base sits on GAME_BOT.
 static void gameDrawGun(M5Canvas& cv, int cx) {
   int by = GAME_BOT;
   // Antenna: a vertical boom with a few crossed elements (an arrow/Yagi).
@@ -34647,7 +35802,7 @@ bool App::audioAcquire() {
 #if CARDSAT_HAS_USBCAT
   // USB CAT engaged runs the heap tight (~17 KB free, ~7 KB largest block when
   // first measured). The speaker's I2S buffers want ~8 KB contiguous, so rather
-  // than refuse outright (old behaviour) we now check the ACTUAL largest free
+  // than refuse outright (old behavior) we now check the ACTUAL largest free
   // block at the moment of the request: if it clears AUDIO_MIN_BLOCK the speaker
   // comes up and playback works alongside USB CAT; if not, we decline so the
   // caller can say so instead of stranding the heap mid-allocation. Cosmetic
@@ -36137,7 +37292,7 @@ void App::drawGDoppler() {
   int tw1 = x0 + (int)((gdlTarget + halfBW) * (x1 - x0));
   if (tw0 < x0) tw0 = x0; if (tw1 > x1) tw1 = x1;
   canvas.fillRect(tw0, yb - 12, tw1 - tw0, 24, CL_DGREEN);
-  // Target centre (the bird's signal).
+  // Target center (the bird's signal).
   int tx = x0 + (int)(gdlTarget * (x1 - x0));
   canvas.drawFastVLine(tx, yb - 16, 32, CL_GREEN);
   // Cursor (your signal).
@@ -36230,7 +37385,7 @@ void App::drawGPass() {
   bool inWin = (gpT >= w0 && gpT <= w1);
   gameDrawSat(canvas, sx - 11, sy - 6, 0);
   if (inWin) { canvas.drawCircle(sx, sy, 10, CL_GREEN); }
-  // Ground station at the centre baseline.
+  // Ground station at the center baseline.
   gameDrawGun(canvas, cx);
   canvas.setTextColor(inWin ? CL_GREEN : CL_GREY, CL_BLACK);
   canvas.setCursor(86, 30); canvas.print(inWin ? "WORKABLE" : "        ");
@@ -36252,7 +37407,7 @@ void App::keyGPass(char c, bool enter, bool back) {
 
 // ===========================================================================
 //  G3. Rotor Runner -- a satellite drifts around the sky; slew your antenna
-//  crosshair (tilt pitch+roll, or arrow keys) to keep it centred on the bird.
+//  crosshair (tilt pitch+roll, or arrow keys) to keep it centered on the bird.
 //  Score accrues while the crosshair is on target. A genuine two-axis IMU game.
 // ===========================================================================
 void App::gRotorReset() {
@@ -36601,7 +37756,7 @@ void App::runCatTest() {
     // USB-up to radioOut). If that's why the rig isn't ready, request engagement and
     // tell the operator to re-run once it's up -- the reconciler brings USB CAT up on
     // the next loop. CI-V/LAN wires are always live, so a not-ready there is real.
-    if (cfg.catType == CAT_USB && rig && !radioOut) {
+    if (catUsesUsb() && rig && !radioOut) {
       radioOut = true;
       catToolEngaged = true;            // WE turned it on; leaving the tool turns it back off
       catLog("USB CAT: starting...");
@@ -36785,7 +37940,7 @@ void App::enterCatMon() {
   // ties USB-up to radioOut). Request engagement so the monitor has a live link to
   // watch; the reconciler brings USB CAT up on the next loop and polling begins once
   // rig->ready(). CI-V/LAN wires are always live, so this is a harmless no-op there.
-  if (cfg.catType == CAT_USB && rig && !radioOut) { radioOut = true; catToolEngaged = true; }
+  if (catUsesUsb() && rig && !radioOut) { radioOut = true; catToolEngaged = true; }
   screen = SCR_CATMON; lastDrawMs = 0;
 }
 
@@ -36881,13 +38036,13 @@ void App::drPingLink() {
   if (drLinkMs && (now - drLinkMs) < 2500) return;          // rate-limit
   drLinkMs = now;
   if (!rig || (cfg.catType != CAT_RIGCTL && cfg.catType != CAT_RIGCTL_GROVE)) {
-    drLink = 0; return;                                      // not applicable -> grey
+    drLink = 0; return;                                      // not applicable -> gray
   }
   String r = rig->vendorLine("\\csdr_get");
   drLink = (r.length() && r.indexOf("downlink") >= 0) ? 1 : 2;
 }
 
-// Query the Stick: current config (\csdr_get) + the model catalogue (\csdr_models).
+// Query the Stick: current config (\csdr_get) + the model catalog (\csdr_models).
 void App::drQuery() {
   drLoaded = false; drDevN = 0; drModelN = 0;
   if (!drDev || !drModel) { if (!drAlloc()) return; }   // tables must exist to parse into
@@ -36937,7 +38092,7 @@ void App::drQuery() {
       }
     }
   }
-  // ---- model catalogue ----
+  // ---- model catalog ----
   String ml = rig->vendorLine("\\csdr_models");
   int drModelParsed = 0;
   if (ml.length() && ml.indexOf('{') >= 0) {
@@ -36958,7 +38113,7 @@ void App::drQuery() {
       p = e + 1;
     }
   }
-  // C3: an empty or unparseable catalogue is a query FAILURE, not a good link. Don't set
+  // C3: an empty or unparseable catalog is a query FAILURE, not a good link. Don't set
   // drLoaded / a green link when no models came back -- that masked the failure and left
   // both legs showing "(none)" with no way to select a model.
   if (drModelParsed == 0) {
@@ -37004,7 +38159,176 @@ void App::drSave() {
   else snprintf(drStatus, sizeof(drStatus), "Save failed: %s", r.c_str());
 }
 
+// ---------------------------------------------------------------------------
+//  Dual-Rig screen, LOCAL mode (CAT_DUAL): configure the two native legs.
+//  Reuses the screen's cursor member (drSel) with its own field map:
+//  drSel = leg*6 + field, field 0..5 = Model / Bus / CI-V / baud / Host / Port.
+//  Free-text fields go through SCR_EDIT (targets 920..931); Model and Bus cycle
+//  on ENTER. 's' saves and re-applies the radio config; the engage-path guard
+//  reports any physical-bus conflict (both legs Grove / both USB).
+// ---------------------------------------------------------------------------
+void App::drawDualRigLocal() {
+  header("Dual rig (native)");
+  canvas.setTextSize(1);
+
+  // Status line: composite readiness + the loudest config problem, if any.
+  canvas.setCursor(6, 18);
+  const bool bothG = cfg.dualBus[0] == LEGBUS_GROVE && cfg.dualBus[1] == LEGBUS_GROVE;
+  const bool bothU = cfg.dualBus[0] == LEGBUS_USB   && cfg.dualBus[1] == LEGBUS_USB;
+  if (bothG) {
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.print("! both legs on Grove - one UART");
+  } else if (bothU && !(cfg.dualUsbKey[0][0] && cfg.dualUsbKey[1][0] &&
+                        strcmp(cfg.dualUsbKey[0], cfg.dualUsbKey[1]) != 0)) {
+    // Dual-USB is legal (hub + two adapters); what it NEEDS is both legs
+    // nominated onto different adapters. Say so until that's true.
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.print("! 2xUSB: nominate both adapters (a)");
+  } else if (cfg.dualModel[1] < LEG_NONE && LEG_RADIOS[cfg.dualModel[1]].rxOnly) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.print("! uplink leg is a receive-only radio");
+  } else {
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.printf("legs -> one rig  %s",
+                  (rig && rig->ready()) ? "(connected)" : "(idle)");
+  }
+
+  static const char* BUSN[LEGBUS_N] = { "Grove", "USB", "LAN" };
+  const char* legName[2] = { "DN", "UP" };
+  int y = 30;
+  for (int L = 0; L < 2; ++L) {
+    const uint8_t m = cfg.dualModel[L];
+    const LegProfile& lp = LEG_RADIOS[m];
+    int f = L * 6;
+    auto row = [&](bool sel, const String& s){
+      canvas.fillRect(6, y - 1, 228, 10, sel ? CL_SELBG : CL_BLACK);
+      canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(10, y); canvas.print(s);
+      y += 10;
+    };
+    row(f + 0 == drSel, String(legName[L]) + " Rig: " +
+        (m == LEG_NONE ? "(none)" : lp.name) + (lp.rxOnly ? " [RX]" : ""));
+    {
+      String b = String("   Bus: ") + BUSN[cfg.dualBus[L]];
+      if (cfg.dualBus[L] == LEGBUS_USB)
+        b += "  Adp:" + usbAdapterLabel(cfg.dualUsbKey[L]);
+      row(f + 1 == drSel, b);
+    }
+    {
+      bool selCiv = (f + 2 == drSel), selBaud = (f + 3 == drSel);
+      uint8_t  civ = cfg.dualCiv[L] ? cfg.dualCiv[L] : lp.civAddr;
+      uint32_t bd  = cfg.dualBaud[L] ? cfg.dualBaud[L] : lp.baud;
+      String civS  = cfg.dualCiv[L] ? String(civ, HEX) : (String(civ, HEX) + "*");
+      String baudS = cfg.dualBaud[L] ? String(bd) : (String(bd) + "*");
+      String r = String("   ") + (selCiv ? ">" : " ") + "CIV:" + civS +
+                 "  " + (selBaud ? ">" : " ") + "baud:" + baudS;
+      canvas.fillRect(6, y - 1, 228, 10, (selCiv || selBaud) ? CL_SELBG : CL_BLACK);
+      canvas.setTextColor((selCiv || selBaud) ? CL_BLACK : CL_WHITE,
+                          (selCiv || selBaud) ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(10, y); canvas.print(r);
+      y += 10;
+    }
+    {
+      // The radio's IP goes HERE, on the leg -- not in Settings' LAN host row
+      // (that one belongs to single-rig Icom LAN / rigctld). Label it "IP:" and
+      // keep the port visibly separate: "LAN:<host>:<port>" read as one field and
+      // left the operator unsure which half wanted the address.
+      bool selH = (f + 4 == drSel), selP = (f + 5 == drSel);
+      String r;
+      if (cfg.dualBus[L] == LEGBUS_LAN) {
+        String h = cfg.dualHost[L][0] ? String(cfg.dualHost[L]) : String("(enter radio IP)");
+        if (h.length() > 15) h = "..." + h.substring(h.length() - 12);
+        r = String("  ") + (selH ? ">" : " ") + "IP:" + h +
+            "  " + (selP ? ">" : " ") + "port:" + String(cfg.dualPort[L]);
+      } else {
+        r = "    IP/port: set Bus to LAN first";
+      }
+      canvas.fillRect(6, y - 1, 228, 10, (selH || selP) ? CL_SELBG : CL_BLACK);
+      canvas.setTextColor((selH || selP) ? CL_BLACK : CL_WHITE,
+                          (selH || selP) ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(10, y); canvas.print(r);
+      y += 10;
+    }
+  }
+  // '*' marks a table default in the CIV/baud fields.
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(6, 112);
+  canvas.print("ENTER edit/cycle (IP on the IP row)");
+  canvas.setCursor(6, 122);
+  canvas.print("a:adapter u/p:login s:save *=dflt");
+}
+
+void App::keyDualRigLocal(char c, bool enter, bool back) {
+  if (isBack(c, back)) { setSel = 0; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
+  const int L = drSel / 6, F = drSel % 6;
+  if (isUp(c))   { if (drSel > 0)  drSel--; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (drSel < 11) drSel++; lastDrawMs = 0; return; }
+  if (c == 's') {
+    cfg.save(); applyRadioFromCfg();
+    setStatus(rig ? (String("Dual rig: ") + rig->name()) : String("Saved (legs idle)"));
+    lastDrawMs = 0; return;
+  }
+  if (c == 'a') {
+    // Nominate the SELECTED leg's adapter. With both legs on USB each leg carries
+    // its own key, and the cycle skips the other leg's adapter (alsoTaken).
+    if (cfg.dualBus[L] == LEGBUS_USB) {
+      const int  O = 1 - L;
+      const char* other = (cfg.dualBus[O] == LEGBUS_USB) ? cfg.dualUsbKey[O] : nullptr;
+      cycleUsbAdapter(cfg.dualUsbKey[L], sizeof(cfg.dualUsbKey[L]), +1, true, other);
+    } else setStatus("Selected leg is not on USB");
+    lastDrawMs = 0; return;
+  }
+  if (c == 'u' || c == 'p') {
+    if (cfg.dualBus[L] != LEGBUS_LAN) { setStatus("Login: LAN bus only"); return; }
+    editTarget = (c == 'u' ? 928 : 930) + L;
+    editTitle  = String(L ? "UP" : "DN") + (c == 'u' ? " LAN user" : " LAN password");
+    editBuf    = (c == 'u') ? cfg.dualUser[L] : cfg.dualPass[L];
+    screen = SCR_EDIT; return;
+  }
+  if (enter || c == '\r') {
+    switch (F) {
+      case 0:   // Model: cycle the leg catalog (LEG_NONE included as "(none)")
+        cfg.dualModel[L] = (uint8_t)((cfg.dualModel[L] + 1) % LEG_COUNT);
+        lastDrawMs = 0; return;
+      case 1: { // Bus: cycle the legal buses for this leg
+        uint8_t b = cfg.dualBus[L];
+        for (int step = 0; step < LEGBUS_N; ++step) {
+          b = (uint8_t)((b + 1) % LEGBUS_N);
+#if !CARDSAT_HAS_USBCAT
+          if (b == LEGBUS_USB) continue;            // not in this build
+#endif
+          if (b == LEGBUS_LAN &&
+              !(cfg.dualModel[L] < LEG_NONE && LEG_RADIOS[cfg.dualModel[L]].hasLan))
+            continue;                               // LAN only for LAN-capable Icoms
+          break;
+        }
+        cfg.dualBus[L] = b;
+        lastDrawMs = 0; return;
+      }
+      case 2: editTarget = 920 + L;
+              editTitle = String(L ? "UP" : "DN") + " CI-V addr (hex, 0=def)";
+              editBuf = cfg.dualCiv[L] ? String(cfg.dualCiv[L], HEX) : String("");
+              screen = SCR_EDIT; return;
+      case 3: editTarget = 922 + L;
+              editTitle = String(L ? "UP" : "DN") + " CAT baud (0=default)";
+              editBuf = cfg.dualBaud[L] ? String(cfg.dualBaud[L]) : String("");
+              screen = SCR_EDIT; return;
+      case 4: if (cfg.dualBus[L] != LEGBUS_LAN) { setStatus("Host: LAN bus only"); return; }
+              editTarget = 924 + L;
+              editTitle = String(L ? "UP" : "DN") + " radio IP (e.g. 192.168.1.50)";
+              editBuf = cfg.dualHost[L]; screen = SCR_EDIT; return;
+      case 5: if (cfg.dualBus[L] != LEGBUS_LAN) { setStatus("Port: LAN bus only"); return; }
+              editTarget = 926 + L;
+              editTitle = String(L ? "UP" : "DN") + " control port (IC-705: 50001)";
+              editBuf = String(cfg.dualPort[L]); screen = SCR_EDIT; return;
+    }
+  }
+}
+
 void App::drawDualRig() {
+  // CAT_DUAL: this screen edits the NATIVE two-leg setup instead of the Stick.
+  // The companion editor below is untouched and still serves the rigctl backends.
+  if (cfg.catType == CAT_DUAL) { drawDualRigLocal(); return; }
   header("Dual-Rig setup (Stick)");
   canvas.setTextSize(1);
 
@@ -37094,6 +38418,7 @@ void App::drawDualRig() {
 }
 
 void App::keyDualRig(char c, bool enter, bool back) {
+  if (cfg.catType == CAT_DUAL) { keyDualRigLocal(c, enter, back); return; }
   (void)enter;
   if (isBack(c, back)) { setSel = 0; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
   if (c == 'q') { setStatus("Querying Stick..."); draw(); drQuery(); lastDrawMs = 0; return; }
@@ -37442,60 +38767,196 @@ static double solarDensityScale(uint8_t act) {
   }
 }
 
-// Days to reentry from B* + exponential atmosphere, using a King-Hele style
-// decay that lets the orbit circularize: drag is strongest at perigee, so the
-// apogee comes down faster than the perigee while the perigee altitude is what
-// governs the drag. We track perigee/apogee radii (rp, ra) separately and apply
-// the per-orbit energy loss preferentially to apogee until the orbit is nearly
-// circular, then bring both down together. Cd*A/m = 12.741621 * B* (m^2/kg).
-// densScale brackets solar activity. Order-of-magnitude only: no attitude, lift,
-// or short-term space weather. Returns -1 = rising/no data, 1e9 = effectively
-// stable, otherwise estimated days to a ~120 km perigee.
-static double estimateDecayDays(const SatEntry& s, double densScale) {
-  if (s.bstar <= 0 || s.meanMotion <= 0 || densScale <= 0) return -1;
+// ---- Trapped-drag helpers for the decay model --------------------------------
+// Modified Bessel functions I0/I1, EXPONENTIALLY SCALED: these return
+// exp(-z)*In(z). King-Hele's per-revolution drag integral needs I0 and I1 of
+// z = a*e/H, which for an eccentric orbit runs into the hundreds -- In(z) itself
+// overflows a double there, while the scaled form stays O(1/sqrt(z)). Polynomial
+// approximations from Abramowitz & Stegun 9.8.1-9.8.4 (|err| < 2e-7).
+static double besselI0e(double z) {
+  if (z < 3.75) {
+    double t = z / 3.75, t2 = t * t;
+    double v = 1.0 + t2*(3.5156229 + t2*(3.0899424 + t2*(1.2067492
+             + t2*(0.2659732 + t2*(0.0360768 + t2*0.0045813)))));
+    return v * exp(-z);
+  }
+  double t = 3.75 / z;
+  return (0.39894228 + t*(0.01328592 + t*(0.00225319 + t*(-0.00157565
+        + t*(0.00916281 + t*(-0.02057706 + t*(0.02635537
+        + t*(-0.01647633 + t*0.00392377)))))))) / sqrt(z);
+}
+static double besselI1e(double z) {
+  if (z < 3.75) {
+    double t = z / 3.75, t2 = t * t;
+    double v = z * (0.5 + t2*(0.87890594 + t2*(0.51498869 + t2*(0.15084934
+             + t2*(0.02658733 + t2*(0.00301532 + t2*0.00032411))))));
+    return v * exp(-z);
+  }
+  double t = 3.75 / z;
+  return (0.39894228 + t*(-0.03988024 + t*(-0.00362018 + t*(0.00163801
+        + t*(-0.01031555 + t*(0.02282967 + t*(-0.02895312
+        + t*(0.01787654 + t*(-0.00420059)))))))))/ sqrt(z);
+}
+
+// Local scale height (m) of the exponential atmosphere at this altitude. Exact
+// for the band model -- each band IS an exponential with a published H.
+static double atmScaleHeightM(double hkm) {
+  static const double B[][2] = {
+    {100,5.877},{110,7.263},{120,9.473},{130,12.636},{140,16.149},{150,22.523},
+    {180,29.740},{200,37.105},{250,45.546},{300,53.628},{350,53.298},{400,58.515},
+    {450,60.828},{500,63.822},{600,71.835},{700,88.667},{800,124.64},{900,181.05},
+    {1000,268.00}
+  };
+  const int N = (int)(sizeof(B) / sizeof(B[0]));
+  if (hkm < 100) hkm = 100;
+  int i = 0; for (; i < N - 1; ++i) if (hkm < B[i + 1][0]) break;
+  return B[i][1] * 1000.0;
+}
+
+// ---- Empirical calibration (0.9.68) ------------------------------------------
+// Fitted against 244 catalogued objects that actually re-entered (Space-Track TIP
+// decay epochs + gp_history element sets, 2025-2026), scored at 30/14/7/3 days
+// before re-entry, and cross-checked against the observed mean-motion derivative
+// of ~1500 catalogued objects. See docs/design/DECAY_MODEL_0_9_68.md.
+//
+//   DECAY_DENS_CAL   density multiplier for the B*-derived path. The exponential
+//                    table is "nominal"; the fit wants 1.30x at ~250 km.
+//   DECAY_DENS_HKM   how that multiplier grows with altitude. The re-entry set is
+//                    all low-altitude (final 40 days), so it cannot constrain this
+//                    -- the value comes from the n-dot ensemble at 400-600 km and
+//                    is the WEAKEST-CONSTRAINED number in the model.
+//   DECAY_ANCHOR_DRAG  n-dot is a fitted mean over the element set's fit span, so
+//                    it lags the instantaneous rate while decay accelerates; the
+//                    fit wants 1.15x. (A DENSITY factor would cancel out of the
+//                    anchored path exactly -- verified -- so this must be applied
+//                    to the drag, not the density.)
+static constexpr double DECAY_DENS_CAL    = 1.30;
+static constexpr double DECAY_DENS_HKM    = 300.0;
+static constexpr double DECAY_ANCHOR_DRAG = 1.15;
+static constexpr double DECAY_DENS_CAP    = 8.0;
+
+static double decayDensCal(double hkm) {
+  double s = DECAY_DENS_CAL * exp((hkm - 250.0) / DECAY_DENS_HKM);
+  return (s > DECAY_DENS_CAP) ? DECAY_DENS_CAP : s;
+}
+
+// Which measurement the estimate was built from, for the UI: a measured decay
+// rate and a fitted drag term deserve different confidence.
+enum : uint8_t { DECAY_SRC_NONE = 0, DECAY_SRC_NDOT = 1, DECAY_SRC_BSTAR = 2 };
+
+// Days to re-entry. Two anchors, in order of preference:
+//
+//   1. OBSERVED n-dot. The element set's mean-motion derivative IS a measurement
+//      of the current decay rate: adot = -(2/3)(a/n) * ndot. Back-solving the
+//      ballistic coefficient from it makes the present rate right BY CONSTRUCTION
+//      and removes every calibration the B* path needs -- the B*->Cd*A/m
+//      conversion, the absolute density normalization, and the solar-activity
+//      scale (which cancels exactly, since it multiplies both the back-solve and
+//      the integration). It also absorbs attitude and true area, because it is a
+//      measurement of the object rather than a model of it. Scored 0.99x median
+//      against real re-entries, 92% within +/-30%.
+//
+//   2. B* fallback, for objects whose n-dot is absent, negative (rising or
+//      post-maneuver) or below the noise floor. Cd*A/m = 12.741621 * B* -- the
+//      textbook SGP4 conversion. (0.9.67 and earlier used 38 * B* together with a
+//      da/dt that was a factor of 2 too large; the two errors partly cancelled at
+//      ISS altitude, where the constant was tuned, and left the model predicting
+//      ~1/5 of the true remaining life across the re-entry set.)
+//
+// Both integrate the same King-Hele decay: drag is evaluated at perigee with the
+// eccentricity factor exp(-z)(I0(z) + 2e*I1(z)), z = a*e/H, which accounts for
+// the satellite spending almost none of an eccentric revolution near perigee --
+// without it a GTO reads ~40 days instead of years. Energy comes out of APOGEE
+// while the perigee altitude stays nearly fixed until the orbit circularizes.
+//
+// densScale brackets solar activity (B* path only). Returns -1 = no usable data,
+// 1e9 = effectively stable, else days to a ~120 km perigee. srcOut (optional)
+// reports which anchor produced the number.
+static double estimateDecayDays(const SatEntry& s, double densScale,
+                                uint8_t* srcOut = nullptr) {
+  if (srcOut) *srcOut = DECAY_SRC_NONE;
+  if (s.meanMotion <= 0 || densScale <= 0) return -1;
   const double MU = 3.986004418e14, RE = 6.378137e6, TP = 6.283185307179686;
-  // Cd*A/m from B*: the textbook SGP4 conversion (12.741621*B*) leaves LEO
-  // lifetimes ~3x too long against observed reentries (an un-reboosted ISS at
-  // ~420 km comes down in ~1-2 yr, not ~10). Calibrating the per-rev decay
-  // against ISS-class, ~400 km and ~550 km objects at mean solar activity puts
-  // the multiplier near 38 (about 3x the textbook value -- consistent with a
-  // reference-density normalization slip). Still order-of-magnitude: B* itself
-  // is frequently a fitted fudge term, so treat the result as a coarse cue.
-  double CdAm = 38.0 * s.bstar;                            // m^2/kg (calibrated)
   double nn = s.meanMotion * TP / 86400.0;                 // rad/s
   double a  = pow(MU / (nn * nn), 1.0 / 3.0);              // m
   double e  = s.ecc; if (e < 0) e = 0; if (e > 0.95) e = 0.95;
-  double rp = a * (1.0 - e);                               // perigee radius (m)
-  double ra = a * (1.0 + e);                               // apogee radius (m)
+  double rp = a * (1.0 - e), ra = a * (1.0 + e);
+  double hp0 = (rp - RE) / 1000.0;                          // perigee altitude (km)
+  if (hp0 < 80.0) return 0;
+
+  // Density at a perigee altitude, INCLUDING both calibrations. One function, used
+  // for the n-dot back-solve and for every integration step, so the solar scale
+  // and the density calibration cancel out of the anchored path exactly.
+  auto rhoAt = [&](double hkm) {
+    return expAtmosphere(hkm) * densScale * decayDensCal(hkm);
+  };
+  auto kingHele = [&](double aa, double ee, double hkm) {
+    if (ee <= 1e-4) return 1.0;
+    double z = aa * ee / atmScaleHeightM(hkm);
+    if (z <= 0.05) return 1.0;
+    return besselI0e(z) + 2.0 * ee * besselI1e(z);
+  };
+
+  double B = 0;                                             // effective Cd*A/m (m^2/kg)
+  uint8_t src = DECAY_SRC_NONE;
+  // ---- anchor 1: the observed decay rate ------------------------------------
+  // s.ndot is MEAN_MOTION_DOT, i.e. ndot/2 in rev/day^2, so ndot = 2*s.ndot.
+  {
+    double adot = -(2.0 / 3.0) * (a / s.meanMotion) * (2.0 * (double)s.ndot);  // m/day
+    double rho0 = rhoAt(hp0);
+    // Require a decaying, above-noise rate on an orbit where drag is the plausible
+    // cause. A negative or tiny n-dot means rising, freshly maneuvered, or pure
+    // fit noise -- and on a high orbit it is absorbing third-body terms, not drag.
+    if (adot < -0.5 && rho0 > 0 && hp0 < 1000.0) {
+      double f0 = kingHele(a, e, hp0);
+      double cand = DECAY_ANCHOR_DRAG * (-adot / 86400.0)
+                  / (rho0 * sqrt(MU * a) * f0);
+      // Sanity window on the implied ballistic coefficient: a real satellite is
+      // ~1e-3..1e-1 m^2/kg, debris and balloons wider. Anything outside means the
+      // n-dot was not drag, so fall through to B*.
+      if (cand > 1e-4 && cand < 50.0) { B = cand; src = DECAY_SRC_NDOT; }
+    }
+  }
+  // ---- anchor 2: B* ---------------------------------------------------------
+  if (src == DECAY_SRC_NONE) {
+    if (s.bstar <= 0) return -1;
+    B = 12.741621 * (double)s.bstar;
+    src = DECAY_SRC_BSTAR;
+  }
+  if (srcOut) *srcOut = src;
+
   double tDays = 0;
   for (int it = 0; it < 200000; ++it) {
-    double hp = rp - RE;                                    // perigee altitude (m)
-    if (hp < 120e3) return tDays;                           // reentry
-    double rho = expAtmosphere(hp / 1000.0) * densScale;    // density at perigee
-    if (rho <= 0) return 1e9;                               // above atmosphere table
+    double hp = rp - RE;
+    double hkm = hp / 1000.0;
     a = 0.5 * (rp + ra);
-    double T = TP * sqrt(a * a * a / MU);                   // orbital period (s)
-    // Energy-equivalent SMA decay rate, evaluated with perigee density (drag
-    // acts mainly near perigee). dadt < 0.
-    double dadt = -2.0 * TP * CdAm * rho * a * a / T;       // m/s
+    double ecur = (ra - rp) / (ra + rp);
+    // Re-entry threshold. A near-circular orbit is finished once perigee reaches
+    // ~120 km. An ECCENTRIC one is not: it sweeps through perigee far too quickly
+    // to be stopped there -- the same King-Hele suppression applied above -- and
+    // routinely survives many revolutions with perigee well below 120 km while the
+    // orbit circularizes. A flat 120 km cut declared such objects already down:
+    // CZ-3B R/B (e = 0.175) sat at a 111 km perigee and lived another 2.5 days,
+    // which is now a pinned case in tools/host_decay.
+    double hpEnd = (ecur <= 0.02) ? 120e3 : 90e3;
+    if (hp < hpEnd) return tDays;                           // re-entry
+    double rho = rhoAt(hkm);
+    if (rho <= 0) return 1e9;                               // above the table
+    double dadt = -B * rho * sqrt(MU * a) * kingHele(a, ecur, hkm);   // m/s
     if (dadt >= 0) return 1e9;
     // Adaptive step: shrink near the end so the fast final plunge isn't overshot.
-    double margin = hp - 120e3;
-    double dt = -(margin * 0.25 + 1000.0) / dadt;           // ~quarter of remaining drop
-    double capDays = (hp < 200e3) ? 0.25 : (hp < 350e3 ? 5.0 : 30.0);
+    double dt = -((hp - 120e3) * 0.20 + 500.0) / dadt;
+    double capDays = (hp < 200e3) ? 0.15 : (hp < 350e3 ? 2.0 : 20.0);
     if (dt > capDays * 86400.0) dt = capDays * 86400.0;
     if (dt < 1.0) dt = 1.0;
-    double da = dadt * dt;                                  // total SMA decrement (<0)
-    // King-Hele: while eccentric, drag at perigee removes energy mainly from
-    // apogee. Pull apogee down at ~ (ra/rp) the rate of perigee so the orbit
-    // circularizes; once nearly circular, both fall together.
-    double ecur = (ra - rp) / (ra + rp);
+    double da = dadt * dt;                                  // SMA decrement (<0)
+    // King-Hele: drag acting at perigee takes energy out of APOGEE; the perigee
+    // altitude holds nearly constant until the orbit is circular. (0.9.67 split
+    // the drop between the two, which lowered perigee far too fast -- and since
+    // perigee altitude sets the density, that error fed back on itself.)
     if (ecur > 1e-3) {
-      double ratio = ra / rp;                               // > 1
-      double dra = 2.0 * da * ratio / (1.0 + ratio);        // apogee share
-      double drp = 2.0 * da / (1.0 + ratio);                // perigee share (smaller)
-      ra += dra; rp += drp;
-      if (ra < rp) ra = rp;                                 // clamp at circular
+      ra += 2.0 * da;
+      if (ra < rp) { double m = 0.5 * (ra + rp); ra = rp = m; }
     } else {
       ra += da; rp += da;                                   // circular: uniform
     }
@@ -37582,7 +39043,7 @@ uint8_t App::decayLevelFor(const SatEntry& s) {
 void App::buildOrbit(bool quiet) {
   orbHasPass = false; orbEcl = false; orbVisible = false; orbSunPct = 0;
   orbAscT = 0; orbAscLon = 0; orbEclT0 = 0; orbEclT1 = 0;
-  orbDecayDays = -1; orbDecayLo = -1; orbDecayHi = -1;
+  orbDecayDays = -1; orbDecayLo = -1; orbDecayHi = -1; orbDecaySrc = DECAY_SRC_NONE;
   SatEntry* s = activeSat();
   if (!s || !timeIsSet() || s->meanMotion <= 0) return;
   if (!quiet) { setStatus("Analyzing orbit..."); draw(); }
@@ -37652,9 +39113,17 @@ void App::buildOrbit(bool quiet) {
     }
     orbSunPct = total ? (100.0f * sun / total) : 0;
   }
-  orbDecayDays = estimateDecayDays(*s, decayDensityScale());
-  orbDecayLo   = estimateDecayDays(*s, solarDensityScale(SOLAR_LOW));   // longest life
-  orbDecayHi   = estimateDecayDays(*s, solarDensityScale(SOLAR_HIGH));  // shortest life
+  orbDecayDays = estimateDecayDays(*s, decayDensityScale(), &orbDecaySrc);
+  if (orbDecaySrc == DECAY_SRC_BSTAR) {
+    orbDecayLo = estimateDecayDays(*s, solarDensityScale(SOLAR_LOW));   // longest life
+    orbDecayHi = estimateDecayDays(*s, solarDensityScale(SOLAR_HIGH));  // shortest life
+  } else {
+    // An n-dot anchored estimate is pinned to a MEASURED decay rate, and the solar
+    // density scale multiplies both the back-solve and the integration, so it
+    // cancels: the bracket would be two identical numbers. Suppress it instead of
+    // implying a sensitivity the estimate does not have.
+    orbDecayLo = orbDecayHi = -1;
+  }
 
   // Pass outlook over the next ORB_OUTLOOK_DAYS days: count passes, find the best
   // (highest) one, the longest, how many clear 30 deg, and the mean spacing.
@@ -37743,7 +39212,13 @@ void App::drawOrbit() {
     row("Incl/Ecc",     String(s->incl, 2) + " / " + String(s->ecc, 5));
     row("SMA (a)",      String(a, 0) + " km");
     row("B* / decay",   String(s->bstar, 6) + " " + fmtDecay(orbDecayDays));
-    if (orbDecayDays >= 0 && orbDecayDays < 36500)        // show the solar bracket
+    // Name the anchor: "obs" means the estimate is pinned to this element set's
+    // measured decay rate (n-dot), "B*" means it is modeled from the drag term.
+    if (orbDecayDays >= 0 && orbDecayDays < 36500)
+      row("Decay from", orbDecaySrc == DECAY_SRC_NDOT
+                          ? String("observed n-dot")
+                          : String("B* (modeled)"));
+    if (orbDecayDays >= 0 && orbDecayDays < 36500 && orbDecaySrc == DECAY_SRC_BSTAR)
       row("Decay rng",  fmtDecayShort(orbDecayHi) + "-" + fmtDecayShort(orbDecayLo) +
                         " (" + solarActLabel(cfg.solarAct) + ")");
     row("Age/Rev",      String(ageD, 2) + "d / " + String(revNow));
@@ -37950,7 +39425,7 @@ void App::drawOrbit() {
     double toPeri = (360.0 - maNow) / 360.0 * periodS;     // s until next MA=0
     double toApo  = fmod((180.0 - maNow + 360.0), 360.0) / 360.0 * periodS;
     // Argument of latitude u = argp + true anomaly (approx with MA for small e is
-    // poor; use a 3-term equation-of-centre expansion for the true anomaly).
+    // poor; use a 3-term equation-of-center expansion for the true anomaly).
     double M = maNow * D2R, e = s->ecc;
     double nu = M + (2*e - 0.25*e*e*e) * sin(M)
                   + 1.25*e*e * sin(2*M)
@@ -38571,7 +40046,7 @@ void App::drawSunMoon() {
   const uint16_t bodyCol[2] = { SUNCOL, MOONCOL };
 
   if (smGraphic) {
-    // ---- Graphical sky dome: zenith at centre, N up, elevation = radius. ----
+    // ---- Graphical sky dome: zenith at center, N up, elevation = radius. ----
     // Bodies below the horizon are shown faintly just outside the rim so their
     // azimuth is still readable. The selected body gets a ring, not a fill bar.
     const int cx = 62, cy = 68, R = 42;
@@ -39203,14 +40678,14 @@ void App::keyBandPlan(char c, bool enter, bool back) {
 
 // ===========================================================================
 //  Celestial sky plot (SCR_SKYMAP): planets and strong radio sources on a sky
-//  dome (zenith centre, N up, elevation = radius), reached with `s` from the
+//  dome (zenith center, N up, elevation = radius), reached with `s` from the
 //  Sun/Moon screen. Useful for antenna pointing (Sun/Moon/planet) and as a
 //  reference for the strongest cosmic radio sources crossing the sky.
 // ===========================================================================
 
 // Equatorial (RA/Dec, degrees, J2000-ish) -> horizontal (az/el) for the observer
 // at time t. The same conversion used inside skyObjAzEl, factored out so fixed
-// catalogue sources and computed planet positions can share it.
+// catalog sources and computed planet positions can share it.
 // GENERATED by tools/make_star_tables.py -- do not edit by hand.
 // Data: d3-celestial (BSD-3, ofrohn/d3-celestial; BSC5/HYG). RA/dec in 0.01 deg.
 // Stars sorted brightest-first (mag encoded as (mag+2)*10 in a uint8).
@@ -39300,13 +40775,13 @@ static void planetRaDec(int p, time_t t, double& raDeg, double& decDeg) {
   decDeg = atan2(ze, sqrt(xe * xe + ye * ye)) * R2D;
 }
 
-// Catalogue of strong cosmic radio sources (fixed J2000 RA/Dec, degrees) plus a
+// Catalog of strong cosmic radio sources (fixed J2000 RA/Dec, degrees) plus a
 // couple of bright orientation stars. Names kept short for the 240 px display.
 struct SkySrc { const char* name; double ra, dec; bool rf; };
 static const SkySrc SKY_RF[] = {
   { "CasA",  350.85,  58.81, true },   // brightest galactic radio source
   { "CygA",  299.87,  40.73, true },   // radio galaxy
-  { "SgrA",  266.42, -29.01, true },   // galactic centre
+  { "SgrA",  266.42, -29.01, true },   // galactic center
   { "TauA",   83.63,  22.01, true },   // Crab nebula / pulsar
   { "VirA",  187.71,  12.39, true },   // M87
   { "Sun",     0.0,    0.0,  true },   // placeholder (computed live)
@@ -39328,7 +40803,7 @@ void App::drawSkyMap() {
   }
   time_t now = nowUtc();
 
-  // Build the combined object list: 5 planets, then the catalogue sources.
+  // Build the combined object list: 5 planets, then the catalog sources.
   const int NP = 5;
   const int NST = (skyLayers >= 3) ? STAR_NAME_N : 0;   // named stars join the list
   const int NTOT = NP + SKY_RF_N + NST;
@@ -39359,7 +40834,7 @@ void App::drawSkyMap() {
   if (skySel < 0) skySel = NTOT - 1;
   if (skySel >= NTOT) skySel = 0;
 
-  // Sky dome: zenith centre, N up, elevation = radius (same as Sun/Moon graphic).
+  // Sky dome: zenith center, N up, elevation = radius (same as Sun/Moon graphic).
   const int cx = 62, cy = 70, R = 50;
   drawPolarGrid(cx, cy, R);
   auto domeXY = [&](double a, double e, int& x, int& y) {
@@ -39530,7 +41005,7 @@ void App::keyGpsPos(char c, bool enter, bool back) {
 
 // ===========================================================================
 //  Sat-to-sat visibility finder (SCR_SATSAT): the windows over the next few days
-//  when the selected satellite AND a second satellite (chosen from favourites)
+//  when the selected satellite AND a second satellite (chosen from favorites)
 //  are BOTH above the horizon at your location at the same time — e.g. for
 //  cross-satellite relay experiments or back-to-back working. Reached with `2`
 //  from the Satellites screen.
@@ -39867,7 +41342,7 @@ void App::drawSatSat() {
     int y = 50 + v * 10;
     bool sel = (i == satsatSel);
     // Selected row: a solid SELBG bar with black text in every column (matching
-    // the memo/mutual/log lists). Drawing the per-column colours with a CL_BLACK
+    // the memo/mutual/log lists). Drawing the per-column colors with a CL_BLACK
     // text background used to punch black cells through the highlight, which made
     // the selected row look striped and hard to read.
     uint16_t bg = sel ? CL_SELBG : CL_BLACK;
@@ -40417,7 +41892,7 @@ void App::drawLoraCompass() {
   double distKm, brg;
   greatCircle(o.lat, o.lon, lcLat, lcLon, distKm, brg);
 
-  // Compass rose: fixed, North up. cx/cy centre, R radius.
+  // Compass rose: fixed, North up. cx/cy center, R radius.
   const int cx = 70, cy = 78, R = 42;
   canvas.drawCircle(cx, cy, R, CL_DGREY);
   canvas.drawCircle(cx, cy, 2, CL_GREY);
@@ -41404,7 +42879,7 @@ void App::keyTools(char c, bool enter, bool back) {
 //  transponder passband planner, link-margin curve, debris-group screen.
 //  All five live under Tools; the two propagation screens reuse the fitter's
 //  pairwise forward model (Predictor::temeStateAt) and carry the TLE-accuracy
-//  caveat on screen: kilometre-class elements make this AWARENESS, not
+//  caveat on screen: kilometer-class elements make this AWARENESS, not
 //  collision avoidance.
 // ===========================================================================
 
@@ -42513,9 +43988,9 @@ void App::keyLnkCrv(char c, bool enter, bool back) {
 // analytic -- beta from inclination/RAAN/epoch via Predictor::betaAngleDeg(), eclipse
 // fraction from the cylindrical-shadow geometry (eclipsed when |beta| < betaStar,
 // betaStar = acos(RE/(RE+h))) -- so no propagation is needed and a custom orbit with no
-// catalogue entry works exactly like a real one. Orbit inputs default from the active
+// catalog entry works exactly like a real one. Orbit inputs default from the active
 // satellite; every input is user-editable. NOT a flight thermal analysis; clearly
-// labelled first-order in the UI and on the printout.
+// labeled first-order in the UI and on the printout.
 void App::computeThermal() {
   thValid = false;
   const double RE = 6378.137;                 // km
@@ -42523,7 +43998,7 @@ void App::computeThermal() {
   const double S0 = 1361.0;                   // solar constant W/m^2
   const double ALB = 0.30;                    // Earth albedo (bond)
   const double EIR = 237.0;                   // Earth IR emission W/m^2
-  const double CP = 900.0;                    // J/kg/K, aluminium-dominated bus
+  const double CP = 900.0;                    // J/kg/K, aluminum-dominated bus
 
   double h = thAlt; if (h < 100) h = 100;     // km, guard
   double m = thMass; if (m <= 0) m = 0.1;
@@ -42755,7 +44230,7 @@ void App::printThermal() {
 // AMSAT status reports for the two mode-tagged names -- confirmed against the AMSAT
 // status API name list as "AO-7[A]" and "AO-7[B]" -- and estimates the daily switch
 // time from when reports shift between the modes. Honest about thin data: report
-// counts are shown and the estimate is labelled as derived from listener reports.
+// counts are shown and the estimate is labeled as derived from listener reports.
 
 // Sample one orbit; ao7ContSun = true only if sunlit at every sample.
 void App::ao7CheckSunlight() {
@@ -42899,9 +44374,9 @@ void App::printAprs() {
 namespace {
   struct MufRegion { const char* name; double lat; double lon; }; // lon: west positive
   // West longitude positive, matching minimufMHz(). Chosen to spread the compass and
-  // the distance range from a mid-northern QTH: near neighbours, the major DX centres,
+  // the distance range from a mid-northern QTH: near neighbors, the major DX centers,
   // and a couple of deep-DX/antipodal checks.
-  // West longitude positive, matching minimufMHz(). 24 centres chosen to spread the
+  // West longitude positive, matching minimufMHz(). 24 centers chosen to spread the
   // compass and distance range and to break out the paths a DX operator actually
   // distinguishes: the two Americas coasts and their tropics, the Caribbean, the poles
   // (trans-polar to Asia is a real northern-hemisphere path), the Pacific (Hawaii and
@@ -42935,7 +44410,7 @@ namespace {
   };
   const int MUF_REGION_N = sizeof(MUF_REGIONS)/sizeof(MUF_REGIONS[0]);
 
-  // Colour a MUF value: red (low, <10), amber (10-17), green (17-24), cyan (high, >24).
+  // Color a MUF value: red (low, <10), amber (10-17), green (17-24), cyan (high, >24).
   uint16_t mufColour(double m) {
     if (m < 10) return CL_RED;
     if (m < 17) return CL_YELLOW;
@@ -43105,7 +44580,7 @@ void App::keyNearby(char c, bool enter, bool back) {
 }
 
 // ---------------------------------------------------------------------------
-//  APRS.fi stations (SCR_APRS list, SCR_APRSDET bearing detail)
+//  APRS-IS stations heard (SCR_APRS list, SCR_APRSDET bearing detail)
 // ---------------------------------------------------------------------------
 // MIC-E destination character -> latitude digit plus the two flag bits it carries.
 // '0'-'9' digit with message bit 0; 'A'-'J' and 'P'-'Y' digit 0-9 with bit 1;
@@ -43219,7 +44694,7 @@ bool App::aprsDecodeLine(const char* line, char* callOut, size_t cap,
 }
 
 // ---------------------------------------------------------------------------
-//  APRS-IS socket lifecycle. Modelled on serviceRigctld()/serviceWebd(): allocated
+//  APRS-IS socket lifecycle. Modeled on serviceRigctld()/serviceWebd(): allocated
 //  on demand, polled from loop(), and torn down whenever an outbound fetch needs the
 //  heap. The difference is that this one dials out instead of listening.
 // ---------------------------------------------------------------------------
@@ -43251,7 +44726,7 @@ void App::aprsStart() {
     strlcpy(aprsStatus, "WiFi failed", sizeof(aprsStatus)); return;
   }
 
-  // Allocate the records BEFORE dialling: a failed allocation should not leave a
+  // Allocate the records BEFORE dialing: a failed allocation should not leave a
   // live socket with nowhere to put what it receives.
   aprsSta = (AprsSta*)calloc(APRS_MAX, sizeof(AprsSta));
   if (!aprsSta) { strlcpy(aprsStatus, "Out of memory", sizeof(aprsStatus)); return; }
@@ -43708,7 +45183,7 @@ void App::drawDxc() {
       canvas.printf("%-10s %9.1f %5s de %-6s", s.dx, s.freqKhz,
                     s.band >= 0 ? DXC_BANDS[s.band].name : "-", s.de);
       // ---- comment line: a small drawn lead-in triangle then the comment, in a steady
-      // mid-grey that reads clearly on black; omitted entirely (blank line) when there is
+      // mid-gray that reads clearly on black; omitted entirely (blank line) when there is
       // no comment. The triangle is drawn (not a font glyph) so it renders identically
       // regardless of the built-in font's extended-character coverage. ----
       if (s.cmt[0]) {
@@ -43783,7 +45258,7 @@ void App::fetchAdsb() {
   adsbBusy = true; setStatus("Fetching aircraft"); draw();
   // cfg.adsbUrl is the API BASE. The query is built here from the live QTH and
   // adsbRangeKm so the operator never hand-edits coordinates into a URL. adsb.lol's
-  // path takes NAUTICAL MILES -- passing kilometres straight in would silently
+  // path takes NAUTICAL MILES -- passing kilometers straight in would silently
   // request a ring 1.85x too big. Trailing slashes on the base are tolerated.
   char base[100]; strlcpy(base, cfg.adsbUrl, sizeof(base));
   size_t bl = strlen(base);
@@ -43901,7 +45376,7 @@ void App::fetchAdsb() {
 
 // Recompute the scatter-target bearing from the current grid + QTH. Split out of fetchAdsb
 // so setting the target grid updates the overlay immediately, rather than only on the next
-// fetch (the old behaviour: the indicator changed only after leaving and re-entering).
+// fetch (the old behavior: the indicator changed only after leaving and re-entering).
 void App::adsbUpdateScatter() {
   adsbScatter = false;
   if (!adsbTgtGrid[0]) return;
@@ -44776,11 +46251,11 @@ void App::fetchAo7Reports() {
               String rp = fld("report"), ra = fld("reported_time"), gs = fld("grid_square");
               time_t rt = isoZToUnix(ra.c_str());
               if (rt > 0) ++seen;
-              // 15-minute resolution. Every reported_time comes back normalised to HH:30,
+              // 15-minute resolution. Every reported_time comes back normalized to HH:30,
               // but each record also carries the quarter-hour slot it was filed in -- the
               // API's own de-duplication key is (satellite, callsign, hour, 15-minute
-              // period). Rebuilding hour-start + period*15min + 7.5min centres the
-              // observation in its true slot and cuts the quantisation from +/-30 min to
+              // period). Rebuilding hour-start + period*15min + 7.5min centers the
+              // observation in its true slot and cuts the quantization from +/-30 min to
               // +/-7.5 min, which is a 4x reduction in the noise floor of the whole fit.
               int per = num("period", -1);
               if (rt > 0 && per >= 0 && per <= 3) rt = (rt - (rt % 3600)) + per * 900 + 450;
@@ -44817,7 +46292,7 @@ void App::fetchAo7Reports() {
     // The response carries no "there is more" flag, and the API exposes only `since` (a
     // LOWER bound) -- there is no `before`/`until`, so paging further back is simply not
     // expressible. What we CAN do is notice that the cap was reached, so the window we
-    // actually analysed is shorter than the 30 days requested, and say so rather than
+    // actually analyzed is shorter than the 30 days requested, and say so rather than
     // quietly presenting a truncated baseline as a full one. The on-disk cache below is
     // the real answer to this: it accumulates history across runs.
     if (seen >= 500) ao7Trunc = true;
@@ -44942,7 +46417,7 @@ void App::ao7Estimate() {
     }
   }
 
-  // 5. local refinement around the coarse optimum -- removes the grid quantisation from
+  // 5. local refinement around the coarse optimum -- removes the grid quantization from
   //    both the period and the phase, which is what the coarse step alone would leave as
   //    an irreducible error floor.
   {
@@ -45020,7 +46495,7 @@ void App::drawAo7() {
 
   if (ao7Idx < 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(X, y);
-    canvas.print("AO-7 not in catalogue.");
+    canvas.print("AO-7 not in catalog.");
     canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(X, y + LH);
     canvas.print("Load GP data incl. NORAD 7530.");
     footer("` back");
@@ -47065,7 +48540,7 @@ static char loconvUtmBand(double lat) {
   return B[i];
 }
 
-// --- UTM forward projection (WGS84, Snyder series; validated sub-metre) ----------
+// --- UTM forward projection (WGS84, Snyder series; validated sub-meter) ----------
 // Fills zone/band/easting/northing. Handles the Norway/Svalbard zone exceptions.
 static void loconvToUTM(double lat, double lon, int& zone, char& band, double& easting, double& northing) {
   const double a = 6378137.0, f = 1.0 / 298.257223563;
@@ -47546,7 +49021,7 @@ void App::keyGraph(char c, bool enter, bool back) {
   if (isRight(c)) { graphXmin += xr * 0.1; graphXmax += xr * 0.1; lastDrawMs = 0; return; }
   if (isUp(c))    { graphYmin += yr * 0.1; graphYmax += yr * 0.1; lastDrawMs = 0; return; }
   if (isDown(c))  { graphYmin -= yr * 0.1; graphYmax -= yr * 0.1; lastDrawMs = 0; return; }
-  // Zoom about the window centre.
+  // Zoom about the window center.
   if (c == '+' || c == '=') {                    // zoom in (shrink span)
     double cx = (graphXmin + graphXmax) / 2, cy = (graphYmin + graphYmax) / 2;
     graphXmin = cx - xr * 0.4; graphXmax = cx + xr * 0.4;
@@ -48167,7 +49642,7 @@ namespace {
       err = "syntax"; return -1;
     }
 
-    // Execute a whole line, honouring ':' as a statement separator (the tutorial and the
+    // Execute a whole line, honoring ':' as a statement separator (the tutorial and the
     // manual both document it, e.g. "40 FOR I=1 TO 3: PRINT I: NEXT"). Only a fall-through
     // statement continues to the next: a GOTO/GOSUB/IF-jump (>=0), END (-999) or error
     // consumes the remainder of the line, so "10 GOTO 90 : PRINT X" never prints and a
@@ -48248,7 +49723,7 @@ bool App::basHookSatsel(void* self, int idx, double out[13]) {
   // satellite just can't be propagated right now -- no position/time fix, or a decayed /
   // stale TLE that SGP4 rejects -- is a SOFT failure: return true but flag it with an az
   // sentinel (-999) so the interpreter sets SATOK=0 and the program can skip it. This is
-  // what lets a catalogue scan (FOR I=0 TO NSAT-1 : SATSEL I : IF SATOK=0 ...) survive a
+  // what lets a catalog scan (FOR I=0 TO NSAT-1 : SATSEL I : IF SATOK=0 ...) survive a
   // dead bird instead of aborting on it.
   if (idx < 0 || idx >= a.db.count()) return false;                 // real error -> halt
   out[0] = -999.0;                                                  // default: soft-fail sentinel
@@ -48304,9 +49779,9 @@ bool App::basHookLpr(void* self, const char* line, int op) {
 void App::basHookGfx(void* self, int op, double pa, double pb, double pc, double pd,
                      double pe, const char* s) {
   App& a = *static_cast<App*>(self);
-  // Small fixed palette of canvas colour INDICES (the canvas is a paletted sprite;
+  // Small fixed palette of canvas color INDICES (the canvas is a paletted sprite;
   // draw calls take CL_* indices, not 565 values). Out of range = white; 0 = black
-  // (useful for erasing). BASIC colours: 0 blk 1 wht 2 red 3 grn 4 blu 5 yel 6 cyn
+  // (useful for erasing). BASIC colors: 0 blk 1 wht 2 red 3 grn 4 blu 5 yel 6 cyn
   // 7 org 8 gry 9 dark-green.
   static const uint8_t PAL[10] = { CL_BLACK, CL_WHITE, CL_RED, CL_GREEN, CL_BLUE,
                                    CL_YELLOW, CL_CYAN, CL_ORANGE, CL_GREY, CL_DGREEN };
@@ -48704,7 +50179,7 @@ void App::keyBasicFiles(char c, bool enter, bool back) {
       if (Store::fs().remove(path)) setStatus(String("Deleted ") + basFileList[basFileSel]);
       else setStatus("Delete failed");
       basFilesScan();
-    } else { basFileConfirmDel = false; setStatus("Delete cancelled"); }
+    } else { basFileConfirmDel = false; setStatus("Delete canceled"); }
     lastDrawMs = 0; return;
   }
   if (enter) {                                   // load the selected program, back to editor
@@ -49390,7 +50865,7 @@ void App::keyBasicRef(char c, bool enter, bool back) {
   if (c == 'p') { printReport(PR_BASICREF); return; }   // print the reference
 }
 // Print the Tiny BASIC reference: stream the on-device BASICREF[] table, dropping
-// the '#'/'~' colour markers. Printer::line() per-sink wraps, so long reference
+// the '#'/'~' color markers. Printer::line() per-sink wraps, so long reference
 // lines fold correctly on 58 mm paper without any special handling here.
 void App::printBasicRef() {
   Printer::title("TINY BASIC REFERENCE");
@@ -49604,7 +51079,7 @@ bool App::gpfSolve() {
     double rr = sqrt(resid[0]*resid[0]+resid[1]*resid[1]+resid[2]*resid[2]);
     if (rr < bestResid) { bestResid = rr; for (int i=0;i<6;++i) pBest[i] = p[i]; }
     // Early-exit at the achievable floor. The forward model round-trips through a TLE, so the
-    // residual can't go below the TLE-quantization limit (tens of metres at LEO); 1 m is
+    // residual can't go below the TLE-quantization limit (tens of meters at LEO); 1 m is
     // unreachable. Accept once we're within ~50 m -- that's a converged fit for this model.
     if (rr < 0.05) { unpack(p, gpfResult); gpfResidM = rr*1000.0; gpfConverged = true;
                      return true; } // <~50 m
@@ -51029,7 +52504,7 @@ void App::drawToolForm() {
       double D = tfVal[0], fMHz = tfVal[1];
       if (D <= 0 || fMHz <= 0) { out("Enter", "length,freq > 0", CL_ORANGE); break; }
       double fGHz = fMHz / 1000.0;
-      double r1 = 8.657 * sqrt(D / fGHz);                  // metres, at midpoint
+      double r1 = 8.657 * sqrt(D / fGHz);                  // meters, at midpoint
       out("1st zone r", String(r1, 1) + " m", CL_CYAN);
       out("60% clear", String(r1 * 0.6, 1) + " m", CL_WHITE);
       out("  at midpoint", String(D / 2.0, 1) + " km", CL_GREY);
@@ -51572,27 +53047,27 @@ static double minimufMHz(double L1, double W1, double L2, double W2,
 //
 //  Zone models (all approximate, no published verification vector exists):
 //   - South Atlantic Anomaly: an axis-aligned geographic ellipse in east-positive
-//     longitude, centred ~27S 53W with a slow westward drift, approximating the
+//     longitude, centered ~27S 53W with a slow westward drift, approximating the
 //     commonly-drawn SAA outline (elevated trapped-proton flux) at LEO. There is no
-//     sharp edge; intensity is highest near the centre and grows with altitude.
+//     sharp edge; intensity is highest near the center and grows with altitude.
 //   - Eclipse: the satellite is in Earth's shadow (the predictor's cylindrical-shadow
 //     sunlit flag) -- matters for power and thermal.
 //   - Polar: geographic |latitude| >= 60 deg.
-//   - Inner / outer Van Allen belts: centred-dipole McIlwain L-shell in range AND
+//   - Inner / outer Van Allen belts: centered-dipole McIlwain L-shell in range AND
 //     altitude above the ~1000 km atmospheric-loss floor, so LEO satellites (whose only
 //     belt exposure is the SAA) do not register. The belts are an L-shell phenomenon,
 //     not geographic; the SAA is the inner belt reaching down to LEO because the real
-//     (eccentric) field is offset, which a centred dipole cannot reproduce -- hence the
-//     SAA is modelled geographically and the belts by L-shell. Inner: 1.2<=L<=2.5.
+//     (eccentric) field is offset, which a centered dipole cannot reproduce -- hence the
+//     SAA is modeled geographically and the belts by L-shell. Inner: 1.2<=L<=2.5.
 //     Outer: 3<=L<=7 (the slot region between them is excluded).
 // ===========================================================================
 
-// Centred-dipole McIlwain L: L = (r/RE) / cos^2(magnetic latitude), with the geomagnetic
-// dipole north pole at ~2020 epoch. latDeg/lonEDeg are the geographic sub-point
-// (east-positive longitude), altKm the satellite altitude.
+// Centered-dipole McIlwain L, kept for the status line's quick readout and as the
+// analytic twin of maybeInBelt()'s pre-filter. The BELT TEST no longer uses it --
+// see shellAt() below, which traces the real IGRF-14 field line.
 double App::lShellAt(double latDeg, double lonEDeg, double altKm) {
   const double RE = 6371.0, D2R = 0.017453292519943295;
-  const double poleLat = 80.65, poleLon = -72.68;
+  const double poleLat = 80.79, poleLon = -72.76;      // IGRF-14 2025.0 dipole axis
   double s = sin(latDeg*D2R)*sin(poleLat*D2R)
            + cos(latDeg*D2R)*cos(poleLat*D2R)*cos((lonEDeg - poleLon)*D2R);
   if (s >  1) s =  1; if (s < -1) s = -1;             // sin(magnetic latitude)
@@ -51601,11 +53076,238 @@ double App::lShellAt(double latDeg, double lonEDeg, double altKm) {
   return (RE + altKm) / RE / cos2;
 }
 
+// IGRF-14 (IAGA, 2024) main-field coefficients, epoch 2025.0, Schmidt
+// semi-normalized, nT. Secular variation (nT/yr) is published to degree 8 and
+// is valid 2025-2030. Generated from igrf14coeffs.txt by tools/make_igrf.py --
+// do not hand-edit. Index: i = n(n+1)/2 + m, n = 1..13, m = 0..n.
+static const uint8_t IGRF_NMAX = 13;
+static const uint8_t IGRF_SVMAX = 8;
+static const float IGRF_EPOCH = 2025.0f;
+static const float IGRF_G[105] = {
+        0.00f,  -29350.00f,   -1410.30f,   -2556.20f,    2950.90f,    1648.70f,
+     1360.90f,   -2404.20f,    1243.80f,     453.40f,     894.70f,     799.60f,
+       55.80f,    -281.10f,      12.00f,    -232.90f,     369.00f,     187.20f,
+     -138.70f,    -141.90f,      20.90f,      64.30f,      63.80f,      76.70f,
+     -115.70f,     -40.90f,      14.90f,     -60.80f,      79.60f,     -76.90f,
+       -8.80f,      59.30f,      15.80f,       2.50f,     -11.20f,      14.30f,
+       23.10f,      10.90f,     -17.50f,       2.00f,     -21.80f,      16.90f,
+       14.90f,     -16.80f,       1.00f,       4.70f,       8.00f,       3.00f,
+       -0.20f,      -2.50f,     -13.10f,       2.40f,       8.60f,      -8.70f,
+      -12.80f,      -1.30f,      -6.40f,       0.20f,       2.00f,      -1.00f,
+       -0.50f,      -0.90f,       1.50f,       0.90f,      -2.60f,      -3.90f,
+        3.00f,      -1.40f,      -2.50f,       2.40f,      -0.60f,       0.00f,
+       -0.60f,      -0.10f,       1.10f,      -1.00f,      -0.10f,       2.60f,
+       -2.00f,      -0.10f,       0.40f,       1.20f,      -1.20f,       0.60f,
+        0.50f,       0.50f,      -0.10f,      -0.50f,      -0.20f,      -1.20f,
+       -0.70f,       0.20f,      -0.90f,       0.60f,       0.70f,      -0.20f,
+        0.50f,       0.10f,       0.70f,       0.00f,       0.30f,       0.20f,
+        0.40f,      -0.50f,      -0.40f,
+};
+static const float IGRF_H[105] = {
+        0.00f,       0.00f,    4545.50f,       0.00f,   -3133.60f,    -814.20f,
+        0.00f,     -56.90f,     237.60f,    -549.60f,       0.00f,     278.60f,
+     -134.00f,     212.00f,    -375.40f,       0.00f,      45.30f,     220.00f,
+     -122.90f,      42.90f,     106.20f,       0.00f,     -18.40f,      16.80f,
+       48.90f,     -59.80f,      10.90f,      72.80f,       0.00f,     -48.90f,
+      -14.40f,      -1.00f,      23.50f,      -7.40f,     -25.10f,      -2.20f,
+        0.00f,       7.20f,     -12.60f,      11.50f,      -9.70f,      12.70f,
+        0.70f,      -5.20f,       3.90f,       0.00f,     -24.80f,      12.10f,
+        8.30f,      -3.40f,      -5.30f,       7.20f,      -0.60f,       0.80f,
+        9.80f,       0.00f,       3.30f,       0.10f,       2.50f,       5.40f,
+       -9.00f,       0.40f,      -4.20f,      -3.80f,       0.90f,      -9.00f,
+        0.00f,       0.00f,       2.80f,      -0.60f,       0.10f,       0.50f,
+       -0.30f,      -1.20f,      -1.70f,      -2.90f,      -1.80f,      -2.30f,
+        0.00f,      -1.20f,       0.60f,       1.00f,      -1.50f,       0.00f,
+        0.60f,      -0.20f,       0.80f,       0.10f,      -0.90f,       0.10f,
+        0.20f,       0.00f,      -0.90f,       0.70f,       1.20f,      -0.30f,
+       -1.30f,      -0.10f,       0.20f,      -0.20f,       0.50f,       0.60f,
+       -0.60f,      -0.30f,      -0.50f,
+};
+static const float IGRF_GSV[45] = {
+        0.00f,      12.60f,      10.00f,     -11.20f,      -5.30f,      -8.30f,
+       -1.50f,      -4.40f,       0.40f,     -15.60f,      -1.70f,      -2.30f,
+       -5.80f,       5.40f,      -6.80f,       0.60f,       1.30f,       0.00f,
+        0.70f,       2.30f,       1.00f,      -0.20f,      -0.30f,       0.80f,
+        1.20f,      -0.80f,       0.40f,       0.90f,      -0.10f,      -0.10f,
+       -0.10f,       0.50f,      -0.10f,      -0.80f,      -0.80f,       0.90f,
+       -0.10f,       0.20f,       0.00f,       0.40f,      -0.10f,       0.30f,
+        0.10f,       0.00f,       0.30f,
+};
+static const float IGRF_HSV[45] = {
+        0.00f,       0.00f,     -21.50f,       0.00f,     -27.30f,     -11.10f,
+        0.00f,       3.80f,      -0.20f,      -3.90f,       0.00f,      -1.30f,
+        4.10f,       1.60f,      -4.10f,       0.00f,      -0.50f,       2.10f,
+        0.50f,       1.70f,       1.90f,       0.00f,       0.30f,      -1.60f,
+       -0.40f,       0.80f,       0.70f,       0.90f,       0.00f,       0.60f,
+        0.50f,      -0.70f,       0.00f,      -0.90f,       0.50f,      -0.30f,
+        0.00f,      -0.30f,       0.40f,      -0.30f,       0.40f,      -0.50f,
+       -0.60f,       0.30f,       0.20f,
+};
+#define IGRF_IDX(n,m) ((n)*((n)+1)/2 + (m))
+static const float IGRF_A = 6371.2f;      // IGRF reference radius, km
+static const int   SHELL_MAX_STEPS = 3000;// hard bound on a field-line walk
+
+// ---- IGRF-14 evaluation ------------------------------------------------------
+// Geocentric spherical harmonic sum, Schmidt semi-normalized, the standard
+// formulation. Returns Br (outward), Bt (colatitude/south), Bp (east) in nT.
+// Validated against an independent implementation (ppigrf, IGRF14.shc) to 3e-5
+// relative from the surface to GEO -- see tools/host_geomag.
+void App::igrfField(float rKm, float colatDeg, float lonEDeg, float yrs,
+                    float& Br, float& Bt, float& Bp) {
+  const float D2R = 0.01745329252f;
+  float th = colatDeg * D2R, ph = lonEDeg * D2R;
+  float ct = cosf(th), st = sinf(th);
+  if (fabsf(st) < 1e-7f) st = (st < 0) ? -1e-7f : 1e-7f;   // magnetic-pole guard
+  const int NM = IGRF_NMAX;
+  float P[IGRF_IDX(13,13)+1], dP[IGRF_IDX(13,13)+1];
+  P[IGRF_IDX(0,0)] = 1.0f; dP[IGRF_IDX(0,0)] = 0.0f;
+  float sm[14], cm[14];
+  for (int m = 0; m <= NM; ++m) { sm[m] = sinf(m*ph); cm[m] = cosf(m*ph); }
+  float ar = IGRF_A / rKm, arn = ar*ar;      // becomes (a/r)^(n+2) inside the loop
+  Br = Bt = Bp = 0.0f;
+  for (int n = 1; n <= NM; ++n) {
+    arn *= ar;
+    for (int m = 0; m <= n; ++m) {
+      if (n == m) {
+        float k = (n == 1) ? 1.0f : sqrtf(1.0f - 0.5f/(float)n);
+        P [IGRF_IDX(n,m)] = k * st * P[IGRF_IDX(n-1,m-1)];
+        dP[IGRF_IDX(n,m)] = k * (st * dP[IGRF_IDX(n-1,m-1)] + ct * P[IGRF_IDX(n-1,m-1)]);
+      } else {
+        float den = sqrtf((float)(n*n - m*m));
+        float k1  = (float)(2*n - 1) / den;
+        float k2  = (n-1 >= m) ? sqrtf((float)((n-1)*(n-1) - m*m)) / den : 0.0f;
+        float Pnm2  = (n-2 >= m) ? P [IGRF_IDX(n-2,m)] : 0.0f;
+        float dPnm2 = (n-2 >= m) ? dP[IGRF_IDX(n-2,m)] : 0.0f;
+        P [IGRF_IDX(n,m)] = k1 * ct * P[IGRF_IDX(n-1,m)] - k2 * Pnm2;
+        dP[IGRF_IDX(n,m)] = k1 * (ct * dP[IGRF_IDX(n-1,m)] - st * P[IGRF_IDX(n-1,m)]) - k2 * dPnm2;
+      }
+      float g = IGRF_G[IGRF_IDX(n,m)], h = IGRF_H[IGRF_IDX(n,m)];
+      if (n <= IGRF_SVMAX) {                       // linear secular variation
+        g += yrs * IGRF_GSV[IGRF_IDX(n,m)];
+        h += yrs * IGRF_HSV[IGRF_IDX(n,m)];
+      }
+      float gc = g*cm[m] + h*sm[m], gs = g*sm[m] - h*cm[m];
+      Br += arn * (float)(n+1) * gc * P[IGRF_IDX(n,m)];
+      Bt -= arn * gc * dP[IGRF_IDX(n,m)];
+      Bp += arn * (float)m * gs * P[IGRF_IDX(n,m)] / st;
+    }
+  }
+}
+
+// Years past the IGRF epoch, for the secular-variation term. Clamped to the
+// model's published validity window: extrapolating IGRF beyond it is not
+// meaningful, and a wrong clock must not silently produce a wrong field.
+float App::igrfYears() {
+  float y = 1.5f;                                   // mid-window fallback
+  if (timeIsSet()) { time_t n = nowUtc(); struct tm tv; gmtime_r(&n, &tv);
+                     y = (tv.tm_year + 1900 + tv.tm_yday/365.0f) - IGRF_EPOCH; }
+  if (y < 0.0f) y = 0.0f; if (y > 5.0f) y = 5.0f;   // IGRF-14 SV covers 2025-2030
+  return y;
+}
+
+// |B| (nT) at a geocentric Cartesian point (km), and the field direction.
+void App::igrfVec(const float p[3], float yrs, float b[3]) {
+  float r = sqrtf(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]);
+  if (r < 1.0f) { b[0]=b[1]=b[2]=0; return; }
+  float colat = acosf(p[2]/r) * 57.2957795f;
+  float lon   = atan2f(p[1], p[0]) * 57.2957795f;
+  float Br, Bt, Bp; igrfField(r, colat, lon, yrs, Br, Bt, Bp);
+  float th = colat/57.2957795f, ph = lon/57.2957795f;
+  float st=sinf(th), ct=cosf(th), sp=sinf(ph), cp=cosf(ph);
+  b[0] = Br*st*cp + Bt*ct*cp - Bp*sp;
+  b[1] = Br*st*sp + Bt*ct*sp + Bp*cp;
+  b[2] = Br*ct    - Bt*st;
+}
+
+// ---- Field-line shell: the actual belt test ----------------------------------
+// Walk DOWNHILL in |B| along the field line through the point until |B| turns
+// around. That minimum is the shell's magnetic equator: its |B| is B0 and its
+// geocentric radius (in Earth radii) is the shell label L -- exactly McIlwain L
+// in a dipole, and the physically meaningful equatorial crossing radius in the
+// real field. Only ONE direction is walked and the feet are never reached,
+// because B0 and L are all the belt test needs.
+//
+// Why B/B0 and not altitude: the belts are flux tubes. Their field lines come
+// down to low altitude at high magnetic latitude (the "horns"), so an altitude
+// floor cannot separate "in the belt" from "under it" -- a 1200 km polar
+// satellite at 65 deg sits on the L=5.5 shell at 184x its equatorial field,
+// where trapped flux is orders of magnitude below the belt proper. B/B0 is the
+// standard second coordinate (McIlwain's (L, B/B0)) and measures exactly that
+// displacement from the shell's equator.
+App::ShellInfo App::shellAt(double latDeg, double lonEDeg, double altKm) {
+  ShellInfo s;
+  const float yrs = igrfYears();
+  const float RE = 6371.0f;
+  float r = RE + (float)altKm;
+  float colat = (90.0f - (float)latDeg) / 57.2957795f, ph = (float)lonEDeg / 57.2957795f;
+  float p[3] = { r*sinf(colat)*cosf(ph), r*sinf(colat)*sinf(ph), r*cosf(colat) };
+  float b[3]; igrfVec(p, yrs, b);
+  float bm = sqrtf(b[0]*b[0] + b[1]*b[1] + b[2]*b[2]);
+  s.bSat = bm; s.b0 = bm; s.shellL = r / RE;
+  if (bm <= 0) { s.bRatio = 1.0f; return s; }
+
+  // Downhill direction: one probe each way along the line.
+  int sign = +1;
+  { float q[3], t[3];
+    for (int i=0;i<3;i++) q[i] = p[i] + 50.0f * b[i] / bm;
+    igrfVec(q, yrs, t);
+    if (sqrtf(t[0]*t[0]+t[1]*t[1]+t[2]*t[2]) > bm) sign = -1; }
+
+  float prev = bm; int rising = 0;
+  for (int step = 0; step < SHELL_MAX_STEPS; ++step) {
+    float rr = sqrtf(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);
+    if (rr > 12.0f*RE || rr < RE + 80.0f) break;    // magnetopause / atmosphere
+    float h = 0.02f * rr; if (h < 15.0f) h = 15.0f; if (h > 500.0f) h = 500.0f;
+    float k1[3],k2[3],k3[3],k4[3],q[3],t[3],m;      // RK4 on dp/ds = sign * B/|B|
+    igrfVec(p,yrs,t); m = sqrtf(t[0]*t[0]+t[1]*t[1]+t[2]*t[2]); if (m<=0) break;
+    for (int i=0;i<3;i++) k1[i] = sign*t[i]/m;
+    for (int i=0;i<3;i++) q[i] = p[i] + 0.5f*h*k1[i];
+    igrfVec(q,yrs,t); m = sqrtf(t[0]*t[0]+t[1]*t[1]+t[2]*t[2]); if (m<=0) break;
+    for (int i=0;i<3;i++) k2[i] = sign*t[i]/m;
+    for (int i=0;i<3;i++) q[i] = p[i] + 0.5f*h*k2[i];
+    igrfVec(q,yrs,t); m = sqrtf(t[0]*t[0]+t[1]*t[1]+t[2]*t[2]); if (m<=0) break;
+    for (int i=0;i<3;i++) k3[i] = sign*t[i]/m;
+    for (int i=0;i<3;i++) q[i] = p[i] + h*k3[i];
+    igrfVec(q,yrs,t); m = sqrtf(t[0]*t[0]+t[1]*t[1]+t[2]*t[2]); if (m<=0) break;
+    for (int i=0;i<3;i++) k4[i] = sign*t[i]/m;
+    for (int i=0;i<3;i++) p[i] += (h/6.0f)*(k1[i] + 2*k2[i] + 2*k3[i] + k4[i]);
+    igrfVec(p,yrs,t);
+    float bnew = sqrtf(t[0]*t[0]+t[1]*t[1]+t[2]*t[2]);
+    float rn   = sqrtf(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);
+    if (bnew < s.b0) { s.b0 = bnew; s.shellL = rn / RE; }
+    if (bnew > prev) { if (++rising >= 2) break; } else rising = 0;
+    prev = bnew;
+  }
+  s.bRatio = (s.b0 > 0) ? s.bSat / s.b0 : 1.0f;
+  return s;
+}
+
+// Cheap analytic pre-filter: centered-dipole (L, B/B0), ~20 flops, no tracing.
+// Used only to REJECT points that are nowhere near a belt, which is the common
+// case and also the expensive one to trace (a high-latitude LEO sample walks the
+// whole field line to its equator). Margins are deliberately generous -- 3x the
+// B/B0 cutoff and a wide L window -- so the analytic model can never reject a
+// point the real field would have accepted.
+bool App::maybeInBelt(double latDeg, double lonEDeg, double altKm) {
+  const double RE = 6371.0, D2R = 0.017453292519943295;
+  const double poleLat = 80.79, poleLon = -72.76;      // IGRF-14 2025.0 dipole axis
+  double s = sin(latDeg*D2R)*sin(poleLat*D2R)
+           + cos(latDeg*D2R)*cos(poleLat*D2R)*cos((lonEDeg - poleLon)*D2R);
+  if (s >  1) s =  1; if (s < -1) s = -1;
+  double sin2 = s*s, cos2 = 1.0 - sin2;
+  if (cos2 < 1e-6) return false;                        // over the magnetic pole
+  double L = (RE + altKm) / RE / cos2;
+  if (L < 1.05 || L > 9.0) return false;
+  double cos6 = cos2*cos2*cos2;
+  double ratio = sqrt(1.0 + 3.0*sin2) / cos6;           // dipole B/B0
+  return ratio <= 3.0 * ZONE_BRATIO_MAX;
+}
+
 // Is the sub-point (lat, east-lon, altKm; sunlit flag) inside the given zone?
 bool App::zoneContains(int zone, double lat, double lonE, double altKm, bool sunlit) {
   switch (zone) {
     case ZONE_SAA: {
-      // Ellipse centred ~27S, 53W with ~0.3 deg/yr westward drift from 2025.0.
+      // Ellipse centered ~27S, 53W with ~0.3 deg/yr westward drift from 2025.0.
       double yrs = 0;
       if (timeIsSet()) { time_t n = nowUtc(); struct tm tv; gmtime_r(&n, &tv);
                          yrs = (tv.tm_year + 1900 + tv.tm_yday/365.0) - 2025.0; }
@@ -51617,10 +53319,26 @@ bool App::zoneContains(int zone, double lat, double lonE, double altKm, bool sun
     }
     case ZONE_ECLIPSE: return !sunlit;
     case ZONE_POLAR:   return fabs(lat) >= 60.0;
-    case ZONE_INNER: { double L = lShellAt(lat, lonE, altKm);
-                       return altKm >= 1000.0 && L >= 1.2 && L <= 2.5; }
-    case ZONE_OUTER: { double L = lShellAt(lat, lonE, altKm);
-                       return altKm >= 1000.0 && L >= 3.0 && L <= 7.0; }
+    case ZONE_INNER:
+    case ZONE_OUTER: {
+      // Trapped-particle test in McIlwain (L, B/B0) coordinates, from the real
+      // IGRF-14 field. BOTH conditions must hold:
+      //   * the field line through the satellite is a belt shell (L range), and
+      //   * the satellite is near that shell's magnetic equator (B/B0 <= cutoff),
+      //     i.e. inside the belt itself rather than out on its high-latitude horn
+      //     where the flux tube dips to low altitude and the trapped population
+      //     is depleted into the atmosphere.
+      // The old altitude floor is gone: it could not express this (the horns pass
+      // straight through any altitude), and the real field makes it unnecessary --
+      // a low-altitude point only lands on a belt shell near its equator inside
+      // the South Atlantic Anomaly, which IS the inner belt reaching down to LEO.
+      if (altKm < 300.0) return false;              // dense atmosphere: nothing trapped
+      if (!maybeInBelt(lat, lonE, altKm)) return false;     // cheap analytic reject
+      ShellInfo s = shellAt(lat, lonE, altKm);
+      if (s.bRatio > ZONE_BRATIO_MAX) return false;
+      return (zone == ZONE_INNER) ? (s.shellL >= 1.2 && s.shellL <= 2.5)
+                                  : (s.shellL >= 3.0 && s.shellL <= 7.0);
+    }
   }
   return false;
 }
@@ -51645,7 +53363,7 @@ static const char* zoneShort(int z) {
 // current zone over the next few orbits. One-shot (runs on entry and on zone/refresh),
 // mirrors the pass-finder's SGP4 loop; refines each crossing by bisection to a few sec.
 void App::saaCompute() {
-  saaWinN = 0; saaInNow = false; saaCurL = 0; saaComputed = true;
+  saaWinN = 0; saaInNow = false; saaCurL = 0; saaCurBR = 1; saaComputed = true;
   SatEntry* s = activeSat();
   if (!s || !timeIsSet()) return;
   pred.setSat(*s);
@@ -51670,7 +53388,11 @@ void App::saaCompute() {
   { LiveLook L0 = pred.look(now);
     double lon = L0.subLon; while (lon < -180) lon += 360; while (lon > 180) lon -= 360;
     saaInNow = zoneContains(saaZone, L0.subLat, lon, L0.satAltKm, L0.sunlit);
-    saaCurL  = lShellAt(L0.subLat, lon, L0.satAltKm); }
+    // Report the REAL field-line shell (IGRF-14), the same numbers the belt test
+    // uses, rather than the analytic dipole approximation.
+    ShellInfo sh = shellAt(L0.subLat, lon, L0.satAltKm);
+    saaCurL  = sh.shellL;
+    saaCurBR = sh.bRatio; }
 
   // Bisect a boolean crossing between ta (state a) and tb (state !a) to ~2 s.
   auto refine = [&](time_t ta, time_t tb)->time_t {
@@ -51727,7 +53449,14 @@ void App::drawSaa() {
     return;
   }
   { char sb[48];
-    snprintf(sb, sizeof(sb), "Now: %s   L=%.1f", saaInNow ? "IN ZONE" : "outside", saaCurL);
+    // B/B0 earns its place on the line: it is what decides the belt zones, and it
+    // is the number that explains a "outside" verdict on a shell whose L looks
+    // like a belt (a high-latitude pass sits on the shell but far off its equator).
+    if (saaZone == ZONE_INNER || saaZone == ZONE_OUTER)
+      snprintf(sb, sizeof(sb), "Now: %s  L=%.2f B/B0=%.1f",
+               saaInNow ? "IN ZONE" : "outside", saaCurL, saaCurBR);
+    else
+      snprintf(sb, sizeof(sb), "Now: %s   L=%.1f", saaInNow ? "IN ZONE" : "outside", saaCurL);
     canvas.setTextColor(saaInNow ? CL_GREEN : CL_GREY, CL_BLACK);
     canvas.setCursor(4, 48); canvas.print(sb); }
 
@@ -51782,7 +53511,7 @@ float App::estMufMHz(bool day) {
 //  MINIMUF-3.5 MUF-to-regions (SCR_MUF table + SCR_MUFMAP map), off Space Wx.
 //  Runs the verified minimufMHz() model from the QTH to a fixed set of world DX
 //  regions for the current UT, giving a "what's the path MUF right now" read that
-//  the single-number Space Wx MUF cannot. The regions are representative centres,
+//  the single-number Space Wx MUF cannot. The regions are representative centers,
 //  not exhaustive; the model is F-region only and best on 800-8000 km paths, so
 //  the very short and antipodal rows are shown but flagged in the reference.
 // ===========================================================================
@@ -51843,7 +53572,7 @@ void App::drawMuf() {
     // bearing + distance
     char db[24]; snprintf(db, sizeof(db), "%03d\xF8 %5.0fkm", (int)lround(brg), distKm);
     canvas.setCursor(104, y); canvas.print(db);
-    // MUF value, coloured
+    // MUF value, colored
     canvas.setTextColor(mufColour(m), sel ? CL_SELBG : CL_BLACK);
     char mb[16]; snprintf(mb, sizeof(mb), "%4.1f %s", m, mufBand(m));
     canvas.setCursor(184, y); canvas.print(mb);
@@ -51900,9 +53629,9 @@ void App::drawMufMap() {
   const double D2R = 0.017453292519943295;
   double qLatR = o.lat * D2R, qLonR = -o.lon * D2R;
 
-  // Region markers, coloured by MUF band. With two dozen regions, printing a number
+  // Region markers, colored by MUF band. With two dozen regions, printing a number
   // at every dot would overlap (Europe alone stacks several), so the dots carry the
-  // band by colour and only the SELECTED region's exact MUF is printed, once, below --
+  // band by color and only the SELECTED region's exact MUF is printed, once, below --
   // step the selection with ;/. to read each in place. The selected dot gets a white
   // ring so it is findable among the cluster.
   if (mufSel < 0) mufSel = 0;
@@ -52298,7 +54027,7 @@ void App::drawReady() {
   // Rotator: protocol + WIRE + link state. The old row said "GS-232" or
   // "other/rotctld" and nothing else -- with a USB adapter and no radio engaged
   // that told the operator nothing about whether the link was up, which adapter
-  // bound, or why it did not. Colour carries the link state so it reads at a
+  // bound, or why it did not. Color carries the link state so it reads at a
   // glance: green = talking, red = configured but no link, white = off.
   if (!cfg.rotEnable) {
     row("Rotator", "off", CL_WHITE);
@@ -52623,7 +54352,7 @@ void App::drawTxDb() {
     bool manual = (strncmp(t.desc, "manual", 6) == 0);
     bool sel = (e == txDbSel);
     // line 1: index + description. Selected entry is green with a '>'; inactive
-    // (SatNOGS-decommissioned) entries are dimmed grey and flagged so the operator
+    // (SatNOGS-decommissioned) entries are dimmed gray and flagged so the operator
     // can tell at a glance which transponders are no longer believed operational.
     uint16_t descCol = sel ? CL_GREEN : (t.active ? CL_CYAN : CL_GREY);
     canvas.setTextColor(descCol, CL_BLACK); canvas.setCursor(4, y);
@@ -52968,7 +54697,7 @@ void App::keyQrz(char c, bool enter, bool back) {
 // ===========================================================================
 //  Workable grid squares: 4-char Maidenhead grids under the satellite footprint.
 //  Off Passes (union over the selected pass) and off Track (live "now"). The
-//  footprint half-angle is acos(Re/(Re+h)); a grid counts if its centre is
+//  footprint half-angle is acos(Re/(Re+h)); a grid counts if its center is
 //  within that great-circle radius of the sub-point. A per-grid bitset is used
 //  so it handles any altitude (whole-Earth = 32400 grids) with no cap.
 // ===========================================================================
@@ -53023,7 +54752,7 @@ void App::addFootprintGrids(double subLat, double subLon, double altKm) {
     int lonHi = (int)ceil((subLon + lonHalf) / 2.0) * 2;
     double A = sin(clatR) * sinSub, B = cos(clatR) * cosSub;
     for (int lo = lonLo; lo <= lonHi; lo += 2) {
-      double c = lo + 1.0;                                 // grid centre longitude
+      double c = lo + 1.0;                                 // grid center longitude
       if (A + B * cos((c - subLon) * D2R) < coslam) continue;   // outside footprint
       int idx = gridIdx(clat, c);
       if (gridBits) gridBits[idx >> 3] |= (uint8_t)(1 << (idx & 7));
@@ -53172,7 +54901,7 @@ void App::keyGrid(char c, bool enter, bool back) {
 //  the only difference is the per-point lookup -- a point-in-polygon test
 //  against bundled simplified state boundaries instead of Maidenhead math.
 //  Boundaries are coarse (~0.1 deg); a footprint grazing a border may claim
-//  both neighbours, which is acceptable at footprint scale.
+//  both neighbors, which is acceptable at footprint scale.
 // ===========================================================================
 // Simplified boundary polygons. Encoding: int16_t (lon*10, lat*10) pairs;
 // 32767,32767 separates entities. Order matches STATE_CODE (alphabetical),
@@ -53449,7 +55178,7 @@ void App::keyStates(char c, bool enter, bool back) {
 // int16_t (lon*10, lat*10) pairs; 32767,32767 separates entities; order
 // matches DXCCPOLY_CODE. These are the large landmasses; smaller entities
 // are handled as points (see DXCCPT). Coarse borders: a footprint near a
-// border may also list the neighbour.
+// border may also list the neighbor.
 static const int16_t DXCCPOLY[] = {
   /*3D2*/ 1765,-193, 1795,-193, 1795,-163, 1765,-163, 1765,-193, 32767,32767,
   /*3V*/ 77,320, 113,320, 113,370, 77,370, 77,320, 32767,32767,
@@ -54586,7 +56315,7 @@ void App::printVisList() {
 //
 // The number that matters on this no-PSRAM board is LARGEST BLOCK, not free heap: TLS
 // needs one big contiguous allocation, and fragmentation can starve it while "free"
-// still looks healthy. The thresholds below are anchored to measured behaviour -- a GP
+// still looks healthy. The thresholds below are anchored to measured behavior -- a GP
 // fetch runs with ~25 KB free and the largest block dipping to ~8 KB.
 void App::drawPerf() {
   header("Performance");
@@ -55328,7 +57057,7 @@ bool App::tsResolveTarget() {
     return true;
   } else if (tsKind == 1) {                            // DXCC (geometry index 0..DXCC_N-1)
     if (tsGeoIdx < 0 || tsGeoIdx >= DXCC_N) return false;
-    if (tsGeoIdx < DXCCPOLY_N) {                       // polygon: bbox centre
+    if (tsGeoIdx < DXCCPOLY_N) {                       // polygon: bbox center
       tsLon = (DXCCPOLY_LOMIN[tsGeoIdx] + DXCCPOLY_LOMAX[tsGeoIdx]) / 20.0;
       tsLat = (DXCCPOLY_LAMIN[tsGeoIdx] + DXCCPOLY_LAMAX[tsGeoIdx]) / 20.0;
     } else {                                           // point entity: direct coord
@@ -56655,7 +58384,7 @@ void App::keyBig(char c, bool enter, bool back) {
   // Everything else that's valid on Track stays valid here: passband tuning
   // (,/; . and s/x), CAL trims, tune-mode cycling (m/d), transponder (t), radio
   // (r), rotator (o), tilt (y), and logging (l). Delegate to keyTrack so the
-  // behaviour -- including the FULL/DL knob-driven guard -- is identical and lives
+  // behavior -- including the FULL/DL knob-driven guard -- is identical and lives
   // in one place. keyTrack won't navigate away for any of these, so we just keep
   // showing the big view.
   if (c == 'l') { beginQso(); return; }            // log keeps tracking
@@ -57039,7 +58768,7 @@ void App::drawPolar() {
   canvas.setTextSize(1);
   if (!s) { footer("` back"); return; }
 
-  const int cx = 66, cy = 70, R = 44;   // plot centre + outer (horizon) radius
+  const int cx = 66, cy = 70, R = 44;   // plot center + outer (horizon) radius
 
   // (Re)build the ground-track arc on entry or when the cached pass has ended.
   if (timeIsSet() && (!polarPathValid || nowUtc() > polarPass.los)) buildPolarPath();
@@ -57100,19 +58829,19 @@ void App::drawPolar() {
 
 // ===========================================================================
 //  OSCARLOCATOR live view (SCR_OSCAR): an azimuthal-equidistant "plotting
-//  board" centred either on your station (QTH mode) or on a pole (polar mode).
+//  board" centered either on your station (QTH mode) or on a pole (polar mode).
 //  Live: it follows the satellite's sub-point in real time, drawing the
 //  graticule, a coarse coastline, the satellite marker + ground footprint, and
-//  (QTH mode) range rings. Modelled on the OSCARLOCATOR simulator; the same
+//  (QTH mode) range rings. Modeled on the OSCARLOCATOR simulator; the same
 //  footprint/great-circle math used by the world map is reused here.
 // ===========================================================================
 
 // Azimuthal-equidistant projection onto the disc. Returns false if the point
-// falls outside the plotted radius (rmaxDeg). mode 0 = QTH-centred (great-circle
+// falls outside the plotted radius (rmaxDeg). mode 0 = QTH-centered (great-circle
 // bearing/range from the observer), mode 1/2 = North/South polar.
 //   qth   : t = azimuth, 0=N at top, clockwise
-//   polarN: t = longitude, rho = 90-lat   (north pole at centre)
-//   polarS: t = longitude, rho = 90+lat   (south pole at centre)
+//   polarN: t = longitude, rho = 90-lat   (north pole at center)
+//   polarS: t = longitude, rho = 90+lat   (south pole at center)
 static bool oscarProject(int mode, double qlat, double qlon,
                          double lat, double lon, double rmaxDeg,
                          int cx, int cy, int R, int& sx, int& sy) {
@@ -57154,7 +58883,7 @@ void App::buildOscarArc() {
   double periodMin = 1440.0 / s->meanMotion;          // orbital period (minutes)
   time_t periodS = (time_t)llround(periodMin * 60.0);
   if (periodS < 60) periodS = 60;
-  // Centre the track on now: half an orbit back, half forward, so the satellite
+  // Center the track on now: half an orbit back, half forward, so the satellite
   // marker sits in the middle of the drawn track.
   time_t t0 = now - periodS / 2;
   for (int i = 0; i < OSCAR_ARC_PTS; ++i) {
@@ -57185,7 +58914,7 @@ void App::drawOscar() {
     return;
   }
 
-  // Centre low enough that the disc (and its N/S edge labels) clear the 16 px
+  // Center low enough that the disc (and its N/S edge labels) clear the 16 px
   // header bar: top of the disc is cy-R = 24, and the labels sit just inside it.
   const int cx = 70, cy = 76, R = 52;
   const Observer& o = loc.obs();
@@ -57245,11 +58974,11 @@ void App::drawOscar() {
   }
 
   // QTH range ring (amber, dashed): the satellite's footprint radius at MEAN
-  // altitude, centred on the station. Inside this great-circle ring the bird is
+  // altitude, centered on the station. Inside this great-circle ring the bird is
   // above the horizon and workable. Drawn dashed so it stays distinct from the
   // (same-radius) instantaneous footprint circle when the sat is near your QTH.
-  // Re-projects correctly in both QTH (a circle centred on you) and polar (an
-  // off-centre oval) modes.
+  // Re-projects correctly in both QTH (a circle centered on you) and polar (an
+  // off-center oval) modes.
   if (s->meanMotion > 0.0) {
     const double D2R = 0.0174532925199433, R2D = 57.2957795130823, RE = 6371.0;
     const double MU = 398600.4418;
@@ -57365,7 +59094,7 @@ void App::drawOscar() {
     canvas.drawCircle(satx, saty, 4, CL_BLACK);
   }
 
-  // QTH marker (amber star-ish dot at centre in QTH mode; a small ring in polar).
+  // QTH marker (amber star-ish dot at center in QTH mode; a small ring in polar).
   if (pm == 0) canvas.fillCircle(cx, cy, 2, CL_ORANGE);
 
   // ---- right-hand readout ----
@@ -57400,7 +59129,7 @@ void App::drawOscar() {
 // ===========================================================================
 //  3D globe view (SCR_GLOBE): an orthographic wireframe Earth that auto-follows
 //  the selected satellite. The globe rotates so the satellite's sub-point stays
-//  centred; a day/night terminator and all favourites are drawn. Arrow keys nudge
+//  centered; a day/night terminator and all favorites are drawn. Arrow keys nudge
 //  the view; ENTER re-snaps to follow. Front hemisphere only (z>=0 culled).
 // ===========================================================================
 
@@ -57423,7 +59152,7 @@ static void subSolarPoint(time_t t, double& slat, double& slon) {
   while (slon < -180) slon += 360; while (slon > 180) slon -= 360;
 }
 
-// Orthographic projection: rotate a geographic point by the view centre, then
+// Orthographic projection: rotate a geographic point by the view center, then
 // drop Z. Returns false if the point is on the far hemisphere (z < 0, hidden).
 // Precomputed sin/cos of the view lat/lon are passed in for speed.
 static bool globeProject(double lat, double lon, double svlat, double cvlat,
@@ -57433,8 +59162,8 @@ static bool globeProject(double lat, double lon, double svlat, double cvlat,
   double x = cos(la) * sin(dlo);
   double y = cos(la) * cos(dlo);
   double z = sin(la);
-  // Rotate about the X axis by the view latitude so the view centre (lat=vlat,
-  // dlo=0) maps to the front pole (yr=0, zr=1): screen-centre, facing viewer.
+  // Rotate about the X axis by the view latitude so the view center (lat=vlat,
+  // dlo=0) maps to the front pole (yr=0, zr=1): screen-center, facing viewer.
   double yr = z * cvlat - y * svlat;    // vertical on screen (+ = up = north)
   double zr = y * cvlat + z * svlat;    // + = toward viewer (front hemisphere)
   if (zr < 0) return false;             // far side, hidden
@@ -57461,7 +59190,7 @@ void App::drawGlobe() {
   pred.setSat(*s);
   LiveLook L = pred.look(now);
 
-  // Auto-follow: keep the selected satellite's sub-point centred.
+  // Auto-follow: keep the selected satellite's sub-point centered.
   if (globeFollow) { globeViewLat = L.subLat; globeViewLon = L.subLon; }
   double sv = sin(globeViewLat * 0.017453292519943295);
   double cv = cos(globeViewLat * 0.017453292519943295);
@@ -57588,7 +59317,7 @@ void App::drawGlobe() {
     }
   }
 
-  // All favourites as dots (selected sat drawn last, larger). Non-selected use a
+  // All favorites as dots (selected sat drawn last, larger). Non-selected use a
   // dim green dot when on the visible hemisphere.
   int selX = -1, selY = 0;
   for (int i = 0; i < favN; ++i) {
@@ -57773,7 +59502,7 @@ void App::drawSettings() {
   // MUST exceed the highest rows[] index used below. This is a hand-maintained
   // bound on a stack array of Strings, so getting it wrong is not a cosmetic bug:
   // rows[99..101] (the USB picker and scan rows) were written past the end of a
-  // 99-element array -- undefined behaviour that showed up as "the new settings
+  // 99-element array -- undefined behavior that showed up as "the new settings
   // rows have no label" and was quietly constructing String objects on whatever
   // followed on the stack. check_settings_rows.py now enforces this bound.
   const int N = 120;         // highest index used: 114 (Nearby & DX feed rows)
@@ -57922,8 +59651,9 @@ void App::drawSettings() {
   rows[20] = String("GP source: ") + gpSourceLabel();
   rows[21] = String("VFO: ") + (cfg.vfoType == VFO_MAIN_UP_SUB_DOWN
                                 ? "Main Up/Sub Dn" : "Main Dn/Sub Up")
-             + ((cfg.catType == CAT_RIGCTL || cfg.catType == CAT_RIGCTL_GROVE)
-                ? " (fixed: DualRig)" : "");   // H9: layout is forced for the companion backends
+             + ((cfg.catType == CAT_RIGCTL || cfg.catType == CAT_RIGCTL_GROVE ||
+                 cfg.catType == CAT_DUAL)
+                ? " (fixed: dual rig)" : "");  // H9: layout forced for companion + CAT_DUAL
   { const char* rv = (cfg.rxOnlyVfo == RXO_MAIN) ? "Main"
                    : (cfg.rxOnlyVfo == RXO_SUB)  ? "Sub" : "Follow VFO";
     rows[65] = String("Beacon/RX-only DL: ") + rv; }
@@ -57943,18 +59673,21 @@ void App::drawSettings() {
   rows[27] = String("Backup config+favs -> SD");
   rows[28] = String("Restore config+favs");
   rows[29] = String("Reset all data (erase)");
-  rows[30] = String("CAT type: ") + (cfg.catType == CAT_USB ? "USB serial"
+  rows[30] = String("CAT type: ") + (cfg.catType == CAT_DUAL ? "Dual (2 radios)"
+                     : cfg.catType == CAT_USB ? "USB serial"
                      : cfg.catType == CAT_RIGCTL_GROVE ? "rigctl (Grove)"
                      : cfg.catType == CAT_RIGCTL ? "rigctl (net)"
                      : cfg.catType == CAT_NET ? "Icom LAN" : "Wired CI-V");
   {
     String h = cfg.catHost[0] ? String(cfg.catHost) : String("(not set)");
     if (h.length() > 17) h = "..." + h.substring(h.length() - 14);
-    rows[31] = (cfg.catType == CAT_USB) ? String("Host: n/a (USB)")
+    rows[31] = (cfg.catType == CAT_DUAL) ? String("Host: per leg (Dual-Rig scrn)")
+             : (cfg.catType == CAT_USB) ? String("Host: n/a (USB)")
              : (cfg.catType == CAT_RIGCTL_GROVE) ? String("Host: n/a (Grove)")
              : String(cfg.catType == CAT_RIGCTL ? "rigctld host: " : "LAN host: ") + h;
   }
-  rows[32] = (cfg.catType == CAT_USB) ? String("Port: n/a (USB)")
+  rows[32] = (cfg.catType == CAT_DUAL) ? String("Port: per leg (Dual-Rig scrn)")
+           : (cfg.catType == CAT_USB) ? String("Port: n/a (USB)")
            : (cfg.catType == CAT_RIGCTL_GROVE) ? (String("Grove baud: ") + String(cfg.catGroveBaud))
            : String(cfg.catType == CAT_RIGCTL ? "rigctld port: " : "LAN port: ") + String(cfg.catPort);
   rows[33] = String("LAN user: ") + (cfg.catUser[0] ? cfg.catUser : "(not set)");
@@ -57978,8 +59711,20 @@ void App::drawSettings() {
   rows[106] = String("Weather pressure: ") + (cfg.wxPres == WXP_INHG ? "inHg" : "hPa");
   rows[107] = String("Downlink LO: ") + (cfg.xvtrDlHz ? (fmtMHz(cfg.xvtrDlHz) + " MHz") : String("off"));
   rows[108] = String("Uplink LO: ")   + (cfg.xvtrUlHz ? (fmtMHz(cfg.xvtrUlHz) + " MHz") : String("off"));
-  rows[109] = String("Dual-Rig setup (Stick) >") +
-              (drLink == 1 ? "  linked" : drLink == 2 ? "  no link" : "");
+  // The row must name the editor it actually opens: in CAT_DUAL this screen edits
+  // the NATIVE legs, and "(Stick)" sent the operator looking for a companion that
+  // isn't in the picture. The link indicator is a companion concept too, so it is
+  // only meaningful on that path.
+  if (cfg.catType == CAT_DUAL) {
+    const uint8_t dm = cfg.dualModel[0], um = cfg.dualModel[1];
+    rows[109] = String("Dual-Rig setup (2 radios) > ") +
+                ((dm == LEG_NONE && um == LEG_NONE)
+                   ? String("set legs")
+                   : String(LEG_RADIOS[dm].name) + "+" + LEG_RADIOS[um].name);
+  } else {
+    rows[109] = String("Dual-Rig setup (Stick) >") +
+                (drLink == 1 ? "  linked" : drLink == 2 ? "  no link" : "");
+  }
   rows[85] = String("Antenna lengths: ") + (cfg.antUnits == 1 ? "metric (m)" : "imperial (ft/in)");
   rows[44] = String("Dopp FM band: ") + String(cfg.doppThreshFmHz) + " Hz";
   rows[45] = String("Dopp linear band: ") + String(cfg.doppThreshLinHz) + " Hz";
@@ -58069,8 +59814,8 @@ void App::drawSettings() {
                          canvas.setTextColor(CL_BLACK, danger ? CL_RED : CL_SELBG); }
     else                 canvas.setTextColor(danger ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(rows[ai]);
-    // Dual-Rig setup row: a red/green/grey dot at the right edge so link state
-    // reads at a glance, before opening the screen. Grey = n/a or not yet checked.
+    // Dual-Rig setup row: a red/green/gray dot at the right edge so link state
+    // reads at a glance, before opening the screen. Gray = n/a or not yet checked.
     if (ai == 109) {
       uint8_t dot = (drLink == 1) ? CL_GREEN : (drLink == 2) ? CL_RED : CL_GREY;
       canvas.fillCircle(230, y + 4, 3, dot);

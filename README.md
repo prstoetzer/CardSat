@@ -23,6 +23,19 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.68:** **two radios, natively — and two pieces of orbital physics rebuilt.**
+> Set **CAT type → Dual (2 radios)** and CardSat drives a downlink and an uplink radio itself,
+> no companion Stick required: any two of **27 radios**, each on its own bus — Grove serial, a
+> USB adapter (**both legs may be USB** through a hub), or Icom LAN, including the **IC-705 over
+> its own Wi-Fi**. The **Van Allen belt** zones now use McIlwain **(L, B/B₀)** traced through the
+> real **IGRF-14** field, so a high-latitude LEO bird crossing a belt's field line no longer
+> reads as a belt transit — and the South Atlantic Anomaly falls out of the inner-belt test on
+> its own. The **orbital-decay** estimate is re-anchored on each element set's *measured* decay
+> rate: it was predicting about a fifth of an object's true remaining life, and now lands within
+> **±30% for 89%** of real re-entries, validated against **244 objects that actually re-entered**.
+> A new gate also caught **five pre-existing** cases where canceling an edit field dropped you
+> into an unrelated editor. See the **[release notes](docs/releases/RELEASE_NOTES_0.9.68.md)**.
+
 > **New in v0.9.67:** **a Telnet client, and DX spots that read right.** From Tools ›
 > Calculators & programming, open **Telnet** for a line-oriented terminal to a rotator box, APRS
 > box, DX-cluster node, or any raw-TCP host on a trusted LAN — up to **10 saved connections**,
@@ -40,8 +53,9 @@ transit prediction, sun/eclipse status, and more.
 > to two dozen world DX regions — with a color-coded world map — built on the verified
 > MINIMUF-3.5 model. Select a satellite and press **`o`** then **`z`** for an orbital-zone
 > transit tool: when your bird passes through the **South Atlantic Anomaly**, into **eclipse**,
-> over the **poles**, or through the **inner/outer Van Allen belts** (by magnetic L-shell, for
-> higher orbits). The charge/sleep screen now reads the battery correctly on the ADV, infers
+> over the **poles**, or through the **inner/outer Van Allen belts** — the belts tested in
+> McIlwain **(L, B/B₀)** coordinates traced from the real **IGRF-14** field, so a high-latitude
+> LEO bird crossing a belt's field line no longer reads as a belt transit. The charge/sleep screen now reads the battery correctly on the ADV, infers
 > charging from the voltage trend, and wakes without flashing; WiFi comes back after charge
 > mode; the APRS/DX/ADS-B feeds fetch on entry and refresh in place; and Tiny BASIC's
 > `IF … THEN` handles every statement.
@@ -73,7 +87,12 @@ transit prediction, sun/eclipse status, and more.
 > the **CardSatDualRig** companion (M5StickS3) turns two half-duplex/RX radios into one
 > full-duplex station over a Hamlib `rigctld` server; CardSat drives it over **rigctl (net)**
 > or the new **rigctl (Grove)** cable transport and configures it from an on-device **Dual-Rig
-> setup** screen that shows the Stick's live USB enumeration; and a mirror **`<FULLu>`**
+> setup** screen that shows the Stick's live USB enumeration. Since 0.9.68 the same
+> two-radio station also runs **natively**: CAT type **Dual (2 radios)** drives a downlink
+> and an uplink leg itself — any of the companion's 27 radios per leg, on Grove serial, a
+> USB adapter (both legs may be USB, through a hub), or Icom LAN (the **IC-705 over its
+> own Wi-Fi**) — with the companion still
+> fully supported for radios kept off the Cardputer; and a mirror **`<FULLu>`**
 > tune mode follows the **uplink** knob for setups where that's the radio with the dial. Plus
 > **calendar (.ics) export**, a documented **`/api/status`** JSON contract, and a
 > gyro/accelerometer **hand-pointing aid**.
@@ -322,6 +341,12 @@ transit prediction, sun/eclipse status, and more.
   **operating notes**, an **AOS alarm**, **deep sleep until the next pass**, a built-in
   **logbook** (ADIF/LoTW) with DXCC/grid/state tracking, a free-form **Notes** editor,
   **LoRa messaging**, voice memos, and an optional IR-LED pass beacon.
+- **Live terrestrial feeds** — a **Nearby & DX** hub with **APRS stations heard**
+  (live, receive-only APRS-IS listen around your grid), **DX-cluster spots** with
+  comments and a cycle-through-active-bands filter, an **ADS-B aircraft radar** for
+  airplane-scatter planning, and **QRZ callsign lookup** — plus a saved-connection
+  **Telnet client** (in Tools) for cluster nodes and shack boxes, with optional
+  line-printer output.
 - **Offline-first** — GP elements, transponders, and DXCC data are cached to microSD
   (or internal flash) for full operation with no network.
 
@@ -332,7 +357,7 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 *(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
 unchanged since. Several features added since — rove planner, workable horizon, target
 search, on-device printing, the Files page's multi-select — are not pictured yet; a
-screenshot refresh is planned. The current firmware is v0.9.64.)*
+screenshot refresh is planned. The current firmware is v0.9.68.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#22-screen-by-screen-reference).

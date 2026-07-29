@@ -194,7 +194,7 @@ bool CivRig::sendFrame(const uint8_t* payload, size_t len) {
 // any stream that produces bytes as fast as they are consumed -- which a USB serial
 // adapter can, and a UART generally cannot. Both call sites want "clear what is
 // there now", not "read until the end of time", so a cap is a faithful fix and not
-// a behaviour change: 512 bytes is far more than any CI-V frame or echo (longest is
+// a behavior change: 512 bytes is far more than any CI-V frame or echo (longest is
 // ~11 bytes), and the time bound catches a stream that is merely fast.
 void CivRig::drainStale() {
   if (!_stream) return;

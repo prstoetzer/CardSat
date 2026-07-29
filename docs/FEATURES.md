@@ -232,6 +232,17 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   hand-tuning calculator, and an Orbit card shows the analysis numbers.
 - **rigctl network radio.** Drive a radio attached to a remote **Hamlib rigctld**
   server over WiFi (Settings -> CAT type -> rigctl) — Doppler both legs via split.
+- **Native dual rig (CAT type -> Dual (2 radios)).** Drive a downlink radio and an
+  uplink radio directly — no companion in the middle. Each leg is any of the 27
+  half-duplex/receive-only radios from the CardSatDualRig catalog (IC-705/905,
+  IC-7100/7000/706MKIIG, IC-275/475, nine IC-R receivers, FT-817/818/857/897,
+  FT-100, VR-5000, FT-991/991A, FTX-1, TH-D74/D75) on its own bus: Grove TTL
+  serial, a USB<->serial adapter, or **Icom network CAT — the IC-705 over its own
+  Wi-Fi**. Per-leg CI-V address, baud, host/port and login; conflict guard for the
+  shared Grove UART; **both legs can be USB** through a hub (each leg's adapter
+  nominated; a USB rotator is excluded while dual-USB runs); PTT stays manual and
+  FM tones are set on the radio. The four CAT dialect encoders are byte-verified
+  by a host harness against the companion's bench-validated frames.
 - **World map with coastline** — recognizable continents with **all favorites'**
   footprints at once; `f` highlights one bird at a time, and **`c` recenters the map
   on your own location** so your QTH sits in the middle.
@@ -407,7 +418,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   conditions and a multi-day forecast for your operating site from **Open-Meteo**
   (free, no key): temperature, sky, wind and humidity now, then per-day high/low and
   precipitation chance. Units selectable (°F·mph / °C·km·h / °C·m·s); cached offline.
-- **QRZ.com callsign lookup** — a **QRZ Lookup** screen (main menu) resolves a
+- **QRZ.com callsign lookup** — a **QRZ Lookup** screen (in the **Nearby & DX** hub) resolves a
   callsign to name, location, grid and license class over the QRZ XML API (needs a
   QRZ XML-data subscription and WiFi) — handy for working a station you've just
   contacted.
@@ -608,6 +619,22 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   `sats`, `fav`, `next`, `net`, `time`, `gps`, `bat`, `fs`, `up`, and `pass <sat>`
   (next pass for any catalog bird), and `print <report>` for the receipt printer.
   Zero heap cost; never changes device state (`print` only transmits to your printer).
+- **Nearby & DX hub (v0.9.66)** — live terrestrial feeds beside the satellite screens:
+  **APRS heard near me** (a live, receive-only APRS-IS listen — passcode −1, filter set
+  on login — centered on your station or any grid, with a per-station bearing-rose
+  detail), **DX-cluster spots** (fetch on demand, spotter + comment shown, `n` cycles
+  only the bands that actually have spots), an **ADS-B aircraft radar** (polar plot,
+  range as radius, aircraft beyond range pinned to the outer ring, and a scatter-target
+  grid that highlights aircraft near the great-circle path; source URL is operator-set
+  in Settings → Network), and **QRZ callsign lookup**. One feed's records are resident
+  at a time (heap-on-demand), and every bearing is recomputed locally so it agrees with
+  the rest of the firmware.
+- **Telnet client (v0.9.67)** — a line-oriented LAN terminal in Tools → Calculators &
+  programming: up to ten saved connections (label / host / port / output), ANSI escapes
+  stripped, Ctrl/Fn/Opt key mapping for control characters, F-keys, Esc, scrollback,
+  and live line-printer mirroring through every printer sink except IPP/raster.
+  Plaintext by design — trusted networks only (SSH evaluated and shelved for RAM;
+  see docs/design/TELNET_SHIPPED_SSH_SHELVED_0_9_67.md).
 
 ## Printing (v0.9.55, refined v0.9.56)
 

@@ -576,7 +576,7 @@ namespace {
       err = "syntax"; return -1;
     }
 
-    // Execute a whole line, honouring ':' as a statement separator (the tutorial and the
+    // Execute a whole line, honoring ':' as a statement separator (the tutorial and the
     // manual both document it, e.g. "40 FOR I=1 TO 3: PRINT I: NEXT"). Only a fall-through
     // statement continues to the next: a GOTO/GOSUB/IF-jump (>=0), END (-999) or error
     // consumes the remainder of the line, so "10 GOTO 90 : PRINT X" never prints and a

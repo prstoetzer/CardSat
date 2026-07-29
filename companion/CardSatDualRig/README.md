@@ -1,5 +1,14 @@
 # CardSatDualRig — two-radio rigctld bridge for the M5StickS3
 
+> **Since CardSat 0.9.68 the two-radio station also runs natively on the Cardputer**
+> (CAT type **Dual (2 radios)**): the main firmware absorbed this companion's radio
+> catalog and CAT dialects and drives both legs itself over Grove serial, a USB
+> adapter, or Icom LAN. This companion remains fully supported — it is still the
+> answer when the radios live off the Cardputer (its powered-hub story and field
+> ergonomics). The main firmware now also runs **two USB radios** itself (through
+> a hub, each leg's adapter nominated), so the companion is a deployment choice
+> rather than the only route to any configuration.
+
 A companion firmware that lets **CardSat** (or any Hamlib NET-rigctl client) work a
 linear-transponder satellite pass with **two half-duplex or receive-only radios** —
 one on the downlink, one on the uplink — as if they were a single full-duplex rig.
@@ -178,7 +187,7 @@ So CardSat can configure the Stick without a phone — over Wi-Fi **or the Grove
 ```
 \csdr_get                one line of JSON: full status (config + USB devices)
 \csdr_devices            one line of JSON: enumerated USB devices
-\csdr_models             one line of JSON: this build's radio catalogue
+\csdr_models             one line of JSON: this build's radio catalog
                          [{id,name,rxOnly,civ}, ...]
 \csdr_set k=v k=v ...     apply config keys (same names as the HTTP API);
                          optional save=1 / reboot=1        -> "RPRT 0"

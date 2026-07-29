@@ -96,11 +96,11 @@ Mini-FT8 MENU P2 `4`: *"Edit ignore list. Prefixes are separated by spaces; maxi
 characters."*
 
 Applied to CardSat: a way to hide satellites you'll never work — dead birds, wrong hemisphere,
-uplinks you can't transmit on. CardSat has favourites (opt-in) but no opt-out, so the full list is
+uplinks you can't transmit on. CardSat has favorites (opt-in) but no opt-out, so the full list is
 always ~90–150 entries deep.
 
-**Modest value** — favourites already solve most of this — but the *catalog* views (Overhead now,
-sat-to-sat, 10-day) don't respect favourites, and that's where noise lives.
+**Modest value** — favorites already solve most of this — but the *catalog* views (Overhead now,
+sat-to-sat, 10-day) don't respect favorites, and that's where noise lives.
 
 ## 7. Copy-files-to-SD as an explicit action
 

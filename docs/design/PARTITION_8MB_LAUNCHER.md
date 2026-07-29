@@ -35,7 +35,7 @@ Cardputer ADV's 8 MB flash, and stop wasting half the chip.
   no `Update.begin`), so it is a single-app-slot program — it does not need two app slots
   of its own. It does use `RTC_NOINIT` for cross-reboot state, already guarded by magic
   numbers against the power-cycle garbage case (see `usbserial.cpp`), so Launcher's
-  power-cycle-to-switch behaviour introduces nothing new.
+  power-cycle-to-switch behavior introduces nothing new.
 
 ## 2. How bmorcelli/Launcher actually works (from the repo)
 

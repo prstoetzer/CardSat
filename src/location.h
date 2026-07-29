@@ -7,7 +7,7 @@
 struct Observer {
   double lat = 0.0;     // degrees +N
   double lon = 0.0;     // degrees +E
-  double altM = 0.0;    // metres
+  double altM = 0.0;    // meters
   bool   valid = false;
   bool   fromGps = false;
 };
@@ -31,7 +31,7 @@ public:
   bool pollGps();
 
   void setManual(double lat, double lon, double altM);
-  bool setFromGrid(const String& grid);    // Maidenhead -> lat/lon (centre)
+  bool setFromGrid(const String& grid);    // Maidenhead -> lat/lon (center)
 
   const Observer& obs() const { return _obs; }
   bool gpsHasFix() const { return _hasFix; }
@@ -45,7 +45,7 @@ public:
   const GpsSat& gpsView(int i) const { return _view[i]; }
 
   static String toGrid(double lat, double lon);  // 6-char Maidenhead
-  // Maidenhead -> lat/lon (square centre) without mutating any Location.
+  // Maidenhead -> lat/lon (square center) without mutating any Location.
   static bool gridToLatLon(const String& grid, double& lat, double& lon);
 
 private:

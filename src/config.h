@@ -21,7 +21,7 @@
 // The class must be DEFINED here, not forward-declared: `Serial.print(...)` needs
 // a complete type at every call site, and a forward declaration gives
 // "'CardSatSerialTee' has incomplete type" at all ~181 of them. So the tee is
-// declared inline here and its behaviour lives in consolelog.cpp.
+// declared inline here and its behavior lives in consolelog.cpp.
 #ifndef CARDSAT_NO_CONSOLE_LOG
 namespace ConsoleLog {
   // Byte sink: consolelog.cpp decides whether to buffer it. Kept out of line so
@@ -190,7 +190,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.67";
+static constexpr const char* FW_VERSION = "0.9.68";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build. Used by main.cpp (btInUse
@@ -357,7 +357,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 #define FILE_TOOLDEF "/CardSat/tooldef.txt"   // per-form-tool saved field values (one line per tool id)
 #define FILE_NOTES   "/CardSat/notes.txt"     // per-sat operating notes: "norad<TAB>text" lines
 #define FILE_FAVS    "/CardSat/favs.txt"      // favorite NORAD ids, one per line
-#define FILE_TELNET  "/CardSat/telnet.txt"    // saved Telnet connections (one per line: label|host|port|user)
+#define FILE_TELNET  "/CardSat/telnet.txt"    // saved Telnet connections (one per line: label|host|port|prnCols|outMode; legacy 6-field rows with a user field still load)
 #define FILE_MGP     "/CardSat/mgp.json"      // manually-entered GP sats (one OMM object/line)
 #define FILE_CTX     "/CardSat/ctx.json"      // CelesTrak-sourced extra favorites (one OMM object/line);
                                               // refreshed from CelesTrak on GP updates, unlike FILE_MGP
@@ -412,7 +412,7 @@ static constexpr size_t   MEMO_PLAY_SAMPLES = 1024; // playback block size (samp
 // site. Free, no key, non-commercial. https://open-meteo.com  Cached for offline use.
 #define WEATHER_API_BASE  "https://api.open-meteo.com/v1/forecast"
 // Open-Meteo elevation API: accepts comma-separated latitude/longitude lists and
-// returns an "elevation":[...] array (metres). Used by the terrain path profiler.
+// returns an "elevation":[...] array (meters). Used by the terrain path profiler.
 #define ELEVATION_API_BASE "https://api.open-meteo.com/v1/elevation"
 #define FILE_WEATHER      "/CardSat/weather.txt"   // cached parsed weather
 #define FILE_WEATHER_TMP  "/CardSat/weather.tmp"   // scratch for streamed JSON (low heap)

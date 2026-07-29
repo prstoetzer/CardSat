@@ -42,7 +42,7 @@ For a chosen satellite and a forward window (e.g. next 1–2 days):
    the body (`azB,elB`) using the spherical law of cosines on az/el.
 3. A **transit** occurs when separation < body angular radius (~0.26°) **and** the body
    is above the horizon. A **near-miss/conjunction** (within, say, 1°) is worth reporting
-   too, since the few-km path width means the observer may be just off the centreline.
+   too, since the few-km path width means the observer may be just off the centerline.
 4. **Refine** around the minimum to get the transit time to sub-second and the minimum
    separation (central vs. grazing).
 
@@ -100,7 +100,7 @@ Each entry: body (Sun/Moon), date/time to the second (local + UTC), minimum sepa
 - **Heap:** a short results list; negligible.
 - **Accuracy:** depends on element freshness and the Sun/Moon ephemeris precision
   (`skyObjAzEl` is low-precision but far finer than the disc size for timing; for the
-  *centreline* the dominant error is element age, not ephemeris). Label minimum
+  *centerline* the dominant error is element age, not ephemeris). Label minimum
   separation honestly; recommend fresh elements before relying on a central transit.
 - **No new hardware/audio/toolchain dependencies.**
 
@@ -108,7 +108,7 @@ Each entry: body (Sun/Moon), date/time to the second (local + UTC), minimum sepa
 
 ## 8. Out of scope
 
-- Mapping the ground centreline / "drive X km north to center it" (needs a map + path
+- Mapping the ground centerline / "drive X km north to center it" (needs a map + path
   solve; the existing world map could host this later).
 - Planetary transits (Mercury/Venus across the Sun) — astronomical, not satellite.
 - Sub-second camera-trigger output.

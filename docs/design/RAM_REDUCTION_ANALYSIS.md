@@ -96,7 +96,7 @@ undocumented sharing contract.
 | **A. Union the two arrays** | **5,120 B** | must prove no path holds one while building the other — `buildOrbit` makes this subtler than it looks |
 | **B. One shared `passScratch[128]`**, explicitly owned by whoever built last | **5,120 B** | same analysis, but *documents* the contract that `buildOrbit` already relies on implicitly |
 | **C. Heap-allocate on screen entry, free on exit** | 10,240 B | the 0.9.56/0.9.57 pattern; but re-introduces the "did the free work?" question, and these are big enough to fragment |
-| **D. Shrink `VIS_PASS_MAX`** | tunable | changes behaviour: the cap exists so high-rate LEOs don't lose the tail |
+| **D. Shrink `VIS_PASS_MAX`** | tunable | changes behavior: the cap exists so high-rate LEOs don't lose the tail |
 
 **Recommend B.** It banks the same 5,120 B as A, and it turns `buildOrbit`'s existing informal
 reuse into a stated invariant instead of a trap for the next person.
@@ -190,5 +190,5 @@ proposal: with both print paths rebuilding, nothing depends on either array pers
 
 Every number here is from Paul's measured boot log or read out of the source — not estimated. The
 one thing I have **not** done is compile: the `.bss` savings should be confirmed with a build and
-the `mem` command, and the "largest block rises by the same amount" claim is a linker-behaviour
+the `mem` command, and the "largest block rises by the same amount" claim is a linker-behavior
 inference that a real build would settle in one line of output.

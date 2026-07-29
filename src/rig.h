@@ -38,11 +38,13 @@ public:
 
   // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
   // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
-  void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
+  // Virtual so the DualRig composite can forward pacing to both of its legs.
+  virtual void setCmdDelay(uint16_t ms) { cmdDelayMs = ms; }
   // Upper bound (ms) on how long a single blocking CAT read may wait, so slow
   // I/O (especially the LAN backend) can't stall the cooperative main loop.
   // 0 = use the backend's built-in default. Set from the CAT cycle rate at engage.
-  void setReadBudgetMs(uint16_t ms) { readBudgetMs = ms; }
+  // Virtual for the same DualRig forwarding reason as setCmdDelay().
+  virtual void setReadBudgetMs(uint16_t ms) { readBudgetMs = ms; }
 
   // ---- External transport (USB-serial) --------------------------------------
   // Supply a ready-made Stream for the wire-level backends to talk through,
@@ -190,7 +192,7 @@ public:
   // unchanged by RigctlGroveRig, so it automatically uses the Grove transport there.
   String vendorLine(const String& line) override {
     // H12: \csdr_models / \csdr_get can return >1 KB of JSON. At low Grove baud the reply
-    // alone can exceed the default 400 ms (e.g. ~1.4 s for the model catalogue at 9600).
+    // alone can exceed the default 400 ms (e.g. ~1.4 s for the model catalog at 9600).
     // Give a baud-aware deadline for these large vendor replies so they don't time out;
     // ordinary short RPRT commands keep the default.
     String l = line.endsWith("\n") ? line : line + "\n";
@@ -261,6 +263,132 @@ private:
   int      _rx = -1, _tx = -1;
   bool     _open = false;
 };
+
+// ===========================================================================
+//  Dual-rig (CAT_DUAL): plain single-VFO leg backends + the DualRig composite
+// ===========================================================================
+//
+//  A dual-rig setup is two half-duplex (or receive-only) radios -- one on the
+//  downlink, one on the uplink -- presented to the rest of the firmware as ONE
+//  full-duplex Rig. Ported from the CardSatDualRig companion per
+//  docs/design/DUALRIG_MAINFW_INTEGRATION_SCOPE.md (Model A): the leg radios,
+//  their four CAT dialects, and the two-leg driver now live here; the external
+//  companion remains supported through the rigctl backends above.
+//
+//  Legs are driven with PLAIN CAT -- one frequency, one mode, no MAIN/SUB and no
+//  satellite mode -- so they get their own small backend rather than reusing the
+//  sat-rig classes. PTT is NEVER commanded: the operator keys the uplink radio
+//  by hand (the same contract the companion honors).
+
+// Pure wire-frame builders for the four leg dialects. Pure functions (no I/O, no
+// state) so the host harness (tools/host_dualrig) byte-verifies them against the
+// companion's bench-validated output. Return the frame length written to out
+// (<= cap), or 0 if the family/params can't be encoded.
+size_t legBuildFreqFrame(LegFamily fam, uint8_t civAddr, uint64_t hz,
+                         uint8_t* out, size_t cap);
+size_t legBuildModeFrame(LegFamily fam, uint8_t civAddr, RigMode m,
+                         uint8_t* out, size_t cap);
+size_t legBuildReadFreqFrame(LegFamily fam, uint8_t civAddr,
+                             uint8_t* out, size_t cap);
+// Parse a read-frequency reply for the family from a raw RX buffer (which may
+// contain an interface echo before the answer). Returns true + hz on success.
+bool   legParseFreqReply(LegFamily fam, uint8_t civAddr,
+                         const uint8_t* buf, size_t n, uint64_t& hz);
+
+// One dual-rig LEG: any LEG_RADIOS[] radio with plain single-VFO CAT over a
+// Stream (the Grove UART, or a USB<->serial adapter via setExternalStream).
+// setMain*/setSub* both land on the radio's one VFO -- the DualRig above it only
+// ever calls the pair that matches the leg's role, so the duplication is free.
+class PlainCatRig : public Rig {
+public:
+  PlainCatRig(LegModel m, uint8_t civAddr, uint32_t baud);
+  void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
+  bool ready() const override { return _stream != nullptr; }
+  bool setMainFreq(freq_t hz) override { return sendFreq(hz); }
+  bool setSubFreq (freq_t hz) override { return sendFreq(hz); }
+  bool setMainMode(RigMode m)   override { return sendMode(m); }
+  bool setSubMode (RigMode m)   override { return sendMode(m); }
+  bool readSubFreq (freq_t& hzOut) override { return readFreq(hzOut); }
+  bool readMainFreq(freq_t& hzOut) override { return readFreq(hzOut); }
+  bool enableSatMode(bool) override { return false; }   // no sat mode on leg radios
+  void selectSubBand()  override {}
+  void selectMainBand() override {}
+  bool canReadFreq() const override;
+  bool hasSatMode()  const override { return false; }
+  bool selVerified() const override { return true; }
+  const char* name() const override { return LEG_RADIOS[_model].name; }
+  void    setAddress(uint8_t a) override { _addr = a; }
+  uint8_t address() const override { return _addr; }
+  bool    sendRaw(const uint8_t* b, size_t n) override;   // serial-terminal diagnostics
+  void    setExternalStream(Stream* s) override { extStream = s; _stream = s; }
+private:
+  bool sendFreq(freq_t hz);
+  bool sendMode(RigMode m);
+  bool readFreq(freq_t& hzOut);
+  bool sendFrame(const uint8_t* b, size_t n);
+  LegModel _model;
+  uint8_t  _addr;                     // CI-V bus address (LEGF_CIV only)
+  uint32_t _baud;
+  Stream*  _stream = nullptr;
+  uint32_t _lastSetMs = 0;            // H8 echo-settle before a read (CIV family)
+};
+
+// The composite: owns a downlink leg and an uplink leg (any mix of PlainCatRig /
+// IcomNetRig-in-plain-mode on distinct buses) and routes the app's full-duplex
+// Rig calls to the matching leg. The rest of the firmware -- engage, Doppler,
+// calibration, UI -- drives this exactly like any single full-duplex rig.
+class DualRig : public Rig {
+public:
+  // Takes ownership of both legs. usbLeg: -1 = neither leg is USB, 0/1 = that
+  // one leg is, 2 = BOTH legs are USB (dual-USB CAT, through a hub). A USB leg's
+  // begin() is deferred until the reconciler attaches its CDC stream -- via
+  // setExternalStream() for a single USB leg (same lifecycle as CAT_USB
+  // single-rig) or setLegExternalStream() per leg when there are two.
+  DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud);
+  ~DualRig() override;
+  void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
+  bool ready() const override;
+  void service() override;
+  void setCmdDelay(uint16_t ms) override;
+  void setReadBudgetMs(uint16_t ms) override;
+  void setExternalStream(Stream* s) override;   // single-USB attach; nullptr detaches ALL USB legs
+  void setLegExternalStream(int leg, Stream* s);  // per-leg attach/detach (dual-USB CAT)
+  bool setMainFreq(freq_t hz) override;         // uplink leg
+  bool setSubFreq (freq_t hz) override;         // downlink leg
+  bool setMainMode(RigMode m)   override;
+  bool setSubMode (RigMode m)   override;
+  bool readSubFreq (freq_t& hzOut) override;    // downlink leg
+  bool readMainFreq(freq_t& hzOut) override;    // uplink leg
+  bool readPtt(bool& tx) override;              // uplink leg (skip knob-read while TX)
+  bool enableSatMode(bool) override { return false; }
+  void selectSubBand()  override {}
+  void selectMainBand() override {}
+  bool canReadFreq() const override;
+  bool hasSatMode()  const override { return false; }
+  bool selVerified() const override { return true; }
+  const char* name() const override { return _nameBuf; }
+  Rig* downLeg() const { return _down; }        // status surfaces (per-leg readouts)
+  Rig* upLeg()   const { return _up; }
+  int  usbLeg()  const { return _usbLeg; }
+private:
+  Rig*     _down;                     // downlink (RX) leg
+  Rig*     _up;                       // uplink (TX) leg
+  int      _usbLeg;                   // -1 / 0 (down) / 1 (up) / 2 (both)
+  bool     legIsUsb(int L) const { return _usbLeg == L || _usbLeg == 2; }
+  bool     _usbBegun[2] = { false, false };  // per-leg: begin() ran after stream attach
+  uint32_t _baud[2];                  // per-leg CAT baud (0 already resolved by factory)
+  char     _nameBuf[28];
+};
+
+// Build one leg from its config tuple, or nullptr (LEG_NONE / bad params / OOM).
+Rig* makeLegRig(uint8_t legModel, uint8_t bus, uint8_t civAddr, uint32_t baud,
+                const char* host, uint16_t port, const char* user, const char* pass);
+// Build the CAT_DUAL composite from the cfg leg arrays (index 0 = downlink,
+// 1 = uplink). Returns nullptr if EITHER leg fails to construct -- half a dual
+// rig silently tracking one leg is worse than a clear "radio not ready".
+Rig* makeDualRig(const uint8_t model[2], const uint8_t bus[2], const uint8_t civ[2],
+                 const uint32_t baud[2], const char host[2][40], const uint16_t port[2],
+                 const char user[2][24], const char pass[2][24]);
 
 // Construct the backend for a model. Caller owns the returned pointer.
 // catType 0 = wired CI-V/CAT (UART); 1 = Icom LAN (network) for CI-V models, in

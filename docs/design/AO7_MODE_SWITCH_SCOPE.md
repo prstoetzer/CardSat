@@ -58,7 +58,7 @@ infrastructure.
 
 ### Job 1 — continuous sunlight?
 
-- Load AO-7 from the catalogue (alias-resolve AO-07/AO-7), propagate one orbit, sample
+- Load AO-7 from the catalog (alias-resolve AO-07/AO-7), propagate one orbit, sample
   `sunlitAt(t)` at ~120 points. If all are sunlit → continuous sunlight, the 24 h timer is
   free-running, and the switch-time estimate is meaningful. If any sample is eclipsed → report
   "AO-7 is eclipsing each orbit; the 24 h timer resets on power-up, so mode follows the
@@ -167,7 +167,7 @@ few listeners weaken it. The tool must:
 - Purely additive: a new tool screen + `PR_AO7MODE`, reachable from the Tools menu (Satellite
   & orbital category). No change to the existing AMSAT status screens, the report parser's
   current callers, or prediction.
-- The existing `fetchAmsatReports()` behaviour for its current caller is untouched; the tool
+- The existing `fetchAmsatReports()` behavior for its current caller is untouched; the tool
   either reuses it (if the mode tag can be captured without changing the struct) or adds a
   parallel `fetchAmsatReportsByMode()` so the on-screen status list is unaffected.
 
@@ -179,7 +179,7 @@ few listeners weaken it. The tool must:
   recovers them, and that thin/one-report days are flagged low-confidence rather than reported
   as precise. Validates the estimation math without network or hardware.
 - Sanity-check against a live week of real AO-7 reports once on hardware (the one step that
-  needs the network), comparing the estimate to the community-known behaviour.
+  needs the network), comparing the estimate to the community-known behavior.
 
 ## Effort estimate
 

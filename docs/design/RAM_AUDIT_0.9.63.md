@@ -12,7 +12,7 @@ From `xtensa-esp32s3-elf-nm -S` on the built ELF, the largest static symbols:
 
 - `app` (the `App` object): **~98.5 KB** of `.bss` — the dominant consumer.
 - The rest is mostly **`const` lookup data** (`WEB_PAGE`, DXCC/CTY tables, fonts, star
-  catalogues, keymaps) that must stay and can't be freed, plus IDF/M5 library buffers.
+  catalogs, keymaps) that must stay and can't be freed, plus IDF/M5 library buffers.
 
 So savings come from members of `App` that aren't needed continuously.
 

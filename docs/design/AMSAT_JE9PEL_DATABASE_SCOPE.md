@@ -8,7 +8,7 @@ CSV schema and a license/attribution check. This document is the implementation 
 Use the AMSAT / JE9PEL amateur-satellite frequency database (the machine-readable
 palewire mirror at `github.com/palewire/amateur-satellite-database`) as a **fallback and
 cross-check** for transponder data — specifically to fill gaps where SatNOGS returns
-nothing for a satellite — **without disturbing existing behaviour**. SatNOGS stays the
+nothing for a satellite — **without disturbing existing behavior**. SatNOGS stays the
 primary source in every path; the JE9PEL data is consulted only where CardSat currently
 shows zero transponders, and never overrides SatNOGS frequencies.
 
@@ -34,7 +34,7 @@ Non-amateur `n`, To-be-launched `t`, Unknown `u`.
 Because the less-structured JE9PEL data enters only where CardSat currently has *nothing*,
 there is no path where it can corrupt or replace working SatNOGS data. Every new code path
 is gated behind an explicit "SatNOGS returned empty" condition; remove the gate and
-existing behaviour is byte-for-byte unchanged.
+existing behavior is byte-for-byte unchanged.
 
 ## Grounding in current code
 
@@ -57,10 +57,10 @@ existing behaviour is byte-for-byte unchanged.
 - **URL const** (`config.h`), pinned to the *active* file (small; inactive rows are useless
   for tracking):
   `#define AMSAT_FREQ_URL "https://raw.githubusercontent.com/palewire/amateur-satellite-database/main/data/amsat-active-frequencies.csv"`
-- **New `Net` method** modelled exactly on `fetchSatnogsTransmittersToFile`:
+- **New `Net` method** modeled exactly on `fetchSatnogsTransmittersToFile`:
   `bool Net::fetchAmsatFreqToFile(const char* path)` — same `httpsGetToFile` → temp →
   `promoteFileTransactionally` pattern, ~100 KB cap. No new networking machinery.
-- **New `SatDb` streaming CSV parser** modelled on `streamGpFileEntries`:
+- **New `SatDb` streaming CSV parser** modeled on `streamGpFileEntries`:
   `int SatDb::streamAmsatFreqEntries(const char* path, uint32_t norad, Transponder* out, int maxN)`
   — reads the cached CSV line-by-line (never a large RAM String), matches rows by NORAD id,
   fills `Transponder` records. CSV parse is lighter than the ArduinoJson path, so no heap
@@ -84,7 +84,7 @@ if (activeTxCount == 0) {
 }
 ```
 
-That is the entire behavioural change. The manual-append (step 3) and ranking (step 3b)
+That is the entire behavioral change. The manual-append (step 3) and ranking (step 3b)
 already run afterward and treat these records identically — no downstream changes.
 
 ## Item 3 — Status cross-check / annotation (advisory only)

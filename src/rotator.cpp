@@ -26,7 +26,7 @@ static constexpr uint8_t SC_DLH   = 0x01;   // divisor high (when LCR[7]=1)
 //  BridgeStream -- SC16IS750/752 I2C->UART bridge as an Arduino Stream
 // ---------------------------------------------------------------------------
 //  One copy of the register plumbing that Gs232Rotator, EasycommRotator and
-//  SpidRotator each used to carry privately. Behaviour is byte-for-byte what
+//  SpidRotator each used to carry privately. Behavior is byte-for-byte what
 //  they did: same soft reset, same divisor maths, same scratchpad presence test,
 //  same 50 ms THR-empty guard so a stalled bridge can never hang the loop.
 void BridgeStream::wreg(uint8_t reg, uint8_t val) {
@@ -99,7 +99,7 @@ int BridgeStream::peek() {
 // ---------------------------------------------------------------------------
 //  UsbRotStream -- the rotator's USB<->serial adapter as a Stream
 // ---------------------------------------------------------------------------
-//  All the hard parts (resident host, device binding, slot rules) live in
+//  All the hard parts (shared-host lifecycle, device binding, slot rules) live in
 //  usbserial.cpp; this is a forwarding shim so the rotator backends see a Stream
 //  like any other.
 UsbRotStream::~UsbRotStream() {
@@ -576,7 +576,7 @@ void YaesuRotator::outWrite(uint8_t bits) {
   uint8_t port = YAESU_OUT_ACTIVE_LOW ? (uint8_t)~bits : bits;
   Wire1.beginTransmission(YAESU_OUT_ADDR);
   Wire1.write(port);
-  // M25: honour the I2C result. If the expander didn't ACK, the motor/stop command
+  // M25: honor the I2C result. If the expander didn't ACK, the motor/stop command
   // did NOT reach the hardware -- mark the backend not-ready so the controller stops
   // believing a command (including allStop) succeeded. Still record _out so a later
   // successful write can converge, but don't paper over a dead bus.

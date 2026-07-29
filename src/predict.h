@@ -42,7 +42,7 @@ public:
 
   // Propagate an EXPLICIT satellite's GP elements to unix time `t` and return the
   // raw TEME position (km) and velocity (km/s). This is the forward model used by the
-  // state-vector -> GP-element fitter. Returns false if the elements don't initialise.
+  // state-vector -> GP-element fitter. Returns false if the elements don't initialize.
   bool temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]);
 
   // Full topocentric look for an ARBITRARY satellite entry at time t, computed with a
@@ -78,7 +78,7 @@ public:
 
   // Range rate (km/s, +ve receding) at a FRACTIONAL unix time, taken from the
   // SGP4 velocity vector (the method Gpredict/sgp4sdp4 use) rather than by
-  // differencing slant range. Exact and not quantised to whole seconds.
+  // differencing slant range. Exact and not quantized to whole seconds.
   double rangeRateAt(double unixSec);
 
   // Lightweight: just az/el (degrees) for the current site at time t.
@@ -129,7 +129,7 @@ public:
 
   // Linear-transponder passband tracking. Given a tuning offset measured in Hz
   // up from the downlink passband bottom, return the *operating* downlink and
-  // uplink centre frequencies (before Doppler). For an inverting transponder
+  // uplink center frequencies (before Doppler). For an inverting transponder
   // the uplink moves opposite to the downlink; for non-inverting it tracks it.
   // Single-channel transponders ignore the offset (dlOp=downlink, ulOp=uplink).
   static void passbandFreqs(const Transponder& t, int32_t pbOffsetHz,

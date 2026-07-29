@@ -97,7 +97,7 @@ uint32_t Net::INTER_FETCH_MS = 200;     // settle delay before each TLS session 
 uint32_t Net::TLS_MIN_BLOCK  = 28000;   // below the ~31.7 KB resident block; catches real OOM
 
 // --- 0.9.41 proactive WiFi-cycle defrag (see net.h / docs/design/HEAP_WIFI_CYCLE.md) ---
-// Set TLS_WIFI_CYCLE=false to revert to the passive-wait-only reclaim behaviour.
+// Set TLS_WIFI_CYCLE=false to revert to the passive-wait-only reclaim behavior.
 bool     Net::TLS_WIFI_CYCLE      = true;   // enable the last-resort WiFi cycle
 uint32_t Net::WIFI_CYCLE_MIN_GAP_MS = 30000; // don't cycle more than once per 30 s
 
@@ -106,7 +106,7 @@ uint32_t Net::WIFI_CYCLE_MIN_GAP_MS = 30000; // don't cycle more than once per 3
 // once fds wedge and connect() starts returning -1.
 bool Net::hardResetWifi() {
   Serial.println("[net] hard WiFi reset (full radio re-init)");
-  // Fully re-initialise the radio rather than reconnect() the old association. On
+  // Fully re-initialize the radio rather than reconnect() the old association. On
   // this part, after the PHY has been powered down (here, or by the charge-screen
   // WIFI_OFF), a bare reconnect() can reassociate (IP/RSSI look fine) yet leave the
   // stack in a degraded state where every outbound connect() returns -1 -- the

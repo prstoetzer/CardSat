@@ -140,7 +140,7 @@ survives with margin, the design below is small.
 - **NimBLE, not Bluedroid** — materially smaller, which on this board is the only thing that
   matters.
 - **BLE off unless in use.** Init on `Printer::begin()` when the transport is BLE, deinit in
-  `end()`, and release the controller memory otherwise. Do *not* leave a radio initialised for a
+  `end()`, and release the controller memory otherwise. Do *not* leave a radio initialized for a
   feature used once a session. (The 0.9.56/0.9.57 lesson: allocate on use, free on the screen
   transition, and verify the free actually happens — for a radio, "deinit" needs measuring too.)
 - **Warn on the C1 case.** If WiFi is connected when a BLE print starts, either say so or offer to

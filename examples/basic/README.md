@@ -15,7 +15,7 @@ knowing before you write your own:
 - **Variables are single letters `A`–`Z`** holding numbers (26 of them). There is one
   numeric array, `DIM @(n)` with `n ≤ 256`, indexed `@(i)`. A two-letter name is an
   error, not a variable.
-- Graphics colours 0–9: `0` blk `1` wht `2` red `3` grn `4` blu `5` yel `6` cyn
+- Graphics colors 0–9: `0` blk `1` wht `2` red `3` grn `4` blu `5` yel `6` cyn
   `7` org `8` gry `9` dgrn. `CLS` clears, `SHOW` pushes the frame to the screen.
 
 Each program was checked with a grammar validator and an execution model of the
@@ -26,9 +26,9 @@ available yet (no fix, no clock, no elements).
 ## The suite
 
 ### `SKYDOME.BAS` — a live all-sky radar
-The sky as a polar dome: horizon = outer ring, zenith = centre, North = up. Elevation
+The sky as a polar dome: horizon = outer ring, zenith = center, North = up. Elevation
 rings + compass rose, the **Sun** and **Moon** from live data, then the whole loaded
-catalogue walked with `SATSEL` and dotted at each bird's real az/el (green = up). A
+catalog walked with `SATSEL` and dotted at each bird's real az/el (green = up). A
 3-petal rose and UTC clock finish it. *Graphics · trig · `SATSEL` · sun/moon/time.*
 
 ### `PASSES.BAS` — upcoming pass table
@@ -44,16 +44,16 @@ trig · `UTCH/UTCM/UTCS`.*
 ### `DOPPLER.BAS` — transponder Doppler
 Snapshots transponder 0 of the active satellite with `TXSEL`, then from the current
 range-rate `SATRR` computes the Doppler-corrected downlink you **hear** and the uplink
-you must **send**, printed in kHz with a centre-zero shift bar (green = approaching,
+you must **send**, printed in kHz with a center-zero shift bar (green = approaching,
 red = receding). *Ham-radio maths · `TXSEL` · `SATRR`.*
 
 ### `HARMONO.BAS` — harmonograph
 Traces a damped two-pen harmonograph: detuned sine terms per axis, each fading with an
-`EXP` decay, the colour drifting as it winds down. Pure maths — always draws.
+`EXP` decay, the color drifting as it winds down. Pure maths — always draws.
 *Trig art · no system data.*
 
 ### `MANDEL.BAS` — the Mandelbrot set (coarse)
-Escape-time Mandelbrot over the classic view, drawn as coloured blocks. Coarse on
+Escape-time Mandelbrot over the classic view, drawn as colored blocks. Coarse on
 purpose (a 3-pixel grid, iteration cap 12) so it stays inside the interpreter's work
 budget — it still takes a few seconds. *Compute + graphics · nested loops · complex
 iteration.*
@@ -61,7 +61,7 @@ iteration.*
 ### `GROUND.BAS` — live ground-track map
 An equirectangular world grid with the equator and prime meridian marked. Plots the
 active satellite's sub-point from `SATLAT`/`SATLON`, your station from `MYLAT`/`MYLON`,
-and walks the catalogue with `SATSEL` to dot every bird's sub-point. *Graphics ·
+and walks the catalog with `SATSEL` to dot every bird's sub-point. *Graphics ·
 geography · `SATSEL` · sub-point data.*
 
 ### `SPACEWX.BAS` — space-weather dashboard
@@ -70,7 +70,7 @@ with a one-line HF-conditions verdict derived from flux and the K index. Degrade
 notice when the feed hasn't loaded (`SPWXOK`). *Graphics gauges · solar/geomag data.*
 
 ### `RANKPASS.BAS` — rank the best upcoming passes
-Walks the catalogue with `SATSEL`, reads each bird's next-pass peak elevation and
+Walks the catalog with `SATSEL`, reads each bird's next-pass peak elevation and
 minutes-to-AOS, packs a score into the `@()` array and **bubble-sorts** it to print the
 best passes first. *Arrays · sorting · `PASSMAX(1)`/`AOSIN` · `PRINT` tables.*
 

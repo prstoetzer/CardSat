@@ -135,7 +135,7 @@ From `EspUsbHost.cpp`, `isKnownVendorSerial()`:
 | **PL2303** | `0x067b` | `2303`, `23a3` |
 
 Anything else — including a **clone with an unlisted PID** — enumerates perfectly and is simply
-not recognised as a serial device.
+not recognized as a serial device.
 
 ### What this means for the IC-821 + FTDI cable
 

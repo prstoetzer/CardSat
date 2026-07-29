@@ -9,7 +9,7 @@
 present on the ESP Component Registry (each checked individually — an earlier pass gave false
 positives because the 404 page is large):
 
-| component | version | licence | relevance |
+| component | version | license | relevance |
 |---|---|---|---|
 | `espressif/usb_host_cdc_acm` | 2.4.0 | Apache-2.0 | standard CDC-ACM serial devices |
 | `espressif/usb_host_vcp` | 1.0.0 | Apache-2.0 | **unifying wrapper** — see below |

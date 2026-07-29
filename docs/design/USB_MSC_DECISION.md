@@ -42,7 +42,7 @@ unrelated files in the blast radius of a PC that believes it owns the disk.
 
 ## The options
 
-### A. Whole-volume MSC, clearly labelled
+### A. Whole-volume MSC, clearly labeled
 
 Forward sectors straight to `SD.readRAW`/`writeRAW` (both exist, along with `numSectors()` and
 `sectorSize()`).

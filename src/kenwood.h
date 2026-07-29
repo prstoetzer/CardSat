@@ -17,7 +17,7 @@
 //  uplink (TX) on VFO B (FB). The rig's own satellite / split mode and the
 //  uplink/downlink BANDS are selected by the operator on the radio (CAT can't
 //  switch bands on these rigs); CardSat Doppler-tunes within that setup. On the
-//  TS-2000 in particular, verify the VFO-A/B vs main/sub-band behaviour for your
+//  TS-2000 in particular, verify the VFO-A/B vs main/sub-band behavior for your
 //  firmware. The TS-790 supports a subset of these commands.
 // ===========================================================================
 #include <Arduino.h>

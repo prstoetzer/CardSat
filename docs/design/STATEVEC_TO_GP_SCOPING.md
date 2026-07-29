@@ -54,7 +54,7 @@ Input: epoch (UTC), and TEME `(rx,ry,rz)` km, `(vx,vy,vz)` km/s.
    - Numerical 6x6 Jacobian: perturb each of {n,e,i,RAAN,argp,M}, re-propagate, finite
      difference.
    - Solve `J dX = residual` (6x6 Gaussian elimination with partial pivoting), update, repeat
-     until |residual| < tol (e.g. metres / mm/s) or max iters.
+     until |residual| < tol (e.g. meters / mm/s) or max iters.
 3. **Output GP elements:** n (rev/day), e, i, RAAN, argp, M, epoch, B\*=0. Show them, and
    offer **"save as manual satellite"** -> writes a `SatEntry` straight into the manual-sat
    store (the same struct SGP4 already consumes), so it's immediately trackable.

@@ -410,7 +410,7 @@ bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume)
     _err = "Out of RAM";
     return false;
   }
-  bool cancelled = false;
+  bool canceled = false;
   for (;;) {
     size_t got = f.read((uint8_t*)pbuf, MEMO_PLAY_SAMPLES * sizeof(int16_t));
     if (got < 2) break;                       // EOF
@@ -418,13 +418,13 @@ bool VoiceMemo::playMemo(const char* file, bool (*cancelPoll)(), uint8_t volume)
     // Wait for the previous block to finish so we don't overrun the channel.
     while (M5Cardputer.Speaker.isPlaying()) {
       M5.delay(1);
-      if (cancelPoll && cancelPoll()) { cancelled = true; break; }
+      if (cancelPoll && cancelPoll()) { canceled = true; break; }
     }
-    if (cancelled) break;
+    if (canceled) break;
     M5Cardputer.Speaker.playRaw(pbuf, nsamp, rate, false, 1, 0);
   }
-  // Let the final block finish unless cancelled.
-  if (!cancelled) {
+  // Let the final block finish unless canceled.
+  if (!canceled) {
     while (M5Cardputer.Speaker.isPlaying()) {
       M5.delay(1);
       if (cancelPoll && cancelPoll()) break;

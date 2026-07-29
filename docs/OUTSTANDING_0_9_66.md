@@ -41,7 +41,7 @@ to heap-on-demand recovers the remaining ~3 KB of permanent `.bss`.
 
 **Two separate defects; do not conflate them.**
 
-### 2a. Display behaviour
+### 2a. Display behavior
 Current implementation: `Display.sleep()` (SLPIN) on park, no drawing at all while dark,
 paint-then-`wakeup()` on keypress, CPU parked at 80 MHz, WiFi/IMU/speaker off, plain
 `delay(50)` idle. The 250 ms light-sleep loop was removed on the theory that LEDC backlight
@@ -55,13 +55,13 @@ Screen now turns the screen off", so its display-power path has already been thr
 failure modes being hit here.
 
 Specific things to check in Launcher's source: the order and timing of SLPIN/SLPOUT versus
-backlight changes; whether it delays between them; whether it re-initialises the panel on
+backlight changes; whether it delays between them; whether it re-initializes the panel on
 wake rather than only issuing SLPOUT.
 
 ### 2b. Battery reads low
 Almost certainly unrelated to the sleep path — suspect the ADC read/calibration route in
 `batteryPercent()` / `M5Cardputer.Power.getBatteryVoltage()`. Check whether the reading is
-taken while the CPU is at 80 MHz (ADC reference behaviour can shift with clock/power state)
+taken while the CPU is at 80 MHz (ADC reference behavior can shift with clock/power state)
 and whether it needs a settling delay or averaging after wake. Compare a reading taken
 immediately on wake against one taken a second later — if they differ, that's the answer.
 
@@ -72,7 +72,7 @@ The wake window was extended 20 s → 60 s and that part is believed fixed.
 ## 3. Activations: footprint lookup fails for near-term passes  *(operator, twice)*
 
 **Symptom.** A JO-97 pass ~1.5 h out shows "Footprint: sat not in your list" (now reworded);
-same for FO-29. Both satellites are in the catalogue and work for *later* activations.
+same for FO-29. Both satellites are in the catalog and work for *later* activations.
 
 **What was done.** Diagnosis only, not a fix. `activationFootprint()` returned the same
 state for five different failures — satellite lookup, short date, empty start, unparseable

@@ -1,6 +1,20 @@
 # Dual-rig capability in the main firmware — scope
 
-Status: **scoped, not implemented** (0.9.65 cycle). This document scopes bringing the
+Status: **implemented — Model A, Phases 1 + 2 + 4** (0.9.68 cycle). CAT type
+`CAT_DUAL` composes two native legs (`DualRig` over `PlainCatRig` /
+`IcomNetRig`-in-plain-mode, `src/rig.{h,cpp}` + `src/icomnet.*`), configured per
+leg on the Dual-Rig screen; the leg catalog and all four CAT dialects are ported
+from the companion and byte-verified by `tools/host_dualrig/`. **Phase 3
+(two USB radios on the one PHY) is implemented as well** — heap headroom for the
+second port was confirmed by the project's hardware owner, so the gate came off:
+a second CAT CDC (`cat2*` in usbserial) binds on the shared host through a hub,
+each leg nominated to its own adapter, with dual-USB + a USB rotator refused
+(channel budget). Hub enumeration behavior is on the bench matrix. The IC-705-over-LAN
+caveat below is resolved: the leg rides the existing RS-BA1-family backend in
+plain-VFO mode (the protocol note in this document's caveat section proved
+pessimistic; the transport is the same UDP trio). Original scope follows.
+
+This document scoped bringing the
 two-radio (dual-rig) capability currently provided by the external **CardSatDualRig**
 companion (M5StickS3) directly into the main CardSat firmware on the Cardputer ADV.
 
@@ -26,7 +40,7 @@ single **rigctld** server (over Wi-Fi/TCP or Grove UART) that CardSat drives as 
 
 So the dual-rig *feature* works now. What lives on the Stick and is **not** in the main
 firmware is the part that requires hosting two USB radios at once and translating each
-radio's native CAT: the **radio catalogue + per-dialect CAT encoders**, the **dual-USB host
+radio's native CAT: the **radio catalog + per-dialect CAT encoders**, the **dual-USB host
 + device registry**, the **two-leg VFO state machine**, and the **rigctld server** that ties
 them together.
 
@@ -54,7 +68,7 @@ designed:
    annotated "when first measured" and predates that work; it is stale. Two USB radios plus a
    second CAT dialect stack is now a **plausible** target rather than a non-starter.
 
-The one thing that cannot be settled from source is the **contiguous-block** behaviour with
+The one thing that cannot be settled from source is the **contiguous-block** behavior with
 two radios enumerated *and* a TLS fetch or audio path live — heap fragmentation on the
 no-PSRAM part is the real risk, and it can only be proven on hardware. So this scope treats
 "two USB radios on the Cardputer directly" as feasible-pending-bench, not as certain.
@@ -212,7 +226,7 @@ Stage accordingly:
 
 ## What must not regress
 
-- **Single-rig behaviour on every transport is untouched.** Dual-rig is a new mode; each of
+- **Single-rig behavior on every transport is untouched.** Dual-rig is a new mode; each of
   the five existing single-rig transports (`CAT_WIRED`, `CAT_NET`, `CAT_RIGCTL`,
   `CAT_RIGCTL_GROVE`, `CAT_USB`) and the radio+rotator USB coexistence must behave
   byte-for-byte as today when dual-rig mode isn't engaged.
@@ -261,7 +275,7 @@ Stage accordingly:
    the backend is validated against). Until then, pair the IC-705 as USB or wired CI-V.
 3. **Two-USB-on-one-PHY heap proof** — the one cell that still needs the Phase-0 bench
    validation; every other permutation avoids it.
-4. **Conflict-guard UX** — decide how the local-mode UI presents an illegal pair (grey out
+4. **Conflict-guard UX** — decide how the local-mode UI presents an illegal pair (gray out
    leg-B transports that collide with leg A on G1/G2 / USB PHY, matching the matrix).
 5. Decide Model A vs B (companion-kept) — Model A now covers all permutations natively; the
    companion remains the answer only for "radios physically off the Cardputer" ergonomics.

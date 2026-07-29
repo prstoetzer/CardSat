@@ -967,7 +967,7 @@ int SatDb::loadGpFromFilePreferring(const char* path, const uint32_t* favs, int 
 }
 
 // ===========================================================================
-//  GP elements -> TLE line-pair (only to initialise the SGP4 propagator)
+//  GP elements -> TLE line-pair (only to initialize the SGP4 propagator)
 // ===========================================================================
 //  Field layout follows the canonical NORAD two-line spec. This is host-tested
 //  by round-tripping the elements back through spec column offsets and by

@@ -405,6 +405,7 @@ bool IcomNetRig::sendCivPayload(const uint8_t* pl, size_t pllen) {
   return true;
 }
 void IcomNetRig::selBand(bool sub) {
+  if (_plain) return;                     // leg mode: one VFO, nothing to select
   const RadioProfile& p = RADIOS[_model];
   if (p.selLen) sendCivPayload(sub ? p.selSub : p.selMain, p.selLen);
 }
@@ -419,7 +420,8 @@ bool IcomNetRig::setModeNet(bool sub, CivMode m, uint8_t filter) {
   return sendCivPayload(pl, 3);
 }
 bool IcomNetRig::readFreqNet(bool sub, freq_t& hzOut) {
-  if (_state != NS_CONNECTED || !RADIOS[_model].canReadFreq) return false;
+  if (_state != NS_CONNECTED) return false;
+  if (!_plain && !RADIOS[_model].canReadFreq) return false;
   selBand(sub);
   while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); }  // drain stale
   uint8_t pl[1] = { 0x03 };

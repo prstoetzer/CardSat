@@ -201,13 +201,79 @@ see the active VFO flicker while tracking, start `rigctld` with `-x 1` (the Haml
 A full-duplex rig (IC-9700, FT-847, TS-2000) transmits and receives at once, so
 CardSat drives it directly. **Half-duplex and receive-only** radios (IC-705, FT-817,
 IC-R8600, TH-D74, …) cannot, so a proper linear-transponder station needs *two* of
-them — one on the downlink, one on the uplink. The **CardSatDualRig** companion
-firmware (in `companion/CardSatDualRig/`, for the M5StickS3) makes that work: it hosts
+them — one on the downlink, one on the uplink. CardSat offers **two** ways to run
+that pair: **natively** (CAT type → **Dual (2 radios)**, next section) or through the
+**CardSatDualRig** companion firmware (in `companion/CardSatDualRig/`, for the
+M5StickS3), which hosts
 the two radios on its own USB port, speaks each one's native CAT, and presents CardSat
 a single `rigctld` server. CardSat steers two VFOs (VFOA = downlink, VFOB = uplink) and
 the Stick fans them out to the two radios. PTT is manual — you key your transmit radio
 by hand. Point CardSat at the Stick with either **rigctl (net)** over Wi-Fi or **rigctl
 (Grove)** below.
+
+### Two radios natively — CAT type **Dual (2 radios)**
+
+Set **CAT type → Dual (2 radios)** and CardSat drives the downlink and uplink radios
+itself — no companion in the middle. Open **Settings → Radio → Dual-Rig setup** (the
+same screen; it becomes the native two-leg editor whenever CAT type is Dual) and give
+each leg a radio and a bus:
+
+- **Rig** — any of the **27 leg radios** absorbed from the companion's catalog:
+  the Icom CI-V transceivers (IC-705, IC-905, IC-7100, IC-7000, IC-706MKIIG,
+  IC-275/475) and receivers (IC-R10/R20/R30/R7000/R7100/R8500/R8600/R9000/R9500),
+  the old-binary Yaesus (FT-817/818/857/897, FT-100, VR-5000), the ASCII Yaesus
+  (FT-991/991A, FTX-1), and the Kenwood TH-D74/TH-D75 handhelds (their all-mode
+  SSB/CW receiver lives on **Band B**, which is what CardSat drives). Receive-only
+  radios are marked **[RX]**; assigning one to the **UP** leg gets a warning, since
+  it can never transmit.
+- **Bus** — **Grove** (plain TTL serial on G1/G2, 8N1; old-binary Yaesus are set
+  8N2 automatically on the USB bus and expect their usual CAT levels on Grove),
+  **USB** (a USB↔serial adapter on the USB-C port), or **LAN** (Icom network CAT —
+  see the IC-705 note below). **Both legs can be USB** — plug the two adapters in
+  through a hub and nominate each leg's adapter with `a` (select the leg first);
+  the downlink rides the first CAT port and the uplink rides a second CDC on the
+  same USB host, each at its own line settings. Two legs can never share the one
+  Grove UART — the screen flags it in red and the engage path refuses it — while
+  two **LAN** legs are fine (each has its own host, port, and login). Dual-USB
+  legs exclude a **USB rotator** (three ports behind a hub presses the S3's USB
+  channel budget); move the rotator to Grove, LAN, or the I²C bridge.
+- **CIV / baud** — per-leg CI-V address and CAT baud; `*` marks the catalog
+  default, and entering `0` returns to it.
+- **IP / port** — **the radio's own IP address goes on the leg's IP row**, not in
+  Settings' "LAN host" row (that one belongs to single-rig Icom LAN and rigctld;
+  in Dual mode it simply points here). Set the leg's **Bus** to **LAN** first —
+  the IP and port rows are inactive on the Grove and USB buses — then ENTER on
+  **IP:** and type the address, e.g. `192.168.1.50`. The **port** is the radio's
+  control port, `50001` on the IC-705 unless you changed it. `u` and `p` set that
+  leg's network user and password.
+
+`s` saves and applies; the composite then behaves exactly like any full-duplex
+radio — engage with `r` on Track, and the One True Rule Doppler loop writes the
+downlink to the DN radio and the uplink to the UP radio, each with plain
+single-VFO CAT (no MAIN/SUB, no satellite mode — there is nothing to select on
+these radios). The VFO-layout setting is forced to Main Up/Sub Dn, for the same
+reason it is with the companion. **PTT is always manual** — CardSat never keys the
+uplink radio — and **FM uplink tones (CTCSS) are set on the radio itself** in dual
+mode, the same contract the companion honors.
+
+**The IC-705 over its own Wi-Fi.** The IC-705's network CAT speaks the same
+RS-BA1-family UDP protocol as the IC-9700 path CardSat already uses, so an IC-705
+leg on the **LAN** bus needs no wiring at all: on the radio set **MENU → SET →
+WLAN** to ON (join your shack network or use the radio's own access point),
+create a **Network User1** id and password, note the radio's IP, and leave the
+**Control port** at 50001. Enter that host and login on the leg's LAN rows. The
+IC-905 carries the same protocol family and is selectable too, but is **untested
+on hardware**; the VR-5000's CAT opcodes likewise carry the companion's
+verify-on-hardware caveat.
+
+The physical-bus rules are the familiar ones: a **Grove leg** claims G1/G2 exactly
+as wired CI-V does (a Grove rotator must move to USB/LAN or the I²C bridge, and
+Grove GPS can't share), and a **USB leg** follows the USB CAT lifecycle — the
+adapter opens when the radio is engaged, the console drops while it's up, and the
+Doppler loop starts once the leg attaches. The companion path is unchanged and
+fully supported; native Dual simply removes the Stick for stations whose radios
+can reach the Cardputer's own three buses — including **two USB radios through a
+hub**, the last cell of the transport matrix, now native as well.
 
 ### Driving the companion (or any rigctld) over a Grove cable — no Wi-Fi
 
@@ -584,11 +650,12 @@ still be transmitting. Stop with `r` (radio) or `o` (rotator) — see
 
 ### Home
 
-A menu of twenty items: **Satellites · Next Passes (favs) · Passes (sel) · Track (sel) ·
-World Map · Sun / Moon · Space Wx · Weather · Activations · AMSAT status · Overhead now ·
-Grid dist/bearing · QRZ Lookup · Location · Update · Settings · Log · Messages · About ·
-Charge / Sleep.** The currently selected satellite is shown at the bottom right.
-`;`/`.` move, ENTER selects, and any letter jumps to the next item starting with it.
+A two-column menu of twenty items, in this order: **Satellites · Next Passes (favs) ·
+Passes (sel) · Track (sel) · World Map · Overhead now · Sun / Moon · Space Wx ·
+Activations · AMSAT status · Weather · Grid dist/bearing · Nearby & DX · Location ·
+Update · Settings · Log · Messages · About · Charge / Sleep.** The currently selected
+satellite is shown at the bottom right. `;`/`.` move, `,`/`/` hop between the columns,
+ENTER selects, and any letter jumps to the next item starting with it.
 
 ### About
 
@@ -906,7 +973,7 @@ notes.
 
 ![Awards](docs/img/awards.jpg)
 
-**Awards** on the **Log** menu summarises what you've worked, read straight from
+**Awards** on the **Log** menu summarizes what you've worked, read straight from
 `/CardSat/qso_log.csv`. The top of the screen shows the **all-satellites totals**:
 total **QSOs**, unique **grid squares**, the number of distinct **satellites** in
 your log, unique US **states** (out of 51, counting DC), and unique **DXCC entities**.
@@ -1123,26 +1190,54 @@ The pages:
   perigee altitudes, the **footprint diameters at apogee and perigee**,
   inclination/eccentricity, semi-major axis, B\* with a rough drag-decay
   estimate, element age/revolution, and the next ascending-node longitude/time.
-  The decay estimate integrates B\* through an exponential-atmosphere model with
-  a **King-Hele** treatment that lets an eccentric orbit circularize (drag at
-  perigee lowers apogee fastest), down to a ~120 km reentry. The physics: drag
-  acts hardest where the air is densest, which is at **perigee**, and a velocity
-  loss there pulls down the *opposite* side of the orbit — so an elliptical orbit
-  rounds off (apogee drops toward perigee) before the whole thing spirals in. B\*
-  scales how much atmosphere the satellite "feels" (ballistic coefficient × a
-  reference density), and the model decrements energy each revolution until the
-  perigee reaches the ~120 km reentry floor. Because
-  thermospheric density swings about a factor of ten over the solar cycle - the
-  single biggest driver of lifetime - a second **"Decay rng"** line shows the
-  bracket from **solar maximum (shortest)** to **solar minimum (longest)**, with
-  the assumed level (`mean`/`min`/`max`/`auto`, set in *Settings → Station /
-  display → Decay solar*) in parentheses. In **`auto`** the density scale is
-  derived from the live **F10.7 solar flux**, downloaded with the GP elements and
-  cached (the setting row shows the current value); without a cached flux it
-  falls back to mean. Treat all of this as **order-of-magnitude**: it
-  ignores attitude, lift, and short-term space weather, and B\* itself is often
-  a fitted fudge term, so the chart is a "should I worry about this object" cue,
-  not a reentry prediction.
+  The decay estimate works from **two anchors**, and a **"Decay from"** line names
+  which one produced the number — a measured decay rate and a modeled one deserve
+  different confidence.
+
+  - **Observed n-dot (preferred).** An element set carries the **mean-motion
+    derivative**, and that is not a model — it is a *measurement* of how fast the
+    orbit is currently decaying (`ȧ = −⅔·(a/n)·ṅ`). CardSat back-solves the
+    satellite's drag from it, so the present decay rate is right by construction,
+    and everything the modeled path has to guess at — the B\*→ballistic-coefficient
+    conversion, the absolute air density, the solar-activity level, the satellite's
+    attitude and true cross-section — drops out, because they are all folded into
+    the number that was measured. This works for about **95%** of catalogued
+    satellites, including nearly all of CardSat's list.
+  - **B\* (fallback)** for the rest: satellites whose n-dot is missing, negative
+    (rising, or freshly maneuvered), or lost in fit noise. Here the ballistic
+    coefficient comes from the drag term via the textbook `Cd·A/m = 12.741621·B*`,
+    with a density calibration fitted against real reentries.
+
+  Either way the integration is the same **King-Hele** decay: drag acts hardest
+  where the air is densest, which is at **perigee**, and a velocity loss there
+  pulls down the *opposite* side of the orbit — so an elliptical orbit rounds off
+  (apogee falls, perigee holds nearly steady) before the whole thing spirals in.
+  Crucially the per-revolution drag carries the eccentricity factor
+  `exp(-z)(I0(z)+2e·I1(z))`, which accounts for an eccentric satellite spending almost
+  none of its orbit down at perigee; without it a GTO object reads as reentering in
+  weeks rather than years. Reentry is called at a ~120 km perigee for a
+  near-circular orbit, and lower for an eccentric one, which sweeps through perigee
+  too fast to be stopped there.
+
+  **Accuracy.** The model was calibrated and scored against **244 catalogued
+  objects that actually reentered** (US Space Force TIP decay epochs paired with
+  historical element sets), scored from element sets 30, 14, 7 and 3 days before
+  the event: the median prediction is **1.05×** the true remaining life, with
+  **89%** inside ±30% at every lead time. The cases are pinned in
+  `tools/host_decay` so this cannot silently regress.
+
+  The **"Decay rng"** line appears only on the **B\*** path, showing the bracket
+  from **solar maximum (shortest)** to **solar minimum (longest)** with the assumed
+  level (`mean`/`min`/`max`/`auto`, set in *Settings → Station / display → Decay
+  solar*) in parentheses; in **`auto`** the density scale comes from the live
+  **F10.7 solar flux** downloaded with the GP elements. There is deliberately no
+  bracket on an n-dot anchored estimate: the solar scale multiplies both the
+  back-solve and the integration, so it cancels exactly, and showing a "range"
+  of two identical numbers would imply a sensitivity the estimate does not have.
+
+  Still worth treating as **planning-grade**: it ignores attitude changes, lift,
+  short-term space weather, and any future maneuvering, and an object under active
+  propulsion (a deorbiting Starlink, say) is not doing pure drag decay at all.
   The **footprint** is the diameter of the visibility circle on the ground
   (`2·Re·acos(Re/(Re+h))`) — the widest separation between two stations that can
   both see the bird at once, i.e. the **longest theoretically possible QSO**
@@ -1156,7 +1251,7 @@ The pages:
   gap between the satellite's anti-solar position and the edge of the shadow
   cylinder: it climbs as the bird moves toward the center of the shadow and
   crosses zero exactly at the **terminator** (entry/exit), which is why a value
-  near 0° means a sunrise/sunset is imminent — useful for spin-stabilised or
+  near 0° means a sunrise/sunset is imminent — useful for spin-stabilized or
   solar-powered birds whose behavior changes at the shadow boundary.
 - **Next pass** — AOS countdown, duration, max elevation, AOS/LOS azimuths,
   sunlit fraction, eclipse entry/exit, the **peak eclipse depth** if the bird
@@ -1255,18 +1350,36 @@ The five zones:
 - **Eclipse** — the satellite in Earth's shadow, from the same geometric shadow test the
   Illumination screen uses. Matters for power budgeting and thermal cycling.
 - **Polar region** — passes above 60° latitude.
-- **Inner** and **outer Van Allen belts** — for **higher-orbit** satellites. Unlike the SAA and
-  the other zones, the belts are not geographic: they are organized by magnetic **L-shell**, and
-  CardSat computes L from a centered-dipole model with an **altitude floor**, so a low-Earth-orbit
-  bird correctly shows **no belt transits** (at LEO altitude the belts' particles are scoured away
-  except in the SAA, which is the separate zone above), while a **GTO, Molniya, or geostationary**
-  bird shows the belt crossings as it climbs. QO-100 at GEO reads as sitting in the **outer belt**
-  continuously.
+- **Inner** and **outer Van Allen belts** — for **higher-orbit** satellites. The belts are not
+  geographic and not an altitude band: they are **flux tubes**, so CardSat tests membership in
+  McIlwain **(L, B/B0)** coordinates computed from the real **IGRF-14** geomagnetic field
+  (degree 13, with secular variation, valid through 2030). For each sample it traces the field
+  line through the satellite down to its minimum-field point — the shell's magnetic equator —
+  giving two numbers, both shown on the status line:
+  - **L**, that minimum's geocentric distance in Earth radii: *which* shell the satellite is on.
+    Inner belt is L 1.2–2.5, outer belt L 3–7.
+  - **B/B0**, the local field divided by the shell's equatorial field: *where along* the shell it
+    sits. B/B0 = 1 means it's at the shell's magnetic equator, in the heart of the belt.
+
+  A satellite counts as being in a belt only when **both** hold: the shell is a belt shell **and**
+  B/B0 ≤ 3 (roughly within 30° magnetic latitude of the shell's equator). That second condition is
+  the one that matters, because a belt's field lines dip to low altitude at high magnetic latitude
+  — a 1200 km polar satellite crosses the L = 5.5 shell every orbit, but at **184×** its equatorial
+  field, out on the belt's horn where trapped particles are lost into the atmosphere. No altitude
+  floor can express that distinction, which is why CardSat no longer uses one.
+
+  A consequence worth knowing: with a real field model, **the SAA falls out of the inner-belt test
+  by itself** — the anomaly *is* the inner belt reaching down to LEO where the offset field is
+  weak, so ISS in the SAA reads as L = 1.23, B/B0 = 1.44, genuinely inside. The separate SAA zone
+  is kept as its own entry because it's the form operators are used to seeing.
 
 Every zone here is an approximation — none of these regions has a sharp physical edge, the SAA
-drifts and varies with altitude, and the belts use a centered dipole rather than the full
-geomagnetic field. The membership logic is pinned by a host-test harness against known points and
-orbits, but treat the results as planning-grade, not a radiation-dose calculation.
+outline is still the commonly-drawn geographic ellipse, and the B/B0 ≤ 3 cutoff is a judgment
+about where a belt stops rather than a measured boundary. The field model itself is verified
+against an independent IGRF implementation to about one part in 10^5 from the surface to GEO
+(`tools/host_geomag`), and the zone logic is pinned by `tools/host_zones`, but treat the results
+as planning-grade, not a radiation-dose calculation: CardSat models *where the belts are*, not
+how much flux is there.
 
 ### Next Passes (schedule)
 
@@ -2715,7 +2828,7 @@ tool) for your grid when precision matters.
 
 ### Space weather
 
-**Space Wx** on the main menu summarises the indices that matter most for
+**Space Wx** on the main menu summarizes the indices that matter most for
 propagation: the **solar 10.7 cm radio flux** (F10.7, a proxy for solar activity
 and ionospheric ionisation), the **planetary Kp index** (geomagnetic disturbance,
 0–9), and the **running A index** (the daily-equivalent geomagnetic amplitude,
@@ -2872,14 +2985,52 @@ operational. It's a quick offline reference for a bird's frequencies and modes �
 for checking what a satellite carries without a radio connected. If nothing shows,
 the transponders haven't been cached yet; run **Update** with WiFi on.
 
+### Nearby & DX — live terrestrial feeds
+
+**Nearby & DX** on the main menu is a small hub for what is on the air *around* you
+right now, kept deliberately separate from the satellite screens: they answer "where
+is the bird", these answer "who else is out there". It offers four items: **APRS
+heard near me**, **DX cluster spots**, **ADS-B aircraft radar**, and **QRZ callsign
+lookup**. `;`/`.` pick, **ENTER** opens, `` ` `` steps back out. The three feeds share
+one discipline: only one feed's records are held in memory at a time, distances and
+bearings are recomputed locally (so every bearing in the firmware agrees), and an
+empty list always carries a status line saying *why* it is empty.
+
+**APRS heard near me** is a **live APRS-IS listen**, not a web query: CardSat opens a
+receive-only connection to the APRS-IS network (passcode −1 — nothing the device
+sends can reach the network) with a radius filter centered on your station, and
+stations appear as their packets arrive. It **requires your callsign** (Settings →
+Station) for the APRS-IS login line. **`g`** re-centers the filter on any grid square
+(blank returns to your own location), **ENTER** opens a bearing-rose detail for the
+selected station, **`f`** restarts the listen, **`p`** prints the heard list. The
+connection is opened when you enter the screen and closed when you leave it.
+
+**DX cluster spots** fetches a current spot list **on demand** — press **`f`** — from
+the HamQTH cluster feed (a third-party service; it is never polled in the
+background). Each spot shows the **DX call, frequency, and band**, plus the
+**spotter (de)**, with the spot **comment** on a second line. **`n`** cycles the band
+filter through *only the bands that actually have spots* (all → each active band →
+all), **`p`** prints, `;`/`.` step spot-to-spot.
+
+**ADS-B aircraft radar** draws nearby aircraft on the same **polar plot** the pass
+screens use, with the radius remapped from elevation to **range** — north up,
+aircraft beyond the configured range pinned to the outer ring so distant traffic is
+still visible. It needs an **aggregator source URL** in *Settings → Network / data*
+(an adsb.lol-style endpoint returning `{"ac":[...]}`; CardSat substitutes your
+position and range). **`f`** fetches, **`t`** sets a **scatter target grid**: the
+bearing to that grid is drawn as a line and aircraft near the great-circle path are
+highlighted — the ones geometrically able to support an airplane-scatter contact.
+**`p`** prints the picture as a report.
+
 ### QRZ callsign lookup
 
-**QRZ Lookup** on the main menu looks up a callsign in the **QRZ.com** database and
+**QRZ callsign lookup**, in the **Nearby & DX** hub (Home → Nearby & DX), looks up a
+callsign in the **QRZ.com** database and
 shows the operator's name, mailing address, country, grid square and license class.
 It uses QRZ's XML data service, which **requires a QRZ XML-data subscription**.
 
 To use it, enter your QRZ **username** and **password** in *Settings → Network /
-data* (rows **QRZ user** / **QRZ pass**). Then open **QRZ Lookup**, press **ENTER**,
+data* (rows **QRZ user** / **QRZ pass**). Then open the lookup, press **ENTER**,
 type a callsign, and press ENTER again. CardSat logs in to QRZ, caches the session
 key, and displays the result; the key is reused for subsequent lookups until it
 expires (then it re-logs in automatically).
@@ -2900,7 +3051,7 @@ passwords are; it is shown masked in Settings. CardSat talks to QRZ over HTTPS.
 
 ![Grid distance](docs/img/grid-distance.jpg)
 
-**Grid dist/bearing** on the main menu (just before QRZ Lookup) is a great-circle
+**Grid dist/bearing** on the main menu (just before Nearby & DX) is a great-circle
 calculator for terrestrial VHF/UHF work — tropo, contests, or just aiming a beam at a
 known grid. Press **`g`** and enter a **Maidenhead grid**; CardSat shows the
 **distance** (km and miles) and the **beam heading** from your station, both **short
@@ -4206,16 +4357,15 @@ listed below.
 
 - **Purpose** — the top-level launcher.
 - **Reached from** — power-on lands here; `` ` `` from most top-level screens returns here.
-- **Shows** — a scrolling list of the twenty destinations: Satellites, Next
-  Passes (all favs), Passes (sel), Track (sel), World Map, Overhead now, Sun / Moon,
-  Space Wx, Activations, AMSAT status, Weather, Grid dist/bearing, QRZ Lookup,
-  Location, Update, Settings, Log, Messages, About, and Charge / Sleep. The header
-  carries the clock and battery gauge.
-- **Keys** — **`t`** opens the **Tools** hub (below); after LOS, `q` (60 s window)
-  deep-sleeps until the next favorite pass; `;`/`.` move the highlight; `{`/`}` page;
+- **Shows** — a two-column grid of the twenty destinations, all visible at once:
+  Satellites, Next Passes (all favs), Passes (sel), Track (sel), World Map,
+  Overhead now, Sun / Moon, Space Wx, Activations, AMSAT status, Weather,
+  Grid dist/bearing, Nearby & DX, Location, Update, Settings, Log, Messages,
+  About, and Charge / Sleep. The header carries the clock and battery gauge.
+- **Keys** — `;`/`.` move the highlight; `,`/`/` hop between the two columns;
   **ENTER** opens the selected item; any **letter** jumps to the next item starting
   with it (repeat to cycle — `s` steps through Satellites, Sun / Moon, Space Wx,
-  Settings).
+  Settings). The **Tools** hub is reached from **About** (`t`).
 
 ### Satellites
 
@@ -4818,13 +4968,52 @@ engine underneath; they differ only in the direction of the question.
   report; **`r`** refreshes the fetch; **`` ` ``** backs out (field page → summary → Home).
 - **Keys** — `r` refresh over WiFi; `` ` `` back.
 
+### Nearby & DX (hub)
+
+- **Purpose** — the launcher for the live terrestrial feeds; detail in
+  [§13 → Nearby & DX](#nearby-dx-live-terrestrial-feeds).
+- **Reached from** — Home → Nearby & DX.
+- **Shows** — four items: APRS heard near me, DX cluster spots, ADS-B aircraft
+  radar, QRZ callsign lookup.
+- **Keys** — `;`/`.` pick; **ENTER** opens; `` ` `` back to Home.
+
+### APRS heard near me
+
+- **Purpose** — live APRS-IS stations around your station (or a chosen grid).
+- **Reached from** — Nearby & DX → APRS heard near me.
+- **Shows** — stations as their packets arrive: callsign, distance, bearing; a
+  status line explains an empty list (no callsign set, no location, connecting…).
+- **Keys** — **`g`** set the center grid (blank = your location); **ENTER**
+  bearing-rose detail for the selected station; **`f`** restart the listen;
+  **`p`** print; `;`/`.` select; `` ` `` back (closes the connection).
+
+### DX cluster spots
+
+- **Purpose** — current DX-cluster spots with comments, fetched on demand.
+- **Reached from** — Nearby & DX → DX cluster spots (fetches on entry).
+- **Shows** — DX call, frequency, band, spotter (de), and the spot comment on a
+  second line.
+- **Keys** — **`f`** fetch; **`n`** cycle only the bands that have spots; **`p`**
+  print; `;`/`.` step spot-to-spot; `` ` `` back.
+
+### ADS-B aircraft radar
+
+- **Purpose** — nearby aircraft on a polar range plot, for airplane-scatter planning.
+- **Reached from** — Nearby & DX → ADS-B aircraft radar (fetches on entry).
+- **Shows** — north-up polar plot, radius = range; aircraft beyond the configured
+  range sit on the outer ring; with a scatter target set, the target bearing line
+  and highlighted near-path aircraft.
+- **Keys** — **`f`** fetch; **`t`** set the scatter target grid (blank = off);
+  **`p`** print; `;`/`.` select; `` ` `` back. Needs a source URL in *Settings →
+  Network / data*.
+
 ### QRZ callsign lookup
 
 ![QRZ callsign lookup](docs/img/qrz-lookup.jpg)
 
 - **Purpose** — resolve a callsign to name, location, grid and license class via
   the QRZ.com XML API; detail in [§13 → QRZ callsign lookup](#qrz-callsign-lookup).
-- **Reached from** — Home → QRZ Lookup.
+- **Reached from** — Home → **Nearby & DX** → QRZ callsign lookup.
 - **Shows** — prompts for credentials/WiFi if needed; otherwise the looked-up
   station's details.
 - **Keys** — **ENTER** type a callsign to look up; `;`/`.` scroll a long result;
@@ -5495,7 +5684,7 @@ operation.
   mini-set, **thermal equilibrium**, a **polarization / Faraday** estimate, **trace & wire
   ampacity**, and a **PLL / frequency-plan** helper.
 - **Reached from** — About → `t`.
-- **Menu layout** — the sixty tools are organized into **six categories**, so Tools opens
+- **Menu layout** — the sixty-three tools are organized into **six categories**, so Tools opens
   on a short **category list** rather than one long scroll. Pick a category with `;`/`.` and
   ENTER to open its tool list; `` ` `` steps back from a tool list to the categories (and
   again to leave Tools). The categories are **Calculators & programming** (the scientific,
@@ -5689,7 +5878,7 @@ operation.
 These were added in 0.9.59. The five **satellite tools** are standalone screens (they read
 the active satellite and, where noted, the loaded catalog); the rest are live-recalc forms
 like the ones above. The two screeners that propagate pairs of objects carry an on-screen
-reminder that **public TLE/GP elements are only kilometre-class accurate — these screens are
+reminder that **public TLE/GP elements are only kilometer-class accurate — these screens are
 for situational awareness, not collision avoidance.**
 
 - **Conjunction screener** — pick a second object from the loaded satellites and scan the next
@@ -6254,19 +6443,22 @@ the no-interactive-programs rule stands; that is precisely why it lives in firmw
 | **Sun / Moon** | graphical sky-dome view (Sun/Moon glyphs on a polar dome) · `g` toggle graphic/data list · `;`/`.` pick Sun/Moon · `o` rotor track on/off (takes the rotator from sat tracking) · `s` sky sources (radio sources/planets) · `t` Sun/Moon transit finder · `e` EME / moonbounce · auto-parks while the body is below the horizon · header shows SUN/MOON tag on other screens · `x` stop · `` ` `` back |
 | **Space Wx** (main menu) | solar 10.7 cm flux + planetary Kp + running A index, each labeled & color-coded, with a plain-language HF/satellite operating outlook and a data-freshness note · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Space Wx" bar + result · also refreshes with Update · `p` HF/6m propagation guide · `m` MUF to world regions (`k` map) · `r` refresh · `` ` `` back |
 | **Weather** (main menu) | terrestrial current conditions + multi-day forecast for the operating site from Open-Meteo · current temp/sky/wind/humidity then per-day hi/lo & precip chance · shows cache then auto-fetches on entry (if on WiFi) with an "Updating Weather" bar + result · also refreshes with Update · `r` refresh · cached offline · `` ` `` back |
-| **QRZ Lookup** (main menu) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network / data) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
+| **QRZ Lookup** (Nearby & DX) | callsign lookup via QRZ.com XML (needs a QRZ XML subscription + credentials in Settings → Network / data) · ENTER type a callsign · shows name/address/country/grid/class · WiFi required · `` ` `` back |
 | **EME / moonbounce** (Sun/Moon → `e`) | self-echo Doppler per band (50/144/432/1296/10368, topocentric) · range + rate · degradation vs perigee · galactic sky-noise flag · red SUN flag <10° · `p` 30-day plan (dec + degr, `;`/`.` scroll) · `m` mutual-Moon window vs DX grid (`g` grid, `;`/`.` select) · `o` point rotator at Moon · `x` stop · `a` per-band analysis page · `w` print · `` ` `` back |
 | **Grid dist/bearing** (main menu) | great-circle distance + heading to a Maidenhead grid (short/long path, km/mi) · `g` grid · `q` QRZ→grid lookup · `o` point rotator at bearing (el 0) · `x` stop · `` ` `` back |
 | **QRZ → grid** (Grid dist/bearing → `q`) | resolve a callsign to its grid · `c` callsign · ENTER use grid in the calculator · `` ` `` back |
 | **HF/6m propagation** (Space Wx → `p`) | band guidance from solar flux + Kp: HF conditions, 10/15/20 m open/marg/shut, geomagnetic, auroral VHF, absorption · rule-of-thumb (6 m Es seasonal) · `r` refetch · `` ` `` back |
 | **MUF to regions** (Space Wx → `m`) | MINIMUF-3.5 path MUF from QTH to 24 world DX regions: bearing, distance, MUF, best band, color-coded · `;`/`.` scroll · `k` world map (colored dots, `;`/`.` step region) · `x` print · `` ` `` back |
 | **Transponder DB** (Satellites → `t`) | scrollable list of the selected satellite's transponder/beacon entries (description; **D** downlink + mode; **U** uplink + tone/inv/lin flags) · `;`/`.` scroll · `` ` `` back |
+| **Nearby & DX** (hub) | live-feeds launcher: APRS heard, DX cluster, ADS-B radar, QRZ lookup · `;`/`.` pick · ENTER open · `` ` `` back |
+| **APRS heard** (Nearby & DX) | live APRS-IS listen (receive-only, needs your callsign in Settings): stations appear as packets arrive with distance + bearing · `g` center grid (blank = here) · ENTER bearing-rose detail · `f` restart · `p` print · `` ` `` back closes the connection |
 | **DX cluster** (Nearby & DX → DX spots) | live DX-cluster spots: each shows DX call, frequency, band, and **spotter (de)**, with the spot **comment** on a second line beneath · `;`/`.` step spot-to-spot (skips comment lines) · `f` fetch · `n` step bands that have spots · `p` print · `` ` `` back |
+| **ADS-B radar** (Nearby & DX) | aircraft on a north-up polar plot, radius = range (beyond-range traffic pinned to the outer ring); scatter-target bearing line highlights near-path aircraft · `f` fetch · `t` scatter target grid · `p` print · source URL in Settings → Network / data · `` ` `` back |
 | **Telnet client** (Tools → Calc & prog → Telnet) | connection list: `a` add · `e` edit · `d` delete · ENTER open · setup walks label → host → port → output (screen/printer/both) · plaintext + unauthenticated, trusted LANs only |
 | **Telnet terminal** (open a connection) | **type to send** · ENTER sends line (CR LF) · **Ctrl+key** control chars (Ctrl-C/D/Z…) · **Fn+`;`/`.`/`,`/`/`** arrows · **Fn+`1`..`0`** F1–F10 · **Fn+`` ` ``** Escape (all to the remote) · **Opt+`;`/`.`** scroll buffer · **Opt+`c`** clear · **Opt+`r`** reconnect · **Opt+`1`/`2`/`3`** output screen/printer/both · **Opt+`` ` ``** exit · no Fn combo reaches a CardSat global here; exit is Opt+`` ` `` only |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |
 | **About** | build/version, IP, free heap and diagnostics (read-only) · `t` Tools hub · `p` Print submenu · `r` station readiness checklist · `l` license · `z` games |
-| **Printing** (contextual) | `p` prints the current screen's report on the printable screens (Passes day-sheet, Mutual, DX Doppler, EQX, Target-search, Pass detail/polar, **Orbital analysis, Illumination, 10-day passes, 6-hour timeline**) · `P` prints all-favorite passes from the schedule · `Fn`+`p` prints the note in the note editor · About → `p` opens a Print submenu listing **every** report; About → `a` Support-AMSAT card; About → `c` operator contact card · **tools:** `p` prints on the programmer calc / graphing calc / location converter / char lookup / BASIC console, and (0.9.59) on **every form tool** (all 34 — inputs + the complete output list) and the **conjunction / neighborhood / debris-group / link-margin** screens; `Fn`+`p` on the scientific calc and BASIC editor (where plain `p` types) |
+| **Printing** (contextual) | `p` prints the current screen's report on the printable screens (Passes day-sheet, Mutual, DX Doppler, EQX, Target-search, Pass detail/polar, **Orbital analysis, Illumination, 10-day passes, 6-hour timeline**) · `P` prints all-favorite passes from the schedule · `Fn`+`p` prints the note in the note editor · About → `p` opens a Print submenu of **30** reports (feed and tool reports print from their own screens); About → `a` Support-AMSAT card; About → `c` operator contact card · **tools:** `p` prints on the programmer calc / graphing calc / location converter / char lookup / BASIC console, and (0.9.59) on **every form tool** (all 34 — inputs + the complete output list) and the **conjunction / neighborhood / debris-group / link-margin** screens; `Fn`+`p` on the scientific calc and BASIC editor (where plain `p` types) |
 
 ---
 

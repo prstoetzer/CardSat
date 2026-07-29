@@ -200,7 +200,7 @@ and the separate `companion/CardSatDualRig` M5StickS3 sketch (compiles independe
   Added a dedicated `uint32_t catGroveBaud = 115200` with load/save, migration, `validate()`
   clamp to {9600,19200,38400,57600,115200}, a `makeRig` parameter, and all editor/display sites.
 - **C3** — model parser bounded its loop by `sizeof(pointer)` -> 0, so zero models parsed
-  while reporting a green link. Bound fixed to `DR_MAX_MODEL`; empty catalogue now fails
+  while reporting a green link. Bound fixed to `DR_MAX_MODEL`; empty catalog now fails
   visibly (red link, "No models from companion").
 
 ### High — CardSat side, fixed
@@ -249,3 +249,134 @@ C1-C3 and the required Highs (H9-H12, H14) are fixed and both firmwares compile.
 audit, CardSatDualRig should still NOT be described as production-operational until the
 two-radio regression matrix (one CI-V + one non-CI-V, over both TCP and Grove) is run on real
 hardware; the v0.9.62 "not hardware-tested" honesty note stays prominent until then.
+
+## 0.9.68 cycle-open documentation audit
+
+Full doc audit (repo + on-device) against code ground truth; 22 finding groups, all
+fixed or dispositioned in **docs/design/DOC_AUDIT_0_9_68.md**. Headlines: Nearby & DX
+was almost entirely undocumented in MANUAL/README/FEATURES (now covered in §13, §22
+×4 entries, §23 ×3 rows, README bullet, FEATURES bullets, cheat-card tile, on-device
+help section); stale counts corrected everywhere (tools 55/60 → 63, reports 29/40 →
+30-item menu of 50 total, games six → seven, orbit pages 9 → 11); Home documented as
+the two-column grid it is (QRZ Lookup → Nearby & DX; stale t/q key claims removed);
+`FILE_TELNET` comment and the "APRS.fi" banner corrected; 488-replacement American-
+English pass over live docs and both source representations (parity gates green).
+
+## 0.9.68 source-comment audit
+
+Comments audited against current code and pinned libraries; findings dispositioned
+in **docs/design/COMMENT_AUDIT_0_9_68.md**. Headlines: the usbserial.cpp forensic
+comments described the removed finishUninstall()/poke machinery in the present
+tense and claimed EspUsbHost "omits" the unblock escape hatch — rewritten as an
+explicit HISTORY block after source-verifying the pinned 2.5.2 (end() self-unblocks,
+3 s wait, checked+logged uninstall via releaseClientResources()/
+uninstallHostLibrary(); begin() refuses over live handles); two vestigial includes
+removed from BOTH representations (the .ino prologue had its own stale copies);
+eleven "2.4.1" ongoing-behavior annotations → "2.4.1+"; /api/orbit "nine pages" →
+count-free; API_STATUS.md → WEB_API.md; six/'b'-key/usbLastError()/Kenwood's
+fixes; 13 more AmE stragglers (quantise/normalise/summarise family). Verified
+correct: all three feed size-math comments, DXC wire order, 24 bands, 5 presets,
+1018 stars, MAX_SATS=150, AO-7 constants, PA↔keyPrintAbout 30/30, games 0-6.
+IMPORTANT session-memory correction recorded: the "resident host forever" design
+is 0.9.58 history; current code fully tears down via the library's fixed end()
+with the M2 ESP_ERR_TIMEOUT guard. Rebuild differs from the pre-audit binary
+only in the two ESP-IDF image hashes (ELF SHA in esp_app_desc + trailing image
+SHA, 65 bytes total); code/rodata/strings byte-identical, strings-diff empty —
+proof the audit was documentation-only.
+
+## 0.9.68 bench round 1 (dual rig) — three reports, and a gate for the family
+
+Bench (N8HM) on the native dual-rig build:
+1. **ESC from a dual-rig leg edit landed in the new-activation editor.** Edit
+   targets 920-931 had no `editHome()` rule and fell into its `t >= 720 ->
+   SCR_SKEDENTRY` catch-all. This is the SECOND time this exact trap fired — the
+   Nearby & DX 900s did it first, and the fix comment for that is three lines
+   above where mine fell in. Fixed (920-931 -> SCR_DUALRIG, above the catch-alls).
+2. **"Where does the IC-705's IP go?"** The leg row rendered `LAN:<host>:<port>`,
+   which reads as one field, and Settings' Host row said only "per leg". Now the
+   row is `IP:<addr>  port:<n>`, non-LAN buses say "set Bus to LAN first", the
+   edit titles name the format (`192.168.1.50`, "IC-705: 50001"), and MANUAL says
+   explicitly that the address goes on the leg row, not Settings' LAN host.
+3. **Settings row still read "Dual-Rig setup (Stick)" in native mode.** The row
+   label was unconditional. Now it reads "Dual-Rig setup (2 radios) > IC-705+FT-817"
+   (or "set legs") when catType is CAT_DUAL. Also fixed while there: entering the
+   screen in native mode no longer calls `drAlloc()`/`drQuery()` — it was querying
+   a companion that isn't in the picture, stalling on `\csdr_get` and reporting
+   "No reply from Stick" on a screen with no Stick.
+
+**New gate: `tools/audit_edit_home.py` (15th).** Parses the key-dispatch table for
+handler->screen, interprets `editHome()`'s ordered rules, and verifies every
+`editTarget = N` cancels back to the screen that launched it. It immediately found
+five MORE pre-existing instances of the same family, all fixed:
+- **760** target-search grid — had an explicit rule, but it sat BELOW `t >= 720`,
+  so it was dead code; cancel went to the new-activation editor.
+- **784** QTH preset name — no rule; same landing. (Commit was fine; only cancel
+  was broken, exactly like finding 1.)
+- **701 / 702** LoRa freq and TX power — fell into `t >= 500`, dumping the
+  operator into the QSO log-entry editor.
+- **350** grid-calculator target grid and **360** EME DX grid — fell into
+  `t >= 320` to the Passes screen.
+Allow-list (deliberate cross-screen cancels, each justified in the script): 104,
+203, 210, 216, 230, 240, 326, 351 (one target, two legitimate launchers), 600, 710.
+
+## 0.9.68 — Van Allen belt model replaced with IGRF-14 (L, B/B0)
+
+Bench report (N8HM): satellites that never approach the outer belt were being
+listed as outer-belt transits. Diagnosis: the model gated on `L >= 3 && altKm >=
+1000` with L from a **centered dipole**. Because L = (r/RE)/cos^2(magnetic
+latitude), L diverges toward the poles: a 1200 km satellite reaches L = 3 at only
+51 deg magnetic latitude, so every high-inclination bird above the altitude floor
+scored a belt transit over the auroral zone. The belts' equatorial altitude for
+those shells is 12,700-38,200 km. An altitude floor cannot fix this — the flux
+tube passes through every altitude at its horns.
+
+**Replacement.** McIlwain (L, B/B0) from the real field:
+- **IGRF-14** (IAGA 2024 release), degree 13, epoch 2025.0 with published secular
+  variation to 2030, 1.2 KB of coefficients. Regenerate with `tools/make_igrf.py`
+  from the archived IAGA distribution file in `tools/host_geomag/`.
+- `shellAt()` walks the field line **downhill in |B| only**, stopping at the
+  turning point: that minimum is the shell's magnetic equator, giving B0 and
+  L (its geocentric radius in RE). One direction, no feet — 22-102 field
+  evaluations for points actually in a belt.
+- Membership = belt L range **AND** `B/B0 <= ZONE_BRATIO_MAX` (3.0, about
+  |magnetic latitude| <= 30 deg). The altitude floor is gone; a 300 km atmospheric
+  cutoff remains.
+- `maybeInBelt()` is a ~20-flop analytic-dipole pre-filter with 3x margins that
+  rejects the common (and most expensive to trace) case without tracing at all.
+
+A criterion I tried first and rejected: the loss-cone fraction
+sqrt(1 - B_sat/B_foot). It does not discriminate — it is ~0.4 even at ISS
+altitude, because the locally trapped pitch-angle cone is wide anywhere above the
+atmosphere. Measured, not assumed; B/B0 is the coordinate that tracks flux.
+
+**Verification.** New `tools/host_geomag` (16th check) compares the extracted
+evaluator against **ppigrf** (an independent implementation of the same model) at
+six points from the surface to GEO: worst relative error 3.5e-5, i.e. float32
+rounding. `tools/host_zones` extended with the regression cases (polar 1200 km at
+50/65/70 N and 1400 km at 60 S must all read "not in belt") and updated for the
+new physics.
+
+**Side effect worth noting:** with a real field the **SAA now satisfies the
+inner-belt test on its own** (ISS in the SAA: L = 1.23, B/B0 = 1.44) — the
+anomaly is the inner belt dipping into LEO, which the centered dipole could not
+reproduce and which is why the SAA needed a hand-drawn ellipse. The geographic SAA
+zone is retained as its own entry deliberately.
+
+Cost: +5.9 KB flash, +8 B static RAM. **Bench items:** confirm the zone scan's
+run time on hardware for a high-inclination LEO (worst case for tracing) and for
+a GTO/Molniya bird; confirm the status line's new `L=x.xx B/B0=y.y` readout.
+
+## 0.9.68 orbital-decay model rework
+
+Reviewed on request; the estimator turned out to predict ~1/5 of true remaining
+life and to never land within ±30% of a real re-entry. Four defects (factor-2
+da/dt error, a 38*B* constant tuned on ISS that masked it, no King-Hele
+eccentricity factor — a GTO read 43 days — and perigee falling far too fast),
+all detailed with the replacement and its scoring in
+**docs/design/DECAY_MODEL_0_9_68.md**. Now anchored on the observed
+MEAN_MOTION_DOT (already parsed, previously unused) with B* as fallback: median
+1.05x, 89% within ±30%, validated against 244 objects that actually re-entered.
+New gate tools/host_decay (16th). Two rejected-alternative notes worth keeping:
+the loss-cone criterion tried first does not discriminate (it is ~0.4 even at ISS
+altitude), and a density calibration cannot be applied to the anchored path
+because it cancels exactly — the correction belongs on drag.

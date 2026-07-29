@@ -36,6 +36,20 @@ public:
       _ctlPort(port ? port : 50001), _user(user), _pass(pass) {
     snprintf(_nameBuf, sizeof(_nameBuf), "%s/LAN", RADIOS[m].name);
   }
+  // Dual-rig LEG constructor (CAT_DUAL): plain single-VFO network CAT for a
+  // LEG_RADIOS[] radio -- the IC-705 over its own Wi-Fi being the flagship. No
+  // MAIN/SUB band selects, no satellite mode; just cmd 05/06/03 on the one VFO.
+  // The UDP transport, auth handshake and keepalives are identical to the
+  // IC-9700 path (same RS-BA1-family protocol; see the banner above), so the
+  // whole connection state machine is reused unchanged. _model is parked on
+  // RIG_NONE, whose profile row is all-zeros -- selBand() no-ops on selLen == 0
+  // and every capability that reads RADIOS[_model] is overridden below.
+  IcomNetRig(uint8_t civAddr, const char* legName, const char* host, uint16_t port,
+             const char* user, const char* pass)
+    : _model(RIG_NONE), _addr(civAddr), _host(host),
+      _ctlPort(port ? port : 50001), _user(user), _pass(pass), _plain(true) {
+    snprintf(_nameBuf, sizeof(_nameBuf), "%s/LAN", legName ? legName : "leg");
+  }
   ~IcomNetRig() override;
 
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
@@ -57,10 +71,10 @@ public:
   void selectSubBand()          override { if (ready()) selBand(true); }
   void selectMainBand()         override { if (ready()) selBand(false); }
 
-  bool canReadFreq() const override { return RADIOS[_model].canReadFreq; }
-  bool hasSatMode()  const override { return RADIOS[_model].hasSatMode; }
-  bool hasTone()     const override { return RADIOS[_model].hasTone; }
-  bool selVerified() const override { return RADIOS[_model].selVerified; }
+  bool canReadFreq() const override { return _plain ? true  : RADIOS[_model].canReadFreq; }
+  bool hasSatMode()  const override { return _plain ? false : RADIOS[_model].hasSatMode; }
+  bool hasTone()     const override { return _plain ? false : RADIOS[_model].hasTone; }
+  bool selVerified() const override { return _plain ? true  : RADIOS[_model].selVerified; }
   const char* name() const override { return _nameBuf; }
 
   void    setAddress(uint8_t a) override { _addr = a; }
@@ -82,6 +96,7 @@ private:
 
   RadioModel _model;
   uint8_t    _addr;
+  bool       _plain = false;   // dual-rig leg mode: plain single-VFO CAT, no selects
   String     _host;
   uint16_t   _ctlPort;
   String     _user, _pass;

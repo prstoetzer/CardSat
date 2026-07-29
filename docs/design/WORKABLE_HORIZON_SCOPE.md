@@ -53,7 +53,7 @@ hazard, made worse because we hold the union *for the duration of the sweep*. Tw
 - **(A, preferred) Reuse the existing `gridBits` block as the union.** Allocate it once at
   survey start via `ensureGridBits()`, `memset` it to zero **once** (not per pass — that is the
   whole point), OR each pass's grids into it directly, and **free it when the sweep completes or
-  is cancelled** (mirroring the rove planner's `if (gridBits) { free(gridBits); gridBits = nullptr; }`).
+  is canceled** (mirroring the rove planner's `if (gridBits) { free(gridBits); gridBits = nullptr; }`).
   While the sweep runs, `gridBuiltMs = 0` invalidates the live-grid view so the shared block is
   never shown as a stale union — same guard the per-pass counter already uses.
 - (B) A separate `unionGridBits` malloc. Rejected: a *second* 4 KB block doubles the
@@ -89,7 +89,7 @@ days. With, say, 10 favorites that is ~500–700 passes. Each pass samples up to
 evaluations, and the grid footprint fill is the heaviest primitive (thousands of grid cells
 ray-tested). This is the same primitive the rove planner runs per pass, but here multiplied by
 the full 10-day horizon — **plausibly tens of seconds to a few minutes**. That is acceptable
-*only* with a progress bar and cancellable jobbing; it must never block the UI. (Grid footprint
+*only* with a progress bar and cancelable jobbing; it must never block the UI. (Grid footprint
 fill dominates; see §6 for a "states/DXCC only, skip grids" fast mode.)
 
 **Jobbing granularity.** The rove planner jobs **one favorite per `loop()`**. That is too coarse
@@ -133,7 +133,7 @@ bar** plus live text:
 **Completion.** When the cursor exhausts all selected favorites:
 - Show a clear **"Done"** state (bar full, a "complete" line) — the user explicitly asked for a
   clean finished signal, distinct from mid-run.
-- Present the three totals prominently: **DXCC N · States N · Grids N**, labelled as "ever
+- Present the three totals prominently: **DXCC N · States N · Grids N**, labeled as "ever
   workable, next _D_ days, _K_ satellites."
 - Offer drill-down keys to list **which**: `s` states, `d` DXCC, `g` grids — reusing the
   existing workable-list renderers, but reading from the **union** bitset instead of a
@@ -230,7 +230,7 @@ fast mode in the entry prompt.
   (largest-block returns to baseline — the rove-planner fragmentation lesson).
 - **Progress monotonicity**: `whPassesDone` never exceeds `whPassesTotal`; bar reaches 100% exactly
   at `WH_DONE`.
-- **Cancel path**: cancelling mid-sweep frees the block, restores `gridBuiltMs`/live-grid view,
+- **Cancel path**: canceling mid-sweep frees the block, restores `gridBuiltMs`/live-grid view,
   and leaves state/DXCC scratch consistent.
 - Then the usual gate: `balance.py` 0, `parity.py` green, dispatch-case audit, mirror-identical
   bodies in `CardSat.ino`, `static_assert`s, and an on-device timing pass to confirm the sweep

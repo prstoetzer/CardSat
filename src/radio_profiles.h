@@ -157,3 +157,96 @@ static const RadioProfile RADIOS[RIG_COUNT] = {
   // in Settings). makeRig() returns nullptr for it, so none of the other fields are used.
   { "None",     PROTO_CIV,    0x00,  9600,  {0,0,0},       {0,0,0},        0,  false,false,0x00, 0x00, false,false, 0x00, false },
 };
+
+// ===========================================================================
+//  Dual-rig LEG catalog (CAT_DUAL) -- the CardSatDualRig companion's radio set,
+//  absorbed into the main firmware (DUALRIG_MAINFW_INTEGRATION_SCOPE.md, Model A).
+//
+//  These are the half-duplex transceivers and receive-only radios that pair up as
+//  a downlink + uplink leg. They are driven with PLAIN single-VFO CAT (one freq,
+//  one mode -- no MAIN/SUB, no satellite mode), which is why they live in their
+//  own table instead of RADIOS[]: the RadioProfile machinery above is all about
+//  MAIN/SUB band access on full-duplex sat rigs and does not apply here.
+//
+//  Four CAT dialects cover every leg radio (same families as the companion):
+//    LEGF_CIV   Icom binary CI-V, addressed          (cmd 05 freq, 06 mode, 03 read)
+//    LEGF_YBIN  Yaesu "old" 5-byte binary CAT        (4-byte BCD @10 Hz + opcode)
+//    LEGF_YTXT  Yaesu "new" ASCII CAT                (FA/MD ';'-terminated)
+//    LEGF_KWHT  Kenwood TH-D74/D75 handheld CAT      (FQ<band>,<Hz> + CR; Band B)
+//
+//  Table data (names, dialects, default bauds, CI-V addresses, RX-only flags) is
+//  ported verbatim from companion/CardSatDualRig (RADIO_TABLE[]), which is the
+//  bench-validated source of truth for these radios.
+//
+//  hasLan: the radio has native Icom network CAT that CardSat's IcomNetRig can
+//  target (same RS-BA1-family UDP protocol the IC-9700 path speaks). Set for the
+//  IC-705 (the requested + supported LAN target, over the radio's own Wi-Fi) and
+//  the IC-905 (same protocol family per Icom's docs -- UNTESTED on hardware).
+// ===========================================================================
+enum LegFamily : uint8_t { LEGF_CIV, LEGF_YBIN, LEGF_YTXT, LEGF_KWHT };
+
+enum LegModel : uint8_t {
+  // --- Icom CI-V transceivers ---
+  LEG_IC705 = 0, LEG_IC905, LEG_IC7100, LEG_IC7000, LEG_IC706MK2G, LEG_IC275, LEG_IC475,
+  // --- Icom CI-V receivers (RX only) ---
+  LEG_ICR10, LEG_ICR20, LEG_ICR30,
+  LEG_ICR7000, LEG_ICR7100, LEG_ICR8500, LEG_ICR8600, LEG_ICR9000, LEG_ICR9500,
+  // --- Yaesu old binary ---
+  LEG_FT817, LEG_FT818, LEG_FT857, LEG_FT897, LEG_FT100,
+  // --- Yaesu receiver (old-binary CAT family) ---
+  LEG_VR5000,
+  // --- Yaesu new ASCII ---
+  LEG_FT991, LEG_FT991A, LEG_FTX1,
+  // --- Kenwood handhelds (all-mode receiver on Band B, RX only) ---
+  LEG_THD74, LEG_THD75,
+  LEG_NONE,      // leg unassigned; makeLegRig() returns nullptr
+  LEG_COUNT
+};
+
+struct LegProfile {
+  const char* name;
+  LegFamily   family;
+  uint32_t    baud;      // default CAT baud (0 in cfg = use this)
+  uint8_t     civAddr;   // default CI-V bus address (LEGF_CIV only; 0 otherwise)
+  bool        rxOnly;    // receive-only: warn if assigned to the uplink leg
+  bool        hasLan;    // Icom network CAT available as a leg transport
+};
+
+// Order MUST match LegModel. Data ported from the companion's RADIO_TABLE[].
+static const LegProfile LEG_RADIOS[LEG_COUNT] = {
+  //  name           family     baud   addr  rxOnly lan
+  { "IC-705",      LEGF_CIV,  19200, 0xA4, false, true  },
+  { "IC-905",      LEGF_CIV,  19200, 0xAC, false, true  },
+  { "IC-7100",     LEGF_CIV,  19200, 0x88, false, false },
+  { "IC-7000",     LEGF_CIV,  19200, 0x70, false, false },
+  { "IC-706MKIIG", LEGF_CIV,   9600, 0x58, false, false },
+  { "IC-275",      LEGF_CIV,   9600, 0x10, false, false },
+  { "IC-475",      LEGF_CIV,   9600, 0x14, false, false },
+  { "IC-R10",      LEGF_CIV,   9600, 0x52, true,  false },
+  { "IC-R20",      LEGF_CIV,   9600, 0x6C, true,  false },
+  { "IC-R30",      LEGF_CIV,   9600, 0x9C, true,  false },
+  { "IC-R7000",    LEGF_CIV,   1200, 0x08, true,  false },
+  { "IC-R7100",    LEGF_CIV,   9600, 0x34, true,  false },
+  { "IC-R8500",    LEGF_CIV,   9600, 0x4A, true,  false },
+  { "IC-R8600",    LEGF_CIV,  19200, 0x96, true,  false },
+  { "IC-R9000",    LEGF_CIV,   1200, 0x2A, true,  false },
+  { "IC-R9500",    LEGF_CIV,  19200, 0x72, true,  false },
+  { "FT-817",      LEGF_YBIN,  9600, 0x00, false, false },
+  { "FT-818",      LEGF_YBIN,  9600, 0x00, false, false },
+  { "FT-857",      LEGF_YBIN,  9600, 0x00, false, false },
+  { "FT-897",      LEGF_YBIN,  9600, 0x00, false, false },
+  { "FT-100",      LEGF_YBIN,  9600, 0x00, false, false },
+  // VR-5000: Yaesu 5-byte family; opcodes close to the FT-817's but VERIFY on
+  // hardware (carried over from the companion's own caveat).
+  { "VR-5000",     LEGF_YBIN,  9600, 0x00, true,  false },
+  { "FT-991",      LEGF_YTXT, 38400, 0x00, false, false },
+  { "FT-991A",     LEGF_YTXT, 38400, 0x00, false, false },
+  { "FTX-1",       LEGF_YTXT, 38400, 0x00, false, false },
+  { "TH-D74",      LEGF_KWHT,  9600, 0x00, true,  false },
+  { "TH-D75",      LEGF_KWHT,  9600, 0x00, true,  false },
+  { "None",        LEGF_CIV,   9600, 0x00, false, false },
+};
+
+// Which physical bus a dual-rig leg rides. One Grove UART and one USB CAT port
+// exist, so two legs may not share either; Wi-Fi (LAN) is shareable.
+enum LegBus : uint8_t { LEGBUS_GROVE = 0, LEGBUS_USB = 1, LEGBUS_LAN = 2, LEGBUS_N = 3 };

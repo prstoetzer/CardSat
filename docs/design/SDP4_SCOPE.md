@@ -65,7 +65,7 @@ The library was fetched and compiled on the host and driven through **CardSat's 
 
 The AO-40-class case is the one that matters for the question. Run end-to-end through
 `twoline2rv()` with physically valid elements — perigee **951 km**, apogee **38,644 km**, checked
-independently against Kepler — it selects SDP4, initialises resonance handling, and propagates with
+independently against Kepler — it selects SDP4, initializes resonance handling, and propagates with
 **no error**. Radius at epoch came back 7,299 km, matching the computed perigee.
 
 An early attempt used ecc 0.79 at 2.0 rev/day and returned `error 6` — because that combination

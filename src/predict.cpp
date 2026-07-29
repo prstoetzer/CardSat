@@ -47,7 +47,7 @@ bool Predictor::setSat(SatEntry& s) {
   return _haveSat;
 }
 
-// Forward model for the state-vector -> GP fitter: initialise SGP4 from a candidate
+// Forward model for the state-vector -> GP fitter: initialize SGP4 from a candidate
 // SatEntry's GP elements and propagate to `unixSec`, returning the TEME state. Uses a
 // LOCAL Sgp4 object so it never disturbs the live tracking propagator (_sat).
 bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3]) {
@@ -71,7 +71,7 @@ bool Predictor::temeStateAt(SatEntry& s, double unixSec, double r[3], double v[3
     l1[68] = '0' + (sum % 10); }
   // static: an Sgp4 carries a full elsetrec (hundreds of bytes). Keeping it off the
   // stack matters because this is the deepest frame before SGP4's own large frames.
-  // Safe here: single-threaded, and fp.init() fully re-initialises it every call.
+  // Safe here: single-threaded, and fp.init() fully re-initializes it every call.
   static Sgp4 fp;
   if (!fp.init((char*)"FIT", l1, l2)) return false;     // now always re-parses (line 1 differs)
   if (fp.satrec.error != 0) return false;
@@ -148,7 +148,7 @@ bool Predictor::lookFor(SatEntry& s, time_t t, float& az, float& el, float& rang
 
 // Range rate from the SGP4 velocity vector at a fractional instant -- the
 // method Gpredict uses (sgp4sdp4 converts ECI position+velocity straight to
-// observer-centred range rate). Far cleaner near TCA than differencing slant
+// observer-centered range rate). Far cleaner near TCA than differencing slant
 // range, and evaluated at the exact time rather than the nearest whole second.
 // This Hopperpop build uses the older Vallado propagator signature
 // sgp4(whichconst, satrec, tsince_min, r[3], v[3]); pass WGS72 (the constant set

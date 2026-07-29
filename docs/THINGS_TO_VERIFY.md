@@ -147,7 +147,7 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
   rotator from WSJT-X/GPredict/Hamlib `rigctl` over the network: frequency-set and
   rotator commands still parse and act correctly, long commands are bounded (no
   overrun), and a sustained session runs without heap issues. Load the web-dashboard
-  page and click through its controls: requests route, the page serves. (Behaviour
+  page and click through its controls: requests route, the page serves. (Behavior
   identical; this is a heap change.)
 - **Terrestrial tools + declination (0.9.61).** The six terrestrial tools (radio
   horizon, Fresnel, tropo index, rain fade, terrestrial path budget, terrain profile)
@@ -185,9 +185,9 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
   fitting the paper width. The 90-day planner scrolls a full quarter and marks good
   days; its print matches. Pol offset reads ~0 near the Moon's meridian transit.
 - **CAT fixed-buffer stores (0.9.60).** Open the CAT monitor during live CI-V
-  traffic: hex lines still render (up to 36 chars) with T/R colouring, the ring
+  traffic: hex lines still render (up to 36 chars) with T/R coloring, the ring
   scrolls, nothing truncates oddly. Run the CAT self-test: PASS/FAIL/INFO lines
-  colour correctly and scroll. (Behaviour identical to before; this is a heap
+  color correctly and scroll. (Behavior identical to before; this is a heap
   change, not a visible one.)
 - **Menu-order audit (0.9.60) — spot-checks.** Home: Overhead now launches from its
   new slot beside World Map; Weather from the station column; all twenty land right.
@@ -240,7 +240,7 @@ For all of these, keep the network servers/clients on a trusted LAN (no auth).
   (no instant round-end); a steep lob back onto your own roof still loses; v=1
   wobbles ~1.6 s then detonates on the pad. Rev B: backspace deletes digits (game
   survives), `,`/`/` swap fields, every turn shows both fields, off-screen and
-  loitering shots end within ~8 s, title centred, aim form sits on the aiming player's side (P1 left, P2 hugging the right edge, clear of the wind arrow), star names selectable with the
+  loitering shots end within ~8 s, title centered, aim form sits on the aiming player's side (P1 left, P2 hugging the right edge, clear of the wind arrow), star names selectable with the
   diamond marker and panel readout. Rev D: a fast direct hit at high velocity
   connects (no tunneling); a crater beside a station kills it; after any impact
   the next player's form appears with no keypress; the flight footer names the
@@ -564,3 +564,53 @@ tools_make_cheatcard.py generates the printable 5×7 key-reference card (front +
 - **Calculator Fn+p print** (tools screen) uses the same Fn chord that failed
   for EME on the bench — worth one test; if dead it needs its own fallback in
   a follow-up (bare letters all type into the expression there).
+
+## 0.9.68 — documentation-audit on-device changes
+
+- Help screen (`h`): scroll the full list — new **NEARBY & DX / APRS HEARD /
+  DX CLUSTER SPOTS / ADS-B RADAR** blocks render before QRZ LOOKUP; HOME block now
+  describes the two-column grid; ORBIT ANALYSIS says 11 pages; PRINTING says 30;
+  About/Tools say 63. No line should clip at the right edge (gate-checked ≤39 cols,
+  but eyes on hardware are the truth).
+- Weather help block ends with " times shown in UTC".
+- GPS sky plot footer and legend now read "gray=weak" (was "grey").
+- AO-7 tool with no catalog entry: status reads "AO-7 not in catalog."
+
+## 0.9.68 — native dual rig, dual-USB CAT (FIRST BRING-UP)
+
+Nothing in this block has run on hardware. The dialect encoders are byte-verified
+against the companion's frames by `tools/host_dualrig`, but no leg has driven a
+real radio from the main firmware.
+
+- **One pair per CAT dialect**, end to end (engage, Doppler writes to both legs,
+  mode set, knob read-back): CI-V (e.g. IC-705 wired), Yaesu binary (FT-817/818),
+  Yaesu ASCII (FT-991A), Kenwood TH-D74 (Band B — the handheld's all-mode receiver).
+- **IC-705 over LAN**: radio WLAN on, Network User1 created, control port 50001.
+  Connect, authenticate, CI-V flow, keepalive survival, reconnect after a Wi-Fi drop.
+- **USB leg lifecycle**: engage / disengage / re-engage through the reconciler;
+  adapter pinning with `a` when two adapters are present; 8N2 applied for an
+  old-binary Yaesu leg.
+- **Dual-USB CAT**: hub plus two adapters, each leg nominated. Verify the downlink
+  rides CAT-A and the uplink CAT-B (Doppler traces), per-leg line settings, and the
+  late-adapter retry (plug CAT-B's adapter in *after* engaging). Confirm the host is
+  released only when CAT-A, CAT-B and any rotator are all down, and the console
+  returns. Watch heap and largest-free-block with two live CDC ports.
+- **Refusals show correctly**: both legs on Grove; dual-USB together with a USB
+  rotator; the two legs nominated to the same adapter; an RX-only radio on the
+  uplink leg (warns but proceeds).
+- **Grove leg arbitration** should mirror wired CI-V against a Grove rotator and
+  Grove GPS.
+- **Carried caveats**: IC-905 LAN is untested; the VR-5000's CAT opcodes are
+  unverified (both inherited from the companion and labeled in the leg table).
+
+## 0.9.68 — orbital physics (bench sanity)
+
+- **Van Allen zones**: a high-inclination LEO satellite above 1000 km should now
+  report *no* belt transits, with the status line showing a large `B/B0`. A GEO or
+  HEO bird should still register the outer belt. Check the zone scan's run time on a
+  high-inclination LEO (worst case for field-line tracing) and on a GTO/Molniya.
+- **Decay estimate**: the Orbit Info page should read "Decay from: observed n-dot"
+  for most list satellites and "B* (modeled)" for one without a usable n-dot
+  (RS-44 currently carries a negative MEAN_MOTION_DOT). The solar bracket should
+  appear only on the B* path. The decay-watch flag should no longer fire on
+  high-eccentricity objects.

@@ -82,6 +82,423 @@ float ctcssToneHz(int index) {
 }
 
 // ---------------------------------------------------------------------------
+//  Dual-rig legs (CAT_DUAL): dialect frame builders, PlainCatRig, DualRig
+// ---------------------------------------------------------------------------
+//  Ported from companion/CardSatDualRig (the bench-validated encoders): CI-V
+//  plain set (cmd 05/06/03), Yaesu 5-byte binary (opcode 01/07/03), Yaesu ASCII
+//  (FA/MD0x), Kenwood TH-D7x (FQ/MD on Band B -- the handheld's all-mode SSB/CW
+//  receiver lives on Band B only, Band A is FM/DV). The builders are PURE so
+//  tools/host_dualrig can byte-verify them without hardware.
+
+// -- BCD helpers (leg-local; civ.cpp has its own file-static copies) ----------
+static void legCivPackFreq(uint64_t hz, uint8_t out[5]) {
+  for (int i = 0; i < 5; i++) {
+    uint8_t lo = hz % 10; hz /= 10;
+    uint8_t hi = hz % 10; hz /= 10;
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+}
+static uint64_t legCivUnpackFreq(const uint8_t* b) {
+  uint64_t hz = 0;
+  for (int i = 4; i >= 0; i--) hz = hz * 100 + (b[i] >> 4) * 10 + (b[i] & 0x0F);
+  return hz;
+}
+static void legYBinPackFreq(uint64_t hz, uint8_t out[4]) {
+  uint32_t f = (uint32_t)(hz / 10);                       // Yaesu binary is 10 Hz units
+  out[0] = (uint8_t)((((f/10000000)%10)<<4) | ((f/1000000)%10));
+  out[1] = (uint8_t)((((f/100000)%10)<<4)   | ((f/10000)%10));
+  out[2] = (uint8_t)((((f/1000)%10)<<4)     | ((f/100)%10));
+  out[3] = (uint8_t)((((f/10)%10)<<4)       | (f%10));
+}
+static uint64_t legYBinUnpackFreq(const uint8_t* b) {
+  uint64_t f = 0;
+  for (int i = 0; i < 4; i++) f = f * 100 + (b[i] >> 4) * 10 + (b[i] & 0x0F);
+  return f * 10ULL;
+}
+// -- per-family mode bytes (RigMode -> wire). CardSat has no CWR mode, so the
+//    companion's CWR rows are unreachable here and intentionally not carried. --
+static uint8_t legCivModeByte(RigMode m) {
+  switch (m) { case RM_LSB: return 0x00; case RM_USB: return 0x01;
+               case RM_AM:  return 0x02; case RM_CW:  return 0x03;
+               case RM_FM:  return 0x05; case RM_DATA: return 0x01;
+               default: return 0x01; }
+}
+static uint8_t legYBinModeByte(RigMode m) {
+  switch (m) { case RM_LSB: return 0x00; case RM_USB: return 0x01;
+               case RM_CW:  return 0x02; case RM_AM:  return 0x04;
+               case RM_FM:  return 0x08; case RM_DATA: return 0x0A;
+               default: return 0x01; }
+}
+static char legYTxtModeDigit(RigMode m) {
+  switch (m) { case RM_LSB: return '1'; case RM_USB: return '2';
+               case RM_CW:  return '3'; case RM_FM:  return '4';
+               case RM_AM:  return '5'; case RM_DATA: return 'C';
+               default: return '2'; }
+}
+static const char LEG_KWHT_BAND = '1';   // Band B = the all-mode (SSB/CW/AM) receiver
+static char legKwHtModeDigit(RigMode m) {
+  switch (m) { case RM_FM: return '0'; case RM_AM: return '2';
+               case RM_LSB: return '3'; case RM_USB: return '4';
+               case RM_CW: return '5';  case RM_DATA: return '1'; /* DV */
+               default: return '4'; }
+}
+
+size_t legBuildFreqFrame(LegFamily fam, uint8_t civAddr, uint64_t hz,
+                         uint8_t* out, size_t cap) {
+  switch (fam) {
+    case LEGF_CIV: {
+      if (cap < 11) return 0;
+      uint8_t f[5]; legCivPackFreq(hz, f);
+      const uint8_t fr[11] = { 0xFE,0xFE, civAddr, 0xE0, 0x05,
+                               f[0],f[1],f[2],f[3],f[4], 0xFD };
+      memcpy(out, fr, 11); return 11;
+    }
+    case LEGF_YBIN: {
+      if (cap < 5) return 0;
+      uint8_t f[4]; legYBinPackFreq(hz, f);
+      out[0]=f[0]; out[1]=f[1]; out[2]=f[2]; out[3]=f[3]; out[4]=0x01; return 5;
+    }
+    case LEGF_YTXT: {
+      int n = snprintf((char*)out, cap, "FA%09llu;", (unsigned long long)hz);
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+    case LEGF_KWHT: {
+      int n = snprintf((char*)out, cap, "FQ%c,%010llu\r",
+                       LEG_KWHT_BAND, (unsigned long long)hz);
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+  }
+  return 0;
+}
+
+size_t legBuildModeFrame(LegFamily fam, uint8_t civAddr, RigMode m,
+                         uint8_t* out, size_t cap) {
+  switch (fam) {
+    case LEGF_CIV: {
+      if (cap < 8) return 0;
+      const uint8_t fr[8] = { 0xFE,0xFE, civAddr, 0xE0, 0x06,
+                              legCivModeByte(m), 0x01, 0xFD };
+      memcpy(out, fr, 8); return 8;
+    }
+    case LEGF_YBIN: {
+      if (cap < 5) return 0;
+      out[0]=legYBinModeByte(m); out[1]=0; out[2]=0; out[3]=0; out[4]=0x07; return 5;
+    }
+    case LEGF_YTXT: {
+      int n = snprintf((char*)out, cap, "MD0%c;", legYTxtModeDigit(m));
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+    case LEGF_KWHT: {
+      int n = snprintf((char*)out, cap, "MD%c,%c\r", LEG_KWHT_BAND, legKwHtModeDigit(m));
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+  }
+  return 0;
+}
+
+size_t legBuildReadFreqFrame(LegFamily fam, uint8_t civAddr,
+                             uint8_t* out, size_t cap) {
+  switch (fam) {
+    case LEGF_CIV: {
+      if (cap < 6) return 0;
+      const uint8_t q[6] = { 0xFE,0xFE, civAddr, 0xE0, 0x03, 0xFD };
+      memcpy(out, q, 6); return 6;
+    }
+    case LEGF_YBIN: {
+      if (cap < 5) return 0;
+      out[0]=0; out[1]=0; out[2]=0; out[3]=0; out[4]=0x03; return 5;
+    }
+    case LEGF_YTXT: {
+      if (cap < 4) return 0;
+      memcpy(out, "FA;", 3); return 3;
+    }
+    case LEGF_KWHT: {
+      int n = snprintf((char*)out, cap, "FQ%c\r", LEG_KWHT_BAND);
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
+  }
+  return 0;
+}
+
+bool legParseFreqReply(LegFamily fam, uint8_t civAddr,
+                       const uint8_t* buf, size_t n, uint64_t& hz) {
+  switch (fam) {
+    case LEGF_CIV:
+      // Reply: FE FE E0 <addr> 03 <5 BCD> FD. The 6-byte query echo a CI-V
+      // interface commonly returns can't match this 11-byte pattern (H6).
+      for (size_t i = 0; i + 11 <= n; i++) {
+        if (buf[i]==0xFE && buf[i+1]==0xFE && buf[i+2]==0xE0 &&
+            buf[i+3]==civAddr && buf[i+4]==0x03 && buf[i+10]==0xFD) {
+          hz = legCivUnpackFreq(&buf[i+5]);
+          return hz > 0;
+        }
+      }
+      return false;
+    case LEGF_YBIN:
+      // 4 BCD bytes + mode; the companion takes the first 5 bytes after an RX
+      // clear (this family's adapters do not echo the binary command).
+      if (n < 5) return false;
+      hz = legYBinUnpackFreq(buf);
+      return hz > 0;
+    case LEGF_YTXT:
+      for (size_t i = 0; i + 12 <= n; i++) {
+        if (buf[i]=='F' && buf[i+1]=='A') {
+          uint64_t v = 0; bool ok = true;
+          for (int k = 2; k < 11; k++) {
+            char c = (char)buf[i+k];
+            if (c < '0' || c > '9') { ok = false; break; }
+            v = v*10 + (uint64_t)(c - '0');
+          }
+          if (ok) { hz = v; return hz > 0; }
+        }
+      }
+      return false;
+    case LEGF_KWHT:
+      // Expect "FQ<band>,<digits>"; accept >= 6 digits.
+      for (size_t i = 0; i + 4 <= n; i++) {
+        if (buf[i]=='F' && buf[i+1]=='Q') {
+          size_t j = i + 2;
+          while (j < n && buf[j] != ',') j++;
+          j++;
+          uint64_t v = 0; int digits = 0;
+          while (j < n && buf[j] >= '0' && buf[j] <= '9') {
+            v = v*10 + (uint64_t)(buf[j]-'0'); j++; digits++;
+          }
+          if (digits >= 6) { hz = v; return hz > 0; }
+        }
+      }
+      return false;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+//  PlainCatRig
+// ---------------------------------------------------------------------------
+PlainCatRig::PlainCatRig(LegModel m, uint8_t civAddr, uint32_t baud)
+  : _model(m),
+    _addr(civAddr ? civAddr : LEG_RADIOS[m].civAddr),
+    _baud(baud ? baud : LEG_RADIOS[m].baud) {}
+
+void PlainCatRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
+  (void)uartNum;
+  if (baud) _baud = baud;
+  if (extStream) { _stream = extStream; return; }   // USB leg: adapter already open
+  // Grove leg: plain 8N1 TTL on G1/G2, same UART claim as the other Grove CAT
+  // paths (the CAT_DUAL conflict guard has already ensured we're the only Grove
+  // claimant). Serial1 is the shared on-board UART object, as in RigctlGroveRig.
+  Serial1.begin(_baud, SERIAL_8N1, rxPin, txPin);
+  _stream = &Serial1;
+}
+
+bool PlainCatRig::canReadFreq() const {
+  // All four families implement a read; the VR-5000's is UNVERIFIED on hardware
+  // (companion caveat) but attempting it is harmless -- a silent radio just
+  // returns false and the Doppler loop skips knob-follow that cycle.
+  return true;
+}
+
+bool PlainCatRig::sendFrame(const uint8_t* b, size_t n) {
+  if (!_stream || !n) return false;
+  catTrace("TX", b, n);
+  size_t w = _stream->write(b, n);
+  _stream->flush();
+  if (cmdDelayMs) delay(cmdDelayMs);
+  return w == n;
+}
+
+bool PlainCatRig::sendRaw(const uint8_t* b, size_t n) { return sendFrame(b, n); }
+
+bool PlainCatRig::sendFreq(freq_t hz) {
+  uint8_t fr[24];
+  size_t n = legBuildFreqFrame(LEG_RADIOS[_model].family, _addr, hz, fr, sizeof(fr));
+  bool ok = sendFrame(fr, n);
+  if (ok) _lastSetMs = millis();
+  return ok;
+}
+
+bool PlainCatRig::sendMode(RigMode m) {
+  uint8_t fr[16];
+  size_t n = legBuildModeFrame(LEG_RADIOS[_model].family, _addr, m, fr, sizeof(fr));
+  bool ok = sendFrame(fr, n);
+  if (ok) _lastSetMs = millis();
+  return ok;
+}
+
+bool PlainCatRig::readFreq(freq_t& hzOut) {
+  if (!_stream) return false;
+  const LegFamily fam = LEG_RADIOS[_model].family;
+  // H8: let a just-sent set's echo/ACK settle before clearing RX for the read.
+  if (_lastSetMs) {
+    uint32_t frameMs = _baud ? (uint32_t)((16UL * 10UL * 1000UL) / _baud) + 3 : 8;
+    if (frameMs > 40) frameMs = 40;
+    while ((millis() - _lastSetMs) < frameMs) delay(1);
+  }
+  while (_stream->available() > 0) _stream->read();  // clear stale RX (>0: closed CDC returns -1)
+  uint8_t q[8];
+  size_t qn = legBuildReadFreqFrame(fam, _addr, q, sizeof(q));
+  if (!qn) return false;
+  catTrace("TX", q, qn);
+  if (_stream->write(q, qn) != qn) return false;
+  _stream->flush();
+  // Collect until a stop byte / quiet interval / deadline, then parse. The CIV
+  // family needs the quiet-interval collect (H6: interface echo shares the 0xFD
+  // terminator with the reply); the ASCII families stop on their terminator.
+  const uint32_t deadline = readBudgetMs ? readBudgetMs : 220;
+  int stopByte = (fam == LEGF_YTXT) ? ';' : (fam == LEGF_KWHT) ? '\r' : -1;
+  uint8_t buf[96]; size_t n = 0;
+  uint32_t t0 = millis(), lastRx = millis();
+  while ((millis() - t0) < deadline && n < sizeof(buf)) {
+    int c = (_stream->available() > 0) ? _stream->read() : -1;
+    if (c < 0) {
+      if (n > 0 && fam == LEGF_CIV && (millis() - lastRx) > 20) break;
+      if (n >= 5 && fam == LEGF_YBIN && (millis() - lastRx) > 20) break;
+      delay(1); continue;
+    }
+    buf[n++] = (uint8_t)c; lastRx = millis();
+    if (stopByte >= 0 && c == stopByte && n > 3) break;
+  }
+  if (n) catTrace("RX", buf, n);
+  uint64_t hz = 0;
+  if (!legParseFreqReply(fam, _addr, buf, n, hz)) return false;
+  hzOut = (freq_t)hz;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  DualRig
+// ---------------------------------------------------------------------------
+DualRig::DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud)
+  : _down(down), _up(up), _usbLeg(usbLeg) {
+  _baud[0] = downBaud; _baud[1] = upBaud;
+  snprintf(_nameBuf, sizeof(_nameBuf), "Dual %s+%s",
+           _down ? _down->name() : "?", _up ? _up->name() : "?");
+}
+
+DualRig::~DualRig() {
+  // The legs cache extStream copies (see the fix31 note on setExternalStream in
+  // rig.h); the engage teardown clears the stream through us BEFORE UsbSerial
+  // dies, exactly as for a single CAT_USB rig, so plain delete is safe here.
+  delete _down; delete _up;
+}
+
+void DualRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
+  (void)baud;
+  // Begin every leg except the USB one(s) -- a USB leg starts when the reconciler
+  // attaches its CDC stream (setExternalStream / setLegExternalStream below),
+  // mirroring the single-rig CAT_USB lifecycle. LAN legs ignore the UART args.
+  if (_down && !legIsUsb(0)) _down->begin(_baud[0], uartNum, rxPin, txPin);
+  if (_up   && !legIsUsb(1)) _up->begin(_baud[1], uartNum, rxPin, txPin);
+}
+
+bool DualRig::ready() const {
+  return _down && _up && _down->ready() && _up->ready();
+}
+
+void DualRig::service() {
+  if (_down) _down->service();
+  if (_up)   _up->service();
+}
+
+void DualRig::setCmdDelay(uint16_t ms) {
+  Rig::setCmdDelay(ms);
+  if (_down) _down->setCmdDelay(ms);
+  if (_up)   _up->setCmdDelay(ms);
+}
+
+void DualRig::setReadBudgetMs(uint16_t ms) {
+  Rig::setReadBudgetMs(ms);
+  if (_down) _down->setReadBudgetMs(ms);
+  if (_up)   _up->setReadBudgetMs(ms);
+}
+
+// Per-leg attach: the dual-USB reconciler binds each leg to its OWN CDC stream
+// (CAT-A for the downlink, CAT-B for the uplink). First attach begins the leg;
+// detach (nullptr) resets so the next attach begins it again.
+void DualRig::setLegExternalStream(int leg, Stream* s) {
+  if (leg < 0 || leg > 1 || !legIsUsb(leg)) return;
+  Rig* L = (leg == 0) ? _down : _up;
+  if (!L) return;
+  L->setExternalStream(s);
+  if (s && !_usbBegun[leg]) {
+    L->begin(_baud[leg], -1, -1, -1);
+    _usbBegun[leg] = true;
+  }
+  if (!s) _usbBegun[leg] = false;
+}
+
+void DualRig::setExternalStream(Stream* s) {
+  Rig::setExternalStream(s);
+  if (_usbLeg < 0) return;
+  if (s) {
+    // A single stream can only serve a SINGLE USB leg. With two, the reconciler
+    // must use setLegExternalStream() per leg; a blanket non-null attach here
+    // would put both radios on one wire, so it is deliberately ignored.
+    if (_usbLeg == 0 || _usbLeg == 1) setLegExternalStream(_usbLeg, s);
+    return;
+  }
+  // nullptr = teardown: detach EVERY USB leg (fix31 rule -- clear each backend's
+  // cached copy before the Stream dies), whether there are one or two.
+  if (legIsUsb(0)) setLegExternalStream(0, nullptr);
+  if (legIsUsb(1)) setLegExternalStream(1, nullptr);
+}
+
+bool DualRig::setMainFreq(freq_t hz) { return _up   ? _up->setMainFreq(hz)   : false; }
+bool DualRig::setSubFreq (freq_t hz) { return _down ? _down->setSubFreq(hz)  : false; }
+bool DualRig::setMainMode(RigMode m) { return _up   ? _up->setMainMode(m)    : false; }
+bool DualRig::setSubMode (RigMode m) { return _down ? _down->setSubMode(m)   : false; }
+bool DualRig::readSubFreq (freq_t& hzOut) { return _down ? _down->readSubFreq(hzOut)  : false; }
+bool DualRig::readMainFreq(freq_t& hzOut) { return _up   ? _up->readMainFreq(hzOut)   : false; }
+bool DualRig::readPtt(bool& tx) { return _up ? _up->readPtt(tx) : false; }
+bool DualRig::canReadFreq() const { return _down && _down->canReadFreq(); }
+
+// ---------------------------------------------------------------------------
+//  Leg + composite factories
+// ---------------------------------------------------------------------------
+Rig* makeLegRig(uint8_t legModel, uint8_t bus, uint8_t civAddr, uint32_t baud,
+                const char* host, uint16_t port, const char* user, const char* pass) {
+  if (legModel >= LEG_NONE) return nullptr;
+  const LegProfile& lp = LEG_RADIOS[legModel];
+  const uint8_t  addr = civAddr ? civAddr : lp.civAddr;
+  const uint32_t bd   = baud    ? baud    : lp.baud;
+  if (bus == LEGBUS_LAN) {
+    // Icom network CAT leg (the IC-705 over its own Wi-Fi being the flagship).
+    // Only the CI-V family has this transport, and only LAN-capable models offer
+    // it in the UI; both are re-checked here so a stale config can't build a
+    // nonsense backend.
+    if (lp.family != LEGF_CIV || !lp.hasLan || !host || !host[0]) return nullptr;
+    return new (std::nothrow) IcomNetRig(addr, lp.name, host, port ? port : 50001,
+                                         user ? user : "", pass ? pass : "");
+  }
+  // Grove serial or USB adapter leg: the plain-CAT backend over a Stream. For a
+  // USB leg the stream is attached later by the reconciler (extStream), exactly
+  // like single-rig CAT_USB.
+  return new (std::nothrow) PlainCatRig((LegModel)legModel, addr, bd);
+}
+
+Rig* makeDualRig(const uint8_t model[2], const uint8_t bus[2], const uint8_t civ[2],
+                 const uint32_t baud[2], const char host[2][40], const uint16_t port[2],
+                 const char user[2][24], const char pass[2][24]) {
+  // Physical-bus conflicts (two Grove legs, two USB legs) are refused by the
+  // settings UI and re-checked by the engage path; this factory only builds.
+  Rig* down = makeLegRig(model[0], bus[0], civ[0], baud[0],
+                         host[0], port[0], user[0], pass[0]);
+  Rig* up   = makeLegRig(model[1], bus[1], civ[1], baud[1],
+                         host[1], port[1], user[1], pass[1]);
+  if (!down || !up) { delete down; delete up; return nullptr; }
+  int usbLeg = -1;
+  if (bus[0] == LEGBUS_USB && bus[1] == LEGBUS_USB) usbLeg = 2;   // dual-USB CAT
+  else if (bus[0] == LEGBUS_USB) usbLeg = 0;
+  else if (bus[1] == LEGBUS_USB) usbLeg = 1;
+  const LegProfile& d = LEG_RADIOS[model[0]];
+  const LegProfile& u = LEG_RADIOS[model[1]];
+  DualRig* dr = new (std::nothrow) DualRig(down, up, usbLeg,
+      baud[0] ? baud[0] : d.baud, baud[1] ? baud[1] : u.baud);
+  if (!dr) { delete down; delete up; return nullptr; }
+  return dr;
+}
+
+// ---------------------------------------------------------------------------
 //  RigctlRig - rigctld (Hamlib NET rigctl) TCP client backend
 // ---------------------------------------------------------------------------
 // ---- base (TCP) transport primitives --------------------------------------

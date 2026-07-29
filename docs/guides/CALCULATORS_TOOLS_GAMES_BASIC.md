@@ -1,7 +1,7 @@
 # CardSat — Calculators, Tools, Games & BASIC
 
 A standalone guide to the interactive and just-for-fun side of CardSat: the three
-calculators, the 60-tool Tools menu (organized into six categories), the seven games, and Tiny BASIC. It stands
+calculators, the 63-tool Tools menu (organized into six categories), the seven games, and Tiny BASIC. It stands
 apart from the main manual so you can keep it open while you play. Everything here
 is reachable without a radio, a rotator, or a network connection.
 
@@ -50,7 +50,7 @@ calculator, with **x** added as a variable. Press ENTER to type a function
 (`sin(x)`, `x^2-4`, `1/x`, `exp(x/50)`); the curve is sampled one point per pixel
 column across a pan/zoomable window.
 
-- **Arrow keys pan**, **`+`/`-` zoom** about the centre, **`a`** auto-fits the vertical
+- **Arrow keys pan**, **`+`/`-` zoom** about the center, **`a`** auto-fits the vertical
   range to the visible data, **`r`** resets the window.
 - Advanced readouts (see the manual for depth): a **second curve** (Y2), a **trace
   cursor** with dy/dx, **zero/intersection finding**, **Simpson integration** between
@@ -67,7 +67,7 @@ and byte math. Bitwise operations and base entry are on-screen; `` ` `` returns.
 
 ## Part 2 — The Tools menu
 
-Open with **`t`** from Home. The sixty tools are organized into **six categories**,
+Open with **`t`** from Home. The sixty-three tools are organized into **six categories**,
 so Tools opens on a short category list. **`;`/`.`** scroll, **ENTER** opens the
 highlighted category, and its tools appear as a second list; **`` ` ``** steps back
 from a tool list to the categories (and again to leave Tools). A **letter key jumps**
@@ -231,7 +231,7 @@ They're deliberately small and satellite-themed; **Fn+b** screenshots any of the
   S-curve; a tuning-skill trainer.
 - **Catch the Pass** — time your move to intercept a satellite as it crosses.
 - **Rotor Runner** — a genuine two-axis game: a satellite drifts around the sky and
-  you slew an antenna to keep it centred, exactly like driving a real rotator.
+  you slew an antenna to keep it centered, exactly like driving a real rotator.
 - **Morse Meteors** — letters fall and you clear each by keying its Morse code (two
   keys for dit/dah); a code-practice game in disguise.
 - **Grid Chase** — a Maidenhead grid-square trainer: a location hint appears and you
@@ -322,14 +322,14 @@ calculator convention.
 ### Graphics
 
 Drawing goes to the screen and the frame **holds after the program ends**, so you
-can plot and look. Colour is an optional last argument (a small palette index);
+can plot and look. Color is an optional last argument (a small palette index);
 coordinates are screen pixels.
 
 - **`CLS`** — clear the drawing.
-- **`PSET x, y [, colour]`** — set a pixel.
-- **`LINE x1, y1, x2, y2 [, colour]`** — draw a line.
-- **`CIRCLE x, y, r [, colour]`** — draw a circle.
-- **`TEXT x, y, "string" [, colour]`** — draw text.
+- **`PSET x, y [, color]`** — set a pixel.
+- **`LINE x1, y1, x2, y2 [, color]`** — draw a line.
+- **`CIRCLE x, y, r [, color]`** — draw a circle.
+- **`TEXT x, y, "string" [, color]`** — draw text.
 - **`SHOW`** — present the drawn frame (flush what you've plotted).
 
 ### The system bridge (what makes it CardSat's BASIC)
@@ -341,7 +341,7 @@ Each of these samples the live state at the moment it's called:
   `0 .. NSAT-1`) stops the program, but a valid index whose satellite can't be
   propagated right now — no position/time fix, or a decayed / stale element set that
   SGP4 rejects — is not fatal: it sets `SATOK` to 0 and the program keeps running, so a
-  catalogue scan can skip dead birds. The idiom is `SATSEL I : IF SATOK = 0 THEN GOTO
+  catalog scan can skip dead birds. The idiom is `SATSEL I : IF SATOK = 0 THEN GOTO
   <skip>` before reading any `SAT*` value.
 - **`TXSEL i`** — select a transponder.
 - **Selected-satellite position:** `SATAZ`, `SATEL` (az/el, degrees), `SATLAT`,
@@ -388,6 +388,6 @@ Plot the selected satellite's position as a dot on a simple az/el field:
 ## Where to go deeper
 
 This guide is the tour. For field-by-field detail on any tool, the full graphing
-calculator instrument set, BASIC coordinate/colour specifics, and the exact game
+calculator instrument set, BASIC coordinate/color specifics, and the exact game
 scoring, see the main **MANUAL.md** (Tools, Games, and BASIC chapters). The LoRa
 KESSLER wire format is documented in `docs/interfaces/LORA_KESSLER_NETPLAY.md`.

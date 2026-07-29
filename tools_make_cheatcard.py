@@ -41,8 +41,8 @@ FRONT = [
   "<b>{</b> <b>}</b> page &middot; <b>b</b> screenshot &middot; <b>h</b> help &middot; <b>Fn+`</b>/<b>Fn+DEL</b> STOP all radio/rotator control "
   "(Help links: <b>g</b> glossary+math &middot; <b>m</b> user guide &middot; <b>s</b> sat history &middot; <b>t</b> tech help &middot; <b>l</b> learn theory &middot; <b>f</b> band plan)"),
  ("HOME",
-  "<b>ENTER</b> opens item; menu scrolls: Satellites, Next Passes, Passes, Track, "
-  "World Map, Overhead now, Sun/Moon, Space Wx, Activations, AMSAT status, Weather, Grid dist/bearing, QRZ Lookup, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
+  "<b>ENTER</b> opens item; 2-column grid: Satellites, Next Passes, Passes, Track, "
+  "World Map, Overhead now, Sun/Moon, Space Wx, Activations, AMSAT status, Weather, Grid dist/bearing, Nearby & DX, Location, Update, Settings, Log, Messages, About, Charge/Sleep"),
  ("SATELLITES",
   "<b>f</b> favorite &middot; <b>v</b> favs-only &middot; <b>/</b> search ALL of CelesTrak &rarr; add as auto-updating fav (10 s/2 h courtesy limits) &middot; <b>n</b> new GP sat &middot; <b>x</b> del added sat &middot; "
   "<b>e</b> EQX table &middot; <b>k</b> OSCARLOCATOR &middot; <b>3</b> 3D globe &middot; <b>2</b> sat-to-sat &middot; <b>o</b> orbital &middot; <b>y</b> sim &middot; <b>t</b> transponders &middot; <b>d</b> 10-day &middot; <b>i</b> illum &middot; <b>s</b> AMSAT status &middot; <b>L</b> share GP over LoRa &middot; <b>ENTER</b> passes &middot; "
@@ -191,6 +191,13 @@ BACK = [
  ("SETTINGS",
   "<b>,</b>/<b>/</b> change &middot; <b>ENTER</b> edit/toggle &middot; <b>s</b> scan WiFi "
   "&middot; opt. 2nd WiFi (field fallback) &middot; reset = ERASE"),
+ ("DUAL RIG (2 radios)",
+  "CAT type <b>Dual</b> = a downlink + an uplink radio driven natively (27 radios). "
+  "<b>Settings &rarr; Dual-Rig setup</b>: per leg pick <b>Rig</b>, <b>Bus</b> (Grove / USB / LAN), "
+  "CI-V, baud; LAN legs take the radio&rsquo;s <b>IP</b> + port (<b>IC-705 over its own WiFi</b>; "
+  "<b>u</b>/<b>p</b> login). <b>a</b> nominate USB adapter (both legs may be USB via a hub) "
+  "&middot; <b>s</b> save+apply. One Grove leg only; PTT stays manual; FM tones set on the radio. "
+  "The CardSatDualRig companion (rigctl net/Grove) is still supported."),
  ("GP SOURCE",
   "<b>AMSAT</b> / <b>CelesTrak</b> JSON-PP category / <b>Custom URL</b> &middot; <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> select"),
  ("ROTATOR (manual)",
@@ -202,8 +209,10 @@ BACK = [
   "Doppler readout, tap-to-copy freqs, visible-pass list + AOS alerts, radio/rotator control, <b>Files</b> = download-only /CardSat browser (no upload)"),
  ("EDIT",
   "type &middot; <b>DEL</b> backspace &middot; <b>ENTER</b> ok &middot; <b>`</b> cancel"),
+ ("NEARBY & DX (Home)",
+  "Live-feeds hub. <b>APRS heard</b>: live APRS-IS listen (needs callsign; <b>g</b> center grid, ENTER bearing detail, <b>f</b> restart). <b>DX cluster</b>: <b>f</b> fetch, <b>n</b> next band with spots, comments shown. <b>ADS-B radar</b>: polar range plot; <b>f</b> fetch, <b>t</b> scatter target grid; source URL in Settings &gt; Network. <b>QRZ lookup</b>. <b>p</b> prints each feed."),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (55): scientific/graphing/programmer calculators, <b>Tiny BASIC</b> (0.9.59: SATSEL/LPRINT/gfx; no INPUT), <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b>, Q-codes/phonetics/RST, CTCSS, <b>Telnet</b> (0.9.67: LAN terminal, 10 saved hosts, opt. printing); <b>0.9.59 sat/build tools</b>: conjunction screener, orbital neighborhood, transponder planner, link-margin curve, debris-group screen, Doppler budget, cascade NF/G&sol;T, sun-noise G&sol;T, helix, L&sol;Pi&sol;T match, pointing loss, IMD, microstrip Z0, toroid, delta-v, thermal, Faraday, ampacity, PLL plan &middot; <b>p</b> <b>Print</b>: 29 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens + all form tools, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: six mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (63): scientific/graphing/programmer calculators, <b>Tiny BASIC</b> (0.9.59: SATSEL/LPRINT/gfx; no INPUT), <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b>, Q-codes/phonetics/RST, CTCSS, <b>Telnet</b> (0.9.67: LAN terminal, 10 saved hosts, opt. printing); <b>0.9.59 sat/build tools</b>: conjunction screener, orbital neighborhood, transponder planner, link-margin curve, debris-group screen, Doppler budget, cascade NF/G&sol;T, sun-noise G&sol;T, helix, L&sol;Pi&sol;T match, pointing loss, IMD, microstrip Z0, toroid, delta-v, thermal, Faraday, ampacity, PLL plan &middot; <b>p</b> <b>Print</b>: 30 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens + all form tools, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: seven mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
 ]
 
 

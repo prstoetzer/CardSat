@@ -137,7 +137,7 @@ void Location::setManual(double lat, double lon, double altM) {
   _obs.valid = true; _obs.fromGps = false;
 }
 
-// Maidenhead grid -> lat/lon (centre of the square). Accepts 4 or 6 chars.
+// Maidenhead grid -> lat/lon (center of the square). Accepts 4 or 6 chars.
 bool Location::gridToLatLon(const String& gridIn, double& latOut, double& lonOut) {
   String g = gridIn; g.trim(); g.toUpperCase();
   // M18: accept EXACTLY 4 or 6 characters (8-char extended locators aren't supported),
@@ -156,7 +156,7 @@ bool Location::gridToLatLon(const String& gridIn, double& latOut, double& lonOut
     lon += (g[4] - 'A') * (2.0 / 24.0) + (1.0 / 24.0);
     lat += (g[5] - 'A') * (1.0 / 24.0) + (0.5 / 24.0);
   } else {
-    lon += 1.0; lat += 0.5;   // centre of the 2x1 deg square
+    lon += 1.0; lat += 0.5;   // center of the 2x1 deg square
   }
   latOut = lat; lonOut = lon;
   return true;

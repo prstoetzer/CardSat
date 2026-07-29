@@ -212,7 +212,7 @@ public:
                                  void (*sink)(const SatEntry&, void*), void* ctx);
 
   // Reconstruct a TLE line-pair from a satellite's GP elements (69 chars each,
-  // checksummed). Only used to initialise the SGP4 propagator. Returns false
+  // checksummed). Only used to initialize the SGP4 propagator. Returns false
   // on a malformed entry.
   static bool gpToTle(const SatEntry& s, char l1[72], char l2[72]);
 

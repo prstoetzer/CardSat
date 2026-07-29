@@ -132,7 +132,7 @@ no-PSRAM part, best taken deliberately rather than bundled.
 `catMonLines[64]` and `catLines[48]` converted from `String[]` to fixed
 `char[64][40]` and `char[48][56]`. The self-test append (`strncpy`, bounded),
 the monitor hex-dump builder (`snprintf` into the slot, width-guarded), and both
-draw paths (`%.36s`/`%.38s`, `strncmp` for the tag colouring) were updated;
+draw paths (`%.36s`/`%.38s`, `strncmp` for the tag coloring) were updated;
 `catMonIsTx`/`catCount`/`catMonHead` ring machinery is unchanged.
 
 Measured effect: static globals 151,064 -> 154,520 B (+3,456), because the fixed

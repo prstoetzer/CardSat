@@ -163,7 +163,7 @@ public:
   // adjacent free blocks merge -- the last resort before declining the handshake.
   // Gated so it only fires when really needed and never twice in quick succession.
   //
-  // TO DISABLE: set TLS_WIFI_CYCLE = false (reverts to passive-wait-only behaviour).
+  // TO DISABLE: set TLS_WIFI_CYCLE = false (reverts to passive-wait-only behavior).
   // See docs/design/HEAP_WIFI_CYCLE.md.
   static bool     TLS_WIFI_CYCLE;               // master enable for the proactive cycle
   static uint32_t WIFI_CYCLE_MIN_GAP_MS;        // min gap between proactive cycles
@@ -179,7 +179,7 @@ public:
   // to release its LAN listener sockets (rigctld/rotctld/web) for the duration of
   // the fetch -- on the socket-limited, no-PSRAM ESP32-S3 those listeners (plus a
   // kept-alive browser tab) can otherwise starve the outbound HTTPS connect and
-  // it gets refused. Set once at startup; leaving it null disables the behaviour.
+  // it gets refused. Set once at startup; leaving it null disables the behavior.
   // Guarding here (the single choke point) covers every fetch -- GP, weather,
   // space weather, AMSAT, transponders, QRZ -- without per-call-site discipline.
   static void (*onTlsBusy)(bool busy);

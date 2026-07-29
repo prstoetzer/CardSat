@@ -18,7 +18,7 @@
 //
 //  ---- Cost, and why it is buffered -----------------------------------------
 //  Logstore::line() is open+write+flush+close per call: ~6 ms on LittleFS
-//  (modelled -- the bench will supply the real constant; every line is
+//  (modeled -- the bench will supply the real constant; every line is
 //  timestamped, so the log profiles itself). CardSat ships CIV_DEBUG=1, so
 //  Doppler tracking emits ~8 console lines/sec. Unbuffered that is ~48 ms/s of
 //  BLOCKING flash I/O on loopTask -- the same task that runs Doppler, the UI,

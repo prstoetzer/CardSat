@@ -19,7 +19,7 @@ enum VfoType : uint8_t {
 // mid-pass. This setting makes the choice explicit.
 enum RxOnlyVfo : uint8_t {
   RXO_FOLLOW = 0,   // use the same downlink VFO as full transponders (per vfoType)
-  RXO_MAIN   = 1,   // force receive-only downlink to MAIN (legacy behaviour)
+  RXO_MAIN   = 1,   // force receive-only downlink to MAIN (legacy behavior)
   RXO_SUB    = 2,   // force receive-only downlink to SUB
 };
 
@@ -40,15 +40,28 @@ enum CatType : uint8_t {
                    // transport is swapped, the dialect is unchanged. Only present
                    // when built with CARDSAT_HAS_USBCAT=1 (the default since
                    // 0.9.59); see usbserial.h.
+  CAT_DUAL  = 5,   // TWO radios driven natively: a downlink leg + an uplink leg,
+                   // each any radio from the LEG_RADIOS[] catalog on its own
+                   // transport (Grove serial, USB adapter, or Icom LAN -- the
+                   // IC-705 over its own Wi-Fi being the flagship LAN leg).
+                   // CardSat composes them into one full-duplex rig (DualRig);
+                   // configure the legs on the Dual-Rig screen. Absorbs the
+                   // CardSatDualRig companion's radio catalog + CAT dialects
+                   // (DUALRIG_MAINFW_INTEGRATION_SCOPE.md, Model A). The external
+                   // companion path (rigctl net/Grove) remains fully supported.
 };
 // How many CAT transports the Settings row cycles through. CAT_USB is only
 // selectable when the feature is compiled in, so a build without it behaves
 // exactly as before -- the operator cannot land on an unimplemented transport.
+// CAT_DUAL is always selectable: its Grove and LAN leg buses need no compile
+// flag, and the USB leg bus is simply not offered in a build without USB CAT.
 #if CARDSAT_HAS_USBCAT
-static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), rigctl(Grove), USB
+static constexpr uint8_t CAT_TYPE_N = 6;   // Wired, LAN, rigctl(net), rigctl(Grove), USB, Dual
 #else
-static constexpr uint8_t CAT_TYPE_N = 4;   // Wired, LAN, rigctl(net), rigctl(Grove)
+static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), rigctl(Grove), Dual
 #endif
+// NOTE (non-USB build): the enum VALUE CAT_DUAL is still 5 while the row cycles
+// 0..4; the Settings row maps slot 4 -> CAT_DUAL when USB CAT is compiled out.
 
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
 // rotctld server reached over TCP (CardSat is the client).
@@ -80,7 +93,7 @@ static constexpr uint8_t ROT_XPORT_N = 3;
 // Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
 enum RotAzRange : uint8_t {
   ROT_AZ_360 = 0,  // 0..360 deg, 0=North, 180=South (default)
-  ROT_AZ_180 = 1,  // -180..+180 deg, centred on 0=North
+  ROT_AZ_180 = 1,  // -180..+180 deg, centered on 0=North
   ROT_AZ_450 = 2,  // 0..450 deg, 90 deg overlap to avoid cable-wrap at North
 };
 
@@ -154,7 +167,7 @@ struct Settings {
   // search at all (it is documented as querying named stations only, no wildcard),
   // which is why the old key-based station list never returned anything. The range
   // below is passed straight through as the APRS-IS server-side r/lat/lon/dist
-  // filter, which already takes kilometres.
+  // filter, which already takes kilometers.
   int      aprsRangeKm = 150; // APRS-IS r/ filter radius for "heard near me"
   char     dxcUrl[96] = "";   // DX spot JSON feed (an aggregator; blank = feature off)
   // ADS-B: the API BASE only. The request path is built from the current QTH and
@@ -215,6 +228,21 @@ struct Settings {
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
   uint8_t  rxOnlyVfo  = RXO_FOLLOW;   // downlink VFO for receive-only (beacon) entries
   bool     satMode    = false;
+  // ---- Dual-rig legs (catType = CAT_DUAL). Index 0 = downlink (RX), 1 = uplink (TX).
+  // Each leg is a LEG_RADIOS[] radio on its own bus. civ/baud 0 = the leg table's
+  // default. Host/port/user/pass are PER LEG so two LAN radios can coexist
+  // (scope Phase 2); the USB leg reuses catUsbKey-style adapter pinning.
+  uint8_t  dualModel[2]  = { LEG_NONE, LEG_NONE };
+  uint8_t  dualBus[2]    = { LEGBUS_GROVE, LEGBUS_GROVE };
+  uint8_t  dualCiv[2]    = { 0, 0 };
+  uint32_t dualBaud[2]   = { 0, 0 };
+  char     dualHost[2][40] = { "", "" };
+  uint16_t dualPort[2]   = { 50001, 50001 };
+  char     dualUser[2][24] = { "", "" };
+  char     dualPass[2][24] = { "", "" };
+  char     dualUsbKey[2][40] = { "", "" };  // per-leg USB adapter pins. With BOTH legs
+                                  // on USB (through a hub) each leg should be nominated;
+                                  // "" = Auto (bindable only when the pick is unambiguous).
   uint32_t catRateMs  = 500;   // CAT/Doppler update period (ms), adjustable in 10 ms steps
   uint16_t catDelayMs = 70;    // pause after each CAT command before the next (ms)
   // Doppler CAT write deadband + predictive lead (tunable; see app.h DOPP_* defaults)
@@ -331,7 +359,7 @@ struct Settings {
   // Region presets pick a legal amateur LoRa frequency/bandwidth for the operator:
   //   0 = US  : 33cm amateur band (902-928 MHz). 70cm in the US is held to 100 kHz
   //             occupied bandwidth, so 33cm is the home for 125 kHz LoRa. Default
-  //             906.875 MHz, clear of the busy 915 MHz ISM centre.
+  //             906.875 MHz, clear of the busy 915 MHz ISM center.
   //   1 = EU  : 70cm amateur band (430-440 MHz). LoRa-APRS standard 433.775 MHz.
   //   2 = JP  : 430 MHz amateur band (430-440 MHz). Japan's 920 MHz band is ISM,
   //             not amateur, so amateur LoRa belongs on 430 MHz. Default 431.000.

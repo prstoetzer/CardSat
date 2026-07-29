@@ -7,7 +7,7 @@ existing eclipse/beta/sun-position machinery.
 
 ## Goal
 
-Given a satellite (from the catalogue) and a few user-supplied spacecraft properties (size,
+Given a satellite (from the catalog) and a few user-supplied spacecraft properties (size,
 mass, surface optical properties, internal power), estimate the **equilibrium and transient
 temperature over one orbit** — the hot case (full sun), the cold case (deep eclipse), and the
 swing between them as the satellite passes in and out of Earth's shadow. This is a first-order
@@ -35,9 +35,9 @@ math and a parameter form are new. Reuse:
 - The **`SCR_TOOLFORM` form-tool** (`app.cpp:27840`) for the parameter-entry UI, with the
   universal form-tool printing already wired, so results print for free through a `PR_*`.
 
-**What the catalogue does NOT provide:** `SatEntry` (`satdb.h:74`) holds orbital elements but
+**What the catalog does NOT provide:** `SatEntry` (`satdb.h:74`) holds orbital elements but
 **no physical properties** — no mass, size, or surface optical constants. So this is by
-necessity a **parametric** tool: the user supplies the spacecraft properties; the catalogue
+necessity a **parametric** tool: the user supplies the spacecraft properties; the catalog
 supplies only the orbit. Sensible per-form-factor defaults (1U/2U/3U/6U) make it one-tap
 usable.
 
@@ -46,8 +46,8 @@ environment depends on the orbit only through **altitude, inclination, and RAAN*
 is a closed form of inclination/RAAN/epoch via `betaAngleDeg`; the eclipse fraction is a
 closed form of beta and altitude via the cylindrical-shadow `betaStar = acos(RE/(RE+h))`
 geometry the Outlook screen already uses). So the tool defaults those three from the active
-satellite but lets the user **override each** — altitude, inclination, RAAN — to analyse a
-hypothetical orbit with no catalogue entry. No full propagation is required for the custom
+satellite but lets the user **override each** — altitude, inclination, RAAN — to analyze a
+hypothetical orbit with no catalog entry. No full propagation is required for the custom
 case; the analytic eclipse-fraction/beta path covers it, which also keeps the compute trivial.
 
 ## The model (lumped-parameter, single node)
@@ -71,7 +71,7 @@ with, per time-step around the orbit:
 - **Q_internal** = user-supplied avg electronics dissipation (W).
 - **Q_radiated** = ε · σ · A_total · T⁴ — radiative cooling to deep space (~3 K), the only
   loss term. σ = Stefan-Boltzmann.
-- **C** = m · c_p — thermal mass; m user-supplied, c_p defaulted for an aluminium-dominated
+- **C** = m · c_p — thermal mass; m user-supplied, c_p defaulted for an aluminum-dominated
   bus.
 
 Integrate forward (explicit Euler or RK2) over one or two orbits from an initial guess until
@@ -91,7 +91,7 @@ in-sun/in-eclipse asymptotes.
 
 Areas are derived from the form factor; a "tumbling" spacecraft uses the area-averaged
 projected area (A/4 for a convex body), a "sun-pointing" one uses a fixed face. These two
-attitude cases bracket most real behaviour without a full 6-face geometric model.
+attitude cases bracket most real behavior without a full 6-face geometric model.
 
 ## Fidelity ladder (pick a rung)
 
@@ -129,7 +129,7 @@ attitude cases bracket most real behaviour without a full 6-face geometric model
 
 - Purely additive: a new tool screen + `PR_THERMAL`, reachable from the Tools menu. No change
   to prediction, tracking, or any existing tool.
-- The model is clearly labelled **first-order / educational** in the UI and the printout, so it
+- The model is clearly labeled **first-order / educational** in the UI and the printout, so it
   is never mistaken for a flight thermal analysis. Assumptions (single node, area-averaging,
   fixed optical properties, no conduction) are stated on the report.
 

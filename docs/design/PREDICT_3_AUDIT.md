@@ -80,7 +80,7 @@ The library was fetched and compiled on the host, and driven through **CardSat's
 | **QO-100 (1.0027)** | **1436.2 min** | **`'d'`** |
 
 The AO-40-class case was run end-to-end through `twoline2rv` with physically valid elements
-(perigee 951 km, apogee 38,644 km — checked independently): it selects SDP4, initialises resonance
+(perigee 951 km, apogee 38,644 km — checked independently): it selects SDP4, initializes resonance
 handling, and propagates with no error.
 
 Also verified: `gpToTle()` encodes eccentricity as a 7-digit field clamped to `0.9999999`, so a

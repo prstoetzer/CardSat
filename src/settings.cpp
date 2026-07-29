@@ -152,6 +152,36 @@ bool Settings::load() {
   // uint16_t catPort as a baud. validate() further clamps to the supported UART set.
   catGroveBaud = d["catgbaud"] | (uint32_t)115200;
   strncpy(catUser, d["catuser"] | "", sizeof(catUser)-1); catUser[sizeof(catUser)-1]=0;
+  // Dual-rig legs (CAT_DUAL). Missing keys leave the "no legs assigned" defaults.
+  for (int L = 0; L < 2; ++L) {
+    const char* K = L ? "u" : "d";           // key suffix: d = downlink, u = uplink
+    char k[16];
+    snprintf(k, sizeof(k), "dl%smodel", K); dualModel[L] = d[k] | (uint8_t)LEG_NONE;
+    if (dualModel[L] >= LEG_COUNT) dualModel[L] = LEG_NONE;
+    snprintf(k, sizeof(k), "dl%sbus",  K);  dualBus[L]  = d[k] | (uint8_t)LEGBUS_GROVE;
+    if (dualBus[L] >= LEGBUS_N) dualBus[L] = LEGBUS_GROVE;
+    snprintf(k, sizeof(k), "dl%sciv",  K);  dualCiv[L]  = d[k] | (uint8_t)0;
+    snprintf(k, sizeof(k), "dl%sbaud", K);  dualBaud[L] = d[k] | (uint32_t)0;
+    snprintf(k, sizeof(k), "dl%shost", K);
+    strncpy(dualHost[L], d[k] | "", sizeof(dualHost[L])-1); dualHost[L][sizeof(dualHost[L])-1]=0;
+    snprintf(k, sizeof(k), "dl%sport", K);  dualPort[L] = d[k] | (uint16_t)50001;
+    snprintf(k, sizeof(k), "dl%suser", K);
+    strncpy(dualUser[L], d[k] | "", sizeof(dualUser[L])-1); dualUser[L][sizeof(dualUser[L])-1]=0;
+    snprintf(k, sizeof(k), "dl%spass", K);
+    strncpy(dualPass[L], d[k] | "", sizeof(dualPass[L])-1); dualPass[L][sizeof(dualPass[L])-1]=0;
+  }
+  strncpy(dualUsbKey[0], d["dlusbkeyd"] | "", sizeof(dualUsbKey[0])-1); dualUsbKey[0][sizeof(dualUsbKey[0])-1]=0;
+  strncpy(dualUsbKey[1], d["dlusbkeyu"] | "", sizeof(dualUsbKey[1])-1); dualUsbKey[1][sizeof(dualUsbKey[1])-1]=0;
+  // Legacy (0.9.68 development): a single "dlusbkey" served the then-single USB leg.
+  // Migrate it onto whichever leg is on the USB bus (downlink wins a tie).
+  if (!dualUsbKey[0][0] && !dualUsbKey[1][0]) {
+    const char* legacy = d["dlusbkey"] | "";
+    if (legacy[0]) {
+      int L = (dualBus[0] == LEGBUS_USB) ? 0 : (dualBus[1] == LEGBUS_USB) ? 1 : 0;
+      strncpy(dualUsbKey[L], legacy, sizeof(dualUsbKey[L])-1);
+      dualUsbKey[L][sizeof(dualUsbKey[L])-1]=0;
+    }
+  }
   strncpy(catPass, d["catpass"] | "", sizeof(catPass)-1); catPass[sizeof(catPass)-1]=0;
   vfoType    = d["vfotype"] | (uint8_t)VFO_MAIN_UP_SUB_DOWN;
   rxOnlyVfo  = d["rxovfo"]  | (uint8_t)RXO_FOLLOW;
@@ -342,6 +372,19 @@ bool Settings::save() {
   d["catusbkey"] = catUsbKey;
   d["conslog"] = consoleLog;
   d["catuser"] = catUser; d["catpass"] = catPass;
+  for (int L = 0; L < 2; ++L) {                      // dual-rig legs (CAT_DUAL)
+    const char* K = L ? "u" : "d";
+    char k[16];
+    snprintf(k, sizeof(k), "dl%smodel", K); d[k] = dualModel[L];
+    snprintf(k, sizeof(k), "dl%sbus",  K);  d[k] = dualBus[L];
+    snprintf(k, sizeof(k), "dl%sciv",  K);  d[k] = dualCiv[L];
+    snprintf(k, sizeof(k), "dl%sbaud", K);  d[k] = dualBaud[L];
+    snprintf(k, sizeof(k), "dl%shost", K);  d[k] = dualHost[L];
+    snprintf(k, sizeof(k), "dl%sport", K);  d[k] = dualPort[L];
+    snprintf(k, sizeof(k), "dl%suser", K);  d[k] = dualUser[L];
+    snprintf(k, sizeof(k), "dl%spass", K);  d[k] = dualPass[L];
+  }
+  d["dlusbkeyd"] = dualUsbKey[0]; d["dlusbkeyu"] = dualUsbKey[1];
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
   d["rxovfo"] = rxOnlyVfo;
   d["catdly"] = catDelayMs;

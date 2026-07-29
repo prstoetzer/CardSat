@@ -4,9 +4,7 @@
 
 #include <esp_task_wdt.h>   // TWDT "user" subscription: watches this CODE, not a task
 #include <esp_heap_caps.h> // largest-free-block: fragmentation vs genuine OOM
-#include <usb/usb_host.h> // usb_host_lib_unblock(): the escape hatch EspUsbHost omits
 #include <freertos/task.h> // uxTaskGetStackHighWaterMark(): size the stacks from data
-#include <esp_timer.h>    // one-shot unblock poke during teardown (see end())
 
 // ---- Why there is NO ESP_USB_HOST_MAX_DEVICES define here ----------------------
 // There was one (0.9.58-wip pinned it to 1 right here, before the include), and it
@@ -71,6 +69,8 @@ namespace {
   EspUsbHostCdcSerial* s_cdc    = nullptr;
   EspUsbHostCdcSerial* s_rotCdc = nullptr;   // rotator CDC port (shared host); declared here
                                              //   so CAT end() can check it for shared teardown
+  EspUsbHostCdcSerial* s_cdc2   = nullptr;   // CAT-B: the second radio's CDC (dual-USB CAT),
+                                             //   same shared-host rules as the rotator port
   bool                 s_active = false;
   bool                 s_bound  = false;   // a serial device enumerated
   bool                 s_sawDev = false;   // ANY device enumerated (see begin())
@@ -150,10 +150,11 @@ namespace {
   const uint32_t kTaskStack = 4096;
 
   // (The teardown poke timer was removed in fix37. It woke the daemon out of
-  // usb_host_lib_handle_events(portMAX_DELAY) so its cleanup could run -- but that
-  // cleanup can never complete: EspUsbHost::end() kills the CLIENT task first, and
-  // every call in the daemon's cleanup path is client-scoped. Waking the daemon
-  // only got it far enough to fail. See the note in end().)
+  // usb_host_lib_handle_events(portMAX_DELAY) so its cleanup could run -- but under
+  // the OLD (pre-2.4.1) library that cleanup could never complete: its end() killed
+  // the CLIENT task first, and every call in the daemon's cleanup path was
+  // client-scoped. Waking the daemon only got it far enough to fail. See the note
+  // in end().)
 
   // Task-by-name lookups that cannot assert. Two traps in one, both from the
   // FreeRTOS source: (1) xTaskGetHandle() configASSERTs strlen(name) <
@@ -169,30 +170,29 @@ namespace {
     return xTaskGetHandle(q);
   }
 
-  // ---- Why the library's own uninstall does not stick (the 259) -----------------
-  // Bench, fix32: teardown freed its memory and the tasks exited, yet a re-engage
-  // failed with ESP_ERR_INVALID_STATE (259) from usb_host_install() -- the IDF host
-  // stack was still installed. Cause, from the two sources side by side:
+  // ---- Why the OLD library's uninstall did not stick (the 259) -- HISTORY --------
+  // Bench, fix32, against the pre-2.4.1 library: teardown freed its memory and the
+  // tasks exited, yet a re-engage failed with ESP_ERR_INVALID_STATE (259) from
+  // usb_host_install() -- the IDF host stack was still installed. Cause, from the
+  // two sources side by side:
   //
   //   * usb_host_uninstall() REFUSES unless process_pending_flags, lib_event_flags
   //     and flags.val are all zero (IDF v5.4 usb_host.c:585-588).
   //   * Only usb_host_lib_handle_events() clears them (line 647 / 669) and it is
   //     also what clears the handling_events flag (line 666).
-  //   * EspUsbHost's taskLoop() calls usb_host_uninstall() and IGNORES ITS RETURN,
-  //     then self-deletes. So the failure is silent: the task vanishes (our wait
-  //     passes, the heap comes back) while the stack stays installed.
+  //   * That library's taskLoop() called usb_host_uninstall() and IGNORED ITS
+  //     RETURN, then self-deleted. So the failure was silent: the task vanished
+  //     (our wait passed, the heap came back) while the stack stayed installed.
   //
-  // Our own poke is what dirties the flags: usb_host_lib_unblock() sets a pending
-  // flag to wake the daemon, the daemon sees !running_ and leaves the loop WITHOUT
-  // another handle_events() call, so that flag is never cleared. The daemon's
-  // uninstall then fails on the very flag we set to get it out.
-  //
-  // So finish the job here, after the tasks are gone: poll handle_events(0) until
-  // it reports nothing left (that clears all three fields), then uninstall
-  // ourselves. Both are legal from any task -- neither checks caller identity, and
-  // by this point the daemon is dead and cannot race us. If the library DID manage
-  // its own uninstall, p_host_lib_obj is already NULL and both calls return
-  // INVALID_STATE harmlessly, which is why this is safe to run unconditionally.
+  // Our own wake poke was what dirtied the flags, and finishUninstall() -- a
+  // hand-rolled "poll usb_host_lib_handle_events(0) until it reports nothing left,
+  // then usb_host_uninstall() ourselves" pass -- finished the job. Both the poke
+  // and the finisher were removed (fix37) when the library grew a correct end():
+  // 2.4.1+ performs that exact handshake internally, and the pinned 2.5.2
+  // (source-checked) splits it into releaseClientResources() /
+  // uninstallHostLibrary() with the uninstall result checked and logged. The
+  // mechanism stays recorded here because it explains end()'s ordering rules below
+  // and will matter again if the library is ever swapped.
 
   // Sample both stacks' high-water marks. MUST be called before teardown starts:
   // uxTaskGetStackHighWaterMark walks a live TCB, and reading one mid-deletion
@@ -310,9 +310,11 @@ namespace {
   // address work exists to prevent, walking in through the unguarded door.
   int catPickAdapter();
   bool waitForAdapterKey(const char* key, uint32_t ms);  // dual-USB: await a nominated adapter
+  int  cat2PickAdapter();                                // CAT-B's adapter choice (dual-USB CAT)
 
   uint8_t  s_catAddress = 0xff;      // the adapter the RADIO bound
   uint8_t  s_rotAddress = 0xff;      // the adapter the ROTATOR bound
+  uint8_t  s_cat2Address = 0xff;     // the adapter the SECOND radio (CAT-B) bound
   char     s_catWantKey[40] = {0};   // adapter the user nominated as the RADIO
   char     s_rotWantKey[40] = {0};   // adapter the user nominated as the ROTATOR
   uint32_t s_rotBaud        = 9600;  // rotator line speed (app pushes from settings)
@@ -397,8 +399,8 @@ namespace {
   // restoring the console would claim the PHY before release is confirmed. Retain,
   // latch reboot-required, stay quiet.
   void releaseHostIfIdle() {
-    if (!s_host || s_cdc || s_rotCdc) return;   // someone still owns it
-    s_host->end();                              // 2.4.1: drain, deregister, uninstall
+    if (!s_host || s_cdc || s_cdc2 || s_rotCdc) return;   // someone still owns it
+    s_host->end();                              // 2.4.1+: drain, deregister, uninstall
     if (s_host->lastError() == ESP_ERR_TIMEOUT) {
       s_hostTeardownStuck = true;
       s_hostReleased = false;
@@ -418,7 +420,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   s_err[0] = 0; s_dev[0] = 0; s_sawDev = false;
 
   // ---- Reuse a live host, or build one the first time --------------------------
-  // Under 2.4.1 a normal disengage releases the host, so most engages build fresh. But the
+  // Under 2.4.1+ a normal disengage releases the host, so most engages build fresh. But the
   // host may still be up because a USB ROTATOR started it (shared host, two adapters) -- in
   // which case s_host is live but s_cdc has never existed. Create just the missing CAT port
   // and fall into the rebind path; allocating a second EspUsbHost over the top of
@@ -580,12 +582,12 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     //
     // But delete the OBJECTS is not the same as release the STACK. "begin() failed"
     // does NOT mean usb_host_install() failed: the daemon installs first, then
-    // registers a client, allocates transfers, and so on. In 2.4.1 the daemon owns
+    // registers a client, allocates transfers, and so on. In 2.4.1+ the daemon owns
     // its own teardown -- on any post-install failure it runs the ALL_FREE handshake
     // and uninstalls with the return checked, and end() blocks until that completes.
     // So call end() here exactly as the disengage path does: it either fully releases
     // the stack or reports (via a still-set taskHandle_/lastError) that it could not,
-    // and 2.4.1's begin() refuses to start over an incomplete shutdown rather than
+    // and 2.4.1+'s begin() refuses to start over an incomplete shutdown rather than
     // returning 259 mid-operation. The daemon has already observed running_ = false by
     // this point; if install never happened, end() early-returns harmlessly.
     s_host->end();
@@ -648,7 +650,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // 0x1a86, PL2303 0x067b, each with a fixed PID set. Vendor bridges are
     // interface class 0xFF with no standard descriptor, so there is nothing to
     // detect BY -- the library must know them by ID. A clone with an unlisted PID
-    // enumerates fine and is simply not recognised.
+    // enumerates fine and is simply not recognized.
     char msg[64];
     if (s_sawDev) snprintf(msg, sizeof(msg), "Not a known serial adapter: %s", s_dev);
     else          snprintf(msg, sizeof(msg), "%s", "No USB device detected");
@@ -656,7 +658,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // unbound so that plugging the adapter in and retrying would rebind in
     // milliseconds instead of re-allocating ~20 KB. That reasoning was written when
     // end() could not actually release the stack, so keeping it cost nothing that
-    // was recoverable anyway. Under 2.4.1 it does release, and the trade inverted:
+    // was recoverable anyway. Under 2.4.1+ it does release, and the trade inverted:
     // the common case is not "retry in five seconds", it is a cable that is not
     // plugged in at all, or a rig that is switched off -- after which the host, the
     // IDF stack, both USB tasks and the serial console stayed gone until reboot for
@@ -683,10 +685,10 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   // adapter ALSO plugged in it is the whole ballgame: findSerialDevice(ANY)
   // returns devices_[first-with-bulk-OUT], so two ANY-bound CDC ports both grab
   // the same adapter and the radio's Doppler writes can land on the rotator --
-  // and "first" is enumeration order, which can change across a replug. Honour
+  // and "first" is enumeration order, which can change across a replug. Honor
   // the user's nominated radio adapter if there is one; otherwise take the first
   // enumerated serial device, which is exactly the historical single-adapter
-  // behaviour.
+  // behavior.
   if (s_serDevN > 0) {
     int pick = catPickAdapter();
     if (pick < 0) {
@@ -734,7 +736,7 @@ void end() {
 
   snapshotHeadroom();          // while both tasks are alive (see the note there)
 
-  // ---- Full teardown via EspUsbHost 2.4.1's fixed end() ------------------------
+  // ---- Full teardown via EspUsbHost's fixed end() (2.4.1+, pinned 2.5.2) --------
   // History: fix28-fix36 could not tear the IDF host stack down from outside the old
   // library, because its end() killed the CLIENT task first and then ran client-scoped
   // cleanup (releaseInterfaces / device_close / client_deregister) on a dead event queue,
@@ -751,7 +753,7 @@ void end() {
   // fully releases or cleanly reports it did not.
   //
   // Order: detach the CDC port, stop+uninstall the host, then delete the objects. begin()'s
-  // 2.4.1 guard (it refuses to start over taskHandle_/clientHandle_ that are not null)
+  // 2.4.1+ guard (it refuses to start over taskHandle_/clientHandle_ that are not null)
   // protects a re-engage from racing an incomplete shutdown, which is the wedge s_hostReleased
   // used to guard by hand; we keep s_hostReleased as a belt-and-suspenders latch anyway.
   stage(USBCAT_STAGE_END_CDC);
@@ -764,8 +766,8 @@ void end() {
   // guard is load-bearing, not just defensive: with the rotator still up, CAT disengage
   // must leave the host (and thus the rotator's port) running.
   stage(USBCAT_STAGE_END_HOST);
-  if (s_host && !s_rotCdc) {
-    s_host->end();             // 2.4.1: drains client, deregisters, uninstalls, frees
+  if (s_host && !s_rotCdc && !s_cdc2) {
+    s_host->end();             // 2.4.1+: drains client, deregisters, uninstalls, frees
     // M2: end() can TIME OUT (3 s) and, per the library, leave its tasks alive rather than
     // free in-flight transfers. Deleting the object then would be a use-after-free, and
     // restoring the console would claim the PHY before release is confirmed. On timeout,
@@ -867,6 +869,14 @@ namespace {
 
   void setRotErr(const char* m) { snprintf(s_rotErr, sizeof(s_rotErr), "%s", m); }
 
+  // ---- CAT-B (second radio) bookkeeping, shaped exactly like the rotator's ----
+  bool                 s_cat2Active = false;
+  char                 s_cat2Dev[48] = {0};
+  char                 s_cat2Err[72] = {0};
+  char                 s_cat2WantKey[40] = {0};
+
+  void setErr2(const char* m) { snprintf(s_cat2Err, sizeof(s_cat2Err), "%s", m); }
+
   // Bring the host up for a ROTATOR-ONLY configuration (no USB CAT). Same host and
   // slots as CAT's begin() -- just without binding a radio CDC. Whoever gets here first
   // (radio or rotator) pays the ~11.8 KB and the console; the second one finds the host
@@ -886,7 +896,7 @@ namespace {
     hostCfg.taskStackSize = kTaskStack;
     if (!s_host->begin(hostCfg)) {
       const int e = s_host->lastError();
-      s_host->end();            // 2.4.1: daemon runs its own ALL_FREE uninstall
+      s_host->end();            // 2.4.1+: daemon runs its own ALL_FREE uninstall
       delete s_host; s_host = nullptr;
       consoleUp();
       char m[64]; snprintf(m, sizeof(m), "USB host would not start (err %d)", e);
@@ -905,6 +915,79 @@ void catConfigure(const char* key) {
   snprintf(s_catWantKey, sizeof(s_catWantKey), "%s", key ? key : "");
 }
 
+// ---- CAT-B: the second radio's CDC port (dual-USB CAT) ------------------------
+// Shaped like the rotator port: bind one more CDC on the shared host, to ONE
+// nominated adapter, with the same shared-teardown rules. The line settings come
+// from the SECOND leg's radio (its own baud; 8N2 for old-binary Yaesu), because
+// the two radios need not match.
+void cat2Configure(const char* key) {
+  snprintf(s_cat2WantKey, sizeof(s_cat2WantKey), "%s", key ? key : "");
+}
+
+bool cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
+  if (s_cat2Active && s_cdc2) return true;
+  s_cat2Err[0] = 0;
+  if (!s_host) {
+    // Order of engaging the two CAT ports must not matter (same rule as the
+    // rotator): whoever gets here first starts the bare host. hostUpForRotator()
+    // is exactly that starter -- the name predates a second CAT port.
+    if (!hostUpForRotator()) { setErr2("USB host would not start"); return false; }
+  }
+  int pick = cat2PickAdapter();
+  if (pick < 0) { releaseHostIfIdle(); return false; }   // error text already set
+  s_cdc2 = new (std::nothrow) EspUsbHostCdcSerial(*s_host);
+  if (!s_cdc2) { setErr2("Out of RAM for 2nd CAT port"); releaseHostIfIdle(); return false; }
+  // THE critical call, exactly as for the rotator: bind this port to ONE device
+  // address so it can never race CAT-A for the first adapter in devices_.
+  s_cat2Address = s_serDev[pick].address;
+  s_cdc2->setAddress(s_cat2Address);
+  if (!s_cdc2->begin(baud)) {
+    delete s_cdc2; s_cdc2 = nullptr; s_cat2Address = 0xff;
+    setErr2("2nd CAT port would not open");
+    releaseHostIfIdle();
+    return false;
+  }
+  EspUsbHostSerialConfig cfg;
+  cfg.baud     = baud;
+  cfg.dataBits = dataBits;
+  cfg.parity   = (EspUsbHostSerialParity)parity;
+  cfg.stopBits = (EspUsbHostSerialStopBits)stopBits;
+  s_cdc2->setConfig(cfg);
+  s_cdc2->setDtr(true);
+  s_cdc2->setRts(true);
+  // Bounded wait for the CDC interface to come up, exactly as CAT-A and the
+  // rotator do -- connected() reflects USB readiness, not the radio answering.
+  {
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 2500 && !s_cdc2->connected()) {
+      delay(20);
+      feedFreezeWatchdog();
+    }
+  }
+  if (!s_cdc2->connected()) {
+    delete s_cdc2; s_cdc2 = nullptr; s_cat2Address = 0xff;
+    setErr2("2nd radio adapter not responding");
+    releaseHostIfIdle();
+    return false;
+  }
+  snprintf(s_cat2Dev, sizeof(s_cat2Dev), "%s", s_serDev[pick].label);
+  s_cat2Active = true;
+  return true;
+}
+
+void cat2End() {
+  if (s_cdc2) { s_cdc2->end(); delete s_cdc2; s_cdc2 = nullptr; }
+  s_cat2Active = false;
+  s_cat2Address = 0xff;
+  s_cat2Dev[0] = 0;
+  releaseHostIfIdle();   // M2-safe; no-op while CAT-A or the rotator still owns it
+}
+
+bool    cat2Active()      { return s_cat2Active && s_cdc2; }
+Stream* cat2Stream()      { return cat2Active() ? s_cdc2 : nullptr; }
+const char* cat2DeviceName() { return s_cat2Dev; }
+const char* cat2LastError()  { return s_cat2Err; }
+
 void rotConfigure(const char* key, uint32_t baud) {
   snprintf(s_rotWantKey, sizeof(s_rotWantKey), "%s", key ? key : "");
   s_rotBaud = baud ? baud : 9600;
@@ -913,7 +996,7 @@ void rotConfigure(const char* key, uint32_t baud) {
 uint8_t scanAdapters() {
   // hostUpForRotator() IS a scan: it brings the host up, registers onDev and
   // waits for enumeration. The name is historical (the rotator was the first
-  // caller); the behaviour is exactly what a scan needs, so reuse it rather than
+  // caller); the behavior is exactly what a scan needs, so reuse it rather than
   // write a second copy of the host bring-up that could drift from it.
   rotTrace("scan: adapters");
   if (!hostUpForRotator()) { rotTrace("scan: host would not start"); return 0; }
@@ -960,11 +1043,12 @@ int catPickAdapter() {
       if (strcmp(s_serDev[i].key, s_catWantKey) == 0) { pick = i; break; }
     if (pick < 0) { setErr("Radio adapter not found (replug/re-select)"); return -1; }
   } else {
-    // No nominated adapter: take the first one the ROTATOR is not using. With a
-    // single adapter and the rotator on it, that leaves none -- which is the
-    // honest answer, not a silent double-bind.
+    // No nominated adapter: take the first one neither the ROTATOR nor CAT-B is
+    // using. With a single adapter and another port on it, that leaves none --
+    // which is the honest answer, not a silent double-bind.
     for (uint8_t i = 0; i < s_serDevN; ++i) {
       if (rotActive() && s_serDev[i].address == s_rotAddress) continue;
+      if (s_cdc2 && s_serDev[i].address == s_cat2Address) continue;
       pick = i; break;
     }
     if (pick < 0) {
@@ -973,10 +1057,47 @@ int catPickAdapter() {
       return -1;
     }
   }
-  // Nominated or not, never take the rotator's wire.
+  // Nominated or not, never take the rotator's or CAT-B's wire.
   if (rotActive() && s_serDev[pick].address == s_rotAddress) {
     setErr("That adapter is the rotator's");
     return -1;
+  }
+  if (s_cdc2 && s_serDev[pick].address == s_cat2Address) {
+    setErr("That adapter is the 2nd radio's");
+    return -1;
+  }
+  return pick;
+}
+
+// CAT-B's adapter selection: same order, same refusals as catPickAdapter(), with
+// the exclusion set widened to BOTH other ports (CAT-A and the rotator). An
+// un-nominated CAT-B binds only when the exclusions leave exactly one candidate.
+int cat2PickAdapter() {
+  int pick = -1;
+  if (s_cat2WantKey[0]) {
+    waitForAdapterKey(s_cat2WantKey, 2500);
+    for (uint8_t i = 0; i < s_serDevN; ++i)
+      if (strcmp(s_serDev[i].key, s_cat2WantKey) == 0) { pick = i; break; }
+    if (pick < 0) { setErr2("2nd radio adapter not found (replug/re-select)"); return -1; }
+  } else {
+    int free = -1, freeN = 0;
+    for (uint8_t i = 0; i < s_serDevN; ++i) {
+      if (s_active && s_cdc && s_serDev[i].address == s_catAddress) continue;
+      if (rotActive() && s_serDev[i].address == s_rotAddress) continue;
+      free = i; freeN++;
+    }
+    if (freeN == 1) pick = free;                 // unambiguous: take the one left over
+    else {
+      setErr2(freeN == 0 ? "No free adapter for 2nd radio"
+                         : "Nominate the 2nd radio's adapter");
+      return -1;
+    }
+  }
+  if (s_active && s_cdc && s_serDev[pick].address == s_catAddress) {
+    setErr2("That adapter is the radio's"); return -1;
+  }
+  if (rotActive() && s_serDev[pick].address == s_rotAddress) {
+    setErr2("That adapter is the rotator's"); return -1;
   }
   return pick;
 }
@@ -1065,6 +1186,7 @@ bool rotBegin() {
     // of for a second adapter to plug in.
     for (uint8_t i = 0; i < s_serDevN; ++i) {
       if (s_active && s_cdc && s_serDev[i].address == s_catAddress) continue;
+      if (s_cdc2 && s_serDev[i].address == s_cat2Address) continue;
       pick = i; break;
     }
     if (pick < 0) {
@@ -1077,9 +1199,13 @@ bool rotBegin() {
     if (s_serDevN == 1) rotTrace("rot: one adapter present, using it");
   }
 
-  // Nominated or not, never take the radio's wire.
+  // Nominated or not, never take either radio's wire.
   if (s_active && s_cdc && s_serDev[pick].address == s_catAddress) {
     setRotErr("That adapter is the radio's"); rotTrace(s_rotErr);
+    releaseHostIfIdle(); return false;
+  }
+  if (s_cdc2 && s_serDev[pick].address == s_cat2Address) {
+    setRotErr("That adapter is the 2nd radio's"); rotTrace(s_rotErr);
     releaseHostIfIdle(); return false;
   }
   { char b[80]; snprintf(b, sizeof(b), "rot: binding addr=%u baud=%lu",
@@ -1137,10 +1263,10 @@ void rotEnd() {
   s_rotActive = false;
   s_rotAddress = 0xff;
   s_rotDev[0] = 0;
-  // Shared host: tear it down only when CAT isn't still using it (symmetric with end()).
-  if (s_host && !s_cdc) {
+  // Shared host: tear it down only when neither CAT port still uses it (symmetric with end()).
+  if (s_host && !s_cdc && !s_cdc2) {
     rotTrace("rot: releasing host");
-    s_host->end();             // 2.4.1: full drain/deregister/uninstall
+    s_host->end();             // 2.4.1+: full drain/deregister/uninstall
     // M2: same timeout handling as end() -- on a stuck teardown, retain the host, latch
     // reboot-required, and leave the console down rather than deleting under live tasks.
     if (s_host->lastError() == ESP_ERR_TIMEOUT) {
@@ -1158,7 +1284,7 @@ void rotEnd() {
 bool     hostReleased()           { return s_hostReleased; }
 bool     hostTeardownStuck()      { return s_hostTeardownStuck; }
 String   uninstallDiag() {
-  // EspUsbHost 2.4.1 performs the drain/deregister/uninstall handshake itself and logs
+  // EspUsbHost 2.4.1+ performs the drain/deregister/uninstall handshake itself and logs
   // any failure via ESP_LOG. We no longer hand-roll it, so there is no extra forensic
   // string to surface here; the About screen falls back to hostReleased()/lastError().
   return String();

@@ -121,7 +121,7 @@ private:
   // or Grove) via its \csdr_* escape. Holds the last query result so the screen
   // can be edited offline and pushed with one save.
   static constexpr int DR_MAX_DEV   = 8;     // devices shown from the Stick
-  static constexpr int DR_MAX_MODEL = 40;    // model-catalogue entries from the Stick
+  static constexpr int DR_MAX_MODEL = 40;    // model-catalog entries from the Stick
   struct DrDevice { char product[24]; char serial[24]; char vidpid[12]; int addr; };   // H11: serial 24 to match companion
   struct DrModel  { int id; char name[14]; bool rxOnly; };
   // Heap-allocated on entering SCR_DUALRIG and freed by drFree() from the
@@ -147,9 +147,9 @@ private:
   void  drFree();                            // release them (screen-transition hook)
   void  drQuery();                           // pull \csdr_get + \csdr_models
   void  drSave();                            // push \csdr_set ... save=1
-  int   drModelIdx(int id) const;            // catalogue index for a model id (-1)
+  int   drModelIdx(int id) const;            // catalog index for a model id (-1)
   // At-a-glance link status for the Settings row, so bring-up is a glance not a
-  // query. 0 = unknown (grey), 1 = linked (green), 2 = no link (red).
+  // query. 0 = unknown (gray), 1 = linked (green), 2 = no link (red).
   uint8_t drLink = 0; uint32_t drLinkMs = 0;
   void  drPingLink();                        // throttled \csdr_get ping; sets drLink
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
@@ -220,7 +220,7 @@ private:
   static const int CATMON_MAX = 64;     // ring-buffer depth (lines)
   static const int CATMON_W   = 40;     // per-line chars (draw shows 36); no heap
   char     catMonLines[CATMON_MAX][CATMON_W] = {};
-  bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (colour), false = RX
+  bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (color), false = RX
   int      catMonHead = 0;              // next write index (ring)
   int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
   int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
@@ -388,6 +388,12 @@ private:
   double   orbDecayDays = -1;       // rough days-to-reentry (-1 n/a, 1e9 stable)
   double   orbDecayLo = -1;         // low-density (solar-min) bound: longer life
   double   orbDecayHi = -1;         // high-density (solar-max) bound: shorter life
+  uint8_t  orbDecaySrc = 0;         // which anchor produced orbDecayDays:
+                                    // 0 none, 1 observed n-dot, 2 B* (see
+                                    // estimateDecayDays). The solar bracket is
+                                    // meaningful only for the B* path -- the
+                                    // solar scale cancels out of an anchored
+                                    // estimate, so bracketing it would be theatre.
   // Apogee/perigee shown on the Info page, sampled from the SAME perturbed predictor
   // that produces the live altitude (geocentric, over one orbit), so the displayed
   // Altitude is always within [perigee, apogee]. A mean-element apogee (a(1+e)-RE) can
@@ -424,8 +430,8 @@ private:
   int      memoScroll = 0;          // scroll offset
   bool      memoConfirmDel = false; // true while a delete confirmation is pending
   // OSCARLOCATOR polar view (SCR_OSCAR): live azimuthal-equidistant plot.
-  // oscarMode: 0 = QTH-centred (your station at disc centre), 1 = polar (N or S
-  // pole at centre, chosen automatically from the satellite's hemisphere).
+  // oscarMode: 0 = QTH-centered (your station at disc center), 1 = polar (N or S
+  // pole at center, chosen automatically from the satellite's hemisphere).
   int       oscarMode = 0;
   // Cached OSCARLOCATOR ground-track arc: one full orbital period of sub-points
   // (lat/lon), sampled once and held static, so the arc covers the whole disc
@@ -439,11 +445,11 @@ private:
   time_t    oscarArcAos = 0, oscarArcLos = 0;  // AOS/LOS within the track (for markers)
   uint32_t  oscarArcTriedMs = 0;     // millis() of last build attempt (throttle retries)
   // 3D globe view (SCR_GLOBE): orthographic wireframe Earth that auto-follows the
-  // selected satellite (the globe rotates to keep its sub-point centred), with a
-  // day/night terminator and all favourites plotted. Arrow keys nudge the view
+  // selected satellite (the globe rotates to keep its sub-point centered), with a
+  // day/night terminator and all favorites plotted. Arrow keys nudge the view
   // away from the follow point; a key re-snaps to auto-follow.
-  double    globeViewLat = 0, globeViewLon = 0;  // current centre of the visible disc (deg)
-  bool      globeFollow = true;       // true = re-centre on the selected sat each frame
+  double    globeViewLat = 0, globeViewLon = 0;  // current center of the visible disc (deg)
+  bool      globeFollow = true;       // true = re-center on the selected sat each frame
   void drawGlobe();
   void keyGlobe(char c, bool enter, bool back);
   // DX Doppler table (SCR_DXDOPP): predicted RX/TX for BOTH my station and the DX
@@ -458,7 +464,7 @@ private:
   freq_t    dxdAnchorHz = 0;         // fixed-mode target dial freq (Hz); re-applied on transponder change (0 = none)
   void drawDxDopp();
   void keyDxDopp(char c, bool enter, bool back);
-  void dxdCenterPassband();          // centre dxdPbOff on the selected linear transponder
+  void dxdCenterPassband();          // center dxdPbOff on the selected linear transponder
   void dxdStepAnchorDial(int dir);   // step the anchored dial by 1 kHz (fixed modes)
   void dxdReanchorToStored();        // re-apply dxdAnchorHz to the current transponder after a change
   void dxDoppFreqs(time_t t, freq_t& myRx, freq_t& myTx,
@@ -683,7 +689,7 @@ private:
   uint8_t  gInvType[GAME_INV];      // which sprite (0..2) per invader
   int      gInvAliveN = 0;          // remaining invaders
   int      gShotX[GAME_SHOTS], gShotY[GAME_SHOTS];   // player shots; y<0 = inactive
-  int      gGunX = 0;               // gun centre x
+  int      gGunX = 0;               // gun center x
   int      gScore = 0, gLives = 0, gLevel = 0;
   uint8_t  gState = 0;              // 0 attract, 1 playing, 2 win-wave, 3 game over
   uint32_t gStepMs = 0;             // last formation step (millis)
@@ -702,7 +708,7 @@ private:
   uint8_t  gpPhase = 0;            // 0 rising to window, 1 in window, 2 leaving
   int      gpMisses = 0;
   uint32_t gpArcMs = 0;
-  // Rotor Runner: slew a crosshair (tilt/keys) to keep a moving sat centred.
+  // Rotor Runner: slew a crosshair (tilt/keys) to keep a moving sat centered.
   float    grSatX = 0, grSatY = 0, grSatVX = 0, grSatVY = 0;   // sat pos/vel (px)
   float    grCurX = 0, grCurY = 0;                     // crosshair pos (px)
   uint32_t grOnMs = 0, grLastMs = 0;
@@ -889,8 +895,8 @@ private:
   // Inverse of the workable horizon: pick ONE target (US state / DXCC / grid) and find every
   // pass on any favorite over HORIZON_DAYS during which it is workable. Keeps per-pass TIMING
   // (a small .bss hit list), not a union. The membership test is one shared pointInFootprint()
-  // per sample against the target's representative point (bbox centre for state/DXCC polygons,
-  // the point coord for DXCC point-entities, the locator centre for grids) -- far cheaper than
+  // per sample against the target's representative point (bbox center for state/DXCC polygons,
+  // the point coord for DXCC point-entities, the locator center for grids) -- far cheaper than
   // filling a bitset, so this search is snappier than the union sweep. Zero heap allocation.
   enum TsPhase { TS_PICK, TS_RUNNING, TS_DONE, TS_CANCEL };
   static const int TS_HIT_MAX = 40;
@@ -961,7 +967,7 @@ private:
   void drawRoveView();  void keyRoveView(char c, bool enter, bool back);
   // "Sky at a glance": a horizontal timeline of upcoming passes for all favorites
   // over the next SKY_HOURS. One row per favorite that has a pass in the window;
-  // each bar is one pass, coloured by peak elevation. Fixed-size (.bss), no heap.
+  // each bar is one pass, colored by peak elevation. Fixed-size (.bss), no heap.
   static const int SKY_ROWS = 12;      // favorites shown (rows)
   static const int SKY_BARS = 60;      // total passes drawn across all rows
   static const int SKY_HOURS = 6;      // timeline span (hours)
@@ -1297,10 +1303,25 @@ private:
            cfg.rotType != ROT_YAESU && cfg.rotType != ROT_NONE &&
            cfg.rotTransport == ROT_XPORT_USB;
   }
+  // CAT bus-ownership predicates, dual-rig aware. Every "does CAT own the Grove
+  // UART / the USB CAT port" check routes through these, so a CAT_DUAL leg on a
+  // bus claims it exactly as the equivalent single-rig transport would.
+  bool        catUsesGroveWire() const {
+    if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE) return true;
+    return cfg.catType == CAT_DUAL &&
+           (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_GROVE);
+  }
+  bool        catUsesUsb() const {
+    if (cfg.catType == CAT_USB) return (RadioModel)cfg.radioModel != RIG_NONE;
+    if (cfg.catType != CAT_DUAL) return false;
+    return (cfg.dualBus[0] == LEGBUS_USB && cfg.dualModel[0] != LEG_NONE) ||
+           (cfg.dualBus[1] == LEGBUS_USB && cfg.dualModel[1] != LEG_NONE);
+  }
   void        yieldGroveIfTaken(const char* who);  // CAT/GPS just claimed Grove
   bool        groveCatVsGpsArbitrate(const char* who);  // H10: disable the losing Grove CAT/GPS claimant
   void        scanUsbAdapters();
-  void        cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio);
+  void        cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio,
+                              const char* alsoTaken = nullptr);   // 2nd excluded key (dual-USB)
   String      usbAdapterLabel(const char* key) const;
   bool passNeedsFlip(time_t aos, time_t los);  // per-pass flip decision (0-180 el rotators)
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
@@ -1330,7 +1351,11 @@ private:
     // layout setting must NOT swap them here, or "Main Dn/Sub Up" would send downlink
     // commands to the uplink radio and vice versa -- the opposite physical radios. Force
     // the companion-correct mapping (downlink on Sub -> VFOA) for these backends.
-    if (cfg.catType == CAT_RIGCTL || cfg.catType == CAT_RIGCTL_GROVE) return true;
+    // CAT_DUAL is the same shape natively: the DualRig composite hardwires
+    // Sub = the downlink leg and Main = the uplink leg, so the mapping is
+    // forced here for exactly the reason it is for the companion.
+    if (cfg.catType == CAT_RIGCTL || cfg.catType == CAT_RIGCTL_GROVE ||
+        cfg.catType == CAT_DUAL) return true;
     if (txReceiveOnly()) {                            // receive-only (beacon/telemetry)
       switch (cfg.rxOnlyVfo) {
         case RXO_MAIN: return false;                 // force downlink to MAIN (legacy)
@@ -1487,12 +1512,35 @@ private:
   void   saaCompute();                               // (re)run the forward scan for the current zone
   bool   zoneContains(int zone, double lat, double lonE, double altKm, bool sunlit);
   static double lShellAt(double latDeg, double lonEDeg, double altKm);  // centered-dipole McIlwain L
+
+  // ---- IGRF-14 field model + trapped-particle shell geometry -------------------
+  // The Van Allen tests use McIlwain (L, B/B0) from the real field, not altitude:
+  // a belt is a flux tube, and its field lines reach low altitude at high magnetic
+  // latitude, so no altitude floor can separate "in the belt" from "beneath it".
+  // B/B0 measures displacement from the shell's magnetic equator, which is what
+  // actually tracks trapped flux. Cutoff below; 3.0 ~ |magnetic latitude| <= 30 deg.
+  static constexpr float ZONE_BRATIO_MAX = 3.0f;
+  struct ShellInfo {
+    float bSat = 0;      // |B| at the satellite (nT)
+    float b0 = 0;        // |B| at the field line's minimum -- the shell's equator
+    float shellL = 0;    // that minimum's geocentric radius in Earth radii (= L)
+    float bRatio = 1;    // bSat / b0
+  };
+  static void igrfField(float rKm, float colatDeg, float lonEDeg, float yrs,
+                        float& Br, float& Bt, float& Bp);
+  static void igrfVec(const float p[3], float yrs, float b[3]);
+  float igrfYears();          // non-static: reads the clock via nowUtc()/timeIsSet()
+  ShellInfo shellAt(double latDeg, double lonEDeg, double altKm);
+  static bool maybeInBelt(double latDeg, double lonEDeg, double altKm);
   int      saaZone = ZONE_SAA;      // selected zone
   int      saaScroll = 0;           // window-list viewport
   ZoneWin  saaWin[16];              // upcoming transit windows
   int      saaWinN = 0;
   bool     saaInNow = false;        // in the selected zone right now
   double   saaCurL = 0;             // current L-shell (for the status line)
+  double   saaCurBR = 1;            // current B/B0 -- displacement from the shell's
+                                    // magnetic equator, the belt test's second
+                                    // coordinate (1 = at the equator of the shell)
   bool     saaComputed = false;
   const char* auroraLevel();         // aurora activity word from Kp/Bz
   const char* vhfFlag();             // 6m/2m Es / auroral-E hint
@@ -1979,7 +2027,7 @@ private:
   int    gpfField = 0;                 // 0=epoch 1..3=r 4..6=v 7=[solve]
   bool   gpfSolved = false;
   bool   gpfConverged = false;
-  double gpfResidM = 0;                // final position residual, metres
+  double gpfResidM = 0;                // final position residual, meters
   SatEntry gpfResult;                  // fitted GP elements
   void gpfInit();
   bool gpfSolve();                     // returns true on convergence; fills gpfResult
@@ -2044,7 +2092,7 @@ private:
 
   // Orbital thermal analysis tool (SCR_THERMAL). Single-node lumped-parameter model
   // over one orbit, driven by the analytic eclipse fraction (beta + betaStar) so it
-  // needs no propagation and works for custom orbits with no catalogue entry. Orbit
+  // needs no propagation and works for custom orbits with no catalog entry. Orbit
   // fields (alt/incl/raan) default from the active satellite but are user-editable;
   // the rest are spacecraft properties with per-U defaults.
   double thAlt = 500;    // orbit altitude (km)          [orbit]
@@ -2088,7 +2136,7 @@ private:
   // packets, so this screen shows what has been HEARD since the socket opened.
   //
   // That is deliberately the same semantics as the LoRa roster (SCR_LORAROSTER) and
-  // as a Kenwood's station list: "heard recently, nearby", not a database snapshot.
+  // as a Kenwood rig's station list: "heard recently, nearby", not a database snapshot.
   // Fixed stations beacon every 10-30 min, so the list fills over minutes.
   //
   // Lifetime: socket AND record array are created on entering the screen and
@@ -2106,7 +2154,7 @@ private:
   AprsSta* aprsSta = nullptr;          // APRS_MAX records; null whenever the screen is closed
   int    aprsN = 0, aprsSel = 0, aprsScroll = 0;
   char   aprsStatus[64] = {0};         // "" = a list is shown; else why it isn't
-  char   aprsCenter[8]  = {0};         // grid the filter is centred on ("" = own location)
+  char   aprsCenter[8]  = {0};         // grid the filter is centered on ("" = own location)
   WiFiClient* aprsis = nullptr;        // APRS-IS socket; null unless the screen is open
   LineBuf  aprsBuf{256};               // TNC2 line assembly (info fields run long)
   uint32_t aprsOpenMs = 0;             // millis() the socket connected (0 = not connected)
@@ -2136,7 +2184,7 @@ private:
   DxSpot* dxcSpot = nullptr;
   int    dxcN = 0, dxcSel = 0, dxcScroll = 0;
   int    dxcBandFilter = -1;           // -1 = all bands, else index into DXC_BANDS
-  int    dxcBandFilterPrev = -1;       // cycle cursor for the 'b' band-step key
+  int    dxcBandFilterPrev = -1;       // cycle cursor for the 'n' band-step key
   char   dxcStatus[64] = {0};
   bool   dxcBusy = false;
 
@@ -2214,7 +2262,7 @@ private:
   uint32_t telPrnLastMs = 0;             // for idle flush of a prompt with no newline
   uint32_t telLastRxMs = 0;
 
-  int    ao7Idx = -1;            // catalogue index of AO-7 (NORAD 7530), -1 if absent
+  int    ao7Idx = -1;            // catalog index of AO-7 (NORAD 7530), -1 if absent
   int    ao7Phase = 0;          // 0 idle, 1 fetched/analyzed, 2 no-sunlight, 3 error
   bool   ao7ContSun = false;    // true = continuous sunlight (24 h timer free-running)
   double ao7Beta = 0, ao7EclFrac = 0;
@@ -2276,7 +2324,7 @@ private:
   void   drawAprsDet();void keyAprsDet(char c, bool enter, bool back);
   void   aprsStart();                    // allocate records + open the filtered socket
   void   aprsStop();                     // close socket, free records (leaving the screen)
-  void   aprsRestart();                  // reopen with a new filter centre
+  void   aprsRestart();                  // reopen with a new filter center
   void   serviceAprsIs();                // pump the socket from loop(); no-op when closed
   void   aprsHandleLine(const char* ln); // one TNC2 line -> upsert, or ignore
   void   aprsUpsert(const char* call, double lat, double lon, char sym);
@@ -2596,7 +2644,7 @@ private:
   void gameReset(bool full);   // (re)start: full=new game, else next wave
   void gameStep();             // advance one formation step + shots
 
-  // Games menu + the six mini-games. Each is draw + key + a reset; all fixed-size.
+  // Games menu + the seven mini-games. Each is draw + key + a reset; all fixed-size.
   void drawGamesMenu(); void keyGamesMenu(char c, bool enter, bool back);
   void beep(uint16_t freq, uint16_t ms);       // on-demand speaker beep (acquires + schedules release)
   void sfx(uint16_t freq, uint16_t ms);        // gated game sound (cfg.gameSound)
@@ -2692,6 +2740,8 @@ private:
   void enterCatMon();                       // open the monitor, claim the trace sink
   void drawCatMon();
   void drawDualRig();
+  void drawDualRigLocal();                 // CAT_DUAL: native two-leg editor
+  void keyDualRigLocal(char c, bool enter, bool back);
   void keyDualRig(char c, bool enter, bool back);
   void keyCatMon(char c, bool enter, bool back);
   void catMonPush(const char* dir, const uint8_t* b, size_t n);  // append a trace line
@@ -2736,7 +2786,7 @@ private:
   void keyLog(char c, bool enter, bool back);
   void keyLogEntry(char c, bool enter, bool back);
   void beginQso();                // snapshot auto fields, open the entry screen
-  void seedQsoSatDefaults();      // fill qso sat/mode + non-Doppler centre/nominal freqs
+  void seedQsoSatDefaults();      // fill qso sat/mode + non-Doppler center/nominal freqs
   bool saveQso();                 // append the pending QSO to the CSV log
   int  qsoCount();                // number of logged QSOs
   bool exportAdif();              // write ADIF from the CSV log

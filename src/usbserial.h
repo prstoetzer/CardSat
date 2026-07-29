@@ -47,7 +47,7 @@
 //     ESP32-S3 "has a small number of USB host channels" which "composite devices,
 //     hubs, audio ... can exhaust quickly". We bind only the serial interface and
 //     never claim audio (CardSat has no use for rig audio). Whether that is enough
-//     on a real composite rig is UNVERIFIED -- see usbLastError().
+//     on a real composite rig is UNVERIFIED -- see lastError().
 //
 //  ---- FEASIBILITY / REVERSIBILITY ----------------------------------------------
 //  The whole feature is behind CARDSAT_HAS_USBCAT. Compile it out and CardSat is
@@ -68,17 +68,14 @@ namespace UsbSerial {
   // lastError() if the host will not start or no serial device enumerates.
   bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
 
-  // Detach the CDC port and stop CAT. The IDF host stack and the ~11.8 KB host
-  // object STAY RESIDENT until reboot, by design: EspUsbHost cannot release its
-  // client (checked v2.3.0 and unchanged through v2.3.2: end() kills the client
-  // task before running client-scoped
-  // cleanup), so a real teardown leaves the stack installed with a live client --
-  // and then even a rebind is refused. Bench-proven over eight revisions; the full
-  // account is in end() in the .cpp. Consequences the caller must know:
-  //   * A re-engage is FAST and reliable -- it rebinds the resident host.
-  //   * The USB CDC console does NOT come back (the host still owns the PHY).
-  //   * The RAM is not returned until reboot. One host, ever, so it is bounded.
-  // Safe to call when not started.
+  // Detach CAT-A's CDC port and, when no other port (CAT-B, rotator) still holds
+  // the shared host, fully tear the host down: EspUsbHost 2.4.1+'s fixed end()
+  // drains, deregisters and uninstalls the IDF stack (checked against the pinned
+  // 2.5.2), the object is freed, and the serial console returns. (The old
+  // "resident host until reboot" design was the pre-2.4.1 library's limitation;
+  // its history lives in end() in the .cpp.) On the M2 timeout path the host is
+  // retained, reboot-required is latched, and the console stays down. Safe to
+  // call when not started.
   void end();
 
   bool    active();          // is the host up and a device bound?
@@ -277,6 +274,25 @@ namespace UsbSerial {
   uint8_t     serialDeviceCount();
   const char* serialDeviceLabel(uint8_t i);   // "FTDI FT232R 0403:6001 #A50285BI"
   const char* serialDeviceKey(uint8_t i);     // stable id to persist (see .cpp)
+
+  // ---- Second CAT port (CAT-B): two USB radios on the shared host --------------
+  // Dual-USB CAT (CAT_DUAL with BOTH legs on USB, through a hub): CAT-A is
+  // begin()/stream() above, CAT-B is this trio, shaped like the rotator port. The
+  // host has 4 device slots (build_opt.h: hub + 2 adapters + root) and 4 CDC
+  // slots, so three bound ports (CAT-A + CAT-B + rotator) fit structurally -- but
+  // dual-CAT plus a USB ROTATOR is refused at the app level: three CDCs behind a
+  // hub presses the S3's 8 host channels, and that combination has no bench
+  // story. Adapter assignment follows the same rule as CAT+rotator: with two
+  // radio adapters BOTH should be nominated (each leg's key); an un-nominated
+  // CAT-B binds only when exactly one adapter is free after CAT-A/rotator
+  // exclusions -- never a guess between two.
+  void        cat2Configure(const char* key);
+  bool        cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
+  void        cat2End();          // release CAT-B (host stays while any port remains)
+  bool        cat2Active();
+  Stream*     cat2Stream();       // nullptr unless cat2Active()
+  const char* cat2DeviceName();
+  const char* cat2LastError();
 }
 
 #endif  // CARDSAT_HAS_USBCAT

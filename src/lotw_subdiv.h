@@ -1246,7 +1246,7 @@ static const int CNTY_OR_N = 36;
 static const SubdivEntry CNTY_PA[] = {
   {"Adams","Adams"},{"Allegheny","Allegheny"},{"Armstrong","Armstrong"},{"Beaver","Beaver"},
   {"Bedford","Bedford"},{"Berks","Berks"},{"Blair","Blair"},{"Bradford","Bradford"},{"Bucks","Bucks"},
-  {"Butler","Butler"},{"Cambria","Cambria"},{"Cameron","Cameron"},{"Carbon","Carbon"},{"Centre","Centre"},
+  {"Butler","Butler"},{"Cambria","Cambria"},{"Cameron","Cameron"},{"Carbon","Carbon"},{"Center","Center"},
   {"Chester","Chester"},{"Clarion","Clarion"},{"Clearfield","Clearfield"},{"Clinton","Clinton"},
   {"Columbia","Columbia"},{"Crawford","Crawford"},{"Cumberland","Cumberland"},{"Dauphin","Dauphin"},
   {"Delaware","Delaware"},{"Elk","Elk"},{"Erie","Erie"},{"Fayette","Fayette"},{"Forest","Forest"},

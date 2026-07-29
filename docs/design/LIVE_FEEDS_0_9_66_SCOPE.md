@@ -146,7 +146,7 @@ to "how much of each can we build well."
 
 **Scoped separately already: `DUALRIG_MAINFW_INTEGRATION_SCOPE.md`.** That document covers
 bringing the two-radio capability currently provided by the external CardSatDualRig
-companion (M5StickS3) directly into the main firmware — the radio catalogue, per-dialect
+companion (M5StickS3) directly into the main firmware — the radio catalog, per-dialect
 CAT encoders, dual-USB host registry, two-leg VFO state machine, and rigctld server. Its
 own feasibility re-assessment already argued the historical RAM blocker has eased; this
 document doesn't re-scope it, only notes that the flash-budget crunch that document didn't

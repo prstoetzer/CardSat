@@ -1,6 +1,9 @@
 # Scope: dual-radio CAT support (two FT-817/818, split uplink/downlink)
 
-Status: **design only — no code written.** This document scopes the first dual-radio
+Status: **superseded / implemented** — the generalized design shipped in the
+0.9.68 cycle as CAT type `CAT_DUAL` (see `DUALRIG_MAINFW_INTEGRATION_SCOPE.md`,
+Model A). The FT-817/818 pair described here is one cell of that matrix: both
+legs use the plain single-VFO CAT this document called for. Original text: This document scopes the first dual-radio
 case: two Yaesu FT-817/818 radios, one as the uplink (TX) and one as the downlink
 (RX), each on its own CAT link, so a full-duplex satellite station can be run from
 two single-VFO mobiles. It is grounded in the current single-radio architecture as
@@ -59,7 +62,7 @@ transports, service ticks, and CAT pacing.
    (0x01, 4-byte BCD, 10 Hz), mode set (0x07), optional read-back, CAT-on preamble.
    Independently useful even for single-radio 817 users.
 2. **Second rig object + lifetime.** `rigUp`/`rigDown` created and destroyed
-   together in the engage/disengage paths. Both must honour the same
+   together in the engage/disengage paths. Both must honor the same
    setExternalStream lifetime discipline that the 0.9.58 fix hardened — clear the
    Stream before tearing it down, per rig.
 3. **Two transports at once.** The two radios need two wires. Options, in rough
@@ -97,7 +100,7 @@ transports, service ticks, and CAT pacing.
   loop's time budget.
 - **PTT / TX-RX coordination.** With two radios there is no shared PTT. Whether
   CardSat needs to coordinate (e.g. mute downlink Doppler updates during uplink
-  transmit to avoid CAT contention) is an open behavioural question.
+  transmit to avoid CAT contention) is an open behavioral question.
 - **Which radio is which.** Binding "uplink = adapter #2, downlink = adapter #1"
   must survive re-plugging; the `#N` device-address model helps but a user-facing
   assignment step is needed.

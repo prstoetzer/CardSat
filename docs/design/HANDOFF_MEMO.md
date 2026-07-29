@@ -76,7 +76,7 @@ sed 's/\x1b\[[0-9;]*m//g' /home/claude/blN.log | grep -iE "error:" | head -8
 sed 's/\x1b\[[0-9;]*m//g' /home/claude/blN.log | grep -E "Sketch uses|Global"
 ```
 
-- Strip ANSI colour codes (`sed 's/\x1b\[[0-9;]*m//g'`) or the log is unreadable.
+- Strip ANSI color codes (`sed 's/\x1b\[[0-9;]*m//g'`) or the log is unreadable.
 - Success shows `Sketch uses N bytes (P%)` and `Global variables use N bytes (P%)`.
 - As of 0.9.60 release: **~2,804,154 B flash (89%), 155,304 B RAM (47%)**. Flash is the
   tighter budget; watch the 89% headroom.
@@ -141,21 +141,37 @@ When a type is defined in an inlined header, it must also be present in the `.in
 After EVERY source touch, run all of these (all in `tools/`), and they must all pass:
 
 ```bash
-for g in check_balance check_parity check_screen_text check_settings_rows \
-         check_defines check_ino_dupes; do
-  printf "%-20s " "$g"; python3 tools/$g.py >/dev/null 2>&1 && echo PASS || echo FAIL
+for g in check_parity check_body_parity check_balance check_ino_dupes check_defines \
+         check_switch_dupes check_screen_text check_settings_rows check_stream_guards \
+         check_idf_symbols audit_list_scroll audit_caps_fields audit_key_conflicts \
+         audit_screen_geometry; do
+  printf "%-24s " "$g"; python3 tools/$g.py >/dev/null 2>&1 && echo PASS || echo FAIL
 done
-python3 tools/audit_screen_geometry.py   # must exit 0
 ```
 
-- **check_balance** — brace/paren balance across the sources.
 - **check_parity** — the dual-representation invariant: `src/` vs `.ino`, and that
   inlined-header type declarations are present in `.ino`.
-- **check_screen_text** — on-screen string/footention constraints (footer ≤39 chars, etc.).
-- **check_settings_rows** — every settings-menu id has a backing row; row bound sufficient.
-- **check_defines** — `#define`/constant consistency.
+- **check_body_parity** — function-*body* equality between `src/` and `.ino` (signature
+  parity alone missed real drift once; this gate exists because of that).
+- **check_balance** — brace/paren balance across the sources (must report 0,0,0).
 - **check_ino_dupes** — guards against a duplicate-inlining bug (added after one bit us).
+- **check_defines** — `#define`/constant consistency.
+- **check_switch_dupes** — duplicate `case` labels across the big switches.
+- **check_screen_text** — on-screen string/footer width constraints (footer ≤39 chars, etc.).
+- **check_settings_rows** — every settings-menu id has a backing row; row bound sufficient.
+- **check_stream_guards** — streaming fetches carry the USB-CAT/heap guards.
+- **check_idf_symbols** — no references to ESP-IDF symbols absent from this core version.
+- **audit_list_scroll** — scroll offsets that are only ever written to literal 0 (stuck
+  viewports).
+- **audit_caps_fields** — edit fields missing from the type-as-caps list.
+- **audit_key_conflicts** — per-screen key-handler collisions with global hotkeys.
 - **audit_screen_geometry** — screen-coordinate/overlap sanity.
+
+`tools/check_compiles.py` is the compile smoke wrapper, and the host harnesses under
+`tools/host_aprs`, `tools/host_basic`, `tools/host_muf`, `tools/host_orbit_audit`, and
+`tools/host_zones` cross-check the APRS decoder, Tiny BASIC, the MUF model, orbit
+agreement, and the zone lookups against known vectors — run the relevant one whenever
+its subsystem is touched.
 
 If any gate fails, fix before compiling. The gates are fast; run them freely.
 
@@ -284,7 +300,7 @@ Other design notes worth knowing:
   just the named site — several bugs this cycle were "fix the formatter" that turned out
   to need the data source fixed too (the 60-minute pass length is the canonical example:
   it took three reports because the real cap was in `buildSchedule`, not the formatter).
-- **Bench photos drive game/UI fixes.** `.HEIC` uploads show real on-device behaviour;
+- **Bench photos drive game/UI fixes.** `.HEIC` uploads show real on-device behavior;
   read them for the actual geometry, then re-derive the math rather than guessing.
 - **Be honest about what can't be verified here.** Netplay needs two devices; USB CAT
   heap-feel needs hardware. Say so, and put the item in `docs/THINGS_TO_VERIFY.md`.
@@ -335,3 +351,98 @@ Other design notes worth knowing:
 *End of memo. When in doubt: apply changes to both files, run the gates, compile with
 the exact command above (STEP 1 first, no extra_flags, poll with `pgrep -x`), and keep
 documentation grounded in the actual source.*
+
+## 0.9.68: native dual-rig (CAT_DUAL) + IC-705 LAN — shipped, bench pending
+
+Model A of DUALRIG_MAINFW_INTEGRATION_SCOPE.md shipped (Phases 1+2+4): CAT type
+**Dual (2 radios)** drives a downlink + uplink leg natively. New code: leg catalog
+(27 radios, `LEG_RADIOS[]` in radio_profiles.h, ported verbatim from the
+companion), pure dialect frame builders + `PlainCatRig` + `DualRig` composite +
+factories (rig.cpp), `IcomNetRig` plain-VFO leg mode + leg ctor (icomnet.*, the
+IC-705-over-Wi-Fi path), per-leg cfg block + persistence (settings.*), engage
+branch with physical-bus conflict guard, `catUsesGroveWire()`/`catUsesUsb()`
+predicates rerouting every bus-ownership check, dual-aware USB reconciler
+(leg baud/8N2/adapter-key/addr), slot-cycled CAT-type row (non-USB build keeps
+CAT_DUAL=5 reachable), SCR_DUALRIG local-mode editor (targets 920-931), help/
+MANUAL/README/FEATURES/companion-README updates, and `tools/host_dualrig/`
+(extracts the builders from rig.cpp at build time — one source of truth; 18
+vectors pass). Build: EXIT=0, zero warnings, flash 3,017,994 (+14.6 KB, 95%),
+static RAM 161,848 (+240 B = the cfg fields; rig objects stay heap-side).
+Phase 3 (USB+USB on the one PHY) stays gated on the bench heap proof; the
+engage guard refuses it and points at the companion.
+
+**Bench-verification matrix (all pending hardware):**
+- One pair per dialect, spot-checked end-to-end (engage, Doppler write both legs,
+  mode set, knob read-back): CIV (e.g. IC-705 wired), YBIN (FT-817/818), YTXT
+  (FT-991A), KWHT (TH-D74 Band B).
+- **IC-705 LAN leg**: radio WLAN on, Network User1, control port 50001 — connect,
+  auth, CI-V flow, keepalive survival, reconnect after Wi-Fi drop.
+- USB leg lifecycle: engage/disengage/re-engage through the reconciler; adapter
+  pinning via `a` with two adapters; 8N2 applied for a YBIN leg.
+- Grove leg vs rotator/GPS arbitration messages (should mirror wired CI-V).
+- rxOnly-on-uplink warning shows; both-legs-same-bus refusal messages show.
+- Two LAN legs at once: heap/largest-block observation (fragmentation risk on
+  the no-PSRAM part is the one thing source review can't settle).
+- Carried caveats: IC-905 LAN untested; VR-5000 opcodes unverified (companion
+  caveat, surfaced in the leg table comment).
+
+Polish candidates (not blockers): `,`/`/` back-cycling on the Model/Bus rows
+(ENTER cycles forward only); per-leg readiness readouts on Track using the
+`DualRig::downLeg()/upLeg()` accessors (added for exactly that, currently
+unused); per-leg CAT delay if a slow leg ever needs it.
+
+## 0.9.68 addendum: dual-USB CAT (Phase 3) implemented
+
+Per the hardware owner's confirmation that heap headroom covers two radios, the
+USB+USB gate came off. usbserial gained a **second CAT port** (CAT-B: `cat2Configure/
+cat2Begin/cat2End/cat2Stream/cat2Active/cat2DeviceName/cat2LastError`), shaped on the
+rotator port: one more CDC bound to a nominated adapter on the shared host, its own
+line settings (per-leg baud; 8N2 for old-binary Yaesu). All three adapter pickers
+now exclude all three ports symmetrically; `releaseHostIfIdle()`/`end()`/`rotEnd()`
+count CAT-B as an owner. `DualRig` grew per-leg attach (`setLegExternalStream`;
+`usbLeg==2` = both; blanket `setExternalStream(nullptr)` detaches every USB leg).
+The reconciler runs CAT-A for the downlink, brings CAT-B up before
+`initializeEngagedRig()`, retries CAT-B on a 3 s throttle if its adapter arrives
+late, and tears down CAT-B before `end()`. Per-leg adapter keys
+(`cfg.dualUsbKey[2]`, "dlusbkeyd"/"dlusbkeyu", legacy "dlusbkey" migrated);
+`cycleUsbAdapter` takes `alsoTaken` and computes both radio keys for the rotator
+picker. Guards: dual-USB + USB rotator refused (S3 8-channel budget); identical
+leg keys refused; un-nominated CAT-B binds only when exactly one adapter is free.
+The stale "resident host until reboot" block in usbserial.h's end() doc (missed by
+the 0.9.68 comment audit, which fixed only the .cpp) was rewritten to the 2.4.1+
+truth. Build: EXIT=0, zero warnings.
+
+**Bench additions (dual-USB):**
+- Hub + two adapters: enumerate, nominate each leg (`a`), engage; verify DN on
+  CAT-A / UP on CAT-B by Doppler traces; per-leg line settings (e.g. FT-817 8N2
+  uplink + CI-V 8N1 downlink).
+- Engage order independence: adapter for CAT-B plugged AFTER engage → throttled
+  retry binds it and `initializeEngagedRig()` re-runs.
+- Disengage/re-engage cycles: host released only when CAT-A, CAT-B and rotator
+  are all down; console returns; no 259.
+- Un-nominated single-free-adapter auto-bind for CAT-B; ambiguity refusal text.
+- Refusals on-screen: dual-USB+USB-rotator; identical keys.
+- Heap/largest-block during two live CDC ports + a TLS fetch (the owner's
+  headroom call, verified with numbers in the USB log headers).
+
+## 0.9.68 addendum: orbital-decay model rework
+
+Decay estimator re-anchored on the observed MEAN_MOTION_DOT with B* as fallback;
+correct da/dt, King-Hele eccentricity factor (scaled Bessel I0/I1), perigee-
+preserving circularization, eccentricity-aware re-entry threshold. Calibrated and
+scored against 244 real re-entries from Space-Track: median 1.05x predicted/actual,
+89% within +/-30% at every lead time from 30 days to 3, versus 0.21x and 0-2% for
+the shipped 0.9.67 model. Full account in docs/design/DECAY_MODEL_0_9_68.md.
+New: tools/host_decay (16th gate, extracts the estimator from app.cpp and pins
+twelve real re-entries + eccentric sanity + anchor selection) and
+tools/fetch_decay_calibration.py (rebuilds the calibration set from Space-Track;
+batches by decay month to respect the 30/min, 300/hr limits). Orbit Info page gains
+a "Decay from" row naming the anchor; the solar bracket now appears only on the B*
+path, because the solar scale cancels exactly out of an anchored estimate.
+Build: EXIT=0, zero warnings, flash 3,029,166 (96%), static RAM 162,080.
+
+**Bench items:** confirm the Info page shows "observed n-dot" for typical list
+satellites and "B* (modeled)" for one with no/negative n-dot (RS-44 has a negative
+MEAN_MOTION_DOT in the current set); confirm the decay-watch flag no longer fires
+on high-eccentricity objects; spot-check a couple of decay figures against
+independent sources.

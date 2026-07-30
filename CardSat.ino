@@ -1,67 +1,104 @@
 // ===========================================================================
-//  CardSat.ino  -  M5Stack Cardputer ADV satellite tracker + multi-radio CAT
+//  CardSat.ino  -  M5Stack Cardputer ADV satellite tracker, CAT Doppler
+//                  controller, rotator controller and station computer
 //
-//  SINGLE-FILE Arduino IDE build (modular PlatformIO sources concatenated).
+//  SINGLE-FILE Arduino IDE build. This file is the MONOLITHIC representation of
+//  the modular sources under src/ (the PlatformIO representation), concatenated
+//  in include order. It has no src/ includes.
 //
-//  ---- REQUIRED LIBRARIES (Library Manager unless noted) ----
-//    M5Cardputer (pulls M5Unified+M5GFX) | ArduinoJson v7 | TinyGPSPlus
-//    Sgp4  <- Hopperpop: https://github.com/Hopperpop/Sgp4-Library (.ZIP)
-//    WiFi/WiFiClientSecure/HTTPClient/LittleFS/HardwareSerial: ESP32 core.
+//  >>> THE ONE INVARIANT FOR ANYONE EDITING THIS PROJECT <<<
+//  src/*.{h,cpp} and this file are TWO REPRESENTATIONS OF THE SAME PROGRAM, and
+//  every change must land in BOTH, byte-identically inside function bodies. Use
+//  tools/dual_edit.py, which applies an edit to both or aborts. tools/parity.py,
+//  tools/check_body_parity.py and tools/check_ino_dupes.py enforce it; they run
+//  as part of the gate suite below and they are not optional. A change that
+//  compiles here and not in src/ (or vice versa) is a shipped bug -- it has
+//  happened, and the gates exist because of it.
 //
-//  ---- BOARD SETTINGS (Arduino IDE Tools menu) ----
-//    Board "ESP32S3 Dev Module" or "M5StampS3" | Flash 8MB
-//    Partition Scheme "Huge APP (3MB No OTA/1MB SPIFFS)"  <-- REQUIRED
-//    PSRAM Disabled | USB CDC On Boot Enabled
+//  ---- REQUIRED LIBRARIES ----------------------------------------------------
+//    M5Cardputer (pulls M5Unified + M5GFX)   | ArduinoJson v7 (7.4.2 pinned)
+//    Sgp4 <- Hopperpop (.ZIP install):         https://github.com/Hopperpop/Sgp4-Library
+//    TinyGPSPlus                             | RadioLib 7.7.1   (LoRa)
+//    ESP_SSLClient 3.1.3 (NOT WiFiClientSecure -- see the TLS note below)
+//    EspUsbHost 2.5.2    (USB CAT / USB rotator; version matters, see usbserial)
+//    From the ESP32 core: WiFi, HTTPClient, LittleFS, SD, Wire, HardwareSerial,
+//    mbedTLS (LoTW signing), miniz (ADIF zip).
 //
-//  ---- SUPPORTED RADIOS (3 CAT families, pick in Settings) ----
-//    Icom CI-V    : IC-820/821/910/970/9100/9700 (binary, addressed bus)
-//    Yaesu CAT    : FT-847, FT-736R (5-byte binary, 8N2)
-//    Kenwood CAT  : TS-790, TS-2000 (ASCII ';'-terminated, RS-232)
-//    Protocols follow the Hamlib backends (icom, yaesu/ft847+ft736,
-//    kenwood/ts2000+ts790). See civ/yaesu/kenwood.cpp for the encoders.
+//  ---- BOARD SETTINGS (Arduino IDE Tools menu) -------------------------------
+//    Board: "ESP32S3 Dev Module"     | Flash: 8 MB
+//    Partition Scheme: "Huge APP (3MB No OTA/1MB SPIFFS)"   <-- REQUIRED
+//    PSRAM: DISABLED (the ADV has none -- the whole memory design assumes this)
+//    USB CDC On Boot: Enabled
+//    Reference build: arduino-cli 1.5.1, ESP32 core 3.2.1, FQBN
+//    esp32:esp32:esp32s3:PartitionScheme=huge_app,CDCOnBoot=cdc
 //
-//  ---- I/O ----
-//    CAT  : UART1 on G1/G2 @3.3 V. The interface HARDWARE differs per family:
-//           Icom    = single-wire 5 V CI-V level interface (G1/G2 + GND);
-//           Yaesu   = serial CAT (verify TTL vs RS-232 per the CAT manual);
-//           Kenwood = RS-232 (DB-9) via a MAX3232-class level shifter.
-//           The ESP32-S3 pins are NOT 5 V tolerant -- never wire CAT direct.
-//           Every CAT frame is traced to Serial @115200 (decoded). Toggle via
-//           CIV_DEBUG / YAESU_DEBUG / KW_DEBUG in the respective .cpp.
-//    Freq read-back (radio-knob One True Rule tuning): Icom yes; Kenwood yes;
-//           Yaesu FT-847/FT-736R no (use the device TUNE keys instead).
-//    BAND PAIR: on the Yaesu/Kenwood sat rigs, CAT cannot switch bands -- the
-//           operator selects the uplink/downlink bands and the rig's own sat/
-//           full-duplex mode by hand; CardSat Doppler-tunes within that. (Same
-//           as SatPC32.) On Icom, CardSat drives MAIN/SUB and forces sat OFF.
-//    GPS  : runtime-selectable on the Location screen ('s'): Grove (G1/G2,
-//           shares CAT pins), Cap LoRa868 (G15/G13 @9600), or Cap LoRa-1262
-//           (G15/G13 @115200). Runs on UART2 so it doesn't fight CAT.
-//    Spkr : built-in speaker drives the AOS alarm (M5Cardputer.Speaker).
+//  ---- CAT TRANSPORTS (Settings -> CAT type) ---------------------------------
+//    Wired CI-V     on-board UART on G1/G2. Two-wire (G2=TX, G1=RX) or
+//                   SINGLE-WIRE CI-V on one pad (Settings -> CI-V wiring), which
+//                   is how most Icoms present the bus. See CIV_SINGLE_PIN.md.
+//    Icom LAN       native RS-BA1-family network CAT over WiFi (IC-9700, and
+//                   IC-705/IC-905 as dual-rig legs). No wiring at all.
+//    rigctl (net)   Hamlib rigctld over TCP.
+//    rigctl (Grove) rigctld over a Grove serial cable -- no WiFi needed. This is
+//                   also how the CardSatDualRig companion is driven.
+//    USB serial     FTDI / CP210x / CH34x adapter on the USB-C port, for ANY
+//                   wire-level dialect. Costs the serial console while engaged.
+//    Dual (2 radios) NATIVE two-radio control: a downlink leg and an uplink leg,
+//                   each any of 27 half-duplex/receive-only radios, each on its
+//                   own bus (Grove / USB adapter / Icom LAN). Either leg may be
+//                   "None", in which case that half is simply not CAT-driven.
+//                   Two USB legs are supported through a hub. PTT is NEVER
+//                   commanded -- the operator keys the uplink by hand.
 //
-//  Doppler: full correction of BOTH legs to hold a CONSTANT FREQUENCY AT THE
-//    SATELLITE (KB5MU "One True Rule"). Tune the passband with the device keys
-//    (TUNE) or, on 'd', with the radio's own knob -- let go and nothing drifts.
-//  Linear-transponder modes: USB downlink + LSB uplink (inverting-SSB), or
-//    USB up + USB down if either leg is HF (< 30 MHz). FM birds: FM both legs.
+//    Full-duplex sat rigs (Settings -> Radio): Icom CI-V IC-820/821/910/970/
+//    9100/9700, Yaesu FT-847/FT-736R (5-byte binary, 8N2), Kenwood TS-790/TS-2000
+//    (ASCII, RS-232). Protocols follow the Hamlib backends; encoders live in
+//    civ/yaesu/kenwood.cpp. Dual-rig LEG radios are a separate catalog
+//    (LEG_RADIOS[] in radio_profiles.h) with their own four dialects.
 //
-//  Next Passes: unified schedule across ALL favorites (soonest AOS first),
-//    AOS alarm (countdown beeps + screen flash, toggle in Settings), TLE
-//    element-set age shown/colored, and "z" to deep-sleep until the next AOS.
-//  Sun/eclipse: Polar screen shows Sun az/el + a Sun glyph and whether the
-//    satellite is SUNLIT or in ECLIPSE; Track shows an "ECL" flag in shadow.
-//  Pass detail: on Passes, ;/. pick a pass and "d" plots its elevation curve
-//    (yellow = sunlit, blue = eclipse) with AOS/LOS/az, max el, and sunlit %.
+//  ---- ROTATOR TRANSPORTS (Settings -> Rotator) ------------------------------
+//    GS-232A/B, Easycomm I/II/III and SPID Rot2Prog over an SC16IS750 I2C->UART
+//    bridge (default) or the Grove UART; Yaesu rotators wired directly via an
+//    I2C ADC + output expander; rotctld over TCP; PstRotator over UDP; and a USB
+//    serial adapter. Grove CAT and a Grove rotator cannot coexist -- one UART.
 //
-//  Keys: Satellites - f=favorite v=favorites-only n=new TLE.
-//        Next Passes - ENT track, r refresh, z deep-sleep until AOS.
-//        Passes - ;/. select, d=detail plot, n=add transponder, t/ENT track.
-//        Location - p=gps s=gps-source c=set UTC.
-//        Track - m=TUNE/CAL, d=radio-knob tuning (One True Rule), t=cycle TX,
-//                r=radio on/off, o=rotator on/off, p=polar, ENTER=save cal.
-//        Update - k=keps, a=cache ALL transponders (offline). DEL=backspace.
-//        Settings - radio model/addr/baud; AOS alarm; "Reset all data" (ERASE).
-//  Convention: "Sub"=downlink/RX, "Main"=uplink/TX on every backend.
+//  ---- I/O -------------------------------------------------------------------
+//    CAT   G1/G2 @3.3 V, or USB-C, or WiFi (see above). The ESP32-S3 pins are
+//          NOT 5 V tolerant: never wire CAT or a rotator directly to a radio --
+//          use a level shifter. See docs/WIRING.md and the CI-V documents.
+//    GPS   runtime-selectable on Location ('s'): Grove (G1/G2, shares the CAT
+//          pins), Cap LoRa868 (G15/G13 @9600) or Cap LoRa-1262 (G15/G13
+//          @115200). Runs on UART2 so it does not fight CAT.
+//    LoRa  Cap LoRa868 / LoRa-1262 modules via RadioLib (messaging + roster).
+//    Other built-in speaker (AOS alarm, CW, voice memos), IR LED (pass beacon),
+//          microSD (logs, caches, screenshots), optional line printer.
+//
+//  ---- CONVENTIONS A CONTRIBUTOR MUST KNOW ----------------------------------
+//    "Sub" = DOWNLINK/RX and "Main" = UPLINK/TX on every backend, everywhere.
+//    Doppler corrects BOTH legs to hold a constant frequency AT THE SATELLITE
+//    (KB5MU's "One True Rule"), so tuning -- by device key or by the radio's own
+//    knob -- never walks the signal through the passband.
+//    American English in comments and documentation.
+//    Never touch the git remote. Celestrak is .org, never .com.
+//    FW_VERSION bumps are release decisions, not mid-session edits.
+//
+//  ---- BEFORE YOU SHIP A CHANGE ---------------------------------------------
+//    tools/ carries 16 static gates (parity, brace balance, duplicate switch
+//    cases, screen-text width, settings rows, stream guards, IDF symbols, list
+//    scrolling, caps fields, key conflicts, screen geometry, edit-cancel routing,
+//    settings clamps, ...) and 8 host harnesses that EXTRACT code from src/ and
+//    test it on the host: APRS decode, BASIC, MUF, orbit agreement, zones, the
+//    IGRF field model, the dual-rig CAT encoders and the orbital-decay model.
+//    Run them all. They encode bugs that already shipped once.
+//
+//  ---- WHERE THE REST IS DOCUMENTED -----------------------------------------
+//    MANUAL.md            the operator's manual (also built as a PDF)
+//    README.md            what it is, install, quick start
+//    docs/FEATURES.md     the complete feature list
+//    docs/WIRING.md       every wiring option, with cautions
+//    docs/design/         architecture, audits, model derivations, handoff notes
+//    docs/interfaces/     CI-V, level shifters, web API, BASIC, printer
+//    On-device help: 'h' on most screens, and the About page.
 // ===========================================================================
 
 #include <Arduino.h>
@@ -157,6 +194,7 @@ extern ConsoleLog::Tee CardSatSerialTee;
 #include <esp_core_dump.h>   // read the panic backtrace back on the next boot
 #include <esp_system.h>  // esp_reset_reason() for validating RTC-held batch state
 #include <esp_task_wdt.h>  // USB CAT freeze watchdog: TWDT user subscription
+#include <atomic>          // release fence when publishing an adapter registry entry
 // LoTW multi-batch upload state, persisted in RTC RAM across the DELIBERATE
 // ESP.restart() we issue between batches. Rationale: a full log's .tq8 body can
 // exceed the ESP32 lwip TCP_SND_BUF (~5744 B) send ceiling, which stalls the upload
@@ -388,7 +426,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.68";
+static constexpr const char* FW_VERSION = "0.9.69";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build.
@@ -1324,6 +1362,21 @@ private:
   bool     _open = false;
 };
 
+// Open the on-board Grove UART for a CI-V-family backend, honoring the CI-V
+// WIRING MODE (Settings -> CI-V wiring): 0 = two-wire TX/RX on G2/G1, 1 = single
+// wire on G2, 2 = single wire on G1. Most half-duplex Icoms expose one-wire CI-V
+// on a 3.5 mm jack, so single-pin is the common case, not the exception.
+//
+// This owns BOTH the HardwareSerial instance and the pin lifecycle, and is shared
+// by the wired CivRig and by dual-rig PlainCatRig legs. It is one function on
+// purpose: the single-wire setup is a delicate, bench-verified sequence (clear
+// UART signal inversion, pull-up, open-drain at the PAD REGISTER so the output
+// matrix stays attached, then re-assert the RX input on the shared pad), and a
+// second copy of it would drift. It also means the "release the previously bound
+// pins" bookkeeping is global, which is what it has to be -- there is one UART.
+HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
+                            int rxPin, int txPin);
+
 // ===========================================================================
 //  Dual-rig (CAT_DUAL): plain single-VFO leg backends + the DualRig composite
 // ===========================================================================
@@ -1381,7 +1434,12 @@ public:
   uint8_t address() const override { return _addr; }
   bool    sendRaw(const uint8_t* b, size_t n) override;   // serial-terminal diagnostics
   void    setExternalStream(Stream* s) override { extStream = s; _stream = s; }
+  // CI-V wiring mode for a GROVE leg (0 = two-wire, 1 = one-wire G2, 2 = one-wire
+  // G1). Most half-duplex Icoms present one-wire CI-V on a 3.5 mm jack, so a dual
+  // rig with an Icom leg on Grove needs this exactly as the wired path does.
+  void    setPinMode(uint8_t mode) override { _pinMode = mode; }
 private:
+  uint8_t  _pinMode = 0;
   bool sendFreq(freq_t hz);
   bool sendMode(RigMode m);
   bool readFreq(freq_t& hzOut);
@@ -1411,6 +1469,7 @@ public:
   void service() override;
   void setCmdDelay(uint16_t ms) override;
   void setReadBudgetMs(uint16_t ms) override;
+  void setPinMode(uint8_t mode) override;       // CI-V wiring, forwarded to both legs
   void setExternalStream(Stream* s) override;   // single-USB attach; nullptr detaches ALL USB legs
   void setLegExternalStream(int leg, Stream* s);  // per-leg attach/detach (dual-USB CAT)
   bool setMainFreq(freq_t hz) override;         // uplink leg
@@ -1953,8 +2012,10 @@ public:
   // and every capability that reads RADIOS[_model] is overridden below.
   IcomNetRig(uint8_t civAddr, const char* legName, const char* host, uint16_t port,
              const char* user, const char* pass)
-    : _model(RIG_NONE), _addr(civAddr), _host(host),
-      _ctlPort(port ? port : 50001), _user(user), _pass(pass), _plain(true) {
+    // Initializer order must match DECLARATION order (_plain sits next to _addr),
+    // or the compiler reorders it silently and -Wreorder fires.
+    : _model(RIG_NONE), _addr(civAddr), _plain(true), _host(host),
+      _ctlPort(port ? port : 50001), _user(user), _pass(pass) {
     snprintf(_nameBuf, sizeof(_nameBuf), "%s/LAN", legName ? legName : "leg");
   }
   ~IcomNetRig() override;
@@ -7968,10 +8029,19 @@ private:
   // CAT bus-ownership predicates, dual-rig aware. Every "does CAT own the Grove
   // UART / the USB CAT port" check routes through these, so a CAT_DUAL leg on a
   // bus claims it exactly as the equivalent single-rig transport would.
+  // THE single USB-CAT teardown. Both CAT ports and the rig's stream pointers come
+  // down together, in the one order that is safe, so no caller can release half a
+  // session. Introduced after 0.9.68 shipped with applyRadioFromCfg() tearing down
+  // only CAT-A: changing settings while dual-USB was engaged left CAT-B holding a
+  // CDC, an adapter and the USB host (so the console never returned), and a
+  // re-engage reused the stale port instead of applying the new line settings.
+  void        usbCatTeardown();
   bool        catUsesGroveWire() const {
     if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE) return true;
+    // Only a leg with a radio assigned claims the wire (see the engage guard).
     return cfg.catType == CAT_DUAL &&
-           (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_GROVE);
+           ((cfg.dualModel[0] != LEG_NONE && cfg.dualBus[0] == LEGBUS_GROVE) ||
+            (cfg.dualModel[1] != LEG_NONE && cfg.dualBus[1] == LEGBUS_GROVE));
   }
   bool        catUsesUsb() const {
     if (cfg.catType == CAT_USB) return (RadioModel)cfg.radioModel != RIG_NONE;
@@ -8916,6 +8986,8 @@ private:
   int    telScrollUp = 0;                // rows scrolled UP from live (0 = pinned to bottom)
   bool   telPendCR = false;              // saw a lone CR; overwrite the line if no LF
   uint8_t telAnsi = 0;                   // sanitizer state: 0 normal 1 esc 2 csi 3 osc 4 osc-esc
+  uint8_t telIac  = 0;                   // Telnet IAC state: 0 none, 1 saw IAC, 2 awaiting option
+  uint8_t telIacCmd = 0;                 // the DO/DONT/WILL/WONT verb being negotiated
   bool    telConnected = false;
   WiFiClient telClient;                  // plain TCP transport (small handle; socket freed on stop())
   uint8_t telOutMode = 3;               // active output mode for the live session
@@ -9017,6 +9089,7 @@ private:
   void   telDisconnect();                // close socket + printer sink
   void   telService();                   // pump incoming bytes (call from the modal loop)
   void   telSendBytes(const uint8_t* d, size_t n);   // keyboard -> remote
+  bool   telIacByte(uint8_t c);          // Telnet IAC negotiation; true = byte consumed
   void   telRemoteByte(uint8_t c);       // sanitize + route one received byte
   void   telGridPutByte(uint8_t c);      // one printable byte onto the screen grid
   void   telGridNewline();               // advance a row, scroll on overflow
@@ -11080,14 +11153,16 @@ PlainCatRig::PlainCatRig(LegModel m, uint8_t civAddr, uint32_t baud)
     _baud(baud ? baud : LEG_RADIOS[m].baud) {}
 
 void PlainCatRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
-  (void)uartNum;
   if (baud) _baud = baud;
   if (extStream) { _stream = extStream; return; }   // USB leg: adapter already open
-  // Grove leg: plain 8N1 TTL on G1/G2, same UART claim as the other Grove CAT
-  // paths (the CAT_DUAL conflict guard has already ensured we're the only Grove
-  // claimant). Serial1 is the shared on-board UART object, as in RigctlGroveRig.
-  Serial1.begin(_baud, SERIAL_8N1, rxPin, txPin);
-  _stream = &Serial1;
+  // Grove leg: go through the SHARED CI-V UART opener, so a leg honors the CI-V
+  // wiring mode just like the wired path -- including SINGLE-WIRE CI-V, which is
+  // how nearly every half-duplex Icom in the leg catalog presents the bus (a 3.5 mm
+  // jack carrying both directions). Before 0.9.69 this called Serial1.begin(rx,tx)
+  // directly, which is two-wire only: a one-wire radio simply never answered.
+  // Yaesu/Kenwood legs pass pinMode 0 and get the ordinary two-wire setup.
+  // (The CAT_DUAL conflict guard has already ensured we are the only Grove claimant.)
+  _stream = &civUartOpen(_pinMode, _baud, uartNum, rxPin, txPin);
 }
 
 bool PlainCatRig::canReadFreq() const {
@@ -11170,8 +11245,12 @@ bool PlainCatRig::readFreq(freq_t& hzOut) {
 DualRig::DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud)
   : _down(down), _up(up), _usbLeg(usbLeg) {
   _baud[0] = downBaud; _baud[1] = upBaud;
-  snprintf(_nameBuf, sizeof(_nameBuf), "Dual %s+%s",
-           _down ? _down->name() : "?", _up ? _up->name() : "?");
+  // Name says what is actually driven, so a one-legged setup is never mistaken for
+  // a broken two-legged one.
+  if (_down && _up)      snprintf(_nameBuf, sizeof(_nameBuf), "Dual %s+%s", _down->name(), _up->name());
+  else if (_down)        snprintf(_nameBuf, sizeof(_nameBuf), "%s (DL only)", _down->name());
+  else if (_up)          snprintf(_nameBuf, sizeof(_nameBuf), "%s (UL only)", _up->name());
+  else                   snprintf(_nameBuf, sizeof(_nameBuf), "Dual (no legs)");
 }
 
 DualRig::~DualRig() {
@@ -11190,8 +11269,14 @@ void DualRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   if (_up   && !legIsUsb(1)) _up->begin(_baud[1], uartNum, rxPin, txPin);
 }
 
+// Ready when every leg that EXISTS is ready. A "None" leg is not a missing leg --
+// it is a deliberate choice that this half of the link is not CAT-controlled, so
+// it must not hold the composite permanently un-ready.
 bool DualRig::ready() const {
-  return _down && _up && _down->ready() && _up->ready();
+  if (!_down && !_up) return false;
+  if (_down && !_down->ready()) return false;
+  if (_up   && !_up->ready())   return false;
+  return true;
 }
 
 void DualRig::service() {
@@ -11209,6 +11294,13 @@ void DualRig::setReadBudgetMs(uint16_t ms) {
   Rig::setReadBudgetMs(ms);
   if (_down) _down->setReadBudgetMs(ms);
   if (_up)   _up->setReadBudgetMs(ms);
+}
+
+// Only a GROVE leg can use a wiring mode; the call is harmless on the others
+// (USB legs take the external-stream path, LAN legs ignore it entirely).
+void DualRig::setPinMode(uint8_t mode) {
+  if (_down) _down->setPinMode(mode);
+  if (_up)   _up->setPinMode(mode);
 }
 
 // Per-leg attach: the dual-USB reconciler binds each leg to its OWN CDC stream
@@ -11249,6 +11341,7 @@ bool DualRig::setSubMode (RigMode m) { return _down ? _down->setSubMode(m)   : f
 bool DualRig::readSubFreq (freq_t& hzOut) { return _down ? _down->readSubFreq(hzOut)  : false; }
 bool DualRig::readMainFreq(freq_t& hzOut) { return _up   ? _up->readMainFreq(hzOut)   : false; }
 bool DualRig::readPtt(bool& tx) { return _up ? _up->readPtt(tx) : false; }
+// Knob-follow reads the DOWNLINK. With no downlink leg there is nothing to follow.
 bool DualRig::canReadFreq() const { return _down && _down->canReadFreq(); }
 
 // ---------------------------------------------------------------------------
@@ -11280,15 +11373,23 @@ Rig* makeDualRig(const uint8_t model[2], const uint8_t bus[2], const uint8_t civ
                  const char user[2][24], const char pass[2][24]) {
   // Physical-bus conflicts (two Grove legs, two USB legs) are refused by the
   // settings UI and re-checked by the engage path; this factory only builds.
-  Rig* down = makeLegRig(model[0], bus[0], civ[0], baud[0],
-                         host[0], port[0], user[0], pass[0]);
-  Rig* up   = makeLegRig(model[1], bus[1], civ[1], baud[1],
-                         host[1], port[1], user[1], pass[1]);
-  if (!down || !up) { delete down; delete up; return nullptr; }
+  // A leg set to "None" is DELIBERATELY absent: that half of the link simply is not
+  // CAT-controlled, and Doppler for it goes nowhere. That covers the common station
+  // where only one radio speaks CAT -- an SSB downlink rig plus a hand-tuned HT on
+  // the uplink, or a CAT receiver alongside a transmitter with no computer port.
+  // Only a leg that was ASKED for and could not be built is an error.
+  const bool wantDown = (model[0] != LEG_NONE), wantUp = (model[1] != LEG_NONE);
+  if (!wantDown && !wantUp) return nullptr;             // nothing configured at all
+  Rig* down = wantDown ? makeLegRig(model[0], bus[0], civ[0], baud[0],
+                                    host[0], port[0], user[0], pass[0]) : nullptr;
+  Rig* up   = wantUp   ? makeLegRig(model[1], bus[1], civ[1], baud[1],
+                                    host[1], port[1], user[1], pass[1]) : nullptr;
+  if ((wantDown && !down) || (wantUp && !up)) { delete down; delete up; return nullptr; }
   int usbLeg = -1;
-  if (bus[0] == LEGBUS_USB && bus[1] == LEGBUS_USB) usbLeg = 2;   // dual-USB CAT
-  else if (bus[0] == LEGBUS_USB) usbLeg = 0;
-  else if (bus[1] == LEGBUS_USB) usbLeg = 1;
+  const bool uD = wantDown && bus[0] == LEGBUS_USB, uU = wantUp && bus[1] == LEGBUS_USB;
+  if (uD && uU) usbLeg = 2;                            // dual-USB CAT
+  else if (uD)  usbLeg = 0;
+  else if (uU)  usbLeg = 1;
   const LegProfile& d = LEG_RADIOS[model[0]];
   const LegProfile& u = LEG_RADIOS[model[1]];
   DualRig* dr = new (std::nothrow) DualRig(down, up, usbLeg,
@@ -11567,6 +11668,15 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   // reason. The adapter's own driver handles framing; CI-V is 8N1 either way.
   if (extStream) { _stream = extStream; (void)baud; (void)uartNum;
                    (void)rxPin; (void)txPin; return; }
+  _stream = &civUartOpen(_pinMode, baud, uartNum, rxPin, txPin);
+}
+
+// The shared Grove-UART opener declared in rig.h. Body unchanged from the
+// bench-verified CivRig::begin() it was lifted out of (0.9.69); the only edit is
+// that the wiring mode arrives as a parameter instead of a member, so dual-rig
+// legs can reach the same single-wire path.
+HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
+                            int rxPin, int txPin) {
   static HardwareSerial* hs = nullptr;   // construct once, reuse on re-begin
   if (!hs) hs = new HardwareSerial(uartNum);
 
@@ -11581,7 +11691,7 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   if (lastB >= 0 && lastB != lastA) gpio_reset_pin((gpio_num_t)lastB);
   lastA = lastB = -1;
 
-  if (_pinMode == 0) {
+  if (pinMode == 0) {
     // Normal, recommended path: separate wires. G2 = TX (push-pull), G1 = RX.
     hs->end();                                   // release any prior pin bindings
     hs->begin(baud, SERIAL_8N1, rxPin, txPin);
@@ -11590,10 +11700,12 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
     // Single-pin CI-V: one shared GPIO carries both directions, like a real CI-V
     // one-wire bus. The line idles near 3.3 V (UART mark, held by the pull-up) and is
     // pulled low only for data. An external pull-up (the radio's CI-V bus and/or a
-    // level-shifter) should still be present for real communication. UNVERIFIED
-    // on-air -- see CIV_SINGLE_PIN.md and mind the 5 V / 3.3 V cautions before
-    // connecting a radio.
-    int pin = (_pinMode == 2) ? rxPin : txPin;   // 1 -> tx pin (G2), 2 -> rx pin (G1)
+    // level-shifter) should still be present for real communication. CONFIRMED on
+    // hardware (IC-821: bidirectional CI-V -- frequency reads and ACKs -- over one
+    // shared open-drain wire); this comment previously said UNVERIFIED, which had
+    // been true before that bench session and contradicted CIV_SINGLE_PIN.md.
+    // Mind the 5 V / 3.3 V cautions in that document before connecting a radio.
+    int pin = (pinMode == 2) ? rxPin : txPin;   // 1 -> tx pin (G2), 2 -> rx pin (G1)
 
     // Single-pin CI-V setup (verified on the bench step by step):
     //  1. begin(pin, pin) puts BOTH UART TX and RX on the chosen pad. This is the
@@ -11626,7 +11738,7 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
     Serial.printf("[CI-V 1-pin] G%d ready (idle=%d)\n", pin, digitalRead(pin));
   }
 
-  _stream = hs;
+  return *hs;
 }
 
 // Raw byte write for the serial-terminal diagnostic: push arbitrary bytes onto
@@ -14497,7 +14609,15 @@ namespace {
     char     key[40];
   };
   SerialDev s_serDev[4];
-  uint8_t   s_serDevN = 0;
+  // VOLATILE + a release barrier before the count is bumped (see onDev): this is
+  // written on the USB host's task and read on the main task. The entry must be
+  // fully populated BEFORE the count that publishes it becomes visible, or a
+  // reader can see s_serDevN include a half-written label/key. This is publication
+  // ordering, not mutual exclusion -- adds are append-only and the array is only
+  // reset while no reader is mid-scan (host start), which is what makes that
+  // sufficient here.
+  volatile uint8_t s_serDevN = 0;
+  volatile uint32_t s_lastDevMs = 0;   // when the newest adapter appeared (quiet-period timing)
 
   // Stable identity across replugs: serial number when the adapter reports one
   // (FTDI/CP210x usually do, CH340 usually does not), else VID:PID + address.
@@ -14535,7 +14655,9 @@ namespace {
              (d.product && *d.product) ? d.product : "serial",
              (unsigned)d.vid, (unsigned)d.pid);
     makeKey(e.key, sizeof(e.key), d);
+    std::atomic_thread_fence(std::memory_order_release);   // entry complete before it is counted
     s_serDevN++;
+    s_lastDevMs = millis();
   }
 
   void consoleDown() {
@@ -15068,9 +15190,19 @@ namespace {
       setRotErr(m);
       return false;
     }
-    // Let devices enumerate; the callback fills s_serDev.
+    // Let devices enumerate; the callback fills s_serDev. Stopping at the FIRST
+    // device made the adapter list depend on enumeration order -- fine when only
+    // one adapter is expected, wrong as soon as two are (dual-USB CAT, or CAT plus
+    // a USB rotator, especially through a hub where the devices come up
+    // staggered). Wait instead for a QUIET PERIOD: keep going until nothing new
+    // has appeared for a while, bounded by the same overall cap as before.
     const uint32_t t0 = millis();
-    while (millis() - t0 < 2500 && s_serDevN == 0) delay(25);
+    const uint32_t QUIET_MS = 400;
+    while (millis() - t0 < 2500) {
+      delay(25);
+      if (s_serDevN == 0) continue;                       // nothing yet: keep waiting
+      if (millis() - s_lastDevMs >= QUIET_MS) break;      // settled
+    }
     return true;
   }
 
@@ -15090,6 +15222,10 @@ void cat2Configure(const char* key) {
 }
 
 bool cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
+  // Already open: report success WITHOUT reconfiguring. To change the adapter or
+  // the line settings, the caller must cat2End() first -- which App::usbCatTeardown()
+  // does on every settings re-apply. (0.9.68 shipped without that teardown, so a
+  // baud/model/adapter change on the uplink leg silently kept the old session.)
   if (s_cat2Active && s_cdc2) return true;
   s_cat2Err[0] = 0;
   if (!s_host) {
@@ -19527,23 +19663,35 @@ bool Settings::load() {
   strncpy(catUsbKey, d["catusbkey"] | "", sizeof(catUsbKey)-1);
   catUsbKey[sizeof(catUsbKey)-1] = 0;
   consoleLog = d["conslog"] | false;
-  // Bounds-check against the LAST enumerator, not a hardcoded one. This read
-  // `> CAT_RIGCTL` (2), which silently reset a saved CAT_USB (3) to CAT_WIRED on
-  // every load: the setting survived in RAM until reboot, then reverted -- so a
-  // build with USB CAT selected came back up driving the G1/G2 UART instead, and
-  // the USB path was never entered at all. The clamp was written before CAT_USB
-  // existed and was never revisited when it was added.
+  // Validate against an EXPLICIT WHITELIST, never a range.
   //
-  // When USB CAT is compiled out, a config that selects it must still fall back to
-  // something usable rather than leave an unhandled value.
+  // This clamp has now silently discarded a saved transport TWICE, each time by
+  // the same mechanism: it was written as `> <the last enumerator at the time>`,
+  // and the next transport added to the enum inherited a bound that predates it.
+  //   * It read `> CAT_RIGCTL` (2) when CAT_USB (4) was added: a saved USB config
+  //     came back up driving the G1/G2 UART, and the USB path was never entered.
+  //   * It read `> CAT_USB` (4) when CAT_DUAL (5) was added in 0.9.68: a saved
+  //     native dual-radio config reverted to wired CI-V on every reboot, which
+  //     could seize the Grove UART out from under a Grove GPS or rotator.
+  // A range check silently couples this function to the enum's growth. A switch
+  // does not: a new enumerator either appears here or the compiler's
+  // -Wswitch warning flags it, and either way a wrong value lands in default.
+  switch (catType) {
+    case CAT_WIRED:
+    case CAT_NET:
+    case CAT_RIGCTL:
+    case CAT_RIGCTL_GROVE:
+    case CAT_DUAL:            // Grove/LAN legs need no USB support to be valid
+      break;
 #if CARDSAT_HAS_USBCAT
-  if (catType > CAT_USB) catType = CAT_WIRED;
+    case CAT_USB: break;
 #else
-  // CAT_USB not built: only that one value is invalid. CAT_RIGCTL_GROVE (3) is a
-  // valid no-USB transport (rigctl over the Grove UART), so clamping at > CAT_RIGCTL
-  // (2) wrongly discarded a saved Grove config. Reset ONLY CAT_USB to wired.
-  if (catType == CAT_USB || catType > CAT_RIGCTL_GROVE) catType = CAT_WIRED;
+    case CAT_USB:             // built without USB CAT: fall back to something usable
 #endif
+    default:
+      catType = CAT_WIRED;
+      break;
+  }
   strncpy(catHost, d["cathost"] | "", sizeof(catHost)-1); catHost[sizeof(catHost)-1]=0;
   catPort    = d["catport"] | (uint16_t)50001;
   if (catPort == 0) catPort = 50001;
@@ -20398,6 +20546,22 @@ void App::setup() {
   resumeLotwIfPending();
 }
 
+// Release every USB CAT resource this firmware can hold, in the only safe order:
+// stream pointers first (they alias Streams that are about to die -- fix31), then
+// CAT-B, then CAT-A. UsbSerial deliberately keeps the shared host alive while any
+// port remains, so ending CAT-B before CAT-A is what lets the final end() actually
+// release the host and give the console back.
+void App::usbCatTeardown() {
+#if CARDSAT_HAS_USBCAT
+  const bool anyUsb = UsbSerial::active() || UsbSerial::cat2Active();
+  if (!anyUsb) return;
+  // DualRig clears every USB leg on a null attach; a single rig clears its one.
+  if (rig) rig->setExternalStream(nullptr);
+  UsbSerial::cat2End();     // no-op when CAT-B was never opened
+  UsbSerial::end();         // releases the host once no port (or rotator) remains
+#endif
+}
+
 void App::applyRadioFromCfg() {
   RadioModel m = (RadioModel)cfg.radioModel;
   uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[m].defaultBaud;
@@ -20407,11 +20571,7 @@ void App::applyRadioFromCfg() {
   // the old transport bound while the new rig object never gets a stream -- CAT silently dies
   // or binds the wrong adapter after a model/baud/CI-V/adapter change (H7). Dropping the stream
   // first, then end(), leaves the reconciler to rebuild cleanly against the new rig next pass.
-  const bool usbWasActive = UsbSerial::active();
-  if (usbWasActive) {
-    if (rig) rig->setExternalStream(nullptr);   // drop the dangling pointer before end()
-    UsbSerial::end();                           // frees/rebinds on the next reconciler pass
-  }
+  usbCatTeardown();     // BOTH ports: see the note on the declaration
 #endif
   if (rig) { delete rig; rig = nullptr; }
   if (cfg.catType == CAT_DUAL) {
@@ -20419,8 +20579,15 @@ void App::applyRadioFromCfg() {
     // Physical-bus conflicts are refused HERE, at the single choke point every
     // config path funnels through, so a stale or hand-edited config can never
     // put two legs on one wire (the matrix in DUALRIG_MAINFW_INTEGRATION_SCOPE.md).
-    const bool aG = cfg.dualBus[0] == LEGBUS_GROVE, bG = cfg.dualBus[1] == LEGBUS_GROVE;
-    const bool aU = cfg.dualBus[0] == LEGBUS_USB,   bU = cfg.dualBus[1] == LEGBUS_USB;
+    // A leg set to "None" claims NO bus: its bus field is stale UI state, not a
+    // resource reservation. Without this, configuring a single-leg dual rig whose
+    // unused leg still showed "Grove" was refused as a two-Grove conflict.
+    const bool haveD = cfg.dualModel[0] != LEG_NONE, haveU = cfg.dualModel[1] != LEG_NONE;
+    if (!haveD && !haveU) { setStatus("Dual: set a downlink or uplink radio", 5000); return; }
+    const bool aG = haveD && cfg.dualBus[0] == LEGBUS_GROVE;
+    const bool bG = haveU && cfg.dualBus[1] == LEGBUS_GROVE;
+    const bool aU = haveD && cfg.dualBus[0] == LEGBUS_USB;
+    const bool bU = haveU && cfg.dualBus[1] == LEGBUS_USB;
     if (aG && bG) { setStatus("Dual: both legs on Grove - one UART", 5000); return; }
     if (aU && bU) {
       // Dual-USB CAT (Phase 3): two radios on the one PHY through a hub -- CAT-A
@@ -20440,12 +20607,24 @@ void App::applyRadioFromCfg() {
 #if !CARDSAT_HAS_USBCAT
     if (aU || bU) { setStatus("Dual: no USB CAT in this build", 5000); return; }
 #endif
-    if (cfg.dualModel[1] < LEG_NONE && LEG_RADIOS[cfg.dualModel[1]].rxOnly)
-      setStatus("Dual: uplink leg is RX-only", 4000);   // warn, don't refuse
+    if (haveU && LEG_RADIOS[cfg.dualModel[1]].rxOnly) {
+      // REFUSE, don't warn. A receive-only radio on the uplink leg produces a
+      // configuration that looks complete and can never transmit -- and because a
+      // status message is transient, the operator is left with no standing
+      // indication of why uplink Doppler does nothing. Refusing at the same choke
+      // point as the bus conflicts keeps every "this cannot work" answer in one
+      // place. (0.9.68 warned and proceeded; flagged in the post-release audit.)
+      setStatus(String(LEG_RADIOS[cfg.dualModel[1]].name) + " is receive-only - not an uplink", 6000);
+      return;
+    }
     rig = makeDualRig(cfg.dualModel, cfg.dualBus, cfg.dualCiv, cfg.dualBaud,
                       cfg.dualHost, cfg.dualPort, cfg.dualUser, cfg.dualPass);
     if (!rig) { setStatus("Dual: legs not configured", 4000); return; }
     rig->setCmdDelay(cfg.catDelayMs);
+    // CI-V wiring mode, before begin(): a GROVE leg opens the same on-board UART as
+    // wired CI-V and needs the same one-wire/two-wire choice. Most half-duplex Icoms
+    // present one-wire CI-V, so this is the usual case for an Icom leg on Grove.
+    if (aG || bG) rig->setPinMode(cfg.civPinMode);
 #if CARDSAT_HAS_USBCAT
     // A USB leg starts like single-rig CAT_USB: the reconciler in loop() opens
     // the adapter and attaches the stream when the radio is engaged; DualRig
@@ -20513,9 +20692,7 @@ void App::yieldGroveIfTaken(const char* who) {
 // claimant ('who') wins and the other Grove user is turned off, with a clear message --
 // so the two peripherals can never initialize the same pins at once.
 bool App::groveCatVsGpsArbitrate(const char* who) {
-  bool catGrove = (cfg.catType == CAT_RIGCTL_GROVE) ||
-                  (cfg.catType == CAT_DUAL &&
-                   (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_GROVE));
+  bool catGrove = (cfg.catType == CAT_RIGCTL_GROVE) || catUsesGroveWire();
   bool gpsGrove = cfg.useGps &&
                   (cfg.gpsSource == GPS_SRC_GROVE_9600 || cfg.gpsSource == GPS_SRC_GROVE_115K);
   if (!(catGrove && gpsGrove)) return false;    // no direct conflict
@@ -25102,9 +25279,12 @@ void App::webdSendStatusJson() {
     j += "\"wifi\":\""; j += (wc ? "up" : "down"); j += "\",";
     j += "\"ip\":\""; j += (wc ? WiFi.localIP().toString() : String("")); j += "\",";
     j += "\"rssi\":"; j += (wc ? (long)WiFi.RSSI() : (long)0); j += ","; }
-  { int bl = M5.Power.getBatteryLevel();
-    // isCharging() returns a tri-state enum (charging / discharging / unknown).
-    bool chg = (M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging);
+  { // Same source of truth as the device's own screens. M5.Power.isCharging() is
+    // NOT usable on the Cardputer ADV (no charger-status line reaches it), which is
+    // why batteryCharging() infers from the voltage trend; the web API must not
+    // quietly report the value the charge screen was rewritten to stop trusting.
+    int bl = batteryPercent();
+    bool chg = batteryCharging();
     j += "\"batt\":"; j += (bl >= 0 ? String(bl) : String("null")); j += ",";
     j += "\"charging\":"; j += (chg ? "true" : "false"); j += ","; }
   j += "\"heapFree\":"; j += (long)ESP.getFreeHeap(); j += ",";
@@ -25774,7 +25954,11 @@ void App::loop() {
   // engaged -- which held the host, kept the console down, and made the rotator refuse the
   // radio's old adapter with "That adapter is the radio's" long after the radio stopped
   // using it.
-  if (catUsesUsb() || UsbSerial::active()) {
+  // The gate must test BOTH ports. Testing CAT-A alone meant that switching away
+  // from a dual-USB config (to LAN, Grove, or a single radio) skipped this whole
+  // block, stranding CAT-B as an invisible owner of a CDC, an adapter and the USB
+  // host -- with the console never coming back. Found in the post-0.9.68 audit.
+  if (catUsesUsb() || UsbSerial::active() || UsbSerial::cat2Active()) {
     // want is only ever true for an actual USB radio (single-rig CAT_USB, or a
     // CAT_DUAL leg whose bus is USB). If neither holds any longer, want is
     // false, so the teardown branch below fires and releases the stale session.
@@ -25782,14 +25966,18 @@ void App::loop() {
     // Which radio is on the adapter decides the line settings. For CAT_DUAL it is
     // the USB LEG's profile (LEG_RADIOS), not the single-rig radioModel; the old
     // Yaesu 5-byte binary family is the 8N2 one in both catalogs.
+    // A "None" leg has no radio and therefore no USB port, whatever its stale bus
+    // field says -- so it must not be picked as THE usb leg, nor make dualBoth true.
+    const bool dHave = cfg.dualModel[0] != LEG_NONE, uHave = cfg.dualModel[1] != LEG_NONE;
     const int dLeg = (cfg.catType == CAT_DUAL)
-                       ? (cfg.dualBus[0] == LEGBUS_USB ? 0
-                          : cfg.dualBus[1] == LEGBUS_USB ? 1 : -1) : -1;
+                       ? ((dHave && cfg.dualBus[0] == LEGBUS_USB) ? 0
+                          : (uHave && cfg.dualBus[1] == LEGBUS_USB) ? 1 : -1) : -1;
     // Dual-USB CAT: both legs on USB. CAT-A (begin/stream) carries the DOWNLINK
     // (dLeg lands on 0 above); CAT-B (cat2*) carries the uplink, brought up right
     // after CAT-A engages, and re-tried below if its adapter shows up late.
     const bool dualBoth = (cfg.catType == CAT_DUAL) &&
-                          cfg.dualBus[0] == LEGBUS_USB && cfg.dualBus[1] == LEGBUS_USB;
+                          dHave && cfg.dualBus[0] == LEGBUS_USB &&
+                          uHave && cfg.dualBus[1] == LEGBUS_USB;
     if (want && !UsbSerial::active()) {
       uint32_t baud; bool yaesu;
       if (dLeg >= 0) {
@@ -25963,11 +26151,11 @@ void App::loop() {
             Logstore::rawf(Logstore::LOG_USB, "# CAT-B up (retry): %s", UsbSerial::cat2DeviceName());
         }
       }
-    } else if (!want && UsbSerial::active()) {
-      if (rig) rig->setExternalStream(nullptr);   // drop the pointers BEFORE the Streams die
-                                                  // (DualRig clears EVERY USB leg on nullptr)
-      UsbSerial::cat2End();                        // CAT-B first: host must outlive its ports
-      UsbSerial::end();                            // frees the host stack; console returns
+    } else if (!want && (UsbSerial::active() || UsbSerial::cat2Active())) {
+      // One teardown, shared with applyRadioFromCfg(). Note the condition also tests
+      // CAT-B: a config change that drops the USB legs can leave CAT-B as the only
+      // remaining owner, and testing CAT-A alone would strand it holding the host.
+      usbCatTeardown();
       // Record the teardown's RESULT. A disengage that fails to release the IDF
       // stack is invisible at the UI (the heap even looks fine) and only surfaces
       // one engage LATER as a 259 -- which is exactly how the bench lost four
@@ -30882,9 +31070,9 @@ void App::drawAbout() {
   }
   line(String("WiFi: ") + (net.connected() ? WiFi.localIP().toString() : String("not connected")));
   {
-    int b = M5.Power.getBatteryLevel();
+    int b = batteryPercent();
     String s = String("Battery: ") + (b < 0 ? String("n/a") : String(b) + "%");
-    if ((int)M5.Power.isCharging() == 1) s += " (charging)";  // 1=charging; ignore "unknown" (2)
+    if (batteryCharging()) s += " (charging)";   // inferred from trend; see batteryCharging()
     line(s);
   }
   line(String("Heap ") + String(ESP.getFreeHeap() / 1024) + "K  blk " +
@@ -34056,6 +34244,10 @@ void App::drawHelp() {
     " uplink radios driven",
     " natively (27-radio list)",
     " legs: Grove / USB / LAN",
+    " leg=None: that half is",
+    "  simply not CAT driven",
+    " Grove honors CI-V wiring",
+    "  incl 1-pin (most Icoms)",
     " both legs USB ok (hub,",
     "  nominate adapters: a)",
     " IC-705 LAN = its own WiFi",
@@ -38173,9 +38365,21 @@ void App::drawDualRigLocal() {
 
   // Status line: composite readiness + the loudest config problem, if any.
   canvas.setCursor(6, 18);
-  const bool bothG = cfg.dualBus[0] == LEGBUS_GROVE && cfg.dualBus[1] == LEGBUS_GROVE;
-  const bool bothU = cfg.dualBus[0] == LEGBUS_USB   && cfg.dualBus[1] == LEGBUS_USB;
-  if (bothG) {
+  const bool haveD = cfg.dualModel[0] != LEG_NONE, haveU = cfg.dualModel[1] != LEG_NONE;
+  const bool bothG = haveD && haveU &&
+                     cfg.dualBus[0] == LEGBUS_GROVE && cfg.dualBus[1] == LEGBUS_GROVE;
+  const bool bothU = haveD && haveU &&
+                     cfg.dualBus[0] == LEGBUS_USB   && cfg.dualBus[1] == LEGBUS_USB;
+  if (!haveD && !haveU) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.print("set a DN and/or UP radio (ENTER)");
+  } else if (!haveD || !haveU) {
+    // One leg deliberately unset: say which half is driven, so "half of it isn't
+    // working" is never the operator's first reading of a working configuration.
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.printf("%s only - %s not CAT controlled",
+                  haveD ? "downlink" : "uplink", haveD ? "uplink" : "downlink");
+  } else if (bothG) {
     canvas.setTextColor(CL_RED, CL_BLACK);
     canvas.print("! both legs on Grove - one UART");
   } else if (bothU && !(cfg.dualUsbKey[0][0] && cfg.dualUsbKey[1][0] &&
@@ -38184,9 +38388,10 @@ void App::drawDualRigLocal() {
     // nominated onto different adapters. Say so until that's true.
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.print("! 2xUSB: nominate both adapters (a)");
-  } else if (cfg.dualModel[1] < LEG_NONE && LEG_RADIOS[cfg.dualModel[1]].rxOnly) {
-    canvas.setTextColor(CL_YELLOW, CL_BLACK);
-    canvas.print("! uplink leg is a receive-only radio");
+  } else if (haveU && LEG_RADIOS[cfg.dualModel[1]].rxOnly) {
+    // Red, not yellow: this configuration is refused at engage, not merely odd.
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.print("! UP leg is receive-only - cannot TX");
   } else {
     canvas.setTextColor(CL_CYAN, CL_BLACK);
     canvas.printf("legs -> one rig  %s",
@@ -38533,11 +38738,18 @@ int App::batteryMilliVolts() {
 // "charging", a clear fall latches "discharging"; small changes hold the last verdict so the
 // readout doesn't flicker on ADC noise.
 bool App::batteryCharging() {
+  uint32_t now = millis();
+  // Serve the latched verdict without touching the ADC until the window elapses.
+  // This is THE charge-state accessor for the whole firmware -- the charge screen,
+  // the About page and /api/status all call it -- so it has to be cheap enough to
+  // sit in a draw path. (0.9.68 left /api/status and About reading M5.Power's
+  // isCharging() directly, which on the ADV is exactly the unusable value this
+  // function exists to replace: the web page could contradict the device.)
+  if (battTrendMv != 0 && (now - battTrendMs) < 30000) return battChargeState == 1;
   int mv = batteryMilliVolts();
   if (mv <= 0) return battChargeState == 1;
-  uint32_t now = millis();
   if (battTrendMv == 0) { battTrendMv = mv; battTrendMs = now; return false; }
-  if (now - battTrendMs >= 30000) {                  // evaluate every 30 s
+  {
     int delta = mv - battTrendMv;
     if (delta >  20) battChargeState = 1;            // rising >20 mV/30s -> charging
     else if (delta < -20) battChargeState = 0;       // falling -> on battery
@@ -38547,6 +38759,7 @@ bool App::batteryCharging() {
   }
   return battChargeState == 1;
 }
+
 
 int App::batteryPercent() {
   // Prefer M5Unified's getBatteryLevel(): on the ADV this uses a working internal ADC read
@@ -43510,7 +43723,7 @@ void App::kessSeedRound(uint16_t seed) {
   const int HtInc = 10, DefBW = 37, RandH = 120;
   int x = 2;                                            // virtual x
   int bIdx = 0; int stCol[2] = {30, 210};
-  int bCx[24]; int bTop[24]; int nB = 0;
+  int bCx[24]; int nB = 0;         // roof heights live in K.sky[]; no parallel array needed
   while (x < 638) {
     switch (slope) {                                    // per-building height walk
       case 1: newHt += HtInc; break;                    // upward
@@ -43528,7 +43741,7 @@ void App::kessSeedRound(uint16_t seed) {
     int c0 = (int)(x * 240L / 640), c1 = (int)((x + bw) * 240L / 640);
     uint8_t top = (uint8_t)((335 - bh) * 135L / 350);
     for (int c = c0; c < c1 && c < 240; ++c) K.sky[c] = top;
-    if (nB < 24) { bCx[nB] = (c0 + c1) / 2; bTop[nB] = top; nB++; }
+    if (nB < 24) { bCx[nB] = (c0 + c1) / 2; nB++; }
     x += bw + 2;
     (void)bIdx;
   }
@@ -43718,7 +43931,7 @@ void App::drawKessler() {
   canvas.printf("%d P2", K.wins[1]);
   // Solar wind arrow (magnitude = GORILLAS wind units).
   int wl2 = K.wind; if (wl2 > 15) wl2 = 15; if (wl2 < -15) wl2 = -15;
-  canvas.drawFastHLine(120 - abs(wl2), 7, abs(wl2) * 2 ? abs(wl2) * 2 : 1, CL_ORANGE);
+  canvas.drawFastHLine(120 - abs(wl2), 7, abs(wl2) ? abs(wl2) * 2 : 1, CL_ORANGE);
   if (wl2) {
     int tip = 120 + wl2, dd = (wl2 > 0) ? -1 : 1;
     canvas.drawLine(tip, 7, tip + dd * 3, 5, CL_ORANGE);
@@ -45504,7 +45717,8 @@ bool App::telSessAlloc() {
 
 void App::telSessFree() {
   if (telSess) { free(telSess); telSess = nullptr; }
-  telRow = telCol = 0; telAnsi = 0; telPrnLen = 0; telPendCR = false; telScrollUp = 0;
+  telRow = telCol = 0; telAnsi = 0; telIac = 0; telIacCmd = 0;
+  telPrnLen = 0; telPendCR = false; telScrollUp = 0;
 }
 
 void App::telLoad() {
@@ -45695,12 +45909,59 @@ void App::telPrnByte(uint8_t c) {
   telPrnLastMs = millis();
 }
 
+// ---- Telnet option negotiation (RFC 854/1143), minimal but well-behaved ------
+//  A real Telnet daemon opens by offering options -- echo, suppress-go-ahead,
+//  terminal type, window size. 0.9.68 had no IAC handling at all: those bytes fell
+//  through the sanitizer and were drawn as text, and worse, a server that waits for
+//  a reply before presenting a login could simply hang. (Named "Telnet" while
+//  speaking only raw TCP; raised in the post-0.9.68 audit.)
+//
+//  This is deliberately a REFUSER, not an implementation: every DO/DONT gets WONT
+//  and every WILL/WONT gets DONT, which is the correct, spec-compliant way to say
+//  "I support no options" and leaves the session in the line-oriented NVT mode this
+//  terminal is built around. Subnegotiation blocks (SB ... SE) are swallowed whole.
+//  Returns true if the byte was consumed by negotiation and must not be displayed.
+bool App::telIacByte(uint8_t c) {
+  const uint8_t IAC = 255, SE = 240, SB = 250;
+  const uint8_t WILL = 251, WONT = 252, DO = 253, DONT = 254;
+  switch (telIac) {
+    case 0:
+      if (c != IAC) return false;
+      telIac = 1;
+      return true;
+    case 1:
+      if (c == IAC) { telIac = 0; return false; }   // IAC IAC = a literal 0xFF byte
+      if (c == WILL || c == WONT || c == DO || c == DONT) { telIacCmd = c; telIac = 2; return true; }
+      if (c == SB) { telIac = 3; return true; }     // subnegotiation: swallow to SE
+      telIac = 0;                                    // standalone command (NOP, GA, ...)
+      return true;
+    case 2: {                                        // c is the option code
+      uint8_t reply = (telIacCmd == DO || telIacCmd == DONT) ? WONT : DONT;
+      if (telClient.connected()) {
+        const uint8_t f[3] = { IAC, reply, c };
+        telClient.write(f, 3);
+      }
+      telIac = 0;
+      return true;
+    }
+    case 3:                                          // inside SB
+      if (c == IAC) telIac = 4;
+      return true;
+    case 4:
+      telIac = (c == SE) ? 0 : 3;                    // IAC SE ends it; IAC IAC stays in SB
+      return true;
+  }
+  telIac = 0;
+  return false;
+}
+
 // ---- ANSI sanitizer: one received byte -> screen grid + printer line -------
 //  A compact state machine that DROPS escape sequences (CSI/OSC/two-byte ESC)
 //  rather than interpreting them, so the line-oriented outputs never show raw
 //  control garbage. Same shape as the reference sketch's processRemoteByte.
 
 void App::telRemoteByte(uint8_t c) {
+  if (telIacByte(c)) return;        // Telnet negotiation never reaches the display
   switch (telAnsi) {
     case 0:  // NORMAL
       if (c == 0x1B) { telAnsi = 1; }
@@ -59718,9 +59979,10 @@ void App::drawSettings() {
   if (cfg.catType == CAT_DUAL) {
     const uint8_t dm = cfg.dualModel[0], um = cfg.dualModel[1];
     rows[109] = String("Dual-Rig setup (2 radios) > ") +
-                ((dm == LEG_NONE && um == LEG_NONE)
-                   ? String("set legs")
-                   : String(LEG_RADIOS[dm].name) + "+" + LEG_RADIOS[um].name);
+                ((dm == LEG_NONE && um == LEG_NONE) ? String("set legs")
+                 : (um == LEG_NONE) ? String(LEG_RADIOS[dm].name) + " (DL only)"
+                 : (dm == LEG_NONE) ? String(LEG_RADIOS[um].name) + " (UL only)"
+                 : String(LEG_RADIOS[dm].name) + "+" + LEG_RADIOS[um].name);
   } else {
     rows[109] = String("Dual-Rig setup (Stick) >") +
                 (drLink == 1 ? "  linked" : drLink == 2 ? "  no link" : "");

@@ -614,3 +614,26 @@ real radio from the main firmware.
   (RS-44 currently carries a negative MEAN_MOTION_DOT). The solar bracket should
   appear only on the B* path. The decay-watch flag should no longer fire on
   high-eccentricity objects.
+
+## 0.9.69 — single-leg dual rig, and single-wire CI-V on a leg
+
+- **Leg = None**: set DN to a radio and UP to None (and the reverse). Engage; the
+  configured half should track Doppler normally and the other half should do
+  nothing. The screen should read "downlink only - uplink not CAT controlled",
+  the radio name `<rig> (DL only)`, and the Settings row `... > IC-705 (DL only)`.
+  Both legs None should refuse with "set a downlink or uplink radio".
+- **A None leg must claim no bus**: with UP = None but its bus field still showing
+  Grove, a DN Grove leg must engage (this was refused as a two-Grove conflict
+  before 0.9.69). Likewise a None leg on USB must not consume an adapter, and must
+  not make CardSat think the console is owned.
+- **Single-wire CI-V on a Grove leg (NEW PATH, needs a radio)**: an Icom leg on
+  Grove with *Settings -> CI-V wiring* = **1-pin G2** or **1-pin G1**. Before
+  0.9.69 a leg opened a two-wire UART only, so a one-wire radio never answered.
+  Legs now go through the same `civUartOpen()` the wired path uses. Verify
+  frequency writes AND read-back (the read is what proves the shared pad is
+  receiving), on the same radio/wiring already known good in wired CAT_WIRED mode
+  — that comparison is the point of the test.
+- **Wiring-mode changes while engaged**: switch CI-V wiring between TX/RX and
+  1-pin with a dual rig configured, and confirm the pins are released and rebound
+  (the opener tracks the previously bound pads globally now that two backends
+  share it).

@@ -123,5 +123,10 @@ dependable station, prefer **TX/RX (G2/G1)**.
 ---
 
 *All CI-V interfacing on the Cardputer is at your own risk. The GPIOs are not 5 V
-tolerant; verify voltages with a meter before connecting a radio. This single-pin mode
-in particular is unverified on hardware.*
+tolerant; verify voltages with a meter before connecting a radio.*
+
+*(This closing line previously read "this single-pin mode in particular is unverified
+on hardware", contradicting the confirmation banner at the top of this document. The
+banner is the current status — bidirectional CI-V was verified on an IC-821. The stale
+sentence was left behind when the mode was confirmed and is corrected here, along with
+the matching comment in `civ.cpp`.)*

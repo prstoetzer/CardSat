@@ -281,14 +281,16 @@ PlainCatRig::PlainCatRig(LegModel m, uint8_t civAddr, uint32_t baud)
     _baud(baud ? baud : LEG_RADIOS[m].baud) {}
 
 void PlainCatRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
-  (void)uartNum;
   if (baud) _baud = baud;
   if (extStream) { _stream = extStream; return; }   // USB leg: adapter already open
-  // Grove leg: plain 8N1 TTL on G1/G2, same UART claim as the other Grove CAT
-  // paths (the CAT_DUAL conflict guard has already ensured we're the only Grove
-  // claimant). Serial1 is the shared on-board UART object, as in RigctlGroveRig.
-  Serial1.begin(_baud, SERIAL_8N1, rxPin, txPin);
-  _stream = &Serial1;
+  // Grove leg: go through the SHARED CI-V UART opener, so a leg honors the CI-V
+  // wiring mode just like the wired path -- including SINGLE-WIRE CI-V, which is
+  // how nearly every half-duplex Icom in the leg catalog presents the bus (a 3.5 mm
+  // jack carrying both directions). Before 0.9.69 this called Serial1.begin(rx,tx)
+  // directly, which is two-wire only: a one-wire radio simply never answered.
+  // Yaesu/Kenwood legs pass pinMode 0 and get the ordinary two-wire setup.
+  // (The CAT_DUAL conflict guard has already ensured we are the only Grove claimant.)
+  _stream = &civUartOpen(_pinMode, _baud, uartNum, rxPin, txPin);
 }
 
 bool PlainCatRig::canReadFreq() const {
@@ -371,8 +373,12 @@ bool PlainCatRig::readFreq(freq_t& hzOut) {
 DualRig::DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud)
   : _down(down), _up(up), _usbLeg(usbLeg) {
   _baud[0] = downBaud; _baud[1] = upBaud;
-  snprintf(_nameBuf, sizeof(_nameBuf), "Dual %s+%s",
-           _down ? _down->name() : "?", _up ? _up->name() : "?");
+  // Name says what is actually driven, so a one-legged setup is never mistaken for
+  // a broken two-legged one.
+  if (_down && _up)      snprintf(_nameBuf, sizeof(_nameBuf), "Dual %s+%s", _down->name(), _up->name());
+  else if (_down)        snprintf(_nameBuf, sizeof(_nameBuf), "%s (DL only)", _down->name());
+  else if (_up)          snprintf(_nameBuf, sizeof(_nameBuf), "%s (UL only)", _up->name());
+  else                   snprintf(_nameBuf, sizeof(_nameBuf), "Dual (no legs)");
 }
 
 DualRig::~DualRig() {
@@ -391,8 +397,14 @@ void DualRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   if (_up   && !legIsUsb(1)) _up->begin(_baud[1], uartNum, rxPin, txPin);
 }
 
+// Ready when every leg that EXISTS is ready. A "None" leg is not a missing leg --
+// it is a deliberate choice that this half of the link is not CAT-controlled, so
+// it must not hold the composite permanently un-ready.
 bool DualRig::ready() const {
-  return _down && _up && _down->ready() && _up->ready();
+  if (!_down && !_up) return false;
+  if (_down && !_down->ready()) return false;
+  if (_up   && !_up->ready())   return false;
+  return true;
 }
 
 void DualRig::service() {
@@ -410,6 +422,13 @@ void DualRig::setReadBudgetMs(uint16_t ms) {
   Rig::setReadBudgetMs(ms);
   if (_down) _down->setReadBudgetMs(ms);
   if (_up)   _up->setReadBudgetMs(ms);
+}
+
+// Only a GROVE leg can use a wiring mode; the call is harmless on the others
+// (USB legs take the external-stream path, LAN legs ignore it entirely).
+void DualRig::setPinMode(uint8_t mode) {
+  if (_down) _down->setPinMode(mode);
+  if (_up)   _up->setPinMode(mode);
 }
 
 // Per-leg attach: the dual-USB reconciler binds each leg to its OWN CDC stream
@@ -450,6 +469,7 @@ bool DualRig::setSubMode (RigMode m) { return _down ? _down->setSubMode(m)   : f
 bool DualRig::readSubFreq (freq_t& hzOut) { return _down ? _down->readSubFreq(hzOut)  : false; }
 bool DualRig::readMainFreq(freq_t& hzOut) { return _up   ? _up->readMainFreq(hzOut)   : false; }
 bool DualRig::readPtt(bool& tx) { return _up ? _up->readPtt(tx) : false; }
+// Knob-follow reads the DOWNLINK. With no downlink leg there is nothing to follow.
 bool DualRig::canReadFreq() const { return _down && _down->canReadFreq(); }
 
 // ---------------------------------------------------------------------------
@@ -481,15 +501,23 @@ Rig* makeDualRig(const uint8_t model[2], const uint8_t bus[2], const uint8_t civ
                  const char user[2][24], const char pass[2][24]) {
   // Physical-bus conflicts (two Grove legs, two USB legs) are refused by the
   // settings UI and re-checked by the engage path; this factory only builds.
-  Rig* down = makeLegRig(model[0], bus[0], civ[0], baud[0],
-                         host[0], port[0], user[0], pass[0]);
-  Rig* up   = makeLegRig(model[1], bus[1], civ[1], baud[1],
-                         host[1], port[1], user[1], pass[1]);
-  if (!down || !up) { delete down; delete up; return nullptr; }
+  // A leg set to "None" is DELIBERATELY absent: that half of the link simply is not
+  // CAT-controlled, and Doppler for it goes nowhere. That covers the common station
+  // where only one radio speaks CAT -- an SSB downlink rig plus a hand-tuned HT on
+  // the uplink, or a CAT receiver alongside a transmitter with no computer port.
+  // Only a leg that was ASKED for and could not be built is an error.
+  const bool wantDown = (model[0] != LEG_NONE), wantUp = (model[1] != LEG_NONE);
+  if (!wantDown && !wantUp) return nullptr;             // nothing configured at all
+  Rig* down = wantDown ? makeLegRig(model[0], bus[0], civ[0], baud[0],
+                                    host[0], port[0], user[0], pass[0]) : nullptr;
+  Rig* up   = wantUp   ? makeLegRig(model[1], bus[1], civ[1], baud[1],
+                                    host[1], port[1], user[1], pass[1]) : nullptr;
+  if ((wantDown && !down) || (wantUp && !up)) { delete down; delete up; return nullptr; }
   int usbLeg = -1;
-  if (bus[0] == LEGBUS_USB && bus[1] == LEGBUS_USB) usbLeg = 2;   // dual-USB CAT
-  else if (bus[0] == LEGBUS_USB) usbLeg = 0;
-  else if (bus[1] == LEGBUS_USB) usbLeg = 1;
+  const bool uD = wantDown && bus[0] == LEGBUS_USB, uU = wantUp && bus[1] == LEGBUS_USB;
+  if (uD && uU) usbLeg = 2;                            // dual-USB CAT
+  else if (uD)  usbLeg = 0;
+  else if (uU)  usbLeg = 1;
   const LegProfile& d = LEG_RADIOS[model[0]];
   const LegProfile& u = LEG_RADIOS[model[1]];
   DualRig* dr = new (std::nothrow) DualRig(down, up, usbLeg,

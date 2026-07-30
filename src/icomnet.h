@@ -46,8 +46,10 @@ public:
   // and every capability that reads RADIOS[_model] is overridden below.
   IcomNetRig(uint8_t civAddr, const char* legName, const char* host, uint16_t port,
              const char* user, const char* pass)
-    : _model(RIG_NONE), _addr(civAddr), _host(host),
-      _ctlPort(port ? port : 50001), _user(user), _pass(pass), _plain(true) {
+    // Initializer order must match DECLARATION order (_plain sits next to _addr),
+    // or the compiler reorders it silently and -Wreorder fires.
+    : _model(RIG_NONE), _addr(civAddr), _plain(true), _host(host),
+      _ctlPort(port ? port : 50001), _user(user), _pass(pass) {
     snprintf(_nameBuf, sizeof(_nameBuf), "%s/LAN", legName ? legName : "leg");
   }
   ~IcomNetRig() override;

@@ -127,23 +127,35 @@ bool Settings::load() {
   strncpy(catUsbKey, d["catusbkey"] | "", sizeof(catUsbKey)-1);
   catUsbKey[sizeof(catUsbKey)-1] = 0;
   consoleLog = d["conslog"] | false;
-  // Bounds-check against the LAST enumerator, not a hardcoded one. This read
-  // `> CAT_RIGCTL` (2), which silently reset a saved CAT_USB (3) to CAT_WIRED on
-  // every load: the setting survived in RAM until reboot, then reverted -- so a
-  // build with USB CAT selected came back up driving the G1/G2 UART instead, and
-  // the USB path was never entered at all. The clamp was written before CAT_USB
-  // existed and was never revisited when it was added.
+  // Validate against an EXPLICIT WHITELIST, never a range.
   //
-  // When USB CAT is compiled out, a config that selects it must still fall back to
-  // something usable rather than leave an unhandled value.
+  // This clamp has now silently discarded a saved transport TWICE, each time by
+  // the same mechanism: it was written as `> <the last enumerator at the time>`,
+  // and the next transport added to the enum inherited a bound that predates it.
+  //   * It read `> CAT_RIGCTL` (2) when CAT_USB (4) was added: a saved USB config
+  //     came back up driving the G1/G2 UART, and the USB path was never entered.
+  //   * It read `> CAT_USB` (4) when CAT_DUAL (5) was added in 0.9.68: a saved
+  //     native dual-radio config reverted to wired CI-V on every reboot, which
+  //     could seize the Grove UART out from under a Grove GPS or rotator.
+  // A range check silently couples this function to the enum's growth. A switch
+  // does not: a new enumerator either appears here or the compiler's
+  // -Wswitch warning flags it, and either way a wrong value lands in default.
+  switch (catType) {
+    case CAT_WIRED:
+    case CAT_NET:
+    case CAT_RIGCTL:
+    case CAT_RIGCTL_GROVE:
+    case CAT_DUAL:            // Grove/LAN legs need no USB support to be valid
+      break;
 #if CARDSAT_HAS_USBCAT
-  if (catType > CAT_USB) catType = CAT_WIRED;
+    case CAT_USB: break;
 #else
-  // CAT_USB not built: only that one value is invalid. CAT_RIGCTL_GROVE (3) is a
-  // valid no-USB transport (rigctl over the Grove UART), so clamping at > CAT_RIGCTL
-  // (2) wrongly discarded a saved Grove config. Reset ONLY CAT_USB to wired.
-  if (catType == CAT_USB || catType > CAT_RIGCTL_GROVE) catType = CAT_WIRED;
+    case CAT_USB:             // built without USB CAT: fall back to something usable
 #endif
+    default:
+      catType = CAT_WIRED;
+      break;
+  }
   strncpy(catHost, d["cathost"] | "", sizeof(catHost)-1); catHost[sizeof(catHost)-1]=0;
   catPort    = d["catport"] | (uint16_t)50001;
   if (catPort == 0) catPort = 50001;

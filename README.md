@@ -23,6 +23,20 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.69:** a **correctness release** for the dual-radio feature, most of it
+> found by an external audit of v0.9.68 and by bench review. **Two release-blocking bugs
+> are fixed:** the new *Dual* CAT type was silently discarded on every reboot (a saved
+> dual configuration came back as wired CI-V), and changing radio settings while
+> dual-USB was engaged stranded the second CAT port holding the USB host, so the serial
+> console never returned. **Single-wire CI-V now works on a dual-rig leg** — it never
+> had, which mattered because most half-duplex Icoms present CI-V on one wire. Either
+> leg can now be set to **None**, so a station where only one radio has a computer port
+> is a first-class setup. Also: the web API can no longer contradict the device's own
+> battery reading, the Telnet client negotiates properly instead of printing option
+> bytes, receive-only radios are refused as uplinks, and USB enumeration waits for both
+> adapters instead of the first. See the
+> **[release notes](docs/releases/RELEASE_NOTES_0.9.69.md)**.
+
 > **New in v0.9.68:** **two radios, natively — and two pieces of orbital physics rebuilt.**
 > Set **CAT type → Dual (2 radios)** and CardSat drives a downlink and an uplink radio itself,
 > no companion Stick required: any two of **27 radios**, each on its own bus — Grove serial, a
@@ -324,10 +338,25 @@ transit prediction, sun/eclipse status, and more.
 - **Constant-frequency-at-the-satellite Doppler** (KB5MU's *One True Rule*) on both
   legs, so your signal never walks through the passband. Tune with the device keys
   **or the radio's own knob** — let go and nothing drifts.
-- **Three CAT families, ten radios** behind one rig interface: Icom **CI-V**
-  (IC-820/821/910/970/9100/9700), Yaesu (**FT-847**, **FT-736R**), Kenwood
-  (**TS-790**, **TS-2000**) — plus native **Icom LAN (RS-BA1)** control of the
-  **IC-9700** over WiFi with no wiring.
+- **Six CAT transports, one rig interface.** Full-duplex satellite rigs over
+  **wired CI-V** (two-wire *or* single-wire, as most Icoms present it), Yaesu
+  5-byte binary, or Kenwood ASCII: IC-820/821/910/970/9100/9700, FT-847, FT-736R,
+  TS-790, TS-2000. Plus native **Icom LAN (RS-BA1)** over WiFi with no wiring,
+  **Hamlib rigctld** over TCP *or* a Grove cable, and a **USB↔serial adapter** on
+  the USB-C port for any dialect.
+- **Two radios, natively** (*CAT type → Dual*) — a downlink radio and an uplink
+  radio driven directly, no companion device: any two of **27** half-duplex or
+  receive-only radios (IC-705/905/7100/7000/706MKIIG, IC-275/475, nine IC-R
+  receivers, FT-817/818/857/897, FT-100, VR-5000, FT-991/991A, FTX-1, TH-D74/D75),
+  each on **its own bus** — Grove serial, a USB adapter (**both** legs may be USB
+  through a hub), or Icom LAN, including the **IC-705 over its own WiFi**. Either
+  leg can be **None**, so a station where only one radio has a computer port works
+  too. PTT is never commanded — you key the uplink yourself.
+- **Rotator control** — **GS-232A/B**, **Easycomm I/II/III** and **SPID Rot2Prog**
+  over an I²C→UART bridge or a Grove cable, **Yaesu** rotators wired directly via
+  an I²C ADC and output expander, **rotctld** over TCP, **PstRotator** over UDP, or
+  a USB adapter — with park/limits, flip/over-the-top pass handling, and a manual
+  jog screen.
 - **Linear-transponder passband tracking** with correct inversion and automatic
   sideband, and **automatic PL/CTCSS** on FM uplinks.
 - **Prediction & planning** — an all-favorites **Next Passes** schedule, **pass-detail**
@@ -347,6 +376,18 @@ transit prediction, sun/eclipse status, and more.
   airplane-scatter planning, and **QRZ callsign lookup** — plus a saved-connection
   **Telnet client** (in Tools) for cluster nodes and shack boxes, with optional
   line-printer output.
+- **A station computer, not just a tracker** — CardSat can *be* the server:
+  **rigctld** and **rotctld** servers so a PC (Gpredict, SatPC32) drives your radio
+  and rotator through it, plus an opt-in **web page** for phones with a live sky
+  plot, Doppler readout, pass list with AOS alerts, radio/rotator control and file
+  download. On-device **BASIC** scripting with satellite and telemetry access, a
+  **line-printer** output for logs and cards, a **Telnet/raw-TCP** terminal, a
+  **CAT/rotator diagnostic** suite, **MUF** propagation, and seven mini-games.
+- **Physics you can check** — belt transits use McIlwain **(L, B/B₀)** traced
+  through the real **IGRF-14** field, not a dipole plus an altitude guess; the
+  **decay/reentry** estimate is anchored on each element set's *measured* decay rate
+  and scores within ±30% for 89% of real reentries. Both are verified against
+  outside data by host test harnesses, and the limits are written down.
 - **Offline-first** — GP elements, transponders, and DXCC data are cached to microSD
   (or internal flash) for full operation with no network.
 
@@ -357,7 +398,7 @@ The complete, detailed feature list is in **[docs/FEATURES.md](docs/FEATURES.md)
 *(The captures below were taken on v0.9.49 and show CardSat's core screens, which are
 unchanged since. Several features added since — rove planner, workable horizon, target
 search, on-device printing, the Files page's multi-select — are not pictured yet; a
-screenshot refresh is planned. The current firmware is v0.9.68.)*
+screenshot refresh is planned. The current firmware is v0.9.69.)*
 
 A few of CardSat's screens (240×135 native captures). The full set is in the
 [manual](MANUAL.md#22-screen-by-screen-reference).

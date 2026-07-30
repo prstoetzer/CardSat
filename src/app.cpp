@@ -586,6 +586,22 @@ void App::setup() {
   resumeLotwIfPending();
 }
 
+// Release every USB CAT resource this firmware can hold, in the only safe order:
+// stream pointers first (they alias Streams that are about to die -- fix31), then
+// CAT-B, then CAT-A. UsbSerial deliberately keeps the shared host alive while any
+// port remains, so ending CAT-B before CAT-A is what lets the final end() actually
+// release the host and give the console back.
+void App::usbCatTeardown() {
+#if CARDSAT_HAS_USBCAT
+  const bool anyUsb = UsbSerial::active() || UsbSerial::cat2Active();
+  if (!anyUsb) return;
+  // DualRig clears every USB leg on a null attach; a single rig clears its one.
+  if (rig) rig->setExternalStream(nullptr);
+  UsbSerial::cat2End();     // no-op when CAT-B was never opened
+  UsbSerial::end();         // releases the host once no port (or rotator) remains
+#endif
+}
+
 void App::applyRadioFromCfg() {
   RadioModel m = (RadioModel)cfg.radioModel;
   uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[m].defaultBaud;
@@ -595,11 +611,7 @@ void App::applyRadioFromCfg() {
   // the old transport bound while the new rig object never gets a stream -- CAT silently dies
   // or binds the wrong adapter after a model/baud/CI-V/adapter change (H7). Dropping the stream
   // first, then end(), leaves the reconciler to rebuild cleanly against the new rig next pass.
-  const bool usbWasActive = UsbSerial::active();
-  if (usbWasActive) {
-    if (rig) rig->setExternalStream(nullptr);   // drop the dangling pointer before end()
-    UsbSerial::end();                           // frees/rebinds on the next reconciler pass
-  }
+  usbCatTeardown();     // BOTH ports: see the note on the declaration
 #endif
   if (rig) { delete rig; rig = nullptr; }
   if (cfg.catType == CAT_DUAL) {
@@ -607,8 +619,15 @@ void App::applyRadioFromCfg() {
     // Physical-bus conflicts are refused HERE, at the single choke point every
     // config path funnels through, so a stale or hand-edited config can never
     // put two legs on one wire (the matrix in DUALRIG_MAINFW_INTEGRATION_SCOPE.md).
-    const bool aG = cfg.dualBus[0] == LEGBUS_GROVE, bG = cfg.dualBus[1] == LEGBUS_GROVE;
-    const bool aU = cfg.dualBus[0] == LEGBUS_USB,   bU = cfg.dualBus[1] == LEGBUS_USB;
+    // A leg set to "None" claims NO bus: its bus field is stale UI state, not a
+    // resource reservation. Without this, configuring a single-leg dual rig whose
+    // unused leg still showed "Grove" was refused as a two-Grove conflict.
+    const bool haveD = cfg.dualModel[0] != LEG_NONE, haveU = cfg.dualModel[1] != LEG_NONE;
+    if (!haveD && !haveU) { setStatus("Dual: set a downlink or uplink radio", 5000); return; }
+    const bool aG = haveD && cfg.dualBus[0] == LEGBUS_GROVE;
+    const bool bG = haveU && cfg.dualBus[1] == LEGBUS_GROVE;
+    const bool aU = haveD && cfg.dualBus[0] == LEGBUS_USB;
+    const bool bU = haveU && cfg.dualBus[1] == LEGBUS_USB;
     if (aG && bG) { setStatus("Dual: both legs on Grove - one UART", 5000); return; }
     if (aU && bU) {
       // Dual-USB CAT (Phase 3): two radios on the one PHY through a hub -- CAT-A
@@ -628,12 +647,24 @@ void App::applyRadioFromCfg() {
 #if !CARDSAT_HAS_USBCAT
     if (aU || bU) { setStatus("Dual: no USB CAT in this build", 5000); return; }
 #endif
-    if (cfg.dualModel[1] < LEG_NONE && LEG_RADIOS[cfg.dualModel[1]].rxOnly)
-      setStatus("Dual: uplink leg is RX-only", 4000);   // warn, don't refuse
+    if (haveU && LEG_RADIOS[cfg.dualModel[1]].rxOnly) {
+      // REFUSE, don't warn. A receive-only radio on the uplink leg produces a
+      // configuration that looks complete and can never transmit -- and because a
+      // status message is transient, the operator is left with no standing
+      // indication of why uplink Doppler does nothing. Refusing at the same choke
+      // point as the bus conflicts keeps every "this cannot work" answer in one
+      // place. (0.9.68 warned and proceeded; flagged in the post-release audit.)
+      setStatus(String(LEG_RADIOS[cfg.dualModel[1]].name) + " is receive-only - not an uplink", 6000);
+      return;
+    }
     rig = makeDualRig(cfg.dualModel, cfg.dualBus, cfg.dualCiv, cfg.dualBaud,
                       cfg.dualHost, cfg.dualPort, cfg.dualUser, cfg.dualPass);
     if (!rig) { setStatus("Dual: legs not configured", 4000); return; }
     rig->setCmdDelay(cfg.catDelayMs);
+    // CI-V wiring mode, before begin(): a GROVE leg opens the same on-board UART as
+    // wired CI-V and needs the same one-wire/two-wire choice. Most half-duplex Icoms
+    // present one-wire CI-V, so this is the usual case for an Icom leg on Grove.
+    if (aG || bG) rig->setPinMode(cfg.civPinMode);
 #if CARDSAT_HAS_USBCAT
     // A USB leg starts like single-rig CAT_USB: the reconciler in loop() opens
     // the adapter and attaches the stream when the radio is engaged; DualRig
@@ -701,9 +732,7 @@ void App::yieldGroveIfTaken(const char* who) {
 // claimant ('who') wins and the other Grove user is turned off, with a clear message --
 // so the two peripherals can never initialize the same pins at once.
 bool App::groveCatVsGpsArbitrate(const char* who) {
-  bool catGrove = (cfg.catType == CAT_RIGCTL_GROVE) ||
-                  (cfg.catType == CAT_DUAL &&
-                   (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_GROVE));
+  bool catGrove = (cfg.catType == CAT_RIGCTL_GROVE) || catUsesGroveWire();
   bool gpsGrove = cfg.useGps &&
                   (cfg.gpsSource == GPS_SRC_GROVE_9600 || cfg.gpsSource == GPS_SRC_GROVE_115K);
   if (!(catGrove && gpsGrove)) return false;    // no direct conflict
@@ -5148,9 +5177,12 @@ void App::webdSendStatusJson() {
     j += "\"wifi\":\""; j += (wc ? "up" : "down"); j += "\",";
     j += "\"ip\":\""; j += (wc ? WiFi.localIP().toString() : String("")); j += "\",";
     j += "\"rssi\":"; j += (wc ? (long)WiFi.RSSI() : (long)0); j += ","; }
-  { int bl = M5.Power.getBatteryLevel();
-    // isCharging() returns a tri-state enum (charging / discharging / unknown).
-    bool chg = (M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging);
+  { // Same source of truth as the device's own screens. M5.Power.isCharging() is
+    // NOT usable on the Cardputer ADV (no charger-status line reaches it), which is
+    // why batteryCharging() infers from the voltage trend; the web API must not
+    // quietly report the value the charge screen was rewritten to stop trusting.
+    int bl = batteryPercent();
+    bool chg = batteryCharging();
     j += "\"batt\":"; j += (bl >= 0 ? String(bl) : String("null")); j += ",";
     j += "\"charging\":"; j += (chg ? "true" : "false"); j += ","; }
   j += "\"heapFree\":"; j += (long)ESP.getFreeHeap(); j += ",";
@@ -5818,7 +5850,11 @@ void App::loop() {
   // engaged -- which held the host, kept the console down, and made the rotator refuse the
   // radio's old adapter with "That adapter is the radio's" long after the radio stopped
   // using it.
-  if (catUsesUsb() || UsbSerial::active()) {
+  // The gate must test BOTH ports. Testing CAT-A alone meant that switching away
+  // from a dual-USB config (to LAN, Grove, or a single radio) skipped this whole
+  // block, stranding CAT-B as an invisible owner of a CDC, an adapter and the USB
+  // host -- with the console never coming back. Found in the post-0.9.68 audit.
+  if (catUsesUsb() || UsbSerial::active() || UsbSerial::cat2Active()) {
     // want is only ever true for an actual USB radio (single-rig CAT_USB, or a
     // CAT_DUAL leg whose bus is USB). If neither holds any longer, want is
     // false, so the teardown branch below fires and releases the stale session.
@@ -5826,14 +5862,18 @@ void App::loop() {
     // Which radio is on the adapter decides the line settings. For CAT_DUAL it is
     // the USB LEG's profile (LEG_RADIOS), not the single-rig radioModel; the old
     // Yaesu 5-byte binary family is the 8N2 one in both catalogs.
+    // A "None" leg has no radio and therefore no USB port, whatever its stale bus
+    // field says -- so it must not be picked as THE usb leg, nor make dualBoth true.
+    const bool dHave = cfg.dualModel[0] != LEG_NONE, uHave = cfg.dualModel[1] != LEG_NONE;
     const int dLeg = (cfg.catType == CAT_DUAL)
-                       ? (cfg.dualBus[0] == LEGBUS_USB ? 0
-                          : cfg.dualBus[1] == LEGBUS_USB ? 1 : -1) : -1;
+                       ? ((dHave && cfg.dualBus[0] == LEGBUS_USB) ? 0
+                          : (uHave && cfg.dualBus[1] == LEGBUS_USB) ? 1 : -1) : -1;
     // Dual-USB CAT: both legs on USB. CAT-A (begin/stream) carries the DOWNLINK
     // (dLeg lands on 0 above); CAT-B (cat2*) carries the uplink, brought up right
     // after CAT-A engages, and re-tried below if its adapter shows up late.
     const bool dualBoth = (cfg.catType == CAT_DUAL) &&
-                          cfg.dualBus[0] == LEGBUS_USB && cfg.dualBus[1] == LEGBUS_USB;
+                          dHave && cfg.dualBus[0] == LEGBUS_USB &&
+                          uHave && cfg.dualBus[1] == LEGBUS_USB;
     if (want && !UsbSerial::active()) {
       uint32_t baud; bool yaesu;
       if (dLeg >= 0) {
@@ -6007,11 +6047,11 @@ void App::loop() {
             Logstore::rawf(Logstore::LOG_USB, "# CAT-B up (retry): %s", UsbSerial::cat2DeviceName());
         }
       }
-    } else if (!want && UsbSerial::active()) {
-      if (rig) rig->setExternalStream(nullptr);   // drop the pointers BEFORE the Streams die
-                                                  // (DualRig clears EVERY USB leg on nullptr)
-      UsbSerial::cat2End();                        // CAT-B first: host must outlive its ports
-      UsbSerial::end();                            // frees the host stack; console returns
+    } else if (!want && (UsbSerial::active() || UsbSerial::cat2Active())) {
+      // One teardown, shared with applyRadioFromCfg(). Note the condition also tests
+      // CAT-B: a config change that drops the USB legs can leave CAT-B as the only
+      // remaining owner, and testing CAT-A alone would strand it holding the host.
+      usbCatTeardown();
       // Record the teardown's RESULT. A disengage that fails to release the IDF
       // stack is invisible at the UI (the heap even looks fine) and only surfaces
       // one engage LATER as a 259 -- which is exactly how the bench lost four
@@ -10929,9 +10969,9 @@ void App::drawAbout() {
   }
   line(String("WiFi: ") + (net.connected() ? WiFi.localIP().toString() : String("not connected")));
   {
-    int b = M5.Power.getBatteryLevel();
+    int b = batteryPercent();
     String s = String("Battery: ") + (b < 0 ? String("n/a") : String(b) + "%");
-    if ((int)M5.Power.isCharging() == 1) s += " (charging)";  // 1=charging; ignore "unknown" (2)
+    if (batteryCharging()) s += " (charging)";   // inferred from trend; see batteryCharging()
     line(s);
   }
   line(String("Heap ") + String(ESP.getFreeHeap() / 1024) + "K  blk " +
@@ -13735,6 +13775,10 @@ void App::drawHelp() {
     " uplink radios driven",
     " natively (27-radio list)",
     " legs: Grove / USB / LAN",
+    " leg=None: that half is",
+    "  simply not CAT driven",
+    " Grove honors CI-V wiring",
+    "  incl 1-pin (most Icoms)",
     " both legs USB ok (hub,",
     "  nominate adapters: a)",
     " IC-705 LAN = its own WiFi",
@@ -17853,9 +17897,21 @@ void App::drawDualRigLocal() {
 
   // Status line: composite readiness + the loudest config problem, if any.
   canvas.setCursor(6, 18);
-  const bool bothG = cfg.dualBus[0] == LEGBUS_GROVE && cfg.dualBus[1] == LEGBUS_GROVE;
-  const bool bothU = cfg.dualBus[0] == LEGBUS_USB   && cfg.dualBus[1] == LEGBUS_USB;
-  if (bothG) {
+  const bool haveD = cfg.dualModel[0] != LEG_NONE, haveU = cfg.dualModel[1] != LEG_NONE;
+  const bool bothG = haveD && haveU &&
+                     cfg.dualBus[0] == LEGBUS_GROVE && cfg.dualBus[1] == LEGBUS_GROVE;
+  const bool bothU = haveD && haveU &&
+                     cfg.dualBus[0] == LEGBUS_USB   && cfg.dualBus[1] == LEGBUS_USB;
+  if (!haveD && !haveU) {
+    canvas.setTextColor(CL_YELLOW, CL_BLACK);
+    canvas.print("set a DN and/or UP radio (ENTER)");
+  } else if (!haveD || !haveU) {
+    // One leg deliberately unset: say which half is driven, so "half of it isn't
+    // working" is never the operator's first reading of a working configuration.
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.printf("%s only - %s not CAT controlled",
+                  haveD ? "downlink" : "uplink", haveD ? "uplink" : "downlink");
+  } else if (bothG) {
     canvas.setTextColor(CL_RED, CL_BLACK);
     canvas.print("! both legs on Grove - one UART");
   } else if (bothU && !(cfg.dualUsbKey[0][0] && cfg.dualUsbKey[1][0] &&
@@ -17864,9 +17920,10 @@ void App::drawDualRigLocal() {
     // nominated onto different adapters. Say so until that's true.
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.print("! 2xUSB: nominate both adapters (a)");
-  } else if (cfg.dualModel[1] < LEG_NONE && LEG_RADIOS[cfg.dualModel[1]].rxOnly) {
-    canvas.setTextColor(CL_YELLOW, CL_BLACK);
-    canvas.print("! uplink leg is a receive-only radio");
+  } else if (haveU && LEG_RADIOS[cfg.dualModel[1]].rxOnly) {
+    // Red, not yellow: this configuration is refused at engage, not merely odd.
+    canvas.setTextColor(CL_RED, CL_BLACK);
+    canvas.print("! UP leg is receive-only - cannot TX");
   } else {
     canvas.setTextColor(CL_CYAN, CL_BLACK);
     canvas.printf("legs -> one rig  %s",
@@ -18212,11 +18269,18 @@ int App::batteryMilliVolts() {
 // "charging", a clear fall latches "discharging"; small changes hold the last verdict so the
 // readout doesn't flicker on ADC noise.
 bool App::batteryCharging() {
+  uint32_t now = millis();
+  // Serve the latched verdict without touching the ADC until the window elapses.
+  // This is THE charge-state accessor for the whole firmware -- the charge screen,
+  // the About page and /api/status all call it -- so it has to be cheap enough to
+  // sit in a draw path. (0.9.68 left /api/status and About reading M5.Power's
+  // isCharging() directly, which on the ADV is exactly the unusable value this
+  // function exists to replace: the web page could contradict the device.)
+  if (battTrendMv != 0 && (now - battTrendMs) < 30000) return battChargeState == 1;
   int mv = batteryMilliVolts();
   if (mv <= 0) return battChargeState == 1;
-  uint32_t now = millis();
   if (battTrendMv == 0) { battTrendMv = mv; battTrendMs = now; return false; }
-  if (now - battTrendMs >= 30000) {                  // evaluate every 30 s
+  {
     int delta = mv - battTrendMv;
     if (delta >  20) battChargeState = 1;            // rising >20 mV/30s -> charging
     else if (delta < -20) battChargeState = 0;       // falling -> on battery
@@ -18226,6 +18290,7 @@ bool App::batteryCharging() {
   }
   return battChargeState == 1;
 }
+
 
 int App::batteryPercent() {
   // Prefer M5Unified's getBatteryLevel(): on the ADV this uses a working internal ADC read
@@ -23161,7 +23226,7 @@ void App::kessSeedRound(uint16_t seed) {
   const int HtInc = 10, DefBW = 37, RandH = 120;
   int x = 2;                                            // virtual x
   int bIdx = 0; int stCol[2] = {30, 210};
-  int bCx[24]; int bTop[24]; int nB = 0;
+  int bCx[24]; int nB = 0;         // roof heights live in K.sky[]; no parallel array needed
   while (x < 638) {
     switch (slope) {                                    // per-building height walk
       case 1: newHt += HtInc; break;                    // upward
@@ -23179,7 +23244,7 @@ void App::kessSeedRound(uint16_t seed) {
     int c0 = (int)(x * 240L / 640), c1 = (int)((x + bw) * 240L / 640);
     uint8_t top = (uint8_t)((335 - bh) * 135L / 350);
     for (int c = c0; c < c1 && c < 240; ++c) K.sky[c] = top;
-    if (nB < 24) { bCx[nB] = (c0 + c1) / 2; bTop[nB] = top; nB++; }
+    if (nB < 24) { bCx[nB] = (c0 + c1) / 2; nB++; }
     x += bw + 2;
     (void)bIdx;
   }
@@ -23369,7 +23434,7 @@ void App::drawKessler() {
   canvas.printf("%d P2", K.wins[1]);
   // Solar wind arrow (magnitude = GORILLAS wind units).
   int wl2 = K.wind; if (wl2 > 15) wl2 = 15; if (wl2 < -15) wl2 = -15;
-  canvas.drawFastHLine(120 - abs(wl2), 7, abs(wl2) * 2 ? abs(wl2) * 2 : 1, CL_ORANGE);
+  canvas.drawFastHLine(120 - abs(wl2), 7, abs(wl2) ? abs(wl2) * 2 : 1, CL_ORANGE);
   if (wl2) {
     int tip = 120 + wl2, dd = (wl2 > 0) ? -1 : 1;
     canvas.drawLine(tip, 7, tip + dd * 3, 5, CL_ORANGE);
@@ -25162,7 +25227,8 @@ bool App::telSessAlloc() {
 
 void App::telSessFree() {
   if (telSess) { free(telSess); telSess = nullptr; }
-  telRow = telCol = 0; telAnsi = 0; telPrnLen = 0; telPendCR = false; telScrollUp = 0;
+  telRow = telCol = 0; telAnsi = 0; telIac = 0; telIacCmd = 0;
+  telPrnLen = 0; telPendCR = false; telScrollUp = 0;
 }
 
 void App::telLoad() {
@@ -25353,12 +25419,59 @@ void App::telPrnByte(uint8_t c) {
   telPrnLastMs = millis();
 }
 
+// ---- Telnet option negotiation (RFC 854/1143), minimal but well-behaved ------
+//  A real Telnet daemon opens by offering options -- echo, suppress-go-ahead,
+//  terminal type, window size. 0.9.68 had no IAC handling at all: those bytes fell
+//  through the sanitizer and were drawn as text, and worse, a server that waits for
+//  a reply before presenting a login could simply hang. (Named "Telnet" while
+//  speaking only raw TCP; raised in the post-0.9.68 audit.)
+//
+//  This is deliberately a REFUSER, not an implementation: every DO/DONT gets WONT
+//  and every WILL/WONT gets DONT, which is the correct, spec-compliant way to say
+//  "I support no options" and leaves the session in the line-oriented NVT mode this
+//  terminal is built around. Subnegotiation blocks (SB ... SE) are swallowed whole.
+//  Returns true if the byte was consumed by negotiation and must not be displayed.
+bool App::telIacByte(uint8_t c) {
+  const uint8_t IAC = 255, SE = 240, SB = 250;
+  const uint8_t WILL = 251, WONT = 252, DO = 253, DONT = 254;
+  switch (telIac) {
+    case 0:
+      if (c != IAC) return false;
+      telIac = 1;
+      return true;
+    case 1:
+      if (c == IAC) { telIac = 0; return false; }   // IAC IAC = a literal 0xFF byte
+      if (c == WILL || c == WONT || c == DO || c == DONT) { telIacCmd = c; telIac = 2; return true; }
+      if (c == SB) { telIac = 3; return true; }     // subnegotiation: swallow to SE
+      telIac = 0;                                    // standalone command (NOP, GA, ...)
+      return true;
+    case 2: {                                        // c is the option code
+      uint8_t reply = (telIacCmd == DO || telIacCmd == DONT) ? WONT : DONT;
+      if (telClient.connected()) {
+        const uint8_t f[3] = { IAC, reply, c };
+        telClient.write(f, 3);
+      }
+      telIac = 0;
+      return true;
+    }
+    case 3:                                          // inside SB
+      if (c == IAC) telIac = 4;
+      return true;
+    case 4:
+      telIac = (c == SE) ? 0 : 3;                    // IAC SE ends it; IAC IAC stays in SB
+      return true;
+  }
+  telIac = 0;
+  return false;
+}
+
 // ---- ANSI sanitizer: one received byte -> screen grid + printer line -------
 //  A compact state machine that DROPS escape sequences (CSI/OSC/two-byte ESC)
 //  rather than interpreting them, so the line-oriented outputs never show raw
 //  control garbage. Same shape as the reference sketch's processRemoteByte.
 
 void App::telRemoteByte(uint8_t c) {
+  if (telIacByte(c)) return;        // Telnet negotiation never reaches the display
   switch (telAnsi) {
     case 0:  // NORMAL
       if (c == 0x1B) { telAnsi = 1; }
@@ -39441,9 +39554,10 @@ void App::drawSettings() {
   if (cfg.catType == CAT_DUAL) {
     const uint8_t dm = cfg.dualModel[0], um = cfg.dualModel[1];
     rows[109] = String("Dual-Rig setup (2 radios) > ") +
-                ((dm == LEG_NONE && um == LEG_NONE)
-                   ? String("set legs")
-                   : String(LEG_RADIOS[dm].name) + "+" + LEG_RADIOS[um].name);
+                ((dm == LEG_NONE && um == LEG_NONE) ? String("set legs")
+                 : (um == LEG_NONE) ? String(LEG_RADIOS[dm].name) + " (DL only)"
+                 : (dm == LEG_NONE) ? String(LEG_RADIOS[um].name) + " (UL only)"
+                 : String(LEG_RADIOS[dm].name) + "+" + LEG_RADIOS[um].name);
   } else {
     rows[109] = String("Dual-Rig setup (Stick) >") +
                 (drLink == 1 ? "  linked" : drLink == 2 ? "  no link" : "");

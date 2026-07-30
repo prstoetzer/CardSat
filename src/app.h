@@ -1306,10 +1306,19 @@ private:
   // CAT bus-ownership predicates, dual-rig aware. Every "does CAT own the Grove
   // UART / the USB CAT port" check routes through these, so a CAT_DUAL leg on a
   // bus claims it exactly as the equivalent single-rig transport would.
+  // THE single USB-CAT teardown. Both CAT ports and the rig's stream pointers come
+  // down together, in the one order that is safe, so no caller can release half a
+  // session. Introduced after 0.9.68 shipped with applyRadioFromCfg() tearing down
+  // only CAT-A: changing settings while dual-USB was engaged left CAT-B holding a
+  // CDC, an adapter and the USB host (so the console never returned), and a
+  // re-engage reused the stale port instead of applying the new line settings.
+  void        usbCatTeardown();
   bool        catUsesGroveWire() const {
     if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE) return true;
+    // Only a leg with a radio assigned claims the wire (see the engage guard).
     return cfg.catType == CAT_DUAL &&
-           (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_GROVE);
+           ((cfg.dualModel[0] != LEG_NONE && cfg.dualBus[0] == LEGBUS_GROVE) ||
+            (cfg.dualModel[1] != LEG_NONE && cfg.dualBus[1] == LEGBUS_GROVE));
   }
   bool        catUsesUsb() const {
     if (cfg.catType == CAT_USB) return (RadioModel)cfg.radioModel != RIG_NONE;
@@ -2254,6 +2263,8 @@ private:
   int    telScrollUp = 0;                // rows scrolled UP from live (0 = pinned to bottom)
   bool   telPendCR = false;              // saw a lone CR; overwrite the line if no LF
   uint8_t telAnsi = 0;                   // sanitizer state: 0 normal 1 esc 2 csi 3 osc 4 osc-esc
+  uint8_t telIac  = 0;                   // Telnet IAC state: 0 none, 1 saw IAC, 2 awaiting option
+  uint8_t telIacCmd = 0;                 // the DO/DONT/WILL/WONT verb being negotiated
   bool    telConnected = false;
   WiFiClient telClient;                  // plain TCP transport (small handle; socket freed on stop())
   uint8_t telOutMode = 3;               // active output mode for the live session
@@ -2355,6 +2366,7 @@ private:
   void   telDisconnect();                // close socket + printer sink
   void   telService();                   // pump incoming bytes (call from the modal loop)
   void   telSendBytes(const uint8_t* d, size_t n);   // keyboard -> remote
+  bool   telIacByte(uint8_t c);          // Telnet IAC negotiation; true = byte consumed
   void   telRemoteByte(uint8_t c);       // sanitize + route one received byte
   void   telGridPutByte(uint8_t c);      // one printable byte onto the screen grid
   void   telGridNewline();               // advance a row, scroll on overflow

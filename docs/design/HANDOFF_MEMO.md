@@ -446,3 +446,25 @@ satellites and "B* (modeled)" for one with no/negative n-dot (RS-44 has a negati
 MEAN_MOTION_DOT in the current set); confirm the decay-watch flag no longer fires
 on high-eccentricity objects; spot-check a couple of decay figures against
 independent sources.
+
+## 0.9.69: audit response + dual-rig completion — SHIPPED
+
+Cycle opened by evaluating an external functional audit of v0.9.64→v0.9.68. Both
+its P0 findings were correct and both were 0.9.68 regressions; full disposition in
+docs/design/AUDIT_RESPONSE_0_9_69.md. Fixed: the `catType` load clamp discarding
+CAT_DUAL on every boot (now a switch whitelist, plus gate #17
+`audit_settings_clamps.py`, validated against the real defect); CAT-B stranded on
+settings re-apply (one `App::usbCatTeardown()` for all paths) plus the reconciler's
+outer gate that also tested only CAT-A; battery state centralized on
+`batteryPercent()`/`batteryCharging()`; minimal Telnet IAC refuser; RX-only uplink
+refused; USB enumeration quiet period + release fence on the adapter registry.
+Owner follow-ups: a leg may be **None** (single-leg dual rig; an absent leg claims
+no bus — guards, arbitration and reconciler all updated), and **single-wire CI-V
+now reaches a leg** via the shared `civUartOpen()` lifted verbatim out of
+`CivRig::begin()`. The `.ino` header was rewritten (it still said "3 CAT families")
+and README's feature list brought current. Corrected our own claim: 0.9.68's "zero
+warnings" was measured with warnings suppressed; real count is 103 (70 ours), three
+substantive ones fixed, rest a tracked baseline.
+
+Build: EXIT=0, flash 3,031,306 (96.4%), static RAM 162,080 (49%). 17 static gates,
+8 host harnesses, all pass. **Native dual-radio still has not driven a real radio.**

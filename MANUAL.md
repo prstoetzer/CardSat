@@ -218,7 +218,8 @@ itself — no companion in the middle. Open **Settings → Radio → Dual-Rig se
 same screen; it becomes the native two-leg editor whenever CAT type is Dual) and give
 each leg a radio and a bus:
 
-- **Rig** — any of the **27 leg radios** absorbed from the companion's catalog:
+- **Rig** — **None**, or any of the **27 leg radios** absorbed from the companion's
+  catalog:
   the Icom CI-V transceivers (IC-705, IC-905, IC-7100, IC-7000, IC-706MKIIG,
   IC-275/475) and receivers (IC-R10/R20/R30/R7000/R7100/R8500/R8600/R9000/R9500),
   the old-binary Yaesus (FT-817/818/857/897, FT-100, VR-5000), the ASCII Yaesus
@@ -226,8 +227,21 @@ each leg a radio and a bus:
   SSB/CW receiver lives on **Band B**, which is what CardSat drives). Receive-only
   radios are marked **[RX]**; assigning one to the **UP** leg gets a warning, since
   it can never transmit.
-- **Bus** — **Grove** (plain TTL serial on G1/G2, 8N1; old-binary Yaesus are set
-  8N2 automatically on the USB bus and expect their usual CAT levels on Grove),
+  Setting a leg to **None** is a normal configuration, not an unfinished one: that
+  half of the link simply isn't CAT-controlled, and its Doppler goes nowhere while
+  the other leg tracks normally. That covers the common station where only one radio
+  has a computer port — an SSB downlink rig with a hand-tuned HT on the uplink, or a
+  CAT-capable receiver alongside a transmitter you key and tune yourself. The screen
+  says which half is driven ("downlink only — uplink not CAT controlled"), and the
+  radio name reads `IC-705 (DL only)` so a working one-legged setup is never
+  mistaken for a half-broken two-legged one.
+- **Bus** — **Grove** (the on-board serial port on G1/G2). This honors the
+  **CI-V wiring** setting exactly as wired CI-V does, including **single-wire
+  CI-V** — which matters, because nearly every half-duplex Icom in the leg catalog
+  (IC-705, IC-7100, IC-706MKIIG, IC-275/475, and the IC-R receivers) presents CI-V
+  on a single 3.5 mm jack carrying both directions. Set *Settings → CI-V wiring* to
+  **1-pin G2** or **1-pin G1** and the leg opens the same open-drain one-wire bus
+  the wired path uses. Yaesu and Kenwood legs are ordinary two-wire TTL,
   **USB** (a USB↔serial adapter on the USB-C port), or **LAN** (Icom network CAT —
   see the IC-705 note below). **Both legs can be USB** — plug the two adapters in
   through a hub and nominate each leg's adapter with `a` (select the leg first);

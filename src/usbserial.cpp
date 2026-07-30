@@ -5,6 +5,7 @@
 #include <esp_task_wdt.h>   // TWDT "user" subscription: watches this CODE, not a task
 #include <esp_heap_caps.h> // largest-free-block: fragmentation vs genuine OOM
 #include <freertos/task.h> // uxTaskGetStackHighWaterMark(): size the stacks from data
+#include <atomic>          // release fence when publishing an adapter registry entry
 
 // ---- Why there is NO ESP_USB_HOST_MAX_DEVICES define here ----------------------
 // There was one (0.9.58-wip pinned it to 1 right here, before the include), and it
@@ -331,7 +332,15 @@ namespace {
     char     key[40];
   };
   SerialDev s_serDev[4];
-  uint8_t   s_serDevN = 0;
+  // VOLATILE + a release barrier before the count is bumped (see onDev): this is
+  // written on the USB host's task and read on the main task. The entry must be
+  // fully populated BEFORE the count that publishes it becomes visible, or a
+  // reader can see s_serDevN include a half-written label/key. This is publication
+  // ordering, not mutual exclusion -- adds are append-only and the array is only
+  // reset while no reader is mid-scan (host start), which is what makes that
+  // sufficient here.
+  volatile uint8_t s_serDevN = 0;
+  volatile uint32_t s_lastDevMs = 0;   // when the newest adapter appeared (quiet-period timing)
 
   // Stable identity across replugs: serial number when the adapter reports one
   // (FTDI/CP210x usually do, CH340 usually does not), else VID:PID + address.
@@ -369,7 +378,9 @@ namespace {
              (d.product && *d.product) ? d.product : "serial",
              (unsigned)d.vid, (unsigned)d.pid);
     makeKey(e.key, sizeof(e.key), d);
+    std::atomic_thread_fence(std::memory_order_release);   // entry complete before it is counted
     s_serDevN++;
+    s_lastDevMs = millis();
   }
 
   void consoleDown() {
@@ -903,9 +914,19 @@ namespace {
       setRotErr(m);
       return false;
     }
-    // Let devices enumerate; the callback fills s_serDev.
+    // Let devices enumerate; the callback fills s_serDev. Stopping at the FIRST
+    // device made the adapter list depend on enumeration order -- fine when only
+    // one adapter is expected, wrong as soon as two are (dual-USB CAT, or CAT plus
+    // a USB rotator, especially through a hub where the devices come up
+    // staggered). Wait instead for a QUIET PERIOD: keep going until nothing new
+    // has appeared for a while, bounded by the same overall cap as before.
     const uint32_t t0 = millis();
-    while (millis() - t0 < 2500 && s_serDevN == 0) delay(25);
+    const uint32_t QUIET_MS = 400;
+    while (millis() - t0 < 2500) {
+      delay(25);
+      if (s_serDevN == 0) continue;                       // nothing yet: keep waiting
+      if (millis() - s_lastDevMs >= QUIET_MS) break;      // settled
+    }
     return true;
   }
 
@@ -925,6 +946,10 @@ void cat2Configure(const char* key) {
 }
 
 bool cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
+  // Already open: report success WITHOUT reconfiguring. To change the adapter or
+  // the line settings, the caller must cat2End() first -- which App::usbCatTeardown()
+  // does on every settings re-apply. (0.9.68 shipped without that teardown, so a
+  // baud/model/adapter change on the uplink leg silently kept the old session.)
   if (s_cat2Active && s_cdc2) return true;
   s_cat2Err[0] = 0;
   if (!s_host) {

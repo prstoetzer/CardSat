@@ -380,3 +380,26 @@ New gate tools/host_decay (16th). Two rejected-alternative notes worth keeping:
 the loss-cone criterion tried first does not discriminate (it is ~0.4 even at ISS
 altitude), and a density calibration cannot be applied to the anchored path
 because it cancels exactly — the correction belongs on drag.
+
+## 0.9.69 — external audit of the 0.9.68 release
+
+An outside functional review of v0.9.64→v0.9.68 was evaluated finding by finding;
+full disposition in **docs/design/AUDIT_RESPONSE_0_9_69.md**. Both P0 findings
+were CORRECT and both were 0.9.68 regressions: (1) `Settings::load()` clamped
+`catType > CAT_USB`, silently discarding the new `CAT_DUAL` on every boot —
+the same bug the comment above that clamp documents from the CAT_USB era, now
+fixed with a switch whitelist and covered by the new gate
+`tools/audit_settings_clamps.py` (validated against the real defect); (2)
+`applyRadioFromCfg()` tore down only CAT-A, stranding CAT-B with a CDC, an adapter
+and the USB host — fixed by a single `App::usbCatTeardown()` used by both paths,
+plus a third related defect the audit implied (the reconciler's outer gate also
+tested only CAT-A). Mediums fixed: battery state centralized on
+`batteryPercent()`/`batteryCharging()` so the web API cannot contradict the charge
+screen; a minimal Telnet IAC refuser; RX-only uplink now refused rather than
+warned; USB enumeration now waits for a bounded quiet period instead of stopping
+at the first adapter, with a release fence publishing registry entries.
+IMPORTANT correction to our own claim: 0.9.68's "zero warnings" was measured at
+arduino-cli's default `--warnings none` (i.e. `-w`) and was meaningless; a real
+`--warnings all` build reports 103 warnings, 70 ours. Three substantive ones fixed
+(-Wreorder in the code I added, -Wint-in-bool-context, an unused array); the
+remaining 67 are recorded as a tracked baseline, not accepted silently.

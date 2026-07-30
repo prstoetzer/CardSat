@@ -264,6 +264,21 @@ private:
   bool     _open = false;
 };
 
+// Open the on-board Grove UART for a CI-V-family backend, honoring the CI-V
+// WIRING MODE (Settings -> CI-V wiring): 0 = two-wire TX/RX on G2/G1, 1 = single
+// wire on G2, 2 = single wire on G1. Most half-duplex Icoms expose one-wire CI-V
+// on a 3.5 mm jack, so single-pin is the common case, not the exception.
+//
+// This owns BOTH the HardwareSerial instance and the pin lifecycle, and is shared
+// by the wired CivRig and by dual-rig PlainCatRig legs. It is one function on
+// purpose: the single-wire setup is a delicate, bench-verified sequence (clear
+// UART signal inversion, pull-up, open-drain at the PAD REGISTER so the output
+// matrix stays attached, then re-assert the RX input on the shared pad), and a
+// second copy of it would drift. It also means the "release the previously bound
+// pins" bookkeeping is global, which is what it has to be -- there is one UART.
+HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
+                            int rxPin, int txPin);
+
 // ===========================================================================
 //  Dual-rig (CAT_DUAL): plain single-VFO leg backends + the DualRig composite
 // ===========================================================================
@@ -321,7 +336,12 @@ public:
   uint8_t address() const override { return _addr; }
   bool    sendRaw(const uint8_t* b, size_t n) override;   // serial-terminal diagnostics
   void    setExternalStream(Stream* s) override { extStream = s; _stream = s; }
+  // CI-V wiring mode for a GROVE leg (0 = two-wire, 1 = one-wire G2, 2 = one-wire
+  // G1). Most half-duplex Icoms present one-wire CI-V on a 3.5 mm jack, so a dual
+  // rig with an Icom leg on Grove needs this exactly as the wired path does.
+  void    setPinMode(uint8_t mode) override { _pinMode = mode; }
 private:
+  uint8_t  _pinMode = 0;
   bool sendFreq(freq_t hz);
   bool sendMode(RigMode m);
   bool readFreq(freq_t& hzOut);
@@ -351,6 +371,7 @@ public:
   void service() override;
   void setCmdDelay(uint16_t ms) override;
   void setReadBudgetMs(uint16_t ms) override;
+  void setPinMode(uint8_t mode) override;       // CI-V wiring, forwarded to both legs
   void setExternalStream(Stream* s) override;   // single-USB attach; nullptr detaches ALL USB legs
   void setLegExternalStream(int leg, Stream* s);  // per-leg attach/detach (dual-USB CAT)
   bool setMainFreq(freq_t hz) override;         // uplink leg

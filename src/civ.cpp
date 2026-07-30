@@ -79,6 +79,15 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   // reason. The adapter's own driver handles framing; CI-V is 8N1 either way.
   if (extStream) { _stream = extStream; (void)baud; (void)uartNum;
                    (void)rxPin; (void)txPin; return; }
+  _stream = &civUartOpen(_pinMode, baud, uartNum, rxPin, txPin);
+}
+
+// The shared Grove-UART opener declared in rig.h. Body unchanged from the
+// bench-verified CivRig::begin() it was lifted out of (0.9.69); the only edit is
+// that the wiring mode arrives as a parameter instead of a member, so dual-rig
+// legs can reach the same single-wire path.
+HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
+                            int rxPin, int txPin) {
   static HardwareSerial* hs = nullptr;   // construct once, reuse on re-begin
   if (!hs) hs = new HardwareSerial(uartNum);
 
@@ -93,7 +102,7 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   if (lastB >= 0 && lastB != lastA) gpio_reset_pin((gpio_num_t)lastB);
   lastA = lastB = -1;
 
-  if (_pinMode == 0) {
+  if (pinMode == 0) {
     // Normal, recommended path: separate wires. G2 = TX (push-pull), G1 = RX.
     hs->end();                                   // release any prior pin bindings
     hs->begin(baud, SERIAL_8N1, rxPin, txPin);
@@ -102,10 +111,12 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
     // Single-pin CI-V: one shared GPIO carries both directions, like a real CI-V
     // one-wire bus. The line idles near 3.3 V (UART mark, held by the pull-up) and is
     // pulled low only for data. An external pull-up (the radio's CI-V bus and/or a
-    // level-shifter) should still be present for real communication. UNVERIFIED
-    // on-air -- see CIV_SINGLE_PIN.md and mind the 5 V / 3.3 V cautions before
-    // connecting a radio.
-    int pin = (_pinMode == 2) ? rxPin : txPin;   // 1 -> tx pin (G2), 2 -> rx pin (G1)
+    // level-shifter) should still be present for real communication. CONFIRMED on
+    // hardware (IC-821: bidirectional CI-V -- frequency reads and ACKs -- over one
+    // shared open-drain wire); this comment previously said UNVERIFIED, which had
+    // been true before that bench session and contradicted CIV_SINGLE_PIN.md.
+    // Mind the 5 V / 3.3 V cautions in that document before connecting a radio.
+    int pin = (pinMode == 2) ? rxPin : txPin;   // 1 -> tx pin (G2), 2 -> rx pin (G1)
 
     // Single-pin CI-V setup (verified on the bench step by step):
     //  1. begin(pin, pin) puts BOTH UART TX and RX on the chosen pad. This is the
@@ -138,7 +149,7 @@ void CivRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
     Serial.printf("[CI-V 1-pin] G%d ready (idle=%d)\n", pin, digitalRead(pin));
   }
 
-  _stream = hs;
+  return *hs;
 }
 
 // Raw byte write for the serial-terminal diagnostic: push arbitrary bytes onto

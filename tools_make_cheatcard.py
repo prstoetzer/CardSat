@@ -194,7 +194,8 @@ BACK = [
  ("DUAL RIG (2 radios)",
   "CAT type <b>Dual</b> = a downlink + an uplink radio driven natively (27 radios). "
   "<b>Settings &rarr; Dual-Rig setup</b>: per leg pick <b>Rig</b>, <b>Bus</b> (Grove / USB / LAN), "
-  "CI-V, baud; LAN legs take the radio&rsquo;s <b>IP</b> + port (<b>IC-705 over its own WiFi</b>; "
+  "CI-V, baud (<b>Grove honors CI-V wiring, incl. 1-pin</b>); a leg set to <b>None</b> = that "
+  "half simply not CAT driven; LAN legs take the radio&rsquo;s <b>IP</b> + port (<b>IC-705 over its own WiFi</b>; "
   "<b>u</b>/<b>p</b> login). <b>a</b> nominate USB adapter (both legs may be USB via a hub) "
   "&middot; <b>s</b> save+apply. One Grove leg only; PTT stays manual; FM tones set on the radio. "
   "The CardSatDualRig companion (rigctl net/Grove) is still supported."),

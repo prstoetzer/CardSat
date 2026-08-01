@@ -67,6 +67,30 @@ flashing is good practice.
 
 ### Build from source — Arduino IDE (single-file `CardSat.ino`)
 
+> ⚠️ **The USB host library must be patched. Read this before you build.**
+>
+> CardSat drives USB CAT and USB rotators through **EspUsbHost**. The stock library
+> from the Library Manager compiles and appears to work — and then **strands the USB
+> stack the first time a radio stops answering**, with no recovery short of a reboot.
+> The failure looks like "USB busy" on every later engage.
+>
+> A patched copy is vendored at **`third_party/EspUsbHost/`**. Install it over the
+> library instead of the Library Manager version:
+>
+> ```sh
+> cp -r third_party/EspUsbHost ~/Arduino/libraries/EspUsbHost
+> ```
+>
+> **[third_party/EspUsbHost/PATCHES.md](../third_party/EspUsbHost/PATCHES.md)**
+> explains each patch, why it exists, and how to re-apply it after an upstream version
+> bump — including a placement trap that fails *silently*. Three of the patches are
+> drafted as upstream bug reports with attachable `.patch` files; if they land upstream
+> a future release will drop the vendored copy.
+>
+> The **M5StickS3 DualRig companion** uses the same library and needs the same patched
+> copy — see [`companion/README.md`](../companion/README.md).
+
+
 > 📖 **New to this?** See **[ARDUINO_SETUP.md](guides/ARDUINO_SETUP.md)** for complete
 > step-by-step instructions on setting up a fresh Arduino IDE environment from
 > scratch — installing the IDE, the ESP32 core, every library at a known-good

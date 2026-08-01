@@ -1,15 +1,20 @@
-10 REM ====== DOPPLER - transponder shift for the active satellite ======
-20 REM Snapshots transponder 0 of the ACTIVE satellite with TXSEL, then uses
+10 REM ====== DOPPLER - transponder shift, self-selecting ======
+20 REM Finds its OWN satellite: walks the catalog for the first bird that is up
+25 REM with a transponder, so nothing has to be selected before you run this.
+30 REM SATSEL brings the transponders with it, so TXSEL reads THAT satellite.
+35 REM Snapshots transponder 0 with TXSEL, then uses
 30 REM the current range-rate SATRR (km/s, + = receding) to work out the
 40 REM Doppler-corrected downlink you HEAR and the uplink you must SEND:
 50 REM   heard = TXDL * (1 - rr/c)      send = TXUL * (1 + rr/c)
 60 REM c = 299792.458 km/s. Prints the numbers in kHz and draws a shift bar
-70 REM (green = toward you / blue-shift, red = away). Pick a satellite with a
-80 REM linear/FM transponder on Track first.
+70 REM (green = toward you / blue-shift, red = away), then cross-checks the
+80 REM arithmetic against DOPPRX/DOPPTX, which the firmware computed itself.
 100 LET V = 299792.458 : REM speed of light, km/s
 110 CLS
 120 TEXT 2,2,"DOPPLER  tx0"
+125 GOSUB 900 : REM pick a satellite with a transponder
 130 IF SATOK = 0 THEN GOTO 800
+135 IF NTX <= 0 THEN GOTO 800
 140 TXSEL 0
 150 LET R = SATRR : REM range rate km/s (+ receding)
 160 LET F = R / V : REM fractional shift
@@ -48,7 +53,17 @@
 490 TEXT 2,122,"grn=toward you  red=away"
 500 SHOW
 510 END
-800 TEXT 2,20,"No active satellite."
-810 TEXT 2,32,"Pick one on Track."
+800 TEXT 2,20,"No satellite up with a"
+810 TEXT 2,32,"transponder right now."
 820 SHOW
 830 END
+900 REM ---- pick the first satellite that is up and has a transponder --------
+910 REM SATOK=0 is a soft failure (no fix, or elements SGP4 rejects): skip it.
+920 FOR K = 0 TO NSAT - 1
+930 SATSEL K
+940 IF SATOK = 0 THEN GOTO 980
+950 IF SATEL <= 0 THEN GOTO 980
+960 IF NTX <= 0 THEN GOTO 980
+970 RETURN
+980 NEXT
+990 RETURN

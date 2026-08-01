@@ -24,6 +24,9 @@
 #include <esp_sleep.h>   // deep-sleep-until-next-pass
 #include <esp_system.h>  // esp_reset_reason() for validating RTC-held batch state
 #include <esp_heap_caps.h>   // heap_caps_get_largest_free_block() for the TLS sprite-free
+#if CARDSAT_USB_DIAG
+#include <esp_log.h>         // esp_log_set_vprintf() for the USB diagnostic capture
+#endif
 #include <esp_core_dump.h>   // read the panic backtrace back on the next boot
 
 // LoTW multi-batch upload state, persisted in RTC RAM across the DELIBERATE
@@ -56,7 +59,20 @@ static const uint32_t LOTW_BATCH_MAGIC = 0x1073B47C; // "LoTW BATCh"
 enum : uint8_t {
   CL_BLACK = 0, CL_WHITE = 1, CL_GREEN = 2, CL_RED = 3,
   CL_YELLOW = 4, CL_CYAN = 5, CL_ORANGE = 6, CL_GREY = 7,
-  CL_BLUE = 8, CL_DGREEN = 9, CL_SELBG = 10, CL_DGREY = 11, CL_MGREY = 12
+  CL_BLUE = 8, CL_DGREEN = 9, CL_SELBG = 10, CL_DGREY = 11, CL_MGREY = 12,
+  // 0.9.70: the last three of the sixteen 4bpp slots, spent deliberately.
+  //   CL_DKRED  -- BACKGROUND for armed/destructive and refusal states. Red TEXT
+  //               already means "bad value"; an armed delete or a refused action
+  //               should read at a glance before the words do, and a background
+  //               is what does that at 6x8.
+  //   CL_AMBER  -- dim amber. Dual duty by design: as text on black it is the
+  //               de-emphasis color for units and secondary labels (so values in
+  //               white pop); as a background with black text it is the WARNING
+  //               fill for the status bar. One hue, one meaning: "caution/aside".
+  //   Slot 15 stays RESERVED. Repainting the palette is cheap; re-deciding what a
+  //   color means across 150+ screens is not. The next taker must document its
+  //   semantics here first.
+  CL_DKRED = 13, CL_AMBER = 14
 };
 // Parallel table of the real 16-bit 565 colors, indexed by the CL_* values.
 // CL_SELBG: a calmer medium forest green for the selection bar (pure green
@@ -66,6 +82,11 @@ static const uint16_t CL_PALETTE[] = {
   /*4 YELLOW*/ 0xFFE0, /*5 CYAN  */ 0x07FF, /*6 ORANGE*/ 0xFD20, /*7 GREY  */ 0x7BEF,
   /*8 BLUE  */ 0x041F, /*9 DGREEN*/ 0x0320, /*10 SELBG*/ 0x05C0, /*11 DGREY*/ 0x2104,
   /*12 MGREY*/ 0x4208,
+  // DKRED 0x6000 = (96,0,0): dark enough that white 6x8 glyphs carry, unmistakably
+  // red at arm's length, and clearly distinct from CL_RED text sharing the panel.
+  // AMBER 0xCC40 = (200,136,0): readable BOTH ways (amber-on-black for labels,
+  // black-on-amber for the warning bar) -- picked for that dual duty, see enum.
+  /*13 DKRED*/ 0x6000, /*14 AMBER*/ 0xCC40,
 };
 static const uint32_t CL_PALETTE_N = sizeof(CL_PALETTE) / sizeof(CL_PALETTE[0]);
 
@@ -285,6 +306,10 @@ static bool copyFile(const char* from, const char* to) {
 
 void App::setup() {
   s_self = this;
+#if CARDSAT_USB_DIAG
+  // Install BEFORE anything can log: the enumeration lines are the point of this build.
+  usbDiagInstall();
+#endif
   // The LoTW batch state lives in RTC RAM, which survives ESP.restart() but is GARBAGE
   // after a cold power-on/brownout. Trust it only on a software/deep-sleep reset; on any
   // other reset reason, scrub it so stale bits can't trigger a spurious upload or a
@@ -375,7 +400,7 @@ void App::setup() {
 
   db.begin();
   if (!Store::ready())
-    setStatus("No filesystem! Allocate SPIFFS or insert SD.", 8000);
+    setStatus("No filesystem: allocate SPIFFS or SD", 8000, SEV_ERR);
   else if (Store::onSD())
     setStatus("Using SD card for storage", 4000);
 
@@ -509,7 +534,7 @@ void App::setup() {
                             : "WiFi connected (NTP pending)", 3000);
     } else {
       Serial.println("[boot] WiFi connect failed");
-      setStatus("WiFi connect failed at boot", 3000);
+      setStatus("WiFi connect failed at boot", 3000, SEV_WARN);
     }
   }
 
@@ -551,7 +576,7 @@ void App::setup() {
       if (a < minAge) minAge = a;
     }
     if (minAge < 1e9 && minAge > GP_STALE_DAYS) {
-      setStatus("Elements stale - refreshing GP...", 2500); draw();
+      setStatus("Elements stale - refreshing GP...", 2500, SEV_WARN); draw();
       doUpdateGp();
     }
   }
@@ -591,6 +616,125 @@ void App::setup() {
 // CAT-B, then CAT-A. UsbSerial deliberately keeps the shared host alive while any
 // port remains, so ending CAT-B before CAT-A is what lets the final end() actually
 // release the host and give the console back.
+#if CARDSAT_USB_DIAG
+// ---- USB diagnostic capture ----------------------------------------------------
+void cardsatUsbDiag(const char* fmt, ...);   // C++ linkage: see PATCHES.md
+namespace {
+  constexpr size_t USBDIAG_CAP = 6144;
+  char             usbDiagBuf[USBDIAG_CAP];
+  volatile size_t  usbDiagLen  = 0;      // bytes held
+  volatile uint32_t usbDiagDrop = 0;     // bytes discarded once full
+  portMUX_TYPE     usbDiagMux = portMUX_INITIALIZER_UNLOCKED;
+  int (*usbDiagPrev)(const char*, va_list) = nullptr;
+
+  // Shared append. One short critical section, no allocation, no I/O -- callable
+  // from the USB host task and (via the esp_log hook) potentially an ISR.
+  void usbDiagAppend(const char* p, size_t len) {
+    portENTER_CRITICAL_SAFE(&usbDiagMux);
+    size_t room = USBDIAG_CAP - usbDiagLen;
+    if (len <= room) {
+      memcpy(usbDiagBuf + usbDiagLen, p, len);
+      usbDiagLen += len;
+    } else {
+      if (room) { memcpy(usbDiagBuf + usbDiagLen, p, room); usbDiagLen += room; }
+      usbDiagDrop += (uint32_t)(len - room);
+    }
+    portEXIT_CRITICAL_SAFE(&usbDiagMux);
+  }
+
+  // esp_log hook. Kept even though ESP_LOGI cannot be enabled under Arduino's
+  // precompiled IDF libraries: ESP_LOGE *is* compiled in (CONFIG_LOG_MAXIMUM_LEVEL
+  // = 1 = ERROR), so IDF's own USB host/hub ERROR lines still arrive here -- which
+  // is exactly what a wedged host would emit.
+  int usbDiagVprintf(const char* fmt, va_list ap) {
+    char line[192];
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    if (n < 0) return 0;
+    size_t len = (size_t)n < sizeof(line) - 1 ? (size_t)n : sizeof(line) - 1;
+    usbDiagAppend(line, len);
+    return n;                            // deliberately NOT chained to usbDiagPrev:
+                                         // the console may be gone, and writing to a
+                                         // dead CDC port is what we are avoiding
+  }
+}
+
+// Callback the VENDORED EspUsbHost calls (see third_party/EspUsbHost/PATCHES.md).
+// This is the path that actually works: ESP_LOGI is unreachable under Arduino's
+// precompiled IDF libraries, so the descriptor-walk facts are reported directly.
+void cardsatUsbDiag(const char* fmt, ...) {
+  char line[192];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(line, sizeof(line), fmt, ap);
+  va_end(ap);
+  if (n < 0) return;
+  size_t len = (size_t)n < sizeof(line) - 2 ? (size_t)n : sizeof(line) - 2;
+  line[len++] = '\n';
+  usbDiagAppend(line, len);
+}
+
+void App::usbDiagInstall() {
+  usbDiagPrev = esp_log_set_vprintf(&usbDiagVprintf);
+  // Targeted, not "*"=INFO: the library's own lines are the ones being hunted, and
+  // WARN elsewhere still catches IDF host/hub errors if the stack wedges.
+  esp_log_level_set("*", ESP_LOG_WARN);
+  esp_log_level_set("EspUsbHost", ESP_LOG_INFO);
+  esp_log_level_set("USBH", ESP_LOG_INFO);
+  esp_log_level_set("HUB", ESP_LOG_INFO);
+  esp_log_level_set("USB_HOST", ESP_LOG_INFO);
+}
+
+// Main loop. Moves whole lines out under a brief lock, then writes them OUTSIDE the
+// lock (Logstore blocks). Bounded per call so a burst cannot stall the Doppler loop.
+void App::usbDiagDrain() {
+  // One-shot banner, written on the first drain once the filesystem is up. Without
+  // it, a build whose ESP_LOGI lines were compiled out looks exactly like a build
+  // that ran and saw nothing -- a silent false negative. If this line is absent from
+  // the log, the capture never armed and no conclusion may be drawn from the run.
+  static bool banner = false;
+  if (!banner && Store::ready()) {
+    banner = true;
+    Logstore::rawf(Logstore::LOG_USB,
+                   "## DIAG BUILD ACTIVE  fw=%s  capture=%u B  LOG_LOCAL_LEVEL=%d",
+                   FW_VERSION, (unsigned)USBDIAG_CAP, (int)LOG_LOCAL_LEVEL);
+    // LOG_LOCAL_LEVEL must be a NUMBER, not the enum name: esp_log.h tests it in
+    // preprocessor #if contexts, where an enum identifier evaluates to 0 and every
+    // ESP_LOGI silently vanishes. The banner prints it so the log proves the level
+    // that was actually compiled in (expect 3 = INFO).
+    // Prove the pipeline end-to-end using the path that actually works. ESP_LOGI is
+    // NOT usable here: Arduino ships PRECOMPILED IDF libraries and its ESP_LOGI call
+    // sites are absent from the binary regardless of LOG_LOCAL_LEVEL (verified by
+    // compile probe AND by string-searching the ELF), so the vendored library
+    // reports through cardsatUsbDiag() instead. ESP_LOGE still reaches the vprintf
+    // hook, which is why that hook is retained.
+    cardsatUsbDiag("diagnostic capture armed (vendored-library hook)");
+  }
+  for (int guard = 0; guard < 8; ++guard) {
+    char out[200];
+    size_t take = 0;
+    portENTER_CRITICAL_SAFE(&usbDiagMux);
+    if (usbDiagLen) {
+      // prefer a whole line; otherwise flush what fits
+      size_t nl = 0;
+      while (nl < usbDiagLen && usbDiagBuf[nl] != '\n') ++nl;
+      take = (nl < usbDiagLen) ? nl + 1 : usbDiagLen;
+      if (take > sizeof(out) - 1) take = sizeof(out) - 1;
+      memcpy(out, usbDiagBuf, take);
+      memmove(usbDiagBuf, usbDiagBuf + take, usbDiagLen - take);
+      usbDiagLen -= take;
+    }
+    uint32_t dropped = usbDiagDrop;
+    usbDiagDrop = 0;
+    portEXIT_CRITICAL_SAFE(&usbDiagMux);
+    if (dropped) Logstore::rawf(Logstore::LOG_USB, "## DIAG: %lu byte(s) LOST (buffer full)", (unsigned long)dropped);
+    if (!take) return;
+    while (take && (out[take-1] == '\n' || out[take-1] == '\r')) --take;
+    out[take] = 0;
+    if (take) Logstore::rawf(Logstore::LOG_USB, "%s", out);
+  }
+}
+#endif  // CARDSAT_USB_DIAG
+
 void App::usbCatTeardown() {
 #if CARDSAT_HAS_USBCAT
   const bool anyUsb = UsbSerial::active() || UsbSerial::cat2Active();
@@ -637,15 +781,15 @@ void App::applyRadioFromCfg() {
       if (rotUsesUsb()) {
         // Three CDCs behind a hub presses the S3's 8 host channels and has no
         // bench story -- refuse the combination rather than mis-enumerate.
-        setStatus("Dual USB + USB rotator: move rotator off USB", 6000); return;
+        setStatus("Dual USB: move the rotator off USB", 6000, SEV_ERR); return;
       }
       if (cfg.dualUsbKey[0][0] && cfg.dualUsbKey[1][0] &&
           strcmp(cfg.dualUsbKey[0], cfg.dualUsbKey[1]) == 0) {
-        setStatus("Dual USB: legs share one adapter - renominate", 6000); return;
+        setStatus("Dual USB: both legs on one adapter", 6000, SEV_ERR); return;
       }
     }
 #if !CARDSAT_HAS_USBCAT
-    if (aU || bU) { setStatus("Dual: no USB CAT in this build", 5000); return; }
+    if (aU || bU) { setStatus("Dual: no USB CAT in this build", 5000, SEV_WARN); return; }
 #endif
     if (haveU && LEG_RADIOS[cfg.dualModel[1]].rxOnly) {
       // REFUSE, don't warn. A receive-only radio on the uplink leg produces a
@@ -654,12 +798,12 @@ void App::applyRadioFromCfg() {
       // indication of why uplink Doppler does nothing. Refusing at the same choke
       // point as the bus conflicts keeps every "this cannot work" answer in one
       // place. (0.9.68 warned and proceeded; flagged in the post-release audit.)
-      setStatus(String(LEG_RADIOS[cfg.dualModel[1]].name) + " is receive-only - not an uplink", 6000);
+      setStatus(String(LEG_RADIOS[cfg.dualModel[1]].name) + " is RX-only: not an uplink", 6000, SEV_ERR);
       return;
     }
     rig = makeDualRig(cfg.dualModel, cfg.dualBus, cfg.dualCiv, cfg.dualBaud,
                       cfg.dualHost, cfg.dualPort, cfg.dualUser, cfg.dualPass);
-    if (!rig) { setStatus("Dual: legs not configured", 4000); return; }
+    if (!rig) { setStatus("Dual: legs not configured", 4000, SEV_WARN); return; }
     rig->setCmdDelay(cfg.catDelayMs);
     // CI-V wiring mode, before begin(): a GROVE leg opens the same on-board UART as
     // wired CI-V and needs the same one-wire/two-wire choice. Most half-duplex Icoms
@@ -724,7 +868,7 @@ void App::yieldGroveIfTaken(const char* who) {
   cfg.rotTransport = ROT_XPORT_BRIDGE;
   cfg.save();
   applyRotatorFromCfg();
-  setStatus(String("Rotator moved to I2C bridge (") + who + " took Grove)", 5000);
+  setStatus(String("Rotator -> I2C bridge (") + who + ")", 5000);
 }
 
 // H10: enforce the direct Grove CAT <-> Grove GPS conflict. Both would open UART1 on the
@@ -785,7 +929,7 @@ void App::scanUsbAdapters() {
   setStatus("Scanning USB (console closes)...", 2000);
   draw();                                     // paint it: the scan blocks ~2.5 s
   const uint8_t n = UsbSerial::scanAdapters();
-  if (n == 0) setStatus("No USB adapters found", 4000);
+  if (n == 0) setStatus("No USB adapters found", 4000, SEV_WARN);
   else        setStatus(String(n) + " adapter" + (n == 1 ? "" : "s") + " found", 4000);
 #else
   setStatus("USB CAT not in this build", 3000);
@@ -1152,7 +1296,7 @@ void App::toggleMemo() {
     // momentarily too fragmented for even that block.
     if (UsbSerial::active() &&
         heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 6000) {
-      setStatus("Memo needs more free RAM (USB CAT active)", 4000);
+      setStatus("Memo needs RAM (USB CAT active)", 4000);
       lastDrawMs = 0; return;
     }
 #endif
@@ -1185,8 +1329,8 @@ void App::drawMemoIndicator() {
   canvas.printf("REC%lus", (unsigned long)memo.secondsLeft());
 }
 
-void App::setStatus(const String& s, uint32_t ms) {
-  status = s; statusUntil = millis() + ms;
+void App::setStatus(const String& s, uint32_t ms, StatusSev sev) {
+  status = s; statusUntil = millis() + ms; statusSev = sev;
 }
 
 time_t App::nowUtc() { return time(nullptr); }
@@ -1372,7 +1516,7 @@ void App::doUpdateGp() {
   setStatus("WiFi..."); draw();
   if (!net.connected() && !connectWifiCfg()) {
     Serial.println("[gp] WiFi connect failed");
-    setStatus("WiFi failed (check SSID/pass)"); return;
+    setStatus("WiFi failed (check SSID/pass)", 2500, SEV_ERR); return;
   }
   Serial.printf("[gp] WiFi OK, IP %s\n", WiFi.localIP().toString().c_str());
   net.syncTimeNtp();
@@ -1380,7 +1524,7 @@ void App::doUpdateGp() {
   // Stream straight to the cache file (the download IS the offline cache) and
   // parse from flash -- avoids holding the whole ~75 KB body in RAM.
   if (!gpFetchDue(cfg.gpUrl)) {
-    setStatus("GP cache <2 h old (courtesy) - reloading"); draw();
+    setStatus("GP cache <2 h old - reloading"); draw();
   } else if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
     Serial.printf("[gp] download failed: %s\n", net.lastErr.c_str());
     setStatus("GP DL failed: " + net.lastErr); return;
@@ -1416,12 +1560,12 @@ void App::doFastUpdate() {
   setStatus("WiFi..."); draw();
   if (!net.connected() && !connectWifiCfg()) {
     Serial.println("[fast] WiFi connect failed");
-    setStatus("WiFi failed (check SSID/pass)"); return;
+    setStatus("WiFi failed (check SSID/pass)", 2500, SEV_ERR); return;
   }
   net.syncTimeNtp();
   setStatus("Fast: GP..."); draw();
   if (!gpFetchDue(cfg.gpUrl)) {
-    setStatus("GP cache <2 h old (courtesy) - reloading"); draw();
+    setStatus("GP cache <2 h old - reloading"); draw();
   } else if (!net.fetchGpToFile(cfg.gpUrl, FILE_GP)) {
     Serial.printf("[fast] GP download failed: %s\n", net.lastErr.c_str());
     setStatus("GP DL failed: " + net.lastErr); return;
@@ -2282,14 +2426,14 @@ void App::hamsatEnter() {
   mergeUserSked();                         // include the user's manual entries
   hamsatStatus[0] = 0;                     // body stays clean; progress goes on the bar
   screen = SCR_HAMSAT; lastDrawMs = 0; draw();   // cached list (or empty state) on screen now
-  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)", 2500, SEV_ERR); lastDrawMs = 0; return; }
   int before = hamsatN;
   fetchHamsat();                           // shows "Updating Activations" while it runs
   // Result on the bottom bar, then the loop clears it when it times out.
   if (net.lastCode > 0 || hamsatN > 0)
     setStatus(hamsatN != before ? "Activations updated" : "Activations unchanged");
   else
-    setStatus("Activations update failed");
+    setStatus("Activations update failed", 2500, SEV_ERR);
   lastDrawMs = 0;
 }
 
@@ -2298,7 +2442,7 @@ void App::hamsatEnter() {
 // and leave a result that the loop drops when it expires.
 void App::spaceWxEnter() {
   screen = SCR_SPACEWX; lastDrawMs = 0; draw();   // cached values (loaded at boot) shown now
-  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)", 2500, SEV_ERR); lastDrawMs = 0; return; }
   float beforeF = spaceF107, beforeK = spaceKp;
   fetchSpaceWeather();                     // shows "Updating Space Wx" while it runs
   bool got = (spaceF107 > 0 || spaceKp >= 0);
@@ -2310,7 +2454,7 @@ void App::spaceWxEnter() {
 
 void App::weatherEnter() {
   screen = SCR_WEATHER; lastDrawMs = 0; draw();   // cached forecast (loaded at boot) shown now
-  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)", 2500, SEV_ERR); lastDrawMs = 0; return; }
   const Observer& o = loc.obs();
   if (!(o.lat != 0.0 || o.lon != 0.0)) { setStatus("Set a location first"); lastDrawMs = 0; return; }
   time_t before = wxEpoch;
@@ -2445,8 +2589,8 @@ void App::drawHamsat() {
     canvas.setCursor(212, 18);
     canvas.printf("%d/%d", hamsatSel + 1, hamsatN);
   }
-  if (skedAt) footer("sked set: c clr  n new  e edit ` bk");
-  else        footer("ENT detail  n new  e edit  r  ` bk");
+  if (skedAt) footer("sked set: c clr  n new  e edit ` back");
+  else        footer("ENT detail  n new  e edit  r  ` back");
 }
 
 void App::keyHamsat(char c, bool enter, bool back) {
@@ -2553,7 +2697,7 @@ void App::noteListFree() {
   noteListN = 0;
 }
 void App::buildNoteList() {
-  if (!noteListAlloc()) { noteListN = 0; setStatus("Out of memory"); return; }
+  if (!noteListAlloc()) { noteListN = 0; setStatus("Out of memory", 2500, SEV_ERR); return; }
   noteListN = Notes::list(noteList, noteTime, NOTES_LIST_MAX, NOTE_NAME_MAX);
   if (noteSel >= noteListN) noteSel = noteListN > 0 ? noteListN - 1 : 0;
 }
@@ -2574,8 +2718,8 @@ bool App::noteLoad(const char* base) {
 bool App::noteSave() {
   char nm[NOTE_NAME_MAX];
   strncpy(nm, noteName.c_str(), sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
-  if (!Notes::sanitizeName(nm, sizeof(nm))) { setStatus("Bad note name"); return false; }
-  if (!Notes::write(nm, noteBuf)) { setStatus("Note save failed"); return false; }
+  if (!Notes::sanitizeName(nm, sizeof(nm))) { setStatus("Bad note name", 2500, SEV_ERR); return false; }
+  if (!Notes::write(nm, noteBuf)) { setStatus("Note save failed", 2500, SEV_ERR); return false; }
   noteName = nm; noteDirty = false; noteIsNew = false;
   setStatus(String("Saved ") + nm);
   return true;
@@ -2654,7 +2798,7 @@ void App::keyNotes(char c, bool enter, bool back) {
     if (enter) {
       if (noteSel >= 0 && noteSel < noteListN) {
         if (Notes::remove(noteList[noteSel])) setStatus("Note deleted");
-        else                                  setStatus("Delete failed");
+        else                                  setStatus("Delete failed", 2500, SEV_ERR);
         buildNoteList();
       }
       noteConfirmDel = false;
@@ -3294,7 +3438,7 @@ void App::fetchTerrainProfile() {
   }
   String url = String(ELEVATION_API_BASE) + "?latitude=" + lats + "&longitude=" + lons;
   if (!net.httpsGetToFileRetry(url, FILE_DL_TMP, 8000, nullptr, 3, 20000)) {
-    Store::fs().remove(FILE_DL_TMP); setStatus("Terrain fetch failed"); return;
+    Store::fs().remove(FILE_DL_TMP); setStatus("Terrain fetch failed", 2500, SEV_ERR); return;
   }
   String body = readSmallFile(FILE_DL_TMP, 8000);
   Store::fs().remove(FILE_DL_TMP);
@@ -3302,7 +3446,7 @@ void App::fetchTerrainProfile() {
   int k = body.indexOf("elevation");
   int lb = (k >= 0) ? body.indexOf('[', k) : -1;
   int rb = (lb >= 0) ? body.indexOf(']', lb) : -1;
-  if (lb < 0 || rb < 0) { setStatus("Terrain parse error"); return; }
+  if (lb < 0 || rb < 0) { setStatus("Terrain parse error", 2500, SEV_ERR); return; }
   String arr = body.substring(lb + 1, rb);
   float elev[NS]; int n = 0;
   int from = 0;
@@ -5177,12 +5321,12 @@ void App::webdSendStatusJson() {
     j += "\"wifi\":\""; j += (wc ? "up" : "down"); j += "\",";
     j += "\"ip\":\""; j += (wc ? WiFi.localIP().toString() : String("")); j += "\",";
     j += "\"rssi\":"; j += (wc ? (long)WiFi.RSSI() : (long)0); j += ","; }
-  { // Same source of truth as the device's own screens. M5.Power.isCharging() is
-    // NOT usable on the Cardputer ADV (no charger-status line reaches it), which is
-    // why batteryCharging() infers from the voltage trend; the web API must not
-    // quietly report the value the charge screen was rewritten to stop trusting.
+  { // Same source of truth as the device's own screens. The Cardputer ADV has NO
+    // charger-status line -- not via M5.Power.isCharging(), which has no case for
+    // this board, and not by inference. "charging" is therefore reported as false
+    // rather than guessed, so the web page cannot contradict the device.
     int bl = batteryPercent();
-    bool chg = batteryCharging();
+    bool chg = batteryCharging();       // always false; kept for API shape stability
     j += "\"batt\":"; j += (bl >= 0 ? String(bl) : String("null")); j += ",";
     j += "\"charging\":"; j += (chg ? "true" : "false"); j += ","; }
   j += "\"heapFree\":"; j += (long)ESP.getFreeHeap(); j += ",";
@@ -5802,6 +5946,9 @@ uint32_t App::dopplerThreshAndLead(double rrNow, uint32_t centerHz, bool linear,
 
 void App::loop() {
   M5Cardputer.update();
+#if CARDSAT_USB_DIAG
+  usbDiagDrain();          // move any captured ESP_LOG text to the SD log
+#endif
   // Land a partial console buffer that has gone quiet. Cheap: a flag test and a
   // millis() compare unless capture is on AND something is pending.
   ConsoleLog::poll();
@@ -5971,7 +6118,7 @@ void App::loop() {
               Logstore::rawf(Logstore::LOG_USB, "# CAT-B up: %s baud=%lu (%s)",
                              l2.name, (unsigned long)b2, UsbSerial::cat2DeviceName());
           } else {
-            setStatus(String("2nd USB radio: ") + UsbSerial::cat2LastError(), 6000);
+            setStatus(String("CAT-B: ") + UsbSerial::cat2LastError(), 6000, SEV_ERR);
             if (Store::ready())
               Logstore::rawf(Logstore::LOG_USB, "# CAT-B FAILED: %s", UsbSerial::cat2LastError());
           }
@@ -6042,7 +6189,7 @@ void App::loop() {
         if (UsbSerial::cat2Begin(b2, 8, 0, (l2.family == LEGF_YBIN) ? 2 : 0)) {
           static_cast<DualRig*>(rig)->setLegExternalStream(1, UsbSerial::cat2Stream());
           if (radioOut && !catToolEngaged) initializeEngagedRig();  // both legs now attached
-          setStatus(String("2nd USB radio up: ") + UsbSerial::cat2DeviceName(), 4000);
+          setStatus(String("CAT-B up: ") + UsbSerial::cat2DeviceName(), 4000);
           if (Store::ready())
             Logstore::rawf(Logstore::LOG_USB, "# CAT-B up (retry): %s", UsbSerial::cat2DeviceName());
         }
@@ -6081,10 +6228,15 @@ void App::loop() {
     // Leaving Tiny BASIC entirely (the editor and its run console are one tool): the
     // program's output can be the full 6 KB cap, and holding it for the rest of the
     // session starves the big contiguous block a TLS upload needs.
-    if ((from == SCR_BASIC || from == SCR_BASICRUN) &&
-        screen != SCR_BASIC && screen != SCR_BASICRUN && screen != SCR_EDIT &&
-        screen != SCR_BASICREF) {
+    // SCR_BASICIMM is in both sets: leaving BASIC entirely frees the program output
+    // AND the prompt's resident VM (~3.8 KB) plus its scrollback. Catching it here
+    // rather than in the key handler covers every way out, including Fn+h to Help.
+    if ((from == SCR_BASIC || from == SCR_BASICRUN || from == SCR_BASICIMM) &&
+        screen != SCR_BASIC && screen != SCR_BASICRUN && screen != SCR_BASICIMM &&
+        screen != SCR_EDIT && screen != SCR_BASICREF) {
       basicFree();
+      basImmClose();
+      basicFreeTx();          // BASIC's own transponder buffer (5 KB when used)
     }
     // Leaving the voice-memo browser: its directory listing is ~6.6 KB and is
     // rebuilt on every entry, so nothing needs it to survive.
@@ -6849,7 +7001,13 @@ void App::handleKey(char c, bool enter, bool back) {
   // cursor movement. That keeps "screenshot any screen" true everywhere: no screen can
   // consume Fn+b, because none of these handlers look at keyFn at all.
   const bool lettersFree = (screen != SCR_EDIT && screen != SCR_NOTEEDIT &&
-                            screen != SCR_BASIC && screen != SCR_CALC &&
+                            screen != SCR_BASIC && screen != SCR_BASICIMM &&
+                            // SCR_BASICIMM was missing: the immediate-mode prompt takes
+                            // ANY printable character as text (its handler says so), so
+                            // bare 'b' screenshotted and bare 'h' opened Help instead of
+                            // typing -- making it impossible to enter either letter at
+                            // the prompt. Fn+b / Fn+h still reach the globals.
+                            screen != SCR_CALC &&
                             screen != SCR_LOTWSUB &&
                             screen != SCR_TOOLS && screen != SCR_DXLK &&
                             screen != SCR_CHARLK &&
@@ -6958,6 +7116,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_GRAPH:   keyGraph(c, enter, back); break;
     case SCR_BASIC:    keyBasic(c, enter, back); break;
     case SCR_BASICRUN: keyBasicRun(c, enter, back); break;
+    case SCR_BASICIMM: keyBasicImm(c, enter, back); break;
     case SCR_BASICFILES: keyBasicFiles(c, enter, back); break;
     case SCR_PERF:     keyPerf(c, enter, back); break;
     case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
@@ -7134,7 +7293,7 @@ void App::buildMemoList() {
   if (!memos) {
     memos = new (std::nothrow) VoiceMemo::MemoEntry[MEMO_LIST_MAX];
     if (!memos) { memoN = 0; memoSel = 0; memoScroll = 0;
-                  setStatus("Out of memory"); return; }
+                  setStatus("Out of memory", 2500, SEV_ERR); return; }
   }
   memoN = VoiceMemo::listMemos(memos, MEMO_LIST_MAX);
   if (memoSel >= memoN) memoSel = memoN > 0 ? memoN - 1 : 0;
@@ -7220,8 +7379,7 @@ void App::drawMemos() {
   }
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (memoScroll > 0)              { canvas.setCursor(232, 30);  canvas.print("^"); }
-  if (memoScroll + VIS < memoN)    { canvas.setCursor(232, 118); canvas.print("v"); }
+  scrollbar(30, 126, memoN, VIS, memoScroll);
 
   if (memoConfirmDel) {
     canvas.fillRect(20, 50, 200, 34, CL_BLACK);
@@ -7232,7 +7390,7 @@ void App::drawMemos() {
     canvas.setCursor(28, 70); canvas.print("ENT = delete   ` = cancel");
     footer("");
   } else {
-    footer("ENT play n new d del r refr `back");
+    footer("ENT play n new d del r refr ` back");
   }
 }
 
@@ -7253,7 +7411,7 @@ void App::keyMemos(char c, bool enter, bool back) {
     if (enter) {
       if (memoSel >= 0 && memoSel < memoN) {
         if (VoiceMemo::deleteMemo(memos[memoSel].file)) setStatus("Memo deleted");
-        else                                            setStatus("Delete failed");
+        else                                            setStatus("Delete failed", 2500, SEV_ERR);
         buildMemoList();
       }
       memoConfirmDel = false;
@@ -7280,7 +7438,7 @@ void App::keyMemos(char c, bool enter, bool back) {
   if (c == 'd' && memoN > 0) { memoConfirmDel = true; }
   if (enter && memoN > 0 && memoSel < memoN) {
     if (!audioAcquire()) {               // USB CAT + too little contiguous heap right now
-      setStatus("Playback needs more free RAM (USB CAT active)", 4000);
+      setStatus("Playback needs RAM (USB CAT active)", 4000);
     } else {
       setStatus("Playing... (any key stops)");
       draw();                            // show the status before we block
@@ -7712,7 +7870,7 @@ void App::drawWorkHzn() {
       snprintf(line, sizeof(line), "Grids  %d", whGridN);
       canvas.setCursor(12, y); canvas.print(line); y += 13;
     }
-    footer("s states d DXCC g +grids w save `bk");
+    footer("s states d DXCC g +grids w save ` back");
   } else {
     canvas.setCursor(6, y); canvas.print("(idle)");
     footer("` back");
@@ -7788,7 +7946,7 @@ void App::drawPlanner() {
   if (planComputed && planN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 78);
     canvas.print("No passes in the window.");
-    footer(";/. fld ENTER edit/GO l saved `back");
+    footer(";/. fld ENTER edit/GO l saved ` back");
     return;
   }
   if (planN == 0) {                                   // fresh, not yet computed
@@ -7796,7 +7954,7 @@ void App::drawPlanner() {
     canvas.setCursor(6, 60); canvas.print("Set grid/date/time, then GO.");
     canvas.setCursor(6, 72); canvas.print("Lists passes for all favorites");
     canvas.setCursor(6, 82); canvas.print("with workable states & DXCC.");
-    footer(";/. fld ENTER edit/GO l saved `back");
+    footer(";/. fld ENTER edit/GO l saved ` back");
     return;
   }
   // column header
@@ -7828,8 +7986,7 @@ void App::drawPlanner() {
     canvas.setCursor(4, y); canvas.print(line);
     y += LH;
   }
-  if (planScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 58);  canvas.print("^"); }
-  if (planScroll + rows < planN)      { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 120); canvas.print("v"); }
+  scrollbar(58, 128, planN, rows, planScroll);
   footer(";/. row  ENT detail  w save  g form");
 }
 
@@ -8030,7 +8187,7 @@ void App::keySatList(char c, bool enter, bool back) {
       buildSatView();
       if (viewSel >= viewN) viewSel = viewN > 0 ? viewN - 1 : 0;
       setStatus("Satellite deleted");
-    } else setStatus("Delete failed");
+    } else setStatus("Delete failed", 2500, SEV_ERR);
     return;
   }
   if (viewSel < satScroll)      satScroll = viewSel;
@@ -8176,7 +8333,7 @@ void App::keyTrack(char c, bool enter, bool back) {
     strncpy(rptArmName, nm, sizeof(rptArmName) - 1); rptArmName[sizeof(rptArmName) - 1] = 0;
     rptArmUntil = millis() + 3500;
     char pretty[40];   // AMSAT names are <28 chars; the prettify transform never grows the string
-    setStatus(String("Report ") + amsPretty(nm, pretty, sizeof(pretty)) + " Heard? press i again", 3500);
+    setStatus(String("Report ") + amsPretty(nm, pretty, sizeof(pretty)) + " Heard? press i", 3500);
     return;
   }
   if (c == 'v') { toggleMemo(); return; }            // SD voice memo (record/stop)
@@ -8314,6 +8471,28 @@ void App::keyTrack(char c, bool enter, bool back) {
       setStatus("Radio OFF");
     }
   }
+#if CARDSAT_HAS_USBCAT
+  // Fn+u: fully release the USB host. Disengaging a radio or rotator now DETACHES the
+  // port but leaves the host installed and the device enumerated, because some devices
+  // (measured: TH-D75) never re-initialise their firmware after a re-enumeration and go
+  // deaf on the next engage. That makes "really let go of USB" an explicit action --
+  // which is also when the serial console comes back.
+  //
+  // Behind Fn deliberately: it is a rare, deliberate operation, and bare letters are
+  // scarce on the tracking screen.
+  if (keyFn && c == 'u') {
+    if (UsbSerial::active() || UsbSerial::cat2Active() || UsbSerial::rotActive()) {
+      setStatus("Turn radio/rotator off first");
+    } else if (!UsbSerial::usbHostResident()) {
+      setStatus("USB already released");
+    } else {
+      UsbSerial::releaseUsbNow();
+      setStatus(UsbSerial::hostReleased() ? "USB released (console back)"
+                                          : "USB release failed - see log");
+    }
+    return;
+  }
+#endif
   if (c == 'o') {                                    // toggle rotator pointing
     if (!ensureRotatorReady()) setStatus(rotNotReadyMsg());
     else {
@@ -8479,7 +8658,7 @@ void App::keyPassPolar(char c, bool enter, bool back) {
 void App::computeMutual(const String& grid) {
   double dlat, dlon;
   if (!Location::gridToLatLon(grid, dlat, dlon)) {
-    setStatus("Bad grid (e.g. FM18lw)"); screen = SCR_PASSES; return;
+    setStatus("Bad grid (e.g. FM18lw)", 2500, SEV_ERR); screen = SCR_PASSES; return;
   }
   if (!timeIsSet()) { setStatus("Set the clock first"); screen = SCR_PASSES; return; }
   SatEntry* s = activeSat();
@@ -8536,7 +8715,7 @@ void App::drawMutual() {
     canvas.printf("%s %ld:%02ld %3.0f %3.0f", fmtMDHM(m.start).c_str(),
                   secs/60, secs%60, m.myMaxEl, m.dxMaxEl);
   }
-  footer(";/. sel  ENT detail  d Doppler  `back");
+  footer(";/. sel  ENT detail  d Doppler  ` back");
 }
 
 void App::keyMutual(char c, bool enter, bool back) {
@@ -9198,7 +9377,7 @@ void App::drawDxDopp() {
     if (dTx) { canvas.setCursor(150, yDx); canvas.printf("%.4f", dTx / 1e6); }
   }
 
-  footer("t m a   ,// dial 1k   ;/. `bk");
+  footer("t m a   ,// dial 1k   ;/. ` back");
 }
 
 void App::keyDxDopp(char c, bool enter, bool back) {
@@ -9284,11 +9463,11 @@ void App::drawVis() {
         canvas.setCursor(6, 62);
         canvas.printf("incl %.1f too low for %.1f%c", (double)vs->incl,
                       fabs(vo.lat), vo.lat >= 0 ? 'N' : 'S');
-        footer(";/. +/-1d  r recomp  p print  ` bk"); return;
+        footer(";/. +/-1d  r recomp  p print  ` back"); return;
       } }
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 56); canvas.print("No passes in this 10-day window.");
-    footer(";/. +/-1d  r recomp  p print  ` bk"); return;
+    footer(";/. +/-1d  r recomp  p print  ` back"); return;
   }
   const int barX0 = 40, barW = 196;          // 196 px = 24 h
   const int y0 = 19, rowH = 10;
@@ -9320,7 +9499,7 @@ void App::drawVis() {
   // "Now" marker only on today's row (first row when not scrolled into the future).
   if (visDayOff == 0)
     canvas.drawFastVLine(barX0 + (int)(barW * (nowUtc() - mid0) / 86400), y0, rowH, CL_RED);
-  footer(";/. +/-1d  r recomp  p print  ` bk");
+  footer(";/. +/-1d  r recomp  p print  ` back");
 }
 
 void App::keyVis(char c, bool enter, bool back) {
@@ -9355,7 +9534,7 @@ void App::buildVisList() {
   // so it rents the shared arena (config.h Scratch) instead of 1,280 B of permanent .bss.
   Scratch::Lease dayLease("vis", sizeof(PassPredict) * VIS_DAY_MAX);
   PassPredict* day = (PassPredict*)dayLease.p;
-  if (!day) { building = false; setStatus("Out of RAM"); return; }
+  if (!day) { building = false; setStatus("Out of RAM", 2500, SEV_ERR); return; }
   for (int i = 0; i < VIS_DAY_MAX; ++i) new (&day[i]) PassPredict();
   time_t from = now;
   while (from < winEnd && vlN < VIS_PASS_MAX) {
@@ -9458,7 +9637,7 @@ void App::illumFree() {
 
 void App::buildIllum() {
   illumValid = false;
-  if (!illumAlloc()) { setStatus("Out of memory"); return; }
+  if (!illumAlloc()) { setStatus("Out of memory", 2500, SEV_ERR); return; }
   SatEntry* s = activeSat();
   if (!s || !timeIsSet() || s->meanMotion <= 0) return;
   building = true;
@@ -9544,7 +9723,7 @@ void App::drawIllum() {
     canvas.printf("-> %s in %ldm", illumNextEclipse ? "shadow" : "sun",
                   illumNextSec / 60);
   }
-  footer(",// +/-60d  r recomp  p print  ` bk");
+  footer(",// +/-60d  r recomp  p print  ` back");
 }
 
 void App::keyIllum(char c, bool enter, bool back) {
@@ -9887,7 +10066,7 @@ void App::keySettings(char c, bool enter, bool back) {
                 // anyway just stalled on a \csdr_get nobody answers and reported
                 // "No reply from Stick" on a screen with no Stick in it.)
                 if (cfg.catType == CAT_DUAL) { screen = SCR_DUALRIG; lastDrawMs = 0; break; }
-                if (!drAlloc()) { setStatus("Out of memory"); break; }   // companion path
+                if (!drAlloc()) { setStatus("Out of memory", 2500, SEV_ERR); break; }   // companion path
                 screen = SCR_DUALRIG; lastDrawMs = 0; drQuery(); break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save();
               setStatus(cfg.aosAlarm ? "AOS alarm on" : "AOS alarm off"); break;
@@ -9895,7 +10074,7 @@ void App::keySettings(char c, bool enter, bool back) {
         static const uint8_t W[] = {3,6,12,24,48,72}; int n = 6, i = 0;
         for (int k = 0; k < n; ++k) if (W[k] == cfg.amsatWindowH) { i = k; break; }
         cfg.amsatWindowH = W[(i + 1) % n]; cfg.save();
-        setStatus(String("AMSAT window: ") + (int)cfg.amsatWindowH + " h - re-fetch to apply", 2500);
+        setStatus(String("AMSAT window: ") + (int)cfg.amsatWindowH + " h - re-fetch", 2500);
       } break;
       case 84: {   // AOS lead alert (cycle forward on ENTER)
         static const uint8_t L[] = {0,2,5,10,15}; int n = 5, i = 0;
@@ -10008,7 +10187,7 @@ void App::keySettings(char c, bool enter, bool back) {
                   loadFavs(); applyRadioFromCfg(); applyRotatorFromCfg();
                   buildSatView(); if (timeIsSet() && favN) buildSchedule();
                   setStatus("Restored from SD"); }
-        else setStatus("Restore failed");
+        else setStatus("Restore failed", 2500, SEV_ERR);
       } break;
       case 29: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
@@ -10129,7 +10308,7 @@ void App::keyEdit(char c, bool enter, bool back) {
           strncpy(dxGrid, g.c_str(), sizeof(dxGrid) - 1); dxGrid[sizeof(dxGrid)-1] = 0;
           dxLat = dlat; dxLon = dlon;
           setStatus(String("DX set: ") + dxGrid);
-        } else setStatus("Bad grid (e.g. FM18lw)");
+        } else setStatus("Bad grid (e.g. FM18lw)", 2500, SEV_ERR);
       } break;
       case 781: {                                   // Tiny BASIC: save under a name
         String v = editBuf; v.trim();
@@ -10151,18 +10330,18 @@ void App::keyEdit(char c, bool enter, bool back) {
         String v = editBuf; v.trim();
         graphExpr2 = v;
         if (v.length()) { bool ok; calcEvalX(v.c_str(), 0.0, ok);
-                          if (!ok) { graphExpr2 = ""; setStatus("Y2 expression error"); } }
+                          if (!ok) { graphExpr2 = ""; setStatus("Y2 expression error", 2500, SEV_ERR); } }
         screen = SCR_GRAPH; return;
       }
       case 780: {                                   // graphing calculator: expression
         String v = editBuf; v.trim();
         if (v.length()) { graphExpr = v; bool ok; calcEvalX(graphExpr.c_str(), 0.0, ok); graphErr = !ok;
-                          if (graphErr) setStatus("Expression error"); }
+                          if (graphErr) setStatus("Expression error", 2500, SEV_ERR); }
       } break;
       case 770: {                                   // location converter: grid in
         double dlat, dlon; String g = editBuf; g.trim(); g.toUpperCase();
         if (Location::gridToLatLon(g, dlat, dlon)) { locoLat = dlat; locoLon = dlon; locoValid = true; locoRecompute(); }
-        else setStatus("Bad grid (e.g. FM18lw)");
+        else setStatus("Bad grid (e.g. FM18lw)", 2500, SEV_ERR);
       } break;
       case 771: {                                   // location converter: latitude in
         String v = editBuf; v.trim();
@@ -10267,7 +10446,7 @@ void App::keyEdit(char c, bool enter, bool back) {
                   else if (Location::gridToLatLon(g, dlat, dlon)) {
                     strncpy(aprsCenter, g.c_str(), sizeof(aprsCenter)-1);
                     aprsCenter[sizeof(aprsCenter)-1] = 0; aprsRestart();
-                  } else setStatus("Bad grid (e.g. FM18lw)");
+                  } else setStatus("Bad grid (e.g. FM18lw)", 2500, SEV_ERR);
                   screen = SCR_APRS; } break;
       case 901: { String g = editBuf; g.trim(); g.toUpperCase();
                   double dlat, dlon;
@@ -10275,7 +10454,7 @@ void App::keyEdit(char c, bool enter, bool back) {
                   else if (Location::gridToLatLon(g, dlat, dlon)) {
                     strncpy(adsbTgtGrid, g.c_str(), sizeof(adsbTgtGrid)-1);
                     adsbTgtGrid[sizeof(adsbTgtGrid)-1] = 0;
-                  } else setStatus("Bad grid (e.g. FM18lw)");
+                  } else setStatus("Bad grid (e.g. FM18lw)", 2500, SEV_ERR);
                   adsbUpdateScatter();               // update the overlay now, not on next fetch
                   screen = SCR_ADSB; } break;
       case 226: strncpy(cfg.clKey, editBuf.c_str(), sizeof(cfg.clKey)-1);
@@ -10324,7 +10503,7 @@ void App::keyEdit(char c, bool enter, bool back) {
         char nm[NOTE_NAME_MAX];
         strncpy(nm, editBuf.c_str(), sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
         if (!Notes::sanitizeName(nm, sizeof(nm))) {
-          setStatus("Bad name"); buildNoteList();   // rebuild: the browser list was released
+          setStatus("Bad name", 2500, SEV_ERR); buildNoteList();   // rebuild: the browser list was released
           screen = SCR_NOTES; lastDrawMs = 0; return;
         }
         if (noteIsNew && Notes::exists(nm)) {        // don't silently clobber on 'new'
@@ -10557,7 +10736,7 @@ void App::keyEdit(char c, bool enter, bool back) {
         if (Location::gridToLatLon(g, dlat, dlon)) {
           strncpy(planGrid, g.c_str(), sizeof(planGrid)-1); planGrid[sizeof(planGrid)-1]=0;
           planLat = dlat; planLon = dlon;
-        } else setStatus("Bad grid");
+        } else setStatus("Bad grid", 2500, SEV_ERR);
         planComputed = false; planN = 0;
         screen = SCR_PLANNER; return;
       }
@@ -10971,7 +11150,8 @@ void App::drawAbout() {
   {
     int b = batteryPercent();
     String s = String("Battery: ") + (b < 0 ? String("n/a") : String(b) + "%");
-    if (batteryCharging()) s += " (charging)";   // inferred from trend; see batteryCharging()
+    // No "(charging)" suffix: this board has no charger status line, so any such
+    // claim would be a guess. See batteryCharging().
     line(s);
   }
   line(String("Heap ") + String(ESP.getFreeHeap() / 1024) + "K  blk " +
@@ -10984,7 +11164,7 @@ void App::drawAbout() {
              (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
     line(String(b));
   }
-  footer("p print a/c t tools l lic z game `bk");
+  footer("p print a/c t tools l lic z game ` back");
 }
 
 void App::keyAbout(char c, bool enter, bool back) {
@@ -12676,7 +12856,7 @@ void App::logViewFree() {
 
 void App::loadLog() {
   logRecN = 0;
-  if (!logViewAlloc()) { setStatus("Out of memory"); return; }
+  if (!logViewAlloc()) { setStatus("Out of memory", 2500, SEV_ERR); return; }
   int total = qsoCount();
   logFirstIdx = (total > LOG_VIEW_MAX) ? total - LOG_VIEW_MAX : 0;
   logListSel = 0;
@@ -12794,6 +12974,16 @@ void App::keyLogList(char c, bool enter, bool back) {
   }
 }
 
+void App::scrollbar(int yTop, int yBot, int total, int vis, int off) {
+  if (total <= vis || total <= 0 || yBot - yTop < 8) return;   // fits: no chrome
+  const int x = 238, h = yBot - yTop;
+  canvas.fillRect(x, yTop, 2, h, CL_DGREY);                    // track
+  int th = (int)((int32_t)h * vis / total); if (th < 6) th = 6; // thumb, min grabbable
+  int maxOff = total - vis; if (off < 0) off = 0; if (off > maxOff) off = maxOff;
+  int ty = yTop + (maxOff ? (int)((int32_t)(h - th) * off / maxOff) : 0);
+  canvas.fillRect(x, ty, 2, th, CL_GREY);
+}
+
 void App::footer(const String& t) {
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setTextSize(1);
@@ -12897,6 +13087,7 @@ void App::draw() {
     case SCR_GRAPH:   drawGraph(); break;
     case SCR_BASIC:    drawBasic(); break;
     case SCR_BASICRUN: drawBasicRun(); break;
+    case SCR_BASICIMM: drawBasicImm(); break;
     case SCR_BASICFILES: drawBasicFiles(); break;
     case SCR_PERF:     drawPerf(); break;
     case SCR_FOXANAT: drawFoxAnat(); break;
@@ -12988,8 +13179,12 @@ void App::draw() {
   }
   // transient status
   if (status.length() && !timeReached(millis(), statusUntil)) {
-    canvas.fillRect(0, 114, 240, 11, CL_DGREEN);
-    canvas.setTextColor(CL_WHITE, CL_DGREEN);
+    // Fill by severity so the class of message reads before the words do.
+    const uint8_t bg = (statusSev == SEV_ERR)  ? CL_DKRED
+                     : (statusSev == SEV_WARN) ? CL_AMBER : CL_DGREEN;
+    const uint8_t fg = (statusSev == SEV_WARN) ? CL_BLACK : CL_WHITE;
+    canvas.fillRect(0, 114, 240, 11, bg);
+    canvas.setTextColor(fg, bg);
     canvas.setTextSize(1);
     canvas.setCursor(2, 115);
     canvas.print(status);
@@ -13909,7 +14104,7 @@ void App::drawHelp() {
     canvas.setTextColor(hdr ? CL_CYAN : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, 20 + i * 12); canvas.print(s);
   }
-  footer("topics: g m s t l   ;/. scrl ` bk");
+  footer("topics: g m s t l   ;/. scrl ` back");
 }
 
 void App::keyHelp(char c, bool enter, bool back) {
@@ -15780,6 +15975,7 @@ void App::runSerialCommand(const char* cmd) {
     else if (!strcasecmp(q, "allpass")) pr = PR_ALLPASS;
     else if (!strcasecmp(q, "target"))  pr = PR_TARGET;
     else if (!strcasecmp(q, "note"))    pr = PR_NOTE;
+    else if (!strcasecmp(q, "basicimm")) pr = PR_BASICIMM;
     else if (!strcasecmp(q, "orbit"))   pr = PR_ORBIT;
     else if (!strcasecmp(q, "illum"))   pr = PR_ILLUM;
     else if (!strcasecmp(q, "tenday"))  pr = PR_TENDAY;
@@ -16658,6 +16854,29 @@ void App::printBasicOut() {
 }
 
 
+// The immediate-mode scrollback: the transcript of what was typed and what came back.
+// Printed as-is, INCLUDING the "> " prompt lines, because the questions are half the
+// value of a session record -- a column of answers with no expressions is not a
+// working note. The buffer is capped at 2 KB and trimmed from the front by
+// basImmExec(), so what prints is the tail of the session; that is stated on the
+// sheet rather than left to be inferred from a transcript that begins mid-thought.
+void App::printBasicImm() {
+  Printer::title("BASIC PROMPT");
+  if (!basImmVm) { Printer::line("(prompt not open)"); return; }
+  Printer::blank();
+  if (basImmLog.length() == 0) { Printer::line("(nothing entered yet)"); return; }
+  int i = 0, n = basImmLog.length(); String ln;
+  while (i < n) {
+    char c = basImmLog[i++];
+    if (c == '\r') continue;
+    if (c == '\n') { Printer::wrap(ln); ln = ""; }
+    else if (ln.length() < 200) ln += c;
+  }
+  if (ln.length()) Printer::wrap(ln);
+  Printer::blank();
+  Printer::line("(most recent 2 KB of session)");
+}
+
 void App::printAmsatPitch() {
   Printer::title("SUPPORT AMSAT");
   Printer::wrap("AMSAT is the volunteer, nonprofit organization that keeps amateur "
@@ -16754,6 +16973,7 @@ const char* App::prtStem(PrintReport w) {
     case PR_TIMELINE: return "timeline";
     case PR_BASICLIST: return "basic_listing";
     case PR_BASICOUT:  return "basic_output";
+    case PR_BASICIMM:  return "basic_prompt";
     case PR_TOOLOUT:   return "tool_output";
     case PR_TOOLFORM:  return "tool_form";
     case PR_CONJ:      return "conjunction";
@@ -16833,6 +17053,7 @@ bool App::printReport(PrintReport which) {
     case PR_TIMELINE: printTimeline(); break;
     case PR_BASICLIST: printBasicList(); break;
     case PR_BASICOUT:  printBasicOut(); break;
+    case PR_BASICIMM:  printBasicImm(); break;
     case PR_TOOLOUT:   printToolOut(); break;
     case PR_TOOLFORM:  printToolForm(); break;
     case PR_CONJ:      printConj(); break;
@@ -17473,7 +17694,7 @@ void App::catStep(const String& name, bool ok, const String& detail) {
 void App::runCatTest() {
   catCount = 0; catScroll = 0; catPass = 0; catFail = 0;
   if (!catLines) catLines = new (std::nothrow) char[CATTEST_MAX][CATTEST_W];
-  if (!catLines) { setStatus("Out of memory"); return; }   // catCount stays 0 -> safe
+  if (!catLines) { setStatus("Out of memory", 2500, SEV_ERR); return; }   // catCount stays 0 -> safe
 
   if (!rig || !rig->ready()) {
     // A USB CAT radio only opens its transport when engaged (loop() reconciler ties
@@ -17909,8 +18130,10 @@ void App::drawDualRigLocal() {
     // One leg deliberately unset: say which half is driven, so "half of it isn't
     // working" is never the operator's first reading of a working configuration.
     canvas.setTextColor(CL_CYAN, CL_BLACK);
-    canvas.printf("%s only - %s not CAT controlled",
-                  haveD ? "downlink" : "uplink", haveD ? "uplink" : "downlink");
+    // 39 columns at x=6. The long form ("downlink only - uplink not CAT
+    // controlled") was 41 and lost its last two characters off the right edge.
+    canvas.printf("%s only - %s not CAT driven",
+                  haveD ? "DN" : "UP", haveD ? "UP" : "DN");
   } else if (bothG) {
     canvas.setTextColor(CL_RED, CL_BLACK);
     canvas.print("! both legs on Grove - one UART");
@@ -17937,32 +18160,65 @@ void App::drawDualRigLocal() {
     const uint8_t m = cfg.dualModel[L];
     const LegProfile& lp = LEG_RADIOS[m];
     int f = L * 6;
-    auto row = [&](bool sel, const String& s){
+    // Label/value split (0.9.70 hierarchy pass): the LABEL sits in grey and the
+    // VALUE in white, so the eye lands on the part that varies. On the selection
+    // bar both go black -- contrast against CL_SELBG matters more than hierarchy
+    // for the one row being acted on.
+    auto row = [&](bool sel, const String& lbl, const String& val){
       canvas.fillRect(6, y - 1, 228, 10, sel ? CL_SELBG : CL_BLACK);
+      canvas.setTextColor(sel ? CL_BLACK : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+      canvas.setCursor(10, y); canvas.print(lbl);
       canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
-      canvas.setCursor(10, y); canvas.print(s);
+      canvas.print(val);
       y += 10;
     };
-    row(f + 0 == drSel, String(legName[L]) + " Rig: " +
-        (m == LEG_NONE ? "(none)" : lp.name) + (lp.rxOnly ? " [RX]" : ""));
+    if (L == 1) {
+      // Hairline between the leg blocks. The rows TILE (fill y-1..y+8, next fill
+      // starts y+9), so there is no free pixel to borrow: the first version drew at
+      // y-3 and struck the bottom pixel row of the previous text -- straight
+      // through the descender of the 'p' in "port:". The line needs its own space:
+      // draw at the current y (row 69 above it is clear, the next fill starts at
+      // y+1 after the +2) and advance. Column after this: leg-1 rows at 72..102,
+      // last fill ends 110, row 111 clear, hint text at 112.
+      canvas.drawFastHLine(6, y, 228, CL_DGREY);
+      y += 2;
+    }
+    row(f + 0 == drSel, String(legName[L]) + " Rig: ",
+        (m == LEG_NONE ? String("(none)") : String(lp.name)) + (lp.rxOnly ? " [RX]" : ""));
     {
-      String b = String("   Bus: ") + BUSN[cfg.dualBus[L]];
-      if (cfg.dualBus[L] == LEGBUS_USB)
-        b += "  Adp:" + usbAdapterLabel(cfg.dualUsbKey[L]);
-      row(f + 1 == drSel, b);
+      String b = String(BUSN[cfg.dualBus[L]]);
+      if (cfg.dualBus[L] == LEGBUS_USB) {
+        // 38 columns at x=10, and "   Bus: USB  Adp:" already spends 17 of them.
+        // A real adapter label is longer than what is left ("FTDI FT232R
+        // 0403:6001 #A50285BI" is 31), so keep the TAIL: the serial number at the
+        // end is what distinguishes two otherwise identical adapters.
+        String lbl = usbAdapterLabel(cfg.dualUsbKey[L]);
+        if (lbl.length() > 20) lbl = "..." + lbl.substring(lbl.length() - 17);
+        b += "  Adp:" + lbl;
+      }
+      row(f + 1 == drSel, "   Bus: ", b);
     }
     {
       bool selCiv = (f + 2 == drSel), selBaud = (f + 3 == drSel);
       uint8_t  civ = cfg.dualCiv[L] ? cfg.dualCiv[L] : lp.civAddr;
       uint32_t bd  = cfg.dualBaud[L] ? cfg.dualBaud[L] : lp.baud;
-      String civS  = cfg.dualCiv[L] ? String(civ, HEX) : (String(civ, HEX) + "*");
-      String baudS = cfg.dualBaud[L] ? String(bd) : (String(bd) + "*");
-      String r = String("   ") + (selCiv ? ">" : " ") + "CIV:" + civS +
-                 "  " + (selBaud ? ">" : " ") + "baud:" + baudS;
-      canvas.fillRect(6, y - 1, 228, 10, (selCiv || selBaud) ? CL_SELBG : CL_BLACK);
-      canvas.setTextColor((selCiv || selBaud) ? CL_BLACK : CL_WHITE,
-                          (selCiv || selBaud) ? CL_SELBG : CL_BLACK);
-      canvas.setCursor(10, y); canvas.print(r);
+      // The "*" marks a catalog DEFAULT rather than an operator-set value; it is
+      // an aside, so it takes CL_AMBER (see the palette notes) when unselected.
+      const bool sel = selCiv || selBaud;
+      const uint8_t bgc = sel ? CL_SELBG : CL_BLACK;
+      const uint8_t lbc = sel ? CL_BLACK : CL_GREY;
+      const uint8_t vlc = sel ? CL_BLACK : CL_WHITE;
+      const uint8_t asc = sel ? CL_BLACK : CL_AMBER;
+      canvas.fillRect(6, y - 1, 228, 10, bgc);
+      canvas.setCursor(10, y);
+      canvas.setTextColor(lbc, bgc);
+      canvas.print(String("   ") + (selCiv ? ">" : " ") + "CIV:");
+      canvas.setTextColor(vlc, bgc); canvas.print(String(civ, HEX));
+      if (!cfg.dualCiv[L]) { canvas.setTextColor(asc, bgc); canvas.print("*"); }
+      canvas.setTextColor(lbc, bgc);
+      canvas.print(String("  ") + (selBaud ? ">" : " ") + "baud:");
+      canvas.setTextColor(vlc, bgc); canvas.print(String(bd));
+      if (!cfg.dualBaud[L]) { canvas.setTextColor(asc, bgc); canvas.print("*"); }
       y += 10;
     }
     {
@@ -17971,26 +18227,34 @@ void App::drawDualRigLocal() {
       // keep the port visibly separate: "LAN:<host>:<port>" read as one field and
       // left the operator unsure which half wanted the address.
       bool selH = (f + 4 == drSel), selP = (f + 5 == drSel);
-      String r;
+      const bool sel = selH || selP;
+      const uint8_t bgc = sel ? CL_SELBG : CL_BLACK;
+      const uint8_t lbc = sel ? CL_BLACK : CL_GREY;
+      const uint8_t vlc = sel ? CL_BLACK : CL_WHITE;
+      canvas.fillRect(6, y - 1, 228, 10, bgc);
+      canvas.setCursor(10, y);
       if (cfg.dualBus[L] == LEGBUS_LAN) {
         String h = cfg.dualHost[L][0] ? String(cfg.dualHost[L]) : String("(enter radio IP)");
         if (h.length() > 15) h = "..." + h.substring(h.length() - 12);
-        r = String("  ") + (selH ? ">" : " ") + "IP:" + h +
-            "  " + (selP ? ">" : " ") + "port:" + String(cfg.dualPort[L]);
+        canvas.setTextColor(lbc, bgc);
+        canvas.print(String("  ") + (selH ? ">" : " ") + "IP:");
+        canvas.setTextColor(vlc, bgc); canvas.print(h);
+        canvas.setTextColor(lbc, bgc);
+        canvas.print(String("  ") + (selP ? ">" : " ") + "port:");
+        canvas.setTextColor(vlc, bgc); canvas.print(String(cfg.dualPort[L]));
       } else {
-        r = "    IP/port: set Bus to LAN first";
+        // Whole line is an aside (nothing editable here until the Bus changes),
+        // so it stays in the label grey rather than value white.
+        canvas.setTextColor(lbc, bgc);
+        canvas.print("    IP/port: set Bus to LAN first");
       }
-      canvas.fillRect(6, y - 1, 228, 10, (selH || selP) ? CL_SELBG : CL_BLACK);
-      canvas.setTextColor((selH || selP) ? CL_BLACK : CL_WHITE,
-                          (selH || selP) ? CL_SELBG : CL_BLACK);
-      canvas.setCursor(10, y); canvas.print(r);
       y += 10;
     }
   }
-  // '*' marks a table default in the CIV/baud fields.
+  // The amber '*' marks a table default in the CIV/baud fields.
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(6, 112);
-  canvas.print("ENTER edit/cycle (IP on the IP row)");
+  canvas.print("ENTER edit/cycle   x:swap DN<->UP");
   canvas.setCursor(6, 122);
   canvas.print("a:adapter u/p:login s:save *=dflt");
 }
@@ -17998,11 +18262,44 @@ void App::drawDualRigLocal() {
 void App::keyDualRigLocal(char c, bool enter, bool back) {
   if (isBack(c, back)) { setSel = 0; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
   const int L = drSel / 6, F = drSel % 6;
-  if (isUp(c))   { if (drSel > 0)  drSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (drSel < 11) drSel++; lastDrawMs = 0; return; }
+  // Twelve rows, wrapping: off the bottom of the UP leg returns to the top of the
+  // DN leg. Same convention as every selectable list.
+  if (isUp(c))   { drSel = (uint8_t)((drSel + 11) % 12); lastDrawMs = 0; return; }
+  if (isDown(c)) { drSel = (uint8_t)((drSel + 1)  % 12); lastDrawMs = 0; return; }
   if (c == 's') {
     cfg.save(); applyRadioFromCfg();
     setStatus(rig ? (String("Dual rig: ") + rig->name()) : String("Saved (legs idle)"));
+    lastDrawMs = 0; return;
+  }
+  if (c == 'x') {
+    // Swap the two legs WHOLESALE -- every per-leg field moves together (radio,
+    // bus, CI-V address, baud, LAN host/port/login and the USB adapter pin), so
+    // the pair is genuinely exchanged rather than half-swapped into a
+    // configuration that was never valid. Re-picking both legs by hand is the
+    // thing this replaces; getting the downlink and uplink the wrong way round is
+    // an easy mistake to make and a tedious one to undo.
+    auto sw8  = [](uint8_t&  a, uint8_t&  b){ uint8_t  t = a; a = b; b = t; };
+    auto sw16 = [](uint16_t& a, uint16_t& b){ uint16_t t = a; a = b; b = t; };
+    auto sw32 = [](uint32_t& a, uint32_t& b){ uint32_t t = a; a = b; b = t; };
+    auto swStr = [](char* a, char* b, size_t n){
+      char t[64]; if (n > sizeof(t)) n = sizeof(t);
+      memcpy(t, a, n); memcpy(a, b, n); memcpy(b, t, n);
+      a[n-1] = 0; b[n-1] = 0;
+    };
+    sw8 (cfg.dualModel[0], cfg.dualModel[1]);
+    sw8 (cfg.dualBus[0],   cfg.dualBus[1]);
+    sw8 (cfg.dualCiv[0],   cfg.dualCiv[1]);
+    sw32(cfg.dualBaud[0],  cfg.dualBaud[1]);
+    sw16(cfg.dualPort[0],  cfg.dualPort[1]);
+    swStr(cfg.dualHost[0], cfg.dualHost[1], sizeof(cfg.dualHost[0]));
+    swStr(cfg.dualUser[0], cfg.dualUser[1], sizeof(cfg.dualUser[0]));
+    swStr(cfg.dualPass[0], cfg.dualPass[1], sizeof(cfg.dualPass[0]));
+    swStr(cfg.dualUsbKey[0], cfg.dualUsbKey[1], sizeof(cfg.dualUsbKey[0]));
+    cfg.save(); applyRadioFromCfg();
+    setStatus(String("Swapped: DN=") +
+              (cfg.dualModel[0] == LEG_NONE ? "none" : LEG_RADIOS[cfg.dualModel[0]].name) +
+              " UP=" +
+              (cfg.dualModel[1] == LEG_NONE ? "none" : LEG_RADIOS[cfg.dualModel[1]].name));
     lastDrawMs = 0; return;
   }
   if (c == 'a') {
@@ -18160,8 +18457,8 @@ void App::keyDualRig(char c, bool enter, bool back) {
   if (isBack(c, back)) { setSel = 0; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
   if (c == 'q') { setStatus("Querying Stick..."); draw(); drQuery(); lastDrawMs = 0; return; }
   if (c == 's') { drSave(); lastDrawMs = 0; return; }
-  if (isUp(c))   { if (drSel > 0) drSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (drSel < 7) drSel++; lastDrawMs = 0; return; }
+  if (isUp(c))   { drSel = (uint8_t)((drSel + 7) % 8); lastDrawMs = 0; return; }
+  if (isDown(c)) { drSel = (uint8_t)((drSel + 1) % 8); lastDrawMs = 0; return; }
   // The enumerated-device list is informational and can be longer than the rows that
   // fit, and drawDualRig() already draws a "...more" hint when it is truncated -- but
   // nothing advanced drScroll, so that hint pointed at devices the operator could not
@@ -18232,7 +18529,7 @@ void App::catMonSendHex(const String& hex) {
   }
   if (hi >= 0 && n < sizeof(buf)) buf[n++] = (uint8_t)hi;    // trailing nibble
   if (!n) { setStatus("No hex bytes parsed"); return; }
-  if (!rig || !rig->sendRaw(buf, n)) { setStatus("Send failed (no CAT port)"); return; }
+  if (!rig || !rig->sendRaw(buf, n)) { setStatus("Send failed (no CAT port)", 2500, SEV_ERR); return; }
   setStatus(String("Sent ") + n + " byte(s)");
 }
 
@@ -18256,41 +18553,50 @@ void App::catMonSendHex(const String& hex) {
 // separate internal read), so we read the battery ADC pin directly the way bmorcelli/Launcher
 // does: GPIO10 through a 2:1 divider. Averaged over a few samples to steady the last digit.
 int App::batteryMilliVolts() {
-  const int BAT_ADC_PIN = 10;          // Cardputer / Cardputer ADV battery sense (2:1 divider)
-  long acc = 0; int n = 0;
-  for (int i = 0; i < 8; ++i) { int m = analogReadMilliVolts(BAT_ADC_PIN); if (m > 0) { acc += m; ++n; } }
-  if (!n) return 0;
-  return (int)(acc / n) * 2;           // undo the divider
+  // USE M5UNIFIED'S READER, NOT analogReadMilliVolts(). Both want ADC1, and only one
+  // can have it: M5Unified's _getBatteryAdcRaw() calls adc_oneshot_new_unit() and
+  // returns 0 if that fails, while Arduino's analogRead path claims the same unit and
+  // logs "adc1 is already in use" when it loses. CardSat used to read the pin
+  // directly, which is what BROKE M5.Power.getBatteryVoltage() -- and an old comment
+  // here blamed M5Unified for returning 0. We caused that. One owner, no contention,
+  // no error spam, and a voltage that actually reads.
+  //
+  // Kept: the 2 s cache, because the charge screen, About, /api/status and BASIC's
+  // BATTMV all call this, several within a frame, and a battery does not move that
+  // fast.
+  static uint32_t lastMs = 0;
+  static int      lastMv = 0;
+  const uint32_t now = millis();
+  if (lastMs && (now - lastMs) < 2000) return lastMv;
+  lastMs = now;
+  const int mv = (int)M5.Power.getBatteryVoltage();   // 0 = unreadable
+  lastMv = (mv > 0) ? mv : 0;
+  return lastMv;
 }
 
-// Infer charge state from the voltage trend, because the ADV exposes no charger-status line
-// that M5Unified can read (its isCharging() has no pmic_adc case and returns a fixed value).
-// A slow EMA reference is compared to the live reading every ~30 s: a clear rise latches
-// "charging", a clear fall latches "discharging"; small changes hold the last verdict so the
-// readout doesn't flicker on ADC noise.
+// CHARGE STATE IS NOT KNOWABLE ON THIS HARDWARE. This returns false, always, and the
+// UI no longer shows a charging indicator. The evidence, so nobody re-implements it:
+//
+//   * The Cardputer ADV has NO PMIC. M5Unified classifies it as pmic_adc -- a bare
+//     battery-sense ADC on GPIO10 with a 2:1 divider, nothing else.
+//   * It has no charger status line. M5Unified reads CHG_STAT for the boards that do
+//     (StickS3 via PM1_G0, PaperDIY via PM1_G3, PaperS3 via a dedicated pin); the
+//     Cardputer ADV appears NOWHERE in Power_Class::isCharging(), so that call cannot
+//     answer for this board and never could.
+//   * The old voltage-trend inference could not work either, for two reasons. It read
+//     batteryMilliVolts(), which returned 0 because of the ADC contention above, so
+//     it held its initial latch and reported "not charging" forever -- the reported
+//     symptom. And even with a working voltage it is not a sound test: a full battery
+//     on the charger is flat, which is indistinguishable from idle on battery.
+//   * USB VBUS presence was considered and rejected: CardSat SUPPLIES VBUS in USB
+//     host mode, so it would read "charging" while driving a radio.
+//
+// A wrong indicator is worse than no indicator -- it was reporting "on battery" while
+// plugged in. Battery PERCENTAGE still works (M5.Power.getBatteryLevel(), a separate
+// internal path) and is what the UI shows.
 bool App::batteryCharging() {
-  uint32_t now = millis();
-  // Serve the latched verdict without touching the ADC until the window elapses.
-  // This is THE charge-state accessor for the whole firmware -- the charge screen,
-  // the About page and /api/status all call it -- so it has to be cheap enough to
-  // sit in a draw path. (0.9.68 left /api/status and About reading M5.Power's
-  // isCharging() directly, which on the ADV is exactly the unusable value this
-  // function exists to replace: the web page could contradict the device.)
-  if (battTrendMv != 0 && (now - battTrendMs) < 30000) return battChargeState == 1;
-  int mv = batteryMilliVolts();
-  if (mv <= 0) return battChargeState == 1;
-  if (battTrendMv == 0) { battTrendMv = mv; battTrendMs = now; return false; }
-  {
-    int delta = mv - battTrendMv;
-    if (delta >  20) battChargeState = 1;            // rising >20 mV/30s -> charging
-    else if (delta < -20) battChargeState = 0;       // falling -> on battery
-    // small |delta|: hold the previous latched state
-    battTrendMv += delta / 4;                        // ease the reference toward the reading
-    battTrendMs = now;
-  }
-  return battChargeState == 1;
+  return false;
 }
-
 
 int App::batteryPercent() {
   // Prefer M5Unified's getBatteryLevel(): on the ADV this uses a working internal ADC read
@@ -18387,9 +18693,8 @@ void App::drawCharge() {
   if (screenAsleep && !chargeWoke) return;
   // Woken (or first entry): show battery status. The loop auto-blanks this window
   // after 10 s to return to the dark idle.
-  bool charging = batteryCharging();     // inferred from voltage trend (ADV has no charger line)
   int  pct = batteryPercent();
-  int  mv  = batteryMilliVolts();        // GPIO10 direct; M5's getBatteryVoltage() reads 0 on ADV
+  int  mv  = batteryMilliVolts();        // via M5.Power.getBatteryVoltage() (single ADC owner)
 
   // Bucket the percentage to 2% so the on-screen number is steady despite ADC jitter (the
   // ADV's getBatteryLevel() wobbles +/-1%). We repaint every tick regardless -- draw() clears
@@ -18418,7 +18723,8 @@ void App::drawCharge() {
   canvas.drawRect(bx, by, bw, bh, CL_WHITE);
   canvas.fillRect(bx + bw, by + 14, 5, bh - 28, CL_WHITE);   // terminal nub
   int fill = (shown < 0) ? 0 : (shown * (bw - 4)) / 100;
-  uint16_t col = charging ? CL_GREEN : (shown > 50 ? CL_GREEN : (shown > 20 ? CL_YELLOW : CL_RED));
+  // Colour by CHARGE LEVEL only -- the charging state is not knowable here.
+  uint16_t col = (shown > 50) ? CL_GREEN : (shown > 20 ? CL_YELLOW : CL_RED);
   if (fill > 0) canvas.fillRect(bx + 2, by + 2, fill, bh - 4, col);
 
   canvas.setTextColor(CL_WHITE, CL_BLACK);
@@ -18427,12 +18733,17 @@ void App::drawCharge() {
   canvas.setCursor(120 - (int)(p.length() + 1) * 6, by + bh / 2 - 7);
   canvas.print(p); canvas.print("%");
 
+  // No "Charging / On battery" line. This board cannot report charge state (see
+  // batteryCharging()), and the old readout was stuck on "On battery" even while
+  // plugged in -- a confident wrong answer, which is worse than none. The terminal
+  // VOLTAGE is shown instead: it is a real measurement, and it rises on the charger,
+  // so it carries the same information honestly and lets the operator judge.
   canvas.setTextSize(1);
-  canvas.setTextColor(charging ? CL_GREEN : CL_GREY, CL_BLACK);
-  canvas.setCursor(6, 96);
-  canvas.print(charging ? "Charging" : "On battery");
-  if (mv > 0) { canvas.setTextColor(CL_GREY, CL_BLACK);
-                canvas.setCursor(150, 96); canvas.printf("%d.%02d V", mv/1000, (mv%1000)/10); }
+  if (mv > 0) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(6, 96);
+    canvas.printf("%d.%02d V", mv / 1000, (mv % 1000) / 10);
+  }
 
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(6, 112); canvas.print("ENT redraw");
@@ -18972,13 +19283,13 @@ void App::drawOrbit() {
                            orbAscLon < 0 ? 'W' : 'E', tmv.tm_hour, tmv.tm_min);
       row("Asc node", String(b));
     } else row("Asc node", "--");
-    footer(",// page  r refresh  p print  ` bk");
+    footer(",// page  r refresh  p print  ` back");
     return;
   }
 
   if (orbitPage == 1) {                              // ---------- Live geometry ----------
     if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-                canvas.print("Clock not set."); footer(",// page  ` bk"); return; }
+                canvas.print("Clock not set."); footer(",// page  ` back"); return; }
     pred.setSat(*s); LiveLook L = pred.look(now);
     row("Az / El",    String(L.az, 1) + " / " + String(L.el, 1));
     row("Range",      String(L.rangeKm, 0) + " km");
@@ -18994,13 +19305,13 @@ void App::drawOrbit() {
     canvas.setCursor(2, y); canvas.print(L.sunlit ? "SUNLIT" : "ECLIPSE");
     canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.printf("  sun el %.0f  ecl dep %+.1f", L.sunEl, pred.eclipseDepthDeg(now));
-    footer(",// page  ` bk");
+    footer(",// page  ` back");
     return;
   }
 
   if (orbitPage == 2) {                              // ---------- Next pass ----------
     if (!orbHasPass) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-      canvas.print("No upcoming pass."); footer(",// page  r refresh  p print  ` bk"); return; }
+      canvas.print("No upcoming pass."); footer(",// page  r refresh  p print  ` back"); return; }
     auto hms = [](long sec) -> String { if (sec < 0) sec = 0; char b[12];
       snprintf(b, sizeof(b), "%ld:%02ld", sec / 60, sec % 60); return String(b); };
     row("AOS in",   hms((long)(orbPass.aos - now)));
@@ -19030,7 +19341,7 @@ void App::drawOrbit() {
     canvas.setTextColor(orbVisible ? CL_YELLOW : CL_GREY, CL_BLACK);
     canvas.setCursor(2, y); canvas.print(orbVisible ? "Optically VISIBLE pass"
                                                     : "Not optically visible");
-    footer(",// page  r refresh  p print  ` bk");
+    footer(",// page  r refresh  p print  ` back");
     return;
   }
 
@@ -19065,7 +19376,7 @@ void App::drawOrbit() {
     }
     canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.setCursor(2, MY + MH + 2); canvas.print("ground track: next 2 orbits");
-    footer(",// page  ` bk");
+    footer(",// page  ` back");
     return;
   }
 
@@ -19116,13 +19427,13 @@ void App::drawOrbit() {
         row(wantFull ? "-> full sun" : "-> eclipses", ">180d");
       }
     }
-    footer(",// page  r refresh  p print  ` bk");
+    footer(",// page  r refresh  p print  ` back");
     return;
   }
 
   if (orbitPage == 7) {                              // ---------- Pass outlook ----------
     if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-                canvas.print("Clock not set."); footer(",// page  r refresh  p print  ` bk"); return; }
+                canvas.print("Clock not set."); footer(",// page  r refresh  p print  ` back"); return; }
     canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(2, y);
     canvas.printf("Next %d days", ORB_OUTLOOK_DAYS); y += LH;
     if (orbOutlookN == 0) {
@@ -19132,11 +19443,11 @@ void App::drawOrbit() {
           canvas.print("Never rises from your QTH."); y += LH;
           canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, y);
           canvas.printf("incl %.1f vs lat %.1f", (double)s->incl, fabs(oo.lat));
-          footer(",// page  r refresh  p print  ` bk"); return;
+          footer(",// page  r refresh  p print  ` back"); return;
         } }
       canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, y);
       canvas.print("No passes above mask.");
-      footer(",// page  r refresh  p print  ` bk"); return;
+      footer(",// page  r refresh  p print  ` back"); return;
     }
     auto hms = [](long sec) -> String { if (sec < 0) sec = 0; char b[12];
       snprintf(b, sizeof(b), "%ld:%02ld", sec / 60, sec % 60); return String(b); };
@@ -19153,13 +19464,13 @@ void App::drawOrbit() {
       row("Best in",  hms((long)(orbBestT - now)));
       row("Best dur", hms((long)orbBestDur));
     }
-    footer(",// page  r refresh  p print  ` bk");
+    footer(",// page  r refresh  p print  ` back");
     return;
   }
 
   if (orbitPage == 8) {                              // ---------- Orbit position ----------
     if (!now) { canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(6, 56);
-                canvas.print("Clock not set."); footer(",// page  ` bk"); return; }
+                canvas.print("Clock not set."); footer(",// page  ` back"); return; }
     const double D2R = 0.017453292519943295, TWO_PI2 = 6.283185307179586;
     double periodS = (mm > 0) ? 86400.0 / mm : 0.0;
     // Mean anomaly now (deg) advanced from epoch.
@@ -19188,7 +19499,7 @@ void App::drawOrbit() {
     row("RAAN",      String(s->raan, 1) + " deg");
     row("Rev now",   String(revNow));
     row("Epoch age", String((now - s->epochUnix) / 86400.0, 2) + " d");
-    footer(",// page  ` bk");
+    footer(",// page  ` back");
     return;
   }
 
@@ -19230,7 +19541,7 @@ void App::drawOrbit() {
       double tmax = (wApo > 0) ? 2.0 * lamA / wApo / 60.0 : 0.0;
       row("Max pass",  String(tmax, 1) + " min");
     }
-    footer(",// page  r refresh  p print  ` bk");
+    footer(",// page  r refresh  p print  ` back");
     return;
   }
 
@@ -19320,7 +19631,7 @@ void App::drawOrbit() {
       row("Launched", "--");
       if (s->intlDes[0]) row("Cospar", String(s->intlDes));
     }
-    footer(",// page  ` bk");
+    footer(",// page  ` back");
     return;
   }
 
@@ -19381,7 +19692,7 @@ void App::drawOrbit() {
     orow("Node drift", String(Odot, 3) + " /day", CL_WHITE);
     orow("Sun-sync",   (fabs(Odot - 0.98565) < 0.05) ? "yes" : "no",
          (fabs(Odot - 0.98565) < 0.05) ? CL_GREEN : CL_GREY);
-    footer(";/. row type edit x reseed ,// pg `bk");
+    footer(";/. row type edit x reseed ,// pg ` bk");
     return;
   }
 
@@ -19412,7 +19723,7 @@ void App::drawOrbit() {
       }
       // Keep `f` advertised: the key handler accepts it on this page regardless of
       // whether a pass exists, and the beacon frequency is worth setting in advance.
-      footer(",// page  f freq  ` bk"); return;
+      footer(",// page  f freq  ` back"); return;
     }
     pred.setSat(*s);
     static float buf[PW > 0 ? PW : 1];
@@ -19440,7 +19751,7 @@ void App::drawOrbit() {
     canvas.setCursor(2, PY + PH - 6);   canvas.printf("%+.0f", mn);
     canvas.setCursor(2, PY + PH + 2);   canvas.printf("@%g MHz  pk %.1f kHz  RR %.2f",
                                                       cfg.beaconMHz, peak, maxRR);
-    footer(",// page  f freq  ` bk");
+    footer(",// page  f freq  ` back");
     return;
   }
 }
@@ -19533,7 +19844,7 @@ void App::eqxFree() {
 
 void App::buildEqx() {
   eqxN = 0; eqxScroll = 0;
-  if (!eqxAlloc()) { setStatus("Out of memory"); return; }
+  if (!eqxAlloc()) { setStatus("Out of memory", 2500, SEV_ERR); return; }
   SatEntry* s = activeSat();
   if (!s || !timeIsSet() || s->meanMotion <= 0) return;
   setStatus(eqxDescending ? "Computing crossings (desc)..." : "Computing EQX table...");
@@ -19619,8 +19930,7 @@ void App::drawEqx() {
   }
   // scrollbar hints + position
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (eqxScroll > 0)              { canvas.setCursor(232, 28);  canvas.print("^"); }
-  if (eqxScroll + ROWS < eqxN)    { canvas.setCursor(232, 112); canvas.print("v"); }
+  scrollbar(28, 120, eqxN, ROWS, eqxScroll);
   int last = eqxScroll + ROWS; if (last > eqxN) last = eqxN;
   { char c[28]; snprintf(c, sizeof(c), "%d-%d/%d", eqxScroll + 1, last, eqxN);
     footer(String("`bk ;/. scr d ") + (eqxDescending ? "asc" : "desc") + " r recalc " + c); }
@@ -19726,7 +20036,7 @@ void App::drawSim() {
     canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(2, MY + MH + 11);
     canvas.printf("El %.0f  step %s  %s", L.el, SIM_STEPL[simStepIdx],
                   L.el > 0 ? "VIS" : "---");
-    footer("m data  ,// time  ;/. step  ` bk");
+    footer("m data  ,// time  ;/. step  ` back");
     return;
   }
 
@@ -19946,7 +20256,7 @@ void App::emeComputeMutual(const String& grid) {
   emeMutN = 0; emeMutSel = 0; emeMutScroll = 0;
   Observer o = loc.obs();
   double dlat, dlon;
-  if (!Location::gridToLatLon(grid, dlat, dlon)) { setStatus("Bad grid"); return; }
+  if (!Location::gridToLatLon(grid, dlat, dlon)) { setStatus("Bad grid", 2500, SEV_ERR); return; }
   if (!o.valid || !timeIsSet()) { setStatus("Need QTH + clock"); return; }
   time_t now = nowUtc();
   const int STEP = 300;                 // 5-min scan step over the next 14 days
@@ -20136,15 +20446,15 @@ void App::keyEme(char c, bool enter, bool back) {
     emeRotOut = false; screen = SCR_SUNMOON; lastDrawMs = 0; return;
   }
   if (emeMutShown) {
-    if (isUp(c)   && emeMutSel > 0)            { emeMutSel--; lastDrawMs = 0; return; }
-    if (isDown(c) && emeMutSel < emeMutN - 1)  { emeMutSel++; lastDrawMs = 0; return; }
+    if (isUp(c)   && emeMutN) { emeMutSel = (emeMutSel + emeMutN - 1) % emeMutN; lastDrawMs = 0; return; }
+    if (isDown(c) && emeMutN) { emeMutSel = (emeMutSel + 1) % emeMutN; lastDrawMs = 0; return; }
     if (c == 'g') { editTarget = 360; editTitle = "DX grid (EME)"; editBuf = emeMutGrid; screen = SCR_EDIT; return; }
     return;
   }
   if (c == 'a') { emePage ^= 1; lastDrawMs = 0; return; }   // live <-> per-band analysis ('b'=screenshot)
   if (c == 'p') {                        // 30-day EME planning view
     time_t now2 = timeIsSet() ? nowUtc() : 0;
-    if (!now2) { setStatus("Clock not set"); return; }
+    if (!now2) { setStatus("Clock not set", 2500, SEV_WARN); return; }
     emePlanT0 = now2 - (now2 % 86400) + 12 * 3600;   // 12:00 UTC today, then daily
     const double D2Rp = 0.017453292519943295;
     for (int d = 0; d < 90; ++d) {
@@ -20181,7 +20491,7 @@ void App::gcCompute() {
   Observer o = loc.obs();
   if (!o.valid) { setStatus("Set your location first"); return; }
   double dlat, dlon;
-  if (!gcGrid[0] || !Location::gridToLatLon(String(gcGrid), dlat, dlon)) { setStatus("Bad grid"); return; }
+  if (!gcGrid[0] || !Location::gridToLatLon(String(gcGrid), dlat, dlon)) { setStatus("Bad grid", 2500, SEV_ERR); return; }
   greatCircle(o.lat, o.lon, dlat, dlon, gcDistKm, gcBearing);
   gcHaveResult = true;
 }
@@ -20398,13 +20708,16 @@ void App::drawBandPlan() {
       canvas.setTextColor(indent ? CL_GREY : CL_CYAN, CL_BLACK);
       canvas.setCursor(indent ? 8 : 4, y); canvas.print(band);
       canvas.setTextColor(CL_WHITE, CL_BLACK);
-      canvas.setCursor(96, y); canvas.print(range);
+      // Cap at 23 chars: (238-96)/6. The buffer allows 39, but everything past
+      // column 24 was ALREADY invisible (sprite clip at x=240) -- and now the
+      // right edge belongs to the scrollbar (x=238), so cap short of it rather
+      // than letting dead text run underneath the track.
+      canvas.setCursor(96, y); canvas.printf("%.23s", range);
     }
   }
   // scroll arrows
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (bpScroll > 0)          { canvas.setCursor(232, 20);  canvas.print("^"); }
-  if (bpScroll + rows < N)   { canvas.setCursor(232, 119); canvas.print("v"); }
+  scrollbar(20, 127, N, rows, bpScroll);
   footer("; / . scroll  ` back");
 }
 
@@ -21005,7 +21318,7 @@ void App::drawSatSat() {
     canvas.printf("(%d of %d favorites)", satsatOther + 1, favN);
     canvas.setTextColor(CL_YELLOW, CL_BLACK); canvas.setCursor(2, 78);
     canvas.print("ENTER to find windows");
-    footer("n/p pick  ENTER find  `bk");
+    footer("n/p pick  ENTER find  ` back");
     return;
   }
 
@@ -21044,7 +21357,7 @@ void App::drawSatSat() {
   if (satsatN == 0) {
     canvas.setTextColor(CL_YELLOW, CL_BLACK);
     canvas.setCursor(6, 60); canvas.print("No overlap in 5 days.");
-    footer("n/p pick  r recompute  `bk"); return;
+    footer("n/p pick  r recompute  ` back"); return;
   }
 
   // Column header + rows.
@@ -21074,7 +21387,7 @@ void App::drawSatSat() {
     canvas.printf("%.0f", w.maxElB);
   }
 
-  footer("n/p pick  r recompute  `bk");
+  footer("n/p pick  r recompute  ` back");
 }
 
 void App::keySatSat(char c, bool enter, bool back) {
@@ -21357,7 +21670,7 @@ void App::loraPoll() {
 }
 
 void App::loraSendCurrent(const char* text) {
-  if (!lora.ready()) { setStatus("LoRa radio not ready"); return; }
+  if (!lora.ready()) { setStatus("LoRa radio not ready", 2500, SEV_WARN); return; }
   uint8_t frame[2 + LORA_FROM_LEN + LORA_TEXT_MAX];
   frame[0] = LORA_MSG_MAGIC; frame[1] = LORA_MSG_VER;
   // from callsign, space-padded to fixed width
@@ -21449,7 +21762,7 @@ bool App::loraParseGpBody(const char* body, SatEntry& out, char* fromOut, int fr
 // Begin a jobbed broadcast of one GP element set. Serializes into loraObjTxBuf and arms the
 // per-tick sender; loraObjTxTick() emits one chunk per loop pass with a small gap.
 void App::loraObjSendGp(const SatEntry& s) {
-  if (!lora.ready()) { setStatus("LoRa radio not ready"); return; }
+  if (!lora.ready()) { setStatus("LoRa radio not ready", 2500, SEV_WARN); return; }
   if (loraObjTxActive)   { setStatus("A transfer is already running"); return; }
   char body[LORA_OBJ_MAXLEN];
   int len = loraSerializeGp(s, cfg.myCall[0] ? cfg.myCall : "NOCALL", body, sizeof(body));
@@ -21527,7 +21840,7 @@ void App::loraObjRxFrame(const uint8_t* buf, int n, int rssi, int snr) {
   uint16_t rxCrc = (uint16_t)strtoul(bar + 1, nullptr, 16);
   int bodyLen = (int)(bar - body);                            // CRC covers everything before '|XXXX'
   if (loraCrc16((const uint8_t*)body, bodyLen) != rxCrc) {
-    setStatus("LoRa object: CRC fail (resend)"); return;
+    setStatus("LoRa object: CRC fail (resend)", 2500, SEV_ERR); return;
   }
   *bar = 0;                                                    // trim the CRC field for parsing
   if (loraObjRxType == LORA_OBJ_GP) {
@@ -21538,7 +21851,7 @@ void App::loraObjRxFrame(const uint8_t* buf, int n, int rssi, int snr) {
       loraImportFrom[sizeof(loraImportFrom) - 1] = 0;
       loraImportPending = true;
       screen = SCR_GPIMPORT; lastDrawMs = 0;                  // ask before importing
-    } else setStatus("LoRa GP: parse failed");
+    } else setStatus("LoRa GP: parse failed", 2500, SEV_ERR);
   } else {
     setStatus("LoRa object: unsupported type");               // notes/plans not in this stage
   }
@@ -21581,7 +21894,7 @@ void App::keyGpImport(char c, bool enter, bool back) {
     if (loraImportPending) {
       bool ok = db.addGp(loraImportSat);
       if (ok) { buildSatView(); setStatus(String("Imported ") + loraImportSat.name); }
-      else    setStatus("Import failed (invalid elements)");
+      else    setStatus("Import failed (invalid elements)", 2500, SEV_ERR);
       loraImportPending = false;
     }
     screen = SCR_MESSAGES; lastDrawMs = 0; return;
@@ -21862,7 +22175,7 @@ void App::drawLoraRoster() {
     canvas.setTextColor(CL_GREY, bg);
     canvas.setCursor(140, y + 10); canvas.printf("%ddBm", (int)e.rssi);
   }
-  footer(";/. sel  ENT compass  p ping  ` bk");
+  footer(";/. sel  ENT compass  p ping  ` back");
 }
 
 void App::keyLoraRoster(char c, bool enter, bool back) {
@@ -21962,7 +22275,7 @@ void App::keyAmsatStatus(char c, bool enter, bool back) {
   if (amStatN == 0) {
     if (c == 'u') {
       if (net.connected()) { fetchAmsatStatus(); buildAmsatStatusView(); setStatus("AMSAT status updated", 1500); }
-      else setStatus("No WiFi - connect in Settings", 2000);
+      else setStatus("No WiFi - connect in Settings", 2000, SEV_WARN);
       lastDrawMs = 0;
     }
     return;
@@ -21986,7 +22299,7 @@ void App::keyAmsatStatus(char c, bool enter, bool back) {
   }
   if (c == 'u') {
     if (net.connected()) { fetchAmsatStatus(); buildAmsatStatusView(); setStatus("AMSAT status updated", 1500); }
-    else setStatus("No WiFi - connect in Settings", 2000);
+    else setStatus("No WiFi - connect in Settings", 2000, SEV_WARN);
     lastDrawMs = 0; return;
   }
   if (enter) {                                // adopt the selected sat as active + track
@@ -22028,9 +22341,9 @@ void App::amsRptFree() { delete[] amsRpt; amsRpt = nullptr; amsRptN = 0; }
 
 void App::fetchAmsatReports(const char* apiName) {
   amsRptN = 0; amsRptGrids = 0;
-  if (!amsRptAlloc()) { setStatus("Out of memory"); return; }
+  if (!amsRptAlloc()) { setStatus("Out of memory", 2500, SEV_ERR); return; }
   strncpy(amsRptFor, apiName, sizeof(amsRptFor) - 1); amsRptFor[sizeof(amsRptFor) - 1] = 0;
-  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); return; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)", 2500, SEV_ERR); return; }
   String nm;                                       // percent-encode the API name
   for (const char* p = apiName; *p; ++p) {         // ([ ] / space _ etc. all appear)
     char ch = *p;
@@ -22042,7 +22355,7 @@ void App::fetchAmsatReports(const char* apiName) {
              + "&hours=" + String((int)cfg.amsatWindowH) + "&limit=24";
   setStatus("AMSAT reports..."); draw();
   if (!net.httpsGetToFileRetry(url, FILE_DL_TMP, 60000, nullptr, 2)) {
-    setStatus("Report fetch failed"); return;
+    setStatus("Report fetch failed", 2500, SEV_ERR); return;
   }
   status = "";                       // clear the "AMSAT reports..." banner before the list
   File f = Store::fs().open(FILE_DL_TMP, "r");
@@ -22231,8 +22544,8 @@ const char* App::amsPickNameFor(int satIdx, bool& ambiguous) {
 
 bool App::postAmsatReport(const char* apiName, const char* status) {
   if (!cfg.myCall[0]) { setStatus("Set your callsign first (Settings)"); return false; }
-  if (!timeIsSet())   { setStatus("Clock not set (NTP/GPS)"); return false; }
-  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); return false; }
+  if (!timeIsSet())   { setStatus("Clock not set (NTP/GPS)", 2500, SEV_WARN); return false; }
+  if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)", 2500, SEV_ERR); return false; }
   time_t nowU = nowUtc(); struct tm tmv; gmtime_r(&nowU, &tmv);
   char ts[24];
   snprintf(ts, sizeof(ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
@@ -22495,8 +22808,7 @@ void App::drawTools() {
       canvas.print(TOOLS_NAMES[toolsRowId(i)]);
     }
   }
-  if (toolsScroll > 0)             { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 21);  canvas.print("^"); }
-  if (toolsScroll + VIS < N)       { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 110); canvas.print("v"); }
+  scrollbar(21, 118, N, VIS, toolsScroll);
   footer(toolsCat < 0 ? ";/. pick  ENTER open  ` back"
                       : ";/. pick  ENTER open  ` cats");
 }
@@ -22669,7 +22981,7 @@ void App::drawNeigh() {
   }
   canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(4, 116);
   canvas.printf("%d in band  (TLE ~km accuracy)", neighN);
-  footer(";/. scroll ENTER pair  p prt  `bk");
+  footer(";/. scroll ENTER pair  p prt  ` back");
 }
 
 void App::keyNeigh(char c, bool enter, bool back) {
@@ -22774,7 +23086,7 @@ void App::drawConj() {
                     (double)conjMiss[i], (double)conjRvel[i]);
     }
   }
-  footer(";/. object  ENTER scan  p prt  `bk");
+  footer(";/. object  ENTER scan  p prt  ` back");
 }
 
 void App::keyConj(char c, bool enter, bool back) {
@@ -23189,7 +23501,7 @@ bool App::kessAnimating() const { return kess && (kess->phase >= 2 || kess->kick
 void App::kesslerInit() {
   kesslerFree();
   kess = new (std::nothrow) Kessler();
-  if (!kess) { setStatus("out of memory"); screen = SCR_GAMES; return; }
+  if (!kess) { setStatus("out of memory", 2500, SEV_ERR); screen = SCR_GAMES; return; }
   memset(kess->sky, 130, sizeof(kess->sky));   // flat regolith until round 1
   kess->stX[0] = 30; kess->stX[1] = 210; kess->stY[0] = kess->stY[1] = 130;
 }
@@ -23199,7 +23511,7 @@ void App::kesslerInit() {
 void App::kessNetHost() {
   if (!kess) return;
   Kessler& K = *kess;
-  if (!lora.ready()) { setStatus("LoRa radio not ready", 4000); return; }
+  if (!lora.ready()) { setStatus("LoRa radio not ready", 4000, SEV_WARN); return; }
   K.net = 1; K.mePlayer = 0;
   K.netSeed = (uint16_t)esp_random(); if (!K.netSeed) K.netSeed = 1;
   K.netHelloAcked = false; K.netLastTx = 0;
@@ -23669,7 +23981,7 @@ void App::drawLnkCrv() {
   canvas.setCursor(PX + PW - 12, 112);    canvas.print("90 el");
   canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(150, PY - 2);
   canvas.printf("TCA %+.1f dB", mbuf[PW - 1]);
-  footer(";/. fld type val x alt p prt `bk");
+  footer(";/. fld type val x alt p prt ` back");
 }
 
 void App::keyLnkCrv(char c, bool enter, bool back) {
@@ -23855,7 +24167,7 @@ void App::drawThermal() {
     canvas.setCursor(rx, ry); canvas.print("estimate");
   }
   canvas.setTextColor(CL_WHITE, CL_BLACK);
-  footer(";/. row  edit#  x sat  p prt  ` bk");
+  footer(";/. row  edit#  x sat  p prt  ` back");
 }
 
 void App::keyThermal(char c, bool enter, bool back) {
@@ -24199,6 +24511,10 @@ void App::printSaa() {
   Printer::kv("Zone", String(zoneName(saaZone)));
   if (!timeIsSet()) { Printer::line(""); Printer::line("(no UTC yet)"); return; }
   Printer::kv("Now", saaInNow ? "in zone" : "outside");
+  { char dw[48];
+    snprintf(dw, sizeof(dw), "%.1f min/day (%.1f%% of scanned orbits)",
+             (double)saaDwellMinDay, (double)saaDwellPct);
+    Printer::kv("Dwell", dw); }
   Printer::line("");
   if (saaWinN == 0) { Printer::line("(no transits in the scan window)"); return; }
   for (int i = 0; i < saaWinN; ++i) {
@@ -24615,7 +24931,9 @@ void App::drawAprs() {
     unsigned long ageMin = (millis() - a.heardMs) / 60000UL;
     canvas.printf("%-11s %4.0f  %3.0f  %3lum", a.call, a.distKm, a.brg, ageMin);
   }
-  footer("ENTER bearing  f reconn  g grid  p print");
+  // Was 40 characters -- one over the 39 that fit, so "print" lost its final 't' on
+  // screen. Pre-existing; found by extending the width gate to cover footers.
+  footer("ENTER bearing  f reconn  g grid  p prn");
 }
 
 void App::keyAprs(char c, bool enter, bool back) {
@@ -24953,8 +25271,22 @@ void App::keyDxc(char c, bool enter, bool back) {
   }
   if (!dxcSpot || dxcN == 0) return;
   auto visible = [&](int i) { return dxcBandFilter < 0 || dxcSpot[i].band == dxcBandFilter; };
-  if (isUp(c))   { for (int i = dxcSel - 1; i >= 0; --i) if (visible(i)) { dxcSel = i; break; } lastDrawMs = 0; return; }
-  if (isDown(c)) { for (int i = dxcSel + 1; i < dxcN; ++i) if (visible(i)) { dxcSel = i; break; } lastDrawMs = 0; return; }
+  // Wrap across the FILTER: from the first visible row, up goes to the LAST visible
+  // one, not to row 0 (which the band filter may be hiding).
+  if (isUp(c)) {
+    int t = -1;
+    for (int i = dxcSel - 1; i >= 0; --i) if (visible(i)) { t = i; break; }
+    if (t < 0) for (int i = dxcN - 1; i > dxcSel; --i) if (visible(i)) { t = i; break; }
+    if (t >= 0) dxcSel = t;
+    lastDrawMs = 0; return;
+  }
+  if (isDown(c)) {
+    int t = -1;
+    for (int i = dxcSel + 1; i < dxcN; ++i) if (visible(i)) { t = i; break; }
+    if (t < 0) for (int i = 0; i < dxcSel; ++i) if (visible(i)) { t = i; break; }
+    if (t >= 0) dxcSel = t;
+    lastDrawMs = 0; return;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -26567,7 +26899,7 @@ void App::drawDebGrp() {
     canvas.printf("%-11.11s %5.0fkm %02d:%02d", dgSat[i].name,
                   (double)dgMiss[i], tv.tm_hour, tv.tm_min);
   }
-  footer(";/. scroll  x new grp  p prt  `bk");
+  footer(";/. scroll  x new grp  p prt  ` back");
 }
 
 void App::keyDebGrp(char c, bool enter, bool back) {
@@ -26717,7 +27049,7 @@ void App::ctSearchRun() {
       (uint32_t)nowUtc() - lastQ < 7200 && Store::fs().exists(CTQ_PATH)) {
     cached = true;
   } else {
-    if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed"); return; }
+    if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed", 2500, SEV_ERR); return; }
     setStatus("Searching CelesTrak..."); draw();
     if (!net.fetchGpToFile(url, CTQ_PATH)) {
       // A NAME with no match returns a body CelesTrak phrases as an error; surface it.
@@ -26729,7 +27061,7 @@ void App::ctSearchRun() {
     ctxTsSave(timeIsSet() ? (uint32_t)nowUtc() : 0, h, lastRef);
   }
 
-  if (!ctsRowsAlloc()) { ctsN = 0; setStatus("Out of memory"); return; }
+  if (!ctsRowsAlloc()) { ctsN = 0; setStatus("Out of memory", 2500, SEV_ERR); return; }
   CtParseCtx ctx{ ctsRows, 0, CTS_MAX };
   ctsTotal = SatDb::streamGpFileEntries(CTQ_PATH, ctRowSink, &ctx);
   ctsN = ctx.n; ctsSel = 0; ctsScroll = 0;
@@ -26747,7 +27079,7 @@ void App::ctAddSelected() {
     // on every update would waste CelesTrak's bandwidth for nothing.
     if (!isFav(r.norad)) toggleFav(r.norad);
     buildSatView();
-    setStatus(String(r.name) + ": already in catalog, marked favorite");
+    setStatus(String(r.name) + ": in catalog, now favorite");
     return;
   }
   SatEntry e; CtFindCtx fc{ r.norad, &e, false };
@@ -26761,7 +27093,7 @@ void App::ctAddSelected() {
   }
   if (!isFav(e.norad)) toggleFav(e.norad);
   buildSatView();
-  setStatus(String(e.name) + " added as favorite (auto-updates)");
+  setStatus(String(e.name) + " added as favorite");
 }
 
 // Re-fetch every FILE_CTX object from CelesTrak. Called from both GP update paths
@@ -27459,8 +27791,7 @@ void App::drawCharLkTable() {
     canvas.setTextColor(CL_MGREY, CL_BLACK); canvas.setCursor(170, y); canvas.print(bd);
     y += 11;
   }
-  if (clkTableScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 34);  canvas.print("^"); }
-  if (clkTableScroll + rows < TOTAL)      { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 118); canvas.print("v"); }
+  scrollbar(34, 126, TOTAL, rows, clkTableScroll);
   footer(";/. scroll  = single view  ` back");
 }
 
@@ -28446,8 +28777,7 @@ void App::drawLoconv() {
     if (locoScroll > nDeriv - visRows) locoScroll = nDeriv - visRows;
     for (int r = 0; r < visRows && locoScroll + r < nDeriv; r++)
       row(derived[locoScroll + r].label, derived[locoScroll + r].val, false);
-    if (locoScroll > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 66); canvas.print("^"); }
-    if (locoScroll + visRows < nDeriv) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 118); canvas.print("v"); }
+    scrollbar(66, 126, nDeriv, visRows, locoScroll);
   }
 
   footer(";/.,// nav ENT edit s>QTH p print");
@@ -28714,8 +29044,11 @@ void App::drawGraph() {
     canvas.setCursor(2, 120); canvas.print(b);
   }
 
+  // Both branches must fit 39 columns; the second was 41, so "csv" was clipped to
+  // "cs" -- and that key is how the graph is exported. Pre-existing; found only when
+  // the width gate was extended to footers (and to their ternary branches).
   footer(gTrace >= 0 ? ",// move {} x10  m mark  t off  z zero"
-                     : "ENT e1 2 e2 t trc z zero m mk b tbl c csv");
+                     : "ENT e1 2 e2 t trc z zero m mk b tbl csv");
 }
 
 void App::keyGraph(char c, bool enter, bool back) {
@@ -28896,6 +29229,14 @@ namespace {
     double heapFree = 0, upTime = 0, nSat = 0, nTx = 0;
     bool   txOk = false;   double txDl = 0, txUl = 0, txBw = 0, txInv = 0, txLin = 0;
     double pAos[8], pLos[8], pMax[8]; int pN = 0;         // up to 8 upcoming passes
+    // 0.9.70 additions -- data the firmware gained this cycle and already computes.
+    // All are for the satellite currently selected (SATSEL or the tracked one).
+    double lshell = 0, bratio = 0, bfield = 0;   // IGRF-14 McIlwain L, B/B0, |B| nT
+    double inBelt = 0, inSaa = 0;                // zone membership of the subpoint
+    double decayD = 0, decaySrc = 0;             // days to re-entry; 1 = measured n-dot, 2 = B*
+    double battMv = 0, charging = 0;             // battery millivolts + inferred charge state
+    double heapBlk = 0;                          // largest free block (fragmentation, not total)
+    double doppRx = 0, doppTx = 0;               // Doppler-corrected RX/TX for the current pair
   };
 
   // System-name table. Read-only; every entry is data the firmware already has.
@@ -28925,6 +29266,18 @@ namespace {
     // 0.9.61 space-weather additions
     {"SSN",64},{"FLARE",65},{"BZ",66},{"SWSPEED",67},{"MUF",69},
     {"FCKP1",70},{"FCKP2",71},{"FCKP3",72},{"MAGDECL",73},
+    // 0.9.70: the geomagnetic / decay / power data added this cycle. Ids continue
+    // from 74; 68 stays unused (it always has).
+    {"LSHELL",74},{"BRATIO",75},{"BFIELD",76},
+    {"INBELT",77},{"INSAA",78},
+    {"DECAYD",79},{"DECAYSRC",80},
+    {"BATTMV",81},{"CHARGING",82},{"HEAPBLK",83},
+    {"DOPPRX",84},{"DOPPTX",85},
+    // TXOK was missing: sys.txOk has always been SET by TXSEL but never readable, so a
+    // program could not tell whether a transponder snapshot succeeded. That matters
+    // more now -- SATSEL deliberately clears it, so TXOK=0 means "no transponder
+    // chosen for this satellite yet". Found by tools/host_examples.
+    {"TXOK",86},
   };
   static const int BASIC_SYS_N = (int)(sizeof(BASIC_SYS) / sizeof(BASIC_SYS[0]));
 
@@ -28977,7 +29330,10 @@ namespace {
     // sat/transponder groups; lpr streams a finished line to the report sinks; gfx draws
     // on the canvas; file is the gated /CardSat/basic/ writer + FILES lister.
     void* host = nullptr;
-    bool (*satselCb)(void*, int, double out[13]) = nullptr;
+    // out[13] is the transponder COUNT for the satellite just selected: SATSEL now
+    // carries the transponder context with it, so TXSEL/NTX refer to the satellite
+    // the program chose rather than whatever the operator happened to be tracking.
+    bool (*satselCb)(void*, int, double out[14]) = nullptr;
     bool (*txselCb)(void*, int, double out[5])   = nullptr;
     bool (*lprCb)(void*, const char*, int op)    = nullptr;   // 1 = line, 2 = close
     void (*gfxCb)(void*, int op, double a, double b, double c2, double d, double e, const char* s) = nullptr;
@@ -29045,6 +29401,13 @@ namespace {
         case 51: return sys.gpsLat;  case 52: return sys.gpsLon;  case 53: return sys.gpsAlt;
         case 59: return sys.txDl;    case 60: return sys.txUl;    case 61: return sys.txBw;
         case 62: return sys.txInv;   case 63: return sys.txLin;
+        case 74: return sys.lshell;  case 75: return sys.bratio;  case 76: return sys.bfield;
+        case 77: return sys.inBelt;  case 78: return sys.inSaa;
+        case 79: return sys.decayD;  case 80: return sys.decaySrc;
+        case 81: return sys.battMv;  case 82: return sys.charging;
+        case 83: return sys.heapBlk;
+        case 84: return sys.doppRx;  case 85: return sys.doppTx;
+        case 86: return sys.txOk ? 1 : 0;
       }
       return 0;
     }
@@ -29350,8 +29713,16 @@ namespace {
         double iv = expr(); if (!err.isEmpty()) return -1;
         if (!satselCb) { err = "SATSEL unavailable"; return -1; }
         if (--satselLeft < 0) { err = "SATSEL limit (2000/run)"; return -1; }
-        double o[13];
+        double o[14];
+        o[13] = 0;
         if (!satselCb(host, (int)iv, o)) { err = "bad sat index"; return -1; }  // bad INDEX only
+        // The transponder context follows the selection even when the satellite
+        // itself cannot be propagated: a program may legitimately want to read a
+        // decayed bird's transponders. Any previously TXSELed values are stale now,
+        // so clear TXOK -- silently keeping them was the old trap.
+        sys.nTx  = o[13];
+        sys.txOk = false;
+        sys.txDl = sys.txUl = sys.txBw = sys.txInv = sys.txLin = 0;
         if (o[0] <= -998.0) { sys.satOk = false; return -1; }   // valid index, no fix/dead TLE:
                                                                 //   SATOK=0 so the program branches
         sys.satAz = o[0]; sys.satEl = o[1]; sys.satRng = o[2]; sys.satRR = o[3];
@@ -29359,7 +29730,9 @@ namespace {
         sys.satInc = o[8]; sys.satEcc = o[9]; sys.satRaan = o[10]; sys.satMM = o[11];
         sys.satNor = o[12]; sys.satOk = true;
         return -1; }
-      if (kw("TXSEL")) {                         // snapshot transponder #expr (active sat)
+      if (kw("TXSEL")) {                         // snapshot transponder #expr of the
+                                                 // satellite SATSEL chose (or the
+                                                 // tracked one if SATSEL was not used)
         double iv = expr(); if (!err.isEmpty()) return -1;
         if (!txselCb) { err = "TXSEL unavailable"; return -1; }
         double o[5];
@@ -29508,7 +29881,31 @@ namespace {
 
 // ---- BASIC host trampolines (see the declarations' comment in app.h) ---------------
 
-bool App::basHookSatsel(void* self, int idx, double out[13]) {
+// Load BASIC's transponder view for one satellite. Returns the count. The tracked
+// satellite is the free case -- activeTx[] already holds it, so no allocation.
+int App::basTxLoad(uint32_t norad) {
+  SatEntry* as = activeSat();
+  if (as && as->norad == norad) {           // the tracked bird: reuse activeTx[]
+    basTxNorad = 0; basTxN = activeTxCount;
+    return basTxN;
+  }
+  if (!basTx) {
+    basTx = new (std::nothrow) Transponder[MAX_TX_PER_SAT];
+    if (!basTx) { basTxNorad = 0; basTxN = 0; return 0; }
+  }
+  if (basTxNorad != norad) {                // reload only on a change of satellite
+    basTxN = SatDb::loadTxCache(norad, basTx, MAX_TX_PER_SAT);
+    basTxNorad = norad;
+  }
+  return basTxN;
+}
+
+void App::basTxFree() {
+  if (basTx) { delete[] basTx; basTx = nullptr; }
+  basTxN = 0; basTxNorad = 0;
+}
+
+bool App::basHookSatsel(void* self, int idx, double out[14]) {
   App& a = *static_cast<App*>(self);
   // Only a genuinely out-of-range index is a program error (halt). A valid index whose
   // satellite just can't be propagated right now -- no position/time fix, or a decayed /
@@ -29518,6 +29915,10 @@ bool App::basHookSatsel(void* self, int idx, double out[13]) {
   // dead bird instead of aborting on it.
   if (idx < 0 || idx >= a.db.count()) return false;                 // real error -> halt
   out[0] = -999.0;                                                  // default: soft-fail sentinel
+  // Bring the transponder context along, BEFORE the propagation check: a decayed or
+  // un-propagatable bird still has transponders worth reading, and this is what lets
+  // a program work entirely from BASIC with nothing selected beforehand.
+  out[13] = (double)a.basTxLoad(a.db.at(idx).norad);
   Observer o = a.loc.obs();
   if (!o.valid || !timeIsSet()) return true;                        // no fix -> SATOK=0, continue
   SatEntry& e = a.db.at(idx);
@@ -29534,8 +29935,12 @@ bool App::basHookSatsel(void* self, int idx, double out[13]) {
 
 bool App::basHookTxsel(void* self, int idx, double out[5]) {
   App& a = *static_cast<App*>(self);
-  if (idx < 0 || idx >= a.activeTxCount) return false;
-  Transponder& t = a.activeTx[idx];
+  // Read from whichever view SATSEL left current: BASIC's own buffer when the
+  // program crossed to another satellite, else the tracked satellite's activeTx[].
+  const bool own = (a.basTxNorad != 0 && a.basTx != nullptr);
+  const int  n   = own ? a.basTxN : a.activeTxCount;
+  if (idx < 0 || idx >= n) return false;
+  Transponder& t = own ? a.basTx[idx] : a.activeTx[idx];
   out[0] = t.downlink; out[1] = t.uplink; out[2] = t.bandwidth();
   out[3] = t.invert ? 1 : 0; out[4] = t.isLinear ? 1 : 0;
   return true;
@@ -29643,34 +30048,15 @@ int App::basHookFile(void* self, int op, const char* arg, String* out) {
   return 3;
 }
 
-void App::basicRun() {
-  // Allocate the interpreter state on the heap only while a program is running, then free
-  // it -- the VM's line table is ~3.8 KB and would otherwise sit in .bss for the whole
-  // session even though BASIC is used rarely. `work` holds the tokenized source the VM
-  // points into and is freed together with the VM after the output is copied out.
-  //
-  // basicOut holds the run's output so the console can scroll it, and can reach
-  // BASIC_OUT_MAX (6 KB). It MUST be released when you leave BASIC -- see basicFree(),
-  // called from the editor and console exits. A runaway program fills this buffer to the
-  // cap, and on this no-PSRAM board a permanently-held 6 KB is enough to starve the
-  // contiguous allocation a TLS handshake needs (LoTW/Cloudlog upload).
-  basicErr[0] = 0; basicOut = ""; basicOutScroll = 0;
-  BasicVM* vm = new (std::nothrow) BasicVM();
-  if (!vm) { strlcpy(basicErr, "out of memory", sizeof(basicErr)); return; }
-  String* work = new (std::nothrow) String();
-  if (!work) { delete vm; strlcpy(basicErr, "out of memory", sizeof(basicErr)); return; }
-  vm->host = this;                              // host hooks (see app.h comment)
-  vm->satselCb = &App::basHookSatsel;
-  vm->txselCb  = &App::basHookTxsel;
-  vm->lprCb    = &App::basHookLpr;
-  vm->gfxCb    = &App::basHookGfx;
-  vm->fileCb   = &App::basHookFile;
-  basLprOpen = false; basFileOpen = false; basGfxHold = false;
-  // ---- One system snapshot per run (see BasicSys). Filled inline because it needs App
-  // members and BasicSys lives in the anonymous namespace below, so it cannot be named in
-  // app.h. Exactly one look()/skyObjAzEl() pair per run regardless of what the program does.
-  {
-    BasicSys& sy = vm->sys;
+// Fill a BasicSys snapshot from live App state. Extracted from basicRun() in 0.9.70 so
+// the immediate-mode prompt takes the SAME snapshot a program does -- two copies of this
+// would drift, and a BASIC whose SYS names mean different things at the prompt than in a
+// program would be worse than no prompt at all.
+//
+// sysPtr is void* because BasicSys is deliberately file-scope here: it must not be
+// nameable from app.h. It is a BasicSys* and nothing else.
+void App::basicFillSys(void* sysPtr) {
+  BasicSys& sy = *(BasicSys*)sysPtr;
     Observer o = loc.obs();
     sy.posOk  = o.valid;
     sy.timeOk = timeIsSet();
@@ -29763,7 +30149,74 @@ void App::basicRun() {
     }
     sy.batt = batteryPercent();
     sy.nfav = favN;
+    // ---- 0.9.70 additions ---------------------------------------------------
+    sy.battMv   = (double)batteryMilliVolts();
+    sy.charging = batteryCharging() ? 1 : 0;
+    sy.heapBlk  = (double)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (sy.satOk) {
+      // Geomagnetic shell at the satellite: one field-line trace, the same one the
+      // orbital-zone screen uses. LSHELL is McIlwain L, BRATIO is B/B0 (1 = at the
+      // shell's magnetic equator), BFIELD is |B| in nT.
+      ShellInfo sh = shellAt(sy.satLat, sy.satLon, sy.satAlt);
+      sy.lshell = sh.shellL; sy.bratio = sh.bRatio; sy.bfield = sh.bSat;
+      sy.inBelt = (zoneContains(ZONE_INNER, sy.satLat, sy.satLon, sy.satAlt, sy.satSun > 0) ||
+                   zoneContains(ZONE_OUTER, sy.satLat, sy.satLon, sy.satAlt, sy.satSun > 0)) ? 1 : 0;
+      sy.inSaa  = zoneContains(ZONE_SAA, sy.satLat, sy.satLon, sy.satAlt, sy.satSun > 0) ? 1 : 0;
+    }
+    {
+      // Re-entry estimate for the selected satellite. DECAYSRC says which anchor
+      // produced it, because a measured rate and a modelled one deserve different
+      // trust: 1 = the element set's own n-dot, 2 = B*, 0 = no usable data.
+      SatEntry* ds = activeSat();
+      if (ds) {
+        uint8_t src = 0;
+        double d = estimateDecayDays(*ds, decayDensityScale(), &src);
+        sy.decayD   = (d < 0) ? -1 : (d >= 1e8 ? 1e8 : d);   // -1 = n/a, 1e8 = stable
+        sy.decaySrc = src;
+      }
+    }
+    if (sy.satOk) {
+      // What CAT would command right now for the current transponder pair: the same
+      // passband + Doppler path the Track screen uses, so a script can log or check
+      // it without reimplementing the maths. 0 when no transponder is available.
+      const bool own = (basTxNorad != 0 && basTx != nullptr);
+      const int  nTx = own ? basTxN : activeTxCount;
+      if (nTx > 0) {
+        const Transponder& t = own ? basTx[0] : activeTx[curTx < nTx ? curTx : 0];
+        freq_t dlOp = 0, ulOp = 0;
+        Predictor::passbandFreqs(t, own ? 0 : pbOffset, dlOp, ulOp);
+        freq_t rx = 0, tx = 0;
+        Predictor::dopplerFreqs(dlOp, ulOp, sy.satRR, cfg.calDlHz, cfg.calUlHz, rx, tx);
+        sy.doppRx = (double)rx; sy.doppTx = (double)tx;
+      }
+    }
   }
+
+void App::basicRun() {
+  // Allocate the interpreter state on the heap only while a program is running, then free
+  // it -- the VM's line table is ~3.8 KB and would otherwise sit in .bss for the whole
+  // session even though BASIC is used rarely. `work` holds the tokenized source the VM
+  // points into and is freed together with the VM after the output is copied out.
+  //
+  // basicOut holds the run's output so the console can scroll it, and can reach
+  // BASIC_OUT_MAX (6 KB). It MUST be released when you leave BASIC -- see basicFree(),
+  // called from the editor and console exits. A runaway program fills this buffer to the
+  // cap, and on this no-PSRAM board a permanently-held 6 KB is enough to starve the
+  // contiguous allocation a TLS handshake needs (LoTW/Cloudlog upload).
+  basicErr[0] = 0; basicOut = ""; basicOutScroll = 0;
+  BasicVM* vm = new (std::nothrow) BasicVM();
+  if (!vm) { strlcpy(basicErr, "out of memory", sizeof(basicErr)); return; }
+  String* work = new (std::nothrow) String();
+  if (!work) { delete vm; strlcpy(basicErr, "out of memory", sizeof(basicErr)); return; }
+  vm->host = this;                              // host hooks (see app.h comment)
+  vm->satselCb = &App::basHookSatsel;
+  vm->txselCb  = &App::basHookTxsel;
+  vm->lprCb    = &App::basHookLpr;
+  vm->gfxCb    = &App::basHookGfx;
+  vm->fileCb   = &App::basHookFile;
+  basLprOpen = false; basFileOpen = false; basGfxHold = false;
+  basTxNorad = 0;                // no cross-satellite selection inherited from last run
+  basicFillSys(&vm->sys);        // shared with the immediate-mode prompt
   String perr;
   if (!basicParse(*vm, basicBuf, *work, perr)) { strlcpy(basicErr, perr.c_str(), sizeof(basicErr)); }
   else if (vm->nLines == 0) { strlcpy(basicErr, "no numbered lines", sizeof(basicErr)); }
@@ -29779,6 +30232,201 @@ void App::basicRun() {
 // uploads need. Arduino's String only frees its buffer on destruction/assignment from
 // another String, so assigning an empty temporary is what actually returns the memory --
 // `= ""` keeps the old capacity.
+// ---- BASIC immediate mode -----------------------------------------------------
+// Statements that only mean something inside a numbered program. Refusing these
+// with a clear message beats letting them half-work: with no line table, a GOTO
+// silently falls through (the interpreter's documented "out of range: fall
+// through (classic)" path), and RESTORE/READ would leave the DATA cursor pointing
+// into a String that dies when this function returns.
+static const char* BAS_IMM_BANNED[] = {
+  "GOTO", "GOSUB", "RETURN", "DATA", "READ", "RESTORE"
+};
+static const int BAS_IMM_BANNED_N =
+  (int)(sizeof(BAS_IMM_BANNED) / sizeof(BAS_IMM_BANNED[0]));
+
+// Whole-word search that ignores anything inside double quotes, so PRINT "GOTO"
+// is allowed while GOTO 100 is not.
+static const char* basImmBanned(const String& s) {
+  const char* p = s.c_str();
+  bool inStr = false;
+  while (*p) {
+    if (*p == '"') { inStr = !inStr; ++p; continue; }
+    if (inStr || !isalpha((unsigned char)*p)) { ++p; continue; }
+    for (int i = 0; i < BAS_IMM_BANNED_N; ++i) {
+      const char* w = BAS_IMM_BANNED[i];
+      int n = (int)strlen(w);
+      bool hit = true;
+      for (int k = 0; k < n; ++k)
+        if (toupper((unsigned char)p[k]) != w[k]) { hit = false; break; }
+      if (hit && !isalnum((unsigned char)p[n])) return w;
+    }
+    while (isalnum((unsigned char)*p)) ++p;      // skip the whole identifier
+  }
+  return nullptr;
+}
+
+bool App::basImmOpen() {
+  if (basImmVm) return true;
+  BasicVM* vm = new (std::nothrow) BasicVM();
+  if (!vm) { setStatus("BASIC prompt: out of memory", 4000, SEV_ERR); return false; }
+  vm->host     = this;                     // same host hooks a program gets
+  vm->satselCb = &App::basHookSatsel;
+  vm->txselCb  = &App::basHookTxsel;
+  vm->lprCb    = &App::basHookLpr;
+  vm->gfxCb    = &App::basHookGfx;
+  vm->fileCb   = &App::basHookFile;
+  vm->nLines   = 0;                        // no program: the line table stays unused
+  basImmVm = vm;
+  basImmLine = ""; basImmScroll = 0;
+  if (basImmLog.length() == 0)
+    basImmLog = "CardSat Tiny BASIC - immediate mode\n"
+                "Type a statement, ENTER runs it. Fn+h for help.\n"
+                // DEL no longer exits (it used to, on an empty line, which made
+                // over-backspacing drop you out), so the way back must be stated.
+                "` returns to the editor.\n";
+  return true;
+}
+
+void App::basImmClose() {
+  // Belt and braces: basImmExec() closes per line, but leaving the prompt must not
+  // strand a sink if a line ever exits by a path that skipped it.
+  if (basLprOpen) { Printer::end(); basLprOpen = false; }
+  if (basFileOpen) { basFile.close(); basFileOpen = false; }
+  if (basImmVm) { delete (BasicVM*)basImmVm; basImmVm = nullptr; }
+  // Arduino Strings never release their buffer on assignment (see basicFree), so
+  // destroy and re-place them or the scrollback stays resident for the session.
+  basImmLog.~String();  new (static_cast<void*>(&basImmLog))  String();
+  basImmLine.~String(); new (static_cast<void*>(&basImmLine)) String();
+  basImmPrev.~String(); new (static_cast<void*>(&basImmPrev)) String();
+  basImmScroll = 0;
+}
+
+void App::basImmExec() {
+  BasicVM* vm = (BasicVM*)basImmVm;
+  if (!vm) return;
+  String line = basImmLine;
+  basImmLine = "";
+  line.trim();
+  if (!line.length()) return;
+  basImmPrev = line;
+  basImmLog += "> " + line + "\n";
+
+  const char* bad = basImmBanned(line);
+  if (bad) {
+    basImmLog += String("? ") + bad + " needs a program (use the editor)\n";
+  } else {
+    // Re-snapshot every line: at a prompt the operator expects SATEL to be the
+    // elevation NOW, not when the prompt was opened.
+    basicFillSys(&vm->sys);
+    vm->out = ""; vm->err = "";
+    vm->stmts = 0; vm->depth = 0; vm->forResumeP = nullptr;
+    vm->gosubSP = 0; vm->forSP = 0;
+    // Per-LINE sink bookkeeping. The VM object PERSISTS across prompt lines (unlike a
+    // program run, which builds and destroys one), so lprUsed/fileUsed must be cleared
+    // here or the close below would fire on every subsequent line.
+    basGfxHold = false;
+    vm->lprUsed = false; vm->fileUsed = false;
+    int r = vm->execLine(line.c_str(), -1);
+    // CLOSE THE SINKS THIS LINE OPENED. basicRun() does this after a program; the
+    // prompt did not, and instead cleared basLprOpen/basFileOpen on the NEXT line
+    // without closing anything. So an LPRINT at the prompt opened the printer, was
+    // never flushed or closed, and the next line silently abandoned the handle --
+    // the output never arrived and the connection leaked. Same for FOPEN.
+    if (vm->lprUsed) basHookLpr(this, nullptr, 2);
+    if (basFileOpen) { basFile.close(); basFileOpen = false; }
+    // Any pointer the VM kept into `line` dies with this function, so clear the
+    // two that can outlive a statement before it can be dereferenced again.
+    vm->forResumeP = nullptr; vm->dataP = nullptr; vm->dataLineIdx = 0;
+    if (vm->err.length())      basImmLog += "? " + vm->err + "\n";
+    else if (vm->out.length()) basImmLog += vm->out;
+    else if (r == -999)        basImmLog += "(END)\n";
+    if (vm->out.length() && vm->out[vm->out.length()-1] != '\n') basImmLog += "\n";
+  }
+  // Trim the scrollback from the FRONT: a prompt accumulates without bound, and a
+  // permanently-held few KB starves the contiguous block a TLS upload needs.
+  const int IMM_LOG_MAX = 2048;
+  if ((int)basImmLog.length() > IMM_LOG_MAX) {
+    int cut = basImmLog.indexOf('\n', basImmLog.length() - IMM_LOG_MAX);
+    basImmLog = basImmLog.substring(cut < 0 ? basImmLog.length() - IMM_LOG_MAX : cut + 1);
+  }
+  basImmScroll = 9999;                     // pin to the bottom; draw() clamps it
+}
+
+void App::drawBasicImm() {
+  if (basGfxHold) return;                  // a SHOWed frame stays up
+  header("BASIC immediate");
+  canvas.setTextSize(1);
+  String body = basImmLog;
+  NoteVRow rows[192];
+  int nrows = noteWrap(body, rows, 192);
+  const int VIS = 10, LH = 9;
+  if (basImmScroll > nrows - VIS) basImmScroll = nrows - VIS;
+  if (basImmScroll < 0) basImmScroll = 0;
+  for (int r = 0; r < VIS && basImmScroll + r < nrows; ++r) {
+    int idx = basImmScroll + r;
+    String seg = body.substring(rows[idx].start, rows[idx].end);
+    bool isErr = seg.startsWith("? ");
+    bool isEcho = seg.startsWith("> ");
+    canvas.setTextColor(isErr ? CL_RED : (isEcho ? CL_CYAN : CL_WHITE), CL_BLACK);
+    canvas.setCursor(4, 20 + r * LH);
+    canvas.print(seg);
+  }
+  // The input line, always visible at the bottom with a block cursor.
+  canvas.fillRect(0, 112, 240, 11, CL_DGREEN);
+  canvas.setTextColor(CL_WHITE, CL_DGREEN);
+  canvas.setCursor(2, 113);
+  {
+    String shown = basImmLine;
+    if (shown.length() > 36) shown = shown.substring(shown.length() - 36);
+    canvas.print(">" + shown + "_");
+  }
+  // 39 characters is the hard limit at x=2, size 1, on a 240 px screen; every key
+  // here is behind Fn, so the prefix is stated once rather than repeated four times.
+  footer("ENTER run  Fn r=recall p=print ;/.=scr");
+}
+
+void App::keyBasicImm(char c, bool enter, bool back) {
+  if (basGfxHold) {
+    if (millis() - basGfxHoldMs < 450) return;
+    basGfxHold = false; lastDrawMs = 0; return;
+  }
+  // EVERY navigation key sits behind Fn, exactly as the editor does -- and for the
+  // same reason, which is easy to miss: the arrow keys ARE the characters
+  // ';' '.' ',' '/', and a BASIC prompt cannot give up the decimal point, the PRINT
+  // separator or the division operator. Anything printable is text here.
+  if (keyFn) {
+    if (c == 'r') { basImmLine = basImmPrev; lastDrawMs = 0; return; }      // recall
+    if (c == 'c') { basImmLog = ""; basImmScroll = 0; lastDrawMs = 0; return; }
+    // Fn+p prints the session transcript. It CANNOT be a bare 'p' the way the RUN
+    // console binds it: this is a text screen, and 'p' is a letter the operator has to
+    // be able to type (PRINT, PI, POKE...). Fn+p also matches the note editor, the
+    // other text screen with a print action.
+    if (c == 'p') { printReport(PR_BASICIMM); return; }
+    if (c == 't') { basicRefScroll = 0; screen = SCR_BASICREF; lastDrawMs = 0; return; }
+    if (c == ';') { if (--basImmScroll < 0) basImmScroll = 0; lastDrawMs = 0; return; }
+    if (c == '.') { basImmScroll++; lastDrawMs = 0; return; }
+    return;
+  }
+  if (c == '`') { screen = SCR_BASIC; lastDrawMs = 0; return; }
+  if (back) {                                      // DEL: backspace only
+    // DELIBERATELY NOT an exit. This used to leave for the editor once the line was
+    // empty, so over-backspacing past the start of what you were typing dropped you
+    // out of the prompt mid-thought -- easy to do, and the scrollback is not visible
+    // from the editor. Backspace on an empty line is now a no-op; the documented
+    // exits are the backtick (to the editor) and Fn+Back, neither of which can be
+    // hit by holding DEL one keystroke too long.
+    if (basImmLine.length() == 0) return;
+    basImmLine = basImmLine.substring(0, basImmLine.length() - 1);
+    lastDrawMs = 0; return;
+  }
+  if (enter || c == '\r' || c == '\n') { basImmExec(); lastDrawMs = 0; return; }
+  if (c >= 32 && c < 127 && basImmLine.length() < 96) {
+    basImmLine += c; lastDrawMs = 0; return;
+  }
+}
+
+void App::basicFreeTx() { basTxFree(); }
+
 void App::basicFree() {
   // Arduino's String NEVER releases its buffer on assignment. Verified against the real
   // cores/esp32/WString.cpp: operator=(const String&) calls copy(), which calls reserve(),
@@ -29879,12 +30527,12 @@ bool App::basicSave() {
   char nm[24];
   strncpy(nm, basicName.c_str(), sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
   // reuse the note name sanitizer (alnum + a few safe chars)
-  if (!Notes::sanitizeName(nm, sizeof(nm))) { setStatus("Bad program name"); return false; }
+  if (!Notes::sanitizeName(nm, sizeof(nm))) { setStatus("Bad program name", 2500, SEV_ERR); return false; }
   fs::FS& fsx = Store::fs();
   if (!fsx.exists(BASIC_DIR)) fsx.mkdir(BASIC_DIR);
   String path = String(BASIC_DIR) + "/" + nm + ".bas";
   File f = fsx.open(path, "w");
-  if (!f) { setStatus("Save failed"); return false; }
+  if (!f) { setStatus("Save failed", 2500, SEV_ERR); return false; }
   f.print(basicBuf); f.close();
   basicName = nm;
   setStatus(String("Saved ") + nm);
@@ -29895,7 +30543,7 @@ bool App::basicLoad(const char* base) {
   fs::FS& fsx = Store::fs();
   String path = String(BASIC_DIR) + "/" + base + ".bas";
   File f = fsx.open(path, "r");
-  if (!f) { setStatus("Load failed"); return false; }
+  if (!f) { setStatus("Load failed", 2500, SEV_ERR); return false; }
   basicBuf = "";
   while (f.available() && basicBuf.length() < BASIC_PROG_MAX) basicBuf += (char)f.read();
   f.close();
@@ -29910,7 +30558,7 @@ bool App::basicLoad(const char* base) {
 void App::basFilesScan() {
   basFileN = 0; basFileSel = 0; basFileTop = 0; basFileConfirmDel = false;
   if (!basFileList) basFileList = new (std::nothrow) char[BAS_FILES_MAX][20];
-  if (!basFileList) { setStatus("Out of memory"); return; }   // basFileN stays 0 -> safe
+  if (!basFileList) { setStatus("Out of memory", 2500, SEV_ERR); return; }   // basFileN stays 0 -> safe
   fs::FS& fsx = Store::fs();
   if (!fsx.exists(BASIC_DIR)) return;
   File d = fsx.open(BASIC_DIR);
@@ -29955,8 +30603,7 @@ void App::drawBasicFiles() {
     else                   canvas.setTextColor(CL_WHITE, CL_BLACK);
     canvas.setCursor(6, y); canvas.print(basFileList[i]);
   }
-  if (basFileTop > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 20); canvas.print("^"); }
-  if (basFileTop + VIS < basFileN) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 108); canvas.print("v"); }
+  scrollbar(20, 116, basFileN, VIS, basFileTop);
   if (basFileConfirmDel) footer("d again=delete  other=cancel");
   else                   footer(";/. pick  ENTER load  d delete  ` back");
 }
@@ -29968,7 +30615,7 @@ void App::keyBasicFiles(char c, bool enter, bool back) {
     if (c == 'd') {
       String path = String(BASIC_DIR) + "/" + basFileList[basFileSel] + ".bas";
       if (Store::fs().remove(path)) setStatus(String("Deleted ") + basFileList[basFileSel]);
-      else setStatus("Delete failed");
+      else setStatus("Delete failed", 2500, SEV_ERR);
       basFilesScan();
     } else { basFileConfirmDel = false; setStatus("Delete canceled"); }
     lastDrawMs = 0; return;
@@ -29978,8 +30625,8 @@ void App::keyBasicFiles(char c, bool enter, bool back) {
     screen = SCR_BASIC; lastDrawMs = 0; return;
   }
   if (c == 'd') { basFileConfirmDel = true; lastDrawMs = 0; return; }
-  if (isUp(c))   { if (basFileSel > 0) basFileSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (basFileSel < basFileN - 1) basFileSel++; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (basFileN) basFileSel = (basFileSel + basFileN - 1) % basFileN; lastDrawMs = 0; return; }
+  if (isDown(c)) { if (basFileN) basFileSel = (basFileSel + 1) % basFileN; lastDrawMs = 0; return; }
 }
 
 void App::drawBasic() {
@@ -30012,7 +30659,7 @@ void App::drawBasic() {
       canvas.fillRect(cx, y, 2, 8, CL_CYAN);
     }
   }
-  footer("Fn+r run s/l/n  h help  Fn+t ref  ` exit");
+  footer("Fn+r run i imm s/l/n  h help  ` back");
 }
 
 void App::keyBasic(char c, bool enter, bool back) {
@@ -30023,6 +30670,10 @@ void App::keyBasic(char c, bool enter, bool back) {
     if (c == 'r') {                          // RUN
       basicRun();
       basicOutScroll = 0; screen = SCR_BASICRUN; lastDrawMs = 0; return;
+    }
+    if (c == 'i') {                          // IMMEDIATE mode prompt
+      if (basImmOpen()) { screen = SCR_BASICIMM; lastDrawMs = 0; }
+      return;
     }
     if (c == 'p') { printReport(PR_BASICLIST); return; }   // Fn+p: print the listing
     if (c == 't') { basicRefScroll = 0; screen = SCR_BASICREF; lastDrawMs = 0; return; }  // Fn+t: tutorial/reference
@@ -30092,8 +30743,7 @@ void App::drawBasicRun() {
     canvas.setTextColor(errLine ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(seg);
   }
-  if (basicOutScroll > 0) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 20); canvas.print("^"); }
-  if (basicOutScroll + VIS < nrows) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 112); canvas.print("v"); }
+  scrollbar(20, 120, nrows, VIS, basicOutScroll);
   footer(";/. scroll  p print  ` back");
 }
 
@@ -30509,8 +31159,7 @@ void App::drawMathRef() {
     else { canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y); canvas.print(s); }
     y += LH;
   }
-  if (mathRefScroll > 0)                { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 20);  canvas.print("^"); }
-  if (mathRefScroll + rows < MATHREF_N) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 112); canvas.print("v"); }
+  scrollbar(20, 120, MATHREF_N, rows, mathRefScroll);
   footer(";/. scroll  ` back");
 }
 
@@ -30555,8 +31204,11 @@ namespace {
     " DIM @(n)  one array, n<=256",
     " DATA / READ x,@(i) / RESTORE",
     "#RADIO / OUTPUT",
-    " SATSEL e  reselect sat (0-based)",
-    " TXSEL e   pick transponder",
+    " SATSEL e  pick sat 0..NSAT-1;",
+    "   brings its transponders too,",
+    "   so NTX/TXSEL follow it. Nothing",
+    "   need be selected beforehand.",
+    " TXSEL e   pick transponder of it",
     " LPRINT .. to printer/serial/file",
     " FOPEN\"nm\"/FPRINT../FCLOSE (gated)",
     " FILES  list /CardSat/basic",
@@ -30615,12 +31267,27 @@ namespace {
     "#  Transponder (after TXSEL)",
     " TXDL TXUL Hz  TXBW passband",
     " TXINV 1=invert  TXLIN 1=linear",
+    " TXOK 1=a transponder is held",
+    "#  Geomagnetic (IGRF-14)",
+    " LSHELL McIlwain L",
+    " BRATIO B/B0 (1=shell equator)",
+    " BFIELD nT at the satellite",
+    " INBELT 1=in a Van Allen belt",
+    " INSAA  1=in the S Atl Anomaly",
+    "#  Re-entry",
+    " DECAYD days (-1 n/a, 1E8 stable)",
+    " DECAYSRC 1=measured 2=modelled",
+    "#  Doppler now (what CAT sends)",
+    " DOPPRX DOPPTX Hz",
     "#  GPS (branch on GPSOK)",
     " GPSSATS GPSSPD  always safe",
     " GPSLAT GPSLON GPSALT  need fix",
     "#  Device",
     " BATT %  GPAGE days  NFAV",
+    " BATTMV mV  CHARGING 1=charging",
     " HEAPFREE bytes  UPTIME s",
+    " HEAPBLK largest block (limits",
+    "   a big allocation, not total)",
     " NSAT loaded  NTX transponders",
     "#  Availability flags (1/0)",
     " SATOK TIMEOK POSOK WXOK",
@@ -30644,8 +31311,7 @@ void App::drawBasicRef() {
     else { canvas.setTextColor(CL_WHITE, CL_BLACK); canvas.setCursor(4, y); canvas.print(s); }
     y += LH;
   }
-  if (basicRefScroll > 0)                { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 20);  canvas.print("^"); }
-  if (basicRefScroll + rows < BASICREF_N) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(230, 112); canvas.print("v"); }
+  scrollbar(20, 120, BASICREF_N, rows, basicRefScroll);
   footer(";/. scroll  p print  ` back");
 }
 
@@ -30970,7 +31636,7 @@ void App::drawGpFit() {
     canvas.setCursor(90, y); canvas.print(" SOLVE ");
     canvas.setTextColor(CL_MGREY, CL_BLACK);
     canvas.setCursor(4, 118); canvas.print(gpfFrame==1 ? "J2000 rotated to TEME; B*=0" : "input must be TEME; B*=0");
-    footer(";/. fld ENTER edit ,// frame `back");
+    footer(";/. fld ENTER edit ,// frame ` back");
     return;
   }
   // ---- results ----
@@ -32416,7 +33082,7 @@ void App::drawToolForm() {
            toolId == TOOL_RFEXP || toolId == TOOL_BATT || toolId == TOOL_DEBRIS ||
            toolId == TOOL_PHASE || toolId == TOOL_ATTEN || toolId == TOOL_UNITS ||
            toolId == TOOL_XAREA)
-                            footer("type val ;/. fld ,// scrl x reset `bk");
+                            footer("type val ;/. fld ,// scrl x reset ` bk");
   else                      footer("type value  ;/. field  x reset  ` back");
 }
 
@@ -32589,9 +33255,9 @@ void App::drawMessages() {
     canvas.setCursor(6, 60); canvas.print("No messages yet.");
     canvas.setCursor(6, 74); canvas.print("p=pos  s=sat  k=sked  n=write");
 #if CARDSAT_HAS_LORARX
-    footer("p/s/k send  o who  m RX  ` bk");
+    footer("p/s/k send  o who  m RX  ` back");
 #else
-    footer("p/s/k send  n write  o who  ` bk");
+    footer("p/s/k send  n write  o who  ` back");
 #endif
     return;
   }
@@ -32675,7 +33341,7 @@ void App::drawMessages() {
   }
 
 #if CARDSAT_HAS_LORARX
-  footer("p/s/k  ENT open  o who  m RX  ` bk");
+  footer("p/s/k  ENT open  o who  m RX  ` back");
 #else
   footer("p/s/k  ENT open  o who  ` back");
 #endif
@@ -33173,6 +33839,7 @@ static const char* zoneShort(int z) {
 // mirrors the pass-finder's SGP4 loop; refines each crossing by bisection to a few sec.
 void App::saaCompute() {
   saaWinN = 0; saaInNow = false; saaCurL = 0; saaCurBR = 1; saaComputed = true;
+  saaDwellMinDay = 0; saaDwellPct = 0;
   SatEntry* s = activeSat();
   if (!s || !timeIsSet()) return;
   pred.setSat(*s);
@@ -33232,6 +33899,22 @@ void App::saaCompute() {
   if (prev && curEnter && saaWinN < 16) {              // still inside at the horizon
     saaWin[saaWinN].enter = curEnter; saaWin[saaWinN].exit = 0; saaWinN++;
   }
+  // ---- Dwell summary over the scanned window --------------------------------
+  // Sum the refined windows; an open tail (exit==0, still inside at the horizon)
+  // counts to the horizon so a bird parked inside the zone reads ~100%, not 0.
+  {
+    const time_t horizon = now + (time_t)windowSec;
+    double inSec = 0;
+    for (int i = 0; i < saaWinN; ++i) {
+      time_t en = saaWin[i].enter, ex = saaWin[i].exit ? saaWin[i].exit : horizon;
+      if (en < now) en = now;                          // entered before the scan began
+      if (ex > en) inSec += (double)(ex - en);
+    }
+    if (windowSec > 0) {
+      saaDwellPct    = (float)(100.0 * inSec / windowSec);
+      saaDwellMinDay = (float)((inSec / windowSec) * 1440.0);   // fraction x min/day
+    }
+  }
 }
 
 void App::drawSaa() {
@@ -33267,10 +33950,23 @@ void App::drawSaa() {
     else
       snprintf(sb, sizeof(sb), "Now: %s   L=%.1f", saaInNow ? "IN ZONE" : "outside", saaCurL);
     canvas.setTextColor(saaInNow ? CL_GREEN : CL_GREY, CL_BLACK);
-    canvas.setCursor(4, 48); canvas.print(sb); }
+    canvas.setCursor(4, 44); canvas.print(sb); }
+  // Dwell line: worst case "dwell 1234.5 min/day  (100.0% scanned)" = 38 of 39 cols.
+  // Vertical budget (8 px glyphs): Now@44 ends 52, dwell@53 ends 61, transit
+  // header@63 ends 71, rows start 74. The first draft put dwell at 58 over a
+  // header at 62 -- a 4 px collision the width check alone would never catch.
+  { char db2[44];
+    if (saaDwellMinDay >= 0.05f)
+      snprintf(db2, sizeof(db2), "dwell %.1f min/day  (%.1f%% scanned)",
+               (double)saaDwellMinDay, (double)saaDwellPct);
+    else
+      snprintf(db2, sizeof(db2), "dwell: none in the scanned orbits");
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 53); canvas.print(db2);
+    canvas.setTextColor(CL_WHITE, CL_BLACK); }
 
   canvas.setTextColor(CL_MGREY, CL_BLACK);
-  canvas.setCursor(4, 62);
+  canvas.setCursor(4, 63);
   if (saaWinN == 0) {
     canvas.print(saaZone >= ZONE_INNER ? "No transits (LEO? see SAA)" : "No transits in next orbits");
   } else {
@@ -33295,7 +33991,7 @@ void App::drawSaa() {
       canvas.setCursor(4, y); canvas.print(rb);
     }
   }
-  footer("z zone  ; . scroll  x print  ` bk");
+  footer("z zone  ; . scroll  x print  ` back");
 }
 
 void App::keySaa(char c, bool enter, bool back) {
@@ -33386,14 +34082,16 @@ void App::drawMuf() {
     char mb[16]; snprintf(mb, sizeof(mb), "%4.1f %s", m, mufBand(m));
     canvas.setCursor(184, y); canvas.print(mb);
   }
-  footer("; . move  k map  x print  ` bk");
+  footer("; . move  k map  x print  ` back");
 }
 
 void App::keyMuf(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_SPACEWX; lastDrawMs = 0; return; }
-  if (isUp(c))   { if (mufSel > 0) mufSel--; lastDrawMs = 0; return; }
-  if (isDown(c)) { if (mufSel < MUF_REGION_N - 1) mufSel++; lastDrawMs = 0; return; }
+  // Wrap, like every other selectable list: at the last region, down goes to the
+  // first. Clamping silently makes the end of a list feel like a stuck key.
+  if (isUp(c))   { mufSel = (uint8_t)((mufSel + MUF_REGION_N - 1) % MUF_REGION_N); lastDrawMs = 0; return; }
+  if (isDown(c)) { mufSel = (uint8_t)((mufSel + 1) % MUF_REGION_N); lastDrawMs = 0; return; }
   if (c == 'k')  { screen = SCR_MUFMAP; lastDrawMs = 0; return; }
   if (c == 'x')  { printReport(PR_MUF); return; }
 }
@@ -33497,8 +34195,8 @@ void App::drawMufMap() {
 void App::keyMufMap(char c, bool enter, bool back) {
   (void)enter;
   if (isBack(c, back)) { screen = SCR_MUF; lastDrawMs = 0; return; }
-  if (isUp(c))   { if (mufSel > 0) mufSel--; lastDrawMs = 0; return; }   // step the readout
-  if (isDown(c)) { if (mufSel < MUF_REGION_N - 1) mufSel++; lastDrawMs = 0; return; }
+  if (isUp(c))   { mufSel = (uint8_t)((mufSel + MUF_REGION_N - 1) % MUF_REGION_N); lastDrawMs = 0; return; }  // step the readout
+  if (isDown(c)) { mufSel = (uint8_t)((mufSel + 1) % MUF_REGION_N); lastDrawMs = 0; return; }
 }
 // Aurora / high-latitude activity level word from Kp (and Bz if we have it: a
 // strongly southward Bz upgrades the outlook because it drives coupling).
@@ -33647,7 +34345,7 @@ void App::drawSpaceWx() {
                : (String(ageH / 24) + "d old");
     canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
   }
-  footer("p prop m muf x print r refr ` bk");
+  footer("p prop m muf x print r refr ` back");
 }
 
 void App::keySpaceWx(char c, bool enter, bool back) {
@@ -33726,7 +34424,7 @@ void App::drawProp() {
       uint16_t rc = (spaceR12Prob >= 50) ? CL_ORANGE : (spaceR12Prob >= 20 ? CL_YELLOW : CL_GREEN);
       line(String(rb), rc); }
     line(String("VHF: ") + vhfFlag(), CL_WHITE);
-    footer("o core  p print  r refresh  ` bk");
+    footer("o core  p print  r refresh  ` back");
     return;
   }
   int y = 20; const int LH = 9;
@@ -33785,7 +34483,7 @@ void App::drawProp() {
   // Honest disclaimer: these are heuristics + a reminder that 6m Es is seasonal.
   canvas.setTextColor(CL_MGREY, CL_BLACK);
   canvas.setCursor(2, 116); canvas.print("rule-of-thumb; 6m Es is seasonal");
-  footer("o outlook  p print  r refresh ` bk");
+  footer("o outlook  p print  r refresh ` back");
 }
 
 void App::keyProp(char c, bool enter, bool back) {
@@ -33797,7 +34495,7 @@ void App::keyProp(char c, bool enter, bool back) {
   if (c == 'o') { propPage ^= 1; lastDrawMs = 0; return; }   // core <-> outlook page ('b'=screenshot)
   if (c == 'p') { printReport(PR_SPACEWX); return; }   // print full space-wx + outlook
   if (c == 'r') {                          // refetch the indices without leaving this screen
-    if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)"); lastDrawMs = 0; return; }
+    if (!net.connected() && !connectWifiCfg()) { setStatus("WiFi failed (check SSID/pass)", 2500, SEV_ERR); lastDrawMs = 0; return; }
     setStatus("Updating Space Wx..."); draw();
     fetchSpaceWeather();
     lastDrawMs = 0; return;
@@ -34027,7 +34725,7 @@ void App::drawWeather() {
                : (String(ageH / 24) + "d old");
     canvas.setCursor(240 - 2 - (int)age.length() * 6, 116); canvas.print(age);
   }
-  footer("f field  p print  r refresh  ` bk");
+  footer("f field  p print  r refresh  ` back");
 }
 
 // Second Weather page: outdoor "field conditions" for operating away from home --
@@ -34125,7 +34823,7 @@ void App::drawWeatherField() {
     y += 10;
   }
 
-  footer("f summary  p print  r fresh  ` bk");
+  footer("f summary  p print  r fresh  ` back");
 }
 
 void App::keyWeather(char c, bool enter, bool back) {
@@ -34209,8 +34907,7 @@ void App::drawTxDb() {
   }
   // scrollbar hints + count
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (txDbScroll > 0)                       { canvas.setCursor(232, 19);  canvas.print("^"); }
-  if (txDbScroll + perPage < activeTxCount) { canvas.setCursor(232, 112); canvas.print("v"); }
+  scrollbar(19, 120, activeTxCount, perPage, txDbScroll);
   { bool selManual = (txDbSel < activeTxCount &&
                       strncmp(activeTx[txDbSel].desc, "manual", 6) == 0);
     char cnt[24]; snprintf(cnt, sizeof(cnt), "%d/%d", txDbSel + 1, activeTxCount);
@@ -34243,7 +34940,7 @@ void App::keyTxDb(char c, bool enter, bool back) {
       if (txDbSel >= activeTxCount) txDbSel = activeTxCount > 0 ? activeTxCount - 1 : 0;
       onTransponderChanged();
       setStatus("Transponder deleted");
-    } else setStatus("Delete failed");
+    } else setStatus("Delete failed", 2500, SEV_ERR);
     lastDrawMs = 0; return;
   }
   lastDrawMs = 0;
@@ -34350,7 +35047,7 @@ void App::fillGridsQrz() {
   }
   if (!net.connected()) {
     setStatus("Connecting WiFi..."); draw();
-    if (!connectWifiCfg()) { setStatus("WiFi failed"); clBusy = false; lastDrawMs = 0; draw(); return; }
+    if (!connectWifiCfg()) { setStatus("WiFi failed", 2500, SEV_ERR); clBusy = false; lastDrawMs = 0; draw(); return; }
   }
   if (!Store::fs().exists(FILE_LOG)) { setStatus("No log yet"); clBusy = false; lastDrawMs = 0; draw(); return; }
 
@@ -34372,7 +35069,7 @@ void App::fillGridsQrz() {
   // --- pass 1: scan for distinct callsigns missing a grid (file closed at the end) ---
   {
     File in = Store::fs().open(FILE_LOG, "r");
-    if (!in) { setStatus("Log open failed"); clBusy = false; lastDrawMs = 0; draw(); return; }
+    if (!in) { setStatus("Log open failed", 2500, SEV_ERR); clBusy = false; lastDrawMs = 0; draw(); return; }
     while (in.available()) {
       String t = in.readStringUntil('\n'); t.trim();
       if (!t.length() || t.startsWith("utc,")) continue;
@@ -34416,7 +35113,7 @@ void App::fillGridsQrz() {
   File out = Store::fs().open(tmp.c_str(), "w");
   if (!in || !out) {
     if (in) in.close(); if (out) out.close();
-    setStatus("Rewrite failed"); clBusy = false; lastDrawMs = 0; draw(); return;
+    setStatus("Rewrite failed", 2500, SEV_ERR); clBusy = false; lastDrawMs = 0; draw(); return;
   }
   while (in.available()) {
     String t = in.readStringUntil('\n'); t.trim();
@@ -36438,7 +37135,7 @@ void App::keyTgtSearch(char c, bool enter, bool back) {
       if (!timeIsSet()) { setStatus("Set time first"); return; }
       if (!tsGrid[0]) { setStatus("Enter a grid first"); return; }
       tsGeoIdx = 0;
-      if (!tsResolveTarget()) { setStatus("Bad grid"); return; }
+      if (!tsResolveTarget()) { setStatus("Bad grid", 2500, SEV_ERR); return; }
       tsStart(); screen = SCR_TGTHITS; lastDrawMs = 0; return;
     }
     return;                                            // grid mode: no filter/list keys
@@ -36460,7 +37157,7 @@ void App::keyTgtSearch(char c, bool enter, bool back) {
     if (!timeIsSet()) { setStatus("Set time first"); return; }
     tsGeoIdx = tsFilteredGeoIdx(tsPickSel);            // map filtered position -> geometry index
     if (tsGeoIdx < 0) { setStatus("No target selected"); return; }
-    if (!tsResolveTarget()) { setStatus("Bad target"); return; }
+    if (!tsResolveTarget()) { setStatus("Bad target", 2500, SEV_ERR); return; }
     tsStart(); screen = SCR_TGTHITS; lastDrawMs = 0; return;
   }
 }
@@ -36720,8 +37417,7 @@ void App::drawRoveList() {
     if (roveSize[idx] < 1024) canvas.printf("%luB", (unsigned long)roveSize[idx]);
     else                      canvas.printf("%luK", (unsigned long)(roveSize[idx] / 1024));
   }
-  if (roveScroll > 0)                 { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 20);  canvas.print("^"); }
-  if (roveScroll + ROWS < roveListN)  { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.setCursor(232, 108); canvas.print("v"); }
+  scrollbar(20, 116, roveListN, ROWS, roveScroll);
   footer("ENT view  d del  r refr  ` back");
 }
 
@@ -36731,7 +37427,7 @@ void App::keyRoveList(char c, bool enter, bool back) {
       if (roveSel >= 0 && roveSel < roveListN && Store::ready()) {
         char path[64]; snprintf(path, sizeof(path), "/CardSat/RovePlans/%s", roveList[roveSel]);
         if (Store::fs().remove(path)) setStatus("Plan deleted");
-        else                          setStatus("Delete failed");
+        else                          setStatus("Delete failed", 2500, SEV_ERR);
         buildRoveList();
       }
       roveConfirmDel = false;
@@ -36765,8 +37461,7 @@ void App::drawRoveView() {
   }
   // Scroll + truncation indicators.
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (roveViewTop > 0)                 { canvas.setCursor(232, 18);  canvas.print("^"); }
-  if (roveViewTop + NOTE_ROWS < nrows) { canvas.setCursor(232, 110); canvas.print("v"); }
+  scrollbar(18, 118, nrows, NOTE_ROWS, roveViewTop);
   if (roveViewTrunc) {
     canvas.setTextColor(CL_ORANGE, CL_BLACK);
     canvas.setCursor(4, 118); canvas.print("(truncated -- download for full file)");
@@ -37642,9 +38337,8 @@ void App::drawGpSrc() {
     canvas.setCursor(6, y); canvas.print(GP_SRC[i].label);
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  if (gpSrcScroll > 0)             { canvas.setCursor(232, 18);  canvas.print("^"); }
-  if (gpSrcScroll + VIS < GP_SRC_N){ canvas.setCursor(232, 106); canvas.print("v"); }
-  footer("; / . ENT pick  {} page  ` bk");
+  scrollbar(18, 114, GP_SRC_N, VIS, gpSrcScroll);
+  footer("; / . ENT pick  {} page  ` back");
 }
 
 void App::keyGpSrc(char c, bool enter, bool back) {
@@ -37794,7 +38488,7 @@ void App::drawSchedule() {
       canvas.setCursor(232, y); canvas.print("!");
     }
   }
-  footer("ENT trk m map t tl p plan w/s find `bk");
+  footer("ENT trk m map t tl p plan w/s find ` bk");
 }
 
 void App::drawSatList() {
@@ -37843,8 +38537,9 @@ void App::drawSatList() {
     }
   }
   bool selManual = (viewN > 0 && viewSel < viewN && db.isManualGp(db.at(view[viewSel]).norad));
-  if (selManual) footer("ENT pass o orb t tx s status x del `bk");
-  else           footer("ENT pass o orb t tx s status f fav / `bk");
+  if (selManual) footer("ENT pass o orb t tx s status x del ` bk");
+  // 39-col budget: "status" -> "stat" pays for the standard "` bk" spacing.
+  else           footer("ENT pass o orb t tx s stat f fav / ` bk");
 }
 
 void App::drawPasses() {
@@ -37910,7 +38605,7 @@ void App::drawPasses() {
       canvas.setCursor(232, y); canvas.print("*");
     }
   }
-  footer("ENT trk d dtl n / g w e dx x V vis* `bk");
+  footer("ENT trk d dtl n / g w e dx x V vis ` bk");
 }
 
 void App::drawPassDetail() {
@@ -39225,7 +39920,7 @@ void App::drawGlobe() {
   else           { canvas.setTextColor(CL_GREY, CL_BLACK);
                    canvas.setCursor(rx, 108); canvas.printf("%d favs", favN); }
 
-  footer("arrows turn  g DX  ENT follow  `bk");
+  footer("arrows turn  g DX  ENT follow  ` back");
 }
 
 // ---- QTH presets (0.9.60): five named, recallable station sites -------------
@@ -39553,11 +40248,17 @@ void App::drawSettings() {
   // only meaningful on that path.
   if (cfg.catType == CAT_DUAL) {
     const uint8_t dm = cfg.dualModel[0], um = cfg.dualModel[1];
-    rows[109] = String("Dual-Rig setup (2 radios) > ") +
+    // 39 columns at x=4, and NOTHING truncates a settings row -- drawSettings()
+    // prints it straight out, so anything past column 39 is silently clipped by
+    // the sprite. The long label plus two radio names reached 51 ("Dual-Rig setup
+    // (2 radios) > IC-706MKIIG+IC-706MKIIG"), which lost the uplink radio
+    // entirely. The CAT type row directly above already says "Dual (2 radios)",
+    // so the shorter label here loses nothing.
+    rows[109] = String("Dual rig: ") +
                 ((dm == LEG_NONE && um == LEG_NONE) ? String("set legs")
                  : (um == LEG_NONE) ? String(LEG_RADIOS[dm].name) + " (DL only)"
                  : (dm == LEG_NONE) ? String(LEG_RADIOS[um].name) + " (UL only)"
-                 : String(LEG_RADIOS[dm].name) + "+" + LEG_RADIOS[um].name);
+                 : String(LEG_RADIOS[dm].name) + "+" + LEG_RADIOS[um].name) + " >";
   } else {
     rows[109] = String("Dual-Rig setup (Stick) >") +
                 (drLink == 1 ? "  linked" : drLink == 2 ? "  no link" : "");
@@ -39673,13 +40374,13 @@ void App::startWifiScan(bool forSecond) {
   wifiScan2 = forSecond;
   setStatus("Scanning WiFi...");
   draw();                                   // show the notice before the blocking scan
-  if (!wifiApAlloc()) { wifiApCount = 0; setStatus("Out of memory"); return; }
+  if (!wifiApAlloc()) { wifiApCount = 0; setStatus("Out of memory", 2500, SEV_ERR); return; }
   wifiApCount = net.scanWifi(wifiAp, MAX_WIFI_AP);
   wifiSel = 0;
   screen = SCR_WIFISCAN;
   if (wifiApCount > 0)       setStatus(String(wifiApCount) + " network(s)");
   else if (wifiApCount == 0) setStatus("No networks found");
-  else { wifiApCount = 0;    setStatus("Scan failed"); }
+  else { wifiApCount = 0;    setStatus("Scan failed", 2500, SEV_ERR); }
 }
 
 void App::keyWifiScan(char c, bool enter, bool back) {

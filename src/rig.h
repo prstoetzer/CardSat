@@ -299,16 +299,36 @@ HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
 // state) so the host harness (tools/host_dualrig) byte-verifies them against the
 // companion's bench-validated output. Return the frame length written to out
 // (<= cap), or 0 if the family/params can't be encoded.
+// wideFreq: allow the SIX-byte CI-V frequency field above 5.85 GHz (IC-905 only;
+// LegProfile::wideFreq). Below that threshold, and for every other radio, the
+// ordinary five-byte field is used. Ignored by the non-CI-V families.
 size_t legBuildFreqFrame(LegFamily fam, uint8_t civAddr, uint64_t hz,
-                         uint8_t* out, size_t cap);
+                         uint8_t* out, size_t cap, bool wideFreq = false);
+// withFilter: append the CI-V filter byte to cmd 06. False for the few Icoms that
+// reject passband data on that command (LegProfile::modeFilter). Ignored by the
+// non-CI-V families, which have no such byte.
 size_t legBuildModeFrame(LegFamily fam, uint8_t civAddr, RigMode m,
-                         uint8_t* out, size_t cap);
+                         uint8_t* out, size_t cap, bool withFilter = true);
 size_t legBuildReadFreqFrame(LegFamily fam, uint8_t civAddr,
                              uint8_t* out, size_t cap);
 // Parse a read-frequency reply for the family from a raw RX buffer (which may
 // contain an interface echo before the answer). Returns true + hz on success.
 bool   legParseFreqReply(LegFamily fam, uint8_t civAddr,
                          const uint8_t* buf, size_t n, uint64_t& hz);
+
+// LEGF_KWHT (TH-D74/D75) frequency SET, byte half. This family has no
+// set-frequency command: you query the "FO" record, overwrite its ten frequency
+// digits in place, and send the whole record back. Given a reply buffer holding
+// an FO record, writes the patched command to out and returns its length (0 if
+// the reply does not look like a usable FO record). Pure, so the host harness
+// verifies the exact bytes; the query/response sequencing lives in
+// PlainCatRig::sendFreq().
+// RETIRED in 0.9.70: legKwFoPatch() -- the TH-D74/D75 "FO" read-modify-write. FO
+// WRITES ARE REFUSED by a real TH-D75 (measured: "N" on both bands, in both VFO and
+// memory mode, even byte-identical to what the radio had just returned). Replaced by
+// the single-frame "FQ <band>,<10 digits>" set. Declaration kept commented so the
+// next person to read the D74 reference and reach for FO knows it was tried.
+// Both the declaration and the definition are gone; this note is the tombstone.
 
 // One dual-rig LEG: any LEG_RADIOS[] radio with plain single-VFO CAT over a
 // Stream (the Grove UART, or a USB<->serial adapter via setExternalStream).
@@ -335,7 +355,20 @@ public:
   void    setAddress(uint8_t a) override { _addr = a; }
   uint8_t address() const override { return _addr; }
   bool    sendRaw(const uint8_t* b, size_t n) override;   // serial-terminal diagnostics
-  void    setExternalStream(Stream* s) override { extStream = s; _stream = s; }
+  // ANY re-attach starts a NEW CAT session, so the TH-D75 preconditions must be
+  // re-sent. Cleared UNCONDITIONALLY, including on a null detach and including when
+  // the new stream lands on the SAME heap address as the old one -- which it usually
+  // does, because the CdcSerial object is freed and immediately reallocated.
+  //
+  // Bench evidence for why this matters: with _kwSession left latched, the first
+  // engage after boot sent "VM 1,0" and "BC 1" and the radio answered every command
+  // (24 IN completions, echoes of MD/VM/BC/FT/FS/FQ). The SECOND engage skipped the
+  // setup, so the band was never made the control band, and the radio refused
+  // everything -- zero IN completions, indistinguishable from a dead transport.
+  void    setExternalStream(Stream* s) override {
+    _kwSession = false;
+    extStream = s; _stream = s;
+  }
   // CI-V wiring mode for a GROVE leg (0 = two-wire, 1 = one-wire G2, 2 = one-wire
   // G1). Most half-duplex Icoms present one-wire CI-V on a 3.5 mm jack, so a dual
   // rig with an Icom leg on Grove needs this exactly as the wired path does.
@@ -343,6 +376,20 @@ public:
 private:
   uint8_t  _pinMode = 0;
   bool sendFreq(freq_t hz);
+  // ---- TH-D74/D75 (LEGF_KWHT) session state ------------------------------------
+  // Measured preconditions for a frequency write on a real TH-D75
+  // (tools/thd75_probe.py). ALL THREE are required; miss any one and the radio
+  // replies "N" or silently echoes the unchanged record:
+  //   1. the band is in VFO mode          -> "VM <band>,0"
+  //   2. the band is the CONTROL band     -> "BC <band>"
+  //   3. the frequency is ON the step grid (off-grid writes are refused, not rounded)
+  // The grid is 5 kHz normally, or the fine step when fine mode is on -- and fine
+  // mode is only valid in SSB/CW, not FM.
+  void     kwEnsureSession();      // (1) and (2), once per attached stream
+  void     kwApplyStepForMode(RigMode m);   // fine mode + step, per mode
+  uint32_t kwGrid() const { return _kwFine ? 20u : 5000u; }
+  bool     _kwSession = false;     // VM/BC applied to the current stream
+  bool     _kwFine    = false;     // fine mode currently requested (SSB/CW only)
   bool sendMode(RigMode m);
   bool readFreq(freq_t& hzOut);
   bool sendFrame(const uint8_t* b, size_t n);

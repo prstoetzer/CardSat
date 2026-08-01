@@ -80,7 +80,8 @@ FRONT = [
   "<b>m</b> TUNE/CAL &middot; <b>d</b> tune mode (FULL/DL/UL/FULLu/hold; FULLu=OTR on uplink knob) &middot; <b>t</b> next TX &middot; <b>n</b> jump to beacon &middot; "
   "<b>c</b> CTCSS &middot; <b>N</b> sat note &middot; <b>k</b> CW both legs (linear) &middot; <b>r</b> radio &middot; <b>o</b> rotator &middot; <b>p</b> polar &middot; <b>a</b> point-here arrow &middot; <b>z</b> big readout &middot; "
   "<b>y</b> tilt on/off (ADV) &middot; "
-  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>i</b>&times;2 report Heard (AMSAT) &middot; after LOS <b>q</b> (60s) deep-sleep to next pass &middot; <b>ENTER</b> save cal"),
+  "<b>f</b> Manual &middot; <b>l</b> log QSO &middot; <b>v</b> voice memo (SD) &middot; <b>g</b> grids &middot; <b>w</b> states &middot; <b>e</b> DXCC now &middot; <b>i</b>&times;2 report Heard (AMSAT) &middot; after LOS <b>q</b> (60s) deep-sleep to next pass &middot; <b>ENTER</b> save cal &middot; "
+  "<b>Fn+u</b> fully release USB (host stays resident after disengage; this is when the serial console returns)"),
  ("BIG READOUT (z from Track)",
   "Big RX/TX + az/el + tune mode (follows Track). Radio+rotator keep tracking &middot; "
   "<b>,</b>/<b>/</b> tune &middot; <b>s</b>/<b>x</b> step/ctr &middot; <b>m</b>/<b>d</b> mode &middot; "

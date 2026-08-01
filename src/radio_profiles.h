@@ -110,6 +110,23 @@ struct RadioProfile {
   uint8_t     toneEncSub;    // CI-V tone-encoder on/off sub-cmd under 0x16:
                              // IC-9100/9700 = 0x42 (Repeater tone), IC-910 = 0x43
                              // (Subaudible tone; on the 910, 0x42 is auto-notch). 0 = n/a.
+  // Include the FILTER byte in the CI-V set-mode command (Icom cmd 06)?
+  //
+  // "06 <mode> <filter>" is the normal form, but a handful of Icoms do not accept
+  // passband data on this command and will reject the frame outright -- and since
+  // nothing here checks the ACK, the symptom is simply that mode changes stop
+  // working, with no error anywhere. Hamlib carries an explicit list of them
+  // ("IC-375, IC-731, IC-726, IC-735, IC-910, IC-7000 don't support passband
+  // data", icom.c); of the radios CardSat drives, only the IC-910 is on it.
+  // Those get the two-byte form "06 <mode>".
+  //
+  // NOTE the IC-820/821 are deliberately NOT in that group even though Hamlib's
+  // ic821h backend sets civ_731_mode (which would also suppress this byte). That
+  // flag additionally means a 4-byte frequency -- eight BCD digits, a ~100 MHz
+  // ceiling -- which cannot express 145 or 435 MHz on a 144/430 radio, and the
+  // three-byte form is bench-proven on a real IC-821. Hamlib appears to be wrong
+  // there; the bench wins.
+  bool        modeFilter;
   bool        canAssignBand; // CAT can ASSIGN which band sits on MAIN vs SUB
                              // (Icom CI-V 07 D2). true only for IC-9100/IC-9700;
                              // the 820/821/970 D0/D1 are band *access* only.
@@ -118,7 +135,7 @@ struct RadioProfile {
 
 // Order MUST match RadioModel.
 static const RadioProfile RADIOS[RIG_COUNT] = {
-  // name       proto         addr   baud    selMain        selSub         len verf satM satCmd satSub read tone tnEnc
+  // name       proto         addr   baud    selMain        selSub         len verf satM satCmd satSub read tone tnEnc mFilt asgn
   // NOTE: MAIN/SUB band-select differs between these two otherwise-similar rigs,
   // each confirmed from its own manual's CI-V command table (cmd 07):
   //   IC-821H: Main band access = D0, Sub band access = D1  (addr 4C)
@@ -141,21 +158,23 @@ static const RadioProfile RADIOS[RIG_COUNT] = {
   // "Set satellite mode"). 0/0 where there's no CAT satmode.
   // tnEnc: tone-encoder on/off sub under 0x16. IC-9100/9700 = 0x42 (Repeater tone);
   // IC-910 = 0x43 (Subaudible tone; its 0x42 is auto-notch). 0 where no CAT tone.
-  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, false, 0x00, 0x00, true, false, 0x00, false },
-  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false, 0x00, 0x00, true, false, 0x00, false },
-  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, true, 0x1A, 0x07, true, true,  0x43, true  },
-  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x16, 0x5A, true, false, 0x00, false },
-  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42, true },
-  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42, true },
+  { "IC-820",   PROTO_CIV,    0x42,  9600,  {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, false, 0x00, 0x00, true, false, 0x00, true , false },
+  { "IC-821",   PROTO_CIV,    0x4C,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false, 0x00, 0x00, true, false, 0x00, true , false },
+  // IC-910: modeFilter = false. Hamlib names it among the rigs that "don't support
+  // passband data" on CI-V cmd 06, so it gets the two-byte "06 <mode>" form.
+  { "IC-910",   PROTO_CIV,    0x60,  19200, {0x07,0xD1,0}, {0x07,0xD0,0},  2,  true, true, 0x1A, 0x07, true, true,  0x43, false, true  },
+  { "IC-970",   PROTO_CIV,    0x2E,  9600,  {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, false,0x16, 0x5A, true, false, 0x00, true , false },
+  { "IC-9100",  PROTO_CIV,    0x7C,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42, true , true },
+  { "IC-9700",  PROTO_CIV,    0xA2,  19200, {0x07,0xD0,0}, {0x07,0xD1,0},  2,  true, true, 0x16, 0x5A, true, true,  0x42, true , true },
   // Yaesu: 5-byte CAT. baud is the radio's CAT menu setting. No CI-V select.
-  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00, false },
-  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, false,false, 0x00, false },
+  { "FT-847",   PROTO_YAESU,  0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00, true , false },
+  { "FT-736R",  PROTO_YAESU,  0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, false,false, 0x00, true , false },
   // Kenwood: ASCII CAT over RS-232 (needs a MAX3232-class level interface).
-  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, false, 0x00, false },
-  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00, false },
+  { "TS-790",   PROTO_KENWOOD,0x00,  4800,  {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, false, 0x00, true , false },
+  { "TS-2000",  PROTO_KENWOOD,0x00,  57600, {0,0,0},       {0,0,0},        0,  true, true, 0x00, 0x00, true, true,  0x00, true , false },
   // RIG_NONE: placeholder so RADIOS[RIG_NONE] is a valid dereference (the name is shown
   // in Settings). makeRig() returns nullptr for it, so none of the other fields are used.
-  { "None",     PROTO_CIV,    0x00,  9600,  {0,0,0},       {0,0,0},        0,  false,false,0x00, 0x00, false,false, 0x00, false },
+  { "None",     PROTO_CIV,    0x00,  9600,  {0,0,0},       {0,0,0},        0,  false,false,0x00, 0x00, false,false, 0x00, true , false },
 };
 
 // ===========================================================================
@@ -168,11 +187,29 @@ static const RadioProfile RADIOS[RIG_COUNT] = {
 //  own table instead of RADIOS[]: the RadioProfile machinery above is all about
 //  MAIN/SUB band access on full-duplex sat rigs and does not apply here.
 //
-//  Four CAT dialects cover every leg radio (same families as the companion):
+//  Six CAT dialects cover every leg radio. (0.9.68 shipped four, having assumed the
+//  FT-100 and VR-5000 were "Yaesu 5-byte binary" like the FT-817 family. A 0.9.70
+//  audit against Hamlib found neither is: see the two families below.)
 //    LEGF_CIV   Icom binary CI-V, addressed          (cmd 05 freq, 06 mode, 03 read)
-//    LEGF_YBIN  Yaesu "old" 5-byte binary CAT        (4-byte BCD @10 Hz + opcode)
+//    LEGF_YBIN  Yaesu "old" 5-byte binary CAT        (4-byte BE BCD @10 Hz + opcode
+//               01 freq / 07 mode / 03 read; FT-817/818/857/897 -- verified against
+//               Hamlib ft817.c, ft857.c and ft897.c, which are byte-identical here)
+//    LEGF_Y100  Yaesu FT-100 ONLY. Same 5-byte frame, everything else different:
+//               opcode 0A freq / 0C mode / 10 read, LITTLE-endian BCD, the mode byte
+//               in data[3] instead of data[0], and its own mode values (FM = 06,
+//               DIG = 05). Nothing the FT-817 dialect sends means anything to it.
+//    LEGF_YVR5  Yaesu VR-5000 ONLY. FT-817 framing and opcodes, but FM is 0x88
+//               (Hamlib maps RIG_MODE_FM -> MODE_FMN for this receiver; plain 0x08
+//               is not in its table), and it has NO frequency read-back at all.
 //    LEGF_YTXT  Yaesu "new" ASCII CAT                (FA/MD ';'-terminated)
-//    LEGF_KWHT  Kenwood TH-D74/D75 handheld CAT      (FQ<band>,<Hz> + CR; Band B)
+//    LEGF_KWTS  Kenwood all-mode BASE stations       (FA<11 digits>; / MD<d>;)
+//               TS-711 (2 m) and TS-811 (70 cm) -- the generic Kenwood ASCII CAT
+//               that this firmware already speaks to the TS-790/TS-2000 as a
+//               full-duplex rig. A TS-711 + TS-811 pair is the classic two-radio
+//               all-mode satellite station, which is exactly what a dual rig is.
+//    LEGF_KWHT  Kenwood TH-D74/D75 handheld CAT      ("FO <band>" record + CR;
+//               a frequency SET is a read-modify-write of that record -- this
+//               family has no set-frequency command. Band B = VFO B.)
 //
 //  Table data (names, dialects, default bauds, CI-V addresses, RX-only flags) is
 //  ported verbatim from companion/CardSatDualRig (RADIO_TABLE[]), which is the
@@ -183,11 +220,22 @@ static const RadioProfile RADIOS[RIG_COUNT] = {
 //  IC-705 (the requested + supported LAN target, over the radio's own Wi-Fi) and
 //  the IC-905 (same protocol family per Icom's docs -- UNTESTED on hardware).
 // ===========================================================================
-enum LegFamily : uint8_t { LEGF_CIV, LEGF_YBIN, LEGF_YTXT, LEGF_KWHT };
+enum LegFamily : uint8_t { LEGF_CIV, LEGF_YBIN, LEGF_Y100, LEGF_YVR5,
+                          LEGF_YTXT, LEGF_KWHT, LEGF_KWTS };
+
+// Bumped whenever LegModel changes shape. cfg.dualModel is stored as a raw INDEX
+// into this enum, so inserting a radio silently repoints a saved configuration at
+// a different one -- the same failure mode as a stale settings clamp, and just as
+// invisible. On a version change the leg selections are reset to None and the
+// operator re-picks, which is the honest outcome: a wrong radio driven confidently
+// is worse than an obviously empty slot.
+static const uint8_t LEG_CATALOG_VER = 2;
 
 enum LegModel : uint8_t {
   // --- Icom CI-V transceivers ---
-  LEG_IC705 = 0, LEG_IC905, LEG_IC7100, LEG_IC7000, LEG_IC706MK2G, LEG_IC275, LEG_IC475,
+  LEG_IC705 = 0, LEG_IC905, LEG_IC7100, LEG_IC7000,
+  LEG_IC706MK2G, LEG_IC706MK2, LEG_IC706,
+  LEG_IC275, LEG_IC475, LEG_IC271, LEG_IC471, LEG_IC575, LEG_IC1275,
   // --- Icom CI-V receivers (RX only) ---
   LEG_ICR10, LEG_ICR20, LEG_ICR30,
   LEG_ICR7000, LEG_ICR7100, LEG_ICR8500, LEG_ICR8600, LEG_ICR9000, LEG_ICR9500,
@@ -197,6 +245,8 @@ enum LegModel : uint8_t {
   LEG_VR5000,
   // --- Yaesu new ASCII ---
   LEG_FT991, LEG_FT991A, LEG_FTX1,
+  // --- Kenwood all-mode VHF/UHF base stations (generic Kenwood ASCII CAT) ---
+  LEG_TS711, LEG_TS811,
   // --- Kenwood handhelds (all-mode receiver on Band B, RX only) ---
   LEG_THD74, LEG_THD75,
   LEG_NONE,      // leg unassigned; makeLegRig() returns nullptr
@@ -208,43 +258,74 @@ struct LegProfile {
   LegFamily   family;
   uint32_t    baud;      // default CAT baud (0 in cfg = use this)
   uint8_t     civAddr;   // default CI-V bus address (LEGF_CIV only; 0 otherwise)
-  bool        rxOnly;    // receive-only: warn if assigned to the uplink leg
+  bool        rxOnly;    // receive-only: refused on the uplink leg
   bool        hasLan;    // Icom network CAT available as a leg transport
+  // Six-byte CI-V frequency above 5.85 GHz. The IC-905 switches to a SIX-byte
+  // frequency field there (Hamlib icom.c: `if (RIG_IS_IC905 && freq > 5.85e9)
+  // freq_len = 6`), because five bytes -- ten BCD digits -- top out just under
+  // 10 GHz and cannot express the 10 GHz band at all. Below the threshold the
+  // radio takes the ordinary five-byte form, so this is a per-frequency choice,
+  // not a per-radio one. Set only for the IC-905.
+  bool        wideFreq;
+  // Include the filter byte in CI-V cmd 06 ("06 <mode> <filter>")? A few Icoms
+  // reject the frame when it carries passband data -- Hamlib keeps an explicit
+  // list, and of the leg radios the IC-475 and IC-7000 are on it. They get the
+  // two-byte "06 <mode>" form. Ignored by the non-CI-V families.
+  bool        modeFilter;
+  bool        canRead;   // the radio can report its frequency back. false for the
+                         // VR-5000, whose CAT has no read command at all (Hamlib
+                         // answers get_freq from its own cache) -- so knob-follow
+                         // and read-back verification must not be attempted.
 };
 
 // Order MUST match LegModel. Data ported from the companion's RADIO_TABLE[].
 static const LegProfile LEG_RADIOS[LEG_COUNT] = {
-  //  name           family     baud   addr  rxOnly lan
-  { "IC-705",      LEGF_CIV,  19200, 0xA4, false, true  },
-  { "IC-905",      LEGF_CIV,  19200, 0xAC, false, true  },
-  { "IC-7100",     LEGF_CIV,  19200, 0x88, false, false },
-  { "IC-7000",     LEGF_CIV,  19200, 0x70, false, false },
-  { "IC-706MKIIG", LEGF_CIV,   9600, 0x58, false, false },
-  { "IC-275",      LEGF_CIV,   9600, 0x10, false, false },
-  { "IC-475",      LEGF_CIV,   9600, 0x14, false, false },
-  { "IC-R10",      LEGF_CIV,   9600, 0x52, true,  false },
-  { "IC-R20",      LEGF_CIV,   9600, 0x6C, true,  false },
-  { "IC-R30",      LEGF_CIV,   9600, 0x9C, true,  false },
-  { "IC-R7000",    LEGF_CIV,   1200, 0x08, true,  false },
-  { "IC-R7100",    LEGF_CIV,   9600, 0x34, true,  false },
-  { "IC-R8500",    LEGF_CIV,   9600, 0x4A, true,  false },
-  { "IC-R8600",    LEGF_CIV,  19200, 0x96, true,  false },
-  { "IC-R9000",    LEGF_CIV,   1200, 0x2A, true,  false },
-  { "IC-R9500",    LEGF_CIV,  19200, 0x72, true,  false },
-  { "FT-817",      LEGF_YBIN,  9600, 0x00, false, false },
-  { "FT-818",      LEGF_YBIN,  9600, 0x00, false, false },
-  { "FT-857",      LEGF_YBIN,  9600, 0x00, false, false },
-  { "FT-897",      LEGF_YBIN,  9600, 0x00, false, false },
-  { "FT-100",      LEGF_YBIN,  9600, 0x00, false, false },
+  //  name           family     baud   addr  rxOnly lan    wide   mFilt  canRead
+  { "IC-705",      LEGF_CIV,  19200, 0xA4, false, true, false, true , true   },
+  { "IC-905",      LEGF_CIV,  19200, 0xAC, false, true, true , true , true   },
+  { "IC-7100",     LEGF_CIV,  19200, 0x88, false, false, false, true , true  },
+  { "IC-7000",     LEGF_CIV,  19200, 0x70, false, false, false, false, true  },
+  { "IC-706MKIIG", LEGF_CIV,   9600, 0x58, false, false, false, true , true  },
+  // IC-706MKII and IC-706: 2 m SSB but NO 70 cm (that arrived with the MKIIG), so
+  // they can serve only whichever leg is on 2 m.
+  { "IC-706MKII",  LEGF_CIV,   9600, 0x4E, false, false, false, true , true  },
+  { "IC-706",      LEGF_CIV,   9600, 0x48, false, false, false, true , true  },
+  { "IC-275",      LEGF_CIV,   9600, 0x10, false, false, false, true , true  },
+  { "IC-475",      LEGF_CIV,   9600, 0x14, false, false, false, false, true  },
+  // The classic all-mode VHF/UHF base stations -- the direct siblings of the
+  // IC-275/475 above, and the radios a two-radio linear-satellite station was
+  // typically built from. Addresses and 5-byte frequency verified against Hamlib.
+  { "IC-271",      LEGF_CIV,   9600, 0x20, false, false, false, true , true  },
+  { "IC-471",      LEGF_CIV,   9600, 0x22, false, false, false, true , true  },
+  { "IC-575",      LEGF_CIV,   9600, 0x16, false, false, false, true , true  },
+  { "IC-1275",     LEGF_CIV,   9600, 0x18, false, false, false, true , true  },
+  { "IC-R10",      LEGF_CIV,   9600, 0x52, true,  false, false, true , true  },
+  { "IC-R20",      LEGF_CIV,   9600, 0x6C, true,  false, false, true , true  },
+  { "IC-R30",      LEGF_CIV,   9600, 0x9C, true,  false, false, true , true  },
+  { "IC-R7000",    LEGF_CIV,   1200, 0x08, true,  false, false, true , true  },
+  { "IC-R7100",    LEGF_CIV,   9600, 0x34, true,  false, false, true , true  },
+  { "IC-R8500",    LEGF_CIV,   9600, 0x4A, true,  false, false, true , true  },
+  { "IC-R8600",    LEGF_CIV,  19200, 0x96, true,  false, false, true , true  },
+  { "IC-R9000",    LEGF_CIV,   1200, 0x2A, true,  false, false, true , true  },
+  { "IC-R9500",    LEGF_CIV,  19200, 0x72, true,  false, false, true , true  },
+  { "FT-817",      LEGF_YBIN,  9600, 0x00, false, false, false, true , true  },
+  { "FT-818",      LEGF_YBIN,  9600, 0x00, false, false, false, true , true  },
+  { "FT-857",      LEGF_YBIN,  9600, 0x00, false, false, false, true , true  },
+  { "FT-897",      LEGF_YBIN,  9600, 0x00, false, false, false, true , true  },
+  { "FT-100",      LEGF_Y100,  9600, 0x00, false, false, false, true , true  },
   // VR-5000: Yaesu 5-byte family; opcodes close to the FT-817's but VERIFY on
   // hardware (carried over from the companion's own caveat).
-  { "VR-5000",     LEGF_YBIN,  9600, 0x00, true,  false },
-  { "FT-991",      LEGF_YTXT, 38400, 0x00, false, false },
-  { "FT-991A",     LEGF_YTXT, 38400, 0x00, false, false },
-  { "FTX-1",       LEGF_YTXT, 38400, 0x00, false, false },
-  { "TH-D74",      LEGF_KWHT,  9600, 0x00, true,  false },
-  { "TH-D75",      LEGF_KWHT,  9600, 0x00, true,  false },
-  { "None",        LEGF_CIV,   9600, 0x00, false, false },
+  { "VR-5000",     LEGF_YVR5,  9600, 0x00, true,  false, false, true , false },
+  { "FT-991",      LEGF_YTXT, 38400, 0x00, false, false, false, true , true  },
+  { "FT-991A",     LEGF_YTXT, 38400, 0x00, false, false, false, true , true  },
+  { "FTX-1",       LEGF_YTXT, 38400, 0x00, false, false, false, true , true  },
+  // Kenwood all-mode base stations. Generic Kenwood ASCII CAT at 4800 baud -- the
+  // same encoding this firmware already uses for the TS-790/TS-2000.
+  { "TS-711",      LEGF_KWTS,  4800, 0x00, false, false, false, true , true  },
+  { "TS-811",      LEGF_KWTS,  4800, 0x00, false, false, false, true , true  },
+  { "TH-D74",      LEGF_KWHT,  9600, 0x00, true,  false, false, true , true  },
+  { "TH-D75",      LEGF_KWHT,  9600, 0x00, true,  false, false, true , true  },
+  { "None",        LEGF_CIV,   9600, 0x00, false, false, false, true , true  },
 };
 
 // Which physical bus a dual-rig leg rides. One Grove UART and one USB CAT port

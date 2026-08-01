@@ -99,21 +99,32 @@ bool KenwoodRig::readSubFreq(freq_t& hzOut) {
   // every byte (a deadline that cannot expire while bytes arrive) AND appended to an
   // uncapped String -- so a chatty stream both span forever and grew the String until
   // the heap gave out. Over USB CAT that is reachable with a wrong baud or a floating
-  // RX line. A Kenwood reply is "FA" + 11 digits + ';' = 14 chars; 64 is generous.
+  // RX line.
+  //
+  // THE CAP MUST EXCEED THE LONGEST REPLY, not the shortest. It was 64, justified as
+  // "a Kenwood reply is 'FA' + 11 digits + ';' = 14 chars; 64 is generous" -- true for
+  // FA on a base rig, and wrong for the handhelds. A TH-D74/D75 FO record is ~73
+  // bytes, so at a 64-byte cap the trailing bytes INCLUDING the ';' were consumed and
+  // discarded: rx.endsWith(";") could never fire, the loop burned its full 800 ms
+  // ceiling on every read, and the parse then ran on a truncated string. Bench
+  // measurement that exposed it: USB IN packets arriving 64 + 9 = 73 bytes, twice,
+  // with every read reported "no valid reply". 160 clears the longest documented
+  // record with room to spare and still bounds the heap.
   // Inactivity window (250 ms, as the original) + 800 ms ceiling. Same shape as
   // civ.cpp's loops: a 1200-baud reply ("FA"+11 digits+';' = 117 ms of bus time
   // plus radio processing) is collected byte-by-byte with the window extending,
   // while a stream that never goes quiet hits the ceiling and returns. The 64-char
   // cap already bounds memory; this bounds time without penalizing slow bauds.
-  String rx; rx.reserve(64);
+  static const int KW_RX_MAX = 160;              // see the note above: > longest reply
+  String rx; rx.reserve(KW_RX_MAX);
   const uint32_t t0 = millis(); uint32_t lastByteMs = t0;
   while (millis() - lastByteMs < 250 && millis() - t0 < 800) {
-    unsigned guard = 64;                           // always fall through to the test
+    unsigned guard = KW_RX_MAX;                    // always fall through to the test
     while (_stream->available() > 0 && guard--) {
       const int rc = _stream->read();
       if (rc < 0) break;                          // -1: stream gone, not a byte
       char c = (char)rc;                          // always CONSUME
-      if (rx.length() < 64) rx += c;
+      if ((int)rx.length() < KW_RX_MAX) rx += c;
       lastByteMs = millis();
       if (c == ';') break;
     }

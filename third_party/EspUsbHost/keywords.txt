@@ -1,0 +1,180 @@
+#######################################
+# Syntax Coloring Map For EspUsbHost
+#######################################
+
+#######################################
+# Library (KEYWORD3)
+#######################################
+
+EspUsbHost	KEYWORD3
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+EspUsbHostConfig	KEYWORD1
+EspUsbHostDeviceInfo	KEYWORD1
+EspUsbHostKeyboardEvent	KEYWORD1
+EspUsbHostKeyboardState	KEYWORD1
+EspUsbHostMouseEvent	KEYWORD1
+EspUsbHostHIDInput	KEYWORD1
+EspUsbHostAudioData	KEYWORD1
+EspUsbHostAudioStreamInfo	KEYWORD1
+EspUsbHostAudioFeatureUnitInfo	KEYWORD1
+EspUsbHostAudioVolumeRange	KEYWORD1
+EspUsbHostMscInquiry	KEYWORD1
+EspUsbHostMscSense	KEYWORD1
+EspUsbHostMscBlockDeviceInfo	KEYWORD1
+EspUsbHostMscFS	KEYWORD1
+EspUsbHostKeyboardLayout	KEYWORD1
+EspUsbHostHIDVendorInput	KEYWORD1
+EspUsbHostVendorInterface	KEYWORD1
+EspUsbHostVendorData	KEYWORD1
+EspUsbHostNetworkProtocol	KEYWORD1
+EspUsbHostNetworkInterfaceInfo	KEYWORD1
+EspUsbHostNetworkFrame	KEYWORD1
+EspUsbHostNetworkConfig	KEYWORD1
+EspUsbHostNetworkStats	KEYWORD1
+EspUsbHostListenerId	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+end	KEYWORD2
+ready	KEYWORD2
+setConfigurationSelector	KEYWORD2
+onDeviceConnected	KEYWORD2
+onDeviceDisconnected	KEYWORD2
+onKeyboard	KEYWORD2
+onKeyboardState	KEYWORD2
+onMouse	KEYWORD2
+addKeyboardListener	KEYWORD2
+addKeyboardStateListener	KEYWORD2
+addMouseListener	KEYWORD2
+addConsumerControlListener	KEYWORD2
+addSystemControlListener	KEYWORD2
+addGamepadListener	KEYWORD2
+removeListener	KEYWORD2
+onHIDInput	KEYWORD2
+onAudioData	KEYWORD2
+audioInputReady	KEYWORD2
+audioInputStart	KEYWORD2
+audioOutputReady	KEYWORD2
+audioOutputStart	KEYWORD2
+setAudioSampleRate	KEYWORD2
+audioSend	KEYWORD2
+getAudioStreams	KEYWORD2
+getAudioFeatureUnits	KEYWORD2
+audioHasMute	KEYWORD2
+audioHasVolume	KEYWORD2
+audioGetMute	KEYWORD2
+audioSetMute	KEYWORD2
+audioGetVolume	KEYWORD2
+audioSetVolume	KEYWORD2
+audioGetVolumeRange	KEYWORD2
+audioGetVolumeDb	KEYWORD2
+audioSetVolumeDb	KEYWORD2
+audioSetVolumeDbClamped	KEYWORD2
+audioConfigureVolume	KEYWORD2
+audioSetVolumePercent	KEYWORD2
+audioConfigureVolumePercent	KEYWORD2
+mscReady	KEYWORD2
+mscInquiry	KEYWORD2
+mscRequestSense	KEYWORD2
+mscLastSense	KEYWORD2
+mscMaxLun	KEYWORD2
+mscSelectLun	KEYWORD2
+mscGetBlockDeviceInfo	KEYWORD2
+mscTestUnitReady	KEYWORD2
+mscWaitReady	KEYWORD2
+mscCapacity64	KEYWORD2
+mscCapacity	KEYWORD2
+mscReadBlocks	KEYWORD2
+mscWriteBlocks	KEYWORD2
+mscReadBlocks64	KEYWORD2
+mscWriteBlocks64	KEYWORD2
+mscSynchronizeCache	KEYWORD2
+mscMount	KEYWORD2
+mscUnmount	KEYWORD2
+mscMounted	KEYWORD2
+mounted	KEYWORD2
+basePath	KEYWORD2
+espUsbHostAudioStreamSupportsSampleRate	KEYWORD2
+espUsbHostAudioStreamPreferredSampleRate	KEYWORD2
+espUsbHostAudioStreamMatchesPcm	KEYWORD2
+espUsbHostPrintHex	KEYWORD2
+espUsbHostPrint	KEYWORD2
+espUsbHostNetworkProtocolName	KEYWORD2
+getNetworkInterfaces	KEYWORD2
+networkOpen	KEYWORD2
+networkClose	KEYWORD2
+networkReady	KEYWORD2
+networkWriteFrame	KEYWORD2
+networkReadFrame	KEYWORD2
+networkLinkUp	KEYWORD2
+networkAttachNetif	KEYWORD2
+networkDetachNetif	KEYWORD2
+networkLocalIP	KEYWORD2
+networkStats	KEYWORD2
+onNetworkFrame	KEYWORD2
+setKeyboardLayout	KEYWORD2
+sendHIDReport	KEYWORD2
+onHIDVendorInput	KEYWORD2
+sendHIDVendorOutput	KEYWORD2
+sendHIDVendorFeature	KEYWORD2
+onVendorData	KEYWORD2
+vendorOpen	KEYWORD2
+vendorWrite	KEYWORD2
+vendorRead	KEYWORD2
+vendorControlIn	KEYWORD2
+vendorControlOut	KEYWORD2
+setKeyboardLeds	KEYWORD2
+getKeyboardNumLock	KEYWORD2
+getKeyboardCapsLock	KEYWORD2
+getKeyboardScrollLock	KEYWORD2
+keyboardUsesBitmapReport	KEYWORD2
+printDeviceInfo	KEYWORD2
+printAllDeviceInfo	KEYWORD2
+lastError	KEYWORD2
+lastErrorName	KEYWORD2
+
+ESP_USB_HOST_KEYBOARD_LAYOUT_ZH_TW	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_DA_DK	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_DE_DE	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_EN_GB	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_EN_US	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_ES_ES	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_FI_FI	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_FR_CH	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_FR_FR	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_HU_HU	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_IT_IT	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_JA_JP	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_KO_KR	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_NB_NO	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_NL_NL	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_PT_BR	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_PT_PT	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_SV_SE	LITERAL1
+ESP_USB_HOST_KEYBOARD_LAYOUT_ZH_CN	LITERAL1
+ESP_USB_HOST_HID_REPORT_TYPE_INPUT	LITERAL1
+ESP_USB_HOST_HID_REPORT_TYPE_OUTPUT	LITERAL1
+ESP_USB_HOST_HID_REPORT_TYPE_FEATURE	LITERAL1
+ESP_USB_HOST_KEYBOARD_LED_NUM_LOCK	LITERAL1
+ESP_USB_HOST_KEYBOARD_LED_CAPS_LOCK	LITERAL1
+ESP_USB_HOST_KEYBOARD_LED_SCROLL_LOCK	LITERAL1
+ESP_USB_HOST_KEYBOARD_LED_COMPOSE	LITERAL1
+ESP_USB_HOST_KEYBOARD_LED_KANA	LITERAL1
+ESP_USB_HOST_MOUSE_LEFT	LITERAL1
+ESP_USB_HOST_MOUSE_RIGHT	LITERAL1
+ESP_USB_HOST_MOUSE_MIDDLE	LITERAL1
+ESP_USB_HOST_MOUSE_BACK	LITERAL1
+ESP_USB_HOST_MOUSE_FORWARD	LITERAL1
+ESP_USB_HOST_VENDOR_RX_BUFFER_SIZE	LITERAL1
+ESP_USB_HOST_VENDOR_CONTROL_DEFAULT_TIMEOUT_MS	LITERAL1
+ESP_USB_HOST_MAX_NETWORK_INTERFACES	LITERAL1
+ESP_USB_HOST_NETWORK_PROTOCOL_NONE	LITERAL1
+ESP_USB_HOST_NETWORK_PROTOCOL_CDC_ECM	LITERAL1
+ESP_USB_HOST_NETWORK_PROTOCOL_CDC_NCM	LITERAL1

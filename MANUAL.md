@@ -346,9 +346,25 @@ Two things to know before engaging:
 
 1. **The serial console goes away while USB is engaged.** The ESP32-S3 has one USB PHY;
    engaging USB CAT (or a USB rotator) claims it, and the console drops for as long as the
-   USB device is engaged. Since v0.9.64 the console is reinitialized when you disengage
-   (the host releases the PHY), so turning USB CAT off should bring a serial terminal back
-   — but while it's engaged there's no console. Diagnostics move to disk regardless:
+   USB host holds it.
+
+   **Since v0.9.70 the USB host stays resident once started, and turning the radio off
+   does not release it.** Press **`Fn`+`u` on the Track screen** to fully release USB,
+   which is when the serial console returns. It refuses while a radio or rotator is
+   still engaged and says so.
+
+   That may look like a step backwards, so here is why. Disengaging used to uninstall
+   the whole USB host, which meant re-engaging **re-enumerated** the radio — and some
+   radios never restart their CAT firmware after that. A Kenwood TH-D75 re-enumerates
+   perfectly, accepts exactly two packets into its endpoint buffer, and then stops
+   reading: the USB side is fine, the CAT application is simply gone until the radio is
+   power-cycled. Waiting five minutes does not help. Keeping the host resident is what
+   a desktop computer effectively does when it closes and reopens a serial port, and the
+   same radio survives that indefinitely. The result is that you can now switch radio
+   control on and off, change satellites, and switch the radio off and on, as often as
+   you like without rebooting anything.
+
+   Diagnostics move to disk regardless:
    `/CardSat/Logs/usb.log` records every engage/bind/failure automatically, and
    **Settings → Station / logging → `Console to file`** can mirror the whole console to
    `console.log` (see [§16](#16-radio-specific-notes)). If you want CAT *and* a live
@@ -461,11 +477,31 @@ download GP elements — see [§7](#7-first-time-setup).)
    via *Sketch → Include Library → Add .ZIP Library* (from
    <https://github.com/Hopperpop/Sgp4-Library>). **ESP_SSLClient is required** — all
    HTTPS runs on its BearSSL stack and the build will not compile without it.
-   **EspUsbHost is required by the default build** (USB CAT is on by default) —
-   install **v2.3.1 or later**, which compiles clean against arduino-esp32 3.2.1
-   (only stale ≤2.3.0 copies need the one-line patch kept in
-   **[docs/BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md)**, which also covers
-   building without USB CAT instead).
+   **EspUsbHost is required by the default build** (USB CAT is on by default), and
+   **must be patched** — see the warning below.
+
+> ⚠️ **Do not use the Library Manager copy of EspUsbHost.** It compiles, and it
+> appears to work, and then it **strands the USB stack the first time a radio stops
+> answering** — every later attempt to engage reports "USB busy" until you reboot the
+> Cardputer. The cause is that the library never cancels an outstanding CDC *write*
+> during shutdown, so a radio that has stopped reading its port blocks the whole
+> teardown chain.
+>
+> A patched copy is included in the source tree at **`third_party/EspUsbHost/`**.
+> Install it over the library:
+>
+> ```sh
+> cp -r third_party/EspUsbHost ~/Arduino/libraries/EspUsbHost
+> ```
+>
+> **`third_party/EspUsbHost/PATCHES.md`** documents every patch, why it exists, and
+> how to re-apply them after an upstream version bump — including a placement trap
+> that fails silently. Three patches are drafted as upstream bug reports with
+> attachable `.patch` files; if they are accepted, a later CardSat release will drop
+> the vendored copy and go back to a stock library.
+>
+> The **M5StickS3 DualRig companion** uses the same library and needs the same
+> patched copy.
 2. Open `CardSat.ino`. Under **Tools**, set:
    - **Board:** ESP32S3 Dev Module (or M5StampS3)
    - **Flash Size:** 8MB
@@ -3505,6 +3541,38 @@ The TS-790 supports a subset of the same commands.
 > the uplink/downlink bands and engage the rig's own satellite / full-duplex mode
 > **on the radio**; CardSat Doppler-tunes within that. (Same as SatPC32.)
 
+### Kenwood TH-D74 / TH-D75 handhelds
+
+These are supported as a **dual-rig leg** (CAT type *Dual*), not as a single-radio
+selection, because their all-mode SSB/CW receiver lives on **Band B** — which is the
+band CardSat drives, and the only one that can cover linear birds and FM alike.
+
+What the radio requires, all of which CardSat now sends automatically:
+
+- **Band B must be in VFO mode and must be the control band.** In memory mode, or when
+  the other band is the control band, the radio refuses frequency writes outright.
+- **Frequencies must land on the current step grid.** An off-grid write is *rejected*,
+  not rounded — the radio simply echoes back the frequency it already had. CardSat
+  rounds to the grid before every write.
+- **Fine tuning (20 Hz) only works in SSB, CW and AM.** FM and NFM do not support it,
+  so on an FM bird CardSat uses the finest normal step, 5 kHz. That is well inside FM
+  bandwidth and costs you nothing in practice; on a linear bird you get the full 20 Hz.
+- **On Band B, "FM" means NFM.** The radio refuses plain wide FM on this band. CardSat
+  maps FM satellites to NFM automatically.
+
+Two practical notes:
+
+- **CAT stays engaged across satellite changes.** Since v0.9.70 the USB host stays
+  resident, so you can switch birds and toggle radio control freely. If you fully
+  release USB (**`Fn`+`u`**) and then re-engage, the radio is re-enumerated and its CAT
+  firmware does not come back — you will need to power-cycle the handheld. This is the
+  radio's behaviour, not CardSat's; releasing USB is worth doing only when you actually
+  want the serial console back.
+- **Set the radio's APRS/GPS data output to Bluetooth**, or leave the TNC off, if you
+  want the USB port free for CAT.
+
+Verified on hardware at 60 consecutive Doppler steps, all exact, at 33 ms per step.
+
 ### Watching the CAT trace
 
 CardSat prints **every CAT frame it sends** to the serial monitor at **115200
@@ -6049,6 +6117,29 @@ later. Line numbers are also the targets for `GOTO`/`GOSUB`/`IF … THEN`.
 
 #### Statements
 
+**Immediate mode.** Press **Fn+i** in the editor for a prompt: type one statement,
+press ENTER, it runs at once, and variables persist between lines — so `A=5` then
+`PRINT A*2` prints `10`. It is the same interpreter, so expressions, statements,
+system names and error messages are identical to a program's, and `SATSEL`/`TXSEL`
+work exactly as they do in a program. **Fn+r** recalls the previous line, **Fn+c**
+clears the log, **Fn+;**/**Fn+.** scroll it, **Fn+t** opens the reference, and DEL
+backspaces (or leaves, on an empty line). Every navigation key is behind **Fn**
+because the bare arrow keys are the characters `;` `.` `,` `/`, which a BASIC prompt
+needs as text. Statements that only mean something inside a numbered program —
+`GOTO`, `GOSUB`, `RETURN`, `DATA`, `READ`, `RESTORE` — are refused with a message
+naming them.
+
+New system names in 0.9.70, all for the currently selected satellite:
+**`LSHELL`** (McIlwain L), **`BRATIO`** (B/B₀; 1 = the shell's magnetic equator) and
+**`BFIELD`** (nT) from the real IGRF-14 field; **`INBELT`** and **`INSAA`** for
+Van Allen / South Atlantic Anomaly membership; **`DECAYD`** days to re-entry with
+**`DECAYSRC`** saying whether that came from the element set's *measured* n-dot (1)
+or a *modelled* B\* (2); **`BATTMV`** and **`CHARGING`**; **`HEAPBLK`**, the largest
+free block — the number that actually limits a big allocation, unlike total free
+heap; **`DOPPRX`**/**`DOPPTX`**, the frequencies CAT would command right now; and
+**`TXOK`**, which the firmware always set but never exposed.
+
+
 | Statement | Meaning |
 |---|---|
 | `LET A = expr` | Assign a variable. The `LET` is optional: `A = 5` works too. |
@@ -6062,8 +6153,9 @@ later. Line numbers are also the targets for `GOTO`/`GOSUB`/`IF … THEN`.
 | `DIM @(n)` | Allocate the one numeric array, `n` ≤ 256 elements (`@(0)…@(n-1)`), zeroed. Freed when the run ends. |
 | `DATA v, v, …` / `READ X[,@(I),…]` / `RESTORE` | Classic data lists: `DATA` lines hold numbers, `READ` pulls them in order into variables or `@( )` slots, `RESTORE` rewinds. Reading past the end halts with `out of DATA`. |
 | `ON expr GOTO n1, n2, …` | Computed jump: `expr`=1 goes to `n1`, 2 to `n2`, …; out of range falls through. |
-| `SATSEL expr` | **Re-snapshot the `SAT*` names** (geometry + elements) for satellite number `expr` in the list (0-based). One SGP4 run per call, budgeted at **2,000 per program**; the pass names (`AOSIN` `LOSIN` `PASSEL` `PASSAOS…`) always refer to the run-start active satellite. |
-| `TXSEL expr` | Snapshot transponder `expr` (0-based) of the **active** satellite into `TXDL` `TXUL` `TXBW` `TXINV` `TXLIN` (`NTX` tells you how many are loaded). |
+| `SATSEL expr` | **Re-snapshot the `SAT*` names** (geometry + elements) for satellite number `expr` in the list (0-based), **and bring that satellite's transponders with it** — `NTX` becomes its count and `TXSEL` reads *its* transponders. This is what lets a program be self-sufficient: nothing has to be selected before BASIC is opened. `TXOK` is cleared, so `TXOK=0` means "no transponder chosen yet" rather than a stale one from another satellite. One SGP4 run per call, budgeted at **2,000 per program**; the pass names (`AOSIN` `LOSIN` `PASSEL` `PASSAOS…`) always refer to the run-start active satellite. |
+| `TXSEL expr` | Snapshot transponder `expr` (0-based) **of the satellite `SATSEL` last chose** (or the tracked one if `SATSEL` has not been used) into `TXDL` `TXUL` `TXBW` `TXINV` `TXLIN`, and set `TXOK`. Before 0.9.70 this always read the *tracked* satellite, so a program that selected a satellite and then asked for its transponder silently got a different bird's frequencies. |
+
 | `LPRINT …` | `PRINT`, but the line goes to the **configured report sinks** (printer / serial / file) — same grammar as `PRINT`. Sinks open on the first `LPRINT` and close when the run ends; with no sink configured it halts with `no print output`. |
 | `CLS` / `PSET x,y[,c]` / `LINE x1,y1,x2,y2[,c]` / `CIRCLE x,y,r[,c]` / `TEXT x,y,"s"` / `SHOW` | **Canvas graphics.** Draw on the 240×135 screen (colors 0–9: black, white, red, green, blue, yellow, cyan, orange, gray, dark green; default white), then `SHOW` pushes the frame. A `SHOW`ed frame **stays on screen after the run** until you press a key. `TEXT` also takes an expression instead of a string. |
 | `FOPEN "name"` / `FPRINT …` / `FCLOSE` | **Gated file logging** (off by default — Settings → Station/logging → *BASIC file write*). Appends lines to `/CardSat/basic/<name>` (plain names only, no paths). The file closes automatically at run end. |
@@ -6427,7 +6519,7 @@ the no-interactive-programs rule stands; that is precisely why it lives in firmw
 | **Passes** | `;`/`.` select · `d` detail · `t`/ENTER track · `n` add TX · `r` recompute · `x` mutual · `v` 10-day · `V` visible-pass list · `i` illum · `g` workable grids (this pass) · `w` workable US states (this pass) · `e` workable DXCC (this pass) |
 | **Pass detail** | `p` polar of this pass · `` ` ``/ENTER back |
 | **Pass polar** | `p` back to curve · `` ` ``/ENTER passes |
-| **Track** | `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `n` jump to beacon · `N` per-sat operating note · `k` CW both legs (linear) · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `a` point-here arrow · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `v` voice memo (SD card; also drops a **log stub** to finish after LOS) · after LOS: `q` (60 s window) deep-sleeps until the next favorite pass · `i`×2 report Heard to AMSAT (mode-aware) · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
+| **Track** | **`Fn`+`u` fully release USB** (see ch. 3) · `m` TUNE/CAL · `d` cycle tune mode (FULL/DL/UL/hold) · `t` next TX · `n` jump to beacon · `N` per-sat operating note · `k` CW both legs (linear) · `c` CTCSS tone · `r` radio on/off · `o` rotator on/off · `p` polar · `a` point-here arrow · `z` large-font readout · `y` tilt tuning on/off (if IMU) · `f` Manual mode · `l` log QSO · `v` voice memo (SD card; also drops a **log stub** to finish after LOS) · after LOS: `q` (60 s window) deep-sleeps until the next favorite pass · `i`×2 report Heard to AMSAT (mode-aware) · `g` workable grids now · `w` workable US states now · `e` workable DXCC now (radio/rotator keep running) · ENTER save cal |
 | **Large-font readout** (`z` from Track) | big RX/TX + az/el + tune mode · `,`/`/` tune · `s`/`x` step/center · `m` TUNE/CAL · `d` mode · `t` next TX · `n` beacon · `k` CW (linear) · `r` radio · `o` rotator · `y` tilt · `l` log · `v` voice memo · `z`/`` ` `` back to Track |
 | **Manual large-font** (`z` from Manual) | HOLD/TUNE legs in big digits · `u` swap leg · `,`/`/` tune · `s`/`x` · `m` CAL · `t` next TX · `z`/`` ` `` back to Manual |
 | **Manual mode** (`f` from Track) | no-radio frequency calculator · `u` toggle which leg is fixed (HOLD vs TUNE>) · `,`/`/` move fixed freq in passband (linear) · `s` step · `x` center · `m` CAL · `t` next TX · `l` log · `p` polar · `g` grids (all return here) · ENTER save cal · `` ` ``/`f` back to Track |

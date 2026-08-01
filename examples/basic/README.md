@@ -4,14 +4,30 @@ A suite of small programs for the on-device BASIC (Settings → BASIC). Paste a
 listing in and press **Run**. They follow the interpreter's rules, which are worth
 knowing before you write your own:
 
-- **Line numbers are required**, and there is **one statement per line** — `:` only
-  attaches a trailing `REM` comment, it does *not* chain statements.
+- **Line numbers are required.** `:` **chains statements** on one line, so
+  `10 A=2: B=3: PRINT A*B` prints `6`, and a whole loop fits on a line:
+  `10 FOR I=1 TO 3: PRINT I: NEXT`. (Earlier revisions of this file claimed `:` only
+  attached a trailing `REM`. That was wrong — verified against the interpreter.)
 - **Trig is in degrees** (`SIN`, `COS`, `TAN`, `ATN`), so azimuths and elevations drop
   straight in. The screen is **240×135**; y points **down**.
-- After `THEN` you may only put a **line number, `PRINT`, `LET`, `GOTO`, or an
-  assignment** — not `GOSUB`/`CIRCLE`/etc. Use a `GOTO`-guard instead.
+- After `THEN` you may put a **bare line number** (an implicit `GOTO`) **or any
+  statement** — `PRINT`, `LET`, `GOSUB`, `TEXT`, `CIRCLE`, `CLS`, an assignment. (This
+  file previously said only a small subset was allowed. That restriction was removed
+  from the interpreter; the note was stale.)
 - There is **no `INPUT`/`INKEY$`**: a program computes and draws, then `SHOW`s its
   frame. System variables (`SATAZ`, `UTCH`, `SFI`, …) are **read-only snapshots**.
+- **A program picks its own satellite — nothing needs selecting first.** `SATSEL i`
+  chooses any satellite in the loaded catalog (`i` = `0` … `NSAT-1`) and now brings its
+  **transponders with it**: `NTX` becomes that satellite's transponder count and
+  `TXSEL k` reads *its* transponder `k`. Before this, `TXSEL` always read whatever the
+  operator happened to be tracking, so a program that selected a satellite and then
+  asked for its transponder silently got a different bird's frequencies.
+  `SATSEL` also clears `TXOK`, so `TXOK=0` means "no transponder chosen yet" rather
+  than a stale one — and `TXOK` is now readable, which it never was before. See `PICKSAT.BAS` for the self-sufficient idiom.
+- **Immediate mode** (`Fn+i` in the editor) gives a prompt: type one statement, it runs
+  at once, and variables persist between lines. Handy for trying an expression before
+  committing it to a program. Statements that need a program (`GOTO`, `GOSUB`,
+  `RETURN`, `DATA`, `READ`, `RESTORE`) are refused there.
 - **Variables are single letters `A`–`Z`** holding numbers (26 of them). There is one
   numeric array, `DIM @(n)` with `n ≤ 256`, indexed `@(i)`. A two-letter name is an
   error, not a variable.
@@ -22,6 +38,29 @@ Each program was checked with a grammar validator and an execution model of the
 interpreter (flow, budget, bounds), but the *visual* result is best judged on the
 device. Where a program uses live data it degrades gracefully when that data isn't
 available yet (no fix, no clock, no elements).
+
+## System names added in 0.9.70
+
+Data the firmware gained recently, exposed read-only like the rest. All refer to the
+**currently selected** satellite (whatever `SATSEL` last chose, or the tracked one):
+
+| Name | Meaning |
+| --- | --- |
+| `LSHELL` | McIlwain **L** — which geomagnetic shell the satellite is on, from the real IGRF-14 field |
+| `BRATIO` | **B/B₀** — how far along that shell from its magnetic equator (`1` = at the equator) |
+| `BFIELD` | field strength at the satellite, **nT** |
+| `INBELT` | `1` if inside the inner or outer Van Allen belt (needs shell **and** `BRATIO` ≤ 3) |
+| `INSAA` | `1` if inside the South Atlantic Anomaly |
+| `DECAYD` | days to re-entry (`-1` = no estimate, `1E8` = effectively stable) |
+| `DECAYSRC` | how `DECAYD` was derived: **`1` = the element set's measured n-dot**, `2` = modelled from B\*, `0` = none |
+| `BATTMV` | battery millivolts (`BATT` is the percentage) |
+| `CHARGING` | `1` when charging, inferred from the voltage trend |
+| `HEAPBLK` | **largest free block** — the number that actually limits a big allocation, unlike total free heap |
+| `DOPPRX` / `DOPPTX` | the Doppler-corrected receive/transmit frequencies CAT would command right now, Hz |
+
+`DECAYSRC` is worth branching on: a measured rate and a modelled one deserve different
+trust, and a program that prints a re-entry date without saying which it used is
+overstating its case.
 
 ## The suite
 
@@ -42,10 +81,36 @@ a digital readout beside it. A clean demo of the polar hand transform. *Graphics
 trig · `UTCH/UTCM/UTCS`.*
 
 ### `DOPPLER.BAS` — transponder Doppler
-Snapshots transponder 0 of the active satellite with `TXSEL`, then from the current
-range-rate `SATRR` computes the Doppler-corrected downlink you **hear** and the uplink
-you must **send**, printed in kHz with a center-zero shift bar (green = approaching,
-red = receding). *Ham-radio maths · `TXSEL` · `SATRR`.*
+**Finds its own satellite** (first one up with a transponder), snapshots transponder 0
+with `TXSEL`, then from the current range-rate `SATRR` computes the Doppler-corrected
+downlink you **hear** and the uplink you must **send**, printed in kHz with a
+center-zero shift bar (green = approaching, red = receding). Cross-checks its own
+arithmetic against `DOPPRX`/`DOPPTX`. *Ham-radio maths · `SATSEL`+`TXSEL` · `SATRR`.*
+
+### `PICKSAT.BAS` — pick a satellite from inside BASIC
+The idiom for a self-sufficient program: walk the catalog with `SATSEL`, skip birds that
+won't propagate (`SATOK=0`), and list the ones that are **up now and have a
+transponder** with elevation, range rate and downlink. Nothing has to be selected before
+you run it. *Catalog scan · `NSAT`/`NTX` · `SATSEL`+`TXSEL`.*
+
+### `BELT.BAS` — radiation environment
+Where the satellite sits in the geomagnetic field: McIlwain `LSHELL`, `BRATIO`
+(displacement from the shell's magnetic equator), `BFIELD` in nT, and whether that adds
+up to being inside a Van Allen belt or the South Atlantic Anomaly. Explains *why* a
+high-latitude pass on a belt field line is not a belt transit. *IGRF-14 data ·
+`LSHELL`/`BRATIO`/`INBELT`/`INSAA`.*
+
+### `DECAY.BAS` — re-entry watch
+Scans the catalog for the satellites closest to re-entry and prints days remaining,
+**flagging how each estimate was derived** — a measured n-dot or a modelled B\*. Shows
+the difference between "we can see it coming down" and "we think it is". *Catalog scan ·
+`DECAYD`/`DECAYSRC`.*
+
+### `HEALTH.BAS` — station health
+A one-screen readout of the things that decide whether the device will finish a pass:
+battery percent and millivolts, whether it is charging, free heap versus **largest free
+block** (the number that actually limits an upload), uptime and element age. *Housekeeping
+· `BATT`/`BATTMV`/`CHARGING`/`HEAPBLK`/`GPAGE`.*
 
 ### `HARMONO.BAS` — harmonograph
 Traces a damped two-pen harmonograph: detuned sine terms per axis, each fading with an

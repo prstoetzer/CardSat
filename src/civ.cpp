@@ -373,6 +373,14 @@ bool CivRig::setFreqCiv(bool sub, freq_t hz) {
 }
 bool CivRig::setModeCiv(bool sub, CivMode m, uint8_t filter) {
   sub ? selectSub() : selectMain();
+  // Some Icoms reject cmd 06 when a filter byte is appended -- see the modeFilter
+  // note in radio_profiles.h. Sending the two-byte form to those is not a
+  // degradation: the filter simply stays as the radio has it, which is what the
+  // operator set. Getting it wrong is invisible, because no ACK is checked here.
+  if (!RADIOS[_model].modeFilter) {
+    uint8_t pl2[2] = { 0x06, (uint8_t)m };
+    return sendFrame(pl2, 2);
+  }
   uint8_t pl[3] = { 0x06, (uint8_t)m, filter };
   return sendFrame(pl, 3);
 }

@@ -468,3 +468,52 @@ substantive ones fixed, rest a tracked baseline.
 
 Build: EXIT=0, flash 3,031,306 (96.4%), static RAM 162,080 (49%). 17 static gates,
 8 host harnesses, all pass. **Native dual-radio still has not driven a real radio.**
+
+## STANDING INSTRUCTION: fix the companion too
+
+Owner instruction (0.9.70): whenever a bug is found in CardSat that also exists in
+`companion/CardSatDualRig`, FIX BOTH in the same pass. The companion is the origin
+of the dual-rig radio catalog and all four CAT dialect encoders, so protocol bugs
+found in CardSat's leg code are very likely present there verbatim -- the TH-D74/D75
+dialect was wrong in both, identically, because it was copied.
+
+Practical notes for doing it:
+  * Companion build (verified working, ~5 min):
+      arduino-cli compile --fqbn "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,\
+        FlashSize=8M,PartitionScheme=default_8MB,PSRAM=enabled,DebugLevel=error" \
+        --build-property "compiler.cpp.extra_flags=-DESP_USB_HOST_MAX_DEVICES=4 \
+        -DCORE_DEBUG_LEVEL=1" CardSatDualRig
+    Copy CardSatDualRig.ino + catradio_types.h into a sketch dir of that name first.
+  * dual_edit.py does NOT cover the companion (it is a third representation, not part
+    of the src/ <-> CardSat.ino pair). Edit it directly and compile it.
+  * Refresh companion/CardSatDualRig/firmware/*.bin and the MD5s in its README.
+  * The companion's USB layer is address-based (setSerialBaudRate + an RX callback),
+    NOT the EspUsbHostCdcSerial port objects CardSat uses -- so fixes do not port
+    mechanically. For control lines: construct an EspUsbHostCdcSerial, setAddress(),
+    setDtr/setRts, and never call begin() (begin() is what attaches it as a data
+    sink; setDtr only touches the host's DeviceState + a control transfer).
+
+## Companion build trap (0.9.70)
+run_comp.sh builds a STAGED COPY at /home/claude/compbuild/CardSatDualRig -- NOT the
+tree's companion/CardSatDualRig/. Sync the .ino and catradio_types.h into the staging
+dir before every companion build, and verify the refreshed bin's MD5 CHANGED when the
+source did: an unchanged MD5 after a source edit means the edit never compiled.
+
+## VENDORED LIBRARY (0.9.70): third_party/EspUsbHost
+CardSat now ships a PATCHED EspUsbHost 2.5.2 (MIT, upstream credit and LICENSE
+preserved). One-line fix: the CDC-ACM control interface latch was missing the
+`!device->hasCdcControlInterface` guard its data-interface counterpart has, so on a
+device with TWO CDC-ACM functions the baud and DTR/RTS went to the wrong function.
+See third_party/EspUsbHost/PATCHES.md.
+
+BUILD IMPLICATION: the vendored copy is NOT used automatically. arduino-cli resolves
+libraries from ~/Arduino/libraries, so it must be copied there and the build redone
+in full. Check with:
+    grep -c 'hasCdcControlInterface;' ~/Arduino/libraries/EspUsbHost/src/EspUsbHost.cpp
+1 = patched, 0 = stock. A CardSat binary built against the stock library will look
+fine and behave exactly as before on dual-CDC radios.
+
+UPSTREAM: third_party/EspUsbHost/UPSTREAM_ISSUE.md is a ready-to-file report (not yet
+filed -- filing needs a GitHub account, which is the owner's to use; never touch the
+git remote). When a fixed upstream release lands, DELETE third_party/EspUsbHost and
+bump the version requirement instead.

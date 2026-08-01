@@ -23,8 +23,23 @@
 //      without the web UI. Config is saved to NVS and survives reboots.
 //    * In RUN mode a long-press of Button A returns to CONFIG mode.
 //
+//  *** EXPERIMENTAL - NEVER TESTED ON HARDWARE ***
+//  This sketch compiles clean and has been through several CardSat audits, but nobody
+//  has run it with two radios on a real M5StickS3. The 0.9.70 USB fixes below were
+//  applied by inspection from defects proven on CardSat's own hardware -- well founded,
+//  still unverified here. Bench findings welcome.
+//
 //  Board: M5StickS3 (ESP32-S3-PICO-1-N8R8, 8 MB flash, 8 MB PSRAM, native USB OTG).
-//  Libraries: M5Unified, EspUsbHost (>= 2.3.2).
+//  Libraries: M5Unified, EspUsbHost (>= 2.3.2; 2.7.0 recommended, PATCHED -- see below).
+//
+//  EspUsbHost PATCHES. This firmware drives the same USB host library as CardSat and
+//  has the same exposure to its defects. If you tear down or rebind USB legs at all,
+//  build against the patched copy vendored in CardSat's third_party/EspUsbHost/ --
+//  the patch that matters most here is the CDC serial OUT drain: sendSerial() submits
+//  fire-and-forget, so a radio that stops reading its port leaves a transfer enqueued
+//  forever, which blocks the interface release and eventually strands the USB stack
+//  until reboot. third_party/EspUsbHost/PATCHES.md documents each patch, what it
+//  fixes, and how to re-apply after an upstream bump.
 //
 //  Build (arduino-cli) - verified recipe. The extra defines MUST go in
 //  compiler.cpp.extra_flags (which appends); build.extra_flags would wipe the
@@ -80,37 +95,37 @@ static const int GROVE_TX_PIN = 10;
 // at runtime, so a radio with a non-standard address still works.
 static const RadioProfile RADIO_TABLE[] = {
   //  model          name          family          baud   civAddr rxOnly
-  { RIG_IC705,     "IC-705",     CAT_CIV,        19200, 0xA4,  false },
-  { RIG_IC905,     "IC-905",     CAT_CIV,        19200, 0xAC,  false },
-  { RIG_IC7100,    "IC-7100",    CAT_CIV,        19200, 0x88,  false },
-  { RIG_IC7000,    "IC-7000",    CAT_CIV,        19200, 0x70,  false },
+  { RIG_IC705,     "IC-705",     CAT_CIV,        19200, 0xA4,  false, true  , false},
+  { RIG_IC905,     "IC-905",     CAT_CIV,        19200, 0xAC,  false, true  , true },
+  { RIG_IC7100,    "IC-7100",    CAT_CIV,        19200, 0x88,  false, true  , false},
+  { RIG_IC7000,    "IC-7000",    CAT_CIV,        19200, 0x70,  false, false , false},
   { RIG_IC706MK2G, "IC-706MKIIG",CAT_CIV,         9600, 0x58,  false },
-  { RIG_IC275,     "IC-275",     CAT_CIV,         9600, 0x10,  false },
-  { RIG_IC475,     "IC-475",     CAT_CIV,         9600, 0x14,  false },
+  { RIG_IC275,     "IC-275",     CAT_CIV,         9600, 0x10,  false, true  , false},
+  { RIG_IC475,     "IC-475",     CAT_CIV,         9600, 0x14,  false, false , false},
   // Icom receivers (all RX-only). Wideband all-mode sets cover VHF/UHF SSB/CW.
-  { RIG_ICR10,     "IC-R10",     CAT_CIV,         9600, 0x52,  true  },
-  { RIG_ICR20,     "IC-R20",     CAT_CIV,         9600, 0x6C,  true  },
-  { RIG_ICR30,     "IC-R30",     CAT_CIV,         9600, 0x9C,  true  },
-  { RIG_ICR7000,   "IC-R7000",   CAT_CIV,         1200, 0x08,  true  },
-  { RIG_ICR7100,   "IC-R7100",   CAT_CIV,         9600, 0x34,  true  },
-  { RIG_ICR8500,   "IC-R8500",   CAT_CIV,         9600, 0x4A,  true  },
-  { RIG_ICR8600,   "IC-R8600",   CAT_CIV,        19200, 0x96,  true  },
-  { RIG_ICR9000,   "IC-R9000",   CAT_CIV,         1200, 0x2A,  true  },
-  { RIG_ICR9500,   "IC-R9500",   CAT_CIV,        19200, 0x72,  true  },
-  { RIG_FT817,     "FT-817",     CAT_YAESU_BIN,   9600, 0x00,  false },
-  { RIG_FT818,     "FT-818",     CAT_YAESU_BIN,   9600, 0x00,  false },
-  { RIG_FT857,     "FT-857",     CAT_YAESU_BIN,   9600, 0x00,  false },
-  { RIG_FT897,     "FT-897",     CAT_YAESU_BIN,   9600, 0x00,  false },
-  { RIG_FT100,     "FT-100",     CAT_YAESU_BIN,   9600, 0x00,  false },
+  { RIG_ICR10,     "IC-R10",     CAT_CIV,         9600, 0x52,  true, true   , false},
+  { RIG_ICR20,     "IC-R20",     CAT_CIV,         9600, 0x6C,  true, true   , false},
+  { RIG_ICR30,     "IC-R30",     CAT_CIV,         9600, 0x9C,  true, true   , false},
+  { RIG_ICR7000,   "IC-R7000",   CAT_CIV,         1200, 0x08,  true, true   , false},
+  { RIG_ICR7100,   "IC-R7100",   CAT_CIV,         9600, 0x34,  true, true   , false},
+  { RIG_ICR8500,   "IC-R8500",   CAT_CIV,         9600, 0x4A,  true, true   , false},
+  { RIG_ICR8600,   "IC-R8600",   CAT_CIV,        19200, 0x96,  true, true   , false},
+  { RIG_ICR9000,   "IC-R9000",   CAT_CIV,         1200, 0x2A,  true, true   , false},
+  { RIG_ICR9500,   "IC-R9500",   CAT_CIV,        19200, 0x72,  true, true   , false},
+  { RIG_FT817,     "FT-817",     CAT_YAESU_BIN,   9600, 0x00,  false, true  , false},
+  { RIG_FT818,     "FT-818",     CAT_YAESU_BIN,   9600, 0x00,  false, true  , false},
+  { RIG_FT857,     "FT-857",     CAT_YAESU_BIN,   9600, 0x00,  false, true  , false},
+  { RIG_FT897,     "FT-897",     CAT_YAESU_BIN,   9600, 0x00,  false, true  , false},
+  { RIG_FT100,     "FT-100",     CAT_YAESU_FT100, 9600, 0x00,  false, true  , false},
   // Yaesu VR-5000 wideband all-mode receiver. Uses the Yaesu 5-byte CAT family;
   // its opcodes are close to the FT-817's but VERIFY on hardware (see README).
-  { RIG_VR5000,    "VR-5000",    CAT_YAESU_BIN,   9600, 0x00,  true  },
-  { RIG_FT991,     "FT-991",     CAT_YAESU_TXT,  38400, 0x00,  false },
-  { RIG_FT991A,    "FT-991A",    CAT_YAESU_TXT,  38400, 0x00,  false },
-  { RIG_FTX1,      "FTX-1",      CAT_YAESU_TXT,  38400, 0x00,  false },
+  { RIG_VR5000,    "VR-5000",    CAT_YAESU_VR5000,9600, 0x00,  true, true   , false},
+  { RIG_FT991,     "FT-991",     CAT_YAESU_TXT,  38400, 0x00,  false, true  , false},
+  { RIG_FT991A,    "FT-991A",    CAT_YAESU_TXT,  38400, 0x00,  false, true  , false},
+  { RIG_FTX1,      "FTX-1",      CAT_YAESU_TXT,  38400, 0x00,  false, true  , false},
   // Kenwood handhelds: all-mode receiver on Band B; RX only here.
-  { RIG_THD74,     "TH-D74",     CAT_KENWOOD_HT, 9600,  0x00,  true  },
-  { RIG_THD75,     "TH-D75",     CAT_KENWOOD_HT, 9600,  0x00,  true  },
+  { RIG_THD74,     "TH-D74",     CAT_KENWOOD_HT, 9600,  0x00,  true, true   , false},
+  { RIG_THD75,     "TH-D75",     CAT_KENWOOD_HT, 9600,  0x00,  true, true   , false},
 };
 static const size_t RADIO_COUNT = sizeof(RADIO_TABLE) / sizeof(RADIO_TABLE[0]);
 
@@ -271,11 +286,30 @@ static uint8_t civModeByte(RigMode m) {
                case MODE_DATA: return 0x01; default: return 0x01; }
 }
 static bool civSetFreq(RadioPort& p, uint64_t hz) {
+  // IC-905 above 5.85 GHz: six-byte frequency field (see RadioProfile::wideFreq).
+  if (p.prof && p.prof->wideFreq && hz > 5850000000ULL) {
+    uint8_t f[6]; uint64_t v = hz;
+    for (int i = 0; i < 6; i++) {
+      uint8_t lo = v % 10; v /= 10;
+      uint8_t hi = v % 10; v /= 10;
+      f[i] = (uint8_t)((hi << 4) | lo);
+    }
+    uint8_t fr6[12] = { 0xFE,0xFE, p.civAddr, 0xE0, 0x05,
+                        f[0],f[1],f[2],f[3],f[4],f[5], 0xFD };
+    return catSend(p, fr6, sizeof(fr6));
+  }
   uint8_t f[5]; civPackFreq(hz, f);
   uint8_t fr[11] = { 0xFE,0xFE, p.civAddr, 0xE0, 0x05, f[0],f[1],f[2],f[3],f[4], 0xFD };
   return catSend(p, fr, sizeof(fr));
 }
 static bool civSetMode(RadioPort& p, RigMode m) {
+  // Two-byte form for the radios that reject passband data on cmd 06 (see
+  // RadioProfile::modeFilter). Not a degradation: the filter simply stays as the
+  // operator set it on the radio.
+  if (p.prof && !p.prof->modeFilter) {
+    uint8_t fr2[7] = { 0xFE,0xFE, p.civAddr, 0xE0, 0x06, civModeByte(m), 0xFD };
+    return catSend(p, fr2, sizeof(fr2));
+  }
   uint8_t fr[8] = { 0xFE,0xFE, p.civAddr, 0xE0, 0x06, civModeByte(m), 0x01, 0xFD };
   return catSend(p, fr, sizeof(fr));
 }
@@ -340,6 +374,60 @@ static uint8_t yBinModeByte(RigMode m) {
                case MODE_AM: return 0x04; case MODE_FM: return 0x08;
                case MODE_DATA: return 0x0A; default: return 0x01; }
 }
+// ---- FT-100: its own dialect (0.9.70 audit vs Hamlib ft100.c) ---------------
+// Everything differs from the FT-817 family: opcode 0x0A for frequency (not 0x01),
+// LITTLE-endian BCD (Hamlib to_bcd, where the FT-817 uses to_bcd_be), the mode byte
+// in data[3] with opcode 0x0C (not data[0] with 0x07), its own mode values, read
+// opcode 0x10 (not 0x03), and a reply whose frequency starts at offset 1 behind a
+// band number. Filing it under the FT-817 family meant nothing we sent it applied.
+static void y100PackFreq(uint64_t hz, uint8_t out[4]) {
+  uint32_t f = (uint32_t)((hz + 5) / 10);
+  for (int i = 0; i < 4; i++) { out[i] = (uint8_t)(((f/10)%10)<<4 | (f%10)); f /= 100; }
+}
+static uint64_t y100UnpackFreq(const uint8_t* b) {
+  uint64_t f = 0, mul = 1;
+  for (int i = 0; i < 4; i++) { f += ((b[i]&0x0F) + (uint64_t)(b[i]>>4)*10) * mul; mul *= 100; }
+  return f * 10ULL;
+}
+static uint8_t y100ModeByte(RigMode m) {     // 00 LSB 01 USB 02 CW 03 CWR 04 AM 05 DIG 06 FM
+  switch (m) { case MODE_LSB: return 0x00; case MODE_USB: return 0x01;
+               case MODE_CW: return 0x02;  case MODE_CWR: return 0x03;
+               case MODE_AM: return 0x04;  case MODE_DATA: return 0x05;
+               case MODE_FM: return 0x06;  default: return 0x01; }
+}
+static bool y100SetFreq(RadioPort& p, uint64_t hz) {
+  uint8_t f[4]; y100PackFreq(hz, f);
+  uint8_t cmd[5] = { f[0], f[1], f[2], f[3], 0x0A };
+  return catSend(p, cmd, 5);
+}
+static bool y100SetMode(RadioPort& p, RigMode m) {
+  uint8_t cmd[5] = { 0x00, 0x00, 0x00, y100ModeByte(m), 0x0C };
+  return catSend(p, cmd, 5);
+}
+static bool y100ReadFreq(RadioPort& p, uint64_t& hz) {
+  p.rx.clear();
+  uint8_t q[5] = { 0x00, 0x00, 0x00, 0x00, 0x10 };
+  if (!catSend(p, q, 5)) return false;
+  uint8_t buf[16];
+  size_t n = catDrain(p, buf, sizeof(buf), 250, -1);
+  if (n < 6) return false;                   // band_no, freq[4], mode, ...
+  hz = y100UnpackFreq(buf + 1);
+  return hz > 0;
+}
+
+// ---- VR-5000: FT-817 framing, but FM is 0x88 (MODE_FMN in Hamlib vr5000.c);
+//      plain 0x08 is not in this receiver's table. It also has NO read command at
+//      all, so readFreq is not attempted for it.
+static uint8_t vr5ModeByte(RigMode m) {
+  switch (m) { case MODE_LSB: return 0x00; case MODE_USB: return 0x01;
+               case MODE_CW: return 0x02;  case MODE_AM: return 0x04;
+               case MODE_FM: return 0x88;  default: return 0x01; }
+}
+static bool vr5SetMode(RadioPort& p, RigMode m) {
+  uint8_t cmd[5] = { vr5ModeByte(m), 0x00, 0x00, 0x00, 0x07 };
+  return catSend(p, cmd, 5);
+}
+
 static bool yBinSetFreq(RadioPort& p, uint64_t hz) {
   uint8_t f[4]; yBinPackFreq(hz, f);
   uint8_t cmd[5] = { f[0], f[1], f[2], f[3], 0x01 };
@@ -403,40 +491,113 @@ static bool yTxtReadFreq(RadioPort& p, uint64_t& hz) {
 //  TH-D74 driver order [FM,DV,AM,LSB,USB,CW,NFM]. These are receive radios; PTT is
 //  handled manually by the operator, so no TX/RX keying is sent.
 // =============================================================================
-static const char KWHT_BAND = '1';        // Band B = the all-mode (SSB/CW/AM) receiver
+// CORRECTED 2026-07 after a TH-D75 on the bench (driven by CardSat, which had
+// inherited this encoder from here) enumerated but ignored every command. Verified
+// against Hamlib rigs/kenwood/thd74.c, the reference implementation for this family.
+// This code was wrong in THREE independent ways, any one of which causes silence:
+//   1. There is no "FQ" command. The frequency is a field inside the "FO <band>"
+//      record, and this family has NO set-frequency command at all -- a set is a
+//      READ-MODIFY-WRITE of that whole record.
+//   2. "MD" takes a SPACE before its parameters: "MD 1,4", not "MD1,4".
+//   3. AM and DV were transposed (AM is '1', DV is '2').
+// Band char '1' = VFO B (the all-mode SSB/CW/AM receiver), CR terminator and 9600
+// baud were already correct.
+static const char KWHT_BAND = '1';
+// TH-D74 mode digits: 0 FM  1 AM  2 DV  3 LSB  4 USB  5 CW  6 FM-N  8 W-FM  9 CW-R
 static char kwHtModeDigit(RigMode m) {
-  switch (m) { case MODE_FM: return '0'; case MODE_AM: return '2';
+  switch (m) { case MODE_FM: return '0'; case MODE_AM: return '1';
+               case MODE_DATA: return '2'; /* DV */
                case MODE_LSB: return '3'; case MODE_USB: return '4';
-               case MODE_CW: return '5';  case MODE_DATA: return '1'; /* DV */
+               case MODE_CW: return '5';
                default: return '4'; }
 }
-static bool kwHtSetFreq(RadioPort& p, uint64_t hz) {
-  char b[24]; snprintf(b, sizeof(b), "FQ%c,%010llu\r", KWHT_BAND, (unsigned long long)hz);
-  return catSendStr(p, b);
-}
-static bool kwHtSetMode(RadioPort& p, RigMode m) {
-  char b[12]; snprintf(b, sizeof(b), "MD%c,%c\r", KWHT_BAND, kwHtModeDigit(m));
-  return catSendStr(p, b);
-}
-static bool kwHtReadFreq(RadioPort& p, uint64_t& hz) {
+// Read the FO record for our band. Returns the byte count in buf (0 on failure).
+static size_t kwHtReadFo(RadioPort& p, uint8_t* buf, size_t cap) {
   p.rx.clear();
-  char q[8]; snprintf(q, sizeof(q), "FQ%c\r", KWHT_BAND);
-  if (!catSendStr(p, q)) return false;
-  uint8_t buf[40];
-  size_t n = catDrain(p, buf, sizeof(buf), 200, '\r');
-  // Expect "FQ<band>,<10 digits>"
-  for (size_t i = 0; i + 4 <= n; i++) {
-    if (buf[i]=='F' && buf[i+1]=='Q') {
-      // find the comma, then read digits
-      size_t j = i + 2;
-      while (j < n && buf[j] != ',') j++;
-      j++;                                    // skip comma
-      uint64_t v = 0; int digits = 0;
-      while (j < n && buf[j] >= '0' && buf[j] <= '9') { v = v*10 + (buf[j]-'0'); j++; digits++; }
-      if (digits >= 6) { hz = v; return hz > 0; }
+  char q[8]; snprintf(q, sizeof(q), "FO %c\r", KWHT_BAND);
+  if (!catSendStr(p, q)) return 0;
+  return catDrain(p, buf, cap, 300, '\r');
+}
+// Locate the FO record and return the offset of its "F", or -1. The radio may echo
+// the query first, so prefer the LAST match.
+static int kwHtFoStart(const uint8_t* buf, size_t n) {
+  int at = -1;
+  for (size_t i = 0; i + 15 <= n; i++) {
+    if (buf[i]=='F' && buf[i+1]=='O' && buf[i+2]==' ' && buf[i+4]==',') {
+      bool digits = true;
+      for (int k = 5; k < 15; k++)
+        if (buf[i+k] < '0' || buf[i+k] > '9') { digits = false; break; }
+      if (digits) at = (int)i;
+    }
+  }
+  return at;
+}
+// ---- Kenwood all-mode base stations (TS-711/TS-811) -------------------------
+// Generic Kenwood ASCII CAT, verified against Hamlib kenwood.c: "FA" + ELEVEN
+// digits + ';', "MD<digit>;", and the mode table 1 LSB, 2 USB, 3 CW, 4 FM, 5 AM,
+// 6 FSK. Note the digit count differs from the Yaesu ASCII family's nine.
+static char kwTsModeDigit(RigMode m) {
+  switch (m) { case MODE_LSB: return '1'; case MODE_USB: return '2';
+               case MODE_CW: return '3';  case MODE_FM: return '4';
+               case MODE_AM: return '5';  case MODE_DATA: return '6';
+               default: return '2'; }
+}
+static bool kwTsSetFreq(RadioPort& p, uint64_t hz) {
+  char b[20]; snprintf(b, sizeof(b), "FA%011llu;", (unsigned long long)hz);
+  return catSendStr(p, b);
+}
+static bool kwTsSetMode(RadioPort& p, RigMode m) {
+  char b[8]; snprintf(b, sizeof(b), "MD%c;", kwTsModeDigit(m));
+  return catSendStr(p, b);
+}
+static bool kwTsReadFreq(RadioPort& p, uint64_t& hz) {
+  p.rx.clear();
+  if (!catSendStr(p, "FA;")) return false;
+  uint8_t buf[32];
+  size_t n = catDrain(p, buf, sizeof(buf), 250, ';');
+  for (size_t i = 0; i + 14 <= n; i++) {
+    if (buf[i]=='F' && buf[i+1]=='A') {
+      uint64_t v = 0; bool ok = true;
+      for (int k = 2; k < 13; k++) {
+        char c = (char)buf[i+k];
+        if (c < '0' || c > '9') { ok = false; break; }
+        v = v*10 + (uint64_t)(c - '0');
+      }
+      if (ok) { hz = v; return hz > 0; }
     }
   }
   return false;
+}
+
+static bool kwHtSetFreq(RadioPort& p, uint64_t hz) {
+  uint8_t rx[96];
+  size_t n = kwHtReadFo(p, rx, sizeof(rx));
+  int s = kwHtFoStart(rx, n);
+  if (s < 0) return false;                    // no usable record: send nothing
+  // Copy the record up to its terminator and overwrite the ten frequency digits.
+  size_t len = 0;
+  while ((size_t)s + len < n && rx[s+len] != '\r' && rx[s+len] != '\n' && len < sizeof(rx)-2) len++;
+  if (len < 15) return false;
+  char out[98];
+  memcpy(out, rx + s, len);
+  char fb[12]; snprintf(fb, sizeof(fb), "%010llu", (unsigned long long)hz);
+  memcpy(out + 5, fb, 10);
+  out[len] = '\r'; out[len+1] = 0;
+  return catSendStr(p, String(out));
+}
+static bool kwHtSetMode(RadioPort& p, RigMode m) {
+  char b[12]; snprintf(b, sizeof(b), "MD %c,%c\r", KWHT_BAND, kwHtModeDigit(m));
+  return catSendStr(p, b);
+}
+static bool kwHtReadFreq(RadioPort& p, uint64_t& hz) {
+  uint8_t buf[96];
+  size_t n = kwHtReadFo(p, buf, sizeof(buf));
+  int s = kwHtFoStart(buf, n);
+  if (s < 0) return false;
+  uint64_t v = 0;                             // ten digits at offset 5 of the record
+  for (int k = 5; k < 15; k++) v = v*10 + (uint64_t)(buf[s+k] - '0');
+  hz = v;
+  return hz > 0;
 }
 
 // =============================================================================
@@ -447,8 +608,11 @@ static bool radioSetFreq(RadioPort& p, uint64_t hz) {
   bool ok = false;
   switch (p.prof->family) {
     case CAT_CIV:        ok = civSetFreq(p, hz);  break;
-    case CAT_YAESU_BIN:  ok = yBinSetFreq(p, hz); break;
+    case CAT_YAESU_BIN:
+    case CAT_YAESU_VR5000: ok = yBinSetFreq(p, hz); break;   // same frame + opcode
+    case CAT_YAESU_FT100:  ok = y100SetFreq(p, hz); break;
     case CAT_YAESU_TXT:  ok = yTxtSetFreq(p, hz); break;
+    case CAT_KENWOOD_TS: ok = kwTsSetFreq(p, hz); break;
     case CAT_KENWOOD_HT: ok = kwHtSetFreq(p, hz); break;
   }
   if (ok) p.lastFreq = hz;
@@ -460,8 +624,11 @@ static bool radioSetMode(RadioPort& p, RigMode m) {
   bool ok = false;
   switch (p.prof->family) {
     case CAT_CIV:        ok = civSetMode(p, m);  break;
-    case CAT_YAESU_BIN:  ok = yBinSetMode(p, m); break;
+    case CAT_YAESU_BIN:    ok = yBinSetMode(p, m); break;
+    case CAT_YAESU_VR5000: ok = vr5SetMode(p, m);  break;   // FM is 0x88 here
+    case CAT_YAESU_FT100:  ok = y100SetMode(p, m); break;
     case CAT_YAESU_TXT:  ok = yTxtSetMode(p, m); break;
+    case CAT_KENWOOD_TS: ok = kwTsSetMode(p, m); break;
     case CAT_KENWOOD_HT: ok = kwHtSetMode(p, m); break;
   }
   if (ok) p.lastMode = m;
@@ -482,7 +649,10 @@ static uint64_t radioReadFreq(RadioPort& p) {
     switch (p.prof->family) {
       case CAT_CIV:        ok = civReadFreq(p, hz);  break;
       case CAT_YAESU_BIN:  ok = yBinReadFreq(p, hz); break;
+      case CAT_YAESU_FT100: ok = y100ReadFreq(p, hz); break;
+      case CAT_YAESU_VR5000: ok = false; break;   // no read command exists
       case CAT_YAESU_TXT:  ok = yTxtReadFreq(p, hz); break;
+      case CAT_KENWOOD_TS: ok = kwTsReadFreq(p, hz); break;
       case CAT_KENWOOD_HT: ok = kwHtReadFreq(p, hz); break;
     }
     if (ok) { p.lastFreq = hz; return hz; }
@@ -500,7 +670,10 @@ static bool radioReadFreqChecked(RadioPort& p, uint64_t& out) {
     switch (p.prof->family) {
       case CAT_CIV:        ok = civReadFreq(p, hz);  break;
       case CAT_YAESU_BIN:  ok = yBinReadFreq(p, hz); break;
+      case CAT_YAESU_FT100: ok = y100ReadFreq(p, hz); break;
+      case CAT_YAESU_VR5000: ok = false; break;   // no read command exists
       case CAT_YAESU_TXT:  ok = yTxtReadFreq(p, hz); break;
+      case CAT_KENWOOD_TS: ok = kwTsReadFreq(p, hz); break;
       case CAT_KENWOOD_HT: ok = kwHtReadFreq(p, hz); break;
     }
     if (ok) { p.lastFreq = hz; out = hz; return true; }
@@ -526,6 +699,66 @@ static void applyLegConfig() {
 // Try to bind a newly-enumerated device to a leg. Preference order:
 //   1) a leg whose configured usbSerial matches this device's serial (robust pin)
 //   2) otherwise the first still-unbound, assigned leg (by enumeration order)
+// Assert the CDC control lines (DTR + RTS) for a bound device.
+//
+// WHY THIS IS NEEDED: many USB CDC-ACM devices ignore host traffic until DTR is
+// asserted -- the line is how the host says "a terminal is present". The Kenwood
+// TH-D74/D75 are in that group (Hamlib needs dtr_state ON for them), and this
+// firmware was never setting the lines at all: it only called setSerialBaudRate(),
+// so such a radio would enumerate and then sit silent no matter what we sent.
+//
+// WHY IT IS SHAPED LIKE THIS: the host's address-based API (setSerialBaudRate /
+// setSerialConfig) has no control-line call -- only EspUsbHostCdcSerial exposes
+// setDtr/setRts. Constructing one of those is inert: it registers as a data sink
+// only inside begin(), which we deliberately never call, so the callback-based data
+// path this firmware uses is completely undisturbed. setDtr() itself just updates
+// the host's DeviceState for that address and issues a SET_CONTROL_LINE_STATE
+// control transfer, which is exactly what we want and nothing more.
+// De-assert DTR/RTS when a leg lets a radio go. Mirror of usbAssertControlLines().
+//
+// CardSat 0.9.70 USB work, applied here because the exposure is identical: on a
+// CDC-ACM device DTR is what says "the host has this port open", and CDC has no other
+// close notification. This firmware asserted DTR at bind and never dropped it, so a
+// radio that keys its CAT session off DTR was left believing the session was still
+// open after the leg unbound. On a TH-D75 that meant CAT could not be re-established
+// without power-cycling the RADIO. Failures are ignored deliberately: if the radio has
+// already been unplugged the control transfer cannot land, and that is exactly the
+// case where nothing needs saying.
+static void usbReleaseControlLines(uint8_t addr, const char* who) {
+  if (addr == ESP_USB_HOST_ANY_ADDRESS) return;
+  EspUsbHostCdcSerial line(gUsb);      // inert without begin() -- see above
+  line.setAddress(addr);
+  line.setDtr(false);
+  line.setRts(false);
+  Serial.printf("[USB] %s: port closed (DTR/RTS low, addr %u)\n", who, addr);
+}
+
+static void usbAssertControlLines(uint8_t addr, const char* who) {
+  EspUsbHostCdcSerial line(gUsb);      // inert without begin() -- see above
+  line.setAddress(addr);
+  const bool d = line.setDtr(true);
+  const bool r = line.setRts(true);
+  Serial.printf("[USB] %s: DTR=%s RTS=%s (addr %u)\n",
+                who, d ? "on" : "FAIL", r ? "on" : "FAIL", addr);
+}
+
+// Order-bind guard (CardSat 0.9.70 USB audit): a device whose serial matches SOME
+// leg's pin must NEVER be bound to a different leg by enumeration order. The hole:
+// on a fast replug (hub, quick hands) the new enumeration can arrive BEFORE the
+// old address's disconnect event, so the pinned leg still shows bound, tryPin
+// skips it, and tryOrder would hand the pinned radio to the OTHER (unpinned) leg
+// -- both legs then driving one physical radio. Pinned serials are reserved for
+// their legs, full stop; the late disconnect then frees the pinned leg and the
+// device rebinds where it belongs on the next enumeration or reconfigure.
+static bool serialPinnedToSomeLeg(const char* ser) {
+  if (!ser || !ser[0]) return false;
+  if (gDown.assigned() && gDown.leg->usbSerial[0] &&
+      strcmp(gDown.leg->usbSerial, ser) == 0) return true;
+  if (gUp.assigned() && gUp.leg->usbSerial[0] &&
+      strcmp(gUp.leg->usbSerial, ser) == 0) return true;
+  return false;
+}
+
 static void bindDevice(const EspUsbHostDeviceInfo& info) {
   if (info.isHub) return;
   const char* ser = info.serial ? info.serial : "";
@@ -535,6 +768,7 @@ static void bindDevice(const EspUsbHostDeviceInfo& info) {
     if (p.leg->usbSerial[0] && ser[0] && strcmp(p.leg->usbSerial, ser) == 0) {
       p.bound = true; p.addr = info.address;
       gUsb.setSerialBaudRate(p.baud, p.addr);
+      usbAssertControlLines(p.addr, "pinned");
       Serial.printf("[USB] pinned %s (serial %s) -> %s\n", p.prof->name, ser, p.legName);
       return true;
     }
@@ -542,11 +776,18 @@ static void bindDevice(const EspUsbHostDeviceInfo& info) {
   };
   if (tryPin(gDown) || tryPin(gUp)) return;
 
-  // Fall back to enumeration order for legs without a serial pin.
+  // Fall back to enumeration order for legs without a serial pin -- but never for
+  // a device that some leg has PINNED by serial (see serialPinnedToSomeLeg above).
+  if (serialPinnedToSomeLeg(ser)) {
+    Serial.printf("[USB] addr %u serial %s is pinned to a leg - not order-binding\n",
+                  info.address, ser);
+    return;
+  }
   auto tryOrder = [&](RadioPort& p) -> bool {
     if (!p.assigned() || p.bound || p.leg->usbSerial[0]) return false;
     p.bound = true; p.addr = info.address;
     gUsb.setSerialBaudRate(p.baud, p.addr);
+    usbAssertControlLines(p.addr, "bound");
     Serial.printf("[USB] bound %s (addr %u) -> %s\n", p.prof->name, info.address, p.legName);
     return true;
   };
@@ -564,16 +805,19 @@ static void bindSeen(const SeenDevice& d) {
     if (p.leg->usbSerial[0] && ser[0] && strcmp(p.leg->usbSerial, ser) == 0) {
       p.bound = true; p.addr = d.address;
       gUsb.setSerialBaudRate(p.baud, p.addr);
+      usbAssertControlLines(p.addr, "re-pinned");
       Serial.printf("[USB] re-pinned %s (serial %s) -> %s\n", p.prof->name, ser, p.legName);
       return true;
     }
     return false;
   };
   if (tryPin(gDown) || tryPin(gUp)) return;
+  if (serialPinnedToSomeLeg(ser)) return;   // same order-bind guard as bindDevice()
   auto tryOrder = [&](RadioPort& p) -> bool {
     if (!p.assigned() || p.bound || p.leg->usbSerial[0]) return false;
     p.bound = true; p.addr = d.address;
     gUsb.setSerialBaudRate(p.baud, p.addr);
+    usbAssertControlLines(p.addr, "re-bound");
     Serial.printf("[USB] re-bound %s (addr %u) -> %s\n", p.prof->name, d.address, p.legName);
     return true;
   };
@@ -613,6 +857,11 @@ static void bindSeen(const SeenDevice& d);
 static void reconfigureAndRebind() {
   // 1) drop both bindings and clear per-port runtime state.
   for (RadioPort* p : { &gDown, &gUp }) {
+    // Tell the radio the port is closing while it is still reachable. On a
+    // disconnect the device is already gone and there is nothing to tell; here it
+    // is present, so dropping DTR is both possible and necessary -- otherwise the
+    // radio keeps its CAT session open against a leg that no longer owns it.
+    if (p->bound) usbReleaseControlLines(p->addr, p->legName);
     p->bound = false; p->online = false; p->addr = ESP_USB_HOST_ANY_ADDRESS;
     p->rx.clear(); p->lastFreq = 0;
   }

@@ -232,6 +232,12 @@ struct Settings {
   // Each leg is a LEG_RADIOS[] radio on its own bus. civ/baud 0 = the leg table's
   // default. Host/port/user/pass are PER LEG so two LAN radios can coexist
   // (scope Phase 2); the USB leg reuses catUsbKey-style adapter pinning.
+  // Which revision of LEG_RADIOS the saved leg selections refer to. dualModel is a
+  // raw INDEX into that catalog, so adding a radio shifts every later entry --
+  // without this, an update would silently repoint a saved leg at a different
+  // radio, exactly the kind of invisible settings corruption a stale enum clamp
+  // causes. On a mismatch the selections reset to None and the operator re-picks.
+  uint8_t  dualCatVer    = LEG_CATALOG_VER;
   uint8_t  dualModel[2]  = { LEG_NONE, LEG_NONE };
   uint8_t  dualBus[2]    = { LEGBUS_GROVE, LEGBUS_GROVE };
   uint8_t  dualCiv[2]    = { 0, 0 };

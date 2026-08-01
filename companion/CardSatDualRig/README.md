@@ -206,13 +206,25 @@ send `\csdr_*`, so the escape is harmless to them.
 
 ## Status / honesty
 
-Compiles clean against ESP32-S3 + EspUsbHost 2.3.2 + M5Unified (37% flash, 18% RAM).
+Compiles clean against ESP32-S3 + EspUsbHost + M5Unified (38% flash, 18% RAM as of
+0.9.70; built with the **patched** library — see below).
 **Not yet hardware-tested against physical radios.** All four CAT frequency encoders
 were byte-verified against the specs / CardSat's proven CI-V codec. Bring-up order:
 
+0. **Use the patched EspUsbHost** from CardSat's `third_party/EspUsbHost/`, not the
+   Library Manager copy. The stock library never cancels an outstanding CDC *write* at
+   shutdown, so a radio that stops reading its port strands the USB stack until reboot
+   — proven on CardSat's hardware, and this firmware drives the same library the same
+   way. `third_party/EspUsbHost/PATCHES.md` has the detail.
 1. Config mode first — confirm your radios enumerate and appear in the portal.
 2. Prove **one** radio tunes on USB before adding the hub + second radio (channel
    budget is tight).
+2a. **Watch for the re-enumeration trap (0.9.70).** DTR is now dropped when a leg
+   releases a radio, which is what tells a CDC device the port is closing — this
+   firmware never did that before. Separately, some radios (measured: Kenwood TH-D75)
+   never restart their CAT firmware after being re-enumerated: they enumerate fine,
+   accept a couple of packets, then stop reading. If a radio works once and then goes
+   deaf, that is the shape to look for, and power-cycling the radio is the recovery.
 3. Per-radio quirks most likely to need a tweak: FT-817 CAT-enable state; native-USB
    radios that expose two CDC interfaces (only one is CAT); the TH-D74/D75 mode-digit
    map and PTT-band behavior; exact CI-V addresses (all editable in the portal).

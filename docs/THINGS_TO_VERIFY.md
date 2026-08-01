@@ -637,3 +637,262 @@ real radio from the main firmware.
   1-pin with a dual rig configured, and confirm the pins are released and rebound
   (the opener tracks the previously bound pads globally now that two backends
   share it).
+
+## 0.9.70 — TH-D74/D75 CAT rewritten (bench report: radio ignored everything)
+
+Bench (N8HM): a TH-D75 on USB enumerated but did not respond. Cause: the LEGF_KWHT
+dialect was wrong in three independent ways, so every frame was ignored. Verified
+against Hamlib `rigs/kenwood/thd74.c`, the reference implementation for this family:
+
+- There is **no `FQ` command**. The frequency lives in the **`FO <band>`** record,
+  and a SET is a read-modify-write of that whole record -- query it, overwrite the
+  ten digits at offset 5, send it back. We were sending `FQ1,<digits>`.
+- **`MD` takes a space**: `MD 1,4`, not `MD1,4`.
+- **AM and DV were transposed** in the mode map (AM is '1', DV is '2').
+
+Terminator (CR), band char ('1' = VFO B) and 9600 baud were already correct.
+
+To verify on the D75:
+- Downlink leg = TH-D75, bus = USB. Engage and confirm the radio's **Band B**
+  frequency follows Doppler, and that the Info page reads frequency back.
+- Mode: request USB, AM, FM and DV in turn (a linear bird gives USB/LSB; an FM
+  bird gives FM) and confirm the radio's mode matches -- AM/DV in particular,
+  since those were the transposed pair.
+- Because a set is now a round trip, watch the CAT cycle rate: a Kenwood handheld
+  leg needs more time per update than the other dialects. If updates lag, raise
+  the CAT rate rather than lowering it.
+- The **TH-D74** shares this dialect and is worth the same check if available.
+- Hamlib has no TH-D75 backend; the D75 is being driven as a D74. If frequency
+  works but mode does not (or vice versa), that is the place to suspect a
+  D75-specific difference, and the per-command traces in the CAT tool will show it.
+
+## 0.9.70 — dual-rig swap key and on-screen visibility
+
+- **`x` swaps the legs** on the Dual-Rig screen: radio, bus, CI-V address, baud,
+  LAN host/port/login and the USB adapter pin all move together, then the config
+  is saved and re-applied. Verify with an asymmetric pair (different buses and
+  bauds) that BOTH legs are fully exchanged, not just the radio names, and that a
+  swap while engaged re-engages correctly (USB legs included).
+- **Widths.** These all overflowed the 240 px screen and were silently clipped;
+  confirm each now reads to its end on hardware:
+  - Settings row: was `Dual-Rig setup (2 radios) > <dn>+<up>` (up to 51 of 39
+    columns, losing the uplink radio entirely); now `Dual rig: <dn>+<up> >`.
+  - Status line: `downlink only - uplink not CAT controlled` (41) -> `DN only -
+    UP not CAT driven`.
+  - Bus row: a real USB adapter label ("FTDI FT232R 0403:6001 #A50285BI") ran ~10
+    characters past the edge; the label is now tail-truncated, keeping the serial
+    number that distinguishes two identical adapters.
+  - Engage refusals: three exceeded the 39-column status bar and lost their
+    actionable end ("...move rotator off USB", "...renominate", "...an uplink").
+
+## 0.9.70 — BASIC immediate mode (SCR_BASICIMM)
+
+Reach it from the BASIC editor with **Fn+i**. The prompt reuses the interpreter
+unchanged: `execLine()` is exactly the direct-mode primitive, and `run()` is only a
+loop over it, so expressions, statements, SYS names, host hooks and error text are
+identical to a program's.
+
+- Typing: `PRINT 2+2` -> `4`. Then `A=5` and `PRINT A*2` -> `10` (variables persist
+  between lines while the prompt is open).
+- **Every navigation key is behind Fn**, exactly as in the editor, because the arrow
+  keys ARE `;` `.` `,` `/` -- a BASIC prompt cannot surrender the decimal point, the
+  PRINT separator or the division operator. Verify `PRINT 1.5, 3/2` types correctly.
+- Fn+r recalls the previous line, Fn+c clears the log, Fn+;/. scroll, Fn+t opens the
+  reference, DEL backspaces (and leaves when the line is empty).
+- Single-line loops should work: `FOR I=1 TO 3: PRINT I: NEXT`.
+- Program-only statements must be REFUSED with a message naming them, not
+  half-executed: `GOTO 10`, `GOSUB 10`, `RETURN`, `DATA 1`, `READ A`, `RESTORE`.
+  But `PRINT "GOTO"` must still work (the check skips quoted text).
+- Live data: `PRINT SATEL` should read the CURRENT elevation each time -- the system
+  snapshot is retaken per line, not once when the prompt opened.
+- Host hooks: `SATSEL`, `TXSEL`, `LPRINT`, graphics (`PSET`/`LINE`/`SHOW`) and the
+  gated file writer should behave as in a program. After `SHOW`, a keypress should
+  dismiss the held frame back to the prompt.
+- **Memory**: the VM is ~3.8 KB and resident only while the prompt is open. Leaving
+  BASIC by ANY route (including Fn+h to Help) must free it -- watch the Performance
+  screen's free-heap and largest-block figures before and after.
+
+## 0.9.70 — BASIC self-selection and the new system names
+
+- **Nothing selected beforehand**: from a cold start with no satellite tracked, open
+  BASIC and run `PICKSAT.BAS`. It should list satellites that are up with a
+  transponder. Then in immediate mode: `SATSEL 12` / `PRINT NTX` / `TXSEL 0` /
+  `PRINT TXDL` -- the downlink must belong to satellite 12, not to whatever was
+  tracked before.
+- **The old trap, explicitly**: track satellite A, open BASIC, `SATSEL <B>`,
+  `TXSEL 0`, `PRINT TXDL`. Before 0.9.70 this returned A's downlink. It must now
+  return B's.
+- `TXOK` should read 0 right after a `SATSEL` and 1 after a successful `TXSEL`.
+- **New names** against the screens that show the same numbers: `LSHELL`/`BRATIO`
+  vs the orbital-zone status line, `DECAYD`/`DECAYSRC` vs the Orbit Info page,
+  `BATTMV`/`CHARGING` vs the charge screen, `HEAPBLK` vs the Performance screen,
+  `DOPPRX`/`DOPPTX` vs the Track screen's radio rows.
+- **Memory**: BASIC's transponder buffer is 5 KB and allocated only when a program
+  crosses to a non-tracked satellite. Run `PICKSAT.BAS` (which does), leave BASIC,
+  and confirm on the Performance screen that free heap and largest block return.
+
+## 0.9.70 — zone dwell line
+
+- Orbital zones screen: a grey "dwell N.N min/day (P.P% scanned)" line between the
+  Now/L line and the transit list. Check it against hand arithmetic on the listed
+  transits (sum the durations / scan window). ISS + SAA should land in the rough
+  ballpark of a few percent; a MEO bird on the inner-belt zone should read high.
+- Layout: no overlap between Now (y44), dwell (y53), transit header (y63) and the
+  first row (y74) on the real panel.
+- The printed zone report gains a "Dwell" row.
+
+## 0.9.70 — UI pass
+
+- **Status bar colors**: trigger an ERR (e.g. a dual-rig engage refusal) -> white on
+  dark red; a WARN (e.g. "Clock not set") -> black on amber; ordinary saves stay
+  white on dark green. Check amber legibility on the real panel both ways.
+- **Scrollbars**: 15 screens swapped ^/v arrows for the 2 px right-edge bar (memos,
+  plan, equinox list among them). Thumb position/extent should track the list; no
+  bar at all when everything fits.
+- **Dual-Rig**: grey labels / white values, amber '*' on catalog defaults, hairline
+  between the DN and UP blocks. Confirm the selection bar still reads black-on-green
+  across the whole row, and DKRED/AMBER render as intended on hardware (565 values
+  chosen on paper: 0x6000 / 0xCC40).
+- **Footers**: spot-check a few screens for "` back"; the two previously-clipping
+  footers (sat detail, sat list) now fit 39 columns.
+
+## 0.9.70 — USB fixes (findings B, C, A)
+
+- **B**: nominate the SLOWER of two adapters as the radio, engage USB CAT -- must
+  come up (bounded wait) rather than silently engaging dead. Unplug the nominated
+  adapter entirely, engage: "Radio adapter not responding", console restored.
+- **C**: rotator-only engage with the USB stack deliberately wedged is hard to
+  stage; the code path is the same M2 rule as end()/rotEnd() -- verify normal
+  rotator-only engage/disengage still cycles cleanly and the console returns.
+- **A (replug matrix)**: with dual-USB CAT or CAT+rotator engaged, unplug one
+  adapter and replug it (same port, different port, through a hub). Then: the
+  Settings adapter picker must show no duplicates; disengage/re-engage must bind
+  the NEW address (log shows the new addr); the rot/scan trace marks a currently
+  unplugged adapter "(unplugged)".
+
+## 0.9.70 — USB minors + companion guard
+
+- Minor 2: engage dual-USB, unplug the UPLINK adapter, replug, re-apply radio
+  settings -- CAT-B must come back on the new address rather than claiming success
+  over the dead port.
+- Companion: with DN serial-pinned, fast-replug the DN radio (hub helps) -- the
+  serial log must show "is pinned to a leg - not order-binding" if the race is hit,
+  and UP must never start driving DN's radio.
+
+## 0.9.70 — hub enumeration (bench report: nothing visible beyond a powered hub)
+
+- Powered hub + ONE adapter: scan (or engage) must now list the ADAPTER, and must
+  NOT list the hub itself. The rot/scan trace should show "hub present - extended
+  enumeration window used".
+- Powered hub + TWO adapters: both must appear, with distinct keys. This is the
+  configuration native dual-USB CAT has always needed and may never have had.
+- If the trace says "hub seen but NO adapters behind it", the extended window was
+  still not enough (or the slot budget is exhausted) -- capture the log and raise
+  ESP_USB_HOST_MAX_DEVICES / s_serDev[] together, with a FULL rebuild.
+- Watch engage time: with a hub present the enumeration window is now up to 9 s
+  before it gives up, so a genuinely absent adapter takes longer to report.
+
+## 0.9.70 — USB audio claiming disabled (teardown hypothesis test)
+
+The vendored EspUsbHost no longer claims USB audio interfaces
+(`ESPUSBHOST_CLAIM_AUDIO=0`). This is in BOTH the normal and diagnostic builds.
+
+- **The test**: engage then disengage USB CAT with the TH-D75 and compare against the
+  captured baseline -- teardown was 1079 ms with `stack released=NO`; a Prolific
+  adapter on the same firmware was 76 ms and released. If the D75 now matches the
+  Prolific, the audio interfaces were the cause of the reboot-required wedge.
+- **Regression check**: a plain FTDI/CH340 adapter and the USB rotator must still
+  engage, drive, and disengage normally -- audio claiming is not involved for them,
+  but the descriptor walk changed, so confirm rather than assume.
+- Nothing about the D75's CAT behaviour should change; the bytes were already
+  reaching it on the right endpoint.
+
+## 0.9.70 — TH-D75 fine step (mode-aware)
+
+- **Linear bird (USB/LSB/CW downlink)**: Doppler should now move the dial in fine
+  increments, not 5 kHz jumps. The radio should show FINE on. 20 Hz steps.
+- **FM bird (FM/NFM)**: fine mode must NOT be switched on (the radio does not support
+  it there). Expect the VFO step to be set to 5 kHz instead, and Doppler to move in
+  5 kHz increments -- acceptable on FM, but confirm nothing errors or refuses.
+- **Operator settings must survive**: tone, CTCSS, DCS, offset, URCALL and mode are
+  copied back byte-for-byte; only frequency, and either the fine fields OR the normal
+  step, are touched. Check a memory/VFO with a tone set still has it after tracking.
+- If FM Doppler is too coarse in practice, the remaining option is to leave the step
+  alone and accept it, since the family has no finer normal step than 5 kHz.
+
+## 0.9.70 — USB teardown: the three fixes that must be tested TOGETHER
+
+Flash and run engage/disengage repeatedly WITHOUT rebooting, switching the radio off
+between some cycles. The three changes are independent but their symptoms overlap:
+
+1. **Endpoint clear (vendored patch 5)** — teardown after a QUIET radio should now
+   finish in milliseconds with `stack released=yes`. Previously 1001 ms and
+   `released=NO`. Watch the `end():` phase stamps if using the diagnostic build.
+2. **Clear-and-retry (patch 6)** — even if a release stalls, it should recover rather
+   than stranding the stack. No `USB busy - reboot needed (259)` on the next engage.
+3. **DTR close (cdcClosePort)** — after disengaging on the Cardputer, the TH-D75 must
+   accept CAT again on the NEXT engage **without a radio power cycle**. This is the
+   one that tests the "port was never closed" theory directly.
+
+**Heap is the objective check**: note free/largest before the first engage and after
+each teardown. A clean cycle returns everything (76 K / 31.7 K in the reference log).
+Any cycle that loses ~19 KB means the release still failed, whatever it reported.
+
+Also confirm the rotator USB port and a plain FTDI/CH340 still engage and release
+normally — cdcClosePort touches all six detach sites, not just the D75 path.
+
+## 0.9.70 — patch 7: the uninstall now always runs
+
+The check that matters is HEAP ACROSS MANY CYCLES, not one. Engage/disengage six or
+more times without rebooting, noting free/largest after each teardown:
+  * A cycle that returns to the starting figure (~76 K free / 31.7 K largest) is clean.
+  * ~19 KB lost = the host OBJECT was retained (release reported stuck; patch 5/6 issue).
+  * ~10-11 KB lost = the IDF HOST STACK is still installed (patch 7's target), and the
+    next engage will report "USB busy - reboot needed (259)".
+The distinction between those two sizes is what identified this bug, so recording the
+number is worth more than recording pass/fail.
+
+Also worth one deliberately hostile run: switch the radio OFF mid-session, disengage,
+switch it on, re-engage. That is the case that leaves a transfer pending AND a device
+gone, and it exercises the forced-release path directly.
+
+## 0.9.70 — TH-D75 silent on the second engage (open question)
+
+Teardown is fixed and confirmed; this is the last USB-adjacent defect and it is NOT a
+teardown problem. Engage 1 works completely (the radio echoes MD/VM/BC/FT/FS/FQ);
+engage 2 produces ZERO IN completions -- not even the MD echo -- although
+usb_host_install, enumeration, the descriptor walk and the CDC bind (DTR/RTS) all
+succeed.
+
+Next measurement, on the Mac, removing CardSat from the loop as before:
+
+    python3 thd75_probe.py --cycles 6
+
+That opens the port, queries ID and FO, drops DTR/RTS, closes, waits ~0.8 s and repeats
+-- the same close/reopen the Cardputer now performs. Three outcomes, each decisive:
+  * every reopen answers -> the radio is fine across sessions and CardSat's re-bind is
+    what differs; compare its bind order (set config -> DTR -> RTS) on the wire.
+  * silent after the first session on the Mac too -> the radio behaves this way with
+    any host, and a workaround (leave DTR asserted at disengage, or re-open twice) is
+    the honest fix rather than a CardSat bug hunt.
+  * intermittent -> the radio is marginal at this cadence; a settle delay between
+    disengage and re-engage is the mitigation.
+
+## 0.9.70 — resident host between engages
+
+- **The headline test**: engage, disengage, re-engage the TH-D75 repeatedly WITHOUT any
+  power cycling. The radio should answer every time now, because it is never
+  re-enumerated. This is the behaviour the Mac probe showed (6/6) and the Cardputer
+  could not previously reproduce.
+- **Radio switched off mid-session**: turn the radio off, then on, then re-engage. The
+  device physically disconnects and enumerates from cold, which restarts its CAT
+  application -- this should also work, and it is the path that still exercises real
+  enumeration.
+- **Fn+u** on the tracking screen: with radio and rotator both off, it should report
+  "USB released (console back)" and the serial console should return. With either still
+  on it must refuse with "Turn radio/rotator off first".
+- **Rotator**: engage/disengage the USB rotator repeatedly; it now shares the CAT
+  teardown path rather than its own copy, so confirm it still binds, drives and releases.
+- **Both at once**: radio and rotator on USB together, then disengage one -- the other
+  must keep working (the host is shared and must not be released while either holds it).
+- Heap after Fn+u should return to roughly the pre-engage figure (~76 K free).

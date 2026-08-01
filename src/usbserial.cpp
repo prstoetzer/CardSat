@@ -119,6 +119,36 @@ namespace {
   // may still be installed -- a re-engage then reboots the device and takes SD and
   // WiFi with it (observed on the bench). Latch it and refuse instead.
   bool s_hostReleased = true;
+  // True while an engage is being retried after an incomplete teardown, so a failure
+  // can name that cause instead of reporting a generic error. Cleared on success.
+  bool s_retryAfterStuck = false;
+  // True: keep the USB host installed when the last port detaches (see
+  // releaseHostIfIdle). Default ON -- a device whose firmware does not re-initialise
+  // after re-enumeration cannot survive a teardown between engages.
+  bool s_keepHostResident = true;
+  void releaseHostNow();     // defined below; releaseHostIfIdle() calls it
+
+  // Tell the DEVICE the port is closing before dropping it.
+  //
+  // On a CDC-ACM device, DTR is what signals "the host has the port open" -- it is
+  // asserted at bind, and CDC has no other close notification. EspUsbHostCdcSerial::
+  // end() only removes the object from the host's callback array; it never
+  // de-asserts anything, so CardSat raised DTR and then simply vanished. A radio
+  // that keys its CAT session off DTR therefore never sees the session end.
+  //
+  // Bench symptom this explains: after disengaging on the Cardputer, the TH-D75
+  // would not accept CAT again until the RADIO was power-cycled -- there is no
+  // Kenwood "CAT off" command, the port state IS DTR, and ours never dropped.
+  //
+  // Failures are ignored on purpose: if the radio has already been switched off the
+  // control transfer cannot land, and that is exactly the case where nothing needs
+  // saying. Order matches the bind (DTR then RTS), reversed in sense.
+  void cdcClosePort(EspUsbHostCdcSerial* p) {
+    if (!p) return;
+    p->setDtr(false);
+    p->setRts(false);
+  }
+
   // M2: set when end()/rotEnd() timed out with USB tasks still alive. The host object is
   // retained (deleting it would be a use-after-free) and re-engage is blocked until a reboot.
   bool s_hostTeardownStuck = false;
@@ -330,6 +360,16 @@ namespace {
     uint16_t vid, pid;
     char     label[48];
     char     key[40];
+    // Tombstone (audit finding A). Set by onGone() on the host task when the
+    // device disconnects; every resolver skips dead entries. Without this the
+    // registry was append-only for the life of a shared host, so a replug during
+    // a dual-port session (the very sessions dual USB exists for) left a stale
+    // entry whose serial-first KEY matched the live one -- and every first-match
+    // resolver bound the stale, dead ADDRESS. A tombstone is used instead of
+    // compaction because removal must respect the publication rules here: the
+    // writer is the host task, the readers are the main task mid-scan, and a
+    // single byte store is safe where shifting entries under a reader is not.
+    volatile uint8_t dead;
   };
   SerialDev s_serDev[4];
   // VOLATILE + a release barrier before the count is bumped (see onDev): this is
@@ -341,6 +381,32 @@ namespace {
   // sufficient here.
   volatile uint8_t s_serDevN = 0;
   volatile uint32_t s_lastDevMs = 0;   // when the newest adapter appeared (quiet-period timing)
+  // A HUB is present on the bus. Two things change when it is, and both were wrong:
+  //
+  //  1. TIMING. A directly-attached hub enumerates fast, then the IDF hub driver
+  //     still has to power its ports, wait bPwrOn2PwrGood, debounce ~100 ms per
+  //     USB 2.0 s9.1.2, reset 10-50 ms and run a full enumeration PER CHILD --
+  //     sequentially. So the first device to appear is the hub, and its children
+  //     follow hundreds of milliseconds later. The old wait broke as soon as
+  //     nothing new had arrived for 400 ms, which the hub satisfies on its own:
+  //     the scan settled at ~700 ms and reported the hub and nothing else. That is
+  //     the bench's "cannot see any USB devices beyond a powered hub" -- and, since
+  //     the Cardputer has ONE port, it is also why dual-USB CAT (which REQUIRES a
+  //     hub for two adapters) has never enumerated its radios.
+  //
+  //  2. SELECTABILITY. A hub is not an adapter. It has no serial OUT endpoint, so
+  //     binding one can never carry CAT -- but onDev() registered every device, so
+  //     the hub appeared in the Settings picker as a choice, and an un-nominated
+  //     engage could take it as "the first adapter". (Before the 0.9.70 finding-B
+  //     check that bind then reported ENGAGED on a hub.)
+  volatile bool s_sawHub = false;
+
+  // Enumeration budgets. Behind a hub everything is slower and staged, so both the
+  // settle window and the overall cap have to grow -- a cap that expires mid-scan
+  // reports a partial bus, which is indistinguishable to the operator from a
+  // missing adapter.
+  inline uint32_t enumCapMs()   { return s_sawHub ? 9000 : 2500; }
+  inline uint32_t enumQuietMs() { return s_sawHub ? 1200 : 400; }
 
   // Stable identity across replugs: serial number when the adapter reports one
   // (FTDI/CP210x usually do, CH340 usually does not), else VID:PID + address.
@@ -355,6 +421,15 @@ namespace {
   // host's own task: plain byte stores only, read back after a bounded wait.
   void onDev(const EspUsbHostDeviceInfo& d) {
     s_sawDev = true;
+    // A hub is not a selectable adapter: no serial OUT endpoint, so it can never
+    // carry CAT. Record that one is on the bus (it changes every enumeration
+    // budget below) and do NOT put it in the picker. Note s_dev/s_lastDevMs are
+    // updated FIRST so the "settled" timer still counts the hub's own arrival.
+    if (d.isHub) {
+      s_sawHub = true;
+      s_lastDevMs = millis();
+      return;
+    }
     // The device ADDRESS leads the string: two identical adapters (the classic
     // dual-Prolific bench) produce byte-identical manufacturer/product/VID:PID,
     // and on a 240-px row the tail truncates first -- so the one distinguishing
@@ -365,22 +440,60 @@ namespace {
              (d.manufacturer && *d.manufacturer) ? d.manufacturer : "USB",
              (d.product && *d.product) ? d.product : "serial",
              (unsigned)d.vid, (unsigned)d.pid);
-    // Record it as a selectable adapter. Deduplicate by address: a composite
-    // radio (IC-9100/9700) can raise the callback more than once per device.
+    // Record it as a selectable adapter (finding A: update-or-insert, the
+    // companion's model, adapted to this file's publication rules).
+    //
+    // 1) Dedup by address -- against LIVE entries only. A composite radio
+    //    (IC-9100/9700) can raise the callback more than once per device; but a
+    //    DEAD entry at this address means the bus REUSED the address for a new
+    //    device, which must not be swallowed as a duplicate.
     for (uint8_t i = 0; i < s_serDevN; ++i)
-      if (s_serDev[i].address == d.address) return;
-    if (s_serDevN >= (uint8_t)(sizeof(s_serDev) / sizeof(s_serDev[0]))) return;  // full
-    SerialDev& e = s_serDev[s_serDevN];
+      if (!s_serDev[i].dead && s_serDev[i].address == d.address) return;
+    char key[40];
+    makeKey(key, sizeof(key), d);
+    // 2) Same KEY already known (typically a replug at a new address: serial-first
+    //    keys are stable across replugs) -> refresh that slot IN PLACE, so the
+    //    first-match resolvers find the live address at the same index and keyed
+    //    devices can never accumulate duplicates. Publication: tombstone the slot,
+    //    fence, rewrite, fence, un-tombstone -- readers skip it while it is torn.
+    // 3) Else recycle any dead slot, same discipline -- replug churn can no longer
+    //    fill the 4-slot array.
+    // 4) Else append, exactly as before (fence, then count bump publishes it).
+    int slot = -1;
+    for (uint8_t i = 0; i < s_serDevN; ++i)
+      if (strcmp(s_serDev[i].key, key) == 0) { slot = i; break; }
+    if (slot < 0)
+      for (uint8_t i = 0; i < s_serDevN; ++i)
+        if (s_serDev[i].dead) { slot = i; break; }
+    if (slot < 0) {
+      if (s_serDevN >= (uint8_t)(sizeof(s_serDev) / sizeof(s_serDev[0]))) return;  // full
+      slot = s_serDevN;
+    }
+    SerialDev& e = s_serDev[slot];
+    const bool inPlace = (slot < s_serDevN);
+    if (inPlace) { e.dead = 1; std::atomic_thread_fence(std::memory_order_release); }
     e.address = d.address; e.vid = d.vid; e.pid = d.pid;
     snprintf(e.label, sizeof(e.label), "#%u %s %s %04x:%04x",   // address-first: see s_dev
              (unsigned)d.address,
              (d.manufacturer && *d.manufacturer) ? d.manufacturer : "USB",
              (d.product && *d.product) ? d.product : "serial",
              (unsigned)d.vid, (unsigned)d.pid);
-    makeKey(e.key, sizeof(e.key), d);
-    std::atomic_thread_fence(std::memory_order_release);   // entry complete before it is counted
-    s_serDevN++;
+    memcpy(e.key, key, sizeof(e.key));
+    if (!inPlace) e.dead = 0;   // append into a recycled index: the slot may carry a stale
+                                // tombstone from before the registry reset; a dead append
+                                // would publish an entry no resolver can see
+    std::atomic_thread_fence(std::memory_order_release);   // entry complete before it is published
+    if (inPlace) e.dead = 0;                               // republish the refreshed slot
+    else         s_serDevN++;                              // append: the count publishes it
     s_lastDevMs = millis();
+  }
+
+  // Device gone (finding A): tombstone its registry entry so no resolver can bind
+  // the dead address. Runs on the host task; a single byte store, same discipline
+  // as onDev(). The slot itself is recycled by the next insert.
+  void onGone(const EspUsbHostDeviceInfo& d) {
+    for (uint8_t i = 0; i < s_serDevN; ++i)
+      if (s_serDev[i].address == d.address) s_serDev[i].dead = 1;
   }
 
   void consoleDown() {
@@ -409,8 +522,53 @@ namespace {
   // in-flight transfers, so deleting the object would be a use-after-free and
   // restoring the console would claim the PHY before release is confirmed. Retain,
   // latch reboot-required, stay quiet.
+  // RESIDENT HOST BETWEEN ENGAGES (0.9.70).
+  //
+  // Detaching the last port no longer uninstalls the USB host stack. The host is kept
+  // installed and the device stays ENUMERATED; only the CDC port is detached. A full
+  // release happens when the operator explicitly asks for it (releaseHostNow(), the
+  // "Release USB" action), or when the device physically disconnects.
+  //
+  // WHY, measured on a TH-D75 and not guessed:
+  //   * Re-engaging after a full teardown re-enumerates the radio. Enumeration,
+  //     descriptor walk, CDC bind and DTR/RTS ALL succeed -- and the radio then
+  //     accepts exactly TWO bulk-OUT packets (a double-buffered endpoint FIFO) and
+  //     NAKs everything after. Its USB hardware is fine; its CAT application never
+  //     comes back after re-enumeration, so nothing drains the endpoint. Waiting 1
+  //     minute and 5 minutes did not help, so it is not a settle-time problem.
+  //   * The same radio survives close/reopen indefinitely on a Mac (6/6 cycles),
+  //     because closing a port there does NOT re-enumerate the device. Keeping the
+  //     host resident reproduces exactly that, which is the whole point.
+  //   * Switching the radio OFF still works as the operator expects: that physically
+  //     disconnects the device, and powering it back on re-enumerates it from cold,
+  //     which restarts the radio's CAT application -- the case the D75 handles fine.
+  //
+  // This applies to EVERY USB path -- CAT-A, CAT-B and the rotator -- deliberately.
+  // Nothing about the failure is specific to a radio or to this model; any device
+  // whose firmware does not re-initialise on re-enumeration would behave the same,
+  // and this function is the one choke point all three paths already share.
+  //
+  // The teardown itself is NOT abandoned and is not broken: it was fixed and confirmed
+  // on hardware (five consecutive cycles, every byte of heap returned). It is simply
+  // no longer run on every disengage, because doing so costs the device its session.
   void releaseHostIfIdle() {
+    if (s_keepHostResident) return;             // explicit release only
+    releaseHostNow();
+  }
+
+  // The unconditional release. Used by releaseHostIfIdle() when residency is off, and
+  // by the operator-facing "Release USB" action.
+  void releaseHostNow() {
     if (!s_host || s_cdc || s_cdc2 || s_rotCdc) return;   // someone still owns it
+    // Bring the bus to rest BEFORE tearing down. A bulk IN transfer is always
+    // outstanding on a device that is not talking (the read pump re-arms instantly),
+    // and an outstanding transfer is what makes usb_host_client_deregister() refuse
+    // with 259 -- which strands the whole stack until a reboot. quiesce() stops the
+    // pump, cancels what is in flight and waits for the completion while the tasks
+    // are still healthy, which is the state the SUCCESSFUL teardowns were measured
+    // in. Its return is advisory; end() runs either way.
+    s_host->quiesce();
+    s_host->clearLastError();   // sticky lastError_ would fake a wedge -- see the note at the disengage site
     s_host->end();                              // 2.4.1+: drain, deregister, uninstall
     if (s_host->lastError() == ESP_ERR_TIMEOUT) {
       s_hostTeardownStuck = true;
@@ -423,11 +581,34 @@ namespace {
   }
 }
 
+// Operator-facing full release. The host normally stays installed between engages so
+// the device keeps its session (see releaseHostIfIdle); this is the way to actually
+// give the PHY back -- which also restores the serial console.
+void releaseUsbNow() {
+  if (s_cdc || s_cdc2 || s_rotCdc) return;      // a port is still open; not idle yet
+  releaseHostNow();
+}
+
+// True when the host is installed but nothing is bound: resident, and releasable.
+bool usbHostResident() {
+  return s_host && !s_cdc && !s_cdc2 && !s_rotCdc;
+}
+
 bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   if (s_active) return s_bound;
-  // M2: a prior teardown timed out with tasks still alive. Re-engaging over that would race
-  // the live tasks and usb_host_install() would refuse (259). Refuse cleanly until a reboot.
-  if (s_hostTeardownStuck) { setErr("USB host stuck - reboot to reuse USB"); return false; }
+  // M2: a prior teardown timed out with tasks still alive. That WAS an unconditional
+  // refuse-until-reboot. It is now one retry, for the same reasons as the
+  // s_hostReleased gate below: the verdict that set this flag was frequently a false
+  // positive (sticky lastError), and even a real timeout may have completed in the
+  // seconds before the operator tried again. usb_host_install() refuses over a live
+  // stack and reports 259 on its own, so let the hardware answer rather than a latch
+  // set a minute ago. If it does fail, the flag is re-set and the message says the
+  // retry was already spent.
+  if (s_hostTeardownStuck) {
+    rotTrace("cat: prior teardown timed out - attempting anyway (one retry)");
+    s_hostTeardownStuck = false;
+    s_retryAfterStuck = true;
+  }
   s_err[0] = 0; s_dev[0] = 0; s_sawDev = false;
 
   // ---- Reuse a live host, or build one the first time --------------------------
@@ -445,7 +626,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // drops the CAT port (and releases the host only if no rotator owns it), leaving a clean
     // not-active state so the next engage starts fresh instead of seeing a poisoned s_cdc.
     auto rollbackCat = [&]() {
-      if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
+      if (s_cdc) { cdcClosePort(s_cdc); s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
       releaseHostIfIdle();   // M2-safe: retains the host if end() times out
       s_active = false; s_bound = false; s_catAddress = 0xff;
       stage(USBCAT_STAGE_NONE);
@@ -468,6 +649,13 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     stage(USBCAT_STAGE_BIND_DTR);  s_cdc->setDtr(true);
     stage(USBCAT_STAGE_BIND_RTS);  s_cdc->setRts(true);
     stage(USBCAT_STAGE_BIND_DONE);
+    // Bounded wait, as everywhere else post-setAddress (finding B): after a re-pin
+    // to a replugged adapter the CDC interface can still be coming up, and
+    // connected() is specific to the address just set.
+    {
+      const uint32_t t0 = millis();
+      while (millis() - t0 < 2500 && !s_cdc->connected()) delay(20);
+    }
     if (!s_cdc->connected()) { setErr("No USB device detected"); rollbackCat(); return false; }
     s_active = true; s_bound = true;
     stage(USBCAT_STAGE_NONE);
@@ -483,9 +671,23 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   // "USB stack wedged - reboot before re-engage" on a rebindable host was this
   // check sitting above the fast path and refusing an engage that would have
   // worked.
+  // RECOVERABLE, NOT TERMINAL. This used to refuse outright and demand a reboot,
+  // which punished the operator twice: the radio did not work AND the device had to
+  // be power-cycled to try anything at all. Two bench facts made that indefensible:
+  // the "stuck" verdict came from a STICKY lastError and was often wrong (see the
+  // clearLastError work), and even a genuinely incomplete teardown may have finished
+  // by the time the operator tries again seconds later.
+  //
+  // So ATTEMPT the engage and let it fail on its own evidence. begin() below refuses
+  // to install over a live stack and reports 259, which is a real answer from the
+  // hardware rather than a latch we set earlier. The latch is kept only to make the
+  // message specific on the SECOND consecutive failure, and is cleared the moment an
+  // engage succeeds. Worst case the operator retries and gets a clear error; best
+  // case -- and the bench shows this happens -- it simply works.
   if (!s_hostReleased) {
-    setErr("USB stack wedged - reboot before re-engage");
-    return false;
+    rotTrace("cat: previous teardown was incomplete - attempting anyway");
+    s_hostReleased = true;          // spend the latch on this attempt
+    s_retryAfterStuck = true;       // so a failure here can say so precisely
   }
 
   stage(USBCAT_STAGE_ALLOC);
@@ -523,8 +725,9 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   // host's enumeration. Without this, entries from a prior host session survive (stale
   // addresses/keys), and a device given a reused address could be rejected as a duplicate
   // or a scan could return devices that are no longer attached.
-  s_serDevN = 0; s_sawDev = false;
+  s_serDevN = 0; s_sawDev = false; s_sawHub = false;
   s_host->onDeviceConnected(&onDev);   // records the device AND the adapter list
+  s_host->onDeviceDisconnected(&onGone);  // finding A: tombstone on unplug
 
   // Order matters. The console must go down BEFORE the host claims the PHY (they
   // share it), but everything that can fail should be able to REPORT the failure,
@@ -601,6 +804,21 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // and 2.4.1+'s begin() refuses to start over an incomplete shutdown rather than
     // returning 259 mid-operation. The daemon has already observed running_ = false by
     // this point; if install never happened, end() early-returns harmlessly.
+    // lastError_ is STICKY (cleared only in begin()), so a timeout from ANY earlier
+    // point in the session -- a bulk OUT the radio never drained, a control transfer
+    // it ignored -- would still be reported here and make a clean release look like a
+    // wedge. Bench-proven: teardowns completing in ~1080 ms, well inside end()'s own
+    // 3000 ms and the client's 2500 ms waits, were still reported "reboot needed".
+    // Clear first, so the test below can only see a timeout raised BY end().
+    // Bring the bus to rest BEFORE tearing down. A bulk IN transfer is always
+    // outstanding on a device that is not talking (the read pump re-arms instantly),
+    // and an outstanding transfer is what makes usb_host_client_deregister() refuse
+    // with 259 -- which strands the whole stack until a reboot. quiesce() stops the
+    // pump, cancels what is in flight and waits for the completion while the tasks
+    // are still healthy, which is the state the SUCCESSFUL teardowns were measured
+    // in. Its return is advisory; end() runs either way.
+    s_host->quiesce();
+    s_host->clearLastError();
     s_host->end();
     const bool freed = (s_host->lastError() != ESP_ERR_TIMEOUT);
     delete s_cdc;  s_cdc  = nullptr;
@@ -613,7 +831,9 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
       // We could not release the stack, so a re-engage would just hit 259 again.
       // Latch it (s_hostReleased is false) and say so plainly rather than letting
       // the operator retry into the same wall.
-      setErr("USB stack stuck installed - reboot before re-engage");
+      setErr(s_retryAfterStuck
+               ? "USB stack still held after retry - reboot to clear"
+               : "USB stack stuck installed - retry, or reboot if it persists");
       stage(USBCAT_STAGE_NONE);
       return false;
     }
@@ -637,7 +857,9 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   // its own FreeRTOS task, so this is a bounded wait on it, not a busy poll.
   stage(USBCAT_STAGE_ENUM_WAIT);
   const uint32_t t0 = millis();                        // wrap-clean uint32 subtraction,
-  while (millis() - t0 < 2500 && !s_cdc->connected()) { // same idiom as the perf loop
+  // enumCapMs(), not a flat 2500: behind a hub the adapter enumerates AFTER the hub
+  // and its siblings, which a fixed cap can easily expire before.
+  while (millis() - t0 < enumCapMs() && !s_cdc->connected()) {
     delay(20);
     // Feed the TWDT user during the LEGITIMATE wait. The TWDT timeout is 5 s
     // (IDF default; Arduino does not override it) and this span plus the host's
@@ -676,7 +898,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     // a device that never existed. Release it; a later retry pays a one-off ~1 s
     // re-allocation, which is the right price for not leaking on the failure case.
     disarmFreezeWatchdog();
-    if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
+    if (s_cdc) { cdcClosePort(s_cdc); s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
     releaseHostIfIdle();               // no-op if a USB rotator still holds the host
     s_active = false; s_bound = false; s_catAddress = 0xff;
     setErr(msg);
@@ -708,7 +930,7 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
       // active() check) and the freeze watchdog armed (able to reboot a later healthy op).
       // Fully unwind: disarm, drop the port, release the host if no rotator owns it.
       disarmFreezeWatchdog();
-      if (s_cdc) { s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
+      if (s_cdc) { cdcClosePort(s_cdc); s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
       releaseHostIfIdle();   // M2-safe: retains the host if end() times out
       s_active = false; s_bound = false; s_catAddress = 0xff;
       stage(USBCAT_STAGE_NONE);
@@ -734,7 +956,36 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
   s_cdc->setRts(true);
   stage(USBCAT_STAGE_BIND_DONE);
 
+  // ---- Verify the PICKED address actually came up (audit finding B) -------------
+  // The enum wait above proved connected() at ANY_ADDRESS -- i.e. "the FIRST
+  // enumerated adapter is ready". setAddress() re-pointed the port at the PICKED
+  // adapter, and connected() is address-specific (serialReady(address_) in the
+  // library), so that earlier proof says nothing about THIS address. When the
+  // nominated adapter is the slower of two, or its registry entry is stale after a
+  // replug, the old code set s_bound=true on a port whose connected() was false --
+  // "engaged" with every Doppler write silently going nowhere. cat2Begin() and
+  // rotBegin() have always done this bounded wait after setAddress; this was the
+  // one surface missing it.
+  {
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 2500 && !s_cdc->connected()) {
+      delay(20);
+      feedFreezeWatchdog();
+    }
+  }
+  if (!s_cdc->connected()) {
+    disarmFreezeWatchdog();
+    if (s_cdc) { cdcClosePort(s_cdc); s_cdc->end(); delete s_cdc; s_cdc = nullptr; }
+    releaseHostIfIdle();               // M2-safe; no-op while the rotator/CAT-B own it
+    s_active = false; s_bound = false; s_catAddress = 0xff;
+    setErr("Radio adapter not responding");
+    stage(USBCAT_STAGE_NONE);
+    return false;
+  }
+
   s_bound = true;
+  s_retryAfterStuck = false;           // engage succeeded: the previous wedge is history
+  s_hostTeardownStuck = false;         // and the stack is demonstrably usable again
   disarmFreezeWatchdog();              // healthy: never let it reboot a live radio
   stage(USBCAT_STAGE_NONE);            // reached the end: clear the breadcrumb
   return true;
@@ -768,7 +1019,7 @@ void end() {
   // protects a re-engage from racing an incomplete shutdown, which is the wedge s_hostReleased
   // used to guard by hand; we keep s_hostReleased as a belt-and-suspenders latch anyway.
   stage(USBCAT_STAGE_END_CDC);
-  if (s_cdc) s_cdc->end();     // detach the CDC port first
+  if (s_cdc) { cdcClosePort(s_cdc); s_cdc->end(); }   // close, then detach
   delete s_cdc;  s_cdc  = nullptr;
 
   // The host is SHARED with the USB rotator. Only tear it down when no port remains --
@@ -777,7 +1028,19 @@ void end() {
   // guard is load-bearing, not just defensive: with the rotator still up, CAT disengage
   // must leave the host (and thus the rotator's port) running.
   stage(USBCAT_STAGE_END_HOST);
-  if (s_host && !s_rotCdc && !s_cdc2) {
+  // RESIDENT BY DEFAULT: the port is detached above, but the host stays installed and
+  // the device stays enumerated, so a re-engage does not cost the device its session.
+  // See releaseHostIfIdle() for the measurements behind this.
+  if (s_host && !s_rotCdc && !s_cdc2 && !s_keepHostResident) {
+    // Bring the bus to rest BEFORE tearing down. A bulk IN transfer is always
+    // outstanding on a device that is not talking (the read pump re-arms instantly),
+    // and an outstanding transfer is what makes usb_host_client_deregister() refuse
+    // with 259 -- which strands the whole stack until a reboot. quiesce() stops the
+    // pump, cancels what is in flight and waits for the completion while the tasks
+    // are still healthy, which is the state the SUCCESSFUL teardowns were measured
+    // in. Its return is advisory; end() runs either way.
+    s_host->quiesce();
+    s_host->clearLastError();   // sticky lastError_ would fake a wedge -- see the note at the disengage site
     s_host->end();             // 2.4.1+: drains client, deregisters, uninstalls, frees
     // M2: end() can TIME OUT (3 s) and, per the library, leave its tasks alive rather than
     // free in-flight transfers. Deleting the object then would be a use-after-free, and
@@ -895,12 +1158,19 @@ namespace {
   // (see end()/rotEnd()), not held for the whole session.
   bool hostUpForRotator() {
     if (s_host) return true;                    // already up (CAT, or a prior rotator)
-    if (s_hostTeardownStuck) return false;      // M2: prior teardown timed out; reboot needed
+    if (s_hostTeardownStuck) {                 // M2: prior teardown timed out.
+      // One retry, same rationale as begin(): let usb_host_install() decide rather
+      // than a latch. The rotator is the likelier path to be left stuck, because it
+      // is engaged and released far more often than CAT.
+      rotTrace("rot: prior teardown timed out - attempting anyway (one retry)");
+      s_hostTeardownStuck = false;
+    }
     if (!s_hostReleased) return false;          // a failed engage left a stack installed
     s_host = new (std::nothrow) EspUsbHost;
     if (!s_host) return false;
-    s_serDevN = 0; s_sawDev = false;            // fresh host: clear stale adapter registry
+    s_serDevN = 0; s_sawDev = false; s_sawHub = false;   // fresh host: clear the registry
     s_host->onDeviceConnected(&onDev);          // same tracking as CAT
+    s_host->onDeviceDisconnected(&onGone);      // finding A: tombstone on unplug
     consoleDown();                              // the host is about to claim the PHY
     EspUsbHostConfig hostCfg;
     hostCfg.taskCore = 0;
@@ -908,6 +1178,18 @@ namespace {
     if (!s_host->begin(hostCfg)) {
       const int e = s_host->lastError();
       s_host->end();            // 2.4.1+: daemon runs its own ALL_FREE uninstall
+      // M2 (audit finding C): end() can TIME OUT and leave the library's tasks
+      // alive. Deleting the host then is a use-after-free, and consoleUp() would
+      // reclaim the PHY under tasks that still hold it. Every other teardown site
+      // already checks this; this path -- reachable from rotator-only, CAT-B-first
+      // and scanAdapters() engages -- was the one that did not. Same rule as
+      // end()/rotEnd(): retain the object, latch reboot-required, console stays down.
+      if (s_host->lastError() == ESP_ERR_TIMEOUT) {
+        s_hostTeardownStuck = true;
+        s_hostReleased = false;
+        setRotErr("USB host stuck - reboot to reuse USB");
+        return false;          // do NOT delete s_host, do NOT consoleUp()
+      }
       delete s_host; s_host = nullptr;
       consoleUp();
       char m[64]; snprintf(m, sizeof(m), "USB host would not start (err %d)", e);
@@ -920,12 +1202,16 @@ namespace {
     // a USB rotator, especially through a hub where the devices come up
     // staggered). Wait instead for a QUIET PERIOD: keep going until nothing new
     // has appeared for a while, bounded by the same overall cap as before.
+    // Hub-aware settle. The budgets widen the moment a hub is seen (see enumCapMs),
+    // and "settled" requires at least one NON-HUB device: a hub alone is never the
+    // thing we are looking for, and treating its arrival as the end of enumeration
+    // is exactly what hid every downstream adapter.
     const uint32_t t0 = millis();
-    const uint32_t QUIET_MS = 400;
-    while (millis() - t0 < 2500) {
+    while (millis() - t0 < enumCapMs()) {
       delay(25);
-      if (s_serDevN == 0) continue;                       // nothing yet: keep waiting
-      if (millis() - s_lastDevMs >= QUIET_MS) break;      // settled
+      feedFreezeWatchdog();
+      if (s_serDevN == 0) continue;                          // no adapter yet: keep waiting
+      if (millis() - s_lastDevMs >= enumQuietMs()) break;     // settled
     }
     return true;
   }
@@ -950,7 +1236,17 @@ bool cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits
   // the line settings, the caller must cat2End() first -- which App::usbCatTeardown()
   // does on every settings re-apply. (0.9.68 shipped without that teardown, so a
   // baud/model/adapter change on the uplink leg silently kept the old session.)
-  if (s_cat2Active && s_cdc2) return true;
+  //
+  // But "open" must mean ALIVE (audit minor 2): if the adapter was unplugged while
+  // engaged, the port object exists and connected() is false -- returning success
+  // here made a settings re-apply claim a working uplink over a dead wire. Drop the
+  // dead port and fall through to a fresh bind instead: with the finding-A registry
+  // the replugged adapter's slot already carries its new address, so the rebind is
+  // exactly the recovery the operator expects from "apply settings again".
+  if (s_cat2Active && s_cdc2) {
+    if (s_cdc2->connected()) return true;
+    cat2End();                 // releaseHostIfIdle() inside is a no-op while CAT-A/rot own it
+  }
   s_cat2Err[0] = 0;
   if (!s_host) {
     // Order of engaging the two CAT ports must not matter (same rule as the
@@ -991,7 +1287,7 @@ bool cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits
   }
   if (!s_cdc2->connected()) {
     delete s_cdc2; s_cdc2 = nullptr; s_cat2Address = 0xff;
-    setErr2("2nd radio adapter not responding");
+    setErr2("2nd adapter not responding");
     releaseHostIfIdle();
     return false;
   }
@@ -1001,7 +1297,7 @@ bool cat2Begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits
 }
 
 void cat2End() {
-  if (s_cdc2) { s_cdc2->end(); delete s_cdc2; s_cdc2 = nullptr; }
+  if (s_cdc2) { cdcClosePort(s_cdc2); s_cdc2->end(); delete s_cdc2; s_cdc2 = nullptr; }
   s_cat2Active = false;
   s_cat2Address = 0xff;
   s_cat2Dev[0] = 0;
@@ -1029,16 +1325,24 @@ uint8_t scanAdapters() {
     // 96 clipped the KEY on long adapter names -- and the key is the one field
     // the operator must copy into Settings. 160 covers label(48) + key(40) + framing.
     char b[160];
-    snprintf(b, sizeof(b), "scan: adapter[%u] addr=%u %s key=%s",
-             (unsigned)i, (unsigned)s_serDev[i].address, s_serDev[i].label, s_serDev[i].key);
+    snprintf(b, sizeof(b), "scan: adapter[%u]%s addr=%u %s key=%s",
+             (unsigned)i, s_serDev[i].dead ? " (unplugged)" : "",
+             (unsigned)s_serDev[i].address, s_serDev[i].label, s_serDev[i].key);
     rotTrace(b);
   }
-  if (s_serDevN == 0) rotTrace("scan: no adapters found");
+  if (s_sawHub) rotTrace("scan: hub present - extended enumeration window used");
+  if (s_serDevN == 0)
+    rotTrace(s_sawHub ? "scan: hub seen but NO adapters behind it"
+                      : "scan: no adapters found");
   // A scan is a TEMPORARY owner: if neither CAT nor the rotator has a bound port, the host
   // was brought up solely to enumerate, so release it now rather than holding ~11.8 KB and
   // the console for the rest of the session. If either port is live (a scan while engaged),
   // leave the host up -- it belongs to that owner.
-  if (s_host && !s_cdc && !s_rotCdc) {
+  // The exclusion set must cover ALL THREE ports (the s_cdc2 check was missing --
+  // it predated CAT-B). releaseHostIfIdle() always enforced the full set itself,
+  // so nothing ever released wrongly; but the trace below claimed "releasing" while
+  // CAT-B alone held the host, and a log that lies is worse than no log.
+  if (s_host && !s_cdc && !s_cdc2 && !s_rotCdc) {
     rotTrace("scan: releasing temporary host");
     releaseHostIfIdle();       // M2-safe; restores the console when the PHY is really free
   }
@@ -1065,13 +1369,14 @@ int catPickAdapter() {
     // missing. Order of engaging radio vs rotator must not matter.
     waitForAdapterKey(s_catWantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
-      if (strcmp(s_serDev[i].key, s_catWantKey) == 0) { pick = i; break; }
+      if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_catWantKey) == 0) { pick = i; break; }
     if (pick < 0) { setErr("Radio adapter not found (replug/re-select)"); return -1; }
   } else {
     // No nominated adapter: take the first one neither the ROTATOR nor CAT-B is
     // using. With a single adapter and another port on it, that leaves none --
     // which is the honest answer, not a silent double-bind.
     for (uint8_t i = 0; i < s_serDevN; ++i) {
+      if (s_serDev[i].dead) continue;                       // finding A
       if (rotActive() && s_serDev[i].address == s_rotAddress) continue;
       if (s_cdc2 && s_serDev[i].address == s_cat2Address) continue;
       pick = i; break;
@@ -1102,11 +1407,12 @@ int cat2PickAdapter() {
   if (s_cat2WantKey[0]) {
     waitForAdapterKey(s_cat2WantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
-      if (strcmp(s_serDev[i].key, s_cat2WantKey) == 0) { pick = i; break; }
-    if (pick < 0) { setErr2("2nd radio adapter not found (replug/re-select)"); return -1; }
+      if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_cat2WantKey) == 0) { pick = i; break; }
+    if (pick < 0) { setErr2("2nd adapter not found (replug)"); return -1; }
   } else {
     int free = -1, freeN = 0;
     for (uint8_t i = 0; i < s_serDevN; ++i) {
+      if (s_serDev[i].dead) continue;                       // finding A
       if (s_active && s_cdc && s_serDev[i].address == s_catAddress) continue;
       if (rotActive() && s_serDev[i].address == s_rotAddress) continue;
       free = i; freeN++;
@@ -1140,7 +1446,7 @@ bool waitForAdapterKey(const char* key, uint32_t ms) {
   const uint32_t t0 = millis();
   for (;;) {
     for (uint8_t i = 0; i < s_serDevN; ++i)
-      if (strcmp(s_serDev[i].key, key) == 0) return true;
+      if (!s_serDev[i].dead && strcmp(s_serDev[i].key, key) == 0) return true;
     if (millis() - t0 >= ms) return false;
     delay(25);
     feedFreezeWatchdog();
@@ -1168,8 +1474,9 @@ bool rotBegin() {
     // 96 clipped the KEY on long adapter names -- and the key is the one field
     // the operator must copy into Settings. 160 covers label(48) + key(40) + framing.
     char b[160];
-    snprintf(b, sizeof(b), "rot: adapter[%u] addr=%u %s key=%s",
-             (unsigned)i, (unsigned)s_serDev[i].address, s_serDev[i].label, s_serDev[i].key);
+    snprintf(b, sizeof(b), "rot: adapter[%u]%s addr=%u %s key=%s",
+             (unsigned)i, s_serDev[i].dead ? " (unplugged)" : "",
+             (unsigned)s_serDev[i].address, s_serDev[i].label, s_serDev[i].key);
     rotTrace(b);
   }
   if (s_serDevN == 0) rotTrace("rot: NO adapters enumerated");
@@ -1190,7 +1497,7 @@ bool rotBegin() {
     // this specific key before deciding it's missing -- order must not matter.
     waitForAdapterKey(s_rotWantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
-      if (strcmp(s_serDev[i].key, s_rotWantKey) == 0) { pick = i; break; }
+      if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_rotWantKey) == 0) { pick = i; break; }
     if (pick < 0) {
       setRotErr("Rotator adapter not found (replug/re-select)");
       char b[96]; snprintf(b, sizeof(b), "rot: want key=%s but no adapter matches", s_rotWantKey);
@@ -1210,6 +1517,7 @@ bool rotBegin() {
     // radio's", which sends the operator hunting for a setting to change instead
     // of for a second adapter to plug in.
     for (uint8_t i = 0; i < s_serDevN; ++i) {
+      if (s_serDev[i].dead) continue;                       // finding A
       if (s_active && s_cdc && s_serDev[i].address == s_catAddress) continue;
       if (s_cdc2 && s_serDev[i].address == s_cat2Address) continue;
       pick = i; break;
@@ -1284,26 +1592,19 @@ bool rotBegin() {
 }
 
 void rotEnd() {
-  if (s_rotCdc) { rotTrace("rot: releasing port"); s_rotCdc->end(); delete s_rotCdc; s_rotCdc = nullptr; }
+  if (s_rotCdc) { rotTrace("rot: releasing port"); cdcClosePort(s_rotCdc); s_rotCdc->end(); delete s_rotCdc; s_rotCdc = nullptr; }
   s_rotActive = false;
   s_rotAddress = 0xff;
   s_rotDev[0] = 0;
-  // Shared host: tear it down only when neither CAT port still uses it (symmetric with end()).
-  if (s_host && !s_cdc && !s_cdc2) {
-    rotTrace("rot: releasing host");
-    s_host->end();             // 2.4.1+: full drain/deregister/uninstall
-    // M2: same timeout handling as end() -- on a stuck teardown, retain the host, latch
-    // reboot-required, and leave the console down rather than deleting under live tasks.
-    if (s_host->lastError() == ESP_ERR_TIMEOUT) {
-      rotTrace("rot: host teardown TIMED OUT - reboot needed");
-      s_hostTeardownStuck = true;
-      s_hostReleased = false;
-      return;                  // do NOT delete s_host, do NOT consoleUp()
-    }
-    delete s_host; s_host = nullptr;
-    s_hostReleased = true;
-    consoleUp();               // host released the PHY -> serial console can return
-  }
+  // Route through the SHARED choke point rather than open-coding a second teardown.
+  // This block used to duplicate releaseHostIfIdle()'s logic, which meant the rotator
+  // silently missed every fix the CAT path received -- the quiesce, the sticky-error
+  // clear, and now host residency. The rotator is exactly as likely as a radio to be
+  // a device that will not re-initialise after re-enumeration, so it gets the same
+  // treatment by construction instead of by remembering to copy changes across.
+  rotTrace(s_keepHostResident ? "rot: port released (host stays resident)"
+                              : "rot: releasing host");
+  releaseHostIfIdle();
 }
 
 bool     hostReleased()           { return s_hostReleased; }

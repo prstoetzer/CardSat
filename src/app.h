@@ -25,7 +25,7 @@ enum Screen : uint8_t {
   SCR_CALEXPORT,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICREF, SCR_PERF,
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_PERF,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
   SCR_KESSLER, SCR_QTHPRE,
   // "Nearby & DX" hub and its live terrestrial feeds. These are fetch-and-browse views
@@ -1313,6 +1313,22 @@ private:
   // CDC, an adapter and the USB host (so the console never returned), and a
   // re-engage reused the stale port instead of applying the new line settings.
   void        usbCatTeardown();
+#if CARDSAT_USB_DIAG
+  // ---- USB diagnostic capture (DIAGNOSTIC BUILDS ONLY) --------------------------
+  // The interesting ESP_LOG lines (which CDC interfaces were latched, whether an
+  // audio isochronous endpoint was claimed, IDF host errors) are emitted the moment
+  // USB host takes the PHY -- which is exactly when the serial console disappears.
+  // So they are captured into RAM by an esp_log vprintf hook and drained to the SD
+  // log from the MAIN LOOP. The hook itself must never touch the filesystem:
+  // Logstore::raw() does blocking I/O and the hook runs on the USB host task.
+  //
+  // Fills and STOPS rather than overwriting: enumeration happens first and is what
+  // we are trying to read, so old bytes are worth more than new ones here. Dropped
+  // bytes are counted and reported so a truncated capture is never mistaken for a
+  // complete one.
+  static void usbDiagInstall();          // install hook + set log levels (setup)
+  void        usbDiagDrain();            // main loop: move captured text to the log
+#endif
   bool        catUsesGroveWire() const {
     if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE) return true;
     // Only a leg with a radio assigned claims the wire (see the engage guard).
@@ -1471,7 +1487,14 @@ private:
   void  retagTones(uint32_t norad);                  // re-apply override/table to activeTx
   void startGps();                         // (re)open GPS per cfg.gpsSource
   void factoryReset();                     // wipe LittleFS + reboot to defaults
-  void setStatus(const String& s, uint32_t ms = 2500);
+  // Status severity: the bar's fill color, so the operator triages BEFORE reading
+  // -- which matters at 39 columns, where reading is the whole cost. INFO keeps the
+  // long-standing dark green; WARN is black-on-amber; ERR (refusals, failures,
+  // armed-destructive outcomes) is white-on-dark-red. Severity does not change
+  // duration -- an ERR the operator missed should not linger into the next action.
+  enum StatusSev : uint8_t { SEV_INFO = 0, SEV_WARN, SEV_ERR };
+  void setStatus(const String& s, uint32_t ms = 2500, StatusSev sev = SEV_INFO);
+  StatusSev statusSev = SEV_INFO;
   time_t nowUtc();
   SatEntry* activeSat();
   bool ensureTransponders(SatEntry& s);   // load (cache or net)
@@ -1545,6 +1568,15 @@ private:
   int      saaScroll = 0;           // window-list viewport
   ZoneWin  saaWin[16];              // upcoming transit windows
   int      saaWinN = 0;
+  // Accumulated dwell over the scanned window, normalised. This is the number a
+  // CubeSat or telemetry operator actually wants from a zone tool -- not "when is
+  // the next transit" but "how much of its life does this satellite spend in
+  // there" (SAA minutes per day for SEU budgeting, belt fraction for dose). It is
+  // a pure summary of the scan the transit list already runs, so it costs nothing
+  // extra to compute. Derived from the same refined edges; the scan window is 3-36
+  // hours, so per-day figures are a normalisation, not an extrapolation claim.
+  float    saaDwellMinDay = 0;      // minutes per day inside the zone
+  float    saaDwellPct = 0;         // % of the scanned window inside
   bool     saaInNow = false;        // in the selected zone right now
   double   saaCurL = 0;             // current L-shell (for the status line)
   double   saaCurBR = 1;            // current B/B0 -- displacement from the shell's
@@ -1832,6 +1864,32 @@ private:
   void drawBasicRun(); void keyBasicRun(char c, bool enter, bool back);
   void basicInit();                 // open the editor (seed a sample on first use)
   void basicRun();           // execute basicBuf -> basicOut / basicErr
+  // Shared system snapshot. sysPtr is a BasicSys* -- void* because BasicSys is
+  // deliberately file-scope in app.cpp and must not be nameable from a header.
+  void basicFillSys(void* sysPtr);
+
+  // ---- BASIC immediate mode (SCR_BASICIMM) --------------------------------------
+  // A direct-mode prompt: type one line, it runs at once, and variables persist
+  // between lines. This reuses the interpreter completely unchanged -- BasicVM's
+  // execLine() IS this primitive, and run() is only a loop over it across the
+  // program's line table -- so expressions, statements, SYS names, host hooks and
+  // error text are identical to a program's. Statements that need a program to
+  // mean anything (GOTO/GOSUB/RETURN/DATA/READ/RESTORE) are refused with a message
+  // rather than half-working.
+  //
+  // basImmVm is a void* for the same reason as basicFillSys: it is a BasicVM* and
+  // nothing else. The VM is ~3.8 KB and lives only while the prompt is open (its
+  // line table goes unused here); basImmClose() releases it, and the BASIC
+  // screen-transition hook in loop() calls that on every way out.
+  void*  basImmVm = nullptr;
+  String basImmLog;                 // scrollback; released by basImmClose()
+  String basImmLine;                // the line being typed
+  String basImmPrev;                // previous line, recalled with Fn+r
+  int    basImmScroll = 0;
+  void   drawBasicImm(); void keyBasicImm(char c, bool enter, bool back);
+  bool   basImmOpen();              // allocate the resident VM (false = no memory)
+  void   basImmClose();             // free the VM and the buffers
+  void   basImmExec();              // execute basImmLine into basImmLog
   void basicFree();          // release the BASIC output buffer when leaving the tool
   void memoFree();           // release the voice-memo list when leaving its screen
   void drawPerf(); void keyPerf(char c, bool enter, bool back);   // performance monitor
@@ -1852,7 +1910,19 @@ private:
   // transponders; lpr streams LPRINT lines to the configured report sinks (opened
   // lazily, closed after the run); gfx draws BASIC's CLS/PSET/LINE/CIRCLE/TEXT/SHOW on
   // the canvas; file is the Settings-gated /CardSat/basic/ append writer + FILES lister.
-  static bool basHookSatsel(void* self, int idx, double out[13]);
+  static bool basHookSatsel(void* self, int idx, double out[14]);
+  // BASIC's own transponder view. A program may select ANY catalogued satellite with
+  // SATSEL, so TXSEL must not read activeTx[] -- that holds whatever the OPERATOR
+  // was tracking, which silently returned the wrong satellite's transponder. This
+  // buffer is loaded for the satellite BASIC chose, allocated on demand (5 KB) and
+  // only when a program actually crosses to a satellite other than the tracked one;
+  // it is released with the rest of the BASIC state.
+  Transponder* basTx = nullptr;
+  int          basTxN = 0;
+  uint32_t     basTxNorad = 0;          // 0 = "use the operator's activeTx[]"
+  int          basTxLoad(uint32_t norad);   // fill basTx for this norad; returns count
+  void         basTxFree();
+  void         basicFreeTx();       // called alongside basicFree() on every BASIC exit
   static bool basHookTxsel(void* self, int idx, double out[5]);
   static bool basHookLpr(void* self, const char* line, int op);
   static void basHookGfx(void* self, int op, double a, double b, double c, double d,
@@ -2686,7 +2756,7 @@ private:
   enum PrintReport { PR_PASSES, PR_ROVE, PR_TICKET, PR_HORIZON, PR_SATCARD, PR_LOG, PR_KEPS,
                      PR_AMSAT, PR_OPCARD, PR_MUTUAL, PR_DXDOPP, PR_EQX, PR_ALLPASS, PR_TARGET, PR_NOTE, PR_PASSPOLAR,
                      PR_ORBIT, PR_ILLUM, PR_TENDAY, PR_TIMELINE,
-                     PR_BASICLIST, PR_BASICOUT, PR_TOOLOUT, PR_CHARLK,
+                     PR_BASICLIST, PR_BASICOUT, PR_BASICIMM, PR_TOOLOUT, PR_CHARLK,
                      PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
                      PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER, PR_SUNMOON, PR_BASICREF, PR_THERMAL, PR_AO7,
@@ -2717,6 +2787,7 @@ private:
   bool printActiveHint();    // shared helper: "no active satellite" line, returns false if none
   void printBasicList();     // Tiny BASIC: the program listing
   void printBasicOut();      // Tiny BASIC: the last run's console output
+  void printBasicImm();      // Tiny BASIC: the immediate-mode prompt scrollback
   void printToolOut();       // generic: the active tool screen's key result(s)
   void printCharLk();        // char lookup: current value's encodings (near its tables)
   void printSpaceWx(); void printWeather();       // Space weather: all indices + derived HF/VHF outlook
@@ -2778,10 +2849,10 @@ private:
   // reading the battery ADC (GPIO10) directly, like bmorcelli/Launcher does. Charging is
   // inferred from a rising voltage trend over ~30 s, since the ADV exposes no charger line.
   int      batteryMilliVolts();     // GPIO10 * divider, mV (0 if unreadable)
-  bool     batteryCharging();       // inferred from the voltage trend
-  int      battTrendMv = 0;         // smoothed reference voltage for the trend
-  uint32_t battTrendMs = 0;         // last trend sample time
-  int8_t   battChargeState = -1;    // -1 unknown, 0 discharging, 1 charging (latched)
+  bool     batteryCharging();       // ALWAYS false: this board cannot report it
+  // (removed in 0.9.70: battTrendMv/battTrendMs/battChargeState -- the voltage-trend
+  //  charge inference. The Cardputer ADV has no charger status line at all, so the
+  //  state was never knowable; see batteryCharging() for the full evidence.)
 
                                 // lets the woken refresh skip an unchanged redraw
   // Append one result line: echo to Serial and store for the on-screen list.
@@ -2813,5 +2884,12 @@ private:
   // ---- small draw utilities ----
   void header(const String& t);
   void footer(const String& t);
+  // Scroll indicator: a 2 px track at the right edge with a proportional thumb.
+  // Replaces the ^ / v edge arrows, which showed neither position nor extent --
+  // on a screen with no other position cue, a list without one is
+  // indistinguishable from a stuck list (the exact confusion behind the 0.9.70
+  // list-wrap report). yTop/yBot bound the track; total/vis/off are rows.
+  // Draws nothing when everything fits, so call sites need no guard.
+  void scrollbar(int yTop, int yBot, int total, int vis, int off);
   bool drawOobBanner();           // flashing out-of-passband warning (returns true while showing)
 };

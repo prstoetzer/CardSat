@@ -182,6 +182,13 @@ bool Settings::load() {
     snprintf(k, sizeof(k), "dl%spass", K);
     strncpy(dualPass[L], d[k] | "", sizeof(dualPass[L])-1); dualPass[L][sizeof(dualPass[L])-1]=0;
   }
+  // Catalog-revision check BEFORE the models are trusted: a saved index means a
+  // different radio once LEG_RADIOS grows, so a stale file must not be believed.
+  dualCatVer = d["dlcatver"] | (uint8_t)0;
+  if (dualCatVer != LEG_CATALOG_VER) {
+    dualModel[0] = dualModel[1] = LEG_NONE;   // re-pick rather than drive the wrong rig
+    dualCatVer = LEG_CATALOG_VER;
+  }
   strncpy(dualUsbKey[0], d["dlusbkeyd"] | "", sizeof(dualUsbKey[0])-1); dualUsbKey[0][sizeof(dualUsbKey[0])-1]=0;
   strncpy(dualUsbKey[1], d["dlusbkeyu"] | "", sizeof(dualUsbKey[1])-1); dualUsbKey[1][sizeof(dualUsbKey[1])-1]=0;
   // Legacy (0.9.68 development): a single "dlusbkey" served the then-single USB leg.
@@ -244,6 +251,12 @@ bool Settings::load() {
   xvtrUlHz   = d["xvtrul"] | (freq_t)0;
   rotEnable  = d["roten"]  | false;
   rotType    = d["rottype"]| (uint8_t)ROT_GS232;
+  // Bearing reference for the rotator. Was NEVER persisted: the operator could set
+  // "magnetic" on the Settings row, it took effect, and it silently reverted to
+  // true on the next boot -- leaving the rotor mispointed by the local magnetic
+  // declination. Found by tools/audit_settings_persist.py, which exists for exactly
+  // this class of "works until you power-cycle" defect.
+  rotMagCorrect = d["rotmagc"] | false;
   // Clamp to the LAST defined type. The old bound was ROT_PST (2), written before
   // ROT_YAESU(3), ROT_EASYCOMM1..3(4-6), ROT_SPID(7) and ROT_NONE(8) existed -- so
   // every config using one of those was silently reset to GS-232 on load.
@@ -396,6 +409,7 @@ bool Settings::save() {
     snprintf(k, sizeof(k), "dl%suser", K);  d[k] = dualUser[L];
     snprintf(k, sizeof(k), "dl%spass", K);  d[k] = dualPass[L];
   }
+  d["dlcatver"] = dualCatVer;
   d["dlusbkeyd"] = dualUsbKey[0]; d["dlusbkeyu"] = dualUsbKey[1];
   d["vfotype"] = vfoType; d["satmode"] = satMode; d["catms"] = catRateMs;
   d["rxovfo"] = rxOnlyVfo;
@@ -423,6 +437,7 @@ bool Settings::save() {
   d["gamesnd"]  = gameSound;
   d["morseswap"]= morseSwap;
   d["roten"]=rotEnable; d["rottype"]=rotType; d["rothost"]=rotHost;
+  d["rotmagc"]=rotMagCorrect;
   d["rotxport"]=rotTransport; d["rotusbkey"]=rotUsbKey;
   for (int i = 0; i < 5; ++i) {
     char k[6];

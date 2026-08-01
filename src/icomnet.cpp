@@ -411,6 +411,20 @@ void IcomNetRig::selBand(bool sub) {
 }
 bool IcomNetRig::setFreqNet(bool sub, freq_t hz) {
   selBand(sub);
+  // Above 5.85 GHz the IC-905 takes a SIX-byte frequency field: five bytes is ten
+  // BCD digits, which tops out just under 10 GHz and cannot express that band at
+  // all. The rule is per-frequency, not per-radio, so it costs nothing on the
+  // radios that never go there. Same threshold the wired leg path uses.
+  if (hz > 5850000000ULL) {
+    uint8_t pl6[7]; pl6[0] = 0x05;
+    freq_t f = hz;
+    for (int i = 0; i < 6; ++i) {
+      uint8_t lo = f % 10; f /= 10;
+      uint8_t hi = f % 10; f /= 10;
+      pl6[1 + i] = (uint8_t)((hi << 4) | lo);
+    }
+    return sendCivPayload(pl6, 7);
+  }
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
   return sendCivPayload(pl, 6);
 }

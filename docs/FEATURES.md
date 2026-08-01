@@ -61,6 +61,11 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   through one source-independent bridge (parenthetical designator → whole name →
   token), so a CelesTrak catalog maps as cleanly as an AMSAT one: favorite
   activations tint green, and LoTW export auto-resolves CelesTrak-named QSOs.
+- **The BASIC prompt can be printed (0.9.70).** `Fn`+`p` at the immediate-mode prompt sends the
+  session transcript — the expressions typed as well as the answers — to the configured printer,
+  matching `p` on the RUN console and `Fn`+`p` in the note editor. `LPRINT` at the prompt also
+  works properly now: it previously opened the printer and never flushed or closed it, so the
+  output never arrived.
 - **BASIC grows up; the calculators become instruments (0.9.59).** Tiny BASIC gains
   `TAN/ATN/LOG/EXP/SGN/MIN/MAX`, `MOD`, `AND/OR/NOT`, one `DIM @(n)` array (≤256),
   `DATA/READ/RESTORE`, `ON…GOTO`, and a system bridge: `SATSEL i` re-runs SGP4 for **any**
@@ -566,7 +571,8 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
 - **Screenshots** — press **`b`** on any screen to save a 24-bit BMP to
   `/CardSat/Screenshots/` on the SD card (handy for documentation).
 - **Global hotkeys reach every screen (0.9.57)** — `h` (Help) and `b` (screenshot) are global,
-  and are suppressed wherever a bare letter is claimed: the text editors, the Tiny BASIC editor,
+  and are suppressed wherever a bare letter is claimed: the text editors, the Tiny BASIC editor
+  **and its immediate-mode prompt (fixed 0.9.70 — `b` and `h` could not be typed there at all)**,
   the scientific calculator's expression entry, the LoTW passphrase prompt, the Tools
   first-letter jump, and the DXCC / character-lookup type-to-search. On **all** of those they are
   now reachable as **`Fn`+`h`** and **`Fn`+`b`**, so `PRINT "HI"` types and **every screen can be

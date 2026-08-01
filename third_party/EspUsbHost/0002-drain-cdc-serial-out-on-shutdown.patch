@@ -1,0 +1,38 @@
+From: CardSat <https://github.com/prstoetzer/CardSat>
+Subject: [PATCH] drain the CDC serial OUT endpoint during shutdown
+
+drainClientTransfers() halts and flushes the audio OUT and vendor OUT endpoints by
+address, but not the CDC serial OUT endpoint. sendSerial() submits its transfer without
+recording it in endpoints_, so nothing iterating that table can cancel it. If the peer
+stops reading its port, the transfer stays enqueued forever and
+usb_host_interface_release() then refuses the owning interface with
+ESP_ERR_INVALID_STATE -- which blocks the device close, the client deregistration and
+the host uninstall in turn, leaving usb_host_install() returning 259 for the rest of
+the boot.
+
+Measured on a Kenwood TH-D75 (CDC-ACM + USB Audio): with this change, five consecutive
+engage/disengage cycles with the device deliberately silent all released the host
+completely and returned every byte of heap. Without it, the first such cycle stranded
+the stack.
+
+--- a/src/EspUsbHost.cpp
++++ b/src/EspUsbHost.cpp
+@@ drainClientTransfers()
+     if (vendorWritePending(device.info.address) != 0)
+     {
+       usb_host_endpoint_halt(device.handle, device.usbVendorOutEndpointAddress);
+       usb_host_endpoint_flush(device.handle, device.usbVendorOutEndpointAddress);
+     }
+   }
++  // The CDC serial OUT transfer is submitted fire-and-forget by sendSerial() and is
++  // never recorded in endpoints_, so it must be cancelled by ADDRESS or it is never
++  // cancelled at all. A device that stops reading leaves it enqueued, which blocks
++  // usb_host_interface_release() for the interface that owns the endpoint.
++  for (DeviceState &device : devices_)
++  {
++    if (device.inUse && device.handle && device.hasSerialOutEndpoint)
++    {
++      usb_host_endpoint_halt(device.handle, device.serialOutEndpointAddress);
++      usb_host_endpoint_flush(device.handle, device.serialOutEndpointAddress);
++    }
++  }

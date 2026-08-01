@@ -1,0 +1,22 @@
+--- a/src/EspUsbHost.cpp	2026-07-30 22:35:54.729128532 +0000
++++ b/src/EspUsbHost.cpp	2026-07-30 22:35:54.760081478 +0000
+@@ -6247,8 +6247,18 @@
+                                   currentInterfaceSubClass_ == USB_AUDIO_SUBCLASS_AUDIO_STREAMING &&
+                                   intf->bNumEndpoints > 0 &&
+                                   !interfaceAlreadyClaimed;
++    // CardSat patch (see third_party/EspUsbHost/PATCHES.md): bind only the FIRST
++    // CDC-ACM control interface. Without !hasCdcControlInterface this latch is
++    // asymmetric with isCdcAcmDataInterface below, which IS guarded -- so on a
++    // device exposing TWO CDC-ACM functions the data endpoints stay on function 0
++    // while cdcControlInterfaceNumber ends up on the LAST control interface parsed.
++    // Both SET_LINE_CODING and SET_CONTROL_LINE_STATE address that number, so baud
++    // and DTR/RTS are applied to the wrong function and the bound port never comes
++    // alive. The keyboard latch a few lines below already carries the equivalent
++    // !hasKeyboardInterface guard.
+     const bool isCdcAcmControlInterface = currentInterfaceClass_ == USB_CLASS_CDC_CONTROL_VALUE &&
+-                                          currentInterfaceSubClass_ == USB_CDC_SUBCLASS_ACM;
++                                          currentInterfaceSubClass_ == USB_CDC_SUBCLASS_ACM &&
++                                          !device->hasCdcControlInterface;
+     const bool isCdcAcmDataInterface = currentInterfaceClass_ == USB_CLASS_CDC_DATA_VALUE &&
+                                        device->hasCdcControlInterface &&
+                                        !device->hasCdcDataInterface;

@@ -23,6 +23,22 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.70:** a **USB release**. USB CAT can now be engaged and disengaged as
+> often as you like — switch satellites, switch the radio off and on — without rebooting
+> anything. Four defects were stacked here: an undrained CDC write that stranded the USB
+> host stack until reboot (fixed in the library and reported upstream), a port that was
+> never closed because **DTR was never de-asserted**, and a radio whose CAT firmware never
+> comes back after re-enumeration — so the host now **stays resident between engagements**
+> and `Fn`+`u` releases it explicitly. The **Kenwood TH-D74/D75** CAT path was rebuilt
+> from measurement on real hardware: single-frame `FQ` frequency setting, the three
+> preconditions the radio actually requires, corrected mode digits (plain FM was refused
+> on the all-mode band, which would have failed on every FM satellite), and 20 Hz fine
+> tuning only where the radio accepts it. Also: the charge indicator is **removed** —
+> this board cannot report charge state and the old one said "on battery" while plugged
+> in — and BASIC's immediate mode can now type `b` and `h`. **Building it yourself?
+> Read [third_party/EspUsbHost/PATCHES.md](third_party/EspUsbHost/PATCHES.md) first.**
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.70.md)**.
+
 > **New in v0.9.69:** a **correctness release** for the dual-radio feature, most of it
 > found by an external audit of v0.9.68 and by bench review. **Two release-blocking bugs
 > are fixed:** the new *Dual* CAT type was silently discarded on every reboot (a saved
@@ -502,6 +518,7 @@ See **[MANUAL.md](MANUAL.md)** for the complete guide.
 | **[MANUAL.md](MANUAL.md)** | The complete user guide — every screen, setting, and workflow. |
 | **[docs/FEATURES.md](docs/FEATURES.md)** | Full, detailed feature list. |
 | **[docs/BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md)** | Prebuilt binaries, upgrading, building from source. |
+| **[third_party/EspUsbHost/PATCHES.md](third_party/EspUsbHost/PATCHES.md)** | **Required reading if you build it yourself** — the USB host library needs patching. |
 | **[docs/WIRING.md](docs/WIRING.md)** | CAT, GPS, and rotator wiring. |
 | **[docs/interfaces/ROTATOR_TRANSPORTS.md](docs/interfaces/ROTATOR_TRANSPORTS.md)** | Rotator over I2C bridge, Grove G1/G2 or USB: which wires conflict, and the radio+rotator-on-USB guardrails. |
 | **[docs/RADIOS.md](docs/RADIOS.md)** | Per-radio behavior: bands, sat mode, read-back. |

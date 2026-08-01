@@ -39,6 +39,14 @@ namespace {
     double heapFree = 0, upTime = 0, nSat = 0, nTx = 0;
     bool   txOk = false;   double txDl = 0, txUl = 0, txBw = 0, txInv = 0, txLin = 0;
     double pAos[8], pLos[8], pMax[8]; int pN = 0;         // up to 8 upcoming passes
+    // 0.9.70 additions -- data the firmware gained this cycle and already computes.
+    // All are for the satellite currently selected (SATSEL or the tracked one).
+    double lshell = 0, bratio = 0, bfield = 0;   // IGRF-14 McIlwain L, B/B0, |B| nT
+    double inBelt = 0, inSaa = 0;                // zone membership of the subpoint
+    double decayD = 0, decaySrc = 0;             // days to re-entry; 1 = measured n-dot, 2 = B*
+    double battMv = 0, charging = 0;             // battery millivolts + inferred charge state
+    double heapBlk = 0;                          // largest free block (fragmentation, not total)
+    double doppRx = 0, doppTx = 0;               // Doppler-corrected RX/TX for the current pair
   };
 
   // System-name table. Read-only; every entry is data the firmware already has.
@@ -68,6 +76,18 @@ namespace {
     // 0.9.61 space-weather additions
     {"SSN",64},{"FLARE",65},{"BZ",66},{"SWSPEED",67},{"MUF",69},
     {"FCKP1",70},{"FCKP2",71},{"FCKP3",72},{"MAGDECL",73},
+    // 0.9.70: the geomagnetic / decay / power data added this cycle. Ids continue
+    // from 74; 68 stays unused (it always has).
+    {"LSHELL",74},{"BRATIO",75},{"BFIELD",76},
+    {"INBELT",77},{"INSAA",78},
+    {"DECAYD",79},{"DECAYSRC",80},
+    {"BATTMV",81},{"CHARGING",82},{"HEAPBLK",83},
+    {"DOPPRX",84},{"DOPPTX",85},
+    // TXOK was missing: sys.txOk has always been SET by TXSEL but never readable, so a
+    // program could not tell whether a transponder snapshot succeeded. That matters
+    // more now -- SATSEL deliberately clears it, so TXOK=0 means "no transponder
+    // chosen for this satellite yet". Found by tools/host_examples.
+    {"TXOK",86},
   };
   static const int BASIC_SYS_N = (int)(sizeof(BASIC_SYS) / sizeof(BASIC_SYS[0]));
 
@@ -120,7 +140,10 @@ namespace {
     // sat/transponder groups; lpr streams a finished line to the report sinks; gfx draws
     // on the canvas; file is the gated /CardSat/basic/ writer + FILES lister.
     void* host = nullptr;
-    bool (*satselCb)(void*, int, double out[13]) = nullptr;
+    // out[13] is the transponder COUNT for the satellite just selected: SATSEL now
+    // carries the transponder context with it, so TXSEL/NTX refer to the satellite
+    // the program chose rather than whatever the operator happened to be tracking.
+    bool (*satselCb)(void*, int, double out[14]) = nullptr;
     bool (*txselCb)(void*, int, double out[5])   = nullptr;
     bool (*lprCb)(void*, const char*, int op)    = nullptr;   // 1 = line, 2 = close
     void (*gfxCb)(void*, int op, double a, double b, double c2, double d, double e, const char* s) = nullptr;
@@ -188,6 +211,13 @@ namespace {
         case 51: return sys.gpsLat;  case 52: return sys.gpsLon;  case 53: return sys.gpsAlt;
         case 59: return sys.txDl;    case 60: return sys.txUl;    case 61: return sys.txBw;
         case 62: return sys.txInv;   case 63: return sys.txLin;
+        case 74: return sys.lshell;  case 75: return sys.bratio;  case 76: return sys.bfield;
+        case 77: return sys.inBelt;  case 78: return sys.inSaa;
+        case 79: return sys.decayD;  case 80: return sys.decaySrc;
+        case 81: return sys.battMv;  case 82: return sys.charging;
+        case 83: return sys.heapBlk;
+        case 84: return sys.doppRx;  case 85: return sys.doppTx;
+        case 86: return sys.txOk ? 1 : 0;
       }
       return 0;
     }
@@ -493,8 +523,16 @@ namespace {
         double iv = expr(); if (!err.isEmpty()) return -1;
         if (!satselCb) { err = "SATSEL unavailable"; return -1; }
         if (--satselLeft < 0) { err = "SATSEL limit (2000/run)"; return -1; }
-        double o[13];
+        double o[14];
+        o[13] = 0;
         if (!satselCb(host, (int)iv, o)) { err = "bad sat index"; return -1; }  // bad INDEX only
+        // The transponder context follows the selection even when the satellite
+        // itself cannot be propagated: a program may legitimately want to read a
+        // decayed bird's transponders. Any previously TXSELed values are stale now,
+        // so clear TXOK -- silently keeping them was the old trap.
+        sys.nTx  = o[13];
+        sys.txOk = false;
+        sys.txDl = sys.txUl = sys.txBw = sys.txInv = sys.txLin = 0;
         if (o[0] <= -998.0) { sys.satOk = false; return -1; }   // valid index, no fix/dead TLE:
                                                                 //   SATOK=0 so the program branches
         sys.satAz = o[0]; sys.satEl = o[1]; sys.satRng = o[2]; sys.satRR = o[3];
@@ -502,7 +540,9 @@ namespace {
         sys.satInc = o[8]; sys.satEcc = o[9]; sys.satRaan = o[10]; sys.satMM = o[11];
         sys.satNor = o[12]; sys.satOk = true;
         return -1; }
-      if (kw("TXSEL")) {                         // snapshot transponder #expr (active sat)
+      if (kw("TXSEL")) {                         // snapshot transponder #expr of the
+                                                 // satellite SATSEL chose (or the
+                                                 // tracked one if SATSEL was not used)
         double iv = expr(); if (!err.isEmpty()) return -1;
         if (!txselCb) { err = "TXSEL unavailable"; return -1; }
         double o[5];

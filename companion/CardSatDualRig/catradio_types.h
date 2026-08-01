@@ -8,11 +8,18 @@
 //   YAESU_BIN  - "old" Yaesu 5-byte binary CAT (4-byte BCD @10 Hz + opcode)
 //   YAESU_TXT  - "new" Yaesu ASCII CAT (FA/MD/TX ';'-terminated, like Kenwood HF)
 //   KENWOOD_HT - Kenwood TH-D74/D75 handheld CAT (FQ<band>,<10 digit Hz> + CR)
-enum CatFamily : uint8_t { CAT_CIV, CAT_YAESU_BIN, CAT_YAESU_TXT, CAT_KENWOOD_HT };
+// 0.9.70 audit (against Hamlib): the FT-100 and VR-5000 were filed under
+// CAT_YAESU_BIN on the assumption that "old Yaesu binary" meant one protocol. It
+// does not -- see the two families added here and the notes in CardSatDualRig.ino.
+enum CatFamily : uint8_t { CAT_CIV, CAT_YAESU_BIN, CAT_YAESU_FT100,
+                           CAT_YAESU_VR5000, CAT_YAESU_TXT, CAT_KENWOOD_HT,
+                           CAT_KENWOOD_TS };
 
 enum RadioModel : uint8_t {
   // --- Icom CI-V transceivers ---
-  RIG_IC705, RIG_IC905, RIG_IC7100, RIG_IC7000, RIG_IC706MK2G, RIG_IC275, RIG_IC475,
+  RIG_IC705, RIG_IC905, RIG_IC7100, RIG_IC7000,
+  RIG_IC706MK2G, RIG_IC706MK2, RIG_IC706,
+  RIG_IC275, RIG_IC475, RIG_IC271, RIG_IC471, RIG_IC575, RIG_IC1275,
   // --- Icom CI-V receivers (RX only) ---
   RIG_ICR10, RIG_ICR20, RIG_ICR30,
   RIG_ICR7000, RIG_ICR7100, RIG_ICR8500, RIG_ICR8600, RIG_ICR9000, RIG_ICR9500,
@@ -22,6 +29,8 @@ enum RadioModel : uint8_t {
   RIG_VR5000,
   // --- Yaesu new ASCII ---
   RIG_FT991, RIG_FT991A, RIG_FTX1,
+  // --- Kenwood all-mode VHF/UHF base stations (generic Kenwood ASCII CAT) ---
+  RIG_TS711, RIG_TS811,
   // --- Kenwood handhelds (all-mode receiver, RX only) ---
   RIG_THD74, RIG_THD75,
   RIG_MODEL_COUNT
@@ -34,6 +43,18 @@ struct RadioProfile {
   uint32_t    baud;     // default CAT baud; for native-USB rigs the CDC line rate is set anyway
   uint8_t     civAddr;  // default CI-V bus address (CIV family only; 0 otherwise)
   bool        rxOnly;   // true = receive-only (never keyed; warn if assigned to uplink)
+  // Include the filter byte in the CI-V set-mode command ("06 <mode> <filter>")?
+  // A few Icoms reject cmd 06 when it carries passband data -- Hamlib keeps an
+  // explicit list ("IC-375, IC-731, IC-726, IC-735, IC-910, IC-7000 don't support
+  // passband data"), and of the radios here the IC-475 and IC-7000 are on it. They
+  // take the two-byte "06 <mode>" form. Nothing checks the ACK, so getting this
+  // wrong shows up only as "mode changes do nothing". Ignored by non-CI-V families.
+  bool        modeFilter;
+  // Six-byte CI-V frequency above 5.85 GHz (IC-905 only). Five bytes is ten BCD
+  // digits, which tops out just under 10 GHz and cannot express that band; below
+  // the threshold the radio takes the ordinary five-byte form, so this is a
+  // per-frequency choice rather than a per-radio one.
+  bool        wideFreq;
 };
 
 // Neutral mode enum shared by the server and the CAT encoders.

@@ -190,6 +190,13 @@ namespace UsbSerial {
   // False once a teardown or failed engage could NOT release the IDF host stack:
   // re-engaging would just hit ESP_ERR_INVALID_STATE (259) again, so begin()
   // refuses and says so. Cleared only by a reboot.
+  // ---- Resident host / explicit release (0.9.70) --------------------------------
+  // Detaching the last port keeps the USB host installed and the device ENUMERATED,
+  // because some devices (measured: TH-D75) never re-initialise their application
+  // after a re-enumeration and go deaf on the second engage. Call releaseUsbNow() to
+  // actually free the stack and restore the serial console.
+  void        releaseUsbNow();     // full teardown; no-op while any port is still open
+  bool        usbHostResident();   // true when the host is installed with no port open
   bool        hostReleased();
   bool        hostTeardownStuck();   // M2: end() timed out; reboot required to reuse USB
   // Why the last uninstall was refused, when it was. Valid after a failed

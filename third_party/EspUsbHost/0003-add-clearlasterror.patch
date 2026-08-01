@@ -1,0 +1,24 @@
+From: CardSat <https://github.com/prstoetzer/CardSat>
+Subject: [PATCH] add clearLastError() so lastError() means "this operation"
+
+lastError_ is cleared only in begin(), so any timeout anywhere in a session is still
+reported afterwards. A caller testing lastError() after end() to decide whether the
+teardown succeeded gets false positives from unrelated earlier failures -- a bulk OUT
+the device never drained, a control transfer it ignored. We spent considerable time
+chasing a teardown bug that did not exist because of this.
+
+--- a/src/EspUsbHost.h
++++ b/src/EspUsbHost.h
+@@
+   int lastError() const;
++  // Clear the sticky error so a following operation's lastError() reflects only that
++  // operation. lastError_ is otherwise cleared only in begin().
++  void clearLastError();
+
+--- a/src/EspUsbHost.cpp
++++ b/src/EspUsbHost.cpp
+@@ after EspUsbHost::ready()
++void EspUsbHost::clearLastError()
++{
++  lastError_ = ESP_OK;
++}

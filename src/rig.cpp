@@ -91,20 +91,61 @@ float ctcssToneHz(int index) {
 //  tools/host_dualrig can byte-verify them without hardware.
 
 // -- BCD helpers (leg-local; civ.cpp has its own file-static copies) ----------
-static void legCivPackFreq(uint64_t hz, uint8_t out[5]) {
-  for (int i = 0; i < 5; i++) {
+// CI-V frequency: little-endian BCD, two digits per byte, 1 Hz resolution. Five
+// bytes (ten digits) is the universal form; the IC-905 uses six above 5.85 GHz.
+static void legCivPackFreqN(uint64_t hz, uint8_t* out, int nBytes) {
+  for (int i = 0; i < nBytes; i++) {
     uint8_t lo = hz % 10; hz /= 10;
     uint8_t hi = hz % 10; hz /= 10;
     out[i] = (uint8_t)((hi << 4) | lo);
   }
 }
+static void legCivPackFreq(uint64_t hz, uint8_t out[5]) { legCivPackFreqN(hz, out, 5); }
+// Above this, the IC-905 expects the six-byte field (Hamlib icom.c).
+static const uint64_t LEG_CIV_WIDE_HZ = 5850000000ULL;
 static uint64_t legCivUnpackFreq(const uint8_t* b) {
   uint64_t hz = 0;
   for (int i = 4; i >= 0; i--) hz = hz * 100 + (b[i] >> 4) * 10 + (b[i] & 0x0F);
   return hz;
 }
+// FT-100 (LEGF_Y100) uses LITTLE-endian BCD -- Hamlib's to_bcd(), where the FT-817
+// family uses to_bcd_be(). Same four bytes, opposite order.
+static void legY100PackFreq(uint64_t hz, uint8_t out[4]) {
+  uint32_t f = (uint32_t)((hz + 5) / 10);
+  for (int i = 0; i < 4; ++i) {
+    out[i] = (uint8_t)(((f / 10) % 10) << 4 | (f % 10));
+    f /= 100;
+  }
+}
+static uint64_t legY100UnpackFreq(const uint8_t* b) {
+  uint64_t f = 0, mul = 1;
+  for (int i = 0; i < 4; ++i) {
+    f += ((b[i] & 0x0F) + (uint64_t)(b[i] >> 4) * 10) * mul;
+    mul *= 100;
+  }
+  return f * 10ULL;
+}
+// FT-100 mode values, in data[3] with opcode 0x0C (Hamlib ft100.c):
+//   00 LSB  01 USB  02 CW  03 CWR  04 AM  05 DIG  06 FM
+static uint8_t legY100ModeByte(RigMode m) {
+  switch (m) { case RM_LSB: return 0x00; case RM_USB: return 0x01;
+               case RM_CW:  return 0x02; case RM_AM:  return 0x04;
+               case RM_DATA: return 0x05; case RM_FM: return 0x06;
+               default: return 0x01; }
+}
+// VR-5000 (LEGF_YVR5): FT-817 framing, but FM is 0x88 (MODE_FMN) -- plain 0x08 does
+// not appear in this receiver's table at all (Hamlib vr5000.c).
+static uint8_t legYVr5ModeByte(RigMode m) {
+  switch (m) { case RM_LSB: return 0x00; case RM_USB: return 0x01;
+               case RM_CW:  return 0x02; case RM_AM:  return 0x04;
+               case RM_FM:  return 0x88; case RM_DATA: return 0x01;
+               default: return 0x01; }
+}
+
 static void legYBinPackFreq(uint64_t hz, uint8_t out[4]) {
-  uint32_t f = (uint32_t)(hz / 10);                       // Yaesu binary is 10 Hz units
+  // +5 before the divide: round to the nearest 10 Hz rather than truncating, which
+  // is what Hamlib's ft857/ft897 backends do.
+  uint32_t f = (uint32_t)((hz + 5) / 10);                  // Yaesu binary is 10 Hz units
   out[0] = (uint8_t)((((f/10000000)%10)<<4) | ((f/1000000)%10));
   out[1] = (uint8_t)((((f/100000)%10)<<4)   | ((f/10000)%10));
   out[2] = (uint8_t)((((f/1000)%10)<<4)     | ((f/100)%10));
@@ -135,35 +176,101 @@ static char legYTxtModeDigit(RigMode m) {
                case RM_AM:  return '5'; case RM_DATA: return 'C';
                default: return '2'; }
 }
-static const char LEG_KWHT_BAND = '1';   // Band B = the all-mode (SSB/CW/AM) receiver
+// Band/VFO selector character: '0' = VFO A, '1' = VFO B. Band B carries the
+// all-mode (SSB/CW/AM) receiver on the TH-D74/D75, which is what we drive.
+// Kenwood all-mode BASE stations (TS-711/TS-811): the generic Kenwood ASCII CAT.
+// Identical encoding to this firmware's TS-790/TS-2000 backend, verified against
+// Hamlib's kenwood.c mode table: 1 LSB, 2 USB, 3 CW, 4 FM, 5 AM, 6 FSK/RTTY.
+static char legKwTsModeDigit(RigMode m) {
+  switch (m) { case RM_LSB: return '1'; case RM_USB: return '2';
+               case RM_CW:  return '3'; case RM_FM:  return '4';
+               case RM_AM:  return '5'; case RM_DATA: return '6';   // FSK
+               default: return '2'; }
+}
+
+static const char LEG_KWHT_BAND = '1';
+// Mode digits for the TH-D74/D75:
+//   0 FM  1 DV  2 AM  3 LSB  4 USB  5 CW  6 NFM  7 DR  8 WFM  9 R-CW
+// MEASURED on a TH-D75 (tools/thd75_verify.py), not taken from a table -- because
+// the two available references disagree and one of them is self-contradictory:
+//   * LA3QMA/TH-D74-Kenwood tables/mode.md says 1 = DV, 2 = AM.
+//   * Hamlib rigs/kenwood/thd74.c has BOTH: its thd74_mode_table[] says [2] = AM,
+//     while its set_mode() switch sends '1' for AM. CardSat copied the switch.
+// The sweep decides it: on band B code 2 is ACCEPTED and takes fine mode, code 1 is
+// REFUSED -- which is exactly right for a band with an airband AM receiver and no
+// D-STAR. So AM is '2'. (An earlier comment here claimed 0.9.68/0.9.69 had AM and DV
+// transposed and "fixed" them; that change WAS the transposition.)
+//
+// RM_FM maps to NFM ('6'), NOT FM ('0'). CardSat drives band B -- the all-mode
+// receiver, the only band that can cover linear birds AND FM -- and band B REFUSES
+// "MD 1,0" outright ("N"). NFM is what this band calls narrow FM, and it is accepted.
+// Consequence worth knowing: NFM does not support fine mode, so an FM bird tunes on
+// the 5 kHz grid while linear birds get 20 Hz.
+//
+// RM_DATA maps to NFM as well. DV ('1') is refused on band B, and satellite "DATA"
+// transponders are overwhelmingly FM packet, so narrow FM is the useful answer
+// rather than a mode the radio will reject.
 static char legKwHtModeDigit(RigMode m) {
-  switch (m) { case RM_FM: return '0'; case RM_AM: return '2';
-               case RM_LSB: return '3'; case RM_USB: return '4';
-               case RM_CW: return '5';  case RM_DATA: return '1'; /* DV */
+  switch (m) { case RM_FM:   return '6';   // NFM: band B refuses plain FM
+               case RM_DATA: return '6';   // DV is refused here; packet sats are FM
+               case RM_AM:   return '2';   // measured; see above
+               case RM_LSB:  return '3'; case RM_USB: return '4';
+               case RM_CW:   return '5';
                default: return '4'; }
 }
 
 size_t legBuildFreqFrame(LegFamily fam, uint8_t civAddr, uint64_t hz,
-                         uint8_t* out, size_t cap) {
+                         uint8_t* out, size_t cap, bool wideFreq) {
   switch (fam) {
     case LEGF_CIV: {
+      if (wideFreq && hz > LEG_CIV_WIDE_HZ) {     // IC-905 above 5.85 GHz
+        if (cap < 12) return 0;
+        uint8_t f6[6]; legCivPackFreqN(hz, f6, 6);
+        uint8_t fr6[12] = { 0xFE,0xFE, civAddr, 0xE0, 0x05,
+                            f6[0],f6[1],f6[2],f6[3],f6[4],f6[5], 0xFD };
+        memcpy(out, fr6, 12); return 12;
+      }
       if (cap < 11) return 0;
       uint8_t f[5]; legCivPackFreq(hz, f);
       const uint8_t fr[11] = { 0xFE,0xFE, civAddr, 0xE0, 0x05,
                                f[0],f[1],f[2],f[3],f[4], 0xFD };
       memcpy(out, fr, 11); return 11;
     }
-    case LEGF_YBIN: {
+    case LEGF_YBIN:
+    case LEGF_YVR5: {                       // same frame and opcode as the FT-817
       if (cap < 5) return 0;
       uint8_t f[4]; legYBinPackFreq(hz, f);
       out[0]=f[0]; out[1]=f[1]; out[2]=f[2]; out[3]=f[3]; out[4]=0x01; return 5;
+    }
+    case LEGF_Y100: {                       // opcode 0x0A, little-endian BCD
+      if (cap < 5) return 0;
+      uint8_t f[4]; legY100PackFreq(hz, f);
+      out[0]=f[0]; out[1]=f[1]; out[2]=f[2]; out[3]=f[3]; out[4]=0x0A; return 5;
     }
     case LEGF_YTXT: {
       int n = snprintf((char*)out, cap, "FA%09llu;", (unsigned long long)hz);
       return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
     }
+    case LEGF_KWTS: {                     // Kenwood base: VFO A, ELEVEN digits
+      int n = snprintf((char*)out, cap, "FA%011llu;", (unsigned long long)hz);
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
     case LEGF_KWHT: {
-      int n = snprintf((char*)out, cap, "FQ%c,%010llu\r",
+      // "FQ <band>,<10 digits>" -- a SINGLE-FRAME set, measured working on a real
+      // TH-D75 (tools/thd75_probe.py: "FQ 0,0144430000" accepted, readback matched).
+      //
+      // This replaces the FO read-modify-write that shipped through 0.9.70. FO is a
+      // valid QUERY on this radio but its WRITE was refused with "N" on both bands,
+      // in both VFO and memory mode, and even when the payload was byte-identical to
+      // what the radio had just emitted. FQ needs no round trip at all, which also
+      // removes the read latency, the reply-buffer sizing and the record patching
+      // from the hot path.
+      //
+      // The frequency MUST be on the radio's current step grid: an off-grid write is
+      // refused and the old frequency echoed back (probe: 10/10 -- every accepted
+      // write was a 5 kHz multiple, every refused one was not). Callers round before
+      // getting here; see PlainCatRig::sendFreq().
+      int n = snprintf((char*)out, cap, "FQ %c,%010llu\r",
                        LEG_KWHT_BAND, (unsigned long long)hz);
       return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
     }
@@ -172,9 +279,15 @@ size_t legBuildFreqFrame(LegFamily fam, uint8_t civAddr, uint64_t hz,
 }
 
 size_t legBuildModeFrame(LegFamily fam, uint8_t civAddr, RigMode m,
-                         uint8_t* out, size_t cap) {
+                         uint8_t* out, size_t cap, bool withFilter) {
   switch (fam) {
     case LEGF_CIV: {
+      if (!withFilter) {                 // "06 <mode>" -- see LegProfile::modeFilter
+        if (cap < 7) return 0;
+        const uint8_t fr[7] = { 0xFE,0xFE, civAddr, 0xE0, 0x06,
+                                legCivModeByte(m), 0xFD };
+        memcpy(out, fr, 7); return 7;
+      }
       if (cap < 8) return 0;
       const uint8_t fr[8] = { 0xFE,0xFE, civAddr, 0xE0, 0x06,
                               legCivModeByte(m), 0x01, 0xFD };
@@ -184,12 +297,27 @@ size_t legBuildModeFrame(LegFamily fam, uint8_t civAddr, RigMode m,
       if (cap < 5) return 0;
       out[0]=legYBinModeByte(m); out[1]=0; out[2]=0; out[3]=0; out[4]=0x07; return 5;
     }
+    case LEGF_YVR5: {                       // FT-817 form, VR-5000 mode values
+      if (cap < 5) return 0;
+      out[0]=legYVr5ModeByte(m); out[1]=0; out[2]=0; out[3]=0; out[4]=0x07; return 5;
+    }
+    case LEGF_Y100: {                       // mode in data[3], opcode 0x0C
+      if (cap < 5) return 0;
+      out[0]=0; out[1]=0; out[2]=0; out[3]=legY100ModeByte(m); out[4]=0x0C; return 5;
+    }
     case LEGF_YTXT: {
       int n = snprintf((char*)out, cap, "MD0%c;", legYTxtModeDigit(m));
       return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
     }
+    case LEGF_KWTS: {                     // no VFO digit on these: "MD<mode>;"
+      int n = snprintf((char*)out, cap, "MD%c;", legKwTsModeDigit(m));
+      return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    }
     case LEGF_KWHT: {
-      int n = snprintf((char*)out, cap, "MD%c,%c\r", LEG_KWHT_BAND, legKwHtModeDigit(m));
+      // "MD <band>,<mode>" -- note the SPACE. Kenwood handheld CAT separates the
+      // verb from its parameters with one; 0.9.68/0.9.69 emitted "MD1,4" and the
+      // radio simply ignored it.
+      int n = snprintf((char*)out, cap, "MD %c,%c\r", LEG_KWHT_BAND, legKwHtModeDigit(m));
       return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
     }
   }
@@ -204,21 +332,32 @@ size_t legBuildReadFreqFrame(LegFamily fam, uint8_t civAddr,
       const uint8_t q[6] = { 0xFE,0xFE, civAddr, 0xE0, 0x03, 0xFD };
       memcpy(out, q, 6); return 6;
     }
-    case LEGF_YBIN: {
+    case LEGF_YBIN:
+    case LEGF_YVR5: {                       // (the VR-5000 will not answer -- see canRead)
       if (cap < 5) return 0;
       out[0]=0; out[1]=0; out[2]=0; out[3]=0; out[4]=0x03; return 5;
     }
-    case LEGF_YTXT: {
+    case LEGF_Y100: {                       // "get FREQ and MODE status", opcode 0x10
+      if (cap < 5) return 0;
+      out[0]=0; out[1]=0; out[2]=0; out[3]=0; out[4]=0x10; return 5;
+    }
+    case LEGF_YTXT:
+    case LEGF_KWTS: {
       if (cap < 4) return 0;
       memcpy(out, "FA;", 3); return 3;
     }
     case LEGF_KWHT: {
-      int n = snprintf((char*)out, cap, "FQ%c\r", LEG_KWHT_BAND);
+      // "FO <band>" -- the frequency OBJECT query. There is no "FQ" command on
+      // this family; that was the single biggest error in the 0.9.68 encoder and
+      // is why a TH-D75 enumerated but never answered. The reply is one long
+      // record: "FO <band>,<10-digit Hz>,<step>,<shift>,..." (about 73 bytes).
+      int n = snprintf((char*)out, cap, "FO %c\r", LEG_KWHT_BAND);
       return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
     }
   }
   return 0;
 }
+
 
 bool legParseFreqReply(LegFamily fam, uint8_t civAddr,
                        const uint8_t* buf, size_t n, uint64_t& hz) {
@@ -227,24 +366,41 @@ bool legParseFreqReply(LegFamily fam, uint8_t civAddr,
       // Reply: FE FE E0 <addr> 03 <5 BCD> FD. The 6-byte query echo a CI-V
       // interface commonly returns can't match this 11-byte pattern (H6).
       for (size_t i = 0; i + 11 <= n; i++) {
-        if (buf[i]==0xFE && buf[i+1]==0xFE && buf[i+2]==0xE0 &&
-            buf[i+3]==civAddr && buf[i+4]==0x03 && buf[i+10]==0xFD) {
-          hz = legCivUnpackFreq(&buf[i+5]);
-          return hz > 0;
+        if (!(buf[i]==0xFE && buf[i+1]==0xFE && buf[i+2]==0xE0 &&
+              buf[i+3]==civAddr && buf[i+4]==0x03)) continue;
+        // Five-byte field is universal; the IC-905 answers with SIX above
+        // 5.85 GHz, so accept either length by looking for the terminator.
+        if (buf[i+10] == 0xFD) { hz = legCivUnpackFreq(&buf[i+5]); return hz > 0; }
+        if (i + 12 <= n && buf[i+11] == 0xFD) {
+          uint64_t v = 0;
+          for (int k = 5; k >= 0; --k)
+            v = v * 100 + (buf[i+5+k] >> 4) * 10 + (buf[i+5+k] & 0x0F);
+          hz = v; return hz > 0;
         }
       }
       return false;
     case LEGF_YBIN:
-      // 4 BCD bytes + mode; the companion takes the first 5 bytes after an RX
-      // clear (this family's adapters do not echo the binary command).
+    case LEGF_YVR5:
+      // 4 BCD bytes + mode; take the first 5 bytes after an RX clear (this family's
+      // adapters do not echo the binary command).
       if (n < 5) return false;
       hz = legYBinUnpackFreq(buf);
       return hz > 0;
+    case LEGF_Y100:
+      // FT-100 status block: band_no, freq[4] (LITTLE-endian BCD), mode, ...
+      // The frequency starts at offset 1, not 0 (Hamlib ft100.c ft100_status_data).
+      if (n < 6) return false;
+      hz = legY100UnpackFreq(buf + 1);
+      return hz > 0;
     case LEGF_YTXT:
-      for (size_t i = 0; i + 12 <= n; i++) {
+    case LEGF_KWTS: {
+      // Same "FA<digits>;" answer, different width: 9 digits on the Yaesus,
+      // 11 on the Kenwood base stations.
+      const int nd = (fam == LEGF_KWTS) ? 11 : 9;
+      for (size_t i = 0; i + (size_t)nd + 3 <= n; i++) {
         if (buf[i]=='F' && buf[i+1]=='A') {
           uint64_t v = 0; bool ok = true;
-          for (int k = 2; k < 11; k++) {
+          for (int k = 2; k < 2 + nd; k++) {
             char c = (char)buf[i+k];
             if (c < '0' || c > '9') { ok = false; break; }
             v = v*10 + (uint64_t)(c - '0');
@@ -253,18 +409,19 @@ bool legParseFreqReply(LegFamily fam, uint8_t civAddr,
         }
       }
       return false;
+    }
     case LEGF_KWHT:
-      // Expect "FQ<band>,<digits>"; accept >= 6 digits.
-      for (size_t i = 0; i + 4 <= n; i++) {
-        if (buf[i]=='F' && buf[i+1]=='Q') {
-          size_t j = i + 2;
-          while (j < n && buf[j] != ',') j++;
-          j++;
-          uint64_t v = 0; int digits = 0;
-          while (j < n && buf[j] >= '0' && buf[j] <= '9') {
-            v = v*10 + (uint64_t)(buf[j]-'0'); j++; digits++;
+      // "FO <band>,<10-digit Hz>,..." -- the frequency is a fixed ten digits at
+      // offset 5 of the record, the same offset Hamlib's thd74 backend reads.
+      for (size_t i = 0; i + 15 <= n; i++) {
+        if (buf[i]=='F' && buf[i+1]=='O' && buf[i+2]==' ' && buf[i+4]==',') {
+          uint64_t v = 0; bool ok = true;
+          for (int k = 5; k < 15; k++) {
+            char c = (char)buf[i+k];
+            if (c < '0' || c > '9') { ok = false; break; }
+            v = v*10 + (uint64_t)(c - '0');
           }
-          if (digits >= 6) { hz = v; return hz > 0; }
+          if (ok) { hz = v; return hz > 0; }
         }
       }
       return false;
@@ -294,10 +451,11 @@ void PlainCatRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
 }
 
 bool PlainCatRig::canReadFreq() const {
-  // All four families implement a read; the VR-5000's is UNVERIFIED on hardware
-  // (companion caveat) but attempting it is harmless -- a silent radio just
-  // returns false and the Doppler loop skips knob-follow that cycle.
-  return true;
+  // Per-model, from the catalog. Every dialect here implements a read EXCEPT the
+  // VR-5000, whose CAT has no read command at all -- claiming otherwise would make
+  // knob-follow poll a radio that can never answer, once per CAT cycle, and burn
+  // the whole read budget waiting for it.
+  return LEG_RADIOS[_model].canRead;
 }
 
 bool PlainCatRig::sendFrame(const uint8_t* b, size_t n) {
@@ -311,9 +469,58 @@ bool PlainCatRig::sendFrame(const uint8_t* b, size_t n) {
 
 bool PlainCatRig::sendRaw(const uint8_t* b, size_t n) { return sendFrame(b, n); }
 
+// TH-D74/D75 session preconditions. Sent ONCE per attached stream, not per set:
+// they are radio state, not per-frequency parameters, and the probe showed each
+// costs ~70 ms (BC) which is far too slow for the Doppler loop.
+//
+// Both were measured necessary. With band A in VFO mode but band B as the control
+// band, every FO/FQ write to band A was refused; issuing "BC 0" made the identical
+// write succeed. With band A in MEMORY mode, being the control band was not enough.
+void PlainCatRig::kwEnsureSession() {
+  if (_kwSession || !_stream) return;
+  char b[16];
+  int n = snprintf(b, sizeof(b), "VM %c,0\r", LEG_KWHT_BAND);   // (1) VFO, not memory
+  if (n > 0) { _stream->write((const uint8_t*)b, n); _stream->flush(); delay(20); }
+  n = snprintf(b, sizeof(b), "BC %c\r", LEG_KWHT_BAND);         // (2) control band
+  if (n > 0) { _stream->write((const uint8_t*)b, n); _stream->flush(); delay(80); }
+  _kwSession = true;                 // one attempt per stream; a failure here shows
+                                     // up as refused writes, which the caller reports
+}
+
+// Fine mode is what buys a usable Doppler step: 20 Hz instead of 5 kHz. It is only
+// valid in SSB/CW (bench-reported; FM does not support it), so this is a whitelist.
+// FT/FS are standalone commands -- no record patching involved.
+void PlainCatRig::kwApplyStepForMode(RigMode m) {
+  if (!_stream) return;
+  // AM is included on measurement, not assumption: the sweep showed band B accepts
+  // FT 1 in AM and reaches the same 20 Hz grid as SSB/CW. NFM refuses fine mode and
+  // stays on 5 kHz, which is where RM_FM and RM_DATA land.
+  const bool fine = (m == RM_USB || m == RM_LSB || m == RM_CW || m == RM_AM);
+  char b[16];
+  int n = snprintf(b, sizeof(b), "FT %c\r", fine ? '1' : '0');
+  if (n > 0) { _stream->write((const uint8_t*)b, n); _stream->flush(); delay(20); }
+  if (fine) {                                   // 0 = 20 Hz, the finest available
+    n = snprintf(b, sizeof(b), "FS 0\r");
+    if (n > 0) { _stream->write((const uint8_t*)b, n); _stream->flush(); delay(20); }
+  }
+  _kwFine = fine;
+}
+
+
 bool PlainCatRig::sendFreq(freq_t hz) {
+  const LegFamily fam = LEG_RADIOS[_model].family;
+  if (fam == LEGF_KWHT) {
+    // The radio REFUSES an off-grid frequency (it echoes the old one back rather
+    // than rounding), so round here. Measured 10/10 on a TH-D75: every accepted
+    // write sat on the 5 kHz grid, every refused one did not. Grid is 20 Hz when
+    // fine mode is on (SSB/CW) and 5 kHz otherwise.
+    kwEnsureSession();                       // VFO mode + control band, once
+    const uint32_t g = kwGrid();
+    hz = (freq_t)(((hz + g / 2) / g) * g);   // nearest, not truncated
+  }
   uint8_t fr[24];
-  size_t n = legBuildFreqFrame(LEG_RADIOS[_model].family, _addr, hz, fr, sizeof(fr));
+  size_t n = legBuildFreqFrame(fam, _addr, hz, fr, sizeof(fr),
+                               LEG_RADIOS[_model].wideFreq);
   bool ok = sendFrame(fr, n);
   if (ok) _lastSetMs = millis();
   return ok;
@@ -321,8 +528,16 @@ bool PlainCatRig::sendFreq(freq_t hz) {
 
 bool PlainCatRig::sendMode(RigMode m) {
   uint8_t fr[16];
-  size_t n = legBuildModeFrame(LEG_RADIOS[_model].family, _addr, m, fr, sizeof(fr));
+  size_t n = legBuildModeFrame(LEG_RADIOS[_model].family, _addr, m, fr, sizeof(fr),
+                               LEG_RADIOS[_model].modeFilter);
   bool ok = sendFrame(fr, n);
+  if (ok && LEG_RADIOS[_model].family == LEGF_KWHT) {
+    // The usable Doppler step follows the MODE on this family: fine mode (20 Hz) is
+    // valid in SSB/CW only, so it has to be re-applied whenever the mode changes --
+    // which is exactly when CardSat switches between a linear and an FM bird.
+    kwEnsureSession();
+    kwApplyStepForMode(m);
+  }
   if (ok) _lastSetMs = millis();
   return ok;
 }
@@ -346,8 +561,13 @@ bool PlainCatRig::readFreq(freq_t& hzOut) {
   // Collect until a stop byte / quiet interval / deadline, then parse. The CIV
   // family needs the quiet-interval collect (H6: interface echo shares the 0xFD
   // terminator with the reply); the ASCII families stop on their terminator.
-  const uint32_t deadline = readBudgetMs ? readBudgetMs : 220;
-  int stopByte = (fam == LEGF_YTXT) ? ';' : (fam == LEGF_KWHT) ? '\r' : -1;
+  uint32_t deadline = readBudgetMs ? readBudgetMs : 220;
+  int stopByte = (fam == LEGF_YTXT || fam == LEGF_KWTS) ? ';'
+               : (fam == LEGF_KWHT) ? '\r' : -1;
+  // NOTE: a 300 ms floor used to sit here, on the theory that the FO record was slow
+  // to produce. The Mac probe measured that read at 1 ms, 5/5 -- the floor was fixing
+  // a problem that does not exist, so it is gone. Reads on this family are fast; it
+  // was the WRITE that was being refused, for reasons that had nothing to do with time.
   uint8_t buf[96]; size_t n = 0;
   uint32_t t0 = millis(), lastRx = millis();
   while ((millis() - t0) < deadline && n < sizeof(buf)) {
@@ -477,7 +697,7 @@ bool DualRig::canReadFreq() const { return _down && _down->canReadFreq(); }
 // ---------------------------------------------------------------------------
 Rig* makeLegRig(uint8_t legModel, uint8_t bus, uint8_t civAddr, uint32_t baud,
                 const char* host, uint16_t port, const char* user, const char* pass) {
-  if (legModel >= LEG_NONE) return nullptr;
+  if (legModel >= LEG_NONE) return nullptr;   // LEG_NONE is last before LEG_COUNT
   const LegProfile& lp = LEG_RADIOS[legModel];
   const uint8_t  addr = civAddr ? civAddr : lp.civAddr;
   const uint32_t bd   = baud    ? baud    : lp.baud;

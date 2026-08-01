@@ -1,36 +1,42 @@
 # CardSat — precompiled firmware (M5Cardputer ADV)
 
 Prebuilt binaries for the **M5Stack Cardputer ADV** (ESP32-S3FN8, 8 MB flash, no PSRAM),
-firmware **v0.9.69**. Flash these if you just want to run this build without
+firmware **v0.9.70**. Flash these if you want to run this exact build without
 compiling. Source is the rest of this repo; `CardSat.ino` is the monolithic sketch.
 
 Built with: arduino-cli + `esp32:esp32@3.2.1`, FQBN
 `esp32:esp32:esp32s3:PartitionScheme=huge_app,CDCOnBoot=cdc`, M5Cardputer library.
 No `build.extra_flags` (that would break the HWCDC serial console). Flash usage at
-build time: 3,031,306 bytes (96.4%); static RAM 162,080 bytes (49%).
+build time: 3,045,402 bytes (96.8%); static RAM 162,112 bytes (49%).
 
 The flash percentage is only meaningful beside the library versions it was built
 with: M5Cardputer 1.1.1, M5GFX 0.2.26, M5Unified 0.2.19, ESP_SSLClient 3.1.3,
-ArduinoJson 7.4.2, TinyGPSPlus 1.0.3, RadioLib 7.7.1, Sgp4 1.0.3, EspUsbHost 2.5.2.
+ArduinoJson 7.4.2, TinyGPSPlus 1.0.3, RadioLib 7.7.1, Sgp4 1.0.3, EspUsbHost **2.7.0, PATCHED** -- see `third_party/EspUsbHost/PATCHES.md`.
+
+> **Building this yourself? The USB host library must be patched.** A stock EspUsbHost
+> compiles and appears to work, then strands the USB stack the first time a radio stops
+> answering ("USB busy" on every later engage, until you reboot). The patched copy is
+> vendored at `third_party/EspUsbHost/`; copy it over your installed library. Three of
+> the patches are drafted as upstream bug reports, so a future release may drop the
+> vendored copy.
 
 Checksums (MD5):
-- `CardSat-merged.bin`  004056d04bb65d477fec09e05a5f9945
-- `CardSat-app.bin`     fb8b066f355c55d296d6fec8cb1e832d
+- `CardSat-merged.bin`  1e19b517a7254c85dda7d7626dc05fec
+- `CardSat-app.bin`     ab151902df865a7c8c77097727a76eb7
 - `CardSat-bootloader.bin`  c7f9b41acfaba802c7e74ae639a9a162
 - `CardSat-partitions.bin`  70007348574201233bc0cb17155e9d12
 
-> **v0.9.69** is a correctness release for the v0.9.68 dual-radio feature, most of it
-> found by an external audit and bench review. Two release-blocking bugs are fixed: the
-> new **Dual** CAT type was silently discarded on every reboot (a saved dual config came
-> back as wired CI-V, which could also seize the Grove UART from a GPS or rotator), and
-> changing settings while dual-USB was engaged stranded the second CAT port holding the
-> USB host, so the serial console never returned. **Single-wire CI-V now works on a
-> dual-rig leg** — it never had, and most half-duplex Icoms present CI-V on one wire.
-> Either leg may now be set to **None**. Also: the web API can no longer contradict the
-> device's battery reading, the Telnet client negotiates properly, receive-only radios
-> are refused as uplinks, and USB enumeration waits for both adapters. Gate-checked (17
-> static gates, 8 host harnesses). **Still first-bring-up: native dual-radio has never
-> driven a real radio** — see docs/THINGS_TO_VERIFY.md.
+> **v0.9.70** is a **USB release**. USB CAT can now be engaged and disengaged as often
+> as you like — switch satellites, switch the radio off and on — without rebooting.
+> Four defects were stacked here: an undrained CDC write that stranded the USB host
+> stack until reboot (fixed in the vendored library, reported upstream), a port that
+> was never closed because DTR was never de-asserted, and a radio whose CAT firmware
+> never returns after re-enumeration — so the host now **stays resident between
+> engagements**, and **`Fn`+`u`** releases it explicitly (which is when the serial
+> console returns). The **Kenwood TH-D74/D75** CAT path was rebuilt from measurement on
+> real hardware. The charge indicator is **removed** (this board cannot report charge
+> state; the old one said "on battery" while plugged in). See
+> `docs/releases/RELEASE_NOTES_0.9.70.md`.
 
 ## Easiest: one file at 0x0 (esptool)
 

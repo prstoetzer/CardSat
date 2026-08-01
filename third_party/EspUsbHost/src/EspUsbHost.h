@@ -1,0 +1,1914 @@
+#ifndef ESP_USB_HOST_H
+#define ESP_USB_HOST_H
+
+#include <Arduino.h>
+#include <FS.h>
+#include <functional>
+#include <memory>
+#include <usb/usb_host.h>
+#include <class/hid/hid.h>
+
+// lwIP / esp_netif integration for networkAttachNetif() is optional and only
+// compiled when the esp_netif headers are available in the build.
+#if __has_include(<esp_netif.h>)
+#define ESP_USB_HOST_HAS_ESP_NETIF 1
+#endif
+
+#if __has_include(<rom/usb/usb_common.h>)
+#include <rom/usb/usb_common.h>
+#else
+#define USB_DEVICE_DESC 0x01
+#define USB_CONFIGURATION_DESC 0x02
+#define USB_STRING_DESC 0x03
+#define USB_INTERFACE_DESC 0x04
+#define USB_ENDPOINT_DESC 0x05
+#define USB_INTERFACE_ASSOC_DESC 0x0B
+#define USB_HID_DESC 0x21
+#define USB_HID_REPORT_DESC 0x22
+#endif
+
+enum EspUsbHostKeyboardLayout : uint16_t
+{
+  ESP_USB_HOST_KEYBOARD_LAYOUT_ZH_TW = 0x0404,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_DA_DK = 0x0406,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_DE_DE = 0x0407,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_EN_US = 0x0409,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_FI_FI = 0x040B,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_FR_FR = 0x040C,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_HU_HU = 0x040E,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_IT_IT = 0x0410,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_JA_JP = 0x0411,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_KO_KR = 0x0412,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_NL_NL = 0x0413,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_NB_NO = 0x0414,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_PT_BR = 0x0416,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_SV_SE = 0x041D,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_ZH_CN = 0x0804,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_EN_GB = 0x0809,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_PT_PT = 0x0816,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_ES_ES = 0x0C0A,
+  ESP_USB_HOST_KEYBOARD_LAYOUT_FR_CH = 0x100C,
+};
+
+enum EspUsbHostPort
+{
+  ESP_USB_HOST_PORT_DEFAULT = 0,
+  ESP_USB_HOST_PORT_HIGH_SPEED,
+  ESP_USB_HOST_PORT_FULL_SPEED,
+};
+
+static constexpr uint8_t ESP_USB_HOST_MOUSE_LEFT = 0x01;
+static constexpr uint8_t ESP_USB_HOST_MOUSE_RIGHT = 0x02;
+static constexpr uint8_t ESP_USB_HOST_MOUSE_MIDDLE = 0x04;
+static constexpr uint8_t ESP_USB_HOST_MOUSE_BACK = 0x08;
+static constexpr uint8_t ESP_USB_HOST_MOUSE_FORWARD = 0x10;
+
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_TYPE_INPUT = 0x01;
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_TYPE_OUTPUT = 0x02;
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_TYPE_FEATURE = 0x03;
+
+static constexpr uint8_t ESP_USB_HOST_KEYBOARD_LED_NUM_LOCK = 0x01;
+static constexpr uint8_t ESP_USB_HOST_KEYBOARD_LED_CAPS_LOCK = 0x02;
+static constexpr uint8_t ESP_USB_HOST_KEYBOARD_LED_SCROLL_LOCK = 0x04;
+static constexpr uint8_t ESP_USB_HOST_KEYBOARD_LED_COMPOSE = 0x08;
+static constexpr uint8_t ESP_USB_HOST_KEYBOARD_LED_KANA = 0x10;
+
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_ID_KEYBOARD = 0x01;
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_ID_MOUSE = 0x02;
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_ID_GAMEPAD = 0x03;
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_ID_CONSUMER_CONTROL = 0x04;
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_ID_SYSTEM_CONTROL = 0x05;
+static constexpr uint8_t ESP_USB_HOST_HID_REPORT_ID_VENDOR = 0x06;
+static constexpr size_t ESP_USB_HOST_GAMEPAD_MAX_REPORT_BYTES = 64;
+static constexpr size_t ESP_USB_HOST_MAX_HID_INPUT_FIELDS = 96;
+static constexpr size_t ESP_USB_HOST_MAX_HID_EVENT_FIELDS = 64;
+// HID Usage Page for Keyboard/Keypad, and the widest NKRO key bitmap we decode
+// (256 usages = 32 bytes; NKRO keyboards typically expose 0x00-0xDF = 28 bytes).
+static constexpr uint16_t ESP_USB_HOST_HID_USAGE_PAGE_KEYBOARD = 0x0007;
+static constexpr uint16_t ESP_USB_HOST_HID_USAGE_PAGE_LED = 0x0008;
+static constexpr size_t ESP_USB_HOST_NKRO_BITMAP_MAX_BYTES = 32;
+
+static constexpr uint8_t ESP_USB_HOST_SYSTEM_CONTROL_POWER_OFF = 0x01;
+static constexpr uint8_t ESP_USB_HOST_SYSTEM_CONTROL_STANDBY = 0x02;
+static constexpr uint8_t ESP_USB_HOST_SYSTEM_CONTROL_WAKE_HOST = 0x03;
+static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_NEXT_TRACK = 0x00b5;
+static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_PREVIOUS_TRACK = 0x00b6;
+static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_PLAY_PAUSE = 0x00cd;
+static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_MUTE = 0x00e2;
+static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_VOLUME_UP = 0x00e9;
+static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_VOLUME_DOWN = 0x00ea;
+static constexpr uint8_t ESP_USB_HOST_ANY_ADDRESS = 0xff;
+using EspUsbHostListenerId = uint32_t;
+static constexpr EspUsbHostListenerId ESP_USB_HOST_INVALID_LISTENER_ID = 0;
+#ifndef ESP_USB_HOST_MAX_LISTENERS_PER_EVENT
+#define ESP_USB_HOST_MAX_LISTENERS_PER_EVENT 4
+#endif
+// Device lifecycle (connect / disconnect) has its own capacity because the
+// number of listeners it needs grows differently from the parsed-input events.
+// An input event is watched by however many observers care about that one
+// event, which plateaus; lifecycle is watched by *every* subsystem that tracks
+// devices, so the count scales with the number of subsystems built on the
+// stack. Sharing one macro would force either an input-event slot count nobody
+// needs or a lifecycle count that overflows.
+#ifndef ESP_USB_HOST_MAX_LIFECYCLE_LISTENERS
+#define ESP_USB_HOST_MAX_LIFECYCLE_LISTENERS 8
+#endif
+// Maximum number of concurrently-tracked USB devices. Each slot is a sizable
+// static DeviceState (several KB — RX ring, NTB reassembly buffer, HID field
+// tables, etc.), so this constant dominates the library's static RAM use. The
+// ESP32-S2 has far less internal RAM than the S3/P4, so it defaults to fewer
+// slots to fit. Override for any target by defining ESP_USB_HOST_MAX_DEVICES
+// before this header is compiled, e.g. build flag -DESP_USB_HOST_MAX_DEVICES=4.
+#ifndef ESP_USB_HOST_MAX_DEVICES
+#if defined(CONFIG_IDF_TARGET_ESP32S2)
+#define ESP_USB_HOST_MAX_DEVICES 3
+#else
+#define ESP_USB_HOST_MAX_DEVICES 8
+#endif
+#endif
+static constexpr size_t ESP_USB_HOST_MAX_INTERFACES = 16;
+static constexpr size_t ESP_USB_HOST_MAX_ENDPOINTS = 16;
+static constexpr size_t ESP_USB_HOST_MAX_HID_REPORT_DESCRIPTORS = 8;
+static constexpr size_t ESP_USB_HOST_MAX_HID_REPORT_DESCRIPTOR_SIZE = 512;
+static constexpr size_t ESP_USB_HOST_KEYBOARD_BITMAP_SIZE = 32;
+static constexpr size_t ESP_USB_HOST_MAX_AUDIO_STREAMS = 8;
+static constexpr size_t ESP_USB_HOST_MAX_AUDIO_SAMPLE_RATES = 4;
+static constexpr size_t ESP_USB_HOST_MAX_AUDIO_FEATURE_UNITS = 4;
+static constexpr size_t ESP_USB_HOST_MAX_AUDIO_FEATURE_CHANNELS = 8;
+static constexpr size_t ESP_USB_HOST_MAX_CDC_SERIALS = 4;
+static constexpr size_t ESP_USB_HOST_MAX_NETWORK_INTERFACES = 4;
+// Bulk-IN NTB receive buffer. Matches TinyUSB's default CFG_TUD_NCM_IN_NTB_MAX_SIZE
+// (3200) so a whole device->host NTB fits in one transfer.
+static constexpr size_t ESP_USB_HOST_NETWORK_NTB_IN_MAX = 3200;
+// Per-device raw RX ring for networkReadFrame() (frames stored as [uint16 len][payload]).
+static constexpr size_t ESP_USB_HOST_NETWORK_RX_RING_SIZE = 4096;
+// Largest Ethernet frame we accept/transmit (CDC ECM/NCM wMaxSegmentSize default).
+static constexpr size_t ESP_USB_HOST_NETWORK_MAX_FRAME = 1514;
+static constexpr size_t ESP_USB_HOST_AUDIO_OUTPUT_TRANSFERS = 4;
+static constexpr size_t ESP_USB_HOST_VENDOR_RX_BUFFER_SIZE = 512;
+static constexpr uint32_t ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS = 5000;
+static constexpr uint32_t ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS = 1000;
+static constexpr uint32_t ESP_USB_HOST_VENDOR_CONTROL_DEFAULT_TIMEOUT_MS = 1000;
+// Upper bound for vendorWriteQueueBegin(depth, ...). Each slot holds one
+// preallocated transfer, so the practical depth is limited by DMA memory rather
+// than by this constant.
+static constexpr size_t ESP_USB_HOST_VENDOR_WRITE_QUEUE_MAX_DEPTH = 8;
+
+struct EspUsbHostConfig
+{
+  uint32_t taskStackSize = 8192;
+  UBaseType_t taskPriority = 5;
+  BaseType_t taskCore = tskNO_AFFINITY;
+  EspUsbHostPort port = ESP_USB_HOST_PORT_DEFAULT;
+};
+
+enum EspUsbHostSerialParity : uint8_t
+{
+  ESP_USB_HOST_SERIAL_PARITY_NONE = 0,
+  ESP_USB_HOST_SERIAL_PARITY_ODD,
+  ESP_USB_HOST_SERIAL_PARITY_EVEN,
+  ESP_USB_HOST_SERIAL_PARITY_MARK,
+  ESP_USB_HOST_SERIAL_PARITY_SPACE,
+};
+
+enum EspUsbHostSerialStopBits : uint8_t
+{
+  ESP_USB_HOST_SERIAL_STOP_BITS_1 = 0,
+  ESP_USB_HOST_SERIAL_STOP_BITS_1_5,
+  ESP_USB_HOST_SERIAL_STOP_BITS_2,
+};
+
+struct EspUsbHostSerialConfig
+{
+  uint32_t baud = 115200;
+  uint8_t dataBits = 8;
+  EspUsbHostSerialParity parity = ESP_USB_HOST_SERIAL_PARITY_NONE;
+  EspUsbHostSerialStopBits stopBits = ESP_USB_HOST_SERIAL_STOP_BITS_1;
+};
+
+struct EspUsbHostDeviceInfo
+{
+  uint8_t address = 0;
+  uint16_t vid = 0;
+  uint16_t pid = 0;
+  const char *manufacturer = "";
+  const char *product = "";
+  const char *serial = "";
+  uint8_t parentAddress = 0;
+  uint8_t portId = 0;
+  usb_speed_t speed = USB_SPEED_FULL;
+  uint16_t usbVersion = 0;
+  uint16_t deviceVersion = 0;
+  uint8_t deviceClass = 0;
+  uint8_t deviceSubClass = 0;
+  uint8_t deviceProtocol = 0;
+  uint8_t maxPacketSize0 = 0;
+  uint8_t configurationValue = 0;
+  uint8_t configurationAttributes = 0;
+  uint8_t configurationMaxPower = 0;
+  uint8_t configurationInterfaceCount = 0;
+  uint16_t configurationTotalLength = 0;
+  bool supported = false;
+  bool isHub = false;
+};
+
+struct EspUsbHostHubInfo
+{
+  uint8_t address = 0;
+  uint8_t portCount = 0;
+  uint16_t characteristics = 0;
+  bool gangedPowerSwitching = false;
+  bool perPortPowerSwitching = false;
+  bool noPowerSwitching = false;
+  bool compound = false;
+  bool gangedOverCurrent = false;
+  bool perPortOverCurrent = false;
+  bool noOverCurrent = false;
+  uint16_t powerOnToPowerGoodMs = 0;
+  uint8_t controllerCurrentMa = 0;
+  uint8_t descriptorLength = 0;
+  uint8_t rawDescriptor[32] = {};
+};
+
+struct EspUsbHostDeviceProbeInfo
+{
+  uint8_t address = 0;
+  bool openOk = false;
+  bool deviceInfoOk = false;
+  bool deviceDescriptorOk = false;
+  bool configDescriptorOk = false;
+  bool hubDescriptorOk = false;
+  uint8_t parentAddress = 0;
+  uint8_t parentPort = 0;
+  uint8_t speed = 0;
+  uint16_t vid = 0;
+  uint16_t pid = 0;
+  uint8_t deviceClass = 0;
+  uint8_t deviceSubClass = 0;
+  uint8_t deviceProtocol = 0;
+  uint8_t interfaceCount = 0;
+  bool configHasHubInterface = false;
+  EspUsbHostHubInfo hub;
+};
+
+struct EspUsbHostInterfaceInfo
+{
+  uint8_t number = 0;
+  uint8_t alternate = 0;
+  uint8_t interfaceClass = 0;
+  uint8_t interfaceSubClass = 0;
+  uint8_t interfaceProtocol = 0;
+  uint8_t endpointCount = 0;
+  bool claimed = false;
+  bool claimAttempted = false;
+  esp_err_t claimResult = ESP_OK;
+};
+
+struct EspUsbHostEndpointInfo
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t attributes = 0;
+  uint16_t maxPacketSize = 0;
+  uint8_t interval = 0;
+};
+
+enum EspUsbHostNetworkProtocol : uint8_t
+{
+  ESP_USB_HOST_NETWORK_PROTOCOL_NONE = 0,
+  ESP_USB_HOST_NETWORK_PROTOCOL_CDC_ECM,
+  ESP_USB_HOST_NETWORK_PROTOCOL_CDC_NCM,
+};
+
+struct EspUsbHostNetworkInterfaceInfo
+{
+  uint8_t address = 0;
+  uint8_t configurationValue = 0;
+  EspUsbHostNetworkProtocol protocol = ESP_USB_HOST_NETWORK_PROTOCOL_NONE;
+  uint8_t controlInterfaceNumber = 0xff;
+  uint8_t controlInterfaceAlternate = 0;
+  uint8_t dataInterfaceNumber = 0xff;
+  uint8_t dataInterfaceAlternate = 0;
+  uint8_t macAddressStringIndex = 0;
+  uint16_t maxSegmentSize = 0;
+  uint8_t notificationEndpoint = 0;
+  uint16_t notificationMaxPacketSize = 0;
+  uint8_t inEndpoint = 0;
+  uint8_t outEndpoint = 0;
+  uint16_t inMaxPacketSize = 0;
+  uint16_t outMaxPacketSize = 0;
+
+  bool complete() const
+  {
+    return protocol != ESP_USB_HOST_NETWORK_PROTOCOL_NONE &&
+           controlInterfaceNumber != 0xff &&
+           dataInterfaceNumber != 0xff &&
+           inEndpoint != 0 &&
+           outEndpoint != 0;
+  }
+};
+
+// Raw Ethernet frame delivered from / accepted by an opened USB network
+// interface. `data` points at the bare Ethernet frame (dst/src MAC + ethertype
+// + payload); the NCM NTB / ECM framing is added and stripped by the library.
+struct EspUsbHostNetworkFrame
+{
+  uint8_t address = 0;
+  EspUsbHostNetworkProtocol protocol = ESP_USB_HOST_NETWORK_PROTOCOL_NONE;
+  const uint8_t *data = nullptr;
+  size_t length = 0;
+};
+
+// lwIP (esp_netif) attach configuration for a USB network interface. The
+// default is a DHCP client so the USB NIC (or the peer's DHCP server) hands the
+// host an address. Set dhcpClient=false and fill ip/gateway/subnet for a static
+// address.
+struct EspUsbHostNetworkConfig
+{
+  bool dhcpClient = true;
+  IPAddress ip;
+  IPAddress gateway;
+  IPAddress subnet;
+  IPAddress dns1;
+  IPAddress dns2;
+};
+
+// Lightweight counters for diagnosing the USB network data path.
+struct EspUsbHostNetworkStats
+{
+  bool ready = false;
+  bool linkUp = false;
+  bool netifAttached = false;
+  uint32_t rxNtb = 0;    // NTBs received on bulk IN
+  uint32_t rxFrames = 0; // Ethernet datagrams extracted from NTBs
+  uint32_t txFrames = 0; // frames sent (NTB built + bulk OUT ok)
+  uint32_t txFails = 0;  // frame send failures
+};
+
+struct EspUsbHostVendorInterface
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t inEndpoint = 0;
+  uint8_t outEndpoint = 0;
+  uint16_t inMaxPacketSize = 0;
+  uint16_t outMaxPacketSize = 0;
+};
+
+struct EspUsbHostVendorData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t endpoint = 0;
+  const uint8_t *data = nullptr;
+  size_t length = 0;
+};
+
+// Diagnostic snapshot of the asynchronous vendor bulk OUT queue. Counters are
+// updated from the caller task (submitted, queueFullEvents) and from the USB
+// client task (completed, errors, bytes, zlp), so the snapshot is consistent per
+// field but not necessarily taken at a single instant.
+struct EspUsbHostVendorWriteStats
+{
+  uint32_t submitted = 0;       // transfers handed to the USB driver
+  uint32_t completed = 0;       // completion callbacks received
+  uint32_t errors = 0;          // completions with a status other than COMPLETED
+  uint32_t queueFullEvents = 0; // acquires that had to wait for a free slot
+  uint32_t zlp = 0;             // zero-length transfers sent
+  uint64_t bytes = 0;           // bytes of completed transfers
+};
+
+struct EspUsbHostHIDReportDescriptor
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint16_t hidVersion = 0;
+  uint8_t countryCode = 0;
+  uint8_t descriptorType = USB_HID_REPORT_DESC;
+  uint16_t reportedLength = 0;
+  uint16_t length = 0;
+  uint8_t data[ESP_USB_HOST_MAX_HID_REPORT_DESCRIPTOR_SIZE] = {};
+};
+
+struct EspUsbHostHIDReportData
+{
+  uint16_t vid = 0;
+  uint16_t pid = 0;
+  const char *manufacturer = "";
+  const char *product = "";
+  const char *serial = "";
+  const uint8_t *rawData = nullptr;
+  size_t rawLength = 0;
+  const uint8_t *reportData = nullptr;
+  size_t reportLength = 0;
+};
+
+struct EspUsbHostHIDFieldValue
+{
+  uint8_t reportId = 0;
+  uint16_t usagePage = 0;
+  uint16_t usage = 0;
+  int32_t value = 0;
+  int32_t logicalMin = 0;
+  int32_t logicalMax = 0;
+  uint16_t bitOffset = 0;
+  uint8_t bitSize = 0;
+  uint8_t flags = 0;
+};
+
+struct EspUsbHostKeyboardEvent : EspUsbHostHIDReportData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  bool pressed = false;
+  bool released = false;
+  uint8_t keycode = 0;
+  uint8_t ascii = 0;
+  uint16_t unicode = 0; // Unicode code point (0 if none); ascii is its Latin-1 low byte
+  uint8_t modifiers = 0;
+  bool numLock = false;
+  bool capsLock = false;
+  bool scrollLock = false;
+};
+
+// A format-independent snapshot of the Keyboard/Keypad usage page. Boot and
+// bitmap (NKRO) reports are both normalized to the same 256-bit key map.
+struct EspUsbHostKeyboardState : EspUsbHostHIDReportData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t bitmap[ESP_USB_HOST_KEYBOARD_BITMAP_SIZE] = {};
+  uint8_t changedBitmap[ESP_USB_HOST_KEYBOARD_BITMAP_SIZE] = {};
+  uint8_t modifiers = 0;
+  bool numLock = false;
+  bool capsLock = false;
+  bool scrollLock = false;
+
+  bool isDown(uint8_t keycode) const
+  {
+    return (bitmap[keycode >> 3] & static_cast<uint8_t>(1u << (keycode & 7))) != 0;
+  }
+
+  bool wasPressed(uint8_t keycode) const
+  {
+    return isDown(keycode) &&
+           (changedBitmap[keycode >> 3] & static_cast<uint8_t>(1u << (keycode & 7))) != 0;
+  }
+
+  bool wasReleased(uint8_t keycode) const
+  {
+    return !isDown(keycode) &&
+           (changedBitmap[keycode >> 3] & static_cast<uint8_t>(1u << (keycode & 7))) != 0;
+  }
+};
+
+struct EspUsbHostMouseEvent : EspUsbHostHIDReportData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  int16_t x = 0;
+  int16_t y = 0;
+  int16_t wheel = 0;
+  uint8_t buttons = 0;
+  uint8_t previousButtons = 0;
+  bool moved = false;
+  bool buttonsChanged = false;
+};
+
+struct EspUsbHostHIDInput
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint16_t vid = 0;
+  uint16_t pid = 0;
+  const char *manufacturer = "";
+  const char *product = "";
+  const char *serial = "";
+  uint8_t subclass = 0;
+  uint8_t protocol = 0;
+  const uint8_t *data = nullptr;
+  size_t length = 0;
+};
+
+struct EspUsbHostSerialData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  const uint8_t *data = nullptr;
+  size_t length = 0;
+};
+
+struct EspUsbHostMidiMessage
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t cable = 0;
+  uint8_t codeIndex = 0;
+  uint8_t status = 0;
+  uint8_t data1 = 0;
+  uint8_t data2 = 0;
+  const uint8_t *raw = nullptr;
+  size_t length = 0;
+};
+
+struct EspUsbHostAudioData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  const uint8_t *data = nullptr;
+  size_t length = 0;
+};
+
+struct EspUsbHostAudioOutputRequest
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t endpointAddress = 0;
+  uint32_t sampleRate = 0;
+  uint8_t channels = 0;
+  uint8_t bytesPerSample = 0;
+  uint8_t bitsPerSample = 0;
+  uint8_t *data = nullptr;
+  size_t frameCount = 0;
+  size_t byteCount = 0;
+  size_t writtenFrames = 0;
+};
+
+struct EspUsbHostMscInquiry
+{
+  uint8_t peripheralDeviceType = 0;
+  bool removable = false;
+  char vendor[9] = {};
+  char product[17] = {};
+  char revision[5] = {};
+};
+
+struct EspUsbHostMscSense
+{
+  uint8_t responseCode = 0;
+  uint8_t senseKey = 0;
+  uint8_t additionalSenseCode = 0;
+  uint8_t additionalSenseQualifier = 0;
+};
+
+struct EspUsbHostMscBlockDeviceInfo
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t lun = 0;
+  uint8_t maxLun = 0;
+  uint64_t blockCount = 0;
+  uint32_t blockSize = 0;
+  uint64_t capacityBytes = 0;
+};
+
+struct EspUsbHostAudioStreamInfo
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t alternate = 0;
+  uint8_t endpointAddress = 0;
+  bool input = false;
+  bool output = false;
+  uint8_t channels = 0;
+  uint8_t bytesPerSample = 0;
+  uint8_t bitsPerSample = 0;
+  uint32_t sampleRate = 0;
+  uint8_t sampleRateCount = 0;
+  uint32_t sampleRates[ESP_USB_HOST_MAX_AUDIO_SAMPLE_RATES] = {};
+  uint32_t sampleRateMin = 0;
+  uint32_t sampleRateMax = 0;
+  uint32_t sampleRateResolution = 0;
+  uint16_t maxPacketSize = 0;
+  uint8_t interval = 0;
+};
+
+struct EspUsbHostAudioFeatureUnitInfo
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t unitId = 0;
+  uint8_t sourceId = 0;
+  uint8_t channelCount = 0;
+  uint8_t controlSize = 0;
+  uint32_t masterControls = 0;
+  uint32_t channelControls[ESP_USB_HOST_MAX_AUDIO_FEATURE_CHANNELS] = {};
+};
+
+struct EspUsbHostAudioVolumeRange
+{
+  int16_t min = 0;
+  int16_t max = 0;
+  int16_t resolution = 0;
+};
+
+struct EspUsbHostAudioStreamSelection
+{
+  int index = -1;
+  uint32_t sampleRate = 0;
+  int score = 0;
+
+  explicit operator bool() const
+  {
+    return index >= 0 && sampleRate > 0;
+  }
+};
+
+using EspUsbHostAudioStreamFilter = bool (*)(uint32_t sampleRate,
+                                             uint8_t channels,
+                                             uint8_t bitsPerSample);
+
+inline bool espUsbHostAudioStreamSupportsSampleRate(const EspUsbHostAudioStreamInfo &stream, uint32_t sampleRate)
+{
+  if (sampleRate == 0)
+  {
+    return false;
+  }
+
+  if (stream.sampleRateCount > 0)
+  {
+    for (uint8_t i = 0; i < stream.sampleRateCount && i < ESP_USB_HOST_MAX_AUDIO_SAMPLE_RATES; i++)
+    {
+      if (stream.sampleRates[i] == sampleRate)
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (stream.sampleRateMin > 0 && stream.sampleRateMax >= stream.sampleRateMin)
+  {
+    if (sampleRate < stream.sampleRateMin || sampleRate > stream.sampleRateMax)
+    {
+      return false;
+    }
+    if (stream.sampleRateResolution == 0)
+    {
+      return true;
+    }
+    return ((sampleRate - stream.sampleRateMin) % stream.sampleRateResolution) == 0;
+  }
+
+  return stream.sampleRate == 0 || stream.sampleRate == sampleRate;
+}
+
+inline uint32_t espUsbHostAudioStreamPreferredSampleRate(const EspUsbHostAudioStreamInfo &stream, uint32_t preferredSampleRate)
+{
+  if (espUsbHostAudioStreamSupportsSampleRate(stream, preferredSampleRate))
+  {
+    return preferredSampleRate;
+  }
+
+  if (stream.sampleRate > 0 && espUsbHostAudioStreamSupportsSampleRate(stream, stream.sampleRate))
+  {
+    return stream.sampleRate;
+  }
+
+  if (stream.sampleRateCount > 0)
+  {
+    return stream.sampleRates[0];
+  }
+
+  if (stream.sampleRateMin > 0)
+  {
+    return stream.sampleRateMin;
+  }
+
+  return 0;
+}
+
+inline bool espUsbHostAudioStreamMatchesPcm(const EspUsbHostAudioStreamInfo &stream,
+                                            uint8_t channels,
+                                            uint8_t bytesPerSample,
+                                            uint8_t bitsPerSample,
+                                            uint32_t sampleRate)
+{
+  return stream.channels == channels &&
+         stream.bytesPerSample == bytesPerSample &&
+         stream.bitsPerSample == bitsPerSample &&
+         espUsbHostAudioStreamSupportsSampleRate(stream, sampleRate);
+}
+
+inline bool espUsbHostAudioStreamCandidateRateExists(const uint32_t *rates, size_t count, uint32_t rate)
+{
+  for (size_t i = 0; i < count; i++)
+  {
+    if (rates[i] == rate)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+inline size_t espUsbHostAudioStreamCandidateSampleRates(const EspUsbHostAudioStreamInfo &stream,
+                                                        uint32_t *rates,
+                                                        size_t maxRates)
+{
+  if (!rates || maxRates == 0)
+  {
+    return 0;
+  }
+
+  size_t count = 0;
+  auto addRate = [&](uint32_t rate)
+  {
+    if (rate == 0 ||
+        !espUsbHostAudioStreamSupportsSampleRate(stream, rate) ||
+        espUsbHostAudioStreamCandidateRateExists(rates, count, rate) ||
+        count >= maxRates)
+    {
+      return;
+    }
+    rates[count++] = rate;
+  };
+
+  addRate(48000);
+  addRate(44100);
+  addRate(stream.sampleRate);
+  for (uint8_t i = 0; i < stream.sampleRateCount && i < ESP_USB_HOST_MAX_AUDIO_SAMPLE_RATES; i++)
+  {
+    addRate(stream.sampleRates[i]);
+  }
+  if (stream.sampleRateMax > 0)
+  {
+    addRate(stream.sampleRateMax);
+  }
+  addRate(stream.sampleRateMin);
+
+  return count;
+}
+
+inline int espUsbHostAudioStreamScore(const EspUsbHostAudioStreamInfo &stream, uint32_t sampleRate)
+{
+  int score = 0;
+
+  if (sampleRate == 48000)
+  {
+    score += 10000;
+  }
+  else if (sampleRate == 44100)
+  {
+    score += 9000;
+  }
+  else if (sampleRate >= 32000)
+  {
+    score += 6000 + static_cast<int>(sampleRate / 1000);
+  }
+  else
+  {
+    score += static_cast<int>(sampleRate / 100);
+  }
+
+  if (stream.bitsPerSample == 16)
+  {
+    score += 1000;
+    if (stream.bytesPerSample == 2)
+    {
+      score += 100;
+    }
+  }
+  else if (stream.bitsPerSample == 24)
+  {
+    score += 800;
+    if (stream.bytesPerSample == 3 || stream.bytesPerSample == 4)
+    {
+      score += 50;
+    }
+  }
+  else if (stream.bitsPerSample == 32)
+  {
+    score += 700;
+    if (stream.bytesPerSample == 4)
+    {
+      score += 50;
+    }
+  }
+  else if (stream.bitsPerSample == 8)
+  {
+    score += 200;
+    if (stream.bytesPerSample == 1)
+    {
+      score += 25;
+    }
+  }
+  else
+  {
+    score += stream.bitsPerSample;
+  }
+
+  if (stream.channels == 2)
+  {
+    score += 300;
+  }
+  else if (stream.channels == 1)
+  {
+    score += 200;
+  }
+  else
+  {
+    score += stream.channels;
+  }
+
+  return score;
+}
+
+inline uint32_t espUsbHostAudioStreamBestSampleRate(const EspUsbHostAudioStreamInfo &stream)
+{
+  uint32_t rates[ESP_USB_HOST_MAX_AUDIO_SAMPLE_RATES + 4] = {};
+  const size_t count = espUsbHostAudioStreamCandidateSampleRates(stream, rates, sizeof(rates) / sizeof(rates[0]));
+  if (count == 0)
+  {
+    return 0;
+  }
+
+  uint32_t bestRate = 0;
+  int bestScore = -1;
+  for (size_t i = 0; i < count; i++)
+  {
+    const int score = espUsbHostAudioStreamScore(stream, rates[i]);
+    if (bestScore < 0 || score > bestScore)
+    {
+      bestRate = rates[i];
+      bestScore = score;
+    }
+  }
+  return bestRate;
+}
+
+inline EspUsbHostAudioStreamSelection espUsbHostSelectAudioStream(const EspUsbHostAudioStreamInfo *streams,
+                                                                  size_t count,
+                                                                  bool input,
+                                                                  EspUsbHostAudioStreamFilter filter = nullptr)
+{
+  EspUsbHostAudioStreamSelection best;
+  if (!streams)
+  {
+    return best;
+  }
+
+  for (size_t i = 0; i < count; i++)
+  {
+    const EspUsbHostAudioStreamInfo &stream = streams[i];
+    if (input ? !stream.input : !stream.output)
+    {
+      continue;
+    }
+
+    uint32_t rates[ESP_USB_HOST_MAX_AUDIO_SAMPLE_RATES + 4] = {};
+    const size_t rateCount = espUsbHostAudioStreamCandidateSampleRates(stream, rates, sizeof(rates) / sizeof(rates[0]));
+    for (size_t rateIndex = 0; rateIndex < rateCount; rateIndex++)
+    {
+      const uint32_t sampleRate = rates[rateIndex];
+      if (filter && !filter(sampleRate, stream.channels, stream.bitsPerSample))
+      {
+        continue;
+      }
+
+      const int score = espUsbHostAudioStreamScore(stream, sampleRate);
+      if (best.index < 0 || score > best.score)
+      {
+        best.index = static_cast<int>(i);
+        best.sampleRate = sampleRate;
+        best.score = score;
+      }
+    }
+  }
+  return best;
+}
+
+inline EspUsbHostAudioStreamSelection espUsbHostSelectAudioInputStream(const EspUsbHostAudioStreamInfo *streams,
+                                                                       size_t count,
+                                                                       EspUsbHostAudioStreamFilter filter = nullptr)
+{
+  return espUsbHostSelectAudioStream(streams, count, true, filter);
+}
+
+inline EspUsbHostAudioStreamSelection espUsbHostSelectAudioOutputStream(const EspUsbHostAudioStreamInfo *streams,
+                                                                        size_t count,
+                                                                        EspUsbHostAudioStreamFilter filter = nullptr)
+{
+  return espUsbHostSelectAudioStream(streams, count, false, filter);
+}
+
+void espUsbHostPrintHex(const uint8_t *data, size_t length, Print &out = Serial);
+void espUsbHostPrint(const EspUsbHostDeviceInfo &device, Print &out = Serial);
+void espUsbHostPrint(const EspUsbHostInterfaceInfo &intf, Print &out = Serial);
+void espUsbHostPrint(const EspUsbHostEndpointInfo &endpoint, Print &out = Serial);
+void espUsbHostPrint(const EspUsbHostNetworkInterfaceInfo &network, Print &out = Serial);
+void espUsbHostPrint(const EspUsbHostAudioStreamInfo &stream, Print &out = Serial);
+void espUsbHostPrint(const EspUsbHostKeyboardEvent &event, Print &out = Serial);
+void espUsbHostPrint(const EspUsbHostHIDInput &input, Print &out = Serial);
+void espUsbHostPrint(const EspUsbHostHIDReportDescriptor &descriptor, Print &out = Serial);
+void espUsbHostPrintHIDReportDescriptor(const uint8_t *data, size_t length, Print &out = Serial);
+const char *espUsbHostConsumerControlUsageName(uint16_t usage);
+const char *espUsbHostSystemControlUsageName(uint8_t usage);
+const char *espUsbHostNetworkProtocolName(EspUsbHostNetworkProtocol protocol);
+
+struct EspUsbHostConsumerControlEvent : EspUsbHostHIDReportData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint16_t usage = 0;
+  bool pressed = false;
+  bool released = false;
+};
+
+struct EspUsbHostGamepadEvent : EspUsbHostHIDReportData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  const EspUsbHostHIDFieldValue *fields = nullptr;
+  size_t fieldCount = 0;
+  bool changed = false;
+};
+
+struct EspUsbHostGamepadPrevState
+{
+  uint8_t reportData[ESP_USB_HOST_GAMEPAD_MAX_REPORT_BYTES] = {};
+  size_t reportLength = 0;
+};
+
+struct EspUsbHostHIDVendorInput : EspUsbHostHIDReportData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+};
+
+struct EspUsbHostSystemControlEvent : EspUsbHostHIDReportData
+{
+  uint8_t address = 0;
+  uint8_t interfaceNumber = 0;
+  uint8_t usage = 0;
+  bool pressed = false;
+  bool released = false;
+};
+
+class EspUsbHostCdcSerial;
+
+class EspUsbHost
+{
+public:
+  using DeviceCallback = std::function<void(const EspUsbHostDeviceInfo &)>;
+  using KeyboardCallback = std::function<void(const EspUsbHostKeyboardEvent &)>;
+  using KeyboardStateCallback = std::function<void(const EspUsbHostKeyboardState &)>;
+  using MouseCallback = std::function<void(const EspUsbHostMouseEvent &)>;
+  using HIDInputCallback = std::function<void(const EspUsbHostHIDInput &)>;
+  using HIDReportDescriptorCallback = std::function<void(const EspUsbHostHIDReportDescriptor &)>;
+  using SerialDataCallback = std::function<void(const EspUsbHostSerialData &)>;
+  using MidiMessageCallback = std::function<void(const EspUsbHostMidiMessage &)>;
+  using AudioDataCallback = std::function<void(const EspUsbHostAudioData &)>;
+  using AudioOutputCallback = std::function<void(EspUsbHostAudioOutputRequest &)>;
+  using ConsumerControlCallback = std::function<void(const EspUsbHostConsumerControlEvent &)>;
+  using GamepadCallback = std::function<void(const EspUsbHostGamepadEvent &)>;
+  using HIDVendorInputCallback = std::function<void(const EspUsbHostHIDVendorInput &)>;
+  using VendorDataCallback = std::function<void(const EspUsbHostVendorData &)>;
+  using SystemControlCallback = std::function<void(const EspUsbHostSystemControlEvent &)>;
+  using NetworkFrameCallback = std::function<void(const EspUsbHostNetworkFrame &)>;
+  // Return 0 to keep the device's default configuration, or a configuration
+  // value in the range 1..bNumConfigurations. Called from the USB Host library
+  // task during enumeration, so the callback must not block.
+  using ConfigurationSelector = std::function<uint8_t(const usb_device_desc_t &)>;
+  static constexpr size_t MaxListenersPerEvent = ESP_USB_HOST_MAX_LISTENERS_PER_EVENT;
+  static_assert(MaxListenersPerEvent > 0, "ESP_USB_HOST_MAX_LISTENERS_PER_EVENT must be greater than zero");
+  static constexpr size_t MaxLifecycleListeners = ESP_USB_HOST_MAX_LIFECYCLE_LISTENERS;
+  static_assert(MaxLifecycleListeners > 0, "ESP_USB_HOST_MAX_LIFECYCLE_LISTENERS must be greater than zero");
+
+  EspUsbHost();
+  ~EspUsbHost();
+
+  bool begin();
+  bool begin(const EspUsbHostConfig &config);
+  void end();
+  bool ready() const;
+  bool setConfigurationSelector(ConfigurationSelector selector);
+
+  void onDeviceConnected(DeviceCallback callback);
+  void onDeviceDisconnected(DeviceCallback callback);
+  void onKeyboard(KeyboardCallback callback);
+  void onKeyboardState(KeyboardStateCallback callback);
+  void onMouse(MouseCallback callback);
+  void onHIDInput(HIDInputCallback callback);
+  void onHIDReportDescriptor(HIDReportDescriptorCallback callback);
+  void onSerialData(SerialDataCallback callback);
+  void onMidiMessage(MidiMessageCallback callback);
+  void onAudioData(AudioDataCallback callback);
+  void onAudioOutputRequest(AudioOutputCallback callback);
+  void onConsumerControl(ConsumerControlCallback callback);
+  void onGamepad(GamepadCallback callback);
+  void onHIDVendorInput(HIDVendorInputCallback callback);
+  void onVendorData(VendorDataCallback callback);
+  void onSystemControl(SystemControlCallback callback);
+  void onNetworkFrame(NetworkFrameCallback callback);
+  EspUsbHostListenerId addKeyboardListener(KeyboardCallback callback);
+  EspUsbHostListenerId addKeyboardStateListener(KeyboardStateCallback callback);
+  EspUsbHostListenerId addMouseListener(MouseCallback callback);
+  EspUsbHostListenerId addConsumerControlListener(ConsumerControlCallback callback);
+  EspUsbHostListenerId addSystemControlListener(SystemControlCallback callback);
+  EspUsbHostListenerId addGamepadListener(GamepadCallback callback);
+  // Device lifecycle and MIDI listeners. Same contract as the input listeners
+  // above: the single on*() callback stays compatible and runs first, listeners
+  // run in registration order from a per-event snapshot, removal is by id, and
+  // add / remove from inside a callback takes effect on the next event.
+  // Lifecycle listeners share the ESP_USB_HOST_MAX_LIFECYCLE_LISTENERS budget.
+  EspUsbHostListenerId addDeviceConnectedListener(DeviceCallback callback);
+  EspUsbHostListenerId addDeviceDisconnectedListener(DeviceCallback callback);
+  EspUsbHostListenerId addMidiMessageListener(MidiMessageCallback callback);
+  bool removeListener(EspUsbHostListenerId listenerId);
+
+  void setKeyboardLayout(EspUsbHostKeyboardLayout layout);
+  bool sendSetProtocol(uint8_t interfaceNumber, uint8_t address);
+  bool sendHIDReport(uint8_t interfaceNumber,
+                     uint8_t reportType,
+                     uint8_t reportId,
+                     const uint8_t *data,
+                     size_t length,
+                     uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool sendHIDVendorOutput(const uint8_t *data, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool sendHIDVendorFeature(const uint8_t *data, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool vendorOpen(uint8_t address = ESP_USB_HOST_ANY_ADDRESS, uint8_t interfaceNumber = 0xff);
+  bool vendorWrite(const uint8_t *data, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  size_t vendorRead(uint8_t *buffer, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  // Max packet size of the bulk OUT endpoint opened by vendorOpen(), or 0 when
+  // no vendor interface is open. Callers that must terminate a transfer on a
+  // packet boundary need this value.
+  uint16_t vendorOutPacketSize(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  uint16_t vendorInPacketSize(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  // Address of the endpoints vendorOpen() selected, or 0 when none is open. An
+  // interface can expose several bulk endpoints per direction, so a caller that
+  // requires a specific one needs to check which was chosen.
+  uint8_t vendorOutEndpoint(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  uint8_t vendorInEndpoint(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+
+  // Asynchronous bulk OUT queue. vendorWrite() waits for each transfer to
+  // complete, which leaves the bus idle between transfers; the queue keeps
+  // several transfers in flight instead. Unlike vendorWrite(), these calls never
+  // wait for completion and may be used from USB callbacks.
+  //
+  // Preferred (zero-copy) sequence: acquire a pooled DMA buffer, write the
+  // payload into it, then submit it.
+  //
+  //   size_t capacity = 0;
+  //   uint8_t *buffer = usb.vendorWriteAcquire(&capacity, 100);
+  //   if (buffer) { size_t n = encode(buffer, capacity); usb.vendorWriteSubmit(buffer, n); }
+  bool vendorWriteQueueBegin(size_t depth,
+                             size_t bufferBytes,
+                             uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  void vendorWriteQueueEnd(uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool vendorWriteQueueReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  uint8_t *vendorWriteAcquire(size_t *capacity,
+                              uint32_t timeoutMs = 0,
+                              uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool vendorWriteSubmit(uint8_t *buffer, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  void vendorWriteRelease(uint8_t *buffer, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  // Copies into a pooled buffer and submits it. Fails when length exceeds the
+  // per-slot buffer size; the caller decides how to split.
+  bool vendorWriteAsync(const uint8_t *data, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  size_t vendorWritePending(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  size_t vendorWriteQueueFree(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool vendorWriteFlush(uint32_t timeoutMs, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  EspUsbHostVendorWriteStats vendorWriteStats(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  void vendorWriteStatsReset(uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+
+  // Bulk OUT packet boundaries. A transfer whose length is a multiple of the
+  // endpoint max packet size does not terminate the USB transfer by itself; some
+  // protocols (ADB, CDC-NCM) require a following zero-length packet.
+  bool vendorWriteZlp(uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  // Off by default. When enabled, every vendor bulk OUT write whose length is a
+  // non-zero multiple of the max packet size is followed by a ZLP. With the
+  // async queue this consumes a second slot, so use a depth of at least 2.
+  void vendorSetAutoZlp(bool enable, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool vendorAutoZlp(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool vendorControlIn(uint8_t request,
+                       uint16_t value,
+                       uint16_t index,
+                       uint8_t *data,
+                       size_t length,
+                       size_t *actualLength = nullptr,
+                       uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                       uint32_t timeoutMs = ESP_USB_HOST_VENDOR_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool vendorControlOut(uint8_t request,
+                        uint16_t value,
+                        uint16_t index,
+                        const uint8_t *data = nullptr,
+                        size_t length = 0,
+                        uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                        uint32_t timeoutMs = ESP_USB_HOST_VENDOR_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool sendSerial(const uint8_t *data, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool sendSerial(const char *text, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool serialReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool setSerialBaudRate(uint32_t baud, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool setSerialConfig(const EspUsbHostSerialConfig &config, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool audioInputReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool audioInputStart(uint8_t channels,
+                       uint8_t bitsPerSample,
+                       uint32_t sampleRate,
+                       uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool audioInputStart(const EspUsbHostAudioStreamInfo &stream,
+                       uint32_t sampleRate = 0,
+                       uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool audioOutputReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool setAudioSampleRate(uint32_t sampleRate, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool audioOutputStart(uint8_t channels,
+                        uint8_t bitsPerSample,
+                        uint32_t sampleRate,
+                        uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool audioOutputStart(const EspUsbHostAudioStreamInfo &stream,
+                        uint32_t sampleRate = 0,
+                        uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  void audioOutputStop(uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool audioOutputRunning(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  uint32_t audioOutputUnderruns(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool audioSend(const uint8_t *data, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  size_t getAudioFeatureUnits(uint8_t address, EspUsbHostAudioFeatureUnitInfo *units, size_t maxUnits) const;
+  bool audioHasMute(uint8_t address = ESP_USB_HOST_ANY_ADDRESS, uint8_t unitId = 0, uint8_t channel = 0) const;
+  bool audioHasVolume(uint8_t address = ESP_USB_HOST_ANY_ADDRESS, uint8_t unitId = 0, uint8_t channel = 0) const;
+  bool audioGetMute(bool &mute,
+                    uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                    uint8_t unitId = 0,
+                    uint8_t channel = 0,
+                    uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioSetMute(bool mute,
+                    uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                    uint8_t unitId = 0,
+                    uint8_t channel = 0,
+                    uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioGetVolume(int16_t &volume,
+                      uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                      uint8_t unitId = 0,
+                      uint8_t channel = 0,
+                      uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioSetVolume(int16_t volume,
+                      uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                      uint8_t unitId = 0,
+                      uint8_t channel = 0,
+                      uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioGetVolumeRange(EspUsbHostAudioVolumeRange &range,
+                           uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                           uint8_t unitId = 0,
+                           uint8_t channel = 0,
+                           uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioGetVolumeDb(float &db,
+                        uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                        uint8_t unitId = 0,
+                        uint8_t channel = 0,
+                        uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioSetVolumeDb(float db,
+                        uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                        uint8_t unitId = 0,
+                        uint8_t channel = 0,
+                        uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioSetVolumeDbClamped(float db,
+                               uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                               uint8_t unitId = 0,
+                               uint8_t channel = 0,
+                               uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioConfigureVolume(float db,
+                            bool mute = false,
+                            uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                            uint8_t unitId = 0,
+                            uint8_t channel = 0,
+                            uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioSetVolumePercent(uint8_t percent,
+                             uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                             uint8_t unitId = 0,
+                             uint8_t channel = 0,
+                             uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool audioConfigureVolumePercent(uint8_t percent,
+                                   uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                                   uint8_t unitId = 0,
+                                   uint8_t channel = 0,
+                                   uint32_t timeoutMs = ESP_USB_HOST_AUDIO_CONTROL_DEFAULT_TIMEOUT_MS);
+  bool mscReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool mscInquiry(EspUsbHostMscInquiry &inquiry,
+                  uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                  uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscRequestSense(EspUsbHostMscSense &sense,
+                       uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                       uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscLastSense(EspUsbHostMscSense &sense,
+                    uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool mscMaxLun(uint8_t &maxLun,
+                 uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                 uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscSelectLun(uint8_t lun,
+                    uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                    uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscGetBlockDeviceInfo(EspUsbHostMscBlockDeviceInfo &info,
+                             uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                             uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscTestUnitReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                        uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscWaitReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                    uint32_t readyTimeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS,
+                    uint32_t commandTimeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscCapacity64(uint64_t &blockCount,
+                     uint32_t &blockSize,
+                     uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                     uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscCapacity(uint32_t &blockCount,
+                   uint32_t &blockSize,
+                   uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                   uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscReadBlocks(uint32_t lba,
+                     uint8_t *data,
+                     uint32_t blockCount,
+                     uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                     uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscWriteBlocks(uint32_t lba,
+                      const uint8_t *data,
+                      uint32_t blockCount,
+                      uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                      uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscReadBlocks64(uint64_t lba,
+                       uint8_t *data,
+                       uint32_t blockCount,
+                       uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                       uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscWriteBlocks64(uint64_t lba,
+                        const uint8_t *data,
+                        uint32_t blockCount,
+                        uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                        uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscSynchronizeCache(uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                           uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS);
+  bool mscMount(const char *basePath = "/usb",
+                uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+                uint8_t lun = 0,
+                uint8_t maxFiles = 4,
+                uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS,
+                bool skipSyncCache = false);
+  bool mscUnmount(const char *basePath = "/usb");
+  bool mscMounted(const char *basePath = "/usb") const;
+  bool midiSend(const uint8_t *data, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendControlChange(uint8_t channel, uint8_t control, uint8_t value, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendProgramChange(uint8_t channel, uint8_t program, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendPolyPressure(uint8_t channel, uint8_t note, uint8_t pressure, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendChannelPressure(uint8_t channel, uint8_t pressure, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendPitchBend(uint8_t channel, uint16_t value, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendPitchBendSigned(uint8_t channel, int16_t value, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool midiSendSysEx(const uint8_t *data, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool setKeyboardLeds(bool numLock, bool capsLock, bool scrollLock, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool setHubPortPower(uint8_t hubAddress, uint8_t port, bool enable);
+  bool getHubPortStatus(uint8_t hubAddress, uint8_t port, uint16_t &status, uint16_t &change);
+  bool networkOpen(uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool networkOpen(const EspUsbHostNetworkInterfaceInfo &network);
+  void networkClose(uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool networkReady(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  // Raw Ethernet frame transport over an opened USB network interface. Received
+  // frames are delivered to onNetworkFrame() (USB task context; keep it light)
+  // and also buffered for polling with networkReadFrame(). networkWriteFrame()
+  // wraps one Ethernet frame in a single-datagram NCM NTB and sends it.
+  bool networkWriteFrame(const uint8_t *frame, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  size_t networkReadFrame(uint8_t *buffer, size_t length, uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool networkLinkUp(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  // lwIP (esp_netif) integration: register the opened USB network interface as
+  // a netif so standard Arduino networking (NetworkClient/HTTPClient/ping) runs
+  // over the USB NIC. networkAttachNetif() also opens the interface if needed.
+  bool networkAttachNetif(const EspUsbHostNetworkConfig &config = EspUsbHostNetworkConfig(),
+                          uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool networkDetachNetif(uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  IPAddress networkLocalIP(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool networkStats(EspUsbHostNetworkStats &stats, uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool getKeyboardNumLock(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool getKeyboardCapsLock(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  bool getKeyboardScrollLock(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  // True when the attached keyboard reports keys as an NKRO bitmap (report
+  // protocol) rather than the 6-key boot report. Detected from the HID report
+  // descriptor; decoding is automatic, this is a diagnostic.
+  bool keyboardUsesBitmapReport(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  size_t deviceCount() const;
+  size_t getDevices(EspUsbHostDeviceInfo *devices, size_t maxDevices) const;
+  bool getDevice(uint8_t address, EspUsbHostDeviceInfo &device) const;
+  size_t getHostDeviceAddresses(uint8_t *addresses, size_t maxAddresses) const;
+  bool probeHostDevice(uint8_t address, EspUsbHostDeviceProbeInfo &probe);
+  bool getHubInfo(uint8_t hubAddress, EspUsbHostHubInfo &hub);
+  size_t getInterfaces(uint8_t address, EspUsbHostInterfaceInfo *interfaces, size_t maxInterfaces) const;
+  size_t getEndpoints(uint8_t address, EspUsbHostEndpointInfo *endpoints, size_t maxEndpoints) const;
+  size_t getNetworkInterfaces(uint8_t address,
+                              EspUsbHostNetworkInterfaceInfo *interfaces,
+                              size_t maxInterfaces);
+  size_t endpointChannelCount(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  size_t managedEndpointCount(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  size_t ep0ChannelCount(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  size_t hubEndpointChannelCount(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  size_t estimatedHcdChannelCount(uint8_t address = ESP_USB_HOST_ANY_ADDRESS) const;
+  size_t maxEndpointChannelCount() const;
+  size_t getAudioStreams(uint8_t address, EspUsbHostAudioStreamInfo *streams, size_t maxStreams) const;
+
+  bool quiescing_ = false;   // set by quiesce(); stops the read pump re-arming
+  int lastError() const;
+  void clearLastError();   // CardSat: lastError_ is sticky; see the .cpp note
+  // CardSat: bring the bus to rest before end(). Stops the bulk IN pump re-arming,
+  // cancels what is in flight and waits for it, then un-halts the pipes. Returns
+  // false if anything is still submitted when the budget expires.
+  bool quiesce(uint32_t timeoutMs = 400);
+  const char *lastErrorName() const;
+  void printDeviceInfo(uint8_t address, bool includeHubInfo = false, Print &out = Serial);
+  void printAllDeviceInfo(Print &out = Serial);
+
+private:
+  template <typename Callback>
+  struct ListenerSlot
+  {
+    EspUsbHostListenerId id = ESP_USB_HOST_INVALID_LISTENER_ID;
+    std::shared_ptr<Callback> callback;
+  };
+
+  template <typename Callback, size_t Capacity = ESP_USB_HOST_MAX_LISTENERS_PER_EVENT>
+  struct ListenerRegistry
+  {
+    ListenerSlot<Callback> slots[Capacity];
+    size_t count = 0;
+  };
+
+  struct EndpointState
+  {
+    bool inUse = false;
+    uint8_t deviceIndex = 0xff;
+    uint8_t deviceAddress = 0;
+    usb_device_handle_t deviceHandle = nullptr;
+    uint8_t address = 0;
+    uint8_t interfaceNumber = 0;
+    uint8_t alternate = 0;
+    uint8_t interfaceClass = 0;
+    uint8_t interfaceSubClass = 0;
+    uint8_t interfaceProtocol = 0;
+    uint8_t audioChannels = 0;
+    uint8_t audioBytesPerSample = 0;
+    uint8_t audioBitsPerSample = 0;
+    usb_transfer_t *transfer = nullptr;
+    bool transferSubmitted = false;
+    bool recoveryPending = false;
+    bool resubmitPending = false;
+    bool resubmitAfterLed = false;
+    uint8_t lastKeyboardReport[8] = {};
+    bool keyboardReportReady = false;
+    uint8_t lastKeyboardState[ESP_USB_HOST_KEYBOARD_BITMAP_SIZE] = {};
+    // Previous NKRO bitmap report state, for press/release diffing.
+    uint8_t lastKeyboardBitmap[ESP_USB_HOST_NKRO_BITMAP_MAX_BYTES] = {};
+    uint8_t lastKeyboardBitmapModifiers = 0;
+    bool keyboardBitmapReady = false;
+    uint8_t lastMouseButtons = 0;
+    uint16_t lastConsumerUsage = 0;
+    EspUsbHostGamepadPrevState lastGamepadState;
+    // Generic HID field values are only needed by decoded gamepad events.
+    EspUsbHostHIDFieldValue *hidFieldValues = nullptr;
+    size_t hidFieldValueCount = 0;
+    uint8_t lastSystemUsage = 0;
+  };
+
+  struct HIDInputFieldState
+  {
+    uint8_t interfaceNumber = 0;
+    uint8_t reportId = 0;
+    uint16_t usagePage = 0;
+    uint16_t usage = 0;
+    int32_t logicalMin = 0;
+    int32_t logicalMax = 0;
+    uint16_t bitOffset = 0;
+    uint8_t bitSize = 0;
+    uint8_t flags = 0;
+  };
+
+  struct HIDReportDescriptorState
+  {
+    uint8_t address = 0;
+    uint8_t interfaceNumber = 0;
+    uint16_t hidVersion = 0;
+    uint8_t countryCode = 0;
+    uint8_t descriptorType = USB_HID_REPORT_DESC;
+    uint16_t reportedLength = 0;
+  };
+
+  struct DeviceState
+  {
+    bool inUse = false;
+    usb_device_handle_t handle = nullptr;
+    EspUsbHostDeviceInfo info;
+    String manufacturer;
+    String product;
+    String serial;
+    bool hasKeyboardInterface = false;
+    uint8_t keyboardInterfaceNumber = 0;
+    // Keyboard input-report layout learned from the HID report descriptor. When a
+    // device reports keys as an NKRO bitmap (report protocol) instead of the 8-byte
+    // boot report, keyboardBitmapReport is true and the offsets below locate the
+    // modifier byte and the key bitmap within the report body.
+    bool keyboardBitmapReport = false;
+    uint8_t keyboardLayoutInterface = 0xff; // interface the layout below describes
+    uint8_t keyboardLayoutReportId = 0;     // report ID prefix (0 = none)
+    bool keyboardHasModifierField = false;
+    uint16_t keyboardModifierBitOffset = 0;
+    uint16_t keyboardBitmapBitOffset = 0;
+    uint16_t keyboardBitmapBitCount = 0;
+    uint16_t keyboardBitmapUsageMin = 0;
+    // Keyboard LED output report learned from the HID report descriptor (LED usage
+    // page in an Output item). Lets setKeyboardLeds() reach keyboards that never
+    // declare a boot interface (report-ID composites, NKRO keyboards): the LED
+    // Set_Report then targets this interface with this report ID instead of the
+    // boot interface with report ID 0.
+    bool hasKeyboardLedOutput = false;
+    uint8_t keyboardLedInterface = 0xff;
+    uint8_t keyboardLedReportId = 0;
+    bool keyboardNumLock = true;
+    bool keyboardCapsLock = false;
+    bool keyboardScrollLock = false;
+    bool keyboardLedPending = false;
+    bool keyboardLedDirty = false;
+    uint32_t keyboardLedDirtyTimeMs = 0;
+    uint8_t keyboardLedLastSent = 0;
+    bool hasVendorInterface = false;
+    uint8_t vendorInterfaceNumber = 0;
+    bool hasVendorOutEndpoint = false;
+    uint8_t vendorOutEndpointAddress = 0;
+    uint16_t vendorOutPacketSize = 0;
+    bool hasCdcControlInterface = false;
+    bool hasCdcDataInterface = false;
+    bool cdcConfigured = false;
+    uint8_t cdcControlInterfaceNumber = 0;
+    uint8_t cdcDataInterfaceNumber = 0;
+    bool hasSerialOutEndpoint = false;
+    uint8_t serialOutEndpointAddress = 0;
+    uint16_t serialOutPacketSize = 0;
+    EspUsbHostSerialConfig serialConfig;
+    bool serialDtr = true;
+    bool serialRts = true;
+    bool hasVendorSerialInterface = false;
+    bool vendorSerialSupported = false;
+    uint8_t vendorSerialInterfaceNumber = 0;
+    bool hasUsbVendorInterface = false;
+    uint8_t usbVendorInterfaceNumber = 0xff;
+    bool hasUsbVendorInEndpoint = false;
+    uint8_t usbVendorInEndpointAddress = 0;
+    uint16_t usbVendorInPacketSize = 0;
+    bool hasUsbVendorOutEndpoint = false;
+    uint8_t usbVendorOutEndpointAddress = 0;
+    uint16_t usbVendorOutPacketSize = 0;
+    uint8_t usbVendorRxBuffer[ESP_USB_HOST_VENDOR_RX_BUFFER_SIZE] = {};
+    size_t usbVendorRxHead = 0;
+    size_t usbVendorRxTail = 0;
+    size_t usbVendorRxCount = 0;
+    // Asynchronous bulk OUT queue. Slots are preallocated by
+    // vendorWriteQueueBegin() and reused; usbVendorOutFreeSlots counts the slots
+    // that are neither acquired nor in flight.
+    bool usbVendorOutQueueActive = false;
+    uint8_t usbVendorOutQueueDepth = 0;
+    size_t usbVendorOutBufferBytes = 0;
+    usb_transfer_t *usbVendorOutTransfers[ESP_USB_HOST_VENDOR_WRITE_QUEUE_MAX_DEPTH] = {};
+    uint8_t usbVendorOutSlotState[ESP_USB_HOST_VENDOR_WRITE_QUEUE_MAX_DEPTH] = {};
+    SemaphoreHandle_t usbVendorOutFreeSlots = nullptr;
+    bool usbVendorOutHalted = false;
+    bool usbVendorAutoZlp = false;
+    EspUsbHostVendorWriteStats usbVendorWriteStats;
+    bool hasMidiInterface = false;
+    uint8_t midiInterfaceNumber = 0;
+    bool hasMidiOutEndpoint = false;
+    uint8_t midiOutEndpointAddress = 0;
+    uint16_t midiOutPacketSize = 0;
+    bool hasAudioInterface = false;
+    uint8_t audioInterfaceNumber = 0;
+    bool hasAudioInEndpoint = false;
+    uint8_t audioInInterfaceNumber = 0;
+    uint8_t audioInAlternate = 0;
+    uint8_t audioInEndpointAddress = 0;
+    uint8_t audioInChannels = 0;
+    uint8_t audioInBytesPerSample = 0;
+    uint8_t audioInBitsPerSample = 0;
+    bool hasAudioOutEndpoint = false;
+    uint8_t audioOutInterfaceNumber = 0;
+    uint8_t audioOutEndpointAddress = 0;
+    uint16_t audioOutPacketSize = 0;
+    uint8_t audioOutChannels = 0;
+    uint8_t audioOutBytesPerSample = 0;
+    uint8_t audioOutBitsPerSample = 0;
+    uint8_t audioOutInterval = 0;
+    bool audioOutRunning = false;
+    uint32_t audioOutFrameAccumulator = 0;
+    uint32_t audioOutUnderruns = 0;
+    usb_transfer_t *audioOutTransfers[ESP_USB_HOST_AUDIO_OUTPUT_TRANSFERS] = {};
+    uint32_t audioSampleRate = 48000;
+    uint8_t audioControlInterfaceNumber = 0xff;
+    EspUsbHostAudioFeatureUnitInfo audioFeatureUnits[ESP_USB_HOST_MAX_AUDIO_FEATURE_UNITS] = {};
+    uint8_t audioFeatureUnitCount = 0;
+    bool hasMscInterface = false;
+    uint8_t mscInterfaceNumber = 0;
+    bool hasMscInEndpoint = false;
+    uint8_t mscInEndpointAddress = 0;
+    uint16_t mscInPacketSize = 0;
+    bool hasMscOutEndpoint = false;
+    uint8_t mscOutEndpointAddress = 0;
+    uint16_t mscOutPacketSize = 0;
+    uint32_t mscTag = 1;
+    uint32_t mscBlockCount = 0;
+    uint64_t mscBlockCount64 = 0;
+    uint32_t mscBlockSize = 0;
+    EspUsbHostMscSense mscLastSense = {};
+    bool hasMscLastSense = false;
+    uint8_t mscMaxLun = 0;
+    bool hasMscMaxLun = false;
+    uint8_t mscLun = 0;
+    // Latched when SYNCHRONIZE CACHE(10) fails once, so later calls skip the
+    // command instead of stalling the bulk pipes again on the same device.
+    bool mscSyncCacheUnsupported = false;
+    bool hasNetworkInterface = false;
+    EspUsbHostNetworkInterfaceInfo networkInterface;
+    bool networkLinkUp = false;
+    uint16_t networkTxSequence = 0;
+    // Reusable bulk-OUT transfer + its completion semaphore, so networkWriteFrame()
+    // does not alloc/free a transfer and a semaphore on every frame. networkTxLock
+    // serializes concurrent senders (a user thread and the lwIP transmit hook) so
+    // they cannot corrupt the shared transfer / sequence counter, and lets teardown
+    // drain an in-flight send before freeing. The lock and completion semaphore are
+    // created once per device slot and preserved across resetDeviceState() (never
+    // deleted) so a concurrent sender can never block on or signal a freed handle.
+    usb_transfer_t *networkOutTransfer = nullptr;
+    SemaphoreHandle_t networkOutDone = nullptr;
+    SemaphoreHandle_t networkTxLock = nullptr;
+    // Allocated only while a network interface is open. Keeping these large
+    // buffers out of every DeviceState slot avoids reserving ~7 KB per tracked
+    // device for sketches that never use USB networking.
+    uint8_t *networkRxRing = nullptr;
+    volatile uint16_t networkRxHead = 0;
+    volatile uint16_t networkRxTail = 0;
+    void *networkNetif = nullptr; // esp_netif_t* (opaque here to keep esp_netif out of the header)
+    bool networkNetifAttached = false;
+    uint32_t networkRxNtbCount = 0;
+    uint32_t networkRxFrameCount = 0;
+    uint32_t networkTxCount = 0;
+    uint32_t networkTxFailCount = 0;
+    // Reassembly buffer: a device->host NTB can span several bulk-IN completions
+    // (one per USB packet at full speed), so accumulate until wBlockLength bytes.
+    uint8_t *networkAsm = nullptr;
+    uint16_t networkAsmLen = 0;
+    uint16_t networkAsmExpected = 0;
+    EspUsbHostAudioStreamInfo audioStreamInfos[ESP_USB_HOST_MAX_AUDIO_STREAMS] = {};
+    uint8_t audioStreamInfoCount = 0;
+    EspUsbHostInterfaceInfo interfaceInfos[ESP_USB_HOST_MAX_INTERFACES] = {};
+    uint8_t interfaceInfoCount = 0;
+    EspUsbHostEndpointInfo endpointInfos[ESP_USB_HOST_MAX_ENDPOINTS] = {};
+    uint8_t endpointInfoCount = 0;
+    uint8_t endpointChannelCount = 0;
+    HIDReportDescriptorState hidReportDescriptors[ESP_USB_HOST_MAX_HID_REPORT_DESCRIPTORS] = {};
+    uint8_t hidReportDescriptorCount = 0;
+    // Allocated when a HID report descriptor is first parsed. Most device
+    // slots never need this comparatively large field table.
+    HIDInputFieldState *hidInputFields = nullptr;
+    size_t hidInputFieldCount = 0;
+    uint8_t interfaces[ESP_USB_HOST_MAX_INTERFACES] = {};
+    uint8_t interfaceCount = 0;
+    bool isHub = false;
+    uint8_t hubIndex = 0;
+    bool disconnectPending = false;
+  };
+
+  static void taskEntry(void *arg);
+  static void clientTaskEntry(void *arg);
+  static void clientEventCallback(const usb_host_client_event_msg_t *eventMsg, void *arg);
+  static void transferCallback(usb_transfer_t *transfer);
+  static void controlTransferCallback(usb_transfer_t *transfer);
+  static void hidReportDescriptorTransferCallback(usb_transfer_t *transfer);
+  static void outputTransferCallback(usb_transfer_t *transfer);
+  static void serialOutTransferCallback(usb_transfer_t *transfer);
+  static void vendorOutTransferCallback(usb_transfer_t *transfer);
+
+  void taskLoop();
+  void clientTaskLoop();
+  void handleClientEvent(const usb_host_client_event_msg_t *eventMsg);
+  void handleNewDevice(uint8_t address);
+  void handleDeviceGone(usb_device_handle_t goneHandle);
+  void scanHostDevices();
+  void refreshDeviceTopology(DeviceState &device);
+  void parseConfigDescriptor(DeviceState &device, const usb_config_desc_t *configDesc);
+  size_t parseNetworkInterfaces(uint8_t address,
+                                const usb_config_desc_t *configDesc,
+                                EspUsbHostNetworkInterfaceInfo *interfaces,
+                                size_t maxInterfaces) const;
+  void handleDescriptor(uint8_t descriptorType, const uint8_t *data);
+  void parseAudioControlDescriptor(DeviceState &device, const uint8_t *data);
+  void recordAudioStream(DeviceState &device, const usb_ep_desc_t *ep, bool input);
+  void handleTransfer(usb_transfer_t *transfer);
+  void dispatchKeyboardState(EndpointState &endpoint,
+                             DeviceState *device,
+                             const uint8_t *bitmap,
+                             const uint8_t *rawData,
+                             size_t rawLength,
+                             const uint8_t *reportData,
+                             size_t reportLength);
+  void handleKeyboard(EndpointState &endpoint, const uint8_t *data, size_t length, const uint8_t *rawData, size_t rawLength);
+  void handleKeyboardBitmap(EndpointState &endpoint, DeviceState &device, const uint8_t *data, size_t length);
+  void handleMouse(EndpointState &endpoint, const uint8_t *data, size_t length);
+  void handleSerial(EndpointState &endpoint, const uint8_t *data, size_t length);
+  void handleMidi(EndpointState &endpoint, const uint8_t *data, size_t length);
+  void handleAudio(EndpointState &endpoint, usb_transfer_t *transfer);
+  void handleUsbVendorData(EndpointState &endpoint, const uint8_t *data, size_t length);
+  void handleConsumerControl(EndpointState &endpoint, const uint8_t *data, size_t length, const uint8_t *rawData, size_t rawLength);
+  void handleGamepad(EndpointState &endpoint, const uint8_t *data, size_t length, const uint8_t *rawData, size_t rawLength);
+  void handleHIDVendorInput(EndpointState &endpoint, const uint8_t *data, size_t length, const uint8_t *rawData, size_t rawLength);
+  void handleSystemControl(EndpointState &endpoint, const uint8_t *data, size_t length, const uint8_t *rawData, size_t rawLength);
+  void parseHIDReportDescriptor(DeviceState &device, const EspUsbHostHIDReportDescriptor &descriptor);
+  bool hasHIDReportId(const DeviceState &device, uint8_t interfaceNumber, uint8_t reportId) const;
+  size_t decodeHIDInputFields(const DeviceState &device,
+                              uint8_t interfaceNumber,
+                              uint8_t reportId,
+                              const uint8_t *data,
+                              size_t length,
+                              EspUsbHostHIDFieldValue *fields,
+                              size_t maxFields) const;
+
+  EndpointState *findEndpoint(usb_device_handle_t deviceHandle, uint8_t endpointAddress);
+  EndpointState *allocateEndpoint(DeviceState &device);
+  DeviceState *allocateDevice();
+  void resetDeviceState(DeviceState &device);
+  void resetEndpointState(EndpointState &endpoint);
+  DeviceState *findDevice(uint8_t address);
+  const DeviceState *findDevice(uint8_t address) const;
+  DeviceState *findDeviceByHandle(usb_device_handle_t handle);
+  DeviceState *findSerialDevice(uint8_t address);
+  const DeviceState *findSerialDevice(uint8_t address) const;
+  DeviceState *findMidiDevice(uint8_t address);
+  const DeviceState *findMidiDevice(uint8_t address) const;
+  DeviceState *findAudioOutputDevice(uint8_t address);
+  const DeviceState *findAudioOutputDevice(uint8_t address) const;
+  DeviceState *findAudioInputDevice(uint8_t address);
+  const DeviceState *findAudioInputDevice(uint8_t address) const;
+  const DeviceState *findAudioDevice(uint8_t address) const;
+  DeviceState *findAudioControlDevice(uint8_t address);
+  const DeviceState *findAudioControlDevice(uint8_t address) const;
+  const EspUsbHostAudioFeatureUnitInfo *findAudioFeatureUnit(const DeviceState &device,
+                                                             uint8_t unitId,
+                                                             uint8_t controlSelector,
+                                                             uint8_t channel) const;
+  const EspUsbHostAudioFeatureUnitInfo *findAudioPlaybackFeatureUnit(const DeviceState &device,
+                                                                     uint8_t unitId,
+                                                                     uint8_t channel) const;
+  DeviceState *findMscDevice(uint8_t address);
+  const DeviceState *findMscDevice(uint8_t address) const;
+  DeviceState *findKeyboardDevice(uint8_t address);
+  const DeviceState *findKeyboardDevice(uint8_t address) const;
+  DeviceState *findHIDVendorDevice(uint8_t address);
+  DeviceState *findUsbVendorDevice(uint8_t address);
+  const DeviceState *findUsbVendorDevice(uint8_t address) const;
+  DeviceState *findUsbVendorCandidate(uint8_t address, uint8_t interfaceNumber);
+  int vendorOutSlotOf(const DeviceState &device, const uint8_t *buffer) const;
+  int vendorOutSlotOfTransfer(const DeviceState &device, const usb_transfer_t *transfer) const;
+  bool submitVendorOutSlot(DeviceState &device, int slot, size_t length);
+  bool submitVendorOutZlp(DeviceState &device);
+  void releaseVendorOutQueue(DeviceState &device);
+  void vendorDrainOut(DeviceState &device);
+  DeviceState *findNetworkDevice(uint8_t address);
+  const DeviceState *findNetworkDevice(uint8_t address) const;
+  void releaseEndpoints(DeviceState &device, bool clearEndpoints);
+  void releaseAllEndpoints(bool clearEndpoints);
+  void releaseInterfaces(DeviceState &device);
+  bool finalizeDisconnectedDevice(DeviceState &device);
+  bool drainClientTransfers(uint32_t timeoutMs);
+  bool releaseClientResources();
+  bool uninstallHostLibrary(uint32_t timeoutMs);
+  void configureCdcAcm(DeviceState &device);
+  void configureVendorSerial(DeviceState &device);
+  bool submitInputTransfer(EndpointState &endpoint);
+  bool submitHIDReportDescriptorRequest(const HIDReportDescriptorState &descriptor);
+  void submitPendingTransfers(usb_device_handle_t deviceHandle, uint8_t interfaceNumber);
+  bool submitSetInterface(DeviceState &device, uint8_t interfaceNumber, uint8_t alternateSetting);
+  bool claimNetworkInterface(DeviceState &device, const EspUsbHostNetworkInterfaceInfo &network);
+  void releaseNetworkInterface(DeviceState &device);
+  bool startNetworkEndpoints(DeviceState &device);
+  void handleNetworkInput(DeviceState &device, EndpointState &endpoint, const uint8_t *data, size_t length);
+  void parseNetworkNtb(DeviceState &device, const uint8_t *data, size_t length);
+  void handleNetworkNotification(DeviceState &device, const uint8_t *data, size_t length);
+  void deliverNetworkFrame(DeviceState &device, const uint8_t *frame, size_t length);
+  size_t buildNcmFrame(uint8_t *out, size_t outCapacity, const uint8_t *frame, size_t length, uint16_t sequence);
+  bool networkSendFrameInternal(DeviceState &device, const uint8_t *frame, size_t length);
+  bool networkSendLocked(DeviceState &device, const uint8_t *frame, size_t length);
+  void networkDrainTx(DeviceState &device);
+#if defined(ESP_USB_HOST_HAS_ESP_NETIF)
+  // esp_netif (lwIP) attach/detach. The netif transmit hook reuses the public
+  // networkWriteFrame(); esp_netif headers are only pulled into the .cpp.
+  bool networkStartNetif(DeviceState &device, const EspUsbHostNetworkConfig &config);
+  void networkStopNetif(DeviceState &device);
+  // Reads the CDC iMACAddress string descriptor into mac[6] (12 hex chars).
+  // Returns false when the device advertises no MAC string (index 0) or on error.
+  bool readNetworkMac(DeviceState &device, uint8_t mac[6]);
+#endif
+  void clearParsedDescriptorState(DeviceState &device);
+  bool submitAudioSamplingFrequency(DeviceState &device, uint8_t endpointAddress, uint32_t sampleRate);
+  bool audioFeatureControl(DeviceState &device,
+                           uint8_t request,
+                           uint8_t unitId,
+                           uint8_t controlSelector,
+                           uint8_t channel,
+                           uint8_t *data,
+                           size_t length,
+                           bool dataIn,
+                           uint32_t timeoutMs);
+  bool submitAudioOutputTransfer(DeviceState &device, const uint8_t *data, size_t length);
+  bool submitAudioOutputRequestTransfer(DeviceState &device, usb_transfer_t *transfer);
+  bool fillAudioOutputTransfer(DeviceState &device, usb_transfer_t *transfer);
+  bool isManagedAudioOutputTransfer(const DeviceState &device, const usb_transfer_t *transfer) const;
+  void releaseAudioOutputTransfers(DeviceState &device);
+  bool mscCommand(DeviceState &device,
+                  const uint8_t *command,
+                  uint8_t commandLength,
+                  uint8_t *data,
+                  size_t dataLength,
+                  bool dataIn,
+                  uint32_t timeoutMs);
+  bool mscClearEndpointHalt(DeviceState &device, uint8_t endpointAddress, uint32_t timeoutMs);
+  bool mscResetRecovery(DeviceState &device, uint32_t timeoutMs);
+  void mscUnmountAddress(uint8_t address);
+  bool submitVendorSerialControl(uint8_t requestType,
+                                 uint8_t request,
+                                 uint16_t value,
+                                 uint16_t index,
+                                 const uint8_t *data = nullptr,
+                                 size_t length = 0,
+                                 uint8_t address = ESP_USB_HOST_ANY_ADDRESS);
+  bool submitVendorControl(DeviceState &device,
+                           uint8_t requestType,
+                           uint8_t request,
+                           uint16_t value,
+                           uint16_t index,
+                           uint8_t *data,
+                           size_t length,
+                           size_t *actualLength,
+                           uint32_t timeoutMs);
+  void attachCdcSerial(EspUsbHostCdcSerial *serial);
+  void detachCdcSerial(EspUsbHostCdcSerial *serial);
+  void setLastError(esp_err_t err);
+  static String usbString(const usb_str_desc_t *strDesc);
+  friend class EspUsbHostCdcSerial;
+
+  template <typename Callback>
+  void setHIDCallback(std::shared_ptr<Callback> &target, Callback callback);
+  template <typename Callback, size_t Capacity>
+  EspUsbHostListenerId addHIDListener(ListenerRegistry<Callback, Capacity> &registry, Callback callback);
+  template <typename Callback, size_t Capacity>
+  bool removeHIDListenerLocked(ListenerRegistry<Callback, Capacity> &registry, EspUsbHostListenerId listenerId);
+  template <typename Callback, size_t Capacity>
+  bool listenerIdInUseLocked(const ListenerRegistry<Callback, Capacity> &registry,
+                             EspUsbHostListenerId listenerId) const;
+  template <typename Callback, size_t Capacity>
+  size_t snapshotHIDCallbacks(const std::shared_ptr<Callback> &single,
+                              const ListenerRegistry<Callback, Capacity> &registry,
+                              std::shared_ptr<Callback> &singleSnapshot,
+                              std::shared_ptr<Callback> *listenerSnapshots);
+  void dispatchDeviceConnected(const EspUsbHostDeviceInfo &info);
+  void dispatchDeviceDisconnected(const EspUsbHostDeviceInfo &info);
+  EspUsbHostListenerId allocateListenerIdLocked();
+  bool listenerIdInUseLocked(EspUsbHostListenerId listenerId) const;
+#if defined(CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK) && CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
+  static bool enumerationFilterCallback(const usb_device_desc_t *deviceDescriptor,
+                                        uint8_t *configurationValue);
+  static EspUsbHost *enumerationHost_;
+#endif
+
+  EspUsbHostConfig config_;
+  TaskHandle_t taskHandle_ = nullptr;
+  TaskHandle_t clientTaskHandle_ = nullptr;
+  volatile bool running_ = false;
+  volatile bool ready_ = false;
+  esp_err_t lastError_ = ESP_OK;
+
+  usb_host_client_handle_t clientHandle_ = nullptr;
+  // A device counts as a keyboard when it declared a boot keyboard interface or
+  // when the report descriptor revealed a keyboard input report.
+  static bool deviceHasKeyboard(const DeviceState &device);
+  // Resolve where a keyboard LED Set_Report must go: boot interface with report
+  // ID 0 when declared, otherwise the LED output report learned from the report
+  // descriptor. False when the device has no known LED output.
+  static bool keyboardLedTarget(const DeviceState &device, uint8_t &interfaceNumber, uint8_t &reportId);
+  bool sendKeyboardLedReport(DeviceState &device, uint8_t leds);
+  DeviceState devices_[ESP_USB_HOST_MAX_DEVICES];
+  DeviceState *currentDevice_ = nullptr;
+  EspUsbHostCdcSerial *cdcSerials_[ESP_USB_HOST_MAX_CDC_SERIALS] = {};
+  EspUsbHostSerialConfig defaultSerialConfig_;
+  uint32_t defaultAudioSampleRate_ = 48000;
+  uint8_t nextHubIndex_ = 1;
+  uint32_t lastHostDeviceScanMs_ = 0;
+
+  EndpointState endpoints_[16];
+  uint8_t currentInterfaceNumber_ = 0;
+  uint8_t currentInterfaceAlternate_ = 0;
+  uint8_t currentInterfaceClass_ = 0;
+  uint8_t currentInterfaceSubClass_ = 0;
+  uint8_t currentInterfaceProtocol_ = 0;
+  uint8_t currentAudioChannels_ = 0;
+  uint8_t currentAudioBytesPerSample_ = 0;
+  uint8_t currentAudioBitsPerSample_ = 0;
+  uint32_t currentAudioSampleRate_ = 0;
+  uint8_t currentAudioSampleRateCount_ = 0;
+  uint32_t currentAudioSampleRates_[ESP_USB_HOST_MAX_AUDIO_SAMPLE_RATES] = {};
+  uint32_t currentAudioSampleRateMin_ = 0;
+  uint32_t currentAudioSampleRateMax_ = 0;
+  uint32_t currentAudioSampleRateResolution_ = 0;
+  bool currentInterfaceClaimed_ = false;
+  esp_err_t currentClaimResult_ = ESP_OK;
+
+  EspUsbHostKeyboardLayout keyboardLayout_ = ESP_USB_HOST_KEYBOARD_LAYOUT_EN_US;
+
+  std::shared_ptr<DeviceCallback> deviceConnectedCallback_;
+  std::shared_ptr<DeviceCallback> deviceDisconnectedCallback_;
+  std::shared_ptr<KeyboardCallback> keyboardCallback_;
+  std::shared_ptr<KeyboardStateCallback> keyboardStateCallback_;
+  std::shared_ptr<MouseCallback> mouseCallback_;
+  HIDInputCallback hidInputCallback_;
+  HIDReportDescriptorCallback hidReportDescriptorCallback_;
+  SerialDataCallback serialDataCallback_;
+  std::shared_ptr<MidiMessageCallback> midiMessageCallback_;
+  AudioDataCallback audioDataCallback_;
+  AudioOutputCallback audioOutputCallback_;
+  std::shared_ptr<ConsumerControlCallback> consumerControlCallback_;
+  std::shared_ptr<GamepadCallback> gamepadCallback_;
+  HIDVendorInputCallback hidVendorInputCallback_;
+  VendorDataCallback vendorDataCallback_;
+  // Guards the vendor bulk OUT slot-state scan against concurrent callers and
+  // against the completion callback on the USB client task.
+  portMUX_TYPE vendorOutMux_ = portMUX_INITIALIZER_UNLOCKED;
+  std::shared_ptr<SystemControlCallback> systemControlCallback_;
+  NetworkFrameCallback networkFrameCallback_;
+  ConfigurationSelector configurationSelector_;
+  ListenerRegistry<KeyboardCallback> keyboardListeners_;
+  ListenerRegistry<KeyboardStateCallback> keyboardStateListeners_;
+  ListenerRegistry<MouseCallback> mouseListeners_;
+  ListenerRegistry<ConsumerControlCallback> consumerControlListeners_;
+  ListenerRegistry<SystemControlCallback> systemControlListeners_;
+  ListenerRegistry<GamepadCallback> gamepadListeners_;
+  ListenerRegistry<MidiMessageCallback> midiMessageListeners_;
+  ListenerRegistry<DeviceCallback, ESP_USB_HOST_MAX_LIFECYCLE_LISTENERS> deviceConnectedListeners_;
+  ListenerRegistry<DeviceCallback, ESP_USB_HOST_MAX_LIFECYCLE_LISTENERS> deviceDisconnectedListeners_;
+  SemaphoreHandle_t hidCallbackMutex_ = nullptr;
+  EspUsbHostListenerId nextListenerId_ = 1;
+};
+
+class EspUsbHostMscFS : public fs::FS
+{
+public:
+  EspUsbHostMscFS();
+  ~EspUsbHostMscFS();
+
+  bool begin(EspUsbHost &host,
+             const char *basePath = "/usb",
+             uint8_t address = ESP_USB_HOST_ANY_ADDRESS,
+             uint8_t lun = 0,
+             uint8_t maxFiles = 4,
+             uint32_t timeoutMs = ESP_USB_HOST_MSC_DEFAULT_TIMEOUT_MS,
+             bool skipSyncCache = false);
+  void end();
+  bool mounted() const;
+  const char *basePath() const;
+  void setSkipSyncCache(bool skip);
+  bool skipSyncCache() const;
+
+private:
+  EspUsbHost *host_ = nullptr;
+  char basePath_[16] = {};
+  bool skipSyncCache_ = false;
+};
+
+class EspUsbHostCdcSerial : public Stream
+{
+public:
+  explicit EspUsbHostCdcSerial(EspUsbHost &host);
+
+  bool begin(uint32_t baud = 115200);
+  void end();
+  bool connected() const;
+
+  int available() override;
+  int read() override;
+  int peek() override;
+  void flush() override;
+  size_t write(uint8_t data) override;
+  size_t write(const uint8_t *buffer, size_t size) override;
+  using Print::write;
+
+  bool setBaudRate(uint32_t baud);
+  bool setConfig(const EspUsbHostSerialConfig &config);
+  bool setDtr(bool enable);
+  bool setRts(bool enable);
+  void setAddress(uint8_t address);
+  uint8_t address() const;
+  void clearAddress();
+
+private:
+  static constexpr size_t RX_BUFFER_SIZE = 512;
+
+  void pushData(const uint8_t *data, size_t length);
+  bool accepts(uint8_t address) const;
+  size_t nextIndex(size_t index) const;
+  friend class EspUsbHost;
+
+  EspUsbHost &host_;
+  uint8_t address_ = ESP_USB_HOST_ANY_ADDRESS;
+  uint8_t rxBuffer_[RX_BUFFER_SIZE] = {};
+  size_t rxHead_ = 0;
+  size_t rxTail_ = 0;
+  portMUX_TYPE rxMux_ = portMUX_INITIALIZER_UNLOCKED;
+};
+
+#endif

@@ -809,12 +809,20 @@ void App::applyRadioFromCfg() {
     // wired CI-V and needs the same one-wire/two-wire choice. Most half-duplex Icoms
     // present one-wire CI-V, so this is the usual case for an Icom leg on Grove.
     if (aG || bG) rig->setPinMode(cfg.civPinMode);
-#if CARDSAT_HAS_USBCAT
-    // A USB leg starts like single-rig CAT_USB: the reconciler in loop() opens
-    // the adapter and attaches the stream when the radio is engaged; DualRig
-    // then begins that leg on attach. Non-USB legs begin right here.
-    if (aU || bU) { return; }
-#endif
+    // A USB leg starts like single-rig CAT_USB: the reconciler in loop() opens the
+    // adapter and attaches the stream when the radio is engaged, and DualRig begins
+    // that leg on attach. Every OTHER leg begins right here.
+    //
+    // This used to `return` outright when EITHER leg was USB, which meant a mixed
+    // config -- USB on one leg, LAN or Grove on the other -- never began the non-USB
+    // leg at all. For an Icom LAN leg (the IC-705 over its own Wi-Fi) begin() is what
+    // ARMS the connect state machine, so the leg simply sat idle forever: service()
+    // ran, found NS_IDLE with no pending attempt, and did nothing. The radio looked
+    // configured and never connected.
+    //
+    // DualRig::begin() already skips USB legs individually
+    // (`if (_down && !legIsUsb(0))`), so calling it unconditionally is correct and
+    // cannot double-begin the USB side.
     rig->begin(0, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
     return;
   }
@@ -975,13 +983,18 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio,
   // list where EVERY adapter is taken lands back on Auto rather than spinning.
   const int slots = (int)n + 1;
   const int step  = (dir >= 0) ? 1 : -1;
-  bool skippedTaken = false;
+  // Track WHICH owner caused the skip, not merely that one did. On a radio picker
+  // `taken` is the rotator's adapter but `taken2` is the OTHER RADIO LEG's, so a
+  // single "skipped something" flag made the message below claim the rotator owned an
+  // adapter that actually belongs to the other leg -- wrong, and confusing precisely
+  // when the operator is trying to work out which port has what.
+  bool skippedTaken = false, skippedOtherLeg = false;
   for (int tries = 0; tries < slots; ++tries) {
     cur = (cur + step + slots) % slots;
     if (cur == 0) break;                                       // Auto is always free
     const char* k = UsbSerial::serialDeviceKey(cur - 1);
-    if ((taken[0]  && strcmp(k, taken)  == 0) ||
-        (taken2[0] && strcmp(k, taken2) == 0)) { skippedTaken = true; continue; }
+    if (taken[0] && strcmp(k, taken) == 0) { skippedTaken = true; continue; }
+    if (taken2[0] && strcmp(k, taken2) == 0) { skippedOtherLeg = true; continue; }
     break;                                                     // free: take it
   }
 
@@ -990,8 +1003,16 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio,
   cfg.save();
   // If we could only land on Auto because the sole adapter belongs to the other
   // port, say so -- otherwise the selector looks broken ("won't leave Auto").
-  if (cur == 0 && skippedTaken)
-    setStatus(isRadio ? "Only adapter is the rotator's" : "Only adapter is the radio's", 4000);
+  if (cur == 0 && (skippedTaken || skippedOtherLeg)) {
+    // Name the real owner. For a radio picker taken2 is the other RADIO leg, so
+    // "the rotator's" was simply false whenever that was what got skipped. For the
+    // rotator picker both excluded keys are radio legs, so "the radio's" is right
+    // either way.
+    const char* who = !isRadio               ? "Only adapter is the radio's"
+                    : (skippedTaken)         ? "Only adapter is the rotator's"
+                                             : "Only adapter is the other leg's";
+    setStatus(who, 4000);
+  }
   if (!isRadio) applyRotatorFromCfg();   // a rotator key change must re-bind
 #if CARDSAT_HAS_USBCAT
   else {
@@ -1184,7 +1205,21 @@ void App::rotPoint(float az, float el) {
 // running it twice applies the same state. This is the single place engagement state is set,
 // so a deferred-connect transport can't skip it (H6) and every transport initializes the same.
 void App::initializeEngagedRig() {
-  if (!rig || !rig->ready()) return;             // USB not attached yet -> reconciler retries
+  // NOT READY YET? REMEMBER, AND RETRY WHEN IT IS.
+  //
+  // Same defect as applyTransponderModes(), but wider: this function also sets SAT
+  // MODE, the MAIN/SUB band assignment and the CAT READ BUDGET. In a mixed dual rig
+  // the LAN leg needs seconds to finish its login while the USB leg is ready at once,
+  // and DualRig::ready() requires every leg -- so on that configuration NONE of it ran,
+  // silently, and was never retried.
+  //
+  // The read budget is the one that showed up on the bench: left unset it stays 0, and
+  // IcomNetRig then falls back to its own 300 ms default instead of the intended
+  // constrain(catRate/4, 60, 200). Measured latencies of successful reads are p50 23 ms,
+  // p95 121 ms, p99 188 ms, so 300 ms bought nothing and cost a third more blocking in
+  // the cooperative loop on every read that timed out -- and most of them do.
+  if (!rig || !rig->ready()) { rigInitPending = true; return; }
+  rigInitPending = false;
   // Satellite mode: a receive-only transponder (beacon/telemetry) turns it OFF and tunes the
   // downlink on MAIN; a two-way transponder follows the Sat Mode setting.
   rig->enableSatMode(cfg.satMode && !txReceiveOnly());
@@ -1204,7 +1239,21 @@ void App::initializeEngagedRig() {
 }
 
 void App::applyTransponderModes(const Transponder& t) {
-  if (!rig || !rig->ready()) return;
+  // NOT READY YET? REMEMBER TO COME BACK.
+  //
+  // This used to just return, which silently lost the modes whenever a leg was not
+  // up at engage time -- and in a mixed dual rig that is the NORMAL case, because
+  // DualRig::ready() requires EVERY leg, and an Icom LAN leg needs seconds to
+  // complete its login handshake while the USB leg is ready immediately.
+  //
+  // The consequence was subtle and looked like a tuning bug: with no mode ever sent,
+  // a TH-D75 leg never received MD, so kwApplyStepForMode() never ran, fine mode was
+  // never enabled, and every Doppler write was rounded to the 5 kHz normal step --
+  // exactly the reported "rounded to the nearest 5 kHz when not in FM". Modes were
+  // only retried on a transponder change, so an operator who never switched
+  // transponder never got them at all.
+  if (!rig || !rig->ready()) { modeApplyPending = true; return; }
+  modeApplyPending = false;
   // Set the UPLINK (MAIN) leg first, then the DOWNLINK (SUB) leg, so the radio is
   // left selected on the downlink band -- that is where the operator's RX knob
   // sits and where the One-True-Rule read-back happens. (On the IC-821 the SUB
@@ -6166,8 +6215,13 @@ void App::loop() {
             Logstore::rawf(Logstore::LOG_USB, "## ENGAGE FAILED: %s", why.c_str());
             const String diag = UsbSerial::uninstallDiag();
             if (diag.length()) Logstore::rawf(Logstore::LOG_USB, "## uninstall diag: %s", diag.c_str());
-            Logstore::rawf(Logstore::LOG_USB, "## stack released=%s | heap=%lu largest=%lu",
-                      UsbSerial::hostReleased() ? "yes" : "NO (reboot needed)",
+            // Same three-way truth as the disengage report: after a FAILED engage the
+            // host may legitimately still be up and resident, which is not the same
+            // thing as a teardown that could not complete.
+            Logstore::rawf(Logstore::LOG_USB, "## stack %s | heap=%lu largest=%lu",
+                      UsbSerial::usbHostResident() ? "RESIDENT (Fn+u on Track releases it)"
+                        : (UsbSerial::hostReleased() ? "released=yes"
+                                                     : "released=NO (reboot needed)"),
                       (unsigned long)ESP.getFreeHeap(),
                       (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
           }
@@ -6208,8 +6262,17 @@ void App::loop() {
         {
           const String ddiag = UsbSerial::uninstallDiag();
           if (ddiag.length()) Logstore::rawf(Logstore::LOG_USB, "## uninstall diag: %s", ddiag.c_str());
-          Logstore::rawf(Logstore::LOG_USB, "## DISENGAGED: stack released=%s | heap=%lu largest=%lu",
-                    UsbSerial::hostReleased() ? "yes" : "NO (reboot needed)",
+          // Report the ACTUAL state, three ways, not two. Since the host became
+          // resident by default a disengage does NOT release the stack -- yet this
+          // said "released=yes", because s_hostReleased is a latch about whether the
+          // last teardown SUCCEEDED, not about whether the host is up now. The bench
+          // logs show the contradiction plainly: "released=yes" alongside heap that
+          // never returns (17 KB instead of 82 KB), because the host is still held.
+          // Reading that as a leak is the obvious mistake, and it is the wrong one.
+          Logstore::rawf(Logstore::LOG_USB, "## DISENGAGED: stack %s | heap=%lu largest=%lu",
+                    UsbSerial::usbHostResident() ? "RESIDENT (Fn+u on Track releases it)"
+                      : (UsbSerial::hostReleased() ? "released=yes"
+                                                   : "released=NO (reboot needed)"),
                     (unsigned long)ESP.getFreeHeap(),
                     (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         }
@@ -6313,7 +6376,20 @@ void App::loop() {
   // park near-idle.
   bool parked = (screen == SCR_CHARGE);
   if (!parked) {
+    // Network CAT is now ON DEMAND, like every other socket owner here. The session
+    // exists only while radio control is engaged; disengaging closes it politely and
+    // frees its sockets, and re-engaging reconnects. radioOut is the right signal
+    // because the CAT diagnostic tool sets it too, so the tool still gets a live rig.
+    if (rig) rig->setSessionWanted(radioOut);
     if (rig) rig->service();  // net CAT (Icom LAN): advance connect + keepalives
+    // A leg that was still connecting when the modes were pushed gets them now. This
+    // is the normal path in a mixed dual rig: the LAN leg finishes its handshake a
+    // few seconds after engage, long after applyTransponderModes() first ran.
+    // A leg that was still connecting at engage gets the full initialisation now --
+    // sat mode, band assignment, read budget and modes. Normal in a mixed dual rig.
+    if (rigInitPending && rig && rig->ready()) initializeEngagedRig();
+    else if (modeApplyPending && rig && rig->ready() && activeTxCount > 0)
+      applyTransponderModes(activeTx[curTx]);
     if (rot) rot->service();  // self-driven rotators (Yaesu direct) run their loop here
     // APRS-IS is only alive while its screen is open, so this is a null check in
     // every other state. Placed with the other socket services for the same reason
@@ -7002,6 +7078,13 @@ void App::handleKey(char c, bool enter, bool back) {
   // consume Fn+b, because none of these handlers look at keyFn at all.
   const bool lettersFree = (screen != SCR_EDIT && screen != SCR_NOTEEDIT &&
                             screen != SCR_BASIC && screen != SCR_BASICIMM &&
+                            // SCR_BASICASK: the pre-run input form. Values are free
+                            // text -- a callsign or a grid contains B and H.
+                            screen != SCR_BASICASK &&
+                            // SCR_TGTSEARCH: pre-existing, found when audit_text_screens
+                            // was widened to catch the `c > 32` spelling of "printable".
+                            // It has always taken typed text and always lost b and h.
+                            screen != SCR_TGTSEARCH &&
                             // SCR_BASICIMM was missing: the immediate-mode prompt takes
                             // ANY printable character as text (its handler says so), so
                             // bare 'b' screenshotted and bare 'h' opened Help instead of
@@ -7117,6 +7200,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_BASIC:    keyBasic(c, enter, back); break;
     case SCR_BASICRUN: keyBasicRun(c, enter, back); break;
     case SCR_BASICIMM: keyBasicImm(c, enter, back); break;
+    case SCR_BASICASK: keyBasicAsk(c, enter, back); break;
+    case SCR_CALCREF:  keyCalcRef(c, enter, back); break;
     case SCR_BASICFILES: keyBasicFiles(c, enter, back); break;
     case SCR_PERF:     keyPerf(c, enter, back); break;
     case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
@@ -13088,6 +13173,8 @@ void App::draw() {
     case SCR_BASIC:    drawBasic(); break;
     case SCR_BASICRUN: drawBasicRun(); break;
     case SCR_BASICIMM: drawBasicImm(); break;
+    case SCR_BASICASK: drawBasicAsk(); break;
+    case SCR_CALCREF:  drawCalcRef(); break;
     case SCR_BASICFILES: drawBasicFiles(); break;
     case SCR_PERF:     drawPerf(); break;
     case SCR_FOXANAT: drawFoxAnat(); break;
@@ -27342,6 +27429,40 @@ namespace {
             return (r > 0) ? sqrt(398600.4418 / r) : 0.0; }, 1.0);
       if (word("fpr"))   return callFn([](double alt){ double r = 6378.137 + alt;
             return (r > 6378.137) ? 6378.137 * acos(6378.137 / r) : 0.0; }, 1.0);
+      // ---- 0.9.71 additions: the gaps an operator kept filling by hand ------------
+      // Chosen because each was being computed on paper beside the device, and each
+      // has a wrong answer that looks plausible if you misremember the constant.
+      if (word("lam"))   return callFn([](double mhz){                     // wavelength, m
+            return (mhz > 0) ? 299.792458 / mhz : 0.0; }, 1.0);
+      if (word("dipole"))return callFn([](double mhz){                     // 1/2-wave dipole, m
+            // 95% velocity factor for wire, the figure every antenna book uses; a
+            // free-space half wave cuts the element measurably long.
+            return (mhz > 0) ? 0.95 * 149.896229 / mhz : 0.0; }, 1.0);
+      if (word("dbm2w")) return callFn([](double dbm){                     // dBm -> watts
+            return pow(10.0, (dbm - 30.0) / 10.0); }, 1.0);
+      if (word("w2dbm")) return callFn([](double w){                       // watts -> dBm
+            return (w > 0) ? 10.0 * log10(w) + 30.0 : 0.0; }, 1.0);
+      // Altitude for a given orbital PERIOD -- the inverse of porb, and the question
+      // actually asked when designing or identifying an orbit ("what is 96 minutes?").
+      if (word("aorb"))  return callFn([](double minutes){
+            if (minutes <= 0) return 0.0;
+            double T = minutes * 60.0;
+            double a = cbrt(398600.4418 * T * T / (4.0 * 3.14159265358979 * 3.14159265358979));
+            return a - 6378.137; }, 1.0);
+      // Slant range to a satellite from ELEVATION and altitude. The naive answer --
+      // using the altitude as the range -- is wrong by a factor of six at the horizon,
+      // which is exactly where link budgets matter most.
+      if (word("slant")) return callFn2([](double elDeg, double alt){
+            const double Re = 6378.137, D2R = 0.017453292519943295;
+            double r = Re + alt; if (r <= Re) return 0.0;
+            double e = elDeg * D2R;
+            return sqrt(Re * Re * sin(e) * sin(e) + r * r - Re * Re) - Re * sin(e); });
+      // Parabolic dish gain, dBi, from diameter (m) and frequency (MHz), 55% efficiency.
+      if (word("dgain")) return callFn2([](double dm, double mhz){
+            if (dm <= 0 || mhz <= 0) return 0.0;
+            double lambda = 299.792458 / mhz;
+            double g = 0.55 * pow(3.14159265358979 * dm / lambda, 2.0);
+            return 10.0 * log10(g); });
       // --- amateur-radio / satellite helper functions (single-argument) ---
       // Power/ratio in dB, watts<->dBm, and frequency(MHz)->wavelength(m).
       if (word("dbm"))   return callFn([](double w){ return 10.0*log10(w) + 30.0; }, 1.0); // W -> dBm
@@ -27457,7 +27578,7 @@ void App::drawCalc() {
     canvas.setCursor(4, 106); canvas.print("const c kB Re mu g0 sfx p n u m k M G T");
   }
   if (calcEngNota) { canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(210, 96); canvas.print("ENG"); }
-  footer("' fns  \\ eng  [ ] scroll  Fn+h help");
+  footer("' fns  \\ eng  [ ] tape  Fn+f list");
 }
 
 void App::keyCalc(char c, bool enter, bool back) {
@@ -27468,6 +27589,11 @@ void App::keyCalc(char c, bool enter, bool back) {
   // Fn+p prints the current entry + result. Guarded on keyFn so a plain 'p' (needed for
   // "pi", "exp", "power") still types into the expression normally.
   if (keyFn && (c == 'p' || c == 'P')) { printReport(PR_TOOLOUT); return; }
+  // Fn+f: the full function list. Behind Fn because every bare letter on this screen
+  // is expression text -- 'f' is needed for "floor", "fact", "fspl" and "fq".
+  if (keyFn && (c == 'f' || c == 'F')) {
+    calcRefFrom = SCR_CALC; calcRefScroll = 0; screen = SCR_CALCREF; lastDrawMs = 0; return;
+  }
   if (c == '\'') { calcHintPage2 = !calcHintPage2; lastDrawMs = 0; return; }   // toggle fn-hint page
   if (c == '\\') { calcEngNota = !calcEngNota; lastDrawMs = 0; return; }        // toggle eng-notation output
   // Tape scroll uses [ ] -- the arrow keys ; and . are expression characters
@@ -27956,11 +28082,22 @@ void App::drawDxLk() {
 }
 
 void App::keyDxLk(char c, bool enter, bool back) {
-  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == '`') {
+    // Return where the operator came from. Dropping a picker into Tools would strand
+    // them somewhere they never chose to be.
+    if (dxPickFor == 1) { dxPickFor = 0; screen = SCR_MUF; lastDrawMs = 0; return; }
+    screen = SCR_TOOLS; lastDrawMs = 0; return;
+  }
   if (isUp(c))   { if (dxMatchN) dxSel = (dxSel + dxMatchN - 1) % dxMatchN; lastDrawMs = 0; return; }
   if (isDown(c)) { if (dxMatchN) dxSel = (dxSel + 1) % dxMatchN;            lastDrawMs = 0; return; }
   if (enter) {
-    if (dxMatchN > 0) { dxDetail = dxMatch[dxSel]; screen = SCR_DXLKD; lastDrawMs = 0; }
+    if (dxMatchN > 0) {
+      if (dxPickFor == 1) {                       // picking a MUF path target
+        mufDxccIdx = dxMatch[dxSel];
+        dxPickFor = 0; screen = SCR_MUF; lastDrawMs = 0; return;
+      }
+      dxDetail = dxMatch[dxSel]; screen = SCR_DXLKD; lastDrawMs = 0;
+    }
     return;
   }
   if (back) {                                    // DEL edits the query
@@ -29047,6 +29184,10 @@ void App::drawGraph() {
   // Both branches must fit 39 columns; the second was 41, so "csv" was clipped to
   // "cs" -- and that key is how the graph is exported. Pre-existing; found only when
   // the width gate was extended to footers (and to their ternary branches).
+  // Fn+f (the function reference) is deliberately NOT in this footer: all 39 columns
+  // are already spent on keys that DO something, and hiding the table or CSV export to
+  // advertise a help screen is the wrong trade. It is documented in the manual and on
+  // the calculator's own footer, and the two screens share one reference.
   footer(gTrace >= 0 ? ",// move {} x10  m mark  t off  z zero"
                      : "ENT e1 2 e2 t trc z zero m mk b tbl csv");
 }
@@ -29054,6 +29195,12 @@ void App::drawGraph() {
 void App::keyGraph(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
   if (c == 'p') { printReport(PR_TOOLOUT); return; }   // p: print expr + window
+  // Fn+f: the same function reference the scientific calculator uses -- the grapher
+  // evaluates the identical expression language, so a separate list would be a second
+  // thing to keep in step with the evaluator, and would drift.
+  if (keyFn && (c == 'f' || c == 'F')) {
+    calcRefFrom = SCR_GRAPH; calcRefScroll = 0; screen = SCR_CALCREF; lastDrawMs = 0; return;
+  }
   if (enter) {                                   // edit the expression
     editTarget = 780; editTitle = "y = f(x)"; editBuf = graphExpr;
     screen = SCR_EDIT; lastDrawMs = 0; return;
@@ -29323,6 +29470,56 @@ namespace {
       return q;
     }
     double* arr = nullptr; int arrN = 0;        // the one @() array (DIM @(n), n<=256)
+
+    // ---- String variables A$..Z$ -------------------------------------------------
+    // ALLOCATED ON DEMAND, like every other large buffer in this firmware: 26 Arduino
+    // Strings cost real heap, and most programs never touch one. The table appears the
+    // first time a program mentions a string variable and dies with the VM.
+    String* svars = nullptr;
+    String* sv() {
+      if (!svars) svars = new (std::nothrow) String[26];
+      return svars;
+    }
+    // True once any string feature has been used, so the prompt/report can say so.
+    bool strUsed = false;
+
+    // ---- Named numeric arrays A() .. Z() ------------------------------------------
+    // ON DEMAND, one allocation per array actually DIMmed, freed with the VM. A budget
+    // caps the TOTAL elements across every array rather than each one separately:
+    // 26 x 256 would be 53 KB of doubles on a device whose whole free heap is ~76 KB,
+    // so a per-array limit would let a program starve the radio, the display and the
+    // USB host while looking perfectly reasonable line by line.
+    static const int ARR_TOTAL_MAX = 2048;      // 16 KB of doubles, all arrays together
+    double* narr[26] = {};
+    int     narrN[26] = {};
+    int     narrTotal = 0;                      // elements currently allocated
+    void freeArrays() {
+      for (int i = 0; i < 26; ++i) { delete[] narr[i]; narr[i] = nullptr; narrN[i] = 0; }
+      narrTotal = 0;
+    }
+    // Allocate or re-dimension one array. Re-DIM is allowed and clears it, which is what
+    // BASIC programmers expect from DIM in a loop.
+    bool dimArray(int idx, int n) {
+      if (idx < 0 || idx > 25) { err = "array A-Z"; return false; }
+      if (n < 1 || n > 1024)   { err = "size 1..1024"; return false; }
+      int after = narrTotal - narrN[idx] + n;
+      if (after > ARR_TOTAL_MAX) { err = "arrays too big (2048 total)"; return false; }
+      delete[] narr[idx];
+      narr[idx] = new (std::nothrow) double[n];
+      if (!narr[idx]) { narrTotal -= narrN[idx]; narrN[idx] = 0; err = "out of memory"; return false; }
+      narrTotal = after; narrN[idx] = n;
+      for (int i = 0; i < n; ++i) narr[idx][i] = 0;
+      return true;
+    }
+    // Bounds-checked element access. Returns nullptr and sets err, so a bad subscript
+    // stops the program instead of corrupting the heap -- BASIC's traditional silent
+    // out-of-range write is not survivable on a device that is also flying a radio.
+    double* arrCell(int idx, double dv) {
+      if (idx < 0 || idx > 25 || !narr[idx]) { err = "array not DIMmed"; return nullptr; }
+      int i = (int)dv;
+      if (i < 0 || i >= narrN[idx]) { err = "subscript out of range"; return nullptr; }
+      return &narr[idx][i];
+    }
     int    dataLineIdx = 0;                     // DATA read cursor: line index...
     const char* dataP = nullptr;                //   ...and position inside its value list
     // Host hooks (set by basicRun; null = feature unavailable). The VM stays ignorant of
@@ -29340,7 +29537,7 @@ namespace {
     int  (*fileCb)(void*, int op, const char* a, String* out) = nullptr;
     int  satselLeft = 2000;                     // SGP4-per-run budget for SATSEL
     bool gfxUsed = false, lprUsed = false, fileUsed = false;
-    ~BasicVM() { delete[] arr; }
+    ~BasicVM() { delete[] arr; delete[] svars; freeArrays(); }
 
     void ws() { while (*p == ' ' || *p == '\t') ++p; }
     // Boundary-checked keyword match for WORD OPERATORS (MOD/AND/OR/NOT...): unlike kw(),
@@ -29415,6 +29612,109 @@ namespace {
       const char* q = p; while (*w) { if (toupper((unsigned char)*q) != *w) return false; ++q; ++w; }
       p = q; return true;
     }
+    // ---- String expressions ------------------------------------------------------
+    // Deliberately a SEPARATE evaluator rather than a variant type threaded through the
+    // numeric one. The numeric path is the hot path -- Doppler loops, plot points -- and
+    // giving every value a tag would cost speed and memory on the 99% of expressions
+    // that are numbers. BASIC has always distinguished the two syntactically with the
+    // '$' suffix, so the parser can too.
+    //
+    // isStrStart() decides which evaluator a caller should use, WITHOUT consuming
+    // input: a quote, a NAME$ function, or a bare X$ variable.
+    bool isStrStart() {
+      const char* q = p; while (*q == ' ' || *q == '\t') ++q;
+      if (*q == '"') return true;
+      if (!isalpha((unsigned char)*q)) return false;
+      const char* r = q; while (isalnum((unsigned char)*r)) ++r;
+      return *r == '$';
+    }
+
+    // One string term: literal, variable, or function. Concatenation is handled by
+    // strExpr().
+    String strTerm() {
+      ws();
+      if (*p == '"') { ++p; String s; while (*p && *p != '"') s += *p++; if (*p == '"') ++p; return s; }
+      if (kw("LEFT$"))  { String s; double n; if (!str2(s, n)) return ""; 
+                          int k = (int)n; if (k < 0) k = 0;
+                          return k >= (int)s.length() ? s : s.substring(0, k); }
+      if (kw("RIGHT$")) { String s; double n; if (!str2(s, n)) return "";
+                          int k = (int)n; if (k < 0) k = 0;
+                          return k >= (int)s.length() ? s : s.substring(s.length() - k); }
+      if (kw("MID$"))   { // MID$(s, start [, len]) -- start is 1-BASED, as in every
+                          // Microsoft BASIC. Off-by-one here would be silently wrong
+                          // in every program a user ports.
+                          ws(); if (*p != '(') { err = "MID$ ("; return ""; } ++p;
+                          String s = strExpr(); ws(); if (*p != ',') { err = "MID$ ,"; return ""; } ++p;
+                          double st = expr(); double ln = -1; ws();
+                          if (*p == ',') { ++p; ln = expr(); ws(); }
+                          if (*p == ')') ++p; else { err = "MID$ )"; return ""; }
+                          int i = (int)st - 1; if (i < 0) i = 0;
+                          if (i >= (int)s.length()) return "";
+                          if (ln < 0) return s.substring(i);
+                          int k = (int)ln; if (k < 0) k = 0;
+                          return s.substring(i, min((int)s.length(), i + k)); }
+      if (kw("CHR$"))   { double v = paren1(); char b[2] = { (char)(int)v, 0 }; return String(b); }
+      if (kw("STR$"))   { double v = paren1(); return fmtNum(v); }
+      if (kw("UCASE$")) { String s = paren1s(); s.toUpperCase(); return s; }
+      if (kw("LCASE$")) { String s = paren1s(); s.toLowerCase(); return s; }
+      if (kw("TRIM$"))  { String s = paren1s(); s.trim(); return s; }
+      // GRID$(lat, lon) -- Maidenhead, via the firmware's own converter rather than a
+      // second implementation. A program that computes a grid differently from the
+      // tracker it runs on is worse than one that cannot compute it at all.
+      if (kw("GRID$"))  { ws(); if (*p != '(') { err = "GRID$ ("; return ""; } ++p;
+                          double la = expr(); ws();
+                          if (*p != ',') { err = "GRID$ ,"; return ""; } ++p;
+                          double lo = expr(); ws();
+                          if (*p == ')') ++p; else { err = "GRID$ )"; return ""; }
+                          return Location::toGrid(la, lo); }
+      // DXCC$(code) -- entity name for an ARRL code, from the table already on board.
+      if (kw("DXCC$"))  { double v = paren1();
+                          int code = (int)v;
+                          for (size_t i = 0; i < sizeof(DXCC_LK) / sizeof(DXCC_LK[0]); ++i)
+                            if (DXCC_LK[i].code == code) return String(DXCC_LK[i].name);
+                          return String(""); }
+      // TIME$ / DATE$ -- from the SAME snapshot the numeric fields use, so a program
+      // cannot print a timestamp that disagrees with its own UTCH/UTCM readings.
+      if (kw("TIME$"))  { if (!sys.timeOk) { err = "no time"; return ""; }
+                          char b[12]; snprintf(b, sizeof(b), "%02d:%02d:%02d",
+                            (int)sys.utcH, (int)sys.utcM, (int)sys.utcS); return String(b); }
+      if (kw("DATE$"))  { if (!sys.timeOk) { err = "no time"; return ""; }
+                          char b[12]; snprintf(b, sizeof(b), "%04d-%02d-%02d",
+                            (int)sys.utcYr, (int)sys.utcMon, (int)sys.utcDay); return String(b); }
+      if (isalpha((unsigned char)*p) && *(p + 1) == '$') {          // A$ .. Z$
+        int i = toupper((unsigned char)*p) - 'A'; p += 2;
+        strUsed = true;
+        String* t = sv(); if (!t) { err = "out of memory"; return ""; }
+        return t[i];
+      }
+      err = "string expected"; return "";
+    }
+    String strExpr() {
+      String v = strTerm();
+      for (;;) { ws(); if (*p != '+') break; ++p; v += strTerm(); if (!err.isEmpty()) break; }
+      return v;
+    }
+    // (s, n) argument pair used by LEFT$/RIGHT$.
+    bool str2(String& s, double& n) {
+      ws(); if (*p != '(') { err = "( expected"; return false; } ++p;
+      s = strExpr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      n = expr(); ws(); if (*p == ')') ++p; else { err = ") expected"; return false; }
+      return true;
+    }
+    // Four comma-separated numbers in parens: (lat1, lon1, lat2, lon2).
+    bool arg4(double& a, double& b, double& c2, double& d) {
+      ws(); if (*p != '(') { err = "( expected"; return false; } ++p;
+      a = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      b = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      c2 = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      d = expr(); ws(); if (*p == ')') ++p; else { err = ") expected"; return false; }
+      return true;
+    }
+    double paren1()  { ws(); if (*p != '(') { err = "( expected"; return 0; } ++p;
+                       double v = expr(); ws(); if (*p == ')') ++p; else err = ") expected"; return v; }
+    String paren1s() { ws(); if (*p != '(') { err = "( expected"; return ""; } ++p;
+                       String s = strExpr(); ws(); if (*p == ')') ++p; else err = ") expected"; return s; }
+
     double expr() { double v = term(); for (;;) { ws();
       if (*p == '+') { ++p; v += term(); } else if (*p == '-') { ++p; v -= term(); } else break; } return v; }
     double term() { double v = power(); for (;;) { ws();
@@ -29450,6 +29750,66 @@ namespace {
         return arr[i];
       }
       if (isalpha((unsigned char)*p)) {
+        // String-consuming functions that RETURN a number. They live here, in the
+        // numeric evaluator, because that is what they produce -- LEN("AB")+1 is
+        // arithmetic. The '$'-suffix rule keeps the two evaluators unambiguous.
+        if (kw("LEN"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return (double)s.length(); } }
+        if (kw("ASC"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return s.length() ? (double)(uint8_t)s[0] : 0.0; } }
+        if (kw("VAL"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return atof(s.c_str()); } }
+        // INSTR(haystack, needle) -> 1-based position, 0 = not found. Microsoft order
+        // and Microsoft's 1-based result: 0 is the "no" answer precisely because 1 is
+        // a real position.
+        if (kw("INSTR")) { ws(); if (*p=='(') { ++p; String h=strExpr(); ws();
+                             if (*p==',') { ++p; String n=strExpr(); ws(); if(*p==')')++p;
+                               int i = h.indexOf(n); return i < 0 ? 0.0 : (double)(i + 1); }
+                             err = "INSTR ,"; return 0; } }
+        // ---- constants -------------------------------------------------------------
+        // Bare names, no parentheses, matching PI's traditional spelling. Values that a
+        // program would otherwise have to type out and get subtly wrong: writing
+        // 3.14159 instead of PI is a 5-arcsecond pointing error at the horizon.
+        if (kwb("PI"))    return 3.14159265358979323846;
+        if (kwb("TWOPI")) return 6.28318530717958647692;
+        if (kwb("DEG"))   return 57.29577951308232087680;   // radians -> degrees
+        if (kwb("RAD"))   return 0.01745329251994329577;    // degrees -> radians
+        if (kwb("CLIGHT"))return 299792458.0;               // m/s, exact by definition
+        if (kwb("KBOLT")) return 1.380649e-23;              // J/K, exact by definition
+        if (kwb("REARTH"))return 6378.137;                  // km, WGS-84 equatorial
+
+        // ---- maths that BASIC programs kept hand-rolling ---------------------------
+        if (kw("ATN2"))  { // ATN2(y, x) -- full-quadrant bearing. Hand-rolling this with
+                           // ATN(y/x) loses the quadrant and divides by zero due east;
+                           // every program doing geometry needs it.
+                           ws(); if (*p=='(') { ++p; double y=expr(); ws();
+                             if (*p==',') { ++p; double x=expr(); ws(); if(*p==')')++p;
+                               return atan2(y, x); }
+                             err = "ATN2 ,"; return 0; } }
+        if (kw("ASN"))   { double v = paren1(); return asin(v < -1 ? -1 : (v > 1 ? 1 : v)); }
+        if (kw("ACS"))   { double v = paren1(); return acos(v < -1 ? -1 : (v > 1 ? 1 : v)); }
+        if (kw("LOG10")) { double v = paren1(); return v > 0 ? log10(v) : 0; }
+        if (kw("ROUND")) { double v = paren1(); return floor(v + 0.5); }
+        if (kw("FRAC"))  { double v = paren1(); return v - (double)(long)v; }
+        if (kw("HYP"))   { ws(); if (*p=='(') { ++p; double a=expr(); ws();
+                             if (*p==',') { ++p; double b=expr(); ws(); if(*p==')')++p;
+                               return sqrt(a*a + b*b); }
+                             err = "HYP ,"; return 0; } }
+
+        // ---- geometry and radio, reusing the firmware's own routines ---------------
+        // These are the calculations CardSat already trusts on its own screens. Giving
+        // BASIC a second, hand-written copy is how a program comes to disagree with the
+        // tracker it is running on.
+        if (kw("GCDIST")) { double a,b,c2,d; if (!arg4(a,b,c2,d)) return 0;
+                            double km, br; greatCircle(a, b, c2, d, km, br); return km; }
+        if (kw("GCAZ"))   { double a,b,c2,d; if (!arg4(a,b,c2,d)) return 0;
+                            double km, br; greatCircle(a, b, c2, d, km, br); return br; }
+        if (kw("DXCCLAT")) { double v = paren1(); double la, lo;
+                             if (!dxccGeoFind((int)v, la, lo)) { err = "no such entity"; return 0; }
+                             return la; }
+        if (kw("DXCCLON")) { double v = paren1(); double la, lo;
+                             if (!dxccGeoFind((int)v, la, lo)) { err = "no such entity"; return 0; }
+                             return lo; }
         if (kw("ABS")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return fabs(v); } }
         else if (kw("INT")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return floor(v); } }
         else if (kw("SQR")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return v>0?sqrt(v):0; } }
@@ -29494,6 +29854,16 @@ namespace {
         char v = toupper((unsigned char)*p); ++p;
         // guard: a two-letter identifier we don't know is an error, not a var
         if (isalpha((unsigned char)*p)) { err = "unknown name"; return 0; }
+        // A(i) is an array element when A has been DIMmed. Checking narr[] rather than
+        // just the '(' keeps "A (3+1)" -- a scalar followed by a parenthesised term --
+        // working for programs written before arrays existed.
+        { const char* save = p; ws();
+          if (*p == '(' && narr[v - 'A']) {
+            ++p; double iv = expr(); ws();
+            if (*p == ')') ++p; else { err = "paren"; return 0; }
+            double* c = arrCell(v - 'A', iv); return c ? *c : 0;
+          }
+          p = save; }
         return vars[v - 'A'];
       }
       char* e = nullptr; double v = strtod(p, &e);
@@ -29511,6 +29881,18 @@ namespace {
       if (kwb("OR"))  { double r = land(); v = (v != 0 || r != 0) ? 1 : 0; } else break; } return v; }
 
     double relation() {
+      // STRING COMPARISON. IF A$ = "X" is the single most common string test in BASIC,
+      // and without this it would evaluate A as a number and silently compare nonsense.
+      // Only = and <> are supported: ordering strings invites locale questions this
+      // interpreter has no answer to, and a wrong answer is worse than a clear refusal.
+      if (isStrStart()) {
+        String l = strExpr(); if (!err.isEmpty()) return 0;
+        ws();
+        char a = *p, b = *(p + 1);
+        if (a == '<' && b == '>') { p += 2; String r = strExpr(); return l != r ? 1 : 0; }
+        if (a == '=')             { ++p;    String r = strExpr(); return l == r ? 1 : 0; }
+        err = "strings compare with = or <> only"; return 0;
+      }
       double l = expr(); ws();
       char a = *p, b = *(p + 1);
       if (a == '<' && b == '=') { p += 2; return l <= expr(); }
@@ -29523,18 +29905,25 @@ namespace {
     }
     int findLine(int num) { for (int i = 0; i < nLines; ++i) if (lines[i].num == num) return i; return -1; }
 
-    void printNum(double v) {
+    // ONE number->text rule, shared by PRINT and STR$. Splitting them would let
+    // PRINT X and PRINT STR$(X) disagree, which is the kind of difference that only
+    // shows up in someone's report output long after it was introduced.
+    String fmtNum(double v) {
       char b[32];
       if (v == floor(v) && fabs(v) < 1e15) snprintf(b, sizeof(b), "%ld", (long)v);
       else snprintf(b, sizeof(b), "%g", v);
-      out += b;
+      return String(b);
     }
+    void printNum(double v) { out += fmtNum(v); }
     // PRINT's item grammar rendered into a caller String -- one finished line, no
     // trailing newline. Shared by LPRINT (report sinks) and FPRINT (gated file).
     void emitLine(String& dst) {
       for (;;) { ws();
         if (*p == 0 || *p == ':') break;
-        if (*p == '"') { ++p; while (*p && *p != '"') dst += *p++; if (*p == '"') ++p; }
+        // Same grammar as PRINT, including string expressions -- LPRINT A$ and
+        // FPRINT LEFT$(N$,3) must work, or the report sinks silently diverge from
+        // what the screen shows.
+        if (isStrStart()) { String s = strExpr(); if (!err.isEmpty()) return; dst += s; }
         else if (*p == ',') { dst += "  "; ++p; }
         else if (*p == ';') { ++p; }
         else { double v = expr(); if (!err.isEmpty()) return;
@@ -29552,7 +29941,8 @@ namespace {
       bool suppressNL = false, emitted = false, sawSep = false;
       for (;;) { ws();
         if (*p == 0 || *p == ':') break;
-        if (*p == '"') { ++p; while (*p && *p != '"') out += *p++; if (*p == '"') ++p; emitted = true; suppressNL = false; }
+        if (isStrStart()) { String s = strExpr(); if (!err.isEmpty()) return;
+                            out += s; emitted = true; suppressNL = false; }
         else if (*p == ',') { out += "  "; ++p; suppressNL = true; sawSep = true; }
         else if (*p == ';') { ++p; suppressNL = true; sawSep = true; }
         else { double v = expr(); if (!err.isEmpty()) return;   // check BEFORE printing --
@@ -29564,6 +29954,33 @@ namespace {
       if (!suppressNL || (!emitted && !sawSep)) out += '\n';
     }
     int assign() { ws();
+      // A$ = <string expression>. Checked before the numeric path because "A$" starts
+      // with a letter and would otherwise be read as the variable A followed by junk.
+      if (isalpha((unsigned char)*p) && *(p + 1) == '$') {
+        int i = toupper((unsigned char)*p) - 'A'; p += 2; ws();
+        if (*p != '=') { err = "="; return -1; }
+        ++p;
+        String v = strExpr(); if (!err.isEmpty()) return -1;
+        strUsed = true;
+        String* t = sv(); if (!t) { err = "out of memory"; return -1; }
+        t[i] = v; return -1;
+      }
+      // A(i) = expr, for a DIMmed array. Same "only when DIMmed" rule as the read
+      // side, so an undimensioned A( is still the old clear error rather than a
+      // mysterious no-op.
+      if (isalpha((unsigned char)*p) && !isalpha((unsigned char)*(p + 1))) {
+        const char* save = p;
+        int idx = toupper((unsigned char)*p) - 'A'; ++p; ws();
+        if (*p == '(' && narr[idx]) {
+          ++p; double iv = expr(); ws();
+          if (*p == ')') ++p; else { err = "paren"; return -1; }
+          ws(); if (*p != '=') { err = "="; return -1; }
+          ++p; double val = expr(); if (!err.isEmpty()) return -1;
+          double* c = arrCell(idx, iv); if (!c) return -1;
+          *c = val; return -1;
+        }
+        p = save;
+      }
       if (*p == '@') {                            // @(index) = expr
         ++p; ws(); if (*p != '(') { err = "@ needs ()"; return -1; }
         ++p; double iv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
@@ -29662,15 +30079,42 @@ namespace {
         if (bodyOnThisLine) { forResumeP = f.bodyP; return -998; }
         return f.lineIdx + 1;
       }
-      if (kw("DIM")) {                           // DIM @(n) -- the one numeric array
-        ws(); if (*p == '@') ++p; else { err = "DIM @(n)"; return -1; }
-        ws(); if (*p != '(') { err = "DIM @(n)"; return -1; }
-        ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
-        int n = (int)nv;
-        if (n < 1 || n > 256) { err = "@ size 1..256"; return -1; }
-        delete[] arr; arr = new (std::nothrow) double[n];
-        if (!arr) { err = "out of memory"; arrN = 0; return -1; }
-        arrN = n; for (int i = 0; i < n; ++i) arr[i] = 0;
+      if (kw("DIM")) {
+        // DIM @(n)            -- the original single array, unchanged for old programs
+        // DIM A(n) [, B(m)..] -- named arrays, several per statement as in MS BASIC
+        for (;;) {
+          ws();
+          if (*p == '@') {
+            ++p; ws(); if (*p != '(') { err = "DIM @(n)"; return -1; }
+            ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+            int n = (int)nv;
+            if (n < 1 || n > 256) { err = "@ size 1..256"; return -1; }
+            delete[] arr; arr = new (std::nothrow) double[n];
+            if (!arr) { err = "out of memory"; arrN = 0; return -1; }
+            arrN = n; for (int i = 0; i < n; ++i) arr[i] = 0;
+          } else if (isalpha((unsigned char)*p)) {
+            int idx = toupper((unsigned char)*p) - 'A'; ++p; ws();
+            if (*p != '(') { err = "DIM A(n)"; return -1; }
+            ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+            if (!dimArray(idx, (int)nv)) return -1;
+          } else { err = "DIM name"; return -1; }
+          ws(); if (*p == ',') { ++p; continue; }      // DIM A(10), B(20)
+          break;
+        }
+        return -1; }
+      if (kw("ERASE")) {                          // ERASE A -- give the heap back early
+        ws();
+        if (!isalpha((unsigned char)*p)) { err = "ERASE A"; return -1; }
+        int idx = toupper((unsigned char)*p) - 'A'; ++p;
+        narrTotal -= narrN[idx];
+        delete[] narr[idx]; narr[idx] = nullptr; narrN[idx] = 0;
+        return -1; }
+      if (kw("INPUT")) {
+        // The value was collected by the pre-run form (see basicScanInputs), so at run
+        // time this only has to step over its own arguments. Doing the asking here
+        // would mean re-entering the event loop with a live VM on the stack, which is
+        // exactly the design this interpreter avoids -- it runs to completion.
+        while (*p && *p != ':') ++p;
         return -1; }
       if (kwb("DATA")) return -1;                 // data lines execute as no-ops
       if (kw("RESTORE")) { dataLineIdx = 0; dataP = nullptr; return -1; }
@@ -30192,6 +30636,100 @@ void App::basicFillSys(void* sysPtr) {
     }
   }
 
+// Scan the program text for INPUT declarations and fill basicAsk[].
+//
+//   INPUT "Downlink MHz"; F
+//   INPUT "Callsign"; C$
+//
+// A TEXT scan, not an interpreter pass: the form has to exist before the VM does, and
+// building a VM merely to discover its questions would mean running the program to find
+// out what to ask it. Duplicates are collapsed -- a variable asked for twice is one
+// field, because two boxes writing the same variable is a UI that cannot be right.
+int App::basicScanInputs() {
+  basicAskN = 0; basicAskSel = 0;
+  const char* p = basicBuf.c_str();     // basicBuf is a String; scan its buffer
+  while (*p && basicAskN < BASIC_ASK_MAX) {
+    // Start of a line: skip the line number and leading space.
+    while (*p == ' ' || *p == '\t') ++p;
+    while (isdigit((unsigned char)*p)) ++p;
+    // Walk statements on this line, looking for INPUT at a statement boundary.
+    while (*p && *p != '\n' && basicAskN < BASIC_ASK_MAX) {
+      while (*p == ' ' || *p == '\t' || *p == ':') ++p;
+      if (strncasecmp(p, "INPUT", 5) == 0 && !isalnum((unsigned char)p[5])) {
+        p += 5;
+        while (*p == ' ' || *p == '\t') ++p;
+        String prompt;
+        if (*p == '"') { ++p; while (*p && *p != '"') prompt += *p++; if (*p == '"') ++p; }
+        while (*p == ' ' || *p == '\t' || *p == ';' || *p == ',') ++p;
+        if (isalpha((unsigned char)*p)) {
+          char v = toupper((unsigned char)*p); ++p;
+          bool isStr = (*p == '$'); if (isStr) ++p;
+          bool dup = false;
+          for (int i = 0; i < basicAskN; ++i)
+            if (basicAsk[i].var == v && basicAsk[i].isStr == isStr) dup = true;
+          if (!dup) {
+            BasicAsk& a = basicAsk[basicAskN++];
+            a.var = v; a.isStr = isStr;
+            a.prompt = prompt.length() ? prompt
+                                       : (String(v) + (isStr ? "$" : ""));
+            a.value = "";
+          }
+        }
+      }
+      // advance to the next statement or line
+      while (*p && *p != '\n' && *p != ':') ++p;
+    }
+    while (*p == '\n') ++p;
+  }
+  return basicAskN;
+}
+
+// The form. One field per declared input, edited in place; ENTER runs the program.
+void App::drawBasicAsk() {
+  header("Program input");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, 26); canvas.print("Values are set before the program runs");
+  const int TOP = 42, ROWH = 13;
+  for (int i = 0; i < basicAskN; ++i) {
+    int y = TOP + i * ROWH;
+    bool sel = (i == basicAskSel);
+    if (sel) canvas.fillRect(0, y - 2, 240, ROWH, CL_SELBG);
+    canvas.setTextColor(sel ? CL_WHITE : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    char lb[26]; snprintf(lb, sizeof(lb), "%c%s %.14s", basicAsk[i].var,
+                          basicAsk[i].isStr ? "$" : " ", basicAsk[i].prompt.c_str());
+    canvas.setCursor(4, y); canvas.print(lb);
+    canvas.setTextColor(sel ? CL_YELLOW : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(150, y);
+    canvas.print(basicAsk[i].value.length() ? basicAsk[i].value : String("_"));
+  }
+  footer("type value  ;/. field  ENTER run  ` bk");
+}
+
+void App::keyBasicAsk(char c, bool enter, bool back) {
+  if (c == '`') { screen = SCR_BASIC; lastDrawMs = 0; return; }
+  if (enter) {                                   // collected: now run to completion
+    basicRun();
+    basicOutScroll = 0; screen = SCR_BASICRUN; lastDrawMs = 0; return;
+  }
+  if (isUp(c))   { if (basicAskN) basicAskSel = (basicAskSel + basicAskN - 1) % basicAskN;
+                   lastDrawMs = 0; return; }
+  if (isDown(c)) { if (basicAskN) basicAskSel = (basicAskSel + 1) % basicAskN;
+                   lastDrawMs = 0; return; }
+  if (back) {                                    // DEL edits the value, never exits --
+    // over-backspacing must not throw away a half-filled form (the same trap the BASIC
+    // prompt had until 0.9.70).
+    String& v = basicAsk[basicAskSel].value;
+    if (v.length()) v.remove(v.length() - 1);
+    lastDrawMs = 0; return;
+  }
+  if (c > 32 && c < 127) {
+    String& v = basicAsk[basicAskSel].value;
+    if (v.length() < 18) v += c;
+    lastDrawMs = 0;
+  }
+}
+
 void App::basicRun() {
   // Allocate the interpreter state on the heap only while a program is running, then free
   // it -- the VM's line table is ~3.8 KB and would otherwise sit in .bss for the whole
@@ -30220,7 +30758,19 @@ void App::basicRun() {
   String perr;
   if (!basicParse(*vm, basicBuf, *work, perr)) { strlcpy(basicErr, perr.c_str(), sizeof(basicErr)); }
   else if (vm->nLines == 0) { strlcpy(basicErr, "no numbered lines", sizeof(basicErr)); }
-  else { vm->run(); basicOut = vm->out; strlcpy(basicErr, vm->err.c_str(), sizeof(basicErr)); }
+  else {
+    // Seed the variables the form collected, BEFORE the first statement runs. An empty
+    // field leaves the variable at its default (0 / "") rather than erroring: a program
+    // that asks for an optional value should not be stopped by the operator declining
+    // to give one.
+    for (int i = 0; i < basicAskN; ++i) {
+      const BasicAsk& a = basicAsk[i];
+      if (!a.value.length()) continue;
+      if (a.isStr) { String* t = vm->sv(); if (t) { t[a.var - 'A'] = a.value; vm->strUsed = true; } }
+      else         { vm->vars[a.var - 'A'] = atof(a.value.c_str()); }
+    }
+    vm->run(); basicOut = vm->out; strlcpy(basicErr, vm->err.c_str(), sizeof(basicErr));
+  }
   if (vm->lprUsed)  basHookLpr(this, nullptr, 2);       // close the report sinks
   if (basFileOpen) { basFile.close(); basFileOpen = false; }  // and the FOPEN file
   delete work; delete vm;
@@ -30668,6 +31218,9 @@ void App::keyBasic(char c, bool enter, bool back) {
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
   if (keyFn) {
     if (c == 'r') {                          // RUN
+      // A program that declares INPUT gets the form first; everything else runs
+      // straight away, so nothing changes for programs that ask nothing.
+      if (basicScanInputs() > 0) { screen = SCR_BASICASK; lastDrawMs = 0; return; }
       basicRun();
       basicOutScroll = 0; screen = SCR_BASICRUN; lastDrawMs = 0; return;
     }
@@ -31145,6 +31698,83 @@ namespace {
   const int MATHREF_N = (int)(sizeof(MATHREF) / sizeof(MATHREF[0]));
 }
 
+// Full calculator vocabulary. The entry screen can show two lines of hints; this is
+// the rest. Grouped by what an operator is trying to DO, not alphabetically -- someone
+// looking for "how do I get wavelength" does not know to look under L.
+static const char* const CALCREF[] = {
+  "#ARITHMETIC",
+  " + - * / ^  ( )  mod  Ans",
+  " sqrt cbrt abs sign round",
+  " floor ceil min(a,b) max(a,b)",
+  " hypot(a,b) fact ncr(n,r) npr(n,r)",
+  "#LOGS AND POWERS",
+  " ln  log (base 10)  log2  exp",
+  "#TRIG - angles in DEGREES",
+  " sin cos tan  asin acos atan",
+  " atan2(y,x) full quadrant",
+  " sinh cosh tanh  d2r r2d",
+  "#CONSTANTS",
+  " pi  e   c    speed of light m/s",
+  " kB  Boltzmann   Re  Earth radius km",
+  " mu  Earth GM    g0  9.80665 m/s2",
+  "#SI SUFFIXES on any number",
+  " p n u m k M G T   e.g. 145M",
+  "#DECIBELS AND POWER",
+  " db(x) undb(x)   dbm(w) w(dbm)",
+  " dbm2w(dbm) w2dbm(w)",
+  " dbd(dbi) dbi(dbd)  antenna refs",
+  "#SWR AND FEEDLINE",
+  " swr2rl(swr)  rl2swr(db)",
+  " mml(swr)  mismatch loss dB",
+  "#NOISE",
+  " nf2t(nf)  noise figure -> kelvin",
+  " t2nf(k)   kelvin -> noise figure",
+  "#FREQUENCY AND ANTENNAS",
+  " wl(mhz) fq(m)   lam(mhz) metres",
+  " dipole(mhz) 1/2-wave, 0.95 vf",
+  " dgain(d_m,mhz)  dish dBi at 55%",
+  " fspl(mhz,km)    free-space loss",
+  "#SATELLITE",
+  " porb(alt_km)  period, minutes",
+  " aorb(min)     altitude for period",
+  " vorb(alt_km)  orbital speed km/s",
+  " fpr(alt_km)   footprint radius km",
+  " slant(el,alt) range km at that el",
+  " dop(mhz,rr)   Doppler Hz, rr km/s",
+  "#GRAPHER ONLY",
+  " x  is the plotted variable",
+  "",
+  " Fn+p prints the tape.",
+  " ' toggles the on-screen hints.",
+};
+static const int CALCREF_N = sizeof(CALCREF) / sizeof(CALCREF[0]);
+
+void App::drawCalcRef() {
+  header("Calculator functions");
+  canvas.setTextSize(1);
+  const int rows = 11, LH = 9;
+  if (calcRefScroll < 0) calcRefScroll = 0;
+  if (calcRefScroll > CALCREF_N - rows) calcRefScroll = (CALCREF_N > rows) ? CALCREF_N - rows : 0;
+  int y = 20;
+  for (int r = 0; r < rows && calcRefScroll + r < CALCREF_N; ++r) {
+    const char* s = CALCREF[calcRefScroll + r];
+    if (*s == '#') { canvas.setTextColor(CL_CYAN, CL_BLACK); ++s; }
+    else             canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, y); canvas.print(s);
+    y += LH;
+  }
+  footer("; . scroll  ` back");
+}
+
+void App::keyCalcRef(char c, bool enter, bool back) {
+  (void)enter;
+  // Back returns to whichever calculator opened it -- calcRefFrom is set there, so the
+  // operator lands where they were rather than in Tools.
+  if (isBack(c, back)) { screen = calcRefFrom; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (calcRefScroll > 0) calcRefScroll--; lastDrawMs = 0; return; }
+  if (isDown(c)) { calcRefScroll++; lastDrawMs = 0; return; }
+}
+
 void App::drawMathRef() {
   header("Radio math reference");
   canvas.setTextSize(1);
@@ -31177,12 +31807,15 @@ void App::keyMathRef(char c, bool enter, bool back) {
 //  same idiom as MATHREF (~zero heap). '#' = section header, '~' = dim note.
 // ---------------------------------------------------------------------------
 namespace {
+  // Kept in step with the manual's Tiny BASIC reference by hand; both describe the SAME
+  // interpreter, so a name appearing in one and not the other is a defect either way.
   const char* const BASICREF[] = {
     "#TUTORIAL",
     " A program is numbered lines, run",
     " in order. Number by 10s so you",
     " can insert 15 between 10 and 20.",
-    " 26 vars A-Z hold numbers.",
+    " 26 vars A-Z hold numbers,",
+    " A$-Z$ hold text.",
     "~Try this:",
     "   10 LET A = 7",
     "   20 PRINT \"AZ=\"; SATAZ",
@@ -31222,10 +31855,40 @@ namespace {
     "~colors 0-9: blk wht red grn blu",
     "~yel cyn org gry dkgrn",
     "#FUNCTIONS",
-    " ABS INT SGN SQR EXP LOG",
+    " ABS INT SGN SQR EXP LOG LOG10",
     " SIN COS TAN ATN  (DEGREES)",
-    " MIN(a,b) MAX(a,b) RND",
+    " ASN ACS  ATN2(y,x) keeps the",
+    "   quadrant - use it for bearings",
+    " MIN(a,b) MAX(a,b) HYP(a,b) RND",
+    " ROUND FRAC",
     "~RND gives 0..1; INT(RND*6)+1",
+    "#CONSTANTS",
+    " PI TWOPI DEG RAD",
+    " CLIGHT KBOLT REARTH",
+    "#TEXT  (A$..Z$, join with +)",
+    " LEFT$(s,n) RIGHT$(s,n)",
+    " MID$(s,start,len)  start is 1",
+    " CHR$ STR$ UCASE$ LCASE$ TRIM$",
+    " LEN(s) ASC(s) VAL(s)",
+    " INSTR(hay,needle) 1-based, 0=no",
+    "~Compare with = and <> only.",
+    "#ARRAYS",
+    " DIM A(n)   DIM A(10), B(20)",
+    " A(i) reads and assigns",
+    " ERASE A frees it early",
+    "~2048 elements across ALL arrays.",
+    "~A bad subscript stops the run.",
+    "#STATION AND GEOMETRY",
+    " GCDIST(la1,lo1,la2,lo2)  km",
+    " GCAZ(la1,lo1,la2,lo2)    deg",
+    " DXCCLAT(code) DXCCLON(code)",
+    " DXCC$(code)  GRID$(lat,lon)",
+    " TIME$  DATE$",
+    "#ASKING FOR INPUT",
+    " INPUT \"Callsign\"; N$",
+    " INPUT \"MHz\"; F",
+    "~All INPUT lines become ONE form",
+    "~shown BEFORE the program runs.",
     "#OPERATORS",
     " ^  then * /  MOD  then + -",
     " = < > <= >= <>  compare",
@@ -34057,7 +34720,55 @@ void App::drawMuf() {
                           (int)lround(ssn), tv.tm_hour, tv.tm_min);
     canvas.setCursor(4, 26); canvas.print(hb); }
 
-  const int ROWS = 8, ROWH = 11, TOP = 38;
+  // PATH TO A CHOSEN DXCC ENTITY, above the region table.
+  //
+  // The region list answers "how are paths generally right now"; the question an
+  // operator actually has is usually "can I work THAT entity", and no region row
+  // answers it. Same MINIMUF model, same units, so the number is directly comparable
+  // with the rows below -- it is simply a path the operator named.
+  // ROWS must follow TOP. The pinned DXCC row pushes the table down by 13 px, and
+  // leaving the row count at 8 ran the last row to y=139 -- under the footer, which
+  // draws over it. The operator sees a list that is silently one row short, with no
+  // hint that anything is missing.
+  //
+  // ROW_BOTTOM is where the footer starts: the last row must END above it, so the
+  // count is derived rather than written down twice.
+  // LAST_ROW_Y is the lowest y a row may START at: footer() prints at y=127, and a row
+  // paints fillRect(0, y-1, 240, ROWH), so y=116 fills to 126 and just clears it.
+  // Deriving ROWS from it preserves the original 8 rows at TOP=38 while shrinking to 6
+  // when the pinned DXCC row pushes the table down -- rather than trimming a row that
+  // always displayed correctly.
+  const int ROWH = 11, LAST_ROW_Y = 116;
+  int TOP = 38;
+  if (mufDxccIdx >= 0 && mufDxccIdx < (int)(sizeof(DXCC_LK) / sizeof(DXCC_LK[0]))) {
+    const DxccLk& e = DXCC_LK[mufDxccIdx];
+    double eLat, eLon;                                   // east-positive
+    if (dxccGeoFind(e.code, eLat, eLon)) {
+      // minimufMHz wants WEST-positive longitude, like qLonR above; the table is
+      // east-positive, so negate. MUF_REGIONS stores west-positive and does not.
+      double m = minimufMHz(qLatR, qLonR, eLat * D2R, -eLon * D2R, mon, day, ut, ssn);
+      double dKm, brg; greatCircle(o.lat, o.lon, eLat, eLon, dKm, brg);
+      // CL_BLUE, not the green selection bar: this row is a pinned target, not the
+      // list cursor, and using the selection colour for both would make the table
+      // look like it had two cursors.
+      canvas.fillRect(0, 36, 240, 12, CL_BLUE);
+      canvas.setTextColor(CL_WHITE, CL_BLUE);
+      char nb[22]; snprintf(nb, sizeof(nb), "%.15s", e.name);
+      canvas.setCursor(4, 38);   canvas.print(nb);
+      char db[24]; snprintf(db, sizeof(db), "%03d\xF8 %5.0fkm", (int)lround(brg), dKm);
+      canvas.setCursor(104, 38); canvas.print(db);
+      canvas.setTextColor(mufColour(m), CL_BLUE);
+      char mb[16]; snprintf(mb, sizeof(mb), "%4.1f %s", m, mufBand(m));
+      canvas.setCursor(184, 38); canvas.print(mb);
+    } else {
+      // A deleted entity has no coordinates. Say so rather than plotting 0,0 -- which
+      // is a real place in the Atlantic and would look like a plausible answer.
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.setCursor(4, 38); canvas.print("no location (deleted entity)");
+    }
+    TOP = 51;                                            // region table starts below
+  }
+  const int ROWS = (LAST_ROW_Y - TOP) / ROWH + 1;         // 8 normally, 6 with a target
   if (mufSel < 0) mufSel = 0;
   if (mufSel >= MUF_REGION_N) mufSel = MUF_REGION_N - 1;
   if (mufSel < mufScroll) mufScroll = mufSel;
@@ -34082,7 +34793,9 @@ void App::drawMuf() {
     char mb[16]; snprintf(mb, sizeof(mb), "%4.1f %s", m, mufBand(m));
     canvas.setCursor(184, y); canvas.print(mb);
   }
-  footer("; . move  k map  x print  ` back");
+  // 39 columns is the hard limit; both branches are checked by audit_status_width.
+  footer(mufDxccIdx >= 0 ? "; . move  d DXCC  D clr  k map  ` back"
+                         : "; . move  d DXCC  k map  x prn  ` back");
 }
 
 void App::keyMuf(char c, bool enter, bool back) {
@@ -34094,6 +34807,12 @@ void App::keyMuf(char c, bool enter, bool back) {
   if (isDown(c)) { mufSel = (uint8_t)((mufSel + 1) % MUF_REGION_N); lastDrawMs = 0; return; }
   if (c == 'k')  { screen = SCR_MUFMAP; lastDrawMs = 0; return; }
   if (c == 'x')  { printReport(PR_MUF); return; }
+  // 'd' picks a DXCC entity as the path target. The fixed region list answers "how are
+  // the paths generally", but the question an operator usually has is "can I work THAT
+  // entity right now", and no region row answers it.
+  if (c == 'd')  { dxPickFor = 1; dxQuery = ""; dxRunFilter(); dxSel = 0;
+                   screen = SCR_DXLK; lastDrawMs = 0; return; }
+  if (c == 'D')  { mufDxccIdx = -1; lastDrawMs = 0; return; }   // clear the target
 }
 
 void App::drawMufMap() {

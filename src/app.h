@@ -25,7 +25,7 @@ enum Screen : uint8_t {
   SCR_CALEXPORT,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_PERF,
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_BASICASK, SCR_CALCREF, SCR_PERF,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
   SCR_KESSLER, SCR_QTHPRE,
   // "Nearby & DX" hub and its live terrestrial feeds. These are fetch-and-browse views
@@ -1352,6 +1352,15 @@ private:
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
   void parkAndReleaseRotator();        // park, then free a USB rotator's host (~12 KB) when off
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
+  // Set when applyTransponderModes() ran before every leg was ready -- normal in a
+  // mixed dual rig, where a LAN leg is still handshaking while a USB leg is live.
+  // The loop retries once the rig reports ready; without it the modes were lost and
+  // a TH-D75 leg silently stayed on its 5 kHz normal step.
+  bool modeApplyPending = false;
+  // Set when initializeEngagedRig() ran before every leg was ready. That function also
+  // carries sat mode, band assignment and the CAT read budget, so losing it costs more
+  // than the modes alone; the loop retries it once the rig reports ready.
+  bool rigInitPending = false;
   void initializeEngagedRig();  // post-connect engage init (sat mode, bands, modes, budget)
   // Compute the per-tick CAT write deadband (mode-aware, adaptively tightened
   // near TCA) and the TCA-tapered predictive lead range rate. `rrNow` is the
@@ -1997,6 +2006,12 @@ private:
   // is an embedded table generated from the ARRL DXCC list (dxcc_lookup.h).
   String dxQuery;
   int dxSel = 0, dxScroll = 0;      // selection + scroll within the filtered list
+  // The DXCC type-to-search screen doubles as a PICKER. 0 = normal (ENTER opens the
+  // entity detail); 1 = picking a MUF path target, where ENTER hands the choice back
+  // to the MUF tool instead. Reusing one search screen keeps a single place that knows
+  // how to match prefixes and names.
+  uint8_t dxPickFor = 0;
+  int     mufDxccIdx = -1;          // DXCC_LK index of the MUF path target, -1 = none
   int dxMatch[32]; int dxMatchN = 0; // indices into DXCC_LK of current matches (capped)
   int dxDetail = 0;                  // DXCC_LK index shown on the detail card
   void dxRunFilter();
@@ -2850,6 +2865,36 @@ private:
   // inferred from a rising voltage trend over ~30 s, since the ADV exposes no charger line.
   int      batteryMilliVolts();     // GPIO10 * divider, mV (0 if unreadable)
   bool     batteryCharging();       // ALWAYS false: this board cannot report it
+
+  // ---- BASIC pre-run input form (SCR_BASICASK) -----------------------------------
+  // A program declares its inputs with INPUT "prompt"; VAR. Before the program runs,
+  // CardSat scans for those declarations and presents ONE form; the program then
+  // executes to completion exactly as before, with the variables already set.
+  //
+  // Why a form and not a run-time prompt: the interpreter runs inside a single key
+  // handler, to completion, with the watchdog fed by a statement budget. Stopping
+  // mid-run to wait for a keystroke would mean re-entering the event loop with a live
+  // VM on the stack -- which is the design this interpreter deliberately avoids.
+  // Collecting first keeps the "runs to completion" property intact.
+  struct BasicAsk {
+    char   var = 'A';        // A-Z
+    bool   isStr = false;    // true for A$
+    String prompt;
+    String value;
+  };
+  static const int BASIC_ASK_MAX = 6;
+  BasicAsk basicAsk[BASIC_ASK_MAX];
+  int      basicAskN = 0, basicAskSel = 0;
+  int      basicScanInputs();      // fills basicAsk[], returns the count
+  // Calculator function reference (SCR_CALCREF), reached with Fn+f from either
+  // calculator. The two-line hint above the entry line can only ever show a dozen of
+  // the 65 names; without a full list on the device, the rest may as well not exist.
+  int      calcRefScroll = 0;
+  Screen   calcRefFrom = SCR_CALC;   // which calculator opened the reference
+  void     drawCalcRef();
+  void     keyCalcRef(char c, bool enter, bool back);
+  void     drawBasicAsk();
+  void     keyBasicAsk(char c, bool enter, bool back);
   // (removed in 0.9.70: battTrendMv/battTrendMs/battChargeState -- the voltage-trend
   //  charge inference. The Cardputer ADV has no charger status line at all, so the
   //  state was never knowable; see batteryCharging() for the full evidence.)

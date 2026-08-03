@@ -178,7 +178,20 @@ namespace {
   // re-read the END_CDC headroom log before trusting this: the log prints it on
   // every disengage precisely so the number is never a guess. Raise it back to
   // 8192 at the first sign of a stack-overflow panic in either task.
-  const uint32_t kTaskStack = 4096;
+  // 4096 -> 6144. The 4096 figure came from END_CDC high-water-mark logs taken with a
+  // single directly-attached device, and it does not survive a HUB:
+  //     no hub:  EspUsbHost used 1156 of 4096, free 2940
+  //     hub:     EspUsbHost used 2684 of 4096, free 1412
+  // IDF's multi-level external hub support recurses through port enumeration, and this
+  // file's own rule -- safe = used + 2048 -- wants 4732, MORE than was allocated. 1412
+  // bytes of headroom on a task that reboots the device when it overflows is not a
+  // margin, and hub scans were observed to be unreliable and to end in resets.
+  //
+  // 6144 gives 3460 bytes of headroom against the measured hub peak and still sits well
+  // under the library's 8192 default. The high-water mark is printed at every disengage,
+  // so this stays a measurement rather than a guess -- if a hub-with-devices peak ever
+  // exceeds ~4 KB, raise it again.
+  const uint32_t kTaskStack = 6144;
 
   // (The teardown poke timer was removed in fix37. It woke the daemon out of
   // usb_host_lib_handle_events(portMAX_DELAY) so its cleanup could run -- but under
@@ -400,12 +413,30 @@ namespace {
   //     engage could take it as "the first adapter". (Before the 0.9.70 finding-B
   //     check that bind then reported ENGAGED on a hub.)
   volatile bool s_sawHub = false;
+  // Set when a device enumerated but could not be recorded: the 4-slot adapter
+  // registry was full. Surfaced by the scan so the operator is told, rather than
+  // silently seeing one fewer adapter than is plugged in.
+  volatile bool s_devRegistryFull = false;
 
   // Enumeration budgets. Behind a hub everything is slower and staged, so both the
   // settle window and the overall cap have to grow -- a cap that expires mid-scan
   // reports a partial bus, which is indistinguishable to the operator from a
   // missing adapter.
-  inline uint32_t enumCapMs()   { return s_sawHub ? 9000 : 2500; }
+  // BOOTSTRAP BUG, fixed: the cap used to be `s_sawHub ? 9000 : 2500`, so the long
+  // budget that exists FOR HUBS was gated on having already enumerated one. A hub
+  // needing more than 2500 ms could therefore never be seen -- and a hub is the
+  // slowest thing on the bus: it powers up its own controller, then IDF applies port
+  // reset recovery (CONFIG_USB_HOST_EXT_PORT_RESET_RECOVERY_DELAY_MS) and a power-on
+  // delay per downstream port. The same short window also caught a radio with a
+  // slow-booting USB stack.
+  //
+  // The cap is a CEILING, not a wait: the loop below exits as soon as the bus goes
+  // quiet with at least one device present, so a USB-serial adapter that appears in
+  // 400 ms still returns in 400 ms. Raising it costs time only when something slow is
+  // attached, or when nothing is attached at all -- and in the latter case a few extra
+  // seconds is much cheaper than reporting "no adapters found" for a device that was
+  // simply still waking up.
+  inline uint32_t enumCapMs()   { return s_sawHub ? 12000 : 9000; }
   inline uint32_t enumQuietMs() { return s_sawHub ? 1200 : 400; }
 
   // Stable identity across replugs: serial number when the adapter reports one
@@ -415,6 +446,47 @@ namespace {
   void makeKey(char* out, size_t n, const EspUsbHostDeviceInfo& d) {
     if (d.serial && *d.serial) snprintf(out, n, "%04x:%04x/%s", d.vid, d.pid, d.serial);
     else                       snprintf(out, n, "%04x:%04x@%u", d.vid, d.pid, (unsigned)d.address);
+  }
+
+  // Find the registry slot for a configured key, tolerating an ADDRESS CHANGE.
+  //
+  // A device with no iSerialNumber is keyed VID:PID@address -- the TH-D75 and the
+  // IC-705 are both exactly this. The USB address is assigned by enumeration order, so
+  // it is NOT a property of the radio: plugging the same radio in through a hub, or
+  // into a different hub port, or powering things up in a different order, gives it a
+  // different address and the configured key stops matching. Nothing is wrong with the
+  // radio and nothing is wrong with the bus; the leg simply finds no adapter.
+  //
+  // That is exactly the bench report "the D75 only works when connected directly":
+  // configured direct it keys @1, behind a hub it enumerates at another address, and an
+  // exact strcmp can never match again.
+  //
+  // So: exact match first, always. Only if that fails, and the wanted key is the
+  // address form, fall back to the VID:PID part -- and ONLY when exactly one live
+  // device carries it. That last condition is what preserves the reason the address is
+  // in the key at all: two identical adapters (the likely radio + rotator case) stay
+  // ambiguous and are never guessed between.
+  int findAdapter(const char* wantKey) {
+    if (!wantKey || !*wantKey) return -1;
+    for (uint8_t i = 0; i < s_serDevN; ++i)
+      if (!s_serDev[i].dead && strcmp(s_serDev[i].key, wantKey) == 0) return i;
+
+    const char* at = strchr(wantKey, '@');
+    if (!at) return -1;                       // serial-keyed: no fallback, and none needed
+    const size_t vp = (size_t)(at - wantKey); // "vvvv:pppp"
+    int hit = -1, n = 0;
+    for (uint8_t i = 0; i < s_serDevN; ++i) {
+      if (s_serDev[i].dead) continue;
+      if (strncmp(s_serDev[i].key, wantKey, vp) == 0 && s_serDev[i].key[vp] == '@') {
+        hit = i; n++;
+      }
+    }
+    if (n != 1) return -1;                    // 0 = absent, >1 = ambiguous; do not guess
+    char b[128];
+    snprintf(b, sizeof(b), "adapter matched by VID:PID (address moved: want %s, found %s)",
+             wantKey, s_serDev[hit].key);
+    rotTrace(b);
+    return hit;
   }
 
   // ONE device-connected callback for both the CAT and rotator paths. Runs on the
@@ -466,7 +538,15 @@ namespace {
       for (uint8_t i = 0; i < s_serDevN; ++i)
         if (s_serDev[i].dead) { slot = i; break; }
     if (slot < 0) {
-      if (s_serDevN >= (uint8_t)(sizeof(s_serDev) / sizeof(s_serDev[0]))) return;  // full
+      if (s_serDevN >= (uint8_t)(sizeof(s_serDev) / sizeof(s_serDev[0]))) {
+        // FULL. This used to drop the device with no record anywhere -- the operator
+        // saw an adapter simply missing from the picker, with nothing in the log to
+        // say why. A silent drop is the single most expensive failure mode in this
+        // subsystem: it is indistinguishable from "the device did not enumerate",
+        // which is a completely different problem with completely different fixes.
+        s_devRegistryFull = true;
+        return;
+      }
       slot = s_serDevN;
     }
     SerialDev& e = s_serDev[slot];
@@ -1206,6 +1286,10 @@ namespace {
     // and "settled" requires at least one NON-HUB device: a hub alone is never the
     // thing we are looking for, and treating its arrival as the end of enumeration
     // is exactly what hid every downstream adapter.
+    // NOTE on cost: this settle loop runs ONLY on a cold host -- hostUpForRotator()
+    // returns early when s_host already exists -- so the long window is paid once per
+    // host lifetime, not per scan. Bench timings confirm it: 9111 ms for the first
+    // scan after boot, 80 ms for every scan after that while the host stays resident.
     const uint32_t t0 = millis();
     while (millis() - t0 < enumCapMs()) {
       delay(25);
@@ -1320,7 +1404,49 @@ uint8_t scanAdapters() {
   // caller); the behavior is exactly what a scan needs, so reuse it rather than
   // write a second copy of the host bring-up that could drift from it.
   rotTrace("scan: adapters");
+  s_devRegistryFull = false;                 // per-scan verdict, not a sticky latch
+
+  // RE-ENUMERATE FROM COLD when nothing is using the bus.
+  //
+  // The adapter registry is rebuilt only when a host is CREATED. Before the host
+  // became resident that happened on every scan, so every scan produced a fresh, true
+  // list. With a resident host it never happens again: the list only accumulates
+  // whatever the callbacks reported, so an unplugged radio stays listed as
+  // "(unplugged)" forever and a device attached afterwards may not appear at all.
+  // Bench log: the TH-D75 tombstone survived six consecutive scans while a Prolific
+  // adapter plugged in during that window was never listed.
+  //
+  // Residency exists to stop a re-enumeration killing a LIVE radio session. A manual
+  // scan with no port open has no session to protect, so the honest thing is to give
+  // the operator a real enumeration. Costs the cold-start window (~9 s) on a scan the
+  // operator explicitly asked for; that is exactly what it cost before residency.
+  // REFRESH THE REGISTRY FROM THE LIVE HOST -- do NOT tear it down.
+  //
+  // The previous attempt released the host so the next hostUpForRotator() would
+  // re-enumerate from cold. It does not work: the bench log shows the release
+  // succeeding and the immediate re-install failing with "host would not start", every
+  // time, leaving the operator worse off than the stale list they had. The IDF host
+  // cannot be reinstalled the instant it is uninstalled.
+  //
+  // The library already knows what is attached RIGHT NOW -- getDevices() reads its live
+  // device table -- so the registry can be rebuilt from reality without touching the
+  // host at all. That fixes the actual complaint (a scan not reflecting a plug or
+  // unplug) without the teardown that caused the regression.
+  if (s_host) {
+    EspUsbHostDeviceInfo live[ESP_USB_HOST_MAX_DEVICES];
+    const size_t n = s_host->getDevices(live, ESP_USB_HOST_MAX_DEVICES);
+    // Tombstone every entry, then re-publish the ones still present. An entry that is
+    // gone stays dead, which is what makes an unplug visible.
+    for (uint8_t i = 0; i < s_serDevN; ++i) s_serDev[i].dead = 1;
+    std::atomic_thread_fence(std::memory_order_release);
+    for (size_t i = 0; i < n; ++i) onDev(live[i]);
+    char b[64];
+    snprintf(b, sizeof(b), "scan: refreshed from live host (%u device(s))", (unsigned)n);
+    rotTrace(b);
+  }
   if (!hostUpForRotator()) { rotTrace("scan: host would not start"); return 0; }
+  if (s_devRegistryFull)
+    rotTrace("scan: MORE devices than the 4-slot registry - some are not listed");
   for (uint8_t i = 0; i < s_serDevN; ++i) {
     // 96 clipped the KEY on long adapter names -- and the key is the one field
     // the operator must copy into Settings. 160 covers label(48) + key(40) + framing.
@@ -1332,6 +1458,11 @@ uint8_t scanAdapters() {
   }
   if (s_sawHub) rotTrace("scan: hub present - extended enumeration window used");
   if (s_serDevN == 0)
+    // (A "check PORTA 5V" hint briefly lived here, from a line in another project's
+    // README. It was WRONG for this hardware: VBUS on the OTG port is present and
+    // measured, an IC-705 charges from it, and a bus-powered serial adapter enumerates
+    // without any external supply. Sending operators to check their wiring over a
+    // theory that the bench had already disproven would have wasted their time.)
     rotTrace(s_sawHub ? "scan: hub seen but NO adapters behind it"
                       : "scan: no adapters found");
   // A scan is a TEMPORARY owner: if neither CAT nor the rotator has a bound port, the host
@@ -1343,7 +1474,19 @@ uint8_t scanAdapters() {
   // so nothing ever released wrongly; but the trace below claimed "releasing" while
   // CAT-B alone held the host, and a log that lies is worse than no log.
   if (s_host && !s_cdc && !s_cdc2 && !s_rotCdc) {
-    rotTrace("scan: releasing temporary host");
+    // SAY WHAT ACTUALLY HAPPENS. Since the host became resident by default,
+    // releaseHostIfIdle() returns immediately without releasing anything -- so this
+    // line claimed a release that never occurred. That is the same defect the comment
+    // above complains about ("a log that lies is worse than no log"), reintroduced by
+    // a later change, and it matters here: an operator reading "releasing" would
+    // reasonably expect the serial console back, and be puzzled when it stays down.
+    // The host was just re-created by this scan's cold enumeration, so it is up and
+    // idle. Leaving it resident is right -- an engage moments later must not pay the
+    // enumeration again, which is the whole point of residency -- but say so plainly:
+    // this line used to claim a release that residency had already made impossible.
+    rotTrace(s_keepHostResident
+               ? "scan: host stays resident (Fn+u on Track releases it)"
+               : "scan: releasing temporary host");
     releaseHostIfIdle();       // M2-safe; restores the console when the PHY is really free
   }
   return s_serDevN;
@@ -1370,6 +1513,7 @@ int catPickAdapter() {
     waitForAdapterKey(s_catWantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_catWantKey) == 0) { pick = i; break; }
+    if (pick < 0) pick = findAdapter(s_catWantKey);   // same radio, different address
     if (pick < 0) { setErr("Radio adapter not found (replug/re-select)"); return -1; }
   } else {
     // No nominated adapter: take the first one neither the ROTATOR nor CAT-B is
@@ -1408,6 +1552,7 @@ int cat2PickAdapter() {
     waitForAdapterKey(s_cat2WantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_cat2WantKey) == 0) { pick = i; break; }
+    if (pick < 0) pick = findAdapter(s_cat2WantKey);  // same radio, different address
     if (pick < 0) { setErr2("2nd adapter not found (replug)"); return -1; }
   } else {
     int free = -1, freeN = 0;
@@ -1447,6 +1592,7 @@ bool waitForAdapterKey(const char* key, uint32_t ms) {
   for (;;) {
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (!s_serDev[i].dead && strcmp(s_serDev[i].key, key) == 0) return true;
+    if (findAdapter(key) >= 0) return true;           // present, just at a new address
     if (millis() - t0 >= ms) return false;
     delay(25);
     feedFreezeWatchdog();
@@ -1498,6 +1644,7 @@ bool rotBegin() {
     waitForAdapterKey(s_rotWantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_rotWantKey) == 0) { pick = i; break; }
+    if (pick < 0) pick = findAdapter(s_rotWantKey);   // same rotator, different address
     if (pick < 0) {
       setRotErr("Rotator adapter not found (replug/re-select)");
       char b[96]; snprintf(b, sizeof(b), "rot: want key=%s but no adapter matches", s_rotWantKey);

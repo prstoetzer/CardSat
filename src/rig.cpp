@@ -495,6 +495,7 @@ void PlainCatRig::kwApplyStepForMode(RigMode m) {
   // AM is included on measurement, not assumption: the sweep showed band B accepts
   // FT 1 in AM and reaches the same 20 Hz grid as SSB/CW. NFM refuses fine mode and
   // stays on 5 kHz, which is where RM_FM and RM_DATA land.
+  _kwMode = m;                          // remembered so a band change can re-apply it
   const bool fine = (m == RM_USB || m == RM_LSB || m == RM_CW || m == RM_AM);
   char b[16];
   int n = snprintf(b, sizeof(b), "FT %c\r", fine ? '1' : '0');
@@ -516,13 +517,43 @@ bool PlainCatRig::sendFreq(freq_t hz) {
     // fine mode is on (SSB/CW) and 5 kHz otherwise.
     kwEnsureSession();                       // VFO mode + control band, once
     const uint32_t g = kwGrid();
+    const freq_t want = hz;
     hz = (freq_t)(((hz + g / 2) / g) * g);   // nearest, not truncated
+    // WHICH SIDE ROUNDS? The bench sees 5 kHz quantisation on an AO-7 mode A downlink
+    // while the radio itself demonstrably does 20 Hz there (verified at 29.4 MHz), and
+    // the band-change theory was measured and refuted. So the number CardSat actually
+    // puts on the wire, and the grid it chose, have to be visible -- reading the code
+    // has now failed twice. Logged only when rounding actually moved the frequency.
+    if (want != hz)
+      Serial.printf("[KWHT] want %llu -> sent %llu (grid %lu, fine=%d)\n",
+                    (unsigned long long)want, (unsigned long long)hz,
+                    (unsigned long)g, (int)_kwFine);
   }
   uint8_t fr[24];
   size_t n = legBuildFreqFrame(fam, _addr, hz, fr, sizeof(fr),
                                LEG_RADIOS[_model].wideFreq);
   bool ok = sendFrame(fr, n);
   if (ok) _lastSetMs = millis();
+  // RE-APPLY THE STEP AFTER A BAND CHANGE.
+  //
+  // The TH-D75 holds its tuning step PER BAND. CardSat sends MD/FT/FS first and the
+  // frequency second, so on a bird whose downlink is in a different band from wherever
+  // the radio was sitting -- AO-7 mode A, downlink 29.4 MHz, is the case that exposed
+  // it -- the fine step is set on the old band and then thrown away by the move to the
+  // new one. Everything downstream still BELIEVES fine mode is on: kwGrid() keeps
+  // returning 20 Hz and CardSat keeps sending exact frequencies, while the radio
+  // quantises them to the band's 5 kHz step. The symptom is "rounding on HF downlinks
+  // only", with VHF/UHF perfect.
+  //
+  // Measured, not assumed: thd75_verify.py --freq 29400000 shows USB/LSB/CW/AM all
+  // accepting fine mode with a 20 Hz grid at 29.4 MHz, so the radio is not the limit.
+  if (ok && fam == LEGF_KWHT) {
+    const uint8_t band = kwBandOf(hz);
+    if (band != _kwBand) {
+      _kwBand = band;
+      kwApplyStepForMode(_kwMode);        // re-assert FT/FS on the band we just entered
+    }
+  }
   return ok;
 }
 
@@ -630,6 +661,11 @@ bool DualRig::ready() const {
 void DualRig::service() {
   if (_down) _down->service();
   if (_up)   _up->service();
+}
+
+void DualRig::setSessionWanted(bool want) {
+  if (_down) _down->setSessionWanted(want);
+  if (_up)   _up->setSessionWanted(want);
 }
 
 void DualRig::setCmdDelay(uint16_t ms) {

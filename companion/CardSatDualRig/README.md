@@ -211,6 +211,13 @@ Compiles clean against ESP32-S3 + EspUsbHost + M5Unified (38% flash, 18% RAM as 
 **Not yet hardware-tested against physical radios.** All four CAT frequency encoders
 were byte-verified against the specs / CardSat's proven CI-V codec. Bring-up order:
 
+0a. **Pin each leg to its radio.** Set the leg's `usbSerial` to the radio's USB serial
+   number, or -- for radios that report none, which includes the TH-D75 (`2166:9023`)
+   and the IC-705 (`0c26:0036`) -- to its **`vvvv:pppp` VID:PID**. Left blank, a leg is
+   bound by ENUMERATION ORDER, and order is what changes when a hub is added, a hub port
+   changes, or the radios power up in a different sequence: downlink and uplink can then
+   swap silently while both radios work perfectly. VID:PID pinning is deterministic
+   whenever the two radios are different models, which is the usual satellite station.
 0. **Use the patched EspUsbHost** from CardSat's `third_party/EspUsbHost/`, not the
    Library Manager copy. The stock library never cancels an outstanding CDC *write* at
    shutdown, so a radio that stops reading its port strands the USB stack until reboot

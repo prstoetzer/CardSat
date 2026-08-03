@@ -1,13 +1,14 @@
 # CardSat — precompiled firmware (M5Cardputer ADV)
 
 Prebuilt binaries for the **M5Stack Cardputer ADV** (ESP32-S3FN8, 8 MB flash, no PSRAM),
-firmware **v0.9.70**. Flash these if you want to run this exact build without
+firmware **v0.9.71**. Flash these if you want to run this exact build without
 compiling. Source is the rest of this repo; `CardSat.ino` is the monolithic sketch.
 
 Built with: arduino-cli + `esp32:esp32@3.2.1`, FQBN
-`esp32:esp32:esp32s3:PartitionScheme=huge_app,CDCOnBoot=cdc`, M5Cardputer library.
-No `build.extra_flags` (that would break the HWCDC serial console). Flash usage at
-build time: 3,045,402 bytes (96.8%); static RAM 162,112 bytes (49%).
+`esp32:esp32:esp32s3:PartitionScheme=custom,CDCOnBoot=cdc` with the repo's
+`partitions.csv` (4 MB app / 1.5 MB LittleFS), M5Cardputer library.
+No `build.extra_flags` (that would break the HWCDC serial console). Flash usage at build time: 3,065,206 bytes of a **4 MB** app partition (73.1%);
+static RAM 162,360 bytes (49%).
 
 The flash percentage is only meaningful beside the library versions it was built
 with: M5Cardputer 1.1.1, M5GFX 0.2.26, M5Unified 0.2.19, ESP_SSLClient 3.1.3,
@@ -21,22 +22,25 @@ ArduinoJson 7.4.2, TinyGPSPlus 1.0.3, RadioLib 7.7.1, Sgp4 1.0.3, EspUsbHost **2
 > vendored copy.
 
 Checksums (MD5):
-- `CardSat-merged.bin`  1e19b517a7254c85dda7d7626dc05fec
-- `CardSat-app.bin`     ab151902df865a7c8c77097727a76eb7
+- `CardSat-merged.bin`  17fcb2de3c5581349155af032a2c0dc6
+- `CardSat-app.bin`     8f1119a4accc929d49c88d3a5c22ddcd
 - `CardSat-bootloader.bin`  c7f9b41acfaba802c7e74ae639a9a162
-- `CardSat-partitions.bin`  70007348574201233bc0cb17155e9d12
+- `CardSat-partitions.bin`  a4c137645ca493e8abffae39e6fb5a03
 
-> **v0.9.70** is a **USB release**. USB CAT can now be engaged and disengaged as often
-> as you like — switch satellites, switch the radio off and on — without rebooting.
-> Four defects were stacked here: an undrained CDC write that stranded the USB host
-> stack until reboot (fixed in the vendored library, reported upstream), a port that
-> was never closed because DTR was never de-asserted, and a radio whose CAT firmware
-> never returns after re-enumeration — so the host now **stays resident between
-> engagements**, and **`Fn`+`u`** releases it explicitly (which is when the serial
-> console returns). The **Kenwood TH-D74/D75** CAT path was rebuilt from measurement on
-> real hardware. The charge indicator is **removed** (this board cannot report charge
-> state; the old one said "on battery" while plugged in). See
-> `docs/releases/RELEASE_NOTES_0.9.70.md`.
+> **v0.9.71** is a **tools release**: Tiny BASIC gains string variables, text
+> functions, named arrays and a pre-run input form; the calculators gain satellite and
+> antenna functions plus an on-device list (`Fn`+`f`) and a printable card; the MUF tool
+> can target a DXCC entity. **Dual CAT works** (tested: TH-D75 on USB + IC-705 over
+> Wi-Fi). **Multiple USB devices do not** — see the release notes.
+>
+> **PARTITION CHANGE.** The app partition is now **4 MB** and LittleFS **1.5 MB**, using
+> flash that was previously unused. Upgrading through **Launcher is unaffected**: the app
+> still fits an existing 3 MB layout, so `CardSat-app.bin` installs exactly as before and
+> your settings survive. The larger filesystem only appears after a full
+> `CardSat-merged.bin` flash, which erases internal data — back it up first if you keep
+> notes or logs there.
+>
+> See `docs/releases/RELEASE_NOTES_0.9.71.md`.
 
 ## Easiest: one file at 0x0 (esptool)
 

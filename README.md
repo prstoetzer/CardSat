@@ -23,6 +23,36 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.71:** a **tools release**. **Tiny BASIC** gains **string variables**
+> `A$`–`Z$`, Microsoft-style **text functions** (`LEFT$ MID$ INSTR VAL …`), **named
+> arrays** (`DIM A(n)`), and a **pre-run input form** — a program declares `INPUT
+> "Callsign"; N$` and CardSat asks once, before the run, so programs still execute to
+> completion. The **calculators** gain `lam dipole dbm2w w2dbm aorb slant dgain`, a full
+> on-device function list (**`Fn`+`f`**) and a new printable **Calculator Card**. The
+> **MUF tool** can now answer "can I work *that* entity" — press **`d`** to pick a DXCC
+> entity and see bearing, range and path MUF. **Dual CAT is working**, tested with a
+> **TH-D75 on USB and an IC-705 over Wi-Fi**, with fixes for a LAN leg that never
+> started, fine tuning lost on a mixed rig, and unresponsive uplink tuning. The app
+> partition grew **3 MB → 4 MB** and LittleFS **896 KB → 1.5 MB** (Launcher upgrades are
+> unaffected). **Known limitation: multiple USB devices do not work** — see the release
+> notes for why, and why it cannot be fixed from an Arduino build.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.71.md)**.
+
+> **New in v0.9.71:** a **tools release**. **Tiny BASIC** gains **string variables**
+> `A$`–`Z$`, Microsoft-style **text functions** (`LEFT$ MID$ INSTR VAL …`), **named
+> arrays** (`DIM A(n)`), and a **pre-run input form** — a program declares `INPUT
+> "Callsign"; N$` and CardSat asks once, before the run, so programs still execute to
+> completion. The **calculators** gain `lam dipole dbm2w w2dbm aorb slant dgain`, a full
+> on-device function list (**`Fn`+`f`**) and a new printable **Calculator Card**. The
+> **MUF tool** can now answer "can I work *that* entity" — press **`d`** to pick a DXCC
+> entity and see bearing, range and path MUF. **Dual CAT is working**, tested with a
+> **TH-D75 on USB and an IC-705 over Wi-Fi**, with fixes for a LAN leg that never
+> started, fine tuning lost on a mixed rig, and unresponsive uplink tuning. The app
+> partition grew **3 MB → 4 MB** and LittleFS **896 KB → 1.5 MB** (Launcher upgrades are
+> unaffected). **Known limitation: multiple USB devices do not work** — see the release
+> notes for why, and why it cannot be fixed from an Arduino build.
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.71.md)**.
+
 > **New in v0.9.70:** a **USB release**. USB CAT can now be engaged and disengaged as
 > often as you like — switch satellites, switch the radio off and on — without rebooting
 > anything. Four defects were stacked here: an undrained CDC write that stranded the USB

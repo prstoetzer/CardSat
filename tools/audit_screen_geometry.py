@@ -242,4 +242,55 @@ else:
         print(f"  [{kind:14s}] {name:24s} {loc:16s} "
               f"x={op.x} y={op.y} size={op.size} txt={op.txt!r}")
 print(f"  hard failures (definite clip): {hard_fail}")
+# ---------------------------------------------------------------------------
+# A layout base this tool CANNOT evaluate.
+#
+# The analyzer resolves literal coordinate arithmetic. A mutable local that is
+# assigned more than once -- `int TOP = 38; ... TOP = 51;` -- has no single value at
+# analysis time, so every bound derived from it is unverified. The tool used to pass
+# such a function silently, which is the worst outcome: it reported success about
+# something it had not checked.
+#
+# This is exactly how the MUF screen shipped with its last row hidden under the
+# footer. TOP moved from 38 to 51 when a DXCC target was pinned while the row COUNT
+# stayed at 8, running the table to y=139. The gate said nothing.
+#
+# Narrow on purpose: only mutable ints named like layout constants, assigned twice or
+# more, inside a draw function that also runs a list loop. Exactly one function in the
+# tree matched when this was written, so it is a real signal rather than noise.
+def unverifiable_bases():
+    out = []
+    for m in re.finditer(r'void App::(draw\w+)\(\)\s*\{', src):
+        name = m.group(1); i = m.end(); d = 1; j = i
+        while j < len(src) and d:
+            if src[j] == '{': d += 1
+            elif src[j] == '}': d -= 1
+            j += 1
+        body = src[i:j]
+        if 'ROWH' not in body and 'ROWS' not in body:
+            continue                                  # not a list screen
+        for dm in re.finditer(r'\bint\s+([A-Z_][A-Za-z_]*)\s*=\s*\d+\s*;', body):
+            v = dm.group(1)
+            if re.search(r'const\s+int\s+' + v + r'\b', body):
+                continue
+            if len(re.findall(r'\b' + v + r'\s*=\s*\d+\s*;', body)) <= 1:
+                continue
+            # If the row count is DERIVED from this variable, the layout adapts when it
+            # moves and there is nothing to warn about -- that is the fix, not the bug.
+            # Flag only a moving base paired with a FIXED row count.
+            if re.search(r'ROWS\s*=\s*\([^;]*\b' + v + r'\b', body):
+                continue
+            out.append((name, v))
+    return out
+
+_unver = unverifiable_bases()
+if _unver:
+    print('SCREEN GEOMETRY: layout base cannot be evaluated')
+    for fn, v in _unver:
+        print(f'  {fn}(): "{v}" is a mutable int assigned more than once, so every')
+        print(f'    row bound derived from it is UNCHECKED. Make it const, or derive')
+        print(f'    the row count from it (ROWS = (LAST_ROW_Y - {v}) / ROWH + 1) so the')
+        print(f'    table cannot outgrow the space when {v} moves.')
+    sys.exit(1)
+
 sys.exit(1 if hard_fail else 0)

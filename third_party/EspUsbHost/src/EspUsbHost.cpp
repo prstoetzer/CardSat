@@ -6367,6 +6367,8 @@ void EspUsbHost::taskLoop()
   {
     uint32_t eventFlags = 0;
     err = usb_host_lib_handle_events(portMAX_DELAY, &eventFlags);
+    if (eventFlags)
+      CS_DIAG("## host lib event flags 0x%08x", (unsigned)eventFlags);
     if (err != ESP_OK && err != ESP_ERR_TIMEOUT)
     {
       ESP_LOGW(TAG, "usb_host_lib_handle_events() failed: %s", esp_err_to_name(err));
@@ -6652,6 +6654,14 @@ void EspUsbHost::clientTaskLoop()
 
 void EspUsbHost::clientEventCallback(const usb_host_client_event_msg_t *eventMsg, void *arg)
 {
+  // Every client event, unconditionally. The hub and the IC-705 both produce NOTHING
+  // in the log -- no device line, no IDF error -- and the two readings of that are
+  // completely different: either IDF never saw an attach (electrical: VBUS, inrush,
+  // cable, CC), or it saw one and the library dropped it. This line separates them.
+  CS_DIAG("## client event %d (0=NEW_DEV 1=DEV_GONE) addr=%u",
+          (int)eventMsg->event,
+          (unsigned)(eventMsg->event == USB_HOST_CLIENT_EVENT_NEW_DEV
+                     ? eventMsg->new_dev.address : 0));
   static_cast<EspUsbHost *>(arg)->handleClientEvent(eventMsg);
 }
 
@@ -6776,6 +6786,16 @@ void EspUsbHost::handleNewDevice(uint8_t address)
   device->info.configurationMaxPower = configDesc->bMaxPower;
   device->info.configurationInterfaceCount = configDesc->bNumInterfaces;
   device->info.configurationTotalLength = configDesc->wTotalLength;
+  // The 256-byte wall. Arduino's prebuilt IDF sets
+  // CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=256, and a device whose CONFIGURATION
+  // descriptor is longer than that cannot be fetched during enumeration -- it simply
+  // never appears, with no error the application can see. A CDC + USB Audio composite
+  // is exactly the shape that overruns it. Report the size for every device so the
+  // comparison is on the record rather than inferred.
+  CS_DIAG("## device %04x:%04x config descriptor = %u bytes (IDF control-transfer limit 256)%s",
+          (unsigned)device->info.vid, (unsigned)device->info.pid,
+          (unsigned)configDesc->wTotalLength,
+          configDesc->wTotalLength > 256 ? "  <-- OVER THE LIMIT" : "");
 
   const bool isHub = devDesc && (devDesc->bDeviceClass == USB_CLASS_HUB_VALUE || configHasInterfaceClass(configDesc, USB_CLASS_HUB_VALUE));
   device->isHub = isHub;
@@ -6968,6 +6988,16 @@ void EspUsbHost::scanHostDevices()
     device->info.configurationMaxPower = configDesc->bMaxPower;
     device->info.configurationInterfaceCount = configDesc->bNumInterfaces;
     device->info.configurationTotalLength = configDesc->wTotalLength;
+  // The 256-byte wall. Arduino's prebuilt IDF sets
+  // CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=256, and a device whose CONFIGURATION
+  // descriptor is longer than that cannot be fetched during enumeration -- it simply
+  // never appears, with no error the application can see. A CDC + USB Audio composite
+  // is exactly the shape that overruns it. Report the size for every device so the
+  // comparison is on the record rather than inferred.
+  CS_DIAG("## device %04x:%04x config descriptor = %u bytes (IDF control-transfer limit 256)%s",
+          (unsigned)device->info.vid, (unsigned)device->info.pid,
+          (unsigned)configDesc->wTotalLength,
+          configDesc->wTotalLength > 256 ? "  <-- OVER THE LIMIT" : "");
     device->isHub = true;
     device->info.isHub = true;
     device->info.supported = true;
@@ -7249,10 +7279,10 @@ void EspUsbHost::handleDescriptor(uint8_t descriptorType, const uint8_t *data)
         break;
       }
     }
-    const bool isAudioControlInterface = ESPUSBHOST_CLAIM_AUDIO && currentInterfaceClass_ == USB_CLASS_AUDIO_VALUE &&
+    const bool isAudioControlInterface = currentInterfaceClass_ == USB_CLASS_AUDIO_VALUE &&
                                          currentInterfaceSubClass_ == USB_AUDIO_SUBCLASS_AUDIO_CONTROL &&
                                          !interfaceAlreadyClaimed;
-    const bool isAudioInterface = ESPUSBHOST_CLAIM_AUDIO && currentInterfaceClass_ == USB_CLASS_AUDIO_VALUE &&
+    const bool isAudioInterface = currentInterfaceClass_ == USB_CLASS_AUDIO_VALUE &&
                                   currentInterfaceSubClass_ == USB_AUDIO_SUBCLASS_AUDIO_STREAMING &&
                                   intf->bNumEndpoints > 0 &&
                                   !interfaceAlreadyClaimed;
@@ -7598,7 +7628,18 @@ void EspUsbHost::handleDescriptor(uint8_t descriptorType, const uint8_t *data)
       return;
     }
 
-    if (currentClaimResult_ == ESP_OK &&
+    // CardSat patch 4, CORRECTED placement: the gate belongs on CLAIMING the
+    // endpoint, not on RECOGNISING the interface.
+    //
+    // It was originally applied to the isAudioControlInterface/isAudioInterface
+    // predicates, which also guard `device->hasAudioInterface = true` and the
+    // interface-number bookkeeping. That made an audio device report
+    // info.supported == false and erased it from the descriptor picture, which is a
+    // detection change we never wanted -- we only wanted to stop servicing an
+    // isochronous pipe CardSat has no use for. Recognition is now unconditional and
+    // only the endpoint claim is skipped.
+    if (ESPUSBHOST_CLAIM_AUDIO &&
+        currentClaimResult_ == ESP_OK &&
         currentInterfaceClass_ == USB_CLASS_AUDIO_VALUE &&
         currentInterfaceSubClass_ == USB_AUDIO_SUBCLASS_AUDIO_STREAMING &&
         isIsochronous)

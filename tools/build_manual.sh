@@ -7,7 +7,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 TMP="$(mktemp -d)"
-VER="$(grep -oE 'FW_VERSION = "[0-9.]+"' "$ROOT/src/config.h" | grep -oE '[0-9.]+' | head -1)"
+# Accept any version string, including a suffix like "0.9.71-wip". The old pattern was
+# [0-9.]+ , which matched NOTHING once a suffix existed -- and because this script runs
+# under `set -euo pipefail`, a failed grep aborted it on line 10. The build then did
+# nothing at all while appearing to succeed, leaving a stale PDF on disk. Silent is the
+# problem here, not strict.
+VER="$(grep -oE 'FW_VERSION = "[^"]+"' "$ROOT/src/config.h" | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+[ -n "$VER" ] || { echo "build_manual: cannot read FW_VERSION from src/config.h" >&2; exit 1; }
 
 # 1) split MANUAL.md: drop H1 title; capture intro+Status (front matter);
 #    drop the hand TOC; promote '## N. X' chapters to '# X'.

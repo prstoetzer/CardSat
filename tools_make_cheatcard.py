@@ -15,7 +15,7 @@ def _fw_version():
     here = os.path.dirname(os.path.abspath(__file__))
     cfg = os.path.join(here, "src", "config.h")
     try:
-        m = re.search(r'FW_VERSION\s*=\s*"([0-9.]+)"', open(cfg).read())
+        m = re.search(r'FW_VERSION\s*=\s*"([^"]+)"', open(cfg).read())
         if m:
             return m.group(1)
     except Exception:
@@ -214,7 +214,7 @@ BACK = [
  ("NEARBY & DX (Home)",
   "Live-feeds hub. <b>APRS heard</b>: live APRS-IS listen (needs callsign; <b>g</b> center grid, ENTER bearing detail, <b>f</b> restart). <b>DX cluster</b>: <b>f</b> fetch, <b>n</b> next band with spots, comments shown. <b>ADS-B radar</b>: polar range plot; <b>f</b> fetch, <b>t</b> scatter target grid; source URL in Settings &gt; Network. <b>QRZ lookup</b>. <b>p</b> prints each feed."),
  ("ABOUT",
-  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (63): scientific/graphing/programmer calculators, <b>Tiny BASIC</b> (0.9.59: SATSEL/LPRINT/gfx; no INPUT), <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b>, Q-codes/phonetics/RST, CTCSS, <b>Telnet</b> (0.9.67: LAN terminal, 10 saved hosts, opt. printing); <b>0.9.59 sat/build tools</b>: conjunction screener, orbital neighborhood, transponder planner, link-margin curve, debris-group screen, Doppler budget, cascade NF/G&sol;T, sun-noise G&sol;T, helix, L&sol;Pi&sol;T match, pointing loss, IMD, microstrip Z0, toroid, delta-v, thermal, Faraday, ampacity, PLL plan &middot; <b>p</b> <b>Print</b>: 30 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens + all form tools, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: seven mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
+  "Build/version, IP, free heap and diagnostics (read-only). <b>r</b> Station readiness checklist &middot; <b>t</b> <b>Tools</b> (63): scientific/graphing/programmer calculators, <b>Tiny BASIC</b> (A-Z numbers, A$-Z$ text, LEFT$/MID$/INSTR, DIM arrays, <b>INPUT form before the run</b>, SATSEL/LPRINT/graphics), <b>location converter</b> (grid/DMS/DDM/Plus/UTM/MGRS), DXCC/CQ/ITU lookups, RF/antenna workbench, link budget, phasing/stub, attenuator, RF exposure, orbit lifetime, <b>State vector &rarr; GP</b>, Q-codes/phonetics/RST, CTCSS, <b>Telnet</b> (LAN terminal, 10 saved hosts, opt. printing); <b>sat/build tools</b>: conjunction screener, orbital neighborhood, transponder planner, link-margin curve, debris-group screen, Doppler budget, cascade NF/G&sol;T, sun-noise G&sol;T, helix, L&sol;Pi&sol;T match, pointing loss, IMD, microstrip Z0, toroid, delta-v, thermal, Faraday, ampacity, PLL plan &middot; <b>p</b> <b>Print</b>: 30 reports to network printer / serial / 80-col /Reports file (any mix); contextual <b>p</b> on report screens + all form tools, <b>P</b> all-passes &amp; polar map &middot; <b>l</b> License &amp; credits &middot; <b>z</b> <b>Games menu</b>: seven mini-games (<b>;</b>/<b>.</b> pick, ENTER launch)."),
 ]
 
 

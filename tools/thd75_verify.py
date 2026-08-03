@@ -253,6 +253,32 @@ def main():
             else:
                 print("   -> the new command set is reliable for Doppler on this radio")
 
+        # ── 6. BAND-CHANGE TEST ───────────────────────────────────────────────
+        # Does the fine step survive a move to another band? CardSat sends MD/FT/FS and
+        # THEN the frequency, so on a bird whose downlink sits in a different band from
+        # wherever the radio was, the step is set on the OLD band and the move lands on
+        # the new band's step. Symptom: exact frequencies quantised to 5 kHz on HF while
+        # VHF/UHF is perfect -- which is exactly what the bench reported.
+        print("\n6. does fine mode survive a band change?")
+        r.ok(f"MD {band},{MODES['USB']}")
+        r.ok("FT 1")
+        r.ok("FS 0")
+        r.set_freq(band, 435000000)                 # settle on UHF with fine mode on
+        g_uhf = measure_grid(r, band, r.freq(band))
+        print(f"   grid on UHF after setting fine mode:      {g_uhf} Hz")
+        r.set_freq(band, 29400000)                  # cross into HF, do NOT re-apply
+        g_hf = measure_grid(r, band, r.freq(band))
+        print(f"   grid on HF after crossing, no re-apply:   {g_hf} Hz")
+        r.ok("FT 1"); r.ok("FS 0")                  # re-apply, as CardSat now does
+        g_fix = measure_grid(r, band, r.freq(band))
+        print(f"   grid on HF after re-applying FT/FS:       {g_fix} Hz")
+        if g_hf and g_fix and g_hf > g_fix:
+            print("   -> CONFIRMED: the step does NOT survive a band change, and")
+            print("      re-applying FT/FS restores it. That is the CardSat fix.")
+        elif g_hf == g_fix:
+            print("   -> the step DID survive the band change, so the HF rounding has")
+            print("      another cause; the re-apply is harmless but is not the fix.")
+
         # ── restore ───────────────────────────────────────────────────────────
         print("\nrestoring")
         try:

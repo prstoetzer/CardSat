@@ -3541,6 +3541,29 @@ The TS-790 supports a subset of the same commands.
 > the uplink/downlink bands and engage the rig's own satellite / full-duplex mode
 > **on the radio**; CardSat Doppler-tunes within that. (Same as SatPC32.)
 
+### The calculators
+
+Both calculators share one expression language, so anything below works in either. The
+scientific calculator is under **Tools**; the grapher adds `x` as the plotted variable.
+
+Press **`Fn`+`f`** on either screen for the full function list on the device. The
+printable **Calculator Card** covers the same ground on paper.
+
+- **Entry**: type and press ENTER. `Ans` is the previous result. `'` toggles the
+  two-line hints, `\` switches engineering notation, `[` `]` scroll the tape, and
+  `Fn`+`p` prints it.
+- **SI suffixes** work on any number: `p n u m k M G T`, so `145M` is 145 000 000.
+- **Trigonometry is in degrees**, not radians. Use `atan2(y,x)` for bearings — it keeps
+  the quadrant, which `atan(y/x)` cannot.
+- **Radio**: `db undb dbm w dbm2w w2dbm dbd dbi swr2rl rl2swr mml nf2t t2nf fspl`.
+- **Antennas**: `wl fq lam` wavelength, `dipole(mhz)` half-wave length to cut (0.95
+  velocity factor), `dgain(d,mhz)` dish gain at 55% efficiency.
+- **Satellite**: `porb` period from altitude, `aorb` altitude from period, `vorb` speed,
+  `fpr` footprint radius, `slant(el,alt)` actual range, `dop(mhz,rr)` Doppler.
+
+`slant()` is worth knowing about: treating altitude as range understates a horizon path
+by about 5.6x, and the horizon is exactly where a link budget is tightest.
+
 ### Kenwood TH-D74 / TH-D75 handhelds
 
 These are supported as a **dual-rig leg** (CAT type *Dual*), not as a single-radio
@@ -6080,6 +6103,47 @@ CardSat includes a small **line-numbered BASIC interpreter** with a built-in edi
 from **Tools → Tiny BASIC**. It's meant for short programs — quick calculations, loops, table
 generation, or just playing with code in the field — and runs entirely on the device with no
 network. Programs are capped at **4 KB**.
+
+#### Variables, strings and arrays
+
+- **Numbers**: 26 variables, `A` to `Z`.
+- **Strings**: `A$` to `Z$`. Concatenate with `+`; compare with `=` and `<>` only —
+  ordering strings raises collation questions the interpreter cannot answer, so it
+  refuses rather than guess.
+- **Text functions**: `LEFT$ RIGHT$ MID$ CHR$ STR$ UCASE$ LCASE$ TRIM$` and the
+  number-returning `LEN ASC VAL INSTR`.
+  **Index rules follow Microsoft BASIC**, which is what a ported program expects:
+  `MID$(s, start, len)` counts `start` from **1**, and `INSTR(hay, needle)` returns a
+  **1-based** position with `0` meaning "not found".
+- **Arrays**: `DIM A(n)`, several per statement (`DIM A(10), B(20)`), plus the original
+  `@()`. `ERASE A` returns the memory early. All arrays together may hold **2048
+  elements** — this is a device with about 76 KB of free heap that is also flying a
+  radio, so the budget is shared rather than per-array. A subscript outside an array
+  **stops the program** instead of quietly corrupting memory.
+- **Constants**: `PI TWOPI DEG RAD CLIGHT KBOLT REARTH`.
+- **Extra maths**: `ATN2(y,x) ASN ACS LOG10 ROUND FRAC HYP MOD`.
+- **Station and geometry**: `GCDIST` / `GCAZ` great-circle distance and bearing,
+  `DXCCLAT` / `DXCCLON` / `DXCC$` entity position and name, `GRID$(lat,lon)` Maidenhead,
+  `TIME$` and `DATE$`. These call the firmware's own routines, so a program cannot
+  disagree with the tracker it is running on.
+
+#### Asking the operator for input
+
+A program declares what it needs, and CardSat asks **once, before the run**:
+
+```basic
+110 INPUT "DXCC code"; C
+120 INPUT "Callsign"; N$
+```
+
+Press `Fn`+`R` and a single form appears with every declared field; the program then
+runs to completion with the variables already set. A program that declares no `INPUT`
+runs immediately, exactly as before.
+
+Nothing pauses mid-run to ask, and that is deliberate: the interpreter executes inside
+one key handler, to completion, which is what makes it safe to run while a radio is
+being tuned. An empty field simply leaves the variable at its default rather than
+stopping the program.
 
 #### The editor
 

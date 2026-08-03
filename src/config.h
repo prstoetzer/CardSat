@@ -190,7 +190,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.70";
+static constexpr const char* FW_VERSION = "0.9.71";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build. Used by main.cpp (btInUse

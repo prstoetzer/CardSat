@@ -20,7 +20,7 @@ def _fw_version():
     here = os.path.dirname(os.path.abspath(__file__))
     cfg = os.path.join(here, "src", "config.h")
     try:
-        m = re.search(r'FW_VERSION\s*=\s*"([0-9.]+)"', open(cfg).read())
+        m = re.search(r'FW_VERSION\s*=\s*"([^"]+)"', open(cfg).read())
         if m:
             return m.group(1)
     except Exception:
@@ -49,10 +49,10 @@ FRONT = [
  ("CAT TRANSPORTS (pick in Settings)",
   "<b>Wired</b> TTL UART CI-V (single or separate pin) &middot; <b>Icom LAN</b> RS-BA1 UDP 50001/50002 (IC-9700) &middot; "
   "<b>rigctl (net)</b> Hamlib NET TCP (VFOA=DL/B=UL) &middot; <b>rigctl (Grove)</b> same protocol over Grove G1/G2, no Wi-Fi (port row = baud) &middot; "
-  "<b>USB</b> adapter on USB-C (default-on since 0.9.59): "
+  "<b>USB</b> adapter on USB-C: "
   "FTDI 0403, CP210x 10c4, CH34x 1a86, PL2303 067b, any CDC-ACM. USB device strings lead with "
   "<b>#N</b> = device address = the id explicit binding stores (tells identical adapters apart)."),
- ("DUAL-RIG + TRANSVERTER (0.9.62)",
+ ("DUAL-RIG + TRANSVERTER",
   "<b>CardSatDualRig</b> (M5StickS3 companion): two half-duplex/RX radios as one full-duplex station over a rigctld server; "
   "drive via rigctl (net/Grove). <b>Settings&rarr;Radio&rarr;Dual-Rig setup</b> shows the Stick's live USB enumeration to bind a device per leg (link dot red/green). "
   "<b>d</b> gains <b>FULLu</b> = One True Rule on the UPLINK knob. <b>Transverter LO</b>: Downlink/Uplink LO (MHz) drive a microwave up/down-converter "
@@ -77,7 +77,7 @@ FRONT = [
   "<b>25</b> CelesTrak extras &middot; BASIC: <b>500,000</b> statements/run, <b>2,000</b> SATSEL calls, "
   "@() array &le; <b>256</b>, <b>6 KB</b> output — and <b>no INPUT</b>, by design."),
  ("ORBIT ENGINE",
-  "SGP4/SDP4 (deep space included). Periods over ~225 min (Molniya, GTO, GEO) use the 0.9.59 "
+  "SGP4/SDP4 (deep space included). Periods over ~225 min (Molniya, GTO, GEO) use the "
   "scan finder: ~1 s AOS/LOS, horizon-long pass for a bird parked in view — Skyfield-verified "
   "(crossings &le; 0.04&deg;). Doppler: AMSAT One True Rule, per-satellite calibration."),
  ("KEY FILES  (/CardSat/ on SD)",
@@ -86,7 +86,7 @@ FRONT = [
   "<b>basic/</b> programs &amp; gated logs &middot; <b>plot.csv</b> grapher CSV mode &middot; <b>Reports/</b> printed reports &middot; "
   "<b>Logs/</b> QSO log &middot; <b>RovePlans/</b> &middot; <b>Screenshots/</b> &middot; <b>calib.txt</b> per-sat cal &middot; "
   "<b>lotw_sats.csv</b> LoTW name overrides &middot; <b>audio/</b> voice memos &middot; "
-  "<b>telnet.txt</b> saved Telnet connections (0.9.67; label|host|port|prnCols|outMode)."),
+  "<b>telnet.txt</b> saved Telnet connections (label|host|port|prnCols|outMode)."),
 ]
 
 BACK = [

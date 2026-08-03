@@ -208,7 +208,14 @@ static void registerSeen(const EspUsbHostDeviceInfo& info) {
   SeenDevice* slot = nullptr;
   for (auto& s : gSeen) if (s.used && s.address == info.address) { slot = &s; break; }
   if (!slot) for (auto& s : gSeen) if (!s.used) { slot = &s; break; }
-  if (!slot) return;
+  if (!slot) {
+    // FULL. Dropping the device silently makes it look like it never enumerated --
+    // a completely different fault with a different fix, and the same trap CardSat's
+    // adapter registry had until this release. Say so.
+    Serial.printf("[USB] device table FULL (%u slots): addr %u %04X:%04X not tracked\n",
+                  (unsigned)MAX_SEEN, info.address, info.vid, info.pid);
+    return;
+  }
   slot->used = true; slot->address = info.address;
   slot->vid = info.vid; slot->pid = info.pid; slot->isHub = info.isHub;
   strncpy(slot->product, info.product ? info.product : "", sizeof(slot->product) - 1);
@@ -750,6 +757,19 @@ static void usbAssertControlLines(uint8_t addr, const char* who) {
 // -- both legs then driving one physical radio. Pinned serials are reserved for
 // their legs, full stop; the late disconnect then frees the pinned leg and the
 // device rebinds where it belongs on the next enumeration or reconfigure.
+// Does a leg's pin string identify THIS device? Accepts a USB serial number or a
+// "vvvv:pppp" VID:PID. VID:PID exists because the radios that most need pinning report
+// no serial at all: TH-D75 2166:9023, IC-705 0c26:0036 (both iSerialNumber = 0).
+// Without it they can only be bound by ENUMERATION ORDER, which a hub reorders -- so
+// downlink and uplink can swap silently while both radios work perfectly.
+static bool legPinMatches(const char* pin, const char* ser, uint16_t vid, uint16_t pid) {
+  if (!pin || !*pin) return false;
+  if (ser && *ser && strcmp(pin, ser) == 0) return true;
+  char vp[10];
+  snprintf(vp, sizeof(vp), "%04x:%04x", vid, pid);
+  return strcasecmp(pin, vp) == 0;
+}
+
 static bool serialPinnedToSomeLeg(const char* ser) {
   if (!ser || !ser[0]) return false;
   if (gDown.assigned() && gDown.leg->usbSerial[0] &&
@@ -765,8 +785,8 @@ static void bindDevice(const EspUsbHostDeviceInfo& info) {
 
   auto tryPin = [&](RadioPort& p) -> bool {
     if (!p.assigned() || p.bound) return false;
-    if (p.leg->usbSerial[0] && ser[0] && strcmp(p.leg->usbSerial, ser) == 0) {
-      p.bound = true; p.addr = info.address;
+    if (legPinMatches(p.leg->usbSerial, ser, info.vid, info.pid)) {
+      p.bound = true; p.addr = info.address; p.lastOnlineMs = 0;
       gUsb.setSerialBaudRate(p.baud, p.addr);
       usbAssertControlLines(p.addr, "pinned");
       Serial.printf("[USB] pinned %s (serial %s) -> %s\n", p.prof->name, ser, p.legName);
@@ -785,7 +805,7 @@ static void bindDevice(const EspUsbHostDeviceInfo& info) {
   }
   auto tryOrder = [&](RadioPort& p) -> bool {
     if (!p.assigned() || p.bound || p.leg->usbSerial[0]) return false;
-    p.bound = true; p.addr = info.address;
+    p.bound = true; p.addr = info.address; p.lastOnlineMs = 0;
     gUsb.setSerialBaudRate(p.baud, p.addr);
     usbAssertControlLines(p.addr, "bound");
     Serial.printf("[USB] bound %s (addr %u) -> %s\n", p.prof->name, info.address, p.legName);
@@ -802,8 +822,8 @@ static void bindSeen(const SeenDevice& d) {
   const char* ser = d.serial[0] ? d.serial : "";
   auto tryPin = [&](RadioPort& p) -> bool {
     if (!p.assigned() || p.bound) return false;
-    if (p.leg->usbSerial[0] && ser[0] && strcmp(p.leg->usbSerial, ser) == 0) {
-      p.bound = true; p.addr = d.address;
+    if (legPinMatches(p.leg->usbSerial, ser, d.vid, d.pid)) {
+      p.bound = true; p.addr = d.address; p.lastOnlineMs = 0;
       gUsb.setSerialBaudRate(p.baud, p.addr);
       usbAssertControlLines(p.addr, "re-pinned");
       Serial.printf("[USB] re-pinned %s (serial %s) -> %s\n", p.prof->name, ser, p.legName);
@@ -815,7 +835,7 @@ static void bindSeen(const SeenDevice& d) {
   if (serialPinnedToSomeLeg(ser)) return;   // same order-bind guard as bindDevice()
   auto tryOrder = [&](RadioPort& p) -> bool {
     if (!p.assigned() || p.bound || p.leg->usbSerial[0]) return false;
-    p.bound = true; p.addr = d.address;
+    p.bound = true; p.addr = d.address; p.lastOnlineMs = 0;
     gUsb.setSerialBaudRate(p.baud, p.addr);
     usbAssertControlLines(p.addr, "re-bound");
     Serial.printf("[USB] re-bound %s (addr %u) -> %s\n", p.prof->name, d.address, p.legName);
@@ -835,16 +855,46 @@ static void onUsbConnected(const EspUsbHostDeviceInfo& info) {
 static void onUsbDisconnected(const EspUsbHostDeviceInfo& info) {
   unregisterSeen(info.address);
   RadioPort* p = portForAddr(info.address);
-  if (p) { p->bound = false; p->online = false; p->addr = ESP_USB_HOST_ANY_ADDRESS;
+  if (p) { p->bound = false; p->online = false; p->addr = ESP_USB_HOST_ANY_ADDRESS; p->lastOnlineMs = 0;
            Serial.printf("[USB] %s radio removed\n", p->legName); }
 }
 static void onUsbSerialData(const EspUsbHostSerialData& d) {
   RadioPort* p = portForAddr(d.address);
   if (p) p->rx.push(d.data, d.length);
 }
+// Poll link state, and RELEASE A BINDING THAT HAS GONE STALE.
+//
+// A leg is unbound only by onUsbDisconnected() or a live reconfigure, and every bind
+// path refuses a leg that is already `bound`. So if a disconnect event is ever missed --
+// the device yanked mid-transfer, the host confused, or the radio re-appearing at a new
+// address before the callback lands -- the leg stays bound to an address that no longer
+// exists, `online` goes false, and NOTHING ever recovers it. This firmware cannot fall
+// back on re-enumeration the way CardSat does, because its USB host is created once in
+// setup() and never torn down: there is no fresh-host path to rebuild state.
+//
+// So: if a bound leg has been offline continuously for STALE_MS, drop the binding and
+// try to re-bind it from the live device registry. Re-binding is exactly what would
+// have happened on a clean disconnect/reconnect, so this only restores the normal path;
+// it cannot bind a radio that is not actually present, because bindSeen() walks gSeen.
+static void bindSeen(const SeenDevice& d);
 static void pollRadioOnline() {
-  if (gDown.bound) gDown.online = gUsb.serialReady(gDown.addr);
-  if (gUp.bound)   gUp.online   = gUsb.serialReady(gUp.addr);
+  static const uint32_t STALE_MS = 10000;   // ~5 rigctld poll cycles: not a hiccup
+  const uint32_t now = millis();
+  for (RadioPort* p : { &gDown, &gUp }) {
+    if (!p->bound) continue;
+    p->online = gUsb.serialReady(p->addr);
+    if (p->online) { p->lastOnlineMs = now; continue; }
+    if (p->lastOnlineMs == 0) { p->lastOnlineMs = now; continue; }   // just bound
+    if (now - p->lastOnlineMs < STALE_MS) continue;
+    Serial.printf("[USB] %s offline %lums at addr %u - releasing stale binding\n",
+                  p->legName, (unsigned long)(now - p->lastOnlineMs), p->addr);
+    p->bound = false; p->addr = ESP_USB_HOST_ANY_ADDRESS;
+    p->lastOnlineMs = 0; p->rx.clear();
+    for (const SeenDevice& d : gSeen) {          // re-bind if it is present again
+      if (!d.used || d.isHub) continue;
+      bindSeen(d);
+    }
+  }
 }
 
 // H3: atomically apply a live config change and rebind USB radios. A plain applyLegConfig()
@@ -862,7 +912,7 @@ static void reconfigureAndRebind() {
     // is present, so dropping DTR is both possible and necessary -- otherwise the
     // radio keeps its CAT session open against a leg that no longer owns it.
     if (p->bound) usbReleaseControlLines(p->addr, p->legName);
-    p->bound = false; p->online = false; p->addr = ESP_USB_HOST_ANY_ADDRESS;
+    p->bound = false; p->online = false; p->addr = ESP_USB_HOST_ANY_ADDRESS; p->lastOnlineMs = 0;
     p->rx.clear(); p->lastFreq = 0;
   }
   // 2) re-resolve profile / baud / CI-V address from the (possibly changed) config.

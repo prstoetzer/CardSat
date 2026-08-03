@@ -36,6 +36,16 @@ public:
   // state machine and answer keepalives here; wired backends need nothing.
   virtual void service() {}
 
+  // Does this rig want a live network session right now?
+  //
+  // Network-backed rigs (Icom LAN) hold real resources -- UDP sockets and lwIP state --
+  // and run a connect/keepalive state machine. Everything else in CardSat that owns a
+  // socket is already on-demand: APRS-IS lives only while its screen is open, the live
+  // feeds free their buffers on the way out. The LAN rig never adopted that pattern and
+  // connected from boot forever, retrying every 8 s, whether or not radio control was
+  // even on. Wired and USB backends ignore this.
+  virtual void setSessionWanted(bool) {}
+
   // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
   // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
   // Virtual so the DualRig composite can forward pacing to both of its legs.
@@ -390,6 +400,14 @@ private:
   uint32_t kwGrid() const { return _kwFine ? 20u : 5000u; }
   bool     _kwSession = false;     // VM/BC applied to the current stream
   bool     _kwFine    = false;     // fine mode currently requested (SSB/CW only)
+  RigMode  _kwMode    = RM_USB;    // last mode sent, so the step can be re-applied
+  uint8_t  _kwBand    = 0xff;      // coarse band of the last frequency written
+  // Coarse band of a frequency. The TH-D75 keeps its tuning step PER BAND, so a write
+  // that crosses one of these boundaries lands on the new band's step and silently
+  // discards the fine step we set for the old one.
+  static uint8_t kwBandOf(freq_t hz) {
+    return hz < 30000000ULL ? 0 : (hz < 300000000ULL ? 1 : 2);
+  }
   bool sendMode(RigMode m);
   bool readFreq(freq_t& hzOut);
   bool sendFrame(const uint8_t* b, size_t n);
@@ -416,6 +434,7 @@ public:
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override;
   void service() override;
+  void setSessionWanted(bool want) override;    // forwarded to both legs
   void setCmdDelay(uint16_t ms) override;
   void setReadBudgetMs(uint16_t ms) override;
   void setPinMode(uint8_t mode) override;       // CI-V wiring, forwarded to both legs

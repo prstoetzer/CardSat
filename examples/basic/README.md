@@ -161,3 +161,32 @@ live data) or `PASSES.BAS`/`RANKPASS.BAS` (text + system data). The full languag
 function list, and every system-variable name are in
 `docs/guides/CALCULATORS_TOOLS_GAMES_BASIC.md`, on the printed reference card, and now on
 the device itself via **Fn+T** in the BASIC editor.
+
+## New in 0.9.71
+
+| Program | Shows |
+| --- | --- |
+| `DXPATH.BAS` | The **pre-run input form**, `DXCC$`/`DXCCLAT`/`DXCCLON`, `GCDIST`/`GCAZ`, `GRID$`, `TIME$`/`DATE$` |
+| `CALLPARSE.BAS` | String variables and the text functions: `LEFT$ RIGHT$ MID$ LEN INSTR VAL UCASE$ TRIM$` |
+| `PASSTATS.BAS` | Named arrays: `DIM A(n), B(n)`, element read/write, `ERASE` |
+
+**The input form.** A program declares what it needs and CardSat asks once, before the
+run:
+
+```basic
+110 INPUT "DXCC code"; C
+120 INPUT "Your note"; N$
+```
+
+Press Fn+R and a single form appears with both fields; the program then runs to
+completion with `C` and `N$` already set. Programs that declare no `INPUT` run
+immediately, exactly as before. Nothing pauses mid-run to ask — that is deliberate, and
+it is why BASIC stays safe to run while a radio is being tuned.
+
+**Text function index rules follow Microsoft BASIC**, because that is what a ported
+program expects: `MID$(s, start, len)` counts `start` from **1**, and
+`INSTR(hay, needle)` returns a **1-based** position with `0` meaning "not found".
+
+**Arrays share a budget.** All of `A()`..`Z()` together may hold 2048 elements. That is
+a device with ~76 KB of free heap running a radio, not a desktop. A subscript outside an
+array stops the program rather than corrupting memory.

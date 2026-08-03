@@ -15,11 +15,11 @@ Built with: arduino-cli + `esp32:esp32@3.2.1`, board `esp32:esp32:esp32s3`,
 PSRAM=enabled`, and `-DESP_USB_HOST_MAX_DEVICES=4 -DCORE_DEBUG_LEVEL=1`, against the **patched**
 EspUsbHost from CardSat's `third_party/EspUsbHost/` (a stock library will build but
 can strand the USB stack — see `third_party/EspUsbHost/PATCHES.md`).
-Flash usage: 1,280,738 bytes (38%); static RAM 61,244 bytes (18%).
+Flash usage: 1,280,770 bytes (38%); static RAM 61,244 bytes (18%).
 
 Checksums (MD5):
-- `CardSatDualRig-merged.bin`  cc6ec3f54acfa9fd4e03e3d7b4900dd4
-- `CardSatDualRig-app.bin`     3a796887d685f592b007e50665885669
+- `CardSatDualRig-merged.bin`  6e44a0f41edc3caf46f5b9f7b7456dc2
+- `CardSatDualRig-app.bin`     67fcf25735d108966968a1c73fdb1cab
 - `CardSatDualRig-bootloader.bin`  120ea00b035393656671e3561eee9eaf
 - `CardSatDualRig-partitions.bin`  801ba71678a964614657a6d8fbc6baca
 

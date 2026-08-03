@@ -67,7 +67,15 @@ struct LegConfig {
   uint8_t  model    = 0xFF;   // RadioModel; 0xFF = unassigned
   uint8_t  civAddr  = 0;      // 0 = use the model's table default
   uint32_t baud     = 0;      // 0 = use the model's table default
-  char     usbSerial[24] = "";// pin this leg to a device with this USB serial; "" = by slot order
+  // Pin this leg to a specific USB device. Accepts EITHER a USB serial number, OR a
+  // "vvvv:pppp" VID:PID (hex, lower case) for radios that report no serial at all --
+  // which is the common case, not the exception: the TH-D75 (2166:9023) and the
+  // IC-705 (0c26:0036) both have iSerialNumber = 0. Without this those legs can only
+  // be bound by ENUMERATION ORDER, and order is exactly what changes when a hub is
+  // added, a hub port changes, or the radios are powered up in a different sequence --
+  // so the downlink and uplink can silently swap with both radios working perfectly.
+  // "" = bind by slot order (the old behaviour, still fine for a single radio).
+  char     usbSerial[24] = "";
 };
 
 struct AppConfig {
@@ -127,6 +135,9 @@ struct RadioPort {
   uint8_t  addr    = ESP_USB_HOST_ANY_ADDRESS;   // USB device address once bound
   bool     bound   = false;
   bool     online  = false;
+  // millis() when this leg was last seen ONLINE. Used to release a binding that has
+  // gone stale: see pollRadioOnline(). 0 = never yet online since binding.
+  uint32_t lastOnlineMs = 0;
   RxRing   rx;
   uint64_t lastFreq = 0;
   uint32_t lastSetMs = 0;      // H8: millis() of the last set, so a read can let it settle

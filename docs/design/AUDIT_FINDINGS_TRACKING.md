@@ -2756,3 +2756,1293 @@ companion READMEs.
 
 NOT regenerated: CardSat_Fun_Guide.pdf has no generator script in the tree (it is
 hand-maintained) and was left as-is.
+
+## 0.9.70 — release zip rebuilt: I had excluded 89 files that ship with the repo
+
+Owner spotted that docs were missing from the package. Cause was my zip command:
+`-x 'docs/design/*'` (I assumed those were internal working notes; they are part of the
+repository) and `-x '*.git*'`, which is over-broad and also caught `.gitignore`.
+89 files dropped: all 87 docs/design/*.md, docs/design/postmortems/*, and .gitignore.
+
+Rebuilt excluding ONLY genuine noise -- `.git/`, `__pycache__/`, `*.pyc`. Verified by
+diffing the file list against the owner's previous repo snapshot: **zero files from the
+snapshot are missing**, and every addition is accounted for (the vendored EspUsbHost,
+the new gates audit_session_latches/audit_text_screens, the thd75 probe scripts, the
+release notes, and the host harnesses).
+
+Method note: I verified the zip's CONTENTS (the .ino matched, the binary matched, the
+new artefacts were present) but never verified its COMPLETENESS against a known-good
+file list. Checking that a package contains what you put in it is not the same as
+checking it contains everything it should. The previous snapshot was the right
+reference and it took the owner to point at it.
+
+## 0.9.71 — IC-705 LAN leg never began (mixed-bus dual config)
+
+Owner: IC-705 LAN CAT does not work from the dual-rig screen.
+
+FOUND, and it is exact. applyRadioFromCfg()'s CAT_DUAL branch ended:
+
+    #if CARDSAT_HAS_USBCAT
+        if (aU || bU) { return; }          // returns if EITHER leg is USB
+    #endif
+        rig->begin(0, CIV_UART_NUM, ...);  // never reached
+
+So in a MIXED config -- USB on one leg, LAN (or Grove) on the other -- the early
+return skipped begin() for the whole composite, and the non-USB leg was never begun.
+For an Icom LAN leg that is fatal in a quiet way: IcomNetRig::begin() is what ARMS the
+connect state machine (resetSession + allow an immediate first attempt). Without it the
+leg sits at NS_IDLE forever; service() runs every loop, finds nothing pending, and does
+nothing. The radio looks fully configured and simply never connects -- no error, no
+retry, no trace.
+
+FIX: call begin() unconditionally. DualRig::begin() already skips USB legs
+INDIVIDUALLY (`if (_down && !legIsUsb(0)) ...`), so the blanket return was not only
+wrong, it was redundant -- the per-leg guard it duplicated is the correct one, and
+calling begin() cannot double-begin the USB side. A LAN+LAN or LAN+Grove dual worked
+because neither aU nor bU was set; only a mix with USB hit it.
+
+## 0.9.71 — audio gate placement corrected (regression from 0.9.70 patch 4)
+
+While investigating the second report, found that ESPUSBHOST_CLAIM_AUDIO was applied to
+the isAudioControlInterface / isAudioInterface PREDICATES -- which also guard
+`device->hasAudioInterface = true` and the audio interface-number bookkeeping. That
+conflated CLAIMING with DETECTING: with audio off, an audio device's interfaces were no
+longer recorded, so info.supported could come back false and the descriptor picture lost
+the audio interfaces entirely. We only ever wanted to stop SERVICING an isochronous pipe
+CardSat has no use for.
+
+Gate moved to the endpoint-claim site; recognition is now unconditional. Not the cause
+of the IC-705 report (dispatchDeviceConnected fires before the `supported` test, and
+CardSat's onDev registers any non-hub device regardless), but wrong on its own terms.
+
+## 0.9.71 — IC-705 USB: not yet diagnosed, facts needed
+
+"No USB devices found" with an IC-705 attached. Established so far by reading, not
+guessing:
+  * CardSat's onDev() registers EVERY non-hub device, whatever its class, and
+    dispatchDeviceConnected() fires before the library's `supported` test. So an
+    unrecognised radio would still APPEAR in the picker -- an empty list means
+    enumeration itself is not completing, not that the device was filtered out.
+  * The library's vendor-serial table covers FTDI 0x0403, Silicon Labs 0x10c4,
+    CH34x 0x1a86 and Prolific 0x067b. Icom's own VID (0x0C26) is absent -- which would
+    prevent CAT from working, but NOT prevent the device being listed.
+Candidate causes not yet distinguished: VBUS/power (the IC-705 charges over USB and may
+draw more than the Cardputer can source, collapsing the bus before enumeration
+completes), or the radio's USB function needing a menu setting. Next step is a
+descriptor dump from a Mac plus a diagnostic-build enumeration trace -- measurement
+before another firmware change, per this project's hard-won practice.
+
+## 0.9.71 — IC-705 USB: the hub message narrows it sharply
+
+Owner: with a powered hub, the scan said "no adapters found".
+
+That is the more informative of the two messages scanAdapters() can produce. The other
+is "hub seen but NO adapters behind it", emitted when s_sawHub is set. Getting the
+FORMER means the HUB ITSELF never enumerated. So:
+  * this is not the IC-705 being filtered out of the picker (CardSat registers every
+    non-hub device regardless of class or `supported`);
+  * nothing at all is completing enumeration while the 705 is attached;
+  * and the power theory is dead -- a powered hub supplies its own downstream current.
+
+Checked and ELIMINATED: external hub support IS compiled in
+(CONFIG_USB_HOST_HUBS_SUPPORTED=y, CONFIG_USB_HOST_HUB_MULTI_LEVEL=y).
+
+LEADING HYPOTHESIS, not yet confirmed: Arduino's prebuilt IDF sets
+**CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=256**. A device whose CONFIGURATION
+descriptor exceeds 256 bytes cannot be fetched during enumeration and never appears,
+with no error visible to the application. A CDC + USB Audio composite is exactly the
+shape that overruns it -- and the TH-D75 (also CDC + audio) fits and works, while the
+IC-705 carries more audio interfaces. If true this is an IDF build-configuration limit,
+NOT a CardSat bug, and cannot be fixed without a custom IDF build -- which is worth
+establishing before anyone spends more effort on the firmware.
+
+Diagnostic build 82ac9372... reports every device's wTotalLength against that limit, on
+BOTH enumeration paths. Three-run bench procedure in the diag README, chosen to separate
+"hubs do not work here" from "the 705 breaks enumeration" from "the descriptor is too
+large", with a control run first so a silent log cannot be misread as a result.
+
+## 0.9.71 — mixed USB+LAN: the begin() fix WORKS; the remaining failure is RAM
+
+Owner's bench log with the 0.9.71 build, TH-D75 on USB + IC-705 on LAN:
+
+    [NET] connecting to 10.0.0.100:50001 (CI-V A4)
+    [NET] login sent
+    [NET] reconnect: handshake stalled
+
+**The begin() fix is confirmed.** Those lines cannot appear unless begin() armed the
+connect state machine, and before the fix a mixed config never reached it. The LAN leg
+now starts, resolves, opens its sockets and sends the login. The IC-705 is being talked
+to. That was the reported bug and it is fixed.
+
+**What remains is a resource ceiling, not a protocol fault.** Heap through a mixed
+engage, straight from the log:
+
+    LAN leg only, before USB engage    free=58128  largest=31732
+      after allocating USB host        free=45100  largest=31732
+      after host tasks start           free=33884  largest=22516
+      after CDC bind                   free=26424  largest=13812
+      during the NET retry loop        free=23708  largest= 7412
+    reference, USB-only engage:        free=76304  largest=31732
+
+The LAN leg costs ~18 KB (the Wi-Fi/lwIP stack itself -- IcomNetRig's own state is two
+WiFiUDP sockets and a few small buffers, nothing), the USB host ~32 KB. Together they
+leave ~26 KB free with the largest contiguous block collapsed from 31,732 to ~7,000.
+Wi-Fi cannot reliably allocate receive buffers in that state, so the login reply never
+lands and the 4-second handshake timeout fires. Corroborating detail: on the third
+attempt "login sent" took 1,318 ms after "connecting" versus 151 ms on the first -- a
+system under allocation strain, not a radio declining to answer.
+
+Instrumented so the next run CONFIRMS or REFUTES this rather than resting on inference:
+the stall now logs the state it was in, free heap, largest free block, and how long
+since the last RX. If largest-block is in the low thousands the diagnosis holds; if the
+heap looks healthy at the stall, this is CPU starvation or a protocol issue and I have
+been wrong.
+
+DELIBERATELY NOT DONE: reducing ESP_USB_HOST_MAX_DEVICES from 4 to 3. It would save one
+DeviceState, which is ~1-2 KB against a ~26 KB shortfall -- marginal -- while risking a
+legitimate hub-with-three-devices setup. That is exactly the speculative change this
+project has been burned by; it waits for the measurement.
+
+## 0.9.71 — memory hypothesis REFUTED; the stall is at NS_CTL_LOGIN with a healthy heap
+
+The instrumented stall settles it, and against my own theory:
+
+    stalled in state 3 after 4001ms | heap=80612 largest=31732 rx=51ms ago
+
+**heap=80,612 with a 31,732-byte largest block is a completely healthy heap** -- that is
+the same figure a USB-only engage starts from. So the resource ceiling I diagnosed from
+the previous log was WRONG. The earlier run did show a squeezed heap, but that was a
+consequence of repeated failed reconnects, not the cause of them: after a reboot, with
+memory untouched and USB never engaged, the LAN leg stalls identically.
+
+WHAT THE NUMBERS ACTUALLY SAY:
+  * **state 3 = NS_CTL_LOGIN** -- the login was sent and the 96-byte token reply never
+    arrived (or never matched).
+  * **rx=51ms ago** -- packets ARE flowing. But isPing() also refreshes _tLastRxMs, so
+    recent RX may be nothing more than pings we are dutifully answering. "Traffic
+    exists" is not "the reply exists", and the log could not tell those apart.
+
+TWO CANDIDATES, both now instrumented rather than argued:
+  1. **Empty per-leg credentials.** dualUser/dualPass are PER LEG. Moving the IC-705
+     between the downlink and uplink legs to make room for the D75 leaves its
+     username/password behind on the old leg -- easy to do, invisible afterwards, and it
+     produces exactly this signature: with no username the radio does not answer at all,
+     so there is no 96-byte reply to reject and the handshake times out instead of
+     failing cleanly with "invalid username/password". This also explains precisely why
+     the same radio works alone on the other leg. startConnect() now logs credential
+     LENGTHS (never contents).
+  2. **A reply we discard.** Every branch of handleCtl() matches on an exact length AND
+     first byte, so a reply of an unexpected size is dropped silently -- indistinguishable
+     from no reply. Unmatched control packets in the handshake states are now logged with
+     length and leading bytes, capped at 8 lines.
+
+Build 72280c5e. One run distinguishes them: "user=0 ch pass=0 ch" is the configuration
+error; an "unhandled ctl pkt" line is a protocol gap on our side.
+
+METHOD NOTE: I inferred a memory ceiling from a heap trace that was real but was an
+EFFECT of the retry loop rather than its cause, and I was about to reason further from
+it. The instrumentation that disproved it cost one build. Recording this because it is
+the same failure mode as the D75 saga -- a plausible mechanism, confirmed by
+correlation, wrong.
+
+## 0.9.71 — Icom LAN never adopted the on-demand pattern the rest of the net code uses
+
+Asked to check icomnet against the memory work done elsewhere. Result:
+
+**NOTHING TO TRIM INSIDE IcomNetRig.** Its whole persistent state is two WiFiUDP
+sockets, three Strings (host/user/pass), a 24-byte name buffer, a 6-byte auth ID and a
+16-byte capabilities copy. No packet history, no receive pool, no oversized buffers.
+The TLS setBufferSizes() work in net.cpp has no analogue here -- UDP has no such knob.
+Socket open/close is balanced: resetSession() stops both, startConnect() begins the
+control socket, teardown() stops both, and the destructor tears down. No leak found.
+
+**THE REAL GAP IS STRUCTURAL, and it is the one pattern everything else here follows.**
+Look at what sits immediately below the service call in loop():
+    APRS-IS is only alive while its screen is open  (aprsStop() on any other route out)
+    the DX / ADS-B feeds free their buffers on the way out
+    dxcAlloc/adsbAlloc/feedsFreeExcept enforce one-array-at-a-time
+Every socket and buffer owner in CardSat is on-demand -- except the Icom LAN rig, which
+ran `if (rig) rig->service();` with no reference to whether radio control was even on.
+So from boot it opened a UDP socket, ran a full login handshake, failed, and retried
+every 8 seconds forever, holding lwIP state the whole time. That is visible in the
+owner's log: [NET] connect/login/stall cycling with nothing engaged, straight through a
+reboot.
+
+FIX: `Rig::setSessionWanted(bool)` -- a no-op for wired and USB backends, forwarded by
+DualRig to both legs, implemented by IcomNetRig to tear the session down and hold idle
+when false. loop() drives it from `radioOut`, which is the right signal because the CAT
+diagnostic tool sets radioOut too, so the tool still gets a live rig. Disengaging now
+also CLOSES the session properly (teardown sends de-auth + disconnect) instead of
+abandoning it -- the same defect class as the USB DTR-never-dropped bug fixed in 0.9.70.
+
+Costs: a few seconds to connect at engage, which is when the operator is ready anyway.
+Buys: no sockets or lwIP state held while idle, no endless retry loop, no log spam, and
+a clean session close on the radio side.
+
+NOT claimed: that this fixes the NS_CTL_LOGIN stall. It does not -- the credential and
+unhandled-packet instrumentation is still what will answer that. This is the answer to
+the question actually asked.
+
+## 0.9.71 — IC-705 descriptor dump: it is a TRUE DUAL-CDC device
+
+Mac-side descriptor dump (tools/usb_probe.py) of 0c26:0036:
+
+    CONFIG DESCRIPTOR TOTAL LENGTH  141 bytes      (limit 256 -- comfortably under)
+    self-powered, requests 100 mA
+    iface 0  CDC control  ep 0x83 interrupt
+    iface 1  CDC data     ep 0x01 bulk OUT, 0x82 bulk IN
+    iface 2  CDC control  ep 0x86 interrupt
+    iface 3  CDC data     ep 0x04 bulk OUT, 0x85 bulk IN
+
+**The descriptor-size hypothesis is DEAD** -- 141 bytes, nowhere near the 256-byte IDF
+control-transfer limit. So is the power theory: self-powered, 100 mA, and a powered hub
+changed nothing.
+
+**The device is a true dual-CDC composite** -- two independent serial ports, device
+class 0xEF/0x02/0x01 (IAD). This is precisely the hardware CardSat's vendored patch 1
+was written for: the stock library latches EVERY CDC control interface, so
+SET_LINE_CODING and SET_CONTROL_LINE_STATE end up addressed to the second function
+while data flows on the first. Patch 1 binds only the first control interface, and the
+data latch is guarded the same way, so iface 0/1 pair correctly.
+
+Note the patch was written speculatively in an earlier cycle and explicitly recorded as
+"NOT the TH-D75's problem, but real for true dual-CDC composites". The IC-705 is that
+composite. Worth recording that the speculative patch turned out to be aimed at a real
+device -- and equally, that it was NOT validated until now.
+
+STILL UNEXPLAINED: why nothing enumerates at all ("no adapters found", which requires
+BOTH zero devices and no hub seen -- so even the hub went unregistered). Nothing in the
+descriptor accounts for that. Diagnostic build b991c138 will place the failure: the
+device/config-descriptor line is emitted during parse, and both early-exit paths in
+handleNewDevice (usb_host_device_open, usb_host_get_active_config_descriptor) log at
+ESP_LOGE, which the capture does receive.
+
+FLAGGED FOR AFTER enumeration is working: which of the two ports carries CI-V. CardSat
+binds the FIRST (iface 0/1). If the radio puts CAT on the second, we bind the wrong port
+and get silence with every layer apparently healthy -- the same misleading signature as
+the D75 saga, and worth checking before drawing conclusions from a quiet radio.
+
+## 0.9.71 — dual CAT works; three follow-on findings from the bench log
+
+Owner: dual CAT working (IC-705 LAN + TH-D75 USB), but (1) frequencies rounded to 5 kHz
+outside FM, (2) uplink-based tuning too slow, (3) stops working after a few cycles.
+
+**(1) 5 kHz ROUNDING -- FIXED, and the cause was not in the rig code at all.**
+applyTransponderModes() opened with `if (!rig || !rig->ready()) return;`, and
+DualRig::ready() requires EVERY leg. In a mixed rig that is the normal case at engage:
+the USB leg is ready immediately while the LAN leg needs seconds for its login. So the
+modes were silently dropped and only retried on a transponder change. With no MD ever
+sent, PlainCatRig::kwApplyStepForMode() never ran, _kwFine stayed false, and kwGrid()
+returned 5000 -- every Doppler write rounded to 5 kHz, exactly as reported, in every
+mode. Now sets modeApplyPending and the loop re-applies once rig->ready() goes true.
+
+**(3) STOPS AFTER A FEW CYCLES -- FIXED (probable).** The log's shape is the evidence:
+    cycle 1 CONNECTED | cycle 2 CONNECTED | cycle 3 stalled at NS_CTL_AUTH
+    cycle 4 stalled at NS_CTL_LOGIN, and every retry after
+The failure moves EARLIER each cycle, which is not what a transient fault looks like --
+it is stale sessions accumulating on a radio that accepts one at a time. Cause:
+teardown() only sent the de-auth/disconnect when `_state == NS_CONNECTED`, so
+disengaging mid-handshake (cycle 3) told the radio nothing at all. Now any state past
+NS_CTL_OPEN gets the close, and the 20 ms settle -- too short to be sure the datagrams
+even left before the sockets closed -- became a 120 ms pumped wait.
+
+**(2) SLOW UPLINK TUNING -- MECHANISM IDENTIFIED, NOT YET FIXED.** Measured from the
+log: cmd 03 goes out every ~405 ms and an answer appears every 4-12 s, i.e. roughly one
+read in thirty succeeds. 405 ms is the signature of a 200 ms timeout plus overhead --
+and 200 ms is exactly the ceiling CardSat imposes with
+`constrain(effectiveCatRateMs()/4, 60, 200)`. So nearly every read times out.
+DELIBERATELY NOT "fixed" by raising the number: whether 200 ms is simply too short for
+this transport, or replies are being lost for some other reason, is decided by how long
+a SUCCESSFUL read actually takes -- and three theories have already died this cycle from
+reasoning past the evidence. Both paths are now instrumented: successful reads log their
+latency, timeouts log elapsed/budget every 8th occurrence. One run gives the number.
+
+## 0.9.71 — HUBS DO NOT ENUMERATE AT ALL. This is separable from the IC-705.
+
+Owner's diagnostic run, and the most useful line in it is the one about the D75:
+"I can't even see the D75 beyond a connected powered hub, or any hub device."
+
+The log confirms it exactly:
+    scan: adapters ... scan: no adapters found          <- with the hub attached
+    ...
+    ## device 2166:9023 config descriptor = 174 bytes   <- D75 DIRECT, enumerates fine
+    scan: adapter[0] addr=1 #1 JVCKENWOOD TH-D75 ...
+
+s_sawHub is set in onDev() the moment any device reports isHub, and the message chosen
+was "no adapters found", NOT "hub seen but NO adapters behind it". So the HUB ITSELF
+never enumerated -- and a device that works perfectly when plugged direct also
+disappears behind it.
+
+**THIS IS A SEPARATE BUG FROM THE IC-705, and a much better one to chase:** it
+reproduces with hardware that otherwise works (hub + TH-D75), needs no IC-705, and has
+a clean pass/fail. Every earlier conclusion that treated "no adapters found with a hub"
+as evidence about the IC-705 was reading two independent faults as one -- including my
+own power/VBUS theory, which the powered hub was supposed to have tested and did not,
+because the hub was never working in the first place.
+
+Established so far:
+  * CONFIG_USB_HOST_HUBS_SUPPORTED=y and CONFIG_USB_HOST_HUB_MULTI_LEVEL=y in the
+    prebuilt IDF, so hub support IS compiled in.
+  * The library has hub handling (nextHubIndex_, scanHostDevices(), isHub detection).
+  * usb_host_install() is called with skip_phy_setup=false, intr_flags=LOWMED, and the
+    enum filter compiled out (CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK is not set).
+  * No IDF ESP_LOGE appears when the hub is attached -- and ESP_LOGE IS captured by this
+    build, so IDF is not reporting an enumeration failure. It looks like the attach
+    event never happens at all.
+
+IC-705 direct is a DIFFERENT and still-open failure: no "## device" line, no IDF error,
+so again no attach event -- while the same radio enumerates fine on a Mac (141-byte
+descriptor, dual CDC, self-powered, 100 mA).
+
+Both share a shape: the device is electrically present and IDF never raises a new-device
+event. That is now the question, and it is one question rather than two theories.
+
+## 0.9.71 — OTR read latency measured: the BUDGET WAS NEVER THE PROBLEM
+
+Successful reads answered in **4 ms, 8 ms and 12 ms**. Every one of the 145 timeouts sat
+at the full ~300 ms budget. So the radio replies almost instantly WHEN IT REPLIES, and
+roughly 1 read in 30 gets any reply at all -- the other 29 receive nothing.
+
+Raising the read budget, which was the obvious "fix" before this measurement, would have
+changed absolutely nothing. Recording that plainly: it is the fourth theory this cycle
+that measurement killed before it reached the bench.
+
+TWO CANDIDATES REMAIN, and they are opposites:
+  * The replies ARE arriving, just after the budget expires, and the next read's
+    "drain stale" loop throws them away -- so we run permanently one read behind and
+    only occasionally catch one inside the window.
+  * The radio genuinely ignores most 0x03 polls at this rate.
+Both now instrumented: each timeout reports how many stale packets the pre-read drain
+discarded and how many packets arrived DURING the read. Steady non-zero drain counts
+mean the first; zeros for both mean the second, and the fix is to stop polling this hard
+rather than to wait longer.
+
+## 0.9.71 — HUBS CONFIRMED BROKEN FOR EVERY DEVICE
+
+Owner: the hub does not work with a plain Prolific adapter either, and the same adapter
+enumerates immediately without the hub. So external hub support is broken universally on
+this build -- not a TH-D75 issue, not an IC-705 issue. The hub itself never enumerates
+(s_sawHub is never set, hence "no adapters found" rather than "hub seen but NO adapters
+behind it"), and no IDF ESP_LOGE appears, so IDF is not reporting a failure -- there is
+simply no attach event.
+
+This now has a clean, cheap test rig: powered hub + Prolific adapter, no radios needed.
+Tracked as its own defect rather than as evidence about any particular radio.
+
+## 0.9.71 — rounding narrowed to HF downlinks only
+
+Owner: after the mode-apply fix, the 5 kHz rounding remains ONLY on HF downlinks
+(AO-7 mode A, 29.4 MHz on the TH-D75's band B), and full-OTR tuning via the DOWNLINK
+radio is smooth. So modes ARE reaching the radio now and fine mode works on VHF/UHF --
+the remaining case is band-specific.
+
+Hypothesis to TEST, not to code around: the D75 may not offer fine mode below 30 MHz on
+band B. tools/thd75_verify.py already sweeps modes and MEASURES the achievable grid, and
+takes --freq, so `python3 thd75_verify.py --freq 29400000` answers it directly against
+the radio. If fine mode is refused on HF, 5 kHz there is the radio's limit and CardSat
+should stop trying rather than pretend otherwise.
+
+## 0.9.71 — HF rounding: fine mode does NOT survive a band change (CardSat bug)
+
+Owner ran thd75_verify.py --freq 29400000: at 29.4 MHz the radio accepts fine mode in
+USB/LSB/CW/AM with a measured 20 Hz grid, exactly as it does on VHF. **So the radio is
+not the limit and the "HF" framing was a red herring** -- what matters is not the band
+itself but CROSSING into it.
+
+MECHANISM. The TH-D75 holds its tuning step PER BAND. CardSat sends MD/FT/FS first and
+the frequency second, so on a bird whose downlink lies in a different band from wherever
+the radio was sitting -- AO-7 mode A, downlink 29.4 MHz, with the radio previously on
+UHF -- the fine step is applied to the OLD band and then discarded by the move. Nothing
+downstream notices: kwGrid() still returns 20 Hz, CardSat still sends exact frequencies,
+and the radio quantises them to that band's 5 kHz step. Hence "rounding on HF downlinks
+only, VHF/UHF perfect".
+
+FIX: PlainCatRig remembers the last mode (_kwMode) and the coarse band of the last
+frequency (_kwBand, split at 30 MHz and 300 MHz). After a successful KWHT frequency
+write that changes band, FT/FS are re-asserted for the current mode. Cheap, idempotent,
+and harmless if the radio ever stops needing it.
+
+VERIFICATION ADDED rather than asserted: thd75_verify.py gains a band-change test --
+set fine mode on UHF, measure the grid, cross to 29.4 MHz, measure again WITHOUT
+re-applying, then re-apply FT/FS and measure a third time. If the middle number is
+coarser than the third, the mechanism is confirmed on the owner's hardware and the
+CardSat fix is the right one; if they are equal, the step survived and this fix is
+harmless but not the cause. The script says which in plain words.
+
+## 0.9.71 — band-change theory REFUTED; HF rounding source still unidentified
+
+Owner's band-change run: 20 Hz on UHF, 20 Hz on HF after crossing WITHOUT re-applying,
+20 Hz after re-applying. The step survives a band change. My fix is harmless and
+idempotent so it stays, but it is NOT the cause, and the entry above is corrected.
+
+Two theories now dead on this one symptom (band-specific fine mode; step lost on band
+change), both killed by a two-minute script run rather than a firmware cycle.
+
+WHAT READING THE CODE ESTABLISHES, and where it runs out:
+  * kwGrid() is the ONLY quantiser in the tree -- grep for 5000 across rig/civ/icomnet
+    finds nothing else. So a 5 kHz result means either _kwFine was false on the KWHT
+    leg, or the rounding is not CardSat's at all.
+  * modeFromString() defaults to RM_USB, so no transponder-mode string can land the
+    leg on FM by accident; and applyTransponderModes() sets the downlink to USB on
+    every linear bird regardless of band.
+  * Which means reading further is guessing. It has now failed twice on this symptom.
+
+INSTRUMENTED INSTEAD, on both legs, so the next run says which side rounds:
+  * KWHT (TH-D75 over USB): logs "want X -> sent Y (grid G, fine=N)" but ONLY when the
+    rounding actually moved the frequency. If this line is absent while the operator
+    sees 5 kHz steps, CardSat is sending exact values and the radio is quantising.
+  * Icom LAN (IC-705): logs the exact Hz handed to CI-V, rate-limited to every 16th
+    write. CI-V carries 1 Hz resolution and this path applies no rounding, so a 5 kHz
+    result there is an Icom TUNING STEP setting on the radio, not CardSat.
+
+The distinction matters because the two have completely different fixes, and AO-7 mode A
+is the one configuration where the HF leg might be EITHER radio depending on which leg
+the operator assigned -- something worth confirming alongside the log.
+
+## 0.9.71 — OTR uplink: we were DISCARDING the dial frames (CI-V transceive)
+
+The counters added last round answer it outright:
+
+    freq read TIMEOUT after 300ms -- drained 0 stale, saw 12 pkt(s) this read
+    freq read TIMEOUT after 300ms -- drained 0 stale, saw 13 pkt(s) this read
+
+12-13 packets arrive during EVERY read and NONE of them matches. Nothing is being
+discarded as stale (drained 0), so the "we are one read behind" theory is dead too --
+the packets are arriving inside the window and being rejected by the parse.
+
+CAUSE: the frequency parse required `f[2] == 0xE0` (destination = controller) and
+`f[4] == 0x03`. An Icom with CI-V Transceive enabled emits a frame every time the dial
+moves, addressed to **0x00 (broadcast)** with command **0x00**. Those are exactly the
+frames that carry the operator's dial position -- and we threw every one of them away,
+catching only the occasional direct poll reply. Hence uplink-based OTR feeling
+unresponsive while the downlink path, a different transport entirely, felt smooth.
+
+FIX: accept FE FE <E0|00> <addr> <03|00> <5 BCD> FD. Both forms carry the frequency in
+the same place, so one widened check covers them.
+
+VERIFIED BY CONSTRUCTION rather than by hope: the same timeout line now prints the
+leading bytes of the last CI-V frame that did NOT match. If the theory is right those
+read FE FE 00 A4 00 -- and the widened match consumes them, so the timeouts should
+largely stop. If they read something else, the bytes say what is really arriving and
+the theory is wrong. (Anchor check worth recording: the capture site appears twice in
+the file, in readPtt and readFreqNet; placement in readFreqNet was confirmed by
+extracting the function body, not assumed from a successful build.)
+
+Note this also means polling at ~2.5 reads/second was never necessary for a radio with
+Transceive on -- the dial position arrives unsolicited. Reducing the poll rate is a
+follow-on worth making once the fix is confirmed.
+
+## 0.9.71 — leg assignment clarified
+
+Owner: "Kenwood HTs can only be the downlink and is in this case." So for AO-7 mode A
+the HF 29.4 MHz DOWNLINK is the TH-D75 over USB, and the rounding therefore sits on the
+KWHT path -- kwGrid() -- not on the IC-705's CI-V path. The KWHT instrumentation
+("want X -> sent Y (grid G, fine=N)") is in place but this log was a VHF bird, so the
+line could not appear. An AO-7 mode A run is what will show it.
+
+## 0.9.71 — USB enumeration: a BOOTSTRAP BUG in the enumeration window
+
+Explored the hub + IC-705 failures. The strongest finding is in CardSat's own code:
+
+    inline uint32_t enumCapMs() { return s_sawHub ? 9000 : 2500; }
+
+The long budget exists SPECIFICALLY FOR HUBS -- and it is gated on s_sawHub, which is
+only set once a hub HAS ALREADY ENUMERATED. So a hub that needs more than 2500 ms can
+never be seen, and the generous window written for hubs is unreachable by the very
+devices it was written for. The same 2500 ms also applied to a radio with a slow USB
+stack.
+
+This is a strong candidate for BOTH symptoms:
+  * a hub must power its own controller, after which IDF applies port reset recovery
+    (CONFIG_USB_HOST_EXT_PORT_RESET_RECOVERY_DELAY_MS=30) and a power-on delay per
+    downstream port before anything behind it can appear;
+  * the IC-705 is a self-powered radio whose USB stack comes up on its own schedule,
+    not the host's.
+Both work on a Mac, which waits indefinitely.
+
+FIX: cap is now 9000 ms normally and 12000 ms once a hub is seen. Note the cap is a
+CEILING, not a wait -- the loop exits as soon as the bus goes quiet with at least one
+device present, so a USB-serial adapter that appears in 400 ms still returns in 400 ms.
+Raising it costs time only when something slow is attached or nothing is attached at
+all, and in that second case a few extra seconds is far cheaper than reporting "no
+adapters found" for a device that was still waking up.
+
+RULED OUT ALONG THE WAY, so they are not revisited:
+  * Configuration descriptor size -- IC-705 is 141 bytes against a 256-byte limit.
+  * Hub support missing -- CONFIG_USB_HOST_HUBS_SUPPORTED=y, HUB_MULTI_LEVEL=y.
+  * A board-level USB host power switch CardSat fails to enable -- M5Unified has no
+    such GPIO for the Cardputer ADV; VBUS is not under firmware control here.
+  * Device class/descriptor exotica -- the 705 is an ordinary dual-CDC composite, and
+    its descriptor is smaller than the TH-D75's, which works.
+NOTED, not pursued: Arduino's IDF ships CONFIG_USB_HOST_HW_BUFFER_BIAS_PERIODIC_OUT=y
+rather than BALANCED, which shrinks the non-periodic FIFO used by control and bulk
+transfers. It affects throughput rather than attach detection, so it does not explain a
+missing attach, but it is a real deviation from the IDF default and worth remembering.
+
+STILL POSSIBLE if the window fix does not do it: inrush/VBUS current limiting on attach
+(a hub and a radio both present far more bulk capacitance than a USB-serial adapter),
+or USB-C CC configuration. Neither is diagnosable from firmware, which is why the
+diagnostic below reports whether IDF sees an attach AT ALL.
+
+DIAGNOSTIC d1097a2c: logs every client event (NEW_DEV / DEV_GONE) and every host-library
+event flag. Silence on plug-in means IDF never detected an attach -- electrical, and no
+amount of firmware work will help. Any event means it was seen and the library lost it,
+which is ours to fix.
+
+## 0.9.71 — OTR responsive; and the same early-return bug found in a WIDER form
+
+Owner: uplink OTR with the IC-705 on LAN is now responsive. The log shows long runs of
+successful reads tracking the dial smoothly (145897260 -> 145898550 -> 145901210 ...).
+
+HONEST NOTE ON THE MECHANISM. The timeout lines all report
+"last CI-V 00 00 00 00 00", i.e. during a timed-out read NO CI-V frame arrives at all --
+the 12-13 packets are pings and keepalives, not data. So the widened match is consistent
+with the improvement (broadcast frames that were previously rejected are now accepted
+and counted as successes) but the "we were discarding dial frames" story is NOT directly
+confirmed by the bytes, because unmatched CI-V frames never appear during failures.
+Recording that distinction rather than claiming a proven mechanism.
+
+MEASURED latency of 121 successful reads: p50 23 ms, p75 36 ms, p90 94 ms, p95 121 ms,
+p99 188 ms, max 259 ms. A 200 ms budget would still catch 99%.
+
+WHICH EXPOSED A BIGGER BUG. The log says "budget 300", but CardSat's intended value is
+constrain(effectiveCatRateMs()/4, 60, 200) -- capped at 200. 300 is IcomNetRig's own
+fallback, used when readBudgetMs is still 0. It was 0 because initializeEngagedRig()
+opens with `if (!rig || !rig->ready()) return;` -- the SAME early-return defect fixed
+earlier for applyTransponderModes(), but on a function that also carries:
+  * enableSatMode()
+  * the MAIN/SUB band assignment
+  * setReadBudgetMs()
+In a mixed dual rig none of those ever ran, because the LAN leg is not ready at engage
+and DualRig::ready() requires every leg. The mode fix retried only the modes; sat mode,
+band assignment and the read budget stayed lost.
+
+FIX: initializeEngagedRig() sets rigInitPending when it bails, and the loop re-runs the
+WHOLE function once the rig reports ready. That also subsumes the mode retry, which is
+kept for the paths that call applyTransponderModes() directly.
+
+Consequence worth noting: with the budget now actually applied (<=200 ms instead of the
+300 ms fallback), a timed-out read blocks the cooperative loop a third less. At ~625
+timeouts in a six-minute session that is a meaningful reduction in loop stalling for
+everything else -- USB CAT ticks, the UI, the rotator.
+
+## 0.9.71 — the window fix WORKS, and exposed a stack that is too small for hubs
+
+Owner's log, the good news first:
+
+    43761 scan: adapter[0] addr=2 Prolific ... key=067b:23a3/FDCKb133812
+    43840 scan: hub present - extended enumeration window used
+
+**A hub enumerated and a device behind it was found.** That is the first time either has
+happened, and it confirms the bootstrap bug: the long window really was the blocker, and
+gating it on "have we already seen a hub" made it unreachable. The IC-705 also worked
+once behind the hub.
+
+**BUT IT IS UNRELIABLE, AND THE STACK NUMBERS SAY WHY.** The high-water mark printed at
+every disengage:
+
+    no hub:  EspUsbHost task  used 1156 of 4096  free 2940
+    HUB:     EspUsbHost task  used 2684 of 4096  free 1412
+
+kTaskStack = 4096 was sized from END_CDC headroom logs taken with a single directly
+attached device. IDF's multi-level external hub support recurses through port
+enumeration and more than doubles the peak. This file's own stated rule -- safe =
+used + 2048 -- wants 4732, MORE than was allocated. 1412 bytes of headroom on a task
+whose overflow reboots the device is not a margin, and the log shows repeated
+"## REBOOTED - reset reason=3" around hub scans.
+
+FIX: kTaskStack 4096 -> 6144. That is 3460 bytes of headroom against the measured hub
+peak, still below the library's 8192 default, and costs ~4 KB of heap across the two
+tasks. The high-water mark is printed at every disengage, so this remains a measurement:
+if a hub-with-devices peak ever exceeds ~4 KB, raise it again.
+
+Worth noting the sequence: the enumeration-window bug HID the stack problem, because a
+hub could never get far enough to use the stack. Fixing the first exposed the second --
+which is the usual shape, and a reason not to read one fix working as the end of a
+problem.
+
+STILL OPEN: two radios (TH-D75 + IC-705) on USB together did not work. That needs its
+own look once hub enumeration is stable, since it is the case that needs the hub, three
+devices, and ESP_USB_HOST_MAX_DEVICES=4 all at once -- and the earlier note about
+reducing MAX_DEVICES to 3 would have broken exactly this configuration.
+
+## 0.9.71 — full USB review (CardSat + vendored EspUsbHost)
+
+APPLIED THIS ROUND
+  1. **Host task stack 4096 -> 6144** (previous entry). The measured hub peak is 2684
+     versus 1156 without a hub; this file's own rule wants 4732. Done.
+  2. **Adapter-registry exhaustion is no longer silent.** onDev() dropped a device with
+     a bare `return` when the 4-slot s_serDev[] array was full. The operator saw one
+     fewer adapter with NOTHING in the log -- indistinguishable from "it did not
+     enumerate", which is a different problem with a different fix. Now sets a flag and
+     the scan reports "MORE devices than the 4-slot registry - some are not listed".
+
+REVERTED, and worth recording as a lesson: I added a shorter settle window for a
+non-fresh host, believing the 9 s cap was being paid on every scan. The owner's own
+timings disprove it -- first scan after boot 9111 ms, every later scan 79-80 ms --
+because hostUpForRotator() returns early when s_host exists, so the settle loop only
+ever runs on a cold host. The change was unnecessary AND would not have compiled
+(`freshHost` was undefined at the use site). Reverted; a comment now records the
+measured timings so nobody re-derives the same wrong premise.
+
+REMAINING FINDINGS, ranked, NOT yet acted on
+  A. **ESP_USB_HOST_MAX_DEVICES = 4 is exactly at the limit** for a real station:
+     hub + radio A + radio B + USB rotator = 4, with nothing spare -- and many
+     "4-port powered hubs" are internally two chained 2-port hubs, which needs 5.
+     Exhaustion logs at ESP_LOGW, compiled out on our FQBN, so the device vanishes
+     silently. Raising it costs heap in the ~13 KB EspUsbHost object; the cost per slot
+     has NOT been measured, so this needs a number before a decision. This is the most
+     likely cause of "could not get both a TH-D75 and IC-705 working over USB".
+  B. **Endpoint-slot exhaustion** ("No endpoint slots available", 6 sites) also logs at
+     a compiled-out level. ESP_USB_HOST_MAX_ENDPOINTS = 16; two CDC radios plus a hub
+     plus a rotator is comfortably inside it, so this is a diagnosability gap rather
+     than a live limit.
+  C. **Address-based adapter keys are unstable behind a hub.** A device with no
+     iSerialNumber keys as VID:PID@address (the TH-D75 is exactly this). Hub port order
+     and enumeration order decide the address, so a replug or a different power-up order
+     can silently rebind a leg to the wrong radio. Worth a warning in the picker when a
+     configured key is address-based AND a hub is present.
+  D. **The IC-705 exposes TWO CDC functions and CardSat always binds the first.**
+     Vendored patch 1 makes that deterministic, which is right, but if the radio puts
+     CI-V on the second function we bind a working port that never answers -- the exact
+     silent-failure shape that cost this project days on the D75. A per-leg "which CDC
+     interface" setting, or trying the second when the first is mute, would remove the
+     guess.
+  E. **"scan: releasing temporary host" now lies** -- with the host resident by default
+     releaseHostIfIdle() returns immediately and nothing is released. The message
+     predates residency. Cosmetic, but this file already carries a comment saying "a log
+     that lies is worse than no log", so it should be fixed.
+
+## 0.9.71 — the hub/direct INVERSION explained: address-based adapter keys
+
+Owner: the IC-705 now works reliably behind a hub but NOT directly; the TH-D75 works
+directly but NOT behind a hub. An inversion like that is not a bus fault -- a bus fault
+does not prefer one radio when hubbed and the other when not.
+
+CAUSE, for the D75 half: NEITHER radio reports an iSerialNumber, so both key as
+VID:PID@ADDRESS (the D75 is literally logged as key=2166:9023@1). The USB address is
+assigned by ENUMERATION ORDER, so it is not a property of the radio at all. Add a hub
+and the hub takes an address and the radio gets a different one; the configured key then
+never matches, because every lookup was an exact strcmp. Nothing is wrong with the
+radio, the hub, or the bus -- the leg simply finds no adapter and reports none. The
+IC-705 works behind the hub because it was CONFIGURED there, and would fail the same way
+if moved back to a direct connection.
+
+FIX: findAdapter() -- exact match first, always; then, only if the wanted key is the
+address form, fall back to the VID:PID part, and ONLY when exactly one live device
+carries it. That last condition preserves the entire reason the address is in the key:
+two identical adapters (the likely radio + rotator case) stay ambiguous and are never
+guessed between. When the fallback fires it says so, naming the wanted and found keys,
+so a silent rebind is impossible. Routed through all four match sites (CAT-A, CAT-B,
+rotator, and the presence check).
+
+This should make a configured radio survive being moved between a direct connection and
+a hub, between hub ports, and across a different power-up order -- none of which change
+the radio, and all of which changed the key.
+
+NOT claimed: that this fixes the IC-705's failure to enumerate when connected DIRECTLY.
+That is a separate matter and still looks electrical -- it is the half of the inversion
+that a key cannot explain, since a device that never enumerates has no key to match.
+
+## 0.9.71 — two misleading messages fixed, and a third found while fixing them
+
+**1. "Only adapter is the rotator's" was wrong in a dual-USB config.** The picker
+excludes up to TWO keys: for a RADIO leg those are the rotator's adapter AND the other
+radio leg's (passed in as alsoTaken). A single `skippedTaken` flag lost which one
+matched, so the message always blamed the rotator -- confusing exactly when the operator
+is working out which port owns what. Now tracked separately and worded accordingly:
+"Only adapter is the rotator's" / "Only adapter is the other leg's" for a radio picker,
+"Only adapter is the radio's" for the rotator picker (both excluded keys are radio legs
+there, so that one was already right).
+
+**2. "scan: releasing temporary host" no longer lies.** Since the host became resident
+by default, releaseHostIfIdle() returns without releasing, so the line claimed something
+that never happened -- and an operator reading "releasing" would reasonably expect the
+serial console back. Now reports "scan: host stays resident (Fn+u on Track releases it)"
+when residency is on. (The rotator's equivalent trace had already been written this way.)
+
+**3. FOUND WHILE CHECKING THE OTHERS: the disengage report had the same defect, and it
+is the line the operator reads most.** "## DISENGAGED: stack released=yes" was printed
+even though residency means the stack is NOT released -- because s_hostReleased is a
+latch about whether the last teardown SUCCEEDED, not about whether the host is up now.
+The bench logs show the contradiction plainly: "released=yes" beside heap that never
+returns (17 KB rather than 82 KB). Reading that as a leak is the obvious inference and
+the wrong one. Now three-way: RESIDENT / released=yes / released=NO (reboot needed).
+The failed-engage report carried the identical two-way test and got the same fix.
+
+Worth noting the pattern: all three are the same bug -- a message written when
+teardown-on-disengage was the only behaviour, left unrevised when residency changed what
+actually happens. Adding a mode without auditing what the existing messages assert about
+that mode is how a log starts lying.
+
+## 0.9.71 — 0.9.7x USB work carried into the CardSatDualRig companion
+
+Reviewed the companion against every USB fix from 0.9.70/0.9.71 rather than assuming.
+
+ALREADY PRESENT / NOT APPLICABLE, verified rather than skipped:
+  * **Library-level fixes** (serial-OUT drain, halt-not-clear, always-uninstall,
+    quiesce, CDC first-control guard): the companion links the SAME vendored
+    EspUsbHost, so it inherits all of them provided it is built against
+    third_party/EspUsbHost/. That requirement is stated in its README and sketch header.
+  * **Resident host**: the companion already calls gUsb.begin() once in setup() and
+    never end()s, so it has always behaved the way CardSat only now does.
+  * **Task stack**: the companion uses the library default (8192), already above the
+    6144 CardSat needed for hub enumeration. No change.
+  * **Enumeration window**: N/A -- it binds from onDeviceConnected callbacks and never
+    polls with a deadline, so the bootstrap bug that hid hubs has no analogue.
+
+APPLIED THIS ROUND:
+  * **DTR de-assert on leg release** (earlier in 0.9.70): usbReleaseControlLines().
+  * **VID:PID leg pinning.** The companion could pin a leg only by USB SERIAL, falling
+    back to enumeration order. Both of the owner's radios report NO serial (TH-D75 and
+    IC-705 are both iSerialNumber = 0), so both legs could only ever be order-bound --
+    and order is exactly what a hub changes. Downlink and uplink could swap silently
+    with both radios working. legPinMatches() now accepts a "vvvv:pppp" VID:PID as well
+    as a serial, which is deterministic whenever the two radios are different models.
+    Applied to BOTH bind paths (bindDevice and bindSeen) -- the second is the one that
+    runs on a live reconfigure, and missing it would have made the fix work only at
+    first attach.
+  * **Registry overflow is no longer silent.** registerSeen() dropped a device with a
+    bare `return` when gSeen[6] was full -- the same trap CardSat's adapter registry
+    had, where a dropped device is indistinguishable from one that never enumerated.
+
+Build: 1,280,526 flash (38%), 61,244 RAM (18%), 0 warnings, both new strings verified
+present in the ELF. Still EXPERIMENTAL and untested on hardware, and still labelled so
+in all four places.
+
+## 0.9.71 — REGRESSION from residency: the adapter list stopped being rebuilt
+
+Owner: the IC-705 is never seen, and the TH-D75 still shows even with a Prolific
+attached. Both are one bug, and it is mine.
+
+    78692  D75 present                   -> listed
+   108603  D75 UNPLUGGED                 -> "(unplugged)", still listed
+   133092 .. 205343  same stale entry across six more scans,
+                     while a Prolific attached in that window is NEVER listed
+
+CAUSE: the registry is cleared exactly once -- inside hostUpForRotator()'s CREATE path
+("fresh host: clear the registry"). Before residency every scan created a host, so every
+scan rebuilt the list from a real enumeration. With the host resident that never happens
+again: the list only accumulates whatever the callbacks happened to report, so a
+tombstone lives forever and anything attached later can be missing entirely.
+
+This is the second time residency has broken something that silently depended on
+"every scan starts a new host" -- the first was the disengage report claiming
+"released=yes". Adding a mode is not just new behaviour; it invalidates assumptions
+that were never written down.
+
+FIX: scanAdapters() now forces a genuine release BEFORE enumerating, but ONLY when no
+port is open. Residency exists to stop a re-enumeration killing a live radio session; a
+manual scan with nothing engaged has no session to protect, and the operator asked for
+the truth. The host is then left resident afterwards, so an engage moments later does
+not pay the enumeration again. Cost: the cold-start window on an explicitly requested
+scan -- exactly what it cost before residency.
+
+NOT explained by this, and still open: why the IC-705 does not enumerate at all when
+connected directly. A stale registry cannot hide a device that never attaches, and the
+earlier direct-connection failures predate residency. That remains the electrical
+suspicion (VBUS/inrush), and it is the one thing the powered hub reliably works around.
+
+## 0.9.71 — companion checked against the stale-registry regression
+
+Asked to make sure the CardSat registry bug does not affect CardSatDualRig. Checked
+rather than assumed, and the answer is two-part.
+
+**THE SPECIFIC BUG DOES NOT APPLY.** CardSat's failure was that the adapter registry is
+cleared only when a host is CREATED, so a permanently resident host means it is never
+rebuilt. The companion does not share the pattern:
+  * it never clears gSeen wholesale, so it does not depend on a fresh host to do so;
+  * a disconnect FREES the slot (unregisterSeen sets used = false) rather than leaving a
+    tombstone, so entries cannot accumulate;
+  * onUsbDisconnected is wired, and it also unbinds the leg.
+Its host has always been permanently resident, so if it shared the pattern the symptom
+would have been visible long ago.
+
+**BUT THE SAME FAILURE CLASS HAS ANOTHER ROUTE IN, and that one was real.** A leg is
+unbound only by onUsbDisconnected() or a live reconfigure, and every bind path refuses a
+leg that is already `bound`. pollRadioOnline() would set online = false when the device
+vanished, but leave `bound` set. So a MISSED disconnect event -- device yanked
+mid-transfer, host confused, or the radio reappearing at a new address before the
+callback lands -- left the leg pinned to an address that no longer exists, permanently
+offline, with nothing able to recover it. CardSat escapes this via re-enumeration on a
+scan; the companion has no equivalent, because its host is created once in setup() and
+never torn down.
+
+FIX: pollRadioOnline() now releases a binding that has been offline continuously for
+10 s (about five rigctld poll cycles -- long enough not to react to a hiccup) and
+re-binds from the live registry. Re-binding is exactly what a clean
+disconnect/reconnect would have done, so this restores the normal path rather than
+inventing one, and it cannot bind a radio that is not present because bindSeen() walks
+gSeen. lastOnlineMs is armed at all four bind sites and cleared at both unbind sites.
+
+Self-inflicted detail worth recording: the first application of that timer used two
+overlapping search patterns and double-assigned it at two of the four sites
+(`p.lastOnlineMs = 0; p.lastOnlineMs = 0;`). Harmless, but it was found by checking the
+result rather than trusting the replace count -- the counts themselves (1+2+1+2 for four
+sites) were the tell.
+
+Build: 1,280,770 flash (38%), 61,244 RAM (18%), 0 warnings, the new string verified in
+the ELF. Still EXPERIMENTAL and untested on hardware.
+
+## 0.9.71 — partition scheme enlarged, and item 1 (MUF to a DXCC entity)
+
+**PARTITIONS.** Moved from stock `huge_app` to a custom partitions.csv. huge_app is a
+4 MB-part layout (3 MB app, 896 KB FS) and left HALF of the Cardputer ADV's 8 MB chip
+unused, while the app sat at 96.9% with 97 KB free.
+
+    app0      4 MB    (was 3 MB)      -> 1,142,800 bytes free, 11.8x the headroom
+    spiffs    1.5 MB  (was 896 KB)    -> LittleFS for operators with no microSD
+    coredump  64 KB   (kept)
+    total 5.62 MB, leaving 2.38 MB of the part unallocated
+
+The ceiling is deliberate, not an accident: most users install through Launcher, which
+lives in flash alongside the app and writes its own partition table sized to the binary
+it installs. Letting the app expand to fill the chip would squeeze the tool people use
+to install it. Two constraints preserved and documented in the file: the FS partition
+must stay NAMED "spiffs" (LittleFS.begin(true) looks that label up -- a rename silently
+mounts nothing and loses every setting), and the coredump partition must stay (the panic
+backtrace is read back on the next boot).
+
+NEW GATE tools/check_app_fits.py (23rd). With PartitionScheme=custom, arduino-cli reports
+usage against the scheme's DECLARED 16 MB ceiling in boards.txt, NOT against the 4 MB
+app0 we actually define -- "Sketch uses 3048390 bytes (18%)... Maximum is 16777216" is
+meaningless and the compiler would happily emit an unflashable binary while the log
+called it healthy. huge_app reported the true limit, so this check was not needed before;
+it is needed precisely BECAUSE the scheme changed. It also validates the layout itself
+(ordering, overlap, 8 MB bound, the spiffs label, the coredump partition). Validated both
+ways: passes as shipped, and fails with the exact reason on a renamed FS partition and on
+an oversized binary.
+
+**ITEM 1: MUF to a DXCC entity.** The tool answered "how are paths generally"; the
+question an operator has is "can I work THAT entity now", which no region row answers.
+Press `d` on the MUF screen to pick an entity, `D` to clear; the path appears as a
+pinned row above the region table, same model and units so it is directly comparable.
+
+Data: no DXCC coordinates existed anywhere in the tree. Generated src/dxcc_geo.h from
+AD1C cty.csv -- 340 entities, 6 bytes each (~2 KB), int16 hundredths of a degree
+(~1.1 km, far finer than MINIMUF's own accuracy). Coverage verified: the 62 entities
+without coordinates are EXACTLY the 62 flagged deleted in DXCC_LK, so nothing current is
+missing, and dxccGeoFind() returns false for them so the UI says "no location" rather
+than plotting 0,0 -- a real place in the Atlantic that would look like a plausible answer.
+Host-tested against known positions before wiring anything.
+
+SIGN CONVENTION, the trap here: cty.csv stores longitude WEST-positive; CardSat is
+east-positive; minimufMHz() wants west-positive (MUF_REGIONS stores it that way and
+passes it straight through). The table is stored east-positive to match the rest of the
+firmware and negated at the MUF call. Getting this backwards puts every path on the far
+side of the planet, so it is stated in the header and at the call site.
+
+The picker REUSES the existing type-to-search screen (SCR_DXLK) via a dxPickFor flag
+rather than duplicating prefix/name matching; back from the picker returns to MUF, not
+Tools, so the operator is not stranded somewhere they never chose.
+
+TWO SELF-INFLICTED ISSUES, both caught by the toolchain rather than shipped:
+  * CL_DKBLUE does not exist -- the palette has 16 fixed slots. Used CL_BLUE, and
+    deliberately NOT the green CL_SELBG, so a pinned target does not look like a second
+    list cursor.
+  * Inlining dxcc_geo.h early in the .ino broke the build with "'VoiceMemo' has not been
+    declared". dxccGeoFind() is a FUNCTION, and Arduino inserts its generated prototypes
+    immediately before the first function definition in the sketch -- which my block had
+    just become, putting prototypes ahead of VoiceMemo's declaration. Moved the block
+    next to its use in the MUF section. Worth remembering: in the concatenated .ino,
+    WHERE a function lands changes where every prototype lands.
+
+## 0.9.71 — items 3 and 4: string variables and Microsoft-style text functions
+
+BASIC had NO string type at all: 26 numeric variables A-Z, string literals usable only
+as PRINT items. Items 4, 6 and 7 all depend on this, so it went first.
+
+ADDED
+  * **A$ .. Z$**, 26 string variables. The table is ALLOCATED ON DEMAND -- 26 Arduino
+    Strings cost real heap and most programs never touch one, so it appears the first
+    time a program mentions a string variable and dies with the VM. That is the same
+    rule the feeds, notes and BASIC program buffers already follow.
+  * **LEFT$ RIGHT$ MID$ CHR$ STR$ UCASE$ LCASE$ TRIM$** (string-returning) and
+    **LEN ASC VAL INSTR** (number-returning).
+  * Concatenation with '+', and **string comparison in IF** (= and <> only).
+  * Strings work in PRINT, and in LPRINT/FPRINT via the shared emitLine() grammar --
+    otherwise the report sinks would silently disagree with the screen.
+
+DESIGN NOTE. Strings are a SEPARATE evaluator, not a variant type threaded through the
+numeric one. The numeric path is the hot path (Doppler loops, plot points) and tagging
+every value would cost speed and memory on the 99% of expressions that are numbers.
+BASIC has always separated the two syntactically with '$', so the parser does too:
+isStrStart() decides which evaluator a caller needs without consuming input.
+
+Two deliberate restrictions, both stated in the code:
+  * Comparison is = and <> only. Ordering strings raises collation questions this
+    interpreter cannot answer, and a confidently wrong answer is worse than a refusal.
+  * fmtNum() is shared by PRINT and STR$. Separate formatting would let PRINT X and
+    PRINT STR$(X) disagree -- a difference that surfaces months later in someone's
+    report output.
+
+NEW HARNESS tools/host_basicstr (12th). Text functions are where a silent off-by-one
+lives: MID$ is 1-BASED and INSTR returns a 1-based position with 0 meaning "absent",
+and getting either wrong produces a program that runs, prints something plausible and
+is wrong -- which the operator would blame on their own code. 16 vectors check the
+index arithmetic against Microsoft BASIC's actual behaviour, including the clamping
+cases (LEFT$ beyond end, negative counts, MID$ past the end, MID$ start 0). All pass.
+
+Flash after: 3,055,680 of 4,194,304 (72.9%), 1,138,624 free. The partition work paid
+for itself immediately -- this would not have fitted the old 3 MB app.
+
+## 0.9.71 — item 5: named arrays
+
+BASIC had exactly ONE array, `@()`, capped at 256 doubles. Added named arrays A()..Z()
+alongside it; `@()` is untouched so existing programs keep working.
+
+  * `DIM A(n)` and `DIM A(10), B(20)` -- several per statement, as in MS BASIC.
+  * `A(i)` reads and assigns; re-DIM is allowed and clears, which is what a programmer
+    expects from DIM inside a loop.
+  * `ERASE A` gives the heap back early rather than waiting for the program to end.
+
+MEMORY DISCIPLINE, and why the budget is shared. Each array is allocated ON DEMAND when
+DIMmed and freed with the VM. The cap is on TOTAL elements across every array
+(ARR_TOTAL_MAX = 2048 doubles, 16 KB), not per array: 26 arrays of 1024 would be 208 KB
+of doubles on a device whose whole free heap is ~76 KB, so a per-array limit would let a
+program that reads perfectly reasonably line by line starve the radio, the display and
+the USB host. re-DIM releases the old allocation from the budget before charging the new
+one, so a DIM in a loop cannot creep.
+
+BOUNDS ARE ENFORCED, not traditional. arrCell() refuses a subscript outside the array
+and stops the program. Classic BASIC's silent out-of-range write is not survivable here:
+this interpreter shares an address space with a live CAT session and a USB host, and a
+stray write would show up as something else entirely, days later.
+
+PARSING NOTE. `A(i)` is treated as an array element only when A has actually been
+DIMmed. Checking the DIM state rather than merely the '(' keeps `A (3+1)` -- a scalar
+followed by a parenthesised term -- working for programs written before arrays existed,
+and keeps an undimensioned `A(` as the old clear error instead of a mysterious no-op.
+
+Harness tools/host_basicstr extended with 13 array vectors covering the bounds refusals,
+the shared budget, and that re-DIM releases rather than accumulates. All pass alongside
+the 16 text vectors.
+
+## 0.9.71 — item 6: pre-run input form (SCR_BASICASK)
+
+A program declares what it needs:
+
+    10 INPUT "Downlink MHz"; F
+    20 INPUT "Callsign"; C$
+
+Fn+R scans the source, and if any INPUT is declared it shows ONE form -- all fields at
+once -- then runs the program to completion with the variables already set. A program
+that asks nothing runs immediately, exactly as before.
+
+WHY A FORM RATHER THAN A RUN-TIME PROMPT, which is what BASIC traditionally does: this
+interpreter executes inside a single key handler, to completion, with the watchdog fed
+by a statement budget. Stopping mid-run to wait for a keystroke would mean re-entering
+the event loop with a live VM on the stack -- the design this interpreter deliberately
+avoids. Collecting first preserves the run-to-completion property, which is the whole
+reason it is safe to run BASIC on a device that is simultaneously flying a radio.
+
+Details that matter:
+  * The scan is a TEXT pass over basicBuf, not an interpreter pass. Building a VM to
+    discover its questions would mean running the program to find out what to ask it.
+  * Duplicate targets collapse to one field -- two boxes writing the same variable is a
+    UI that cannot be right.
+  * An empty field leaves the variable at its default (0 / "") rather than erroring: a
+    program asking for an optional value should not be stopped by declining to give one.
+  * At run time INPUT steps over its own arguments and continues, because the value is
+    already in place.
+  * DEL edits the value and never exits the form -- over-backspacing must not discard a
+    half-filled form, the same trap the immediate-mode prompt had until 0.9.70.
+
+## 0.9.71 — the text-screen gate had a blind spot, and it was hiding a shipped bug
+
+audit_text_screens reported "all excluded" while SCR_BASICASK -- a screen that takes
+typed callsigns and grids -- was NOT excluded. Cause: the gate matched `c >= 32 && c <
+127`, and the new handler used `c > 32 && c < 127`. One character of difference, and the
+gate silently approved the exact bug it exists to prevent.
+
+Widened to accept both spellings, and it immediately found a SECOND, PRE-EXISTING
+offender: **SCR_TGTSEARCH**, which has always taken typed text and has always lost `b`
+and `h` to the global screenshot and help hotkeys. That one has been shipping.
+
+Both now excluded; the gate covers 10 text-entry screens (was 7). Recorded because the
+lesson is not "add the screen" -- it is that a gate matching one spelling of what it
+looks for is worse than no gate, because it is believed. This is the second time this
+particular gate has needed hardening: the first version could be satisfied by a comment
+mentioning a screen name.
+
+## 0.9.71 — items 2 and 7: constants, functions, and example programs
+
+ITEM 2 -- constants and functions BASIC lacked:
+  * Constants (bare, no parens): PI TWOPI DEG RAD CLIGHT KBOLT REARTH. Writing 3.14159
+    instead of PI is a 5-arcsecond pointing error at the horizon; these exist so a
+    program does not retype them subtly wrong.
+  * Maths: ATN2(y,x) ASN ACS LOG10 ROUND FRAC HYP. ATN2 matters most -- hand-rolling a
+    bearing with ATN(y/x) loses the quadrant and divides by zero due east, and every
+    geometry program needs it.
+  * Geometry/radio: GCDIST GCAZ DXCCLAT DXCCLON, and the string-returning GRID$ DXCC$
+    TIME$ DATE$. All reuse the FIRMWARE'S OWN routines (greatCircle, Location::toGrid,
+    the DXCC tables, the same sys snapshot). A second hand-written copy is how a program
+    comes to disagree with the tracker it is running on, and TIME$ built from anything
+    other than the snapshot could print a timestamp contradicting the program's own
+    UTCH/UTCM.
+
+ITEM 7 -- three example programs, in the REPOSITORY (not flash, per the owner):
+  DXPATH.BAS    the input form + DXCC path work + GRID$/TIME$/DATE$
+  CALLPARSE.BAS string variables and every text function, with the MS index rules
+  PASSTATS.BAS  named arrays, DIM of several, ERASE
+
+NEW GATE tools/audit_basic_examples.py (24th). Examples ship in the repo, so NOTHING
+compiles or runs them: a typo, or a function renamed in app.cpp, produces an example
+that fails on the operator's device -- and they cannot tell whether the mistake is
+theirs or ours. An example that does not run is worse than none, because it teaches that
+the interpreter is unreliable.
+
+THE GATE'S FIRST VERSION WAS WRONG IN THREE WAYS, and it flagged 112 "errors" in the 17
+EXISTING examples, all of them false:
+  * it did not strip trailing ": REM note" comments, so it judged prose as code;
+  * it tokenised scientific notation, turning the perfectly valid `1E8` into an unknown
+    name `E8`;
+  * its keyword list omitted PSET and MOD, both real (MOD is an infix operator at
+    app.cpp:29672).
+Fixed, and only then validated in both directions: 19 programs pass, and injecting
+`GCDISTX` into DXPATH.BAS fails with the exact file, line and token. Recording this
+because the pattern keeps recurring in this project -- a new gate's first job is to
+prove it is right about code already known to be good, and 112 confident failures
+against working examples is what "wrong gate" looks like.
+
+## 0.9.71 — item 8: calculator gaps
+
+Surveyed both calculators first. The scientific one is already strong -- trig and
+hyperbolics, atan2/hypot/mod/ncr/npr/fact/cbrt/log2, and a real radio set
+(swr2rl/rl2swr/mml/fspl/nf2t/t2nf/dbd/dbi/dop) plus orbital porb/vorb/fpr. So this was
+about GAPS, not volume; several obvious candidates (footprint radius, orbital period,
+Doppler) already existed and were deliberately not duplicated.
+
+ADDED, each one something an operator was computing on paper beside the device:
+  lam(mhz)         wavelength in metres
+  dipole(mhz)      half-wave dipole length, 0.95 velocity factor (the figure every
+                   antenna book uses -- a free-space half wave cuts elements long)
+  dbm2w / w2dbm    power conversions
+  aorb(minutes)    altitude for a given orbital period -- the INVERSE of porb, and the
+                   question actually asked when identifying an orbit
+  slant(el, alt)   slant range from elevation and altitude
+  dgain(d, mhz)    parabolic dish gain, dBi, 55% efficiency
+
+Why slant() earns its place: the naive substitute -- treating altitude as range -- is
+5.6x wrong at the horizon, which is exactly where a link budget is tightest and where
+the error is least visible.
+
+VERIFIED against independently computed values before shipping, not merely compiled:
+lam at 145 and 435 MHz, dipole at 14.1 MHz, dbm2w/w2dbm at 30/60 dBm and 5 W, a
+porb->aorb round trip at 420 km, slant at zenith (= altitude) and at the horizon, and
+dgain for a 3 m dish at 10 GHz (47.7 dBi).
+
+Worth recording: the slant() horizon check FAILED first, and the code was right --
+my expected 2292 km was wrong, the true value being sqrt((Re+h)^2 - Re^2) = 2352.5 km.
+Checking the disagreement rather than adjusting the code is the only reason that ended
+correctly; had I "fixed" the function to match my number, every horizon link budget
+would have been quietly 2.5% optimistic.
+
+NOTE FOR ITEM 9: the calculator's function list is NOT shown anywhere on-device -- it
+exists only in MANUAL.md and FEATURES.md. Item 9 must add these six there, or they are
+invisible to everyone who does not read the source.
+
+## 0.9.71 — item 9: help, references, and two silent documentation failures
+
+ON-DEVICE
+  * **SCR_CALCREF**, reached with **Fn+f** from BOTH calculators. The entry screen can
+    show two lines of hints; there are 65 names. Behind Fn because every bare letter on
+    those screens is expression text -- 'f' is needed for floor, fact, fspl and fq.
+    audit_key_conflicts confirms no collision. Both calculators share ONE reference
+    because they share one evaluator; a second list would drift from it.
+  * The BASIC reference screen gained CONSTANTS, TEXT, ARRAYS, STATION AND GEOMETRY and
+    ASKING FOR INPUT sections.
+
+A FOOTER DECISION worth recording: the grapher's footer is already 39 of 39 columns of
+keys that DO something. Fn+f is deliberately NOT advertised there -- hiding the table or
+CSV export to advertise a help screen is the wrong trade. It is on the calculator's
+footer and in the manual instead.
+
+PRINTABLE
+  * NEW **CardSat_CalcCard_4x6.pdf**, generated by tools_make_calccard.py which shares
+    the refcard's LAYOUT verbatim and changes only content, so the two cards cannot
+    drift in style. Includes worked examples with real numbers and a short "why some of
+    these exist" panel (atan2 keeps the quadrant; slant is 5.6x off if you use altitude).
+  * NEW GATE tools/audit_calc_card.py (25th): every `name(` on the card and in the
+    on-device CALCREF must be a function the evaluator actually has. A reference listing
+    a function the firmware lacks is worse than none -- the operator types it, gets an
+    error, and assumes the mistake is theirs. Validated both ways (a planted `vesc(`
+    fails with the name).
+  * **Version numbers removed from the cheat and reference cards**, per the owner: they
+    now describe the firmware as it is. "Added in 0.9.59" tells a reader nothing
+    actionable and goes stale the moment the feature stops being new.
+
+TWO SILENT FAILURES FOUND WHILE DOING THIS, BOTH THE SAME BUG:
+  1. All three card generators read the version with `FW_VERSION\s*=\s*"([0-9.]+)"`,
+     which matches NOTHING once the version carries a suffix. Every card had been
+     printing **v0.0.0** without complaint.
+  2. tools/build_manual.sh extracts the version the same way, and runs under
+     `set -euo pipefail` -- so the failed grep ABORTED THE SCRIPT ON LINE 10. The manual
+     had not been rebuilt at all; the PDF on disk was eight hours old, from the last
+     release when the version had no suffix. I nearly shipped it, and only caught it by
+     grepping the PDF for content I had just written and finding it absent.
+Both fixed to accept any version string, and build_manual.sh now FAILS LOUDLY if the
+version ever comes back empty rather than silently doing nothing.
+
+Recording this because the lesson is not the regex. It is that "the command exited 0"
+proved nothing: the script had exited 0 after doing no work, and the only thing that
+caught it was checking the OUTPUT for something that should be in it.
+
+Manual rebuilt: 165 pages, new content verified present.
+
+## 0.9.71 — MUF DXCC row hid the last region row (my bug, and the gate slept through it)
+
+Owner: with a DXCC target pinned, the last row of the region list is hidden behind the
+footer.
+
+Correct, and the arithmetic is unambiguous. The pinned row pushes the table down --
+TOP 38 -> 51 -- but ROWS stayed at the literal 8, so the last row started at y=128 and
+painted to y=139. footer() prints at y=127, over the top of it. The operator sees a list
+that is silently one row short with no indication anything is missing, which is worse
+than an obviously broken layout.
+
+FIX: derive the count instead of writing it down twice.
+    const int ROWH = 11, LAST_ROW_Y = 116;   // lowest y a row may START at
+    const int ROWS = (LAST_ROW_Y - TOP) / ROWH + 1;
+LAST_ROW_Y = 116 because a row paints fillRect(0, y-1, 240, ROWH), so y=116 fills to 126
+and just clears the footer. That gives 8 rows at TOP=38 -- EXACTLY the original layout,
+not a row fewer -- and 6 with a target pinned. A first attempt used ROW_BOTTOM=124 and
+silently cost a row that had always displayed correctly; caught by computing both cases
+before building rather than after.
+
+WHY audit_screen_geometry MISSED IT. The analyzer evaluates literal coordinate
+arithmetic. `int TOP = 38; ... TOP = 51;` is a mutable local with no single value at
+analysis time, so every bound derived from it was UNVERIFIED -- and the gate passed the
+function silently. Reporting success about something it never checked is the worst
+failure mode a gate has, and this is the third time in this cycle a gate has done it.
+
+GATE EXTENDED: a draw function whose list-layout base is a mutable int assigned more
+than once now FAILS, with the fix spelled out. Refined once during development, because
+the first version also flagged the CORRECTED code -- if the row count is derived from
+the moving variable the layout adapts and there is nothing to warn about, so only a
+moving base paired with a FIXED row count is flagged. Exactly one function in the tree
+matched when written (this one), so it is signal rather than noise. Validated both ways
+by exit code, not by eye: the pre-fix source exits 1, the fixed source exits 0.
+
+## 0.9.71 — my re-enumerate change broke re-scanning; and a VBUS theory retracted
+
+**REGRESSION, MINE.** The "re-enumerate from cold" fix released the host so the next
+scan would rebuild the list. The bench log shows what actually happens:
+
+    scan: re-enumerating from cold for an accurate list
+    scan: host would not start
+
+Every time. The IDF host cannot be reinstalled the instant it is uninstalled, so the
+scan left the operator with NO host at all -- worse than the stale list it was meant to
+fix, and it is the direct cause of "devices never re-enumerate when I re-scan".
+
+FIX: rebuild the registry from the LIVE host instead of tearing it down. The library
+already knows what is attached -- getDevices() reads its device table -- so a scan now
+tombstones every entry, re-publishes whatever is really there, and reports the count.
+No teardown, so nothing can fail to restart.
+
+**A THEORY I HAD NO BUSINESS SHIPPING.** From one line of Mini-FT8's README I concluded
+the Cardputer ADV's OTG port carries no VBUS without 5 V on PORTA, and I added an
+operator-facing hint saying so. The owner had already MEASURED VBUS; an IC-705 charges
+from the port, and a bus-powered serial adapter enumerates with no external supply. The
+hint was removed the moment that was pointed out. It would have sent operators to
+re-wire hardware that was never at fault -- a worse outcome than saying nothing.
+
+**WHAT MINI-FT8 ACTUALLY OFFERS, checked in its source rather than its prose.** It does
+not use the Arduino/IDF-bundled USB host: it vendors `espressif__usb` as a managed
+component, and it explicitly REPARTITIONS the ESP32-S3 FIFO because "built-in Kconfig
+biases do not cover" its case -- reserving lines specifically for NON-PERIODIC OUT,
+which is the FIFO that carries control transfers (enumeration) and CDC bulk.
+
+That matters here, because Arduino's prebuilt IDF ships
+**CONFIG_USB_HOST_HW_BUFFER_BIAS_PERIODIC_OUT=y** -- biased toward isochronous OUT,
+shrinking exactly that non-periodic FIFO. It is a plausible mechanism for the pattern
+seen all cycle: a simple adapter enumerates, a bigger composite is unreliable, and a hub
+(which needs control traffic to every downstream port) fails.
+
+BUT IT IS NOT ACTIONABLE FROM ARDUINO, and that is worth stating plainly rather than
+implying a fix exists: our `usb_host_config_t` has no `fifo_settings_custom` field --
+that is newer than the component Arduino bundles -- and the bias is compiled into the
+prebuilt library, not settable at runtime. Changing it needs either the standalone
+espressif__usb component or a custom IDF build.
+
+RULED OUT along the way: external hub support IS compiled into Arduino's library
+(ext_hub.c.obj and ext_port.c.obj are present, 37 symbols), so "hubs are not built in"
+is dead. And root_port_unpowered defaults false, so the root port is powered -- matching
+the owner's measurement.
+
+## 0.9.71 — native ESP-IDF build: assessed and written up, NOT started
+
+Owner asked whether a non-Arduino build is possible. Assessed against the actual
+container rather than from memory; written up in
+**docs/design/IDF_NATIVE_BUILD_PLAN.md** so it does not have to be re-researched.
+
+Short answer: yes, and the Arduino core is designed for it (arduino-esp32 3.2.1 ships
+CMakeLists.txt, Kconfig.projbuild and idf_component.yml), so every Arduino library
+CardSat depends on would keep working.
+
+Two facts worth having here as well:
+  * **Disk looked like the blocker and is not.** 1.8 G free of 252 G, but 2.3 G of what
+    is already installed is unused by this project -- esp-rv32 (2.1 G, RISC-V, and
+    CardSat is Xtensa only), both GDB builds, and OpenOCD. Pruning yields ~4.1 G.
+  * **The real cost is per-session, not one-off.** The container filesystem resets
+    between sessions, so an IDF install is 10-20 minutes of setup EVERY session before
+    any build runs. This cycle's USB work needed many short build/inspect rounds; a
+    native build would have made each slower.
+
+The plan front-loads the cheap failure modes: prove IDF builds at all with a throwaway
+hello_world, MEASURE the session tax, then test the actual hypothesis (a non-periodic
+FIFO bias enumerating a powered hub) in a minimal project -- and only consider porting
+CardSat if that experiment succeeds. If it fails, the FIFO theory dies for the cost of
+one experiment and the correct outcome is to document the hardware limit and stop
+spending on it.
+
+Also recorded there: esp32-arduino-lib-builder as the middle option (custom sdkconfig
+while keeping the Arduino workflow, and therefore the 18 gates and the release flow
+intact), and the fact that NOTHING about a native build reduces the hardware
+verification the owner still has to do.
+
+## 0.9.71 — "one device behind a hub works, two do not": the FIFO split, quantified
+
+Owner: one device behind a hub enumerates; two do not. That is the signature of a
+resource ceiling, not a hub fault, and the numbers are now exact rather than suspected.
+
+Read from the USB host driver's own source (hcd_dwc.c, obtained via Mini-FT8's vendored
+espressif__usb component). The ESP32-S3 has the full-speed PHY, so otg_dfifo_depth is
+256 and the port has 200 usable FIFO lines of 4 bytes each. The Kconfig bias decides the
+split:
+
+    PERIODIC_OUT (what Arduino ships)
+        RX               34 lines   136 B
+        NON-PERIODIC TX  16 lines    64 B     <-- control + BULK OUT
+        periodic TX     150 lines   600 B
+    BALANCED (the IDF default)
+        RX              104 lines   416 B
+        NON-PERIODIC TX  64 lines   256 B     <-- 4x more
+        periodic TX      32 lines   128 B
+
+**The non-periodic TX FIFO carries CONTROL transfers and BULK OUT** -- that is
+enumeration itself, and every CDC write. Arduino's setting leaves it **64 bytes:
+exactly one full-speed 64-byte packet.**
+
+That fits the whole cycle's evidence without straining:
+  * one CDC device: fits, works;
+  * a second device: its control transfers must share a single-packet FIFO with the
+    first device's traffic -- enumeration of the second fails;
+  * a hub: needs control traffic to the hub AND to each downstream port;
+  * a lone simple adapter direct: always fine, which is why nothing looked wrong until
+    two devices were asked for.
+Arduino presumably chose PERIODIC_OUT for USB audio and MIDI, which is the opposite of
+what CAT over CDC wants.
+
+NOT FIXABLE FROM ARDUINO, and worth stating flatly rather than implying a workaround:
+the split is computed inside the prebuilt library at usb_host_install() time from a
+compile-time Kconfig. Our usb_host_config_t has no fifo_settings_custom field (that is
+newer than the bundled component), so there is no runtime override. Nothing in
+EspUsbHost, and nothing in CardSat, can change it.
+
+This is now the strongest single argument for the native-IDF work, and it converts the
+plan's step 3 from "test a theory" into "confirm a computed figure": build a minimal IDF
+project with BALANCED (or a custom split) and see whether two devices behind a hub
+enumerate. If they do, the cause is settled. If they do not, the FIFO theory dies for
+the cost of one experiment -- which is exactly what that step exists for.

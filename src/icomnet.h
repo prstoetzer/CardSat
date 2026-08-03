@@ -60,6 +60,9 @@ public:
   // Pumped every loop tick: advances the connect/auth state machine, answers and
   // sends keepalives, drains both sockets, re-auths, and reconnects on loss.
   void service() override;
+  // On-demand session: false tears the session down and holds it idle (no sockets,
+  // no retries); true lets service() connect. See Rig::setSessionWanted().
+  void setSessionWanted(bool want) override;
 
   bool setMainFreq(freq_t hz) override;        // uplink (TX) on MAIN
   bool setSubFreq (freq_t hz) override;        // downlink (RX) on SUB
@@ -106,6 +109,7 @@ private:
 
   WiFiUDP    _ctl, _ser;
   NetState   _state = NS_IDLE;
+  bool       _sessionWanted = false;   // set by setSessionWanted(); no session until true
 
   uint32_t _ctlLocalSID = 0, _ctlRemoteSID = 0;
   uint32_t _serLocalSID = 0, _serRemoteSID = 0;

@@ -14,10 +14,23 @@
 //  section 7 -- the one item to confirm against real hardware).
 // ===========================================================================
 #include "icomnet.h"
+#include "logstore.h"   // NLOG mirrors to /CardSat/Logs/usb.log; see NLOG below
+#include <esp_heap_caps.h>  // largest-free-block at a stall: fragmentation is the suspect
 
 #define ICOMNET_DEBUG 1
 #if ICOMNET_DEBUG
-  #define NLOG(...)  do { Serial.printf(__VA_ARGS__); } while (0)
+  // Mirror to the USB/CAT log as well as the console.
+  //
+  // NLOG used to go to Serial ONLY, which is exactly the wrong place: in a dual rig
+  // with one leg on USB, engaging CAT takes the USB PHY and the console disappears --
+  // so a LAN leg that failed to connect did so with no diagnosable trace anywhere.
+  // That is the configuration the mixed-bus begin() bug broke, and it was invisible
+  // for precisely this reason. The disk copy costs nothing when no log is configured
+  // (Logstore checks a closed file and returns).
+  #define NLOG(...)  do { Serial.printf(__VA_ARGS__); \
+                          { char _nb[160]; snprintf(_nb, sizeof(_nb), __VA_ARGS__); \
+                            for (char* _p = _nb; *_p; ++_p) if (*_p == '\n') *_p = 0; \
+                            Logstore::line(Logstore::LOG_USB, _nb); } } while (0)
 #else
   #define NLOG(...)  do {} while (0)
 #endif
@@ -103,7 +116,17 @@ void IcomNetRig::startConnect() {
   uint32_t ms = millis();
   _tStateMs = _tLastRxMs = _tPingCtlMs = _tIdleCtlMs = ms;
   _state = NS_CTL_OPEN;
-  NLOG("[NET] connecting to %s:%u (CI-V %02X)\n", _host.c_str(), _ctlPort, _addr);
+  // Report the CREDENTIAL SHAPE (lengths, never contents). NS_CTL_LOGIN is the state
+  // the bench stalls in, and an empty username or password produces exactly this
+  // signature: the radio does not answer at all, so there is no 96-byte reply to
+  // reject and the handshake times out rather than failing cleanly with "invalid
+  // username/password". Credentials are PER LEG, so moving a radio between the
+  // downlink and uplink legs leaves its user/pass behind on the old leg -- easy to do
+  // and invisible afterwards, and it would explain why this config fails while the
+  // same radio alone on the other leg works.
+  NLOG("[NET] connecting to %s:%u (CI-V %02X) user=%u ch pass=%u ch\n",
+       _host.c_str(), _ctlPort, _addr,
+       (unsigned)_user.length(), (unsigned)_pass.length());
   sendAreYouThere(true);
 }
 
@@ -115,12 +138,29 @@ void IcomNetRig::failReconnect(const char* why) {
 }
 
 void IcomNetRig::teardown(bool graceful) {
-  if (graceful && _state == NS_CONNECTED) {
+  // TELL THE RADIO WHENEVER WE HAVE ITS ATTENTION, not only when fully connected.
+  //
+  // An IC-705 accepts ONE network session at a time, and a half-finished login still
+  // occupies it. The old test (_state == NS_CONNECTED) meant that disengaging while
+  // the handshake was in flight sent nothing at all, so the radio kept a session that
+  // CardSat had already forgotten. The bench signature is unmistakable: engage 1 and 2
+  // connected, engage 3 stalled at NS_CTL_AUTH, engage 4 and every retry after stalled
+  // at NS_CTL_LOGIN -- the failure moving EARLIER each cycle as stale sessions piled
+  // up, which is not what a transient network fault looks like.
+  //
+  // Anything past NS_CTL_OPEN means the radio has answered us and a session exists to
+  // close. Sending a de-auth and disconnect it does not need is harmless; failing to
+  // send one it does need costs a radio power cycle.
+  if (graceful && _state > NS_CTL_OPEN) {
     if (_serOpened) sendSerOpenClose(true);
     sendAuth(0x01);              // de-auth on the control stream
     sendDisconnect(false);
     sendDisconnect(true);
-    delay(20);
+    // 20 ms was not enough to be sure the datagrams left before the sockets close --
+    // and a disconnect that never goes out is exactly the failure above. UDP gives no
+    // acknowledgement to wait for, so pump the socket briefly instead of guessing.
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 120) { pumpCtl(); delay(5); }
   }
   _ctl.stop(); _ser.stop();
   _serOpened = false;
@@ -320,6 +360,19 @@ void IcomNetRig::handleCtl(const uint8_t* r, int n) {
     if (r[48] == 0x00 && r[49] == 0x00 && r[50] == 0x00 && r[64] == 0x01) { failReconnect("radio disconnected"); return; }
     return;
   }
+  // ANYTHING ELSE, while still handshaking. Every branch above matches on an exact
+  // length AND first byte, so a reply of an unexpected size is silently discarded --
+  // which looks identical to no reply at all, and is why a stall at NS_CTL_LOGIN with
+  // packets visibly arriving could not be told apart from a radio that never answered.
+  // Rate-limited to the handshake states so a connected session cannot flood the log.
+  if (_state != NS_CONNECTED && _state != NS_IDLE) {
+    static uint8_t csUnk = 0;
+    if (csUnk < 8) {
+      csUnk++;
+      NLOG("[NET] unhandled ctl pkt in state %d: len=%d first=%02X %02X %02X %02X\n",
+           (int)_state, n, r[0], n > 1 ? r[1] : 0, n > 4 ? r[4] : 0, n > 5 ? r[5] : 0);
+    }
+  }
   if (n == 144 && r[0] == 0x90) {                // conninfo success
     if (_state != NS_CTL_CONN || r[96] != 1) return;
     _ctlRemoteSID = rd32be(r + 8); _ctlLocalSID = rd32be(r + 12);
@@ -355,7 +408,24 @@ void IcomNetRig::handleSer(const uint8_t* r, int n) {
   // unsolicited frequency-change broadcasts are ignored here.
 }
 
+// On-demand session. Holding two UDP sockets and re-running a login handshake every
+// 8 seconds costs real memory and does it from boot, whether or not the operator has
+// turned radio control on -- the one socket owner in CardSat that was not on-demand.
+// Releasing on the way down also means a disengage actually closes the session with
+// the radio (teardown sends de-auth and disconnect) instead of abandoning it.
+void IcomNetRig::setSessionWanted(bool want) {
+  if (want == _sessionWanted) return;
+  _sessionWanted = want;
+  if (!want) {
+    teardown(true);                     // teardown() decides if there is anything to say
+    NLOG("[NET] session released (radio control off)\n");
+  } else {
+    _tLastTryMs = 0;                    // connect on the next service(), no backoff wait
+  }
+}
+
 void IcomNetRig::service() {
+  if (!_sessionWanted) { if (_state != NS_IDLE) resetSession(); return; }
   if (!wifiUp()) { if (_state != NS_IDLE) resetSession(); return; }
   if (_state == NS_IDLE) {
     if (millis() - _tLastTryMs >= 4000) startConnect();
@@ -364,7 +434,24 @@ void IcomNetRig::service() {
   pumpCtl(); pumpSer();
   uint32_t ms = millis();
   if (ms - _tLastRxMs > 8000) { failReconnect("link timeout"); return; }
-  if (_state != NS_CONNECTED && ms - _tStateMs > 4000) { failReconnect("handshake stalled"); return; }
+  if (_state != NS_CONNECTED && ms - _tStateMs > 4000) {
+    // Report the RESOURCE PICTURE with the failure, not just the failure.
+    //
+    // Measured on the bench: a LAN leg alone works, a USB leg alone works, and the two
+    // together stall here every time -- with free heap down to ~26 KB and the largest
+    // contiguous block collapsed from 31,732 to ~7,000 bytes. Wi-Fi cannot allocate
+    // receive buffers in that state, so the login reply never lands and this timeout
+    // fires. Which state we were in when it happened, and how much memory was left,
+    // are the two facts that separate "starved of memory" from "the radio never
+    // answered" -- and neither was in the log before.
+    NLOG("[NET] stalled in state %d after %lums | heap=%lu largest=%lu rx=%lums ago\n",
+         (int)_state, (unsigned long)(ms - _tStateMs),
+         (unsigned long)ESP.getFreeHeap(),
+         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+         (unsigned long)(ms - _tLastRxMs));
+    failReconnect("handshake stalled");
+    return;
+  }
 
   if (_state >= NS_CTL_READY) {
     if (ms - _tPingCtlMs >= 500) { sendPing(true); _tPingCtlMs = ms; }
@@ -426,6 +513,15 @@ bool IcomNetRig::setFreqNet(bool sub, freq_t hz) {
     return sendCivPayload(pl6, 7);
   }
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
+  // The exact Hz put on the wire. CI-V carries 1 Hz resolution and CardSat applies no
+  // rounding on this path, so if the radio still lands on a 5 kHz boundary the
+  // quantisation is the RADIO's (an Icom tuning-step setting), not ours. Rate-limited:
+  // Doppler writes are frequent.
+  {
+    static uint8_t csF = 0;
+    if ((++csF % 16) == 1)
+      NLOG("[NET CI-V TX] set freq %llu Hz exactly\n", (unsigned long long)hz);
+  }
   return sendCivPayload(pl, 6);
 }
 bool IcomNetRig::setModeNet(bool sub, CivMode m, uint8_t filter) {
@@ -437,30 +533,76 @@ bool IcomNetRig::readFreqNet(bool sub, freq_t& hzOut) {
   if (_state != NS_CONNECTED) return false;
   if (!_plain && !RADIOS[_model].canReadFreq) return false;
   selBand(sub);
-  while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); }  // drain stale
+  // COUNT what the "drain stale" throws away. A reply that arrived after the previous
+  // read's budget expired lands here and is discarded as stale -- and since the radio
+  // demonstrably answers in 4-12 ms when it answers at all, a steady stream of
+  // discarded packets would mean the replies ARE coming and we are one read behind,
+  // not that the radio is ignoring us. Those are opposite problems with opposite fixes.
+  int csDrained = 0;
+  while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); csDrained++; }
   uint8_t pl[1] = { 0x03 };
   sendCivPayload(pl, 1);
   uint32_t t0 = millis();
+  int csSeen = 0;                     // packets that arrived during THIS read
+  // First bytes of the last CI-V frame seen but NOT matched. If the transceive theory
+  // is right these read FE FE 00 <addr> 00 -- broadcast, command 0x00 -- which is what
+  // the widened match above now accepts. Anything else means the theory is wrong and
+  // the bytes say what is really arriving.
+  uint8_t csLast[5] = {0, 0, 0, 0, 0};
   while (millis() - t0 < (readBudgetMs ? readBudgetMs : 300)) {
     int n = _ser.parsePacket();
     if (n <= 0) { pumpCtl(); delay(2); continue; }
     uint8_t buf[96]; int r = _ser.read(buf, sizeof(buf)); if (r <= 0) continue;
+    csSeen++;
     _tLastRxMs = millis();
     if (isPing(buf, r)) { if (buf[16] == 0x00) replyPing(false, buf); continue; }
     if (r >= 22 && buf[16] == 0xc1) {
+      if (r >= 26) memcpy(csLast, buf + 21, 5);   // the CI-V frame's leading bytes
       int N = buf[17];
       if (21 + N <= r && N >= 11) {
         const uint8_t* f = buf + 21;
-        if (f[0] == 0xFE && f[1] == 0xFE && f[2] == 0xE0 && f[3] == _addr &&
-            f[4] == 0x03 && f[10] == 0xFD) {
+        // ACCEPT CI-V TRANSCEIVE BROADCASTS, not just replies addressed to us.
+        //
+        // An Icom with CI-V Transceive on emits a frame every time the dial moves,
+        // addressed to 0x00 (broadcast) with command 0x00, rather than to 0xE0 (the
+        // controller) with 0x03. Requiring E0/03 threw those away -- which is why the
+        // bench saw 12-13 packets arrive during EVERY 300 ms read and none of them
+        // match, with only the occasional direct poll reply getting through. Those
+        // discarded frames are precisely the dial position that uplink-based OTR
+        // tuning is trying to follow, which is why it felt unresponsive while the
+        // downlink path (a different transport) felt smooth.
+        //
+        // Both forms carry the same 5-byte BCD frequency in the same place, so one
+        // check covers them: FE FE <E0|00> <addr> <03|00> <5 BCD> FD.
+        if (f[0] == 0xFE && f[1] == 0xFE && (f[2] == 0xE0 || f[2] == 0x00) &&
+            f[3] == _addr && (f[4] == 0x03 || f[4] == 0x00) && f[10] == 0xFD) {
           freq_t hz = 0;
           for (int k = 9; k >= 5; --k) hz = hz * 100 + (f[k] >> 4) * 10 + (f[k] & 0x0F);
           hzOut = hz;
-          NLOG("[NET CI-V] %s freq %llu Hz\n", sub ? "SUB" : "MAIN", (unsigned long long)hz);
+          // The latency of a SUCCESSFUL read is the number that decides whether the
+          // 200 ms budget is simply too short for this transport.
+          NLOG("[NET CI-V] %s freq %llu Hz (answered in %lums)\n", sub ? "SUB" : "MAIN",
+               (unsigned long long)hz, (unsigned long)(millis() - t0));
           return true;
         }
       }
     }
+  }
+  // Read latency is the question here. CardSat caps readBudgetMs at 200 ms via
+  // constrain(catRate/4, 60, 200), and the bench shows cmd 03 going out every ~405 ms
+  // (a 200 ms timeout plus overhead) while an answer lands only every 4-12 s. So
+  // almost every read times out -- which is what makes uplink-based tuning feel
+  // unresponsive. Whether 200 ms is simply too short for this transport, or replies
+  // are being lost for another reason, is decided by how long a SUCCESSFUL read takes;
+  // guessing a bigger budget without that number is how the last three theories died.
+  {
+    static uint16_t csTo = 0;
+    if ((++csTo % 8) == 1)
+      NLOG("[NET] freq read TIMEOUT after %lums (budget %u) -- %u so far, "
+           "drained %d stale, saw %d pkt(s), last CI-V %02X %02X %02X %02X %02X\n",
+           (unsigned long)(millis() - t0), (unsigned)(readBudgetMs ? readBudgetMs : 300),
+           (unsigned)csTo, csDrained, csSeen,
+           csLast[0], csLast[1], csLast[2], csLast[3], csLast[4]);
   }
   return false;
 }

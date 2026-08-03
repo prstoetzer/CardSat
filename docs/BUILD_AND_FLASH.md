@@ -112,14 +112,31 @@ under **Tools**:
 |---|---|
 | Board | **ESP32S3 Dev Module** (full Tools menu) or **M5StampS3** |
 | Flash Size | **8MB (64Mb)** |
-| Partition Scheme | **Huge APP (3MB No OTA/1MB SPIFFS)** — **required** |
+| Partition Scheme | **Custom** — uses the repo's `partitions.csv` |
 | PSRAM | **Disabled** |
 | USB CDC On Boot | **Enabled** |
 
-The default ~1.25 MB app partition is too small and the build fails with *"Sketch
-too big"*; the 3 MB "Huge APP" layout fits (the app is ~92.9% of it as of 0.9.64,
-so headroom is limited but sufficient — see the size note below) and provides the
-1 MB SPIFFS region that LittleFS uses for cached data.
+**Partition scheme (changed in 0.9.71).** CardSat now ships its own `partitions.csv`:
+**4 MB app + 1.5 MB LittleFS**. The stock "Huge APP" scheme is a 4 MB-part layout and
+left half of the Cardputer ADV's 8 MB flash unused while the firmware sat at 97 KB of
+headroom. The 4 MB ceiling is deliberate rather than maximal: most people install
+through Launcher, which lives in the same flash and sizes its own partition table to the
+binary, so it needs room too.
+
+In the Arduino IDE choose **Partition Scheme → Custom**; the IDE reads `partitions.csv`
+from the sketch folder, so copy it next to `CardSat.ino`. With `arduino-cli`, use
+`PartitionScheme=custom` and put `partitions.csv` in the sketch directory.
+
+Two things in that file must not be changed: the filesystem partition must stay **named
+`spiffs`** (CardSat calls `LittleFS.begin(true)`, which looks that label up — a rename
+mounts nothing and silently loses every setting), and the **coredump** partition must
+stay (the panic backtrace is read back on the next boot).
+
+**Watch the size yourself.** With a custom scheme, `arduino-cli` reports usage against
+the scheme's declared ceiling in `boards.txt` (16 MB), *not* against the 4 MB app
+partition you actually defined — so a binary too large to flash will still be reported
+as healthy. `tools/check_app_fits.py` exists precisely to catch that; run it after
+building.
 
 ### USB CAT (`CAT_USB`) — on by default since 0.9.59
 
@@ -299,7 +316,8 @@ needs it.
 ### Do NOT use `-O2`
 
 `-O2` was ~39% larger than `-Os` on the same sample. CardSat's `.bin` is already
-**2,921,408 of the 3,145,728-byte `huge_app` app partition — 92.9%**. Even a 10% text
+**3,065,206 of the 4,194,304-byte app partition — 73.1%** since 0.9.71 moved to a
+custom layout. (Before that it was 92.9% of a 3 MB partition.) Even a 10% text
 growth would not fit. `-Os` is the only correct setting for this project.
 
 > `build_opt.h` also carries **`-mtext-section-literals`**, and this one is not optional: as

@@ -429,7 +429,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.70";
+static constexpr const char* FW_VERSION = "0.9.71";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build.
@@ -1218,6 +1218,16 @@ public:
   // state machine and answer keepalives here; wired backends need nothing.
   virtual void service() {}
 
+  // Does this rig want a live network session right now?
+  //
+  // Network-backed rigs (Icom LAN) hold real resources -- UDP sockets and lwIP state --
+  // and run a connect/keepalive state machine. Everything else in CardSat that owns a
+  // socket is already on-demand: APRS-IS lives only while its screen is open, the live
+  // feeds free their buffers on the way out. The LAN rig never adopted that pattern and
+  // connected from boot forever, retrying every 8 s, whether or not radio control was
+  // even on. Wired and USB backends ignore this.
+  virtual void setSessionWanted(bool) {}
+
   // Inter-command pacing: pause this many ms after each CAT frame (CAT Delay),
   // so a slow radio keeps up. Overwritten from the CAT Delay setting at engage.
   // Virtual so the DualRig composite can forward pacing to both of its legs.
@@ -1567,6 +1577,14 @@ private:
   uint32_t kwGrid() const { return _kwFine ? 20u : 5000u; }
   bool     _kwSession = false;     // VM/BC applied to the current stream
   bool     _kwFine    = false;     // fine mode currently requested (SSB/CW only)
+  RigMode  _kwMode    = RM_USB;    // last mode sent, so the step can be re-applied
+  uint8_t  _kwBand    = 0xff;      // coarse band of the last frequency written
+  // Coarse band of a frequency. The TH-D75 keeps its tuning step PER BAND, so a write
+  // that crosses one of these boundaries lands on the new band's step and silently
+  // discards the fine step we set for the old one.
+  static uint8_t kwBandOf(freq_t hz) {
+    return hz < 30000000ULL ? 0 : (hz < 300000000ULL ? 1 : 2);
+  }
   bool sendMode(RigMode m);
   bool readFreq(freq_t& hzOut);
   bool sendFrame(const uint8_t* b, size_t n);
@@ -1592,6 +1610,7 @@ public:
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override;
   void service() override;
+  void setSessionWanted(bool want) override;    // forwarded to both legs
   void setCmdDelay(uint16_t ms) override;
   void setReadBudgetMs(uint16_t ms) override;
   void setPinMode(uint8_t mode) override;       // CI-V wiring, forwarded to both legs
@@ -2151,6 +2170,9 @@ public:
   // Pumped every loop tick: advances the connect/auth state machine, answers and
   // sends keepalives, drains both sockets, re-auths, and reconnects on loss.
   void service() override;
+  // On-demand session: false tears the session down and holds it idle (no sockets,
+  // no retries); true lets service() connect. See Rig::setSessionWanted().
+  void setSessionWanted(bool want) override;
 
   bool setMainFreq(freq_t hz) override;        // uplink (TX) on MAIN
   bool setSubFreq (freq_t hz) override;        // downlink (RX) on SUB
@@ -2197,6 +2219,7 @@ private:
 
   WiFiUDP    _ctl, _ser;
   NetState   _state = NS_IDLE;
+  bool       _sessionWanted = false;   // set by setSessionWanted(); no session until true
 
   uint32_t _ctlLocalSID = 0, _ctlRemoteSID = 0;
   uint32_t _serLocalSID = 0, _serRemoteSID = 0;
@@ -3426,7 +3449,7 @@ enum Screen : uint8_t {
   SCR_CALEXPORT,
   SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_PERF,
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_BASICASK, SCR_CALCREF, SCR_PERF,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
   SCR_KESSLER, SCR_QTHPRE,
   // "Nearby & DX" hub and its live terrestrial feeds. These are fetch-and-browse views
@@ -6232,6 +6255,8 @@ static const int DXCC_NOTES_N = 107;
 
 // ===== end src/dxcc_lookup.h =====
 
+
+
 // ===== inlined from src/cqzones.h (CQ WAZ zone definitions) =====
 // Auto-generated by tools/gen_cqzones.py from the CQ WAZ zone list.
 // Source: https://cqww.com/cq_waz_list.htm
@@ -8213,6 +8238,15 @@ private:
   void rotPoint(float az, float el);   // send az/el applying the az-range convention
   void parkAndReleaseRotator();        // park, then free a USB rotator's host (~12 KB) when off
   void applyTransponderModes(const Transponder& t);  // per-leg SSB/FM mode policy
+  // Set when applyTransponderModes() ran before every leg was ready -- normal in a
+  // mixed dual rig, where a LAN leg is still handshaking while a USB leg is live.
+  // The loop retries once the rig reports ready; without it the modes were lost and
+  // a TH-D75 leg silently stayed on its 5 kHz normal step.
+  bool modeApplyPending = false;
+  // Set when initializeEngagedRig() ran before every leg was ready. That function also
+  // carries sat mode, band assignment and the CAT read budget, so losing it costs more
+  // than the modes alone; the loop retries it once the rig reports ready.
+  bool rigInitPending = false;
   void initializeEngagedRig();  // post-connect engage init (sat mode, bands, modes, budget)
   // Compute the per-tick CAT write deadband (mode-aware, adaptively tightened
   // near TCA) and the TCA-tapered predictive lead range rate. `rrNow` is the
@@ -8858,6 +8892,12 @@ private:
   // is an embedded table generated from the ARRL DXCC list (dxcc_lookup.h).
   String dxQuery;
   int dxSel = 0, dxScroll = 0;      // selection + scroll within the filtered list
+  // The DXCC type-to-search screen doubles as a PICKER. 0 = normal (ENTER opens the
+  // entity detail); 1 = picking a MUF path target, where ENTER hands the choice back
+  // to the MUF tool instead. Reusing one search screen keeps a single place that knows
+  // how to match prefixes and names.
+  uint8_t dxPickFor = 0;
+  int     mufDxccIdx = -1;          // DXCC_LK index of the MUF path target, -1 = none
   int dxMatch[32]; int dxMatchN = 0; // indices into DXCC_LK of current matches (capped)
   int dxDetail = 0;                  // DXCC_LK index shown on the detail card
   void dxRunFilter();
@@ -9711,6 +9751,36 @@ private:
   // inferred from a rising voltage trend over ~30 s, since the ADV exposes no charger line.
   int      batteryMilliVolts();     // GPIO10 * divider, mV (0 if unreadable)
   bool     batteryCharging();       // ALWAYS false: this board cannot report it
+
+  // ---- BASIC pre-run input form (SCR_BASICASK) -----------------------------------
+  // A program declares its inputs with INPUT "prompt"; VAR. Before the program runs,
+  // CardSat scans for those declarations and presents ONE form; the program then
+  // executes to completion exactly as before, with the variables already set.
+  //
+  // Why a form and not a run-time prompt: the interpreter runs inside a single key
+  // handler, to completion, with the watchdog fed by a statement budget. Stopping
+  // mid-run to wait for a keystroke would mean re-entering the event loop with a live
+  // VM on the stack -- which is the design this interpreter deliberately avoids.
+  // Collecting first keeps the "runs to completion" property intact.
+  struct BasicAsk {
+    char   var = 'A';        // A-Z
+    bool   isStr = false;    // true for A$
+    String prompt;
+    String value;
+  };
+  static const int BASIC_ASK_MAX = 6;
+  BasicAsk basicAsk[BASIC_ASK_MAX];
+  int      basicAskN = 0, basicAskSel = 0;
+  int      basicScanInputs();      // fills basicAsk[], returns the count
+  // Calculator function reference (SCR_CALCREF), reached with Fn+f from either
+  // calculator. The two-line hint above the entry line can only ever show a dozen of
+  // the 65 names; without a full list on the device, the rest may as well not exist.
+  int      calcRefScroll = 0;
+  Screen   calcRefFrom = SCR_CALC;   // which calculator opened the reference
+  void     drawCalcRef();
+  void     keyCalcRef(char c, bool enter, bool back);
+  void     drawBasicAsk();
+  void     keyBasicAsk(char c, bool enter, bool back);
   // (removed in 0.9.70: battTrendMv/battTrendMs/battChargeState -- the voltage-trend
   //  charge inference. The Cardputer ADV has no charger status line at all, so the
   //  state was never knowable; see batteryCharging() for the full evidence.)
@@ -11583,6 +11653,7 @@ void PlainCatRig::kwApplyStepForMode(RigMode m) {
   // AM is included on measurement, not assumption: the sweep showed band B accepts
   // FT 1 in AM and reaches the same 20 Hz grid as SSB/CW. NFM refuses fine mode and
   // stays on 5 kHz, which is where RM_FM and RM_DATA land.
+  _kwMode = m;                          // remembered so a band change can re-apply it
   const bool fine = (m == RM_USB || m == RM_LSB || m == RM_CW || m == RM_AM);
   char b[16];
   int n = snprintf(b, sizeof(b), "FT %c\r", fine ? '1' : '0');
@@ -11604,13 +11675,43 @@ bool PlainCatRig::sendFreq(freq_t hz) {
     // fine mode is on (SSB/CW) and 5 kHz otherwise.
     kwEnsureSession();                       // VFO mode + control band, once
     const uint32_t g = kwGrid();
+    const freq_t want = hz;
     hz = (freq_t)(((hz + g / 2) / g) * g);   // nearest, not truncated
+    // WHICH SIDE ROUNDS? The bench sees 5 kHz quantisation on an AO-7 mode A downlink
+    // while the radio itself demonstrably does 20 Hz there (verified at 29.4 MHz), and
+    // the band-change theory was measured and refuted. So the number CardSat actually
+    // puts on the wire, and the grid it chose, have to be visible -- reading the code
+    // has now failed twice. Logged only when rounding actually moved the frequency.
+    if (want != hz)
+      Serial.printf("[KWHT] want %llu -> sent %llu (grid %lu, fine=%d)\n",
+                    (unsigned long long)want, (unsigned long long)hz,
+                    (unsigned long)g, (int)_kwFine);
   }
   uint8_t fr[24];
   size_t n = legBuildFreqFrame(fam, _addr, hz, fr, sizeof(fr),
                                LEG_RADIOS[_model].wideFreq);
   bool ok = sendFrame(fr, n);
   if (ok) _lastSetMs = millis();
+  // RE-APPLY THE STEP AFTER A BAND CHANGE.
+  //
+  // The TH-D75 holds its tuning step PER BAND. CardSat sends MD/FT/FS first and the
+  // frequency second, so on a bird whose downlink is in a different band from wherever
+  // the radio was sitting -- AO-7 mode A, downlink 29.4 MHz, is the case that exposed
+  // it -- the fine step is set on the old band and then thrown away by the move to the
+  // new one. Everything downstream still BELIEVES fine mode is on: kwGrid() keeps
+  // returning 20 Hz and CardSat keeps sending exact frequencies, while the radio
+  // quantises them to the band's 5 kHz step. The symptom is "rounding on HF downlinks
+  // only", with VHF/UHF perfect.
+  //
+  // Measured, not assumed: thd75_verify.py --freq 29400000 shows USB/LSB/CW/AM all
+  // accepting fine mode with a 20 Hz grid at 29.4 MHz, so the radio is not the limit.
+  if (ok && fam == LEGF_KWHT) {
+    const uint8_t band = kwBandOf(hz);
+    if (band != _kwBand) {
+      _kwBand = band;
+      kwApplyStepForMode(_kwMode);        // re-assert FT/FS on the band we just entered
+    }
+  }
   return ok;
 }
 
@@ -11718,6 +11819,11 @@ bool DualRig::ready() const {
 void DualRig::service() {
   if (_down) _down->service();
   if (_up)   _up->service();
+}
+
+void DualRig::setSessionWanted(bool want) {
+  if (_down) _down->setSessionWanted(want);
+  if (_up)   _up->setSessionWanted(want);
 }
 
 void DualRig::setCmdDelay(uint16_t ms) {
@@ -13513,7 +13619,18 @@ bool PstRotator::readPos(float& az, float& el) {
 
 #define ICOMNET_DEBUG 1
 #if ICOMNET_DEBUG
-  #define NLOG(...)  do { Serial.printf(__VA_ARGS__); } while (0)
+  // Mirror to the USB/CAT log as well as the console.
+  //
+  // NLOG used to go to Serial ONLY, which is exactly the wrong place: in a dual rig
+  // with one leg on USB, engaging CAT takes the USB PHY and the console disappears --
+  // so a LAN leg that failed to connect did so with no diagnosable trace anywhere.
+  // That is the configuration the mixed-bus begin() bug broke, and it was invisible
+  // for precisely this reason. The disk copy costs nothing when no log is configured
+  // (Logstore checks a closed file and returns).
+  #define NLOG(...)  do { Serial.printf(__VA_ARGS__); \
+                          { char _nb[160]; snprintf(_nb, sizeof(_nb), __VA_ARGS__); \
+                            for (char* _p = _nb; *_p; ++_p) if (*_p == '\n') *_p = 0; \
+                            Logstore::line(Logstore::LOG_USB, _nb); } } while (0)
 #else
   #define NLOG(...)  do {} while (0)
 #endif
@@ -13599,7 +13716,17 @@ void IcomNetRig::startConnect() {
   uint32_t ms = millis();
   _tStateMs = _tLastRxMs = _tPingCtlMs = _tIdleCtlMs = ms;
   _state = NS_CTL_OPEN;
-  NLOG("[NET] connecting to %s:%u (CI-V %02X)\n", _host.c_str(), _ctlPort, _addr);
+  // Report the CREDENTIAL SHAPE (lengths, never contents). NS_CTL_LOGIN is the state
+  // the bench stalls in, and an empty username or password produces exactly this
+  // signature: the radio does not answer at all, so there is no 96-byte reply to
+  // reject and the handshake times out rather than failing cleanly with "invalid
+  // username/password". Credentials are PER LEG, so moving a radio between the
+  // downlink and uplink legs leaves its user/pass behind on the old leg -- easy to do
+  // and invisible afterwards, and it would explain why this config fails while the
+  // same radio alone on the other leg works.
+  NLOG("[NET] connecting to %s:%u (CI-V %02X) user=%u ch pass=%u ch\n",
+       _host.c_str(), _ctlPort, _addr,
+       (unsigned)_user.length(), (unsigned)_pass.length());
   sendAreYouThere(true);
 }
 
@@ -13611,12 +13738,29 @@ void IcomNetRig::failReconnect(const char* why) {
 }
 
 void IcomNetRig::teardown(bool graceful) {
-  if (graceful && _state == NS_CONNECTED) {
+  // TELL THE RADIO WHENEVER WE HAVE ITS ATTENTION, not only when fully connected.
+  //
+  // An IC-705 accepts ONE network session at a time, and a half-finished login still
+  // occupies it. The old test (_state == NS_CONNECTED) meant that disengaging while
+  // the handshake was in flight sent nothing at all, so the radio kept a session that
+  // CardSat had already forgotten. The bench signature is unmistakable: engage 1 and 2
+  // connected, engage 3 stalled at NS_CTL_AUTH, engage 4 and every retry after stalled
+  // at NS_CTL_LOGIN -- the failure moving EARLIER each cycle as stale sessions piled
+  // up, which is not what a transient network fault looks like.
+  //
+  // Anything past NS_CTL_OPEN means the radio has answered us and a session exists to
+  // close. Sending a de-auth and disconnect it does not need is harmless; failing to
+  // send one it does need costs a radio power cycle.
+  if (graceful && _state > NS_CTL_OPEN) {
     if (_serOpened) sendSerOpenClose(true);
     sendAuth(0x01);              // de-auth on the control stream
     sendDisconnect(false);
     sendDisconnect(true);
-    delay(20);
+    // 20 ms was not enough to be sure the datagrams left before the sockets close --
+    // and a disconnect that never goes out is exactly the failure above. UDP gives no
+    // acknowledgement to wait for, so pump the socket briefly instead of guessing.
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 120) { pumpCtl(); delay(5); }
   }
   _ctl.stop(); _ser.stop();
   _serOpened = false;
@@ -13816,6 +13960,19 @@ void IcomNetRig::handleCtl(const uint8_t* r, int n) {
     if (r[48] == 0x00 && r[49] == 0x00 && r[50] == 0x00 && r[64] == 0x01) { failReconnect("radio disconnected"); return; }
     return;
   }
+  // ANYTHING ELSE, while still handshaking. Every branch above matches on an exact
+  // length AND first byte, so a reply of an unexpected size is silently discarded --
+  // which looks identical to no reply at all, and is why a stall at NS_CTL_LOGIN with
+  // packets visibly arriving could not be told apart from a radio that never answered.
+  // Rate-limited to the handshake states so a connected session cannot flood the log.
+  if (_state != NS_CONNECTED && _state != NS_IDLE) {
+    static uint8_t csUnk = 0;
+    if (csUnk < 8) {
+      csUnk++;
+      NLOG("[NET] unhandled ctl pkt in state %d: len=%d first=%02X %02X %02X %02X\n",
+           (int)_state, n, r[0], n > 1 ? r[1] : 0, n > 4 ? r[4] : 0, n > 5 ? r[5] : 0);
+    }
+  }
   if (n == 144 && r[0] == 0x90) {                // conninfo success
     if (_state != NS_CTL_CONN || r[96] != 1) return;
     _ctlRemoteSID = rd32be(r + 8); _ctlLocalSID = rd32be(r + 12);
@@ -13851,7 +14008,24 @@ void IcomNetRig::handleSer(const uint8_t* r, int n) {
   // unsolicited frequency-change broadcasts are ignored here.
 }
 
+// On-demand session. Holding two UDP sockets and re-running a login handshake every
+// 8 seconds costs real memory and does it from boot, whether or not the operator has
+// turned radio control on -- the one socket owner in CardSat that was not on-demand.
+// Releasing on the way down also means a disengage actually closes the session with
+// the radio (teardown sends de-auth and disconnect) instead of abandoning it.
+void IcomNetRig::setSessionWanted(bool want) {
+  if (want == _sessionWanted) return;
+  _sessionWanted = want;
+  if (!want) {
+    teardown(true);                     // teardown() decides if there is anything to say
+    NLOG("[NET] session released (radio control off)\n");
+  } else {
+    _tLastTryMs = 0;                    // connect on the next service(), no backoff wait
+  }
+}
+
 void IcomNetRig::service() {
+  if (!_sessionWanted) { if (_state != NS_IDLE) resetSession(); return; }
   if (!wifiUp()) { if (_state != NS_IDLE) resetSession(); return; }
   if (_state == NS_IDLE) {
     if (millis() - _tLastTryMs >= 4000) startConnect();
@@ -13860,7 +14034,24 @@ void IcomNetRig::service() {
   pumpCtl(); pumpSer();
   uint32_t ms = millis();
   if (ms - _tLastRxMs > 8000) { failReconnect("link timeout"); return; }
-  if (_state != NS_CONNECTED && ms - _tStateMs > 4000) { failReconnect("handshake stalled"); return; }
+  if (_state != NS_CONNECTED && ms - _tStateMs > 4000) {
+    // Report the RESOURCE PICTURE with the failure, not just the failure.
+    //
+    // Measured on the bench: a LAN leg alone works, a USB leg alone works, and the two
+    // together stall here every time -- with free heap down to ~26 KB and the largest
+    // contiguous block collapsed from 31,732 to ~7,000 bytes. Wi-Fi cannot allocate
+    // receive buffers in that state, so the login reply never lands and this timeout
+    // fires. Which state we were in when it happened, and how much memory was left,
+    // are the two facts that separate "starved of memory" from "the radio never
+    // answered" -- and neither was in the log before.
+    NLOG("[NET] stalled in state %d after %lums | heap=%lu largest=%lu rx=%lums ago\n",
+         (int)_state, (unsigned long)(ms - _tStateMs),
+         (unsigned long)ESP.getFreeHeap(),
+         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+         (unsigned long)(ms - _tLastRxMs));
+    failReconnect("handshake stalled");
+    return;
+  }
 
   if (_state >= NS_CTL_READY) {
     if (ms - _tPingCtlMs >= 500) { sendPing(true); _tPingCtlMs = ms; }
@@ -13922,6 +14113,15 @@ bool IcomNetRig::setFreqNet(bool sub, freq_t hz) {
     return sendCivPayload(pl6, 7);
   }
   uint8_t pl[6]; pl[0] = 0x05; freqToBcd(hz, &pl[1]);
+  // The exact Hz put on the wire. CI-V carries 1 Hz resolution and CardSat applies no
+  // rounding on this path, so if the radio still lands on a 5 kHz boundary the
+  // quantisation is the RADIO's (an Icom tuning-step setting), not ours. Rate-limited:
+  // Doppler writes are frequent.
+  {
+    static uint8_t csF = 0;
+    if ((++csF % 16) == 1)
+      NLOG("[NET CI-V TX] set freq %llu Hz exactly\n", (unsigned long long)hz);
+  }
   return sendCivPayload(pl, 6);
 }
 bool IcomNetRig::setModeNet(bool sub, CivMode m, uint8_t filter) {
@@ -13933,30 +14133,76 @@ bool IcomNetRig::readFreqNet(bool sub, freq_t& hzOut) {
   if (_state != NS_CONNECTED) return false;
   if (!_plain && !RADIOS[_model].canReadFreq) return false;
   selBand(sub);
-  while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); }  // drain stale
+  // COUNT what the "drain stale" throws away. A reply that arrived after the previous
+  // read's budget expired lands here and is discarded as stale -- and since the radio
+  // demonstrably answers in 4-12 ms when it answers at all, a steady stream of
+  // discarded packets would mean the replies ARE coming and we are one read behind,
+  // not that the radio is ignoring us. Those are opposite problems with opposite fixes.
+  int csDrained = 0;
+  while (_ser.parsePacket() > 0) { uint8_t d[64]; _ser.read(d, sizeof(d)); csDrained++; }
   uint8_t pl[1] = { 0x03 };
   sendCivPayload(pl, 1);
   uint32_t t0 = millis();
+  int csSeen = 0;                     // packets that arrived during THIS read
+  // First bytes of the last CI-V frame seen but NOT matched. If the transceive theory
+  // is right these read FE FE 00 <addr> 00 -- broadcast, command 0x00 -- which is what
+  // the widened match above now accepts. Anything else means the theory is wrong and
+  // the bytes say what is really arriving.
+  uint8_t csLast[5] = {0, 0, 0, 0, 0};
   while (millis() - t0 < (readBudgetMs ? readBudgetMs : 300)) {
     int n = _ser.parsePacket();
     if (n <= 0) { pumpCtl(); delay(2); continue; }
     uint8_t buf[96]; int r = _ser.read(buf, sizeof(buf)); if (r <= 0) continue;
+    csSeen++;
     _tLastRxMs = millis();
     if (isPing(buf, r)) { if (buf[16] == 0x00) replyPing(false, buf); continue; }
     if (r >= 22 && buf[16] == 0xc1) {
+      if (r >= 26) memcpy(csLast, buf + 21, 5);   // the CI-V frame's leading bytes
       int N = buf[17];
       if (21 + N <= r && N >= 11) {
         const uint8_t* f = buf + 21;
-        if (f[0] == 0xFE && f[1] == 0xFE && f[2] == 0xE0 && f[3] == _addr &&
-            f[4] == 0x03 && f[10] == 0xFD) {
+        // ACCEPT CI-V TRANSCEIVE BROADCASTS, not just replies addressed to us.
+        //
+        // An Icom with CI-V Transceive on emits a frame every time the dial moves,
+        // addressed to 0x00 (broadcast) with command 0x00, rather than to 0xE0 (the
+        // controller) with 0x03. Requiring E0/03 threw those away -- which is why the
+        // bench saw 12-13 packets arrive during EVERY 300 ms read and none of them
+        // match, with only the occasional direct poll reply getting through. Those
+        // discarded frames are precisely the dial position that uplink-based OTR
+        // tuning is trying to follow, which is why it felt unresponsive while the
+        // downlink path (a different transport) felt smooth.
+        //
+        // Both forms carry the same 5-byte BCD frequency in the same place, so one
+        // check covers them: FE FE <E0|00> <addr> <03|00> <5 BCD> FD.
+        if (f[0] == 0xFE && f[1] == 0xFE && (f[2] == 0xE0 || f[2] == 0x00) &&
+            f[3] == _addr && (f[4] == 0x03 || f[4] == 0x00) && f[10] == 0xFD) {
           freq_t hz = 0;
           for (int k = 9; k >= 5; --k) hz = hz * 100 + (f[k] >> 4) * 10 + (f[k] & 0x0F);
           hzOut = hz;
-          NLOG("[NET CI-V] %s freq %llu Hz\n", sub ? "SUB" : "MAIN", (unsigned long long)hz);
+          // The latency of a SUCCESSFUL read is the number that decides whether the
+          // 200 ms budget is simply too short for this transport.
+          NLOG("[NET CI-V] %s freq %llu Hz (answered in %lums)\n", sub ? "SUB" : "MAIN",
+               (unsigned long long)hz, (unsigned long)(millis() - t0));
           return true;
         }
       }
     }
+  }
+  // Read latency is the question here. CardSat caps readBudgetMs at 200 ms via
+  // constrain(catRate/4, 60, 200), and the bench shows cmd 03 going out every ~405 ms
+  // (a 200 ms timeout plus overhead) while an answer lands only every 4-12 s. So
+  // almost every read times out -- which is what makes uplink-based tuning feel
+  // unresponsive. Whether 200 ms is simply too short for this transport, or replies
+  // are being lost for another reason, is decided by how long a SUCCESSFUL read takes;
+  // guessing a bigger budget without that number is how the last three theories died.
+  {
+    static uint16_t csTo = 0;
+    if ((++csTo % 8) == 1)
+      NLOG("[NET] freq read TIMEOUT after %lums (budget %u) -- %u so far, "
+           "drained %d stale, saw %d pkt(s), last CI-V %02X %02X %02X %02X %02X\n",
+           (unsigned long)(millis() - t0), (unsigned)(readBudgetMs ? readBudgetMs : 300),
+           (unsigned)csTo, csDrained, csSeen,
+           csLast[0], csLast[1], csLast[2], csLast[3], csLast[4]);
   }
   return false;
 }
@@ -14923,7 +15169,20 @@ namespace {
   // re-read the END_CDC headroom log before trusting this: the log prints it on
   // every disengage precisely so the number is never a guess. Raise it back to
   // 8192 at the first sign of a stack-overflow panic in either task.
-  const uint32_t kTaskStack = 4096;
+  // 4096 -> 6144. The 4096 figure came from END_CDC high-water-mark logs taken with a
+  // single directly-attached device, and it does not survive a HUB:
+  //     no hub:  EspUsbHost used 1156 of 4096, free 2940
+  //     hub:     EspUsbHost used 2684 of 4096, free 1412
+  // IDF's multi-level external hub support recurses through port enumeration, and this
+  // file's own rule -- safe = used + 2048 -- wants 4732, MORE than was allocated. 1412
+  // bytes of headroom on a task that reboots the device when it overflows is not a
+  // margin, and hub scans were observed to be unreliable and to end in resets.
+  //
+  // 6144 gives 3460 bytes of headroom against the measured hub peak and still sits well
+  // under the library's 8192 default. The high-water mark is printed at every disengage,
+  // so this stays a measurement rather than a guess -- if a hub-with-devices peak ever
+  // exceeds ~4 KB, raise it again.
+  const uint32_t kTaskStack = 6144;
 
   // (The teardown poke timer was removed in fix37. It woke the daemon out of
   // usb_host_lib_handle_events(portMAX_DELAY) so its cleanup could run -- but under
@@ -15145,12 +15404,30 @@ namespace {
   //     engage could take it as "the first adapter". (Before the 0.9.70 finding-B
   //     check that bind then reported ENGAGED on a hub.)
   volatile bool s_sawHub = false;
+  // Set when a device enumerated but could not be recorded: the 4-slot adapter
+  // registry was full. Surfaced by the scan so the operator is told, rather than
+  // silently seeing one fewer adapter than is plugged in.
+  volatile bool s_devRegistryFull = false;
 
   // Enumeration budgets. Behind a hub everything is slower and staged, so both the
   // settle window and the overall cap have to grow -- a cap that expires mid-scan
   // reports a partial bus, which is indistinguishable to the operator from a
   // missing adapter.
-  inline uint32_t enumCapMs()   { return s_sawHub ? 9000 : 2500; }
+  // BOOTSTRAP BUG, fixed: the cap used to be `s_sawHub ? 9000 : 2500`, so the long
+  // budget that exists FOR HUBS was gated on having already enumerated one. A hub
+  // needing more than 2500 ms could therefore never be seen -- and a hub is the
+  // slowest thing on the bus: it powers up its own controller, then IDF applies port
+  // reset recovery (CONFIG_USB_HOST_EXT_PORT_RESET_RECOVERY_DELAY_MS) and a power-on
+  // delay per downstream port. The same short window also caught a radio with a
+  // slow-booting USB stack.
+  //
+  // The cap is a CEILING, not a wait: the loop below exits as soon as the bus goes
+  // quiet with at least one device present, so a USB-serial adapter that appears in
+  // 400 ms still returns in 400 ms. Raising it costs time only when something slow is
+  // attached, or when nothing is attached at all -- and in the latter case a few extra
+  // seconds is much cheaper than reporting "no adapters found" for a device that was
+  // simply still waking up.
+  inline uint32_t enumCapMs()   { return s_sawHub ? 12000 : 9000; }
   inline uint32_t enumQuietMs() { return s_sawHub ? 1200 : 400; }
 
   // Stable identity across replugs: serial number when the adapter reports one
@@ -15160,6 +15437,47 @@ namespace {
   void makeKey(char* out, size_t n, const EspUsbHostDeviceInfo& d) {
     if (d.serial && *d.serial) snprintf(out, n, "%04x:%04x/%s", d.vid, d.pid, d.serial);
     else                       snprintf(out, n, "%04x:%04x@%u", d.vid, d.pid, (unsigned)d.address);
+  }
+
+  // Find the registry slot for a configured key, tolerating an ADDRESS CHANGE.
+  //
+  // A device with no iSerialNumber is keyed VID:PID@address -- the TH-D75 and the
+  // IC-705 are both exactly this. The USB address is assigned by enumeration order, so
+  // it is NOT a property of the radio: plugging the same radio in through a hub, or
+  // into a different hub port, or powering things up in a different order, gives it a
+  // different address and the configured key stops matching. Nothing is wrong with the
+  // radio and nothing is wrong with the bus; the leg simply finds no adapter.
+  //
+  // That is exactly the bench report "the D75 only works when connected directly":
+  // configured direct it keys @1, behind a hub it enumerates at another address, and an
+  // exact strcmp can never match again.
+  //
+  // So: exact match first, always. Only if that fails, and the wanted key is the
+  // address form, fall back to the VID:PID part -- and ONLY when exactly one live
+  // device carries it. That last condition is what preserves the reason the address is
+  // in the key at all: two identical adapters (the likely radio + rotator case) stay
+  // ambiguous and are never guessed between.
+  int findAdapter(const char* wantKey) {
+    if (!wantKey || !*wantKey) return -1;
+    for (uint8_t i = 0; i < s_serDevN; ++i)
+      if (!s_serDev[i].dead && strcmp(s_serDev[i].key, wantKey) == 0) return i;
+
+    const char* at = strchr(wantKey, '@');
+    if (!at) return -1;                       // serial-keyed: no fallback, and none needed
+    const size_t vp = (size_t)(at - wantKey); // "vvvv:pppp"
+    int hit = -1, n = 0;
+    for (uint8_t i = 0; i < s_serDevN; ++i) {
+      if (s_serDev[i].dead) continue;
+      if (strncmp(s_serDev[i].key, wantKey, vp) == 0 && s_serDev[i].key[vp] == '@') {
+        hit = i; n++;
+      }
+    }
+    if (n != 1) return -1;                    // 0 = absent, >1 = ambiguous; do not guess
+    char b[128];
+    snprintf(b, sizeof(b), "adapter matched by VID:PID (address moved: want %s, found %s)",
+             wantKey, s_serDev[hit].key);
+    rotTrace(b);
+    return hit;
   }
 
   // ONE device-connected callback for both the CAT and rotator paths. Runs on the
@@ -15211,7 +15529,15 @@ namespace {
       for (uint8_t i = 0; i < s_serDevN; ++i)
         if (s_serDev[i].dead) { slot = i; break; }
     if (slot < 0) {
-      if (s_serDevN >= (uint8_t)(sizeof(s_serDev) / sizeof(s_serDev[0]))) return;  // full
+      if (s_serDevN >= (uint8_t)(sizeof(s_serDev) / sizeof(s_serDev[0]))) {
+        // FULL. This used to drop the device with no record anywhere -- the operator
+        // saw an adapter simply missing from the picker, with nothing in the log to
+        // say why. A silent drop is the single most expensive failure mode in this
+        // subsystem: it is indistinguishable from "the device did not enumerate",
+        // which is a completely different problem with completely different fixes.
+        s_devRegistryFull = true;
+        return;
+      }
       slot = s_serDevN;
     }
     SerialDev& e = s_serDev[slot];
@@ -15950,6 +16276,10 @@ namespace {
     // and "settled" requires at least one NON-HUB device: a hub alone is never the
     // thing we are looking for, and treating its arrival as the end of enumeration
     // is exactly what hid every downstream adapter.
+    // NOTE on cost: this settle loop runs ONLY on a cold host -- hostUpForRotator()
+    // returns early when s_host already exists -- so the long window is paid once per
+    // host lifetime, not per scan. Bench timings confirm it: 9111 ms for the first
+    // scan after boot, 80 ms for every scan after that while the host stays resident.
     const uint32_t t0 = millis();
     while (millis() - t0 < enumCapMs()) {
       delay(25);
@@ -16064,7 +16394,49 @@ uint8_t scanAdapters() {
   // caller); the behavior is exactly what a scan needs, so reuse it rather than
   // write a second copy of the host bring-up that could drift from it.
   rotTrace("scan: adapters");
+  s_devRegistryFull = false;                 // per-scan verdict, not a sticky latch
+
+  // RE-ENUMERATE FROM COLD when nothing is using the bus.
+  //
+  // The adapter registry is rebuilt only when a host is CREATED. Before the host
+  // became resident that happened on every scan, so every scan produced a fresh, true
+  // list. With a resident host it never happens again: the list only accumulates
+  // whatever the callbacks reported, so an unplugged radio stays listed as
+  // "(unplugged)" forever and a device attached afterwards may not appear at all.
+  // Bench log: the TH-D75 tombstone survived six consecutive scans while a Prolific
+  // adapter plugged in during that window was never listed.
+  //
+  // Residency exists to stop a re-enumeration killing a LIVE radio session. A manual
+  // scan with no port open has no session to protect, so the honest thing is to give
+  // the operator a real enumeration. Costs the cold-start window (~9 s) on a scan the
+  // operator explicitly asked for; that is exactly what it cost before residency.
+  // REFRESH THE REGISTRY FROM THE LIVE HOST -- do NOT tear it down.
+  //
+  // The previous attempt released the host so the next hostUpForRotator() would
+  // re-enumerate from cold. It does not work: the bench log shows the release
+  // succeeding and the immediate re-install failing with "host would not start", every
+  // time, leaving the operator worse off than the stale list they had. The IDF host
+  // cannot be reinstalled the instant it is uninstalled.
+  //
+  // The library already knows what is attached RIGHT NOW -- getDevices() reads its live
+  // device table -- so the registry can be rebuilt from reality without touching the
+  // host at all. That fixes the actual complaint (a scan not reflecting a plug or
+  // unplug) without the teardown that caused the regression.
+  if (s_host) {
+    EspUsbHostDeviceInfo live[ESP_USB_HOST_MAX_DEVICES];
+    const size_t n = s_host->getDevices(live, ESP_USB_HOST_MAX_DEVICES);
+    // Tombstone every entry, then re-publish the ones still present. An entry that is
+    // gone stays dead, which is what makes an unplug visible.
+    for (uint8_t i = 0; i < s_serDevN; ++i) s_serDev[i].dead = 1;
+    std::atomic_thread_fence(std::memory_order_release);
+    for (size_t i = 0; i < n; ++i) onDev(live[i]);
+    char b[64];
+    snprintf(b, sizeof(b), "scan: refreshed from live host (%u device(s))", (unsigned)n);
+    rotTrace(b);
+  }
   if (!hostUpForRotator()) { rotTrace("scan: host would not start"); return 0; }
+  if (s_devRegistryFull)
+    rotTrace("scan: MORE devices than the 4-slot registry - some are not listed");
   for (uint8_t i = 0; i < s_serDevN; ++i) {
     // 96 clipped the KEY on long adapter names -- and the key is the one field
     // the operator must copy into Settings. 160 covers label(48) + key(40) + framing.
@@ -16076,6 +16448,11 @@ uint8_t scanAdapters() {
   }
   if (s_sawHub) rotTrace("scan: hub present - extended enumeration window used");
   if (s_serDevN == 0)
+    // (A "check PORTA 5V" hint briefly lived here, from a line in another project's
+    // README. It was WRONG for this hardware: VBUS on the OTG port is present and
+    // measured, an IC-705 charges from it, and a bus-powered serial adapter enumerates
+    // without any external supply. Sending operators to check their wiring over a
+    // theory that the bench had already disproven would have wasted their time.)
     rotTrace(s_sawHub ? "scan: hub seen but NO adapters behind it"
                       : "scan: no adapters found");
   // A scan is a TEMPORARY owner: if neither CAT nor the rotator has a bound port, the host
@@ -16087,7 +16464,19 @@ uint8_t scanAdapters() {
   // so nothing ever released wrongly; but the trace below claimed "releasing" while
   // CAT-B alone held the host, and a log that lies is worse than no log.
   if (s_host && !s_cdc && !s_cdc2 && !s_rotCdc) {
-    rotTrace("scan: releasing temporary host");
+    // SAY WHAT ACTUALLY HAPPENS. Since the host became resident by default,
+    // releaseHostIfIdle() returns immediately without releasing anything -- so this
+    // line claimed a release that never occurred. That is the same defect the comment
+    // above complains about ("a log that lies is worse than no log"), reintroduced by
+    // a later change, and it matters here: an operator reading "releasing" would
+    // reasonably expect the serial console back, and be puzzled when it stays down.
+    // The host was just re-created by this scan's cold enumeration, so it is up and
+    // idle. Leaving it resident is right -- an engage moments later must not pay the
+    // enumeration again, which is the whole point of residency -- but say so plainly:
+    // this line used to claim a release that residency had already made impossible.
+    rotTrace(s_keepHostResident
+               ? "scan: host stays resident (Fn+u on Track releases it)"
+               : "scan: releasing temporary host");
     releaseHostIfIdle();       // M2-safe; restores the console when the PHY is really free
   }
   return s_serDevN;
@@ -16114,6 +16503,7 @@ int catPickAdapter() {
     waitForAdapterKey(s_catWantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_catWantKey) == 0) { pick = i; break; }
+    if (pick < 0) pick = findAdapter(s_catWantKey);   // same radio, different address
     if (pick < 0) { setErr("Radio adapter not found (replug/re-select)"); return -1; }
   } else {
     // No nominated adapter: take the first one neither the ROTATOR nor CAT-B is
@@ -16152,6 +16542,7 @@ int cat2PickAdapter() {
     waitForAdapterKey(s_cat2WantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_cat2WantKey) == 0) { pick = i; break; }
+    if (pick < 0) pick = findAdapter(s_cat2WantKey);  // same radio, different address
     if (pick < 0) { setErr2("2nd adapter not found (replug)"); return -1; }
   } else {
     int free = -1, freeN = 0;
@@ -16191,6 +16582,7 @@ bool waitForAdapterKey(const char* key, uint32_t ms) {
   for (;;) {
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (!s_serDev[i].dead && strcmp(s_serDev[i].key, key) == 0) return true;
+    if (findAdapter(key) >= 0) return true;           // present, just at a new address
     if (millis() - t0 >= ms) return false;
     delay(25);
     feedFreezeWatchdog();
@@ -16242,6 +16634,7 @@ bool rotBegin() {
     waitForAdapterKey(s_rotWantKey, 2500);
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (!s_serDev[i].dead && strcmp(s_serDev[i].key, s_rotWantKey) == 0) { pick = i; break; }
+    if (pick < 0) pick = findAdapter(s_rotWantKey);   // same rotator, different address
     if (pick < 0) {
       setRotErr("Rotator adapter not found (replug/re-select)");
       char b[96]; snprintf(b, sizeof(b), "rot: want key=%s but no adapter matches", s_rotWantKey);
@@ -21550,12 +21943,20 @@ void App::applyRadioFromCfg() {
     // wired CI-V and needs the same one-wire/two-wire choice. Most half-duplex Icoms
     // present one-wire CI-V, so this is the usual case for an Icom leg on Grove.
     if (aG || bG) rig->setPinMode(cfg.civPinMode);
-#if CARDSAT_HAS_USBCAT
-    // A USB leg starts like single-rig CAT_USB: the reconciler in loop() opens
-    // the adapter and attaches the stream when the radio is engaged; DualRig
-    // then begins that leg on attach. Non-USB legs begin right here.
-    if (aU || bU) { return; }
-#endif
+    // A USB leg starts like single-rig CAT_USB: the reconciler in loop() opens the
+    // adapter and attaches the stream when the radio is engaged, and DualRig begins
+    // that leg on attach. Every OTHER leg begins right here.
+    //
+    // This used to `return` outright when EITHER leg was USB, which meant a mixed
+    // config -- USB on one leg, LAN or Grove on the other -- never began the non-USB
+    // leg at all. For an Icom LAN leg (the IC-705 over its own Wi-Fi) begin() is what
+    // ARMS the connect state machine, so the leg simply sat idle forever: service()
+    // ran, found NS_IDLE with no pending attempt, and did nothing. The radio looked
+    // configured and never connected.
+    //
+    // DualRig::begin() already skips USB legs individually
+    // (`if (_down && !legIsUsb(0))`), so calling it unconditionally is correct and
+    // cannot double-begin the USB side.
     rig->begin(0, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
     return;
   }
@@ -21716,13 +22117,18 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio,
   // list where EVERY adapter is taken lands back on Auto rather than spinning.
   const int slots = (int)n + 1;
   const int step  = (dir >= 0) ? 1 : -1;
-  bool skippedTaken = false;
+  // Track WHICH owner caused the skip, not merely that one did. On a radio picker
+  // `taken` is the rotator's adapter but `taken2` is the OTHER RADIO LEG's, so a
+  // single "skipped something" flag made the message below claim the rotator owned an
+  // adapter that actually belongs to the other leg -- wrong, and confusing precisely
+  // when the operator is trying to work out which port has what.
+  bool skippedTaken = false, skippedOtherLeg = false;
   for (int tries = 0; tries < slots; ++tries) {
     cur = (cur + step + slots) % slots;
     if (cur == 0) break;                                       // Auto is always free
     const char* k = UsbSerial::serialDeviceKey(cur - 1);
-    if ((taken[0]  && strcmp(k, taken)  == 0) ||
-        (taken2[0] && strcmp(k, taken2) == 0)) { skippedTaken = true; continue; }
+    if (taken[0] && strcmp(k, taken) == 0) { skippedTaken = true; continue; }
+    if (taken2[0] && strcmp(k, taken2) == 0) { skippedOtherLeg = true; continue; }
     break;                                                     // free: take it
   }
 
@@ -21731,8 +22137,16 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio,
   cfg.save();
   // If we could only land on Auto because the sole adapter belongs to the other
   // port, say so -- otherwise the selector looks broken ("won't leave Auto").
-  if (cur == 0 && skippedTaken)
-    setStatus(isRadio ? "Only adapter is the rotator's" : "Only adapter is the radio's", 4000);
+  if (cur == 0 && (skippedTaken || skippedOtherLeg)) {
+    // Name the real owner. For a radio picker taken2 is the other RADIO leg, so
+    // "the rotator's" was simply false whenever that was what got skipped. For the
+    // rotator picker both excluded keys are radio legs, so "the radio's" is right
+    // either way.
+    const char* who = !isRadio               ? "Only adapter is the radio's"
+                    : (skippedTaken)         ? "Only adapter is the rotator's"
+                                             : "Only adapter is the other leg's";
+    setStatus(who, 4000);
+  }
   if (!isRadio) applyRotatorFromCfg();   // a rotator key change must re-bind
 #if CARDSAT_HAS_USBCAT
   else {
@@ -21927,7 +22341,21 @@ void App::rotPoint(float az, float el) {
 // running it twice applies the same state. This is the single place engagement state is set,
 // so a deferred-connect transport can't skip it (H6) and every transport initializes the same.
 void App::initializeEngagedRig() {
-  if (!rig || !rig->ready()) return;             // USB not attached yet -> reconciler retries
+  // NOT READY YET? REMEMBER, AND RETRY WHEN IT IS.
+  //
+  // Same defect as applyTransponderModes(), but wider: this function also sets SAT
+  // MODE, the MAIN/SUB band assignment and the CAT READ BUDGET. In a mixed dual rig
+  // the LAN leg needs seconds to finish its login while the USB leg is ready at once,
+  // and DualRig::ready() requires every leg -- so on that configuration NONE of it ran,
+  // silently, and was never retried.
+  //
+  // The read budget is the one that showed up on the bench: left unset it stays 0, and
+  // IcomNetRig then falls back to its own 300 ms default instead of the intended
+  // constrain(catRate/4, 60, 200). Measured latencies of successful reads are p50 23 ms,
+  // p95 121 ms, p99 188 ms, so 300 ms bought nothing and cost a third more blocking in
+  // the cooperative loop on every read that timed out -- and most of them do.
+  if (!rig || !rig->ready()) { rigInitPending = true; return; }
+  rigInitPending = false;
   // Satellite mode: a receive-only transponder (beacon/telemetry) turns it OFF and tunes the
   // downlink on MAIN; a two-way transponder follows the Sat Mode setting.
   rig->enableSatMode(cfg.satMode && !txReceiveOnly());
@@ -21947,7 +22375,21 @@ void App::initializeEngagedRig() {
 }
 
 void App::applyTransponderModes(const Transponder& t) {
-  if (!rig || !rig->ready()) return;
+  // NOT READY YET? REMEMBER TO COME BACK.
+  //
+  // This used to just return, which silently lost the modes whenever a leg was not
+  // up at engage time -- and in a mixed dual rig that is the NORMAL case, because
+  // DualRig::ready() requires EVERY leg, and an Icom LAN leg needs seconds to
+  // complete its login handshake while the USB leg is ready immediately.
+  //
+  // The consequence was subtle and looked like a tuning bug: with no mode ever sent,
+  // a TH-D75 leg never received MD, so kwApplyStepForMode() never ran, fine mode was
+  // never enabled, and every Doppler write was rounded to the 5 kHz normal step --
+  // exactly the reported "rounded to the nearest 5 kHz when not in FM". Modes were
+  // only retried on a transponder change, so an operator who never switched
+  // transponder never got them at all.
+  if (!rig || !rig->ready()) { modeApplyPending = true; return; }
+  modeApplyPending = false;
   // Set the UPLINK (MAIN) leg first, then the DOWNLINK (SUB) leg, so the radio is
   // left selected on the downlink band -- that is where the operator's RX knob
   // sits and where the One-True-Rule read-back happens. (On the IC-821 the SUB
@@ -27051,8 +27493,13 @@ void App::loop() {
             Logstore::rawf(Logstore::LOG_USB, "## ENGAGE FAILED: %s", why.c_str());
             const String diag = UsbSerial::uninstallDiag();
             if (diag.length()) Logstore::rawf(Logstore::LOG_USB, "## uninstall diag: %s", diag.c_str());
-            Logstore::rawf(Logstore::LOG_USB, "## stack released=%s | heap=%lu largest=%lu",
-                      UsbSerial::hostReleased() ? "yes" : "NO (reboot needed)",
+            // Same three-way truth as the disengage report: after a FAILED engage the
+            // host may legitimately still be up and resident, which is not the same
+            // thing as a teardown that could not complete.
+            Logstore::rawf(Logstore::LOG_USB, "## stack %s | heap=%lu largest=%lu",
+                      UsbSerial::usbHostResident() ? "RESIDENT (Fn+u on Track releases it)"
+                        : (UsbSerial::hostReleased() ? "released=yes"
+                                                     : "released=NO (reboot needed)"),
                       (unsigned long)ESP.getFreeHeap(),
                       (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
           }
@@ -27093,8 +27540,17 @@ void App::loop() {
         {
           const String ddiag = UsbSerial::uninstallDiag();
           if (ddiag.length()) Logstore::rawf(Logstore::LOG_USB, "## uninstall diag: %s", ddiag.c_str());
-          Logstore::rawf(Logstore::LOG_USB, "## DISENGAGED: stack released=%s | heap=%lu largest=%lu",
-                    UsbSerial::hostReleased() ? "yes" : "NO (reboot needed)",
+          // Report the ACTUAL state, three ways, not two. Since the host became
+          // resident by default a disengage does NOT release the stack -- yet this
+          // said "released=yes", because s_hostReleased is a latch about whether the
+          // last teardown SUCCEEDED, not about whether the host is up now. The bench
+          // logs show the contradiction plainly: "released=yes" alongside heap that
+          // never returns (17 KB instead of 82 KB), because the host is still held.
+          // Reading that as a leak is the obvious mistake, and it is the wrong one.
+          Logstore::rawf(Logstore::LOG_USB, "## DISENGAGED: stack %s | heap=%lu largest=%lu",
+                    UsbSerial::usbHostResident() ? "RESIDENT (Fn+u on Track releases it)"
+                      : (UsbSerial::hostReleased() ? "released=yes"
+                                                   : "released=NO (reboot needed)"),
                     (unsigned long)ESP.getFreeHeap(),
                     (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         }
@@ -27195,7 +27651,20 @@ void App::loop() {
   // park near-idle.
   bool parked = (screen == SCR_CHARGE);
   if (!parked) {
+    // Network CAT is now ON DEMAND, like every other socket owner here. The session
+    // exists only while radio control is engaged; disengaging closes it politely and
+    // frees its sockets, and re-engaging reconnects. radioOut is the right signal
+    // because the CAT diagnostic tool sets it too, so the tool still gets a live rig.
+    if (rig) rig->setSessionWanted(radioOut);
     if (rig) rig->service();  // net CAT (Icom LAN): advance connect + keepalives
+    // A leg that was still connecting when the modes were pushed gets them now. This
+    // is the normal path in a mixed dual rig: the LAN leg finishes its handshake a
+    // few seconds after engage, long after applyTransponderModes() first ran.
+    // A leg that was still connecting at engage gets the full initialisation now --
+    // sat mode, band assignment, read budget and modes. Normal in a mixed dual rig.
+    if (rigInitPending && rig && rig->ready()) initializeEngagedRig();
+    else if (modeApplyPending && rig && rig->ready() && activeTxCount > 0)
+      applyTransponderModes(activeTx[curTx]);
     if (rot) rot->service();  // self-driven rotators (Yaesu direct) run their loop here
     // APRS-IS is only alive while its screen is open, so this is a null check in
     // every other state. Placed with the other socket services for the same reason
@@ -27884,6 +28353,13 @@ void App::handleKey(char c, bool enter, bool back) {
   // consume Fn+b, because none of these handlers look at keyFn at all.
   const bool lettersFree = (screen != SCR_EDIT && screen != SCR_NOTEEDIT &&
                             screen != SCR_BASIC && screen != SCR_BASICIMM &&
+                            // SCR_BASICASK: the pre-run input form. Values are free
+                            // text -- a callsign or a grid contains B and H.
+                            screen != SCR_BASICASK &&
+                            // SCR_TGTSEARCH: pre-existing, found when audit_text_screens
+                            // was widened to catch the `c > 32` spelling of "printable".
+                            // It has always taken typed text and always lost b and h.
+                            screen != SCR_TGTSEARCH &&
                             // SCR_BASICIMM was missing: the immediate-mode prompt takes
                             // ANY printable character as text (its handler says so), so
                             // bare 'b' screenshotted and bare 'h' opened Help instead of
@@ -27999,6 +28475,8 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_BASIC:    keyBasic(c, enter, back); break;
     case SCR_BASICRUN: keyBasicRun(c, enter, back); break;
     case SCR_BASICIMM: keyBasicImm(c, enter, back); break;
+    case SCR_BASICASK: keyBasicAsk(c, enter, back); break;
+    case SCR_CALCREF:  keyCalcRef(c, enter, back); break;
     case SCR_BASICFILES: keyBasicFiles(c, enter, back); break;
     case SCR_PERF:     keyPerf(c, enter, back); break;
     case SCR_FOXANAT: keyFoxAnat(c, enter, back); break;
@@ -34338,6 +34816,8 @@ void App::draw() {
     case SCR_BASIC:    drawBasic(); break;
     case SCR_BASICRUN: drawBasicRun(); break;
     case SCR_BASICIMM: drawBasicImm(); break;
+    case SCR_BASICASK: drawBasicAsk(); break;
+    case SCR_CALCREF:  drawCalcRef(); break;
     case SCR_BASICFILES: drawBasicFiles(); break;
     case SCR_PERF:     drawPerf(); break;
     case SCR_FOXANAT: drawFoxAnat(); break;
@@ -48602,6 +49082,40 @@ namespace {
             return (r > 0) ? sqrt(398600.4418 / r) : 0.0; }, 1.0);
       if (word("fpr"))   return callFn([](double alt){ double r = 6378.137 + alt;
             return (r > 6378.137) ? 6378.137 * acos(6378.137 / r) : 0.0; }, 1.0);
+      // ---- 0.9.71 additions: the gaps an operator kept filling by hand ------------
+      // Chosen because each was being computed on paper beside the device, and each
+      // has a wrong answer that looks plausible if you misremember the constant.
+      if (word("lam"))   return callFn([](double mhz){                     // wavelength, m
+            return (mhz > 0) ? 299.792458 / mhz : 0.0; }, 1.0);
+      if (word("dipole"))return callFn([](double mhz){                     // 1/2-wave dipole, m
+            // 95% velocity factor for wire, the figure every antenna book uses; a
+            // free-space half wave cuts the element measurably long.
+            return (mhz > 0) ? 0.95 * 149.896229 / mhz : 0.0; }, 1.0);
+      if (word("dbm2w")) return callFn([](double dbm){                     // dBm -> watts
+            return pow(10.0, (dbm - 30.0) / 10.0); }, 1.0);
+      if (word("w2dbm")) return callFn([](double w){                       // watts -> dBm
+            return (w > 0) ? 10.0 * log10(w) + 30.0 : 0.0; }, 1.0);
+      // Altitude for a given orbital PERIOD -- the inverse of porb, and the question
+      // actually asked when designing or identifying an orbit ("what is 96 minutes?").
+      if (word("aorb"))  return callFn([](double minutes){
+            if (minutes <= 0) return 0.0;
+            double T = minutes * 60.0;
+            double a = cbrt(398600.4418 * T * T / (4.0 * 3.14159265358979 * 3.14159265358979));
+            return a - 6378.137; }, 1.0);
+      // Slant range to a satellite from ELEVATION and altitude. The naive answer --
+      // using the altitude as the range -- is wrong by a factor of six at the horizon,
+      // which is exactly where link budgets matter most.
+      if (word("slant")) return callFn2([](double elDeg, double alt){
+            const double Re = 6378.137, D2R = 0.017453292519943295;
+            double r = Re + alt; if (r <= Re) return 0.0;
+            double e = elDeg * D2R;
+            return sqrt(Re * Re * sin(e) * sin(e) + r * r - Re * Re) - Re * sin(e); });
+      // Parabolic dish gain, dBi, from diameter (m) and frequency (MHz), 55% efficiency.
+      if (word("dgain")) return callFn2([](double dm, double mhz){
+            if (dm <= 0 || mhz <= 0) return 0.0;
+            double lambda = 299.792458 / mhz;
+            double g = 0.55 * pow(3.14159265358979 * dm / lambda, 2.0);
+            return 10.0 * log10(g); });
       // --- amateur-radio / satellite helper functions (single-argument) ---
       // Power/ratio in dB, watts<->dBm, and frequency(MHz)->wavelength(m).
       if (word("dbm"))   return callFn([](double w){ return 10.0*log10(w) + 30.0; }, 1.0); // W -> dBm
@@ -48717,7 +49231,7 @@ void App::drawCalc() {
     canvas.setCursor(4, 106); canvas.print("const c kB Re mu g0 sfx p n u m k M G T");
   }
   if (calcEngNota) { canvas.setTextColor(CL_CYAN, CL_BLACK); canvas.setCursor(210, 96); canvas.print("ENG"); }
-  footer("' fns  \\ eng  [ ] scroll  Fn+h help");
+  footer("' fns  \\ eng  [ ] tape  Fn+f list");
 }
 
 void App::keyCalc(char c, bool enter, bool back) {
@@ -48728,6 +49242,11 @@ void App::keyCalc(char c, bool enter, bool back) {
   // Fn+p prints the current entry + result. Guarded on keyFn so a plain 'p' (needed for
   // "pi", "exp", "power") still types into the expression normally.
   if (keyFn && (c == 'p' || c == 'P')) { printReport(PR_TOOLOUT); return; }
+  // Fn+f: the full function list. Behind Fn because every bare letter on this screen
+  // is expression text -- 'f' is needed for "floor", "fact", "fspl" and "fq".
+  if (keyFn && (c == 'f' || c == 'F')) {
+    calcRefFrom = SCR_CALC; calcRefScroll = 0; screen = SCR_CALCREF; lastDrawMs = 0; return;
+  }
   if (c == '\'') { calcHintPage2 = !calcHintPage2; lastDrawMs = 0; return; }   // toggle fn-hint page
   if (c == '\\') { calcEngNota = !calcEngNota; lastDrawMs = 0; return; }        // toggle eng-notation output
   // Tape scroll uses [ ] -- the arrow keys ; and . are expression characters
@@ -49214,11 +49733,22 @@ void App::drawDxLk() {
 }
 
 void App::keyDxLk(char c, bool enter, bool back) {
-  if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (c == '`') {
+    // Return where the operator came from. Dropping a picker into Tools would strand
+    // them somewhere they never chose to be.
+    if (dxPickFor == 1) { dxPickFor = 0; screen = SCR_MUF; lastDrawMs = 0; return; }
+    screen = SCR_TOOLS; lastDrawMs = 0; return;
+  }
   if (isUp(c))   { if (dxMatchN) dxSel = (dxSel + dxMatchN - 1) % dxMatchN; lastDrawMs = 0; return; }
   if (isDown(c)) { if (dxMatchN) dxSel = (dxSel + 1) % dxMatchN;            lastDrawMs = 0; return; }
   if (enter) {
-    if (dxMatchN > 0) { dxDetail = dxMatch[dxSel]; screen = SCR_DXLKD; lastDrawMs = 0; }
+    if (dxMatchN > 0) {
+      if (dxPickFor == 1) {                       // picking a MUF path target
+        mufDxccIdx = dxMatch[dxSel];
+        dxPickFor = 0; screen = SCR_MUF; lastDrawMs = 0; return;
+      }
+      dxDetail = dxMatch[dxSel]; screen = SCR_DXLKD; lastDrawMs = 0;
+    }
     return;
   }
   if (back) {                                    // DEL edits the query
@@ -50298,6 +50828,10 @@ void App::drawGraph() {
   // Both branches must fit 39 columns; the second was 41, so "csv" was clipped to
   // "cs" -- and that key is how the graph is exported. Pre-existing; found only when
   // the width gate was extended to footers (and to their ternary branches).
+  // Fn+f (the function reference) is deliberately NOT in this footer: all 39 columns
+  // are already spent on keys that DO something, and hiding the table or CSV export to
+  // advertise a help screen is the wrong trade. It is documented in the manual and on
+  // the calculator's own footer, and the two screens share one reference.
   footer(gTrace >= 0 ? ",// move {} x10  m mark  t off  z zero"
                      : "ENT e1 2 e2 t trc z zero m mk b tbl csv");
 }
@@ -50305,6 +50839,12 @@ void App::drawGraph() {
 void App::keyGraph(char c, bool enter, bool back) {
   if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
   if (c == 'p') { printReport(PR_TOOLOUT); return; }   // p: print expr + window
+  // Fn+f: the same function reference the scientific calculator uses -- the grapher
+  // evaluates the identical expression language, so a separate list would be a second
+  // thing to keep in step with the evaluator, and would drift.
+  if (keyFn && (c == 'f' || c == 'F')) {
+    calcRefFrom = SCR_GRAPH; calcRefScroll = 0; screen = SCR_CALCREF; lastDrawMs = 0; return;
+  }
   if (enter) {                                   // edit the expression
     editTarget = 780; editTitle = "y = f(x)"; editBuf = graphExpr;
     screen = SCR_EDIT; lastDrawMs = 0; return;
@@ -50574,6 +51114,56 @@ namespace {
       return q;
     }
     double* arr = nullptr; int arrN = 0;        // the one @() array (DIM @(n), n<=256)
+
+    // ---- String variables A$..Z$ -------------------------------------------------
+    // ALLOCATED ON DEMAND, like every other large buffer in this firmware: 26 Arduino
+    // Strings cost real heap, and most programs never touch one. The table appears the
+    // first time a program mentions a string variable and dies with the VM.
+    String* svars = nullptr;
+    String* sv() {
+      if (!svars) svars = new (std::nothrow) String[26];
+      return svars;
+    }
+    // True once any string feature has been used, so the prompt/report can say so.
+    bool strUsed = false;
+
+    // ---- Named numeric arrays A() .. Z() ------------------------------------------
+    // ON DEMAND, one allocation per array actually DIMmed, freed with the VM. A budget
+    // caps the TOTAL elements across every array rather than each one separately:
+    // 26 x 256 would be 53 KB of doubles on a device whose whole free heap is ~76 KB,
+    // so a per-array limit would let a program starve the radio, the display and the
+    // USB host while looking perfectly reasonable line by line.
+    static const int ARR_TOTAL_MAX = 2048;      // 16 KB of doubles, all arrays together
+    double* narr[26] = {};
+    int     narrN[26] = {};
+    int     narrTotal = 0;                      // elements currently allocated
+    void freeArrays() {
+      for (int i = 0; i < 26; ++i) { delete[] narr[i]; narr[i] = nullptr; narrN[i] = 0; }
+      narrTotal = 0;
+    }
+    // Allocate or re-dimension one array. Re-DIM is allowed and clears it, which is what
+    // BASIC programmers expect from DIM in a loop.
+    bool dimArray(int idx, int n) {
+      if (idx < 0 || idx > 25) { err = "array A-Z"; return false; }
+      if (n < 1 || n > 1024)   { err = "size 1..1024"; return false; }
+      int after = narrTotal - narrN[idx] + n;
+      if (after > ARR_TOTAL_MAX) { err = "arrays too big (2048 total)"; return false; }
+      delete[] narr[idx];
+      narr[idx] = new (std::nothrow) double[n];
+      if (!narr[idx]) { narrTotal -= narrN[idx]; narrN[idx] = 0; err = "out of memory"; return false; }
+      narrTotal = after; narrN[idx] = n;
+      for (int i = 0; i < n; ++i) narr[idx][i] = 0;
+      return true;
+    }
+    // Bounds-checked element access. Returns nullptr and sets err, so a bad subscript
+    // stops the program instead of corrupting the heap -- BASIC's traditional silent
+    // out-of-range write is not survivable on a device that is also flying a radio.
+    double* arrCell(int idx, double dv) {
+      if (idx < 0 || idx > 25 || !narr[idx]) { err = "array not DIMmed"; return nullptr; }
+      int i = (int)dv;
+      if (i < 0 || i >= narrN[idx]) { err = "subscript out of range"; return nullptr; }
+      return &narr[idx][i];
+    }
     int    dataLineIdx = 0;                     // DATA read cursor: line index...
     const char* dataP = nullptr;                //   ...and position inside its value list
     // Host hooks (set by basicRun; null = feature unavailable). The VM stays ignorant of
@@ -50591,7 +51181,7 @@ namespace {
     int  (*fileCb)(void*, int op, const char* a, String* out) = nullptr;
     int  satselLeft = 2000;                     // SGP4-per-run budget for SATSEL
     bool gfxUsed = false, lprUsed = false, fileUsed = false;
-    ~BasicVM() { delete[] arr; }
+    ~BasicVM() { delete[] arr; delete[] svars; freeArrays(); }
 
     void ws() { while (*p == ' ' || *p == '\t') ++p; }
     // Boundary-checked keyword match for WORD OPERATORS (MOD/AND/OR/NOT...): unlike kw(),
@@ -50666,6 +51256,109 @@ namespace {
       const char* q = p; while (*w) { if (toupper((unsigned char)*q) != *w) return false; ++q; ++w; }
       p = q; return true;
     }
+    // ---- String expressions ------------------------------------------------------
+    // Deliberately a SEPARATE evaluator rather than a variant type threaded through the
+    // numeric one. The numeric path is the hot path -- Doppler loops, plot points -- and
+    // giving every value a tag would cost speed and memory on the 99% of expressions
+    // that are numbers. BASIC has always distinguished the two syntactically with the
+    // '$' suffix, so the parser can too.
+    //
+    // isStrStart() decides which evaluator a caller should use, WITHOUT consuming
+    // input: a quote, a NAME$ function, or a bare X$ variable.
+    bool isStrStart() {
+      const char* q = p; while (*q == ' ' || *q == '\t') ++q;
+      if (*q == '"') return true;
+      if (!isalpha((unsigned char)*q)) return false;
+      const char* r = q; while (isalnum((unsigned char)*r)) ++r;
+      return *r == '$';
+    }
+
+    // One string term: literal, variable, or function. Concatenation is handled by
+    // strExpr().
+    String strTerm() {
+      ws();
+      if (*p == '"') { ++p; String s; while (*p && *p != '"') s += *p++; if (*p == '"') ++p; return s; }
+      if (kw("LEFT$"))  { String s; double n; if (!str2(s, n)) return ""; 
+                          int k = (int)n; if (k < 0) k = 0;
+                          return k >= (int)s.length() ? s : s.substring(0, k); }
+      if (kw("RIGHT$")) { String s; double n; if (!str2(s, n)) return "";
+                          int k = (int)n; if (k < 0) k = 0;
+                          return k >= (int)s.length() ? s : s.substring(s.length() - k); }
+      if (kw("MID$"))   { // MID$(s, start [, len]) -- start is 1-BASED, as in every
+                          // Microsoft BASIC. Off-by-one here would be silently wrong
+                          // in every program a user ports.
+                          ws(); if (*p != '(') { err = "MID$ ("; return ""; } ++p;
+                          String s = strExpr(); ws(); if (*p != ',') { err = "MID$ ,"; return ""; } ++p;
+                          double st = expr(); double ln = -1; ws();
+                          if (*p == ',') { ++p; ln = expr(); ws(); }
+                          if (*p == ')') ++p; else { err = "MID$ )"; return ""; }
+                          int i = (int)st - 1; if (i < 0) i = 0;
+                          if (i >= (int)s.length()) return "";
+                          if (ln < 0) return s.substring(i);
+                          int k = (int)ln; if (k < 0) k = 0;
+                          return s.substring(i, min((int)s.length(), i + k)); }
+      if (kw("CHR$"))   { double v = paren1(); char b[2] = { (char)(int)v, 0 }; return String(b); }
+      if (kw("STR$"))   { double v = paren1(); return fmtNum(v); }
+      if (kw("UCASE$")) { String s = paren1s(); s.toUpperCase(); return s; }
+      if (kw("LCASE$")) { String s = paren1s(); s.toLowerCase(); return s; }
+      if (kw("TRIM$"))  { String s = paren1s(); s.trim(); return s; }
+      // GRID$(lat, lon) -- Maidenhead, via the firmware's own converter rather than a
+      // second implementation. A program that computes a grid differently from the
+      // tracker it runs on is worse than one that cannot compute it at all.
+      if (kw("GRID$"))  { ws(); if (*p != '(') { err = "GRID$ ("; return ""; } ++p;
+                          double la = expr(); ws();
+                          if (*p != ',') { err = "GRID$ ,"; return ""; } ++p;
+                          double lo = expr(); ws();
+                          if (*p == ')') ++p; else { err = "GRID$ )"; return ""; }
+                          return Location::toGrid(la, lo); }
+      // DXCC$(code) -- entity name for an ARRL code, from the table already on board.
+      if (kw("DXCC$"))  { double v = paren1();
+                          int code = (int)v;
+                          for (size_t i = 0; i < sizeof(DXCC_LK) / sizeof(DXCC_LK[0]); ++i)
+                            if (DXCC_LK[i].code == code) return String(DXCC_LK[i].name);
+                          return String(""); }
+      // TIME$ / DATE$ -- from the SAME snapshot the numeric fields use, so a program
+      // cannot print a timestamp that disagrees with its own UTCH/UTCM readings.
+      if (kw("TIME$"))  { if (!sys.timeOk) { err = "no time"; return ""; }
+                          char b[12]; snprintf(b, sizeof(b), "%02d:%02d:%02d",
+                            (int)sys.utcH, (int)sys.utcM, (int)sys.utcS); return String(b); }
+      if (kw("DATE$"))  { if (!sys.timeOk) { err = "no time"; return ""; }
+                          char b[12]; snprintf(b, sizeof(b), "%04d-%02d-%02d",
+                            (int)sys.utcYr, (int)sys.utcMon, (int)sys.utcDay); return String(b); }
+      if (isalpha((unsigned char)*p) && *(p + 1) == '$') {          // A$ .. Z$
+        int i = toupper((unsigned char)*p) - 'A'; p += 2;
+        strUsed = true;
+        String* t = sv(); if (!t) { err = "out of memory"; return ""; }
+        return t[i];
+      }
+      err = "string expected"; return "";
+    }
+    String strExpr() {
+      String v = strTerm();
+      for (;;) { ws(); if (*p != '+') break; ++p; v += strTerm(); if (!err.isEmpty()) break; }
+      return v;
+    }
+    // (s, n) argument pair used by LEFT$/RIGHT$.
+    bool str2(String& s, double& n) {
+      ws(); if (*p != '(') { err = "( expected"; return false; } ++p;
+      s = strExpr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      n = expr(); ws(); if (*p == ')') ++p; else { err = ") expected"; return false; }
+      return true;
+    }
+    // Four comma-separated numbers in parens: (lat1, lon1, lat2, lon2).
+    bool arg4(double& a, double& b, double& c2, double& d) {
+      ws(); if (*p != '(') { err = "( expected"; return false; } ++p;
+      a = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      b = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      c2 = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      d = expr(); ws(); if (*p == ')') ++p; else { err = ") expected"; return false; }
+      return true;
+    }
+    double paren1()  { ws(); if (*p != '(') { err = "( expected"; return 0; } ++p;
+                       double v = expr(); ws(); if (*p == ')') ++p; else err = ") expected"; return v; }
+    String paren1s() { ws(); if (*p != '(') { err = "( expected"; return ""; } ++p;
+                       String s = strExpr(); ws(); if (*p == ')') ++p; else err = ") expected"; return s; }
+
     double expr() { double v = term(); for (;;) { ws();
       if (*p == '+') { ++p; v += term(); } else if (*p == '-') { ++p; v -= term(); } else break; } return v; }
     double term() { double v = power(); for (;;) { ws();
@@ -50701,6 +51394,66 @@ namespace {
         return arr[i];
       }
       if (isalpha((unsigned char)*p)) {
+        // String-consuming functions that RETURN a number. They live here, in the
+        // numeric evaluator, because that is what they produce -- LEN("AB")+1 is
+        // arithmetic. The '$'-suffix rule keeps the two evaluators unambiguous.
+        if (kw("LEN"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return (double)s.length(); } }
+        if (kw("ASC"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return s.length() ? (double)(uint8_t)s[0] : 0.0; } }
+        if (kw("VAL"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return atof(s.c_str()); } }
+        // INSTR(haystack, needle) -> 1-based position, 0 = not found. Microsoft order
+        // and Microsoft's 1-based result: 0 is the "no" answer precisely because 1 is
+        // a real position.
+        if (kw("INSTR")) { ws(); if (*p=='(') { ++p; String h=strExpr(); ws();
+                             if (*p==',') { ++p; String n=strExpr(); ws(); if(*p==')')++p;
+                               int i = h.indexOf(n); return i < 0 ? 0.0 : (double)(i + 1); }
+                             err = "INSTR ,"; return 0; } }
+        // ---- constants -------------------------------------------------------------
+        // Bare names, no parentheses, matching PI's traditional spelling. Values that a
+        // program would otherwise have to type out and get subtly wrong: writing
+        // 3.14159 instead of PI is a 5-arcsecond pointing error at the horizon.
+        if (kwb("PI"))    return 3.14159265358979323846;
+        if (kwb("TWOPI")) return 6.28318530717958647692;
+        if (kwb("DEG"))   return 57.29577951308232087680;   // radians -> degrees
+        if (kwb("RAD"))   return 0.01745329251994329577;    // degrees -> radians
+        if (kwb("CLIGHT"))return 299792458.0;               // m/s, exact by definition
+        if (kwb("KBOLT")) return 1.380649e-23;              // J/K, exact by definition
+        if (kwb("REARTH"))return 6378.137;                  // km, WGS-84 equatorial
+
+        // ---- maths that BASIC programs kept hand-rolling ---------------------------
+        if (kw("ATN2"))  { // ATN2(y, x) -- full-quadrant bearing. Hand-rolling this with
+                           // ATN(y/x) loses the quadrant and divides by zero due east;
+                           // every program doing geometry needs it.
+                           ws(); if (*p=='(') { ++p; double y=expr(); ws();
+                             if (*p==',') { ++p; double x=expr(); ws(); if(*p==')')++p;
+                               return atan2(y, x); }
+                             err = "ATN2 ,"; return 0; } }
+        if (kw("ASN"))   { double v = paren1(); return asin(v < -1 ? -1 : (v > 1 ? 1 : v)); }
+        if (kw("ACS"))   { double v = paren1(); return acos(v < -1 ? -1 : (v > 1 ? 1 : v)); }
+        if (kw("LOG10")) { double v = paren1(); return v > 0 ? log10(v) : 0; }
+        if (kw("ROUND")) { double v = paren1(); return floor(v + 0.5); }
+        if (kw("FRAC"))  { double v = paren1(); return v - (double)(long)v; }
+        if (kw("HYP"))   { ws(); if (*p=='(') { ++p; double a=expr(); ws();
+                             if (*p==',') { ++p; double b=expr(); ws(); if(*p==')')++p;
+                               return sqrt(a*a + b*b); }
+                             err = "HYP ,"; return 0; } }
+
+        // ---- geometry and radio, reusing the firmware's own routines ---------------
+        // These are the calculations CardSat already trusts on its own screens. Giving
+        // BASIC a second, hand-written copy is how a program comes to disagree with the
+        // tracker it is running on.
+        if (kw("GCDIST")) { double a,b,c2,d; if (!arg4(a,b,c2,d)) return 0;
+                            double km, br; greatCircle(a, b, c2, d, km, br); return km; }
+        if (kw("GCAZ"))   { double a,b,c2,d; if (!arg4(a,b,c2,d)) return 0;
+                            double km, br; greatCircle(a, b, c2, d, km, br); return br; }
+        if (kw("DXCCLAT")) { double v = paren1(); double la, lo;
+                             if (!dxccGeoFind((int)v, la, lo)) { err = "no such entity"; return 0; }
+                             return la; }
+        if (kw("DXCCLON")) { double v = paren1(); double la, lo;
+                             if (!dxccGeoFind((int)v, la, lo)) { err = "no such entity"; return 0; }
+                             return lo; }
         if (kw("ABS")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return fabs(v); } }
         else if (kw("INT")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return floor(v); } }
         else if (kw("SQR")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return v>0?sqrt(v):0; } }
@@ -50745,6 +51498,16 @@ namespace {
         char v = toupper((unsigned char)*p); ++p;
         // guard: a two-letter identifier we don't know is an error, not a var
         if (isalpha((unsigned char)*p)) { err = "unknown name"; return 0; }
+        // A(i) is an array element when A has been DIMmed. Checking narr[] rather than
+        // just the '(' keeps "A (3+1)" -- a scalar followed by a parenthesised term --
+        // working for programs written before arrays existed.
+        { const char* save = p; ws();
+          if (*p == '(' && narr[v - 'A']) {
+            ++p; double iv = expr(); ws();
+            if (*p == ')') ++p; else { err = "paren"; return 0; }
+            double* c = arrCell(v - 'A', iv); return c ? *c : 0;
+          }
+          p = save; }
         return vars[v - 'A'];
       }
       char* e = nullptr; double v = strtod(p, &e);
@@ -50762,6 +51525,18 @@ namespace {
       if (kwb("OR"))  { double r = land(); v = (v != 0 || r != 0) ? 1 : 0; } else break; } return v; }
 
     double relation() {
+      // STRING COMPARISON. IF A$ = "X" is the single most common string test in BASIC,
+      // and without this it would evaluate A as a number and silently compare nonsense.
+      // Only = and <> are supported: ordering strings invites locale questions this
+      // interpreter has no answer to, and a wrong answer is worse than a clear refusal.
+      if (isStrStart()) {
+        String l = strExpr(); if (!err.isEmpty()) return 0;
+        ws();
+        char a = *p, b = *(p + 1);
+        if (a == '<' && b == '>') { p += 2; String r = strExpr(); return l != r ? 1 : 0; }
+        if (a == '=')             { ++p;    String r = strExpr(); return l == r ? 1 : 0; }
+        err = "strings compare with = or <> only"; return 0;
+      }
       double l = expr(); ws();
       char a = *p, b = *(p + 1);
       if (a == '<' && b == '=') { p += 2; return l <= expr(); }
@@ -50774,18 +51549,25 @@ namespace {
     }
     int findLine(int num) { for (int i = 0; i < nLines; ++i) if (lines[i].num == num) return i; return -1; }
 
-    void printNum(double v) {
+    // ONE number->text rule, shared by PRINT and STR$. Splitting them would let
+    // PRINT X and PRINT STR$(X) disagree, which is the kind of difference that only
+    // shows up in someone's report output long after it was introduced.
+    String fmtNum(double v) {
       char b[32];
       if (v == floor(v) && fabs(v) < 1e15) snprintf(b, sizeof(b), "%ld", (long)v);
       else snprintf(b, sizeof(b), "%g", v);
-      out += b;
+      return String(b);
     }
+    void printNum(double v) { out += fmtNum(v); }
     // PRINT's item grammar rendered into a caller String -- one finished line, no
     // trailing newline. Shared by LPRINT (report sinks) and FPRINT (gated file).
     void emitLine(String& dst) {
       for (;;) { ws();
         if (*p == 0 || *p == ':') break;
-        if (*p == '"') { ++p; while (*p && *p != '"') dst += *p++; if (*p == '"') ++p; }
+        // Same grammar as PRINT, including string expressions -- LPRINT A$ and
+        // FPRINT LEFT$(N$,3) must work, or the report sinks silently diverge from
+        // what the screen shows.
+        if (isStrStart()) { String s = strExpr(); if (!err.isEmpty()) return; dst += s; }
         else if (*p == ',') { dst += "  "; ++p; }
         else if (*p == ';') { ++p; }
         else { double v = expr(); if (!err.isEmpty()) return;
@@ -50803,7 +51585,8 @@ namespace {
       bool suppressNL = false, emitted = false, sawSep = false;
       for (;;) { ws();
         if (*p == 0 || *p == ':') break;
-        if (*p == '"') { ++p; while (*p && *p != '"') out += *p++; if (*p == '"') ++p; emitted = true; suppressNL = false; }
+        if (isStrStart()) { String s = strExpr(); if (!err.isEmpty()) return;
+                            out += s; emitted = true; suppressNL = false; }
         else if (*p == ',') { out += "  "; ++p; suppressNL = true; sawSep = true; }
         else if (*p == ';') { ++p; suppressNL = true; sawSep = true; }
         else { double v = expr(); if (!err.isEmpty()) return;   // check BEFORE printing --
@@ -50815,6 +51598,33 @@ namespace {
       if (!suppressNL || (!emitted && !sawSep)) out += '\n';
     }
     int assign() { ws();
+      // A$ = <string expression>. Checked before the numeric path because "A$" starts
+      // with a letter and would otherwise be read as the variable A followed by junk.
+      if (isalpha((unsigned char)*p) && *(p + 1) == '$') {
+        int i = toupper((unsigned char)*p) - 'A'; p += 2; ws();
+        if (*p != '=') { err = "="; return -1; }
+        ++p;
+        String v = strExpr(); if (!err.isEmpty()) return -1;
+        strUsed = true;
+        String* t = sv(); if (!t) { err = "out of memory"; return -1; }
+        t[i] = v; return -1;
+      }
+      // A(i) = expr, for a DIMmed array. Same "only when DIMmed" rule as the read
+      // side, so an undimensioned A( is still the old clear error rather than a
+      // mysterious no-op.
+      if (isalpha((unsigned char)*p) && !isalpha((unsigned char)*(p + 1))) {
+        const char* save = p;
+        int idx = toupper((unsigned char)*p) - 'A'; ++p; ws();
+        if (*p == '(' && narr[idx]) {
+          ++p; double iv = expr(); ws();
+          if (*p == ')') ++p; else { err = "paren"; return -1; }
+          ws(); if (*p != '=') { err = "="; return -1; }
+          ++p; double val = expr(); if (!err.isEmpty()) return -1;
+          double* c = arrCell(idx, iv); if (!c) return -1;
+          *c = val; return -1;
+        }
+        p = save;
+      }
       if (*p == '@') {                            // @(index) = expr
         ++p; ws(); if (*p != '(') { err = "@ needs ()"; return -1; }
         ++p; double iv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
@@ -50913,15 +51723,42 @@ namespace {
         if (bodyOnThisLine) { forResumeP = f.bodyP; return -998; }
         return f.lineIdx + 1;
       }
-      if (kw("DIM")) {                           // DIM @(n) -- the one numeric array
-        ws(); if (*p == '@') ++p; else { err = "DIM @(n)"; return -1; }
-        ws(); if (*p != '(') { err = "DIM @(n)"; return -1; }
-        ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
-        int n = (int)nv;
-        if (n < 1 || n > 256) { err = "@ size 1..256"; return -1; }
-        delete[] arr; arr = new (std::nothrow) double[n];
-        if (!arr) { err = "out of memory"; arrN = 0; return -1; }
-        arrN = n; for (int i = 0; i < n; ++i) arr[i] = 0;
+      if (kw("DIM")) {
+        // DIM @(n)            -- the original single array, unchanged for old programs
+        // DIM A(n) [, B(m)..] -- named arrays, several per statement as in MS BASIC
+        for (;;) {
+          ws();
+          if (*p == '@') {
+            ++p; ws(); if (*p != '(') { err = "DIM @(n)"; return -1; }
+            ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+            int n = (int)nv;
+            if (n < 1 || n > 256) { err = "@ size 1..256"; return -1; }
+            delete[] arr; arr = new (std::nothrow) double[n];
+            if (!arr) { err = "out of memory"; arrN = 0; return -1; }
+            arrN = n; for (int i = 0; i < n; ++i) arr[i] = 0;
+          } else if (isalpha((unsigned char)*p)) {
+            int idx = toupper((unsigned char)*p) - 'A'; ++p; ws();
+            if (*p != '(') { err = "DIM A(n)"; return -1; }
+            ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+            if (!dimArray(idx, (int)nv)) return -1;
+          } else { err = "DIM name"; return -1; }
+          ws(); if (*p == ',') { ++p; continue; }      // DIM A(10), B(20)
+          break;
+        }
+        return -1; }
+      if (kw("ERASE")) {                          // ERASE A -- give the heap back early
+        ws();
+        if (!isalpha((unsigned char)*p)) { err = "ERASE A"; return -1; }
+        int idx = toupper((unsigned char)*p) - 'A'; ++p;
+        narrTotal -= narrN[idx];
+        delete[] narr[idx]; narr[idx] = nullptr; narrN[idx] = 0;
+        return -1; }
+      if (kw("INPUT")) {
+        // The value was collected by the pre-run form (see basicScanInputs), so at run
+        // time this only has to step over its own arguments. Doing the asking here
+        // would mean re-entering the event loop with a live VM on the stack, which is
+        // exactly the design this interpreter avoids -- it runs to completion.
+        while (*p && *p != ':') ++p;
         return -1; }
       if (kwb("DATA")) return -1;                 // data lines execute as no-ops
       if (kw("RESTORE")) { dataLineIdx = 0; dataP = nullptr; return -1; }
@@ -51443,6 +52280,100 @@ void App::basicFillSys(void* sysPtr) {
     }
   }
 
+// Scan the program text for INPUT declarations and fill basicAsk[].
+//
+//   INPUT "Downlink MHz"; F
+//   INPUT "Callsign"; C$
+//
+// A TEXT scan, not an interpreter pass: the form has to exist before the VM does, and
+// building a VM merely to discover its questions would mean running the program to find
+// out what to ask it. Duplicates are collapsed -- a variable asked for twice is one
+// field, because two boxes writing the same variable is a UI that cannot be right.
+int App::basicScanInputs() {
+  basicAskN = 0; basicAskSel = 0;
+  const char* p = basicBuf.c_str();     // basicBuf is a String; scan its buffer
+  while (*p && basicAskN < BASIC_ASK_MAX) {
+    // Start of a line: skip the line number and leading space.
+    while (*p == ' ' || *p == '\t') ++p;
+    while (isdigit((unsigned char)*p)) ++p;
+    // Walk statements on this line, looking for INPUT at a statement boundary.
+    while (*p && *p != '\n' && basicAskN < BASIC_ASK_MAX) {
+      while (*p == ' ' || *p == '\t' || *p == ':') ++p;
+      if (strncasecmp(p, "INPUT", 5) == 0 && !isalnum((unsigned char)p[5])) {
+        p += 5;
+        while (*p == ' ' || *p == '\t') ++p;
+        String prompt;
+        if (*p == '"') { ++p; while (*p && *p != '"') prompt += *p++; if (*p == '"') ++p; }
+        while (*p == ' ' || *p == '\t' || *p == ';' || *p == ',') ++p;
+        if (isalpha((unsigned char)*p)) {
+          char v = toupper((unsigned char)*p); ++p;
+          bool isStr = (*p == '$'); if (isStr) ++p;
+          bool dup = false;
+          for (int i = 0; i < basicAskN; ++i)
+            if (basicAsk[i].var == v && basicAsk[i].isStr == isStr) dup = true;
+          if (!dup) {
+            BasicAsk& a = basicAsk[basicAskN++];
+            a.var = v; a.isStr = isStr;
+            a.prompt = prompt.length() ? prompt
+                                       : (String(v) + (isStr ? "$" : ""));
+            a.value = "";
+          }
+        }
+      }
+      // advance to the next statement or line
+      while (*p && *p != '\n' && *p != ':') ++p;
+    }
+    while (*p == '\n') ++p;
+  }
+  return basicAskN;
+}
+
+// The form. One field per declared input, edited in place; ENTER runs the program.
+void App::drawBasicAsk() {
+  header("Program input");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_MGREY, CL_BLACK);
+  canvas.setCursor(4, 26); canvas.print("Values are set before the program runs");
+  const int TOP = 42, ROWH = 13;
+  for (int i = 0; i < basicAskN; ++i) {
+    int y = TOP + i * ROWH;
+    bool sel = (i == basicAskSel);
+    if (sel) canvas.fillRect(0, y - 2, 240, ROWH, CL_SELBG);
+    canvas.setTextColor(sel ? CL_WHITE : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    char lb[26]; snprintf(lb, sizeof(lb), "%c%s %.14s", basicAsk[i].var,
+                          basicAsk[i].isStr ? "$" : " ", basicAsk[i].prompt.c_str());
+    canvas.setCursor(4, y); canvas.print(lb);
+    canvas.setTextColor(sel ? CL_YELLOW : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(150, y);
+    canvas.print(basicAsk[i].value.length() ? basicAsk[i].value : String("_"));
+  }
+  footer("type value  ;/. field  ENTER run  ` bk");
+}
+
+void App::keyBasicAsk(char c, bool enter, bool back) {
+  if (c == '`') { screen = SCR_BASIC; lastDrawMs = 0; return; }
+  if (enter) {                                   // collected: now run to completion
+    basicRun();
+    basicOutScroll = 0; screen = SCR_BASICRUN; lastDrawMs = 0; return;
+  }
+  if (isUp(c))   { if (basicAskN) basicAskSel = (basicAskSel + basicAskN - 1) % basicAskN;
+                   lastDrawMs = 0; return; }
+  if (isDown(c)) { if (basicAskN) basicAskSel = (basicAskSel + 1) % basicAskN;
+                   lastDrawMs = 0; return; }
+  if (back) {                                    // DEL edits the value, never exits --
+    // over-backspacing must not throw away a half-filled form (the same trap the BASIC
+    // prompt had until 0.9.70).
+    String& v = basicAsk[basicAskSel].value;
+    if (v.length()) v.remove(v.length() - 1);
+    lastDrawMs = 0; return;
+  }
+  if (c > 32 && c < 127) {
+    String& v = basicAsk[basicAskSel].value;
+    if (v.length() < 18) v += c;
+    lastDrawMs = 0;
+  }
+}
+
 void App::basicRun() {
   // Allocate the interpreter state on the heap only while a program is running, then free
   // it -- the VM's line table is ~3.8 KB and would otherwise sit in .bss for the whole
@@ -51471,7 +52402,19 @@ void App::basicRun() {
   String perr;
   if (!basicParse(*vm, basicBuf, *work, perr)) { strlcpy(basicErr, perr.c_str(), sizeof(basicErr)); }
   else if (vm->nLines == 0) { strlcpy(basicErr, "no numbered lines", sizeof(basicErr)); }
-  else { vm->run(); basicOut = vm->out; strlcpy(basicErr, vm->err.c_str(), sizeof(basicErr)); }
+  else {
+    // Seed the variables the form collected, BEFORE the first statement runs. An empty
+    // field leaves the variable at its default (0 / "") rather than erroring: a program
+    // that asks for an optional value should not be stopped by the operator declining
+    // to give one.
+    for (int i = 0; i < basicAskN; ++i) {
+      const BasicAsk& a = basicAsk[i];
+      if (!a.value.length()) continue;
+      if (a.isStr) { String* t = vm->sv(); if (t) { t[a.var - 'A'] = a.value; vm->strUsed = true; } }
+      else         { vm->vars[a.var - 'A'] = atof(a.value.c_str()); }
+    }
+    vm->run(); basicOut = vm->out; strlcpy(basicErr, vm->err.c_str(), sizeof(basicErr));
+  }
   if (vm->lprUsed)  basHookLpr(this, nullptr, 2);       // close the report sinks
   if (basFileOpen) { basFile.close(); basFileOpen = false; }  // and the FOPEN file
   delete work; delete vm;
@@ -51919,6 +52862,9 @@ void App::keyBasic(char c, bool enter, bool back) {
   if (c == '`') { screen = SCR_TOOLS; lastDrawMs = 0; return; }
   if (keyFn) {
     if (c == 'r') {                          // RUN
+      // A program that declares INPUT gets the form first; everything else runs
+      // straight away, so nothing changes for programs that ask nothing.
+      if (basicScanInputs() > 0) { screen = SCR_BASICASK; lastDrawMs = 0; return; }
       basicRun();
       basicOutScroll = 0; screen = SCR_BASICRUN; lastDrawMs = 0; return;
     }
@@ -52396,6 +53342,83 @@ namespace {
   const int MATHREF_N = (int)(sizeof(MATHREF) / sizeof(MATHREF[0]));
 }
 
+// Full calculator vocabulary. The entry screen can show two lines of hints; this is
+// the rest. Grouped by what an operator is trying to DO, not alphabetically -- someone
+// looking for "how do I get wavelength" does not know to look under L.
+static const char* const CALCREF[] = {
+  "#ARITHMETIC",
+  " + - * / ^  ( )  mod  Ans",
+  " sqrt cbrt abs sign round",
+  " floor ceil min(a,b) max(a,b)",
+  " hypot(a,b) fact ncr(n,r) npr(n,r)",
+  "#LOGS AND POWERS",
+  " ln  log (base 10)  log2  exp",
+  "#TRIG - angles in DEGREES",
+  " sin cos tan  asin acos atan",
+  " atan2(y,x) full quadrant",
+  " sinh cosh tanh  d2r r2d",
+  "#CONSTANTS",
+  " pi  e   c    speed of light m/s",
+  " kB  Boltzmann   Re  Earth radius km",
+  " mu  Earth GM    g0  9.80665 m/s2",
+  "#SI SUFFIXES on any number",
+  " p n u m k M G T   e.g. 145M",
+  "#DECIBELS AND POWER",
+  " db(x) undb(x)   dbm(w) w(dbm)",
+  " dbm2w(dbm) w2dbm(w)",
+  " dbd(dbi) dbi(dbd)  antenna refs",
+  "#SWR AND FEEDLINE",
+  " swr2rl(swr)  rl2swr(db)",
+  " mml(swr)  mismatch loss dB",
+  "#NOISE",
+  " nf2t(nf)  noise figure -> kelvin",
+  " t2nf(k)   kelvin -> noise figure",
+  "#FREQUENCY AND ANTENNAS",
+  " wl(mhz) fq(m)   lam(mhz) metres",
+  " dipole(mhz) 1/2-wave, 0.95 vf",
+  " dgain(d_m,mhz)  dish dBi at 55%",
+  " fspl(mhz,km)    free-space loss",
+  "#SATELLITE",
+  " porb(alt_km)  period, minutes",
+  " aorb(min)     altitude for period",
+  " vorb(alt_km)  orbital speed km/s",
+  " fpr(alt_km)   footprint radius km",
+  " slant(el,alt) range km at that el",
+  " dop(mhz,rr)   Doppler Hz, rr km/s",
+  "#GRAPHER ONLY",
+  " x  is the plotted variable",
+  "",
+  " Fn+p prints the tape.",
+  " ' toggles the on-screen hints.",
+};
+static const int CALCREF_N = sizeof(CALCREF) / sizeof(CALCREF[0]);
+
+void App::drawCalcRef() {
+  header("Calculator functions");
+  canvas.setTextSize(1);
+  const int rows = 11, LH = 9;
+  if (calcRefScroll < 0) calcRefScroll = 0;
+  if (calcRefScroll > CALCREF_N - rows) calcRefScroll = (CALCREF_N > rows) ? CALCREF_N - rows : 0;
+  int y = 20;
+  for (int r = 0; r < rows && calcRefScroll + r < CALCREF_N; ++r) {
+    const char* s = CALCREF[calcRefScroll + r];
+    if (*s == '#') { canvas.setTextColor(CL_CYAN, CL_BLACK); ++s; }
+    else             canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, y); canvas.print(s);
+    y += LH;
+  }
+  footer("; . scroll  ` back");
+}
+
+void App::keyCalcRef(char c, bool enter, bool back) {
+  (void)enter;
+  // Back returns to whichever calculator opened it -- calcRefFrom is set there, so the
+  // operator lands where they were rather than in Tools.
+  if (isBack(c, back)) { screen = calcRefFrom; lastDrawMs = 0; return; }
+  if (isUp(c))   { if (calcRefScroll > 0) calcRefScroll--; lastDrawMs = 0; return; }
+  if (isDown(c)) { calcRefScroll++; lastDrawMs = 0; return; }
+}
+
 void App::drawMathRef() {
   header("Radio math reference");
   canvas.setTextSize(1);
@@ -52428,12 +53451,15 @@ void App::keyMathRef(char c, bool enter, bool back) {
 //  same idiom as MATHREF (~zero heap). '#' = section header, '~' = dim note.
 // ---------------------------------------------------------------------------
 namespace {
+  // Kept in step with the manual's Tiny BASIC reference by hand; both describe the SAME
+  // interpreter, so a name appearing in one and not the other is a defect either way.
   const char* const BASICREF[] = {
     "#TUTORIAL",
     " A program is numbered lines, run",
     " in order. Number by 10s so you",
     " can insert 15 between 10 and 20.",
-    " 26 vars A-Z hold numbers.",
+    " 26 vars A-Z hold numbers,",
+    " A$-Z$ hold text.",
     "~Try this:",
     "   10 LET A = 7",
     "   20 PRINT \"AZ=\"; SATAZ",
@@ -52473,10 +53499,40 @@ namespace {
     "~colors 0-9: blk wht red grn blu",
     "~yel cyn org gry dkgrn",
     "#FUNCTIONS",
-    " ABS INT SGN SQR EXP LOG",
+    " ABS INT SGN SQR EXP LOG LOG10",
     " SIN COS TAN ATN  (DEGREES)",
-    " MIN(a,b) MAX(a,b) RND",
+    " ASN ACS  ATN2(y,x) keeps the",
+    "   quadrant - use it for bearings",
+    " MIN(a,b) MAX(a,b) HYP(a,b) RND",
+    " ROUND FRAC",
     "~RND gives 0..1; INT(RND*6)+1",
+    "#CONSTANTS",
+    " PI TWOPI DEG RAD",
+    " CLIGHT KBOLT REARTH",
+    "#TEXT  (A$..Z$, join with +)",
+    " LEFT$(s,n) RIGHT$(s,n)",
+    " MID$(s,start,len)  start is 1",
+    " CHR$ STR$ UCASE$ LCASE$ TRIM$",
+    " LEN(s) ASC(s) VAL(s)",
+    " INSTR(hay,needle) 1-based, 0=no",
+    "~Compare with = and <> only.",
+    "#ARRAYS",
+    " DIM A(n)   DIM A(10), B(20)",
+    " A(i) reads and assigns",
+    " ERASE A frees it early",
+    "~2048 elements across ALL arrays.",
+    "~A bad subscript stops the run.",
+    "#STATION AND GEOMETRY",
+    " GCDIST(la1,lo1,la2,lo2)  km",
+    " GCAZ(la1,lo1,la2,lo2)    deg",
+    " DXCCLAT(code) DXCCLON(code)",
+    " DXCC$(code)  GRID$(lat,lon)",
+    " TIME$  DATE$",
+    "#ASKING FOR INPUT",
+    " INPUT \"Callsign\"; N$",
+    " INPUT \"MHz\"; F",
+    "~All INPUT lines become ONE form",
+    "~shown BEFORE the program runs.",
     "#OPERATORS",
     " ^  then * /  MOD  then + -",
     " = < > <= >= <>  compare",
@@ -55245,6 +56301,394 @@ float App::estMufMHz(bool day) {
   return muf;
 }
 
+// ===== inlined from src/dxcc_geo.h (DXCC reference coordinates) =====
+// CardSat -- DXCC entity reference coordinates.
+//
+// Source: AD1C "cty.csv" (country-files.com), the standard contest/DX country file.
+// One representative point per CURRENT ARRL DXCC entity, used for path work: bearing,
+// distance and MUF from the operator's QTH to an entity (see the MUF tool).
+//
+// COVERAGE. 340 entities, which is every entity in DXCC_LK that is not flagged
+// deleted -- the 62 without coordinates are exactly the 62 deleted ones, verified by
+// comparing the two lists. Nothing current is missing.
+//
+// LONGITUDE SIGN. cty.csv stores longitude WEST-POSITIVE, the traditional DX
+// convention. This table stores it EAST-POSITIVE to match Observer, greatCircle() and
+// the rest of CardSat. minimufMHz() wants west-positive, so callers negate -- exactly
+// as MUF_REGIONS does with its own (west-positive) values. Getting this backwards puts
+// every path on the wrong side of the planet, so it is worth stating twice.
+//
+// PRECISION. Hundredths of a degree in int16: ~1.1 km, far finer than a country-sized
+// entity or than MINIMUF's own accuracy. 6 bytes per entity, ~2 KB total.
+//
+// These are REPRESENTATIVE POINTS, not centroids of anything. For a large entity the
+// bearing to the "country" is a fiction; the number is a reasonable path proxy, and
+// the reference says so.
+struct DxccGeo { int16_t code; int16_t lat100; int16_t lon100; };
+
+// Sorted by ARRL entity code -- dxccGeoFind() binary-searches it.
+static const DxccGeo DXCC_GEO[] = {
+  {   1,  4435,  -7875},
+  {   3,  3470,   6580},
+  {   4, -1045,   5667},
+  {   5,  6013,   2037},
+  {   6,  6140, -14887},
+  {   7,  4100,   2000},
+  {   9, -1432, -17078},
+  {  10, -3785,   7753},
+  {  11,  1237,   9278},
+  {  12,  1823,  -6300},
+  {  13, -9000,      0},
+  {  14,  4040,   4490},
+  {  15,  5588,   8408},
+  {  16, -5162,  16762},
+  {  17,  1567,  -6360},
+  {  18,  4045,   4737},
+  {  20,     0, -17600},
+  {  21,  3960,    295},
+  {  22,   745,  13453},
+  {  24, -5442,    338},
+  {  27,  5400,   2800},
+  {  29,  2832,  -1585},
+  {  31,  -283, -17172},
+  {  32,  3590,   -527},
+  {  33,  -732,   7242},
+  {  34, -4385, -17648},
+  {  35, -1048,  10563},
+  {  36,  1028, -10922},
+  {  37,   552,  -8705},
+  {  38, -1215,   9682},
+  {  40,  3523,   2478},
+  {  41, -4642,   5175},
+  {  43,  1808,  -6788},
+  {  45,  3617,   2793},
+  {  46,   268,  11332},
+  {  47, -2710, -10937},
+  {  48,   180, -15735},
+  {  49,   170,   1033},
+  {  50,  2132, -10023},
+  {  51,  1500,   3900},
+  {  52,  5900,   2500},
+  {  53,   900,   3900},
+  {  54,  5365,   4137},
+  {  56,  -385,  -3243},
+  {  60,  2425,  -7600},
+  {  61,  8068,   4992},
+  {  62,  1318,  -5953},
+  {  63,   400,  -5300},
+  {  64,  3232,  -6473},
+  {  65,  1833,  -6475},
+  {  66,  1697,  -8867},
+  {  69,  1932,  -8122},
+  {  70,  2150,  -8000},
+  {  71,   -78,  -9103},
+  {  72,  1913,  -7068},
+  {  74,  1400,  -8900},
+  {  75,  4200,   4500},
+  {  76,  1550,  -9030},
+  {  77,  1213,  -6168},
+  {  78,  1902,  -7218},
+  {  79,  1613,  -6167},
+  {  80,  1500,  -8700},
+  {  82,  1820,  -7747},
+  {  84,  1470,  -6103},
+  {  86,  1288,  -8505},
+  {  88,   900,  -8000},
+  {  89,  2177,  -7175},
+  {  90,  1038,  -6128},
+  {  91,  1253,  -6998},
+  {  94,  1707,  -6180},
+  {  95,  1543,  -6135},
+  {  96,  1675,  -6218},
+  {  97,  1387,  -6100},
+  {  98,  1323,  -6120},
+  {  99, -1155,   4728},
+  { 100, -3250,  -6213},
+  { 103,  1337,  14470},
+  { 104, -1700,  -6500},
+  { 105,  2000,  -7500},
+  { 106,  4945,   -258},
+  { 107,  1100,  -1068},
+  { 108, -1000,  -5300},
+  { 109,  1202,  -1480},
+  { 110,  2112, -15748},
+  { 111, -5308,   7350},
+  { 112, -3000,  -7100},
+  { 114,  5420,   -453},
+  { 116,   500,  -7400},
+  { 117,  4617,    605},
+  { 118,  7105,   -828},
+  { 120,  -140,  -7840},
+  { 122,  4922,   -218},
+  { 123,  1672, -16953},
+  { 124, -1705,   4272},
+  { 125, -3360,  -7885},
+  { 126,  5472,   2052},
+  { 129,   602,  -5945},
+  { 130,  4817,   6518},
+  { 131, -4900,   6927},
+  { 132, -2527,  -5767},
+  { 133, -2925, -17792},
+  { 135,  4170,   7413},
+  { 136, -1000,  -7600},
+  { 137,  3623,  12790},
+  { 138,  2900, -17800},
+  { 140,   400,  -5600},
+  { 141, -5163,  -5872},
+  { 142,  1123,   7278},
+  { 143,  1820,  10455},
+  { 144, -3300,  -5600},
+  { 145,  5703,   2465},
+  { 146,  5545,   2363},
+  { 147, -3155,  15908},
+  { 148,   800,  -6600},
+  { 149,  3870,  -2723},
+  { 150, -2370,  13233},
+  { 152,  2210,  11350},
+  { 153, -5460,  15888},
+  { 157,   -52,  16692},
+  { 158, -1767,  16838},
+  { 159,   415,   7345},
+  { 160, -2122, -17513},
+  { 161,   398,  -8158},
+  { 162, -2150,  16550},
+  { 163,  -950,  14712},
+  { 165, -2035,   5750},
+  { 166,  1518,  14572},
+  { 167,  6000,   1900},
+  { 168,   908,  16733},
+  { 169, -1288,   4515},
+  { 170, -3903,  17447},
+  { 171, -1740,  15585},
+  { 172, -2507, -13010},
+  { 173,   688,  15820},
+  { 174,  2820, -17737},
+  { 175, -1765, -14940},
+  { 176, -1778,  17792},
+  { 177,  2428,  15397},
+  { 179,  4700,   2900},
+  { 180,  4000,   2400},
+  { 181, -1825,   3500},
+  { 182,  1840,  -7500},
+  { 185,  -900,  16000},
+  { 187,  1763,    943},
+  { 188, -1903, -16985},
+  { 189, -2903,  16793},
+  { 190, -1393, -17170},
+  { 191, -1002, -16108},
+  { 192,  2705,  14220},
+  { 195,  -143,    562},
+  { 197,   587, -16207},
+  { 199, -6877,  -9058},
+  { 201, -4688,   3772},
+  { 202,  1818,  -6655},
+  { 203,  4258,    162},
+  { 204,  1877, -11097},
+  { 205,  -793,  -1437},
+  { 206,  4820,   1630},
+  { 207, -1970,   6342},
+  { 209,  5070,    485},
+  { 211,  4393,  -5990},
+  { 212,  4283,   2508},
+  { 213,  1808,  -6303},
+  { 214,  4200,    900},
+  { 215,  3500,   3300},
+  { 216,  1255,  -8172},
+  { 217, -2628,  -8007},
+  { 219,    22,    657},
+  { 221,  5600,   1000},
+  { 222,  6207,   -693},
+  { 223,  5277,   -147},
+  { 224,  6138,   2482},
+  { 225,  4015,    927},
+  { 227,  4600,    200},
+  { 230,  5100,   1000},
+  { 232,   203,   4535},
+  { 233,  3615,   -537},
+  { 234, -2190, -15793},
+  { 235, -5448,  -3708},
+  { 236,  3978,   2178},
+  { 237,  7400,  -4278},
+  { 238, -6060,  -4555},
+  { 239,  4712,   1928},
+  { 240, -5843,  -2633},
+  { 241, -6208,  -5867},
+  { 242,  6480,  -1873},
+  { 245,  5313,   -802},
+  { 246,  4190,   1243},
+  { 247,   988,  11423},
+  { 248,  4282,   1258},
+  { 249,  1737,  -6278},
+  { 250, -1597,   -572},
+  { 251,  4713,    957},
+  { 252,  4700,  -6000},
+  { 253,     0,  -2900},
+  { 254,  5000,    600},
+  { 256,  3275,  -1695},
+  { 257,  3588,   1442},
+  { 259,  7800,   1600},
+  { 260,  4373,    740},
+  { 262,  3882,   7122},
+  { 263,  5228,    547},
+  { 265,  5473,   -668},
+  { 266,  6100,    900},
+  { 269,  5228,   1867},
+  { 270,  -940, -17120},
+  { 272,  3950,   -800},
+  { 273, -2050,  -2932},
+  { 274, -3713,  -1230},
+  { 275,  4578,   2470},
+  { 276, -1588,   5450},
+  { 277,  4677,  -5620},
+  { 278,  4395,   1245},
+  { 279,  5682,   -418},
+  { 280,  3800,   5800},
+  { 281,  4032,   -343},
+  { 282,  -850,  17920},
+  { 283,  3532,   3357},
+  { 284,  5890,   1533},
+  { 285,  1773,  -6480},
+  { 286,   192,   3260},
+  { 287,  4687,    812},
+  { 288,  5000,   3000},
+  { 289,  4075,  -7397},
+  { 291,  3760,  -9187},
+  { 292,  4140,   6397},
+  { 293,  1580,  10790},
+  { 294,  5228,   -373},
+  { 295,  4190,   1247},
+  { 296,  4400,   2100},
+  { 297,  1928,  16663},
+  { 298, -1330, -17620},
+  { 299,   395,  10223},
+  { 301,   142,  17300},
+  { 302,  2482,  -1385},
+  { 303, -1622,  15002},
+  { 304,  2603,   5053},
+  { 305,  2412,   8965},
+  { 306,  2740,   9018},
+  { 308,  1000,  -8400},
+  { 309,  2000,   9637},
+  { 312,  1293,  10513},
+  { 315,   760,   8070},
+  { 318,  3600,  10200},
+  { 321,  2228,  11418},
+  { 324,  2250,   7758},
+  { 327,  -730,  10988},
+  { 330,  3200,   5300},
+  { 333,  3392,   4278},
+  { 336,  3132,   3482},
+  { 339,  3640,  13838},
+  { 342,  3118,   3642},
+  { 344,  3978,  12630},
+  { 345,   450,  11460},
+  { 348,  2938,   4738},
+  { 354,  3383,   3583},
+  { 363,  4677,  10217},
+  { 369,  2770,   8533},
+  { 370,  2360,   5855},
+  { 372,  3000,   7000},
+  { 375,  1300,  12200},
+  { 376,  2525,   5113},
+  { 378,  2420,   4383},
+  { 379,  -467,   5547},
+  { 381,   137,  10378},
+  { 382,  1175,   4235},
+  { 384,  3538,   3820},
+  { 386,  2372,  12088},
+  { 387,  1260,   9970},
+  { 390,  3918,   3565},
+  { 391,  2400,   5400},
+  { 400,  2800,    200},
+  { 401, -1250,   1850},
+  { 402, -2200,   2400},
+  { 404,  -317,   2978},
+  { 406,   538,   1187},
+  { 408,   675,   2033},
+  { 409,  1600,  -2400},
+  { 410,  1580,   1817},
+  { 411, -1163,   4330},
+  { 412,  -102,   1537},
+  { 414,  -312,   2303},
+  { 416,   987,    225},
+  { 420,   -37,   1173},
+  { 422,  1340,  -1638},
+  { 424,   770,   -157},
+  { 428,   758,   -580},
+  { 430,    32,   3815},
+  { 432, -2922,   2788},
+  { 434,   650,   -950},
+  { 436,  2720,   1660},
+  { 438, -1900,   4658},
+  { 440, -1400,   3400},
+  { 442,  1800,   -258},
+  { 444,  2060,  -1050},
+  { 446,  3200,   -500},
+  { 450,   987,    755},
+  { 452, -1800,   3100},
+  { 453, -2112,   5548},
+  { 454,  -175,   2982},
+  { 456,  1520,  -1463},
+  { 458,   850,  -1325},
+  { 460, -1248,  17708},
+  { 462, -2907,   2263},
+  { 464, -2200,   1700},
+  { 466,  1447,   2862},
+  { 468, -2665,   3148},
+  { 470,  -575,   3392},
+  { 474,  3540,    932},
+  { 478,  2628,   2860},
+  { 480,  1200,   -200},
+  { 482, -1422,   2673},
+  { 483,   840,    128},
+  { 489, -2200,  17500},
+  { 490,   -88,  16953},
+  { 492,  1565,   4812},
+  { 497,  4518,   1530},
+  { 499,  4600,   1400},
+  { 501,  4432,   1757},
+  { 502,  4160,   2165},
+  { 503,  5000,   1600},
+  { 504,  4900,   2000},
+  { 505,  2070,  11670},
+  { 506,  1508,  11772},
+  { 507, -1072,  16580},
+  { 508, -2337, -14948},
+  { 509,  -892, -14007},
+  { 510,  3128,   3427},
+  { 511,  -880,  12605},
+  { 512, -1987,  15832},
+  { 513, -2470, -12480},
+  { 514,  4250,   1928},
+  { 515, -1105, -17125},
+  { 516,  1790,  -6283},
+  { 517,  1217,  -6900},
+  { 518,  1807,  -6307},
+  { 519,  1757,  -6310},
+  { 520,  1220,  -6825},
+  { 521,   485,   3160},
+  { 522,  4267,   2117},
+};
+static const int DXCC_GEO_N = sizeof(DXCC_GEO) / sizeof(DXCC_GEO[0]);
+
+// Look up an entity's reference point by ARRL code. Returns false for a deleted entity
+// (no coordinates exist) so callers can say "no location" rather than plotting 0,0 --
+// which is a real place in the Atlantic and would look like a plausible answer.
+static inline bool dxccGeoFind(int code, double& latOut, double& lonOut) {
+  int lo = 0, hi = DXCC_GEO_N - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    if (DXCC_GEO[mid].code == code) {
+      latOut = DXCC_GEO[mid].lat100 / 100.0;
+      lonOut = DXCC_GEO[mid].lon100 / 100.0;   // EAST-positive
+      return true;
+    }
+    if (DXCC_GEO[mid].code < code) lo = mid + 1; else hi = mid - 1;
+  }
+  return false;
+}
+// ===== end src/dxcc_geo.h =====
+
 // ===========================================================================
 //  MINIMUF-3.5 MUF-to-regions (SCR_MUF table + SCR_MUFMAP map), off Space Wx.
 //  Runs the verified minimufMHz() model from the QTH to a fixed set of world DX
@@ -55290,7 +56734,55 @@ void App::drawMuf() {
                           (int)lround(ssn), tv.tm_hour, tv.tm_min);
     canvas.setCursor(4, 26); canvas.print(hb); }
 
-  const int ROWS = 8, ROWH = 11, TOP = 38;
+  // PATH TO A CHOSEN DXCC ENTITY, above the region table.
+  //
+  // The region list answers "how are paths generally right now"; the question an
+  // operator actually has is usually "can I work THAT entity", and no region row
+  // answers it. Same MINIMUF model, same units, so the number is directly comparable
+  // with the rows below -- it is simply a path the operator named.
+  // ROWS must follow TOP. The pinned DXCC row pushes the table down by 13 px, and
+  // leaving the row count at 8 ran the last row to y=139 -- under the footer, which
+  // draws over it. The operator sees a list that is silently one row short, with no
+  // hint that anything is missing.
+  //
+  // ROW_BOTTOM is where the footer starts: the last row must END above it, so the
+  // count is derived rather than written down twice.
+  // LAST_ROW_Y is the lowest y a row may START at: footer() prints at y=127, and a row
+  // paints fillRect(0, y-1, 240, ROWH), so y=116 fills to 126 and just clears it.
+  // Deriving ROWS from it preserves the original 8 rows at TOP=38 while shrinking to 6
+  // when the pinned DXCC row pushes the table down -- rather than trimming a row that
+  // always displayed correctly.
+  const int ROWH = 11, LAST_ROW_Y = 116;
+  int TOP = 38;
+  if (mufDxccIdx >= 0 && mufDxccIdx < (int)(sizeof(DXCC_LK) / sizeof(DXCC_LK[0]))) {
+    const DxccLk& e = DXCC_LK[mufDxccIdx];
+    double eLat, eLon;                                   // east-positive
+    if (dxccGeoFind(e.code, eLat, eLon)) {
+      // minimufMHz wants WEST-positive longitude, like qLonR above; the table is
+      // east-positive, so negate. MUF_REGIONS stores west-positive and does not.
+      double m = minimufMHz(qLatR, qLonR, eLat * D2R, -eLon * D2R, mon, day, ut, ssn);
+      double dKm, brg; greatCircle(o.lat, o.lon, eLat, eLon, dKm, brg);
+      // CL_BLUE, not the green selection bar: this row is a pinned target, not the
+      // list cursor, and using the selection colour for both would make the table
+      // look like it had two cursors.
+      canvas.fillRect(0, 36, 240, 12, CL_BLUE);
+      canvas.setTextColor(CL_WHITE, CL_BLUE);
+      char nb[22]; snprintf(nb, sizeof(nb), "%.15s", e.name);
+      canvas.setCursor(4, 38);   canvas.print(nb);
+      char db[24]; snprintf(db, sizeof(db), "%03d\xF8 %5.0fkm", (int)lround(brg), dKm);
+      canvas.setCursor(104, 38); canvas.print(db);
+      canvas.setTextColor(mufColour(m), CL_BLUE);
+      char mb[16]; snprintf(mb, sizeof(mb), "%4.1f %s", m, mufBand(m));
+      canvas.setCursor(184, 38); canvas.print(mb);
+    } else {
+      // A deleted entity has no coordinates. Say so rather than plotting 0,0 -- which
+      // is a real place in the Atlantic and would look like a plausible answer.
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.setCursor(4, 38); canvas.print("no location (deleted entity)");
+    }
+    TOP = 51;                                            // region table starts below
+  }
+  const int ROWS = (LAST_ROW_Y - TOP) / ROWH + 1;         // 8 normally, 6 with a target
   if (mufSel < 0) mufSel = 0;
   if (mufSel >= MUF_REGION_N) mufSel = MUF_REGION_N - 1;
   if (mufSel < mufScroll) mufScroll = mufSel;
@@ -55315,7 +56807,9 @@ void App::drawMuf() {
     char mb[16]; snprintf(mb, sizeof(mb), "%4.1f %s", m, mufBand(m));
     canvas.setCursor(184, y); canvas.print(mb);
   }
-  footer("; . move  k map  x print  ` back");
+  // 39 columns is the hard limit; both branches are checked by audit_status_width.
+  footer(mufDxccIdx >= 0 ? "; . move  d DXCC  D clr  k map  ` back"
+                         : "; . move  d DXCC  k map  x prn  ` back");
 }
 
 void App::keyMuf(char c, bool enter, bool back) {
@@ -55327,6 +56821,12 @@ void App::keyMuf(char c, bool enter, bool back) {
   if (isDown(c)) { mufSel = (uint8_t)((mufSel + 1) % MUF_REGION_N); lastDrawMs = 0; return; }
   if (c == 'k')  { screen = SCR_MUFMAP; lastDrawMs = 0; return; }
   if (c == 'x')  { printReport(PR_MUF); return; }
+  // 'd' picks a DXCC entity as the path target. The fixed region list answers "how are
+  // the paths generally", but the question an operator usually has is "can I work THAT
+  // entity right now", and no region row answers it.
+  if (c == 'd')  { dxPickFor = 1; dxQuery = ""; dxRunFilter(); dxSel = 0;
+                   screen = SCR_DXLK; lastDrawMs = 0; return; }
+  if (c == 'D')  { mufDxccIdx = -1; lastDrawMs = 0; return; }   // clear the target
 }
 
 void App::drawMufMap() {

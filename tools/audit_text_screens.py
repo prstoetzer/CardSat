@@ -24,9 +24,15 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, 'src', 'app.cpp')
 
+# Both spellings of "is this a printable character". The `> 32` form was missed on the
+# first version of this gate, and SCR_BASICASK -- a genuine text-entry screen added
+# later -- slipped straight past it: the operator could not type B or H into a callsign
+# field, which is the precise bug this gate exists to prevent. A gate that only catches
+# one spelling of the thing it is looking for is worse than none, because it is
+# believed.
 TEXTUAL = (
-    re.compile(r'c\s*>=\s*32\s*&&\s*c\s*<\s*127'),
-    re.compile(r'c\s*>=\s*0x20'),
+    re.compile(r'c\s*>=?\s*32\s*&&\s*c\s*<\s*127'),
+    re.compile(r'c\s*>=?\s*0x20'),
 )
 
 

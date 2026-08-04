@@ -36,6 +36,62 @@ void cardsatUsbDiag(const char *fmt, ...);   // C++ linkage, defined in CardSat
 #define ESPUSBHOST_CLAIM_AUDIO 0
 #endif
 
+// CardSat patch: do not claim CDC-ACM *control* interfaces.
+//
+// The ESP32-S3 DWC OTG core has OTG_NUM_HOST_CHAN = 8 host channels for the whole
+// bus, and one channel is consumed per open pipe - including each device's default
+// control pipe. A hub costs 2 (EP0 + status interrupt), a CDC radio costs 4
+// (EP0 + notification + bulk IN + bulk OUT), a Prolific costs 4. Hub + TH-D75 alone
+// is 6 of 8, which is why a second adapter behind the hub fails to claim a single
+// interface and then reports "not responding" at engage time.
+//
+// A CDC-ACM control interface carries only the SERIAL_STATE notification endpoint,
+// which CardSat never reads. Line coding and DTR/RTS are control transfers issued on
+// the default pipe with the interface number in wIndex (see configureCdcAcm), so they
+// do NOT require the interface to be claimed. Detecting it and skipping the claim
+// returns one channel per CDC device at no functional cost.
+//
+// usb_host_interface_claim() allocates a pipe for EVERY endpoint of the interface,
+// all-or-nothing, so this is only possible where the endpoint sits on an interface of
+// its own. That is true for CDC control and NOT true for vendor-serial adapters like
+// the Prolific, whose interrupt IN shares interface 0 with the bulk pair.
+//
+// Set -DESPUSBHOST_CLAIM_CDC_NOTIFY=1 to restore upstream behaviour.
+#ifndef ESPUSBHOST_CLAIM_CDC_NOTIFY
+#define ESPUSBHOST_CLAIM_CDC_NOTIFY 0
+#endif
+
+// CardSat patch: bring VBUS up AFTER the host stack is running, not during install.
+//
+// Root-port connection detection is edge-driven. A SELF-POWERED device that is already
+// powered when the ESP32-S3 boots has its D+ pull-up asserted before the PHY is
+// initialised, so there is no transition for the root port to see: no connect, no
+// reset attempt, and nothing logged anywhere. Bench evidence: a bus-powered Prolific
+// (which cannot pull up until VBUS arrives, i.e. always after the host) cold-attaches
+// in ~900 ms every time, while a self-powered StarTech hub powered before boot is never
+// seen at all, and is seen immediately if its supply is applied after the first scan.
+// The IC-705 is self-powered and shows the same signature: it enumerates through a hub,
+// whose port power sequencing produces a fresh connect event, but not on its own.
+//
+// Installing with root_port_unpowered and raising VBUS once the stack is up inverts
+// that: VBUS rises while the PHY is live, so an already-powered device asserts its
+// pull-up into a host that is listening. Expected to apply equally to the IC-9700 and
+// IC-9100, which are self-powered CDC radios of the same family (UNTESTED - no hardware).
+//
+// Compiled out where the IDF is too old to have the field. Set
+// -DESPUSBHOST_DEFER_ROOT_PORT_POWER=0 to restore upstream behaviour.
+#ifndef ESPUSBHOST_DEFER_ROOT_PORT_POWER
+#define ESPUSBHOST_DEFER_ROOT_PORT_POWER 1
+#endif
+#if ESPUSBHOST_DEFER_ROOT_PORT_POWER && defined(ESP_IDF_VERSION) && defined(ESP_IDF_VERSION_VAL)
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
+#define ESPUSBHOST_HAS_DEFERRED_VBUS 1
+#endif
+#endif
+#ifndef ESPUSBHOST_HAS_DEFERRED_VBUS
+#define ESPUSBHOST_HAS_DEFERRED_VBUS 0
+#endif
+
 #ifdef CARDSAT_USB_DIAG
 // Raw IN-transfer counters, reported as an explicit total at teardown so a zero is a
 // MEASUREMENT rather than a missing line.
@@ -6267,6 +6323,11 @@ void EspUsbHost::taskLoop()
   usb_host_config_t hostConfig = {};
   hostConfig.skip_phy_setup = false;
   hostConfig.intr_flags = ESP_INTR_FLAG_LOWMED;
+#if ESPUSBHOST_HAS_DEFERRED_VBUS
+  // Do not raise VBUS here; see ESPUSBHOST_DEFER_ROOT_PORT_POWER above. The port is
+  // powered once the client is registered and its task exists.
+  hostConfig.root_port_unpowered = true;
+#endif
 #if defined(CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK) && CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
   if (enumerationHost_ && enumerationHost_ != this)
   {
@@ -6356,6 +6417,25 @@ void EspUsbHost::taskLoop()
     vTaskDelete(nullptr);
     return;
   }
+
+#if ESPUSBHOST_HAS_DEFERRED_VBUS
+  // Host installed, client registered, client task created: the stack can now observe
+  // an attach. Raise VBUS. ESP_ERR_INVALID_STATE means the port was already powered
+  // (root_port_unpowered not honoured by this IDF) -- harmless, and NOT an error worth
+  // failing the bring-up over, so it is recorded and ignored.
+  {
+    const esp_err_t vbus = usb_host_lib_set_root_port_power(true);
+    CS_DIAG("## root port power on -> %d (%s)", (int)vbus,
+            vbus == ESP_OK ? "OK" : (vbus == ESP_ERR_INVALID_STATE
+                                     ? "INVALID_STATE: already powered"
+                                     : "failed"));
+    if (vbus != ESP_OK && vbus != ESP_ERR_INVALID_STATE)
+    {
+      ESP_LOGE(TAG, "usb_host_lib_set_root_port_power(true) failed: %s", esp_err_to_name(vbus));
+      setLastError(vbus);
+    }
+  }
+#endif
 
   ready_ = running_;
   ESP_LOGI(TAG, "USB Host started stack=%lu priority=%u core=%d",
@@ -7299,7 +7379,20 @@ void EspUsbHost::handleDescriptor(uint8_t descriptorType, const uint8_t *data)
     const bool isCdcAcmDataInterface = currentInterfaceClass_ == USB_CLASS_CDC_DATA_VALUE &&
                                        device->hasCdcControlInterface &&
                                        !device->hasCdcDataInterface;
-    if (currentInterfaceClass_ == USB_CLASS_HID_VALUE ||
+    if (isCdcAcmControlInterface && !ESPUSBHOST_CLAIM_CDC_NOTIFY)
+    {
+      // Detected but deliberately not claimed - see ESPUSBHOST_CLAIM_CDC_NOTIFY above.
+      // currentInterfaceClaimed_ stays false (reset per interface), so the notification
+      // endpoint is never armed and no host channel is spent on it.
+      device->hasCdcControlInterface = true;
+      device->cdcControlInterfaceNumber = currentInterfaceNumber_;
+      CS_DIAG("  -> CDC CONTROL on iface %u detected, NOT claimed (saves 1 HCD channel)",
+              (unsigned)currentInterfaceNumber_);
+      ESP_LOGI(TAG, "CDC control interface ready (unclaimed): iface=%u",
+               device->cdcControlInterfaceNumber);
+      configureCdcAcm(*device);
+    }
+    else if (currentInterfaceClass_ == USB_CLASS_HID_VALUE ||
         isCdcAcmControlInterface ||
         isCdcAcmDataInterface ||
         isAudioControlInterface ||
@@ -10739,7 +10832,50 @@ bool EspUsbHost::uninstallHostLibrary(uint32_t timeoutMs)
     return false;
   }
 
-  const esp_err_t uninstallErr = usb_host_uninstall();
+  // DRAIN THE LIBRARY EVENT QUEUE BEFORE UNINSTALLING.
+  //
+  // usb_host_uninstall() requires process_pending_flags, lib_event_flags and the
+  // client flags to ALL be zero and returns ESP_ERR_INVALID_STATE (259) otherwise.
+  // When device_free_all() returns ESP_OK the wait loop above never runs, so an event
+  // still sitting in the queue - typically the ALL_FREE the free itself raised - is
+  // never consumed. Bench log: "device_free_all -> 0 (ALL FREE)" followed immediately
+  // by "usb_host_uninstall -> 259", after which the host stays installed and EVERY
+  // later scan reports "host would not start" until the operator reboots.
+  {
+    const uint32_t drainStartMs = millis();
+    for (int i = 0; i < 16 && (uint32_t)(millis() - drainStartMs) < timeoutMs; ++i)
+    {
+      uint32_t drained = 0;
+      const esp_err_t drainErr = usb_host_lib_handle_events(pdMS_TO_TICKS(10), &drained);
+      if (drainErr != ESP_OK && drainErr != ESP_ERR_TIMEOUT)
+      {
+        break;
+      }
+      if (drained == 0)
+      {
+        break;                    // queue empty: safe to uninstall
+      }
+      CS_DIAG("  uninstall: drained lib event flags 0x%08x", (unsigned)drained);
+    }
+  }
+
+  esp_err_t uninstallErr = usb_host_uninstall();
+  if (uninstallErr == ESP_ERR_INVALID_STATE)
+  {
+    // Something arrived between the drain and the call. One more pass, then retry -
+    // failing here costs the operator every subsequent scan, so it is worth a second
+    // attempt rather than leaving the host wedged.
+    CS_DIAG("  uninstall: 259 on first try, draining again and retrying");
+    for (int i = 0; i < 8; ++i)
+    {
+      uint32_t drained = 0;
+      if (usb_host_lib_handle_events(pdMS_TO_TICKS(10), &drained) != ESP_OK && drained == 0)
+      {
+        break;
+      }
+    }
+    uninstallErr = usb_host_uninstall();
+  }
   CS_DIAG("  uninstall: usb_host_uninstall -> %d (%s)", (int)uninstallErr,
           uninstallErr == ESP_OK ? "OK, host released" : "FAILED, host STAYS INSTALLED");
   if (uninstallErr != ESP_OK)

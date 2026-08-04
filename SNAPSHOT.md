@@ -1,15 +1,29 @@
-# CardSat 0.9.70-wip — work-in-progress snapshot
+# CardSat 0.9.72 — release snapshot
 
-**This is not a release.** `FW_VERSION` is `0.9.70-wip`; the bump to a release number
-is a deliberate decision that has not been made. Much of what is here has never run on
-hardware — `docs/THINGS_TO_VERIFY.md` is the list, and it is long.
+**This is a release.** `FW_VERSION` is `0.9.72`. A USB release: the ESP-IDF USB host
+stack is compiled from source (see `docs/design/USB_HOST_VENDORING.md`), which made the
+IC-705 work over USB CAT and fixed three other USB defects.
 
 ## State at packaging
 
-* Build: EXIT=0, **0 warnings**, flash 3,042,602 (96.7%), static RAM 162,176 (49%).
-* All **20 static gates** pass; all **10 host harnesses** pass.
+* Build: EXIT=0, **0 warnings**, flash 3,067,552 (73.1% of the 4 MB app partition),
+  static RAM 162,376 (49%).
+* All **static gates** pass.
 * `CardSat.ino` in this zip is byte-identical to the source that produced
-  `firmware/CardSat-app.bin` (MD5 `4a2fb1e3b0d8aefc0d5ee3ea56981d10`).
+  `firmware/CardSat-app.bin` (MD5 `1db3bc9a69d93827a00293ef63594fe1`).
+* `CardSat_Manual.pdf` regenerated from `MANUAL.md` at v0.9.72 (167 pages).
+
+## Building this package
+
+Two steps beyond a normal Arduino build, and **both are silent if skipped**:
+
+1. Copy `third_party/EspUsbHost/` over the installed EspUsbHost library.
+2. Run `./tools/vendor_usb_host.sh` to install the ESP-IDF USB host component.
+
+Then **delete the sketch build cache** — `build_opt.h` is not a dependency of any object
+file, so a changed flag otherwise yields a byte-identical binary. Verify the vendoring
+took by checking the map: `libraries/UsbHostSrc` in the hundreds, `libusb.a(` at zero.
+
 * Companion `CardSatDualRig-app.bin` MD5 `a3e00f3432997971765c47afcd63976a`, rebuilt
   from the source in `companion/`.
 

@@ -620,7 +620,12 @@ void App::setup() {
 // ---- USB diagnostic capture ----------------------------------------------------
 void cardsatUsbDiag(const char* fmt, ...);   // C++ linkage: see PATCHES.md
 namespace {
-  constexpr size_t USBDIAG_CAP = 6144;
+  // 6144 was sized for CS_DIAG output alone. With the vendored USB stack's DEBUG
+  // narration routed in (CARDSAT_USB_VERBOSE), a single hub enumeration can exceed
+  // that, and a fill-and-stop ring truncates exactly when the interesting part
+  // arrives. RAM is not the constraint here - the build reports ~159 KB free for
+  // local variables - so spend some of it rather than lose the end of a capture.
+  constexpr size_t USBDIAG_CAP = 16384;
   char             usbDiagBuf[USBDIAG_CAP];
   volatile size_t  usbDiagLen  = 0;      // bytes held
   volatile uint32_t usbDiagDrop = 0;     // bytes discarded once full
@@ -682,6 +687,17 @@ void App::usbDiagInstall() {
   esp_log_level_set("USBH", ESP_LOG_INFO);
   esp_log_level_set("HUB", ESP_LOG_INFO);
   esp_log_level_set("USB_HOST", ESP_LOG_INFO);
+  // Raising a runtime level can only UNMASK call sites that were compiled in. Against
+  // Arduino's stock libraries (CONFIG_LOG_MAXIMUM_LEVEL=1, ERROR) these five lines do
+  // nothing at all -- harmless, and that is why they are safe to ship unconditionally.
+  // Against libraries rebuilt with CONFIG_LOG_MAXIMUM_LEVEL_DEBUG they turn on the
+  // port-event narration in hub.c, ext_hub.c, ext_port.c, enum.c and hcd_dwc.c, which
+  // is the only remaining source of evidence for why a device fails to enumerate.
+  esp_log_level_set("HUB", ESP_LOG_DEBUG);
+  esp_log_level_set("EXT_HUB", ESP_LOG_DEBUG);
+  esp_log_level_set("EXT_PORT", ESP_LOG_DEBUG);
+  esp_log_level_set("ENUM", ESP_LOG_DEBUG);
+  esp_log_level_set("HCD DWC", ESP_LOG_DEBUG);
 }
 
 // Main loop. Moves whole lines out under a brief lock, then writes them OUTSIDE the
@@ -914,8 +930,10 @@ bool App::groveCatVsGpsArbitrate(const char* who) {
 String App::usbAdapterLabel(const char* key) const {
 #if CARDSAT_HAS_USBCAT
   if (!key || !key[0]) return String("Auto");
+  // Match LIVE slots only. A tombstoned slot keeps its key, so an adapter that had
+  // been unplugged still resolved to its label and read as though it were plugged in.
   for (uint8_t i = 0; i < UsbSerial::serialDeviceCount(); ++i)
-    if (strcmp(UsbSerial::serialDeviceKey(i), key) == 0)
+    if (UsbSerial::serialDeviceLive(i) && strcmp(UsbSerial::serialDeviceKey(i), key) == 0)
       return String(UsbSerial::serialDeviceLabel(i));
   // The key names an adapter that is not plugged in (or has not been scanned for).
   // That is the useful answer -- a blank would look like "nothing selected" when
@@ -992,6 +1010,10 @@ void App::cycleUsbAdapter(char* key, size_t keyLen, int dir, bool isRadio,
   for (int tries = 0; tries < slots; ++tries) {
     cur = (cur + step + slots) % slots;
     if (cur == 0) break;                                       // Auto is always free
+    // Step past tombstones as well as taken entries: an unplugged adapter is not a
+    // selectable choice. Same bound applies, so a list of nothing but tombstones
+    // lands back on Auto rather than spinning.
+    if (!UsbSerial::serialDeviceLive(cur - 1)) continue;
     const char* k = UsbSerial::serialDeviceKey(cur - 1);
     if (taken[0] && strcmp(k, taken) == 0) { skippedTaken = true; continue; }
     if (taken2[0] && strcmp(k, taken2) == 0) { skippedOtherLeg = true; continue; }
@@ -40856,7 +40878,11 @@ void App::drawSettings() {
     // Scan rows: one per menu, same action. Report what is already known so the
     // row is useful before AND after -- "3 seen" tells you a re-scan is optional.
 #if CARDSAT_HAS_USBCAT
-    const uint8_t n = UsbSerial::serialDeviceCount();
+    // LIVE count, not the slot count. The refresh tombstones an unplugged adapter
+    // rather than deleting it, so serialDeviceCount() still returned 1 after the last
+    // adapter was pulled and this row kept reporting "1 seen" beside a log line
+    // reading "no adapters found".
+    const uint8_t n = UsbSerial::liveDeviceCount();
     String v = n ? (String(n) + " seen - press to re-scan") : String("press to scan");
 #else
     String v = "n/a";

@@ -1,29 +1,41 @@
 # CardSat — precompiled firmware (M5Cardputer ADV)
 
 Prebuilt binaries for the **M5Stack Cardputer ADV** (ESP32-S3FN8, 8 MB flash, no PSRAM),
-firmware **v0.9.71**. Flash these if you want to run this exact build without
+firmware **v0.9.72**. Flash these if you want to run this exact build without
 compiling. Source is the rest of this repo; `CardSat.ino` is the monolithic sketch.
 
 Built with: arduino-cli + `esp32:esp32@3.2.1`, FQBN
 `esp32:esp32:esp32s3:PartitionScheme=custom,CDCOnBoot=cdc` with the repo's
 `partitions.csv` (4 MB app / 1.5 MB LittleFS), M5Cardputer library.
-No `build.extra_flags` (that would break the HWCDC serial console). Flash usage at build time: 3,065,206 bytes of a **4 MB** app partition (73.1%);
-static RAM 162,360 bytes (49%).
+No `build.extra_flags` (that would break the HWCDC serial console). Flash usage at build time: 3,067,552 bytes of a **4 MB** app partition (73.1%);
+static RAM 162,376 bytes (49%).
 
 The flash percentage is only meaningful beside the library versions it was built
 with: M5Cardputer 1.1.1, M5GFX 0.2.26, M5Unified 0.2.19, ESP_SSLClient 3.1.3,
 ArduinoJson 7.4.2, TinyGPSPlus 1.0.3, RadioLib 7.7.1, Sgp4 1.0.3, EspUsbHost **2.7.0, PATCHED** -- see `third_party/EspUsbHost/PATCHES.md`.
 
-> **Building this yourself? The USB host library must be patched.** A stock EspUsbHost
-> compiles and appears to work, then strands the USB stack the first time a radio stops
-> answering ("USB busy" on every later engage, until you reboot). The patched copy is
-> vendored at `third_party/EspUsbHost/`; copy it over your installed library. Three of
-> the patches are drafted as upstream bug reports, so a future release may drop the
-> vendored copy.
+> **Building this yourself? Two libraries must be prepared, not one.**
+>
+> 1. **EspUsbHost must be patched.** A stock copy compiles and appears to work, then
+>    strands the USB stack the first time a radio stops answering. The patched copy is
+>    vendored at `third_party/EspUsbHost/`; copy it over your installed library.
+> 2. **The ESP-IDF USB host stack must be vendored.** Run
+>    `./tools/vendor_usb_host.sh`. Without it the build silently links Arduino's
+>    prebuilt `libusb.a`, and the reset timings, enumeration retry and USB diagnostics
+>    in this release are all absent — with no error to tell you. Read
+>    `docs/design/USB_HOST_VENDORING.md` first; the version pin must match your core.
+>
+> After either step, **delete the sketch build cache**. `build_opt.h` is not a
+> dependency of any object file, so a changed flag will otherwise produce a
+> byte-identical binary that looks exactly like the change having no effect.
+>
+> Verify the override took, in the map file:
+> `grep -c 'libraries/UsbHostSrc' build/*.map` (hundreds) and
+> `grep -c 'libusb\.a(' build/*.map` (zero).
 
 Checksums (MD5):
-- `CardSat-merged.bin`  17fcb2de3c5581349155af032a2c0dc6
-- `CardSat-app.bin`     8f1119a4accc929d49c88d3a5c22ddcd
+- `CardSat-merged.bin`  12a6b05ebde1a013ba5efff436954ff4
+- `CardSat-app.bin`     1db3bc9a69d93827a00293ef63594fe1
 - `CardSat-bootloader.bin`  c7f9b41acfaba802c7e74ae639a9a162
 - `CardSat-partitions.bin`  a4c137645ca493e8abffae39e6fb5a03
 

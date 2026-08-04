@@ -1434,7 +1434,30 @@ uint8_t scanAdapters() {
   // unplug) without the teardown that caused the regression.
   if (s_host) {
     EspUsbHostDeviceInfo live[ESP_USB_HOST_MAX_DEVICES];
-    const size_t n = s_host->getDevices(live, ESP_USB_HOST_MAX_DEVICES);
+    // LET THE DEVICE TABLE SETTLE BEFORE READING IT.
+    //
+    // hostUpForRotator() returns immediately when the host is already resident, so a
+    // re-scan used to read the table about 70 ms after the operator pressed the key --
+    // far less than the ~900 ms a single device needs to enumerate. Plug something in,
+    // scan straight away, see no change: that is why re-scanning looks broken after the
+    // first enumeration. Bench log: thirteen consecutive re-scans, every one ~70 ms,
+    // none of which could have observed an enumeration in progress.
+    //
+    // Poll until the count stops moving, or the cap expires. Costs two reads and a
+    // 50 ms delay when nothing is changing, and does NOT pay the ~9 s cold-start
+    // window -- the host is already up and enumerating on its own task while we wait.
+    constexpr uint32_t SCAN_SETTLE_QUIET_MS = 400;
+    constexpr uint32_t SCAN_SETTLE_CAP_MS   = 2500;
+    size_t n = s_host->getDevices(live, ESP_USB_HOST_MAX_DEVICES);
+    const uint32_t settleT0 = millis();
+    uint32_t lastChangeMs   = settleT0;
+    size_t   lastN          = n;
+    while ((uint32_t)(millis() - settleT0) < SCAN_SETTLE_CAP_MS) {
+      delay(50);
+      n = s_host->getDevices(live, ESP_USB_HOST_MAX_DEVICES);
+      if (n != lastN) { lastN = n; lastChangeMs = millis(); continue; }
+      if ((uint32_t)(millis() - lastChangeMs) >= SCAN_SETTLE_QUIET_MS) break;
+    }
     // Tombstone every entry, then re-publish the ones still present. An entry that is
     // gone stays dead, which is what makes an unplug visible.
     for (uint8_t i = 0; i < s_serDevN; ++i) s_serDev[i].dead = 1;
@@ -1445,6 +1468,40 @@ uint8_t scanAdapters() {
     rotTrace(b);
   }
   if (!hostUpForRotator()) { rotTrace("scan: host would not start"); return 0; }
+
+  // SECOND PASS: the bus may still be settling.
+  //
+  // A cold enumeration that finds nothing is NOT the same as nothing being attached.
+  // Bench: with the hub attached and powered from boot, the first pass fails and the
+  // stack then recovers the root port on its own and enumerates completely about nine
+  // seconds later -- after this scan has already reported "no adapters found". Scanning
+  // again finds everything, which is the whole reason the "power dance" appeared to
+  // work: unplugging and replugging simply took longer than the recovery. Waiting a
+  // while after boot and scanning once has the same effect, with no cable touched.
+  //
+  // So when the first pass comes up empty, keep watching the live host for a second
+  // window before declaring nothing there. Costs nothing when devices were already
+  // found, and nothing when the host never came up.
+  if (s_host && liveDeviceCount() == 0) {
+    constexpr uint32_t SCAN_SECOND_PASS_MS = 12000;
+    constexpr uint32_t SCAN_POLL_MS        =   250;
+    rotTrace("scan: nothing yet - watching for late enumeration");
+    const uint32_t t0 = millis();
+    while ((uint32_t)(millis() - t0) < SCAN_SECOND_PASS_MS) {
+      delay(SCAN_POLL_MS);
+      EspUsbHostDeviceInfo late[ESP_USB_HOST_MAX_DEVICES];
+      const size_t n = s_host->getDevices(late, ESP_USB_HOST_MAX_DEVICES);
+      if (n == 0) continue;
+      for (size_t i = 0; i < n; ++i) onDev(late[i]);
+      if (liveDeviceCount() > 0) {
+        char b[72];
+        snprintf(b, sizeof(b), "scan: late enumeration after %u ms",
+                 (unsigned)(millis() - t0));
+        rotTrace(b);
+        break;
+      }
+    }
+  }
   if (s_devRegistryFull)
     rotTrace("scan: MORE devices than the 4-slot registry - some are not listed");
   for (uint8_t i = 0; i < s_serDevN; ++i) {
@@ -1457,7 +1514,7 @@ uint8_t scanAdapters() {
     rotTrace(b);
   }
   if (s_sawHub) rotTrace("scan: hub present - extended enumeration window used");
-  if (s_serDevN == 0)
+  if (liveDeviceCount() == 0)
     // (A "check PORTA 5V" hint briefly lived here, from a line in another project's
     // README. It was WRONG for this hardware: VBUS on the OTG port is present and
     // measured, an IC-705 charges from it, and a bus-powered serial adapter enumerates
@@ -1489,10 +1546,27 @@ uint8_t scanAdapters() {
                : "scan: releasing temporary host");
     releaseHostIfIdle();       // M2-safe; restores the console when the PHY is really free
   }
-  return s_serDevN;
+  // Return what is PRESENT, not how many slots have ever been used. The caller renders
+  // this straight into the status line, which is how an unplugged adapter came to be
+  // reported as "1 adapter found" beside a log reading "0 device(s)".
+  return liveDeviceCount();
 }
 
+// SLOT COUNT, not the number of adapters present. Callers use this as an ITERATION
+// BOUND for serialDeviceLabel()/serialDeviceKey(), so it must keep counting tombstoned
+// slots or live entries above a dead one become unreachable. Use liveDeviceCount() for
+// any "how many adapters are there" decision.
 uint8_t serialDeviceCount() { return s_serDevN; }
+// How many adapters are ACTUALLY present. s_serDevN counts slots ever used, and the
+// live-host refresh tombstones rather than removes, so after an unplug the two differ.
+// Every emptiness test in this file used s_serDevN and therefore reported one adapter
+// when the log on the same screen said zero.
+uint8_t liveDeviceCount() {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < s_serDevN; ++i) if (!s_serDev[i].dead) ++n;
+  return n;
+}
+bool serialDeviceLive(uint8_t i) { return i < s_serDevN && !s_serDev[i].dead; }
 const char* serialDeviceLabel(uint8_t i) { return i < s_serDevN ? s_serDev[i].label : ""; }
 const char* serialDeviceKey(uint8_t i)   { return i < s_serDevN ? s_serDev[i].key   : ""; }
 

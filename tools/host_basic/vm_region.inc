@@ -133,6 +133,56 @@ namespace {
       return q;
     }
     double* arr = nullptr; int arrN = 0;        // the one @() array (DIM @(n), n<=256)
+
+    // ---- String variables A$..Z$ -------------------------------------------------
+    // ALLOCATED ON DEMAND, like every other large buffer in this firmware: 26 Arduino
+    // Strings cost real heap, and most programs never touch one. The table appears the
+    // first time a program mentions a string variable and dies with the VM.
+    String* svars = nullptr;
+    String* sv() {
+      if (!svars) svars = new (std::nothrow) String[26];
+      return svars;
+    }
+    // True once any string feature has been used, so the prompt/report can say so.
+    bool strUsed = false;
+
+    // ---- Named numeric arrays A() .. Z() ------------------------------------------
+    // ON DEMAND, one allocation per array actually DIMmed, freed with the VM. A budget
+    // caps the TOTAL elements across every array rather than each one separately:
+    // 26 x 256 would be 53 KB of doubles on a device whose whole free heap is ~76 KB,
+    // so a per-array limit would let a program starve the radio, the display and the
+    // USB host while looking perfectly reasonable line by line.
+    static const int ARR_TOTAL_MAX = 2048;      // 16 KB of doubles, all arrays together
+    double* narr[26] = {};
+    int     narrN[26] = {};
+    int     narrTotal = 0;                      // elements currently allocated
+    void freeArrays() {
+      for (int i = 0; i < 26; ++i) { delete[] narr[i]; narr[i] = nullptr; narrN[i] = 0; }
+      narrTotal = 0;
+    }
+    // Allocate or re-dimension one array. Re-DIM is allowed and clears it, which is what
+    // BASIC programmers expect from DIM in a loop.
+    bool dimArray(int idx, int n) {
+      if (idx < 0 || idx > 25) { err = "array A-Z"; return false; }
+      if (n < 1 || n > 1024)   { err = "size 1..1024"; return false; }
+      int after = narrTotal - narrN[idx] + n;
+      if (after > ARR_TOTAL_MAX) { err = "arrays too big (2048 total)"; return false; }
+      delete[] narr[idx];
+      narr[idx] = new (std::nothrow) double[n];
+      if (!narr[idx]) { narrTotal -= narrN[idx]; narrN[idx] = 0; err = "out of memory"; return false; }
+      narrTotal = after; narrN[idx] = n;
+      for (int i = 0; i < n; ++i) narr[idx][i] = 0;
+      return true;
+    }
+    // Bounds-checked element access. Returns nullptr and sets err, so a bad subscript
+    // stops the program instead of corrupting the heap -- BASIC's traditional silent
+    // out-of-range write is not survivable on a device that is also flying a radio.
+    double* arrCell(int idx, double dv) {
+      if (idx < 0 || idx > 25 || !narr[idx]) { err = "array not DIMmed"; return nullptr; }
+      int i = (int)dv;
+      if (i < 0 || i >= narrN[idx]) { err = "subscript out of range"; return nullptr; }
+      return &narr[idx][i];
+    }
     int    dataLineIdx = 0;                     // DATA read cursor: line index...
     const char* dataP = nullptr;                //   ...and position inside its value list
     // Host hooks (set by basicRun; null = feature unavailable). The VM stays ignorant of
@@ -150,7 +200,7 @@ namespace {
     int  (*fileCb)(void*, int op, const char* a, String* out) = nullptr;
     int  satselLeft = 2000;                     // SGP4-per-run budget for SATSEL
     bool gfxUsed = false, lprUsed = false, fileUsed = false;
-    ~BasicVM() { delete[] arr; }
+    ~BasicVM() { delete[] arr; delete[] svars; freeArrays(); }
 
     void ws() { while (*p == ' ' || *p == '\t') ++p; }
     // Boundary-checked keyword match for WORD OPERATORS (MOD/AND/OR/NOT...): unlike kw(),
@@ -225,6 +275,109 @@ namespace {
       const char* q = p; while (*w) { if (toupper((unsigned char)*q) != *w) return false; ++q; ++w; }
       p = q; return true;
     }
+    // ---- String expressions ------------------------------------------------------
+    // Deliberately a SEPARATE evaluator rather than a variant type threaded through the
+    // numeric one. The numeric path is the hot path -- Doppler loops, plot points -- and
+    // giving every value a tag would cost speed and memory on the 99% of expressions
+    // that are numbers. BASIC has always distinguished the two syntactically with the
+    // '$' suffix, so the parser can too.
+    //
+    // isStrStart() decides which evaluator a caller should use, WITHOUT consuming
+    // input: a quote, a NAME$ function, or a bare X$ variable.
+    bool isStrStart() {
+      const char* q = p; while (*q == ' ' || *q == '\t') ++q;
+      if (*q == '"') return true;
+      if (!isalpha((unsigned char)*q)) return false;
+      const char* r = q; while (isalnum((unsigned char)*r)) ++r;
+      return *r == '$';
+    }
+
+    // One string term: literal, variable, or function. Concatenation is handled by
+    // strExpr().
+    String strTerm() {
+      ws();
+      if (*p == '"') { ++p; String s; while (*p && *p != '"') s += *p++; if (*p == '"') ++p; return s; }
+      if (kw("LEFT$"))  { String s; double n; if (!str2(s, n)) return ""; 
+                          int k = (int)n; if (k < 0) k = 0;
+                          return k >= (int)s.length() ? s : s.substring(0, k); }
+      if (kw("RIGHT$")) { String s; double n; if (!str2(s, n)) return "";
+                          int k = (int)n; if (k < 0) k = 0;
+                          return k >= (int)s.length() ? s : s.substring(s.length() - k); }
+      if (kw("MID$"))   { // MID$(s, start [, len]) -- start is 1-BASED, as in every
+                          // Microsoft BASIC. Off-by-one here would be silently wrong
+                          // in every program a user ports.
+                          ws(); if (*p != '(') { err = "MID$ ("; return ""; } ++p;
+                          String s = strExpr(); ws(); if (*p != ',') { err = "MID$ ,"; return ""; } ++p;
+                          double st = expr(); double ln = -1; ws();
+                          if (*p == ',') { ++p; ln = expr(); ws(); }
+                          if (*p == ')') ++p; else { err = "MID$ )"; return ""; }
+                          int i = (int)st - 1; if (i < 0) i = 0;
+                          if (i >= (int)s.length()) return "";
+                          if (ln < 0) return s.substring(i);
+                          int k = (int)ln; if (k < 0) k = 0;
+                          return s.substring(i, min((int)s.length(), i + k)); }
+      if (kw("CHR$"))   { double v = paren1(); char b[2] = { (char)(int)v, 0 }; return String(b); }
+      if (kw("STR$"))   { double v = paren1(); return fmtNum(v); }
+      if (kw("UCASE$")) { String s = paren1s(); s.toUpperCase(); return s; }
+      if (kw("LCASE$")) { String s = paren1s(); s.toLowerCase(); return s; }
+      if (kw("TRIM$"))  { String s = paren1s(); s.trim(); return s; }
+      // GRID$(lat, lon) -- Maidenhead, via the firmware's own converter rather than a
+      // second implementation. A program that computes a grid differently from the
+      // tracker it runs on is worse than one that cannot compute it at all.
+      if (kw("GRID$"))  { ws(); if (*p != '(') { err = "GRID$ ("; return ""; } ++p;
+                          double la = expr(); ws();
+                          if (*p != ',') { err = "GRID$ ,"; return ""; } ++p;
+                          double lo = expr(); ws();
+                          if (*p == ')') ++p; else { err = "GRID$ )"; return ""; }
+                          return Location::toGrid(la, lo); }
+      // DXCC$(code) -- entity name for an ARRL code, from the table already on board.
+      if (kw("DXCC$"))  { double v = paren1();
+                          int code = (int)v;
+                          for (size_t i = 0; i < sizeof(DXCC_LK) / sizeof(DXCC_LK[0]); ++i)
+                            if (DXCC_LK[i].code == code) return String(DXCC_LK[i].name);
+                          return String(""); }
+      // TIME$ / DATE$ -- from the SAME snapshot the numeric fields use, so a program
+      // cannot print a timestamp that disagrees with its own UTCH/UTCM readings.
+      if (kw("TIME$"))  { if (!sys.timeOk) { err = "no time"; return ""; }
+                          char b[12]; snprintf(b, sizeof(b), "%02d:%02d:%02d",
+                            (int)sys.utcH, (int)sys.utcM, (int)sys.utcS); return String(b); }
+      if (kw("DATE$"))  { if (!sys.timeOk) { err = "no time"; return ""; }
+                          char b[12]; snprintf(b, sizeof(b), "%04d-%02d-%02d",
+                            (int)sys.utcYr, (int)sys.utcMon, (int)sys.utcDay); return String(b); }
+      if (isalpha((unsigned char)*p) && *(p + 1) == '$') {          // A$ .. Z$
+        int i = toupper((unsigned char)*p) - 'A'; p += 2;
+        strUsed = true;
+        String* t = sv(); if (!t) { err = "out of memory"; return ""; }
+        return t[i];
+      }
+      err = "string expected"; return "";
+    }
+    String strExpr() {
+      String v = strTerm();
+      for (;;) { ws(); if (*p != '+') break; ++p; v += strTerm(); if (!err.isEmpty()) break; }
+      return v;
+    }
+    // (s, n) argument pair used by LEFT$/RIGHT$.
+    bool str2(String& s, double& n) {
+      ws(); if (*p != '(') { err = "( expected"; return false; } ++p;
+      s = strExpr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      n = expr(); ws(); if (*p == ')') ++p; else { err = ") expected"; return false; }
+      return true;
+    }
+    // Four comma-separated numbers in parens: (lat1, lon1, lat2, lon2).
+    bool arg4(double& a, double& b, double& c2, double& d) {
+      ws(); if (*p != '(') { err = "( expected"; return false; } ++p;
+      a = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      b = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      c2 = expr(); ws(); if (*p != ',') { err = ", expected"; return false; } ++p;
+      d = expr(); ws(); if (*p == ')') ++p; else { err = ") expected"; return false; }
+      return true;
+    }
+    double paren1()  { ws(); if (*p != '(') { err = "( expected"; return 0; } ++p;
+                       double v = expr(); ws(); if (*p == ')') ++p; else err = ") expected"; return v; }
+    String paren1s() { ws(); if (*p != '(') { err = "( expected"; return ""; } ++p;
+                       String s = strExpr(); ws(); if (*p == ')') ++p; else err = ") expected"; return s; }
+
     double expr() { double v = term(); for (;;) { ws();
       if (*p == '+') { ++p; v += term(); } else if (*p == '-') { ++p; v -= term(); } else break; } return v; }
     double term() { double v = power(); for (;;) { ws();
@@ -260,6 +413,66 @@ namespace {
         return arr[i];
       }
       if (isalpha((unsigned char)*p)) {
+        // String-consuming functions that RETURN a number. They live here, in the
+        // numeric evaluator, because that is what they produce -- LEN("AB")+1 is
+        // arithmetic. The '$'-suffix rule keeps the two evaluators unambiguous.
+        if (kw("LEN"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return (double)s.length(); } }
+        if (kw("ASC"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return s.length() ? (double)(uint8_t)s[0] : 0.0; } }
+        if (kw("VAL"))   { ws(); if (*p=='(') { ++p; String s=strExpr(); ws(); if(*p==')')++p;
+                                                return atof(s.c_str()); } }
+        // INSTR(haystack, needle) -> 1-based position, 0 = not found. Microsoft order
+        // and Microsoft's 1-based result: 0 is the "no" answer precisely because 1 is
+        // a real position.
+        if (kw("INSTR")) { ws(); if (*p=='(') { ++p; String h=strExpr(); ws();
+                             if (*p==',') { ++p; String n=strExpr(); ws(); if(*p==')')++p;
+                               int i = h.indexOf(n); return i < 0 ? 0.0 : (double)(i + 1); }
+                             err = "INSTR ,"; return 0; } }
+        // ---- constants -------------------------------------------------------------
+        // Bare names, no parentheses, matching PI's traditional spelling. Values that a
+        // program would otherwise have to type out and get subtly wrong: writing
+        // 3.14159 instead of PI is a 5-arcsecond pointing error at the horizon.
+        if (kwb("PI"))    return 3.14159265358979323846;
+        if (kwb("TWOPI")) return 6.28318530717958647692;
+        if (kwb("DEG"))   return 57.29577951308232087680;   // radians -> degrees
+        if (kwb("RAD"))   return 0.01745329251994329577;    // degrees -> radians
+        if (kwb("CLIGHT"))return 299792458.0;               // m/s, exact by definition
+        if (kwb("KBOLT")) return 1.380649e-23;              // J/K, exact by definition
+        if (kwb("REARTH"))return 6378.137;                  // km, WGS-84 equatorial
+
+        // ---- maths that BASIC programs kept hand-rolling ---------------------------
+        if (kw("ATN2"))  { // ATN2(y, x) -- full-quadrant bearing. Hand-rolling this with
+                           // ATN(y/x) loses the quadrant and divides by zero due east;
+                           // every program doing geometry needs it.
+                           ws(); if (*p=='(') { ++p; double y=expr(); ws();
+                             if (*p==',') { ++p; double x=expr(); ws(); if(*p==')')++p;
+                               return atan2(y, x); }
+                             err = "ATN2 ,"; return 0; } }
+        if (kw("ASN"))   { double v = paren1(); return asin(v < -1 ? -1 : (v > 1 ? 1 : v)); }
+        if (kw("ACS"))   { double v = paren1(); return acos(v < -1 ? -1 : (v > 1 ? 1 : v)); }
+        if (kw("LOG10")) { double v = paren1(); return v > 0 ? log10(v) : 0; }
+        if (kw("ROUND")) { double v = paren1(); return floor(v + 0.5); }
+        if (kw("FRAC"))  { double v = paren1(); return v - (double)(long)v; }
+        if (kw("HYP"))   { ws(); if (*p=='(') { ++p; double a=expr(); ws();
+                             if (*p==',') { ++p; double b=expr(); ws(); if(*p==')')++p;
+                               return sqrt(a*a + b*b); }
+                             err = "HYP ,"; return 0; } }
+
+        // ---- geometry and radio, reusing the firmware's own routines ---------------
+        // These are the calculations CardSat already trusts on its own screens. Giving
+        // BASIC a second, hand-written copy is how a program comes to disagree with the
+        // tracker it is running on.
+        if (kw("GCDIST")) { double a,b,c2,d; if (!arg4(a,b,c2,d)) return 0;
+                            double km, br; greatCircle(a, b, c2, d, km, br); return km; }
+        if (kw("GCAZ"))   { double a,b,c2,d; if (!arg4(a,b,c2,d)) return 0;
+                            double km, br; greatCircle(a, b, c2, d, km, br); return br; }
+        if (kw("DXCCLAT")) { double v = paren1(); double la, lo;
+                             if (!dxccGeoFind((int)v, la, lo)) { err = "no such entity"; return 0; }
+                             return la; }
+        if (kw("DXCCLON")) { double v = paren1(); double la, lo;
+                             if (!dxccGeoFind((int)v, la, lo)) { err = "no such entity"; return 0; }
+                             return lo; }
         if (kw("ABS")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return fabs(v); } }
         else if (kw("INT")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return floor(v); } }
         else if (kw("SQR")) { ws(); if (*p=='(') { ++p; double v=expr(); ws(); if(*p==')')++p; return v>0?sqrt(v):0; } }
@@ -304,6 +517,16 @@ namespace {
         char v = toupper((unsigned char)*p); ++p;
         // guard: a two-letter identifier we don't know is an error, not a var
         if (isalpha((unsigned char)*p)) { err = "unknown name"; return 0; }
+        // A(i) is an array element when A has been DIMmed. Checking narr[] rather than
+        // just the '(' keeps "A (3+1)" -- a scalar followed by a parenthesised term --
+        // working for programs written before arrays existed.
+        { const char* save = p; ws();
+          if (*p == '(' && narr[v - 'A']) {
+            ++p; double iv = expr(); ws();
+            if (*p == ')') ++p; else { err = "paren"; return 0; }
+            double* c = arrCell(v - 'A', iv); return c ? *c : 0;
+          }
+          p = save; }
         return vars[v - 'A'];
       }
       char* e = nullptr; double v = strtod(p, &e);
@@ -321,6 +544,18 @@ namespace {
       if (kwb("OR"))  { double r = land(); v = (v != 0 || r != 0) ? 1 : 0; } else break; } return v; }
 
     double relation() {
+      // STRING COMPARISON. IF A$ = "X" is the single most common string test in BASIC,
+      // and without this it would evaluate A as a number and silently compare nonsense.
+      // Only = and <> are supported: ordering strings invites locale questions this
+      // interpreter has no answer to, and a wrong answer is worse than a clear refusal.
+      if (isStrStart()) {
+        String l = strExpr(); if (!err.isEmpty()) return 0;
+        ws();
+        char a = *p, b = *(p + 1);
+        if (a == '<' && b == '>') { p += 2; String r = strExpr(); return l != r ? 1 : 0; }
+        if (a == '=')             { ++p;    String r = strExpr(); return l == r ? 1 : 0; }
+        err = "strings compare with = or <> only"; return 0;
+      }
       double l = expr(); ws();
       char a = *p, b = *(p + 1);
       if (a == '<' && b == '=') { p += 2; return l <= expr(); }
@@ -333,18 +568,25 @@ namespace {
     }
     int findLine(int num) { for (int i = 0; i < nLines; ++i) if (lines[i].num == num) return i; return -1; }
 
-    void printNum(double v) {
+    // ONE number->text rule, shared by PRINT and STR$. Splitting them would let
+    // PRINT X and PRINT STR$(X) disagree, which is the kind of difference that only
+    // shows up in someone's report output long after it was introduced.
+    String fmtNum(double v) {
       char b[32];
       if (v == floor(v) && fabs(v) < 1e15) snprintf(b, sizeof(b), "%ld", (long)v);
       else snprintf(b, sizeof(b), "%g", v);
-      out += b;
+      return String(b);
     }
+    void printNum(double v) { out += fmtNum(v); }
     // PRINT's item grammar rendered into a caller String -- one finished line, no
     // trailing newline. Shared by LPRINT (report sinks) and FPRINT (gated file).
     void emitLine(String& dst) {
       for (;;) { ws();
         if (*p == 0 || *p == ':') break;
-        if (*p == '"') { ++p; while (*p && *p != '"') dst += *p++; if (*p == '"') ++p; }
+        // Same grammar as PRINT, including string expressions -- LPRINT A$ and
+        // FPRINT LEFT$(N$,3) must work, or the report sinks silently diverge from
+        // what the screen shows.
+        if (isStrStart()) { String s = strExpr(); if (!err.isEmpty()) return; dst += s; }
         else if (*p == ',') { dst += "  "; ++p; }
         else if (*p == ';') { ++p; }
         else { double v = expr(); if (!err.isEmpty()) return;
@@ -362,7 +604,8 @@ namespace {
       bool suppressNL = false, emitted = false, sawSep = false;
       for (;;) { ws();
         if (*p == 0 || *p == ':') break;
-        if (*p == '"') { ++p; while (*p && *p != '"') out += *p++; if (*p == '"') ++p; emitted = true; suppressNL = false; }
+        if (isStrStart()) { String s = strExpr(); if (!err.isEmpty()) return;
+                            out += s; emitted = true; suppressNL = false; }
         else if (*p == ',') { out += "  "; ++p; suppressNL = true; sawSep = true; }
         else if (*p == ';') { ++p; suppressNL = true; sawSep = true; }
         else { double v = expr(); if (!err.isEmpty()) return;   // check BEFORE printing --
@@ -374,6 +617,33 @@ namespace {
       if (!suppressNL || (!emitted && !sawSep)) out += '\n';
     }
     int assign() { ws();
+      // A$ = <string expression>. Checked before the numeric path because "A$" starts
+      // with a letter and would otherwise be read as the variable A followed by junk.
+      if (isalpha((unsigned char)*p) && *(p + 1) == '$') {
+        int i = toupper((unsigned char)*p) - 'A'; p += 2; ws();
+        if (*p != '=') { err = "="; return -1; }
+        ++p;
+        String v = strExpr(); if (!err.isEmpty()) return -1;
+        strUsed = true;
+        String* t = sv(); if (!t) { err = "out of memory"; return -1; }
+        t[i] = v; return -1;
+      }
+      // A(i) = expr, for a DIMmed array. Same "only when DIMmed" rule as the read
+      // side, so an undimensioned A( is still the old clear error rather than a
+      // mysterious no-op.
+      if (isalpha((unsigned char)*p) && !isalpha((unsigned char)*(p + 1))) {
+        const char* save = p;
+        int idx = toupper((unsigned char)*p) - 'A'; ++p; ws();
+        if (*p == '(' && narr[idx]) {
+          ++p; double iv = expr(); ws();
+          if (*p == ')') ++p; else { err = "paren"; return -1; }
+          ws(); if (*p != '=') { err = "="; return -1; }
+          ++p; double val = expr(); if (!err.isEmpty()) return -1;
+          double* c = arrCell(idx, iv); if (!c) return -1;
+          *c = val; return -1;
+        }
+        p = save;
+      }
       if (*p == '@') {                            // @(index) = expr
         ++p; ws(); if (*p != '(') { err = "@ needs ()"; return -1; }
         ++p; double iv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
@@ -472,15 +742,42 @@ namespace {
         if (bodyOnThisLine) { forResumeP = f.bodyP; return -998; }
         return f.lineIdx + 1;
       }
-      if (kw("DIM")) {                           // DIM @(n) -- the one numeric array
-        ws(); if (*p == '@') ++p; else { err = "DIM @(n)"; return -1; }
-        ws(); if (*p != '(') { err = "DIM @(n)"; return -1; }
-        ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
-        int n = (int)nv;
-        if (n < 1 || n > 256) { err = "@ size 1..256"; return -1; }
-        delete[] arr; arr = new (std::nothrow) double[n];
-        if (!arr) { err = "out of memory"; arrN = 0; return -1; }
-        arrN = n; for (int i = 0; i < n; ++i) arr[i] = 0;
+      if (kw("DIM")) {
+        // DIM @(n)            -- the original single array, unchanged for old programs
+        // DIM A(n) [, B(m)..] -- named arrays, several per statement as in MS BASIC
+        for (;;) {
+          ws();
+          if (*p == '@') {
+            ++p; ws(); if (*p != '(') { err = "DIM @(n)"; return -1; }
+            ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+            int n = (int)nv;
+            if (n < 1 || n > 256) { err = "@ size 1..256"; return -1; }
+            delete[] arr; arr = new (std::nothrow) double[n];
+            if (!arr) { err = "out of memory"; arrN = 0; return -1; }
+            arrN = n; for (int i = 0; i < n; ++i) arr[i] = 0;
+          } else if (isalpha((unsigned char)*p)) {
+            int idx = toupper((unsigned char)*p) - 'A'; ++p; ws();
+            if (*p != '(') { err = "DIM A(n)"; return -1; }
+            ++p; double nv = expr(); ws(); if (*p == ')') ++p; else { err = "paren"; return -1; }
+            if (!dimArray(idx, (int)nv)) return -1;
+          } else { err = "DIM name"; return -1; }
+          ws(); if (*p == ',') { ++p; continue; }      // DIM A(10), B(20)
+          break;
+        }
+        return -1; }
+      if (kw("ERASE")) {                          // ERASE A -- give the heap back early
+        ws();
+        if (!isalpha((unsigned char)*p)) { err = "ERASE A"; return -1; }
+        int idx = toupper((unsigned char)*p) - 'A'; ++p;
+        narrTotal -= narrN[idx];
+        delete[] narr[idx]; narr[idx] = nullptr; narrN[idx] = 0;
+        return -1; }
+      if (kw("INPUT")) {
+        // The value was collected by the pre-run form (see basicScanInputs), so at run
+        // time this only has to step over its own arguments. Doing the asking here
+        // would mean re-entering the event loop with a live VM on the stack, which is
+        // exactly the design this interpreter avoids -- it runs to completion.
+        while (*p && *p != ':') ++p;
         return -1; }
       if (kwb("DATA")) return -1;                 // data lines execute as no-ops
       if (kw("RESTORE")) { dataLineIdx = 0; dataP = nullptr; return -1; }

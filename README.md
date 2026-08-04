@@ -23,6 +23,22 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.72:** a **USB release**. **The IC-705 now works over USB CAT** when
+> plugged into a **self-powered hub** — confirmed on the bench with live CI-V traffic.
+> Scanning no longer gives up while the bus is still settling, so the "unplug the hub
+> and scan again" routine is **no longer necessary**. Scanning also works after a CAT
+> disengage (the host used to stay stuck installed until reboot), and an unplugged
+> adapter now drops out of the adapter list instead of lingering. Under the hood the
+> ESP-IDF USB host stack is compiled from source rather than taken from Arduino's
+> prebuilt library — see **[USB_HOST_VENDORING](docs/design/USB_HOST_VENDORING.md)**
+> if you build your own.
+>
+> **Note:** the IC-705 must go through a powered hub; connected directly it never sees
+> a host at all. And the ESP32-S3 has only 8 USB host channels, so a hub plus the
+> TH-D75 plus the IC-705 (10) does not fit — use the IC-705's Wi-Fi CAT for that pair.
+>
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.72.md)**.
+
 > **New in v0.9.71:** a **tools release**. **Tiny BASIC** gains **string variables**
 > `A$`–`Z$`, Microsoft-style **text functions** (`LEFT$ MID$ INSTR VAL …`), **named
 > arrays** (`DIM A(n)`), and a **pre-run input form** — a program declares `INPUT

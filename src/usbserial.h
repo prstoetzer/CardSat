@@ -278,7 +278,9 @@ namespace UsbSerial {
   // Blocks up to ~2.5 s waiting for enumeration. Returns the adapter count.
   uint8_t     scanAdapters();
 
-  uint8_t     serialDeviceCount();
+  uint8_t     serialDeviceCount();      // slot count -- iteration bound only
+  uint8_t     liveDeviceCount();        // adapters actually present (excludes tombstones)
+  bool        serialDeviceLive(uint8_t i);
   const char* serialDeviceLabel(uint8_t i);   // "FTDI FT232R 0403:6001 #A50285BI"
   const char* serialDeviceKey(uint8_t i);     // stable id to persist (see .cpp)
 

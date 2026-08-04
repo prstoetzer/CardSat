@@ -251,6 +251,27 @@ each leg a radio and a bus:
   two **LAN** legs are fine (each has its own host, port, and login). Dual-USB
   legs exclude a **USB rotator** (three ports behind a hub presses the S3's USB
   channel budget); move the rotator to Grove, LAN, or the I²C bridge.
+
+  > **The USB channel budget is a hard limit, and it is easy to exceed.** The
+  > ESP32-S3 has **8 USB host channels** for the whole bus, one per open pipe
+  > including each device's control pipe. A hub costs **2**, a CDC radio (TH-D75,
+  > IC-705) costs **3**, a Prolific adapter costs **4**, an FTDI adapter costs **3**.
+  > The **IC-705 contains its own internal hub**, so it costs **5**, not 3.
+  >
+  > Hub + IC-705 = 7, fits. Hub + TH-D75 + an FTDI adapter = 8, fits exactly.
+  > **Hub + TH-D75 + IC-705 = 10 and cannot work** — pair those two by putting the
+  > IC-705 on **LAN** (its own Wi-Fi) and the TH-D75 on USB, which is the
+  > configuration this combination has always used.
+  >
+  > **The IC-705 must go through a self-powered hub.** Connected straight to the
+  > Cardputer it does not even display `USB COM`: the radio never sees a valid host.
+  > That is a limit of the Cardputer's USB power, not a setting you can change, and
+  > turning off the radio's own USB power input does not help.
+  >
+  > **If a scan finds nothing, scan once more or give it a moment.** A cold scan can
+  > run before the hub has finished settling. From v0.9.72 the scan waits a further
+  > 12 seconds on its own (`scan: watching for late enumeration`), so power-cycling
+  > the hub — which older notes suggested — is **no longer necessary**.
 - **CIV / baud** — per-leg CI-V address and CAT baud; `*` marks the catalog
   default, and entering `0` returns to it.
 - **IP / port** — **the radio's own IP address goes on the leg's IP row**, not in

@@ -1,0 +1,136 @@
+--- a/src/enum.c
++++ b/src/enum.c
+@@ -1,3 +1,4 @@
++#include "cardsat_usb_log.h"
+ /*
+  * SPDX-FileCopyrightText: 2023-2024 Espressif Systems (Shanghai) CO LTD
+  *
+@@ -23,7 +24,40 @@
+ #define ENUM_DEFAULT_CONFIGURATION_VALUE            1       // Default configuration value for SetConfiguration() request
+ #define ENUM_SHORT_DESC_REQ_LEN                     8       // Number of bytes to request when getting a short descriptor (just enough to get bMaxPacketSize0 or wTotalLength)
+ #define ENUM_WORST_CASE_MPS_LS                      8       // The worst case MPS of EP0 for a LS device
+-#define ENUM_WORST_CASE_MPS_FS_HS                   64      // The worst case MPS of EP0 for a FS/HS device
++// CardSat: make the INITIAL EP0 packet size overridable.
++//
++// Enumeration opens the control pipe at this size before it knows the device's real
++// bMaxPacketSize0, then updates it from the short device descriptor. Only 8 bytes are
++// ever requested at that point (ENUM_SHORT_DESC_REQ_LEN), and USB 2.0 guarantees every
++// device supports at least 8, so opening at 8 is legal for any speed and is what the
++// desktop stacks effectively do.
++//
++// Why it may matter here: every device that fails on this hardware reports EP0 max
++// packet 8 (FT232R, the IC-705's internal TUSB2046 hub, the Burr-Brown CODEC), and
++// every device that works reports 64 (Prolific, TH-D75, IC-705 CDC, StarTech hub).
++// Build with -DCARDSAT_ENUM_INITIAL_MPS_FS=8 to test that, and leave it at 64 to
++// restore stock behaviour.
++#ifndef CARDSAT_ENUM_INITIAL_MPS_FS
++#define CARDSAT_ENUM_INITIAL_MPS_FS                 64
++#endif
++#define ENUM_WORST_CASE_MPS_FS_HS                   CARDSAT_ENUM_INITIAL_MPS_FS      // The worst case MPS of EP0 for a FS/HS device
++// CardSat: retry a failed enumeration stage before giving up on the device.
++//
++// IDF abandons a device the first time a control transfer fails. Bench evidence: an
++// FT232R that enumerates perfectly on the root port dies behind a powered hub with
++// "Bad transfer status 1: CHECK_SHORT_DEV_DESC" - status 1 is USB_TRANSFER_STATUS_ERROR,
++// a bus-level failure on the very first control IN, not a device refusal. Desktop
++// stacks re-issue that request several times before declaring a device dead, precisely
++// because first-transfer errors behind a hub are often transient.
++//
++// Each CHECK_* stage is preceded by its own GET_* stage (the enum values are ordered),
++// so stepping back one stage re-issues the request. Set to 0 for stock behaviour.
++#ifndef CARDSAT_ENUM_STAGE_RETRIES
++#define CARDSAT_ENUM_STAGE_RETRIES                  3
++#endif
++#ifndef CARDSAT_ENUM_RETRY_DELAY_MS
++#define CARDSAT_ENUM_RETRY_DELAY_MS                 20
++#endif
+ #define ENUM_LANGID                                 0x409   // Current enumeration only supports English (United States) string descriptors
+ #define ENUM_MAX_ADDRESS                            (127)   // Maximal device address value
+ 
+@@ -1055,7 +1089,41 @@
+                 // These stages should never fail
+                 abort();
+                 break;
+-            default:
++            default: {
++#if CARDSAT_ENUM_STAGE_RETRIES
++                // Only descriptor/address CHECK stages can be retried: each is preceded
++                // by the GET stage that issued the request, so last_stage - 1 re-issues
++                // it. Other stages have no request to repeat and fall through to cancel.
++                const bool retriable = (last_stage == ENUM_STAGE_CHECK_SHORT_DEV_DESC ||
++                                        last_stage == ENUM_STAGE_CHECK_FULL_DEV_DESC ||
++                                        last_stage == ENUM_STAGE_CHECK_SHORT_CONFIG_DESC ||
++                                        last_stage == ENUM_STAGE_CHECK_FULL_CONFIG_DESC ||
++                                        last_stage == ENUM_STAGE_CHECK_ADDR ||
++                                        last_stage == ENUM_STAGE_CHECK_CONFIG);
++                // Single-threaded driver (see the single_thread members), so plain
++                // statics are safe here. The stage comparison resets the budget when a
++                // different stage starts failing, so one flaky stage cannot consume the
++                // allowance of the next.
++                static int s_retry_stage = -1;
++                static uint8_t s_retry_count = 0;
++                if (s_retry_stage != (int)last_stage) {
++                    s_retry_stage = (int)last_stage;
++                    s_retry_count = 0;
++                }
++                if (retriable && s_retry_count < CARDSAT_ENUM_STAGE_RETRIES) {
++                    s_retry_count++;
++                    ESP_LOGE(ENUM_TAG, "[%d:%d] %s failed, retrying (%d/%d)",
++                             p_enum_driver->single_thread.parent_dev_addr,
++                             p_enum_driver->single_thread.parent_port_num,
++                             enum_stage_strings[last_stage],
++                             (int)s_retry_count, (int)CARDSAT_ENUM_STAGE_RETRIES);
++                    vTaskDelay(pdMS_TO_TICKS(CARDSAT_ENUM_RETRY_DELAY_MS));
++                    next_stage = (enum_stage_t)(last_stage - 1);   // re-issue the request
++                    break;
++                }
++                s_retry_count = 0;
++                s_retry_stage = -1;
++#endif
+                 // Stage is not allowed to failed. Cancel enumeration.
+                 ESP_LOGE(ENUM_TAG, "[%d:%d] %s FAILED",
+                          p_enum_driver->single_thread.parent_dev_addr,
+@@ -1064,6 +1132,7 @@
+                 next_stage = ENUM_STAGE_CANCEL;
+                 break;
+             }
++            }
+         }
+ 
+         // Check if the next stage should be skipped
+--- a/src/hcd_dwc.c
++++ b/src/hcd_dwc.c
+@@ -1,3 +1,4 @@
++#include "cardsat_usb_log.h"
+ /*
+  * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
+  *
+@@ -35,8 +36,26 @@
+ 
+ #define INIT_DELAY_MS                           30  // A delay of at least 25ms to enter Host mode. Make it 30ms to be safe
+ #define DEBOUNCE_DELAY_MS                       CONFIG_USB_HOST_DEBOUNCE_DELAY_MS
+-#define RESET_HOLD_MS                           CONFIG_USB_HOST_RESET_HOLD_MS
+-#define RESET_RECOVERY_MS                       CONFIG_USB_HOST_RESET_RECOVERY_MS
++// CardSat: root-port reset timings, overridable at sketch build time.
++//
++// These come from the core's sdkconfig.h (30 ms each) and so cannot be raised with a
++// plain -D without a redefinition clash; hence the indirection.
++//
++// Why raise them: with the hub already attached and powered at boot, the root port
++// reset SUCCEEDS immediately and the very first control IN then fails four times in a
++// row with USB_TRANSFER_STATUS_ERROR. With power applied after the host is up, the
++// same hub logs eleven "Root port reset failed" first, then resets cleanly and
++// enumerates perfectly. A deterministic failure straight after a successful reset is
++// the classic signature of too little reset hold or recovery time for that device -
++// USB 2.0 requires only 10 ms, but says nothing about what a given device needs.
++#ifndef CARDSAT_USB_RESET_HOLD_MS
++#define CARDSAT_USB_RESET_HOLD_MS               CONFIG_USB_HOST_RESET_HOLD_MS
++#endif
++#ifndef CARDSAT_USB_RESET_RECOVERY_MS
++#define CARDSAT_USB_RESET_RECOVERY_MS           CONFIG_USB_HOST_RESET_RECOVERY_MS
++#endif
++#define RESET_HOLD_MS                           CARDSAT_USB_RESET_HOLD_MS
++#define RESET_RECOVERY_MS                       CARDSAT_USB_RESET_RECOVERY_MS
+ #define RESUME_HOLD_MS                          30  // Spec requires at least 20ms, Make it 30ms to be safe
+ #define RESUME_RECOVERY_MS                      20  // Resume recovery of at least 10ms. Make it 20 ms to be safe. This will include the 3 LS bit times of the EOP
+ 

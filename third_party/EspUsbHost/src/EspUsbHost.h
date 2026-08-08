@@ -98,6 +98,20 @@ static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_MUTE = 0x00e2;
 static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_VOLUME_UP = 0x00e9;
 static constexpr uint16_t ESP_USB_HOST_CONSUMER_CONTROL_VOLUME_DOWN = 0x00ea;
 static constexpr uint8_t ESP_USB_HOST_ANY_ADDRESS = 0xff;
+
+// CardSat patch 10 tunables (see sendSerial). CARDSAT_SERIAL_OUT_CAPACITY is the
+// reusable OUT buffer per serial device; CAT frames are tens of bytes and the USB
+// helper caps its own at 128, so 512 is generous. CARDSAT_SERIAL_OUT_STALL_MS is
+// how long an outstanding write may remain in flight before the endpoint is
+// treated as stalled rather than slow -- long enough that a busy radio at 1200
+// baud is not misjudged, short enough that a wedged port is noticed within a
+// Doppler tick or two.
+#ifndef CARDSAT_SERIAL_OUT_CAPACITY
+#define CARDSAT_SERIAL_OUT_CAPACITY 512
+#endif
+#ifndef CARDSAT_SERIAL_OUT_STALL_MS
+#define CARDSAT_SERIAL_OUT_STALL_MS 1500
+#endif
 using EspUsbHostListenerId = uint32_t;
 static constexpr EspUsbHostListenerId ESP_USB_HOST_INVALID_LISTENER_ID = 0;
 #ifndef ESP_USB_HOST_MAX_LISTENERS_PER_EVENT
@@ -1435,6 +1449,17 @@ private:
     bool hasSerialOutEndpoint = false;
     uint8_t serialOutEndpointAddress = 0;
     uint16_t serialOutPacketSize = 0;
+    // CardSat patch 10: ONE reusable OUT transfer per device instead of one
+    // allocation per write. sendSerial() used to allocate a usb_transfer_t and
+    // buffer on every call and free them only in the completion callback, so a
+    // device that NAKs, stalls or simply reads slowly accumulated unbounded heap
+    // -- on a bus with a hub and two devices the largest free block is around
+    // 11 KB, so that is not a theoretical concern. Shaped after the
+    // networkOutTransfer slot below, which already does exactly this.
+    usb_transfer_t *serialOutTransfer = nullptr;
+    volatile bool serialOutBusy = false;
+    uint32_t serialOutSubmitMs = 0;
+    uint16_t serialOutCapacity = 0;
     EspUsbHostSerialConfig serialConfig;
     bool serialDtr = true;
     bool serialRts = true;
@@ -1894,9 +1919,21 @@ public:
   void setAddress(uint8_t address);
   uint8_t address() const;
   void clearAddress();
+  ~EspUsbHostCdcSerial();
 
 private:
-  static constexpr size_t RX_BUFFER_SIZE = 512;
+  // CardSat patch 11: the RX ring is heap-allocated at construction instead of a
+  // fixed in-class array, so its size is a build-time knob and -- where PSRAM
+  // exists (the CardSatUsbHelper's M5StickS3) -- it can live there, off the
+  // internal heap the DMA transfer layer actually needs. Allocation prefers
+  // SPIRAM and falls back to internal; on failure it retries at the 512 B
+  // default, so behaviour on a PSRAM-less part is exactly what it always was.
+  // Safe for PSRAM because every touch (pushData on the client task, read on the
+  // caller's task) is task context under rxMux_ -- no ISR ever sees it.
+#ifndef CARDSAT_CDC_RX_RING
+#define CARDSAT_CDC_RX_RING 512
+#endif
+  static constexpr size_t RX_BUFFER_SIZE = CARDSAT_CDC_RX_RING;
 
   void pushData(const uint8_t *data, size_t length);
   bool accepts(uint8_t address) const;
@@ -1905,7 +1942,8 @@ private:
 
   EspUsbHost &host_;
   uint8_t address_ = ESP_USB_HOST_ANY_ADDRESS;
-  uint8_t rxBuffer_[RX_BUFFER_SIZE] = {};
+  uint8_t *rxBuffer_ = nullptr;   // patch 11: heap, PSRAM-preferred; freed in dtor
+  size_t rxCap_ = 0;
   size_t rxHead_ = 0;
   size_t rxTail_ = 0;
   portMUX_TYPE rxMux_ = portMUX_INITIALIZER_UNLOCKED;

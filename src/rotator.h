@@ -117,6 +117,36 @@ private:
   int _peek = -1;
 };
 
+// A USB<->serial adapter on the CardSatUsbHelper companion, presented as a
+// Stream. Same shape as UsbRotStream above, and for the same reason: the hard
+// parts (link, framing, credit, device binding) live in usbhelper.cpp and this is
+// a forwarding shim so the rotator backends see an ordinary Stream.
+//
+// WHY A ROTATOR WOULD LIVE HERE. A USB radio plus a USB rotator on the
+// Cardputer's own bus costs hub + 3 + 3 = 8 host channels -- the absolute ceiling,
+// with nothing spare. Moving the rotator to the helper leaves the radio a bus to
+// itself, which matters most for the composite rigs that cost 4 or 5 on their own.
+class HelperRotStream : public RotWire {
+public:
+  // RAII, exactly as for UsbRotStream: this object owns the helper's single port
+  // for its lifetime. freeRotator() deletes the transport whenever the rotator is
+  // rebuilt, disabled or moved to another wire, and without a destructor the
+  // helper would keep its port open against a Stream that no longer exists --
+  // which on a CDC radio also means DTR stays asserted and the radio believes a
+  // host still has it open.
+  ~HelperRotStream() override;
+  bool begin(uint32_t baud);          // open the helper's port at the rotator's baud
+  bool ok() const;
+  int  available() override;
+  int  read() override;
+  int  peek() override;
+  void flush() override;
+  size_t write(uint8_t c) override;
+  using Print::write;
+private:
+  int _peek = -1;
+};
+
 class Rotator {
 public:
   virtual ~Rotator() {}

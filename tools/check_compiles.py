@@ -36,6 +36,17 @@ if not (os.path.isfile(CPP) and os.path.isfile(HDR)):
     sys.exit(0)
 
 ROT_STUB = r'''
+// --- UsbHelper stub (rotator.cpp's helper transport calls into it) -------------
+#define CSUH_PAR_NONE 0
+namespace UsbHelper {
+  inline bool started() { return false; }
+  inline bool linked()  { return false; }
+  inline bool active()  { return false; }
+  inline bool open(uint32_t, uint8_t=8, uint8_t=CSUH_PAR_NONE, uint8_t=1, bool=true, bool=false) { return false; }
+  inline void close() {}
+  inline Stream* stream() { return nullptr; }
+}
+
 // --- rotator.cpp's world -------------------------------------------------------
 struct TwoWire { void begin(int,int,uint32_t){} void beginTransmission(uint8_t){}
   size_t write(uint8_t){return 1;} uint8_t endTransmission(){return 0;}
@@ -61,6 +72,7 @@ struct HardwareSerial : Stream { HardwareSerial(int){} void begin(unsigned long,
 
 STUB = r'''
 #include <cstdint>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -184,6 +196,7 @@ static inline esp_err_t esp_timer_start_periodic(esp_timer_handle_t,uint64_t){re
 static inline esp_err_t esp_timer_stop(esp_timer_handle_t){return 0;}
 struct EspUsbHostSerialConfig { uint32_t baud; uint8_t dataBits; int parity; int stopBits; };
 typedef int EspUsbHostSerialParity; typedef int EspUsbHostSerialStopBits;
+#define ESP_USB_HOST_MAX_DEVICES 4
 struct EspUsbHostConfig { uint32_t taskStackSize=8192; UBaseType_t taskPriority=5; BaseType_t taskCore=0; };
 struct EspUsbHostDeviceInfo {   // fields per EspUsbHost.h:169-183
   uint8_t address = 0; uint16_t vid = 0, pid = 0;
@@ -191,10 +204,16 @@ struct EspUsbHostDeviceInfo {   // fields per EspUsbHost.h:169-183
   uint8_t parentAddress = 0; uint8_t portId = 0;
   uint16_t usbVersion = 0, deviceVersion = 0;
   uint8_t deviceClass = 0, deviceSubClass = 0;
+  bool isHub = false;
 };
 struct EspUsbHost {
   bool begin(const EspUsbHostConfig&){return true;} void end(){}
+  void quiesce(){}   // patch 9-era API: drain OUT endpoints during teardown
   int lastError(){return 0;}
+  void clearLastError(){}
+  size_t getDevices(EspUsbHostDeviceInfo*, size_t){return 0;}
+  bool serialReady(uint8_t){return false;}
+  template<class F> void onDeviceDisconnected(F){}
   template<class F> void onDeviceConnected(F){}
 };
 struct EspUsbHostCdcSerial : Stream {

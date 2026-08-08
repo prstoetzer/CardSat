@@ -105,6 +105,12 @@ HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
   if (pinMode == 0) {
     // Normal, recommended path: separate wires. G2 = TX (push-pull), G1 = RX.
     hs->end();                                   // release any prior pin bindings
+    // 4 KB driver RX buffer (default 256). 256 B is ~11 ms of headroom at
+    // 230400 -- less than one screen paint on either board -- and the first
+    // helper bench showed what that costs: any loop stall while a CI-V
+    // transceive flood is arriving silently drops bytes MID-FRAME. Applies
+    // equally to wired CI-V, which sees the same floods. Must precede begin().
+    hs->setRxBufferSize(4096);
     hs->begin(baud, SERIAL_8N1, rxPin, txPin);
     lastA = rxPin; lastB = txPin;
   } else {
@@ -132,6 +138,7 @@ HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
     //     idles HIGH via the pull-up and is pulled low only for data, while still
     //     letting the radio pull it low (shared one-wire bus).
     hs->end();
+    hs->setRxBufferSize(4096);                   // same rationale as the two-wire path
     hs->begin(baud, SERIAL_8N1, pin, pin);       // TX and RX both on `pin`
     uart_set_line_inverse((uart_port_t)uartNum, UART_SIGNAL_INV_DISABLE);  // idle = HIGH
     gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLUP_ONLY);

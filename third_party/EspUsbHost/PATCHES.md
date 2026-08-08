@@ -82,6 +82,56 @@ flushes what is in flight (including serial OUT), waits for completions, and lea
 pipes halted. Not strictly required once patch 2 is in place, but it makes teardown
 deterministic rather than timing-dependent.
 
+### 10. Bounded, reusable serial OUT transfer — **0.9.73**
+
+`sendSerial()` allocated a `usb_transfer_t` *and its buffer* on every call and freed
+them only in the completion callback. Nothing counted what was outstanding, so a
+device that NAKs, stalls, is unplugged mid-transfer, or simply reads its port slowly
+accumulated heap without limit. On a bus carrying a hub and two devices the largest
+free block is around 11 KB, so this is not a theoretical concern.
+
+Now: **one reusable transfer per device**, held in the `DeviceState` slot exactly as
+`networkOutTransfer` already was, with a busy flag and a submit timestamp.
+
+* A write while one is outstanding returns `false`. That is the right answer for CAT
+  (a stale frequency update is worth less than the next one) and the necessary one
+  for the USB helper, whose drain loop would otherwise submit as fast as its ring
+  filled — the credit scheme bounds the *link*, not the transfers.
+* An outstanding write past `CARDSAT_SERIAL_OUT_STALL_MS` (1500) is treated as a
+  stalled endpoint, not a slow one: halt, flush, clear, and report. Without this a
+  single stalled write wedged the port permanently while every later write returned
+  `false` with no explanation.
+* The completion callback marks the slot's transfer free rather than releasing it;
+  anything else reaching that callback is a legacy one-off and is freed as before.
+* `resetDeviceState()` frees it, alongside `networkOutTransfer`.
+
+One refinement found by re-review before release: the stall path originally cleared
+`serialOutBusy` synchronously after halt/flush/clear. That is a race — the flushed
+transfer remains HCD-owned until its CANCELED callback runs on the client task, so
+the next `sendSerial()` could write into and resubmit a transfer the stack still
+held. The flag is now cleared only by the callback; the stall path just refreshes
+the timestamp so repeat halts are rate-limited while the cancellation is delivered.
+If the callback never comes (a truly wedged pipe), writes keep returning `false`
+and the halt retries once per stall window — and disconnect or `resetDeviceState()`
+clears the slot, so nothing is stranded.
+
+Reported by the 0.9.72 USB review; see `docs/design/USB_REVIEW_EVAL_0_9_72.md`.
+Worth sending upstream — the fire-and-forget allocation is upstream behaviour, not
+CardSat's.
+
+### 11. Heap-allocated, size-configurable CDC RX ring — **0.9.73**
+
+`EspUsbHostCdcSerial`'s RX ring was a fixed in-class 512 B array. It is now
+heap-allocated at construction, sized by `-DCARDSAT_CDC_RX_RING` (default 512, so
+CardSat itself is byte-for-byte unchanged in behaviour), **PSRAM-preferred** where
+the cap exists. The CardSatUsbHelper sets 16 KB via its `build_opt.h`, putting the
+burst absorber between USB IN transfers and the drain loop in memory the DMA layer
+cannot use anyway. Fallback chain: SPIRAM → internal → internal at 512; the read
+and push paths guard on the pointer, so a failed allocation degrades rather than
+crashes. Every touch is task-context under `rxMux_` — no ISR ever sees the buffer,
+which is what makes PSRAM legal here. Upstream-worthy alongside patch 10: the
+fixed 512 is an upstream limitation.
+
 ## A warning for anyone tempted to "improve" the teardown
 
 **Do not call `usb_host_endpoint_clear()` before releasing an interface.** We did,

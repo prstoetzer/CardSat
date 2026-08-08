@@ -188,6 +188,8 @@ extern ConsoleLog::Tee CardSatSerialTee;
 #include <Sgp4.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <SPI.h>
 #include <SD.h>
 #include <esp_sleep.h>
@@ -430,7 +432,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.72";
+static constexpr const char* FW_VERSION = "0.9.73";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build.
@@ -528,6 +530,23 @@ typedef uint64_t freq_t;
 #ifndef CARDSAT_HAS_USBCAT
 #define CARDSAT_HAS_USBCAT 1
 #endif
+
+// ---- USB helper over Grove (CardSatUsbHelper companion, 0.9.73) -------------
+// A second USB host on an M5StickS3 at the end of a Grove cable, so a USB radio
+// or rotator can be attached without spending any of the Cardputer's own eight
+// host channels. See src/usbhelper.h for the channel arithmetic that makes this
+// necessary -- the short version is that hub + TH-D75 + IC-705 needs ten and no
+// software arrangement fits it.
+//
+// This side of the link is a UART client and needs NO USB host stack, so it is
+// available even in a build with CARDSAT_HAS_USBCAT=0 -- which is exactly the
+// build where a second USB port is most useful. Defined here rather than in
+// usbhelper.h because settings.h needs it for CAT_TYPE_N and does not include
+// usbhelper.h (the same reason CARDSAT_HAS_USBCAT lives here).
+#ifndef CARDSAT_HAS_USBHELPER
+#define CARDSAT_HAS_USBHELPER 1
+#endif
+
 static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
 static constexpr int   PD_SAMPLES      = 100;  // samples in the pass-detail curve
@@ -1178,7 +1197,16 @@ static const LegProfile LEG_RADIOS[LEG_COUNT] = {
 
 // Which physical bus a dual-rig leg rides. One Grove UART and one USB CAT port
 // exist, so two legs may not share either; Wi-Fi (LAN) is shareable.
-enum LegBus : uint8_t { LEGBUS_GROVE = 0, LEGBUS_USB = 1, LEGBUS_LAN = 2, LEGBUS_N = 3 };
+// Which wire a CAT_DUAL leg runs on.
+//
+// LEGBUS_HELPER (0.9.73) is a USB device on the CardSatUsbHelper companion,
+// reached over the Grove UART. It exists because the Cardputer's eight USB host
+// channels cannot hold two USB radios when one of them is an IC-705 (which brings
+// its own internal hub and costs five by itself) -- see src/usbhelper.h. Note the
+// consequence for a dual rig: the helper OWNS the Grove UART, so a leg on
+// LEGBUS_HELPER means the other leg cannot be LEGBUS_GROVE. It must be USB or LAN.
+enum LegBus : uint8_t { LEGBUS_GROVE = 0, LEGBUS_USB = 1, LEGBUS_LAN = 2,
+                        LEGBUS_HELPER = 3, LEGBUS_N = 4 };
 
 
 // =========================================================================
@@ -1286,13 +1314,6 @@ public:
   // downlink knob read while transmitting (a rig often reports the TX VFO then).
   virtual bool readPtt(bool& tx) { (void)tx; return false; }
 
-  // Send a raw control line to the backend and return one reply line ("" if
-  // unsupported/failed). Used by the Dual-Rig setup screen to talk to the
-  // CardSatDualRig companion's \csdr_* config escape over whichever rigctl
-  // transport is active (net or Grove). No-op on wire-level backends -- only the
-  // rigctl backends carry a line protocol a companion can answer.
-  virtual String vendorLine(const String& line) { (void)line; return String(); }
-
   // Toggle the rig's own satellite mode. Icom: actively forced OFF (we drive
   // MAIN/SUB ourselves). Yaesu/Kenwood: no-op -- their full-duplex/sat mode is
   // set up by the operator and must NOT be disturbed.
@@ -1380,25 +1401,11 @@ public:
   bool hasSatMode()  const override { return false; }
   bool selVerified() const override { return _ok; }
   const char* name() const override { return "rigctl"; }
-  // Raw \csdr_* / rigctl line passthrough for the Dual-Rig setup screen. Sends one
-  // line (newline appended if missing) and returns the single reply line. Inherited
-  // unchanged by RigctlGroveRig, so it automatically uses the Grove transport there.
-  String vendorLine(const String& line) override {
-    // H12: \csdr_models / \csdr_get can return >1 KB of JSON. At low Grove baud the reply
-    // alone can exceed the default 400 ms (e.g. ~1.4 s for the model catalog at 9600).
-    // Give a baud-aware deadline for these large vendor replies so they don't time out;
-    // ordinary short RPRT commands keep the default.
-    String l = line.endsWith("\n") ? line : line + "\n";
-    uint32_t baud = linkBaud();
-    uint32_t replyMs = 400;
-    if (baud && (line.indexOf("csdr_models") >= 0 || line.indexOf("csdr_get") >= 0 ||
-                 line.indexOf("csdr_status") >= 0)) {
-      // ~2 KB budget at this baud (bytes*10 bits / baud), plus headroom, min 2 s.
-      uint32_t ms = (uint32_t)((2048UL * 10UL * 1000UL) / baud) + 500;
-      replyMs = ms < 2000 ? 2000 : ms;
-    }
-    return xchg(l, replyMs);
-  }
+  // NOTE (0.9.73): this class used to carry vendorLine(), a raw line passthrough
+  // that existed solely so the Dual-Rig screen could drive the CardSatDualRig
+  // companion's \csdr_* config escape. That companion is retired and nothing else
+  // ever called it, so it is gone. A rigctld is still driven normally through the
+  // VFO-mode protocol below; only the config side-channel went away.
   // Effective UART baud of this transport, or 0 for the network path (no framing delay).
   virtual uint32_t linkBaud() const { return 0; }
 protected:
@@ -1606,7 +1613,14 @@ public:
   // begin() is deferred until the reconciler attaches its CDC stream -- via
   // setExternalStream() for a single USB leg (same lifecycle as CAT_USB
   // single-rig) or setLegExternalStream() per leg when there are two.
-  DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud);
+  // helperLeg: -1 = neither, 0/1 = that leg is a USB device on the
+  // CardSatUsbHelper companion. Never 2: the helper carries exactly ONE device,
+  // so both legs cannot be on it. A helper leg is deferred-stream in precisely
+  // the same way a USB leg is -- its begin() waits for setLegExternalStream() --
+  // which is why the two share legDeferred() below rather than each getting
+  // their own copy of the lifecycle.
+  DualRig(Rig* down, Rig* up, int usbLeg, int helperLeg,
+          uint32_t downBaud, uint32_t upBaud);
   ~DualRig() override;
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override;
@@ -1634,10 +1648,15 @@ public:
   Rig* downLeg() const { return _down; }        // status surfaces (per-leg readouts)
   Rig* upLeg()   const { return _up; }
   int  usbLeg()  const { return _usbLeg; }
+  int  helperLeg() const { return _helperLeg; }
+  // True when leg L gets its Stream attached later rather than opening a UART in
+  // begin(). Both USB and helper legs do; Grove and LAN legs do not.
+  bool legDeferred(int L) const { return legIsUsb(L) || _helperLeg == L; }
 private:
   Rig*     _down;                     // downlink (RX) leg
   Rig*     _up;                       // uplink (TX) leg
   int      _usbLeg;                   // -1 / 0 (down) / 1 (up) / 2 (both)
+  int      _helperLeg;                // -1 / 0 (down) / 1 (up); never 2
   bool     legIsUsb(int L) const { return _usbLeg == L || _usbLeg == 2; }
   bool     _usbBegun[2] = { false, false };  // per-leg: begin() ran after stream attach
   uint32_t _baud[2];                  // per-leg CAT baud (0 already resolved by factory)
@@ -2003,6 +2022,36 @@ public:
   // bug. Whoever owns the Stream owns the port; that is the whole invariant.
   ~UsbRotStream() override;
   bool begin();                       // bind the rotator's CDC port
+  bool ok() const;
+  int  available() override;
+  int  read() override;
+  int  peek() override;
+  void flush() override;
+  size_t write(uint8_t c) override;
+  using Print::write;
+private:
+  int _peek = -1;
+};
+
+// A USB<->serial adapter on the CardSatUsbHelper companion, presented as a
+// Stream. Same shape as UsbRotStream above, and for the same reason: the hard
+// parts (link, framing, credit, device binding) live in usbhelper.cpp and this is
+// a forwarding shim so the rotator backends see an ordinary Stream.
+//
+// WHY A ROTATOR WOULD LIVE HERE. A USB radio plus a USB rotator on the
+// Cardputer's own bus costs hub + 3 + 3 = 8 host channels -- the absolute ceiling,
+// with nothing spare. Moving the rotator to the helper leaves the radio a bus to
+// itself, which matters most for the composite rigs that cost 4 or 5 on their own.
+class HelperRotStream : public RotWire {
+public:
+  // RAII, exactly as for UsbRotStream: this object owns the helper's single port
+  // for its lifetime. freeRotator() deletes the transport whenever the rotator is
+  // rebuilt, disabled or moved to another wire, and without a destructor the
+  // helper would keep its port open against a Stream that no longer exists --
+  // which on a CDC radio also means DTR stays asserted and the radio believes a
+  // host still has it open.
+  ~HelperRotStream() override;
+  bool begin(uint32_t baud);          // open the helper's port at the rotator's baud
   bool ok() const;
   int  available() override;
   int  read() override;
@@ -3069,6 +3118,14 @@ enum CatType : uint8_t {
                    // transport is swapped, the dialect is unchanged. Only present
                    // when built with CARDSAT_HAS_USBCAT=1 (the default since
                    // 0.9.59); see usbserial.h.
+  CAT_HELPER = 6,  // A USB radio on the CardSatUsbHelper companion, reached over
+                   // the Grove UART. Same idea as CAT_USB -- the transport is
+                   // swapped and the dialect is unchanged -- except the USB host
+                   // is a second MCU with its own eight channels. Use it for a
+                   // radio that will not fit alongside whatever else is already on
+                   // the Cardputer's bus. Claims UART1 like wired CI-V, so it
+                   // shares the Grove exclusion rules. (Declared after CAT_DUAL so
+                   // existing saved configs keep their values.)
   CAT_DUAL  = 5,   // TWO radios driven natively: a downlink leg + an uplink leg,
                    // each any radio from the LEG_RADIOS[] catalog on its own
                    // transport (Grove serial, USB adapter, or Icom LAN -- the
@@ -3084,13 +3141,27 @@ enum CatType : uint8_t {
 // exactly as before -- the operator cannot land on an unimplemented transport.
 // CAT_DUAL is always selectable: its Grove and LAN leg buses need no compile
 // flag, and the USB leg bus is simply not offered in a build without USB CAT.
+// How many CAT transports the Settings row cycles through.
+//
+// CAT_HELPER is counted only when it is compiled in, exactly as CAT_USB is. The
+// two flags are independent: the helper needs no USB host stack on this side, so
+// CARDSAT_HAS_USBHELPER=1 with CARDSAT_HAS_USBCAT=0 is a legitimate (and useful)
+// build. That is why this is a sum rather than a pair of hard-coded totals -- the
+// four combinations were getting hard to keep straight by hand, and an off-by-one
+// here lets the row land on a transport the build cannot construct.
+static constexpr uint8_t CAT_TYPE_N =
+    5                                    // Wired, LAN, rigctl(net), rigctl(Grove), Dual
 #if CARDSAT_HAS_USBCAT
-static constexpr uint8_t CAT_TYPE_N = 6;   // Wired, LAN, rigctl(net), rigctl(Grove), USB, Dual
-#else
-static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), rigctl(Grove), Dual
+  + 1                                    // USB serial
 #endif
-// NOTE (non-USB build): the enum VALUE CAT_DUAL is still 5 while the row cycles
-// 0..4; the Settings row maps slot 4 -> CAT_DUAL when USB CAT is compiled out.
+#if CARDSAT_HAS_USBHELPER
+  + 1                                    // USB helper (Grove)
+#endif
+  ;
+// NOTE: the enum VALUES are fixed (CAT_DUAL = 5, CAT_HELPER = 6) so a saved config
+// always means the same thing, but the Settings row cycles a DENSE slot list built
+// at runtime from the compiled-in transports. catTypeForSlot()/catSlotForType() in
+// app.cpp own that mapping; nothing else should assume slot == enum value.
 
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
 // rotctld server reached over TCP (CardSat is the client).
@@ -3116,8 +3187,14 @@ enum RotTransport : uint8_t {
   ROT_XPORT_GROVE  = 1,  // Cardputer Grove G1/G2 via UART1 -- shared with wired
                          // CI-V and the Grove GPS; the app blocks the overlap
   ROT_XPORT_USB    = 2,  // USB<->serial adapter on the resident EspUsbHost
+  ROT_XPORT_HELPER = 3,  // USB<->serial adapter on the CardSatUsbHelper companion,
+                         // reached over the Grove UART (0.9.73). The reason to use
+                         // it: a USB radio plus a USB rotator on the Cardputer's own
+                         // bus is hub + 3 + 3 = 8 channels, the absolute ceiling with
+                         // no headroom. Moving the rotator to the helper leaves the
+                         // radio a bus to itself. Shares the Grove exclusion rules.
 };
-static constexpr uint8_t ROT_XPORT_N = 3;
+static constexpr uint8_t ROT_XPORT_N = 4;
 
 // Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
 enum RotAzRange : uint8_t {
@@ -3176,6 +3253,11 @@ struct Settings {
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password
+  // space-track.org credentials (Space-Track orbital-history tool). Stored in
+  // the standard config exactly like the QRZ pair above -- plaintext on the FS
+  // like every stored key, so a dedicated password is wise.
+  char     stUser[48] = "";   // Space-Track identity (email)
+  char     stPass[48] = "";   // Space-Track password
   char     printerHost[40] = "";   // ESC/POS receipt printer IP for TCP:9100 printing ("" = off)
   uint16_t printerPort = 9100;     // raw ESC/POS port (JetDirect standard)
   uint8_t  printerCols = 32;       // ESC/POS text columns: 32 (58mm), 42/48 (80mm), 64 (Font B)
@@ -3252,6 +3334,23 @@ struct Settings {
   uint32_t catGroveBaud = 115200;
   char     catUser[24] = "";    // radio Network User1 id
   char     catPass[24] = "";    // radio Network User1 password
+  // ---- CardSatUsbHelper companion (0.9.73) ---------------------------------
+  // ONE set of fields for all three consumers -- a single rig (CAT_HELPER), one
+  // dual-rig leg (LEGBUS_HELPER), or the rotator (ROT_XPORT_HELPER) -- because
+  // the helper carries exactly one USB device and only one consumer can claim it.
+  // Per-consumer copies would let the operator configure two and give no hint
+  // which one wins.
+  //
+  // helperBaud is the GROVE LINK rate, not the radio's CAT baud (that comes from
+  // the radio profile or the leg's own dualBaud, and is pushed to the helper in
+  // the OPEN). Must be one of CSUH_BAUDS[]; the helper auto-bauds across that list
+  // and can never lock onto anything else. Validated below.
+  uint32_t helperBaud = 230400;
+  // Which device on the helper to bind. Empty = "the only one attached", which is
+  // the normal case for a helper carrying one radio. Same key format as
+  // catUsbKey / rotUsbKey (usbserial.cpp makeKey), because the helper builds its
+  // keys with byte-identical logic -- so a key means the same thing on either bus.
+  char     helperKey[40] = "";
   // (CI-V is TTL serial only.) VFO roles + whether to command the rig's own
   // satellite mode when engaging radio control.
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;
@@ -3448,16 +3547,16 @@ enum Screen : uint8_t {
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_CALEXPORT,
-  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
+  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_GBRICK, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_BASICASK, SCR_CALCREF, SCR_PERF,
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_BASICASK, SCR_CALCREF, SCR_PERF, SCR_STHIST,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
   SCR_KESSLER, SCR_QTHPRE,
   // "Nearby & DX" hub and its live terrestrial feeds. These are fetch-and-browse views
   // of what is on the air / in the air around the operator right now, as distinct from
   // the satellite-centric screens above.
   SCR_NEARBY, SCR_APRS, SCR_APRSDET, SCR_DXC, SCR_ADSB,
-  SCR_DUALRIG, SCR_BASICFILES,
+  SCR_DUALRIG, SCR_USBHELPER, SCR_BASICFILES,
   // Telnet client (Tools > Calculators & programming). SCR_TELNET is the connection
   // list / config screen; SCR_TELNETTERM is the modal full-screen terminal. SSH was
   // scoped alongside this but shelved on memory grounds for 0.9.67 (see
@@ -3501,7 +3600,13 @@ struct PendingQso {
   char     call[14];
   char     rstS[6];
   char     rstR[6];
-  char     grid[10];
+  // Multi-grid stations (rovers on a boundary): up to four grids joined with
+  // '/' -- e.g. "FN20/FN30" or a 4-corner "FN20/FN30/FM29/FM39". '/' rather
+  // than the on-air comma because the log file is CSV: a comma inside this
+  // field would split the record (notes survives commas only by being last).
+  // Entry accepts ',' or '/' and normalizes; ADIF export converts back to
+  // commas for VUCC_GRIDS.
+  char     grid[30];
   char     notes[40];
   uint8_t  uploaded;              // bit0: sent to LoTW (CSV col 13, absent => 0)
 };
@@ -6651,6 +6756,19 @@ namespace UsbSerial {
   bool        usbHostResident();   // true when the host is installed with no port open
   bool        hostReleased();
   bool        hostTeardownStuck();   // M2: end() timed out; reboot required to reuse USB
+  // ---- physical disconnect (0.9.73) -------------------------------------------
+  // Set by the host task when the device an OPEN port was bound to goes away, and
+  // consumed by the main loop. The port cannot be torn down inside the callback --
+  // that runs on the host's own task, walking the very objects a teardown frees --
+  // so the loop does it and the existing reconciler then rebinds by stable key.
+  //
+  // Note active()/cat2Active()/rotActive() also consult the CDC object's
+  // connected() now, so a stale binding cannot report itself live even if a flag
+  // is missed.
+  bool        catLost();
+  bool        cat2Lost();
+  bool        rotLost();
+  void        clearLostFlags();
   // Why the last uninstall was refused, when it was. Valid after a failed
   // finishUninstall: clients/devices still registered per usb_host_lib_info(),
   // how many drain polls ran, the union of event flags seen, and
@@ -7006,42 +7124,15 @@ private:
   Predictor pred;
   Rig*      rig = nullptr;   // active CAT backend (Icom/Yaesu/Kenwood)
 
-  // ---- Dual-Rig setup screen (SCR_DUALRIG) ----------------------------------
-  // Configures the CardSatDualRig companion over the active rigctl transport (net
-  // or Grove) via its \csdr_* escape. Holds the last query result so the screen
-  // can be edited offline and pushed with one save.
-  static constexpr int DR_MAX_DEV   = 8;     // devices shown from the Stick
-  static constexpr int DR_MAX_MODEL = 40;    // model-catalog entries from the Stick
-  struct DrDevice { char product[24]; char serial[24]; char vidpid[12]; int addr; };   // H11: serial 24 to match companion
-  struct DrModel  { int id; char name[14]; bool rxOnly; };
-  // Heap-allocated on entering SCR_DUALRIG and freed by drFree() from the
-  // screen-transition hook in loop() -- so the ~1.3 KB of device+model tables is
-  // not resident for the whole session (same lifecycle as the memo/BASIC buffers).
-  DrDevice* drDev   = nullptr; int drDevN = 0;
-  DrModel*  drModel = nullptr; int drModelN = 0;
-  // Editable per-leg selection (index 0 = downlink, 1 = uplink).
-  int   drModelId[2]  = { -1, -1 };          // Stick model id, -1 = none
-  int   drCiv[2]      = { 0, 0 };            // CI-V address (0 = default)
-  uint32_t drBaud[2]  = { 0, 0 };            // H14: per-leg CAT baud (0 = model default)
-  char  drSerial[2][24] = { "", "" };        // H11: assigned device serial (24 to match companion; "" = none)
-  int   drSel = 0;                           // cursor: 0..5 across the 6 editable fields
-  int   drScroll = 0;                        // device-list scroll
-  bool  drLoaded = false;                    // a query has populated the state
-  // Status-line members below are fixed buffers, not Arduino String: a String member of
-  // the global App object keeps its heap block alive for the life of the program once
-  // assigned (String never returns a buffer on reassignment), and each such long-lived
-  // block is a permanent fragmentation anchor in the no-PSRAM heap. Overlong messages
-  // truncate safely via strlcpy/snprintf, which is fine for one-line status text.
-  char drStatus[64] = {0};                   // last transport result / hint
-  bool  drAlloc();                           // allocate drDev/drModel (on screen entry)
-  void  drFree();                            // release them (screen-transition hook)
-  void  drQuery();                           // pull \csdr_get + \csdr_models
-  void  drSave();                            // push \csdr_set ... save=1
-  int   drModelIdx(int id) const;            // catalog index for a model id (-1)
-  // At-a-glance link status for the Settings row, so bring-up is a glance not a
-  // query. 0 = unknown (gray), 1 = linked (green), 2 = no link (red).
-  uint8_t drLink = 0; uint32_t drLinkMs = 0;
-  void  drPingLink();                        // throttled \csdr_get ping; sets drLink
+  // ---- Dual-Rig leg editor (SCR_DUALRIG) ------------------------------------
+  // Cursor for the two-leg CAT_DUAL editor: drSel = leg*6 + field, 12 positions.
+  //
+  // Everything else that used to live here -- the device and model tables pulled
+  // from the CardSatDualRig companion over its \csdr_* escape, the per-leg model
+  // and serial selections, and the Settings link indicator -- went with that
+  // companion in 0.9.73. The legs themselves are configured from cfg.dual*, which
+  // is where the native CAT_DUAL implementation has kept them since 0.9.68.
+  int   drSel = 0;
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
   VoiceMemo memo;            // SD-card voice memo recorder ('v' on Track family)
   IrBeacon  irBeacon;        // IR pass-alert beacon (distinct flash count per event)
@@ -7109,8 +7200,14 @@ private:
   // diagnostic; the operator can also type a raw hex frame to transmit.
   static const int CATMON_MAX = 64;     // ring-buffer depth (lines)
   static const int CATMON_W   = 40;     // per-line chars (draw shows 36); no heap
-  char     catMonLines[CATMON_MAX][CATMON_W] = {};
-  bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (color), false = RX
+  // Heap-on-demand (0.9.73 RAM pass): 2,624 B resident only while the CAT monitor
+  // is open. Safe with NO history loss because enterCatMon() has always reset the
+  // ring on entry and released the trace sink on exit -- nothing ever survived a
+  // session anyway. catMonPush() guards on the pointer: the sink is installed and
+  // removed with the screen, but a frame already in flight when the screen closes
+  // must land somewhere harmless.
+  struct CatMonBuf { char lines[CATMON_MAX][CATMON_W]; bool isTx[CATMON_MAX]; };
+  CatMonBuf* catMonBuf = nullptr;
   int      catMonHead = 0;              // next write index (ring)
   int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
   int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
@@ -7618,6 +7715,17 @@ private:
   int      ggStreak = 0;
   uint32_t ggDeadline = 0;         // answer-by (millis)
 
+  // Deorbit: breakout, themed as sweeping derelict satellites out of orbital
+  // shells. Paddle is the ground-station dish, the ball a capture tug. Bricks
+  // live in a bitmask per row (8 columns), so the whole field is 4 bytes.
+  static const int GBRK_ROWS = 4, GBRK_COLS = 8;
+  uint8_t  gbRow[GBRK_ROWS];       // bit c set = debris present in column c
+  int      gbLeft = 0;             // pieces remaining this shell set
+  float    gbPadX = 0;             // paddle centre (px)
+  float    gbBallX = 0, gbBallY = 0, gbVX = 0, gbVY = 0;
+  uint32_t gbLastMs = 0;
+  bool     gbLaunched = false;     // false = tug parked on the dish, waiting for ENTER
+
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
   uint8_t  stateBits[7];            // 1 bit per entity (STATE_N <= 56)
@@ -7839,9 +7947,14 @@ private:
   static const int ROVE_LIST_MAX  = 40;    // saved plans listed in the browser
   static const int ROVE_NAME_MAX  = 40;    // base filename length (no dir; keeps ".txt")
   static const int ROVEVIEW_MAX   = 3000;  // max bytes of a plan held in the viewer (heap-bounded)
-  char     roveList[ROVE_LIST_MAX][ROVE_NAME_MAX]; // base names (with ".txt")
-  time_t   roveTime[ROVE_LIST_MAX];        // each plan's last-write time (0 if unknown)
-  uint32_t roveSize[ROVE_LIST_MAX];        // each plan's size in bytes
+  // Heap-on-demand (0.9.73 RAM pass): ~2.1 KB resident only while the rove-plan
+  // browser/viewer is open. buildRoveList() allocates; the transition hook frees.
+  struct RoveBrowse {
+    char     name[ROVE_LIST_MAX][ROVE_NAME_MAX];
+    time_t   t[ROVE_LIST_MAX];
+    uint32_t size[ROVE_LIST_MAX];            // each plan's size in bytes
+  };
+  RoveBrowse* roveBrowse = nullptr;
   int      roveListN = 0;                  // plans found
   int      roveSel = 0;                    // browser cursor
   int      roveScroll = 0;                 // browser scroll offset
@@ -7851,7 +7964,7 @@ private:
   bool     roveViewTrunc = false;          // true if the file exceeded ROVEVIEW_MAX
   int      roveViewTop = 0;                // top wrapped-row shown in the viewer
   void buildRoveList();                    // enumerate /CardSat/RovePlans newest-first
-  void roveViewLoad(int idx);              // load roveList[idx] (bounded) into roveViewBuf
+  void roveViewLoad(int idx);              // load roveBrowse->name[idx] (bounded) into roveViewBuf
   void drawRoveList();  void keyRoveList(char c, bool enter, bool back);
   void drawRoveView();  void keyRoveView(char c, bool enter, bool back);
   // "Sky at a glance": a horizontal timeline of upcoming passes for all favorites
@@ -8220,11 +8333,60 @@ private:
 #endif
   bool        catUsesGroveWire() const {
     if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE) return true;
+    // CAT_HELPER puts the CardSatUsbHelper link on G1/G2, which is the same UART1
+    // every other Grove claimant wants. It belongs in this predicate for exactly
+    // the reason wired CI-V does: the wire has one owner.
+    if (cfg.catType == CAT_HELPER) return (RadioModel)cfg.radioModel != RIG_NONE;
     // Only a leg with a radio assigned claims the wire (see the engage guard).
     return cfg.catType == CAT_DUAL &&
-           ((cfg.dualModel[0] != LEG_NONE && cfg.dualBus[0] == LEGBUS_GROVE) ||
-            (cfg.dualModel[1] != LEG_NONE && cfg.dualBus[1] == LEGBUS_GROVE));
+           ((cfg.dualModel[0] != LEG_NONE &&
+             (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[0] == LEGBUS_HELPER)) ||
+            (cfg.dualModel[1] != LEG_NONE &&
+             (cfg.dualBus[1] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_HELPER)));
   }
+  // ---- CardSatUsbHelper claimants -------------------------------------------
+  // The helper carries exactly ONE USB device, so at most one of these may be
+  // true at a time. Three separate predicates rather than one flag because the
+  // three consumers are configured on three different screens and each needs to
+  // know whether IT is the claimant; helperClaimants() is what the conflict rule
+  // uses. Keeping them here, next to catUsesGroveWire(), keeps every
+  // "who owns which wire" question in one place -- which is what stopped the
+  // Grove rules drifting apart across the CAT, GPS and rotator screens.
+  bool        catUsesHelper() const {
+    if (cfg.catType == CAT_HELPER) return (RadioModel)cfg.radioModel != RIG_NONE;
+    if (cfg.catType != CAT_DUAL) return false;
+    return (cfg.dualBus[0] == LEGBUS_HELPER && cfg.dualModel[0] != LEG_NONE) ||
+           (cfg.dualBus[1] == LEGBUS_HELPER && cfg.dualModel[1] != LEG_NONE);
+  }
+  bool        rotUsesHelper() const {
+    return cfg.rotEnable &&
+           cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+           cfg.rotType != ROT_YAESU && cfg.rotType != ROT_NONE &&
+           cfg.rotTransport == ROT_XPORT_HELPER;
+  }
+  // How many things want the helper's one device. >1 is a configuration that
+  // cannot work and is refused at the engage choke point.
+  int         helperClaimants() const {
+    int n = 0;
+    if (cfg.catType == CAT_HELPER && (RadioModel)cfg.radioModel != RIG_NONE) n++;
+    if (cfg.catType == CAT_DUAL) {
+      if (cfg.dualBus[0] == LEGBUS_HELPER && cfg.dualModel[0] != LEG_NONE) n++;
+      if (cfg.dualBus[1] == LEGBUS_HELPER && cfg.dualModel[1] != LEG_NONE) n++;
+    }
+    if (rotUsesHelper()) n++;
+    return n;
+  }
+  // Does anything at all need the Grove link to the helper brought up?
+  bool        helperWanted() const { return catUsesHelper() || rotUsesHelper(); }
+  void        applyHelperFromCfg();     // start/stop the Grove link to match cfg
+  bool        helperEngageGuard();      // refuse an unworkable helper config, with a reason
+  void        serviceHelperCat();       // per-loop: pump the link, attach/detach the Stream
+  // Whether the rig currently holds a Stream from the helper. A member rather
+  // than a static inside the loop so that applyRadioFromCfg() -- which deletes
+  // the rig out from under it -- can clear it; a stale true there would leave the
+  // new rig object permanently without a stream, which is the single-rig version
+  // of the H7 bug the USB reconciler already carries a note about.
+  bool        helperAttached = false;
   bool        catUsesUsb() const {
     if (cfg.catType == CAT_USB) return (RadioModel)cfg.radioModel != RIG_NONE;
     if (cfg.catType != CAT_DUAL) return false;
@@ -9252,7 +9414,7 @@ private:
   bool   ao7ContSun = false;    // true = continuous sunlight (24 h timer free-running)
   double ao7Beta = 0, ao7EclFrac = 0;
   // Observation store: one entry per usable report. Parallel arrays (no struct) to stay
-  // heap-free -- fixed .bss, small. ao7ObsMode packs TWO things per entry:
+  // heap-free -- fixed .bss, small. ao7Obs->mode packs TWO things per entry:
   //   bit 0 : mode      0 = Mode A (V/a), 1 = Mode B (U/v)
   //   bit 1 : polarity  0 = positive ("Heard": that mode WAS active)
   //                     1 = negative ("Not Heard", horizon-gated: that mode was NOT active)
@@ -9262,14 +9424,61 @@ private:
   // and, because Mode A is fetched first, Mode B was starved of slots and the sample was
   // silently biased toward A.
   static const int AO7_MAXOBS = 300;
+  // Heap-on-demand (0.9.73 RAM pass): 2,700 B resident only while the AO-7 tool is
+  // in use. Allocated by ao7ObsAlloc() on entry/fetch/load, freed from the
+  // screen-transition hook. EVERY reader tolerates nullptr -- draw, key, estimate,
+  // save and fetch are all reachable before allocation and after a failed one
+  // (the rule the DX-cluster bugs taught).
+  // ---- Space-Track orbital history (0.9.73) --------------------------------
+  // Compares a satellite's CURRENT mean elements (from the loaded GP/TLE) with
+  // its history from Space-Track's gp_history class. Heap-on-demand: ~3.8 KB
+  // resident only while the tool is open; the transition hook frees it. The
+  // fetch streams CSV and decimates into 120 time bins, so a 25-year history
+  // costs the same RAM as a 30-day one. Credentials live in /sthist.cfg on the
+  // FS (two lines: identity, password) -- editable on the tool screen; the
+  // project's config blob is untouched.
+  static const int ST_BINS = 120;
+  static const int ST_COLS = 7;   // sma ecc inc period apo peri bstar (CSV order)
+  // Per-COLUMN counts (sixth bench): decades-old gp_history rows carry EMPTY
+  // derived-value cells, which atof() turned into 0.0 -- zero-poisoned bins
+  // dragged vmin to 0 and flattened 50 years of real structure against the
+  // top edge, and the "first populated bin" the delta compares against was
+  // all-zeros. A cell now only counts for its own column when it is present
+  // (and positive, for the strictly-positive columns).
+  struct StBin  { float sum[ST_COLS]; uint16_t n[ST_COLS]; };
+  struct StHist {
+    time_t  t0 = 0, t1 = 0;      // window
+    uint32_t rows = 0;           // CSV rows consumed
+    StBin   bin[ST_BINS];
+    float   cur[ST_COLS];        // derived from the CURRENT SatEntry elements
+    bool    haveCur = false;
+    char    name[26]; uint32_t norad = 0;
+  };
+  StHist*  stHist = nullptr;
+  int      stSel = 0;            // 0 sat | 1 span | 2 metric
+  int      stView = 0;           // 0 graph | 1 scrollable data table
+  int      stTabScroll = 0;
+  int      stSpanIdx = 3;        // index into ST_SPans (365 d default)
+  int      stMetric = 0;         // 0 SMA 1 PERIOD 2 APO 3 PERI 4 INC 5 ECC 6 BSTAR
+  int      stSatIdx = -1;        // db index of the selected satellite
+  char     stStatus[64] = {0};   // credentials live in cfg.stUser/cfg.stPass
+  void enterStHist();
+  void drawStHist();
+  void keyStHist(char c, bool enter, bool back);
+  bool stHistAlloc();
+  bool stFetch(String& err);
+  void stComputeCurrent();
+  void printStHist();
+
+  struct Ao7Obs { time_t t[AO7_MAXOBS]; uint8_t mode[AO7_MAXOBS]; };
+  Ao7Obs* ao7Obs = nullptr;
+  bool ao7ObsAlloc();
   static const int AO7_PERMODE = AO7_MAXOBS / 2;   // per-mode fetch cap (newest kept)
   static const int AO7_WINDOW_DAYS = 30;   // fetch window (days). The AMSAT reports API
                                            // caps hours at 720 (30 days) -- confirmed against
                                            // the published API spec -- so 30 days is the
                                            // longest supported window, and a longer window
                                            // captures more A/B switch boundaries for the fit.
-  time_t ao7ObsT[AO7_MAXOBS];    // report time (unix UTC), refined to the 15-min sub-slot
-  uint8_t ao7ObsMode[AO7_MAXOBS];// packed mode|polarity -- see the bit table above
   int    ao7NObs = 0;            // number of stored observations (raw fetch, unfiltered)
   int    ao7NA = 0, ao7NB = 0;   // per-mode counts WITHIN the illuminated window used by
                                  // the fit (recomputed in ao7Estimate; not the raw fetch)
@@ -9371,7 +9580,12 @@ private:
   // objects sharing the active bird's altitude band, and coarse-screen each for
   // closest approach. Transient only -- the resident 150-sat DB is untouched.
   static const int DG_MAX = 14;
-  SatEntry dgSat[DG_MAX]; float dgMiss[DG_MAX]; time_t dgT[DG_MAX];
+  // Heap-on-demand (0.9.73 RAM pass): ~1.9 KB of SatEntry COPIES resident only
+  // while the debris-group screen is open. dgFetchAndScreen() allocates; the
+  // transition hook frees; printDebGrp() guards, because the Print submenu can
+  // reach it with no screen behind it.
+  struct DgBuf { SatEntry sat[DG_MAX]; float miss[DG_MAX]; time_t t[DG_MAX]; };
+  DgBuf* dgBuf = nullptr;
   int   dgN = 0, dgGroup = 0, dgScroll = 0, dgState = 0;   // 0 pick, 1 results
   bool  dgFetchAndScreen(String& err);
   void  drawDebGrp(); void keyDebGrp(char c, bool enter, bool back);
@@ -9664,7 +9878,7 @@ private:
                      PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
                      PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER, PR_SUNMOON, PR_BASICREF, PR_THERMAL, PR_AO7,
-                     PR_APRS, PR_DXC, PR_ADSB, PR_MUF, PR_SAA };
+                     PR_APRS, PR_DXC, PR_ADSB, PR_MUF, PR_SAA, PR_QSL };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -9674,6 +9888,7 @@ private:
   void printSatCard();       // active satellite: transponders + next passes
   void printKeps();          // active satellite: Keplerian elements (nostalgia)
   void printLog();           // recent QSOs (paper backup)
+  void printQsl();           // QSL card for the ONE QSO in `qso` (hand-out confirmation)
   void printAmsatPitch();    // "support AMSAT" outreach page (About)
   void printOpCard();        // operator contact card + ham/satellite explainer (About)
   void printMutual();        // mutual-window (co-visibility) table + sky map
@@ -9716,6 +9931,7 @@ private:
   void drawGRotor();    void keyGRotor(char c, bool enter, bool back);    void gRotorReset();
   void drawGMorse();    void keyGMorse(char c, bool enter, bool back);    void gMorseReset();
   void drawGGrid();     void keyGGrid(char c, bool enter, bool back);     void gGridReset();
+  void drawGBrick();    void keyGBrick(char c, bool enter, bool back);    void gBrickReset();
   float gdlLevelRate();        // Doppler Lock: level-scaled drift rate
   void  ggNewRound();          // Grid Chase: build a fresh question
   void keyHelp(char c, bool enter, bool back);
@@ -9726,10 +9942,12 @@ private:
   void keyCatTest(char c, bool enter, bool back);
   void enterCatMon();                       // open the monitor, claim the trace sink
   void drawCatMon();
-  void drawDualRig();
-  void drawDualRigLocal();                 // CAT_DUAL: native two-leg editor
-  void keyDualRigLocal(char c, bool enter, bool back);
+  void drawDualRig();                      // CAT_DUAL: native two-leg editor
   void keyDualRig(char c, bool enter, bool back);
+  void drawUsbHelper();                    // CardSatUsbHelper link + device picker
+  void keyUsbHelper(char c, bool enter, bool back);
+  int  uhSel = 0;                          // cursor: 0 = link baud, 1 = device
+  int  uhScroll = 0;                       // device-list scroll
   void keyCatMon(char c, bool enter, bool back);
   void catMonPush(const char* dir, const uint8_t* b, size_t n);  // append a trace line
   void catMonSendHex(const String& hex);    // parse "FE FE 4C..." and transmit
@@ -10363,6 +10581,16 @@ namespace Printer {
   void colrow(const String* fields, int n);
   void blank();
   void title(const String& s);         // emphasized/centered where the format allows
+  // Centre one line at EACH sink's own width. Distinct from title(): title() is
+  // "this is a heading" (emphasis + a rule underneath), center() is purely
+  // positional and carries no weight or separator. The QSL card needs the second
+  // -- a callsign centred in a block is not a heading -- and every report before
+  // it was left-aligned tabular material, which is why this did not exist.
+  //
+  // Each sink is padded to ITS OWN width rather than to cols(): the printer may be
+  // 32 columns while the file sink is 80, and centring both to the wider one puts
+  // the receipt's text hard against the right margin.
+  void center(const String& s);
   void rule();                         // a row of '-' at each sink's width
   void feedCut();                      // finish the page (cut / form-feed / showpage)
 
@@ -10988,6 +11216,37 @@ void line(const String& s) {
 }
 
 void wrap(const String& s) { line(s); }   // line() already per-sink wraps
+
+// Centre `s` at each sink's own width. Over-long input is passed through
+// untouched rather than wrapped: a centred line that wraps is worse than one that
+// runs to the margin, and every caller here is a short field (a callsign, a grid,
+// a date) that fits by construction.
+static String centreTo(const String& s, int w) {
+  const int len = (int)s.length();
+  if (w <= 0 || len >= w) return s;
+  String out;
+  out.reserve(w);
+  for (int i = 0; i < (w - len) / 2; ++i) out += ' ';
+  out += s;
+  return out;                      // no trailing pad: it would only waste ribbon
+}
+
+void center(const String& s) {
+  if (s_pOK && isRaster()) {
+    rasterPush(centreTo(s, s_pCols));
+  } else if (s_pOK && s_fmt == FMT_ESCPOS) {
+    // ESC/POS can centre in the printer, which is better than space padding: it
+    // is exact at any character pitch, including double-width titles.
+    uint8_t on[3]  = {0x1B, 0x61, 0x01}; pRaw(on, 3);      // ESC a 1  centre
+    pStr(s); pNL();
+    uint8_t off[3] = {0x1B, 0x61, 0x00}; pRaw(off, 3);     // ESC a 0  left
+  } else if (s_pOK) {
+    printerLine(centreTo(s, s_pCols));
+  }
+  // The serial and file sinks are always plain text, so they always pad.
+  if (s_ser)  Serial.println(centreTo(s, s_fCols));
+  if (s_file) { s_f.print(centreTo(s, s_fCols)); s_f.print('\n'); }
+}
 
 // ---- narrow-paper layout helpers (0.9.65) ---------------------------------
 // narrow(): the widest active sink is a 32-col (58 mm) receipt or tighter. cols()
@@ -11782,8 +12041,9 @@ bool PlainCatRig::readFreq(freq_t& hzOut) {
 // ---------------------------------------------------------------------------
 //  DualRig
 // ---------------------------------------------------------------------------
-DualRig::DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud)
-  : _down(down), _up(up), _usbLeg(usbLeg) {
+DualRig::DualRig(Rig* down, Rig* up, int usbLeg, int helperLeg,
+                 uint32_t downBaud, uint32_t upBaud)
+  : _down(down), _up(up), _usbLeg(usbLeg), _helperLeg(helperLeg) {
   _baud[0] = downBaud; _baud[1] = upBaud;
   // Name says what is actually driven, so a one-legged setup is never mistaken for
   // a broken two-legged one.
@@ -11802,11 +12062,12 @@ DualRig::~DualRig() {
 
 void DualRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   (void)baud;
-  // Begin every leg except the USB one(s) -- a USB leg starts when the reconciler
-  // attaches its CDC stream (setExternalStream / setLegExternalStream below),
-  // mirroring the single-rig CAT_USB lifecycle. LAN legs ignore the UART args.
-  if (_down && !legIsUsb(0)) _down->begin(_baud[0], uartNum, rxPin, txPin);
-  if (_up   && !legIsUsb(1)) _up->begin(_baud[1], uartNum, rxPin, txPin);
+  // Begin every leg whose transport is available NOW. A USB leg starts when the
+  // reconciler attaches its CDC stream, and a HELPER leg when the companion
+  // reports its port open -- both via setLegExternalStream() below, mirroring the
+  // single-rig CAT_USB lifecycle. LAN legs ignore the UART args.
+  if (_down && !legDeferred(0)) _down->begin(_baud[0], uartNum, rxPin, txPin);
+  if (_up   && !legDeferred(1)) _up->begin(_baud[1], uartNum, rxPin, txPin);
 }
 
 // Ready when every leg that EXISTS is ready. A "None" leg is not a missing leg --
@@ -11852,7 +12113,7 @@ void DualRig::setPinMode(uint8_t mode) {
 // (CAT-A for the downlink, CAT-B for the uplink). First attach begins the leg;
 // detach (nullptr) resets so the next attach begins it again.
 void DualRig::setLegExternalStream(int leg, Stream* s) {
-  if (leg < 0 || leg > 1 || !legIsUsb(leg)) return;
+  if (leg < 0 || leg > 1 || !legDeferred(leg)) return;
   Rig* L = (leg == 0) ? _down : _up;
   if (!L) return;
   L->setExternalStream(s);
@@ -11865,18 +12126,26 @@ void DualRig::setLegExternalStream(int leg, Stream* s) {
 
 void DualRig::setExternalStream(Stream* s) {
   Rig::setExternalStream(s);
-  if (_usbLeg < 0) return;
+  if (_usbLeg < 0 && _helperLeg < 0) return;
   if (s) {
-    // A single stream can only serve a SINGLE USB leg. With two, the reconciler
-    // must use setLegExternalStream() per leg; a blanket non-null attach here
-    // would put both radios on one wire, so it is deliberately ignored.
+    // A single stream can only serve a SINGLE leg. With two deferred legs the
+    // reconciler must use setLegExternalStream() per leg; a blanket non-null
+    // attach here would put both radios on one wire, so it is deliberately
+    // ignored. This path exists for the single-deferred-leg case only, which is
+    // the same shape single-rig CAT_USB has.
+    //
+    // NOTE the asymmetry with the nullptr path below: a HELPER leg is never
+    // attached through here even when it is the only deferred leg, because a
+    // mixed USB + helper dual rig has two distinct streams and the app always
+    // knows which leg it is attaching. Routing a helper stream through a
+    // "whichever leg is deferred" guess is how the wrong radio gets driven.
     if (_usbLeg == 0 || _usbLeg == 1) setLegExternalStream(_usbLeg, s);
     return;
   }
-  // nullptr = teardown: detach EVERY USB leg (fix31 rule -- clear each backend's
-  // cached copy before the Stream dies), whether there are one or two.
-  if (legIsUsb(0)) setLegExternalStream(0, nullptr);
-  if (legIsUsb(1)) setLegExternalStream(1, nullptr);
+  // nullptr = teardown: detach EVERY deferred leg (fix31 rule -- clear each
+  // backend's cached copy before the Stream dies), USB or helper, one or two.
+  if (legDeferred(0)) setLegExternalStream(0, nullptr);
+  if (legDeferred(1)) setLegExternalStream(1, nullptr);
 }
 
 bool DualRig::setMainFreq(freq_t hz) { return _up   ? _up->setMainFreq(hz)   : false; }
@@ -11907,9 +12176,12 @@ Rig* makeLegRig(uint8_t legModel, uint8_t bus, uint8_t civAddr, uint32_t baud,
     return new (std::nothrow) IcomNetRig(addr, lp.name, host, port ? port : 50001,
                                          user ? user : "", pass ? pass : "");
   }
-  // Grove serial or USB adapter leg: the plain-CAT backend over a Stream. For a
-  // USB leg the stream is attached later by the reconciler (extStream), exactly
-  // like single-rig CAT_USB.
+  // Grove serial, USB adapter, or USB-helper leg: the plain-CAT backend over a
+  // Stream. For a USB leg the stream is attached later by the reconciler
+  // (extStream), exactly like single-rig CAT_USB; a HELPER leg is identical
+  // except the Stream comes from UsbHelper rather than UsbSerial. The backend
+  // cannot tell the difference and does not need to -- which is the whole reason
+  // the transports are Streams.
   return new (std::nothrow) PlainCatRig((LegModel)legModel, addr, bd);
 }
 
@@ -11935,9 +12207,18 @@ Rig* makeDualRig(const uint8_t model[2], const uint8_t bus[2], const uint8_t civ
   if (uD && uU) usbLeg = 2;                            // dual-USB CAT
   else if (uD)  usbLeg = 0;
   else if (uU)  usbLeg = 1;
+  // At most ONE helper leg: the companion carries a single USB device. Two legs
+  // both set to Helper is refused by the settings UI and re-checked at engage;
+  // if a hand-edited config reaches here anyway, the DOWNLINK wins. That is the
+  // safer half to keep -- knob-follow and every read-back come off the downlink,
+  // so a silently uncontrolled uplink is visible immediately, while a silently
+  // uncontrolled downlink looks like the pass is simply going badly.
+  int helperLeg = -1;
+  if      (wantDown && bus[0] == LEGBUS_HELPER) helperLeg = 0;
+  else if (wantUp   && bus[1] == LEGBUS_HELPER) helperLeg = 1;
   const LegProfile& d = LEG_RADIOS[model[0]];
   const LegProfile& u = LEG_RADIOS[model[1]];
-  DualRig* dr = new (std::nothrow) DualRig(down, up, usbLeg,
+  DualRig* dr = new (std::nothrow) DualRig(down, up, usbLeg, helperLeg,
       baud[0] ? baud[0] : d.baud, baud[1] ? baud[1] : u.baud);
   if (!dr) { delete down; delete up; return nullptr; }
   return dr;
@@ -12135,6 +12416,1317 @@ bool RigctlRig::readPtt(bool& tx) {
 }
 
 
+// NOTE ON PLACEMENT -- do not move these two blocks earlier in the file.
+//
+// csuh_proto.h defines free `static inline` FUNCTIONS (the CRC and COBS codecs).
+// Arduino's build inserts its auto-generated prototype block immediately before
+// the first free function definition in the sketch, and those prototypes name
+// every type the sketch uses. Put this header above rig.h and the prototype for
+// `Rig* makeRig(...)` lands before `class Rig` exists -- which fails with
+// "'Rig' does not name a type" reported against makeRig's line, thousands of
+// lines away from the actual cause.
+//
+// Sitting here, after rig.cpp, the first free function definition in the file is
+// still one of rig.cpp's, so the prototype block does not move. Everything that
+// needs these declarations -- settings.cpp's validate(), rotator.cpp,
+// app.cpp -- is inlined after this point. (In the src/ build this is a non-issue:
+// real headers with real include order, no prototype generation.)
+
+// =========================================================================
+//  csuh_proto.h
+// =========================================================================
+
+// ===========================================================================
+//  csuh_proto.h  --  CardSat USB Helper (CSUH) wire protocol, v1
+// ===========================================================================
+//
+//  ONE FILE, TWO COPIES. This header is shared verbatim between CardSat
+//  (src/csuh_proto.h) and the companion firmware
+//  (companion/CardSatUsbHelper/csuh_proto.h). The two MUST be byte-identical:
+//  a protocol constant that drifts between the ends produces frames that decode
+//  cleanly and mean the wrong thing, which is far worse than a link that fails.
+//  tools/check_csuh_parity.py is the gate; run it before any delivery.
+//
+//  ---- WHAT THIS IS FOR --------------------------------------------------------
+//
+//  The ESP32-S3 has OTG_NUM_HOST_CHAN = 8 host channels for the WHOLE bus, one
+//  per open pipe including each device's default control pipe. A hub costs 2, a
+//  CDC radio 3, a vendor-serial adapter 4. The IC-705 contains its own internal
+//  TI TUSB2046 hub, so it costs 5 on its own. That makes
+//
+//      hub + TH-D75 + IC-705 = 10        -- not solvable in software
+//
+//  because usb_host_interface_claim() allocates a pipe for EVERY endpoint of an
+//  interface, all-or-nothing. A second MCU brings its own 8 channels, which is
+//  the entire reason this protocol exists: CardSat keeps one USB device on the
+//  Cardputer and hands the other to an M5StickS3 over the Grove UART.
+//
+//  ---- WHAT THE HELPER IS NOT --------------------------------------------------
+//
+//  It is a BYTE PIPE, not a radio. It speaks no CAT dialect, holds no radio
+//  model, and knows nothing about Doppler, VFOs or rotator grammar. CardSat owns
+//  every protocol decision exactly as it does for a local USB adapter; the helper
+//  moves bytes, manages the CDC line state, and reports what is plugged in.
+//  That is deliberate: the retired CardSatDualRig companion owned CAT state, and
+//  keeping two independent radio catalogues honest across releases was a standing
+//  cost that bought nothing once CAT_DUAL landed natively.
+//
+//  ---- FRAMING -----------------------------------------------------------------
+//
+//  Every frame is COBS-encoded and terminated by a single 0x00 delimiter, so 0x00
+//  never appears inside a frame and a receiver can always resynchronise at the
+//  next delimiter. That property is the reason for COBS rather than a magic byte
+//  plus escapes: the helper is stateless and may reboot mid-session, and whatever
+//  garbage its UART emits while its bootloader runs must not be able to desync the
+//  host permanently.
+//
+//  Decoded frame layout:
+//
+//      [0]        TYPE          one of the CSUH_T_* codes below
+//      [1]        PORT          reserved; always 0 in v1 (see CSUH_MAX_PORTS)
+//      [2..n-3]   PAYLOAD       type-specific, 0..CSUH_MAX_PAYLOAD bytes
+//      [n-2..n-1] CRC16         CCITT-FALSE over [0..n-3], LITTLE-endian
+//
+//  Minimum decoded frame is 4 bytes (TYPE, PORT, CRC lo, CRC hi).
+//
+//  Host->helper types are 0x01..0x7F, helper->host types are 0x80..0xFF. The
+//  direction is implicit in who received the frame, so the split buys nothing at
+//  runtime -- it buys a byte trace you can read without knowing which end dumped
+//  it, which is worth one bit of type space.
+//
+//  ---- FLOW CONTROL ------------------------------------------------------------
+//
+//  Credit-based, symmetric, counted in FRAMES. Each side may have at most
+//  CSUH_CREDIT_INIT DATA frames outstanding; the receiver returns credit as it
+//  moves payload into its sink. The dangerous direction is helper->host: an Icom
+//  in CI-V transceive mode emits unsolicited frames, and CardSat's main loop can
+//  stall for tens of milliseconds inside a screen redraw. Under credit that
+//  becomes back-pressure into the helper's ring (counted, reported via
+//  CSUH_EV_OVERRUN if it ever overflows) instead of bytes vanishing off the wire.
+//  A dropped CI-V byte does not look like a link fault -- it looks like a radio
+//  fault, and would be chased as one.
+//
+//  ---- LINK BAUD AND AUTO-BAUD -------------------------------------------------
+//
+//  The helper keeps NO persistent configuration, so it cannot remember the link
+//  rate. It scans CSUH_BAUDS[] until a frame passes CRC, then locks; after
+//  CSUH_BAUD_RELOCK_MS with no valid frame it unlocks and scans again. CRC-checked
+//  framing is what makes this safe -- at the wrong rate the decoder sees noise and
+//  noise does not pass a CRC.
+//
+//  Default is 230400. The wire is a short 3.3 V Grove cable, but it runs beside a
+//  transmitting radio, and the failure mode of pushing it faster is corrupted CAT
+//  rather than a clean error. CSUH_T_STAT reports CRC and framing error counts so
+//  "is the link clean at this rate" is a number the operator can read rather than
+//  a thing to guess at.
+// ===========================================================================
+#include <stdint.h>
+#include <stddef.h>
+
+// ---- version + sizing -----------------------------------------------------
+#define CSUH_PROTO_VER      1
+// DATA payload bytes per frame. 128 keeps the whole encoded frame under 140
+// bytes, which is ~6 ms at 230400 -- short enough that a frame in flight never
+// dominates a CAT command's round trip.
+#define CSUH_MAX_PAYLOAD    128
+// Largest decoded frame: TYPE + PORT + payload + CRC16.
+#define CSUH_MAX_FRAME      (2 + CSUH_MAX_PAYLOAD + 2)
+// COBS worst case adds one overhead byte per 254, plus the leading code byte,
+// plus the 0x00 delimiter.
+#define CSUH_MAX_ENCODED    (CSUH_MAX_FRAME + (CSUH_MAX_FRAME / 254) + 2)
+// v1 carries exactly one device. The PORT byte exists so a later revision can
+// carry more without a framing change; v1 receivers reject a non-zero PORT
+// rather than silently treating it as 0.
+#define CSUH_MAX_PORTS      1
+// DATA frames each side may have outstanding before it must wait for credit.
+#define CSUH_CREDIT_INIT    8
+
+// Longest device key ("vvvv:pppp/serial" or "vvvv:pppp@addr") and label the
+// protocol will carry. Both match CardSat's own adapter-registry limits so a key
+// never has to be truncated on the way across.
+#define CSUH_MAX_KEY        40
+#define CSUH_MAX_LABEL      48
+
+// ---- link baud ------------------------------------------------------------
+// Scanned in order by the helper's auto-baud, and offered in this order in
+// CardSat's settings. Index 0 is the default.
+#define CSUH_BAUD_N         3
+static const uint32_t CSUH_BAUDS[CSUH_BAUD_N] = { 230400UL, 115200UL, 460800UL };
+// How long the helper listens at one candidate rate before trying the next.
+#define CSUH_BAUD_TRY_MS    400
+// No valid frame for this long -> unlock and rescan.
+#define CSUH_BAUD_RELOCK_MS 5000
+
+// ---- frame types: host -> helper ------------------------------------------
+#define CSUH_T_HELLO_REQ    0x01   // ()                      -> CSUH_T_HELLO
+#define CSUH_T_ENUM_REQ     0x02   // ()                      -> 0..n CSUH_T_ENUM
+#define CSUH_T_OPEN         0x03   // baud32,bits,par,stop,dtr,rts,keylen,key[]
+#define CSUH_T_CLOSE        0x04   // ()
+#define CSUH_T_DATA_OUT     0x05   // bytes -> the USB device
+#define CSUH_T_MODEM        0x06   // dtr,rts
+#define CSUH_T_PING         0x07   // token16
+#define CSUH_T_CREDIT_OUT   0x08   // frames8  (host returns credit to helper)
+#define CSUH_T_STAT_REQ     0x09   // ()                      -> CSUH_T_STAT
+// Force a fresh USB enumeration pass. The helper implements this by REBOOTING
+// itself, which is only sane because it is stateless: there is no configuration to
+// lose, and a reboot is the one recovery that always works when the USB host stack
+// has wedged (usb_host_install() returning 259 for the rest of a boot is a real
+// failure mode -- see third_party/EspUsbHost/PATCHES.md). Tearing the host down
+// in place would be the elegant version and is exactly the path with a history of
+// getting stuck. The host detects the new epoch in CSUH_T_HELLO and re-OPENs.
+#define CSUH_T_RESCAN       0x0A   // ()  reboot the helper and re-enumerate
+#define CSUH_T_LINE         0x0B   // baud32,bits,par,stop  (re-coding an open port)
+#define CSUH_T_WAKE         0x0C   // on8  ask the helper to light its screen
+
+// ---- frame types: helper -> host ------------------------------------------
+#define CSUH_T_HELLO        0x81   // ver,epoch32,maxPayload,credits,fwlen,fw[]
+#define CSUH_T_ENUM         0x82   // index,count,flags,keylen,key[],lablen,label[]
+#define CSUH_T_OPENED       0x83   // ok8,err8,namelen,name[]
+#define CSUH_T_DATA_IN      0x84   // bytes <- from the USB device
+#define CSUH_T_EVENT        0x85   // code8,detlen,detail[]
+#define CSUH_T_PONG         0x86   // token16
+#define CSUH_T_CREDIT_IN    0x87   // frames8  (helper returns credit to host)
+#define CSUH_T_STAT         0x88   // see CsuhStat below
+
+// ---- OPEN result codes ----------------------------------------------------
+#define CSUH_ERR_NONE       0
+#define CSUH_ERR_NODEV      1   // no device matches the requested key
+#define CSUH_ERR_AMBIG      2   // key matched by VID:PID but >1 candidate; never guess
+#define CSUH_ERR_BUSY       3   // reserved for a multi-port revision; v1 never sends it.
+                                //   A v1 OPEN REPLACES any port already open: that is
+                                //   what the host means when it re-OPENs after a settings
+                                //   change, and making it say CLOSE first would add a
+                                //   state the two ends could disagree about for nothing.
+#define CSUH_ERR_HOST       4   // the USB host stack is not running
+#define CSUH_ERR_BADARG     5   // malformed OPEN (bad baud/bits/parity/stop)
+#define CSUH_ERR_NOTCDC     6   // device present but exposes no usable serial interface
+
+// ---- EVENT codes ----------------------------------------------------------
+#define CSUH_EV_ATTACH      1   // detail = device key
+#define CSUH_EV_DETACH      2   // detail = device key
+#define CSUH_EV_PORTLOST    3   // the OPEN device went away; host must re-OPEN
+#define CSUH_EV_USBERR      4   // detail = human-readable host error
+#define CSUH_EV_OVERRUN     5   // detail = decimal bytes lost from the USB->link ring
+#define CSUH_EV_HOSTDOWN    6   // USB host failed to start; detail = reason
+#define CSUH_EV_REBIND      7   // stale binding dropped and re-bound; detail = key
+#define CSUH_EV_RESTART     8   // helper is rebooting now (CSUH_T_RESCAN); expect a new epoch
+
+// ---- ENUM device flags ----------------------------------------------------
+#define CSUH_DEV_LIVE       0x01   // still present (a tombstone reports 0)
+#define CSUH_DEV_OPEN       0x02   // this device is the currently open port
+
+// ---- parity encoding (matches HardwareSerial's convention) ----------------
+#define CSUH_PAR_NONE       0
+#define CSUH_PAR_ODD        1
+#define CSUH_PAR_EVEN       2
+
+// ---- CSUH_T_STAT payload (packed, little-endian) --------------------------
+// Fixed layout rather than a struct memcpy: both ends are little-endian Xtensa
+// today, but a wire format that depends on that is a trap for any future port.
+// Offsets are explicit so the encoder and decoder can be read against each other.
+// 0.9.73 bench extension: three trailing diagnostic bytes. This is a
+// V1-COMPATIBLE TRAILING EXTENSION -- both receivers read fixed offsets and
+// ignore bytes past what they know, so a 36-byte STAT from an older helper and a
+// 39-byte STAT read by an older host both parse fine. Added because the first
+// hardware session could not distinguish "no attach interrupt ever fired" from
+// "devices enumerated but the serial-capability filter hid them" -- the screen
+// showed zero either way, and those two faults have completely different causes.
+#define CSUH_STAT_LEN       39
+#define CSUH_STAT_O_SEEN    36   // u8: raw registry entries (incl. non-serial; hubs excluded)
+#define CSUH_STAT_O_USABLE  37   // u8: entries passing the serial-capability filter
+#define CSUH_STAT_O_HOSTUP  38   // u8: 1 = usb_host stack installed OK at boot
+#define CSUH_STAT_O_FRAMESRX   0   // u32 frames decoded OK
+#define CSUH_STAT_O_FRAMESTX   4   // u32 frames sent
+#define CSUH_STAT_O_CRCERR     8   // u32 frames failed CRC
+#define CSUH_STAT_O_COBSERR   12   // u32 frames failed COBS / length checks
+#define CSUH_STAT_O_USBRX     16   // u32 bytes received from the USB device
+#define CSUH_STAT_O_USBTX     20   // u32 bytes sent to the USB device
+#define CSUH_STAT_O_OVERRUN   24   // u32 bytes lost to ring overflow
+#define CSUH_STAT_O_HEAP      28   // u32 free heap
+#define CSUH_STAT_O_UPTIME    32   // u32 seconds since helper boot
+
+// ===========================================================================
+//  CRC-16/CCITT-FALSE  (poly 0x1021, init 0xFFFF, no reflection, no final xor)
+// ===========================================================================
+static inline uint16_t csuhCrc16(const uint8_t* d, size_t n) {
+  uint16_t c = 0xFFFF;
+  for (size_t i = 0; i < n; ++i) {
+    c ^= (uint16_t)d[i] << 8;
+    for (int b = 0; b < 8; ++b)
+      c = (c & 0x8000) ? (uint16_t)((c << 1) ^ 0x1021) : (uint16_t)(c << 1);
+  }
+  return c;
+}
+
+// ===========================================================================
+//  COBS  (Consistent Overhead Byte Stuffing)
+// ===========================================================================
+//  Encodes src so the result contains no 0x00, letting a single 0x00 delimit
+//  frames. Returns the encoded length, or 0 if dst is too small. The caller
+//  appends the 0x00 delimiter; keeping it out of the encoder means the same
+//  function can be tested against the reference vectors, which do not include it.
+static inline size_t csuhCobsEncode(const uint8_t* src, size_t n,
+                                    uint8_t* dst, size_t dstMax) {
+  if (dstMax < n + (n / 254) + 1) return 0;
+  size_t rd = 0, wr = 1, code_at = 0;
+  uint8_t code = 1;
+  while (rd < n) {
+    if (src[rd] == 0) {
+      dst[code_at] = code; code = 1; code_at = wr++; rd++;
+    } else {
+      dst[wr++] = src[rd++];
+      if (++code == 0xFF && rd < n) { dst[code_at] = code; code = 1; code_at = wr++; }
+    }
+  }
+  dst[code_at] = code;
+  return wr;
+}
+
+//  Decodes one COBS block (the bytes between delimiters). Returns the decoded
+//  length, or 0 on a malformed block. Zero is safe as the error value because a
+//  zero-length CSUH frame is invalid anyway (the minimum is 4 bytes).
+static inline size_t csuhCobsDecode(const uint8_t* src, size_t n,
+                                    uint8_t* dst, size_t dstMax) {
+  size_t rd = 0, wr = 0;
+  while (rd < n) {
+    uint8_t code = src[rd++];
+    if (code == 0) return 0;                       // 0x00 cannot appear inside a block
+    for (uint8_t i = 1; i < code; ++i) {
+      if (rd >= n || wr >= dstMax) return 0;
+      dst[wr++] = src[rd++];
+    }
+    // A run shorter than 0xFF implies a zero byte, EXCEPT at the very end of the
+    // block where the trailing zero is the delimiter we already stripped.
+    if (code != 0xFF && rd < n) {
+      if (wr >= dstMax) return 0;
+      dst[wr++] = 0;
+    }
+  }
+  return wr;
+}
+
+// ===========================================================================
+//  Frame build / verify helpers (shared by both ends)
+// ===========================================================================
+//  Build one encoded frame INCLUDING the trailing 0x00 delimiter. Returns the
+//  number of bytes written to out, or 0 if it will not fit.
+static inline size_t csuhBuildFrame(uint8_t type, uint8_t port,
+                                    const uint8_t* payload, size_t plen,
+                                    uint8_t* out, size_t outMax) {
+  if (plen > CSUH_MAX_PAYLOAD) return 0;
+  uint8_t raw[CSUH_MAX_FRAME];
+  raw[0] = type; raw[1] = port;
+  for (size_t i = 0; i < plen; ++i) raw[2 + i] = payload[i];
+  const uint16_t crc = csuhCrc16(raw, 2 + plen);
+  raw[2 + plen]     = (uint8_t)(crc & 0xFF);
+  raw[2 + plen + 1] = (uint8_t)(crc >> 8);
+  const size_t rawLen = 2 + plen + 2;
+  if (outMax < 1) return 0;
+  const size_t enc = csuhCobsEncode(raw, rawLen, out, outMax - 1);
+  if (!enc) return 0;
+  out[enc] = 0x00;
+  return enc + 1;
+}
+
+//  Verify and split a DECODED frame. Returns true and fills type/port/payload on
+//  success. `n` is the COBS-decoded length (delimiter already removed).
+static inline bool csuhParseFrame(const uint8_t* raw, size_t n,
+                                  uint8_t* type, uint8_t* port,
+                                  const uint8_t** payload, size_t* plen) {
+  if (n < 4 || n > CSUH_MAX_FRAME) return false;
+  const uint16_t want = (uint16_t)raw[n - 2] | ((uint16_t)raw[n - 1] << 8);
+  if (csuhCrc16(raw, n - 2) != want) return false;
+  if (raw[1] >= CSUH_MAX_PORTS) return false;      // reserved field must be 0 in v1
+  *type = raw[0]; *port = raw[1];
+  *payload = raw + 2; *plen = n - 4;
+  return true;
+}
+
+// =========================================================================
+//  usbhelper.h
+// =========================================================================
+
+// ===========================================================================
+//  usbhelper.h  --  CardSat's client for the CardSatUsbHelper companion
+// ===========================================================================
+//
+//  WHAT IT IS. A second USB host on the end of a Grove cable. CardSat keeps one
+//  USB device on the Cardputer and hands another to an M5StickS3 running
+//  companion/CardSatUsbHelper, which acts as a pure byte pipe. Every CAT dialect,
+//  every rotator grammar and all of the Doppler logic stays here; the helper moves
+//  bytes and manages the CDC line state.
+//
+//  WHY IT EXISTS. The ESP32-S3 has OTG_NUM_HOST_CHAN = 8 host channels for the
+//  whole bus, one per open pipe including each device's default control pipe:
+//  a hub costs 2, a CDC radio 3, a vendor-serial adapter 4. The IC-705 carries its
+//  own internal TI TUSB2046 hub, so it costs 5 by itself.
+//
+//      hub + IC-705           = 7   works
+//      hub + TH-D75 + FTDI    = 8   works, no headroom
+//      hub + TH-D75 + IC-705  = 10  cannot be made to fit
+//
+//  usb_host_interface_claim() takes every endpoint of an interface or none, so
+//  only endpoints on an interface of their own can be skipped -- true for CDC
+//  control, not for vendor-serial adapters. There is no arrangement of 8 channels
+//  that holds two USB radios when one is an IC-705. A second MCU brings its own 8.
+//
+//  ---- WHY THIS FILE IS SMALL --------------------------------------------------
+//
+//  The same trick usbserial.h plays: the CAT backends (CivRig / YaesuRig /
+//  KenwoodRig / PlainCatRig) and every serial rotator backend already talk through
+//  a `Stream*` and know nothing about the transport beneath. stream() hands them
+//  one, so every protocol, every radio, every rotator and every command works over
+//  the helper unchanged. Nothing in the Doppler loop, calibration or UI knows the
+//  bytes are taking a detour through a Grove cable.
+//
+//  ---- THE THREE THINGS THAT CONSTRAIN THE DESIGN ------------------------------
+//
+//  1. ONE GROVE UART. The helper claims UART1 on G1/G2 -- the same wire as wired
+//     CI-V, the Grove GPS, a Grove rotator, rigctl-Grove and any LEGBUS_GROVE leg.
+//     Only one of those can be configured at a time, and the app enforces it
+//     (App::catUsesGroveWire / rotTransportConflict). A dual rig using the helper
+//     therefore has its other leg on local USB or LAN, never on Grove.
+//
+//  2. ONE DEVICE ON THE HELPER. v1 carries exactly one USB device, which may be a
+//     single-rig radio, ONE dual-rig leg, or the rotator -- not two of them. The
+//     helper is a single exclusive resource and the settings layer refuses a second
+//     claimant, the same way it refuses two Grove legs.
+//
+//  3. NO PSRAM HERE. The ring buffers are heap-allocated by begin() and released
+//     by end(), so a CardSat that never uses the helper pays nothing. On the Stick
+//     the equivalent buffers are four times larger because it has 8 MB of PSRAM;
+//     that asymmetry is deliberate and is why the credit window is what it is.
+//
+//  ---- LIVENESS AND RECOVERY ---------------------------------------------------
+//
+//  The helper is STATELESS: it stores nothing across reboots and generates a fresh
+//  random epoch each boot, reported in CSUH_T_HELLO. When this client sees the
+//  epoch change it knows the far end restarted, drops its device list, resets both
+//  credit windows and re-issues the OPEN by itself. So a helper that browns out or
+//  is unplugged mid-pass recovers with no operator action -- which is the whole
+//  reason for preferring a stateless helper over one that remembers its config.
+//
+//  Wire protocol: csuh_proto.h (shared byte-identically with the companion).
+// ===========================================================================
+#include <Arduino.h>
+
+// Compile-time flag, mirroring CARDSAT_HAS_USBCAT. The helper needs no USB host
+// stack on this side -- it is a UART client -- so it is available even in a build
+// with USB CAT compiled out, which is exactly the build where a second USB port is
+// most useful.
+#if CARDSAT_HAS_USBHELPER
+
+// Counters reported by the helper (CSUH_T_STAT). Every one of these exists so a
+// question that would otherwise be answered by guessing has a number instead:
+// "is the link clean at this baud" is crcErr + cobsErr, and "am I losing CAT
+// bytes" is overrun. A silently dropped CI-V byte does not look like a link
+// fault, it looks like a radio fault, and would be chased as one.
+struct CsuhStats {
+  uint32_t framesRx = 0;   // frames the helper decoded OK
+  uint32_t framesTx = 0;   // frames the helper sent
+  uint32_t crcErr   = 0;   // frames that failed CRC (link quality)
+  uint32_t cobsErr  = 0;   // frames that failed COBS/length checks
+  uint32_t usbRx    = 0;   // bytes in from the USB device
+  uint32_t usbTx    = 0;   // bytes out to the USB device
+  uint32_t overrun  = 0;   // bytes lost to a full ring -- must stay 0
+  uint32_t heap     = 0;   // helper free heap
+  uint32_t uptime   = 0;   // helper seconds since boot
+  // 0.9.73 trailing extension (CSUH_STAT_LEN 39): enumeration diagnostics.
+  uint8_t  seen     = 0;   // raw non-hub registry entries on the helper
+  uint8_t  usable   = 0;   // subset passing the serial-capability filter
+  uint8_t  hostUp   = 0;   // 1 = helper's usb_host stack installed OK
+  bool     ext      = false; // true when the helper sent the extended block
+  bool     valid    = false;
+};
+
+// The transport handed to a Rig or Rotator backend. Every accessor pumps the link
+// first, because the backends are written against a UART: they write a command and
+// then spin on available() waiting for a reply, and if that spin did not service
+// the link no reply could ever arrive. That is the same shape usbserial's CDC
+// stream has, for the same reason.
+class HelperStream : public Stream {
+public:
+  int    available() override;
+  int    read() override;
+  int    peek() override;
+  size_t write(uint8_t b) override;
+  size_t write(const uint8_t* d, size_t n) override;
+  void   flush() override;
+  using Print::write;
+};
+
+namespace UsbHelper {
+
+  // ---- link lifecycle -----------------------------------------------------
+  // Claim the Grove UART and start talking. `linkBaud` must be one of
+  // CSUH_BAUDS[]; anything else is clamped to the default, because the helper
+  // only ever scans that list and a rate outside it could never link at all.
+  // Returns false only if the ring buffers could not be allocated -- the link
+  // itself comes up asynchronously, so "did it work" is linked(), not this.
+  bool  begin(uint32_t linkBaud);
+  // Release the UART and the rings. Sends a CLOSE first so the helper drops DTR
+  // on the radio (a CDC device has no other close notification, and a radio that
+  // keys its CAT session off DTR otherwise believes the session is still open --
+  // measured on a TH-D75, where it meant CAT could not be re-established without
+  // power-cycling the RADIO).
+  void  end();
+  bool  started();
+  // Pump the link. Called from the main loop AND from every HelperStream
+  // accessor. Cheap when there is nothing to do.
+  void  service();
+
+  bool        linked();            // HELLO seen and the peer is answering
+  const char* helperVersion();     // firmware version string from HELLO ("" if none)
+  uint32_t    linkBaud();          // the rate actually in use
+  uint32_t    lastSeenMs();        // millis() of the last valid frame (0 = never)
+
+  // ---- device enumeration (the picker on SCR_USBHELPER) -------------------
+  void        requestScan();            // ask the helper for its device list
+  uint8_t     deviceCount();
+  const char* deviceLabel(uint8_t i);   // "IC-705 0c26:0036"
+  const char* deviceKey(uint8_t i);     // "0c26:0036@2" -- the string persisted
+  bool        deviceIsOpen(uint8_t i);
+  // Reboot the helper to force a clean re-enumeration. Safe because the helper is
+  // stateless; it is also the ONLY recovery when a USB host stack has wedged, and
+  // unlike an in-place teardown it cannot itself get stuck.
+  void        rescan();
+
+  // ---- the port -----------------------------------------------------------
+  // Nominate WHICH device on the helper to use ("" = the only one present). Call
+  // before open(); the app pushes this from cfg.helperKey.
+  void        configure(const char* key);
+  // Ask the helper to open the nominated device. Returns immediately: the OPEN is
+  // a round trip, so active() is what says it succeeded. Re-issued automatically
+  // after a helper reboot.
+  bool        open(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
+  void        close();
+  bool        active();                 // a port is open on the far end
+  Stream*     stream();                 // nullptr unless active()
+  const char* deviceName();             // what the helper says it bound
+  const char* lastError();              // "" when there is nothing to report
+  // Change line coding on an already-open port (a per-leg baud edit).
+  void        setLine(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
+  // Drive the CDC control lines explicitly. Rarely needed: open() asserts both.
+  void        setModem(bool dtr, bool rts);
+
+  // ---- diagnostics --------------------------------------------------------
+  void              requestStats();     // ask; the reply lands asynchronously
+  const CsuhStats&  stats();
+  // Frames this side decoded / failed, for the link-quality readout. The helper
+  // reports its own half in stats(); both halves matter, because a cable fault is
+  // usually worse in one direction than the other.
+  uint32_t    rxFrames();
+  uint32_t    restarts();      // helper reboots seen (epoch changes after the first)
+  uint32_t    helloReqTx();    // tenth bench: handshake pipeline stage counters
+  uint32_t    helloRx();
+  uint32_t    lastRttMs();     // audit F11: last validated ping round-trip
+  const char* lastErr();       // last setErr() text ("" when clear)
+  void        rxClassCounts(uint32_t* pong, uint32_t* stat, uint32_t* data,
+                            uint32_t* credit, uint32_t* event, uint8_t* lastTy);
+  uint32_t    linkDrops();     // twelfth bench: dead-timer firings
+  uint32_t    lastValidAge();  // ms since the last VALID frame (live)
+  uint8_t     txCredit();      // DATA_OUT credit currently held
+  uint32_t    localCrcErr();   // OUR decode failures (helper->CardSat direction)
+  uint32_t    localCobsErr();
+  uint32_t    rxCrcErrors();
+  uint32_t    rxCobsErrors();
+  uint32_t    txFrames();
+  // The last EVENT the helper raised, as text for the status line ("" if none).
+  const char* lastEvent();
+}
+
+#endif  // CARDSAT_HAS_USBHELPER
+
+
+// =========================================================================
+//  usbhelper.cpp
+// =========================================================================
+
+// ===========================================================================
+//  usbhelper.cpp  --  CardSat's client for the CardSatUsbHelper companion
+// ===========================================================================
+//  See usbhelper.h for what this is and why it exists. This file is the link
+//  state machine: framing, credit, enumeration, and the Stream adaptor the CAT
+//  and rotator backends actually talk to.
+// ===========================================================================
+
+#if CARDSAT_HAS_USBHELPER
+
+#include <string.h>
+
+// A NAMED namespace, not an anonymous one, and that is deliberate.
+//
+// CardSat ships in two representations: separate translation units under src/,
+// and one monolithic CardSat.ino. In the src/ build an anonymous namespace would
+// be right and every name here would be private to this file. In the MONOLITH
+// every inlined .cpp lands in the same translation unit, so file-scope statics
+// collide -- s_uart, s_devTab and s_errMsg are all already taken by other components,
+// and the collision is a compile error thousands of lines from either definition.
+//
+// A file-scope `using namespace csuh;` would fix the references below and
+// reintroduce the same ambiguity for later code that legitimately has its own
+// s_devTab and s_errMsg. So: named namespace, qualified at the two places outside it
+// that need these names. Internal linkage is lost; nothing here is a symbol
+// anyone else could sensibly reach for.
+namespace csuh {
+
+// ---- tuning ---------------------------------------------------------------
+// RX ring (helper -> us). MUST be at least CSUH_CREDIT_INIT * CSUH_MAX_PAYLOAD,
+// because credit is granted from free space in whole-frame units and the whole
+// point of that arithmetic is that an in-flight frame can always land. 2 KB gives
+// the grant loop room to run ahead of the reader instead of returning credit one
+// frame at a time.
+const size_t RX_RING = 2048;
+// TX ring (us -> helper). CAT commands are tens of bytes; this is generous.
+const size_t TX_RING = 1024;
+
+const uint32_t HELLO_RETRY_MS  = 500;    // while unlinked
+const uint32_t PING_IDLE_MS    = 1500;   // max gap between frames WE send (see ping below)
+const uint32_t LINK_DEAD_MS    = 6500;   // no valid frame -> not linked. Deliberately
+                                         // LONGER than the helper's 5000 ms relock: when a
+                                         // gap does occur, the helper gives up first and
+                                         // rescans while this end is still transmitting
+                                         // steadily at the fixed rate -- so it re-locks in
+                                         // one scan step and the stream never detaches.
+                                         // Equal timers meant both ends abandoned the link
+                                         // in the same instant, which is half of how the
+                                         // first bench flap sustained itself.
+const uint32_t OPEN_RETRY_MS   = 1200;   // re-issue a wanted-but-unopened port
+const uint32_t CREDIT_FLUSH_MS = 20;     // grant even a small batch this often
+const uint8_t  CREDIT_BATCH    = 4;
+// Longest HelperStream::write() will wait for ring space before giving up. A CAT
+// backend does not check the return of write(), so silently dropping bytes here
+// would corrupt a command in a way that presents as a radio fault. Waiting is the
+// honest behaviour -- it is what a UART does when its FIFO is full -- and the
+// deadline exists only so a dead link cannot hang the Doppler loop.
+const uint32_t WRITE_WAIT_MS   = 60;
+
+const uint8_t MAX_DEV = 6;   // matches the helper's own registry size
+
+// ---- ring -----------------------------------------------------------------
+// Single-threaded: everything here runs on the loop task. (The helper's copy of
+// this needs atomics because its producer is the USB host task; ours does not,
+// and pretending otherwise would just be cargo-culted ceremony.)
+struct Ring {
+  uint8_t* buf = nullptr;
+  size_t   cap = 0, head = 0, tail = 0;
+  bool alloc(size_t n) { buf = (uint8_t*)malloc(n); cap = buf ? n : 0; head = tail = 0; return buf != nullptr; }
+  void free_() { if (buf) { ::free(buf); buf = nullptr; } cap = head = tail = 0; }
+  size_t used() const { return cap ? (head + cap - tail) % cap : 0; }
+  size_t freeSpace() const { return cap ? (cap - 1 - used()) : 0; }
+  size_t push(const uint8_t* d, size_t n) {
+    size_t sp = freeSpace(); if (n > sp) n = sp;
+    for (size_t i = 0; i < n; ++i) buf[(head + i) % cap] = d[i];
+    head = (head + n) % cap; return n;
+  }
+  size_t pop(uint8_t* d, size_t n) {
+    size_t hv = used(); if (n > hv) n = hv;
+    for (size_t i = 0; i < n; ++i) d[i] = buf[(tail + i) % cap];
+    tail = (tail + n) % cap; return n;
+  }
+  int peek1() const { return used() ? (int)buf[tail] : -1; }
+  void clear() { tail = head; }
+};
+
+// ---- state ----------------------------------------------------------------
+HardwareSerial* s_uart = nullptr;
+bool     s_started = false;
+uint32_t s_baud = CSUH_BAUDS[0];
+
+Ring s_rx, s_tx;
+
+uint8_t  s_acc[CSUH_MAX_ENCODED];
+size_t   s_accN = 0;
+bool     s_overlong = false;
+
+bool     s_linked = false;
+bool     s_haveEpoch = false;
+uint32_t s_epoch = 0;
+uint32_t s_lastValid = 0, s_lastHelloReq = 0, s_lastPing = 0;
+char     s_fw[20] = {0};
+
+// Credit. s_txCredit is what WE may send; s_peerCredit is our model of what the
+// helper may send. Keeping an explicit model of the peer's window is what lets
+// grantCredit() maintain the invariant that every frame the helper is allowed to
+// send has somewhere to land: s_peerCredit * CSUH_MAX_PAYLOAD <= s_rx.freeSpace().
+int16_t  s_txCredit   = CSUH_CREDIT_INIT;
+int16_t  s_peerCredit = CSUH_CREDIT_INIT;
+uint32_t s_lastGrantMs = 0;
+
+struct Dev {
+  char key[CSUH_MAX_KEY]     = {0};
+  char label[CSUH_MAX_LABEL] = {0};
+  bool live = false, open = false;
+};
+Dev     s_devTab[MAX_DEV];
+uint8_t s_devN = 0;
+
+char     s_wantKey[CSUH_MAX_KEY] = {0};
+bool     s_wantOpen = false;
+bool     s_open = false;
+uint32_t s_pBaud = 19200;
+uint8_t  s_pBits = 8, s_pPar = CSUH_PAR_NONE, s_pStop = 1;
+uint32_t s_lastOpenTry = 0;
+char     s_devName[CSUH_MAX_LABEL] = {0};
+char     s_errMsg[72]   = {0};
+char     s_event[72] = {0};
+
+CsuhStats s_stats;
+uint32_t  s_rxFrames = 0, s_crcErr = 0, s_cobsErr = 0, s_txFrames = 0;
+uint32_t  s_lastTxMs = 0;      // last frame WE sent -- the peer's liveness clock sees only these
+uint32_t  s_helloReqTx = 0;    // tenth bench: HELLO_REQs sent while unlinked
+uint32_t  s_helloRx    = 0;    // tenth bench: HELLOs received (before acceptance checks)
+// Eleventh bench: per-class RX counters. The impossible triangle -- handshake
+// completing, timer firing, traffic "flowing" -- resolves only if specific
+// frame classes vanish between HELLOs. These name the classes.
+uint32_t  s_rxPong = 0, s_rxStat = 0, s_rxData = 0, s_rxCredit = 0, s_rxEvent = 0;
+uint32_t  s_writeTimeouts = 0;   // audit F4: atomic CAT writes refused whole
+uint16_t  s_pingTok = 0;         // audit F11: token of the outstanding ping
+uint32_t  s_pingSentMs = 0, s_lastRttMs = 0, s_pongBad = 0;
+uint8_t   s_rxLastTy = 0;
+uint32_t  s_linkDrops = 0;     // twelfth bench: times the dead timer fired
+uint32_t  s_restarts = 0;      // helper epoch changes after the first (i.e., real reboots)
+
+HelperStream s_stream;
+
+// ---- frame TX -------------------------------------------------------------
+void sendFrame(uint8_t type, const uint8_t* payload, size_t plen) {
+  s_lastTxMs = millis();
+  if (!s_uart) return;
+  uint8_t wire[CSUH_MAX_ENCODED];
+  const size_t n = csuhBuildFrame(type, 0, payload, plen, wire, sizeof(wire));
+  if (!n) return;
+  s_uart->write(wire, n);
+  s_txFrames++;
+}
+void sendEmpty(uint8_t type) { sendFrame(type, nullptr, 0); }
+
+void setErr(const char* e) { strlcpy(s_errMsg, e ? e : "", sizeof(s_errMsg)); }
+
+// ---- credit ---------------------------------------------------------------
+// Grant only as many frames as the RX ring can absorb in full. This is the whole
+// safety argument for the receive path: because the helper never sends more than
+// s_peerCredit frames and each is at most CSUH_MAX_PAYLOAD bytes, a granted frame
+// can always be stored. The alternative -- returning credit for every frame
+// consumed, regardless of space -- overflows the moment the reader stalls, and a
+// dropped CI-V byte does not look like a link fault. It looks like a radio fault.
+void grantCredit(bool force) {
+  if (!s_linked) return;
+  size_t capacity = s_rx.freeSpace() / CSUH_MAX_PAYLOAD;
+  if (capacity > CSUH_CREDIT_INIT) capacity = CSUH_CREDIT_INIT;
+  int grant = (int)capacity - (int)s_peerCredit;
+  if (grant <= 0) return;
+  if (!force && grant < CREDIT_BATCH && (millis() - s_lastGrantMs) < CREDIT_FLUSH_MS) return;
+  const uint8_t k = (uint8_t)(grant > 255 ? 255 : grant);
+  sendFrame(CSUH_T_CREDIT_OUT, &k, 1);
+  s_peerCredit += (int16_t)k;
+  s_lastGrantMs = millis();
+}
+
+// ---- port -----------------------------------------------------------------
+void sendOpen() {
+  uint8_t p[CSUH_MAX_PAYLOAD];
+  size_t n = 0;
+  p[n++] = (uint8_t)(s_pBaud);       p[n++] = (uint8_t)(s_pBaud >> 8);
+  p[n++] = (uint8_t)(s_pBaud >> 16); p[n++] = (uint8_t)(s_pBaud >> 24);
+  p[n++] = s_pBits; p[n++] = s_pPar; p[n++] = s_pStop;
+  p[n++] = 1;   // DTR: many CDC devices ignore host traffic until it is asserted
+  p[n++] = 1;   // RTS
+  const size_t kl = strnlen(s_wantKey, CSUH_MAX_KEY - 1);
+  p[n++] = (uint8_t)kl;
+  for (size_t i = 0; i < kl; ++i) p[n++] = (uint8_t)s_wantKey[i];
+  sendFrame(CSUH_T_OPEN, p, n);
+  s_lastOpenTry = millis();
+}
+
+// Everything that must be forgotten when the far end restarts. Called on a fresh
+// epoch and on begin()/end(). The device list goes because addresses are assigned
+// by enumeration order and are not a property of the radio -- carrying a stale
+// list across a reboot would offer the operator keys that no longer resolve.
+void resetPeerState() {
+  s_devN = 0;
+  s_open = false;
+  s_devName[0] = 0;
+  s_rx.clear(); s_tx.clear();
+  s_txCredit   = CSUH_CREDIT_INIT;
+  s_peerCredit = CSUH_CREDIT_INIT;
+  s_lastOpenTry = 0;
+}
+
+// ---- frame handlers -------------------------------------------------------
+void onHello(const uint8_t* p, size_t n) {
+  if (n < 7) return;
+  const uint8_t ver = p[0];
+  const uint32_t epoch = (uint32_t)p[1] | ((uint32_t)p[2] << 8) |
+                         ((uint32_t)p[3] << 16) | ((uint32_t)p[4] << 24);
+  // p[5] = the helper's max payload, p[6] = its initial credit. We do not adapt to
+  // them: a helper built from a different csuh_proto.h is a parity failure, not a
+  // negotiation, and quietly running with mismatched sizing would hide it.
+  // Audit F8 (0.9.73): and now they are ENFORCED, not just documented -- the
+  // repository parity gates protect the tree, but nothing in the tree can stop
+  // an operator running today's CardSat against last week's flashed helper.
+  // Runtime is the only place a flashed-pair mismatch can be caught.
+  if (ver == CSUH_PROTO_VER &&
+      (p[5] != CSUH_MAX_PAYLOAD || p[6] != CSUH_CREDIT_INIT)) {
+    char b[72];
+    snprintf(b, sizeof(b), "helper proto params differ - flash BOTH boards");
+    setErr(b);
+    s_linked = false;
+    return;
+  }
+  if (ver != CSUH_PROTO_VER) {
+    char b[72];
+    snprintf(b, sizeof(b), "helper protocol v%u, expected v%u", ver, CSUH_PROTO_VER);
+    setErr(b);
+    s_linked = false;
+    return;
+  }
+  const size_t fl = (n > 7) ? p[7] : 0;
+  if (fl && n >= 8 + fl) {
+    const size_t c = fl < sizeof(s_fw) - 1 ? fl : sizeof(s_fw) - 1;
+    memcpy(s_fw, p + 8, c); s_fw[c] = 0;
+  }
+  const bool fresh = !s_haveEpoch || epoch != s_epoch;
+  if (fresh && s_haveEpoch) s_restarts++;   // a CHANGED epoch is a real helper reboot
+  s_epoch = epoch; s_haveEpoch = true;
+  s_linked = true;
+  if (fresh) {
+    // The far end restarted (or this is the first HELLO). Drop everything we
+    // believed about it and re-establish. Re-issuing the OPEN here is what makes a
+    // helper reboot mid-pass invisible to the operator.
+    resetPeerState();
+    setErr("");
+    snprintf(s_event, sizeof(s_event), "helper ready (fw %s)", s_fw[0] ? s_fw : "?");
+    sendEmpty(CSUH_T_ENUM_REQ);
+    if (s_wantOpen) sendOpen();
+  }
+}
+
+void onEnum(const uint8_t* p, size_t n) {
+  if (n < 3) return;
+  const uint8_t idx = p[0], cnt = p[1], flags = p[2];
+  if (cnt == 0) { s_devN = 0; return; }        // explicit "nothing plugged in"
+  if (idx == 0) s_devN = 0;                    // first of a burst: start clean
+  if (idx >= MAX_DEV || n < 4) return;
+  size_t o = 3;
+  const size_t kl = p[o++];
+  if (o + kl > n || kl >= CSUH_MAX_KEY) return;
+  Dev d;
+  memcpy(d.key, p + o, kl); d.key[kl] = 0; o += kl;
+  if (o < n) {
+    const size_t ll = p[o++];
+    if (o + ll <= n && ll < CSUH_MAX_LABEL) { memcpy(d.label, p + o, ll); d.label[ll] = 0; }
+  }
+  d.live = (flags & CSUH_DEV_LIVE) != 0;
+  d.open = (flags & CSUH_DEV_OPEN) != 0;
+  s_devTab[idx] = d;
+  if (idx + 1 > s_devN) s_devN = (uint8_t)(idx + 1);
+}
+
+void onOpened(const uint8_t* p, size_t n) {
+  if (n < 2) return;
+  const uint8_t ok = p[0], err = p[1];
+  char name[CSUH_MAX_LABEL] = {0};
+  if (n > 2) {
+    const size_t nl = p[2];
+    if (3 + nl <= n && nl < sizeof(name)) { memcpy(name, p + 3, nl); name[nl] = 0; }
+  }
+  if (ok) {
+    s_open = true;
+    strlcpy(s_devName, name, sizeof(s_devName));
+    setErr("");
+    return;
+  }
+  s_open = false;
+  switch (err) {
+    case CSUH_ERR_NODEV:
+      setErr(s_wantKey[0] ? "Helper: nominated device not found"
+                          : "Helper: no USB device attached");
+      break;
+    case CSUH_ERR_AMBIG:
+      // Never guessed between. Two identical adapters are indistinguishable by
+      // VID:PID, and picking one would work perfectly right up until it did not.
+      setErr("Helper: more than one device - nominate one");
+      break;
+    case CSUH_ERR_HOST:   setErr("Helper: USB host not running"); break;
+    case CSUH_ERR_BADARG: setErr("Helper: rejected the port settings"); break;
+    case CSUH_ERR_NOTCDC: {
+      char b[72];
+      // %.40s: name can be a full CSUH_MAX_LABEL and the rest of the sentence is
+      // 27 characters, which would overrun this buffer.
+      snprintf(b, sizeof(b), "Helper: %.40s has no serial port", name[0] ? name : "device");
+      setErr(b);
+      break;
+    }
+    default: setErr("Helper: open failed"); break;
+  }
+}
+
+void onEvent(const uint8_t* p, size_t n) {
+  if (n < 1) return;
+  const uint8_t code = p[0];
+  char det[48] = {0};
+  if (n > 1) {
+    const size_t dl = p[1];
+    if (2 + dl <= n && dl < sizeof(det)) { memcpy(det, p + 2, dl); det[dl] = 0; }
+  }
+  switch (code) {
+    case CSUH_EV_ATTACH:
+      snprintf(s_event, sizeof(s_event), "attached %s", det);
+      sendEmpty(CSUH_T_ENUM_REQ);
+      // A device arriving is exactly when a wanted-but-unopened port should be
+      // retried, rather than waiting out the retry timer: plugging the radio in
+      // is the operator's way of saying "now".
+      if (s_wantOpen && !s_open) sendOpen();
+      break;
+    case CSUH_EV_DETACH:
+      snprintf(s_event, sizeof(s_event), "detached %s", det);
+      sendEmpty(CSUH_T_ENUM_REQ);
+      break;
+    case CSUH_EV_PORTLOST:
+      s_open = false;
+      s_devName[0] = 0;
+      setErr("Helper: the radio went away");
+      snprintf(s_event, sizeof(s_event), "port lost %s", det);
+      break;
+    case CSUH_EV_REBIND:
+      s_open = true;
+      snprintf(s_event, sizeof(s_event), "re-bound %s", det);
+      setErr("");
+      break;
+    case CSUH_EV_OVERRUN:
+      snprintf(s_event, sizeof(s_event), "helper overrun %s", det);
+      setErr("Helper: bytes lost (overrun)");
+      break;
+    case CSUH_EV_HOSTDOWN:
+      setErr("Helper: USB host failed to start");
+      snprintf(s_event, sizeof(s_event), "usb host down");
+      break;
+    case CSUH_EV_RESTART:
+      // Expected: a rescan was asked for. Drop the DEVICE model now rather than
+      // waiting for the silence timer, so the UI does not show a stale list --
+      // but do NOT clear s_linked: this event ARRIVED over the Grove link, which
+      // is proof the link is alive, and clearing the flag here made the screen
+      // lie ("no link" while frames flowed). Sixth bench found the class of bug:
+      // link liveness belongs to the timers and the HELLO handshake exclusively;
+      // events may only invalidate what they actually know about (devices).
+      // s_haveEpoch stays too -- the restart, when it lands, announces itself
+      // with a NEW epoch in its HELLO, and that path already re-establishes and
+      // re-OPENs cleanly.
+      resetPeerState();
+      snprintf(s_event, sizeof(s_event), "helper restarting");
+      break;
+    case CSUH_EV_USBERR:
+    default:
+      snprintf(s_event, sizeof(s_event), "helper: %s", det);
+      break;
+  }
+}
+
+void onStat(const uint8_t* p, size_t n) {
+  // Floor at the ORIGINAL 36-byte block, not CSUH_STAT_LEN: an older helper's
+  // STAT must keep parsing after the 0.9.73 trailing extension, or a firmware
+  // mismatch would silently blank the stats screen. The extension is read only
+  // when it is actually present.
+  if (n < 36) return;
+  auto g32 = [&](size_t o) -> uint32_t {
+    return (uint32_t)p[o] | ((uint32_t)p[o+1] << 8) |
+           ((uint32_t)p[o+2] << 16) | ((uint32_t)p[o+3] << 24);
+  };
+  s_stats.framesRx = g32(CSUH_STAT_O_FRAMESRX);
+  s_stats.framesTx = g32(CSUH_STAT_O_FRAMESTX);
+  s_stats.crcErr   = g32(CSUH_STAT_O_CRCERR);
+  s_stats.cobsErr  = g32(CSUH_STAT_O_COBSERR);
+  s_stats.usbRx    = g32(CSUH_STAT_O_USBRX);
+  s_stats.usbTx    = g32(CSUH_STAT_O_USBTX);
+  s_stats.overrun  = g32(CSUH_STAT_O_OVERRUN);
+  s_stats.heap     = g32(CSUH_STAT_O_HEAP);
+  s_stats.uptime   = g32(CSUH_STAT_O_UPTIME);
+  s_stats.ext      = (n >= CSUH_STAT_LEN);
+  if (s_stats.ext) {
+    s_stats.seen   = p[CSUH_STAT_O_SEEN];
+    s_stats.usable = p[CSUH_STAT_O_USABLE];
+    s_stats.hostUp = p[CSUH_STAT_O_HOSTUP];
+  }
+  s_stats.valid    = true;
+}
+
+void handleFrame(uint8_t type, const uint8_t* p, size_t n) {
+  switch (type) {
+    case CSUH_T_HELLO:      s_helloRx++; onHello(p, n); break;
+    case CSUH_T_ENUM:       onEnum(p, n);  break;
+    case CSUH_T_OPENED:     onOpened(p, n); break;
+    case CSUH_T_DATA_IN:
+      s_rxData++;
+      if (s_peerCredit > 0) s_peerCredit--;
+      // Guaranteed to fit: grantCredit() never lets the helper hold more credit
+      // than the ring has whole-frame room for. push() returning short would mean
+      // that invariant broke, so count it rather than losing it silently.
+      if (n) {
+        const size_t took = s_rx.push(p, n);
+        if (took < n) setErr("Helper: RX ring overflow (credit invariant)");
+      }
+      break;
+    case CSUH_T_PONG: {
+      // Audit F11: the token is validated, and a matching pong yields an RTT.
+      // A mismatched token means the reply belongs to an older ping -- counted,
+      // because a steady stream of stale pongs is a servicing-delay signature.
+      s_rxPong++;
+      const uint16_t tok = (n >= 2) ? (uint16_t)(p[0] | (p[1] << 8)) : 0;
+      if (n >= 2 && tok == s_pingTok && s_pingSentMs) {
+        s_lastRttMs = millis() - s_pingSentMs;
+        s_pingSentMs = 0;
+      } else if (n >= 2) s_pongBad++;
+      break;
+    }
+    case CSUH_T_CREDIT_IN:
+      s_rxCredit++;
+      if (n >= 1) {
+        s_txCredit += (int16_t)p[0];
+        if (s_txCredit > CSUH_CREDIT_INIT) s_txCredit = CSUH_CREDIT_INIT;
+      }
+      break;
+    case CSUH_T_EVENT:      s_rxEvent++; onEvent(p, n); break;
+    case CSUH_T_STAT:       s_rxStat++; onStat(p, n);  break;
+    default: break;         // ignore unknown types so a newer helper stays usable
+  }
+}
+
+// ---- link RX --------------------------------------------------------------
+void pumpRx() {
+  if (!s_uart) return;
+  int avail = s_uart->available();
+  // available() returns -1 on a UART that has been torn down (the HWCDC lesson
+  // from 0.9.58, generalised): a `while (available())` on -1 never exits.
+  if (avail <= 0) return;
+  while (avail-- > 0) {
+    const int c = s_uart->read();
+    if (c < 0) break;
+    const uint8_t b = (uint8_t)c;
+    if (b != 0x00) {
+      if (s_accN < sizeof(s_acc)) s_acc[s_accN++] = b;
+      else s_overlong = true;
+      continue;
+    }
+    if (s_overlong || s_accN == 0) {
+      if (s_overlong) s_cobsErr++;
+      s_accN = 0; s_overlong = false;
+      continue;
+    }
+    uint8_t raw[CSUH_MAX_FRAME];
+    const size_t rn = csuhCobsDecode(s_acc, s_accN, raw, sizeof(raw));
+    s_accN = 0;
+    if (!rn) { s_cobsErr++; continue; }
+    uint8_t ty, po; const uint8_t* pp; size_t pl;
+    if (!csuhParseFrame(raw, rn, &ty, &po, &pp, &pl)) { s_crcErr++; continue; }
+    // Only helper->host types are legal inbound. Anything else means the Grove
+    // pair is looped back on itself, which is worth naming rather than
+    // half-processing into nonsense.
+    if (!(ty & 0x80)) { s_cobsErr++; continue; }
+    s_rxFrames++;
+    s_rxLastTy = ty;
+    s_lastValid = millis();
+    handleFrame(ty, pp, pl);
+  }
+}
+
+// ---- link TX --------------------------------------------------------------
+void pumpTx() {
+  while (s_txCredit > 0 && s_tx.used()) {
+    uint8_t buf[CSUH_MAX_PAYLOAD];
+    const size_t n = s_tx.pop(buf, sizeof(buf));
+    if (!n) break;
+    sendFrame(CSUH_T_DATA_OUT, buf, n);
+    s_txCredit--;
+  }
+}
+
+}  // namespace csuh
+
+// ===========================================================================
+//  HelperStream
+// ===========================================================================
+//  Qualified with csuh:: throughout -- see the note on the namespace above.
+int HelperStream::available() {
+  UsbHelper::service();
+  return (int)csuh::s_rx.used();
+}
+int HelperStream::read() {
+  UsbHelper::service();
+  uint8_t b;
+  return csuh::s_rx.pop(&b, 1) ? (int)b : -1;
+}
+int HelperStream::peek() {
+  UsbHelper::service();
+  return csuh::s_rx.peek1();
+}
+size_t HelperStream::write(uint8_t b) { return write(&b, 1); }
+size_t HelperStream::write(const uint8_t* d, size_t n) {
+  if (!csuh::s_started || !d || !n) return 0;
+  // Audit F4 (0.9.73): ALL-OR-NOTHING for anything that fits the ring. The old
+  // incremental push could time out mid-command and hand the radio the first
+  // half of a CAT frame -- and a malformed command a radio acts on is strictly
+  // worse than a dropped one the backend retries. Oversized writes (bigger than
+  // the whole ring; nothing CAT-shaped is) keep the legacy chunked behavior.
+  const uint32_t t0 = millis();
+  if (n <= csuh::TX_RING - 1) {
+    for (;;) {
+      if ((csuh::TX_RING - 1) - csuh::s_tx.used() >= n) {
+        csuh::s_tx.push(d, n);
+        csuh::pumpTx();
+        return n;
+      }
+      UsbHelper::service();
+      if ((millis() - t0) >= csuh::WRITE_WAIT_MS) {
+        csuh::s_writeTimeouts++;
+        return 0;                    // nothing queued: the command stays whole
+      }
+      delay(1);
+    }
+  }
+  size_t done = 0;
+  while (done < n) {
+    done += csuh::s_tx.push(d + done, n - done);
+    if (done >= n) break;
+    UsbHelper::service();
+    if ((millis() - t0) >= csuh::WRITE_WAIT_MS) break;
+    delay(1);
+  }
+  csuh::pumpTx();
+  return done;
+}
+void HelperStream::flush() {
+  const uint32_t t0 = millis();
+  while (csuh::s_tx.used() && (millis() - t0) < csuh::WRITE_WAIT_MS) {
+    UsbHelper::service();
+    delay(1);
+  }
+}
+
+// ===========================================================================
+//  UsbHelper
+// ===========================================================================
+namespace UsbHelper {
+
+// Every name below without a qualifier comes from csuh (above). The directive is
+// scoped to THIS namespace, so it cannot leak into the rest of the monolith.
+using namespace csuh;
+
+bool begin(uint32_t linkBaud) {
+  if (s_started) end();
+  // Clamp to a rate the helper actually scans. Anything else could never link,
+  // and a link that silently never comes up is the hardest kind of fault to read.
+  bool ok = false;
+  for (int i = 0; i < CSUH_BAUD_N; ++i) if (CSUH_BAUDS[i] == linkBaud) { ok = true; break; }
+  s_baud = ok ? linkBaud : CSUH_BAUDS[0];
+
+  if (!s_rx.alloc(RX_RING) || !s_tx.alloc(TX_RING)) {
+    s_rx.free_(); s_tx.free_();
+    setErr("Helper: out of memory");
+    return false;
+  }
+  // Two-wire mode (pinMode 0) through the shared opener, so the "release the
+  // previously bound pins" bookkeeping stays global. There is one Grove UART and
+  // exactly one place that configures it.
+  s_uart = &civUartOpen(0, s_baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
+  s_started = true;
+  s_linked = false; s_haveEpoch = false; s_epoch = 0;
+  s_accN = 0; s_overlong = false;
+  s_fw[0] = 0; s_errMsg[0] = 0; s_event[0] = 0;
+  s_rxFrames = s_crcErr = s_cobsErr = s_txFrames = 0;
+  s_stats = CsuhStats();
+  s_lastValid = 0; s_lastHelloReq = 0; s_lastPing = 0; s_lastGrantMs = 0;
+  resetPeerState();
+  sendEmpty(CSUH_T_HELLO_REQ);
+  return true;
+}
+
+void end() {
+  if (!s_started) return;
+  // Tell the helper to drop DTR before we go. On CDC-ACM, DTR is the only "the
+  // host has this port open" signal there is, and a radio that keys its CAT
+  // session off it otherwise needs a POWER CYCLE to talk again (measured on a
+  // TH-D75). Cheap insurance: one frame.
+  if (s_linked && s_open) { sendEmpty(CSUH_T_CLOSE); if (s_uart) s_uart->flush(); }
+  if (s_uart) s_uart->end();
+  s_uart = nullptr;
+  s_rx.free_(); s_tx.free_();
+  s_started = false; s_linked = false; s_open = false;
+  s_wantOpen = false;
+  s_devN = 0; s_devName[0] = 0;
+}
+
+bool started() { return s_started; }
+
+void service() {
+  if (!s_started) return;
+  // Re-entrancy guard: HelperStream::write() calls service() while service() may
+  // itself be inside pumpTx(). Without this, a full ring plus a slow link would
+  // recurse until the stack gave out -- and a stack overflow inside the Doppler
+  // tick reports as a watchdog panic with a backtrace that names neither.
+  static bool inService = false;
+  if (inService) return;
+  inService = true;
+
+  const uint32_t now = millis();
+  pumpRx();
+
+  // Liveness. A link that has gone quiet is not linked, whatever it last said.
+  //
+  // ROOT CAUSE OF THE 0.9.73 LINK "BLINK" (fourteen bench cycles): `now` above
+  // is captured BEFORE pumpRx(), and pumpRx() stamps s_lastValid with a LATER
+  // millis() whenever a frame decodes during the pump. The old comparison
+  // `now - s_lastValid` was then OLDER minus NEWER: unsigned underflow,
+  // ~4.29e9, always > LINK_DEAD_MS -- and the link flag died on the spot, at
+  // random-looking moments, MORE often the MORE inbound traffic there was.
+  // Proven by instrumentation, not narrative: dr reached 110 while the age
+  // display (computed with a fresh millis()) never left 0.1 s. The fix is a
+  // fresh capture after the pump, plus a signed-delta guard so any future
+  // ordering drift degrades to "slightly late timeout" instead of this.
+  const uint32_t nowLive = millis();
+  if (s_linked && s_lastValid &&
+      (int32_t)(nowLive - s_lastValid) > (int32_t)LINK_DEAD_MS) {
+    s_linked = false;
+    s_haveEpoch = false;
+    s_open = false;
+    s_linkDrops++;
+    setErr("Helper: no response over Grove");
+  }
+  if (!s_linked) {
+    if ((now - s_lastHelloReq) > HELLO_RETRY_MS) {
+      s_lastHelloReq = now;
+      s_helloReqTx++;
+      sendEmpty(CSUH_T_HELLO_REQ);
+    }
+  } else {
+    // KEEPALIVE INVARIANT (first bench flap, root cause): gate the ping on the
+    // last frame this end SENT, never on traffic received. The helper's liveness
+    // clock sees only frames FROM us -- so during an IC-705 transceive flood the
+    // old `s_lastValid` gate kept this end silent while data poured IN, the
+    // helper hit its 5 s relock, walked off the correct baud, and its own TX
+    // turned to noise here... which unlinked this end 5-6 s later, and the two
+    // ends chased each other in a visible up/down flap. RX traffic says the FAR
+    // end is alive; only TX traffic proves that WE are.
+    if ((now - s_lastTxMs) > PING_IDLE_MS) {
+      s_pingTok = (uint16_t)(now & 0xFFFF);
+      s_pingSentMs = now;
+      const uint8_t tok[2] = { (uint8_t)(s_pingTok & 0xFF), (uint8_t)(s_pingTok >> 8) };
+      sendFrame(CSUH_T_PING, tok, 2);
+    }
+    // A port that was asked for but is not open gets retried. This covers the
+    // radio being plugged in after CardSat engaged, which is the ordinary order
+    // of operations on a bench.
+    if (s_wantOpen && !s_open && (now - s_lastOpenTry) > OPEN_RETRY_MS) sendOpen();
+  }
+
+  pumpTx();
+  grantCredit(false);
+  inService = false;
+}
+
+bool        linked()        { return s_linked; }
+const char* helperVersion() { return s_fw; }
+uint32_t    linkBaud()      { return s_baud; }
+uint32_t    lastSeenMs()    { return s_lastValid; }
+
+void requestScan() { if (s_started) sendEmpty(CSUH_T_ENUM_REQ); }
+uint8_t     deviceCount() { return s_devN; }
+const char* deviceLabel(uint8_t i) { return i < s_devN ? s_devTab[i].label : ""; }
+const char* deviceKey(uint8_t i)   { return i < s_devN ? s_devTab[i].key   : ""; }
+bool        deviceIsOpen(uint8_t i){ return i < s_devN && s_devTab[i].open; }
+
+void rescan() {
+  if (!s_started) return;
+  sendEmpty(CSUH_T_RESCAN);
+  // Do not wait for the EVENT: if the helper is wedged badly enough to need a
+  // rescan it may not answer at all. Drop our model now; the next HELLO (new
+  // epoch) rebuilds it.
+  s_linked = false; s_haveEpoch = false;
+  resetPeerState();
+  snprintf(s_event, sizeof(s_event), "rescan requested");
+}
+
+void configure(const char* key) {
+  strlcpy(s_wantKey, key ? key : "", sizeof(s_wantKey));
+}
+
+bool open(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
+  if (!s_started) { setErr("Helper: not started"); return false; }
+  s_pBaud = baud ? baud : 19200;
+  s_pBits = dataBits ? dataBits : 8;
+  s_pPar  = parity;
+  s_pStop = stopBits ? stopBits : 1;
+  s_wantOpen = true;
+  s_open = false;
+  if (s_linked) sendOpen();
+  // True means "the request is in flight", not "the port is open" -- the OPEN is
+  // a round trip and the helper may not even be powered yet. active() is the
+  // question worth asking, and the retry in service() keeps trying meanwhile.
+  return true;
+}
+
+void close() {
+  s_wantOpen = false;
+  if (s_started && s_linked) sendEmpty(CSUH_T_CLOSE);
+  s_open = false;
+  s_devName[0] = 0;
+  s_rx.clear(); s_tx.clear();
+}
+
+bool        active()     { return s_started && s_linked && s_open; }
+Stream*     stream()     { return active() ? (Stream*)&s_stream : nullptr; }
+const char* deviceName() { return s_devName; }
+const char* lastError()  { return s_errMsg; }
+const char* lastEvent()  { return s_event; }
+
+void setLine(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
+  s_pBaud = baud ? baud : s_pBaud;
+  s_pBits = dataBits ? dataBits : s_pBits;
+  s_pPar  = parity;
+  s_pStop = stopBits ? stopBits : s_pStop;
+  if (!active()) return;
+  uint8_t p[7];
+  p[0] = (uint8_t)(s_pBaud);       p[1] = (uint8_t)(s_pBaud >> 8);
+  p[2] = (uint8_t)(s_pBaud >> 16); p[3] = (uint8_t)(s_pBaud >> 24);
+  p[4] = s_pBits; p[5] = s_pPar; p[6] = s_pStop;
+  sendFrame(CSUH_T_LINE, p, 7);
+}
+
+void setModem(bool dtr, bool rts) {
+  if (!active()) return;
+  const uint8_t p[2] = { (uint8_t)(dtr ? 1 : 0), (uint8_t)(rts ? 1 : 0) };
+  sendFrame(CSUH_T_MODEM, p, 2);
+}
+
+void requestStats() { if (s_started && s_linked) sendEmpty(CSUH_T_STAT_REQ); }
+uint32_t  restarts()     { return s_restarts; }
+uint32_t  helloReqTx()   { return s_helloReqTx; }
+uint32_t  helloRx()      { return s_helloRx; }
+uint32_t  lastRttMs()    { return s_lastRttMs; }
+uint32_t  linkDrops()    { return s_linkDrops; }
+uint32_t  lastValidAge() { return s_lastValid ? (millis() - s_lastValid) : 0; }
+void rxClassCounts(uint32_t* pong, uint32_t* stat, uint32_t* data,
+                   uint32_t* credit, uint32_t* event, uint8_t* lastTy) {
+  *pong = s_rxPong; *stat = s_rxStat; *data = s_rxData;
+  *credit = s_rxCredit; *event = s_rxEvent; *lastTy = s_rxLastTy;
+}
+const char* lastErr()    { return s_errMsg; }
+uint8_t   txCredit()     { return (uint8_t)s_txCredit; }
+uint32_t  localCrcErr()  { return s_crcErr; }
+uint32_t  localCobsErr() { return s_cobsErr; }
+
+const CsuhStats& stats() { return s_stats; }
+
+uint32_t rxFrames()      { return s_rxFrames; }
+uint32_t rxCrcErrors()   { return s_crcErr; }
+uint32_t rxCobsErrors()  { return s_cobsErr; }
+uint32_t txFrames()      { return s_txFrames; }
+
+}  // namespace UsbHelper
+
+#endif  // CARDSAT_HAS_USBHELPER
+
+
 // =========================================================================
 //  civ.cpp
 // =========================================================================
@@ -12239,6 +13831,12 @@ HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
   if (pinMode == 0) {
     // Normal, recommended path: separate wires. G2 = TX (push-pull), G1 = RX.
     hs->end();                                   // release any prior pin bindings
+    // 4 KB driver RX buffer (default 256). 256 B is ~11 ms of headroom at
+    // 230400 -- less than one screen paint on either board -- and the first
+    // helper bench showed what that costs: any loop stall while a CI-V
+    // transceive flood is arriving silently drops bytes MID-FRAME. Applies
+    // equally to wired CI-V, which sees the same floods. Must precede begin().
+    hs->setRxBufferSize(4096);
     hs->begin(baud, SERIAL_8N1, rxPin, txPin);
     lastA = rxPin; lastB = txPin;
   } else {
@@ -12266,6 +13864,7 @@ HardwareSerial& civUartOpen(uint8_t pinMode, uint32_t baud, int uartNum,
     //     idles HIGH via the pull-up and is pulled low only for data, while still
     //     letting the radio pull it low (shared one-wire bus).
     hs->end();
+    hs->setRxBufferSize(4096);                   // same rationale as the two-wire path
     hs->begin(baud, SERIAL_8N1, pin, pin);       // TX and RX both on `pin`
     uart_set_line_inverse((uart_port_t)uartNum, UART_SIGNAL_INV_DISABLE);  // idle = HIGH
     gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLUP_ONLY);
@@ -13227,6 +14826,75 @@ void UsbRotStream::flush() {
 size_t UsbRotStream::write(uint8_t c) {
 #if CARDSAT_HAS_USBCAT
   Stream* s = UsbSerial::rotStream();
+  return s ? s->write(c) : 0;
+#else
+  (void)c; return 0;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+//  HelperRotStream -- the rotator's adapter on the CardSatUsbHelper companion
+// ---------------------------------------------------------------------------
+//  Forwarding shim, same as UsbRotStream. One difference worth knowing: the
+//  helper's port opens over a round trip on the Grove link, so begin() returning
+//  true means "the request is in flight", not "the wire is live". ok() is the
+//  question that actually matters, and the app's not-ready path already retries.
+HelperRotStream::~HelperRotStream() {
+#if CARDSAT_HAS_USBHELPER
+  // Release the port with the Stream that owns it. This also drops DTR at the
+  // radio, which on a CDC device is the only "the host has let go" signal there is.
+  UsbHelper::close();
+#endif
+}
+
+bool HelperRotStream::begin(uint32_t baud) {
+#if CARDSAT_HAS_USBHELPER
+  if (!UsbHelper::started()) return false;
+  // 8N1 always: every rotator protocol CardSat speaks (GS-232, Easycomm, SPID)
+  // is 8N1, and no controller in the supported set offers anything else.
+  return UsbHelper::open(baud ? baud : 9600, 8, CSUH_PAR_NONE, 1);
+#else
+  (void)baud; return false;
+#endif
+}
+bool HelperRotStream::ok() const {
+#if CARDSAT_HAS_USBHELPER
+  return UsbHelper::active();
+#else
+  return false;
+#endif
+}
+int HelperRotStream::available() {
+#if CARDSAT_HAS_USBHELPER
+  if (_peek >= 0) return 1;
+  Stream* s = UsbHelper::stream();
+  return s ? s->available() : 0;
+#else
+  return 0;
+#endif
+}
+int HelperRotStream::read() {
+#if CARDSAT_HAS_USBHELPER
+  if (_peek >= 0) { int c = _peek; _peek = -1; return c; }
+  Stream* s = UsbHelper::stream();
+  return s ? s->read() : -1;
+#else
+  return -1;
+#endif
+}
+int HelperRotStream::peek() {
+  if (_peek < 0) _peek = read();
+  return _peek;
+}
+void HelperRotStream::flush() {
+#if CARDSAT_HAS_USBHELPER
+  Stream* s = UsbHelper::stream();
+  if (s) s->flush();
+#endif
+}
+size_t HelperRotStream::write(uint8_t c) {
+#if CARDSAT_HAS_USBHELPER
+  Stream* s = UsbHelper::stream();
   return s ? s->write(c) : 0;
 #else
   (void)c; return 0;
@@ -14450,6 +16118,18 @@ static Stream* makeRotTransport(uint8_t transport, uint32_t baud) {
       s_rotOwned = u;
       return u;
     }
+    case ROT_XPORT_HELPER: {
+      // Unlike the other transports, this one is accepted before the far end has
+      // confirmed anything: opening the helper's port is a round trip over Grove,
+      // and refusing here would mean the rotator could only ever be built when the
+      // Stick happened to answer within one call. The rotator reports not-ready
+      // until ok() goes true, which is the same behaviour as a controller that is
+      // wired but switched off -- a state this firmware already handles.
+      HelperRotStream* h = new HelperRotStream();
+      if (!h->begin(baud)) { delete h; return nullptr; }
+      s_rotOwned = h;
+      return h;
+    }
     case ROT_XPORT_BRIDGE:
     default: {
       BridgeStream* b = new BridgeStream(ROT_I2C_ADDR, baud);
@@ -15350,6 +17030,10 @@ namespace {
   bool waitForAdapterKey(const char* key, uint32_t ms);  // dual-USB: await a nominated adapter
   int  cat2PickAdapter();                                // CAT-B's adapter choice (dual-USB CAT)
 
+  // Physical-disconnect notices raised on the USB host task and consumed by the
+  // main loop. volatile is sufficient for a one-way sticky bool: the writer only
+  // ever sets it and the reader only ever clears it, so there is no value to tear.
+  volatile bool s_catLost = false, s_cat2Lost = false, s_rotLost = false;
   uint8_t  s_catAddress = 0xff;      // the adapter the RADIO bound
   uint8_t  s_rotAddress = 0xff;      // the adapter the ROTATOR bound
   uint8_t  s_cat2Address = 0xff;     // the adapter the SECOND radio (CAT-B) bound
@@ -15568,6 +17252,18 @@ namespace {
   void onGone(const EspUsbHostDeviceInfo& d) {
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (s_serDev[i].address == d.address) s_serDev[i].dead = 1;
+    // Tombstoning the registry was the whole of this callback until 0.9.73, and it
+    // is not enough. active() is `s_active && s_bound`, neither of which the
+    // registry touches, so an unplugged radio stayed LOGICALLY active -- and the
+    // loop reconciler, seeing nothing to do, never rebuilt the port. A replug then
+    // did nothing until the operator changed a setting or rebooted.
+    //
+    // Only flags are set here: this runs on the USB host task, and tearing a port
+    // down from inside a host callback is how you free objects the host is still
+    // walking. The main loop consumes them (serviceDisconnects()).
+    if (d.address == s_catAddress)  s_catLost  = true;
+    if (d.address == s_cat2Address) s_cat2Lost = true;
+    if (d.address == s_rotAddress)  s_rotLost  = true;
   }
 
   void consoleDown() {
@@ -15895,22 +17591,33 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     s_host->clearLastError();
     s_host->end();
     const bool freed = (s_host->lastError() != ESP_ERR_TIMEOUT);
-    delete s_cdc;  s_cdc  = nullptr;
-    delete s_host; s_host = nullptr;
-    s_hostReleased = freed;
     s_active = false; s_bound = false;
-    consoleUp();
     char msg[64];
     if (!freed) {
-      // We could not release the stack, so a re-engage would just hit 259 again.
-      // Latch it (s_hostReleased is false) and say so plainly rather than letting
-      // the operator retry into the same wall.
+      // DO NOT delete, and DO NOT consoleUp(). end() timing out is documented by
+      // the library as "tasks were left alive to avoid freeing in-flight
+      // transfers" (EspUsbHost.cpp, the ESP_LOGW at the end of end()) -- so a live
+      // task still holds `this`, and deleting either object hands it a dangling
+      // pointer. consoleUp() is arguably worse: Serial.begin() reclaims the USB
+      // PHY while the IDF host stack may still own it, and a two-owner PHY fails
+      // in ways that look like anything except a teardown bug.
+      //
+      // Retaining costs ~11.8 KB and the serial console until a reboot. That is
+      // the correct price: the two OTHER teardown sites in this file
+      // (releaseHostNow() and end()) have always retained here, and this path was
+      // simply missed when they were fixed. Found by the 0.9.72 USB review.
+      s_hostTeardownStuck = true;      // block re-engage; only a reboot clears it
+      s_hostReleased = false;
       setErr(s_retryAfterStuck
                ? "USB stack still held after retry - reboot to clear"
                : "USB stack stuck installed - retry, or reboot if it persists");
       stage(USBCAT_STAGE_NONE);
       return false;
     }
+    delete s_cdc;  s_cdc  = nullptr;
+    delete s_host; s_host = nullptr;
+    s_hostReleased = true;
+    consoleUp();
     if (e == 259)   // ESP_ERR_INVALID_STATE: the USB host stack is already installed
       // Kept as a backstop, but this should no longer be reachable via disengage:
       // end() now drains the pending events and calls usb_host_uninstall() itself,
@@ -16142,7 +17849,15 @@ void end() {
   stage(USBCAT_STAGE_END_DONE);
 }
 
-bool    active()     { return s_active && s_bound; }
+// active() now also asks the CDC object whether the device is still there.
+// s_active/s_bound record what CardSat INTENDED; connected() records what the bus
+// actually has. Before 0.9.73 only the intent was consulted, so an unplugged radio
+// reported active forever.
+bool    active()     { return s_active && s_bound && s_cdc && s_cdc->connected(); }
+bool    catLost()    { return s_catLost; }
+bool    cat2Lost()   { return s_cat2Lost; }
+bool    rotLost()    { return s_rotLost; }
+void    clearLostFlags() { s_catLost = false; s_cat2Lost = false; s_rotLost = false; }
 Stream* stream()     { return active() ? s_cdc : nullptr; }
 const char* lastError()  { return s_err; }
 const char* deviceName() { return s_dev; }
@@ -16381,7 +18096,7 @@ void cat2End() {
   releaseHostIfIdle();   // M2-safe; no-op while CAT-A or the rotator still owns it
 }
 
-bool    cat2Active()      { return s_cat2Active && s_cdc2; }
+bool    cat2Active()      { return s_cat2Active && s_cdc2 && s_cdc2->connected(); }
 Stream* cat2Stream()      { return cat2Active() ? s_cdc2 : nullptr; }
 const char* cat2DeviceName() { return s_cat2Dev; }
 const char* cat2LastError()  { return s_cat2Err; }
@@ -16556,14 +18271,28 @@ uint8_t serialDeviceCount() { return s_serDevN; }
 // when the log on the same screen said zero.
 uint8_t liveDeviceCount() {
   uint8_t n = 0;
-  for (uint8_t i = 0; i < s_serDevN; ++i) if (!s_serDev[i].dead) ++n;
+  for (uint8_t i = 0; i < s_serDevN; ++i) if (serialDeviceLive(i)) ++n;
   return n;
 }
-bool serialDeviceLive(uint8_t i) { return i < s_serDevN && !s_serDev[i].dead; }
+// A registry slot counts as selectable only when the host has actually claimed a
+// serial OUT endpoint for it. onDev() excludes hubs and nothing else, so anything
+// that enumerates -- an audio function, a HID device, a composite sibling -- would
+// otherwise appear in the adapter picker as if it could carry CAT.
+//
+// Filtering HERE rather than at insert time is deliberate: serialReady() resolves
+// to hasSerialOutEndpoint, which is set while interfaces are claimed, and whether
+// that has happened by the time the connect callback fires is not something to
+// depend on. By the time anything reads the picker, enumeration has settled and
+// the answer is definitive.
+bool serialDeviceLive(uint8_t i) {
+  if (i >= s_serDevN || s_serDev[i].dead) return false;
+  if (!s_host) return true;                 // no host to ask: do not hide anything
+  return s_host->serialReady(s_serDev[i].address);
+}
 const char* serialDeviceLabel(uint8_t i) { return i < s_serDevN ? s_serDev[i].label : ""; }
 const char* serialDeviceKey(uint8_t i)   { return i < s_serDevN ? s_serDev[i].key   : ""; }
 
-bool rotActive()             { return s_rotActive && s_rotCdc; }
+bool rotActive()             { return s_rotActive && s_rotCdc && s_rotCdc->connected(); }
 Stream* rotStream()          { return rotActive() ? (Stream*)s_rotCdc : nullptr; }
 const char* rotDeviceName()  { return s_rotDev; }
 const char* rotLastError()   { return s_rotErr; }
@@ -20803,6 +22532,15 @@ void Settings::validate() {
     case 9600: case 19200: case 38400: case 57600: case 115200: break;
     default: catGroveBaud = 115200; break;
   }
+  // The helper LINK baud must be a rate the companion actually scans for. It
+  // auto-bauds across CSUH_BAUDS[] and nothing else, so a value outside that list
+  // could never link -- and a link that silently never comes up is the hardest
+  // fault on this feature to read. Snap to the default instead.
+  {
+    bool okBaud = false;
+    for (int i = 0; i < CSUH_BAUD_N; ++i) if (CSUH_BAUDS[i] == helperBaud) { okBaud = true; break; }
+    if (!okBaud) helperBaud = CSUH_BAUDS[0];
+  }
   // Physical coordinates feed SGP4 and the Maidenhead math. Reject non-finite and clamp.
   if (!isfinite(lat) || lat < -90.0  || lat > 90.0)  lat = 0.0;
   if (!isfinite(lon) || lon < -180.0 || lon > 180.0) lon = 0.0;
@@ -20877,6 +22615,8 @@ bool Settings::load() {
   strncpy(opEmail, d["opemail"] | "", sizeof(opEmail)-1); opEmail[sizeof(opEmail)-1]=0;
   strncpy(qrzUser, d["qrzuser"] | "", sizeof(qrzUser)-1); qrzUser[sizeof(qrzUser)-1]=0;
   strncpy(qrzPass, d["qrzpass"] | "", sizeof(qrzPass)-1); qrzPass[sizeof(qrzPass)-1]=0;
+  strncpy(stUser, d["stuser"] | "", sizeof(stUser)-1); stUser[sizeof(stUser)-1]=0;
+  strncpy(stPass, d["stpass"] | "", sizeof(stPass)-1); stPass[sizeof(stPass)-1]=0;
   strncpy(clUrl,  d["clurl"]  | "", sizeof(clUrl)-1);  clUrl[sizeof(clUrl)-1]=0;
   strncpy(clKey,  d["clkey"]  | "", sizeof(clKey)-1);  clKey[sizeof(clKey)-1]=0;
   strncpy(clStation, d["clstation"] | "", sizeof(clStation)-1); clStation[sizeof(clStation)-1]=0;
@@ -20939,6 +22679,11 @@ bool Settings::load() {
   // uint16_t catPort as a baud. validate() further clamps to the supported UART set.
   catGroveBaud = d["catgbaud"] | (uint32_t)115200;
   strncpy(catUser, d["catuser"] | "", sizeof(catUser)-1); catUser[sizeof(catUser)-1]=0;
+  // CardSatUsbHelper. Absent keys (any config written before 0.9.73) give the
+  // defaults, which is "no device nominated at the default link rate" -- inert
+  // until the operator selects the helper as a transport.
+  helperBaud = d["helpbaud"] | (uint32_t)230400;
+  strncpy(helperKey, d["helpkey"] | "", sizeof(helperKey)-1); helperKey[sizeof(helperKey)-1]=0;
   // Dual-rig legs (CAT_DUAL). Missing keys leave the "no legs assigned" defaults.
   for (int L = 0; L < 2; ++L) {
     const char* K = L ? "u" : "d";           // key suffix: d = downlink, u = uplink
@@ -21159,6 +22904,7 @@ bool Settings::save() {
   d["opname"] = opName;
   d["opemail"] = opEmail;
   d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
+  d["stuser"] = stUser; d["stpass"] = stPass;
   d["clurl"] = clUrl; d["clkey"] = clKey; d["clstation"] = clStation;
   d["lotwdxcc"] = lotwDxcc; d["lotwcqz"] = lotwCqz; d["lotwituz"] = lotwItuz;
   d["lotwstate"] = lotwState; d["lotwcnty"] = lotwCnty;
@@ -21172,6 +22918,7 @@ bool Settings::save() {
   d["catusbkey"] = catUsbKey;
   d["conslog"] = consoleLog;
   d["catuser"] = catUser; d["catpass"] = catPass;
+  d["helpbaud"] = helperBaud; d["helpkey"] = helperKey;
   for (int L = 0; L < 2; ++L) {                      // dual-rig legs (CAT_DUAL)
     const char* K = L ? "u" : "d";
     char k[16];
@@ -21976,6 +23723,14 @@ void App::usbCatTeardown() {
 void App::applyRadioFromCfg() {
   RadioModel m = (RadioModel)cfg.radioModel;
   uint32_t baud = cfg.civBaud ? cfg.civBaud : RADIOS[m].defaultBaud;
+#if CARDSAT_HAS_USBHELPER
+  // Refuse an over-subscribed helper before anything is built, and bring the
+  // Grove link up or down to match. Doing it here means the link follows the
+  // configuration for every path that changes it -- Settings, a leg edit, a
+  // profile load -- rather than only the ones that remembered to ask.
+  if (!helperEngageGuard()) return;
+  applyHelperFromCfg();
+#endif
 #if CARDSAT_HAS_USBCAT
   // If USB CAT is live on the OLD rig, tear it down before we delete that rig. The reconciler
   // only (re)attaches when it sees USB not-active, so without this an active session would keep
@@ -21985,6 +23740,9 @@ void App::applyRadioFromCfg() {
   usbCatTeardown();     // BOTH ports: see the note on the declaration
 #endif
   if (rig) { delete rig; rig = nullptr; }
+  // The old rig is gone, so nothing holds the helper's Stream any more. Leaving
+  // this true would stop the reconciler ever attaching to the NEW rig.
+  helperAttached = false;
   if (cfg.catType == CAT_DUAL) {
     // Native dual rig: two legs composed into one full-duplex Rig (DualRig).
     // Physical-bus conflicts are refused HERE, at the single choke point every
@@ -22000,6 +23758,20 @@ void App::applyRadioFromCfg() {
     const bool aU = haveD && cfg.dualBus[0] == LEGBUS_USB;
     const bool bU = haveU && cfg.dualBus[1] == LEGBUS_USB;
     if (aG && bG) { setStatus("Dual: both legs on Grove - one UART", 5000); return; }
+    // The helper link IS the Grove wire, so a helper leg and a Grove leg are the
+    // same conflict wearing a different label -- and two helper legs are a second
+    // one, because the companion carries a single device. Both are refused here
+    // rather than in makeDualRig(), so the operator gets a reason instead of a
+    // silently one-legged rig.
+    const bool aH = haveD && cfg.dualBus[0] == LEGBUS_HELPER;
+    const bool bH = haveU && cfg.dualBus[1] == LEGBUS_HELPER;
+    if (aH && bH) { setStatus("Dual: helper carries one radio only", 6000, SEV_ERR); return; }
+    if ((aH && bG) || (aG && bH)) {
+      setStatus("Dual: helper and Grove share one UART", 6000, SEV_ERR); return;
+    }
+#if !CARDSAT_HAS_USBHELPER
+    if (aH || bH) { setStatus("Dual: no USB helper in this build", 5000, SEV_WARN); return; }
+#endif
     if (aU && bU) {
       // Dual-USB CAT (Phase 3): two radios on the one PHY through a hub -- CAT-A
       // for the downlink, CAT-B for the uplink, each bound to its own adapter.
@@ -22050,6 +23822,26 @@ void App::applyRadioFromCfg() {
     // DualRig::begin() already skips USB legs individually
     // (`if (_down && !legIsUsb(0))`), so calling it unconditionally is correct and
     // cannot double-begin the USB side.
+#if CARDSAT_HAS_USBHELPER
+    // A HELPER leg's port must be OPENed here, exactly as single-rig CAT_HELPER
+    // does above. Found on the first dual-over-helper bench (IC-705 downlink on
+    // the helper, no uplink): enumeration worked, the leg was built, DualRig
+    // correctly deferred it -- and CAT never responded, because NOTHING ever sent
+    // the CSUH OPEN. UsbHelper::open() was only called from the CAT_HELPER
+    // branch, so for CAT_DUAL `s_wantOpen` stayed false forever: no port, no
+    // active(), no stream attach, and serviceHelperCat() waited politely on a
+    // request that had never been made.
+    //
+    // The baud is the LEG's radio baud, resolved exactly as makeLegRig() resolves
+    // it (explicit leg setting, else the leg profile's default -- 115200 for an
+    // IC-705's USB CI-V). It is unrelated to cfg.helperBaud, the Grove link rate.
+    if (aH || bH) {
+      const int      hl = aH ? 0 : 1;
+      const uint32_t hb = cfg.dualBaud[hl] ? cfg.dualBaud[hl]
+                                           : LEG_RADIOS[cfg.dualModel[hl]].baud;
+      UsbHelper::open(hb, 8, CSUH_PAR_NONE, 1);
+    }
+#endif
     rig->begin(0, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);
     return;
   }
@@ -22071,12 +23863,144 @@ void App::applyRadioFromCfg() {
     return;
   }
 #endif
+#if CARDSAT_HAS_USBHELPER
+  // CAT_HELPER: same lifecycle as CAT_USB. The transport is a Stream that arrives
+  // once the companion reports its port open, so begin() must NOT run here -- it
+  // would bind G1/G2 for the rig backend while the helper link already owns that
+  // UART, and the rig would then be begun a second time when the stream appears.
+  //
+  // `baud` here is the RADIO's CAT baud (from the radio profile or the CAT Baud
+  // setting) and is pushed to the far end in the OPEN. It is unrelated to
+  // cfg.helperBaud, which is the Grove LINK rate between the two boards.
+  if (cfg.catType == CAT_HELPER) {
+    if (RADIOS[m].proto == PROTO_CIV)
+      rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
+    rig->setCmdDelay(cfg.catDelayMs);
+    UsbHelper::open(baud, 8, CSUH_PAR_NONE, 1);
+    return;
+  }
+#endif
   rig->begin(baud, CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);   // net backend ignores UART args
   if (RADIOS[m].proto == PROTO_CIV)
     rig->setAddress(cfg.civAddr ? cfg.civAddr : RADIOS[m].civAddr);
   rig->setCmdDelay(cfg.catDelayMs);                  // CAT Delay: inter-command pause
   // The rig's satellite mode is no longer forced here -- it is commanded per the
   // Sat Mode setting when radio control is engaged (see keyTrack, 'r' key).
+}
+
+// ---------------------------------------------------------------------------
+//  CardSatUsbHelper lifecycle
+// ---------------------------------------------------------------------------
+// Bring the Grove link up or down to match the configuration. Called from the
+// same places applyRadioFromCfg() and applyRotatorFromCfg() are, so the link
+// follows the config with no separate "engage the helper" step for the operator.
+//
+// Unlike the USB host on this board, the link is CHEAP -- one UART and ~3 KB of
+// rings -- so it is opened eagerly when anything wants it rather than deferred to
+// a first engage. What is expensive on the far side (the Stick's USB host) is
+// already running there and costs this board nothing.
+void App::applyHelperFromCfg() {
+#if CARDSAT_HAS_USBHELPER
+  if (!helperWanted()) {
+    if (UsbHelper::started()) UsbHelper::end();
+    return;
+  }
+  // Re-begin when the link baud changed; begin() itself is a no-op-and-restart.
+  if (UsbHelper::started() && UsbHelper::linkBaud() == cfg.helperBaud) {
+    UsbHelper::configure(cfg.helperKey);
+    return;
+  }
+  if (!UsbHelper::begin(cfg.helperBaud)) {
+    setStatus("USB helper: out of memory", 4000, SEV_ERR);
+    return;
+  }
+  UsbHelper::configure(cfg.helperKey);
+#endif
+}
+
+// Per-loop helper servicing: pump the link, then reconcile whether the rig is
+// holding the helper's Stream.
+//
+// Attaching is what BEGINS the backend, exactly as it does for a USB leg: the
+// backend cannot open a UART of its own (the helper link owns it), so its begin()
+// waits for the transport to exist.
+void App::serviceHelperCat() {
+#if CARDSAT_HAS_USBHELPER
+  if (!UsbHelper::started()) { helperAttached = false; return; }
+  UsbHelper::service();
+
+  // Audit F9-lite (0.9.73): an always-on 2 s STAT heartbeat, independent of
+  // which screen is showing. Two jobs: the stats participate in recovery logic
+  // rather than existing only while the diagnostics screen polls them, and the
+  // request/reply pair gives the link a steady bidirectional rhythm whatever
+  // the traffic pattern -- the eleventh bench showed the idle pattern matters.
+  {
+    static uint32_t hbMs = 0;
+    const uint32_t nowHb = millis();
+    if (UsbHelper::linked() && nowHb - hbMs > 2000) { hbMs = nowHb; UsbHelper::requestStats(); }
+  }
+
+  // Which leg, if any, is the helper's. -1 = single-rig CAT_HELPER.
+  int hLeg = -1;
+  if (cfg.catType == CAT_DUAL) {
+    if      (cfg.dualModel[0] != LEG_NONE && cfg.dualBus[0] == LEGBUS_HELPER) hLeg = 0;
+    else if (cfg.dualModel[1] != LEG_NONE && cfg.dualBus[1] == LEGBUS_HELPER) hLeg = 1;
+  }
+  const bool want = catUsesHelper() && rig != nullptr;
+  const bool live = UsbHelper::active();
+
+  if (want && live && !helperAttached) {
+    // A dual-rig leg carries its own baud and CI-V address from makeLegRig(); a
+    // single rig gets both applied here, mirroring the USB CAT path.
+    if (hLeg >= 0) {
+      static_cast<DualRig*>(rig)->setLegExternalStream(hLeg, UsbHelper::stream());
+    } else {
+      rig->setExternalStream(UsbHelper::stream());
+      rig->begin(cfg.civBaud ? cfg.civBaud : RADIOS[(RadioModel)cfg.radioModel].defaultBaud,
+                 CIV_UART_NUM, CIV_RX_PIN, CIV_TX_PIN);   // skips UART setup: stream is set
+      if (RADIOS[(RadioModel)cfg.radioModel].proto == PROTO_CIV)
+        rig->setAddress(cfg.civAddr ? cfg.civAddr
+                                    : RADIOS[(RadioModel)cfg.radioModel].civAddr);
+      rig->setCmdDelay(cfg.catDelayMs);
+    }
+    helperAttached = true;
+    rigInitPending = true;      // engage init runs once the composite reports ready
+    return;
+  }
+
+  if (helperAttached && (!live || !want)) {
+    // Clear the backend's cached copy BEFORE the Stream can go away (the fix31
+    // rule). The Stream object itself is static inside usbhelper.cpp and outlives
+    // this, but the backend must not keep polling a transport whose port is shut.
+    if (rig) {
+      if (hLeg >= 0) static_cast<DualRig*>(rig)->setLegExternalStream(hLeg, nullptr);
+      else           rig->setExternalStream(nullptr);
+    }
+    helperAttached = false;
+  }
+#endif
+}
+
+// Refuse a helper configuration that cannot work, at the one choke point every
+// config path funnels through. Returns true when it is safe to proceed.
+//
+// The single rule worth enforcing here is that the helper carries ONE device: a
+// radio OR a rotator, never both, and never two dual-rig legs. Left unchecked the
+// second claimant simply loses the race for the port, which presents as "the
+// rotator works and the radio does not" (or the reverse) depending on start
+// order -- a symptom that points at everything except the actual cause.
+bool App::helperEngageGuard() {
+#if CARDSAT_HAS_USBHELPER
+  const int n = helperClaimants();
+  if (n <= 1) return true;
+  if (catUsesHelper() && rotUsesHelper())
+    setStatus("USB helper holds one device at a time", 6000, SEV_ERR);
+  else
+    setStatus("USB helper: only one leg can use it", 6000, SEV_ERR);
+  return false;
+#else
+  return true;
+#endif
 }
 
 // Is the configured rotator transport unavailable because something else owns
@@ -22266,6 +24190,22 @@ const char* App::rotTransportConflict() const {
   if (!cfg.rotEnable) return nullptr;
   if (cfg.rotType == ROT_NET || cfg.rotType == ROT_PST) return nullptr;  // network
   if (cfg.rotType == ROT_YAESU) return nullptr;                          // I2C direct
+  if (cfg.rotTransport == ROT_XPORT_HELPER) {
+#if !CARDSAT_HAS_USBHELPER
+    return "USB helper not in this build";
+#else
+    // The helper link runs on G1/G2, so a helper rotator loses to any other Grove
+    // claimant exactly as a Grove rotator does -- EXCEPT that CAT on the helper is
+    // not a wire conflict, it is a device conflict: both would be talking to the
+    // same companion over the same working link, but it carries one device.
+    if (catUsesHelper())
+      return "USB helper holds one device at a time";
+    if (catUsesGroveWire())
+      return "Helper rotator needs CAT on USB or LAN";
+    if (cfg.gpsSource == GPS_SRC_GROVE_9600 || cfg.gpsSource == GPS_SRC_GROVE_115K)
+      return "Helper rotator conflicts with Grove GPS";
+#endif
+  }
   if (cfg.rotTransport == ROT_XPORT_GROVE) {
     // CAT_WIRED means the rig backend opens UART1 on G1/G2 in begin(), whatever
     // the protocol (CI-V, Yaesu, Kenwood all do). CAT_RIGCTL_GROVE claims the same
@@ -22297,6 +24237,13 @@ void App::applyRotatorFromCfg() {
     // into its stops.
     const char* why = rotTransportConflict();
     if (why) { setStatus(why, 5000); return; }
+#if CARDSAT_HAS_USBHELPER
+    // A HELPER rotator needs the Grove link up before makeRotator() can open its
+    // port. Unlike a USB rotator this is NOT deferred to first engage: the link is
+    // one UART and ~3 KB, and the expensive part (the USB host) is already running
+    // on the other board at no cost to this one.
+    if (rotUsesHelper()) { if (!helperEngageGuard()) return; applyHelperFromCfg(); }
+#endif
     // A USB rotator brings the USB host up, which is expensive and (like the radio)
     // should NOT happen just because you left Settings. Defer it: leave rot null and
     // let the 'o' toggle in Track build+engage it on first press. Non-USB transports
@@ -22319,6 +24266,14 @@ void App::applyRotatorFromCfg() {
 const char* App::rotNotReadyMsg() const {
   if (!cfg.rotEnable) return "Rotator: enable in Settings";
   if (rotUsesUsb())   return "USB rotator: not found (replug/re-select)";
+#if CARDSAT_HAS_USBHELPER
+  // Two genuinely different faults, so two different messages: no link to the
+  // Stick at all, versus a good link with nothing (or the wrong thing) plugged in.
+  // Collapsing them would send the operator to check the wrong cable.
+  if (rotUsesHelper()) return UsbHelper::linked()
+                              ? "Helper rotator: no adapter on the Stick"
+                              : "Helper rotator: no link over Grove";
+#endif
   return cfg.rotType == ROT_PST  ? "Rotator: no PstRotator link"
        : cfg.rotType == ROT_NET  ? "Rotator: no rotctl link"
                                  : "Rotator: bridge not found";
@@ -27403,7 +29358,50 @@ void App::loop() {
     }
     perfLastLoopUs = now;
   }
+#if CARDSAT_HAS_USBHELPER
+  // ---- USB helper lifecycle --------------------------------------------------------
+  // Reconciled every loop from one place, for the same reason the USB CAT block
+  // below is: the states that would need a teardown hook are set in one place and
+  // cleared in six.
+  //
+  // It is much shorter than that block because the expensive resource is on the
+  // OTHER board. There is no host stack to install, no PHY to take, and no serial
+  // console to give up -- only a UART and ~3 KB of rings. So this reconciles the
+  // STREAM only; the port itself stays open for as long as the configuration wants
+  // it, and is closed by applyHelperFromCfg()/end() rather than by disengaging the
+  // radio. That is deliberate: repeatedly closing and re-opening a CDC port is
+  // what made a TH-D75 go deaf until it was power-cycled (see usbserial.h on the
+  // resident host), and here the cost of leaving it open is nothing.
+  serviceHelperCat();
+#endif
 #if CARDSAT_HAS_USBCAT
+  // ---- physical USB disconnect -----------------------------------------------------
+  // Consume the notices the host task raised in onGone(). Doing it here, before the
+  // reconciler below runs, means an unplugged radio is detached within one loop and
+  // the reconciler's own "want but not active" branch does the rebind on the next
+  // pass -- by stable adapter key, so the same radio in a different hub port is
+  // still found.
+  if (UsbSerial::catLost() || UsbSerial::cat2Lost() || UsbSerial::rotLost()) {
+    const bool lostRot = UsbSerial::rotLost();
+    const bool lostCat = UsbSerial::catLost() || UsbSerial::cat2Lost();
+    UsbSerial::clearLostFlags();
+    if (lostCat) {
+      usbCatTeardown();                 // drops the rig's Stream, then both CAT ports
+      setStatus("USB radio unplugged", 3000, SEV_WARN);
+    }
+    if (lostRot && rot) {
+      // The rotator has no reconciler of its own, so it is not rebuilt
+      // automatically: freeing it here makes rotNotReadyMsg() tell the truth, and
+      // the next 'o' engage builds it again against whatever is now plugged in.
+      // Automatic re-engage is deliberately not done -- a rotator that starts
+      // moving again on its own, because a cable was reseated, is not a surprise
+      // anyone wants from an antenna.
+      freeRotator(rot); rot = nullptr;
+      rotOut = false;
+      setStatus("USB rotator unplugged", 3000, SEV_WARN);
+    }
+  }
+
   // ---- USB CAT lifecycle -----------------------------------------------------------
   // Reconcile the USB transport against radioOut, from ONE place, every loop.
   //
@@ -27683,7 +29681,6 @@ void App::loop() {
     if (from == SCR_MEMOS && screen != SCR_MEMOS) memoFree();
     // Leaving the Dual-Rig setup screen: its device+model tables (~1.3 KB) are
     // rebuilt on every entry, so nothing needs them to survive.
-    if (from == SCR_DUALRIG && screen != SCR_DUALRIG) drFree();
     // Leaving the Telnet terminal by any path closes the socket and printer sink
     // (telDisconnect also frees the ~0.5 KB session buffers via telSessFree).
     if (from == SCR_TELNETTERM && screen != SCR_TELNETTERM) telDisconnect();
@@ -27780,6 +29777,25 @@ void App::loop() {
     // reopens the socket on the way back.
     if ((dxcSpot || adsbAc) && screen != SCR_DXC && screen != SCR_ADSB &&
         screen != SCR_EDIT && screen != SCR_HELP) { dxcFree(); adsbFree(); }
+    // 0.9.73 RAM pass: the same rule for four more screen-scoped blocks. HELP is
+    // excluded everywhere ('h' leaves and returns); EDIT where a field editor can.
+    if (ao7Obs && screen != SCR_AO7 && screen != SCR_HELP) { free(ao7Obs); ao7Obs = nullptr; }
+    if (roveBrowse && screen != SCR_ROVELIST && screen != SCR_ROVEVIEW &&
+        screen != SCR_HELP) { free(roveBrowse); roveBrowse = nullptr; }
+    if (dgBuf && screen != SCR_DEBGRP && screen != SCR_HELP) { free(dgBuf); dgBuf = nullptr; }
+    if (stHist && screen != SCR_STHIST && screen != SCR_EDIT && screen != SCR_HELP)
+      { free(stHist); stHist = nullptr; }
+    if (catMonBuf && screen != SCR_CATMON && screen != SCR_EDIT && screen != SCR_HELP)
+      { free(catMonBuf); catMonBuf = nullptr; }
+#if CARDSAT_HAS_USBHELPER
+    // D1's other half: once the operator is off the helper screen and nothing is
+    // configured to use the helper, the eager Grove claim is released, restoring
+    // the wire to whatever needs it next. No `from` tracking required -- the
+    // condition is idempotent, and applyHelperFromCfg() re-begins if a transport
+    // is later selected.
+    if (UsbHelper::started() && !helperWanted() && screen != SCR_USBHELPER)
+      UsbHelper::end();
+#endif
     serviceRigctld();         // rigctld TCP server: let a PC drive the rig via CardSat
     serviceRotctld();         // rotctld TCP server: let a PC drive the wired rotator
     serviceWebd();            // mobile web control page (opt-in, over the WiFi LAN)
@@ -28236,6 +30252,17 @@ void App::loop() {
       (screen == SCR_TGTHITS && tsPhase == TS_RUNNING) ||
       loraObjTxActive) {
     if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
+  } else if (screen == SCR_USBHELPER) {
+    // Live link/device state, and the numbers behind it. The screen was in no
+    // cadence list at all until the first bench session found it static -- it
+    // painted once on entry and never again, so a device plugged in afterwards
+    // appeared only after a keypress. 500 ms paint, stats asked at 1 Hz (the
+    // reply lands asynchronously and the next paint shows it).
+#if CARDSAT_HAS_USBHELPER
+    static uint32_t uhStatMs = 0;
+    if (UsbHelper::linked() && ms - uhStatMs > 1000) { uhStatMs = ms; UsbHelper::requestStats(); }
+#endif
+    if (ms - lastDrawMs > 500) { lastDrawMs = ms; draw(); }
   } else if (screen == SCR_ORBITZOO || screen == SCR_FOXANAT ||
              (screen == SCR_KESSLER && kessAnimating())) {
     if (ms - lastDrawMs > 66) { lastDrawMs = ms; draw(); }   // ~15 fps: Learn + KESSLER flight/anim
@@ -28298,7 +30325,8 @@ void App::loop() {
   // own state from millis()); redraw while playing (gState==1). Grid Chase is not
   // frame-animated (it's a timed multiple-choice), so it isn't listed here.
   if ((screen == SCR_GDOPPLER || screen == SCR_GPASS || screen == SCR_GROTOR ||
-       screen == SCR_GMORSE) && gState == 1 && ms - lastDrawMs > 40) { lastDrawMs = ms; draw(); }
+       screen == SCR_GMORSE || screen == SCR_GBRICK) && gState == 1 &&
+      ms - lastDrawMs > 40) { lastDrawMs = ms; draw(); }
   // Grid Chase still needs a periodic redraw to tick its countdown timer down.
   if (screen == SCR_GGRID && gState == 1 && ms - lastDrawMs > 200) { lastDrawMs = ms; draw(); }
 
@@ -28571,6 +30599,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_CUBESIM: keyCubeSim(c, enter, back); break;
     case SCR_LOCONV:  keyLoconv(c, enter, back); break;
     case SCR_GRAPH:   keyGraph(c, enter, back); break;
+    case SCR_STHIST:  keyStHist(c, enter, back); break;
     case SCR_BASIC:    keyBasic(c, enter, back); break;
     case SCR_BASICRUN: keyBasicRun(c, enter, back); break;
     case SCR_BASICIMM: keyBasicImm(c, enter, back); break;
@@ -28642,6 +30671,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_GDOPPLER: keyGDoppler(c, enter, back); break;
     case SCR_GPASS:    keyGPass(c, enter, back); break;
     case SCR_GROTOR:   keyGRotor(c, enter, back); break;
+    case SCR_GBRICK:   keyGBrick(c, enter, back); break;
     case SCR_GMORSE:   keyGMorse(c, enter, back); break;
     case SCR_GGRID:    keyGGrid(c, enter, back); break;
     case SCR_SKYGLANCE:keySkyGlance(c, enter, back); break;
@@ -28651,6 +30681,7 @@ void App::handleKey(char c, bool enter, bool back) {
     case SCR_CATTEST:  keyCatTest(c, enter, back); break;
     case SCR_CATMON:   keyCatMon(c, enter, back); break;
     case SCR_DUALRIG:  keyDualRig(c, enter, back); break;
+    case SCR_USBHELPER: keyUsbHelper(c, enter, back); break;
     case SCR_CHARGE:   keyCharge(c, enter, back); break;
     case SCR_ORBIT:    keyOrbit(c, enter, back); break;
     case SCR_SIM:      keySim(c, enter, back); break;
@@ -29428,7 +31459,7 @@ void App::drawPlanner() {
   const int rows = 7, LH = 10;
   if (planSel < planScroll) planScroll = planSel;
   if (planSel >= planScroll + rows) planScroll = planSel - rows + 1;
-  int y = 58;
+  int y = 48;
   for (int r = 0; r < rows && planScroll + r < planN; ++r) {
     int i = planScroll + r;
     PlanRow& pr = planRow[i];
@@ -31257,12 +33288,42 @@ static const char* const SET_CAT_NAME[SET_CAT_N] = {
   "Radio / CAT", "Rotator", "Passes / alerts", "Display / sound",
   "Station / logging", "Network / data"
 };
-static const int SET_RADIO[] = {0,30,109,89,100,1,2,63,107,108,31,32,33,34,36,37,21,65,22,23,24,44,45,46,62,64};
-static const int SET_ROTOR[] = {9,86,99,101,12,10,11,38,39,18,19,16,17,13,104,47,14,15,35};
+static const int SET_RADIO[] = {0,30,109,110,89,100,1,2,63,107,108,31,32,33,34,36,37,21,65,22,23,24,44,45,46,62,64};
+// 110 (the USB-helper screen) appears here AND in Radio/CAT: bench feedback --
+// after choosing the helper as the rotator wire, the operator was in THIS
+// section with no path to the screen where the helper link, device and baud
+// actually get configured. Same row id in two sections is one row, one handler.
+static const int SET_ROTOR[] = {9,86,99,110,101,12,10,11,38,39,18,19,16,17,13,104,47,14,15,35};
 static const int SET_PASS[]  = {3,40,66,67,68,7,84,54,61};
 static const int SET_DISP[]  = {48,25,82,43,105,106,85,49,77,79,81};
 static const int SET_LOG[]   = {26,95,96,69,70,71,72,73,78,74,75,76,102,103};
 static const int SET_NET[]   = {4,5,50,51,6,20,83,41,42,52,53,98,90,91,97,92,88,87,93,94,55,60,56,57,58,59,80,111,112,113,114,27,28,29};
+// The order the CAT type row cycles through, as an explicit SLOT list.
+//
+// It cannot cycle raw enum values: CAT_DUAL is 5 and CAT_HELPER is 6, but a build
+// without USB CAT has no CAT_USB (4) to pass through, so 0..CAT_TYPE_N-1 would
+// skip the tail. The enum values are fixed so a saved config always means the same
+// thing; only the row is dense.
+//
+// ONE table, referenced from both the left/right cycle and the ENTER advance.
+// There were two copies until 0.9.73, which was survivable with one feature flag
+// and two build combinations. With CARDSAT_HAS_USBCAT and CARDSAT_HAS_USBHELPER
+// independent there are four, and two hand-maintained copies of a four-way
+// conditional is a drift waiting to happen -- the failure mode being a row that
+// lands on a transport the build cannot construct.
+static const uint8_t CT_ORDER[CAT_TYPE_N] = {
+  CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE,
+#if CARDSAT_HAS_USBCAT
+  CAT_USB,
+#endif
+#if CARDSAT_HAS_USBHELPER
+  CAT_HELPER,
+#endif
+  CAT_DUAL,
+};
+static_assert(sizeof(CT_ORDER) == CAT_TYPE_N,
+              "CT_ORDER must list exactly CAT_TYPE_N transports");
+
 static const int* const SET_CAT_ROWS[SET_CAT_N] = { SET_RADIO, SET_ROTOR, SET_PASS,
                                                     SET_DISP, SET_LOG, SET_NET };
 static const int SET_CAT_LEN[SET_CAT_N] = {
@@ -31364,8 +33425,24 @@ void App::keySettings(char c, bool enter, bool back) {
       // Rot wire: which transport a SERIAL rotator protocol runs on. Cycling it
       // re-applies immediately so a conflict (Grove already taken by CAT or GPS)
       // is reported the moment it is chosen, not silently at the next pass.
-      case 86: cfg.rotTransport = (uint8_t)((cfg.rotTransport + dir + ROT_XPORT_N) % ROT_XPORT_N);
-               cfg.save(); applyRotatorFromCfg(); break;
+      case 86: {
+               // Step past transports this build cannot construct rather than
+               // letting the row land on one -- otherwise the operator selects
+               // "USB helper" in a build without it and gets a rotator that is
+               // configured, refuses to engage, and gives no reason on the row.
+               uint8_t t = cfg.rotTransport;
+               for (int step = 0; step < ROT_XPORT_N; ++step) {
+                 t = (uint8_t)((t + dir + ROT_XPORT_N) % ROT_XPORT_N);
+#if !CARDSAT_HAS_USBCAT
+                 if (t == ROT_XPORT_USB) continue;
+#endif
+#if !CARDSAT_HAS_USBHELPER
+                 if (t == ROT_XPORT_HELPER) continue;
+#endif
+                 break;
+               }
+               cfg.rotTransport = t;
+               cfg.save(); applyRotatorFromCfg(); } break;
       // USB adapter pickers. Cycle through what the host has actually enumerated
       // and store the chosen adapter's stable KEY. "Auto" (empty key) is the
       // first entry: correct whenever only one adapter is free, and the only
@@ -31418,16 +33495,7 @@ void App::keySettings(char c, bool enter, bool back) {
                  idx = (idx + dir + 5) % 5; cfg.dimSecs = opts[idx];
                  cfg.save(); lastInputMs = millis(); } break;
       case 30: {
-               // Cycle an explicit slot list: the non-USB build must still reach
-               // CAT_DUAL (enum value 5) even though CAT_USB (4) is absent, so the
-               // row cannot cycle raw enum values 0..CAT_TYPE_N-1 any more.
-#if CARDSAT_HAS_USBCAT
-               static const uint8_t CT_ORDER[CAT_TYPE_N] =
-                 { CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE, CAT_USB, CAT_DUAL };
-#else
-               static const uint8_t CT_ORDER[CAT_TYPE_N] =
-                 { CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE, CAT_DUAL };
-#endif
+               // CT_ORDER (above) is the shared slot list; see the note there.
                int ci = 0;
                for (int k = 0; k < CAT_TYPE_N; ++k)
                  if (CT_ORDER[k] == cfg.catType) { ci = k; break; }
@@ -31519,14 +33587,49 @@ void App::keySettings(char c, bool enter, bool back) {
                 editBuf = cfg.xvtrUlHz ? fmtMHz(cfg.xvtrUlHz) : String("");
                 screen = SCR_EDIT; break;
       case 64: enterCatMon(); break;   // open the CAT serial terminal/monitor
-      case 109: drSel = 0; drScroll = 0; drStatus[0] = 0;
-                // CAT_DUAL opens the NATIVE leg editor: no companion to query, and
-                // none of the ~1.3 KB device/model tables to allocate. (Querying
-                // anyway just stalled on a \csdr_get nobody answers and reported
-                // "No reply from Stick" on a screen with no Stick in it.)
-                if (cfg.catType == CAT_DUAL) { screen = SCR_DUALRIG; lastDrawMs = 0; break; }
-                if (!drAlloc()) { setStatus("Out of memory", 2500, SEV_ERR); break; }   // companion path
-                screen = SCR_DUALRIG; lastDrawMs = 0; drQuery(); break;
+      case 109:
+                // The leg editor only means anything when the CAT type IS Dual.
+                // Before 0.9.73 the other CAT types opened a second personality of
+                // this screen that configured the external CardSatDualRig
+                // companion; that firmware is gone, so say what the row needs
+                // rather than opening an editor for a rig that is not configured.
+                if (cfg.catType != CAT_DUAL) {
+                  setStatus("Set CAT type to Dual first", 2500, SEV_WARN); break;
+                }
+                drSel = 0; screen = SCR_DUALRIG; lastDrawMs = 0; break;
+      case 110:
+#if CARDSAT_HAS_USBHELPER
+                // D1 (0.9.73 review): the eager bring-up below claims UART1, which
+                // is the SAME WIRE wired CI-V, a Grove GPS, a Grove rotator or
+                // Grove rigctl may already hold -- and begin() would silently
+                // re-purpose it out from under them, killing CAT/GPS until a
+                // re-engage with nothing pointing here as the cause. Eager only
+                // when the wire is genuinely free; otherwise the screen still
+                // opens, in a wire-busy state, and says why it cannot enumerate.
+                if (!helperWanted() &&
+                    (catUsesGroveWire() ||
+                     cfg.gpsSource == GPS_SRC_GROVE_9600 ||
+                     cfg.gpsSource == GPS_SRC_GROVE_115K ||
+                     (cfg.rotEnable && cfg.rotTransport == ROT_XPORT_GROVE))) {
+                  setStatus("Grove wire busy (CAT/GPS/rotator)", 3500, SEV_WARN);
+                  uhSel = 0; uhScroll = 0;
+                  screen = SCR_USBHELPER; lastDrawMs = 0; break;
+                }
+                uhSel = 0; uhScroll = 0;
+                // Bring the link up on entry even when nothing is configured to
+                // use it yet, so the screen can enumerate. Otherwise picking a
+                // device would need the transport already selected, and selecting
+                // the transport would need to know what is plugged in -- a loop
+                // the operator has no way out of.
+                if (!UsbHelper::started() && !UsbHelper::begin(cfg.helperBaud))
+                  { setStatus("USB helper: out of memory", 3000, SEV_ERR); break; }
+                UsbHelper::configure(cfg.helperKey);
+                UsbHelper::requestScan();
+                screen = SCR_USBHELPER; lastDrawMs = 0;
+#else
+                setStatus("USB helper not in this build", 2500, SEV_WARN);
+#endif
+                break;
       case 7: cfg.aosAlarm = !cfg.aosAlarm; cfg.save();
               setStatus(cfg.aosAlarm ? "AOS alarm on" : "AOS alarm off"); break;
       case 83: {   // AMSAT status window (cycle forward on ENTER)
@@ -31651,13 +33754,6 @@ void App::keySettings(char c, bool enter, bool back) {
       case 29: editTarget = 400; editTitle = "Type ERASE to wipe all";
                editBuf = ""; screen = SCR_EDIT; break;
       case 30: {
-#if CARDSAT_HAS_USBCAT
-               static const uint8_t CT_ORDER[CAT_TYPE_N] =
-                 { CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE, CAT_USB, CAT_DUAL };
-#else
-               static const uint8_t CT_ORDER[CAT_TYPE_N] =
-                 { CAT_WIRED, CAT_NET, CAT_RIGCTL, CAT_RIGCTL_GROVE, CAT_DUAL };
-#endif
                int ci = 0;
                for (int k = 0; k < CAT_TYPE_N; ++k)
                  if (CT_ORDER[k] == cfg.catType) { ci = k; break; }
@@ -31694,6 +33790,10 @@ void App::keySettings(char c, bool enter, bool back) {
 }
 
 static Screen editHome(int t) {
+  if (t == 530 || t == 531) return SCR_STHIST;   // Space-Track user/pass -- found
+                                                 // by audit_edit_home at release
+                                                 // gate: cancel fell to the QSO
+                                                 // log via the 5xx catch-all
   // These MUST come before the "t >= 720 -> SCR_SKEDENTRY" catch-all below. The Nearby &
   // DX targets were numbered in the 900s and fell straight into it, so committing (or
   // canceling) any of them dumped the operator into the new-activation editor.
@@ -32344,8 +34444,21 @@ void App::keyEdit(char c, bool enter, bool back) {
                 qso.rstR[sizeof(qso.rstR)-1]=0;
                 if (logEditIdx >= 0) qso.uploaded = 0; screen=SCR_LOGENTRY; return;
       case 503: { String v = editBuf; v.trim(); v.toUpperCase();   // grids are upper-case
+                  // Multi-grid entry: a rover on a boundary gives "FN20,FN30"
+                  // (or a 4-corner list). Comma is the on-air convention but the
+                  // log is CSV, so it normalizes to '/'; spaces normalize too.
+                  v.replace(", ", "/"); v.replace(",", "/"); v.replace(" ", "/");
+                  while (v.indexOf("//") >= 0) v.replace("//", "/");
                   strncpy(qso.grid, v.c_str(), sizeof(qso.grid)-1);
                   qso.grid[sizeof(qso.grid)-1]=0;
+                  if (logEditIdx >= 0) qso.uploaded = 0; screen=SCR_LOGENTRY; return; }
+      case 530: strlcpy(cfg.stUser, editBuf.c_str(), sizeof(cfg.stUser)); cfg.save();
+                screen = SCR_STHIST; lastDrawMs = 0; return;
+      case 531: strlcpy(cfg.stPass, editBuf.c_str(), sizeof(cfg.stPass)); cfg.save();
+                screen = SCR_STHIST; lastDrawMs = 0; return;
+      case 509: { String v = editBuf; v.trim(); v.toUpperCase();   // grids are upper-case
+                  strncpy(qso.myGrid, v.c_str(), sizeof(qso.myGrid)-1);
+                  qso.myGrid[sizeof(qso.myGrid)-1]=0;
                   if (logEditIdx >= 0) qso.uploaded = 0; screen=SCR_LOGENTRY; return; }
       case 504: strncpy(qso.notes, editBuf.c_str(), sizeof(qso.notes)-1);
                 qso.notes[sizeof(qso.notes)-1]=0;
@@ -32476,7 +34589,7 @@ void App::keyEdit(char c, bool enter, bool back) {
     // stored result. Keep this list in sync when adding a grid/callsign entry field.
     if (editTarget == 103 || editTarget == 104 || editTarget == 204 || editTarget == 216 ||
         editTarget == 330 || editTarget == 228 ||
-        editTarget == 500 || editTarget == 503 || editTarget == 600 ||
+        editTarget == 500 || editTarget == 503 || editTarget == 509 || editTarget == 600 ||
         editTarget == 350 || editTarget == 351 || editTarget == 360 ||
         editTarget == 370 ||
         editTarget == 721 || editTarget == 723 || editTarget == 729 || editTarget == 760 ||
@@ -33379,7 +35492,16 @@ bool App::exportAdif() {
     if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
     adifField(rec, "RST_SENT", q.rstS);
     adifField(rec, "RST_RCVD", q.rstR);
-    adifField(rec, "GRIDSQUARE", q.grid);
+    // ADIF: GRIDSQUARE is defined as a SINGLE grid. A multi-grid entry emits
+    // the first (primary) grid there and the full comma-joined list in
+    // VUCC_GRIDS -- the ADIF field made for exactly this (boundary rovers).
+    {
+      String gAll = q.grid; gAll.replace("/", ",");
+      const int slash = String(q.grid).indexOf('/');
+      String g1 = (slash > 0) ? String(q.grid).substring(0, slash) : String(q.grid);
+      adifField(rec, "GRIDSQUARE", g1);
+      if (slash > 0) adifField(rec, "VUCC_GRIDS", gAll);
+    }
     adifField(rec, "MY_GRIDSQUARE", q.myGrid);
     adifField(rec, "STATION_CALLSIGN", q.myCall);
     adifField(rec, "COMMENT", q.notes);
@@ -34404,7 +36526,13 @@ void App::doCloudlogUpload() {
           if (dlM > 0) { adifField(rec, "FREQ_RX", String(dlM, 4)); adifField(rec, "BAND_RX", bandFor(dlM)); }
           adifField(rec, "RST_SENT", q.rstS);
           adifField(rec, "RST_RCVD", q.rstR);
-          adifField(rec, "GRIDSQUARE", q.grid);
+          {
+            String gAll = q.grid; gAll.replace("/", ",");
+            const int slash = String(q.grid).indexOf('/');
+            String g1 = (slash > 0) ? String(q.grid).substring(0, slash) : String(q.grid);
+            adifField(rec, "GRIDSQUARE", g1);
+            if (slash > 0) adifField(rec, "VUCC_GRIDS", gAll);
+          }
           adifField(rec, "MY_GRIDSQUARE", q.myGrid);
           adifField(rec, "STATION_CALLSIGN", q.myCall[0] ? q.myCall : cfg.myCall);
           rec += "<EOR>\n";
@@ -34550,12 +36678,11 @@ void App::drawLogEntry() {
   canvas.setTextSize(1);
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(4, 18);
-  canvas.printf("MyGrid %s  MyCall %s", qso.myGrid[0] ? qso.myGrid : "-",
-                qso.myCall[0] ? qso.myCall : "-");
+  canvas.printf("MyCall %s", qso.myCall[0] ? qso.myCall : "-");
 
   // The upload-flag rows (LoTW, Cloudlog) only apply to an existing logged QSO, so
   // they are shown when editing (logEditIdx >= 0) and hidden when logging a new one.
-  const int LF = (logEditIdx >= 0) ? 13 : 11;
+  const int LF = (logEditIdx >= 0) ? 14 : 12;
   char dbuf[16], tbuf[16], dlb[16], ulb[16];
   if (qso.utc) { time_t tt = (time_t)qso.utc; struct tm g; gmtime_r(&tt, &g);
                  strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &g);
@@ -34563,11 +36690,18 @@ void App::drawLogEntry() {
   else { strcpy(dbuf, "(set)"); strcpy(tbuf, "(set)"); }
   if (qso.dlHz) snprintf(dlb, sizeof(dlb), "%.4f", qso.dlHz / 1e6); else strcpy(dlb, "(set)");
   if (qso.ulHz) snprintf(ulb, sizeof(ulb), "%.4f", qso.ulHz / 1e6); else strcpy(ulb, "(set)");
-  const char* labels[13] = { "Date", "Time", "Sat", "DL MHz", "UL MHz",
+  // MyGrid is EDITABLE (0.9.73). It was previously display-only in the grey header
+  // line above, which meant a QSO started before the GPS had a fix carried an empty
+  // own-grid forever with no way to correct it -- and own-grid is what the other
+  // operator needs for grid credit, so it is wrong in the ADIF export too. The QSL
+  // card refuses to print without it, which made this a prerequisite rather than a
+  // nicety.
+  const char* labels[14] = { "Date", "Time", "Sat", "DL MHz", "UL MHz",
                              "Call", "Mode", "RST S", "RST R", "Grid", "Notes",
-                             "LoTW", "Cloudlog" };
-  const char* vals[13]   = { dbuf, tbuf, qso.sat[0] ? qso.sat : "(pick)", dlb, ulb,
+                             "MyGrid", "LoTW", "Cloudlog" };
+  const char* vals[14]   = { dbuf, tbuf, qso.sat[0] ? qso.sat : "(pick)", dlb, ulb,
                              qso.call, qso.mode, qso.rstS, qso.rstR, qso.grid, qso.notes,
+                             qso.myGrid[0] ? qso.myGrid : "(set)",
                              (qso.uploaded & 0x1) ? "uploaded (ENT to clear)"
                                                   : "not uploaded (ENT to set)",
                              (qso.uploaded & 0x2) ? "uploaded (ENT to clear)"
@@ -34583,8 +36717,8 @@ void App::drawLogEntry() {
     else        canvas.setTextColor(CL_CYAN, CL_BLACK);
     canvas.setCursor(4, y); canvas.printf("%-6s %.27s", labels[i], vals[i]);
   }
-  footer(logEditIdx >= 0 ? "ENT edit  s save  x del  ` back"
-                         : "ENT edit  s save  ` cancel");
+  footer(logEditIdx >= 0 ? "ENT edit  s save  p QSL  x del  ` back"
+                         : "ENT edit  s save  p QSL  ` cancel");
 }
 
 void App::keyLogEntry(char c, bool enter, bool back) {
@@ -34601,6 +36735,14 @@ void App::keyLogEntry(char c, bool enter, bool back) {
     if (ok) loadLog();
     screen = logReturn; lastDrawMs = 0; return;
   }
+  if (c == 'p') {
+    // Hand-out confirmation for THIS QSO. Safe against the field editors: text
+    // entry happens on SCR_EDIT, which owns the keyboard entirely, so a callsign
+    // containing 'p' is typed there and never reaches this handler.
+    if (!qso.call[0]) { setStatus("No callsign to confirm"); return; }
+    printReport(PR_QSL);
+    return;
+  }
   if (c == 's') {
     if (!qso.call[0]) { setStatus("Call required to log"); return; }
     // qso.uploaded is saved as-is: editing any content field already cleared it (so the
@@ -34614,13 +36756,13 @@ void App::keyLogEntry(char c, bool enter, bool back) {
   }
   if (enter) {
     char b[20];
-    if (logEditIdx >= 0 && logSel == 11) {      // LoTW flag: toggle uploaded bit0
+    if (logEditIdx >= 0 && logSel == 12) {      // LoTW flag: toggle uploaded bit0
       qso.uploaded ^= 0x1;
       setStatus((qso.uploaded & 0x1) ? "Marked uploaded to LoTW"
                                      : "Marked NOT uploaded to LoTW");
       return;
     }
-    if (logEditIdx >= 0 && logSel == 12) {      // Cloudlog flag: toggle uploaded bit1
+    if (logEditIdx >= 0 && logSel == 13) {      // Cloudlog flag: toggle uploaded bit1
       qso.uploaded ^= 0x2;
       setStatus((qso.uploaded & 0x2) ? "Marked uploaded to Cloudlog"
                                      : "Marked NOT uploaded to Cloudlog");
@@ -34658,6 +36800,7 @@ void App::keyLogEntry(char c, bool enter, bool back) {
       case 8:  editTarget = 502; editTitle = "RST rcvd";   editBuf = qso.rstR; break;
       case 9:  editTarget = 503; editTitle = "Their grid"; editBuf = qso.grid; break;
       case 10: editTarget = 504; editTitle = "Notes";      editBuf = qso.notes; break;
+      case 11: editTarget = 509; editTitle = "My grid (yours)"; editBuf = qso.myGrid; break;
     }
     screen = SCR_EDIT;
   }
@@ -34782,7 +36925,7 @@ void App::drawLogList() {
   }
   canvas.setTextColor(CL_GREY, CL_BLACK);
   canvas.setCursor(4, 116); canvas.printf("%d/%d", logListSel + 1, logRecN);
-  footer("; / . move  ENT edit  ` back");
+  footer("; / . move  ENT edit  p QSL  ` back");
 }
 
 void App::keyLogList(char c, bool enter, bool back) {
@@ -34790,6 +36933,13 @@ void App::keyLogList(char c, bool enter, bool back) {
   if (logRecN == 0) return;
   if (isUp(c))   logListSel = (logListSel + logRecN - 1) % logRecN;
   if (isDown(c)) logListSel = (logListSel + 1) % logRecN;
+  if (c == 'p') {
+    // Print the HIGHLIGHTED QSO. Copy it into `qso` exactly as ENTER does, so the
+    // card and the editor can never disagree about which contact is in hand.
+    qso = logRecs[logListSel];
+    printReport(PR_QSL);
+    return;
+  }
   if (enter) {
     qso = logRecs[logListSel];
     logEditIdx = logListSel;
@@ -34912,6 +37062,7 @@ void App::draw() {
     case SCR_CUBESIM: drawCubeSim(); break;
     case SCR_LOCONV:  drawLoconv(); break;
     case SCR_GRAPH:   drawGraph(); break;
+    case SCR_STHIST:  drawStHist(); break;
     case SCR_BASIC:    drawBasic(); break;
     case SCR_BASICRUN: drawBasicRun(); break;
     case SCR_BASICIMM: drawBasicImm(); break;
@@ -34983,6 +37134,7 @@ void App::draw() {
     case SCR_GDOPPLER: drawGDoppler(); break;
     case SCR_GPASS:    drawGPass(); break;
     case SCR_GROTOR:   drawGRotor(); break;
+    case SCR_GBRICK:   drawGBrick(); break;
     case SCR_GMORSE:   drawGMorse(); break;
     case SCR_GGRID:    drawGGrid(); break;
     case SCR_SKYGLANCE:drawSkyGlance(); break;
@@ -34992,6 +37144,7 @@ void App::draw() {
     case SCR_CATTEST:  drawCatTest(); break;
     case SCR_CATMON:   drawCatMon(); break;
     case SCR_DUALRIG:  drawDualRig(); break;
+    case SCR_USBHELPER: drawUsbHelper(); break;
     case SCR_CHARGE:   drawCharge(); break;
     case SCR_ORBIT:    drawOrbit(); break;
     case SCR_SIM:      drawSim(); break;
@@ -35504,6 +37657,8 @@ void App::drawHelp() {
     " stars, constellation lines, names)",
     "Location: q = five named QTH presets",
     " (ENTER recall; recall turns GPS off)",
+    "Deorbit (About>Games): breakout --",
+    " dish paddle, capture tug, 4 shells",
     "KESSLER (About>Games): 2P artillery,",
     " GORILLAS.BAS on the Moon. Type angle",
     " + velocity, ENTER fires; g gravity",
@@ -37581,7 +39736,7 @@ void App::serviceAudioRelease() {
   if (audioGameOwned) {
     bool onGame = (screen == SCR_GAME || screen == SCR_GAMES || screen == SCR_GDOPPLER ||
                    screen == SCR_GPASS || screen == SCR_GROTOR || screen == SCR_GMORSE ||
-                   screen == SCR_GGRID || screen == SCR_KESSLER);
+                   screen == SCR_GGRID || screen == SCR_GBRICK || screen == SCR_KESSLER);
     if (!onGame) {
       audioGameOwned = false;
       if (audioUp) { M5Cardputer.Speaker.stop(); audioReleaseAt = millis(); }  // release now (below)
@@ -38082,6 +40237,161 @@ void App::printLog() {
 }
 
 
+
+// ===========================================================================
+//  printQsl() -- a QSL card for ONE QSO (PR_QSL)
+// ===========================================================================
+//
+//  WHAT THIS IS FOR. Handing someone a paper confirmation on the spot -- at a
+//  hamfest table, after a demo pass, to the person who just watched you work a
+//  satellite. It is not a substitute for a desktop logger's card designer, and it
+//  does not try to be: no artwork, no card stock, no address block, no record of
+//  what has been sent. What it IS is a confirmation that is factually complete,
+//  so the recipient can enter the QSO in their own log from it and claim credit.
+//
+//  Everything a confirmation needs is present: both callsigns, both grids, the
+//  date and time in UTC, the satellite, the mode, uplink and downlink with their
+//  bands, and the report SENT. Everything else is deliberately absent.
+//
+//  Renders through the ordinary sink fan-out, so the same card goes to a receipt
+//  printer, the serial console and /CardSat/Reports/qsl-*.txt.
+// ===========================================================================
+
+// Traditional Maidenhead casing: fields upper, square digits, subsquare lower
+// (FM18lu). Stored grids are upper-cased on commit, so this is presentation only.
+static String qslGrid(const char* g) {
+  String s(g ? g : "");
+  s.trim();
+  for (int i = 0; i < (int)s.length(); ++i) {
+    const char c = s[i];
+    if (i < 2)      s.setCharAt(i, (c >= 'a' && c <= 'z') ? (char)(c - 32) : c);
+    else if (i >= 4) s.setCharAt(i, (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c);
+  }
+  return s;
+}
+
+// "145.9250 MHz  2m", or just the frequency when it falls outside every amateur
+// band in bandFor() -- a blank band is more honest than guessing at one.
+static String qslFreq(uint32_t hz) {
+  if (!hz) return String();
+  const double mhz = hz / 1e6;
+  char b[32];
+  const char* bn = bandFor(mhz);
+  if (bn && bn[0]) snprintf(b, sizeof(b), "%.4f MHz  %s", mhz, bn);
+  else             snprintf(b, sizeof(b), "%.4f MHz", mhz);
+  return String(b);
+}
+
+void App::printQsl() {
+  // OWN GRID IS MANDATORY, and it must be the one recorded WITH THE QSO -- never
+  // the current fix. For a QSO worked from a rove, a hilltop or a previous QTH
+  // those are different squares, and the recipient may claim grid credit from
+  // what is on this card. Substituting today's grid would be silently wrong,
+  // which is the one outcome worth refusing over. MyGrid is editable on the Edit
+  // QSO screen, so the message below is actionable.
+  if (!qso.myGrid[0]) {
+    Printer::line("Cannot print: this QSO has no MyGrid.");
+    Printer::line("Set it on the Edit QSO screen first.");
+    return;
+  }
+
+  const String myCall = qso.myCall[0] ? String(qso.myCall) : String(cfg.myCall);
+  const bool wide = !Printer::narrow();
+
+  // ---- who is sending this -----------------------------------------------
+  Printer::title("RADIO QSL CONFIRMATION");
+  Printer::blank();
+  Printer::center(myCall.length() ? myCall : String("(no callsign set)"));
+  Printer::center(qslGrid(qso.myGrid));
+  if (cfg.opName[0])  Printer::center(String(cfg.opName));
+  // The LoTW identity fields are exactly what a chaser transcribes for awards, so
+  // they earn their place even on a minimal card. Built as one line and only
+  // printed if anything is set.
+  {
+    String ids;
+    if (cfg.lotwDxcc[0])  ids += String("DXCC ") + cfg.lotwDxcc;
+    if (cfg.lotwCqz[0])   ids += (ids.length() ? "  CQ " : "CQ ")  + String(cfg.lotwCqz);
+    if (cfg.lotwItuz[0])  ids += (ids.length() ? "  ITU " : "ITU ") + String(cfg.lotwItuz);
+    if (cfg.lotwState[0]) ids += (ids.length() ? "  " : "") + String(cfg.lotwState);
+    if (ids.length()) Printer::center(ids);
+  }
+  if (cfg.opEmail[0]) Printer::center(String(cfg.opEmail));
+
+  // ---- who it confirms ----------------------------------------------------
+  Printer::rule();
+  Printer::center("CONFIRMING TWO-WAY CONTACT");
+  Printer::center("WITH");
+  Printer::center(qso.call[0] ? String(qso.call) : String("(no callsign)"));
+  Printer::rule();
+
+  // ---- the contact --------------------------------------------------------
+  char d[16] = "", t[16] = "";
+  if (qso.utc) {
+    time_t tt = (time_t)qso.utc; struct tm g; gmtime_r(&tt, &g);
+    strftime(d, sizeof(d), "%Y-%m-%d", &g);
+    strftime(t, sizeof(t), "%H%MZ", &g);
+  }
+  Printer::kv("DATE ", qso.utc ? String(d) : String("(not recorded)"));
+  Printer::kv("UTC  ", qso.utc ? String(t) : String("(not recorded)"));
+  if (qso.sat[0]) {
+    Printer::kv("SAT  ", String(qso.sat));
+    // PROP_MODE=SAT is what LoTW needs for satellite credit, and satellite QSOs
+    // only match when both logs name the same bird. Stating both explicitly is
+    // the most useful thing a satellite card can do for the recipient's log.
+    //
+    // The bare ADIF token, not "SAT (via amateur satellite)": that ran to 33
+    // characters, which kv() split into a stranded "PROP" line on 58 mm paper.
+    // The plain-English version goes below, where it reads as a sentence rather
+    // than as an overflowing field -- and where the person at the table who is
+    // not a ham will actually read it.
+    Printer::kv("PROP ", "SAT");
+  }
+  if (qso.mode[0]) Printer::kv("MODE ", String(qso.mode));
+  { const String u = qslFreq(qso.ulHz); if (u.length()) Printer::kv("UP   ", u); }
+  { const String v = qslFreq(qso.dlHz); if (v.length()) Printer::kv("DOWN ", v); }
+  // The report SENT, labelled. A QSL confirms what you gave the other station;
+  // rstR is our own received copy and is not part of the confirmation. A bare
+  // "RST" here could be read either way round.
+  if (qso.rstS[0]) Printer::kv("RST SENT", String(qso.rstS));
+  if (qso.grid[0]) Printer::kv("UR GRID ", qslGrid(qso.grid));
+
+  // Path length, when both ends have a grid. Free from grids we already hold, and
+  // it is the detail people at a table actually react to. greatCircle() is
+  // forward-declared at file scope near the top of app.cpp, so it is reachable
+  // from here in both representations.
+  if (qso.grid[0] && strlen(qso.grid) >= 4) {
+    // Multi-grid entries: the path length is measured to the FIRST (primary)
+    // grid; "FN20/FN30" is one station, not two endpoints.
+    char g1[8]; int gn = 0;
+    for (const char* p = qso.grid; *p && *p != '/' && gn < 7; ++p) g1[gn++] = *p;
+    g1[gn] = 0;
+    double la1, lo1, la2, lo2;
+    if (Location::gridToLatLon(String(qso.myGrid), la1, lo1) &&
+        Location::gridToLatLon(String(g1),  la2, lo2)) {
+      double km = 0, brg = 0;
+      greatCircle(la1, lo1, la2, lo2, km, brg);
+      char pb[40];
+      snprintf(pb, sizeof(pb), "%.0f km  brg %03.0f", km, brg);
+      Printer::kv("PATH ", String(pb));
+    }
+  }
+
+  // ---- sign-off ------------------------------------------------------------
+  Printer::rule();
+  if (qso.sat[0]) Printer::center("worked via amateur satellite");
+  Printer::center("PSE QSL  /  TNX FOR THE QSO");
+  // "Uploaded", never "Confirmed": bit0 means WE sent it to LoTW, not that it has
+  // matched. A card claiming a confirmation that has not happened propagates a
+  // small untruth into someone else's log.
+  if (qso.uploaded & 0x1) Printer::center("Uploaded to LoTW");
+  if (wide) {
+    // A full-size card is a document somebody signs; a 58 mm receipt is not.
+    Printer::blank();
+    Printer::line("Signed ____________________  Date __________");
+  }
+  Printer::blank();
+  Printer::center(String("73 de ") + (myCall.length() ? myCall : String("?")));
+}
 
 // ---- Additional printable reports (items 9-11): mutual windows, DX Doppler, EQX,
 //      all-favorite passes, target-search hits, notes, and ASCII polar maps. ----
@@ -38828,6 +41138,7 @@ const char* App::prtStem(PrintReport w) {
     case PR_APRS:      return "aprs_heard";
     case PR_MUF:       return "muf_regions";
     case PR_SAA:       return "orbital_zones";
+    case PR_QSL:       return "qsl";
     case PR_DXC:       return "dx_spots";
     case PR_ADSB:      return "aircraft";
   }
@@ -38908,6 +41219,7 @@ bool App::printReport(PrintReport which) {
     case PR_APRS:      printAprs(); break;
     case PR_MUF:       printMuf(); break;
     case PR_SAA:       printSaa(); break;
+    case PR_QSL:       printQsl(); break;
     case PR_DXC:       printDxc(); break;
     case PR_ADSB:      printAdsb(); break;
   }
@@ -38968,15 +41280,15 @@ bool App::gameTiltAxis(float& outLR) {
 // --- Games menu ------------------------------------------------------------
 static const char* const GAMES_NAMES[] = {
   "Zap the Sats", "Doppler Lock", "Catch the Pass", "Rotor Runner",
-  "Morse Meteors", "Grid Chase", "KESSLER (2-player)"
+  "Morse Meteors", "Grid Chase", "Deorbit", "KESSLER (2-player)"
 };
-static const int GAMES_N = 7;
+static const int GAMES_N = 8;
 
 void App::drawGamesMenu() {
   header("Games");
   canvas.setTextSize(1);
   for (int i = 0; i < GAMES_N; ++i) {
-    int y = 20 + i * 14;                        // 7 rows since KESSLER; last clears the footer
+    int y = 20 + i * 13;                        // 8 rows since Deorbit; 13 px keeps the last clear of the footer
     bool sel = (i == gamesSel);
     if (sel) canvas.fillRect(2, y - 2, 236, 13, CL_SELBG);
     canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
@@ -38998,7 +41310,8 @@ void App::keyGamesMenu(char c, bool enter, bool back) {
       case 3: gRotorReset();   screen = SCR_GROTOR;   break;
       case 4: gMorseReset();   screen = SCR_GMORSE;   break;
       case 5: gGridReset();    screen = SCR_GGRID;    break;
-      case 6: kesslerInit();   screen = SCR_KESSLER;  break;   // the GORILLAS tribute
+      case 6: gBrickReset();   screen = SCR_GBRICK;   break;
+      case 7: kesslerInit();   screen = SCR_KESSLER;  break;   // the GORILLAS tribute
     }
     lastDrawMs = 0;
   }
@@ -39480,6 +41793,154 @@ void App::keyGGrid(char c, bool enter, bool back) {
 }
 
 // ===========================================================================
+//  G6. Deorbit -- breakout, themed as clearing derelict satellites out of the
+//  orbital shells above your station. The paddle is the ground-station dish,
+//  the ball a capture tug, and each brick a dead bird. Steer with tilt
+//  (cfg.gameTilt + IMU) or the arrow keys; ENTER launches a parked tug.
+//  Shell rows are colour-coded LEO -> GEO and score more the higher they sit.
+// ===========================================================================
+void App::gBrickReset() {
+  gScore = 0; gLevel = 1; gLives = 3;
+  for (int r = 0; r < GBRK_ROWS; ++r) gbRow[r] = 0xFF;      // all 8 columns present
+  gbLeft = GBRK_ROWS * GBRK_COLS;
+  gbPadX = 120; gbLaunched = false;
+  gbBallX = gbPadX; gbBallY = 116; gbVX = 0; gbVY = 0;
+  gbLastMs = millis();
+  gState = 1;
+}
+
+void App::drawGBrick() {
+  const int X0 = 4, X1 = 236, YTOP = 26, YPAD = 120;
+  const int BW = 28, BH = 7, BX0 = 6, BY0 = 30;            // brick geometry
+  const int PADW = 42;   // bench: +8 px reach alongside the slower launch
+  uint32_t ms = millis();
+
+  if (gState == 1) {
+    float dt = (ms - gbLastMs) / 1000.0f; if (dt > 0.15f) dt = 0.15f; gbLastMs = ms;
+
+    // Dish steering: tilt when it is available, keys otherwise (keyGBrick also
+    // nudges, so the two work together exactly as Rotor Runner does).
+    float lr = 0;
+    if (gameTiltAxis(lr)) gbPadX += lr * 220 * dt;
+    if (gbPadX < X0 + PADW / 2) gbPadX = X0 + PADW / 2;
+    if (gbPadX > X1 - PADW / 2) gbPadX = X1 - PADW / 2;
+
+    if (!gbLaunched) {
+      gbBallX = gbPadX; gbBallY = YPAD - 4;                 // tug rides the dish until launch
+    } else {
+      float sp = 1.0f + 0.08f * (gLevel - 1);
+      gbBallX += gbVX * dt * sp; gbBallY += gbVY * dt * sp;
+      if (gbBallX <= X0 + 2) { gbBallX = X0 + 2; gbVX = fabsf(gbVX); sfx(900, 12); }
+      if (gbBallX >= X1 - 2) { gbBallX = X1 - 2; gbVX = -fabsf(gbVX); sfx(900, 12); }
+      if (gbBallY <= YTOP)   { gbBallY = YTOP;   gbVY = fabsf(gbVY); sfx(900, 12); }
+
+      // Dish bounce. Off-centre hits steer the tug, so the player has some aim.
+      if (gbVY > 0 && gbBallY >= YPAD - 4 && gbBallY <= YPAD + 4 &&
+          gbBallX >= gbPadX - PADW / 2 - 2 && gbBallX <= gbPadX + PADW / 2 + 2) {
+        gbBallY = YPAD - 4;
+        gbVY = -fabsf(gbVY);
+        // Softer edge-of-paddle kick and a lower horizontal cap: the old 2.2x /
+        // 150 sent edge hits into near-horizontal volleys that crossed the full
+        // 240 px in ~1.6 s -- most of the "too fast" impression came from these.
+        gbVX += (gbBallX - gbPadX) * 1.8f;
+        if (gbVX >  110) gbVX =  110;
+        if (gbVX < -110) gbVX = -110;
+        sfx(1400, 18);
+      }
+
+      // Brick hits. One collision per frame is plenty at 25 fps and keeps the
+      // reflection from flipping twice on a corner.
+      int col = (int)((gbBallX - BX0) / BW);
+      int row = (int)((gbBallY - BY0) / BH);
+      if (col >= 0 && col < GBRK_COLS && row >= 0 && row < GBRK_ROWS &&
+          (gbRow[row] & (1 << col))) {
+        gbRow[row] &= (uint8_t)~(1 << col);
+        gbLeft--;
+        gScore += 10 * (GBRK_ROWS - row);                  // higher shells pay more
+        gbVY = -gbVY;
+        sfx(1800 + 120 * (GBRK_ROWS - row), 25);
+        if (gbLeft <= 0) {                                  // shells cleared: next set
+          gLevel++;
+          for (int r = 0; r < GBRK_ROWS; ++r) gbRow[r] = 0xFF;
+          gbLeft = GBRK_ROWS * GBRK_COLS;
+          gbLaunched = false; gbVX = 0; gbVY = 0;
+          sfx(2200, 120);
+        }
+      }
+
+      // Missed: the tug re-enters. Lose a life, re-park on the dish.
+      if (gbBallY > 134) {
+        gbLaunched = false; gbVX = 0; gbVY = 0;
+        sfx(300, 200);
+        if (--gLives <= 0) { gState = 2; }
+      }
+    }
+  }
+
+  header("Deorbit");
+  canvas.setTextSize(1);
+  canvas.setTextColor(CL_GREY, CL_BLACK);
+  canvas.setCursor(4, 18);   canvas.printf("Score %d", gScore);
+  canvas.setCursor(120, 18); canvas.printf("Lvl %d", gLevel);
+  canvas.setCursor(180, 18); canvas.printf("Tugs %d", gLives > 0 ? gLives : 0);
+
+  if (gState != 1) {
+    canvas.setTextColor(CL_CYAN, CL_BLACK);
+    canvas.setCursor(52, 44); canvas.print(gState == 0 ? "DEORBIT" : "RE-ENTRY");
+    canvas.setTextColor(CL_WHITE, CL_BLACK);
+    canvas.setCursor(8, 64);  canvas.print("Sweep the dead birds out of");
+    canvas.setCursor(8, 76);  canvas.print("orbit. Tilt, t/u, arrows.");
+    canvas.setCursor(50, 92); canvas.printf("Score %d", gScore);
+    footer("ENTER play   ` back");
+    return;
+  }
+
+  // Shells, LEO (low, dim) up to GEO (high, bright).
+  static const uint8_t SHELL_CL[GBRK_ROWS] = { CL_BLUE, CL_CYAN, CL_GREEN, CL_ORANGE };
+  for (int r = 0; r < GBRK_ROWS; ++r) {
+    for (int c = 0; c < GBRK_COLS; ++c) {
+      if (!(gbRow[r] & (1 << c))) continue;
+      int bx = BX0 + c * BW, by = BY0 + r * BH;
+      canvas.fillRect(bx, by, BW - 2, BH - 2, SHELL_CL[r]);
+      canvas.drawFastHLine(bx, by, BW - 2, CL_BLACK);       // panel seam, so they read as craft
+    }
+  }
+
+  // Ground-station dish and the capture tug.
+  canvas.fillRect((int)gbPadX - PADW / 2, YPAD, PADW, 4, CL_WHITE);
+  canvas.drawFastHLine((int)gbPadX - PADW / 2 - 3, YPAD + 2, PADW + 6, CL_GREY);
+  canvas.fillCircle((int)gbBallX, (int)gbBallY, 2, CL_ORANGE);
+
+  if (!gbLaunched) footer("ENTER launch   ` back");
+  else             footer(cfg.gameTilt ? "tilt or t/u steer   ` back" : "t/u or arrows steer   ` back");
+}
+
+void App::keyGBrick(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_GAMES; gamesSel = 6; lastDrawMs = 0; return; }
+  if (gState != 1) { if (enter) { gBrickReset(); lastDrawMs = 0; } return; }
+  if (enter && !gbLaunched) {
+    // Launch up and slightly off-vertical so the first volley isn't a straight
+    // line back down onto the dish.
+    gbLaunched = true;
+    // Bench feedback (0.9.73): the original -95/±55 launch (|v| ~110 px/s) was
+    // judged unhittable. -70/±40 is ~27% slower and the level ramp below is
+    // gentler, so difficulty still climbs -- it just starts winnable.
+    gbVY = -70;
+    gbVX = ((esp_random() & 1) ? 40.0f : -40.0f);
+    sfx(1200, 40);
+    lastDrawMs = 0;
+    return;
+  }
+  const float STEP = 16;   // bench: more paddle travel per keypress
+  // t/u sit right above the arrow cluster on the Cardputer, so a player can steer
+  // one-handed from the top row without covering the screen -- requested after the
+  // a/l pair proved awkward to reach mid-volley. All three pairs stay live
+  // together, exactly as the arrows always worked alongside tilt.
+  if (isLeft(c)  || c == 'a' || c == 'A' || c == 't' || c == 'T') { gbPadX -= STEP; lastDrawMs = 0; }
+  if (isRight(c) || c == 'l' || c == 'L' || c == 'u' || c == 'U') { gbPadX += STEP; lastDrawMs = 0; }
+}
+
+// ===========================================================================
 //  CAT self-test (Settings -> Radio / CAT -> "Run CAT self-test")
 //
 //  Exercises every CAT function the active backend exposes and reports a
@@ -39690,13 +42151,14 @@ void App::catMonTrampoline(const char* dir, const uint8_t* b, size_t n) {
 }
 
 void App::catMonPush(const char* dir, const uint8_t* b, size_t n) {
+  if (!catMonBuf) return;            // sink can fire once more while the screen closes
   bool isTx = (dir && dir[0] == 'T');
-  char* line = catMonLines[catMonHead];
+  char* line = catMonBuf->lines[catMonHead];
   int p = 0;
   for (size_t i = 0; i < n && i < 32 && p < CATMON_W - 4; ++i)
     p += snprintf(line + p, CATMON_W - p, "%02X ", b[i]);
   if (n > 32 && p < CATMON_W - 4) snprintf(line + p, CATMON_W - p, "...");
-  catMonIsTx[catMonHead]  = isTx;
+  catMonBuf->isTx[catMonHead]  = isTx;
   catMonHead = (catMonHead + 1) % CATMON_MAX;
   if (catMonCount < CATMON_MAX) catMonCount++;
   // If the operator is following the tail (scroll 0), stay there; otherwise hold
@@ -39705,6 +42167,8 @@ void App::catMonPush(const char* dir, const uint8_t* b, size_t n) {
 }
 
 void App::enterCatMon() {
+  if (!catMonBuf) catMonBuf = (CatMonBuf*)calloc(1, sizeof(CatMonBuf));
+  if (!catMonBuf) { setStatus("Out of memory", 2500, SEV_ERR); return; }
   catMonCount = 0; catMonHead = 0; catMonScroll = 0;
   catMonActive = true;
   catMonLastPollMs = 0;                     // poll immediately on first service tick
@@ -39730,10 +42194,10 @@ void App::drawCatMon() {
     if (idx >= total) break;
     // Map logical index (0 = oldest) to ring slot.
     int slot = (catMonHead - total + idx + CATMON_MAX * 2) % CATMON_MAX;
-    bool tx = catMonIsTx[slot];
+    bool tx = catMonBuf->isTx[slot];
     canvas.setTextColor(tx ? CL_CYAN : CL_GREEN, CL_BLACK);
     canvas.setCursor(2, 20 + i * 12);
-    canvas.printf("%s %.36s", tx ? "T" : "R", catMonLines[slot]);
+    canvas.printf("%s %.36s", tx ? "T" : "R", catMonBuf->lines[slot]);
   }
   if (total == 0) {
     canvas.setTextColor(CL_GREY, CL_BLACK);
@@ -39764,183 +42228,20 @@ void App::keyCatMon(char c, bool enter, bool back) {
 }
 
 // ===========================================================================
-//  SCR_DUALRIG -- configure the CardSatDualRig companion from CardSat
-//  Talks to the Stick over whatever rigctl transport is active (rigctl-net or
-//  rigctl-Grove) using its \csdr_* escape: one JSON line per query. Lets the
-//  operator see the Stick's live USB enumeration and bind a device to each leg
-//  (the downlink RX and the uplink TX radio), pick the model, and set a CI-V
-//  address -- then push it all with one save. Requires an engaged rigctl backend
-//  (rig != null and a vendorLine that isn't a no-op).
-// ===========================================================================
-
-// Pull one object's field out of a JSON array element. `obj` is a single {...}.
-static String drField(const String& obj, const char* key) {
-  return jsonField(obj, key);   // reuse the shared extractor (handles str + num)
-}
-
-int App::drModelIdx(int id) const {
-  for (int i = 0; i < drModelN; ++i) if (drModel[i].id == id) return i;
-  return -1;
-}
-
-// Allocate the device + model tables for SCR_DUALRIG. Heap-on-demand: called on
-// entering the screen, released by drFree() from the transition hook in loop().
-// Returns false (and sets drStatus) if the heap can't give us the ~1.3 KB.
-bool App::drAlloc() {
-  if (!drDev)   drDev   = new (std::nothrow) DrDevice[DR_MAX_DEV];
-  if (!drModel) drModel = new (std::nothrow) DrModel[DR_MAX_MODEL];
-  if (!drDev || !drModel) { drFree(); strlcpy(drStatus, "Out of memory", sizeof(drStatus)); return false; }
-  return true;
-}
-
-// Release the device + model tables. Called from the screen-transition hook in
-// loop() when SCR_DUALRIG is left, so no exit path (incl. Fn+h to Help) can leak it.
-void App::drFree() {
-  delete[] drDev;   drDev   = nullptr;
-  delete[] drModel; drModel = nullptr;
-  drDevN = 0; drModelN = 0;
-}
-
-// Throttled one-shot link check for the Settings row: a single \csdr_get, no
-// parsing. Cheap enough to fire when the row is highlighted; the throttle keeps a
-// dead TCP link (which can block on connect) from hitching the menu every frame.
-void App::drPingLink() {
-  uint32_t now = millis();
-  if (drLinkMs && (now - drLinkMs) < 2500) return;          // rate-limit
-  drLinkMs = now;
-  if (!rig || (cfg.catType != CAT_RIGCTL && cfg.catType != CAT_RIGCTL_GROVE)) {
-    drLink = 0; return;                                      // not applicable -> gray
-  }
-  String r = rig->vendorLine("\\csdr_get");
-  drLink = (r.length() && r.indexOf("downlink") >= 0) ? 1 : 2;
-}
-
-// Query the Stick: current config (\csdr_get) + the model catalog (\csdr_models).
-void App::drQuery() {
-  drLoaded = false; drDevN = 0; drModelN = 0;
-  if (!drDev || !drModel) { if (!drAlloc()) return; }   // tables must exist to parse into
-  if (!rig) { strlcpy(drStatus, "No CAT backend", sizeof(drStatus)); return; }
-  if (cfg.catType != CAT_RIGCTL && cfg.catType != CAT_RIGCTL_GROVE) {
-    strlcpy(drStatus, "Set CAT type to rigctl (net/Grove)", sizeof(drStatus)); return;
-  }
-  String st = rig->vendorLine("\\csdr_get");
-  if (st.length() == 0 || st.indexOf("downlink") < 0) {
-    drLink = 2; drLinkMs = millis();        // no reply -> red on the Settings row too
-    strlcpy(drStatus, "No reply from Stick", sizeof(drStatus)); return;
-  }
-  // ---- legs ----
-  auto readLeg = [&](const char* key, int idx) {
-    int k = st.indexOf(String("\"") + key + "\"");
-    if (k < 0) return;
-    int b = st.indexOf('{', k); if (b < 0) return;
-    int e = st.indexOf('}', b); if (e < 0) return;
-    String o = st.substring(b, e + 1);
-    String m = drField(o, "model"); drModelId[idx] = m.length() ? m.toInt() : -1;
-    drCiv[idx] = drField(o, "civ").toInt();
-    drBaud[idx] = (uint32_t)drField(o, "baud").toInt();   // H14: per-leg CAT baud (0 = default)
-    String s = drField(o, "serial");
-    strncpy(drSerial[idx], s.c_str(), sizeof(drSerial[idx]) - 1);
-    drSerial[idx][sizeof(drSerial[idx]) - 1] = 0;
-  };
-  readLeg("downlink", 0);
-  readLeg("uplink",   1);
-  // ---- devices (array under "devices") ----
-  int dk = st.indexOf("\"devices\"");
-  if (dk >= 0) {
-    int a = st.indexOf('[', dk), z = st.indexOf(']', a);
-    if (a >= 0 && z > a) {
-      String arr = st.substring(a + 1, z);
-      int p = 0;
-      while (p < (int)arr.length() && drDevN < DR_MAX_DEV) {
-        int b = arr.indexOf('{', p); if (b < 0) break;
-        int e = arr.indexOf('}', b); if (e < 0) break;
-        String o = arr.substring(b, e + 1);
-        DrDevice& d = drDev[drDevN];
-        strncpy(d.product, drField(o, "product").c_str(), sizeof(d.product) - 1); d.product[sizeof(d.product)-1]=0;
-        strncpy(d.serial,  drField(o, "serial").c_str(),  sizeof(d.serial)  - 1); d.serial[sizeof(d.serial)-1]=0;
-        strncpy(d.vidpid,  drField(o, "vidpid").c_str(),  sizeof(d.vidpid)  - 1); d.vidpid[sizeof(d.vidpid)-1]=0;
-        d.addr = drField(o, "addr").toInt();
-        drDevN++;
-        p = e + 1;
-      }
-    }
-  }
-  // ---- model catalog ----
-  String ml = rig->vendorLine("\\csdr_models");
-  int drModelParsed = 0;
-  if (ml.length() && ml.indexOf('{') >= 0) {
-    int p = 0;
-    // C3: bound the loop with DR_MAX_MODEL, the real array capacity. The previous bound
-    // sizeof(drModel)/sizeof(drModel[0]) took sizeof of the DrModel* POINTER (4 on ESP32)
-    // over sizeof(DrModel) -> 0, so the loop never ran: zero models parsed while the code
-    // still reported a loaded, green link.
-    while (p < (int)ml.length() && drModelN < DR_MAX_MODEL) {
-      int b = ml.indexOf('{', p); if (b < 0) break;
-      int e = ml.indexOf('}', b); if (e < 0) break;
-      String o = ml.substring(b, e + 1);
-      DrModel& m = drModel[drModelN];
-      m.id = drField(o, "id").toInt();
-      strncpy(m.name, drField(o, "name").c_str(), sizeof(m.name) - 1); m.name[sizeof(m.name)-1]=0;
-      m.rxOnly = drField(o, "rxOnly") == "true";
-      drModelN++; drModelParsed++;
-      p = e + 1;
-    }
-  }
-  // C3: an empty or unparseable catalog is a query FAILURE, not a good link. Don't set
-  // drLoaded / a green link when no models came back -- that masked the failure and left
-  // both legs showing "(none)" with no way to select a model.
-  if (drModelParsed == 0) {
-    drLoaded = false;
-    drLink = 2; drLinkMs = millis();        // 2 = failed
-    strlcpy(drStatus, "No models from companion", sizeof(drStatus));
-    return;
-  }
-  drLoaded = true;
-  drLink = 1; drLinkMs = millis();          // a successful query IS a good link
-  snprintf(drStatus, sizeof(drStatus), "%d device%s enumerated", drDevN, drDevN==1?"":"s");
-}
-
-// Push the edited config back to the Stick and save it to NVS.
-void App::drSave() {
-  if (!rig) { strlcpy(drStatus, "No CAT backend", sizeof(drStatus)); return; }
-  auto modelName = [&](int idx) -> String {
-    int mi = drModelIdx(drModelId[idx]);
-    return mi >= 0 ? String(drModel[mi].name) : String("(none)");
-  };
-  (void)modelName;
-  // H11: the \csdr_set protocol splits tokens on spaces, so a USB serial containing a space
-  // would be truncated at the first space. Percent-encode space (and % itself) so such a
-  // serial round-trips intact; the companion decodes it in applyConfigKV.
-  auto encSerial = [](const char* s) -> String {
-    String o; for (const char* p = s; *p; ++p) {
-      if (*p == '%') o += "%25"; else if (*p == ' ') o += "%20"; else o += *p;
-    }
-    return o;
-  };
-  String cmd = "\\csdr_set";
-  cmd += " dl_model=" + String(drModelId[0]);
-  cmd += " dl_civ="   + String(drCiv[0], HEX);
-  cmd += " dl_baud="  + String(drBaud[0]);   // H14: 0 = model default on the companion
-  cmd += " dl_serial=" + encSerial(drSerial[0]);
-  cmd += " ul_model=" + String(drModelId[1]);
-  cmd += " ul_civ="   + String(drCiv[1], HEX);
-  cmd += " ul_baud="  + String(drBaud[1]);
-  cmd += " ul_serial=" + encSerial(drSerial[1]);
-  cmd += " save=1";
-  String r = rig->vendorLine(cmd);
-  if (r.indexOf("RPRT 0") >= 0) strlcpy(drStatus, "Saved to Stick", sizeof(drStatus));
-  else snprintf(drStatus, sizeof(drStatus), "Save failed: %s", r.c_str());
-}
-
+//  SCR_DUALRIG -- configure the two native CAT_DUAL legs.
+//
+//  Until 0.9.73 this screen had a second personality: it also configured the
+//  external CardSatDualRig companion over rigctl using that firmware's \csdr_*
+//  escape. That companion is gone (see docs/releases/RELEASE_NOTES_0.9.73.md),
+//  so the screen now does one thing.
 // ---------------------------------------------------------------------------
-//  Dual-Rig screen, LOCAL mode (CAT_DUAL): configure the two native legs.
-//  Reuses the screen's cursor member (drSel) with its own field map:
+//  Reuses the screen cursor (drSel) with the field map:
 //  drSel = leg*6 + field, field 0..5 = Model / Bus / CI-V / baud / Host / Port.
 //  Free-text fields go through SCR_EDIT (targets 920..931); Model and Bus cycle
 //  on ENTER. 's' saves and re-applies the radio config; the engage-path guard
 //  reports any physical-bus conflict (both legs Grove / both USB).
 // ---------------------------------------------------------------------------
-void App::drawDualRigLocal() {
+void App::drawDualRig() {
   header("Dual rig (native)");
   canvas.setTextSize(1);
 
@@ -39981,7 +42282,7 @@ void App::drawDualRigLocal() {
                   (rig && rig->ready()) ? "(connected)" : "(idle)");
   }
 
-  static const char* BUSN[LEGBUS_N] = { "Grove", "USB", "LAN" };
+  static const char* BUSN[LEGBUS_N] = { "Grove", "USB", "LAN", "Helper" };
   const char* legName[2] = { "DN", "UP" };
   int y = 30;
   for (int L = 0; L < 2; ++L) {
@@ -40087,7 +42388,7 @@ void App::drawDualRigLocal() {
   canvas.print("a:adapter u/p:login s:save *=dflt");
 }
 
-void App::keyDualRigLocal(char c, bool enter, bool back) {
+void App::keyDualRig(char c, bool enter, bool back) {
   if (isBack(c, back)) { setSel = 0; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
   const int L = drSel / 6, F = drSel % 6;
   // Twelve rows, wrapping: off the bottom of the UP leg returns to the top of the
@@ -40159,6 +42460,14 @@ void App::keyDualRigLocal(char c, bool enter, bool back) {
 #if !CARDSAT_HAS_USBCAT
           if (b == LEGBUS_USB) continue;            // not in this build
 #endif
+#if !CARDSAT_HAS_USBHELPER
+          if (b == LEGBUS_HELPER) continue;         // not in this build
+#endif
+          // The OTHER leg already has the helper: it carries one device, so this
+          // leg cannot also have it. Skipping here means the conflict never gets
+          // configured, rather than being configured and then refused at engage.
+          if (b == LEGBUS_HELPER && cfg.dualModel[1 - L] != LEG_NONE &&
+              cfg.dualBus[1 - L] == LEGBUS_HELPER) continue;
           if (b == LEGBUS_LAN &&
               !(cfg.dualModel[L] < LEG_NONE && LEG_RADIOS[cfg.dualModel[L]].hasLan))
             continue;                               // LAN only for LAN-capable Icoms
@@ -40187,154 +42496,186 @@ void App::keyDualRigLocal(char c, bool enter, bool back) {
   }
 }
 
-void App::drawDualRig() {
-  // CAT_DUAL: this screen edits the NATIVE two-leg setup instead of the Stick.
-  // The companion editor below is untouched and still serves the rigctl backends.
-  if (cfg.catType == CAT_DUAL) { drawDualRigLocal(); return; }
-  header("Dual-Rig setup (Stick)");
+
+// ===========================================================================
+//  SCR_USBHELPER -- the CardSatUsbHelper companion: link, devices, diagnostics
+// ===========================================================================
+//
+//  One screen for the whole companion, because there is only ever one of it and
+//  the questions an operator has are all the same shape: is the Grove link up,
+//  what is plugged into the Stick, which of those am I using, and is the link
+//  clean. Splitting that across Settings rows would scatter four answers that are
+//  only useful together.
+//
+//  The LINK BAUD lives here rather than in the Settings CAT section on purpose.
+//  The CAT section already has a "CAT Baud" row, and that one is the RADIO's
+//  serial rate -- an entirely different number that happens to be spelled the
+//  same way. Two baud rows side by side in one menu is an invitation to set the
+//  wrong one and then debug a radio that was never the problem.
+// ===========================================================================
+void App::drawUsbHelper() {
+  header("USB helper");
   canvas.setTextSize(1);
+#if !CARDSAT_HAS_USBHELPER
+  canvas.setTextColor(CL_YELLOW, CL_BLACK);
+  canvas.setCursor(6, 20); canvas.print("Not built into this firmware.");
+  footer("` back");
+  return;
+#else
+  // ---- link summary (post-root-cause slimdown) ---------------------------
+  // The bench instrumentation (hq/hr, per-class counters, age, the probe key)
+  // did its job -- the stale-now underflow is fixed -- and is retired from the
+  // display. What remains is the operator's view: state+RTT, a red health line
+  // only when something is actually wrong, and the port. The counters live on
+  // in code for the 0.9.74 health layer; the STICK's screen keeps its full set.
+  {
+    canvas.setCursor(6, 16);
+    if (!UsbHelper::started()) {
+      canvas.setTextColor(CL_GREY, CL_BLACK);
+      canvas.print("idle - nothing is using the helper");
+    } else if (UsbHelper::linked()) {
+      canvas.setTextColor(CL_GREEN, CL_BLACK);
+      canvas.printf("link up @%lu  r%lums  fw %.10s",
+                    (unsigned long)UsbHelper::linkBaud(),
+                    (unsigned long)UsbHelper::lastRttMs(),
+                    UsbHelper::helperVersion()[0] ? UsbHelper::helperVersion() : "?");
+    } else {
+      canvas.setTextColor(CL_RED, CL_BLACK);
+      canvas.printf("no link @%lu - check Grove cable",
+                    (unsigned long)UsbHelper::linkBaud());
+    }
 
-  // Link status line (y=18). Kept short so it never reaches the battery/clock.
-  const char* xport = (cfg.catType == CAT_RIGCTL_GROVE) ? "Grove"
-                    : (cfg.catType == CAT_RIGCTL) ? "net" : "n/a";
-  canvas.setTextColor(CL_CYAN, CL_BLACK);
-  canvas.setCursor(6, 18);
-  canvas.printf("rigctl %s  %s", xport, drLoaded ? "loaded" : "not queried");
-
-  // Two legs. Each leg has FOUR editable fields (Rig / Dev / CI-V / baud) but only THREE
-  // display rows: CI-V and baud share the third row to fit the 135 px screen. The leg name
-  // is inlined on the Rig row (no separate banner), so a leg is 3 rows = 30 px and both legs
-  // fit in y=30..96, leaving room for the device reference and a clear status line.
-  const char* legName[2] = { "DN", "UP" };
-  int y = 30;
-  for (int L = 0; L < 2; ++L) {
-    int mi = drModelIdx(drModelId[L]);
-    String mn = mi >= 0 ? String(drModel[mi].name) : String("(none)");
-    String dl = "(none)";
-    for (int i = 0; i < drDevN; ++i)
-      if (drSerial[L][0] && strcmp(drDev[i].serial, drSerial[L]) == 0) { dl = drDev[i].product; break; }
-    if (drSerial[L][0] && dl == "(none)") dl = String("#") + drSerial[L] + " absent";
-
-    int f = L * 4;   // H14: 4 fields per leg
-    auto field = [&](int fi, const String& label){
-      bool sel = (fi == drSel);
-      canvas.fillRect(6, y - 1, 228, 10, sel ? CL_SELBG : CL_BLACK);
-      canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
-      canvas.setCursor(10, y); canvas.print(label);
-      y += 10;
-    };
-    // Leg tag on the Rig row keeps the two legs visually grouped without a banner.
-    field(f + 0, String(legName[L]) + " Rig: " + mn);
-    field(f + 1, String("   Dev: ") + dl);
-    // Third row carries BOTH CI-V (field f+2) and baud (field f+3). Highlight the whole row
-    // when either sub-field is selected, and mark which one with a '>' caret.
+    // Health, only when non-zero: helper reboots, link errors each way, drops.
     {
-      bool selCiv  = (f + 2 == drSel);
-      bool selBaud = (f + 3 == drSel);
-      bool sel = selCiv || selBaud;
-      String civS = drCiv[L] ? (String(drCiv[L] < 16 ? "0" : "") + String(drCiv[L], HEX)) : String("def");
-      String baudS = drBaud[L] ? String(drBaud[L]) : String("def");
-      String row = String("   ") + (selCiv ? ">" : " ") + "CIV:" + civS +
-                   "  " + (selBaud ? ">" : " ") + "baud:" + baudS;
-      canvas.fillRect(6, y - 1, 228, 10, sel ? CL_SELBG : CL_BLACK);
-      canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
-      canvas.setCursor(10, y); canvas.print(row);
-      y += 10;
+      const CsuhStats& st = UsbHelper::stats();
+      const uint32_t lerr = UsbHelper::localCrcErr() + UsbHelper::localCobsErr();
+      const uint32_t rerr = st.valid ? (st.crcErr + st.cobsErr) : 0;
+      const bool hostDown = (st.valid && st.ext && !st.hostUp);
+      if (UsbHelper::restarts() || lerr || rerr || UsbHelper::linkDrops() || hostDown) {
+        canvas.setTextColor(CL_RED, CL_BLACK);
+        canvas.setCursor(6, 26);
+        if (hostDown) canvas.print("helper USB HOST DOWN");
+        else canvas.printf("rst%lu e%lu/%lu dr%lu",
+                           (unsigned long)UsbHelper::restarts() % 100,
+                           (unsigned long)lerr % 1000, (unsigned long)rerr % 1000,
+                           (unsigned long)UsbHelper::linkDrops() % 1000);
+      }
     }
-    y += 3;   // gap between legs
+
+    canvas.setCursor(6, 36);
+    if (UsbHelper::active()) {
+      canvas.setTextColor(CL_CYAN, CL_BLACK);
+      canvas.printf("open: %.33s", UsbHelper::deviceName());
+    } else if (UsbHelper::lastError()[0]) {
+      canvas.setTextColor(CL_YELLOW, CL_BLACK);
+      canvas.printf("%.39s", UsbHelper::lastError());
+    } else {
+      canvas.setTextColor(CL_GREY, CL_BLACK);
+      canvas.print("no port open");
+    }
   }
 
-  // Device reference (numbered, for the 1-8 assign keys). Only what fits above the
-  // status line gets drawn; the count tells the operator if more exist. When there's
-  // no status message, the list may extend into that row.
-  const int listBottom = drStatus[0] ? 115 : 125;
+  // ---- editable rows -----------------------------------------------------
+  int y = 58;
+  auto row = [&](bool sel, const String& lbl, const String& val) {
+    canvas.fillRect(6, y - 1, 228, 10, sel ? CL_SELBG : CL_BLACK);
+    canvas.setTextColor(sel ? CL_BLACK : CL_GREY, sel ? CL_SELBG : CL_BLACK);
+    canvas.setCursor(10, y); canvas.print(lbl);
+    canvas.setTextColor(sel ? CL_BLACK : CL_WHITE, sel ? CL_SELBG : CL_BLACK);
+    canvas.print(val);
+    y += 10;
+  };
+  row(uhSel == 0, "Link baud: ", String(cfg.helperBaud));
+  // "Auto" is correct whenever the Stick carries one device, which is the normal
+  // case -- the helper exists to hold ONE radio. Naming a device matters only
+  // when a hub is involved.
+  row(uhSel == 1, "Device: ",
+      cfg.helperKey[0] ? String(cfg.helperKey) : String("Auto (only one)"));
+
+  // ---- what the Stick can see -------------------------------------------
   canvas.setTextColor(CL_GREY, CL_BLACK);
-  canvas.setCursor(6, y);
-  if (drDevN == 0) {
-    canvas.print(drLoaded ? "USB devices: none seen" : "USB devices: press q to query");
-    y += 10;
-  } else {
-    canvas.printf("USB devices (%d):", drDevN);
-    y += 10;
-    for (int r = 0; drScroll + r < drDevN && y + 8 <= listBottom; ++r) {
-      int i = drScroll + r;
-      canvas.setTextColor(CL_WHITE, CL_BLACK);
-      canvas.setCursor(10, y);
-      canvas.printf("%d %-12.12s %s", i + 1, drDev[i].product, drDev[i].vidpid);
-      y += 10;
-    }
-    // If more devices exist than rows shown, hint that the list scrolls.
-    if (drScroll + 1 < drDevN && y + 8 > listBottom) {
-      canvas.setTextColor(CL_DGREY, CL_BLACK);
-      canvas.setCursor(10, y > listBottom ? listBottom - 8 : y); canvas.print("...more");
-    }
+  canvas.setCursor(6, y + 2);
+  const uint8_t n = UsbHelper::deviceCount();
+  if (!UsbHelper::linked())    canvas.print("devices: (no link)");
+  else if (n == 0)             canvas.print("devices: none plugged in");
+  else                         canvas.printf("devices seen: %u", (unsigned)n);
+  y += 12;
+  const int VIS = 3;   // fits again now the diag table is a summary
+  if (uhScroll > (int)n - VIS) uhScroll = (int)n - VIS;
+  if (uhScroll < 0) uhScroll = 0;
+  for (int i = 0; i < VIS && (uhScroll + i) < (int)n; ++i) {
+    const uint8_t d = (uint8_t)(uhScroll + i);
+    const bool mine = cfg.helperKey[0] && strcmp(cfg.helperKey, UsbHelper::deviceKey(d)) == 0;
+    canvas.setTextColor(UsbHelper::deviceIsOpen(d) ? CL_GREEN : (mine ? CL_CYAN : CL_WHITE),
+                        CL_BLACK);
+    canvas.setCursor(10, y);
+    canvas.printf("%c%.36s", UsbHelper::deviceIsOpen(d) ? '*' : ' ', UsbHelper::deviceLabel(d));
+    y += 9;
   }
-
-  // Status line: a transient message when present, else nothing (the key hints live
-  // in the footer, so this no longer competes for space). Fixed just above the footer.
-  if (drStatus[0]) {
-    canvas.setTextColor(CL_GREEN, CL_BLACK);
-    canvas.setCursor(6, 118); canvas.print(drStatus);
-  }
-  footer("q qry <>fld 1-8 dev [] list s save ` bk");
+  footer(",/ baud|dev  s scan  r restart  ` back");
+#endif
 }
 
-void App::keyDualRig(char c, bool enter, bool back) {
-  if (cfg.catType == CAT_DUAL) { keyDualRigLocal(c, enter, back); return; }
-  (void)enter;
-  if (isBack(c, back)) { setSel = 0; screen = SCR_SETTINGS; lastDrawMs = 0; return; }
-  if (c == 'q') { setStatus("Querying Stick..."); draw(); drQuery(); lastDrawMs = 0; return; }
-  if (c == 's') { drSave(); lastDrawMs = 0; return; }
-  if (isUp(c))   { drSel = (uint8_t)((drSel + 7) % 8); lastDrawMs = 0; return; }
-  if (isDown(c)) { drSel = (uint8_t)((drSel + 1) % 8); lastDrawMs = 0; return; }
-  // The enumerated-device list is informational and can be longer than the rows that
-  // fit, and drawDualRig() already draws a "...more" hint when it is truncated -- but
-  // nothing advanced drScroll, so that hint pointed at devices the operator could not
-  // reach. [ ] is the same scroll convention the calculator footer uses; , and / are
-  // taken here by field cycling (they are isLeft/isRight).
-  if (c == '[') { if (drScroll > 0) --drScroll;            lastDrawMs = 0; return; }
-  if (c == ']') { if (drScroll + 1 < drDevN) ++drScroll;   lastDrawMs = 0; return; }
+void App::keyUsbHelper(char c, bool enter, bool back) {
+#if !CARDSAT_HAS_USBHELPER
+  (void)c; (void)enter;
+  if (isBack(c, back)) { screen = SCR_SETTINGS; lastDrawMs = 0; }
+#else
+  if (isBack(c, back)) { screen = SCR_SETTINGS; lastDrawMs = 0; return; }
+  if (isUp(c))   { uhSel = (uhSel + 1) % 2; lastDrawMs = 0; return; }
+  if (isDown(c)) { uhSel = (uhSel + 1) % 2; lastDrawMs = 0; return; }
 
-  int leg = drSel / 4, field = drSel % 4;   // H14: 4 fields per leg (model, device, civ, baud)
-  // assign a device by number 1..8 to the selected leg (works on either leg field)
-  if (c >= '1' && c <= '8') {
-    int i = c - '1';
-    if (i < drDevN) { strncpy(drSerial[leg], drDev[i].serial, sizeof(drSerial[leg]) - 1);
-                      drSerial[leg][sizeof(drSerial[leg])-1]=0;
-                      snprintf(drStatus, sizeof(drStatus), "Assigned %s -> %s", drDev[i].product, leg?"UP":"DN"); }
+  if (c == 's') {                       // re-ask the Stick what it can see
+    UsbHelper::requestScan();
+    setStatus("Helper: scanning", 1500);
     lastDrawMs = 0; return;
   }
-  // left/right change the selected field
-  int dir = isLeft(c) ? -1 : isRight(c) ? 1 : 0;
-  if (dir == 0) return;
-  if (field == 0) {                       // cycle model
-    if (drModelN == 0) { strlcpy(drStatus, "Query first (q)", sizeof(drStatus)); lastDrawMs = 0; return; }
-    int mi = drModelIdx(drModelId[leg]);
-    mi = (mi < 0) ? (dir > 0 ? 0 : drModelN - 1) : (mi + dir + drModelN) % drModelN;
-    drModelId[leg] = drModel[mi].id;
-  } else if (field == 1) {                // cycle assigned device (incl. none)
-    // build order: none, dev0..devN-1
-    int cur = -1;
-    for (int i = 0; i < drDevN; ++i) if (drSerial[leg][0] && strcmp(drDev[i].serial, drSerial[leg])==0){cur=i;break;}
-    int slots = drDevN + 1;               // slot 0 = none
-    int s = (cur < 0 ? 0 : cur + 1);
-    s = (s + dir + slots) % slots;
-    if (s == 0) drSerial[leg][0] = 0;
-    else { strncpy(drSerial[leg], drDev[s-1].serial, sizeof(drSerial[leg])-1); drSerial[leg][sizeof(drSerial[leg])-1]=0; }
-  } else if (field == 2) {                // CI-V address nudge
-    int v = drCiv[leg] + dir;
-    if (v < 0) v = 0xFF; if (v > 0xFF) v = 0;
-    drCiv[leg] = v;
-  } else {                                // H14: cycle per-leg CAT baud (0 = model default)
-    static const uint32_t DRB[] = { 0, 4800, 9600, 19200, 38400, 57600, 115200 };
-    const int NB = 7;
-    int ci = 0; for (int k = 0; k < NB; ++k) if (DRB[k] == drBaud[leg]) { ci = k; break; }
-    ci = (ci + dir + NB) % NB;
-    drBaud[leg] = DRB[ci];
+  if (c == 'r') {
+    // Reboot the companion. Safe because it is stateless, and it is the only
+    // recovery when its USB host stack has wedged -- unlike an in-place teardown,
+    // a reboot cannot itself get stuck.
+    UsbHelper::rescan();
+    setStatus("Helper: restarting", 2500);
+    lastDrawMs = 0; return;
   }
-  lastDrawMs = 0;
-}
 
+  const int dir = (c == '.') ? 1 : (c == ',') ? -1 : 0;
+  if (!dir && !enter) return;
+  const int step = dir ? dir : 1;       // ENTER advances, like every other row
+
+  if (uhSel == 0) {
+    // Cycle only rates the companion actually scans for. Anything else could
+    // never link, and a link that silently never comes up is the hardest fault
+    // on this feature to read.
+    int bi = 0;
+    for (int k = 0; k < CSUH_BAUD_N; ++k) if (CSUH_BAUDS[k] == cfg.helperBaud) { bi = k; break; }
+    bi = (bi + step + CSUH_BAUD_N) % CSUH_BAUD_N;
+    cfg.helperBaud = CSUH_BAUDS[bi];
+    cfg.save();
+    applyHelperFromCfg();               // re-open the UART at the new rate
+    lastDrawMs = 0; return;
+  }
+
+  // Device nomination: Auto, then each enumerated device, and round again.
+  const int n = (int)UsbHelper::deviceCount();
+  int cur = 0;                          // 0 = Auto, 1..n = device index+1
+  if (cfg.helperKey[0]) {
+    for (int i = 0; i < n; ++i)
+      if (strcmp(cfg.helperKey, UsbHelper::deviceKey((uint8_t)i)) == 0) { cur = i + 1; break; }
+  }
+  cur = (cur + step + (n + 1)) % (n + 1);
+  if (cur == 0) cfg.helperKey[0] = 0;
+  else strlcpy(cfg.helperKey, UsbHelper::deviceKey((uint8_t)(cur - 1)), sizeof(cfg.helperKey));
+  cfg.save();
+  // Re-apply so the new nomination is pushed and the port re-opened against it.
+  // Going through applyRadioFromCfg()/applyRotatorFromCfg() rather than poking
+  // UsbHelper directly keeps the single-claimant guard on the path.
+  applyRadioFromCfg();
+  applyRotatorFromCfg();
+  uhScroll = (cur > 0) ? (cur - 1) : 0;
+  lastDrawMs = 0;
+#endif
+}
 
 // Parse a string of hex byte tokens ("FE FE 4C E0 03 FD", spaces optional) and
 // transmit the bytes verbatim on the current CAT port via the backend's raw write.
@@ -43467,7 +45808,7 @@ void App::loraStart() {
 }
 
 static const uint8_t KES_MAGIC = 0xC7;
-static const uint8_t KES_HELLO = 1, KES_FIRE = 2, KES_SYNC = 3;
+static const uint8_t KES_HELLO = 1, KES_FIRE = 2, KES_SYNC = 3, KES_ACK = 4;
 
 void App::loraPoll() {
   if (!lora.ready()) return;
@@ -44561,6 +46902,7 @@ static const char* const TOOLS_NAMES[] = {
   "Orbital thermal (cubesat)",
   "AO-7 mode switch",
   "Telnet client",
+  "Space-Track history",
 };
 static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 
@@ -44573,8 +46915,8 @@ static const int TOOLS_N = (int)(sizeof(TOOLS_NAMES) / sizeof(TOOLS_NAMES[0]));
 // tools to TOOLS_NAMES as always, then slot the new id into the right band here; the
 // static_assert keeps the two tables the same length (a missing or duplicate id
 // would scramble the menu, so the release checklist includes eyeballing this list).
-static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,62,15,16,17,18,19,54,55,58,56,57,59,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14,60,61 };
-static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 63, "TOOLS_ORDER size");
+static const uint8_t TOOLS_ORDER[] = { 0,1,2,3,62,15,16,17,18,19,63,54,55,58,56,57,59,5,40,31,32,49,50,51,6,7,21,22,23,24,43,45,20,33,44,26,34,25,36,35,27,41,42,46,29,37,38,39,47,48,52,53,30,4,28,8,9,10,11,12,13,14,60,61 };
+static_assert(sizeof(TOOLS_ORDER) == (size_t)0 + 64, "TOOLS_ORDER size");
 
 // ---- Tool categories (0.9.61): a two-level Tools menu. TOOLS_ORDER above is kept as
 // the canonical 60-tool coverage guard; the categories below are the DISPLAY grouping.
@@ -44590,7 +46932,7 @@ static const char* const TOOLS_CAT_NAMES[] = {
   "Electronics & references",
 };
 static const uint8_t TOOLS_CAT_C0[] = { 0,1,2,3,62,28,4 };
-static const uint8_t TOOLS_CAT_C1[] = { 15,16,17,18,19,40,31,32,49,50,51,6,7,60,61 };
+static const uint8_t TOOLS_CAT_C1[] = { 15,16,17,18,19,63,40,31,32,49,50,51,6,7,60,61 };
 static const uint8_t TOOLS_CAT_C2[] = { 5,54,55,58,56,57,59,27,45 };
 static const uint8_t TOOLS_CAT_C3[] = { 21,22,23,24,43,44,33,20,47,48 };
 static const uint8_t TOOLS_CAT_C4[] = { 25,26,34,36,35,41,42,46,29,53 };
@@ -44606,7 +46948,7 @@ static_assert(sizeof(TOOLS_CAT_NAMES) / sizeof(TOOLS_CAT_NAMES[0]) == 6, "cat na
 // Coverage: the six category lengths must sum to the full tool count.
 static_assert(sizeof(TOOLS_CAT_C0) + sizeof(TOOLS_CAT_C1) + sizeof(TOOLS_CAT_C2)
             + sizeof(TOOLS_CAT_C3) + sizeof(TOOLS_CAT_C4) + sizeof(TOOLS_CAT_C5)
-            == 63, "tool categories must cover all 63 tools exactly once");
+            == 64, "tool categories must cover all 64 tools exactly once");
 
 // The first twenty Tools menu entries are standalone screens (sci calc, programmer calc,
 // char lookup, DXCC, CQ zones, ITU zones, link budget, operating references, CTCSS
@@ -44626,7 +46968,7 @@ static const int TOOLS_FIRST_FORM = 20;
 // trailing standalone tools (orbital thermal id 60, AO-7 mode switch id 61, Telnet client
 // id 62) are appended AFTER the forms and dispatched by explicit id checks before the form
 // fallthrough, so they are not forms: the form block is [FIRST_FORM, TOOLS_N-3), hence +3.
-static_assert(TOOLS_N - TOOLS_FIRST_FORM == TOOL__N + 3,
+static_assert(TOOLS_N - TOOLS_FIRST_FORM == TOOL__N + 4,
               "TOOLS_FIRST_FORM / TOOLS_NAMES / TOOL_* enum are out of step");
 
 // Two-level Tools menu. toolsCat == -1 -> the category list; otherwise the tools inside
@@ -44746,6 +47088,8 @@ void App::keyTools(char c, bool enter, bool back) {
       ao7Phase = 0; ao7Note = "";
       ao7CheckSunlight();                        // prime the sunlight verdict for the screen
       screen = SCR_AO7;
+    } else if (toolsSelC == 63) {               // Space-Track orbital history
+      enterStHist();
     } else if (toolsSelC == 62) {               // Telnet client (standalone screen)
       telStatus[0] = 0;
       if (telListAlloc()) { telLoad(); telSel = 0; }   // heap-on-demand connection list
@@ -45228,6 +47572,17 @@ struct App::Kessler {
   uint16_t netSeed = 0;              // agreed terrain/gravity seed (host picks)
   bool     netHelloAcked = false;    // guest has echoed our HELLO (host) / we saw HELLO (guest)
   uint32_t netLastTx = 0;            // for HELLO/keepalive resend cadence
+  // ---- loss tolerance (bench-requested robustness pass) ----
+  // FIRE is the one frame whose loss deadlocks a match (both ends end up
+  // waiting for the peer), so it alone is made reliable: a per-shot sequence
+  // number, resend-until-ACK, and receive-side dedup. HELLO gains a forever
+  // beacon + an explicit join request; SYNC stays fire-and-forget because it
+  // is score reconciliation only.
+  uint8_t  fireSeq = 0;              // sequence of OUR last sent shot
+  uint8_t  rxFireSeq = 0xFF;         // last REMOTE shot sequence accepted
+  uint8_t  pendFire[8]; uint8_t pendLen = 0;   // unacked FIRE body, resent by service
+  uint32_t pendNext = 0; uint8_t pendTries = 0;
+  uint16_t helloTries = 0;           // beacon count (burst-then-slow cadence)
   char     netPeer[10] = "";         // peer callsign, for the header
   uint32_t shockUntil = 0;
   // impact / dance
@@ -45273,18 +47628,49 @@ void App::kessNetRx(const uint8_t* b, int n, int rssi) {
   // A HELLO can arrive when we are NOT in a game yet: that is an inbound invite.
   if (kind == KES_HELLO) {
     if (n < 6) return;
+    const uint16_t seed = (uint16_t)(b[2] | (b[3] << 8));
+    // 0xFFFF is the JOIN REQUEST sentinel ("invite me"): only a waiting host
+    // reacts, by beaconing its invite again immediately. Everyone else drops
+    // it -- a bystander must not mistake a join request for an invite.
+    if (seed == 0xFFFF) {
+      if (kess && kess->net == 1 && !kess->netHelloAcked) {
+        kess->netLastTx = 0;                // service() sends the invite this pass
+        lastDrawMs = 0;
+      }
+      return;
+    }
     if (!kess) { kesslerInit(); if (!kess) return; }
     Kessler& K = *kess;
+    if (K.net == 1) {
+      // We are hosting. Either the guest's echo of OUR invite (seed matches:
+      // the invite is live), or a RIVAL invite -- both players pressed host.
+      // Tie-break deterministically so exactly one converts: the SMALLER seed
+      // keeps hosting; the larger-seed host becomes the guest and falls
+      // through to the normal accept path below. Both radios compare the same
+      // pair of numbers, so they cannot both convert or both stay.
+      if (seed == K.netSeed) { K.netHelloAcked = true; lastDrawMs = 0; return; }
+      if (K.netSeed < seed) return;         // we keep hosting; they convert
+      K.net = 2; K.mePlayer = 1;            // rival with the smaller seed wins
+    }
     if (K.net == 0) {                       // accept the invite as guest (P2)
       K.net = 2; K.mePlayer = 1;
     }
     if (K.net == 2) {
-      K.netSeed = (uint16_t)(b[2] | (b[3] << 8));
+      // Duplicate-invite guard: the host resends HELLO only until it hears our
+      // echo, but RF can replay one late. Once the match has actually started,
+      // a stale invite must only refresh the ACK -- never reset the match.
+      if (K.netHelloAcked && (K.wins[0] || K.wins[1] || K.phase >= 2)) {
+        uint8_t ack[4] = { b[2], b[3], b[4], b[5] };
+        kessNetSend(KES_HELLO, ack, 4);
+        return;
+      }
+      K.netSeed = seed;
       K.gravSel = b[4] % 3; K.playTo = b[5] ? b[5] : 3;
       K.netHelloAcked = true;
       uint8_t ack[4] = { b[2], b[3], b[4], b[5] };
-      kessNetSend(KES_HELLO, ack, 4);       // echo = ack
+      kessNetSend(KES_HELLO, ack, 4);       // echo = ack (host retries cover its loss)
       K.wins[0] = K.wins[1] = 0; K.turn = 0; K.shooter = 0;
+      K.fireSeq = 0; K.rxFireSeq = 0xFF; K.pendLen = 0; K.pendTries = 0;
       kessNetNewRound();                    // seed-driven, identical both ends
       screen = SCR_KESSLER; lastDrawMs = 0;
     }
@@ -45293,14 +47679,15 @@ void App::kessNetRx(const uint8_t* b, int n, int rssi) {
   if (!kess) return;
   Kessler& K = *kess;
   if (K.net == 0) return;
-
-  if (kind == KES_HELLO && K.net == 1) {    // guest's echo -> our invite is live
-    K.netHelloAcked = true; lastDrawMs = 0; return;
-  }
   if (kind == KES_FIRE) {
-    if (n < 8) return;
+    if (n < 9) return;                      // 7-byte body: +seq (reliability pass)
     uint8_t who = b[2];
     if (who == K.mePlayer) return;          // our own shot echoed; ignore
+    const uint8_t seq = b[8];
+    { uint8_t ackb[2] = { seq, who };       // ALWAYS ack, duplicates included --
+      kessNetSend(KES_ACK, ackb, 2); }      // a lost ACK is what caused the dup
+    if (seq == K.rxFireSeq) return;         // duplicate resend: simulated already
+    K.rxFireSeq = seq;
     K.turn = who;
     K.angle[who] = (int16_t)(b[3] | (b[4] << 8));
     K.vel[who]   = (int16_t)(b[5] | (b[6] << 8));
@@ -45310,15 +47697,20 @@ void App::kessNetRx(const uint8_t* b, int n, int rssi) {
     kessNetReplaying = false;
     lastDrawMs = 0; return;
   }
+  if (kind == KES_ACK) {
+    if (n >= 3 && K.pendLen && b[2] == K.fireSeq) { K.pendLen = 0; K.pendTries = 0; }
+    return;
+  }
   if (kind == KES_SYNC) {
+    // Score reconciliation ONLY (bench fix): the round transition is local and
+    // symmetric on both ends now, so acting on SYNC beyond the scores would
+    // double-advance the shared seed. Race-safe whichever side finishes its
+    // impact animation first: identical simulations produce identical scores,
+    // so the overwrite is a no-op in the normal case and a repair after a
+    // dropped FIRE.
     if (n < 5) return;
-    K.wins[0] = b[3]; K.wins[1] = b[4];     // authoritative scores from peer
-    uint8_t winner = b[2];
+    K.wins[0] = b[3]; K.wins[1] = b[4];
     if (K.wins[0] >= K.playTo || K.wins[1] >= K.playTo) { K.phase = 5; K.kick = true; }
-    else {
-      K.turn = (uint8_t)((winner + 1) & 1); // loser opens next round... but seed is shared
-      kessNetNewRound(); K.kick = true;
-    }
     lastDrawMs = 0; return;
   }
 }
@@ -45331,23 +47723,38 @@ void App::kessNetNewRound() {
   K.netSeed = (uint16_t)(K.netSeed * 1103515245u + 12345u);  // advance for next round
 }
 
-// Host-side HELLO beacon: while we are hosting and no guest has acked, resend the
-// invite once a second (up to ~15 s), then give up quietly. Cheap no-op otherwise.
+// Net upkeep, robust against loss (bench-requested pass):
+//  * HELLO beacon: once a second for the first ~15 s, then every 3 s FOREVER
+//    until a guest acks or the host backs out. The old 15-try/60-s give-up
+//    left a host "waiting for guest" that could never be joined -- a guest
+//    opening the game a minute late missed every invite there would ever be.
+//  * FIRE resend: an unacked shot is retransmitted every 1.5 s (12 tries,
+//    ~18 s). A lost FIRE used to deadlock the match outright -- the shooter
+//    handed the turn off locally while the peer never saw the shot.
 void App::kessNetService() {
   if (!kess) return;
   Kessler& K = *kess;
-  if (K.net != 1 || K.netHelloAcked) return;
-  uint32_t now = millis();
-  if (K.netLastTx && now - K.netLastTx < 1000) return;
-  if (K.netLastTx && now - K.netLastTx > 60000) return;      // stale host: stop
-  static uint8_t tries = 0;
-  if (!K.netLastTx) tries = 0;
-  if (tries >= 15) return;
-  uint8_t body[4] = { (uint8_t)(K.netSeed & 0xFF), (uint8_t)(K.netSeed >> 8),
-                      K.gravSel, K.playTo };
-  kessNetSend(KES_HELLO, body, 4);
-  K.netLastTx = now; tries++;
-  if (screen == SCR_KESSLER) lastDrawMs = 0;
+  if (!K.net) return;
+  const uint32_t now = millis();
+  if (K.net == 1 && !K.netHelloAcked) {
+    const uint32_t cad = (K.helloTries < 15) ? 1000 : 3000;
+    if (!K.netLastTx || now - K.netLastTx >= cad) {
+      uint8_t body[4] = { (uint8_t)(K.netSeed & 0xFF), (uint8_t)(K.netSeed >> 8),
+                          K.gravSel, K.playTo };
+      kessNetSend(KES_HELLO, body, 4);
+      K.netLastTx = now; K.helloTries++;
+      if (screen == SCR_KESSLER) lastDrawMs = 0;
+    }
+  }
+  if (K.pendLen && timeReached(now, K.pendNext)) {
+    if (K.pendTries >= 12) {
+      K.pendLen = 0;                        // give up loudly, not silently
+      setStatus("KESSLER: peer not responding", 4000, SEV_WARN);
+    } else {
+      kessNetSend(KES_FIRE, K.pendFire, K.pendLen);
+      K.pendNext = now + 1500; K.pendTries++;
+    }
+  }
 }
 
 
@@ -45371,7 +47778,8 @@ void App::kessNetHost() {
   if (!lora.ready()) { setStatus("LoRa radio not ready", 4000, SEV_WARN); return; }
   K.net = 1; K.mePlayer = 0;
   K.netSeed = (uint16_t)esp_random(); if (!K.netSeed) K.netSeed = 1;
-  K.netHelloAcked = false; K.netLastTx = 0;
+  if (K.netSeed == 0xFFFF) K.netSeed = 0xFFFE;   // 0xFFFF = "invite me" sentinel
+  K.netHelloAcked = false; K.netLastTx = 0; K.helloTries = 0;
   strncpy(K.netPeer, "waiting", sizeof(K.netPeer) - 1);
   setStatus("Hosting KESSLER - waiting for guest...");
 }
@@ -45451,11 +47859,14 @@ void App::kessFire() {
   K.shooter = K.turn;                          // pin the footer to the actual shooter
   K.tPrev = 0;
   if (K.net && K.turn == K.mePlayer && !kessNetReplaying) {
-    uint8_t body[6] = { K.mePlayer,
+    K.fireSeq++;                            // per-shot sequence for dedup + ack
+    uint8_t body[7] = { K.mePlayer,
                         (uint8_t)(K.angle[K.turn] & 0xFF), (uint8_t)(K.angle[K.turn] >> 8),
                         (uint8_t)(K.vel[K.turn] & 0xFF),   (uint8_t)(K.vel[K.turn] >> 8),
-                        (uint8_t)K.wind };
-    kessNetSend(KES_FIRE, body, 6);
+                        (uint8_t)K.wind, K.fireSeq };
+    kessNetSend(KES_FIRE, body, 7);
+    memcpy(K.pendFire, body, 7); K.pendLen = 7;      // resend until KES_ACK
+    K.pendNext = millis() + 1500; K.pendTries = 0;
   }
   sfx(880, 60);                                // the throw chirp
 }
@@ -45477,6 +47888,17 @@ void App::keyKessler(char c, bool enter, bool back) {
       if (c >= '1' && c <= '9') { K.playTo = (uint8_t)(c - '0'); lastDrawMs = 0; return; }
       if (c == 'g') { K.gravSel = (uint8_t)((K.gravSel + 1) % 3); lastDrawMs = 0; return; }
       if (c == 'n') { kessNetHost(); lastDrawMs = 0; return; }   // host over LoRa
+      if (c == 'j') {                                            // ask a waiting host to invite us
+        // Robustness pass: a guest no longer has to be listening when the
+        // host's beacon happens to fire -- 'j' broadcasts the 0xFFFF "invite
+        // me" sentinel and any waiting host re-beacons immediately. Passive
+        // joining still works too, since the beacon now runs forever.
+        if (!lora.ready()) { setStatus("LoRa radio not ready", 3000, SEV_WARN); return; }
+        uint8_t body[4] = { 0xFF, 0xFF, 0, 0 };
+        kessNetSend(KES_HELLO, body, 4);
+        setStatus("Join request sent - listening...");
+        return;
+      }
       if (enter) { K.net = 0; K.wins[0] = K.wins[1] = 0; K.turn = 0; kessNewRound(); lastDrawMs = 0; }
       return;
     case 1: {                                          // aim: a two-field form
@@ -45510,8 +47932,8 @@ void App::keyKessler(char c, bool enter, bool back) {
     case 2: return;                                    // in flight: no keys
     case 3: return;                                    // impact anim
     case 4:                                            // round over
-      if (K.net) {                                     // netplay: SYNC already rebuilt
-        return;                                        // both sides; nothing to do here
+      if (K.net) {                                     // netplay never parks here now --
+        return;                                        // the phase-3 transition is local
       }
       if (enter) { K.turn = (uint8_t)((K.turn + 1) & 1); kessNewRound(); lastDrawMs = 0; }
       return;
@@ -45562,7 +47984,7 @@ void App::drawKessler() {
       canvas.setCursor(30, 116);
       canvas.print(K.netHelloAcked ? "guest joined - starting..." : "hosting: waiting for guest");
     }
-    footer("1-9 rounds  g grav  ENTER  n LoRa host");
+    footer("1-9  g grav  ENTER  n host  j join");
     return;
   }
 
@@ -45756,12 +48178,30 @@ void App::drawKessler() {
       K.kick = true;                       // paint the next phase without a keypress
       if (K.impKind) {
         uint8_t winner = (K.impKind == 1) ? 1 : 0;
-        // Net: the shooter announces the authoritative round result once.
+        // Net: the shooter announces the round result once -- but ONLY as score
+        // reconciliation. The round TRANSITION is local and symmetric: both ends
+        // ran the identical simulation to get here, so both can advance turn,
+        // seed and phase themselves. The old design split the transition across
+        // the wire (SYNC receiver rebuilt instantly; sender parked in phase 4
+        // where net-ENTER was ignored) -- when the SENDER was the loser due to
+        // open the next round, it was frozen while the receiver waited for its
+        // shot: both ends waiting for the peer, the bench-reported deadlock.
+        // And the sender's escape path ran the LOCAL kessNewRound (random
+        // terrain, seed not advanced) -- divergence even without the freeze.
         if (K.net && K.shooter == K.mePlayer) {
           uint8_t body[3] = { winner, K.wins[0], K.wins[1] };
           kessNetSend(KES_SYNC, body, 3);
         }
-        K.phase = (K.wins[winner] >= K.playTo) ? 5 : 4;
+        if (K.net) {
+          if (K.wins[winner] >= K.playTo) K.phase = 5;
+          else {
+            K.turn = (uint8_t)((winner + 1) & 1);      // loser opens, both ends agree
+            kessNetNewRound();                          // shared seed, advanced once
+            K.phase = 1; K.field = 0; K.bufN = 0;
+          }
+        } else {
+          K.phase = (K.wins[winner] >= K.playTo) ? 5 : 4;
+        }
       } else {
         K.turn = (uint8_t)((K.shooter + 1) & 1);
         K.phase = 1; K.field = 0; K.bufN = 0;
@@ -48065,7 +50505,15 @@ bool App::ao7SiteElevOk(const char* grid, time_t t, double minEl, Predictor& p) 
   return L.el >= minEl;
 }
 
+
+// 0.9.73 RAM pass: lazy allocator for the AO-7 observation buffers.
+bool App::ao7ObsAlloc() {
+  if (!ao7Obs) ao7Obs = (Ao7Obs*)calloc(1, sizeof(Ao7Obs));
+  return ao7Obs != nullptr;
+}
+
 int App::ao7LoadObsCache() {
+  if (!ao7ObsAlloc()) return 0;
   if (!Store::ready()) return 0;
   File f = Store::fs().open(FILE_AO7OBS, "r");
   if (!f) return 0;
@@ -48086,9 +50534,9 @@ int App::ao7LoadObsCache() {
     if (now && t > now + 3600) continue;                // clock skew guard
     bool dup = false;                                   // exact (time, packed-mode) match
     for (int i = 0; i < ao7NObs; ++i)
-      if (ao7ObsT[i] == t && ao7ObsMode[i] == (uint8_t)m) { dup = true; break; }
+      if (ao7Obs->t[i] == t && ao7Obs->mode[i] == (uint8_t)m) { dup = true; break; }
     if (dup) continue;
-    ao7ObsT[ao7NObs] = t; ao7ObsMode[ao7NObs] = (uint8_t)m; ao7NObs++;
+    ao7Obs->t[ao7NObs] = t; ao7Obs->mode[ao7NObs] = (uint8_t)m; ao7NObs++;
     if (m & 0x02) ao7NNeg++; else ao7NPos++;
     added++;
   }
@@ -48097,6 +50545,7 @@ int App::ao7LoadObsCache() {
 }
 
 void App::ao7SaveObsCache() {
+  if (!ao7Obs) return;
   if (!Store::ready() || ao7NObs <= 0) return;
   File f = Store::fs().open(FILE_AO7TMP, "w");
   if (!f) return;
@@ -48105,14 +50554,15 @@ void App::ao7SaveObsCache() {
   // never contribute again (ao7Estimate would filter them anyway) and would grow the file
   // without bound across seasons.
   for (int i = 0; i < ao7NObs; ++i) {
-    if (ao7SinceT > 0 && ao7ObsT[i] < ao7SinceT) continue;
-    f.printf("%lu,%u\n", (unsigned long)ao7ObsT[i], (unsigned)ao7ObsMode[i]);
+    if (ao7SinceT > 0 && ao7Obs->t[i] < ao7SinceT) continue;
+    f.printf("%lu,%u\n", (unsigned long)ao7Obs->t[i], (unsigned)ao7Obs->mode[i]);
   }
   f.close();
   Store::promoteFileTransactionally(FILE_AO7OBS, FILE_AO7TMP);
 }
 
 void App::fetchAo7Reports() {
+  if (!ao7ObsAlloc()) { setStatus("Out of memory", 2500, SEV_ERR); return; }
   ao7NObs = 0; ao7NA = 0; ao7NB = 0; ao7NPos = 0; ao7NNeg = 0;
   ao7NSwitch = 0; ao7Note = ""; ao7CacheN = 0; ao7Trunc = false;
   ao7ModeNow = -1; ao7ToSwitchS = 0; ao7NextSwitchT = 0;
@@ -48233,7 +50683,7 @@ void App::fetchAo7Reports() {
                   keep = geoOk && gs.length() && ao7SiteElevOk(gs.c_str(), rt, 10.0, pred);
                   if (keep) { packed |= 0x02; ao7NNeg++; }
                 }
-                if (keep) { ao7ObsT[slot] = rt; ao7ObsMode[slot] = packed; slot++; counted++; }
+                if (keep) { ao7Obs->t[slot] = rt; ao7Obs->mode[slot] = packed; slot++; counted++; }
               }
             }
             oi = 0;
@@ -48269,7 +50719,7 @@ void App::fetchAo7Reports() {
   for (int m = 0; m < 2; ++m) {
     int b = m * AO7_PERMODE, cnt = (m == 0) ? (cA > 0 ? cA : 0) : (cB > 0 ? cB : 0);
     for (int i = 0; i < cnt; ++i) {
-      if (n != b + i) { ao7ObsT[n] = ao7ObsT[b + i]; ao7ObsMode[n] = ao7ObsMode[b + i]; }
+      if (n != b + i) { ao7Obs->t[n] = ao7Obs->t[b + i]; ao7Obs->mode[n] = ao7Obs->mode[b + i]; }
       n++;
     }
   }
@@ -48298,6 +50748,7 @@ void App::fetchAo7Reports() {
 // Steps: exclude pre-illumination reports -> sort -> coarse grid search over (period,
 // phase, parity) -> local refinement -> phase-uncertainty band -> project.
 void App::ao7Estimate() {
+  if (!ao7Obs) return;
   ao7NSwitch = 0; ao7NSwitchAll = 0; ao7PeriodS = 0; ao7T0 = 0; ao7FitRmsS = 0;
   ao7ModeNow = -1; ao7ToSwitchS = 0; ao7NextSwitchT = 0; ao7ExclN = 0; ao7UsedRecent = false;
   ao7NA = 0; ao7NB = 0; ao7AgreePct = 0;
@@ -48305,9 +50756,9 @@ void App::ao7Estimate() {
 
   // 1. insertion-sort observations by time (N <= 300, fine).
   for (int i = 1; i < ao7NObs; ++i) {
-    time_t kt = ao7ObsT[i]; uint8_t km = ao7ObsMode[i]; int j = i - 1;
-    while (j >= 0 && ao7ObsT[j] > kt) { ao7ObsT[j + 1] = ao7ObsT[j]; ao7ObsMode[j + 1] = ao7ObsMode[j]; j--; }
-    ao7ObsT[j + 1] = kt; ao7ObsMode[j + 1] = km;
+    time_t kt = ao7Obs->t[i]; uint8_t km = ao7Obs->mode[i]; int j = i - 1;
+    while (j >= 0 && ao7Obs->t[j] > kt) { ao7Obs->t[j + 1] = ao7Obs->t[j]; ao7Obs->mode[j + 1] = ao7Obs->mode[j]; j--; }
+    ao7Obs->t[j + 1] = kt; ao7Obs->mode[j + 1] = km;
   }
 
   // 2. illumination-window cutoff: drop everything older than the current continuous-sun
@@ -48315,15 +50766,15 @@ void App::ao7Estimate() {
   ao7SinceT = ao7IlluminationSinceT();
   int startIdx = 0;
   if (ao7SinceT > 0)
-    while (startIdx < ao7NObs && ao7ObsT[startIdx] < ao7SinceT) ++startIdx;
+    while (startIdx < ao7NObs && ao7Obs->t[startIdx] < ao7SinceT) ++startIdx;
   ao7ExclN = startIdx;
   if (startIdx >= ao7NObs) { ao7Note = "No reports since illumination began"; return; }
 
   const int N0 = startIdx, N1 = ao7NObs;          // usable range [N0, N1)
   ao7NA = 0; ao7NB = 0; ao7NPos = 0; ao7NNeg = 0;
   for (int i = N0; i < N1; ++i) {
-    if (ao7ObsMode[i] & 0x02) ao7NNeg++; else ao7NPos++;
-    if ((ao7ObsMode[i] & 0x01) == 0) ao7NA++; else ao7NB++;
+    if (ao7Obs->mode[i] & 0x02) ao7NNeg++; else ao7NPos++;
+    if ((ao7Obs->mode[i] & 0x01) == 0) ao7NA++; else ao7NB++;
   }
   if (ao7NPos == 0) { ao7ModeNow = -1; ao7Note = "No positive reports to fit"; return; }
 
@@ -48336,15 +50787,15 @@ void App::ao7Estimate() {
   //    body of negatives tighten a long gap.
   const double W_POS = 1.0, W_NEG = 0.35;
   double wTotal = 0;
-  for (int i = N0; i < N1; ++i) wTotal += (ao7ObsMode[i] & 0x02) ? W_NEG : W_POS;
+  for (int i = N0; i < N1; ++i) wTotal += (ao7Obs->mode[i] & 0x02) ? W_NEG : W_POS;
 
   auto score = [&](double P, double t0, int flip) -> double {
     double sc = 0;
     for (int i = N0; i < N1; ++i) {
-      double k = floor(((double)ao7ObsT[i] - t0) / P);
+      double k = floor(((double)ao7Obs->t[i] - t0) / P);
       int predMode = (((long)k) & 1) ^ flip;
-      int obsMode  = ao7ObsMode[i] & 0x01;
-      if (ao7ObsMode[i] & 0x02) { if (predMode != obsMode) sc += W_NEG; }   // negative
+      int obsMode  = ao7Obs->mode[i] & 0x01;
+      if (ao7Obs->mode[i] & 0x02) { if (predMode != obsMode) sc += W_NEG; }   // negative
       else                      { if (predMode == obsMode) sc += W_POS; }   // positive
     }
     return sc;
@@ -48357,7 +50808,7 @@ void App::ao7Estimate() {
   const double PMIN = 12.0 * 3600.0, PMAX = 30.0 * 3600.0;
   const double PSTEP_C = 300.0, TSTEP_C = 1800.0;      // coarse: 5 min period, 30 min phase
   const double PSTEP_F = 30.0,  TSTEP_F = 60.0;        // fine:  30 s period, 1 min phase
-  const double tRef = (double)ao7ObsT[N0];
+  const double tRef = (double)ao7Obs->t[N0];
 
   double bestP = PMIN, bestT0 = tRef, bestSc = -1; int bestFlip = 0;
   for (double P = PMIN; P <= PMAX; P += PSTEP_C) {
@@ -48411,8 +50862,8 @@ void App::ao7Estimate() {
   int ns = 0;
   int lastPosIdx = -1;
   for (int i = N0; i < N1; ++i) {
-    if (ao7ObsMode[i] & 0x02) continue;                       // positives only
-    if (lastPosIdx >= 0 && (ao7ObsMode[i] & 0x01) != (ao7ObsMode[lastPosIdx] & 0x01)) ns++;
+    if (ao7Obs->mode[i] & 0x02) continue;                       // positives only
+    if (lastPosIdx >= 0 && (ao7Obs->mode[i] & 0x01) != (ao7Obs->mode[lastPosIdx] & 0x01)) ns++;
     lastPosIdx = i;
   }
   ao7NSwitch = ns; ao7NSwitchAll = ns;
@@ -48618,6 +51069,7 @@ namespace {
 }
 
 void App::printDebGrp() {
+  if (!dgBuf) { Printer::line("No debris-group data loaded."); return; }
   if (dgState != 1 || dgN == 0) { Printer::line("(no screening run)"); return; }
   SatEntry* A = activeSat();
   Printer::title("Debris group screen");
@@ -48632,10 +51084,10 @@ void App::printDebGrp() {
   }
   Printer::line("");
   for (int i = 0; i < dgN; ++i) {
-    struct tm tv; time_t tt = dgT[i]; gmtime_r(&tt, &tv);
+    struct tm tv; time_t tt = dgBuf->t[i]; gmtime_r(&tt, &tv);
     char b[64];
     snprintf(b, sizeof(b), "%-14.14s %02d:%02dz  %.0f km",
-             dgSat[i].name, tv.tm_hour, tv.tm_min, (double)dgMiss[i]);
+             dgBuf->sat[i].name, tv.tm_hour, tv.tm_min, (double)dgBuf->miss[i]);
     Printer::line(b);
   }
   Printer::line("");
@@ -48643,7 +51095,495 @@ void App::printDebGrp() {
   Printer::line("NOT collision avoidance.");
 }
 
+
+// ===========================================================================
+//  Space-Track orbital history (0.9.73)
+// ===========================================================================
+// The tool answers "how has this orbit CHANGED": it fetches the satellite's GP
+// history from space-track.org (gp_history class, CSV, derived values served by
+// the API so nothing is converted on-device), decimates the stream into
+// ST_BINS time bins, and plots one metric with the CURRENT loaded elements as a
+// marker on the right edge plus a delta readout. Spans run from 30 days to the
+// full archive ("max" pre-queries the earliest epoch so the axis starts where
+// the data does). Requests ask for exactly the needed predicates in CSV, so a
+// year is ~45 KB streamed and never held whole; login is one form POST whose
+// session cookie is replayed on the query.
+
+static const int32_t ST_SPANS[] = { 30, 90, 180, 365, 730, 1825, 3650, 0 }; // 0 = max
+static const int     ST_SPAN_N  = 8;
+static const char* const ST_SPAN_NAMES[] =
+  { "30 d", "90 d", "180 d", "1 yr", "2 yr", "5 yr", "10 yr", "max (all)" };
+static const char* const ST_METRIC_NAMES[] =
+  { "semi-major axis", "period", "apogee", "perigee", "inclination", "eccentricity", "B*" };
+static const char* const ST_METRIC_UNITS[] =
+  { "km", "min", "km", "km", "deg", "", "/ER" };
+// metric index -> CSV column (CSV: sma ecc inc period apo peri bstar)
+static const uint8_t ST_M2C[] = { 0, 3, 4, 5, 2, 1, 6 };
+
+static void stUrlEnc(const char* in, String& out) {
+  static const char* hex = "0123456789ABCDEF";
+  for (const char* p = in; *p; ++p) {
+    const char c = *p;
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '~') out += c;
+    else { out += '%'; out += hex[(uint8_t)c >> 4]; out += hex[(uint8_t)c & 0xF]; }
+  }
+}
+
+// "YYYY-MM-DD HH:MM:SS[.ffffff]" (Space-Track CSV uses a SPACE separator;
+// OMM/JSON uses 'T' -- fifth bench: the T-only parse zeroed every epoch, so
+// every row failed the window filter and every span reported "no rows") ->
+// Unix UTC. Days-from-civil, no tm/mktime (mktime applies the local zone;
+// Space-Track epochs are UTC by definition). %*c eats either separator, and
+// a leading quote is skipped in case the CSV ever quotes the field.
+static time_t stParseEpoch(const char* s) {
+  while (*s == '"' || *s == ' ') s++;
+  int Y, M, D, h, m; float sec;
+  if (sscanf(s, "%d-%d-%d%*c%d:%d:%f", &Y, &M, &D, &h, &m, &sec) != 6) return 0;
+  const int y = Y - (M <= 2);
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153 * (unsigned)(M + (M > 2 ? -3 : 9)) + 2) / 5 + D - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  const long days = (long)era * 146097 + (long)doe - 719468;
+  return (time_t)days * 86400 + h * 3600 + m * 60 + (int)sec;
+}
+
+// time_t -> "YYYY-MM-DD" (UTC), civil-from-days (Howard Hinnant's algorithm).
+static void stFmtDate(time_t t, char* out, size_t outN) {
+  const long days = (long)(t / 86400);
+  long z = days + 719468;
+  const long era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned long doe = (unsigned long)(z - era * 146097);
+  const unsigned long yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+  const long y = (long)yoe + era * 400;
+  const unsigned long doy = doe - (365*yoe + yoe/4 - yoe/100);
+  const unsigned long mp = (5*doy + 2)/153;
+  const unsigned long d = doy - (153*mp+2)/5 + 1;
+  const unsigned long m = mp + (mp < 10 ? 3 : -9);
+  snprintf(out, outN, "%04ld-%02lu-%02lu", y + (m <= 2), m, d);
+}
+
+bool App::stHistAlloc() {
+  if (!stHist) stHist = (StHist*)calloc(1, sizeof(StHist));
+  return stHist != nullptr;
+}
+
+// Space-Track transport, third revision -- this time MEASURED live before
+// writing (curl from the build sandbox, 2026-08):
+//   * The query-with-login single POST is RETIRED server-side: it now returns
+//     400 "Single command deprecated. See API help for cookie use." -- the
+//     second cut's 400s were this, not encoding.
+//   * The login sets exactly ONE cookie (chocolatechip=...), so HTTPClient's
+//     one-header-per-name Set-Cookie capture is sufficient after all.
+//   * FAILED credentials return HTTP 200 with body {"Login":"Failed"} -- the
+//     silent path behind the first cut's uniform "no rows". It is now checked.
+//   * An unauthenticated/expired-session query returns 500 with an HTML page.
+// So: POST login (validate the body), capture the cookie, GET the query with
+// the cookie, and the CSV "EPOCH" header row remains the final validation.
+static bool stLoginCookie(WiFiClientSecure& tls, const char* user, const char* pass,
+                          String& cookie, String& err) {
+  HTTPClient h;
+  if (!h.begin(tls, "https://www.space-track.org/ajaxauth/login")) { err = "begin() failed"; return false; }
+  const char* keys[] = { "Set-Cookie" };
+  h.collectHeaders(keys, 1);
+  h.setTimeout(15000);
+  h.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String body = "identity="; stUrlEnc(user, body);
+  body += "&password=";      stUrlEnc(pass, body);
+  const int code = h.POST(body);
+  if (code != 200) { err = String("login HTTP ") + code; h.end(); return false; }
+  String resp = h.getString();
+  String sc = h.header((size_t)0);
+  h.end();
+  if (resp.indexOf("\"Login\":\"Failed\"") >= 0) {
+    err = "Space-Track login failed - check user/pass";
+    return false;
+  }
+  const int semi = sc.indexOf(';');
+  if (semi > 0) sc = sc.substring(0, semi);
+  sc.trim();
+  if (!sc.length()) { err = "no session cookie in reply"; return false; }
+  cookie = sc;
+  return true;
+}
+
+// GET the query with the session cookie; returns true with `h` streaming.
+static bool stQueryGet(HTTPClient& h, WiFiClientSecure& tls, const String& cookie,
+                       const String& queryUrl, String& err) {
+  // HTTP/1.0 on purpose: with 1.1 the server answers CHUNKED, and getStreamPtr()
+  // hands over the raw stream with the chunk framing still in it -- the first
+  // "line" is a hex chunk size, which the bench saw verbatim as the error
+  // "Space-Track: 1e86" (0x1e86 = 7814 bytes of perfectly good CSV behind it).
+  // 1.0 forbids chunking, so the raw stream is pure body. The login path keeps
+  // 1.1: getString() de-chunks internally.
+  h.useHTTP10(true);
+  if (!h.begin(tls, queryUrl)) { err = "begin() failed"; return false; }
+  // Fifth bench: HTTP -11 (read timeout) on the 10-year span -- a large
+  // gp_history query makes the SERVER think for longer than the default 5 s
+  // before the first byte. Give the reply 45 s to start.
+  h.setTimeout(45000);
+  h.addHeader("Cookie", cookie);
+  const int code = h.GET();
+  if (code == 500) { err = "session rejected (login expired?)"; h.end(); return false; }
+  if (code != 200) { err = String("HTTP ") + code; h.end(); return false; }
+  return true;
+}
+
+void App::stComputeCurrent() {
+  stHist->haveCur = false;
+  if (stSatIdx < 0 || stSatIdx >= (int)db.count()) return;
+  const SatEntry& e = db.at(stSatIdx);
+  if (e.meanMotion <= 0) return;
+  const double n = e.meanMotion;                                  // rev/day
+  const double a = cbrt(398600.4418 / pow(n * 2.0 * PI / 86400.0, 2.0));
+  stHist->cur[0] = (float)a;
+  stHist->cur[1] = (float)(1440.0 / n);
+  stHist->cur[2] = (float)(a * (1.0 + e.ecc) - 6378.137);
+  stHist->cur[3] = (float)(a * (1.0 - e.ecc) - 6378.137);
+  stHist->cur[4] = e.incl;
+  stHist->cur[5] = e.ecc;
+  stHist->cur[6] = e.bstar;
+  // CSV column order for cur[]: sma ecc inc period apo peri bstar
+  const float sma = stHist->cur[0], per = stHist->cur[1], apo = stHist->cur[2],
+              pge = stHist->cur[3], inc = stHist->cur[4], ecc = stHist->cur[5],
+              bst = stHist->cur[6];
+  stHist->cur[0] = sma; stHist->cur[1] = ecc; stHist->cur[2] = inc;
+  stHist->cur[3] = per; stHist->cur[4] = apo; stHist->cur[5] = pge;
+  stHist->cur[6] = bst;
+  stHist->haveCur = true;
+}
+
+bool App::stFetch(String& err) {
+  if (!stHistAlloc()) { err = "Out of memory"; return false; }
+  if (stSatIdx < 0 || stSatIdx >= (int)db.count()) { err = "No satellite selected"; return false; }
+  const SatEntry& e = db.at(stSatIdx);
+  memset(stHist->bin, 0, sizeof(stHist->bin));
+  stHist->rows = 0;
+  stHist->norad = e.norad;
+  strlcpy(stHist->name, e.name, sizeof(stHist->name));
+
+  if (!cfg.stUser[0] || !cfg.stPass[0]) { err = "Set user (u) and password (w) first"; return false; }
+  WiFiClientSecure tls; tls.setInsecure();
+  HTTPClient h;
+  strlcpy(stStatus, "logging in...", sizeof(stStatus)); draw();
+  String cookie;
+  if (!stLoginCookie(tls, cfg.stUser, cfg.stPass, cookie, err)) return false;
+  time_t now = time(nullptr);
+  if (now < 1000000000) now = (time_t)1755000000;   // clock not set: a sane 2025 fallback
+  const int32_t spanDays = ST_SPANS[stSpanIdx];
+  time_t t0;
+  if (spanDays > 0) {
+    t0 = now - (time_t)spanDays * 86400;
+  } else {
+    // "max": ask for the earliest epoch first so the axis starts where data does.
+    strlcpy(stStatus, "finding earliest epoch...", sizeof(stStatus)); draw();
+    // Percent-encoded operators here: this URL rides the GET request line,
+    // where a raw space is illegal. (In the retired POST mode it was the
+    // reverse -- the form encoder needed raw characters. Both lessons kept.)
+    String u1 = String("https://www.space-track.org/basicspacedata/query/class/gp_history/"
+                       "NORAD_CAT_ID/") + e.norad +
+                "/orderby/EPOCH%20asc/limit/1/format/csv/predicates/EPOCH";
+    if (!stQueryGet(h, tls, cookie, u1, err)) return false;
+    String r = h.getString(); h.end();
+    r.trim();
+    // Expected: "EPOCH\n2019-03-01T...". Anything else is an auth/query error --
+    // surface its first characters instead of a generic "no rows".
+    if (!r.startsWith("EPOCH")) {
+      err = String("Space-Track: ") + (r.length() ? r.substring(0, 34) : String("empty reply"));
+      return false;
+    }
+    int nl = r.indexOf('\n');
+    String line = (nl >= 0) ? r.substring(nl + 1) : String();
+    line.trim();
+    t0 = line.length() ? stParseEpoch(line.c_str()) : 0;
+    if (!t0) { err = "no history rows for this object"; return false; }
+  }
+  stHist->t0 = t0; stHist->t1 = now;
+
+  // date-only filter (Space-Track accepts >YYYY-MM-DD)
+  char since[16];
+  stFmtDate(t0, since, sizeof(since));
+
+  String url = String("https://www.space-track.org/basicspacedata/query/class/gp_history/"
+                      "NORAD_CAT_ID/") + e.norad +
+               "/EPOCH/%3E" + since +
+               "/orderby/EPOCH%20asc/format/csv/predicates/"
+               "EPOCH,SEMIMAJOR_AXIS,ECCENTRICITY,INCLINATION,PERIOD,APOAPSIS,PERIAPSIS,BSTAR";
+  strlcpy(stStatus, "fetching history...", sizeof(stStatus)); draw();
+  if (!stQueryGet(h, tls, cookie, url, err)) return false;
+
+  WiFiClient* sp = h.getStreamPtr();
+  char line[224]; size_t ll = 0; bool first = true;
+  const double range = (double)(stHist->t1 - stHist->t0) + 1.0;
+  uint32_t lastPaint = millis();
+  uint32_t deadline = millis() + 90000UL;   // whole-transfer ceiling
+  while (millis() < deadline) {
+    if (!sp->available()) {
+      if (!h.connected() && !sp->available()) break;
+      delay(2); continue;
+    }
+    const int ci = sp->read();
+    if (ci < 0) continue;
+    const char c = (char)ci;
+    if (c != '\n') { if (ll < sizeof(line) - 1) line[ll++] = c; continue; }
+    line[ll] = 0; ll = 0;
+    if (first) {
+      first = false;
+      // The header row doubles as the auth check in cookie-less mode.
+      if (strncmp(line, "EPOCH", 5) != 0) {
+        char snip[40]; strlcpy(snip, line, sizeof(snip));
+        err = String("Space-Track: ") + (snip[0] ? snip : "empty reply");
+        h.end();
+        return false;
+      }
+      continue;
+    }
+    if (!line[0]) continue;
+    // parse: epoch,sma,ecc,inc,period,apo,peri,bstar
+    char* f[8]; int nf = 0; char* pch = line;
+    f[nf++] = pch;
+    for (char* q = line; *q && nf < 8; ++q) if (*q == ',') { *q = 0; f[nf++] = q + 1; }
+    if (nf < 8) continue;
+    const time_t te = stParseEpoch(f[0]);
+    if (te < stHist->t0 || te > stHist->t1) continue;
+    int bi = (int)(((double)(te - stHist->t0)) * ST_BINS / range);
+    if (bi < 0) bi = 0; if (bi >= ST_BINS) bi = ST_BINS - 1;
+    StBin& b = stHist->bin[bi];
+    for (int k = 0; k < ST_COLS; ++k) {
+      const char* cell = f[k + 1];
+      // Quoted-CSV defense (seventh bench): gp_history may quote its fields,
+      // and atof("\"7826.43\"") is 0.0 -- which the positivity guard then
+      // discards as "no data" (and before the guard existed, it zero-poisoned
+      // the bins: the photo's vmin=0). Skip quotes; a cell that is only
+      // quotes/CR is empty.
+      while (*cell == '"') cell++;
+      if (!cell[0] || cell[0] == '\r') continue;   // empty cell: not a zero
+      const float v = (float)atof(cell);
+      // sma(0) and period(3) are strictly positive; a non-positive value there
+      // is a conversion artifact, not data.
+      if ((k == 0 || k == 3) && v <= 0) continue;
+      if (b.n[k] < 65535) { b.sum[k] += v; b.n[k]++; }
+    }
+    stHist->rows++;
+    if (millis() - lastPaint > 700) {
+      lastPaint = millis();
+      snprintf(stStatus, sizeof(stStatus), "fetching... %lu rows", (unsigned long)stHist->rows);
+      draw();
+    }
+  }
+  h.end();
+  if (!stHist->rows) { err = "no rows in that window"; return false; }
+  stComputeCurrent();
+  snprintf(stStatus, sizeof(stStatus), "%lu rows binned", (unsigned long)stHist->rows);
+  return true;
+}
+
+void App::enterStHist() {
+  if (!stHistAlloc()) { setStatus("Out of memory", 2500, SEV_ERR); return; }
+  if (stSatIdx < 0) {
+    const int ti = trackedNorad ? db.indexOfNorad(trackedNorad) : -1;
+    stSatIdx = (ti >= 0) ? ti : 0;
+  }
+  stStatus[0] = 0;
+  stSel = 0;
+  screen = SCR_STHIST; lastDrawMs = 0;
+}
+
+void App::drawStHist() {
+  header("Space-Track history");
+  canvas.setTextSize(1);
+  if (!stHist) { footer("` back"); return; }
+  const bool haveDb = db.count() > 0 && stSatIdx >= 0 && stSatIdx < (int)db.count();
+
+  // selector rows
+  const char* satName = haveDb ? db.at(stSatIdx).name : "(no satellites loaded)";
+  const uint32_t nor  = haveDb ? db.at(stSatIdx).norad : 0;
+  struct Row { const char* lbl; String val; } rows[3] = {
+    { "Sat",    haveDb ? (String(satName) + " #" + nor) : String("(none)") },
+    { "Span",   String(ST_SPAN_NAMES[stSpanIdx]) },
+    { "Metric", String(ST_METRIC_NAMES[stMetric]) },
+  };
+  for (int i = 0; i < 3; ++i) {
+    canvas.setTextColor(stSel == i ? CL_BLACK : CL_WHITE, stSel == i ? CL_CYAN : CL_BLACK);
+    canvas.setCursor(4, 18 + i * 10);
+    canvas.printf("%-6s %.30s", rows[i].lbl, rows[i].val.c_str());
+  }
+  if (stStatus[0]) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.setCursor(4, 48);
+    canvas.printf("%.39s", stStatus);
+  }
+
+  const int col = ST_M2C[stMetric];
+
+  // ---- table view: every populated bin as "date  value", scrollable -------
+  if (stView == 1) {
+    int idx[ST_BINS]; int nrows = 0;
+    for (int i = 0; i < ST_BINS; ++i)
+      if (stHist->bin[i].n[col]) idx[nrows++] = i;
+    const int VISR = 6;
+    if (stTabScroll > nrows - VISR) stTabScroll = nrows - VISR;
+    if (stTabScroll < 0) stTabScroll = 0;
+    if (!nrows) {
+      canvas.setTextColor(CL_DGREY, CL_BLACK);
+      canvas.setCursor(8, 74); canvas.print("no data - press f to fetch");
+    }
+    for (int r = 0; r < VISR && (stTabScroll + r) < nrows; ++r) {
+      const int i = idx[stTabScroll + r];
+      const time_t tc = stHist->t0 +
+        (time_t)(((double)i + 0.5) * (double)(stHist->t1 - stHist->t0) / ST_BINS);
+      char ds[12]; stFmtDate(tc, ds, sizeof(ds));
+      canvas.setTextColor(CL_WHITE, CL_BLACK);
+      canvas.setCursor(8, 58 + r * 9);
+      canvas.printf("%s  %.6g %s", ds,
+                    stHist->bin[i].sum[col] / stHist->bin[i].n[col],
+                    ST_METRIC_UNITS[stMetric]);
+    }
+    if (nrows > VISR) {
+      canvas.setTextColor(CL_DGREY, CL_BLACK);
+      canvas.setCursor(196, 48);
+      canvas.printf("%d/%d", stTabScroll + 1, nrows);
+    }
+    footer("^v scroll  ,/. metric  t graph  ` back");
+    return;
+  }
+
+  // ---- graph view ----------------------------------------------------------
+  const int PX0 = 8, PX1 = 232, PY0 = 58, PY1 = 108;
+  float vmin = 1e30f, vmax = -1e30f;
+  for (int i = 0; i < ST_BINS; ++i) {
+    if (!stHist->bin[i].n[col]) continue;
+    const float v = stHist->bin[i].sum[col] / stHist->bin[i].n[col];
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+  }
+  const bool have = (vmax >= vmin);
+  if (have && stHist->haveCur) {
+    const float cv = stHist->cur[col];
+    if (cv < vmin) vmin = cv;
+    if (cv > vmax) vmax = cv;
+  }
+  if (have) {
+    if (vmax - vmin < 1e-9f) { vmax += 1e-6f; vmin -= 1e-6f; }
+    canvas.drawRect(PX0 - 2, PY0 - 2, (PX1 - PX0) + 4, (PY1 - PY0) + 4, CL_DGREY);
+    int lx = -1, ly = -1;
+    for (int i = 0; i < ST_BINS; ++i) {
+      if (!stHist->bin[i].n[col]) continue;
+      const float v = stHist->bin[i].sum[col] / stHist->bin[i].n[col];
+      const int x = PX0 + i * (PX1 - PX0) / (ST_BINS - 1);
+      const int y = PY1 - (int)((v - vmin) * (PY1 - PY0) / (vmax - vmin));
+      if (lx >= 0) canvas.drawLine(lx, ly, x, y, CL_GREEN);
+      lx = x; ly = y;
+    }
+    if (stHist->haveCur && stHist->norad == nor) {
+      const float cv = stHist->cur[col];
+      const int cy = PY1 - (int)((cv - vmin) * (PY1 - PY0) / (vmax - vmin));
+      canvas.fillCircle(PX1 + 3, cy, 2, CL_YELLOW);
+      // delta vs the FIRST populated bin: the plain answer to "how much has it moved"
+      float v0 = 0; bool got0 = false;
+      for (int i = 0; i < ST_BINS && !got0; ++i)
+        if (stHist->bin[i].n[col]) { v0 = stHist->bin[i].sum[col] / stHist->bin[i].n[col]; got0 = true; }
+      if (got0) {
+        const float dv = cv - v0;
+        const float days = (float)(stHist->t1 - stHist->t0) / 86400.0f;
+        canvas.setTextColor(CL_YELLOW, CL_BLACK);
+        canvas.setCursor(4, PY1 + 4);
+        if (stMetric <= 3)      // km metrics: show a per-day rate too
+          canvas.printf("now %.2f%s D%+.2f %+.1fm/d", cv, ST_METRIC_UNITS[stMetric],
+                        dv, days > 0 ? dv * 1000.0f / days : 0.0f);
+        else
+          canvas.printf("now %.5f%s D%+.5f", cv, ST_METRIC_UNITS[stMetric], dv);
+      }
+    }
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(PX0 + 2, PY0 + 2);  canvas.printf("%.4g", vmax);
+    canvas.setCursor(PX0 + 2, PY1 - 8);  canvas.printf("%.4g", vmin);
+  } else {
+    canvas.setTextColor(CL_DGREY, CL_BLACK);
+    canvas.setCursor(PX0, 74);
+    canvas.print("no data - press f to fetch");
+  }
+  footer(",/. ^v f fetch t table u/w p ` back");
+}
+
+void App::keyStHist(char c, bool enter, bool back) {
+  if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; return; }
+  if (!stHist) return;
+  if (c == 't') { stView = !stView; stTabScroll = 0; lastDrawMs = 0; return; }
+  if (stView == 1) {                     // table: arrows scroll, ,/. cycle metric
+    if (isUp(c))   { stTabScroll--; lastDrawMs = 0; return; }
+    if (isDown(c)) { stTabScroll++; lastDrawMs = 0; return; }
+    const int td = (c == '.' || isRight(c)) ? 1 : (c == ',' || isLeft(c)) ? -1 : 0;
+    if (td) { stMetric = (stMetric + td + 7) % 7; stTabScroll = 0; lastDrawMs = 0; return; }
+  }
+  if (isUp(c))   { stSel = (stSel + 2) % 3; lastDrawMs = 0; return; }
+  if (isDown(c)) { stSel = (stSel + 1) % 3; lastDrawMs = 0; return; }
+  const int dir = (c == '.' || isRight(c)) ? 1 : (c == ',' || isLeft(c)) ? -1 : 0;
+  if (dir) {
+    if (stSel == 0 && db.count() > 0)
+      stSatIdx = (stSatIdx + dir + (int)db.count()) % (int)db.count();
+    else if (stSel == 1) stSpanIdx = (stSpanIdx + dir + ST_SPAN_N) % ST_SPAN_N;
+    else if (stSel == 2) stMetric = (stMetric + dir + 7) % 7;
+    lastDrawMs = 0; return;
+  }
+  if (c == 'g') {           // jump to the currently tracked satellite
+    const int ti = trackedNorad ? db.indexOfNorad(trackedNorad) : -1;
+    if (ti >= 0) { stSatIdx = ti; lastDrawMs = 0; }
+    return;
+  }
+  if (c == 'u') { editTarget = 530; editTitle = "Space-Track user"; editBuf = cfg.stUser; screen = SCR_EDIT; return; }
+  if (c == 'w') { editTarget = 531; editTitle = "Space-Track password"; editBuf = cfg.stPass; screen = SCR_EDIT; return; }
+  if (c == 'f' || enter) {
+    if (!net.connected() && !connectWifiCfg()) {
+      strlcpy(stStatus, "no WiFi", sizeof(stStatus)); lastDrawMs = 0; return;
+    }
+    String err;
+    if (!stFetch(err)) { snprintf(stStatus, sizeof(stStatus), "%.60s", err.c_str());
+                         setStatus(stStatus, 3500, SEV_WARN); }
+    lastDrawMs = 0; return;
+  }
+  if (c == 'p') { printStHist(); return; }
+}
+
+void App::printStHist() {
+  if (!stHist || !stHist->rows) { setStatus("Nothing fetched", 2000); return; }
+  Printer::Sinks sk;
+  sk.host        = cfg.printerHost[0] ? cfg.printerHost : nullptr;
+  sk.port        = cfg.printerPort;
+  sk.printerCols = cfg.printerCols;
+  sk.format      = cfg.printFormat;
+  sk.transport   = cfg.printTransport;
+  sk.paper       = cfg.printPaper;
+  sk.toSerial    = cfg.printToSerial;
+  sk.toFile      = cfg.printToFile;
+  sk.fileTitle   = "sthist";
+  if (!sk.host && !sk.toSerial && !sk.toFile) { setStatus("No print output on (Settings>Network)"); return; }
+  setStatus("Printing..."); draw();
+  if (!Printer::begin(sk)) { setStatus("No print sink opened"); return; }
+  Printer::title("SPACE-TRACK HISTORY");
+  Printer::line(String(stHist->name) + "  #" + stHist->norad);
+  Printer::line(String("span: ") + ST_SPAN_NAMES[stSpanIdx] + "  rows: " + stHist->rows);
+  Printer::line("first -> last (binned means):");
+  for (int m = 0; m < 7; ++m) {
+    const int col = ST_M2C[m];
+    float v0 = 0, v1 = 0; bool g0 = false, g1 = false;
+    for (int i = 0; i < ST_BINS; ++i)
+      if (stHist->bin[i].n[col]) { if (!g0) { v0 = stHist->bin[i].sum[col]/stHist->bin[i].n[col]; g0 = true; }
+                              v1 = stHist->bin[i].sum[col]/stHist->bin[i].n[col]; g1 = true; }
+    if (!g0 || !g1) continue;
+    char b[64];
+    snprintf(b, sizeof(b), "%-14s %.6g -> %.6g", ST_METRIC_NAMES[m], v0, v1);
+    Printer::line(b);
+  }
+  Printer::end();
+  setStatus("Printed");
+}
+
+
 bool App::dgFetchAndScreen(String& err) {
+  if (!dgBuf) dgBuf = (DgBuf*)calloc(1, sizeof(DgBuf));
+  if (!dgBuf) { err = "Out of memory"; return false; }
   SatEntry* A = activeSat();
   if (!A || A->meanMotion <= 0) { err = "No active satellite"; return false; }
   double pA, aA; satBandKm(*A, pA, aA);
@@ -48659,7 +51599,7 @@ bool App::dgFetchAndScreen(String& err) {
   if (!net.fetchGpToFile(url, path)) { err = net.lastErr; return false; }
   dgN = 0;
   { float gapArr[DG_MAX];
-    DgParseCtx ctx{ pA, aA, dgSat, gapArr, 0, DG_MAX };
+    DgParseCtx ctx{ pA, aA, dgBuf->sat, gapArr, 0, DG_MAX };
     SatDb::streamGpFileEntries(path, dgSink, &ctx);
     dgN = ctx.n;
   }
@@ -48668,7 +51608,7 @@ bool App::dgFetchAndScreen(String& err) {
   // coarse-screen each candidate against the active bird: 3 h at 60 s + refine
   time_t t0 = nowUtc();
   const int STEP = 60, WIN = 3 * 3600, NS = WIN / STEP;
-  for (int j = 0; j < dgN; ++j) { dgMiss[j] = 1e9f; dgT[j] = 0; }
+  for (int j = 0; j < dgN; ++j) { dgBuf->miss[j] = 1e9f; dgBuf->t[j] = 0; }
   dgPct = 0;
   for (int k = 0; k <= NS; ++k) {
     time_t t = t0 + (time_t)k * STEP;
@@ -48676,10 +51616,10 @@ bool App::dgFetchAndScreen(String& err) {
     if (!pred.temeStateAt(*A, (double)t, rA, vA)) continue;
     for (int j = 0; j < dgN; ++j) {
       double rB[3], vB[3];
-      if (!pred.temeStateAt(dgSat[j], (double)t, rB, vB)) continue;
+      if (!pred.temeStateAt(dgBuf->sat[j], (double)t, rB, vB)) continue;
       double dx = rA[0]-rB[0], dy = rA[1]-rB[1], dz = rA[2]-rB[2];
       double d = sqrt(dx*dx + dy*dy + dz*dz);
-      if (d < dgMiss[j]) { dgMiss[j] = (float)d; dgT[j] = t; }
+      if (d < dgBuf->miss[j]) { dgBuf->miss[j] = (float)d; dgBuf->t[j] = t; }
     }
     if ((k & 7) == 0) { dgPct = k * 100 / NS; setStatus(String("Screening ") + dgPct + "%"); draw(); }
   }
@@ -48687,15 +51627,16 @@ bool App::dgFetchAndScreen(String& err) {
   // simple selection sort by miss
   for (int a = 0; a < dgN - 1; ++a)
     for (int b = a + 1; b < dgN; ++b)
-      if (dgMiss[b] < dgMiss[a]) {
-        SatEntry ts = dgSat[a]; dgSat[a] = dgSat[b]; dgSat[b] = ts;
-        float tm = dgMiss[a]; dgMiss[a] = dgMiss[b]; dgMiss[b] = tm;
-        time_t tt = dgT[a]; dgT[a] = dgT[b]; dgT[b] = tt;
+      if (dgBuf->miss[b] < dgBuf->miss[a]) {
+        SatEntry ts = dgBuf->sat[a]; dgBuf->sat[a] = dgBuf->sat[b]; dgBuf->sat[b] = ts;
+        float tm = dgBuf->miss[a]; dgBuf->miss[a] = dgBuf->miss[b]; dgBuf->miss[b] = tm;
+        time_t tt = dgBuf->t[a]; dgBuf->t[a] = dgBuf->t[b]; dgBuf->t[b] = tt;
       }
   return true;
 }
 
 void App::drawDebGrp() {
+  if (!dgBuf) { header("Debris groups"); footer("` back"); return; }
   header("Debris group screen");
   canvas.setTextSize(1);
   if (dgPct >= 0) {
@@ -48730,13 +51671,13 @@ void App::drawDebGrp() {
   if (dgScroll > dgN - 1) dgScroll = 0;
   for (int r = 0; r < VIS; ++r) {
     int i = dgScroll + r; if (i >= dgN) break;
-    struct tm tv; time_t tt = dgT[i]; gmtime_r(&tt, &tv);
+    struct tm tv; time_t tt = dgBuf->t[i]; gmtime_r(&tt, &tv);
     int y = 40 + r * 10;
-    canvas.setTextColor(dgMiss[i] < 25 ? CL_RED :
-                        (dgMiss[i] < 100 ? CL_ORANGE : CL_WHITE), CL_BLACK);
+    canvas.setTextColor(dgBuf->miss[i] < 25 ? CL_RED :
+                        (dgBuf->miss[i] < 100 ? CL_ORANGE : CL_WHITE), CL_BLACK);
     canvas.setCursor(4, y);
-    canvas.printf("%-11.11s %5.0fkm %02d:%02d", dgSat[i].name,
-                  (double)dgMiss[i], tv.tm_hour, tv.tm_min);
+    canvas.printf("%-11.11s %5.0fkm %02d:%02d", dgBuf->sat[i].name,
+                  (double)dgBuf->miss[i], tv.tm_hour, tv.tm_min);
   }
   footer(";/. scroll  x new grp  p prt  ` back");
 }
@@ -60099,9 +63040,11 @@ String App::tsExport() {
 //  in a scrolling, read-only viewer. Reuses the note text-wrapper for the viewer body.
 // ===========================================================================
 
-// Enumerate /CardSat/RovePlans/*.txt into roveList[], newest-first (by mtime; ties fall
+// Enumerate /CardSat/RovePlans/*.txt into roveBrowse->name[], newest-first (by mtime; ties fall
 // back to name descending so the rove_YYYYMMDD_HHMM stamps still read newest-first).
 void App::buildRoveList() {
+  if (!roveBrowse) roveBrowse = (RoveBrowse*)calloc(1, sizeof(RoveBrowse));
+  if (!roveBrowse) { setStatus("Out of memory", 2500, SEV_ERR); roveListN = 0; return; }
   roveListN = 0;
   if (!Store::ready()) return;
   fs::FS& fsx = Store::fs();
@@ -60116,9 +63059,9 @@ void App::buildRoveList() {
     size_t L = strlen(bn);
     bool isTxt = L > 4 && strcasecmp(bn + L - 4, ".txt") == 0;
     if (isTxt && roveListN < ROVE_LIST_MAX && L <= (size_t)(ROVE_NAME_MAX - 1)) {
-      memcpy(roveList[roveListN], bn, L); roveList[roveListN][L] = 0;
-      roveTime[roveListN] = f.getLastWrite();
-      roveSize[roveListN] = (uint32_t)f.size();
+      memcpy(roveBrowse->name[roveListN], bn, L); roveBrowse->name[roveListN][L] = 0;
+      roveBrowse->t[roveListN] = f.getLastWrite();
+      roveBrowse->size[roveListN] = (uint32_t)f.size();
       roveListN++;
     }
     f.close();
@@ -60127,33 +63070,34 @@ void App::buildRoveList() {
   // Newest-first: mtime descending, then name descending (the timestamp filenames sort the
   // same way, so no-mtime filesystems still order correctly). Small n -> insertion sort.
   for (int i = 1; i < roveListN; ++i) {
-    char kn[ROVE_NAME_MAX]; strncpy(kn, roveList[i], ROVE_NAME_MAX);
-    time_t kt = roveTime[i]; uint32_t ks = roveSize[i];
+    char kn[ROVE_NAME_MAX]; strncpy(kn, roveBrowse->name[i], ROVE_NAME_MAX);
+    time_t kt = roveBrowse->t[i]; uint32_t ks = roveBrowse->size[i];
     int j = i - 1;
     auto older = [&](int a){                             // true if row a sorts AFTER the key
-      if (roveTime[a] != kt) return roveTime[a] < kt;
-      return strcmp(roveList[a], kn) < 0;
+      if (roveBrowse->t[a] != kt) return roveBrowse->t[a] < kt;
+      return strcmp(roveBrowse->name[a], kn) < 0;
     };
     while (j >= 0 && older(j)) {
-      strncpy(roveList[j+1], roveList[j], ROVE_NAME_MAX);
-      roveTime[j+1] = roveTime[j]; roveSize[j+1] = roveSize[j];
+      strncpy(roveBrowse->name[j+1], roveBrowse->name[j], ROVE_NAME_MAX);
+      roveBrowse->t[j+1] = roveBrowse->t[j]; roveBrowse->size[j+1] = roveBrowse->size[j];
       --j;
     }
-    strncpy(roveList[j+1], kn, ROVE_NAME_MAX); roveTime[j+1] = kt; roveSize[j+1] = ks;
+    strncpy(roveBrowse->name[j+1], kn, ROVE_NAME_MAX); roveBrowse->t[j+1] = kt; roveBrowse->size[j+1] = ks;
   }
   if (roveSel >= roveListN) roveSel = roveListN > 0 ? roveListN - 1 : 0;
   if (roveScroll > roveSel) roveScroll = roveSel;
 }
 
-// Load roveList[idx] into roveViewBuf, capped at ROVEVIEW_MAX bytes so a large plan can't
+// Load roveBrowse->name[idx] into roveViewBuf, capped at ROVEVIEW_MAX bytes so a large plan can't
 // exhaust the heap. Sets roveViewTrunc when the file is longer than the cap.
 void App::roveViewLoad(int idx) {
+  if (!roveBrowse) return;
   roveViewBuf = (const char*)nullptr;                     // release any prior buffer first
   roveViewBuf = ""; roveViewTrunc = false; roveViewTop = 0;
   if (idx < 0 || idx >= roveListN || !Store::ready()) return;
-  roveViewName = roveList[idx];
+  roveViewName = roveBrowse->name[idx];
   char path[64];
-  snprintf(path, sizeof(path), "/CardSat/RovePlans/%s", roveList[idx]);
+  snprintf(path, sizeof(path), "/CardSat/RovePlans/%s", roveBrowse->name[idx]);
   File f = Store::fs().open(path, "r");
   if (!f) { roveViewBuf = "(could not open file)"; return; }
   // Reserve only what this file actually needs (capped), not the full cap every time -- most
@@ -60175,6 +63119,7 @@ void App::roveViewLoad(int idx) {
 }
 
 void App::drawRoveList() {
+  if (!roveBrowse) { header("Rove plans"); footer("` back"); return; }
   header("Saved rove plans");
   canvas.setTextSize(1);
 
@@ -60182,7 +63127,7 @@ void App::drawRoveList() {
     canvas.setTextColor(CL_RED, CL_BLACK);
     canvas.setCursor(6, 50); canvas.printf("Delete this plan?");
     canvas.setTextColor(CL_WHITE, CL_BLACK);
-    canvas.setCursor(6, 64); canvas.printf("%.30s", roveList[roveSel]);
+    canvas.setCursor(6, 64); canvas.printf("%.30s", roveBrowse->name[roveSel]);
     footer("ENT delete   ` cancel");
     return;
   }
@@ -60210,7 +63155,7 @@ void App::drawRoveList() {
                           canvas.setTextColor(CL_BLACK, CL_SELBG); }
     else                  canvas.setTextColor(CL_WHITE, CL_BLACK);
     // Name (strip the "rove_" prefix and ".txt" for a compact date-stamp read) + size.
-    const char* nm = roveList[idx];
+    const char* nm = roveBrowse->name[idx];
     char shown[24];
     if (strncmp(nm, "rove_", 5) == 0) {
       // rove_YYYYMMDD_HHMM.txt -> YYYY-MM-DD HH:MM
@@ -60222,18 +63167,19 @@ void App::drawRoveList() {
     canvas.setCursor(4, y); canvas.print(shown);
     if (idx != roveSel) canvas.setTextColor(CL_GREY, CL_BLACK);
     canvas.setCursor(196, y);
-    if (roveSize[idx] < 1024) canvas.printf("%luB", (unsigned long)roveSize[idx]);
-    else                      canvas.printf("%luK", (unsigned long)(roveSize[idx] / 1024));
+    if (roveBrowse->size[idx] < 1024) canvas.printf("%luB", (unsigned long)roveBrowse->size[idx]);
+    else                      canvas.printf("%luK", (unsigned long)(roveBrowse->size[idx] / 1024));
   }
   scrollbar(20, 116, roveListN, ROWS, roveScroll);
   footer("ENT view  d del  r refr  ` back");
 }
 
 void App::keyRoveList(char c, bool enter, bool back) {
+  if (!roveBrowse) { if (isBack(c, back)) { screen = SCR_TOOLS; lastDrawMs = 0; } return; }
   if (roveConfirmDel) {
     if (enter) {
       if (roveSel >= 0 && roveSel < roveListN && Store::ready()) {
-        char path[64]; snprintf(path, sizeof(path), "/CardSat/RovePlans/%s", roveList[roveSel]);
+        char path[64]; snprintf(path, sizeof(path), "/CardSat/RovePlans/%s", roveBrowse->name[roveSel]);
         if (Store::fs().remove(path)) setStatus("Plan deleted");
         else                          setStatus("Delete failed", 2500, SEV_ERR);
         buildRoveList();
@@ -60766,6 +63712,14 @@ static int popcountBits(const uint8_t* bits, int nbytes) {
   return c;
 }
 
+// Credit every grid in a possibly multi-grid field ("FN20/FN30/..."): each
+// token sets its own grid bit; state/DXCC are taken from the FIRST token only
+// (the station's primary position -- a boundary rover is standing in one
+// state, whatever the radio-horizon geometry of its grid corners).
+// Declared before gridBitIndex, defined after it (uses it).
+static void awardCreditGrids(const char* multi, uint8_t* gBits,
+                             uint8_t* sBits, uint8_t* dBits);
+
 // Encode a 4-char Maidenhead grid (field+square) to its gridBits index, reading
 // straight from a char buffer with NO String allocation. Uppercases the two field
 // letters inline; returns -1 if the first four characters aren't a valid grid.
@@ -60783,6 +63737,30 @@ static int gridBitIndex(const char* g) {
 }
 
 // Stream the log once and tally everything for the all-sats view.
+static void awardCreditGrids(const char* multi, uint8_t* gBits,
+                             uint8_t* sBits, uint8_t* dBits) {
+  char tok[8]; int tn = 0; bool first = true;
+  for (const char* p = multi; ; ++p) {
+    const char c = *p;
+    if (c && c != '/') { if (tn < 7) tok[tn++] = c; continue; }
+    tok[tn] = 0;
+    if (tn >= 4) {
+      double glat, glon;
+      if (Location::gridToLatLon(String(tok), glat, glon)) {
+        const int gi = gridBitIndex(tok);
+        if (gi >= 0 && gBits) gBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
+        if (first) {                       // primary position only
+          if (sBits) awardStateAt(glon, glat, sBits);
+          if (dBits) awardDxccAt(glon, glat, dBits);
+        }
+        first = false;
+      }
+    }
+    tn = 0;
+    if (!c) break;
+  }
+}
+
 // Lazily allocate the ~4 KB grid bitmap on first use (kept out of .bss to preserve
 // the large contiguous heap block the TLS handshake needs). Zeroes on (re)alloc.
 // Returns false if the allocation fails, in which case callers treat it as "no grids".
@@ -60833,17 +63811,10 @@ void App::buildAwards() {
       if (si >= 0) awSatQso[si]++;
     }
 
-    // Grid / state / DXCC from the worked grid square.
-    if (q.grid[0]) {
-      double glat, glon;
-      if (Location::gridToLatLon(q.grid, glat, glon)) {
-        // Grid bit: encode the 4-char field/square with no String allocation.
-        int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
-        if (gi >= 0 && gridBits) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
-        awardStateAt(glon, glat, stateBits);
-        awardDxccAt(glon, glat, dxccBits);
-      }
-    }
+    // Grid / state / DXCC from the worked grid square(s) -- a multi-grid rover
+    // entry ("FN20/FN30") credits EVERY listed grid (the VUCC rule), while
+    // state/DXCC come from the first (primary) grid only.
+    if (q.grid[0]) awardCreditGrids(q.grid, gridBits, stateBits, dxccBits);
   }
   f.close();
   awGridN  = (gridBits ? popcountBits(gridBits, GRID_BITS_LEN) : 0);
@@ -61074,15 +64045,7 @@ void App::awardsForSat(const char* satName) {
     int bi = bandIdx(mhz);
     if (bi >= 0) awSatBandQso[bi]++;
 
-    if (q.grid[0]) {
-      double glat, glon;
-      if (Location::gridToLatLon(q.grid, glat, glon)) {
-        int gi = (strlen(q.grid) >= 4) ? gridBitIndex(q.grid) : -1;
-        if (gi >= 0 && gridBits) gridBits[gi >> 3] |= (uint8_t)(1 << (gi & 7));
-        awardStateAt(glon, glat, stateBits);
-        awardDxccAt(glon, glat, dxccBits);
-      }
-    }
+    if (q.grid[0]) awardCreditGrids(q.grid, gridBits, stateBits, dxccBits);
   }
   f.close();
   awSatGridN  = (gridBits ? popcountBits(gridBits, GRID_BITS_LEN) : 0);
@@ -61596,11 +64559,22 @@ void App::drawTrack() {
 
   // Radio status line
   canvas.setCursor(4, 102);
-  if (!rig || !rig->ready()) { canvas.setTextColor(CL_GREY, CL_BLACK); canvas.print("Radio: n/a"); }
-  else {
+  // Seventh bench, by request: ONE formula for every CAT method. The previous
+  // shape gated the whole line on ready(), so a dual rig whose helper leg was
+  // riding out a link outage lost its name, its ON state and its highlight all
+  // at once -- while the dial visibly moved. Now: grey "n/a" only when no rig
+  // exists at all; otherwise the color follows radioOut (the operator's own
+  // switch, same as the rotator indicator), the name is always shown, and
+  // transient un-readiness is an appended "wait" note instead of an identity
+  // change. Identical presentation whatever the transport.
+  if (!rig) {
+    canvas.setTextColor(CL_GREY, CL_BLACK);
+    canvas.print("Radio: n/a");
+  } else {
     canvas.setTextColor(radioOut ? CL_GREEN : CL_GREY, CL_BLACK);
-    canvas.printf("Radio %s [%s %02X]", radioOut ? "ON " : "off",
-                  rig->name(), rig->address());
+    canvas.printf("Radio %s [%s %02X]%s", radioOut ? "ON " : "off",
+                  rig->name(), rig->address(),
+                  rig->ready() ? "" : " wait");
   }
   if (cfg.rotEnable) {                       // compact rotator indicator
     bool rok = rot && rot->ready();
@@ -62906,9 +65880,15 @@ void App::drawSettings() {
     // offering a choice that does nothing.
     const bool serialRot = (cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
                             cfg.rotType != ROT_YAESU);
-    String w = !serialRot ? String("n/a")
-             : cfg.rotTransport == ROT_XPORT_GROVE ? String("Grove G1/G2")
-             : cfg.rotTransport == ROT_XPORT_USB   ? String("USB adapter")
+    // Bench feedback (0.9.73): a bare "n/a" here read as "the option does not
+    // exist" -- the operator was looking for the USB-helper transport and this
+    // row is exactly where it lives, but only for the serial protocols. Say WHY
+    // it is n/a so the path to the option (pick a serial rotator type first) is
+    // on the row itself.
+    String w = !serialRot ? String("n/a (serial types only)")
+             : cfg.rotTransport == ROT_XPORT_GROVE  ? String("Grove G1/G2")
+             : cfg.rotTransport == ROT_XPORT_USB    ? String("USB adapter")
+             : cfg.rotTransport == ROT_XPORT_HELPER ? String("USB helper")
              : String("I2C bridge");
     // Name the clash inline: the Settings screen is where it can still be fixed.
     if (serialRot && cfg.rotEnable) {
@@ -62933,7 +65913,11 @@ void App::drawSettings() {
     // Rotator USB adapter. Only meaningful on a USB-transport serial rotator.
     const bool usbRot = (cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
                          cfg.rotType != ROT_YAESU && cfg.rotTransport == ROT_XPORT_USB);
-    String v = usbRot ? usbAdapterLabel(cfg.rotUsbKey) : String("n/a");
+    const bool helperRot = (cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+                            cfg.rotType != ROT_YAESU && cfg.rotTransport == ROT_XPORT_HELPER);
+    String v = usbRot    ? usbAdapterLabel(cfg.rotUsbKey)
+             : helperRot ? String("on helper (see USB helper)")
+             : String("n/a");
     if (usbRot && cfg.rotUsbKey[0] && strcmp(cfg.rotUsbKey, cfg.catUsbKey) == 0)
       v += " (!radio's)";
     rows[99] = String("Rot USB: ") + v;
@@ -63014,6 +65998,7 @@ void App::drawSettings() {
   rows[28] = String("Restore config+favs");
   rows[29] = String("Reset all data (erase)");
   rows[30] = String("CAT type: ") + (cfg.catType == CAT_DUAL ? "Dual (2 radios)"
+                     : cfg.catType == CAT_HELPER ? "USB helper (Grove)"
                      : cfg.catType == CAT_USB ? "USB serial"
                      : cfg.catType == CAT_RIGCTL_GROVE ? "rigctl (Grove)"
                      : cfg.catType == CAT_RIGCTL ? "rigctl (net)"
@@ -63023,6 +66008,7 @@ void App::drawSettings() {
     if (h.length() > 17) h = "..." + h.substring(h.length() - 14);
     rows[31] = (cfg.catType == CAT_DUAL) ? String("Host: per leg (Dual-Rig scrn)")
              : (cfg.catType == CAT_USB) ? String("Host: n/a (USB)")
+             : (cfg.catType == CAT_HELPER) ? String("Host: n/a (helper)")
              : (cfg.catType == CAT_RIGCTL_GROVE) ? String("Host: n/a (Grove)")
              : String(cfg.catType == CAT_RIGCTL ? "rigctld host: " : "LAN host: ") + h;
   }
@@ -63069,9 +66055,19 @@ void App::drawSettings() {
                  : (dm == LEG_NONE) ? String(LEG_RADIOS[um].name) + " (UL only)"
                  : String(LEG_RADIOS[dm].name) + "+" + LEG_RADIOS[um].name) + " >";
   } else {
-    rows[109] = String("Dual-Rig setup (Stick) >") +
-                (drLink == 1 ? "  linked" : drLink == 2 ? "  no link" : "");
+    rows[109] = String("Dual rig: (CAT type is not Dual)");
   }
+  // USB helper. The row carries the LINK state, not the port state, because that
+  // is what tells the operator whether the cable is the problem before they go
+  // looking at radios. Detail lives on the screen it opens.
+#if CARDSAT_HAS_USBHELPER
+  rows[110] = String("USB helper >") +
+              (!helperWanted()      ? String("  (unused)")
+               : UsbHelper::linked() ? (UsbHelper::active() ? String("  open") : String("  linked"))
+                                     : String("  no link"));
+#else
+  rows[110] = String("USB helper: not in this build");
+#endif
   rows[85] = String("Antenna lengths: ") + (cfg.antUnits == 1 ? "metric (m)" : "imperial (ft/in)");
   rows[44] = String("Dopp FM band: ") + String(cfg.doppThreshFmHz) + " Hz";
   rows[45] = String("Dopp linear band: ") + String(cfg.doppThreshLinHz) + " Hz";
@@ -63150,8 +66146,6 @@ void App::drawSettings() {
   const int len = SET_CAT_LEN[setCat];
   const int VIS = 9;
   int scroll = (setSel >= VIS) ? (setSel - VIS + 1) : 0;
-  // If the Dual-Rig row is highlighted, refresh its link indicator (throttled).
-  if (SET_CAT_ROWS[setCat][setSel] == 109) drPingLink();
   for (int v = 0; v < VIS && (scroll + v) < len; ++v) {
     int idx = scroll + v;
     int ai  = SET_CAT_ROWS[setCat][idx];
@@ -63161,12 +66155,6 @@ void App::drawSettings() {
                          canvas.setTextColor(CL_BLACK, danger ? CL_RED : CL_SELBG); }
     else                 canvas.setTextColor(danger ? CL_RED : CL_WHITE, CL_BLACK);
     canvas.setCursor(4, y); canvas.print(rows[ai]);
-    // Dual-Rig setup row: a red/green/gray dot at the right edge so link state
-    // reads at a glance, before opening the screen. Gray = n/a or not yet checked.
-    if (ai == 109) {
-      uint8_t dot = (drLink == 1) ? CL_GREEN : (drLink == 2) ? CL_RED : CL_GREY;
-      canvas.fillCircle(230, y + 4, 3, dot);
-    }
   }
   { int _id = SET_CAT_ROWS[setCat][setSel];
     if (_id == 4 || _id == 50) footer(",/ change  ENT edit  s scan  ` back");

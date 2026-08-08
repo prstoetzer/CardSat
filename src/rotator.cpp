@@ -2,6 +2,7 @@
 //  rotator.cpp  -  GS-232 rotator over an SC16IS750/752 I2C->UART bridge
 // ===========================================================================
 #include "rotator.h"
+#include "usbhelper.h"   // ROT_XPORT_HELPER: the companion transport
 #include <Wire.h>
 #include "usbserial.h"   // UsbSerial::rot* -- the USB rotator transport
 
@@ -153,6 +154,75 @@ void UsbRotStream::flush() {
 size_t UsbRotStream::write(uint8_t c) {
 #if CARDSAT_HAS_USBCAT
   Stream* s = UsbSerial::rotStream();
+  return s ? s->write(c) : 0;
+#else
+  (void)c; return 0;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+//  HelperRotStream -- the rotator's adapter on the CardSatUsbHelper companion
+// ---------------------------------------------------------------------------
+//  Forwarding shim, same as UsbRotStream. One difference worth knowing: the
+//  helper's port opens over a round trip on the Grove link, so begin() returning
+//  true means "the request is in flight", not "the wire is live". ok() is the
+//  question that actually matters, and the app's not-ready path already retries.
+HelperRotStream::~HelperRotStream() {
+#if CARDSAT_HAS_USBHELPER
+  // Release the port with the Stream that owns it. This also drops DTR at the
+  // radio, which on a CDC device is the only "the host has let go" signal there is.
+  UsbHelper::close();
+#endif
+}
+
+bool HelperRotStream::begin(uint32_t baud) {
+#if CARDSAT_HAS_USBHELPER
+  if (!UsbHelper::started()) return false;
+  // 8N1 always: every rotator protocol CardSat speaks (GS-232, Easycomm, SPID)
+  // is 8N1, and no controller in the supported set offers anything else.
+  return UsbHelper::open(baud ? baud : 9600, 8, CSUH_PAR_NONE, 1);
+#else
+  (void)baud; return false;
+#endif
+}
+bool HelperRotStream::ok() const {
+#if CARDSAT_HAS_USBHELPER
+  return UsbHelper::active();
+#else
+  return false;
+#endif
+}
+int HelperRotStream::available() {
+#if CARDSAT_HAS_USBHELPER
+  if (_peek >= 0) return 1;
+  Stream* s = UsbHelper::stream();
+  return s ? s->available() : 0;
+#else
+  return 0;
+#endif
+}
+int HelperRotStream::read() {
+#if CARDSAT_HAS_USBHELPER
+  if (_peek >= 0) { int c = _peek; _peek = -1; return c; }
+  Stream* s = UsbHelper::stream();
+  return s ? s->read() : -1;
+#else
+  return -1;
+#endif
+}
+int HelperRotStream::peek() {
+  if (_peek < 0) _peek = read();
+  return _peek;
+}
+void HelperRotStream::flush() {
+#if CARDSAT_HAS_USBHELPER
+  Stream* s = UsbHelper::stream();
+  if (s) s->flush();
+#endif
+}
+size_t HelperRotStream::write(uint8_t c) {
+#if CARDSAT_HAS_USBHELPER
+  Stream* s = UsbHelper::stream();
   return s ? s->write(c) : 0;
 #else
   (void)c; return 0;
@@ -706,6 +776,18 @@ static Stream* makeRotTransport(uint8_t transport, uint32_t baud) {
       if (!u->begin()) { delete u; return nullptr; }
       s_rotOwned = u;
       return u;
+    }
+    case ROT_XPORT_HELPER: {
+      // Unlike the other transports, this one is accepted before the far end has
+      // confirmed anything: opening the helper's port is a round trip over Grove,
+      // and refusing here would mean the rotator could only ever be built when the
+      // Stick happened to answer within one call. The rotator reports not-ready
+      // until ok() goes true, which is the same behaviour as a controller that is
+      // wired but switched off -- a state this firmware already handles.
+      HelperRotStream* h = new HelperRotStream();
+      if (!h->begin(baud)) { delete h; return nullptr; }
+      s_rotOwned = h;
+      return h;
     }
     case ROT_XPORT_BRIDGE:
     default: {

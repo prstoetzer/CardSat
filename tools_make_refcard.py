@@ -53,7 +53,7 @@ FRONT = [
   "FTDI 0403, CP210x 10c4, CH34x 1a86, PL2303 067b, any CDC-ACM. USB device strings lead with "
   "<b>#N</b> = device address = the id explicit binding stores (tells identical adapters apart)."),
  ("DUAL-RIG + TRANSVERTER",
-  "<b>CardSatDualRig</b> (M5StickS3 companion): two half-duplex/RX radios as one full-duplex station over a rigctld server; "
+  "<b>CardSatUsbHelper</b> (M5StickS3 companion): a second USB host over the Grove port, for a radio or rotator that will not fit the Cardputer's 8 USB channels; "
   "drive via rigctl (net/Grove). <b>Settings&rarr;Radio&rarr;Dual-Rig setup</b> shows the Stick's live USB enumeration to bind a device per leg (link dot red/green). "
   "<b>d</b> gains <b>FULLu</b> = One True Rule on the UPLINK knob. <b>Transverter LO</b>: Downlink/Uplink LO (MHz) drive a microwave up/down-converter "
   "(rig on IF = real&minus;LO; DN/UP show <b>x</b>). Both paths <b>UNTESTED on hardware</b> &mdash; verify."),

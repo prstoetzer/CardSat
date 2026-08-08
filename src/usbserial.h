@@ -199,6 +199,19 @@ namespace UsbSerial {
   bool        usbHostResident();   // true when the host is installed with no port open
   bool        hostReleased();
   bool        hostTeardownStuck();   // M2: end() timed out; reboot required to reuse USB
+  // ---- physical disconnect (0.9.73) -------------------------------------------
+  // Set by the host task when the device an OPEN port was bound to goes away, and
+  // consumed by the main loop. The port cannot be torn down inside the callback --
+  // that runs on the host's own task, walking the very objects a teardown frees --
+  // so the loop does it and the existing reconciler then rebinds by stable key.
+  //
+  // Note active()/cat2Active()/rotActive() also consult the CDC object's
+  // connected() now, so a stale binding cannot report itself live even if a flag
+  // is missed.
+  bool        catLost();
+  bool        cat2Lost();
+  bool        rotLost();
+  void        clearLostFlags();
   // Why the last uninstall was refused, when it was. Valid after a failed
   // finishUninstall: clients/devices still registered per usb_host_lib_info(),
   // how many drain polls ran, the union of event flags seen, and

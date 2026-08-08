@@ -15,6 +15,7 @@
 #include "lora.h"
 #include "lorarx.h"   // general LoRa RX / hex monitor (feature-guarded)
 #include "usbserial.h" // CAT_USB transport: UsbSerial::Stage for the onStage hook
+#include "usbhelper.h" // CardSatUsbHelper transport over Grove (CAT_HELPER etc.)
 
 enum Screen : uint8_t {
   SCR_HOME = 0, SCR_SATLIST, SCR_SCHEDULE, SCR_PASSES, SCR_PASSDETAIL,
@@ -23,16 +24,16 @@ enum Screen : uint8_t {
   SCR_LOGLIST, SCR_VIS, SCR_ILLUM, SCR_WORLDMAP, SCR_ROTMAN, SCR_GPS, SCR_HELP, SCR_ORBIT, SCR_SIM,
   SCR_SUNMOON, SCR_GRID, SCR_GPSRC, SCR_MANUAL, SCR_STATES, SCR_DXCC, SCR_SPACEWX, SCR_TXDB, SCR_QRZ, SCR_WEATHER, SCR_EQX, SCR_BIG, SCR_MANUALBIG, SCR_NETREBOOT, SCR_MEMOS, SCR_OSCAR, SCR_GLOBE, SCR_DXDOPP, SCR_SKYMAP, SCR_GPSPOS, SCR_SATSAT, SCR_MESSAGES, SCR_CATTEST, SCR_CHARGE, SCR_CATMON, SCR_TRANSIT, SCR_VISLIST, SCR_LOTW, SCR_HAMSAT, SCR_NOTES, SCR_NOTEEDIT, SCR_CLOUDLOG, SCR_LOTWSUB, SCR_GLOSSARY, SCR_USERGUIDE, SCR_LICENSE, SCR_SATHIST, SCR_TECHHELP, SCR_LEARN, SCR_ARROW, SCR_OVERHEAD, SCR_SKEDENTRY, SCR_GAME, SCR_SKYGLANCE, SCR_AWARDS, SCR_AWARDSAT, SCR_AWARDLIST,
   SCR_CALEXPORT,
-  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_LORARX,
+  SCR_GAMES, SCR_GDOPPLER, SCR_GPASS, SCR_GROTOR, SCR_GMORSE, SCR_GGRID, SCR_GBRICK, SCR_LORARX,
   SCR_ACTMUTUAL, SCR_ACTDOPP, SCR_MUTUALDETAIL,
-  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_BASICASK, SCR_CALCREF, SCR_PERF,
+  SCR_LORACOMPASS, SCR_LORASAT, SCR_LORAROSTER, SCR_AMSATSTAT, SCR_EME, SCR_GRIDCALC, SCR_QRZGRID, SCR_BANDPLAN, SCR_PROP, SCR_MUF, SCR_MUFMAP, SCR_SAA, SCR_READY, SCR_EMEPLAN, SCR_AMSRPT, SCR_AMSRPICK, SCR_TOOLS, SCR_CALC, SCR_PCALC, SCR_CHARLK, SCR_TOOLFORM, SCR_DXLK, SCR_DXLKD, SCR_CQZ, SCR_CQZD, SCR_ITUZ, SCR_ITUZD, SCR_LINKB, SCR_THERMAL, SCR_AO7, SCR_OPREF, SCR_CTCSS, SCR_ORBITZOO, SCR_MATHREF, SCR_PLANNER, SCR_PLANDETAIL, SCR_GPFIT, SCR_ROVELIST, SCR_ROVEVIEW, SCR_GPIMPORT, SCR_WORKHZN, SCR_TGTSEARCH, SCR_TGTHITS, SCR_CUBESIM, SCR_FOXANAT, SCR_FOXTEXT, SCR_CSIMINFO, SCR_PRINTABOUT, SCR_LOCONV, SCR_GRAPH, SCR_BASIC, SCR_BASICRUN, SCR_BASICIMM, SCR_BASICREF, SCR_BASICASK, SCR_CALCREF, SCR_PERF, SCR_STHIST,
   SCR_CONJ, SCR_NEIGH, SCR_TXPLAN, SCR_LNKCRV, SCR_DEBGRP, SCR_CTSEARCH,
   SCR_KESSLER, SCR_QTHPRE,
   // "Nearby & DX" hub and its live terrestrial feeds. These are fetch-and-browse views
   // of what is on the air / in the air around the operator right now, as distinct from
   // the satellite-centric screens above.
   SCR_NEARBY, SCR_APRS, SCR_APRSDET, SCR_DXC, SCR_ADSB,
-  SCR_DUALRIG, SCR_BASICFILES,
+  SCR_DUALRIG, SCR_USBHELPER, SCR_BASICFILES,
   // Telnet client (Tools > Calculators & programming). SCR_TELNET is the connection
   // list / config screen; SCR_TELNETTERM is the modal full-screen terminal. SSH was
   // scoped alongside this but shelved on memory grounds for 0.9.67 (see
@@ -76,7 +77,13 @@ struct PendingQso {
   char     call[14];
   char     rstS[6];
   char     rstR[6];
-  char     grid[10];
+  // Multi-grid stations (rovers on a boundary): up to four grids joined with
+  // '/' -- e.g. "FN20/FN30" or a 4-corner "FN20/FN30/FM29/FM39". '/' rather
+  // than the on-air comma because the log file is CSV: a comma inside this
+  // field would split the record (notes survives commas only by being last).
+  // Entry accepts ',' or '/' and normalizes; ADIF export converts back to
+  // commas for VUCC_GRIDS.
+  char     grid[30];
   char     notes[40];
   uint8_t  uploaded;              // bit0: sent to LoTW (CSV col 13, absent => 0)
 };
@@ -116,42 +123,15 @@ private:
   Predictor pred;
   Rig*      rig = nullptr;   // active CAT backend (Icom/Yaesu/Kenwood)
 
-  // ---- Dual-Rig setup screen (SCR_DUALRIG) ----------------------------------
-  // Configures the CardSatDualRig companion over the active rigctl transport (net
-  // or Grove) via its \csdr_* escape. Holds the last query result so the screen
-  // can be edited offline and pushed with one save.
-  static constexpr int DR_MAX_DEV   = 8;     // devices shown from the Stick
-  static constexpr int DR_MAX_MODEL = 40;    // model-catalog entries from the Stick
-  struct DrDevice { char product[24]; char serial[24]; char vidpid[12]; int addr; };   // H11: serial 24 to match companion
-  struct DrModel  { int id; char name[14]; bool rxOnly; };
-  // Heap-allocated on entering SCR_DUALRIG and freed by drFree() from the
-  // screen-transition hook in loop() -- so the ~1.3 KB of device+model tables is
-  // not resident for the whole session (same lifecycle as the memo/BASIC buffers).
-  DrDevice* drDev   = nullptr; int drDevN = 0;
-  DrModel*  drModel = nullptr; int drModelN = 0;
-  // Editable per-leg selection (index 0 = downlink, 1 = uplink).
-  int   drModelId[2]  = { -1, -1 };          // Stick model id, -1 = none
-  int   drCiv[2]      = { 0, 0 };            // CI-V address (0 = default)
-  uint32_t drBaud[2]  = { 0, 0 };            // H14: per-leg CAT baud (0 = model default)
-  char  drSerial[2][24] = { "", "" };        // H11: assigned device serial (24 to match companion; "" = none)
-  int   drSel = 0;                           // cursor: 0..5 across the 6 editable fields
-  int   drScroll = 0;                        // device-list scroll
-  bool  drLoaded = false;                    // a query has populated the state
-  // Status-line members below are fixed buffers, not Arduino String: a String member of
-  // the global App object keeps its heap block alive for the life of the program once
-  // assigned (String never returns a buffer on reassignment), and each such long-lived
-  // block is a permanent fragmentation anchor in the no-PSRAM heap. Overlong messages
-  // truncate safely via strlcpy/snprintf, which is fine for one-line status text.
-  char drStatus[64] = {0};                   // last transport result / hint
-  bool  drAlloc();                           // allocate drDev/drModel (on screen entry)
-  void  drFree();                            // release them (screen-transition hook)
-  void  drQuery();                           // pull \csdr_get + \csdr_models
-  void  drSave();                            // push \csdr_set ... save=1
-  int   drModelIdx(int id) const;            // catalog index for a model id (-1)
-  // At-a-glance link status for the Settings row, so bring-up is a glance not a
-  // query. 0 = unknown (gray), 1 = linked (green), 2 = no link (red).
-  uint8_t drLink = 0; uint32_t drLinkMs = 0;
-  void  drPingLink();                        // throttled \csdr_get ping; sets drLink
+  // ---- Dual-Rig leg editor (SCR_DUALRIG) ------------------------------------
+  // Cursor for the two-leg CAT_DUAL editor: drSel = leg*6 + field, 12 positions.
+  //
+  // Everything else that used to live here -- the device and model tables pulled
+  // from the CardSatDualRig companion over its \csdr_* escape, the per-leg model
+  // and serial selections, and the Settings link indicator -- went with that
+  // companion in 0.9.73. The legs themselves are configured from cfg.dual*, which
+  // is where the native CAT_DUAL implementation has kept them since 0.9.68.
+  int   drSel = 0;
   Rotator*  rot = nullptr;   // active rotator backend (GS-232), or null
   VoiceMemo memo;            // SD-card voice memo recorder ('v' on Track family)
   IrBeacon  irBeacon;        // IR pass-alert beacon (distinct flash count per event)
@@ -219,8 +199,14 @@ private:
   // diagnostic; the operator can also type a raw hex frame to transmit.
   static const int CATMON_MAX = 64;     // ring-buffer depth (lines)
   static const int CATMON_W   = 40;     // per-line chars (draw shows 36); no heap
-  char     catMonLines[CATMON_MAX][CATMON_W] = {};
-  bool     catMonIsTx[CATMON_MAX] = {}; // true = TX line (color), false = RX
+  // Heap-on-demand (0.9.73 RAM pass): 2,624 B resident only while the CAT monitor
+  // is open. Safe with NO history loss because enterCatMon() has always reset the
+  // ring on entry and released the trace sink on exit -- nothing ever survived a
+  // session anyway. catMonPush() guards on the pointer: the sink is installed and
+  // removed with the screen, but a frame already in flight when the screen closes
+  // must land somewhere harmless.
+  struct CatMonBuf { char lines[CATMON_MAX][CATMON_W]; bool isTx[CATMON_MAX]; };
+  CatMonBuf* catMonBuf = nullptr;
   int      catMonHead = 0;              // next write index (ring)
   int      catMonCount = 0;             // lines filled (<= CATMON_MAX)
   int      catMonScroll = 0;            // 0 = follow tail (live); >0 = scrolled back
@@ -728,6 +714,17 @@ private:
   int      ggStreak = 0;
   uint32_t ggDeadline = 0;         // answer-by (millis)
 
+  // Deorbit: breakout, themed as sweeping derelict satellites out of orbital
+  // shells. Paddle is the ground-station dish, the ball a capture tug. Bricks
+  // live in a bitmask per row (8 columns), so the whole field is 4 bytes.
+  static const int GBRK_ROWS = 4, GBRK_COLS = 8;
+  uint8_t  gbRow[GBRK_ROWS];       // bit c set = debris present in column c
+  int      gbLeft = 0;             // pieces remaining this shell set
+  float    gbPadX = 0;             // paddle centre (px)
+  float    gbBallX = 0, gbBallY = 0, gbVX = 0, gbVY = 0;
+  uint32_t gbLastMs = 0;
+  bool     gbLaunched = false;     // false = tug parked on the dish, waiting for ENTER
+
   // Workable US states/DC (parallel to grids: same footprint walk, point-in-polygon
   // lookup against bundled simplified boundaries). 51 entities -> 7-byte bitset.
   uint8_t  stateBits[7];            // 1 bit per entity (STATE_N <= 56)
@@ -950,9 +947,14 @@ private:
   static const int ROVE_LIST_MAX  = 40;    // saved plans listed in the browser
   static const int ROVE_NAME_MAX  = 40;    // base filename length (no dir; keeps ".txt")
   static const int ROVEVIEW_MAX   = 3000;  // max bytes of a plan held in the viewer (heap-bounded)
-  char     roveList[ROVE_LIST_MAX][ROVE_NAME_MAX]; // base names (with ".txt")
-  time_t   roveTime[ROVE_LIST_MAX];        // each plan's last-write time (0 if unknown)
-  uint32_t roveSize[ROVE_LIST_MAX];        // each plan's size in bytes
+  // Heap-on-demand (0.9.73 RAM pass): ~2.1 KB resident only while the rove-plan
+  // browser/viewer is open. buildRoveList() allocates; the transition hook frees.
+  struct RoveBrowse {
+    char     name[ROVE_LIST_MAX][ROVE_NAME_MAX];
+    time_t   t[ROVE_LIST_MAX];
+    uint32_t size[ROVE_LIST_MAX];            // each plan's size in bytes
+  };
+  RoveBrowse* roveBrowse = nullptr;
   int      roveListN = 0;                  // plans found
   int      roveSel = 0;                    // browser cursor
   int      roveScroll = 0;                 // browser scroll offset
@@ -1331,11 +1333,60 @@ private:
 #endif
   bool        catUsesGroveWire() const {
     if (cfg.catType == CAT_WIRED || cfg.catType == CAT_RIGCTL_GROVE) return true;
+    // CAT_HELPER puts the CardSatUsbHelper link on G1/G2, which is the same UART1
+    // every other Grove claimant wants. It belongs in this predicate for exactly
+    // the reason wired CI-V does: the wire has one owner.
+    if (cfg.catType == CAT_HELPER) return (RadioModel)cfg.radioModel != RIG_NONE;
     // Only a leg with a radio assigned claims the wire (see the engage guard).
     return cfg.catType == CAT_DUAL &&
-           ((cfg.dualModel[0] != LEG_NONE && cfg.dualBus[0] == LEGBUS_GROVE) ||
-            (cfg.dualModel[1] != LEG_NONE && cfg.dualBus[1] == LEGBUS_GROVE));
+           ((cfg.dualModel[0] != LEG_NONE &&
+             (cfg.dualBus[0] == LEGBUS_GROVE || cfg.dualBus[0] == LEGBUS_HELPER)) ||
+            (cfg.dualModel[1] != LEG_NONE &&
+             (cfg.dualBus[1] == LEGBUS_GROVE || cfg.dualBus[1] == LEGBUS_HELPER)));
   }
+  // ---- CardSatUsbHelper claimants -------------------------------------------
+  // The helper carries exactly ONE USB device, so at most one of these may be
+  // true at a time. Three separate predicates rather than one flag because the
+  // three consumers are configured on three different screens and each needs to
+  // know whether IT is the claimant; helperClaimants() is what the conflict rule
+  // uses. Keeping them here, next to catUsesGroveWire(), keeps every
+  // "who owns which wire" question in one place -- which is what stopped the
+  // Grove rules drifting apart across the CAT, GPS and rotator screens.
+  bool        catUsesHelper() const {
+    if (cfg.catType == CAT_HELPER) return (RadioModel)cfg.radioModel != RIG_NONE;
+    if (cfg.catType != CAT_DUAL) return false;
+    return (cfg.dualBus[0] == LEGBUS_HELPER && cfg.dualModel[0] != LEG_NONE) ||
+           (cfg.dualBus[1] == LEGBUS_HELPER && cfg.dualModel[1] != LEG_NONE);
+  }
+  bool        rotUsesHelper() const {
+    return cfg.rotEnable &&
+           cfg.rotType != ROT_NET && cfg.rotType != ROT_PST &&
+           cfg.rotType != ROT_YAESU && cfg.rotType != ROT_NONE &&
+           cfg.rotTransport == ROT_XPORT_HELPER;
+  }
+  // How many things want the helper's one device. >1 is a configuration that
+  // cannot work and is refused at the engage choke point.
+  int         helperClaimants() const {
+    int n = 0;
+    if (cfg.catType == CAT_HELPER && (RadioModel)cfg.radioModel != RIG_NONE) n++;
+    if (cfg.catType == CAT_DUAL) {
+      if (cfg.dualBus[0] == LEGBUS_HELPER && cfg.dualModel[0] != LEG_NONE) n++;
+      if (cfg.dualBus[1] == LEGBUS_HELPER && cfg.dualModel[1] != LEG_NONE) n++;
+    }
+    if (rotUsesHelper()) n++;
+    return n;
+  }
+  // Does anything at all need the Grove link to the helper brought up?
+  bool        helperWanted() const { return catUsesHelper() || rotUsesHelper(); }
+  void        applyHelperFromCfg();     // start/stop the Grove link to match cfg
+  bool        helperEngageGuard();      // refuse an unworkable helper config, with a reason
+  void        serviceHelperCat();       // per-loop: pump the link, attach/detach the Stream
+  // Whether the rig currently holds a Stream from the helper. A member rather
+  // than a static inside the loop so that applyRadioFromCfg() -- which deletes
+  // the rig out from under it -- can clear it; a stale true there would leave the
+  // new rig object permanently without a stream, which is the single-rig version
+  // of the H7 bug the USB reconciler already carries a note about.
+  bool        helperAttached = false;
   bool        catUsesUsb() const {
     if (cfg.catType == CAT_USB) return (RadioModel)cfg.radioModel != RIG_NONE;
     if (cfg.catType != CAT_DUAL) return false;
@@ -2373,14 +2424,61 @@ private:
   // and, because Mode A is fetched first, Mode B was starved of slots and the sample was
   // silently biased toward A.
   static const int AO7_MAXOBS = 300;
+  // Heap-on-demand (0.9.73 RAM pass): 2,700 B resident only while the AO-7 tool is
+  // in use. Allocated by ao7ObsAlloc() on entry/fetch/load, freed from the
+  // screen-transition hook. EVERY reader tolerates nullptr -- draw, key, estimate,
+  // save and fetch are all reachable before allocation and after a failed one
+  // (the rule the DX-cluster bugs taught).
+  // ---- Space-Track orbital history (0.9.73) --------------------------------
+  // Compares a satellite's CURRENT mean elements (from the loaded GP/TLE) with
+  // its history from Space-Track's gp_history class. Heap-on-demand: ~3.8 KB
+  // resident only while the tool is open; the transition hook frees it. The
+  // fetch streams CSV and decimates into 120 time bins, so a 25-year history
+  // costs the same RAM as a 30-day one. Credentials live in /sthist.cfg on the
+  // FS (two lines: identity, password) -- editable on the tool screen; the
+  // project's config blob is untouched.
+  static const int ST_BINS = 120;
+  static const int ST_COLS = 7;   // sma ecc inc period apo peri bstar (CSV order)
+  // Per-COLUMN counts (sixth bench): decades-old gp_history rows carry EMPTY
+  // derived-value cells, which atof() turned into 0.0 -- zero-poisoned bins
+  // dragged vmin to 0 and flattened 50 years of real structure against the
+  // top edge, and the "first populated bin" the delta compares against was
+  // all-zeros. A cell now only counts for its own column when it is present
+  // (and positive, for the strictly-positive columns).
+  struct StBin  { float sum[ST_COLS]; uint16_t n[ST_COLS]; };
+  struct StHist {
+    time_t  t0 = 0, t1 = 0;      // window
+    uint32_t rows = 0;           // CSV rows consumed
+    StBin   bin[ST_BINS];
+    float   cur[ST_COLS];        // derived from the CURRENT SatEntry elements
+    bool    haveCur = false;
+    char    name[26]; uint32_t norad = 0;
+  };
+  StHist*  stHist = nullptr;
+  int      stSel = 0;            // 0 sat | 1 span | 2 metric
+  int      stView = 0;           // 0 graph | 1 scrollable data table
+  int      stTabScroll = 0;
+  int      stSpanIdx = 3;        // index into ST_SPans (365 d default)
+  int      stMetric = 0;         // 0 SMA 1 PERIOD 2 APO 3 PERI 4 INC 5 ECC 6 BSTAR
+  int      stSatIdx = -1;        // db index of the selected satellite
+  char     stStatus[64] = {0};   // credentials live in cfg.stUser/cfg.stPass
+  void enterStHist();
+  void drawStHist();
+  void keyStHist(char c, bool enter, bool back);
+  bool stHistAlloc();
+  bool stFetch(String& err);
+  void stComputeCurrent();
+  void printStHist();
+
+  struct Ao7Obs { time_t t[AO7_MAXOBS]; uint8_t mode[AO7_MAXOBS]; };
+  Ao7Obs* ao7Obs = nullptr;
+  bool ao7ObsAlloc();
   static const int AO7_PERMODE = AO7_MAXOBS / 2;   // per-mode fetch cap (newest kept)
   static const int AO7_WINDOW_DAYS = 30;   // fetch window (days). The AMSAT reports API
                                            // caps hours at 720 (30 days) -- confirmed against
                                            // the published API spec -- so 30 days is the
                                            // longest supported window, and a longer window
                                            // captures more A/B switch boundaries for the fit.
-  time_t ao7ObsT[AO7_MAXOBS];    // report time (unix UTC), refined to the 15-min sub-slot
-  uint8_t ao7ObsMode[AO7_MAXOBS];// packed mode|polarity -- see the bit table above
   int    ao7NObs = 0;            // number of stored observations (raw fetch, unfiltered)
   int    ao7NA = 0, ao7NB = 0;   // per-mode counts WITHIN the illuminated window used by
                                  // the fit (recomputed in ao7Estimate; not the raw fetch)
@@ -2482,7 +2580,12 @@ private:
   // objects sharing the active bird's altitude band, and coarse-screen each for
   // closest approach. Transient only -- the resident 150-sat DB is untouched.
   static const int DG_MAX = 14;
-  SatEntry dgSat[DG_MAX]; float dgMiss[DG_MAX]; time_t dgT[DG_MAX];
+  // Heap-on-demand (0.9.73 RAM pass): ~1.9 KB of SatEntry COPIES resident only
+  // while the debris-group screen is open. dgFetchAndScreen() allocates; the
+  // transition hook frees; printDebGrp() guards, because the Print submenu can
+  // reach it with no screen behind it.
+  struct DgBuf { SatEntry sat[DG_MAX]; float miss[DG_MAX]; time_t t[DG_MAX]; };
+  DgBuf* dgBuf = nullptr;
   int   dgN = 0, dgGroup = 0, dgScroll = 0, dgState = 0;   // 0 pick, 1 results
   bool  dgFetchAndScreen(String& err);
   void  drawDebGrp(); void keyDebGrp(char c, bool enter, bool back);
@@ -2775,7 +2878,7 @@ private:
                      PR_TOOLFORM, PR_CONJ, PR_NEIGH, PR_DEBGRP, PR_LNKCRV,
                      PR_EME, PR_EMEPLAN, PR_EMEMUT, PR_QRZ, PR_READY, PR_AWARDS,
                      PR_STATES, PR_DXCCLIST, PR_VISLIST, PR_PERF, PR_SPACEWX, PR_WEATHER, PR_SUNMOON, PR_BASICREF, PR_THERMAL, PR_AO7,
-                     PR_APRS, PR_DXC, PR_ADSB, PR_MUF, PR_SAA };
+                     PR_APRS, PR_DXC, PR_ADSB, PR_MUF, PR_SAA, PR_QSL };
   static const char* prtStem(PrintReport w);   // /CardSat/Reports filename stem per report
   bool printReport(PrintReport which);
   void printPasses();        // today's favorites day-sheet
@@ -2785,6 +2888,7 @@ private:
   void printSatCard();       // active satellite: transponders + next passes
   void printKeps();          // active satellite: Keplerian elements (nostalgia)
   void printLog();           // recent QSOs (paper backup)
+  void printQsl();           // QSL card for the ONE QSO in `qso` (hand-out confirmation)
   void printAmsatPitch();    // "support AMSAT" outreach page (About)
   void printOpCard();        // operator contact card + ham/satellite explainer (About)
   void printMutual();        // mutual-window (co-visibility) table + sky map
@@ -2827,6 +2931,7 @@ private:
   void drawGRotor();    void keyGRotor(char c, bool enter, bool back);    void gRotorReset();
   void drawGMorse();    void keyGMorse(char c, bool enter, bool back);    void gMorseReset();
   void drawGGrid();     void keyGGrid(char c, bool enter, bool back);     void gGridReset();
+  void drawGBrick();    void keyGBrick(char c, bool enter, bool back);    void gBrickReset();
   float gdlLevelRate();        // Doppler Lock: level-scaled drift rate
   void  ggNewRound();          // Grid Chase: build a fresh question
   void keyHelp(char c, bool enter, bool back);
@@ -2837,10 +2942,12 @@ private:
   void keyCatTest(char c, bool enter, bool back);
   void enterCatMon();                       // open the monitor, claim the trace sink
   void drawCatMon();
-  void drawDualRig();
-  void drawDualRigLocal();                 // CAT_DUAL: native two-leg editor
-  void keyDualRigLocal(char c, bool enter, bool back);
+  void drawDualRig();                      // CAT_DUAL: native two-leg editor
   void keyDualRig(char c, bool enter, bool back);
+  void drawUsbHelper();                    // CardSatUsbHelper link + device picker
+  void keyUsbHelper(char c, bool enter, bool back);
+  int  uhSel = 0;                          // cursor: 0 = link baud, 1 = device
+  int  uhScroll = 0;                       // device-list scroll
   void keyCatMon(char c, bool enter, bool back);
   void catMonPush(const char* dir, const uint8_t* b, size_t n);  // append a trace line
   void catMonSendHex(const String& hex);    // parse "FE FE 4C..." and transmit

@@ -23,6 +23,19 @@ transit prediction, sun/eclipse status, and more.
 > 1.0 release — deferred work, security decisions, and the hardware-verification gap — is
 > tracked in **[docs/ROADMAP_TO_1.0.md](docs/ROADMAP_TO_1.0.md)**.
 
+> **New in v0.9.73:** a **companion release** — and a hunt. **CardSatUsbHelper**
+> (an M5StickS3 on a Grove cable) adds a second USB bus so **two USB radios track
+> at once**; a fourteen-bench root-cause hunt ended at a one-line stale-timestamp
+> underflow in the link's liveness timer, now fixed and regression-armored, with
+> six findings from an external comms audit implemented alongside. New
+> **Space-Track orbital history** tool: any satellite's semi-major axis, period,
+> apogee/perigee, inclination, eccentricity or B* plotted from 30 days to the
+> **full archive**, with the current elements as a live delta — plus a data
+> table and thermal-printer summary. **Multi-grid (VUCC rover) logging** with
+> ADIF `VUCC_GRIDS` export, and **KESSLER netplay** that survives lost packets.
+>
+> See the **[release notes](docs/releases/RELEASE_NOTES_0.9.73.md)**.
+
 > **New in v0.9.72:** a **USB release**. **The IC-705 now works over USB CAT** when
 > plugged into a **self-powered hub** — confirmed on the bench with live CI-V traffic.
 > Scanning no longer gives up while the bus is still settling, so the "unplug the hub
@@ -160,11 +173,7 @@ transit prediction, sun/eclipse status, and more.
 > and Doppler are now **64-bit** — the old 4.29 GHz ceiling is gone, so C/X/Ku downlinks and
 > 10 GHz QO-100-style birds track and display correctly — and new **transverter LO** offsets
 > let a 1.2 GHz rig work 2.4/10 GHz through an up/down-converter. A **dual-radio** path lands:
-> the **CardSatDualRig** companion (M5StickS3) turns two half-duplex/RX radios into one
-> full-duplex station over a Hamlib `rigctld` server; CardSat drives it over **rigctl (net)**
-> or the new **rigctl (Grove)** cable transport and configures it from an on-device **Dual-Rig
-> setup** screen that shows the Stick's live USB enumeration. Since 0.9.68 the same
-> two-radio station also runs **natively**: CAT type **Dual (2 radios)** drives a downlink
+> since 0.9.68 a two-radio station runs **natively**: CAT type **Dual (2 radios)** drives a downlink
 > and an uplink leg itself — any of the companion's 27 radios per leg, on Grove serial, a
 > USB adapter (both legs may be USB, through a hub), or Icom LAN (the **IC-705 over its
 > own Wi-Fi**) — with the companion still
@@ -534,8 +543,9 @@ complete flashing/upgrade detail are in **[docs/BUILD_AND_FLASH.md](docs/BUILD_A
 > **This testing release ships a prebuilt binary** in **[`firmware/`](firmware/)** —
 > `CardSat-merged.bin` (flash at `0x0`) plus the individual bootloader/partition/app
 > images and a flashing guide with exact offsets and checksums. See
-> [`firmware/README.md`](firmware/README.md). The companion Stick firmware has its own
-> prebuilt binary under [`companion/CardSatDualRig/firmware/`](companion/CardSatDualRig/firmware/).
+> [`firmware/README.md`](firmware/README.md). The **CardSatUsbHelper** companion (a second
+> USB host on an M5StickS3, new in 0.9.73) has its own prebuilt binaries under
+> [`companion/CardSatUsbHelper/firmware/`](companion/CardSatUsbHelper/firmware/).
 
 ## Quick start
 

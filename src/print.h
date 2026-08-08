@@ -91,6 +91,16 @@ namespace Printer {
   void colrow(const String* fields, int n);
   void blank();
   void title(const String& s);         // emphasized/centered where the format allows
+  // Centre one line at EACH sink's own width. Distinct from title(): title() is
+  // "this is a heading" (emphasis + a rule underneath), center() is purely
+  // positional and carries no weight or separator. The QSL card needs the second
+  // -- a callsign centred in a block is not a heading -- and every report before
+  // it was left-aligned tabular material, which is why this did not exist.
+  //
+  // Each sink is padded to ITS OWN width rather than to cols(): the printer may be
+  // 32 columns while the file sink is 80, and centring both to the wider one puts
+  // the receipt's text hard against the right margin.
+  void center(const String& s);
   void rule();                         // a row of '-' at each sink's width
   void feedCut();                      // finish the page (cut / form-feed / showpage)
 

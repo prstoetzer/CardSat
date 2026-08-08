@@ -190,7 +190,7 @@ static constexpr uint32_t SD_FREQ_HZ  = 25000000;   // SD SPI clock (matches M5 
 static constexpr uint32_t CAT_BYTES_PER_UPDATE = 80;
 
 // Firmware version (single source of truth; shown on the About screen).
-static constexpr const char* FW_VERSION = "0.9.72";
+static constexpr const char* FW_VERSION = "0.9.73";
 
 // Reclaim the unused Bluetooth controller+host memory at boot (CardSat has no BLE today).
 // Set to 0 to keep BT reserved for a future BLE-printer build. Used by main.cpp (btInUse
@@ -289,6 +289,23 @@ typedef uint64_t freq_t;
 #ifndef CARDSAT_HAS_USBCAT
 #define CARDSAT_HAS_USBCAT 1
 #endif
+
+// ---- USB helper over Grove (CardSatUsbHelper companion, 0.9.73) -------------
+// A second USB host on an M5StickS3 at the end of a Grove cable, so a USB radio
+// or rotator can be attached without spending any of the Cardputer's own eight
+// host channels. See src/usbhelper.h for the channel arithmetic that makes this
+// necessary -- the short version is that hub + TH-D75 + IC-705 needs ten and no
+// software arrangement fits it.
+//
+// This side of the link is a UART client and needs NO USB host stack, so it is
+// available even in a build with CARDSAT_HAS_USBCAT=0 -- which is exactly the
+// build where a second USB port is most useful. Defined here rather than in
+// usbhelper.h because settings.h needs it for CAT_TYPE_N and does not include
+// usbhelper.h (the same reason CARDSAT_HAS_USBCAT lives here).
+#ifndef CARDSAT_HAS_USBHELPER
+#define CARDSAT_HAS_USBHELPER 1
+#endif
+
 static constexpr int   PASS_LIST_LEN   = 12;   // passes shown per satellite
 static constexpr int   SCHED_MAX       = 24;   // favorites tracked in the schedule
 static constexpr int   PD_SAMPLES      = 100;  // samples in the pass-detail curve

@@ -621,8 +621,9 @@ bool PlainCatRig::readFreq(freq_t& hzOut) {
 // ---------------------------------------------------------------------------
 //  DualRig
 // ---------------------------------------------------------------------------
-DualRig::DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud)
-  : _down(down), _up(up), _usbLeg(usbLeg) {
+DualRig::DualRig(Rig* down, Rig* up, int usbLeg, int helperLeg,
+                 uint32_t downBaud, uint32_t upBaud)
+  : _down(down), _up(up), _usbLeg(usbLeg), _helperLeg(helperLeg) {
   _baud[0] = downBaud; _baud[1] = upBaud;
   // Name says what is actually driven, so a one-legged setup is never mistaken for
   // a broken two-legged one.
@@ -641,11 +642,12 @@ DualRig::~DualRig() {
 
 void DualRig::begin(uint32_t baud, int uartNum, int rxPin, int txPin) {
   (void)baud;
-  // Begin every leg except the USB one(s) -- a USB leg starts when the reconciler
-  // attaches its CDC stream (setExternalStream / setLegExternalStream below),
-  // mirroring the single-rig CAT_USB lifecycle. LAN legs ignore the UART args.
-  if (_down && !legIsUsb(0)) _down->begin(_baud[0], uartNum, rxPin, txPin);
-  if (_up   && !legIsUsb(1)) _up->begin(_baud[1], uartNum, rxPin, txPin);
+  // Begin every leg whose transport is available NOW. A USB leg starts when the
+  // reconciler attaches its CDC stream, and a HELPER leg when the companion
+  // reports its port open -- both via setLegExternalStream() below, mirroring the
+  // single-rig CAT_USB lifecycle. LAN legs ignore the UART args.
+  if (_down && !legDeferred(0)) _down->begin(_baud[0], uartNum, rxPin, txPin);
+  if (_up   && !legDeferred(1)) _up->begin(_baud[1], uartNum, rxPin, txPin);
 }
 
 // Ready when every leg that EXISTS is ready. A "None" leg is not a missing leg --
@@ -691,7 +693,7 @@ void DualRig::setPinMode(uint8_t mode) {
 // (CAT-A for the downlink, CAT-B for the uplink). First attach begins the leg;
 // detach (nullptr) resets so the next attach begins it again.
 void DualRig::setLegExternalStream(int leg, Stream* s) {
-  if (leg < 0 || leg > 1 || !legIsUsb(leg)) return;
+  if (leg < 0 || leg > 1 || !legDeferred(leg)) return;
   Rig* L = (leg == 0) ? _down : _up;
   if (!L) return;
   L->setExternalStream(s);
@@ -704,18 +706,26 @@ void DualRig::setLegExternalStream(int leg, Stream* s) {
 
 void DualRig::setExternalStream(Stream* s) {
   Rig::setExternalStream(s);
-  if (_usbLeg < 0) return;
+  if (_usbLeg < 0 && _helperLeg < 0) return;
   if (s) {
-    // A single stream can only serve a SINGLE USB leg. With two, the reconciler
-    // must use setLegExternalStream() per leg; a blanket non-null attach here
-    // would put both radios on one wire, so it is deliberately ignored.
+    // A single stream can only serve a SINGLE leg. With two deferred legs the
+    // reconciler must use setLegExternalStream() per leg; a blanket non-null
+    // attach here would put both radios on one wire, so it is deliberately
+    // ignored. This path exists for the single-deferred-leg case only, which is
+    // the same shape single-rig CAT_USB has.
+    //
+    // NOTE the asymmetry with the nullptr path below: a HELPER leg is never
+    // attached through here even when it is the only deferred leg, because a
+    // mixed USB + helper dual rig has two distinct streams and the app always
+    // knows which leg it is attaching. Routing a helper stream through a
+    // "whichever leg is deferred" guess is how the wrong radio gets driven.
     if (_usbLeg == 0 || _usbLeg == 1) setLegExternalStream(_usbLeg, s);
     return;
   }
-  // nullptr = teardown: detach EVERY USB leg (fix31 rule -- clear each backend's
-  // cached copy before the Stream dies), whether there are one or two.
-  if (legIsUsb(0)) setLegExternalStream(0, nullptr);
-  if (legIsUsb(1)) setLegExternalStream(1, nullptr);
+  // nullptr = teardown: detach EVERY deferred leg (fix31 rule -- clear each
+  // backend's cached copy before the Stream dies), USB or helper, one or two.
+  if (legDeferred(0)) setLegExternalStream(0, nullptr);
+  if (legDeferred(1)) setLegExternalStream(1, nullptr);
 }
 
 bool DualRig::setMainFreq(freq_t hz) { return _up   ? _up->setMainFreq(hz)   : false; }
@@ -746,9 +756,12 @@ Rig* makeLegRig(uint8_t legModel, uint8_t bus, uint8_t civAddr, uint32_t baud,
     return new (std::nothrow) IcomNetRig(addr, lp.name, host, port ? port : 50001,
                                          user ? user : "", pass ? pass : "");
   }
-  // Grove serial or USB adapter leg: the plain-CAT backend over a Stream. For a
-  // USB leg the stream is attached later by the reconciler (extStream), exactly
-  // like single-rig CAT_USB.
+  // Grove serial, USB adapter, or USB-helper leg: the plain-CAT backend over a
+  // Stream. For a USB leg the stream is attached later by the reconciler
+  // (extStream), exactly like single-rig CAT_USB; a HELPER leg is identical
+  // except the Stream comes from UsbHelper rather than UsbSerial. The backend
+  // cannot tell the difference and does not need to -- which is the whole reason
+  // the transports are Streams.
   return new (std::nothrow) PlainCatRig((LegModel)legModel, addr, bd);
 }
 
@@ -774,9 +787,18 @@ Rig* makeDualRig(const uint8_t model[2], const uint8_t bus[2], const uint8_t civ
   if (uD && uU) usbLeg = 2;                            // dual-USB CAT
   else if (uD)  usbLeg = 0;
   else if (uU)  usbLeg = 1;
+  // At most ONE helper leg: the companion carries a single USB device. Two legs
+  // both set to Helper is refused by the settings UI and re-checked at engage;
+  // if a hand-edited config reaches here anyway, the DOWNLINK wins. That is the
+  // safer half to keep -- knob-follow and every read-back come off the downlink,
+  // so a silently uncontrolled uplink is visible immediately, while a silently
+  // uncontrolled downlink looks like the pass is simply going badly.
+  int helperLeg = -1;
+  if      (wantDown && bus[0] == LEGBUS_HELPER) helperLeg = 0;
+  else if (wantUp   && bus[1] == LEGBUS_HELPER) helperLeg = 1;
   const LegProfile& d = LEG_RADIOS[model[0]];
   const LegProfile& u = LEG_RADIOS[model[1]];
-  DualRig* dr = new (std::nothrow) DualRig(down, up, usbLeg,
+  DualRig* dr = new (std::nothrow) DualRig(down, up, usbLeg, helperLeg,
       baud[0] ? baud[0] : d.baud, baud[1] ? baud[1] : u.baud);
   if (!dr) { delete down; delete up; return nullptr; }
   return dr;

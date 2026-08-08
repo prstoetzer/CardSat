@@ -103,13 +103,6 @@ public:
   // downlink knob read while transmitting (a rig often reports the TX VFO then).
   virtual bool readPtt(bool& tx) { (void)tx; return false; }
 
-  // Send a raw control line to the backend and return one reply line ("" if
-  // unsupported/failed). Used by the Dual-Rig setup screen to talk to the
-  // CardSatDualRig companion's \csdr_* config escape over whichever rigctl
-  // transport is active (net or Grove). No-op on wire-level backends -- only the
-  // rigctl backends carry a line protocol a companion can answer.
-  virtual String vendorLine(const String& line) { (void)line; return String(); }
-
   // Toggle the rig's own satellite mode. Icom: actively forced OFF (we drive
   // MAIN/SUB ourselves). Yaesu/Kenwood: no-op -- their full-duplex/sat mode is
   // set up by the operator and must NOT be disturbed.
@@ -197,25 +190,11 @@ public:
   bool hasSatMode()  const override { return false; }
   bool selVerified() const override { return _ok; }
   const char* name() const override { return "rigctl"; }
-  // Raw \csdr_* / rigctl line passthrough for the Dual-Rig setup screen. Sends one
-  // line (newline appended if missing) and returns the single reply line. Inherited
-  // unchanged by RigctlGroveRig, so it automatically uses the Grove transport there.
-  String vendorLine(const String& line) override {
-    // H12: \csdr_models / \csdr_get can return >1 KB of JSON. At low Grove baud the reply
-    // alone can exceed the default 400 ms (e.g. ~1.4 s for the model catalog at 9600).
-    // Give a baud-aware deadline for these large vendor replies so they don't time out;
-    // ordinary short RPRT commands keep the default.
-    String l = line.endsWith("\n") ? line : line + "\n";
-    uint32_t baud = linkBaud();
-    uint32_t replyMs = 400;
-    if (baud && (line.indexOf("csdr_models") >= 0 || line.indexOf("csdr_get") >= 0 ||
-                 line.indexOf("csdr_status") >= 0)) {
-      // ~2 KB budget at this baud (bytes*10 bits / baud), plus headroom, min 2 s.
-      uint32_t ms = (uint32_t)((2048UL * 10UL * 1000UL) / baud) + 500;
-      replyMs = ms < 2000 ? 2000 : ms;
-    }
-    return xchg(l, replyMs);
-  }
+  // NOTE (0.9.73): this class used to carry vendorLine(), a raw line passthrough
+  // that existed solely so the Dual-Rig screen could drive the CardSatDualRig
+  // companion's \csdr_* config escape. That companion is retired and nothing else
+  // ever called it, so it is gone. A rigctld is still driven normally through the
+  // VFO-mode protocol below; only the config side-channel went away.
   // Effective UART baud of this transport, or 0 for the network path (no framing delay).
   virtual uint32_t linkBaud() const { return 0; }
 protected:
@@ -429,7 +408,14 @@ public:
   // begin() is deferred until the reconciler attaches its CDC stream -- via
   // setExternalStream() for a single USB leg (same lifecycle as CAT_USB
   // single-rig) or setLegExternalStream() per leg when there are two.
-  DualRig(Rig* down, Rig* up, int usbLeg, uint32_t downBaud, uint32_t upBaud);
+  // helperLeg: -1 = neither, 0/1 = that leg is a USB device on the
+  // CardSatUsbHelper companion. Never 2: the helper carries exactly ONE device,
+  // so both legs cannot be on it. A helper leg is deferred-stream in precisely
+  // the same way a USB leg is -- its begin() waits for setLegExternalStream() --
+  // which is why the two share legDeferred() below rather than each getting
+  // their own copy of the lifecycle.
+  DualRig(Rig* down, Rig* up, int usbLeg, int helperLeg,
+          uint32_t downBaud, uint32_t upBaud);
   ~DualRig() override;
   void begin(uint32_t baud, int uartNum, int rxPin, int txPin) override;
   bool ready() const override;
@@ -457,10 +443,15 @@ public:
   Rig* downLeg() const { return _down; }        // status surfaces (per-leg readouts)
   Rig* upLeg()   const { return _up; }
   int  usbLeg()  const { return _usbLeg; }
+  int  helperLeg() const { return _helperLeg; }
+  // True when leg L gets its Stream attached later rather than opening a UART in
+  // begin(). Both USB and helper legs do; Grove and LAN legs do not.
+  bool legDeferred(int L) const { return legIsUsb(L) || _helperLeg == L; }
 private:
   Rig*     _down;                     // downlink (RX) leg
   Rig*     _up;                       // uplink (TX) leg
   int      _usbLeg;                   // -1 / 0 (down) / 1 (up) / 2 (both)
+  int      _helperLeg;                // -1 / 0 (down) / 1 (up); never 2
   bool     legIsUsb(int L) const { return _usbLeg == L || _usbLeg == 2; }
   bool     _usbBegun[2] = { false, false };  // per-leg: begin() ran after stream attach
   uint32_t _baud[2];                  // per-leg CAT baud (0 already resolved by factory)

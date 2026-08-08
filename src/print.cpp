@@ -622,6 +622,37 @@ void line(const String& s) {
 
 void wrap(const String& s) { line(s); }   // line() already per-sink wraps
 
+// Centre `s` at each sink's own width. Over-long input is passed through
+// untouched rather than wrapped: a centred line that wraps is worse than one that
+// runs to the margin, and every caller here is a short field (a callsign, a grid,
+// a date) that fits by construction.
+static String centreTo(const String& s, int w) {
+  const int len = (int)s.length();
+  if (w <= 0 || len >= w) return s;
+  String out;
+  out.reserve(w);
+  for (int i = 0; i < (w - len) / 2; ++i) out += ' ';
+  out += s;
+  return out;                      // no trailing pad: it would only waste ribbon
+}
+
+void center(const String& s) {
+  if (s_pOK && isRaster()) {
+    rasterPush(centreTo(s, s_pCols));
+  } else if (s_pOK && s_fmt == FMT_ESCPOS) {
+    // ESC/POS can centre in the printer, which is better than space padding: it
+    // is exact at any character pitch, including double-width titles.
+    uint8_t on[3]  = {0x1B, 0x61, 0x01}; pRaw(on, 3);      // ESC a 1  centre
+    pStr(s); pNL();
+    uint8_t off[3] = {0x1B, 0x61, 0x00}; pRaw(off, 3);     // ESC a 0  left
+  } else if (s_pOK) {
+    printerLine(centreTo(s, s_pCols));
+  }
+  // The serial and file sinks are always plain text, so they always pad.
+  if (s_ser)  Serial.println(centreTo(s, s_fCols));
+  if (s_file) { s_f.print(centreTo(s, s_fCols)); s_f.print('\n'); }
+}
+
 // ---- narrow-paper layout helpers (0.9.65) ---------------------------------
 // narrow(): the widest active sink is a 32-col (58 mm) receipt or tighter. cols()
 // returns 0 only when no sink is open; treat that as "not narrow" so a preview with

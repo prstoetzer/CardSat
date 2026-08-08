@@ -239,7 +239,7 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   server over WiFi (Settings -> CAT type -> rigctl) — Doppler both legs via split.
 - **Native dual rig (CAT type -> Dual (2 radios)).** Drive a downlink radio and an
   uplink radio directly — no companion in the middle. Each leg is any of the 27
-  half-duplex/receive-only radios from the CardSatDualRig catalog (IC-705/905,
+  half-duplex/receive-only radios from the leg catalog (IC-705/905,
   IC-7100/7000/706MKIIG, IC-275/475, nine IC-R receivers, FT-817/818/857/897,
   FT-100, VR-5000, FT-991/991A, FTX-1, TH-D74/D75) on its own bus: Grove TTL
   serial, a USB<->serial adapter, or **Icom network CAT — the IC-705 over its own
@@ -563,7 +563,8 @@ operating instructions see **[MANUAL.md](../MANUAL.md)**.
   marker on a drifting Doppler S-curve), **Catch the Pass** (time a "QSO" as a bird crosses
   the workable window), **Rotor Runner** (an IMU-tilt or arrow-key antenna-slewing game),
   **Morse Meteors** (clear falling letters by keying their Morse, with a real CW sidetone),
-  and **Grid Chase** (a Maidenhead grid-square trainer). Game sounds follow the speaker
+  **Grid Chase** (a Maidenhead grid-square trainer), and **Deorbit** (breakout with a
+  ground-station dish for a paddle and derelict satellites for bricks). Game sounds follow the speaker
   volume and can be turned off in Settings. See [MANUAL.md](../MANUAL.md).
 - **Fully offline** once GP + transponders are cached. CardSat stores everything in
   a **`/CardSat` folder on the microSD card** by default, falling back to internal

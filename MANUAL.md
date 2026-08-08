@@ -196,20 +196,19 @@ verify against your `rigctld` before a pass. If your rig is an Icom in sat mode 
 see the active VFO flicker while tracking, start `rigctld` with `-x 1` (the Hamlib
 `--uplink` switch) to suppress uplink read-back, which reduces VFO switching.
 
-### Two half-duplex radios on one pass — the CardSatDualRig companion
+### Two half-duplex radios on one pass
 
 A full-duplex rig (IC-9700, FT-847, TS-2000) transmits and receives at once, so
 CardSat drives it directly. **Half-duplex and receive-only** radios (IC-705, FT-817,
 IC-R8600, TH-D74, …) cannot, so a proper linear-transponder station needs *two* of
-them — one on the downlink, one on the uplink. CardSat offers **two** ways to run
-that pair: **natively** (CAT type → **Dual (2 radios)**, next section) or through the
-**CardSatDualRig** companion firmware (in `companion/CardSatDualRig/`, for the
-M5StickS3), which hosts
-the two radios on its own USB port, speaks each one's native CAT, and presents CardSat
-a single `rigctld` server. CardSat steers two VFOs (VFOA = downlink, VFOB = uplink) and
-the Stick fans them out to the two radios. PTT is manual — you key your transmit radio
-by hand. Point CardSat at the Stick with either **rigctl (net)** over Wi-Fi or **rigctl
-(Grove)** below.
+them — one on the downlink, one on the uplink. CardSat runs that pair **natively**:
+CAT type → **Dual (2 radios)**, next section. PTT is manual — you key your transmit
+radio by hand.
+
+> The **CardSatDualRig** companion, which used to be the other way to do this, was
+> retired in 0.9.73. Everything it did is native now, and the duplication meant every
+> radio fix had to be made twice. `rigctl (net)` and `rigctl (Grove)` are unaffected
+> and still drive any Hamlib `rigctld`.
 
 ### Two radios natively — CAT type **Dual (2 radios)**
 
@@ -320,32 +319,47 @@ both ends are 3.3 V, so no level shifter. The **Grove baud** (the row that reads
 port" for the network options) must match the Stick's Grove baud — default **115200**.
 Because rigctl (Grove) claims the Grove UART, it follows the same rule as wired CI-V: a
 **Grove rotator** must move to USB/LAN or the I²C bridge, and it can't share the port
-with a **Grove GPS**. The link is bidirectional, so CardSat can also configure the
-Stick over it (see the companion's `\csdr_*` escape) — no phone or portal needed.
+with a **Grove GPS**.
 
-### Configuring the companion from CardSat — Dual-Rig setup screen
+### A second USB port — the CardSatUsbHelper companion
 
-Once CAT type is **rigctl (net)** or **rigctl (Grove)** and CardSat can reach the
-Stick, open **Settings → Radio → Dual-Rig setup (Stick)** to set the companion up
-from the Cardputer — no phone, portal, or second screen. On entry CardSat queries the
-Stick and shows two things: the two legs (**DN (RX)** = downlink, **UP (TX)** = uplink),
-each with its radio model, bound USB device, and CI-V address; and the **live USB
-enumeration** — every serial adapter the Stick currently sees, with product name and
-VID:PID. That enumeration is the whole point: with two identical adapters plugged in,
-the only reliable way to say *which* radio is the downlink is to pick it from what the
-Stick actually enumerated, so you bind by the device's own USB serial rather than by a
-guessable port order. Move the cursor with `;`/`.`, change a field with `,`/`/`, and
-press a digit **1–8** to bind that enumerated device to the selected leg. `q` re-queries
-the Stick, `s` saves the whole configuration back to it (persisted to the Stick's
-flash), and `` ` `` returns. The model list is fetched from the Stick, so it always
-matches whatever radios that companion build supports.
+The Cardputer's USB bus has **eight host channels** in total, one per open pipe. A
+hub costs 2, a CDC radio 3 — and an **IC-705 carries its own internal hub**, so it
+costs 5 on its own. That means `hub + TH-D75 + IC-705` needs ten, and no amount of
+software can make ten fit into eight.
 
-The **Dual-Rig setup (Stick)** row in the Radio settings list carries a small
-**link dot** on its right edge — green when the Stick answers, red when it doesn't,
-gray when the check hasn't run or CAT isn't a rigctl type — plus a "linked" / "no
-link" word. It updates while the row is highlighted, so during bring-up you can see
-at a glance whether the Grove (or Wi-Fi) link is alive before opening the screen; a
-green dot means the cable, baud, and `\csdr_*` handshake are all working.
+A second microcontroller brings its own eight. **CardSatUsbHelper** runs on an
+M5StickS3 wired to the Grove port and acts as a byte pipe: CardSat keeps one USB
+device on the Cardputer and hands the other to the Stick. CardSat still does all the
+CAT and all the rotator control — the helper only moves bytes and reports what is
+plugged in.
+
+Pick it in one of three places, for **one device at a time**:
+
+* CAT type **USB helper (Grove)** — a single radio on the helper.
+* Dual-rig leg bus **Helper** — one leg there, the other on local USB or LAN.
+* Rotator wire **USB helper** — the rotator there, the radio on the Cardputer.
+
+That last one matters more than it looks: a USB radio *and* a USB rotator on the
+Cardputer is `hub + 3 + 3 = 8`, the exact ceiling with nothing spare.
+
+**Settings → Radio → USB helper >** shows the link, the Stick's firmware version, the
+devices it can see, and the link baud (230400 by default; 115200 and 460800 also
+offered). Opening the screen brings the link up even before you have chosen a
+transport, so you can see what is plugged in first. `s` re-scans, `r` restarts the
+Stick.
+
+Wiring is Cardputer Grove **TX → Stick GPIO9**, **RX ← Stick GPIO10**, GND↔GND, both
+3.3 V. **If nothing ever links, swap those two first** — a reversed pair is silent
+rather than noisy, so it looks exactly like a dead cable.
+
+Because the helper owns the Grove UART it follows the same rule as wired CI-V: it
+cannot share with a Grove rotator, a Grove GPS, `rigctl (Grove)`, or a Grove dual-rig
+leg.
+
+**Power.** The Stick does not supply USB power, so a radio on the helper still needs
+a **self-powered hub** — the same as on the Cardputer. The Stick itself can be fed
+5 V from the Cardputer's Grove rail over the same cable.
 
 ### CAT over a USB-to-serial adapter (any radio, no level shifter)
 
@@ -1040,7 +1054,12 @@ are needed as ordinary punctuation in your text, the editor's commands all use t
 Notes are limited to 4 KB each, which is several pages of text — ample for operating
 notes.
 
-### Awards (Log → Awards)
+### Awards
+
+Multi-grid stations: a QSO whose grid field lists several grids ("FN20/FN30",
+entered with commas) credits every listed grid toward the totals; state/DXCC
+come from the first grid. ADIF export writes GRIDSQUARE (first) + VUCC_GRIDS
+(full list). (Log → Awards)
 
 ![Awards](docs/img/awards.jpg)
 
@@ -5604,6 +5623,44 @@ engine underneath; they differ only in the direction of the question.
   Simulator** intro — AMSAT's desktop satellite for hands-on learning (kits at the
   AMSAT Store; cubesatsim.com); `` ` `` back.
 
+### Space-Track orbital history
+
+- **Purpose** — compare a satellite's CURRENT orbit against its history from
+  space-track.org: how the semi-major axis has decayed, how drag events moved
+  the period, whether an inclination change happened, how B* has trended. The
+  history comes from Space-Track's `gp_history` class; the current values are
+  derived from the elements CardSat already holds for the satellite.
+- **Where** — **Tools** → **Satellite & orbital** → **Space-Track history**.
+- **Account** — a free space-track.org account is required. Press `u` and `w`
+  on the tool screen to enter the identity (email) and password; they are
+  stored in the standard CardSat config alongside the QRZ credentials
+  (plaintext, like every stored key -- a dedicated password is wise).
+- **Rows** — up/down selects **Sat** (`,`/`.` steps the loaded database, `g`
+  jumps to the currently tracked satellite), **Span** (30 d to 10 yr, plus
+  **max (all)** which first asks Space-Track for the object's earliest epoch
+  and then fetches the whole archive), and **Metric** (semi-major axis,
+  period, apogee, perigee, inclination, eccentricity, B*).
+- **Fetch** — `f` (or ENTER) logs in (session cookie), streams the history
+  as CSV, and
+  decimates it into 120 time bins on the fly, so a 25-year record costs the
+  same memory as a 30-day one (~4 KB, freed on leaving the screen). Progress
+  is painted during the transfer; a full archive can take up to a minute or
+  two on a large object.
+- **Reading the plot** — the green line is the binned history; the yellow dot
+  on the right edge is the CURRENT value from the loaded elements, with a
+  delta line beneath: `now 6793.42 km  D-1.83 (-10.2 m/day)` reads "the
+  semi-major axis is 1.83 km below where the window started, decaying about
+  10 m per day". For kilometre metrics the per-day rate is included; angles
+  and dimensionless metrics show the plain delta.
+- **Table** — `t` toggles a scrollable data table of every populated time
+  bin (date + value for the selected metric): up/down scrolls, `,`/`.`
+  switches the metric in place, `t` returns to the graph.
+- **Print** — `p` prints a first→last summary of all seven metrics through
+  the configured print sinks.
+- **Notes** — Space-Track asks users to keep queries modest; one fetch per
+  look is well inside their guidance. Only `gp_history` is queried; nothing
+  is uploaded.
+
 ### Telnet client
 
 - **Purpose** — a line-oriented network terminal for reaching another host on
@@ -6493,14 +6550,14 @@ filesystem and can be copied off over USB like any other file.
 - **Shows** — firmware version, IP address, free heap and other read-only
   diagnostics.
 - **Keys** — **`r`** opens the **Station readiness** checklist (below); `l` opens
-  **License & credits**; **`z`** opens the **Games menu** (seven satellite-themed
+  **License & credits**; **`z`** opens the **Games menu** (eight satellite-themed
   mini-games — see below); `` ` `` back.
 
 ### Games menu (`z` from About)
 
 ![Games menu](docs/img/games.jpg)
 
-Press **`z`** on the About screen to open a menu of six small games — something to do while
+Press **`z`** on the About screen to open a menu of eight small games — something to do while
 waiting on a pass, most of them a light nod to real satellite operating. Use **`;`/`.`** (or
 up/down) to move through the list and **ENTER** to launch the highlighted game; **`` ` ``**
 returns to About. Several of the games can use the **IMU tilt** as well as the keyboard.
@@ -6532,6 +6589,15 @@ because `h` is the global Help key; the **Morse swap** setting flips which is do
 **Grid Chase** — a Maidenhead grid-square trainer: a location hint is shown and you pick the
 correct grid from four options against a countdown. Use `;`/`.` (or up/down) then **ENTER**,
 or press **`1`–`4`** to answer directly.
+
+**Deorbit** — breakout, themed as sweeping derelict satellites out of the orbital shells
+above your station. The paddle is your **ground-station dish** and the ball a **capture
+tug**; the bricks are dead birds in four colour-coded shells, scoring 40 down to 10 a hit
+as you work from the top down. The tug parks on the dish until **ENTER** launches it, and
+losing it off the bottom is a re-entry costing one of three tugs. Clearing all 32 respawns
+the shells a step faster. **Tilt** steers if the IMU is enabled, and the keyboard always works alongside:
+arrow keys, `t`/`u`, or `a`/`l` for left/right. Off-centre dish hits steer the tug, so there is real aim
+in it rather than pure reflection.
 
 **KESSLER (2-player)** — the 1991 QBasic classic **GORILLAS.BAS**, altered to a
 satellite theme: two **lunar ground stations** lob retired CubeSats at each other over a
@@ -6645,6 +6711,7 @@ the no-interactive-programs rule stands; that is precisely why it lives in firmw
 | **APRS heard** (Nearby & DX) | live APRS-IS listen (receive-only, needs your callsign in Settings): stations appear as packets arrive with distance + bearing · `g` center grid (blank = here) · ENTER bearing-rose detail · `f` restart · `p` print · `` ` `` back closes the connection |
 | **DX cluster** (Nearby & DX → DX spots) | live DX-cluster spots: each shows DX call, frequency, band, and **spotter (de)**, with the spot **comment** on a second line beneath · `;`/`.` step spot-to-spot (skips comment lines) · `f` fetch · `n` step bands that have spots · `p` print · `` ` `` back |
 | **ADS-B radar** (Nearby & DX) | aircraft on a north-up polar plot, radius = range (beyond-range traffic pinned to the outer ring); scatter-target bearing line highlights near-path aircraft · `f` fetch · `t` scatter target grid · `p` print · source URL in Settings → Network / data · `` ` `` back |
+| **Space-Track history** (Tools → Satellite & orbital) | `^v` row · `,`/`.` change · `g` tracked sat · `u`/`w` account · `f`/ENTER fetch · `p` print · spans 30 d–10 yr + max (full archive) |
 | **Telnet client** (Tools → Calc & prog → Telnet) | connection list: `a` add · `e` edit · `d` delete · ENTER open · setup walks label → host → port → output (screen/printer/both) · plaintext + unauthenticated, trusted LANs only |
 | **Telnet terminal** (open a connection) | **type to send** · ENTER sends line (CR LF) · **Ctrl+key** control chars (Ctrl-C/D/Z…) · **Fn+`;`/`.`/`,`/`/`** arrows · **Fn+`1`..`0`** F1–F10 · **Fn+`` ` ``** Escape (all to the remote) · **Opt+`;`/`.`** scroll buffer · **Opt+`c`** clear · **Opt+`r`** reconnect · **Opt+`1`/`2`/`3`** output screen/printer/both · **Opt+`` ` ``** exit · no Fn combo reaches a CardSat global here; exit is Opt+`` ` `` only |
 | **Edit** | type · DEL backspace · ENTER ok · `` ` `` cancel |

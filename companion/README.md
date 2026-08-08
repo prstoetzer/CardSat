@@ -1,54 +1,66 @@
 # CardSat companion firmware
 
-Standalone sketches that work *with* CardSat but run on their own hardware.
+Standalone sketches that run on their own hardware and work *with* CardSat.
 
-## CardSatDualRig (`CardSatDualRig/`)
+## CardSatUsbHelper (`CardSatUsbHelper/`)
 
-> ⚠️ **EXPERIMENTAL — never tested on hardware.** This firmware compiles clean and its
-> logic has been reviewed and carried through several CardSat audits, but **no one has
-> yet run it with two radios on a real M5StickS3.** Treat it as a starting point for
-> someone who has the hardware, not as a finished product. If you try it, findings are
-> very welcome — bugs found on a bench are worth more than any amount of code review.
->
-> The 0.9.70 USB work below was applied here by inspection, from defects proven on
-> CardSat's own hardware. That makes it well-founded, but it is still unverified on
-> this board.
+A **second USB host** on the end of a Grove cable, so a USB radio or rotator can be
+attached without spending any of the Cardputer's own USB host channels.
 
-A rigctld server for the **M5StickS3** that bridges CardSat to **two half-duplex or
-receive-only radios** over USB, so you can work a linear-transponder satellite pass
-with one radio on the downlink and another on the uplink — the pair acting as one
-"full-duplex" rig from CardSat's point of view.
+The ESP32-S3 has eight host channels for the whole bus, one per open pipe. A hub
+costs 2, a CDC radio 3, and the IC-705 — which contains its own internal hub —
+costs 5 by itself. So `hub + TH-D75 + IC-705` needs ten, and no arrangement of
+eight fits it. A second microcontroller brings its own eight.
 
-CardSat drives it either over Wi-Fi (CAT type **rigctl (net)**) or over a Grove cable
-(CAT type **rigctl (Grove)**, added in 0.9.62 — no Wi-Fi needed). The Stick can also
-be configured from CardSat over the same link via the `\csdr_*` escape.
+CardSat still owns everything: every CAT dialect, all rotator grammar, all the
+Doppler logic. The helper is a **byte pipe** that moves bytes, manages the CDC line
+state, and reports what is plugged in. It stores nothing across reboots.
 
-See `CardSatDualRig/README.md` for the full build, wiring, supported-radio list, and
-the honest not-yet-hardware-tested status. It is a separate Arduino sketch: open the
-`CardSatDualRig/` folder in the Arduino IDE, not the CardSat root.
+Select it in CardSat as CAT type **USB helper (Grove)**, as a dual-rig leg bus
+**Helper**, or as the rotator wire **USB helper**. One device at a time — it is a
+single exclusive resource and CardSat refuses a second claimant.
 
-## USB host library — use the patched copy (0.9.70)
+See [`CardSatUsbHelper/README.md`](CardSatUsbHelper/README.md) for wiring, power and
+build, and [`../docs/interfaces/CSUH_PROTOCOL.md`](../docs/interfaces/CSUH_PROTOCOL.md)
+for the wire protocol.
 
-This firmware uses **EspUsbHost**, the same library CardSat drives, and inherits the
-same defects. Build against the patched copy vendored at
-`third_party/EspUsbHost/` in the CardSat repository rather than the stock library from
-the Library Manager. `third_party/EspUsbHost/PATCHES.md` lists every patch, why it
-exists, and how to re-apply it after an upstream version bump.
+### Status
 
-The one that matters most for a dual-rig companion:
+The firmware compiles clean and its link layer is verified host-side — the codec
+against reference vectors, and the *shipped* CardSat client run against a mock
+helper covering handshake, enumeration, flow control under load, and reboot
+recovery. **It has not yet been run on a real M5StickS3 with a radio attached.**
+Bench findings are very welcome; they are worth more than any amount of review.
 
-* **CDC serial OUT drain.** `sendSerial()` allocates a transfer, submits it and forgets
-  it — the transfer is never recorded in the library's endpoint table. If a radio stops
-  reading its port (switched off, or its CAT application not running), that transfer
-  stays enqueued in the pipe indefinitely. `usb_host_interface_release()` then refuses
-  the interface that owns the endpoint, which blocks the device close, the client
-  deregistration and the host uninstall in turn — and the USB stack is stranded until
-  a reboot. The library already drains audio-out and vendor-out endpoints this way;
-  serial-out was simply missed.
+`tools/helper_probe.py` speaks CSUH from a Mac over a USB-serial adapter, so the
+Stick can be exercised with CardSat out of the loop — which is the fastest way to
+tell a firmware problem from a wiring problem.
 
-Also applied to this firmware directly in 0.9.70: **DTR is now de-asserted when a leg
-releases a radio.** On a CDC-ACM device DTR is what tells the device the host has the
-port open, and there is no other close notification. This firmware asserted DTR at bind
-and never dropped it, so a radio keying its CAT session off DTR believed the session was
-still open after the leg unbound — on a TH-D75 that meant CAT could not be
-re-established without power-cycling the radio.
+## CardSatDualRig — retired in 0.9.73
+
+The previous companion was a rigctld server that owned CAT state for two radios and
+carried its own radio catalogue. Once `CAT_DUAL` landed natively in CardSat (0.9.68)
+that duplication bought nothing: every radio fix had to be made twice and kept
+honest across two release cycles. It was never run on hardware by anyone.
+
+It is gone, along with the `\csdr_*` configuration escape it needed. **The generic
+rigctl transports are unaffected** — CAT type `rigctl (net)` and `rigctl (Grove)`
+still drive any Hamlib rigctld, which is what they were always for.
+
+## USB host library — use the patched copy
+
+Both CardSat and the helper drive **EspUsbHost** and inherit the same defects. Build
+against the patched copy vendored at `third_party/EspUsbHost/`, not the stock
+library from the Library Manager. `third_party/EspUsbHost/PATCHES.md` lists every
+patch and how to re-apply it after an upstream bump.
+
+The two that matter most here:
+
+* **CDC serial OUT drain.** `sendSerial()` submits its transfer without recording it
+  in the library's endpoint table, so a radio that stops reading its port leaves the
+  transfer enqueued forever. `usb_host_interface_release()` then refuses the
+  interface, which blocks the device close, the client deregistration and the host
+  uninstall in turn — and the USB stack is stranded until a reboot.
+* **`ESPUSBHOST_CLAIM_AUDIO` defaults to 0.** Not claiming a composite radio's audio
+  interface is what keeps it from spending the very channels the helper exists to
+  conserve.

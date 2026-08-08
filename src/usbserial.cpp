@@ -356,6 +356,10 @@ namespace {
   bool waitForAdapterKey(const char* key, uint32_t ms);  // dual-USB: await a nominated adapter
   int  cat2PickAdapter();                                // CAT-B's adapter choice (dual-USB CAT)
 
+  // Physical-disconnect notices raised on the USB host task and consumed by the
+  // main loop. volatile is sufficient for a one-way sticky bool: the writer only
+  // ever sets it and the reader only ever clears it, so there is no value to tear.
+  volatile bool s_catLost = false, s_cat2Lost = false, s_rotLost = false;
   uint8_t  s_catAddress = 0xff;      // the adapter the RADIO bound
   uint8_t  s_rotAddress = 0xff;      // the adapter the ROTATOR bound
   uint8_t  s_cat2Address = 0xff;     // the adapter the SECOND radio (CAT-B) bound
@@ -574,6 +578,18 @@ namespace {
   void onGone(const EspUsbHostDeviceInfo& d) {
     for (uint8_t i = 0; i < s_serDevN; ++i)
       if (s_serDev[i].address == d.address) s_serDev[i].dead = 1;
+    // Tombstoning the registry was the whole of this callback until 0.9.73, and it
+    // is not enough. active() is `s_active && s_bound`, neither of which the
+    // registry touches, so an unplugged radio stayed LOGICALLY active -- and the
+    // loop reconciler, seeing nothing to do, never rebuilt the port. A replug then
+    // did nothing until the operator changed a setting or rebooted.
+    //
+    // Only flags are set here: this runs on the USB host task, and tearing a port
+    // down from inside a host callback is how you free objects the host is still
+    // walking. The main loop consumes them (serviceDisconnects()).
+    if (d.address == s_catAddress)  s_catLost  = true;
+    if (d.address == s_cat2Address) s_cat2Lost = true;
+    if (d.address == s_rotAddress)  s_rotLost  = true;
   }
 
   void consoleDown() {
@@ -901,22 +917,33 @@ bool begin(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits) {
     s_host->clearLastError();
     s_host->end();
     const bool freed = (s_host->lastError() != ESP_ERR_TIMEOUT);
-    delete s_cdc;  s_cdc  = nullptr;
-    delete s_host; s_host = nullptr;
-    s_hostReleased = freed;
     s_active = false; s_bound = false;
-    consoleUp();
     char msg[64];
     if (!freed) {
-      // We could not release the stack, so a re-engage would just hit 259 again.
-      // Latch it (s_hostReleased is false) and say so plainly rather than letting
-      // the operator retry into the same wall.
+      // DO NOT delete, and DO NOT consoleUp(). end() timing out is documented by
+      // the library as "tasks were left alive to avoid freeing in-flight
+      // transfers" (EspUsbHost.cpp, the ESP_LOGW at the end of end()) -- so a live
+      // task still holds `this`, and deleting either object hands it a dangling
+      // pointer. consoleUp() is arguably worse: Serial.begin() reclaims the USB
+      // PHY while the IDF host stack may still own it, and a two-owner PHY fails
+      // in ways that look like anything except a teardown bug.
+      //
+      // Retaining costs ~11.8 KB and the serial console until a reboot. That is
+      // the correct price: the two OTHER teardown sites in this file
+      // (releaseHostNow() and end()) have always retained here, and this path was
+      // simply missed when they were fixed. Found by the 0.9.72 USB review.
+      s_hostTeardownStuck = true;      // block re-engage; only a reboot clears it
+      s_hostReleased = false;
       setErr(s_retryAfterStuck
                ? "USB stack still held after retry - reboot to clear"
                : "USB stack stuck installed - retry, or reboot if it persists");
       stage(USBCAT_STAGE_NONE);
       return false;
     }
+    delete s_cdc;  s_cdc  = nullptr;
+    delete s_host; s_host = nullptr;
+    s_hostReleased = true;
+    consoleUp();
     if (e == 259)   // ESP_ERR_INVALID_STATE: the USB host stack is already installed
       // Kept as a backstop, but this should no longer be reachable via disengage:
       // end() now drains the pending events and calls usb_host_uninstall() itself,
@@ -1148,7 +1175,15 @@ void end() {
   stage(USBCAT_STAGE_END_DONE);
 }
 
-bool    active()     { return s_active && s_bound; }
+// active() now also asks the CDC object whether the device is still there.
+// s_active/s_bound record what CardSat INTENDED; connected() records what the bus
+// actually has. Before 0.9.73 only the intent was consulted, so an unplugged radio
+// reported active forever.
+bool    active()     { return s_active && s_bound && s_cdc && s_cdc->connected(); }
+bool    catLost()    { return s_catLost; }
+bool    cat2Lost()   { return s_cat2Lost; }
+bool    rotLost()    { return s_rotLost; }
+void    clearLostFlags() { s_catLost = false; s_cat2Lost = false; s_rotLost = false; }
 Stream* stream()     { return active() ? s_cdc : nullptr; }
 const char* lastError()  { return s_err; }
 const char* deviceName() { return s_dev; }
@@ -1388,7 +1423,7 @@ void cat2End() {
   releaseHostIfIdle();   // M2-safe; no-op while CAT-A or the rotator still owns it
 }
 
-bool    cat2Active()      { return s_cat2Active && s_cdc2; }
+bool    cat2Active()      { return s_cat2Active && s_cdc2 && s_cdc2->connected(); }
 Stream* cat2Stream()      { return cat2Active() ? s_cdc2 : nullptr; }
 const char* cat2DeviceName() { return s_cat2Dev; }
 const char* cat2LastError()  { return s_cat2Err; }
@@ -1563,14 +1598,28 @@ uint8_t serialDeviceCount() { return s_serDevN; }
 // when the log on the same screen said zero.
 uint8_t liveDeviceCount() {
   uint8_t n = 0;
-  for (uint8_t i = 0; i < s_serDevN; ++i) if (!s_serDev[i].dead) ++n;
+  for (uint8_t i = 0; i < s_serDevN; ++i) if (serialDeviceLive(i)) ++n;
   return n;
 }
-bool serialDeviceLive(uint8_t i) { return i < s_serDevN && !s_serDev[i].dead; }
+// A registry slot counts as selectable only when the host has actually claimed a
+// serial OUT endpoint for it. onDev() excludes hubs and nothing else, so anything
+// that enumerates -- an audio function, a HID device, a composite sibling -- would
+// otherwise appear in the adapter picker as if it could carry CAT.
+//
+// Filtering HERE rather than at insert time is deliberate: serialReady() resolves
+// to hasSerialOutEndpoint, which is set while interfaces are claimed, and whether
+// that has happened by the time the connect callback fires is not something to
+// depend on. By the time anything reads the picker, enumeration has settled and
+// the answer is definitive.
+bool serialDeviceLive(uint8_t i) {
+  if (i >= s_serDevN || s_serDev[i].dead) return false;
+  if (!s_host) return true;                 // no host to ask: do not hide anything
+  return s_host->serialReady(s_serDev[i].address);
+}
 const char* serialDeviceLabel(uint8_t i) { return i < s_serDevN ? s_serDev[i].label : ""; }
 const char* serialDeviceKey(uint8_t i)   { return i < s_serDevN ? s_serDev[i].key   : ""; }
 
-bool rotActive()             { return s_rotActive && s_rotCdc; }
+bool rotActive()             { return s_rotActive && s_rotCdc && s_rotCdc->connected(); }
 Stream* rotStream()          { return rotActive() ? (Stream*)s_rotCdc : nullptr; }
 const char* rotDeviceName()  { return s_rotDev; }
 const char* rotLastError()   { return s_rotErr; }

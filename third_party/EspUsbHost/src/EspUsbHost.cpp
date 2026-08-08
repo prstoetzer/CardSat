@@ -3901,16 +3901,75 @@ bool EspUsbHost::sendSerial(const uint8_t *data, size_t length, uint8_t address)
     return false;
   }
 
-  const size_t packetSize = length > device->serialOutPacketSize ? length : device->serialOutPacketSize;
-  usb_transfer_t *transfer = nullptr;
-  esp_err_t err = usb_host_transfer_alloc(packetSize, 0, &transfer);
-  if (err != ESP_OK)
+  // ---- CardSat patch 10: bounded, reusable OUT transfer --------------------
+  //
+  // At most ONE OUT transfer is in flight per device. A second write while the
+  // first is outstanding returns false, and the CAT layer retries -- which is the
+  // right answer for CAT, where a stale frequency update is worth less than the
+  // next one, and the only safe answer for the USB helper, whose drain loop would
+  // otherwise submit as fast as its ring filled.
+  //
+  // The previous code allocated per call and freed in the completion callback, so
+  // a device that NAKs, stalls, or is unplugged mid-transfer accumulated heap with
+  // nothing counting it.
+  if (device->serialOutBusy)
   {
-    ESP_LOGW(TAG, "usb_host_transfer_alloc(serial OUT) failed: %s", esp_err_to_name(err));
-    setLastError(err);
+    // Overdue means stalled, not slow. Halt and flush the endpoint so the pipe
+    // returns to a releasable state (a resumed transfer is exactly what makes
+    // usb_host_interface_release() refuse -- see quiesce()), then let the caller
+    // retry. Without this a single stalled write would wedge the port forever
+    // while every subsequent write returned false with no explanation.
+    if ((uint32_t)(millis() - device->serialOutSubmitMs) < CARDSAT_SERIAL_OUT_STALL_MS)
+    {
+      return false;
+    }
+    ESP_LOGW(TAG, "serial OUT stalled >%ums on ep 0x%02x; halting endpoint",
+             (unsigned)CARDSAT_SERIAL_OUT_STALL_MS, device->serialOutEndpointAddress);
+    CS_DIAG("  -> OUT STALLED ep=0x%02x after %lums", (unsigned)device->serialOutEndpointAddress,
+            (unsigned long)(millis() - device->serialOutSubmitMs));
+    usb_host_endpoint_halt(device->handle, device->serialOutEndpointAddress);
+    usb_host_endpoint_flush(device->handle, device->serialOutEndpointAddress);
+    usb_host_endpoint_clear(device->handle, device->serialOutEndpointAddress);
+    // Do NOT clear serialOutBusy here. The flushed transfer is still owned by the
+    // HCD until its CANCELED callback runs on the client task (this file says so
+    // itself at the vendor-OUT flush: "the transfer remains owned by the HCD until
+    // the flushed URB callback") -- so clearing busy synchronously would let the
+    // very next sendSerial() memcpy into, and resubmit, a transfer the stack still
+    // holds. The callback below clears the flag when the cancellation is actually
+    // delivered. Refreshing the timestamp rate-limits the halt to once per stall
+    // window while we wait for that callback, instead of once per call.
+    device->serialOutSubmitMs = millis();
+    setLastError(ESP_ERR_TIMEOUT);
     return false;
   }
 
+  // Allocate once, sized for the largest write this path will ever carry. CAT
+  // frames are tens of bytes and the USB helper's are capped at 128, so 512 is
+  // generous; a write past capacity is refused rather than silently truncated.
+  const uint16_t want = device->serialOutPacketSize > CARDSAT_SERIAL_OUT_CAPACITY
+                            ? device->serialOutPacketSize
+                            : (uint16_t)CARDSAT_SERIAL_OUT_CAPACITY;
+  if (device->serialOutTransfer && device->serialOutCapacity < length)
+  {
+    usb_host_transfer_free(device->serialOutTransfer);
+    device->serialOutTransfer = nullptr;
+    device->serialOutCapacity = 0;
+  }
+  if (!device->serialOutTransfer)
+  {
+    const size_t cap = length > want ? length : want;
+    esp_err_t aerr = usb_host_transfer_alloc(cap, 0, &device->serialOutTransfer);
+    if (aerr != ESP_OK)
+    {
+      ESP_LOGW(TAG, "usb_host_transfer_alloc(serial OUT) failed: %s", esp_err_to_name(aerr));
+      setLastError(aerr);
+      device->serialOutTransfer = nullptr;
+      return false;
+    }
+    device->serialOutCapacity = (uint16_t)cap;
+  }
+
+  usb_transfer_t *transfer = device->serialOutTransfer;
   if (length > 0)
   {
     memcpy(transfer->data_buffer, data, length);
@@ -3921,15 +3980,17 @@ bool EspUsbHost::sendSerial(const uint8_t *data, size_t length, uint8_t address)
   transfer->context = this;
   transfer->num_bytes = length;
 
-  err = usb_host_transfer_submit(transfer);
+  device->serialOutBusy = true;
+  device->serialOutSubmitMs = millis();
+  esp_err_t err = usb_host_transfer_submit(transfer);
   if (err != ESP_OK)
   {
+    device->serialOutBusy = false;
     CS_DIAG("  -> OUT submit FAILED err=%d ep=0x%02x (nothing sent)", (int)err,
             (unsigned)device->serialOutEndpointAddress);
     ESP_LOGW(TAG, "usb_host_transfer_submit(serial OUT) failed: %s", esp_err_to_name(err));
     setLastError(err);
-    usb_host_transfer_free(transfer);
-    return false;
+    return false;                 // transfer is RETAINED for the next attempt
   }
   return true;
 }
@@ -8636,6 +8697,21 @@ void EspUsbHost::serialOutTransferCallback(usb_transfer_t *transfer)
       host->setLastError(ESP_FAIL);
     }
   }
+  // CardSat patch 10: the reusable per-device transfer must be marked free, NOT
+  // released -- it is owned by the DeviceState slot and freed in
+  // resetDeviceState(). Anything else reaching this callback is a legacy one-off
+  // and is freed as before, so the two paths cannot be confused.
+  if (host)
+  {
+    for (DeviceState &device : host->devices_)
+    {
+      if (device.serialOutTransfer == transfer)
+      {
+        device.serialOutBusy = false;
+        return;
+      }
+    }
+  }
   usb_host_transfer_free(transfer);
 }
 
@@ -9711,6 +9787,16 @@ void EspUsbHost::resetDeviceState(DeviceState &device)
     usb_host_transfer_free(device.networkOutTransfer);
     device.networkOutTransfer = nullptr;
   }
+  // CardSat patch 10: same treatment for the reusable serial OUT transfer. By the
+  // time a slot is reset the bus has already been quiesced (halt + flush) or the
+  // device has physically gone, so nothing can complete into this buffer.
+  if (device.serialOutTransfer)
+  {
+    usb_host_transfer_free(device.serialOutTransfer);
+    device.serialOutTransfer = nullptr;
+  }
+  device.serialOutBusy = false;
+  device.serialOutCapacity = 0;
   free(device.networkRxRing);
   free(device.networkAsm);
   free(device.hidInputFields);
@@ -12666,8 +12752,31 @@ String EspUsbHost::usbString(const usb_str_desc_t *strDesc)
   return result;
 }
 
+EspUsbHostCdcSerial::~EspUsbHostCdcSerial()
+{
+  if (rxBuffer_)
+  {
+    heap_caps_free(rxBuffer_);
+    rxBuffer_ = nullptr;
+  }
+}
+
 EspUsbHostCdcSerial::EspUsbHostCdcSerial(EspUsbHost &host) : host_(host)
 {
+  // CardSat patch 11: see the header note. SPIRAM-preferred, internal fallback,
+  // then the 512 B default as the last resort so construction cannot fail.
+  rxCap_ = RX_BUFFER_SIZE;
+  rxBuffer_ = (uint8_t *)heap_caps_malloc(rxCap_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!rxBuffer_)
+  {
+    rxBuffer_ = (uint8_t *)heap_caps_malloc(rxCap_, MALLOC_CAP_8BIT);
+  }
+  if (!rxBuffer_ && rxCap_ > 512)
+  {
+    rxCap_ = 512;
+    rxBuffer_ = (uint8_t *)heap_caps_malloc(rxCap_, MALLOC_CAP_8BIT);
+  }
+
 }
 
 bool EspUsbHostCdcSerial::begin(uint32_t baud)
@@ -12694,13 +12803,15 @@ bool EspUsbHostCdcSerial::connected() const
 int EspUsbHostCdcSerial::available()
 {
   portENTER_CRITICAL(&rxMux_);
-  const size_t count = rxHead_ >= rxTail_ ? rxHead_ - rxTail_ : RX_BUFFER_SIZE - rxTail_ + rxHead_;
+  const size_t count = rxHead_ >= rxTail_ ? rxHead_ - rxTail_ : rxCap_ - rxTail_ + rxHead_;
   portEXIT_CRITICAL(&rxMux_);
   return static_cast<int>(count);
 }
 
 int EspUsbHostCdcSerial::read()
 {
+  if (!rxBuffer_) return -1;
+
   portENTER_CRITICAL(&rxMux_);
   if (rxHead_ == rxTail_)
   {
@@ -12715,6 +12826,8 @@ int EspUsbHostCdcSerial::read()
 
 int EspUsbHostCdcSerial::peek()
 {
+  if (!rxBuffer_) return -1;
+
   portENTER_CRITICAL(&rxMux_);
   if (rxHead_ == rxTail_)
   {
@@ -12811,6 +12924,8 @@ void EspUsbHostCdcSerial::clearAddress()
 
 void EspUsbHostCdcSerial::pushData(const uint8_t *data, size_t length)
 {
+  if (!rxBuffer_) return;
+
   portENTER_CRITICAL(&rxMux_);
   for (size_t i = 0; i < length; i++)
   {
@@ -12833,7 +12948,7 @@ bool EspUsbHostCdcSerial::accepts(uint8_t address) const
 size_t EspUsbHostCdcSerial::nextIndex(size_t index) const
 {
   index++;
-  if (index >= RX_BUFFER_SIZE)
+  if (index >= rxCap_)
   {
     return 0;
   }

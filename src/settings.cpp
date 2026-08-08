@@ -28,6 +28,15 @@ void Settings::validate() {
     case 9600: case 19200: case 38400: case 57600: case 115200: break;
     default: catGroveBaud = 115200; break;
   }
+  // The helper LINK baud must be a rate the companion actually scans for. It
+  // auto-bauds across CSUH_BAUDS[] and nothing else, so a value outside that list
+  // could never link -- and a link that silently never comes up is the hardest
+  // fault on this feature to read. Snap to the default instead.
+  {
+    bool okBaud = false;
+    for (int i = 0; i < CSUH_BAUD_N; ++i) if (CSUH_BAUDS[i] == helperBaud) { okBaud = true; break; }
+    if (!okBaud) helperBaud = CSUH_BAUDS[0];
+  }
   // Physical coordinates feed SGP4 and the Maidenhead math. Reject non-finite and clamp.
   if (!isfinite(lat) || lat < -90.0  || lat > 90.0)  lat = 0.0;
   if (!isfinite(lon) || lon < -180.0 || lon > 180.0) lon = 0.0;
@@ -102,6 +111,8 @@ bool Settings::load() {
   strncpy(opEmail, d["opemail"] | "", sizeof(opEmail)-1); opEmail[sizeof(opEmail)-1]=0;
   strncpy(qrzUser, d["qrzuser"] | "", sizeof(qrzUser)-1); qrzUser[sizeof(qrzUser)-1]=0;
   strncpy(qrzPass, d["qrzpass"] | "", sizeof(qrzPass)-1); qrzPass[sizeof(qrzPass)-1]=0;
+  strncpy(stUser, d["stuser"] | "", sizeof(stUser)-1); stUser[sizeof(stUser)-1]=0;
+  strncpy(stPass, d["stpass"] | "", sizeof(stPass)-1); stPass[sizeof(stPass)-1]=0;
   strncpy(clUrl,  d["clurl"]  | "", sizeof(clUrl)-1);  clUrl[sizeof(clUrl)-1]=0;
   strncpy(clKey,  d["clkey"]  | "", sizeof(clKey)-1);  clKey[sizeof(clKey)-1]=0;
   strncpy(clStation, d["clstation"] | "", sizeof(clStation)-1); clStation[sizeof(clStation)-1]=0;
@@ -164,6 +175,11 @@ bool Settings::load() {
   // uint16_t catPort as a baud. validate() further clamps to the supported UART set.
   catGroveBaud = d["catgbaud"] | (uint32_t)115200;
   strncpy(catUser, d["catuser"] | "", sizeof(catUser)-1); catUser[sizeof(catUser)-1]=0;
+  // CardSatUsbHelper. Absent keys (any config written before 0.9.73) give the
+  // defaults, which is "no device nominated at the default link rate" -- inert
+  // until the operator selects the helper as a transport.
+  helperBaud = d["helpbaud"] | (uint32_t)230400;
+  strncpy(helperKey, d["helpkey"] | "", sizeof(helperKey)-1); helperKey[sizeof(helperKey)-1]=0;
   // Dual-rig legs (CAT_DUAL). Missing keys leave the "no legs assigned" defaults.
   for (int L = 0; L < 2; ++L) {
     const char* K = L ? "u" : "d";           // key suffix: d = downlink, u = uplink
@@ -384,6 +400,7 @@ bool Settings::save() {
   d["opname"] = opName;
   d["opemail"] = opEmail;
   d["qrzuser"] = qrzUser; d["qrzpass"] = qrzPass;
+  d["stuser"] = stUser; d["stpass"] = stPass;
   d["clurl"] = clUrl; d["clkey"] = clKey; d["clstation"] = clStation;
   d["lotwdxcc"] = lotwDxcc; d["lotwcqz"] = lotwCqz; d["lotwituz"] = lotwItuz;
   d["lotwstate"] = lotwState; d["lotwcnty"] = lotwCnty;
@@ -397,6 +414,7 @@ bool Settings::save() {
   d["catusbkey"] = catUsbKey;
   d["conslog"] = consoleLog;
   d["catuser"] = catUser; d["catpass"] = catPass;
+  d["helpbaud"] = helperBaud; d["helpkey"] = helperKey;
   for (int L = 0; L < 2; ++L) {                      // dual-rig legs (CAT_DUAL)
     const char* K = L ? "u" : "d";
     char k[16];

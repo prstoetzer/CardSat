@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include "radio_profiles.h"
 #include "config.h"
+#include "csuh_proto.h"   // CSUH_BAUDS[] -- validate() clamps helperBaud to it
 
 // Which physical VFO (Main/Sub) carries the uplink vs the downlink.
 enum VfoType : uint8_t {
@@ -40,6 +41,14 @@ enum CatType : uint8_t {
                    // transport is swapped, the dialect is unchanged. Only present
                    // when built with CARDSAT_HAS_USBCAT=1 (the default since
                    // 0.9.59); see usbserial.h.
+  CAT_HELPER = 6,  // A USB radio on the CardSatUsbHelper companion, reached over
+                   // the Grove UART. Same idea as CAT_USB -- the transport is
+                   // swapped and the dialect is unchanged -- except the USB host
+                   // is a second MCU with its own eight channels. Use it for a
+                   // radio that will not fit alongside whatever else is already on
+                   // the Cardputer's bus. Claims UART1 like wired CI-V, so it
+                   // shares the Grove exclusion rules. (Declared after CAT_DUAL so
+                   // existing saved configs keep their values.)
   CAT_DUAL  = 5,   // TWO radios driven natively: a downlink leg + an uplink leg,
                    // each any radio from the LEG_RADIOS[] catalog on its own
                    // transport (Grove serial, USB adapter, or Icom LAN -- the
@@ -55,13 +64,27 @@ enum CatType : uint8_t {
 // exactly as before -- the operator cannot land on an unimplemented transport.
 // CAT_DUAL is always selectable: its Grove and LAN leg buses need no compile
 // flag, and the USB leg bus is simply not offered in a build without USB CAT.
+// How many CAT transports the Settings row cycles through.
+//
+// CAT_HELPER is counted only when it is compiled in, exactly as CAT_USB is. The
+// two flags are independent: the helper needs no USB host stack on this side, so
+// CARDSAT_HAS_USBHELPER=1 with CARDSAT_HAS_USBCAT=0 is a legitimate (and useful)
+// build. That is why this is a sum rather than a pair of hard-coded totals -- the
+// four combinations were getting hard to keep straight by hand, and an off-by-one
+// here lets the row land on a transport the build cannot construct.
+static constexpr uint8_t CAT_TYPE_N =
+    5                                    // Wired, LAN, rigctl(net), rigctl(Grove), Dual
 #if CARDSAT_HAS_USBCAT
-static constexpr uint8_t CAT_TYPE_N = 6;   // Wired, LAN, rigctl(net), rigctl(Grove), USB, Dual
-#else
-static constexpr uint8_t CAT_TYPE_N = 5;   // Wired, LAN, rigctl(net), rigctl(Grove), Dual
+  + 1                                    // USB serial
 #endif
-// NOTE (non-USB build): the enum VALUE CAT_DUAL is still 5 while the row cycles
-// 0..4; the Settings row maps slot 4 -> CAT_DUAL when USB CAT is compiled out.
+#if CARDSAT_HAS_USBHELPER
+  + 1                                    // USB helper (Grove)
+#endif
+  ;
+// NOTE: the enum VALUES are fixed (CAT_DUAL = 5, CAT_HELPER = 6) so a saved config
+// always means the same thing, but the Settings row cycles a DENSE slot list built
+// at runtime from the compiled-in transports. catTypeForSlot()/catSlotForType() in
+// app.cpp own that mapping; nothing else should assume slot == enum value.
 
 // Rotator transport: a directly-attached GS-232 controller, or a Hamlib
 // rotctld server reached over TCP (CardSat is the client).
@@ -87,8 +110,14 @@ enum RotTransport : uint8_t {
   ROT_XPORT_GROVE  = 1,  // Cardputer Grove G1/G2 via UART1 -- shared with wired
                          // CI-V and the Grove GPS; the app blocks the overlap
   ROT_XPORT_USB    = 2,  // USB<->serial adapter on the resident EspUsbHost
+  ROT_XPORT_HELPER = 3,  // USB<->serial adapter on the CardSatUsbHelper companion,
+                         // reached over the Grove UART (0.9.73). The reason to use
+                         // it: a USB radio plus a USB rotator on the Cardputer's own
+                         // bus is hub + 3 + 3 = 8 channels, the absolute ceiling with
+                         // no headroom. Moving the rotator to the helper leaves the
+                         // radio a bus to itself. Shares the Grove exclusion rules.
 };
-static constexpr uint8_t ROT_XPORT_N = 3;
+static constexpr uint8_t ROT_XPORT_N = 4;
 
 // Azimuth-axis convention of the rotator (matches Gpredict's rotator setting).
 enum RotAzRange : uint8_t {
@@ -147,6 +176,11 @@ struct Settings {
   // QRZ.com XML subscription credentials (for the callsign-lookup screen).
   char     qrzUser[24] = "";  // QRZ username
   char     qrzPass[32] = "";  // QRZ password
+  // space-track.org credentials (Space-Track orbital-history tool). Stored in
+  // the standard config exactly like the QRZ pair above -- plaintext on the FS
+  // like every stored key, so a dedicated password is wise.
+  char     stUser[48] = "";   // Space-Track identity (email)
+  char     stPass[48] = "";   // Space-Track password
   char     printerHost[40] = "";   // ESC/POS receipt printer IP for TCP:9100 printing ("" = off)
   uint16_t printerPort = 9100;     // raw ESC/POS port (JetDirect standard)
   uint8_t  printerCols = 32;       // ESC/POS text columns: 32 (58mm), 42/48 (80mm), 64 (Font B)
@@ -223,6 +257,23 @@ struct Settings {
   uint32_t catGroveBaud = 115200;
   char     catUser[24] = "";    // radio Network User1 id
   char     catPass[24] = "";    // radio Network User1 password
+  // ---- CardSatUsbHelper companion (0.9.73) ---------------------------------
+  // ONE set of fields for all three consumers -- a single rig (CAT_HELPER), one
+  // dual-rig leg (LEGBUS_HELPER), or the rotator (ROT_XPORT_HELPER) -- because
+  // the helper carries exactly one USB device and only one consumer can claim it.
+  // Per-consumer copies would let the operator configure two and give no hint
+  // which one wins.
+  //
+  // helperBaud is the GROVE LINK rate, not the radio's CAT baud (that comes from
+  // the radio profile or the leg's own dualBaud, and is pushed to the helper in
+  // the OPEN). Must be one of CSUH_BAUDS[]; the helper auto-bauds across that list
+  // and can never lock onto anything else. Validated below.
+  uint32_t helperBaud = 230400;
+  // Which device on the helper to bind. Empty = "the only one attached", which is
+  // the normal case for a helper carrying one radio. Same key format as
+  // catUsbKey / rotUsbKey (usbserial.cpp makeKey), because the helper builds its
+  // keys with byte-identical logic -- so a key means the same thing on either bus.
+  char     helperKey[40] = "";
   // (CI-V is TTL serial only.) VFO roles + whether to command the rig's own
   // satellite mode when engaging radio control.
   uint8_t  vfoType    = VFO_MAIN_UP_SUB_DOWN;

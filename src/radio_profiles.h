@@ -330,4 +330,13 @@ static const LegProfile LEG_RADIOS[LEG_COUNT] = {
 
 // Which physical bus a dual-rig leg rides. One Grove UART and one USB CAT port
 // exist, so two legs may not share either; Wi-Fi (LAN) is shareable.
-enum LegBus : uint8_t { LEGBUS_GROVE = 0, LEGBUS_USB = 1, LEGBUS_LAN = 2, LEGBUS_N = 3 };
+// Which wire a CAT_DUAL leg runs on.
+//
+// LEGBUS_HELPER (0.9.73) is a USB device on the CardSatUsbHelper companion,
+// reached over the Grove UART. It exists because the Cardputer's eight USB host
+// channels cannot hold two USB radios when one of them is an IC-705 (which brings
+// its own internal hub and costs five by itself) -- see src/usbhelper.h. Note the
+// consequence for a dual rig: the helper OWNS the Grove UART, so a leg on
+// LEGBUS_HELPER means the other leg cannot be LEGBUS_GROVE. It must be USB or LAN.
+enum LegBus : uint8_t { LEGBUS_GROVE = 0, LEGBUS_USB = 1, LEGBUS_LAN = 2,
+                        LEGBUS_HELPER = 3, LEGBUS_N = 4 };

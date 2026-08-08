@@ -199,7 +199,7 @@ BACK = [
   "half simply not CAT driven; LAN legs take the radio&rsquo;s <b>IP</b> + port (<b>IC-705 over its own WiFi</b>; "
   "<b>u</b>/<b>p</b> login). <b>a</b> nominate USB adapter (both legs may be USB via a hub) "
   "&middot; <b>s</b> save+apply. One Grove leg only; PTT stays manual; FM tones set on the radio. "
-  "The CardSatDualRig companion (rigctl net/Grove) is still supported."),
+  "USB helper (Grove): a 2nd USB host on an M5StickS3 for a radio or rotator."),
  ("GP SOURCE",
   "<b>AMSAT</b> / <b>CelesTrak</b> JSON-PP category / <b>Custom URL</b> &middot; <b>;</b>/<b>.</b> move &middot; <b>ENTER</b> select"),
  ("ROTATOR (manual)",
